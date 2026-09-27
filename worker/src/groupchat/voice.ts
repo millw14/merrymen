@@ -1230,6 +1230,8 @@ const MODE_ASK =
   /\b(?:paper or live|live or paper|paper or real|real or paper)\b|\b(?:are|r) (?:you|u) (?:on |in )?(?:paper|live)\b|\bis (?:my agent|it|he|she) (?:live|on paper|paper|in paper)\b|\bpaper mode\b|\blive yet\b|\bstill (?:on |in )?paper\b|\b(?:is|was) (?:this|that|it|the (?:trade|buy|sell|card)) (?:(?:with |for )?real money|on paper|paper|live|a paper (?:trade|buy|sell)|a live (?:trade|buy|sell)|practice(?: money)?)\b|\b(?:will|when will|are|r) (?:you|u|my agent) (?:ever |be )?(?:go(?:ing)?|gonna go) live\b/;
 /** "is this real money?": asks the card's book, not the agent's mode. */
 const MODE_OF_CARD = /\b(?:is|was) (?:this|that|it|the (?:trade|buy|sell|card))\b/;
+/** An explicit latest-trade question overrides the historical card it was posted under. */
+const LATEST_TRADE_ASK = /\b(?:(?:last|latest|most recent) (?:trade|move|fill)|(?:trade|move|fill) (?:was )?(?:last|latest))\b/;
 /** "why is it still paper mode": asks why, and the choice is the owner's own (MODE.why). */
 const MODE_WHY = /\bwhy\b[^?.!]*\b(?:paper|live)\b/;
 /** "what's your next move?": about the book, and nothing in the facts says what comes next (answerFor, WHEN). */
@@ -2173,6 +2175,8 @@ interface Env {
   threadLost: boolean;
   /** `focus` is the thread's own card (Intent reply `quoted`), not merely the latest. */
   focusThread: boolean;
+  /** The durable card the question quotes, even when its decision has left the facts window. */
+  quotedCard: CallRef | null;
   /**
    * The line a reply answers, lower case with straight apostrophes, or null
    * when the line being said answers nothing: what an echo (T.ECHO_CUE) must
@@ -2957,7 +2961,8 @@ function bookAnswer(env: Env, slots: Slots, audience: Audience, low: string, why
   if (MODE_ASK.test(low)) {
     // "IS THIS REAL MONEY?" UNDER THE AGENT'S OWN CARD asks about that card:
     // its paper or live, which the card itself shows.
-    if (env.focusThread && env.focus && MODE_OF_CARD.test(low)) return pick(env, env.focus.paper === true ? HELD.mode.paper : HELD.mode.live, slots);
+    const card = env.quotedCard ?? (LATEST_TRADE_ASK.test(low) ? env.focus : null);
+    if (card && (MODE_OF_CARD.test(low) || LATEST_TRADE_ASK.test(low))) return pick(env, card.paper === true ? HELD.mode.paper : HELD.mode.live, slots);
     // ANOTHER OWNER'S AGENT is not this one: its mode is theirs to see. Only
     // "are YOU on paper?" is this agent's to answer.
     if (!own && !/\b(?:you|u|your|ur)\b/.test(low)) return pick(env, HELD.notTrading.other, slots);
@@ -3056,6 +3061,9 @@ function namedCoinWord(low: string): string | null {
  * earlier". A why that names no coin is sided as before (sidedEnv).
  */
 function whyEnv(env: Env, low: string): { env: Env; noCard: boolean } {
+  // Naming the old card's coin does not authorize borrowing a later fill's
+  // evidence, even when it used the same coin, side and book.
+  if (env.threadLost) return { env, noCard: false };
   const calls = (Array.isArray(env.ctx.speaker?.calls) ? env.ctx.speaker.calls : []).filter((c): c is CallFact => !!c && typeof c === "object");
   const side = sideAsked(low);
   const named = calls.filter((c) => lineNamesCall(low, c));
@@ -3132,14 +3140,14 @@ function whyAnswer(env: Env, slots: Slots, person = false): string | null {
 }
 
 /** The speaker's own recent lines: the tail's, and the ones the conductor's gate remembers for it (SpeakCtx.ownRecent). */
-function ownLines(env: Env): string[] {
+function ownLines(env: Pick<Env, "ctx">): string[] {
   const self = String(env.ctx.speaker?.name ?? "").toLowerCase();
-  const out: string[] = [];
+  const out = new Set<string>();
   for (const t of env.ctx.tail ?? []) {
-    if (t && t.author === "agent" && String(t.name).toLowerCase() === self && typeof t.body === "string") out.push(t.body);
+    if (t && t.author === "agent" && String(t.name).toLowerCase() === self && typeof t.body === "string") out.add(t.body);
   }
-  for (const l of env.ctx.ownRecent ?? []) if (typeof l === "string") out.push(l);
-  return out;
+  for (const l of env.ctx.ownRecent ?? []) if (typeof l === "string") out.add(l);
+  return [...out];
 }
 
 /**
@@ -3205,45 +3213,29 @@ function gaveReason(c: CallFact, own: readonly string[]): boolean {
 // paper", a second "what are you holding?" twenty minutes on found every
 // named phrasing refused by the gate as the agent repeating itself; a named
 // line always won over the nameless ones, the conductor's re-draws rolled the
-// same three, and the owner's own agent went silent on its own book — two
-// questions in three, in three seeds. Each pool is weighed as the gate will
-// weigh it (repeatsOwn), the named ones first, then the nameless ones; when
-// the agent has said all of it, it points back ("nothing new since"), which
-// is true only because one of its own lines already told this trade.
+// same three, and the owner's own agent went silent on its own book. Each
+// pool is weighed as the gate will weigh it (repeatsOwn), the named ones
+// first, then the nameless ones. When every phrasing was said, still report
+// the actual call: the conductor can repeat an owed factual answer. The
+// words of an old answer do not establish that it reported this decision,
+// even when its coin and side match, so they cannot prove "nothing new".
 function whatBuy(env: Env, slots: Slots): string | null {
-  const c = env.focus;
+  const c = env.quotedCard ?? env.focus;
   if (!c) return pick(env, T.WHATBUY.none, slots);
   const sell = c.side === "sell";
   const paper = c.paper === true;
+  if (env.quotedCard) {
+    const pool = paper ? (sell ? T.WHATBUY.cardPaperSell : T.WHATBUY.cardPaperBuy) : sell ? T.WHATBUY.cardSell : T.WHATBUY.cardBuy;
+    const anon = paper ? (sell ? T.WHATBUY.anonCardPaperSell : T.WHATBUY.anonCardPaperBuy) : sell ? T.WHATBUY.anonCardSell : T.WHATBUY.anonCardBuy;
+    return pick(env, pool, slots) ?? pick(env, anon, slots, true);
+  }
   const namedPool = paper ? (sell ? T.WHATBUY.paperSell : T.WHATBUY.paperBuy) : sell ? T.WHATBUY.sell : T.WHATBUY.buy;
   const anonPool = paper ? (sell ? T.WHATBUY.anonPaperSell : T.WHATBUY.anonPaperBuy) : sell ? T.WHATBUY.anonSell : T.WHATBUY.anonBuy;
   const own = ownLines(env);
   const fresh = (pool: readonly string[]) => (own.length ? pool.filter((t) => !repeatsOwn(env, putNames(fill(t, slots), env.nv))) : pool);
   const named = pick(env, fresh(namedPool), slots) ?? pick(env, fresh(anonPool), slots, true);
   if (named) return named;
-  if (toldLatest(c, own)) {
-    // The pointers back (WHATBUY.again), and the "nothing new" lines that say nothing of time.
-    const again = [...poolOf(T.WHATBUY, "again"), ...T.WHATBUY.none.filter((l) => !NOT_SINCE.test(l))];
-    const pointer = pick(env, fresh(again), slots);
-    if (pointer) return pointer;
-  }
   return pick(env, namedPool, slots) ?? pick(env, anonPool, slots, true);
-}
-
-/** "Nothing new from me LATELY" says something about time the voice does not know; "nothing new" since its own answer is true. */
-const NOT_SINCE = /\b(?:lately|recently|right now|today)\b/;
-
-/**
- * Whether one of the speaker's own lines already told this trade: one of its
- * side's WHATBUY answers, or its coin with a word of its side ("sold NVDA"; a
- * buy card of the coin before a sell is not the sell).
- */
-const SOLD_WORD = /\b(?:sold|sell|selling|sale|off the table|trimmed)\b/i;
-const BOUGHT_WORD = /\b(?:bought|buy|buying|picked up|grabbed|aped|added|bag|into|entry)\b/i;
-function toldLatest(c: CallFact, own: readonly string[]): boolean {
-  const sell = c.side === "sell";
-  const pools = sell ? [...T.WHATBUY.sell, ...T.WHATBUY.paperSell, ...T.WHATBUY.anonSell, ...T.WHATBUY.anonPaperSell] : [...T.WHATBUY.buy, ...T.WHATBUY.paperBuy, ...T.WHATBUY.anonBuy, ...T.WHATBUY.anonPaperBuy];
-  return own.some((l) => says(l, pools) || (namesCoin(l, c) && (sell ? SOLD_WORD : BOUGHT_WORD).test(l) && !(sell ? BOUGHT_WORD : SOLD_WORD).test(l)));
 }
 
 /** "How's your human?" — a true fact about the speaker's own owner. */
@@ -4625,22 +4617,24 @@ export function mustAnswer(intent: Intent): boolean {
 }
 
 /**
- * The speaker's own call a "why"/"what" answer is about: the thread's card
- * when the reply names one and the speaker's facts still hold it, else its
- * latest. `lost`: the thread names a card the facts no longer hold.
+ * The speaker's own call a "why"/"what" answer is about: the quoted decision,
+ * or the latest for an unthreaded/explicit latest question. A missing quoted
+ * decision has no evidence call; its durable card still proves its book and side.
  */
-function focusOf(intent: Intent | "prompt", speaker: AgentFacts): { call: CallFact | null; lost: boolean; thread: boolean } {
+function focusOf(intent: Intent | "prompt", speaker: AgentFacts): { call: CallFact | null; lost: boolean; thread: boolean; quoted: CallRef | null } {
   const calls: CallFact[] = Array.isArray(speaker?.calls) ? speaker.calls.filter((c) => !!c && typeof c === "object") : [];
   const latest = calls[0] ?? null;
-  if (intent === "prompt" || intent.kind !== "reply" || !intent.quoted || !intent.quoted.call) return { call: latest, lost: false, thread: false };
+  if (intent === "prompt" || intent.kind !== "reply" || !intent.quoted || !intent.quoted.call || LATEST_TRADE_ASK.test(String(intent.text ?? "").toLowerCase())) {
+    return { call: latest, lost: false, thread: false, quoted: null };
+  }
   const q = intent.quoted;
-  const byId = typeof q.decisionId === "string" && q.decisionId ? calls.find((c) => c.decisionId === q.decisionId) : undefined;
-  // THE SAME COIN, STRICTLY (facts.ts sameCoin): a different contract that
-  // shares a ticker or a name is another trade, and its reasons are not this
-  // one's — "what i liked: curve early" was Pepe Classic's reason given for
-  // Pepe Frog's card.
-  const same = byId ?? calls.find((c) => c.side === q.call.side && sameCoin(c, q.call));
-  return same ? { call: same, lost: false, thread: true } : { call: latest, lost: true, thread: false };
+  // Only this exact decision owns its reasons. A newer fill of the same
+  // coin, side or book is never evidence for the old card. The card itself
+  // still proves its side and paper/live label after the facts expire.
+  const same = typeof q.decisionId === "string" && q.decisionId
+    ? calls.find((c) => c.decisionId === q.decisionId && c.side === q.call.side && c.paper === q.call.paper && sameCoin(c, q.call))
+    : undefined;
+  return same ? { call: same, lost: false, thread: true, quoted: q.call } : { call: null, lost: true, thread: false, quoted: q.call };
 }
 
 /** The line a reply answers, as an echo cue reads it: lower case, straight apostrophes. Null for anything but a reply. */
@@ -4685,6 +4679,7 @@ function envFor(ctx: SpeakCtx, r: () => number, intent: Intent | "prompt", names
     focus: focus.call,
     threadLost: focus.lost,
     focusThread: focus.thread,
+    quotedCard: focus.quoted,
     heard: heardOf(ctx, intent),
     starter: intent !== "prompt" && intent.kind === "banter",
   };
@@ -4707,7 +4702,8 @@ function namesFor(intent: Intent, env: Env): Partial<Record<NameSlot, string | n
     default:
       break;
   }
-  // An answer names the coin it is about: the thread's card, else the latest.
+  // Only a matching evidence call supplies the coin. An expired card gets an
+  // anonymous historical answer, never the latest call's name.
   if (intent.kind === "reply") nv.coin = env.focus ? coinSlot(env, env.focus) : null;
   if (intent.kind === "banter" && (intent.topic === "room" || intent.topic === "topic")) nv.peer = peerSlot(env);
   return nv;
@@ -4797,7 +4793,7 @@ export function isRitual(intent: Intent, ctx?: Pick<SpeakCtx, "speaker" | "roste
   return cls === "gm" || cls === "gn";
 }
 
-/** A composed line and whether it is new to the room (false: the room had said all of it, and this is the least bad). */
+/** A composed line and whether it passes the full recent-history checks (false: no fresh line was found in the bounded attempts). */
 export interface Composed {
   text: string;
   fresh: boolean;
@@ -4821,11 +4817,12 @@ export function composeLine(intent: Intent, ctx: SpeakCtx, rng: () => number): C
     const vouched = vouchedFor(intent, ctx.speaker);
     const roster = (ctx.rosterNames ?? []).filter((n): n is string => typeof n === "string");
     const plain: AgentLineCtx = { vouchedSymbols: vouched, rosterNames: roster, recentOwn: [], recentRoom: [] };
-    const self = String(ctx.speaker?.name ?? "").toLowerCase();
     const tail = (ctx.tail ?? []).filter((t) => t && typeof t.body === "string");
     const echo: AgentLineCtx = {
       ...plain,
-      recentOwn: tail.filter((t) => String(t.name).toLowerCase() === self).map((t) => t.body),
+      // A previous answer can leave the conversation tail while still being in
+      // the speaker's three-hour history. A fresh result must pass both.
+      recentOwn: ownLines({ ctx }),
       recentRoom: tail.map((t) => t.body),
     };
     const memory = ctx.memory ?? null;
@@ -5001,9 +4998,9 @@ const REPLY_GUIDE: Readonly<Record<LineClass, string>> = {
   buy: "It is a buy call: they just bought a coin. React to the trade or ask what they liked about it. Do not name their coin.",
   sell: "It is a sell call: they just sold some of a coin, maybe all of it. React to the sale itself. Never say they are out of it, done with it or moving on, since a sell may be a trim, and never say it made or lost money. Do not name their coin.",
   "ask-why":
-    "They are asking why you made a trade: the one this conversation is about when one is named above, else your latest. Answer only from the words listed with that trade; if there are none, say it fit your rules. If they name a coin you have no trade of listed above, say you have no card of yours on it — never another trade's reason. If they ask why you are NOT trading, never give a reason: say the reasons are in their app, not in this room.",
+    "They are asking why you made a trade: the one this conversation is about when one is named above, else your latest. Answer only from the words listed with that trade. When a quoted card's evidence is marked unavailable, say its reasons are unavailable; never borrow another fill's reasons. For a known trade with no evidence words, say it fit your rules. If they name a coin you have no trade of listed above, say you have no card of yours on it — never another trade's reason. If they ask why you are NOT trading, never give a reason: say the reasons are in their app, not in this room.",
   "ask-trades":
-    "They are asking what you have been trading. Answer only from your recent trades listed above, or say you have nothing new. Never a figure: if they ask how much, say the numbers are in their app. If they ask whether you trade on paper or live, say which, as written above. If they ask when you will trade next, say your rules decide and you do not know ahead of time.",
+    "They are asking what you have been trading. Answer only from the recent trades or historical card described above. A question about the quoted card uses that card's side and paper/live label, never your current mode; do not call a historical card your latest trade. An explicit last or latest trade question asks about your actual latest fill. Never a figure: if they ask how much, say the numbers are in their app. If they ask whether you trade on paper or live generally, use your current mode. If they ask when you will trade next, say your rules decide and you do not know ahead of time.",
   "ask-advice": "They are asking for advice. You never give any: say you only talk about your own trades.",
   "ask-howareyou": "They are asking how you are. Answer honestly and briefly, and maybe ask back — never when their line already asks you back (\"…, you?\").",
   "ask-owner": "They are asking about your owner. Answer with something true from what you were told about your owner, warmly.",
@@ -5221,7 +5218,7 @@ export function buildPrompt(intent: Intent, ctx: SpeakCtx): { system: string; pr
   // THE TRADE A THREAD IS ABOUT, when somebody asked under one of this
   // agent's cards — not its newest, which can be another coin entirely.
   if (focus.thread && lead) trades += ` This conversation is about one of them: you ${describeCall(lead, sp)}.`;
-  if (focus.lost) trades += " This conversation is about an older trade of yours whose details you no longer have: say it fit your rules.";
+  if (focus.lost && focus.quoted) trades += ` This conversation is about your earlier ${focus.quoted.paper ? "paper trade with practice money" : "live trade with real money"}. The card records a ${focus.quoted.side}. Its reasons are unavailable: say you no longer have them, and never borrow another fill's reasons or your current mode.`;
   else if (lead && (lead.bands ?? []).length) {
     trades += ` Words that describe ${focus.thread ? "that trade" : "your latest"}: ${(lead.bands ?? []).map((b) => nm(b, sp)).join(", ")}.`;
   }

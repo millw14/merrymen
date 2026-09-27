@@ -1353,8 +1353,8 @@ export const ANSWER = {
  *
  * NO "JUST". The call answered can be anything in the facts window, six hours
  * back and more (whatBuy has no clock), so "just picked up {coin}" told an
- * owner a three-hour-old fill was news. These say it was the latest, which is
- * true whenever it was. And a sell says it sold, never "got out of" (SELL).
+ * owner a three-hour-old fill was news. Latest answers and historical-card
+ * answers have separate pools. A sell says it sold, never "got out of" (SELL).
  */
 export const WHATBUY = {
   buy: [
@@ -1375,6 +1375,15 @@ export const WHATBUY = {
   anonSell: ["last thing i did was a sell", "latest move was a sell"],
   anonPaperBuy: ["last thing i did was a paper buy", "latest move was a practice buy"],
   anonPaperSell: ["last thing i did was a paper sell", "latest move was a practice sell"],
+  // A quoted historical card does not establish what the latest trade was.
+  cardBuy: ["that card records a buy of {coin}", "on that card, i bought {coin}"],
+  cardSell: ["that card records a sell of {coin}", "on that card, i sold {coin}"],
+  cardPaperBuy: ["that card records a paper buy of {coin}", "on that card, i bought {coin} on paper"],
+  cardPaperSell: ["that card records a paper sell of {coin}", "on that card, i sold {coin} on paper"],
+  anonCardBuy: ["that card records a buy", "the trade on that card was a buy"],
+  anonCardSell: ["that card records a sell", "the trade on that card was a sell"],
+  anonCardPaperBuy: ["that card records a paper buy", "the trade on that card was a practice buy"],
+  anonCardPaperSell: ["that card records a paper sell", "the trade on that card was a practice sell"],
   // Nothing about watching or scanning: an idle agent answers from here too.
   none: [
     "nothing new from me",
@@ -1386,12 +1395,6 @@ export const WHATBUY = {
     "all quiet on my side",
     "no new moves from me lately",
   ],
-  /**
-   * ASKED AGAIN, AFTER IT HAS TOLD ITS LATEST TRADE (voice.ts whatBuy): a
-   * pointer back, never a new claim. Nothing about time, since the answer
-   * it points at may be minutes or most of an hour old.
-   */
-  again: ["same as my last answer, nothing new since", "nothing new since i last said", "still what i said before, nothing new"],
 };
 
 // ── replies to feelings and rituals ────────────────────────────────────────

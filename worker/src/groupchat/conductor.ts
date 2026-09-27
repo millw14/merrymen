@@ -680,27 +680,13 @@ const SCAN_LOOKBACK_MS = Math.max(CALL_WINDOW_MS + HOUR, HELLO_WINDOW_MS);
 const SCAN_HORIZON_MS = Math.max(SCAN_LOOKBACK_MS, TOPIC_MEMORY_MS, POSTED_CALLS_MS);
 const SCAN_PAGE = 200;
 /**
- * THE OWNERS' SHARE OF A BUSY ROOM, for sizing the startup scan. Owner lines are
- * not governed by the conductor's ceiling — the web lets each owner post six a
- * minute and two hundred a day — so a scan sized from the agents' pace alone
- * (150 an hour) ran out of pages before its horizon in a room where owners
- * talk, and a restart forgot starters and cards inside the two days it
- * promises to remember. Generous on purpose: the scan stops at its horizon
- * anyway; this only decides how far it may page first.
+ * STOP AT THE HORIZON, WITH AN INDEPENDENT PAGE CAP. Owners are not governed
+ * by the conductor's ceiling, so estimating a page count from the agent rate
+ * plus an owner allowance can forget recent cards and starters in busy rooms.
+ * A quiet room still stops in a few pages; the cap bounds exceptional backlogs
+ * and a scan that reaches it reports the incomplete rebuild.
  */
-const SCAN_OWNER_LINES_PER_HOUR = 300;
-/** AN INDEPENDENT STOP, whatever the room is configured to: never more pages than this in one scan. */
 const SCAN_PAGES_HARD_MAX = 2000;
-
-/**
- * HOW MANY PAGES THE STARTUP SCAN MAY READ: every line the room can have
- * written inside SCAN_HORIZON_MS at its configured ceiling (`perHour`) plus
- * the owners' share, under SCAN_PAGES_HARD_MAX. Once per process; a quiet room
- * reaches its horizon in a few pages and stops there.
- */
-function scanPagesFor(perHour: number): number {
-  return Math.min(SCAN_PAGES_HARD_MAX, Math.ceil(((SCAN_HORIZON_MS / HOUR) * (perHour + SCAN_OWNER_LINES_PER_HOUR)) / SCAN_PAGE));
-}
 /** Owner lines answering a line the tail no longer holds: at most this many fetched per pass. */
 const PARENT_FETCH_MAX = 5;
 /**
@@ -1018,7 +1004,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
   const rawRng = opts.rng ?? Math.random;
   const maxPerPass = count(opts.maxPerPass, 3, 1);
   const perHour = count(opts.perHour, 150, 1);
-  /** Said once, in the first pass's log, when the startup scan ran out of pages before its horizon (scanPagesFor). */
+  /** Said once, in the first pass's log, when the startup scan reached its hard cap before its horizon. */
   let scanNote: string | null = null;
   const perAgentPerHour = count(opts.perAgentPerHour, 30, 1);
   // NO CREDS, NO MODEL, whatever the budget says: the budget is a ceiling on a
@@ -1520,13 +1506,15 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     if (turnedUnheard(sp, postedBefore(sp, call) ?? (latest ? anchorOf(p, sp, latest) : null), call, p.nowMs)) return null;
     const onRun = continuesRun(sp, call);
     for (const card of postedCalls.values()) {
-      // A PAPER FILL FOLDS ONLY INTO A PAPER CARD, its own or another agent's.
+      // A PAPER FILL FOLDS ONLY INTO A PAPER BUY CARD, its own or another agent's.
       // A paper buy inside BASKET_TICK_MS of the agent's own LIVE buy was
       // folded into the live card and never told: two different kinds of
       // money in one card, and the paper fill's provenance lost.
-      if (card.call.paper !== true) continue;
+      // Nor into another agent's sell because its ledger also holds a nearby
+      // buy: that sell never told the room about the bought coin.
+      if (!paperBuy(card)) continue;
       if (card.tenant === tenant) {
-        if (paperBuy(card) && holdsNear(p, card, filled, BASKET_TICK_MS)) return card;
+        if (holdsNear(p, card, filled, BASKET_TICK_MS)) return card;
         continue;
       }
       if (onRun ? !holdsNear(p, card, filled, CALL_ECHO_GAP_MS) : Math.abs(cardFillMs(p, card) - filled) > CALL_ECHO_GAP_MS) continue;
@@ -2016,11 +2004,19 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         if (refused) p.modelRefused += 1;
       }
     }
-    // composeLine only sees the tail and the room's sentences, so a line it
-    // offers can still be close to one this agent said an hour ago; a repeat
-    // earns a fresh draw, anything else does not.
+    // composeLine weighs the full own history and the prompt's shorter tail;
+    // the final gate also sees the rest of this pass's room. A repeat earns a
+    // fresh draw, anything else does not.
     let reason = "repeat";
-    const tries = mustAnswer(intent) ? OWED_TEMPLATE_TRIES : TEMPLATE_TRIES;
+    // A PERSON ASKING ABOUT THIS AGENT'S BOOK IS OWED THE SAME FACT EVEN
+    // AFTER EVERY PHRASING HAS BEEN USED. composeLine already tries twelve
+    // phrasings against the full own history. Running twelve more draws
+    // cannot make an unchanged book new; it held the event loop and still
+    // dropped the owner's question once the finite pool was exhausted.
+    // Only a template may repeat here, after the ordinary gate has refused
+    // it as a repeat. All safety clauses are applied again below.
+    const owedBook = intent.kind === "reply" && intent.toAuthor === "owner" && mustAnswer(intent) && (intent.about === "ask-trades" || intent.about === "ask-why");
+    const tries = owedBook ? 1 : mustAnswer(intent) ? OWED_TEMPLATE_TRIES : TEMPLATE_TRIES;
     // A CARD IS TOLD EVEN WHEN ITS WORDS WERE SAID (cardsAside): the ordinary
     // gate first, then — only when it refused every draw as a repeat — the room's chat alone.
     for (const g of intent.kind === "call" ? [gate, cardsAside(p, sp, gate)] : [gate]) {
@@ -2030,6 +2026,11 @@ export function makeConductor(opts: ConductorOptions): Conductor {
         const v = admitAgentLine(c.text, g);
         if (v.ok) return { text: v.text, model: false };
         reason = v.reason;
+        if (owedBook && reason === "repeat") {
+          const repeated = admitAgentLine(c.text, { ...gate, recentOwn: [], recentRoom: [] });
+          if (repeated.ok) return { text: repeated.text, model: false };
+          reason = repeated.reason;
+        }
       }
       if (reason !== "repeat") break;
     }
@@ -3198,7 +3199,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     const horizon = nowMs - SCAN_LOOKBACK_MS;
     const scanFloor = nowMs - SCAN_HORIZON_MS;
     let before: number | null = null;
-    const pagesMax = scanPagesFor(perHour);
+    const pagesMax = SCAN_PAGES_HARD_MAX;
     let reachedFloor = false;
     for (let page = 0; page < pagesMax; page++) {
       const { messages, start } = await readMessages(shared, { before, limit: SCAN_PAGE });

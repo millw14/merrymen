@@ -735,6 +735,55 @@ describe("templates only say true things", () => {
 describe("what a call and an answer about it say is true of THAT trade", () => {
   const WARNING = ["liquidity thin", "round trip expensive", "the same few hands", "a handful of hands", "our size moves it", "our size nudges it", "curve well along", "curve at the exit line"];
 
+  it("a quoted card keeps its book when its decision is missing, and never borrows another fill's reasons", () => {
+    for (const paper of [true, false]) for (const decisionId of ["old-fill", null]) {
+      const card = call({ symbol: "NVDA", name: null, paper, decisionId: "old-fill" });
+      for (const currentPaper of [true, false]) {
+        const newer = call({ ...card, paper: currentPaper, decisionId: "new-fill", bands: ["curve early"] });
+        const sp = speaker(32, { name: "Amber Heron", mode: paper ? "live" : "paper", calls: [newer] });
+        const ctx = { ...ctxOf(sp, 32), tail: [] };
+        const base = { kind: "reply" as const, to: "Amber Heron's owner", toAuthor: "owner" as const, toOwnAgent: true, must: true, quoted: { decisionId, call: card } };
+        const mode: Intent = { ...base, text: "is this real money?", about: "ask-trades" };
+        for (const line of sample(mode, ctx, 12)) assert.ok(fromPools(line, [T.HELD.mode[paper ? "paper" : "live"]]), `borrowed current mode for ${paper ? "paper" : "live"} card: ${line}`);
+        for (const line of sample({ ...base, text: "what did you buy?", about: "ask-trades" }, ctx, 12)) {
+          assert.match(line, /card.*buy/i, line);
+          assert.doesNotMatch(line, /last|latest|recent|NVDA/i, `expired card inherited another fill's name or recency: ${line}`);
+          if (paper) assert.match(line, /paper|practice/i, line);
+          else assert.doesNotMatch(line, /paper|practice/i, line);
+        }
+        for (const text of ["why?", "why did you buy NVDA?"]) {
+          const intent: Intent = { ...base, text, about: "ask-why" };
+          for (const line of sample(intent, ctx, 12)) assert.doesNotMatch(line, /curve early/i, `borrowed newer fill's reason: ${line}`);
+          const prompt = buildPrompt(intent, ctx).system;
+          assert.doesNotMatch(prompt, /Words that describe[^.]*curve early/i);
+          assert.match(prompt, new RegExp(`earlier ${paper ? "paper trade with practice money" : "live trade with real money"}`));
+        }
+      }
+    }
+  });
+
+  it("a historical what question reports its card, while an explicit latest question reports the latest fill", () => {
+    const older = call({ symbol: "NVDA", name: null, paper: true, decisionId: "old-fill", bands: ["curve early"] });
+    const latest = call({ ...older, side: "sell", paper: false, decisionId: "latest-fill", bands: ["held briefly"] });
+    const sp = speaker(32, { name: "Amber Heron", mode: "live", calls: [latest, older] });
+    const ctx = { ...ctxOf(sp, 32), tail: [] };
+    const base = { kind: "reply" as const, to: "Amber Heron's owner", toAuthor: "owner" as const, toOwnAgent: true, must: true, quoted: { decisionId: older.decisionId, call: older }, about: "ask-trades" as const };
+    for (const line of sample({ ...base, text: "what did you buy?" }, ctx, 30)) {
+      assert.match(line, /paper|practice/i, line);
+      assert.doesNotMatch(line, /last|latest|recent|sell|sold/i, `historical card called latest: ${line}`);
+    }
+    for (const text of ["what was your last trade?", "what's your latest trade?", "what did you trade last?"]) {
+      const intent: Intent = { ...base, text };
+      for (const line of sample(intent, ctx, 30)) {
+        assert.match(line, /sell|sold/i, `ignored explicit latest question: ${line}`);
+        assert.doesNotMatch(line, /paper|practice|buy|bought/i, line);
+      }
+      const prompt = buildPrompt(intent, ctx).system;
+      assert.match(prompt, /Words that describe your latest: «held briefly»/);
+      assert.doesNotMatch(prompt, /This conversation is about one of them: you bought/);
+    }
+  });
+
   it("an exit, or a warning band, is never what the agent 'liked'", () => {
     const sell = call({ side: "sell", symbol: "BONK", name: "Bonk", bands: ["held briefly", "curve at the exit line", "sold on my own time limit, not on anything the market did"] });
     const risky = call({ symbol: "BONK", name: "Bonk", bands: ["the same few hands", "liquidity thin"] });
@@ -3612,22 +3661,39 @@ const underOwnCard = (sp: AgentFacts, text: string, own: boolean, n: number, car
       rngOf(s * 41 + 3),
     ),
   );
-/** The conductor's owed answer: up to its OWED_TEMPLATE_TRIES draws, each through the full gate; null when none passes. */
+/** The conductor's owed answer: bounded fresh draws, then a safety-checked factual repeat for an owner's book question. */
 function owedAnswer(intent: Intent, ctx: SpeakCtx, gate: Parameters<typeof admitAgentLine>[1], rng: () => number): string | null {
-  for (let i = 0; i < 12; i++) {
-    const v = admitAgentLine(composeLine(intent, ctx, rng).text, gate);
+  const book = intent.kind === "reply" && intent.toAuthor === "owner" && (intent.about === "ask-trades" || intent.about === "ask-why");
+  for (let i = 0; i < (book ? 1 : 12); i++) {
+    const text = composeLine(intent, ctx, rng).text;
+    const v = admitAgentLine(text, gate);
     if (v.ok) return v.text;
+    if (book && v.reason === "repeat") {
+      const safe = admitAgentLine(text, { ...gate, recentOwn: [], recentRoom: [] });
+      if (safe.ok) return safe.text;
+    }
   }
   return null;
 }
 const IRONIC = /🙃|😅/u;
 
 describe("the live room's triage, final round two", () => {
-  it("T3-03: the owner's own agent answers every question about its book, asked again and again inside the hour", () => {
+  it("a new trade is never called unchanged because an older trade used its available phrasings", () => {
     const sp = BOOK();
-    // The live probe asked these twenty minutes apart; six fit in the hour the agent remembers its own lines for.
+    const own = [...T.WHATBUY.paperSell.map((t) => t.replace("{coin}", "TSLA")), ...T.WHATBUY.anonPaperSell];
+    const intent: Intent = { kind: "reply", to: "Amber Heron's owner", toAuthor: "owner", toOwnAgent: true, text: "what was your last trade?", about: "ask-trades", must: true };
+    for (let seed = 0; seed < 16; seed++) {
+      const ctx: SpeakCtx = { ...ctxOf(sp, seed), tail: [], ownRecent: own, answeredOwnerLately: true, memory: roomMemory(own, [...ROSTER, "TSLA", "NVDA"]) };
+      const said = composeLine(intent, ctx, rngOf(seed)).text;
+      assert.ok(fromPools(said, [T.WHATBUY.paperSell, T.WHATBUY.anonPaperSell]), `hid the new NVDA sell behind an older TSLA answer: ${said}`);
+      assert.doesNotMatch(said, /nothing new|no new|quiet|before|since|TSLA/i, said);
+    }
+  });
+
+  it("T3-03: the owner's own agent answers repeated questions about its book within its remembered history", () => {
+    const sp = BOOK();
+    // Every earlier answer is still within the agent's three-hour history.
     const questions = ["any trades today?", "what are you holding?", "what was your last trade?", "you buy anything good?", "what are you holding?", "any trades today?"];
-    let pointed = 0;
     for (let seed = 0; seed < 16; seed++) {
       const own: string[] = [];
       const tail: SpeakCtx["tail"] = [];
@@ -3638,18 +3704,13 @@ describe("the live room's triage, final round two", () => {
         const ctx: SpeakCtx = { ...ctxOf(sp, seed), tail: tail.slice(-12), ownRecent: [...own], answeredOwnerLately: k > 0 };
         const said = owedAnswer(intent, ctx, { ...gateOf(sp), recentOwn: [...own], recentRoom: tail.map((t) => t.body) }, rngOf(seed * 131 + k * 7 + 1));
         assert.ok(said !== null, `seed ${seed}: "${text}" went unanswered after: ${own.join(" / ")}`);
-        // Honest whichever it is: the latest trade (the NVDA sell, on paper), or "nothing new" once it has told it.
-        assert.ok(fromPools(said!, [T.WHATBUY.paperSell, T.WHATBUY.anonPaperSell, T.WHATBUY.none, extraPool(T.WHATBUY, "again")]), `seed ${seed}: ${text} → ${said}`);
+        // Every answer reports the actual latest trade, even if its phrasing was used before.
+        assert.ok(fromPools(said!, [T.WHATBUY.paperSell, T.WHATBUY.anonPaperSell]), `seed ${seed}: ${text} → ${said}`);
         assert.doesNotMatch(said!, /TSLA|\bbuy\b|bought/i, `not the latest trade: ${said}`);
-        if (fromPools(said!, [T.WHATBUY.none, extraPool(T.WHATBUY, "again")])) {
-          pointed++;
-          assert.ok(own.some((l) => /NVDA|sell|sold/i.test(l)), `"nothing new" before the trade was told: ${said}`);
-        }
         own.push(said!);
         tail.push({ name: "Amber Heron", author: "agent", body: said! });
       }
     }
-    assert.ok(pointed > 0, "fixture: the pointer back was never needed");
   });
 
   it("T3-04: an owner's push to buy or promise of riches is laughed off, and no owner line is answered with the room's agreement", () => {
@@ -4098,15 +4159,6 @@ describe("what the last repairs left, closed", () => {
     assert.ok(sides.has("agree") || sides.has("disagree"), `a marked take was never given a side: ${[...sides].join(", ")}`);
   });
 
-  it("asked about its book again, the pointer back says nothing of time and never repeats the trade", () => {
-    const again = (T.WHATBUY as Record<string, readonly string[]>).again ?? [];
-    assert.ok(again.length >= 3, "WHATBUY.again");
-    for (const l of again) {
-      assert.match(l, /nothing new/, l);
-      assert.doesNotMatch(l, /\b(?:lately|recently|right now|today|minutes?|hours?|buy|bought|sell|sold)\b/, l);
-    }
-  });
-
   it("no answer to a rough day promises how it ends", () => {
     for (const l of [...T.OWN_OWNER.sad, ...T.OTHER_OWNER.sad]) assert.doesNotMatch(l, /\b(?:promise|fresh start|tomorrow)\b/, l);
   });
@@ -4124,6 +4176,28 @@ describe("what the last repairs left, closed", () => {
  */
 describe("LR-04: an owed answer's draws weigh each line once", () => {
   const asked = (text: string): Intent => ({ kind: "reply", to: "Amber Heron's owner", toAuthor: "owner", toOwnAgent: true, text, about: asOwner(text, TICKERS), must: true });
+
+  it("a fresh answer passes the full own history, including answers that left the conversation tail", () => {
+    const sp = BOOK();
+    for (const text of ["what are you holding?", "why did you buy that?", "how are you doing?"]) {
+      const intent = asked(text);
+      const own: string[] = [];
+      for (let k = 0; k < 24; k++) {
+        // Other agents have filled the conversation since the previous question.
+        // The speaker's previous answers remain in its three-hour history.
+        const ctx: SpeakCtx = {
+          ...ctxOf(sp, 3),
+          tail: [{ name: "Amber Heron's owner", author: "owner", body: text }],
+          ownRecent: [...own],
+          answeredOwnerLately: true,
+        };
+        const c = composeLine(intent, ctx, rngOf(k * 11 + 2));
+        const v = admitAgentLine(c.text, { ...gateOf(sp), recentOwn: [...own], recentRoom: [text] });
+        if (c.fresh) assert.ok(v.ok, `marked fresh despite its full history: ${text} → ${c.text}`);
+        own.push(c.text);
+      }
+    }
+  });
 
   it("the conductor's draws on one ctx weigh each line once, and say what fresh ctxs say", () => {
     const sp = BOOK();

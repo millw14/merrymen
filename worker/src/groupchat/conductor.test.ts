@@ -3810,9 +3810,10 @@ describe("round four: owners", () => {
   it("the owner's own agent answers every question about its book, asked again and again inside the hour", async () => {
     // Twenty minutes apart, "what are you holding?" a second time found every
     // phrasing refused as a repeat, and the owner's own agent went silent on
-    // its own book (T3-03). It points back ("nothing new since") instead.
+    // its own book (T3-03). Once fresh phrasings are exhausted it still tells
+    // the actual trade, with the same safety gate as the first answer.
     const names = ["Pine Stoat", "Amber Heron", "Rusty Weasel", "NVDA", "Nvidia"];
-    const told = [T.WHATBUY.paperSell, T.WHATBUY.anonPaperSell, T.WHATBUY.none, (T.WHATBUY as Record<string, readonly string[]>).again ?? []].flat();
+    const told = [...T.WHATBUY.paperSell, ...T.WHATBUY.anonPaperSell];
     for (const seed of [1, 2, 3]) {
       const pine = fixture(0xf8, "Pine Stoat", null, { mode: "paper" });
       pine.calls.push(callAt(T0 - 3 * HOUR, { side: "sell", symbol: "NVDA", name: "Nvidia", paper: true, bands: ["held its full window"] }));
@@ -3820,17 +3821,50 @@ describe("round four: owners", () => {
       await sim.setup();
       await sim.run(T0, T0 + 2 * MIN, 15 * SEC);
       let at = T0 + 2 * MIN;
-      // Six inside the hour the agent weighs its own lines over (its phrase memory).
-      for (const text of ["any trades today?", "what are you holding?", "what was your last trade?", "you buy anything good?", "what are you holding?", "any trades today?"]) {
+      // Twelve inside an hour exhaust the available trade phrasings.
+      // The same fact is still owed after a restart rebuilds the full history.
+      const questions = ["any trades today?", "what are you holding?", "what was your last trade?", "you buy anything good?"];
+      for (let q = 0; q < 12; q++) {
+        if (q === 6) sim.conductor = sim.fresh(1);
+        const text = questions[q % questions.length]!;
         const id = await sim.owner(pine.tenant, text, at);
-        await sim.run(at, at + 10 * MIN, 15 * SEC);
+        await sim.run(at, at + 5 * MIN, 15 * SEC);
         const a = sim.agentRows().find((r) => r.reply_to === id && r.tenant === pine.tenant);
         assert.ok(a, `seed ${seed}: "${text}" at +${Math.round((at - T0) / MIN)} min went unanswered by the owner's own agent`);
         assert.ok(inPool(a!.body, told, names), `seed ${seed}: "${text}" → ${a!.body}`);
-        at += 10 * MIN;
+        at += 5 * MIN;
       }
       sim.close();
     }
+  });
+
+  it("an exhausted own-book answer still refuses unsafe model text before repeating a safe template", async () => {
+    const pine = fixture(0xf8, "Pine Stoat", null, { mode: "paper" });
+    pine.calls.push(callAt(T0 - 3 * HOUR, { side: "sell", symbol: "NVDA", name: "Nvidia", paper: true, bands: [] }));
+    let modelReplies = 0;
+    const unsafe = "sold NVDA and made 400% profit";
+    const sim = new Sim([pine, fixture(0xf9, "Amber Heron", null)], {
+      seed: 17,
+      creds: CREDS,
+      llm: async (_creds, intent) => {
+        if (intent.kind === "reply" && intent.toOwnAgent && intent.about === "ask-trades") modelReplies++;
+        return unsafe;
+      },
+    });
+    await sim.setup();
+    await sim.run(T0, T0 + 2 * MIN, 15 * SEC);
+    for (let q = 0; q < 12; q++) {
+      const at = T0 + (2 + q * 5) * MIN;
+      const id = await sim.owner(pine.tenant, "what was your last trade?", at);
+      await sim.run(at, at + 5 * MIN, 15 * SEC);
+      const answer = sim.agentRows().find((r) => r.reply_to === id && r.tenant === pine.tenant);
+      assert.ok(answer, `question ${q + 1} went unanswered`);
+      assert.notEqual(answer!.body, unsafe);
+      assert.ok(inPool(answer!.body, [...T.WHATBUY.paperSell, ...T.WHATBUY.anonPaperSell], [pine.name, "Amber Heron", "NVDA", "Nvidia"]), answer!.body);
+      assert.ok(admitAgentLine(answer!.body, { vouchedSymbols: ["NVDA", "Nvidia"], rosterNames: [pine.name, "Amber Heron"], recentOwn: [], recentRoom: [] }).ok, answer!.body);
+    }
+    assert.equal(modelReplies, 12, "the model was challenged on every owed answer, including after template exhaustion");
+    sim.close();
   });
 
   it("under a card, an off-trading question is answered as itself, and 'is this real money?' from the card", async () => {
@@ -4207,6 +4241,24 @@ describe("PR #191 review: paper folds only into paper, and a busy room's restart
     sim.close();
   });
 
+  it("a paper buy is not folded into another agent's sell card because that agent also bought it", async () => {
+    const seller = fixture(0xd3, "Wry Otter", null, { mode: "paper", muted: true });
+    const buyer = fixture(0xd4, "Scarlet Bittern", null, { mode: "paper" });
+    const sold = callAt(T0 - 5 * MIN, { side: "sell", symbol: "TSLA", paper: true });
+    const unposted = callAt(T0 - 4 * MIN, { symbol: "NVDA", paper: true });
+    const bought = callAt(T0 - 3 * MIN, { symbol: "NVDA", paper: true });
+    seller.calls.push(sold, unposted);
+    buyer.calls.push(bought);
+    const sim = new Sim([seller, buyer, fixture(0xd5, "Amber Heron", null)], { seed: 11 });
+    await sim.setup();
+    // This card predates the seller muting chat. Its later buy is in its
+    // ledger, but no buy card ever represented it in the room.
+    await putCard(sim, seller, sold, "sold TSLA on paper", T0 - 5 * MIN);
+    await sim.run(T0, T0 + 25 * MIN, 15 * SEC);
+    assert.deepEqual(cardsBy(sim, buyer).map((r) => r.call_decision_id), [bought.decisionId], "the buy disappeared into a sell card of another coin");
+    sim.close();
+  });
+
   it("a restart in a room busier than the agents' ceiling (owners talking) still remembers a starter from forty hours ago", async () => {
     // Owner lines are not under the conductor's ceiling. A scan sized from
     // 150 agent lines an hour ran out of pages before its horizon, and the
@@ -4225,10 +4277,15 @@ describe("PR #191 review: paper folds only into paper, and a busy room's restart
     await sim.step(T0);
     const starter = "which season would you live in forever, and why?";
     await put(sim, fleet[0]!, starter, T0 + 10 * SEC);
-    // Two hundred and forty lines an hour for thirty-seven and a half hours:
-    // more than the old cap's forty-one pages of two hundred (150 an hour over
-    // the 54 h horizon) could read.
-    for (let i = 0; i < 9000; i++) await put(sim, null, `a busy line ${"abcdefghij"[i % 10]}`, T0 + HOUR + i * 15 * SEC);
+    // Beyond both the old agent-only estimate and the later fixed allowance
+    // of 300 owner lines an hour (122 pages over the 54 h horizon). Owners
+    // are not under either room-wide rate: stop on time, not that estimate.
+    // A hundred owners, each below six a minute and two hundred per UTC day.
+    for (let i = 0; i < 26_000; i++) {
+      await put(sim, null, `a busy line ${"abcdefghij"[i % 10]}`, T0 + HOUR + i * 5 * SEC, {
+        authorKind: "owner", tenant: tenantOf(i % 100), speakerName: "a room owner",
+      });
+    }
     sim.conductor = sim.fresh(1);
     await sim.run(T0 + 40 * HOUR, T0 + 40 * HOUR + 5 * MIN, 15 * SEC);
     const ctx = seen.at(-1);

@@ -172,7 +172,7 @@ describe("templates: nothing an agent cannot have, and nothing about a person no
     // out of there") said it for them.
     const LEAVING =
       /\b(out of|out,|closed?|closing|exit(ed|s)?|done with|let go|letting go|bye|goodbye|stepped out|all of it|the (whole|entire) (bag|position|thing|lot)|bag|position|next|leave|left|moving on|free hands|it was fun|the way out)\b/;
-    const sells = inPools("SELL", "SELL_ASLEEP", "WHATBUY.sell", "WHATBUY.paperSell", "WHATBUY.anonSell", "WHATBUY.anonPaperSell", "LAST_RESORT.sell", "CALL_TAIL.sellCloser", "CALL_TAIL.bandExit", "ANSWER.whySell", "REACT.sell");
+    const sells = inPools("SELL", "SELL_ASLEEP", "WHATBUY.sell", "WHATBUY.paperSell", "WHATBUY.anonSell", "WHATBUY.anonPaperSell", "WHATBUY.cardSell", "WHATBUY.cardPaperSell", "WHATBUY.anonCardSell", "WHATBUY.anonCardPaperSell", "LAST_RESORT.sell", "CALL_TAIL.sellCloser", "CALL_TAIL.bandExit", "ANSWER.whySell", "REACT.sell");
     assert.ok(sells.length > 60, `only ${sells.length} sell lines`);
     for (const l of sells) assert.doesNotMatch(l.text, LEAVING, show(l));
     // NOR THAT SOME IS LEFT: "sold some {coin}" and "took some {coin} off the
