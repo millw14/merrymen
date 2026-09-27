@@ -23,6 +23,34 @@ export const ENERGY_RESERVE_WHY =
   "it, so no signature needs to cover it.";
 
 /**
+ * The owner's custom tokens as a SIGNER reads them: the energy reserve left out.
+ *
+ * WHY AT THE READ, NOT ONLY IN THE SIGNER. Current signers drop the reserve
+ * themselves (core wall.ts usableExtraTokens), but a signer is code the server
+ * does not ship on its own schedule: an iOS build whose bundled engine predates
+ * energy, or a tab loaded before the deploy, seals whatever this list says —
+ * $MERRYMEN included, with an uncapped approve — and the server's canonical
+ * rebuild (which drops it) then refuses the grant, so that owner could not
+ * re-sign or renew. Every signer (the web tabs, iOS GrantScreen, Android, the
+ * RN app) reads GET /api/settings, so leaving the reserve out HERE makes an old
+ * signer seal the same wall the new rebuild expects. canonical-wall.ts refuses,
+ * by name, whatever still gets through.
+ *
+ * READ-SIDE ONLY: the stored settings are not rewritten. The worker never
+ * watches the reserve whatever the list says (watchTokensFor), so a stored
+ * entry is inert, and the next save from a form built on this view simply
+ * does not carry it. Anything that is not a reserve entry — including an entry
+ * too malformed to have an address — passes through untouched.
+ */
+export function withoutEnergyReserve<T>(list: T[] | undefined): T[] | undefined {
+  if (!Array.isArray(list)) return list;
+  return list.filter((t) => {
+    const address = (t as { address?: unknown } | null)?.address;
+    return !(typeof address === "string" && isEnergyReserveToken(address));
+  });
+}
+
+/**
  * What a snipe resolved to the energy reserve answers instead of placing an
  * order or asking for a signature. Not an error: the owner named a real coin,
  * and the answer tells them the one way it is bought.
