@@ -67,6 +67,23 @@ class CommandsMirrorTest {
         "ask rather than guess, and if my key doesn't cover it yet I'll tell you what it needs.",
       COMMANDS.getValue("snipe").say(a),
     )
+    assertEquals(
+      "Spend up to \$5.00 of my real USDG on the \$MERRYMEN I'm short of 100,000 — through Uniswap on Robinhood Chain " +
+        "(USDG → VIRTUAL → \$MERRYMEN), and only what's missing. Pool fees and the token's own trading tax come out of " +
+        "what arrives. It stays in my account as energy; my key can't sell or send it. I'll place it — my key's limits " +
+        "still decide whether it goes through.",
+      COMMANDS.getValue("get-energy").say(a),
+    )
+    assertEquals(
+      "Switch me to the dip-hunter strategy. It changes what I trade and when. Note: that one only runs while your " +
+        "wallet and my account hold 100,000 \$MERRYMEN between them — below that I leave it idle.",
+      COMMANDS.getValue("set-strategy").say(mapOf("strategy" to "dip-hunter")),
+    )
+    assertEquals(
+      "the energy card can only ever buy \$MERRYMEN",
+      mapOf("side" to JsonPrimitive("buy"), "symbol" to JsonPrimitive("MERRYMEN")).toString(),
+      COMMANDS.getValue("get-energy").fixed.toString(),
+    )
     assertEquals("Refuse a fill worse than 0.5% off the quote.", COMMANDS.getValue("set-slippage").say(mapOf("slippageBps" to "50")))
     assertEquals("Refuse a fill worse than 1% off the quote.", COMMANDS.getValue("set-slippage").say(mapOf("slippageBps" to "100")))
     assertEquals("Trade this basket from now on: TSLA, NVDA. Anything not on that list I stop buying.",

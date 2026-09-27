@@ -51,6 +51,17 @@ data class TierView(
   val needTokens: Int = 100_000,
   val wallet: String? = null,
   val source: String? = null,
+  /**
+   * The two halves of `tokens` (web tier route, combined standing): the owner's
+   * wallet and the agent's own account. null = unread or not counted, never 0.
+   * A NEW agent starts with an empty account, so the create path reads
+   * `holderTokens`, not the combined figure.
+   */
+  val holderTokens: Int? = null,
+  val agentTokens: Int? = null,
+  val agentAccount: String? = null,
+  /** The hosted energy gate is enforcing — copy only, never a permission. */
+  val energyGate: Boolean = false,
 )
 
 @Serializable

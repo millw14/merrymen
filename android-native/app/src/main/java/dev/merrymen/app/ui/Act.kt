@@ -890,7 +890,11 @@ suspend fun runConfirmedCard(
     }
     Via.ORDER -> {
       val side = spec.fixed["side"]?.jsonPrimitive?.content ?: return
-      val symbol = args["symbol"].orEmpty().trim().uppercase()
+      // A FIXED SYMBOL WINS OVER THE MODEL'S. get-energy fixes it to MERRYMEN
+      // and its card carries only an amount; reading args alone refused it as
+      // "needs a coin", and reading args first would let a model name the coin
+      // a fixed-symbol card exists to pin.
+      val symbol = (spec.fixed["symbol"]?.jsonPrimitive?.content ?: args["symbol"]).orEmpty().trim().uppercase()
       val usdg = amountOf(args)
       if (usdg == null || symbol.isEmpty()) {
         scope.say("agent", "That isn't an order I can place — it needs a coin and an amount — so nothing was sent.")
