@@ -111,8 +111,10 @@ describe("the Circle gate is satisfiable, and the warning is visible", () => {
     // outside their login wallet earns the tier. What matters here is
     // unchanged — the child is written an address the server established, not
     // one the tenant typed.
+    // And one $MERRYMEN wallet powers one agent: which of the two counts is
+    // effectiveHolder's call, over the holder claims (B2).
     const orch = readFileSync(new URL("../../../worker/src/orchestrator.ts", import.meta.url), "utf8");
-    assert.match(orch, /holderAddress: \(proven \?\? tenant\)/);
+    assert.match(orch, /const holder = effectiveHolder\(tenant, settings\?\.holderProof \?\? null, \(w\) => claims\.get\(w\)\);/);
     assert.match(orch, /JSON\.stringify\(forChild, null, 2\)/, "and the child must be written the amended copy");
   });
 
@@ -127,16 +129,20 @@ describe("the Circle gate is satisfiable, and the warning is visible", () => {
     // start of the block rather than from the top of the file — otherwise the
     // slice runs backwards and comes out empty, which passes nothing and
     // proves nothing.
-    const from = orch.indexOf("const forChild: MerrymenSettings = {");
+    const from = orch.indexOf("const forChild: MerrymenSettings = childSettingsFor(settings, holder);");
     assert.ok(from > 0, "the child settings copy must still be built here");
     const block = orch.slice(from, orch.indexOf("const home = childHome(tenant);", from));
-    assert.ok(
-      block.indexOf("...settings") < block.indexOf("holderAddress:"),
-      "the established address must override the stored one, not the other way round",
-    );
+    assert.ok(!/settings\.holderAddress/.test(block), "the self-declared field must not be read here");
+    // STRONGER THAN OVERRIDING: the helper drops the stored field before
+    // anything else, so it cannot survive even when no wallet counts (B2).
+    const helper = readFileSync(new URL("../../../worker/src/holder-claims.ts", import.meta.url), "utf8");
+    const fn = helper.slice(helper.indexOf("export function childSettingsFor("));
+    const drop = fn.indexOf("const { holderAddress: _typedIn, ...rest } = settings ?? {};");
+    const write = fn.indexOf("holderAddress: holder.address");
+    assert.ok(drop > 0 && write > drop, "the established address replaces the stored one, never the other way round");
     // And the stored, typed-in field is never a fallback: only a signature or
     // the session wallet decides whose balance counts.
-    assert.ok(!/settings\.holderAddress/.test(block), "the self-declared field must not be read here");
+    assert.ok(!/settings\??\.holderAddress/.test(fn.slice(0, fn.indexOf("\n}\n"))), "the self-declared field must not be read");
   });
 
   it("and a worker warning now reaches a screen that ships", () => {

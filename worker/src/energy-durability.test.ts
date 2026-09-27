@@ -197,15 +197,19 @@ describe("writeSettingsForChild always writes settings.json", () => {
   const fn = src.slice(src.indexOf("async function writeSettingsForChild("), src.indexOf("\n}\n", src.indexOf("async function writeSettingsForChild(")));
 
   it("WITH NO SAVED SETTINGS: the holder address is written before the early return", () => {
-    const write = fn.indexOf("if (!settings) writeChildSettings(tenant, { holderAddress: tenant });");
+    // B2 (sybil) changed WHICH address: effectiveHolder's, by the same claims
+    // as the saved-settings path — the login wallet unless another account
+    // claims it, and then no key at all (childSettingsFor).
+    const holder = fn.indexOf("const holder = effectiveHolder(tenant, settings?.holderProof ?? null, (w) => claims.get(w));");
+    const write = fn.indexOf("if (!settings) writeChildSettings(tenant, childSettingsFor(null, holder));");
     const early = fn.indexOf("if (!settings) return null;");
-    assert.ok(write > 0, "a settings-less tenant still gets a file");
+    assert.ok(holder > 0 && write > holder, "a settings-less tenant still gets a file, by the one holder rule");
     assert.ok(early > write, "written BEFORE the early return, or it is never written");
   });
 
-  it("and the saved-settings path writes through the same helper, holder rule unchanged", () => {
+  it("and the saved-settings path writes through the same helper, by the same holder rule", () => {
     assert.match(fn, /writeChildSettings\(tenant, forChild\);/);
-    assert.match(fn, /holderAddress: \(proven \?\? tenant\)/);
+    assert.match(fn, /const forChild: MerrymenSettings = childSettingsFor\(settings, holder\);/);
     const helper = src.slice(src.indexOf("function writeChildSettings("), src.indexOf("\n}\n", src.indexOf("function writeChildSettings(")));
     assert.match(helper, /writeFileSync\(path\.join\(home, "settings\.json"\)/);
     assert.match(helper, /mode: 0o600/, "owner-only, like the file it always was");

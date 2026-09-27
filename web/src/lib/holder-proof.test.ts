@@ -25,6 +25,13 @@ import { recoverMessageAddress } from "viem";
 import { holderProofMessage, isHolderProof } from "@merrymen/core";
 
 const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
+/** Comments stripped, so a header naming the field it refuses does not trip a pin. */
+const code = (src: string) =>
+  src
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .split(/\r?\n/)
+    .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
+    .join("\n");
 
 const TENANT = "0x1111111111111111111111111111111111111111";
 const ORIGIN = "https://app.merrymen.dev";
@@ -151,18 +158,48 @@ describe("only the verifying route may write a proof", () => {
 });
 
 describe("the worker trusts the proof and nothing else", () => {
-  it("A PROVEN WALLET OUTRANKS THE LOGIN ONE", () => {
+  /** writeSettingsForChild's body, from its signature to the next top-level brace. */
+  const writeSettings = () => {
     const orch = read("../../../worker/src/orchestrator.ts");
-    assert.match(orch, /const proven = isHolderProof\(settings\.holderProof\) \? settings\.holderProof\.address : null;/);
-    assert.match(orch, /holderAddress: \(proven \?\? tenant\)/);
+    const at = orch.indexOf("async function writeSettingsForChild(");
+    return orch.slice(at, orch.indexOf("\n}\n", at));
+  };
+
+  it("A PROVEN WALLET OUTRANKS THE LOGIN ONE — BY ONE RULE, IN THE WORKER AND ON EVERY SCREEN", () => {
+    // One $MERRYMEN wallet powers one agent: the orchestrator and
+    // holderWalletFor (/api/tier, /api/circle, /api/alpha) both ask
+    // effectiveHolder, with the same claims, so they cannot drift apart.
+    assert.match(writeSettings(), /const holder = effectiveHolder\(tenant, settings\?\.holderProof \?\? null, \(w\) => claims\.get\(w\)\);/);
+    assert.match(writeSettings(), /const forChild: MerrymenSettings = childSettingsFor\(settings, holder\);/);
+    assert.match(writeSettings(), /writeChildSettings\(tenant, childSettingsFor\(null, holder\)\)/);
+    const wallet = read("./holder-wallet.ts");
+    assert.match(wallet, /effectiveHolder\(tenant, proof \?\? null, \(w\) => claims\.get\(w\)\)/);
   });
 
-  it("AND THE SELF-DECLARED FIELD IS STILL OVERWRITTEN", () => {
-    // `holderAddress` remains typed-in and remains untrusted. If this ever
-    // stops being overwritten, the tier goes back to being a claim.
-    const orch = read("../../../worker/src/orchestrator.ts");
-    const line = orch.match(/holderAddress: \([^)]*\)[^,]*,/)?.[0] ?? "";
-    assert.ok(!/settings\.holderAddress/.test(line), "the stored address must not be a fallback");
+  it("AND THE SELF-DECLARED FIELD IS NEVER A FALLBACK", () => {
+    // `holderAddress` remains typed-in and remains untrusted. If it is ever
+    // read here, the tier goes back to being a claim.
+    assert.ok(!/settings\??\.holderAddress/.test(code(writeSettings())), "the orchestrator must not read the stored address");
+    const helper = code(read("../../../worker/src/holder-claims.ts"));
+    const fn = helper.slice(helper.indexOf("export function childSettingsFor("), helper.indexOf("\n}\n", helper.indexOf("export function childSettingsFor(")));
+    assert.match(fn, /const \{ holderAddress: _typedIn, \.\.\.rest \} = settings \?\? \{\};/, "dropped first, whatever it says");
+    assert.equal(fn.split("_typedIn").length, 2, "and never used after it is dropped");
+    assert.ok(!/settings\??\.holderAddress/.test(code(read("./holder-wallet.ts"))), "nor on the screens");
+  });
+
+  it("AND A NULL EFFECTIVE HOLDER DELETES THE KEY — the child is never handed a self-declared wallet", () => {
+    // Behaviour, not text: the helper the orchestrator writes through.
+    // Imported lazily: it is worker code, reached the way the orchestrator
+    // reaches it.
+    return import("../../../worker/src/holder-claims").then(({ childSettingsFor }) => {
+      const typed = { strategy: "trencher", holderAddress: "0x000000000000000000000000000000000000dead" };
+      const none = childSettingsFor(typed, null);
+      assert.equal("holderAddress" in none, false, "no wallet counts → no key at all");
+      assert.equal(none.strategy, "trencher", "and everything else the tenant saved is kept");
+      assert.deepEqual(childSettingsFor(null, null), {}, "a tenant who saved nothing and counts no wallet gets an empty file");
+      const own = `0x${"b".repeat(40)}` as const;
+      assert.equal(childSettingsFor(typed, { address: own, source: "linked" }).holderAddress, own, "the counted wallet overrides the typed one");
+    });
   });
 
   it("and a malformed proof falls back rather than reaching balanceOf", () => {

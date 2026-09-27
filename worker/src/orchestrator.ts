@@ -73,7 +73,8 @@ import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
-import { CASH, DEFAULT_BASKET_SYMBOLS, energyReserveTokens, isHolderProof, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
+import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
+import { backfillHolderClaims, childSettingsFor } from "./holder-claims";
 import { makePgDb, translateSchema, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
@@ -813,8 +814,9 @@ async function refreshGrantForChild(tenant: `0x${string}`): Promise<void> {
 /**
  * Hand the child the tenant's OWN settings.json from the store — their strategy,
  * basket, custom tokens, sizing, their Telegram bot. A tenant who has saved
- * nothing yet gets a file holding only `holderAddress` (the child then runs the
- * safe defaults, and still knows whose $MERRYMEN counts — see below). Refreshed
+ * nothing yet gets a file holding only `holderAddress`, or nothing at all when
+ * no wallet counts for them (the child then runs the safe defaults, and still
+ * knows whose $MERRYMEN counts — see below). Refreshed
  * every reconcile so a config change propagates: the worker re-reads
  * settings.json each tick, and mergeSettings strips house keys + forces the RCE
  * flags off, so what the tenant stored can only ever be their own legitimate
@@ -826,9 +828,28 @@ function writeChildSettings(tenant: `0x${string}`, forChild: MerrymenSettings): 
   writeFileSync(path.join(home, "settings.json"), JSON.stringify(forChild, null, 2), { encoding: "utf8", mode: 0o600 });
 }
 
+/** wallet → the account holding its claim; null when the claims could not be read. */
+type HolderClaimsRead = ReadonlyMap<string, string> | null;
+
+/**
+ * EVERY HOLDER CLAIM, READ ONCE FOR THE WHOLE PASS — one query for the fleet
+ * rather than one per tenant every fifteen seconds. Null when unreadable: an
+ * unread claim is not "nobody claims it", so writeSettingsForChild then leaves
+ * each child's settings.json as it last wrote it rather than guess.
+ */
+async function readHolderClaims(): Promise<HolderClaimsRead> {
+  try {
+    return await getSettingsStore().holderClaims();
+  } catch (e) {
+    log(`holder claims unreadable — settings.json left as last written this pass: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
 async function writeSettingsForChild(
   tenant: `0x${string}`,
   seenBotTokens?: Set<string>,
+  claimsRead?: HolderClaimsRead,
 ): Promise<MerrymenSettings | null> {
   try {
     const settings = await getSettingsStore().get(tenant);
@@ -856,9 +877,25 @@ async function writeSettingsForChild(
     // strategy name and trait words and nothing else; the blob goes no further.
     tenantChatProfile.set(tenant.toLowerCase(), chatProfileOf(settings));
     /**
+     * ONE $MERRYMEN WALLET POWERS ONE AGENT — the same rule, the same claims,
+     * as every holder screen (web/src/lib/holder-wallet.ts), so a person is
+     * never told one thing while their agent is throttled on another.
+     *
+     * effectiveHolder counts the linked proof only while its claim names this
+     * tenant, the login wallet only while no other tenant claims it, and
+     * otherwise nothing: one bag linked into many accounts powers one agent,
+     * not all of them. The claims are read once per pass (reconcile), or here
+     * for a spawn. UNREADABLE → WRITE NOTHING: the child keeps the file this
+     * wrote last, from claims we could read, rather than a guess in either
+     * direction; a fresh home has none, the same as a settings outage.
+     */
+    const claims = claimsRead === undefined ? await readHolderClaims() : claimsRead;
+    if (!claims) return settings;
+    const holder = effectiveHolder(tenant, settings?.holderProof ?? null, (w) => claims.get(w));
+    /**
      * A TENANT WHO NEVER SAVED SETTINGS STILL GETS A settings.json — holding
-     * only the wallet whose $MERRYMEN counts, by the same rule as below (no
-     * proof can exist without saved settings, so it is the tenant).
+     * only the wallet whose $MERRYMEN counts, by the same rule as below, or
+     * nothing at all when no wallet counts.
      *
      * This returned before writing anything, so the child saw no holder
      * address at all, and circle.ts reads "no address" as a KNOWABLE outsider:
@@ -867,8 +904,10 @@ async function writeSettingsForChild(
      * a tenth of its day for tokens it holds. `{ holderAddress }` alone is the
      * safe defaults plus the address, because the child resolves file, then
      * env, then default, and MERRYMEN_HOLDER_ADDRESS is stripped from its env.
+     * Written even when it is `{}`, so a file from an earlier pass that named
+     * a wallet now claimed elsewhere does not outlive the claim.
      */
-    if (!settings) writeChildSettings(tenant, { holderAddress: tenant });
+    if (!settings) writeChildSettings(tenant, childSettingsFor(null, holder));
     if (!settings) return null;
     if (seenBotTokens && settings.telegramBotToken && dedupeBotToken(settings, seenBotTokens)) {
       log(`${tenant}: telegram bot token already claimed by another tenant — telegram disabled for this child`);
@@ -922,12 +961,14 @@ async function writeSettingsForChild(
      * Shape-checked before use, because a settings blob is data: a malformed
      * proof falls back to the tenant rather than reaching `balanceOf` as
      * whatever it happens to be.
+     *
+     * AND CLAIMED, since one wallet powers one agent: `holder` above is
+     * effectiveHolder's answer, and when it is null — the proof and the login
+     * wallet both claimed by other tenants — childSettingsFor DELETES
+     * `holderAddress` rather than leave the typed-in value standing. The
+     * child then counts its own agent account alone.
      */
-    const proven = isHolderProof(settings.holderProof) ? settings.holderProof.address : null;
-    const forChild: MerrymenSettings = {
-      ...settings,
-      holderAddress: (proven ?? tenant) as `0x${string}`,
-    };
+    const forChild: MerrymenSettings = childSettingsFor(settings, holder);
     writeChildSettings(tenant, forChild);
     // The universe this tenant may trade, kept for the news desk. Recorded here
     // because this is the one place the orchestrator reads a tenant's settings,
@@ -1524,8 +1565,10 @@ export async function reconcile(): Promise<void> {
   // seenBotTokens set de-duplicates Telegram bots across the fleet (see the guard
   // in writeSettingsForChild).
   const seenBotTokens = new Set<string>();
+  // Every holder claim in one read for the whole fleet, not one per tenant.
+  const holderClaims = await readHolderClaims();
   for (const tenant of children.keys()) {
-    await writeSettingsForChild(tenant as `0x${string}`, seenBotTokens);
+    await writeSettingsForChild(tenant as `0x${string}`, seenBotTokens, holderClaims);
     // AND THEIR GRANT, for the same reason and on the same clock. Settings
     // reached a live agent in fifteen seconds while a new SIGNATURE reached it
     // only on a restart — so an owner who re-signed to cover a token watched
@@ -4123,6 +4166,51 @@ async function runTenantInspectIfAsked(): Promise<void> {
   }
 }
 
+/**
+ * CLAIM THE PROOFS LINKED BEFORE CLAIMS EXISTED — once per process, at start.
+ *
+ * effectiveHolder counts no unclaimed proof, so until this runs every holder
+ * who linked a wallet reads their login wallet instead. It runs BEFORE
+ * reconcile() on the first pass, so the first settings.json each child is
+ * handed already counts the right wallet. Earliest proof wins a shared wallet
+ * (planHolderBackfill); collisions are logged by name.
+ *
+ * BEHIND A LEASE, the tenant-lease advisory lock on a fixed key that is not an
+ * address, so it can never be a tenant's: one replica backfills at a time.
+ * Idempotent regardless — a replica that finds the lease taken simply tries
+ * again next pass and finds its claims already made. A failure is loud and is
+ * retried next pass; it never blocks the fleet from arming.
+ */
+let holderClaimsBackfilled = false;
+const HOLDER_BACKFILL_LEASE = "0xholder-claims-backfill" as const;
+
+async function runHolderClaimsBackfill(): Promise<void> {
+  if (holderClaimsBackfilled) return;
+  let lease: TenantLease | null;
+  try {
+    lease = await acquireTenantLease(HOLDER_BACKFILL_LEASE);
+  } catch (e) {
+    log(`holder claims backfill: lease attempt failed, trying again next pass — ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+  if (!lease) {
+    log("holder claims backfill: another replica holds its lease — trying again next pass");
+    return;
+  }
+  try {
+    const out = await backfillHolderClaims(getSettingsStore(), log);
+    holderClaimsBackfilled = true;
+    log(
+      `holder claims backfill: ${out.claimed} claimed, ${out.held} already held, ` +
+        `${out.collisions.length} collision(s), ${out.unreadable.length} tenant(s) unreadable`,
+    );
+  } catch (e) {
+    log(`holder claims backfill: FAILED, trying again next pass — ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    await lease.release();
+  }
+}
+
 async function runLiveIntentBackfillIfAsked(): Promise<void> {
   const mode = (process.env.MERRYMEN_BACKFILL_LIVE_INTENT ?? "").trim();
   if (mode !== "report" && mode !== "apply") return;
@@ -5476,6 +5564,9 @@ export async function runOrchestrator(): Promise<void> {
       await runResumeClassEntriesIfAsked();
       await runClassPnlRepairIfAsked();
       await runCashRowRepairIfAsked();
+      // Before reconcile, so the first settings.json a child is handed
+      // already counts the wallet its holder claim names.
+      await runHolderClaimsBackfill();
       await reconcile();
       watchdog();
       await mirrorLedgers();
