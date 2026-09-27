@@ -197,14 +197,16 @@ describe("through the real notifier", () => {
       note: () => {},
       stateRef: { get: () => state as never, set: (s) => { state = s as never; } },
       buildStatusContext: () => ({ name: "Robin", strategy: "s", venue: "v", paused: false, workerAliveSec: 0, grant: null, chainId: 4663, telegramMaxActionUsdg: 25 }),
-      getAlertInputs: () => ({
-        ...(passes++, {}),
-        grantExpiresAt: null, maxActionUsdg: null, cashUsdg: null, drawdownBps: null, breakerBps: null, gasWei: null,
-        energy: { ...REPORT, resetsAt: Math.floor(Date.now() / 1000) + 3_600 },
-        energyAccount: ACCOUNT,
-        energyChainId: 4663,
-        energyHolder: HOLDER,
-      }),
+      getAlertInputs: () => {
+        passes += 1; // read once per pass
+        return {
+          grantExpiresAt: null, maxActionUsdg: null, cashUsdg: null, drawdownBps: null, breakerBps: null, gasWei: null,
+          energy: { ...REPORT, resetsAt: Math.floor(Date.now() / 1000) + 3_600 },
+          energyAccount: ACCOUNT,
+          energyChainId: 4663,
+          energyHolder: HOLDER,
+        };
+      },
       getChainId: () => 4663,
       getAgentId: () => ACCOUNT,
     });
