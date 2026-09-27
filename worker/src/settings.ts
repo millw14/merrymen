@@ -19,6 +19,7 @@ import {
 } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
 import { MAX_DECISION_INTERVAL_SEC } from "./decision-cadence";
+import { energyModeOf, type EnergyMode } from "./energy";
 
 /**
  * A tenant settings file with every house-key field removed (hosted mode). The
@@ -77,6 +78,15 @@ export interface ResolvedConfig {
    * outage until somebody has written the field for the people mid-trade.
    */
   enforceLiveIntent: boolean;
+  /**
+   * The energy gate (core energy.ts, worker/src/energy.ts): off, observe or
+   * enforce. OPERATOR ENV ONLY — MERRYMEN_ENERGY_GATE, never a settings-file
+   * key, never a house key a tenant could strip or set — and HOSTED ONLY:
+   * self-hosted is always 'off' whatever the env says. On their own machine the
+   * owner pays their own model and runs open code; a throttle there would be
+   * both unenforceable and against the token's stance.
+   */
+  energyGate: EnergyMode;
   paperStartUsdg: number;
   /** Builtin name, or a user strategy filename (strategies/<name>.ts). */
   strategy: string;
@@ -374,6 +384,13 @@ export function mergeSettings(
     // `liveTradingEnabled` recorded yet — a fresh self-hosted upgrade — and
     // remove it in the same session, as docs/live-trading-consent.md sets out.
     enforceLiveIntent: (env.MERRYMEN_LIVE_INTENT_STAND_DOWN ?? "").trim() !== "1",
+    // THE ENERGY GATE, from the operator's environment and nowhere else — the
+    // same shape as the line above. `file` is never consulted: a tenant must
+    // not be able to switch off the throttle they are under, and a key in the
+    // file would be exactly that. Off unless the operator says otherwise, and
+    // off self-hosted whatever they say. Reaches hosted children through
+    // childEnv; it is not a secret, so CHILD_SECRET_STRIP leaves it alone.
+    energyGate: hosted ? energyModeOf(env.MERRYMEN_ENERGY_GATE) : "off",
     paperStartUsdg: num(file.paperStartUsdg, env.MERRYMEN_PAPER_START_USDG, d.paperStartUsdg, 1, 10_000_000),
     // Any sane token is a valid strategy name — builtins resolve directly,
     // everything else resolves to strategies/<name>.* (missing file = honest

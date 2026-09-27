@@ -9,7 +9,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { TradeIntent } from "../policy";
-import { breakerIdle, type Snapshot, type Strategy, type Tick } from "../strategies/types";
+import { breakerIdle, energyEntriesSpent, type Snapshot, type Strategy, type Tick } from "../strategies/types";
 import type { Why } from "../strategies/reasons";
 import { parseProposals, proposalsToIntents, type StrategistUniverse } from "./proposals";
 import type { ProposalDriver, Signals } from "./driver";
@@ -80,6 +80,17 @@ export interface LlmStrategistConfig {
   takeProfitBps?: number;
   /** Minimum ms between model calls — decisions are windows, ticks are not. */
   decisionIntervalMs: number;
+  /**
+   * MAY THIS WINDOW'S MODEL CALL BE PAID FOR? Asked once a window is due and
+   * before it is stamped. False means the window is not taken: no model call,
+   * no stamp, and the next tick asks again — which is cheap, because the
+   * energy allowance it is bound to (index.ts) is a counter, not a model.
+   *
+   * The floor and the ceiling above the window never ask: they are exits.
+   * Absent means always yes (backtests, fixtures, the null driver — registry.ts
+   * forwards it only when there is a real model to pay for).
+   */
+  claimWindow?: () => Promise<boolean>;
   /** Injectable clock for tests. */
   now?: () => number;
   /** Where dropped proposals and reasons get reported (worker event log). */
@@ -364,6 +375,21 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       if (braked && snap.holdings.size === 0) return braked;
 
       if (lastDecisionAt !== null && t - lastDecisionAt < cfg.decisionIntervalMs) return braked ?? [];
+
+      // ── TODAY'S ENERGY ────────────────────────────────────────────────
+      //
+      // FLAT WITH TODAY'S NEW TRADES USED UP, the model could only answer with
+      // a buy that index.ts would withhold, so it is not asked and not billed —
+      // the breaker's rule above, for the energy allowance. Not stamped, so the
+      // window is taken the first tick after midnight rather than up to a
+      // window later.
+      //
+      // THEN THE PAID CALL IS CLAIMED against the day's AI reviews. Refused,
+      // nothing is stamped and the next tick asks again; the claim is a counter
+      // read, so asking is free. Below the floor and the ceiling on purpose:
+      // those are exits and never wait on an allowance.
+      if (energyEntriesSpent(snap) && snap.holdings.size === 0) return braked ?? [];
+      if (cfg.claimWindow && !(await cfg.claimWindow())) return braked ?? [];
       lastDecisionAt = t;
 
       // ── THE UNIVERSE THIS WINDOW ACTUALLY HAS ───────────────────────
@@ -480,7 +506,13 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       // become an intent the wall is certain to refuse. Not journaled as a
       // drop: a drop row publishes, and a tripped breaker is account state the
       // public feed leaves out. The owner's log says it, below.
-      const allowed = brake ? actions.filter((a) => a.action !== "buy") : actions;
+      //
+      // AND THE SAME FOR TODAY'S ENERGY: holding, with no new trades left
+      // today, the model was asked because it may want to sell, and a buy it
+      // answered with would only be withheld by index.ts after this journaled
+      // it — a public decision for a trade that could never happen.
+      const energySpent = energyEntriesSpent(snap);
+      const allowed = brake || energySpent ? actions.filter((a) => a.action !== "buy") : actions;
       const withheld = actions.length - allowed.length;
       const { intents, accepted, rejected } = proposalsToIntents(allowed, universeNow, snap);
 
@@ -517,7 +549,12 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
 
       if (thesis) note("ok", `strategist: ${thesis}`);
       if (withheld > 0) {
-        note("ok", `strategist: ${withheld} buy proposal(s) withheld — the drawdown breaker is tripped; sells still run`);
+        note(
+          "ok",
+          brake
+            ? `strategist: ${withheld} buy proposal(s) withheld — the drawdown breaker is tripped; sells still run`
+            : `strategist: ${withheld} buy proposal(s) withheld — today's energy for new trades is used up; sells still run`,
+        );
       }
       for (const r of rejected) note("warn", `strategist proposal dropped: ${r}`);
       for (const a of allowed) {

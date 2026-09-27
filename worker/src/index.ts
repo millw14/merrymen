@@ -174,6 +174,42 @@ import { startupSlotMs } from "./stagger";
 import { llmText, resolveLlm } from "./llm";
 import { applyPaperIntent, type PaperPosition } from "./paper";
 import { checkPolicy, type AgentLimits, type AgentState, type ScoutContext, type TradeIntent } from "./policy";
+// ── ENERGY: how much a low-energy agent may still do on its own today ──────
+// The contract is core energy.ts; the pure throttle is energy.ts; the owner's
+// sentence is energy-copy.ts. What is wired here is where the tick asks.
+import { ENERGY, MERRYMEN_TOKEN, grantEnergyRoute } from "../../packages/core/src/index";
+import { isExitIntent } from "./policy";
+import {
+  ENERGY_OFF,
+  claimCap,
+  countsAsEntry,
+  energyBuyOf,
+  energyLevel,
+  energyPlan,
+  energyShortfallRaw,
+  energyStatus,
+  enforcedCap,
+  entryAllowance,
+  reviewAllowance,
+  shouldTellOwner,
+  usdgCentsUp,
+  utcDay,
+  type BalanceParts,
+  type EnergyPlan,
+  type LastGood,
+} from "./energy";
+import type { EnergyStatus } from "../../packages/core/src/index";
+import { count as countTokens, energyNotice } from "./energy-copy";
+import { energyAmountInFor, grossNeededFor, readEnergyTaxBps } from "./venues/uniswap-v2";
+import {
+  claimEnergy,
+  claimEnergyNotice,
+  getEnergyDay,
+  lastEnergyRead,
+  noteEnergyRead,
+  refundEnergy,
+  setAgentEnergy,
+} from "./store";
 import {
   bundlerChainMismatch,
   connectionKey,
@@ -2610,6 +2646,9 @@ async function main() {
         creds: resolveLlm(c),
         intervalMin: c.llmIntervalMin,
         maxActionUsdg: c.llmMaxActionUsdg,
+        // Each paid model window is claimed against today's energy (the
+        // registry forwards this only when there is a real model to pay).
+        claimWindow: claimReview,
         // RESEARCH INSTEAD OF GUESSING. Off unless the owner asked for it —
         // it costs several model calls a window instead of one.
         ...(c.deskEnabled
@@ -3732,6 +3771,231 @@ async function main() {
   let breakerBrickNoted = false;
   /** Did the last $MERRYMEN read actually answer? A failed read must not be reported as a wallet. */
   let holderReadOk = true;
+  // ── ENERGY: TODAY'S ALLOWANCE, DECIDED ONCE PER TICK ────────────────────
+  //
+  // Decided right after the $MERRYMEN read (refreshEnergy) and read at every
+  // fork of the tick that starts NEW autonomous work: the Brain wake guard,
+  // each paid review (runShadow's admit, the strategist's window), the Brain
+  // live BUY, and each entry the strategy or the class route proposes. Nothing
+  // else consults it. Exits, stop-losses, owner commands (the app's chat, the
+  // web, Telegram, MCP), the energy buy and the kill switch never pass through
+  // any of those forks — submitChatTrade, submitChatTransfer, runQueuedCommand
+  // and processIntentLocked do not know energy exists (energy-wiring.test.ts).
+  //
+  // ENERGY_OFF until decided: nothing limited, nothing counted.
+  let energyNow: EnergyPlan = ENERGY_OFF;
+  /**
+   * The last reading that decided the level, for WHICH account; undefined until
+   * loaded from the ledger. Keyed, because a re-sign can arm a different smart
+   * account in the same process, and one account's reading is not another's.
+   */
+  let energyLastGood: { agentId: string; good: LastGood | null } | undefined;
+  /** An entry was withheld by energy since the last plan — the moment the owner is told. */
+  let energyWithheld = false;
+  /**
+   * THE WORKER'S OWN REPORT, as published on the agents row this tick. Kept in
+   * scope for the Telegram status line and daily alert (readStatus /
+   * startNotifier's getAlertInputs read it — wired by the Telegram slice).
+   */
+  let energyReport: EnergyStatus | null = null;
+  /** The last USDG estimate, the shortfall it priced, and when. At most one re-price per ENERGY.estimateEverySec. */
+  let energyEstimate: { key: string; value: number | null; at: number } | null = null;
+
+  /** A claim made against today's energy: ok = go ahead; day = the row a refund goes back to (null = nothing written). */
+  interface EnergyClaim {
+    ok: boolean;
+    day: string | null;
+    agentId: string | null;
+  }
+
+  /**
+   * CLAIM ONE review or new trade against today's allowance, atomically.
+   *
+   *   not throttled → go ahead, nothing written (a full-energy agent counts
+   *     nothing, so a later unread balance cannot greet it with a spent day);
+   *   observe → counted, NEVER refused — and a line in the log when enforce
+   *     would have refused it, which is what observe is for;
+   *   enforce → refused at the cap (reviews paced across the day, entries
+   *     the day's allowance). A ledger that will not take the write is a
+   *     refusal too: new work fails closed, and exits never come here.
+   *
+   * Claim first, refund on no trade: a crash in between under-spends by one,
+   * never over-spends (store.ts's budgets make the same trade).
+   */
+  async function claimEnergyFor(field: "reviews" | "entries"): Promise<EnergyClaim> {
+    const plan = energyNow;
+    const now = Math.floor(Date.now() / 1000);
+    const cap = claimCap(plan, field, now);
+    if (cap === null || !active) return { ok: true, day: null, agentId: null };
+    const agentId = active.agentId;
+    const day = utcDay(now);
+    const claimed = await claimEnergy(agentId, day, field, cap);
+    if (plan.mode !== "enforce") {
+      if (claimed) {
+        const c = await getEnergyDay(agentId, day);
+        const used = c ? (field === "reviews" ? c.reviews : c.entries) : null;
+        const would = enforcedCap(plan, field, now);
+        if (used !== null && used > would) {
+          console.log(
+            `[${short(agentId)}] [energy] observe: enforce would withhold this ${field === "reviews" ? "AI review" : "new trade"} ` +
+              `(${used} today against ${would})`,
+          );
+        }
+      }
+      return { ok: true, day: claimed ? day : null, agentId };
+    }
+    return { ok: claimed, day: claimed ? day : null, agentId };
+  }
+  /** A paid AI review (Brain run or strategist window). Not refunded: a review that ran was paid for. */
+  async function claimReview(): Promise<boolean> {
+    return (await claimEnergyFor("reviews")).ok;
+  }
+  /** A new trade this agent is about to start on its own. */
+  async function claimEntry(): Promise<EnergyClaim> {
+    return claimEnergyFor("entries");
+  }
+  /** Give back an entry claim that produced no trade. A claim that wrote nothing gives back nothing. */
+  async function refundEntry(claim: EnergyClaim | null | undefined): Promise<void> {
+    if (!claim?.ok || claim.day === null || claim.agentId === null) return;
+    await refundEnergy(claim.agentId, claim.day, "entries");
+  }
+  /**
+   * AN ENTRY WAS WITHHELD: note it, and tell the owner — once per UTC day.
+   *
+   * Told at the FIRST withheld entry, the moment the limit cost them a trade,
+   * not on a paced review. The durable told_at claim goes FIRST and the event
+   * second, so a crash between them loses the message rather than sending it
+   * twice, and a redeploy (which seeds told_at back) does not send it again.
+   * Never public: a warn event is the owner's register, and the sentence is
+   * worker-written — the address in it comes from the grant, never a model.
+   */
+  async function withholdEntry(agentId: string): Promise<void> {
+    energyWithheld = true;
+    if (!active || !shouldTellOwner(energyNow, energyWithheld)) return;
+    const now = Math.floor(Date.now() / 1000);
+    const claimed = await claimEnergyNotice(agentId, energyNow.day, now);
+    energyNow = { ...energyNow, told: true };
+    if (!claimed) return;
+    await addEvent(
+      agentId,
+      "warn",
+      energyNotice({
+        day: energyNow.day,
+        account: active.grant.smartAccount,
+        chainId: active.grant.chainId,
+        holder: cfg.holderAddress ?? null,
+        holderTokens: energyReport?.holderTokens ?? null,
+        agentTokens: energyReport?.agentTokens ?? null,
+        level: energyNow.level,
+        buy: energyReport?.buy ?? null,
+        estimateUsdg: energyReport?.estimateUsdg ?? null,
+      }),
+    );
+  }
+
+  /**
+   * WHAT THE SHORTFALL WOULD COST IN USDG RIGHT NOW, or null when unknown.
+   *
+   * The route's own arithmetic (venues/uniswap-v2.ts) over the tick's metered
+   * mainnet client — no new transport: the $MERRYMEN still missing, grossed up
+   * for the token's buy tax read fresh, priced by getAmountsIn (both pools'
+   * fees included), rounded UP to the cent. Unknown whenever any input is: a
+   * half-read balance, an unreadable or out-of-bounds tax, a pool that will
+   * not quote. It is shown to the owner as an estimate and nothing is bought
+   * on it — the buy itself re-prices at confirmation.
+   */
+  async function estimateEnergyUsdg(client: PublicClient, parts: BalanceParts): Promise<number | null> {
+    const shortRaw = energyShortfallRaw(parts);
+    if (shortRaw === null || shortRaw <= 0n) return null;
+    const tax = await readEnergyTaxBps(client);
+    if (tax === null || tax > ENERGY.maxTaxBps) return null;
+    const amountIn = await energyAmountInFor(client, grossNeededFor(shortRaw, tax, 0));
+    return amountIn === null ? null : usdgCentsUp(amountIn);
+  }
+
+  /**
+   * DECIDE TODAY'S ENERGY from this tick's $MERRYMEN read, and publish it.
+   *
+   * OFF: nothing is limited, nothing is counted, no ledger is read — but a
+   * report is still published (gated false), so the last one on the agents
+   * row is always this process's and a stale "spent" from an enforcing day
+   * cannot outlive a switch-off (the mirror keeps the last non-null report).
+   *
+   * OBSERVE / ENFORCE: the level from the combined read with the durable
+   * last-good standing in for a failed one, the house-baseline allowances,
+   * today's counters, and — while low on a Robinhood Chain grant — the USDG
+   * estimate, re-priced at most every ENERGY.estimateEverySec.
+   */
+  async function refreshEnergy(agentId: string, grant: StoredGrant, parts: BalanceParts): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    energyWithheld = false;
+    const mode = cfg.energyGate;
+    let reviewsAllowed = 0;
+    let estimate: number | null = null;
+    if (mode === "off") {
+      energyNow = energyPlan({
+        mode,
+        level: energyLevel(parts, null, now).level,
+        counters: null,
+        reviewsAllowed: 0,
+        entriesAllowed: 0,
+        nowSec: now,
+      });
+      energyEstimate = null;
+    } else {
+      if (energyLastGood?.agentId !== agentId) {
+        energyLastGood = { agentId, good: await lastEnergyRead(agentId, now - ENERGY.lastGoodMaxAgeSec) };
+      }
+      const { level, decided } = energyLevel(parts, energyLastGood.good, now);
+      if (decided !== null) {
+        energyLastGood = { agentId, good: { full: decided, at: now } };
+        await noteEnergyRead(agentId, utcDay(now), decided, now);
+      }
+      // THE REVIEWERS THAT ARE ACTUALLY RUNNING, each at its HOUSE interval.
+      const brainConfigured = !!cfg.brainUrl && !!cfg.brainToken;
+      const trencherBrain = cfg.strategy === "trencher" && cfg.trencherFastEnabled && brainConfigured;
+      reviewsAllowed = reviewAllowance({
+        brain: !trencherBrain && brainConfigured && (shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)),
+        trencher: trencherBrain,
+        strategistIntervalMin: cfg.strategy === "llm-strategist" && resolveLlm(cfg) ? cfg.llmIntervalMin : null,
+        brainIntervalSec: scheduledInterval(),
+        trencherIntervalSec: TRENCH_REVIEW_INTERVAL_MS / 1000,
+      });
+      energyNow = energyPlan({
+        mode,
+        level,
+        counters: await getEnergyDay(agentId, utcDay(now)),
+        reviewsAllowed,
+        entriesAllowed: entryAllowance(active?.limits.maxOpsPerDay ?? Number.NaN),
+        nowSec: now,
+      });
+      if (grant.chainId === MERRYMEN_TOKEN.chainId && level !== "full" && active) {
+        const key = `${agentId}:${energyShortfallRaw(parts) ?? "unknown"}`;
+        if (energyEstimate && energyEstimate.key === key && now - energyEstimate.at < ENERGY.estimateEverySec) {
+          estimate = energyEstimate.value;
+        } else {
+          const client = active.client;
+          estimate = await boundedRead(() => estimateEnergyUsdg(client, parts), 10_000).catch(() => null);
+          energyEstimate = { key, value: estimate, at: now };
+        }
+      } else {
+        energyEstimate = null;
+      }
+    }
+    energyReport = energyStatus({
+      plan: energyNow,
+      parts,
+      hasReviewer: reviewsAllowed > 0,
+      buy: energyBuyOf({
+        chainId: grant.chainId,
+        live: execMode().mode === "live",
+        hasRoute: grantEnergyRoute(grant) !== null,
+      }),
+      estimateUsdg: estimate,
+      nowSec: now,
+    });
+    void setAgentEnergy(agentId, JSON.stringify(energyReport));
+  }
   let lastSequencerUp = true;
   // A feedless holding never resolves, so warn ONCE while it's held rather than
   // every tick forever. Resets when the book is valuable again.
@@ -9798,7 +10062,15 @@ async function main() {
      * successful read there is nothing to keep, and the floor stands — which
      * is exactly where every agent starts anyway.
      */
-    const holderRead = await readHolderStatusResult(cfg.rpcMainnet, cfg.holderAddress);
+    //
+    // THE COMBINED BALANCE (core energy.ts, D1): the owner's holder wallet PLUS
+    // this agent's own account, where $MERRYMEN it buys or is sent lands. The
+    // account counts only on Robinhood Chain — on any other network the same
+    // address here is not this agent's, and tokens sent to it would not be.
+    // Still ONE read call and one metered client (circle.ts); `ok` only when
+    // every part answered, so the tier stays exact and the rule above holds.
+    const energyAccount = grant.chainId === MERRYMEN_TOKEN.chainId ? (grant.smartAccount as `0x${string}`) : undefined;
+    const holderRead = await readHolderStatusResult(cfg.rpcMainnet, cfg.holderAddress, energyAccount);
     holderReadOk = holderRead.ok;
     if (holderRead.ok) holderTier = holderRead.status.tier;
     if (holderRead.ok && holderTier.id !== lastTierId) {
@@ -9807,11 +10079,20 @@ async function main() {
         agentId,
         "ok",
         holderTier.id === "outsider"
-          ? "Merry Circle — no $MERRYMEN at your holder wallet; standard platform fee applies"
+          ? "Merry Circle — no $MERRYMEN between your wallet and my account; standard platform fee applies"
           : `Merry Circle — ${holderTier.emoji} ${holderTier.name}: ${holderTier.feeDiscountBps / 100}% off the platform fee`,
       );
     }
     const effFeeBps = effectivePerfFeeBps(cfg.perfFeeBps, holderTier);
+    // AND TODAY'S ENERGY, from the same read — the parts, so a half that
+    // answered can still prove full energy where the tier may not. Decided
+    // here, once, before anything this tick could spend it. It never throws
+    // into the tick: energy is never the reason a tick fails.
+    try {
+      await refreshEnergy(agentId, grant, holderRead.parts);
+    } catch (e) {
+      console.error(`[${short(agentId)}] [energy] could not decide this tick — keeping the last plan:`, e);
+    }
 
     // A CURVE-VALUED POSITION MAY NOT RATCHET ANY HIGH-WATER MARK.
     //
@@ -10170,7 +10451,11 @@ async function main() {
 
     // Not on a command tick (plan.brain): the Brain keeps its own clock, and an
     // owner's order arriving is not a reason to ask it anything.
-    if ((fastTrencher || shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)) && cfg.brainUrl && cfg.brainToken && !bookIncomplete && plan.brain) {
+    //
+    // NOR WHILE TODAY'S AI REVIEWS ARE PACED OR SPENT (energyNow.reviews):
+    // skipping the whole block leaves nextBrainReviewAt null, so the tick
+    // keeps its regular cadence instead of chasing a deadline it may not use.
+    if ((fastTrencher || shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)) && cfg.brainUrl && cfg.brainToken && !bookIncomplete && plan.brain && energyNow.reviews.open) {
       try {
         const epochNow = await getAgentEpoch(agentId);
         const netContrib = await getNetContributionsUsdg(agentId);
@@ -10218,7 +10503,12 @@ async function main() {
         // buy, so each review of a new coin was a paid Brain call for an entry
         // that could never be made — thirty of them in fifteen minutes on the
         // live feed. Held positions are still reviewed below: exits only.
-        const entriesBraked = breakerTripped({ drawdown: drawdownNow });
+        //
+        // AND NONE WHILE TODAY'S ENERGY FOR NEW TRADES IS USED UP: every entry
+        // would be withheld below, so a review of a coin not held is a paid
+        // call that cannot act. Held positions are still reviewed.
+        const energyEntriesClosed = energyNow.enforce && !energyNow.entries.open;
+        const entriesBraked = breakerTripped({ drawdown: drawdownNow }) || (energyNow.enforce && !energyNow.entries.open);
         const trenchEligible = fastTrencher && !entriesBraked ? await trenchCandidates() : [];
         const trenchHeld = fastTrencher ? new Set((await trenchOpen()).map(p => p.token.toLowerCase())) : new Set<string>();
         const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => !market.pausedTokens.has(c.symbol) && !positions.some(p => p.token.toLowerCase() === c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter));
@@ -10239,7 +10529,11 @@ async function main() {
         const focus = chooseFocus({
           agentId,
           positions: focusPositions,
-          universe: watchTokens.filter(t => !fastTrencher || trenchSymbols.has(t.symbol)).map((t) => ({ symbol: t.symbol, address: t.address })),
+          universe: watchTokens
+            .filter(t => !fastTrencher || trenchSymbols.has(t.symbol))
+            // Energy spent: held tokens only — exits, never new entries.
+            .filter(t => fastTrencher || !energyEntriesClosed || positions.some(p => p.token.toLowerCase() === t.address.toLowerCase()))
+            .map((t) => ({ symbol: t.symbol, address: t.address })),
           prices: market.prices,
           paused: market.pausedTokens,
           // ── TRENCHER ONLY ────────────────────────────────────────────────
@@ -10666,6 +10960,9 @@ async function main() {
                 // decisionName.
                 ...reviewRecord({ displayName: await decisionName(agentId, focus.symbol), tape }),
                 triggers: { ...DEFAULT_TRIGGERS, scheduledIntervalSec: TRENCH_REVIEW_INTERVAL_MS / 1000, cooldownSec: { ...DEFAULT_TRIGGERS.cooldownSec, "scheduled-review": 30 } },
+                // A paid review, claimed against today's energy once the
+                // trigger has fired and before it is paid for.
+                admit: claimReview,
               }); },
               m => console.log(`[trencher] ${m}`));
           }
@@ -10675,7 +10972,9 @@ async function main() {
             (m) => console.log(`[${short(agentId)}] ${m}`),
             // The coin's name when the focus is a discovered coin; a stock has
             // none, and this is null for it. No tape on this path, so no size.
-            reviewRecord({ displayName: await decisionName(agentId, focus.symbol) }),
+            // And the review is claimed against today's energy — refused, it
+            // returns nextReviewAt null, never a past deadline to spin on.
+            { ...reviewRecord({ displayName: await decisionName(agentId, focus.symbol) }), admit: claimReview },
           );
           nextBrainReviewAt = outcome.nextReviewAt;
           if (!outcome.ran) console.log(`[${short(agentId)}] [brain] asleep — ${outcome.why}`);
@@ -10760,11 +11059,21 @@ async function main() {
             const d = outcome.result.decision;
             const ceiling = Math.min(cfg.llmMaxActionUsdg, Number(active.limits.perTradeUsdg) / 1e6);
             const want = orderFromDecision(d, { maxUsdg: ceiling, minUsdg: BRAIN_MIN_TRADE_USDG });
+            // A BRAIN BUY IS A NEW TRADE THIS AGENT STARTS ON ITS OWN, so it is
+            // claimed against today's energy HERE — at the one Brain call site,
+            // never inside submitChatTrade, which is also the owner's path and
+            // must not know energy exists. A sell is never claimed. Withheld:
+            // console only and no refusal row — a withheld buy is account
+            // state, and a `rejected` row would put it on the public tape.
+            const energyClaim = want.ok && want.order.side === "buy" ? await claimEntry() : null;
             if (!want.ok) {
               // A hold has no execution outcome. A proposed order refused by
               // sizing or a gate still belongs in its original decision's history.
               if (d.action !== "hold") await recordDecisionRefusal(d.decision_id, agentId, want.why);
               console.log(`[${short(agentId)}] [brain] not acting — ${want.why}`);
+            } else if (energyClaim && !energyClaim.ok) {
+              console.log(`[${short(agentId)}] [brain] not acting — energy: today's new trades are used up (${want.order.side} ${want.order.symbol})`);
+              await withholdEntry(agentId);
             } else {
               const o = want.order;
               console.log(`[${short(agentId)}] [brain] acting — ${o.side} ${o.usdgAmount} USDG ${o.symbol}`);
@@ -10784,6 +11093,8 @@ async function main() {
                 provenance: "brain",
               });
               brainOrderAccepted = tradeConsumesSnapshot(r.executionStatus);
+              // No trade came of it (refused, or never sent): the claim goes back.
+              if (!brainOrderAccepted) await refundEntry(energyClaim);
               await addEvent(agentId, r.ok ? "ok" : "warn", `brain: ${r.line}`);
             }
           } else if (!fastTrencher && outcome.ran && outcome.result.ok && outcome.result.decision.action !== "hold") {
@@ -10871,6 +11182,11 @@ async function main() {
       // tick the breaker would start refusing them, and says so once.
       drawdown: drawdownNow,
       perTradeCapUsdg: active.limits.perTradeUsdg,
+      // TODAY'S ENERGY, only while it limits anything: the new trades this
+      // agent may still start on its own. A hint the strategist reads so it
+      // does not pay for a window that could only buy; the rule is the hard
+      // filter below. Null — not limited — whenever the gate is not enforcing.
+      energy: energyNow.enforce ? { entriesLeft: energyNow.entries.left ?? 0 } : null,
       // Liquidity context, best-effort. Bounded and cached (venues/depth-cache),
       // so this costs a few RPC on the ticks where something has gone stale and
       // nothing on the rest. Absent is a normal state — a cold cache, a pool
@@ -11006,7 +11322,7 @@ async function main() {
           // $MERRYMEN because our own read failed is advice they cannot act
           // on — they already did the thing being asked of them.
           holderReadOk
-            ? `${strategy.name} is a Merry Circle strategy — hold $MERRYMEN (Merry Man tier) to run it; idle until then`
+            ? `${strategy.name} is a Merry Circle strategy — hold ${countTokens(ENERGY.fullTokens)} $MERRYMEN between your wallet and my account (Merry Man tier) to run it; idle until then`
             : `${strategy.name} is a Merry Circle strategy and we could not read your $MERRYMEN balance this tick, so it is idle. That is our read failing, not your wallet — it should clear on its own.`,
         );
       }
@@ -11096,6 +11412,9 @@ async function main() {
       }),
       idle,
       modeEmptied,
+      // No class entries once today's energy for new trades is used up. The
+      // class EXITS below never pass this gate.
+      entriesOpen: !energyNow.enforce || energyNow.entries.open,
     });
 
     for (const [proposedAt, intent] of proposed.entries()) {
@@ -11107,6 +11426,21 @@ async function main() {
       // day and say nothing about any of it. renderWhy is the only producer of
       // these strings, which is what makes them safe to publish.
       const w = proposedWhy[proposedAt];
+      // ── TODAY'S ENERGY: THE HARD FILTER ─────────────────────────────────
+      //
+      // A NEW trade this agent starts on its own is claimed against today's
+      // allowance; an EXIT never is — the breaker's own exit test decides
+      // (policy.ts isExitIntent), and a vault deposit is housekeeping. Every
+      // producer passes through here, so a strategy that ignores the Snapshot
+      // hint is held to the rule anyway. Withheld BEFORE ensureDecision, with
+      // `continue` rather than a filtered array (`w` is paired with the intent
+      // by index): no decision row, no public post, no refusal on the tape.
+      const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits));
+      const energyClaim = entry ? await claimEntry() : null;
+      if (energyClaim && !energyClaim.ok) {
+        await withholdEntry(agentId);
+        continue;
+      }
       // PUBLIC REGISTER — a decision row is a post. "re-sign to raise it" is
       // advice for the owner and was going out on every capped keel-top.
       // THE WHY CODE DECIDES THE PROVENANCE. A stop-floor sell and a dca-leg buy
@@ -11115,11 +11449,22 @@ async function main() {
       const stamped = await ensureDecision(intent, publicationSourceFor(strategy.name), w ? renderWhy(w, "public") : undefined, {
         whyCode: w?.code,
       });
-      if (!stamped.ok) continue;
+      if (!stamped.ok) {
+        await refundEntry(energyClaim);
+        continue;
+      }
       // equityUsdg excludes anything we couldn't value, so when the book is
       // incomplete it is a partial sum — say so, or the drawdown rule reads the
       // gap as a loss and rejects every intent including the exit.
-      await processIntent(intent, equityUsdg, !bookIncomplete);
+      if (entry) {
+        // AN ENTRY IS COUNTED ONLY IF IT BECAME A TRADE — landed, submitted,
+        // or filled on paper (the statuses the ops cap counts). Refused by the
+        // wall, or never sent, the claim goes back.
+        const facts = await processIntentReporting(intent, equityUsdg, !bookIncomplete);
+        if (!tradeConsumesSnapshot(facts?.status)) await refundEntry(energyClaim);
+      } else {
+        await processIntent(intent, equityUsdg, !bookIncomplete);
+      }
     }
 
     // ── THE CLASS ROUTE ────────────────────────────────────────────────────
@@ -11185,9 +11530,26 @@ async function main() {
     // this line by `await proposeClassEntries()`.)
     const entries: Tick = await classGate.entries(async () => await proposeClassEntries());
     for (const [at, intent] of entries.intents.entries()) {
+      // THE SAME HARD FILTER as the strategy loop above: each class entry is
+      // claimed against today's energy before its decision exists, and handed
+      // back if no trade came of it. (A class exit can never reach here.)
+      const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits));
+      const energyClaim = entry ? await claimEntry() : null;
+      if (energyClaim && !energyClaim.ok) {
+        await withholdEntry(agentId);
+        continue;
+      }
       const stamped = await ensureDecision(intent, "class-route", ...classDecision(entries.why[at]));
-      if (!stamped.ok) continue;
-      await processIntent(intent, equityUsdg, !bookIncomplete);
+      if (!stamped.ok) {
+        await refundEntry(energyClaim);
+        continue;
+      }
+      if (entry) {
+        const facts = await processIntentReporting(intent, equityUsdg, !bookIncomplete);
+        if (!tradeConsumesSnapshot(facts?.status)) await refundEntry(energyClaim);
+      } else {
+        await processIntent(intent, equityUsdg, !bookIncomplete);
+      }
     }
   }
 

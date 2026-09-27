@@ -283,6 +283,74 @@ export interface ScoutContext {
   quarantinedUsdg: bigint;
 }
 
+/**
+ * IS THIS INTENT MONEY COMING HOME? The drawdown breaker's exit test, lifted
+ * out of checkPolicy VERBATIM so the energy gate (worker/src/energy.ts,
+ * index.ts) asks the one question the breaker asks, rather than a second copy
+ * of it that could drift. checkPolicy still assigns its `isExit` from this,
+ * on the line where the predicate always sat, so the breaker's behaviour is
+ * unchanged by construction. The narrower `isUnsizedExit` above the caps
+ * stays inline: it answers a different question (does the CHAIN size this
+ * call), and exit-caps.test.ts pins it where it is.
+ */
+export function isExitIntent(
+  intent: TradeIntent,
+  limits: Pick<AgentLimits, "cashToken" | "quoteAssets">,
+): boolean {
+  const lc = (a: string) => a.toLowerCase();
+  // AN EXIT MUST ALWAYS BE ATTEMPTABLE.
+  //
+  // The breaker is a brake on taking RISK, not a lock on the doors. Applied to
+  // every kind, it rejected the sell that would clear the position, the vault
+  // withdrawal that would pull cash back, and the transfer that would send
+  // money home — while the high-water mark only ever ratchets up, so nothing
+  // the agent could do would clear it. The account was locked in a losing
+  // position until a human re-signed a looser grant or swept it with the owner
+  // key, and the perverse escape the code actually offered was to DEPOSIT MORE
+  // (which lifts the mark and shrinks the ratio).
+  //
+  // So the same shape `no-exit` already uses: judge the direction of travel by
+  // what is being BOUGHT. Money coming home is never blocked.
+  //   • vault-withdraw → cash returning from Morpho to the account
+  //   • transfer       → to a recipient the wall already pinned at signing
+  //   • swap into USDG → the de-risking sell itself
+  // Buys stay blocked, which is the entire point of the breaker.
+  return (
+    intent.kind === "vault-withdraw" ||
+    intent.kind === "transfer" ||
+    (intent.kind === "swap" &&
+      limits.cashToken !== undefined &&
+      lc(intent.buyToken) === lc(limits.cashToken)) ||
+    (intent.kind === "equity-order" && intent.side === "sell") ||
+    // A curve trade INTO cash is a de-risking exit, judged exactly as a swap
+    // into cash is. Leaving it out would have the breaker block the one
+    // direction it should never block — getting out of a memecoin — while a
+    // drawdown is in progress, which is precisely when it matters most.
+    // ANY curve trade out of the token and back into something the grant can
+    // sell is an exit, not just one into cash. 42.8% of curves are quoted in a
+    // stock token, so the cashToken-only test blocked the exit for nearly half
+    // the venue during a drawdown -- the exact lock-in the comment above says
+    // it prevents, for the positions most likely to be causing the drawdown.
+    // ANY curve trade back into the QUOTE side is an exit, not just one into
+    // cash. 42.8% of curves are quoted in a stock token, so a cashToken-only
+    // test blocked the exit for nearly half the venue during a drawdown --
+    // the exact lock-in the comment above says it prevents, for the positions
+    // most likely to be causing the drawdown.
+    //
+    // QUOTE SIDE, NOT sellableAssets. The wall pins BOTH legs ONE_OF the same
+    // sealed list, so `assetOut is sellable` is true of every curve trade ever
+    // built, including buys -- testing it would mark the whole venue exempt and
+    // switch the breaker off exactly where the risk is highest. The real
+    // discriminator is that sellableAssets = builtinGrantTargets u grantTokens
+    // (grant.ts:344): the launched memecoin arrives as an owner-added EXTRA,
+    // while USDG and the tradeable stock tokens are BUILT IN. So trading out
+    // into a builtin is an exit and trading out into an extra is an entry.
+    (intent.kind === "curve-trade" &&
+      ((limits.cashToken !== undefined && lc(intent.assetOut) === lc(limits.cashToken)) ||
+        (limits.quoteAssets !== undefined && limits.quoteAssets.map(lc).includes(lc(intent.assetOut)))))
+  );
+}
+
 export function checkPolicy(
   intent: TradeIntent,
   limits: AgentLimits,
@@ -696,56 +764,10 @@ export function checkPolicy(
     }
   }
 
-  // AN EXIT MUST ALWAYS BE ATTEMPTABLE.
-  //
-  // The breaker is a brake on taking RISK, not a lock on the doors. Applied to
-  // every kind, it rejected the sell that would clear the position, the vault
-  // withdrawal that would pull cash back, and the transfer that would send
-  // money home — while the high-water mark only ever ratchets up, so nothing
-  // the agent could do would clear it. The account was locked in a losing
-  // position until a human re-signed a looser grant or swept it with the owner
-  // key, and the perverse escape the code actually offered was to DEPOSIT MORE
-  // (which lifts the mark and shrinks the ratio).
-  //
-  // So the same shape `no-exit` already uses: judge the direction of travel by
-  // what is being BOUGHT. Money coming home is never blocked.
-  //   • vault-withdraw → cash returning from Morpho to the account
-  //   • transfer       → to a recipient the wall already pinned at signing
-  //   • swap into USDG → the de-risking sell itself
-  // Buys stay blocked, which is the entire point of the breaker.
-  const isExit =
-    intent.kind === "vault-withdraw" ||
-    intent.kind === "transfer" ||
-    (intent.kind === "swap" &&
-      limits.cashToken !== undefined &&
-      lc(intent.buyToken) === lc(limits.cashToken)) ||
-    (intent.kind === "equity-order" && intent.side === "sell") ||
-    // A curve trade INTO cash is a de-risking exit, judged exactly as a swap
-    // into cash is. Leaving it out would have the breaker block the one
-    // direction it should never block — getting out of a memecoin — while a
-    // drawdown is in progress, which is precisely when it matters most.
-    // ANY curve trade out of the token and back into something the grant can
-    // sell is an exit, not just one into cash. 42.8% of curves are quoted in a
-    // stock token, so the cashToken-only test blocked the exit for nearly half
-    // the venue during a drawdown -- the exact lock-in the comment above says
-    // it prevents, for the positions most likely to be causing the drawdown.
-    // ANY curve trade back into the QUOTE side is an exit, not just one into
-    // cash. 42.8% of curves are quoted in a stock token, so a cashToken-only
-    // test blocked the exit for nearly half the venue during a drawdown --
-    // the exact lock-in the comment above says it prevents, for the positions
-    // most likely to be causing the drawdown.
-    //
-    // QUOTE SIDE, NOT sellableAssets. The wall pins BOTH legs ONE_OF the same
-    // sealed list, so `assetOut is sellable` is true of every curve trade ever
-    // built, including buys -- testing it would mark the whole venue exempt and
-    // switch the breaker off exactly where the risk is highest. The real
-    // discriminator is that sellableAssets = builtinGrantTargets u grantTokens
-    // (grant.ts:344): the launched memecoin arrives as an owner-added EXTRA,
-    // while USDG and the tradeable stock tokens are BUILT IN. So trading out
-    // into a builtin is an exit and trading out into an extra is an entry.
-    (intent.kind === "curve-trade" &&
-      ((limits.cashToken !== undefined && lc(intent.assetOut) === lc(limits.cashToken)) ||
-        (limits.quoteAssets !== undefined && limits.quoteAssets.map(lc).includes(lc(intent.assetOut)))));
+  // AN EXIT MUST ALWAYS BE ATTEMPTABLE — see isExitIntent above checkPolicy,
+  // where the predicate and its reasons now live so the energy gate asks the
+  // same question the breaker does.
+  const isExit = isExitIntent(intent, limits);
 
   if (!isExit && state.highWaterMarkUsdg > 0n && state.equityKnown !== false) {
     const drawdownBps = Number(

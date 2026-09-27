@@ -40,6 +40,8 @@ import type { Db } from "./db";
 import { mergeRiskPeriod, type RiskPeriod } from "./risk-period";
 import { wrapSqlite } from "./db";
 import { mirrorPaperCheckpoints } from "./paper-checkpoint";
+import { mergeEnergyDayRow } from "./energy-days";
+import { energyDayRowOf, utcDay } from "./energy";
 
 /** Rows per table per pass. Bounded so one busy tenant cannot starve the rest. */
 export const MIRROR_BATCH = 500;
@@ -867,7 +869,7 @@ export async function mirrorTenant(args: {
         `SELECT smart_account, name, owner_address, session_key_address, chain_id, caps,
                 granted_at, expires_at, status, created_at, mode, beat_at, sponsor_gas, live_blocker, x_handle, x_verified,
                 epoch, hwm_usdg, hwm_withdrawn_usdg, accrued_fee_usdg,
-                contributions_known, contributions_why, gas_accounting, quality_at FROM agents`,
+                contributions_known, contributions_why, gas_accounting, quality_at, energy FROM agents`,
       )
       .all()) as Record<string, unknown>[];
     if (agents.length) {
@@ -877,8 +879,8 @@ export async function mirrorTenant(args: {
                                caps, granted_at, expires_at, status, created_at, mode, beat_at,
                                sponsor_gas, live_blocker, x_handle, x_verified, epoch, hwm_usdg,
                                hwm_withdrawn_usdg, accrued_fee_usdg,
-                               contributions_known, contributions_why, gas_accounting, quality_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               contributions_known, contributions_why, gas_accounting, quality_at, energy)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (smart_account) DO UPDATE SET
              name = excluded.name, status = excluded.status, caps = excluded.caps,
              expires_at = excluded.expires_at,
@@ -944,7 +946,13 @@ export async function mirrorTenant(args: {
              contributions_known = excluded.contributions_known,
              contributions_why = excluded.contributions_why,
              gas_accounting = excluded.gas_accounting,
-             quality_at = excluded.quality_at`,
+             quality_at = excluded.quality_at,
+             -- THE WORKER'S ENERGY REPORT: the last one said stands until a
+             -- newer one replaces it. A rebuilt child has not reported yet and
+             -- carries NULL, which is "not yet", never "no energy" — the same
+             -- rule as mode and beat_at above. The worker reports every tick
+             -- whatever the gate's mode, so a stale report is always replaced.
+             energy = COALESCE(excluded.energy, agents.energy)`,
         );
         for (const a of agents) {
           await ins.run(
@@ -970,6 +978,8 @@ export async function mirrorTenant(args: {
             // pick an answer on its behalf.
             a.contributions_known ?? null, a.contributions_why ?? null,
             a.gas_accounting ?? null, a.quality_at ?? null,
+            // Null until this child has reported its energy.
+            a.energy ?? null,
           );
         }
       });
@@ -979,6 +989,46 @@ export async function mirrorTenant(args: {
       const periods = hasPeriods ? await child.prepare("SELECT * FROM risk_periods").all() as RiskPeriod[] : [];
       for (const period of periods) await mergeRiskPeriod(shared, period);
       copied.agents = agents.length;
+
+      // ── TODAY'S ENERGY COUNTERS, carried up so a redeploy cannot reset them ──
+      //
+      // The child's sqlite is emptied by every redeploy, and a daily allowance
+      // kept only there would be handed out afresh by each deploy. So today's
+      // and yesterday's rows travel up here, and the orchestrator seeds them
+      // back into a rebuilt child before it arms (seedEnergyForChild). The
+      // merge is energy-days.ts's one statement: counters only ever go UP
+      // through a copy, the first notice stamp stands, the newer balance read
+      // wins — so a rebuilt child's zeros can never lower what shared holds.
+      //
+      // ITS OWN try: energy is not money, and a failure here must not stop
+      // the positions and cost basis below from copying. A child from before
+      // this table existed has nothing to send and is skipped, not failed.
+      try {
+        const hasEnergy = await child
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'energy_days'")
+          .get();
+        if (hasEnergy) {
+          const since = utcDay(nowSec - 86_400);
+          const days = (await child
+            .prepare(
+              `SELECT agent_id, day, reviews, entries, told_at, read_at, read_full
+                 FROM energy_days WHERE day >= ?`,
+            )
+            .all(since)) as Record<string, unknown>[];
+          let n = 0;
+          await shared.tx(async (db) => {
+            for (const d of days) {
+              const row = energyDayRowOf(d);
+              if (!row || typeof d.agent_id !== "string") continue;
+              await mergeEnergyDayRow(db, d.agent_id, row);
+              n++;
+            }
+          });
+          copied.energy_days = n;
+        }
+      } catch (e) {
+        failed.energy_days = e instanceof Error ? e.message : String(e);
+      }
       copied.paper_checkpoints = await mirrorPaperCheckpoints(child, shared);
 
       const positions = (await child

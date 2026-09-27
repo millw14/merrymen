@@ -80,6 +80,12 @@ export interface StrategyBuildOpts {
     /** Persist each strategist decision (survivor + drop) — see makeLlmStrategist. */
     onDecision?: (d: StrategistDecision) => void | Promise<void>;
     /**
+     * The energy allowance's claim on a paid model window — see
+     * makeLlmStrategist's `claimWindow`. Forwarded ONLY when there is a real
+     * model: the null driver pays for nothing, so it must spend nothing.
+     */
+    claimWindow?: () => Promise<boolean>;
+    /**
      * Research instead of one-shot. Present only when the owner turned it on
      * AND there is a model to run it — see makeLlmStrategist's `desk`.
      */
@@ -306,6 +312,10 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
       decisionIntervalMs: opts.llm.intervalMin * 60_000,
       onNote: opts.onNote,
       onDecision: opts.llm.onDecision,
+      // Only a real model is a review worth claiming. The null driver answers
+      // nothing and costs nothing; claiming for it would spend a low-energy
+      // agent's reviews on silence.
+      ...(driver !== nullDriver && opts.llm.claimWindow ? { claimWindow: opts.llm.claimWindow } : {}),
       // The desk needs a real model: with the null driver there is nothing to
       // research WITH, and a loop around no provider is just a slower no-op.
       ...(opts.llm.desk && opts.llm.creds

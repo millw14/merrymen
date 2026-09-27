@@ -99,6 +99,8 @@ import { makeNewsDesk, type NewsDesk } from "./research-pass";
 import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
 import type { PublicThesis } from "./thesis-policy";
 import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
+import { ENERGY_DAYS_SCHEMA, mergeEnergyDayRow, readEnergyDaysSince } from "./energy-days";
+import { planEnergySeed, utcDay } from "./energy";
 import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand, type FileCommandResult } from "./command-files";
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
 import { makeMcpBackground } from "./mcp/background";
@@ -810,12 +812,20 @@ async function refreshGrantForChild(tenant: `0x${string}`): Promise<void> {
 
 /**
  * Hand the child the tenant's OWN settings.json from the store — their strategy,
- * basket, custom tokens, sizing, their Telegram bot. No-op if the tenant has
- * saved nothing yet (the child then runs the safe defaults). Refreshed every
- * reconcile so a config change propagates: the worker re-reads settings.json each
- * tick, and mergeSettings strips house keys + forces the RCE flags off, so what
- * the tenant stored can only ever be their own legitimate configuration.
+ * basket, custom tokens, sizing, their Telegram bot. A tenant who has saved
+ * nothing yet gets a file holding only `holderAddress` (the child then runs the
+ * safe defaults, and still knows whose $MERRYMEN counts — see below). Refreshed
+ * every reconcile so a config change propagates: the worker re-reads
+ * settings.json each tick, and mergeSettings strips house keys + forces the RCE
+ * flags off, so what the tenant stored can only ever be their own legitimate
+ * configuration.
  */
+function writeChildSettings(tenant: `0x${string}`, forChild: MerrymenSettings): void {
+  const home = childHome(tenant);
+  mkdirSync(home, { recursive: true });
+  writeFileSync(path.join(home, "settings.json"), JSON.stringify(forChild, null, 2), { encoding: "utf8", mode: 0o600 });
+}
+
 async function writeSettingsForChild(
   tenant: `0x${string}`,
   seenBotTokens?: Set<string>,
@@ -845,6 +855,20 @@ async function writeSettingsForChild(
     // would double the decrypting SELECTs. chatProfileOf keeps a publishable
     // strategy name and trait words and nothing else; the blob goes no further.
     tenantChatProfile.set(tenant.toLowerCase(), chatProfileOf(settings));
+    /**
+     * A TENANT WHO NEVER SAVED SETTINGS STILL GETS A settings.json — holding
+     * only the wallet whose $MERRYMEN counts, by the same rule as below (no
+     * proof can exist without saved settings, so it is the tenant).
+     *
+     * This returned before writing anything, so the child saw no holder
+     * address at all, and circle.ts reads "no address" as a KNOWABLE outsider:
+     * a holder who never opened the settings screen was read as holding
+     * nothing — the Circle tier lost and, with energy, the agent throttled to
+     * a tenth of its day for tokens it holds. `{ holderAddress }` alone is the
+     * safe defaults plus the address, because the child resolves file, then
+     * env, then default, and MERRYMEN_HOLDER_ADDRESS is stripped from its env.
+     */
+    if (!settings) writeChildSettings(tenant, { holderAddress: tenant });
     if (!settings) return null;
     if (seenBotTokens && settings.telegramBotToken && dedupeBotToken(settings, seenBotTokens)) {
       log(`${tenant}: telegram bot token already claimed by another tenant — telegram disabled for this child`);
@@ -904,9 +928,7 @@ async function writeSettingsForChild(
       ...settings,
       holderAddress: (proven ?? tenant) as `0x${string}`,
     };
-    const home = childHome(tenant);
-    mkdirSync(home, { recursive: true });
-    writeFileSync(path.join(home, "settings.json"), JSON.stringify(forChild, null, 2), { encoding: "utf8", mode: 0o600 });
+    writeChildSettings(tenant, forChild);
     // The universe this tenant may trade, kept for the news desk. Recorded here
     // because this is the one place the orchestrator reads a tenant's settings,
     // and it runs on every reconcile — so an owner who changes their basket
@@ -1001,6 +1023,52 @@ async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): P
     log(`basis seed: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
   } finally {
     handle.close();
+  }
+}
+
+/**
+ * GIVE A REBUILT CHILD BACK TODAY'S ENERGY BEFORE IT ARMS.
+ *
+ * A redeploy empties the child's sqlite, and with it `energy_days`: today's
+ * used reviews and new trades, the day's notice stamp and the last balance
+ * reading that decided the level. Without this every deploy would hand a
+ * low-energy agent a fresh day's allowance, re-send the day's notice, and — the
+ * one that matters to a holder — forget that the balance read full, so a
+ * restart during an RPC outage would throttle somebody who holds the tokens.
+ *
+ * The mirror carries the rows up (ledger-mirror.ts); this carries today's and
+ * yesterday's back, merged by the same statement: counters only rise, the
+ * first notice stamp stands, the newer reading wins. BEFORE spawn, beside the
+ * cost-basis seed and for the same reason — the child reads them on its first
+ * tick.
+ *
+ * NOT MONEY, AND SAID SO. A failed seed is logged loudly and the child arms
+ * anyway: the worst case is one day's allowance issued twice, or a holder on
+ * the reduced allowance until the chain answers — never a trade, a fee or a
+ * balance written wrong.
+ */
+async function seedEnergyForChild(tenant: `0x${string}`, smartAccount: string): Promise<void> {
+  const url = process.env.DATABASE_URL;
+  if (!url) return; // self-hosted: the child's own sqlite is the only copy, and it is never wiped
+  const raw = new DatabaseSync(path.join(childHome(tenant), "merrymen.db"));
+  try {
+    const local = wrapSqlite(raw);
+    await local.exec(ENERGY_DAYS_SCHEMA);
+    const shared = await makePgDb(url);
+    // The mirror creates this table on its first pass; a spawn can come first.
+    await shared.exec(ENERGY_DAYS_SCHEMA);
+    const sinceDay = utcDay(Math.floor(Date.now() / 1000) - 86_400);
+    const plan = planEnergySeed({
+      shared: await readEnergyDaysSince(shared, smartAccount, sinceDay),
+      child: await readEnergyDaysSince(local, smartAccount, sinceDay),
+      sinceDay,
+    });
+    for (const row of plan) await mergeEnergyDayRow(local, smartAccount, row);
+    if (plan.length) log(`energy seed: ${tenant} — ${plan.length} day(s) restored`);
+  } catch (e) {
+    log(`energy seed: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)} (the child arms without its energy history)`);
+  } finally {
+    raw.close();
   }
 }
 
@@ -1208,6 +1276,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   // AND THE BOOK'S OWN COST BASIS, which the redeploy that just happened wiped
   // out of the child's sqlite. Same placement and same reason as the anchor.
   await seedBasisForChild(tenant, smartAccount);
+  // AND TODAY'S ENERGY — the counters, the notice stamp and the last good
+  // balance reading the redeploy just emptied. Same placement, same reason.
+  await seedEnergyForChild(tenant, smartAccount);
   // AFTER the anchor and BEFORE spawn, with the others: a link restored once the
   // child is already polling would be read from a file the child has by then
   // replaced with a fresh, unlinked default.
