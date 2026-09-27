@@ -236,6 +236,14 @@ describe("THE EXECUTOR", () => {
     assert.match(hooks.slice(0, 400), /\.\.\.tokenLegs\(intent\),/);
   });
 
+  it("its decision is filed under its OWN action word, never 'buy' — so it is never narrated as a position", () => {
+    // maybePost builds an agent post only for action buy/sell; the energy buy
+    // is not a trade view and must never become one in the agent's voice.
+    const describe_ = body("describeIntent", "function");
+    assert.match(describe_, /if \(intent\.kind === "energy-buy"\) \{\s*return \{ action: "energy-buy", symbol: MERRYMEN_TOKEN\.symbol,/);
+    assert.match(CODE, /const act = d\?\.action === "buy" \? "enter" : d\?\.action === "sell" \? "exit" : null;/);
+  });
+
   it("delivery is checked for the energy buy, into the account itself", () => {
     const at = CODE.indexOf("const acquired: { token:");
     assert.match(CODE.slice(at, at + 1400), /intent\.kind === "energy-buy"\s*\?\s*\{ token: intent\.buyToken,[^\n]*holder: executor\.address \}/);
