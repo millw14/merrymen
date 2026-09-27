@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import type { TradeIntent } from "../policy";
 import { breakerIdle, energyEntriesSpent, type Snapshot, type Strategy, type Tick } from "../strategies/types";
 import type { Why } from "../strategies/reasons";
-import { parseProposals, proposalsToIntents, type StrategistUniverse } from "./proposals";
+import { parseProposals, proposalsToIntents, type ProposedAction, type StrategistUniverse, type ValidationResult } from "./proposals";
 import type { ProposalDriver, Signals } from "./driver";
 import { runDesk, type DeskLink, type DeskPeer, type DeskWorld } from "./desk";
 import type { LlmCreds } from "../llm";
@@ -212,6 +212,49 @@ function buildSignals(snap: Snapshot, universe: StrategistUniverse, at: Date, st
       return rows.length > 0 ? { depth: rows } : {};
     })(),
   };
+}
+
+/**
+ * AT MOST TODAY'S NEW TRADES, IN THE MODEL'S ORDER, COUNTED AFTER VALIDATION.
+ *
+ * With a PARTIAL allowance left (Snapshot.energy.entriesLeft = 1 or 2 — every
+ * low morning starts at 2, and maxActionsPerTick is 4), only the spent case was
+ * filtered. Every buy the model proposed was journaled — a public decision row
+ * each — and announced to the owner, and index.ts's hard filter then withheld
+ * the extras with no row at all: a published buy that never happens.
+ *
+ * AFTER proposalsToIntents, never before it: a cap on the raw proposals could
+ * keep a buy validation then drops (unknown symbol, over the ceiling, short of
+ * cash) and withhold the valid one behind it. The extras are removed from the
+ * PROPOSALS and validation is run again rather than the output being trimmed,
+ * because a withheld buy must not keep what it reserved — the cash later buys
+ * are checked against, and the per-tick action slot a later SELL needs. A
+ * re-run can admit a buy the first run refused for cash; that one is past the
+ * cap too, so it goes the same way, and the loop ends because the list only
+ * shrinks. Sells, holds and everything before the cap are untouched.
+ *
+ * Absent, null or a non-finite figure means NOT LIMITED (energyEntriesSpent's
+ * rule), and validation runs exactly once, as it always has.
+ */
+export function capEntries(
+  proposals: readonly ProposedAction[],
+  universe: StrategistUniverse,
+  snap: Snapshot,
+): ValidationResult & { kept: readonly ProposedAction[]; withheld: number } {
+  const left = snap.energy?.entriesLeft;
+  const cap = typeof left === "number" && Number.isFinite(left) ? Math.max(0, Math.floor(left)) : null;
+  let kept = proposals;
+  let withheld = 0;
+  for (;;) {
+    const v = proposalsToIntents(kept, universe, snap);
+    if (cap === null) return { ...v, kept, withheld };
+    // accepted[i] IS the proposal object that produced intents[i], so identity
+    // names exactly the extras and nothing else.
+    const extra = new Set(v.accepted.filter((a) => a.action === "buy").slice(cap));
+    if (extra.size === 0) return { ...v, kept, withheld };
+    kept = kept.filter((a) => !extra.has(a));
+    withheld += extra.size;
+  }
 }
 
 export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
@@ -511,10 +554,14 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       // today, the model was asked because it may want to sell, and a buy it
       // answered with would only be withheld by index.ts after this journaled
       // it — a public decision for a trade that could never happen.
+      //
+      // AND WITH SOME LEFT, no more buys than are left (capEntries): the rest
+      // are withheld here, counted in the same note, never journaled.
       const energySpent = energyEntriesSpent(snap);
       const allowed = brake || energySpent ? actions.filter((a) => a.action !== "buy") : actions;
-      const withheld = actions.length - allowed.length;
-      const { intents, accepted, rejected } = proposalsToIntents(allowed, universeNow, snap);
+      const capped = capEntries(allowed, universeNow, snap);
+      const withheld = actions.length - allowed.length + capped.withheld;
+      const { intents, accepted, rejected } = capped;
 
       // Journal the decision BEFORE the intent leaves for the policy wall: every
       // survivor gets a decisionId stamped onto its intent (so the resulting trade
@@ -557,7 +604,8 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
         );
       }
       for (const r of rejected) note("warn", `strategist proposal dropped: ${r}`);
-      for (const a of allowed) {
+      // What was KEPT — a withheld buy is announced only as a count, above.
+      for (const a of capped.kept) {
         if (a.action !== "hold" && a.reason) {
           note("ok", `strategist: ${a.action} ${a.sizeUsdg} USDG ${a.symbol} — ${a.reason}`);
         }

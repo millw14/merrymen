@@ -11405,6 +11405,17 @@ async function main() {
               if (d.action !== "hold") await recordDecisionRefusal(d.decision_id, agentId, want.why);
               console.log(`[${short(agentId)}] [brain] not acting — ${want.why}`);
             } else if (energyClaim && !energyClaim.ok) {
+              // THE DECISION ROW IS ALREADY WRITTEN, and this leaves it with no
+              // outcome — accepted, not overlooked. runShadow persisted the BUY
+              // before this line could run, and the only per-decision history
+              // this repo has, recordDecisionRefusal, writes a `rejected` trade
+              // row: the public tape, which an energy refusal must never reach.
+              // There is no private equivalent to write instead. The gap is
+              // narrow: with entries closed the review is held to tokens already
+              // held (energyEntriesClosed above), so this arm is a buy-more of a
+              // held position, or a claim that lost to the plan read at the top
+              // of the tick. The owner hears it through today's energy notice
+              // (withholdEntry); the console line names the order.
               console.log(`[${short(agentId)}] [brain] not acting — energy: today's new trades are used up (${want.order.side} ${want.order.symbol})`);
               await withholdEntry(agentId);
             } else {
