@@ -225,3 +225,38 @@ describe("PgSettingsStore specifics", () => {
     assert.ok(log.includes("DELETE FROM holder_claims WHERE wallet = $1 AND tenant = $2"), log.join("\n"));
   });
 });
+
+describe("PgSettingsStore: two services creating the new table at once", () => {
+  it("THE LOSER OF THE CATALOG RACE (23505 / 42P07) STILL OPENS THE STORE — it must not stay broken for the process", async () => {
+    // Web and the orchestrator both open this store after the deploy that
+    // adds holder_claims. A failed first init is cached for the life of the
+    // process, so losing Postgres's IF NOT EXISTS race must not be a failure.
+    for (const code of ["23505", "42P07"]) {
+      const real = sqliteClient();
+      const client: Client = {
+        async query(sql, params) {
+          if (/^\s*CREATE TABLE IF NOT EXISTS holder_claims/.test(sql)) {
+            await real.query(sql, params); // the other service won: it exists
+            throw Object.assign(new Error("duplicate key value violates unique constraint"), { code });
+          }
+          return real.query(sql, params);
+        },
+      };
+      const s = new PgSettingsStore("postgres://stand-in", async () => client);
+      assert.deepEqual(await s.claimHolder(W, A), { ok: true, fresh: true }, code);
+    }
+  });
+
+  it("any other failure to create it is still a failure", async () => {
+    const client: Client = {
+      async query(sql) {
+        if (/CREATE TABLE IF NOT EXISTS holder_claims/.test(sql)) {
+          throw Object.assign(new Error("permission denied for schema public"), { code: "42501" });
+        }
+        return { rows: [] };
+      },
+    };
+    const s = new PgSettingsStore("postgres://stand-in", async () => client);
+    await assert.rejects(s.holderClaims(), /permission denied/);
+  });
+});

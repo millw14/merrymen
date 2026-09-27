@@ -229,6 +229,25 @@ export interface PgClientLike {
   query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
 }
 
+/**
+ * CREATE TABLE IF NOT EXISTS, SAFE AGAINST A SECOND SERVICE DOING THE SAME.
+ *
+ * Web and the orchestrator both open this store, and after the deploy that
+ * adds a table both create it at once. Postgres's IF NOT EXISTS is not atomic
+ * against that: the loser can fail on the catalog's own unique index (23505)
+ * or see the table appear mid-statement (42P07). Either means the table now
+ * exists, which is all this wanted.
+ */
+async function createIfAbsent(c: PgClientLike, ddl: string): Promise<void> {
+  try {
+    await c.query(ddl);
+  } catch (e) {
+    const code = (e as { code?: unknown }).code;
+    if (code === "23505" || code === "42P07") return;
+    throw e;
+  }
+}
+
 /** Opens the connection. pg in production; a test passes a stand-in. */
 export type PgConnect = (url: string) => Promise<PgClientLike>;
 
@@ -260,7 +279,8 @@ export class PgSettingsStore implements SettingsStore {
     if (!this.ready) {
       this.ready = (async () => {
         const c = await this.connect(this.url);
-        await c.query(
+        await createIfAbsent(
+          c,
           `CREATE TABLE IF NOT EXISTS tenant_settings (
              tenant TEXT PRIMARY KEY,
              sealed TEXT NOT NULL,
@@ -269,9 +289,10 @@ export class PgSettingsStore implements SettingsStore {
         );
         // ONE ROW PER WALLET, so the primary key IS the one-wallet-one-agent
         // rule: a second account's INSERT conflicts and changes nothing.
-        // Plain columns, not sealed: a wallet and the account holding it are
-        // both public addresses, and the table must be queryable by wallet.
-        await c.query(
+        // Plain columns, like `grants`: it holds no secret, and it must be
+        // queryable by wallet, which a sealed blob is not.
+        await createIfAbsent(
+          c,
           `CREATE TABLE IF NOT EXISTS holder_claims (
              wallet TEXT PRIMARY KEY,
              tenant TEXT NOT NULL,
