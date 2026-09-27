@@ -98,14 +98,25 @@ describe("the forks that start NEW autonomous work ask", () => {
   });
 });
 
-describe("THE OWNER'S PATHS DO NOT KNOW ENERGY EXISTS", () => {
+/**
+ * THE GATE'S OWN SYMBOLS, not the word. The owner's energy BUY legitimately
+ * runs through the order path (a refusal in submitChatTrade, an arm in
+ * processIntentLocked) and may say "energy"; what must never appear there is
+ * anything that could WITHHOLD an owner's order: the plan, a claim, a refund.
+ */
+const GATE = /\benergyNow\b|\benergyWithheld\b|\bclaimEntry\b|\bclaimReview\b|\brefundEntry\b|\bwithholdEntry\b|\bclaimEnergy(For|Notice)?\b|\bgetEnergyDay\b/;
+
+describe("THE OWNER'S PATHS ARE UNTOUCHED BY THE GATE", () => {
   for (const name of ["submitChatTrade", "submitChatTransfer", "runQueuedCommand", "processIntentLocked"]) {
-    it(`${name} is untouched by the gate`, () => {
-      const b = body(name);
-      assert.doesNotMatch(b, /energy/i, `${name} mentions energy`);
-      assert.doesNotMatch(b, /claimEntry|claimReview|withholdEntry/);
+    it(`${name} consults no part of the throttle`, () => {
+      assert.doesNotMatch(body(name), GATE, `${name} reaches the energy gate`);
     });
   }
+
+  it("and the pattern does catch the gate where it is meant to be", () => {
+    assert.match(body("refreshEnergy"), GATE);
+    assert.match(CODE.slice(CODE.indexOf("for (const [proposedAt, intent] of proposed.entries()) {")), GATE);
+  });
 
   it("no second copy of the exit test lives in index.ts", () => {
     assert.doesNotMatch(CODE, /buyToken\) === lc\(limits\.cashToken/);
