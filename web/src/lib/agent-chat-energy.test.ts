@@ -136,6 +136,9 @@ describe("what the model is told", () => {
     assert.match(system, /"get your merrymen" \/ "top up your energy" \/ "buy the tokens you need" → get-energy/);
     assert.match(system, /get-energy \{usdgAmount\}/);
     assert.match(system, /today's energy is spent \(the ENERGY block says so\)/);
+    // One card for it, the one that explains it: never a bare buy or snipe of
+    // the token, and never a sell, which the key cannot do.
+    assert.match(system, /\$MERRYMEN is only ever bought with get-energy — never buy or snipe it — and never sold/);
   });
 });
 
