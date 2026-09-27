@@ -716,6 +716,49 @@ test("summary: only money moved between the two readings is said to be inside th
   assert.ok(text!.split("\n").some((l) => l.startsWith(`LIVE: equity 1300.00 USDG as of ${utcOf(end - 100)} (1000.00 at the start, +300.00). Deposits 200.00 USDG and withdrawals 50.00 USDG are inside that change.`)), text);
 });
 
+/**
+ * USDG SET ASIDE AS ENERGY IS NOT A WITHDRAWAL.
+ *
+ * The worker books an energy purchase as an 'out' flow with source
+ * 'energy-buy' (capital leaving the trading book), so the change arithmetic
+ * already includes it. What changes is the SENTENCE: counted under
+ * "withdrawals" it sent an owner looking for money they never took out.
+ */
+test("summary: energy bought is said apart from withdrawals, and the arithmetic is unchanged", async () => {
+  const f = await setup();
+  const { start, end } = summaryPeriod("day", 0, NOW);
+  f.sub("summary", { period: "day", hour_utc: 0 }, { createdAt: start - 3600 });
+  equity(f, "live", 1000, start - 100);
+  equity(f, "live", 1130, end - 100);
+  const flow = f.raw.prepare("INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, log_index, chain_id, source, at, epoch) VALUES (?, ?, ?, ?, ?, 4663, ?, ?, 1)");
+  flow.run(ACCOUNT_A, "in", 200, tx(60), 1, "chain-log", start + 100);
+  flow.run(ACCOUNT_A, "out", 50, tx(61), 1, "transfer-intent", start + 200);
+  flow.run(ACCOUNT_A, "out", 20, tx(62), 4, "energy-buy", start + 300);
+  await f.pass();
+  const [text] = texts(f);
+  const live = text!.split("\n").find((l) => l.startsWith("LIVE:"))!;
+  assert.ok(live.includes("(1000.00 at the start, +130.00)."), live);
+  assert.ok(live.includes("Deposits 200.00 USDG and withdrawals 50.00 USDG are inside that change."), live);
+  assert.ok(live.includes("So is 20.00 USDG set aside as energy ($MERRYMEN)"), live);
+  assert.doesNotMatch(live, /withdrawals 70\.00/, "energy is not counted as a withdrawal");
+});
+
+test("summary: an energy purchase alone is said on its own, never as 'withdrawals'", async () => {
+  const f = await setup();
+  const { start, end } = summaryPeriod("day", 0, NOW);
+  f.sub("summary", { period: "day", hour_utc: 0 }, { createdAt: start - 3600 });
+  equity(f, "live", 1000, start - 100);
+  equity(f, "live", 980, end - 100);
+  f.raw.prepare("INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, log_index, chain_id, source, at, epoch) VALUES (?, 'out', 20, ?, 4, 4663, 'energy-buy', ?, 1)")
+    .run(ACCOUNT_A, tx(63), start + 300);
+  await f.pass();
+  const [text] = texts(f);
+  const live = text!.split("\n").find((l) => l.startsWith("LIVE:"))!;
+  assert.ok(live.includes("Inside that change is 20.00 USDG set aside as energy ($MERRYMEN)"), live);
+  assert.doesNotMatch(live, /withdrawals|Deposits/);
+  assert.doesNotMatch(live, /price|returns?\b|profit/i);
+});
+
 test("summary: one on-chain deposit recorded under both spellings of the account is counted once", async () => {
   const f = await setup();
   const { start, end } = summaryPeriod("day", 0, NOW);

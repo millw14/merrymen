@@ -1232,11 +1232,17 @@ async function bookLine(shared: Db, scope: AgentScope, book: "live" | "paper", s
     // on-chain log can be recorded once per spelling. De-duplicated by chain
     // identity (tx, log index), as the web's reports flowRows does.
     const flows = (await shared
-      .prepare(`SELECT direction, amount_usdg, tx_hash, log_index FROM flows
+      .prepare(`SELECT direction, amount_usdg, tx_hash, log_index, source FROM flows
         WHERE agent_id IN (${placeholders(acct.length)}) AND epoch = ? AND source <> 'epoch-carry' AND at > ? AND at <= ?`)
-      .all(...acct, last.epoch, openAt, lastAt)) as Array<{ direction: string; amount_usdg: unknown; tx_hash: unknown; log_index: unknown }>;
+      .all(...acct, last.epoch, openAt, lastAt)) as Array<{ direction: string; amount_usdg: unknown; tx_hash: unknown; log_index: unknown; source: unknown }>;
     let inflow = 0;
     let outflow = 0;
+    // USDG SET ASIDE AS ENERGY is capital leaving the trading book — the P&L
+    // arithmetic is right to count it with the withdrawals — but it is not a
+    // withdrawal: nothing reached the owner's wallet. Said apart, by the flow's
+    // own source (the worker books it 'energy-buy'), so "withdrawals 40 USDG"
+    // never sends an owner looking for forty dollars they never took out.
+    let energy = 0;
     const seenLogs = new Set<string>();
     for (const f of flows) {
       const amount = num(f.amount_usdg);
@@ -1248,9 +1254,13 @@ async function bookLine(shared: Db, scope: AgentScope, book: "live" | "paper", s
         seenLogs.add(k);
       }
       if (f.direction === "in") inflow += amount;
+      else if (f.source === "energy-buy") energy += amount;
       else outflow += amount;
     }
     if (inflow > 0 || outflow > 0) flowsText = ` Deposits ${usd(inflow)} USDG and withdrawals ${usd(outflow)} USDG are inside that change.`;
+    if (energy > 0) {
+      flowsText += ` ${flowsText ? "So is" : "Inside that change is"} ${usd(energy)} USDG set aside as energy ($MERRYMEN) — capital leaving the trading book, not a loss.`;
+    }
   }
   return `${label}: ${valued}${change}.${flowsText} ${fillsText}`;
 }
