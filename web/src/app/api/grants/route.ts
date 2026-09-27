@@ -21,12 +21,14 @@ import {
   duplicateWallPermissions,
   isHostedMode,
   type Derivation,
+  type EnergyStatus,
   type StoredGrant,
 } from "@merrymen/core";
 import { requestOrigin, tenantOf, verifyGrantBinding } from "@/lib/auth";
 import { checkCanonicalWall } from "@/lib/canonical-wall";
 import { privyTokenOf, verifyPrivyToken } from "@/lib/privy";
 import { withReadDb } from "@/lib/ledger";
+import { readAgentEnergy } from "@/lib/agent-energy";
 import { getGrantStore } from "@merrymen/grant-store";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
@@ -109,6 +111,19 @@ export interface AgentStatus {
    * `workerAliveAt` are what separate those.
    */
   liveBlocker?: string | null;
+  /**
+   * THIS AGENT'S ENERGY — how much it may start on its own today, and why.
+   *
+   * REPORTED BY THE WORKER, never computed here: the process that throttles is
+   * the only one that knows its own counters and whether it could read the
+   * $MERRYMEN balances it throttles on (packages/core/src/energy.ts).
+   *
+   * NULL IS "NOT SAID YET", NEVER ZERO. No report, an old ledger without the
+   * column, or a value that is not the v1 shape are all null, and a screen
+   * renders that as "I can't see my energy" — never as an empty allowance, and
+   * never as a balance of 0 that sends somebody to buy what they already hold.
+   */
+  energy?: EnergyStatus | null;
 }
 
 export async function POST(req: Request) {
@@ -524,6 +539,13 @@ export async function GET(req: Request) {
     }
   }
 
+  // ENERGY IS READ ON ITS OWN, OUTSIDE THE BRANCH ABOVE. That branch runs only
+  // when there is no heartbeat file, and self-hosted there always is one — so a
+  // column read inside it would never reach a self-hosted owner at all. The
+  // report is the child's own and lives only on the agents row, on both
+  // deployments. Best effort: an unreadable report is null, never an error.
+  const energy = await readAgentEnergy(grant.smartAccount);
+
   // Never echo key material to the browser: the serialized session account, the
   // session key, AND the generated owner key (which custodies the funds).
   const { serialized: _s, demoSessionPrivateKey: _k, demoOwnerPrivateKey: _o, ...publicGrant } = grant;
@@ -536,6 +558,7 @@ export async function GET(req: Request) {
     mode,
     gasSponsored,
     liveBlocker,
+    energy,
   };
   return NextResponse.json(status);
 }
