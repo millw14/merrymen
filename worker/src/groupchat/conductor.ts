@@ -57,7 +57,7 @@ import { agentNameForSlug } from "../../../packages/core/src/agent-name";
 import type { Db } from "../db";
 import { describeLlmFailure } from "../llm-failure";
 import { isAsleep, localDay, localMinutes, phaseOf, sleepWindow } from "./clock";
-import { loadFacts, sameCoin, type AgentFacts, type CallFact, type ChatProfile } from "./facts";
+import { CALLS_PER_AGENT, loadFacts, sameCoin, type AgentFacts, type CallFact, type ChatProfile } from "./facts";
 import { admitAgentLine, type AgentLineCtx } from "./policy";
 import {
   agentActivity,
@@ -225,6 +225,11 @@ const FACTS_WINDOW_SEC = (CALL_WINDOW_MS + CALL_REPEAT_MS) / SEC;
  * echo a quarter hour after the other's. A fill a card absorbs — folded into
  * it, or skipped as its repeat — widens what the card holds, so a schedule
  * that keeps buying stays in its one card, and one that stops lets go.
+ * ANOTHER AGENT'S CARD IS WEIGHED BY ALL IT HOLDS ONLY FOR A FILL THAT
+ * CONTINUES THIS AGENT'S OWN SCHEDULE (continuesRun); any other fill echoes
+ * only that card's own fill. Weighed by the grown span, one agent's single
+ * buy of a coin a running basket also buys was folded into the basket's card
+ * from hours before, and never posted.
  */
 const CALL_ECHO_GAP_MS = 15 * MIN;
 /**
@@ -1399,6 +1404,37 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     return atMs >= s.lo - gapMs && atMs <= s.hi + gapMs;
   }
 
+  /**
+   * WHETHER THIS PAPER BUY CONTINUES THIS AGENT'S OWN SCHEDULE: its previous
+   * paper buy of the coin lies within BASKET_TICK_MS before it and was not
+   * posted (folded, or skipped) — or the facts, cut at CALLS_PER_AGENT, do not
+   * reach back that far, and the fill before it cannot be seen. Only such a
+   * fill is weighed against the whole span of another agent's card: a one-off
+   * buy measured against a basket's grown span was folded, for good, into a
+   * card from hours before, and its owner never saw the trade. Read from the
+   * facts and the room's dedupe keys: nothing stored, and the same after a
+   * restart.
+   */
+  function continuesRun(sp: Speaker, call: CallFact): boolean {
+    const calls = sp.facts.calls;
+    const filled = call.atSec * SEC;
+    const order = fillOrder(calls);
+    const prev = calls.some(
+      (o) =>
+        !!o &&
+        o.decisionId !== call.decisionId &&
+        o.side === "buy" &&
+        o.paper === true &&
+        sameCoin(o, call) &&
+        order(o, call) < 0 &&
+        filled - o.atSec * SEC <= BASKET_TICK_MS &&
+        !said.has(`call:${o.decisionId}`),
+    );
+    if (prev || calls.length < CALLS_PER_AGENT) return prev;
+    const floor = Math.min(...calls.slice(0, CALLS_PER_AGENT).map((c) => (c ? c.atSec * SEC : Number.POSITIVE_INFINITY)));
+    return filled - BASKET_TICK_MS < floor;
+  }
+
   /** A fill a paper buy card stands for now — folded into it, or skipped as its repeat — widens what it holds. */
   function absorb(p: Pass, card: PostedCard | null, call: CallFact): void {
     if (!card || !paperBuy(card)) return;
@@ -1426,7 +1462,9 @@ export function makeConductor(opts: ConductorOptions): Conductor {
    *     bought it too. The fills, not "any card posted since": a sleeper's
    *     overnight buy was folded into another agent's card of the coin posted
    *     two hours after it, and its own card was never posted. Lockstep books
-   *     and a sleeper's same-tick fill still fold;
+   *     and a sleeper's same-tick fill still fold. All the card holds only
+   *     for a fill that continues this agent's own schedule (continuesRun);
+   *     else that card's own fill;
    *   - or, a top-up: this agent's latest card of this coin is a paper buy of
    *     it posted less than TOP_UP_FOLD_MS before the fill.
    *
@@ -1462,12 +1500,13 @@ export function makeConductor(opts: ConductorOptions): Conductor {
     }
     if (latest?.call.side === "sell") return null;
     if (turnedUnheard(sp, postedBefore(sp, call) ?? (latest ? anchorOf(p, sp, latest) : null), call, p.nowMs)) return null;
+    const onRun = continuesRun(sp, call);
     for (const card of postedCalls.values()) {
       if (card.tenant === tenant) {
         if (card.call.side === call.side && holdsNear(p, card, filled, BASKET_TICK_MS)) return card;
         continue;
       }
-      if (!holdsNear(p, card, filled, CALL_ECHO_GAP_MS)) continue;
+      if (onRun ? !holdsNear(p, card, filled, CALL_ECHO_GAP_MS) : Math.abs(cardFillMs(p, card) - filled) > CALL_ECHO_GAP_MS) continue;
       if ((card.call.side === call.side && sameCoin(card.call, call)) || filledAlike(p, card.tenant, call, CALL_ECHO_GAP_MS)) return card;
     }
     if (latest === null) return basketOf(p, sp, call, filled - TOP_UP_FOLD_MS);
@@ -2686,8 +2725,12 @@ export function makeConductor(opts: ConductorOptions): Conductor {
       // above are the room joining in after the owner's own agent; asleep, off
       // the roster or muted, it was not there, and an owner's "hi" to the room
       // went unanswered one time in four. The first answer is certain then,
-      // the second keeps its odds.
-      if (!taken.has(ownerTenant)) draws = [1, ...draws.slice(1)];
+      // the second keeps its odds. AND IT IS OWED (must), as the own agent's
+      // answer is: queued as a line that may be dropped, a certain answer was
+      // not given once the room's phrase memory had spent its pool, and an
+      // owner whose agent slept asked the room and heard nothing.
+      const ownGone = !taken.has(ownerTenant);
+      if (ownGone) draws = [1, ...draws.slice(1)];
       let pool = fairOrder(p.nowMs, awakeOthers(p, ownerTenant).filter((s) => !taken.has(s.tenant)));
       // "ANYONE BUYING?" IS FOR WHOEVER BOUGHT. Drawn blind, the room answered
       // "nothing new from me" to a question whose answer was a few cards up.
@@ -2710,7 +2753,7 @@ export function makeConductor(opts: ConductorOptions): Conductor {
           prio: OWNER_ROOM_PRIO,
           kind: "chat",
           quoted: null,
-          must: false,
+          must: k === 0 && ownGone,
         });
         if (queued) left--;
         k++;

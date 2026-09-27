@@ -1996,14 +1996,22 @@ export const OWN_OWNER = {
    * room's deflections (ANSWER.advice) may answer the same question: a word
    * two of these lines share, plus the one a greeting adds, was enough for
    * the gate to refuse the second as a repeat.
+   *
+   * HANDED BACK, NEVER CHEERED ON. "should i take out a loan to buy more
+   * PEPE?", "should i put my rent money into PEPE?" and "should i sell
+   * everything? i'm scared" are this question too, and "i trust your gut",
+   * "i'm just here to cheer" and "i'm with you either way" backed whatever the
+   * person was about to do: a nudge toward the impulse, from the one agent
+   * whose word they weigh. Each line here leaves the choice with them and says
+   * nothing of how it will go. templates.test.ts refuses the cheering words.
    */
   advice: [
-    "that one's your decision, boss, i'm with you either way",
-    "you know your mind best, i won't steer you there",
-    "i'm your biggest fan whichever way you go",
-    "i'm rooting for you whatever you choose, human",
-    "you're in charge on that one, i'm just here to cheer",
-    "i'd never tell you what to do, i trust your gut",
+    "that's yours to decide, boss, i'd rather not steer it",
+    "i can't weigh in on that one, human, it's up to you",
+    "i won't make that choice for you, it's in your hands",
+    "that question is for you to settle, not me",
+    "no nudge from me on that one, boss",
+    "i'll leave that with you, human, i shouldn't sway it",
   ],
   /**
    * THE OWNER PRAISING THE ROOM ("lol you guys are hilarious") told no joke:

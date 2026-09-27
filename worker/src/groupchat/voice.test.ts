@@ -30,6 +30,7 @@ import {
   composeLine,
   describeCreds,
   draftLineForTest,
+  gateWeighsForTest,
   groupChatCreds,
   llmLine,
   normaliseLine,
@@ -1402,7 +1403,9 @@ describe("an owner's line is read as what it says", () => {
     }
     // And the model is told the same.
     const own = buildPrompt({ kind: "reply", to: "Amber Heron's owner", toAuthor: "owner", toOwnAgent: true, text: "should i stay in TSLA or sell?" }, ctxOf(sp, 43)).system;
-    assert.match(own, /Decline warmly/);
+    assert.match(own, /Decline kindly and leave the choice with them/);
+    // Handed back, never cheered on (OWN_OWNER.advice): "i trust your gut" backed a loan to buy more PEPE.
+    assert.match(own, /never cheer on, back or encourage/);
     assert.doesNotMatch(own, /only talk about your own trades/);
   });
 
@@ -4106,5 +4109,79 @@ describe("what the last repairs left, closed", () => {
 
   it("no answer to a rough day promises how it ends", () => {
     for (const l of [...T.OWN_OWNER.sad, ...T.OTHER_OWNER.sad]) assert.doesNotMatch(l, /\b(?:promise|fresh start|tomorrow)\b/, l);
+  });
+});
+
+// ── LR-04: an owed answer never holds the event loop ───────────────────────
+
+/**
+ * The conductor hands ONE ctx to all of an owed answer's draws (lineFor: up
+ * to OWED_TEMPLATE_TRIES composeLines, twelve attempts each), and each
+ * attempt weighed every phrasing of its pool against the agent's own lines
+ * and the room's tail again: five owners asking about their agents' books
+ * held the orchestrator for seconds a pass (rule 4). A verdict is remembered
+ * for the ctx (voice.ts gateVerdict), and must never change an answer.
+ */
+describe("LR-04: an owed answer's draws weigh each line once", () => {
+  const asked = (text: string): Intent => ({ kind: "reply", to: "Amber Heron's owner", toAuthor: "owner", toOwnAgent: true, text, about: asOwner(text, TICKERS), must: true });
+
+  it("the conductor's draws on one ctx weigh each line once, and say what fresh ctxs say", () => {
+    const sp = BOOK();
+    for (const text of ["what are you holding?", "why did you buy that?"]) {
+      const intent = asked(text);
+      // Asked again and again: sixty own lines the gate remembers, and the room's tail.
+      const own: string[] = [];
+      const tail: SpeakCtx["tail"] = [];
+      const ctxNow = (): SpeakCtx => ({ ...ctxOf(sp, 3), tail: tail.slice(-12), ownRecent: [...own], answeredOwnerLately: true });
+      for (let k = 0; k < 8; k++) {
+        const said = composeLine(intent, ctxNow(), rngOf(k * 7 + 1)).text;
+        own.push(said);
+        tail.push({ name: "Amber Heron's owner", author: "owner", body: text }, { name: "Amber Heron", author: "agent", body: said });
+      }
+      own.push(...Topics.MUSINGS.slice(0, 60 - own.length));
+      const ctx = ctxNow();
+      const draws = (next: () => SpeakCtx) => {
+        const rng = rngOf(11);
+        return Array.from({ length: 12 }, () => composeLine(intent, next(), rng));
+      };
+      const w0 = gateWeighsForTest();
+      const shared = draws(() => ctx);
+      const w1 = gateWeighsForTest();
+      const fresh = draws(() => ({ ...ctx }));
+      const w2 = gateWeighsForTest();
+      assert.deepEqual(shared, fresh, `${text}: a remembered verdict changed an answer`);
+      assert.ok(w1 > w0, "fixture: nothing was weighed");
+      assert.ok((w1 - w0) * 3 <= w2 - w1, `${text}: one ctx weighed ${w1 - w0} verdicts, twelve fresh ones ${w2 - w1}`);
+      // The same draws again: nothing is weighed twice.
+      assert.deepEqual(draws(() => ctx), shared);
+      assert.equal(gateWeighsForTest(), w2, `${text}: a verdict was weighed again for the same ctx`);
+    }
+  });
+
+  it("a ctx whose lines change in place is weighed afresh", () => {
+    const sp = BOOK();
+    let moved = 0;
+    let movedTail = 0;
+    for (const text of ["what are you holding?", "why did you buy that?"]) {
+      const intent = asked(text);
+      for (let s = 0; s < 6; s++) {
+        // Its own lines grow: the line it just said is not remembered as unsaid.
+        const ownRecent: string[] = [];
+        const ctx: SpeakCtx = { ...ctxOf(sp, s), tail: [{ name: "Amber Heron's owner", author: "owner", body: text }], ownRecent, answeredOwnerLately: true };
+        const a = composeLine(intent, ctx, rngOf(s));
+        ownRecent.push(a.text);
+        const now = composeLine(intent, { ...ctx, ownRecent: [...ownRecent] }, rngOf(s));
+        assert.deepEqual(composeLine(intent, ctx, rngOf(s)), now, `${text}: own lines grew, the old verdicts were kept`);
+        if (now.text !== a.text) moved++;
+        // The room's tail grows the same way.
+        const room: SpeakCtx = { ...ctx, ownRecent: [], tail: [...ctx.tail] };
+        const b = composeLine(intent, room, rngOf(s));
+        room.tail.push({ name: "Amber Heron", author: "agent", body: b.text });
+        const heard = composeLine(intent, { ...room, tail: [...room.tail] }, rngOf(s));
+        assert.deepEqual(composeLine(intent, room, rngOf(s)), heard, `${text}: the tail grew, the old verdicts were kept`);
+        if (heard.text !== b.text) movedTail++;
+      }
+    }
+    assert.ok(moved > 0 && movedTail > 0, "fixture: no line changed its answer");
   });
 });

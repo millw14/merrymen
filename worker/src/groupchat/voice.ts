@@ -3101,7 +3101,7 @@ function whyAnswer(env: Env, slots: Slots, person = false): string | null {
   const sentences = (c.bands ?? []).filter((b) => typeof b === "string" && b.length > SHORT_BAND);
   if (c.side === "sell" && sentences.length > 0 && chance(env, 0.6)) {
     const s = pickWith(env.r, sentences);
-    if (!repeatsOwn(env, s, own, true)) return s;
+    if (!repeatsOwn(env, s, true)) return s;
   }
   const band = bandSlot(env, c);
   if (band) {
@@ -3114,7 +3114,7 @@ function whyAnswer(env: Env, slots: Slots, person = false): string | null {
     // curve early") made every phrasing an echo of the room, the gate refused
     // each, and the agent asked under its own card never answered. Weighed as
     // the gate weighs them (the tail is the room's last ROOM_ECHO_WINDOW lines).
-    const line = pick(env, pool.filter((t) => !repeatsOwn(env, fill(t, withBand), own, true)), withBand);
+    const line = pick(env, pool.filter((t) => !repeatsOwn(env, fill(t, withBand), true)), withBand);
     if (line) return line;
   }
   // "WHY?" AGAIN, AFTER THE REASON WAS GIVEN. A card's reason is often one
@@ -3144,14 +3144,49 @@ function ownLines(env: Env): string[] {
 
 /**
  * Whether the gate would refuse `line` as the speaker saying one of its own
- * recent lines again — and, with `room`, as an echo of the room's tail (the
- * gate weighs the room's last ROOM_ECHO_WINDOW lines; the tail is that long).
+ * recent lines again (ownLines) — and, with `room`, as an echo of the room's
+ * tail (the gate weighs the room's last ROOM_ECHO_WINDOW lines; the tail is
+ * that long). Remembered for the ctx (gateVerdict).
  */
-function repeatsOwn(env: Env, line: string, own: readonly string[], room = false): boolean {
-  const recentRoom = room ? (Array.isArray(env.ctx.tail) ? env.ctx.tail : []).map((t) => t?.body).filter((b): b is string => typeof b === "string") : [];
-  if (own.length === 0 && recentRoom.length === 0) return false;
-  const v = admitAgentLine(line, { vouchedSymbols: vouchedFor({ kind: "gm" }, env.ctx.speaker), rosterNames: env.ctx.rosterNames ?? [], recentOwn: [...own], recentRoom });
-  return !v.ok && v.reason === "repeat";
+function repeatsOwn(env: Env, line: string, room = false): boolean {
+  return gateVerdict(env.ctx, ["own", room, line], () => {
+    const own = ownLines(env);
+    const recentRoom = room ? (Array.isArray(env.ctx.tail) ? env.ctx.tail : []).map((t) => t?.body).filter((b): b is string => typeof b === "string") : [];
+    if (own.length === 0 && recentRoom.length === 0) return false;
+    const v = admitAgentLine(line, { vouchedSymbols: vouchedFor({ kind: "gm" }, env.ctx.speaker), rosterNames: env.ctx.rosterNames ?? [], recentOwn: own, recentRoom });
+    return !v.ok && v.reason === "repeat";
+  });
+}
+
+/**
+ * ONE GATE VERDICT PER CTX AND LINE (LR-04). The conductor hands one ctx to
+ * all of an owed answer's draws — up to OWED_TEMPLATE_TRIES composeLines of
+ * twelve attempts each — and every attempt weighed every phrasing of its pool
+ * again (repeatsOwn), against up to sixty own lines and the room's tail, and
+ * put its line through the gate twice more (composeLine): five owners asking
+ * their agents about their books held the orchestrator's event loop for
+ * seconds a pass (rule 4). A verdict depends only on the ctx and what `key`
+ * names, so it is kept for the ctx and the same draws give the same answers;
+ * a caller that changes the ctx's lines in place starts afresh (the stamp).
+ */
+function gateVerdict<V>(ctx: SpeakCtx, key: readonly unknown[], weigh: () => V): V {
+  if (typeof ctx !== "object" || ctx === null) return weigh();
+  const stamp = [ctx.tail, ctx.tail?.length, ctx.ownRecent, ctx.ownRecent?.length, ctx.rosterNames, ctx.rosterNames?.length, ctx.speaker, ctx.speaker?.name, ctx.speaker?.calls, ctx.speaker?.calls?.length];
+  let memo = GATE_VERDICTS.get(ctx);
+  if (!memo || memo.stamp.some((v, i) => !Object.is(v, stamp[i]))) GATE_VERDICTS.set(ctx, (memo = { stamp, known: new Map() }));
+  const k = JSON.stringify(key);
+  if (memo.known.has(k)) return memo.known.get(k) as V;
+  gateWeighs += 1;
+  const v = weigh();
+  memo.known.set(k, v);
+  return v;
+}
+const GATE_VERDICTS = new WeakMap<SpeakCtx, { stamp: readonly unknown[]; known: Map<string, unknown> }>();
+let gateWeighs = 0;
+
+/** Test seam: how many verdicts gateVerdict has weighed (a remembered one is not counted). */
+export function gateWeighsForTest(): number {
+  return gateWeighs;
 }
 
 /** Whether one of the speaker's own lines already says one of this call's reasons. */
@@ -3183,7 +3218,7 @@ function whatBuy(env: Env, slots: Slots): string | null {
   const namedPool = paper ? (sell ? T.WHATBUY.paperSell : T.WHATBUY.paperBuy) : sell ? T.WHATBUY.sell : T.WHATBUY.buy;
   const anonPool = paper ? (sell ? T.WHATBUY.anonPaperSell : T.WHATBUY.anonPaperBuy) : sell ? T.WHATBUY.anonSell : T.WHATBUY.anonBuy;
   const own = ownLines(env);
-  const fresh = (pool: readonly string[]) => (own.length ? pool.filter((t) => !repeatsOwn(env, putNames(fill(t, slots), env.nv), own)) : pool);
+  const fresh = (pool: readonly string[]) => (own.length ? pool.filter((t) => !repeatsOwn(env, putNames(fill(t, slots), env.nv))) : pool);
   const named = pick(env, fresh(namedPool), slots) ?? pick(env, fresh(anonPool), slots, true);
   if (named) return named;
   if (toldLatest(c, own)) {
@@ -3878,8 +3913,8 @@ function answersPrompt(p: TopicPrompt, text: string): boolean {
 /** Answers the owner's own agent may open with "hey boss": the ones that do not already call them something. */
 // Not "ask": OWN_OWNER.ask already calls them boss ("hi boss, ooh, good question boss").
 // Not "ask-topic": "there's my human, winter, hot chocolate season" is a greeting glued to a taste.
-// A pool here with a line that does ("i'm rooting for you whatever you choose,
-// human", in OWN_OWNER.advice) takes no opener on that line (sayReply VOCATIVE).
+// A pool here with a line that does ("that's yours to decide, boss, i'd rather
+// not steer it", in OWN_OWNER.advice) takes no opener on that line (sayReply VOCATIVE).
 const WARM_OPEN: ReadonlySet<LineClass> = new Set(["ask-trades", "ask-doing", "ask-strategy", "ask-why", "ask-vibe", "ask-here", "ask-fun", "ask-advice"]);
 
 /** The openings the owner's own agent greets them with (OWN_OWNER_OPEN, OWN_OWNER.hello), as the memory's words. */
@@ -4798,10 +4833,11 @@ export function composeLine(intent: Intent, ctx: SpeakCtx, rng: () => number): C
     for (let attempt = 0; attempt < 12; attempt++) {
       const line = compose(intent, envFor(ctx, r, intent, attempt < 8));
       if (!line) continue;
-      const v = admitAgentLine(line, plain);
+      // Remembered for the ctx (gateVerdict): the conductor's draws weigh the same lines again.
+      const v = gateVerdict(ctx, ["plain", vouched, line], () => admitAgentLine(line, plain));
       if (!v.ok) continue;
       fallback ??= v.text;
-      if (!admitAgentLine(line, echo).ok) continue;
+      if (!gateVerdict(ctx, ["echo", vouched, line], () => admitAgentLine(line, echo).ok)) continue;
       if (memory && !ritual && memory.hasLine(memory.norm(v.text))) continue;
       return { text: v.text, fresh: true };
     }
@@ -5066,7 +5102,7 @@ function intentInstruction(intent: Intent, ctx: SpeakCtx): string {
       // THE OWNER'S OWN BOOK IS NOT "YOUR OWN TRADES" TO THEM (ownAdvice).
       const guide =
         cls === "ask-advice" && intent.toAuthor === "owner" && intent.toOwnAgent
-          ? "Your own owner is asking for advice about a trade. Decline warmly: you never tell anyone what to buy or sell, them included, and you never pick a side."
+          ? "Your own owner is asking for advice about a trade. Decline kindly and leave the choice with them: you never tell anyone what to buy or sell, them included, you never pick a side, and you never cheer on, back or encourage what they are thinking of doing."
           : REPLY_GUIDE[cls];
       return `Reply to ${nm(intent.to, sp)}${who}. Their line is quoted at the end of the chat below. ${guide}${naming} This is a reply: no sign-off.`;
     }

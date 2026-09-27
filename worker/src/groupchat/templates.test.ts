@@ -870,6 +870,13 @@ describe("templates: the owner's own agent, and praise for the room", () => {
       assert.doesNotMatch(t, /\bmy own\b|\b(bags?|calls?|trades?|trading|buy\w*|sell\w*|sold|hold\w*|coins?|positions?)\b/, t);
     }
     assert.deepEqual(echoes([T.OWN_OWNER.advice]), []);
+    // HANDED BACK, NEVER CHEERED ON: "should i take out a loan to buy more
+    // PEPE?" and "should i sell everything? i'm scared" drew "i trust your gut",
+    // "i'm just here to cheer" and "i'm with you either way" — the owner's own
+    // agent backing the impulse. No line endorses, roots for or backs the choice.
+    const CHEERS =
+      /\b(gut|cheer\w*|root(?:ing)? for|fan|either way|whichever way|whatever you|on your side|back(?:ing)? you|behind you|go for it|you got this|believe in you|proud|support\w*|i'?m with you)\b/;
+    for (const t of T.OWN_OWNER.advice) assert.doesNotMatch(t, CHEERS, `cheers the choice on: ${t}`);
     // Another agent may deflect the same question from ANSWER.advice, before or after.
     assert.deepEqual(echoes([T.OWN_OWNER.advice], T.ANSWER.advice), []);
     assert.deepEqual(echoes([T.ANSWER.advice], T.OWN_OWNER.advice), []);

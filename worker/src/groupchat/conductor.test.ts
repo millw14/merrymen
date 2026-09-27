@@ -3419,6 +3419,33 @@ describe("round three: owners", () => {
     }
   });
 
+  it("an owner whose agent sleeps is answered every time they ask the room, after the phrase memory has spent the pool", async () => {
+    // LR-03: the room's certain first answer was queued as a line that may be
+    // dropped, and once the six-hour phrase memory had spent the eight "what
+    // are you up to" lines, "what's everyone up to?" drew nobody at all.
+    for (const seed of [1, 2, 3]) {
+      const own = fixture(0x50, "Pine Stoat", "Asia/Tokyo");
+      const others = [0x51, 0x52, 0x53, 0x54].map((b, i) => fixture(b, ["Amber Heron", "Rusty Weasel", "Blue Vole", "Iron Quail"][i]!, null));
+      let t = T0;
+      while (!isAsleep(own.tz, own.tenant, t)) t += 5 * MIN;
+      t += 10 * MIN;
+      const sim = new Sim([own, ...others], { seed });
+      await sim.setup();
+      await sim.run(t - 20 * MIN, t, 15 * SEC);
+      let now = t;
+      for (let k = 0; k < 5; k++) {
+        const at = t + k * 70 * MIN;
+        assert.ok(isAsleep(own.tz, own.tenant, at + 10 * MIN), "fixture: the owner's agent sleeps through every ask");
+        await sim.run(now, at, 30 * SEC);
+        const id = await sim.owner(own.tenant, "what's everyone up to?", at);
+        await sim.run(at, at + 10 * MIN, 15 * SEC);
+        now = at + 10 * MIN;
+        assert.ok(sim.agentRows().some((r) => r.reply_to === id), `seed ${seed}: ask ${k + 1} at +${k * 70} min went unanswered while the owner's agent slept`);
+      }
+      sim.close();
+    }
+  });
+
   it("an owner's line said before their new agent reached the roster is answered by it", async () => {
     const sim = new Sim(awakeFleet(3, 0x70), { seed: 11 });
     await sim.setup();
@@ -3907,6 +3934,32 @@ describe("round four: one card per move", () => {
     await sim.run(restart, restart + HOUR, 15 * SEC);
     const cards = books.flatMap((b) => cardsBy(sim, b));
     assert.equal(cards.length, 1, `the redeploy posted: ${cards.slice(1).map((r) => `${r.speaker_name}: ${r.body}`).join(" | ")}`);
+    sim.close();
+  });
+
+  it("another agent's one paper buy of a coin a running schedule also buys is its own card, hours in; the lockstep books stay one card", async () => {
+    // LR-01: the schedule's card grows over every fill it holds (spanOf), and
+    // another agent's one-off buy was measured against that whole span: Moss
+    // Otter's QQQ at +3 h and TSLA at +8 h folded, for good, into a card from
+    // 00:10, and its owner never saw either trade in the room.
+    const coins = [paper("TSLA", "Tesla"), paper("NVDA", "NVIDIA"), paper("QQQ", "Invesco QQQ")];
+    const books = ["Scarlet Bittern", "Crimson Siskin", "Wry Otter"].map((n, i) => fixture(0x31 + i, n, null, { mode: "paper" }));
+    for (let tick = T0 + 10 * MIN; tick < T0 + 9 * HOUR; tick += 4 * MIN) {
+      books.forEach((b, bi) => coins.forEach((c, ci) => b.calls.push(callAt(tick + [0, 5, 40][bi]! * SEC + ci * SEC, c))));
+    }
+    const moss = fixture(0x3c, "Moss Otter", null, { mode: "paper" });
+    const qqq = callAt(T0 + 3 * HOUR + 90 * SEC, coins[2]!);
+    const tsla = callAt(T0 + 8 * HOUR + 90 * SEC, coins[0]!);
+    moss.calls.push(qqq, tsla);
+    const sim = new Sim([...books, moss, fixture(0x3a, "Amber Heron", null)], { seed: 7 });
+    await sim.setup();
+    await sim.run(T0, T0 + 8 * HOUR + 20 * MIN, MIN);
+    const cards = books.flatMap((b) => cardsBy(sim, b));
+    assert.equal(cards.length, 1, `the lockstep books posted: ${cards.map((r) => `${r.speaker_name}: ${r.body}`).join(" | ")}`);
+    const mine = cardsBy(sim, moss);
+    const lag = (c: CallFact) => mine.find((r) => r.call_decision_id === c.decisionId)?.created_at_ms ?? Number.POSITIVE_INFINITY;
+    assert.deepEqual(mine.map((r) => r.call_decision_id), [qqq.decisionId, tsla.decisionId], "a one-off buy was folded into the schedule's card from hours before");
+    for (const c of [qqq, tsla]) assert.ok(lag(c) - c.atSec * SEC <= 2 * MIN, `told ${Math.round((lag(c) - c.atSec * SEC) / MIN)} min late`);
     sim.close();
   });
 
