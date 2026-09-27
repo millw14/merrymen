@@ -67,7 +67,7 @@ describe("the forks that start NEW autonomous work ask", () => {
     const at = CODE.indexOf("for (const [proposedAt, intent] of proposed.entries()) {");
     const end = CODE.indexOf("\n    }\n", at);
     const loop = CODE.slice(at, end);
-    assert.match(loop, /const entry = countsAsEntry\(intent\.kind, isExitIntent\(intent, active\.limits\)\);/);
+    assert.match(loop, /const entry = countsAsEntry\(intent\.kind, isExitIntent\(intent, active\.limits\), sellsHeldLeg\(intent, heldLegs\)\);/);
     const withheld = loop.indexOf("await withholdEntry(agentId);\n        continue;");
     const decided = loop.indexOf("await ensureDecision(");
     assert.ok(withheld > 0 && decided > withheld, "withheld with `continue` BEFORE any decision row exists");
@@ -78,9 +78,18 @@ describe("the forks that start NEW autonomous work ask", () => {
   it("THE CLASS ENTRIES: the same filter, and the gate is told when entries are closed", () => {
     const at = CODE.indexOf("const entries: Tick = await classGate.entries(async () => await proposeClassEntries());");
     const loop = CODE.slice(at, CODE.indexOf("\n    }\n", at));
-    assert.match(loop, /countsAsEntry\(intent\.kind, isExitIntent\(intent, active\.limits\)\)/);
+    assert.match(loop, /countsAsEntry\(intent\.kind, isExitIntent\(intent, active\.limits\), sellsHeldLeg\(intent, heldLegs\)\)/);
     assert.ok(loop.indexOf("await withholdEntry(agentId);") < loop.indexOf("await ensureDecision("));
     assert.match(CODE, /entriesOpen: !energyNow\.enforce \|\| energyNow\.entries\.open,/);
+  });
+
+  it("A CURVE SALE OUT OF A HELD LEG is read from this tick's book, before either filter asks", () => {
+    const held = CODE.indexOf("const heldLegs = heldCurveLegs({");
+    assert.ok(held > 0 && held < CODE.indexOf("for (const [proposedAt, intent] of proposed.entries()) {"));
+    assert.match(
+      CODE.slice(held, held + 300),
+      /positions,\s*curveLegs: lastCurveLegs,\s*classRows: await classPositions\(agentId\),\s*classBalances: lastClassBalances,/,
+    );
   });
 
   it("THE CLASS EXITS NEVER ASK", () => {

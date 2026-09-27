@@ -152,6 +152,7 @@ import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus, readHolderStatusResult } from "./circle";
+import { CIRCLE_SHORT_CLASS_GATE, circleExitsOnly } from "./circle-gate";
 import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
 import { killHosted, killRequested } from "./kill-request";
@@ -190,7 +191,9 @@ import {
   energyStatus,
   enforcedCap,
   entryAllowance,
+  heldCurveLegs,
   reviewAllowance,
+  sellsHeldLeg,
   shouldTellOwner,
   shouldTellOwnerSpent,
   usdgCentsUp,
@@ -11426,6 +11429,17 @@ async function main() {
               if (d.action !== "hold") await recordDecisionRefusal(d.decision_id, agentId, want.why);
               console.log(`[${short(agentId)}] [brain] not acting — ${want.why}`);
             } else if (energyClaim && !energyClaim.ok) {
+              // THE DECISION ROW IS ALREADY WRITTEN, and this leaves it with no
+              // outcome — accepted, not overlooked. runShadow persisted the BUY
+              // before this line could run, and the only per-decision history
+              // this repo has, recordDecisionRefusal, writes a `rejected` trade
+              // row: the public tape, which an energy refusal must never reach.
+              // There is no private equivalent to write instead. The gap is
+              // narrow: with entries closed the review is held to tokens already
+              // held (energyEntriesClosed above), so this arm is a buy-more of a
+              // held position, or a claim that lost to the plan read at the top
+              // of the tick. The owner hears it through today's energy notice
+              // (withholdEntry); the console line names the order.
               console.log(`[${short(agentId)}] [brain] not acting — energy: today's new trades are used up (${want.order.side} ${want.order.symbol})`);
               await withholdEntry(agentId);
             } else {
@@ -11664,9 +11678,20 @@ async function main() {
     }
     breakerBrickNoted = false;
 
-    // Merry Circle strategies run only for holders (Merry Man+). A non-holder may
-    // select one, but it stays idle with a one-time note until they hold $MERRYMEN.
-    if (isCircleStrategy(strategy.name) && !holderTier.bonusStrategies) {
+    // Merry Circle strategies run in full only for holders (Merry Man+). A
+    // non-holder may select one; it starts nothing new, with a one-time note,
+    // until they hold $MERRYMEN.
+    //
+    // A BRAKE ON NEW WORK, NEVER A RETURN. This used to end the tick here, ahead
+    // of the strategy's own sells and ahead of the class route's exits, so an
+    // owner who fell below the tier with positions open had an agent that could
+    // not close anything — while every energy surface says exits are never
+    // limited. Below the tier the strategy still ticks and only its exits go on
+    // (circle-gate.ts), the class route proposes no entries, and the class
+    // exits run exactly as they do for everyone. Nothing below may `return`
+    // before them (circle-gate.test.ts).
+    const circleShort = isCircleStrategy(strategy.name) && !holderTier.bonusStrategies;
+    if (circleShort) {
       if (!circleBlockedNoted) {
         circleBlockedNoted = true;
         await addEvent(
@@ -11676,13 +11701,13 @@ async function main() {
           // $MERRYMEN because our own read failed is advice they cannot act
           // on — they already did the thing being asked of them.
           holderReadOk
-            ? `${strategy.name} is a Merry Circle strategy — hold ${countTokens(ENERGY.fullTokens)} $MERRYMEN between your wallet and my account (Merry Man tier) to run it; idle until then`
-            : `${strategy.name} is a Merry Circle strategy and we could not read your $MERRYMEN balance this tick, so it is idle. That is our read failing, not your wallet — it should clear on its own.`,
+            ? `${strategy.name} is a Merry Circle strategy — hold ${countTokens(ENERGY.fullTokens)} $MERRYMEN between your wallet and my account (Merry Man tier) to run it; idle until then, apart from exits, which always run`
+            : `${strategy.name} is a Merry Circle strategy and we could not read your $MERRYMEN balance this tick, so it is idle apart from exits, which always run. That is our read failing, not your wallet — it should clear on its own.`,
         );
       }
-      return;
+    } else {
+      circleBlockedNoted = false;
     }
-    circleBlockedNoted = false;
 
     // A strategy may hand back a reason for each intent. It travels to the
     // decisions table and nowhere else — never onto the TradeIntent, because
@@ -11720,9 +11745,13 @@ async function main() {
 
     // A submitted Brain order invalidates this tick's pre-trade holdings.
     // Do not run another discretionary strategy against the old book.
-    const { intents: proposed, why: proposedWhy, idle } = brainOrderAccepted
-      ? { intents: [], why: [], idle: null }
-      : takeTick(await strategy.tick(snap));
+    // Below the Circle tier the strategy still ticks — its exits are the
+    // point — and only what the breaker's own exit test calls an exit survives.
+    const ticked: Tick = brainOrderAccepted ? { intents: [], why: [] } : takeTick(await strategy.tick(snap));
+    const exitLimits = active.limits;
+    const { intents: proposed, why: proposedWhy, idle } = circleShort
+      ? circleExitsOnly(ticked, (intent) => isExitIntent(intent, exitLimits))
+      : ticked;
 
     // ── AND WHY IT PROPOSED NOTHING ─────────────────────────────────────
     //
@@ -11754,7 +11783,11 @@ async function main() {
     // renderWhy's public register, the only producer of these strings, which
     // is what makes a silence safe to publish; a tripped breaker is account
     // state and is never a post. The entries themselves are below.
-    const classGate = await idleAndClassGate({
+    //
+    // BELOW THE CIRCLE TIER, neither: no class entries, and no idle write — a
+    // locked strategy's idle reason is not why nothing new is bought, the
+    // Circle is, and the Circle note above already said so.
+    const classGate = circleShort ? CIRCLE_SHORT_CLASS_GATE : await idleAndClassGate({
       channel: idleChannel,
       agentId,
       strategyName: strategy.name,
@@ -11771,6 +11804,17 @@ async function main() {
       entriesOpen: !energyNow.enforce || energyNow.entries.open,
     });
 
+    // WHAT THE BOOK HOLDS ON A CURVE, and the curve and quote each leg sells
+    // back into — energy's own answer for a curve SALE the breaker's test reads
+    // as an entry (a quote that is an owner-added stock token on a legacy
+    // grant). The energy count only; the breaker is unchanged (energy.ts).
+    const heldLegs = heldCurveLegs({
+      positions,
+      curveLegs: lastCurveLegs,
+      classRows: await classPositions(agentId),
+      classBalances: lastClassBalances,
+    });
+
     for (const [proposedAt, intent] of proposed.entries()) {
       // The LLM strategist already journaled + stamped its survivors; this covers
       // deterministic strategies so every trade still links to a decision.
@@ -11784,12 +11828,13 @@ async function main() {
       //
       // A NEW trade this agent starts on its own is claimed against today's
       // allowance; an EXIT never is — the breaker's own exit test decides
-      // (policy.ts isExitIntent), and a vault deposit is housekeeping. Every
+      // (policy.ts isExitIntent), with a curve sale out of a held leg added for
+      // this count alone (heldLegs above), and a vault deposit is housekeeping. Every
       // producer passes through here, so a strategy that ignores the Snapshot
       // hint is held to the rule anyway. Withheld BEFORE ensureDecision, with
       // `continue` rather than a filtered array (`w` is paired with the intent
       // by index): no decision row, no public post, no refusal on the tape.
-      const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits));
+      const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits), sellsHeldLeg(intent, heldLegs));
       const energyClaim = entry ? await claimEntry() : null;
       if (energyClaim && !energyClaim.ok) {
         await withholdEntry(agentId);
@@ -11887,7 +11932,7 @@ async function main() {
       // THE SAME HARD FILTER as the strategy loop above: each class entry is
       // claimed against today's energy before its decision exists, and handed
       // back if no trade came of it. (A class exit can never reach here.)
-      const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits));
+      const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits), sellsHeldLeg(intent, heldLegs));
       const energyClaim = entry ? await claimEntry() : null;
       if (energyClaim && !energyClaim.ok) {
         await withholdEntry(agentId);

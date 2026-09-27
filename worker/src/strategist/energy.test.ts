@@ -19,7 +19,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { makeLlmStrategist, type StrategistDecision } from "./strategy";
+import { capEntries, makeLlmStrategist, type StrategistDecision } from "./strategy";
 import { buildStrategy } from "../strategies/registry";
 import type { Snapshot, Strategy, Tick } from "../strategies/types";
 
@@ -161,6 +161,87 @@ describe("today's new trades used up", () => {
       const t = await tickOf(build(spy.driver, { claimWindow: async () => true }), snap({ energy }));
       assert.equal(t.intents.length, 1, JSON.stringify(energy));
     }
+  });
+});
+
+describe("some of today's new trades left", () => {
+  const BUY_TSLA = { action: "buy", symbol: "TSLA", sizeUsdg: 5, reason: "the dip is bought" };
+
+  it("ONE LEFT, TWO BUYS: the first is journaled and announced; the second is only counted as withheld", async () => {
+    const spy = driverSaying([BUY, BUY_TSLA]);
+    const decisions: StrategistDecision[] = [];
+    const notes: string[] = [];
+    const t = await tickOf(
+      build(spy.driver, { claimWindow: async () => true, decisions, notes }),
+      snap({ energy: { entriesLeft: 1 } }),
+    );
+    assert.equal(t.intents.length, 1, "no more buys than today has left");
+    const out = t.intents[0]!;
+    assert.ok(out.kind === "swap" && out.sellToken === USDG && out.buyToken === NVDA, "the model's first, in its order");
+    assert.deepEqual(
+      decisions.filter((d) => d.action).map((d) => [d.action, d.symbol]),
+      [["buy", "NVDA"]],
+      "no public decision for the buy index.ts would withhold",
+    );
+    assert.equal(decisions.filter((d) => d.dropped_rule).length, 0, "withheld is not dropped: a drop row publishes");
+    assert.ok(notes.some((n) => /^strategist: 1 buy proposal\(s\) withheld — today's energy for new trades is used up; sells still run$/.test(n)), notes.join("\n"));
+    assert.ok(!notes.some((n) => /buy 5 USDG TSLA/.test(n)), "and the owner is not told of a buy that will not happen");
+    assert.ok(notes.some((n) => /buy 5 USDG NVDA/.test(n)));
+  });
+
+  it("THE CAP COUNTS VALID BUYS: one validation drops does not use up the allowance", async () => {
+    const spy = driverSaying([{ action: "buy", symbol: "NOPE", sizeUsdg: 5, reason: "x" }, BUY]);
+    const t = await tickOf(build(spy.driver, { claimWindow: async () => true }), snap({ energy: { entriesLeft: 1 } }));
+    assert.equal(t.intents.length, 1);
+    const out = t.intents[0]!;
+    assert.ok(out.kind === "swap" && out.buyToken === NVDA);
+  });
+
+  it("sells are never capped", async () => {
+    const spy = driverSaying([BUY, BUY_TSLA, SELL]);
+    const t = await tickOf(
+      build(spy.driver, { claimWindow: async () => true }),
+      snap({ holdings: holding(), energy: { entriesLeft: 1 } }),
+    );
+    assert.equal(t.intents.length, 2);
+    assert.ok(t.intents.some((i) => i.kind === "swap" && i.sellToken === TSLA && i.buyToken === USDG), "the sell");
+    assert.ok(t.intents.some((i) => i.kind === "swap" && i.buyToken === NVDA), "and one buy");
+  });
+
+  it("A WITHHELD BUY GIVES BACK ITS ACTION SLOT — a sell behind it still fits the tick", () => {
+    const universe = {
+      legs: new Map([["TSLA", TSLA], ["NVDA", NVDA]]),
+      swapRouter: ROUTER,
+      usdg: USDG,
+      maxPerActionUsdg: 10_000_000n,
+      maxActionsPerTick: 2,
+    };
+    const proposals = [BUY, BUY_TSLA, SELL] as Parameters<typeof capEntries>[0];
+    const once = capEntries(proposals, universe, snap({ holdings: holding() }));
+    assert.equal(once.intents.length, 2, "not limited: two buys fill the tick");
+    assert.equal(once.rejected.length, 1, "and the sell is turned away for the slot");
+    const capped = capEntries(proposals, universe, snap({ holdings: holding(), energy: { entriesLeft: 1 } }));
+    assert.equal(capped.withheld, 1);
+    assert.deepEqual(capped.rejected, []);
+    assert.deepEqual(
+      capped.accepted.map((a) => [a.action, a.symbol]),
+      [["buy", "NVDA"], ["sell", "TSLA"]],
+    );
+    assert.deepEqual(capped.kept, [proposals[0], proposals[2]]);
+  });
+
+  it("a buy refused for cash stays a refusal, not a withheld one", () => {
+    const universe = {
+      legs: new Map([["TSLA", TSLA], ["NVDA", NVDA]]),
+      swapRouter: ROUTER,
+      usdg: USDG,
+      maxPerActionUsdg: 10_000_000n,
+      maxActionsPerTick: 4,
+    };
+    const r = capEntries([BUY, BUY_TSLA] as Parameters<typeof capEntries>[0], universe, snap({ cashUsdg: 6_000_000n, energy: { entriesLeft: 1 } }));
+    assert.equal(r.intents.length, 1);
+    assert.equal(r.withheld, 0);
+    assert.equal(r.rejected.length, 1);
   });
 });
 

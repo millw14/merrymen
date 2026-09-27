@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { ENERGY, ENERGY_FULL_RAW, parseEnergyStatus } from "../../packages/core/src/index";
+import { CASH, ENERGY, ENERGY_FULL_RAW, STOCK_TOKENS, parseEnergyStatus, type StoredGrant } from "../../packages/core/src/index";
 import {
   ENERGY_OFF,
   TRENCHER_REVIEW_SEC,
@@ -25,17 +25,20 @@ import {
   energyStatus,
   enforcedCap,
   entryAllowance,
+  heldCurveLegs,
   mergeEnergyDay,
   nextUtcMidnight,
   pacedCap,
   planEnergySeed,
   reviewAllowance,
+  sellsHeldLeg,
   shouldTellOwner,
   shouldTellOwnerSpent,
   usdgCentsUp,
   utcDay,
   type EnergyDayRow,
 } from "./energy";
+import { limitsFromGrant } from "./limits";
 import { isExitIntent, type TradeIntent } from "./policy";
 import { TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 
@@ -220,6 +223,91 @@ describe("what counts as a new trade", () => {
   });
   it("NOR DOES THE IDLE-CASH SWEEP — a vault deposit is housekeeping", () => {
     assert.equal(ask({ kind: "vault-deposit", target: USDG, amountUsdg: 1n }), false);
+  });
+});
+
+/**
+ * A LEGACY GRANT, A CURVE QUOTED IN A STOCK TOKEN THE OWNER ADDED.
+ *
+ * Signed before tradeable-v2, the grant's built-ins are USDG + QQQ/NVDA/TSLA;
+ * AAPL and the launch are EXTRAS. The breaker's test therefore reads the sale
+ * MEME→AAPL as an entry (and must keep doing so — the breaker is not this
+ * file's), and energy used to count it: a low day withheld the way out.
+ */
+describe("a curve sale into an extra stock token on a legacy grant", () => {
+  const AAPL = STOCK_TOKENS.find((t) => t.symbol === "AAPL")!.address as `0x${string}`;
+  const MEME = "0x00000000000000000000000000000000000000e1" as const;
+  const MEME2 = "0x00000000000000000000000000000000000000e2" as const;
+  const CURVE = "0x00000000000000000000000000000000000000c1" as const;
+  const CURVE2 = "0x00000000000000000000000000000000000000c2" as const;
+  const ADAPTER = "0x00000000000000000000000000000000000000ad" as const;
+  const USDG_ADDR = CASH.USDG as `0x${string}`;
+  const grant = {
+    smartAccount: "0x00000000000000000000000000000000000000a9",
+    owner: "0x00000000000000000000000000000000000000b1",
+    sessionKeyAddress: "0x00000000000000000000000000000000000000c9",
+    serialized: "x",
+    caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 14, maxDrawdownPct: 5, maxOpsPerDay: 24 },
+    grantedAt: 1_700_000_000,
+    expiresAt: 4_000_000_000,
+    chainId: 4663,
+    grantFeatures: [],
+    grantTokens: [AAPL, MEME, MEME2],
+  } as unknown as StoredGrant;
+  const limits = limitsFromGrant(grant);
+  const curve = (assetIn: `0x${string}`, assetOut: `0x${string}`, on: `0x${string}` = CURVE): TradeIntent => ({
+    kind: "curve-trade",
+    target: ADAPTER,
+    curve: on,
+    assetIn,
+    assetOut,
+    amountInRaw: 1n,
+    minAmountOutRaw: 1n,
+    notionalUsdg: 1n,
+  });
+  const book = (over: Partial<Parameters<typeof heldCurveLegs>[0]> = {}) =>
+    heldCurveLegs({
+      positions: [
+        { symbol: "MEME", token: MEME, rawBalance: 10n ** 18n },
+        // The book holds the quote stock too — which must not make a BUY paid
+        // in it look like a sale.
+        { symbol: "AAPL", token: AAPL, rawBalance: 10n ** 18n },
+      ],
+      curveLegs: new Map([["MEME", { curve: CURVE, quoteToken: AAPL }]]),
+      classRows: [],
+      classBalances: new Map(),
+      ...over,
+    });
+  const counts = (i: TradeIntent, held = book()) => countsAsEntry(i.kind, isExitIntent(i, limits), sellsHeldLeg(i, held));
+
+  it("the premise: AAPL is not built in on this grant, so the breaker calls the sale an entry", () => {
+    assert.ok(!limits.quoteAssets?.map((a) => a.toLowerCase()).includes(AAPL.toLowerCase()));
+    assert.equal(isExitIntent(curve(MEME, AAPL), limits), false, "the breaker's own test is unchanged");
+    assert.equal(countsAsEntry("curve-trade", false), true, "and asked alone, energy would count it");
+  });
+
+  it("SELLING THE HELD LEG BACK INTO ITS QUOTE IS NOT A NEW TRADE", () => {
+    assert.equal(counts(curve(MEME, AAPL)), false);
+  });
+
+  it("a BUY of the leg still counts — paid in USDG, or in the stock the book also holds", () => {
+    assert.equal(counts(curve(USDG_ADDR, MEME)), true);
+    assert.equal(counts(curve(AAPL, MEME)), true);
+  });
+
+  it("nothing held, another curve, or another quote: counted", () => {
+    assert.equal(counts(curve(MEME, AAPL), book({ positions: [{ symbol: "MEME", token: MEME, rawBalance: 0n }] })), true, "sold out");
+    assert.equal(counts(curve(MEME, AAPL, CURVE2)), true, "not the curve it was recorded on");
+    assert.equal(counts(curve(MEME, MEME2)), true, "not its own quote");
+  });
+
+  it("A CLASS POSITION counts as held while the vault holds it, on the curve and quote its row recorded", () => {
+    const classRows = [{ token: MEME2, curve: CURVE2, quoteToken: AAPL }];
+    const sale = curve(MEME2, AAPL, CURVE2);
+    assert.equal(counts(sale, book({ classRows, classBalances: new Map([[MEME2.toLowerCase(), 5n]]) })), false);
+    assert.equal(counts(sale, book({ classRows, classBalances: new Map() })), true, "swept or sold: nothing held");
+    assert.equal(counts(sale, book({ classRows: [{ token: MEME2, curve: null, quoteToken: AAPL }], classBalances: new Map([[MEME2.toLowerCase(), 5n]]) })), true, "no curve on record is not a known leg");
+    assert.equal(counts(sale, book({ classRows: null })), true, "an unreadable list holds nothing");
   });
 });
 
