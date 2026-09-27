@@ -73,7 +73,7 @@ import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
-import { CASH, DEFAULT_BASKET_SYMBOLS, isHolderProof, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
+import { CASH, DEFAULT_BASKET_SYMBOLS, energyReserveTokens, isHolderProof, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
 import { makePgDb, translateSchema, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
@@ -2756,6 +2756,11 @@ async function runHwmRepairIfAsked(): Promise<void> {
       fromBlock: 0n,
       toBlock: head,
       custodyAddressesFor: (a) => custodyOf.get(a.toLowerCase()),
+      // The energy reserve, so an agent's energy purchase reads `reserve-out`
+      // (capital that left the book, which the worker lowered the peak for)
+      // rather than a trade — otherwise the derived peak is too high by every
+      // purchase and this repair is a no-op exactly when one went unbooked.
+      reserveTokens: energyReserveTokens(Number(process.env.MERRYMEN_CHAIN_ID ?? 4663)),
       log: (m) => log(`hwm| ${m}`),
     });
 
@@ -2788,6 +2793,7 @@ async function runHwmRepairIfAsked(): Promise<void> {
       // custody makes the whole derivation for this tenant unsafe.
       let deposits: number | null = 0;
       let withdrawals: number | null = 0;
+      let reservePurchases = 0;
       let internalMoves = 0;
       let tradeLegs = 0;
       let ambiguousMoves = 0;
@@ -2803,6 +2809,7 @@ async function runHwmRepairIfAsked(): Promise<void> {
         if (!c.complete) complete = false;
         deposits = deposits === null ? null : deposits + Number(BigInt(c.totals.grossContributionsRaw)) / 1e6;
         withdrawals = withdrawals === null ? null : withdrawals + Number(BigInt(c.totals.grossWithdrawalsRaw)) / 1e6;
+        reservePurchases += Number(BigInt(c.totals.grossReservePurchasesRaw)) / 1e6;
         internalMoves += c.totals.internal;
         tradeLegs += c.totals.tradeLegs;
         ambiguousMoves += c.totals.ambiguous;
@@ -2818,6 +2825,7 @@ async function runHwmRepairIfAsked(): Promise<void> {
         maxDrawdownBps: r.capBps,
         depositsUsdg: deposits,
         withdrawalsUsdg: withdrawals,
+        reservePurchasesUsdg: reservePurchases,
         internalMoves,
         tradeLegs,
         ambiguousMoves,
@@ -4468,6 +4476,10 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
       // a repair: a trade counted as a withdrawal moves the peak the drawdown
       // breaker divides by, in the direction that halts a healthy account.
       custodyAddressesFor: (a) => custodyVaults.get(a.toLowerCase()),
+      // The energy reserve, so an energy purchase is proposed as the
+      // 'energy-buy' capital-out the worker books (and collides with it by
+      // identity) rather than dropped as a trade. See accounting-reconstruction.
+      reserveTokens: energyReserveTokens(Number(process.env.MERRYMEN_CHAIN_ID ?? 4663)),
       log: (m) => log(`recon| ${m}`),
     });
 
