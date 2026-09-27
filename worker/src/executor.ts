@@ -50,8 +50,20 @@ export interface ExecutionResult {
   txHash: `0x${string}`;
   /** OUR operation. The only id that identifies this trade on a 4337 explorer. */
   userOpHash: `0x${string}`;
-  /** Emitted logs — the real swap amounts live here (see fills.ts). */
-  logs: readonly { address: string; topics: readonly string[]; data: string }[];
+  /**
+   * Emitted logs — the real swap amounts live here (see fills.ts). viem hands
+   * back each log's position too; typed optional, as in fills.ts ReceiptLog,
+   * so the energy booking can key a flow on tx#logIndex from the receipt it
+   * already has instead of re-reading it.
+   */
+  logs: readonly {
+    address: string;
+    topics: readonly string[];
+    data: string;
+    logIndex?: number | string | bigint | null;
+    blockNumber?: bigint | number | string | null;
+    transactionHash?: string | null;
+  }[];
   /**
    * Gas actually paid, in wei. The account self-pays with no paymaster, so this
    * is a real cost of the trade and it was invisible to P&L: `equity_usdg` is
