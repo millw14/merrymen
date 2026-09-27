@@ -315,3 +315,11 @@ describe("durability: merge and seed", () => {
     assert.equal(energyDayRowOf({ day: "2026-09-27", reviews: 0, entries: 0, told_at: null, read_at: 7, read_full: 0 })?.readFull, false);
   });
 });
+
+describe("the seed reads both shapes of a row", () => {
+  it("A PARSED ROW KEEPS ITS NOTICE AND ITS READ — the round trip that once dropped them", () => {
+    const parsed: EnergyDayRow = { day: "2026-09-27", reviews: 1, entries: 2, toldAt: 123, readAt: 500, readFull: true };
+    assert.deepEqual(energyDayRowOf(parsed), parsed);
+    assert.deepEqual(planEnergySeed({ shared: [parsed], sinceDay: "2026-09-26" }), [parsed]);
+  });
+});

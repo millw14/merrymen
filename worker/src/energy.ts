@@ -430,12 +430,16 @@ export function mergeEnergyDay(a: EnergyDayRow, b: EnergyDayRow): EnergyDayRow {
  * written as zeros.
  */
 export function planEnergySeed(i: {
+  /** Rows from shared — database rows or parsed ones; malformed rows are dropped. */
   shared: readonly unknown[];
-  child?: readonly EnergyDayRow[];
+  child?: readonly unknown[];
   sinceDay: string;
 }): EnergyDayRow[] {
   const byDay = new Map<string, EnergyDayRow>();
-  for (const r of i.child ?? []) byDay.set(r.day, r);
+  for (const raw of i.child ?? []) {
+    const r = energyDayRowOf(raw);
+    if (r) byDay.set(r.day, byDay.has(r.day) ? mergeEnergyDay(byDay.get(r.day)!, r) : r);
+  }
   for (const raw of i.shared) {
     const r = energyDayRowOf(raw);
     if (!r || r.day < i.sinceDay) continue;
@@ -451,17 +455,24 @@ const count = (v: unknown): number | null => {
 };
 const stamp = (v: unknown): number | null | undefined => (v === null || v === undefined ? null : (count(v) ?? undefined));
 
-/** A database row (snake_case, either backend's number spelling) → EnergyDayRow, or null. */
+/**
+ * A row → EnergyDayRow, or null. Accepts a database row (snake_case, either
+ * backend's number spelling) OR an already-parsed EnergyDayRow, so a caller
+ * cannot lose a column by handing over the wrong one of the two — which is
+ * exactly how told_at and the last read once vanished between the mirror and
+ * the seed in energy-durability.test.ts.
+ */
 export function energyDayRowOf(raw: unknown): EnergyDayRow | null {
   if (typeof raw !== "object" || raw === null) return null;
   const o = raw as Record<string, unknown>;
+  const col = (snake: string, camel: string): unknown => (snake in o ? o[snake] : o[camel]);
   if (typeof o.day !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(o.day)) return null;
   const reviews = count(o.reviews);
   const entries = count(o.entries);
-  const toldAt = stamp(o.told_at);
-  const readAt = stamp(o.read_at);
+  const toldAt = stamp(col("told_at", "toldAt"));
+  const readAt = stamp(col("read_at", "readAt"));
   if (reviews === null || entries === null || toldAt === undefined || readAt === undefined) return null;
-  const rf = o.read_full;
+  const rf = col("read_full", "readFull");
   const readFull = rf === null || rf === undefined ? null : rf === true || rf === 1 || rf === "1" || rf === 1n;
   return { day: o.day, reviews, entries, toldAt, readAt, readFull: readAt === null ? null : readFull };
 }
