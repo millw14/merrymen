@@ -1720,14 +1720,19 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           <HolderLink />
           {/* WHAT THE TOKEN IS FOR, said where it is linked. Text only — this
               section's controls are HolderLink's, and the census in
-              app/settings/honesty.test.ts counts every one. */}
-          <p className="mm-hint">
-            On the hosted service your agent runs at full energy while your wallet and its account hold{" "}
-            {count(ENERGY.fullTokens)} $MERRYMEN between them; below that it gets about a tenth of its daily AI reviews and
-            new trades. Stop-losses, take-profits and your own orders are never limited; its own AI
-            reviews — including of its open positions — are paced along with the rest. $MERRYMEN buys
-            capacity, nothing else — we make no promise about its price.
-          </p>
+              app/settings/honesty.test.ts counts every one. ONLY WHILE THE
+              DEPLOYMENT GATES ENERGY (tier.energyGate, as CreateAgent asks):
+              the gate is off until an operator turns it on, and a throttle
+              described while nothing is limited is a false reason to buy. */}
+          {tier?.energyGate && (
+            <p className="mm-hint">
+              On the hosted service your agent runs at full energy while your wallet and its account hold{" "}
+              {count(ENERGY.fullTokens)} $MERRYMEN between them; below that it gets about a tenth of its daily AI reviews and
+              new trades. Stop-losses, take-profits and your own orders are never limited; its own AI
+              reviews — including of its open positions — are paced along with the rest. $MERRYMEN buys
+              capacity, nothing else — we make no promise about its price.
+            </p>
+          )}
           <div className="mm-section">{t("settings.section.connections")}</div>
           <div className="mm-grid">
             <Field

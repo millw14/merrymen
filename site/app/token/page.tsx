@@ -59,8 +59,9 @@ export default function TokenPage() {
         </p>
 
         <div className="callout">
-          <strong>$MERRYMEN is your agent&apos;s energy.</strong> On the hosted service an agent runs at
-          full strength while your wallet and its own account hold 100,000 $MERRYMEN between them.
+          <strong>$MERRYMEN is your agent&apos;s energy.</strong> When the hosted service gates energy (an
+          operator switch, off until it is turned on), an agent runs at full strength while your wallet
+          and its own account hold 100,000 $MERRYMEN between them.
           Without it, it still runs — on about a tenth of a normal day of paid AI reviews and new trades
           it opens on its own, resetting at 00:00 UTC. Stop-losses, take-profits and your own orders are
           never limited; its own AI reviews, including of its open positions, are paced with the rest.

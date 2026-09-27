@@ -248,6 +248,18 @@ describe("whose tokens each screen counts", () => {
     assert.doesNotMatch(settings, /tier\.tokens \?\? 0/);
   });
 
+  it("THE ENERGY LINE SHOWS ONLY WHILE THE DEPLOYMENT GATES ENERGY — as CreateAgent's does", () => {
+    // The gate is off until an operator turns it on; describing a throttle
+    // while nothing is limited is a false reason to buy.
+    const settings = readFileSync(new URL("./screens/Settings.tsx", import.meta.url), "utf8");
+    const at = settings.indexOf("On the hosted service your agent runs at full energy");
+    assert.ok(at > 0);
+    const guard = settings.lastIndexOf("{tier?.energyGate && (", at);
+    assert.ok(guard > 0 && at - guard < 200, "the paragraph sits directly inside the energyGate guard");
+    const create = readFileSync(new URL("./screens/CreateAgent.tsx", import.meta.url), "utf8");
+    assert.match(create, /tier\.energyGate &&[\s\S]{0,400}Your agent runs at full energy/);
+  });
+
   it("AND SAYS WHAT THE TOKEN IS FOR, and only that", () => {
     const settings = readFileSync(new URL("./screens/Settings.tsx", import.meta.url), "utf8");
     assert.match(settings, /\$MERRYMEN buys\s+capacity, nothing else — we make no promise about its price\./);

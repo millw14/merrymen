@@ -40,6 +40,17 @@ describe("energy thresholds come from the tier table, never a literal", () => {
     assert.equal(ENERGY.lowBps, 1_000);
   });
 
+  it("THE TIER TABLE CLAIMS NO THROTTLE — every client renders its perks whether or not the gate is on", () => {
+    // /api/circle sends these to the web, iOS and Android unconditionally, and
+    // MERRYMEN_ENERGY_GATE is off until an operator turns it on. A perk saying
+    // outsiders run on a tenth told non-holders they were throttled when nothing was.
+    const outsider = CIRCLE_TIERS.find((t) => t.id === "outsider")!;
+    assert.deepEqual(outsider.perks, ["merrymen is free and open to everyone — hold $MERRYMEN to join the Circle"]);
+    for (const t of CIRCLE_TIERS) {
+      for (const p of t.perks) assert.doesNotMatch(p, /tenth|energy|throttl/i, `${t.id}: ${p}`);
+    }
+  });
+
   it("the constants cannot be edited at runtime", () => {
     assert.ok(Object.isFrozen(ENERGY));
     assert.ok(Object.isFrozen(ENERGY_ROUTE_V1));
