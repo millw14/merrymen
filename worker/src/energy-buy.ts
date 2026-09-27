@@ -20,11 +20,16 @@
  * have — and a tax nobody could read is never a floor. Each unknown refuses, by
  * name, before anything is sized.
  *
- * THE SIZING IS EXACT V2 ARITHMETIC, not a hedge. What must ARRIVE is the
- * shortfall plus a 50 bps rounding margin; grossNeededFor inverts the token's
- * buy tax and the owner's slippage tolerance exactly (ceiling at each step);
- * the router's own getAmountsIn prices that gross output across both pools,
- * fees included; the result is rounded UP to the cent. Only then is it capped:
+ * THE SIZING IS EXACT V2 ARITHMETIC AT THE EXPECTED RATE, not a hedge. What
+ * must ARRIVE is the shortfall plus a 50 bps margin; grossNeededFor inverts the
+ * token's buy tax exactly (ceiling at each step); the router's own getAmountsIn
+ * prices that gross output across both pools, fees included; the result is
+ * rounded UP to the cent. The owner's slippage tolerance is NOT in the size —
+ * it is the router's floor on what arrives (the executor's minOut), nothing
+ * else. Sizing for the worst case bought 1.5% over the shortfall at the default
+ * tolerance and ~11.7% at the maximum on every ask; a buy the market moves
+ * against now arrives a little short, and the next ask tops it up from the
+ * chain, which is already safe. Only then is it capped:
  * by the owner's own maximum for this ask, the key's per-trade cap (the USDG
  * approve the wall seals), what is left of today's budget, and the cash in the
  * account — each rounded DOWN to the cent. Every cap binds at once, so the
@@ -44,7 +49,12 @@ import type { LedgerFacts } from "./order-receipt";
 import { rejectRuleLabel, rejectRuleRemedy } from "./thesis-policy";
 import { grossNeededFor } from "./venues/uniswap-v2";
 
-/** The rounding margin on what must arrive, bps. Tax and slippage are handled exactly; this is rounding only. */
+/**
+ * The margin on what must arrive, bps — the ONLY margin over the shortfall.
+ * The tax is inverted exactly; slippage is never sized in (it is the router's
+ * floor, see the header), so this is what absorbs rounding and a small move
+ * between the quote and the fill: the card's "small margin for price movement".
+ */
 export const ENERGY_BUFFER_BPS = 50;
 /** One cent of USDG, raw 6dp. */
 const CENT = 10_000n;
@@ -79,12 +89,14 @@ export interface EnergyCaps {
   maxOpsPerDay: number;
 }
 
-/** How the route prices right now. `amountInFor` is the router's getAmountsIn over the energy path. */
+/**
+ * How the route prices right now. `amountInFor` is the router's getAmountsIn
+ * over the energy path. NO SLIPPAGE: the owner's tolerance is the executor's
+ * floor on what arrives (energyMinOut at the re-quote), never part of the size.
+ */
 export interface EnergyPricing {
   /** $MERRYMEN's buy tax, bps, read now; null = unreadable. */
   taxBps: number | null;
-  /** The owner's slippage tolerance, bps. */
-  slippageBps: number;
   amountInFor(grossOut: bigint): Promise<bigint | null>;
 }
 
@@ -142,15 +154,17 @@ const floorCent = (v: bigint) => (v <= 0n ? 0n : v - (v % CENT));
 
 /**
  * THE ONE SIZING RULE: how much $MERRYMEN to price for a shortfall. What must
- * arrive is the shortfall plus its rounding margin; grossNeededFor inverts the
- * token's buy tax and the owner's slippage tolerance on top. The planner sizes
- * the buy with it and index.ts's "about $X" estimate prices the same figure,
- * so the number an owner is shown is the number they will be asked for — the
- * estimate once left the margin and the slippage out and under-asked.
+ * arrive is the shortfall plus its margin (ENERGY_BUFFER_BPS); grossNeededFor
+ * inverts the token's buy tax on top, at the EXPECTED rate — zero slippage,
+ * because the owner's tolerance is the router's floor (energyMinOut), never
+ * part of the size. It takes no slippage argument, so no caller can size with
+ * one. The planner sizes the buy with it and index.ts's "about $X" estimate
+ * prices the same figure, so the number an owner is shown is the number they
+ * will be asked for.
  */
-export function energyGrossFor(shortRaw: bigint, taxBps: number, slippageBps: number): bigint {
+export function energyGrossFor(shortRaw: bigint, taxBps: number): bigint {
   const wantNet = (shortRaw * BigInt(10_000 + ENERGY_BUFFER_BPS) + 9_999n) / 10_000n;
-  return grossNeededFor(wantNet, taxBps, slippageBps);
+  return grossNeededFor(wantNet, taxBps, 0);
 }
 
 /** A route quote → the USDG one buy asks: rounded UP to the cent, and never under the smallest buy. */
@@ -343,7 +357,7 @@ export async function planEnergyBuy(
   }
 
   // 6. THE PRICE OF THE SHORTFALL, then every cap at once.
-  const gross = energyGrossFor(shortRaw, taxBps, pricing.slippageBps);
+  const gross = energyGrossFor(shortRaw, taxBps);
   const quoted = await pricing.amountInFor(gross);
   if (quoted === null || quoted <= 0n) {
     return refuse(

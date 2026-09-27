@@ -406,10 +406,12 @@ const REGISTRY: ChatCommand[] = [
    *
    * IT SAYS WHAT THE SIZING DOES, NOT "ONLY WHAT'S MISSING". The planner
    * (worker/src/energy-buy.ts energyGrossFor) sizes for the shortfall plus a
-   * rounding margin, grossed up through the owner's slippage tolerance and the
-   * token's tax, and never below the smallest buy — so a typical fill lands a
-   * little over the shortfall, and the fees and tax are paid out of the USDG
-   * rather than coming out of what arrives. That is what the card says.
+   * small margin (0.5%), grossed up through the token's tax at the quoted rate,
+   * and never below the smallest buy — so a fill at the quote lands a little
+   * over the shortfall, a small move against it is absorbed by the margin, and
+   * the fees and tax are paid out of the USDG rather than coming out of what
+   * arrives. The owner's slippage tolerance is the router's floor, never part
+   * of the size. That is what the card says.
    *
    * THE SENTENCE PRINTS NO FEE OR TAX PERCENTAGE. The token's own trading tax is
    * set by its owner and can change without a line of our code changing; a

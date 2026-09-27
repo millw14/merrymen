@@ -41,7 +41,6 @@ const caps = (over: Partial<EnergyCaps> = {}): EnergyCaps => ({
 });
 const pricing = (over: Partial<EnergyPricing> = {}): EnergyPricing => ({
   taxBps: 100,
-  slippageBps: 100,
   amountInFor: async (g) => linear(g),
   ...over,
 });
@@ -64,10 +63,14 @@ const refusal = (p: EnergyPlan) => {
   assert.equal(p.kind, "refuse");
   return p as Extract<EnergyPlan, { kind: "refuse" }>;
 };
-/** What the uncapped shortfall would cost, computed independently of the planner. */
-const needFor = (short: bigint, tax = 100, slip = 100) => {
+/**
+ * What the uncapped shortfall would cost, computed independently of the
+ * planner: the shortfall plus the margin, grossed up for the tax alone, at the
+ * expected rate — the owner's slippage tolerance is never in the size.
+ */
+const needFor = (short: bigint, tax = 100) => {
   const want = (short * BigInt(10_000 + ENERGY_BUFFER_BPS) + 9_999n) / 10_000n;
-  const raw = linear(grossNeededFor(want, tax, slip));
+  const raw = linear(grossNeededFor(want, tax, 0));
   return raw % 10_000n === 0n ? raw : raw + (10_000n - (raw % 10_000n));
 };
 const NO_PRICE_WORDS = /price|returns?\b|profit|moon|pump|investment|worth|\d+(\.\d+)?\s*%/i;
@@ -199,7 +202,7 @@ describe("planEnergyBuy — the size", () => {
         opsRemaining: 1 + Math.floor(rnd() * 5),
       });
       const r = reads({ holder: big(100_000) * TOKEN, account: big(20_000) * TOKEN, cashUsdg: big(50_000_000) });
-      const p = await plan(r, c, pricing({ taxBps: Math.floor(rnd() * 201), slippageBps: Math.floor(rnd() * 300) }));
+      const p = await plan(r, c, pricing({ taxBps: Math.floor(rnd() * 201) }));
       if (p.kind !== "buy") continue;
       bought += 1;
       const dailyLeft = c.dailyRaw > c.spentTodayRaw ? c.dailyRaw - c.spentTodayRaw : 0n;
@@ -215,19 +218,23 @@ describe("planEnergyBuy — the size", () => {
   it("THE ESTIMATE AND THE ASK ARE ONE RULE — energyGrossFor/energyAskFor size exactly what the planner buys", async () => {
     // index.ts's "about $X" estimate prices energyAskFor(amountIn(energyGrossFor(...))).
     // Uncapped, that must be the planner's own amount, to the cent — it once
-    // priced the bare shortfall at zero slippage and under-stated the ask.
+    // priced the bare shortfall and under-stated the ask.
     const big = caps({ ownerMaxRaw: 900n * USDG, perTradeRaw: 900n * USDG, dailyRaw: 900n * USDG });
-    for (const [held, tax, slip] of [
-      [20_000n, 100, 100],
-      [12_345n, 0, 0],
-      [99_000n, 200, 1_000],
-      [99_995n, 100, 100], // a few tokens short: the smallest buy
+    for (const [held, tax] of [
+      [20_000n, 100],
+      [12_345n, 0],
+      [99_000n, 200],
+      [99_995n, 100], // a few tokens short: the smallest buy
     ] as const) {
       const short = ENERGY_FULL_RAW - held * TOKEN;
-      const p = buyOf(await plan(reads({ holder: held * TOKEN, cashUsdg: 900n * USDG }), big, pricing({ taxBps: tax, slippageBps: slip })));
-      const estimate = energyAskFor(linear(energyGrossFor(short, tax, slip)));
-      assert.equal(estimate, p.amountInRaw, `held ${held}, tax ${tax}, slippage ${slip}`);
-      assert.equal(p.needInRaw, needFor(short, tax, slip), "and the independent arithmetic agrees");
+      const p = buyOf(await plan(reads({ holder: held * TOKEN, cashUsdg: 900n * USDG }), big, pricing({ taxBps: tax })));
+      const estimate = energyAskFor(linear(energyGrossFor(short, tax)));
+      assert.equal(estimate, p.amountInRaw, `held ${held}, tax ${tax}`);
+      assert.equal(p.needInRaw, needFor(short, tax), "and the independent arithmetic agrees");
+      // A card sized at the estimate covers the shortfall in one ask.
+      const atEstimate = buyOf(await plan(reads({ holder: held * TOKEN, cashUsdg: 900n * USDG }), caps({ ...big, ownerMaxRaw: estimate }), pricing({ taxBps: tax })));
+      assert.equal(atEstimate.coversShortfall, true, `held ${held}: the estimate is enough`);
+      assert.equal(atEstimate.asksLeft, 0);
     }
   });
 
@@ -238,12 +245,28 @@ describe("planEnergyBuy — the size", () => {
     assert.equal(energyAskFor(37_120_000n), 37_120_000n);
   });
 
-  it("the margin and the owner's slippage are IN the size: more slippage, more asked", () => {
+  it("THE SIZE IS THE EXPECTED-RATE COST: the margin and the tax are in it, the owner's slippage is NOT", () => {
     const short = 87_655n * TOKEN;
     const bare = grossNeededFor(short, 100, 0);
-    const sized = energyGrossFor(short, 100, 100);
-    assert.ok(sized > bare, "the old estimate's figure is below what is actually bought");
-    assert.ok(energyGrossFor(short, 100, 1_000) > sized);
+    const sized = energyGrossFor(short, 100);
+    assert.ok(sized > bare, "the margin is in the size");
+    // Exactly the shortfall plus 50 bps, grossed up for the tax alone.
+    assert.equal(sized, grossNeededFor((short * 10_050n + 9_999n) / 10_000n, 100, 0));
+    // What arrives at the quoted rate is the shortfall plus the margin — not
+    // plus the slippage setting too, which bought ~11.7% over at the maximum.
+    const afterTax = (sized * 9_900n) / 10_000n;
+    assert.ok(afterTax >= short && afterTax - short <= (short * 51n) / 10_000n, "over by the margin, and only the margin");
+  });
+
+  it("THE OWNER'S SLIPPAGE TOLERANCE DOES NOT CHANGE THE SIZE — it is the router's floor, nothing else", async () => {
+    // The plan has no slippage input at all; what the executor floors at is
+    // energyMinOut(re-quote, tax, cfg.slippageBps) — pinned in energy-buy-wiring.
+    const big = caps({ ownerMaxRaw: 900n * USDG, perTradeRaw: 900n * USDG, dailyRaw: 900n * USDG });
+    const p = buyOf(await plan(reads({ holder: 20_000n * TOKEN, cashUsdg: 900n * USDG }), big));
+    const short = ENERGY_FULL_RAW - 20_000n * TOKEN;
+    const worstCase = energyAskFor(linear(grossNeededFor((short * 10_050n + 9_999n) / 10_000n, 100, 1_000)));
+    assert.ok(p.amountInRaw < worstCase, "no longer sized for the worst case");
+    assert.equal(p.amountInRaw, needFor(short));
   });
 
   it("DETERMINISTIC: the same reads give the same plan", async () => {

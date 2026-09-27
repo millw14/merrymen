@@ -4016,12 +4016,13 @@ async function main() {
    * WHAT THE BUY WOULD ASK IN USDG RIGHT NOW, or null when unknown.
    *
    * Sized EXACTLY as the buy itself is (energy-buy.ts energyGrossFor and
-   * energyAskFor): the $MERRYMEN still missing plus its rounding margin,
-   * grossed up for the token's buy tax read fresh and the owner's own slippage
-   * tolerance, priced by getAmountsIn over the tick's metered mainnet client
+   * energyAskFor): the $MERRYMEN still missing plus its margin, grossed up for
+   * the token's buy tax read fresh — at the expected rate, since the owner's
+   * slippage tolerance is only the router's floor and never part of the size —
+   * priced by getAmountsIn over the tick's metered mainnet client
    * (both pools' fees included), rounded UP to the cent and never under the
-   * smallest buy. It once priced the bare shortfall at zero slippage and so
-   * under-stated the ask the owner then confirmed. Unknown whenever any input
+   * smallest buy. It once priced the bare shortfall, without the margin, and
+   * so under-stated the ask the owner then confirmed. Unknown whenever any input
    * is: a half-read balance, an unreadable or out-of-bounds tax, a pool that
    * will not quote. It is shown as an estimate and nothing is bought on it —
    * the buy itself re-prices at confirmation.
@@ -4031,7 +4032,7 @@ async function main() {
     if (shortRaw === null || shortRaw <= 0n) return null;
     const tax = await readEnergyTaxBps(client);
     if (tax === null || tax > ENERGY.maxTaxBps) return null;
-    const amountIn = await energyAmountInFor(client, energyGrossFor(shortRaw, tax, cfg.slippageBps));
+    const amountIn = await energyAmountInFor(client, energyGrossFor(shortRaw, tax));
     return amountIn === null ? null : usdgCentsUp(energyAskFor(amountIn));
   }
 
@@ -12632,7 +12633,8 @@ async function main() {
           opsRemaining: limits.maxOpsPerDay - opsTodayCount(),
           maxOpsPerDay: limits.maxOpsPerDay,
         },
-        { taxBps, slippageBps: cfg.slippageBps, amountInFor: (g) => energyAmountInFor(client, g) },
+        // No slippage in the size: it is the executor's floor (energyMinOut) only.
+        { taxBps, amountInFor: (g) => energyAmountInFor(client, g) },
         {
           paper: paperActive(),
           equityKnown: judged.equityKnown,
