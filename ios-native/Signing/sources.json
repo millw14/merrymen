@@ -1,7 +1,7 @@
 {
   "ios-native/Resources/FeedEngine.js": "8137af2d388414af011ce4c22d049240cbee8caaf11b4ef3049b0d3eabefd4d3",
   "ios-native/Resources/WalletCryptography.js": "2acd222eb726c067fefe9b18aa9af7e98c138e2f1c518c951650dfd0393ee02c",
-  "ios-native/Resources/WalletEngine.js": "450b31feedda4aabbd0b21415e2162d8c3a14ada45abe24a8eb2135751bd2c60",
+  "ios-native/Resources/WalletEngine.js": "8540d1efac86acfad6e22816c3618edb3bf8f1062d870dc8205d3f8dc0a2abc4",
   "ios-native/Resources/WalletRuntime.js": "ab934c4b8ff5fb422e2276dc30cc0eaf7696a4a31dd9c2606533d6aca95dfdd3",
   "ios-native/Signing/build.mjs": "457a8884e0f46acf5319492fb3f6c6bbe0bd26db7bdd0ad7f0f6d00e95c3d8b2",
   "ios-native/Signing/crypto-platform.js": "508224e9cb61498f7680f0321d4f003b9135fb1032cb881b09c22fe8b8f1659d",
@@ -70,7 +70,7 @@
   "web/src/terminal/why.ts": "86fb9a4a2645ad6cd87947bdc14e90a8a775a0bdf176550ad9c33ea1ce54a5e5",
   "worker/src/class-recovery.ts": "87e2a987769677dfa28ea1fa5d64e540076625c99ad2291af00df7a9f5646818",
   "worker/src/gas.ts": "26151ec23d111c235d09ddd48ca25325f7b8f5ef18b7ca9546edc24ab291b24c",
-  "worker/src/recover.ts": "bd7893be764c64b3b24065ebecc951b410bae8804a57336b6cb69554b008715d",
+  "worker/src/recover.ts": "c55bf8c3d134e226836c6bc3cc33d3a727878b643fd0475ed01da690fec8443e",
   "worker/src/thesis-policy.ts": "a610048cc672874a3a83033783c33f137842207899283f2410245973c842462a",
   "worker/src/venues/class-log.ts": "d14520eeba5174d8077d8e17df16d98c66b95ef11d04b413d69983ecf60dc2ab"
 }
