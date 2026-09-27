@@ -31,6 +31,7 @@ import {
   planEnergySeed,
   reviewAllowance,
   shouldTellOwner,
+  shouldTellOwnerSpent,
   usdgCentsUp,
   utcDay,
   type EnergyDayRow,
@@ -231,6 +232,42 @@ describe("telling the owner", () => {
     assert.equal(shouldTellOwner(plan("enforce", null), false), false, "a pacing refusal is not worth a message");
     assert.equal(shouldTellOwner(plan("enforce", now - 5), true), false, "once told, not again today");
     assert.equal(shouldTellOwner(plan("observe", null), true), false, "observe tells nobody");
+  });
+
+  // The Trencher, the Brain, the strategist and the class route all stop
+  // PROPOSING entries once the day is spent, so a withheld entry may never
+  // come. The day becoming spent is its own moment to tell them.
+  const at = (mode: "observe" | "enforce", entries: number | null, toldAt: number | null = null, level: "low" | "unread" | "full" = "low") =>
+    energyPlan({
+      mode,
+      level,
+      counters: entries === null ? null : { reviews: 0, entries, toldAt },
+      reviewsAllowed: 5,
+      entriesAllowed: 2,
+      nowSec: now,
+    });
+  it("AND WHEN TODAY'S NEW TRADES ARE USED UP, withheld or not — once, and only enforcing", () => {
+    assert.equal(shouldTellOwnerSpent(at("enforce", 2)), true, "the second of two is the moment");
+    assert.equal(shouldTellOwnerSpent(at("enforce", 3)), true, "past the allowance still counts as used up");
+    assert.equal(shouldTellOwnerSpent(at("enforce", 2, null, "unread")), true, "an unread day on the reduced allowance is spent too");
+    assert.equal(shouldTellOwnerSpent(at("enforce", 1)), false, "one left is not spent");
+    assert.equal(shouldTellOwnerSpent(at("enforce", 0)), false);
+    assert.equal(shouldTellOwnerSpent(at("enforce", 2, now - 5)), false, "once told, not again today");
+    assert.equal(shouldTellOwnerSpent(at("observe", 2)), false, "observe tells nobody");
+    assert.equal(shouldTellOwnerSpent(at("enforce", 2, null, "full")), false, "full energy is never spent");
+    assert.equal(shouldTellOwnerSpent(ENERGY_OFF), false);
+  });
+  it("AN UNREADABLE COUNTER IS NOT 'SPENT' — the plan fails closed, but the sentence would be a guess", () => {
+    const unread = at("enforce", null);
+    assert.equal(unread.entries.open, false, "new work is still withheld");
+    assert.equal(shouldTellOwnerSpent(unread), false);
+  });
+  it("and it agrees with the report's `spent`, which the desk and Telegram already show", () => {
+    for (const entries of [0, 1, 2, 3]) {
+      const p = at("enforce", entries);
+      const s = energyStatus({ plan: p, parts: { holder: tok(1), account: tok(0) }, hasReviewer: true, buy: "ready", estimateUsdg: null, nowSec: now });
+      assert.equal(shouldTellOwnerSpent(p), s.spent, `entries ${entries}`);
+    }
   });
 });
 

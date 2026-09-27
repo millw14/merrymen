@@ -192,6 +192,7 @@ import {
   entryAllowance,
   reviewAllowance,
   shouldTellOwner,
+  shouldTellOwnerSpent,
   usdgCentsUp,
   utcDay,
   type BalanceParts,
@@ -3879,7 +3880,7 @@ async function main() {
    * account in the same process, and one account's reading is not another's.
    */
   let energyLastGood: { agentId: string; good: LastGood | null } | undefined;
-  /** An entry was withheld by energy since the last plan — the moment the owner is told. */
+  /** An entry was withheld by energy since the last plan — one of the two moments the owner is told (tellEnergySpent). */
   let energyWithheld = false;
   /**
    * THE WORKER'S OWN REPORT, as published on the agents row this tick. Kept in
@@ -3949,18 +3950,19 @@ async function main() {
     await refundEnergy(claim.agentId, claim.day, "entries");
   }
   /**
-   * AN ENTRY WAS WITHHELD: note it, and tell the owner — once per UTC day.
+   * TELL THE OWNER TODAY'S ENERGY IS SPENT — at most once per UTC day, from
+   * either moment that decides it (withholdEntry, or refreshEnergy seeing the
+   * day's new trades used up). One helper, so the claim and the sentence exist
+   * once.
    *
-   * Told at the FIRST withheld entry, the moment the limit cost them a trade,
-   * not on a paced review. The durable told_at claim goes FIRST and the event
-   * second, so a crash between them loses the message rather than sending it
-   * twice, and a redeploy (which seeds told_at back) does not send it again.
-   * Never public: a warn event is the owner's register, and the sentence is
-   * worker-written — the address in it comes from the grant, never a model.
+   * The durable told_at claim goes FIRST and the event second, so a crash
+   * between them loses the message rather than sending it twice, and a
+   * redeploy (which seeds told_at back) does not send it again. Never public:
+   * a warn event is the owner's register, and the sentence is worker-written —
+   * the address in it comes from the grant, never a model.
    */
-  async function withholdEntry(agentId: string): Promise<void> {
-    energyWithheld = true;
-    if (!active || !shouldTellOwner(energyNow, energyWithheld)) return;
+  async function tellEnergySpent(agentId: string): Promise<void> {
+    if (!active) return;
     const now = Math.floor(Date.now() / 1000);
     const claimed = await claimEnergyNotice(agentId, energyNow.day, now);
     energyNow = { ...energyNow, told: true };
@@ -3980,6 +3982,15 @@ async function main() {
         estimateUsdg: energyReport?.estimateUsdg ?? null,
       }),
     );
+  }
+  /**
+   * AN ENTRY WAS WITHHELD: note it, and tell the owner if today's notice has
+   * not gone — the moment the limit cost them a trade, not a paced review.
+   */
+  async function withholdEntry(agentId: string): Promise<void> {
+    energyWithheld = true;
+    if (!active || !shouldTellOwner(energyNow, energyWithheld)) return;
+    await tellEnergySpent(agentId);
   }
 
   /**
@@ -4084,6 +4095,12 @@ async function main() {
       nowSec: now,
     });
     void setAgentEnergy(agentId, JSON.stringify(energyReport));
+    // THE DAY'S NEW TRADES ARE USED UP: tell the owner now, not only at a
+    // withheld entry. The Trencher, the Brain, the strategist and the class
+    // route all stop proposing entries once spent, so a withheld one may never
+    // come — and on iOS and Android this dated warn is the only word the owner
+    // gets. After the report, so the notice carries this tick's figures.
+    if (shouldTellOwnerSpent(energyNow)) await tellEnergySpent(agentId);
   }
   let lastSequencerUp = true;
   // A feedless holding never resolves, so warn ONCE while it's held rather than

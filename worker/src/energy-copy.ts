@@ -2,8 +2,9 @@
  * WHAT THE OWNER READS WHEN TODAY'S ENERGY RUNS OUT.
  *
  * One sentence-set, written by the worker and never by a model, sent once per
- * UTC day at the first new trade the limit actually withheld (index.ts, behind
- * a durable told_at claim). Pure, so every variant is executed by
+ * UTC day — when the day's new trades are used up, or at the first new trade
+ * the limit withheld, whichever comes first (index.ts tellEnergySpent, behind a
+ * durable told_at claim). Pure, so every variant is executed by
  * energy-copy.test.ts rather than read.
  *
  * WHAT IT MUST ALWAYS SAY, whichever arm it takes:
@@ -31,7 +32,7 @@ import { ENERGY, ENERGY_NOTICE_PREFIX } from "../../packages/core/src/index";
 import type { EnergyBuy, EnergyLevel } from "../../packages/core/src/index";
 
 export interface EnergyNoticeFacts {
-  /** The UTC day the entry was withheld, 'YYYY-MM-DD'. */
+  /** The UTC day whose allowance is used up, 'YYYY-MM-DD'. */
   day: string;
   /** The agent's smart account, in full. */
   account: string;
