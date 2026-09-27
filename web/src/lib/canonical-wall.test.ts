@@ -13,7 +13,8 @@ import {
   type StoredGrant,
 } from "@merrymen/core";
 import { CANONICAL_GRANT_FEATURES, checkCanonicalWall } from "./canonical-wall";
-import { CLASS_FACTORY, CLASS_VAULT, TRENCHER_FACTORY, TRENCHER_VAULT, resealed, signerGrant } from "./canonical-wall-fixture";
+import { CallPolicyVersion, toCallPolicy, toTimestampPolicy } from "@zerodev/permissions/policies";
+import { CLASS_FACTORY, CLASS_VAULT, TRENCHER_FACTORY, TRENCHER_VAULT, resealed, sealWall, signerGrant } from "./canonical-wall-fixture";
 
 /**
  * THE SERVER STORES THE MERRYMEN WALL, AND NOTHING ELSE.
@@ -224,6 +225,91 @@ describe("an owner-enabled permission that is not the Merrymen wall is refused",
   it("anything unreadable, without throwing", () => {
     for (const g of [{}, { serialized: "not-a-permission-account" }, { owner: ATTACKER, smartAccount: ACCOUNT, caps: {}, grantedAt: 1, expiresAt: 2, serialized: "e30=" }]) {
       assert.equal(verdict(g).ok, false);
+    }
+  });
+});
+
+/**
+ * A SIGNER FROM BEFORE ENERGY, WITH $MERRYMEN IN THE OWNER'S CUSTOM TOKENS.
+ *
+ * Before energy, an owner who wanted $MERRYMEN in view listed it as a custom
+ * token, and the signer of the day sealed it like any other: an uncapped approve
+ * and a place in `grantTokens`. Every current signer drops it (core wall.ts
+ * usableExtraTokens), so the canonical rebuild never contains that approve and
+ * the byte comparison fails — as "does not implement the advertised limits",
+ * which tells an owner whose grant is running out nothing they can act on.
+ *
+ * THE LEGACY WALL IS REBUILT EXACTLY. Today's core cannot seal the reserve, so
+ * the wall is built with a stand-in address where $MERRYMEN goes and the
+ * stand-in is then replaced by $MERRYMEN in the permission data. That is byte
+ * for byte what the base commit's buildWallPolicies sealed (checked against
+ * 75995697's core, with the reserve first and last, with and without the class
+ * vault): the old signer differed only in keeping the reserve. The control below
+ * — the same construction without the reserve — passes, so the refusal is the
+ * reserve and nothing about how the wall was sealed.
+ */
+describe("a grant from a signer that predates energy", () => {
+  const MERRY = core.MERRYMEN_TOKEN.address;
+  const STANDIN = "0x000000000000000000000000000000000000beef";
+  const swap = (v: unknown): unknown =>
+    typeof v === "string"
+      ? v.toLowerCase() === STANDIN ? MERRY : v
+      : Array.isArray(v)
+        ? v.map(swap)
+        : v && typeof v === "object"
+          ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, swap(x)]))
+          : v;
+
+  /** What a pre-energy signer minted for these custom tokens: no energy marker, the reserve sealed like any extra. */
+  async function preEnergyGrant(extras: { symbol: string; address: `0x${string}`; decimals: number }[]) {
+    const standins = extras.map((t) => (core.isEnergyReserveToken(t.address) ? { ...t, address: STANDIN as `0x${string}` } : t));
+    const { grant, owner } = await signerGrant({ account: ACCOUNT, extraTokens: standins });
+    const grantFeatures = (grant.grantFeatures ?? []).filter((f) => f !== GRANT_ENERGY);
+    const permissions = swap(
+      core.buildCallPermissions(grant.caps, grant.smartAccount, {
+        ...core.grantWallOptions({ grantTokens: grant.grantTokens, grantFeatures }),
+        ponsClassVaultAddress: grant.ponsClassVaultAddress,
+        ponsClassVaultFactoryAddress: grant.ponsClassVaultFactoryAddress,
+      }),
+    );
+    const policies = [
+      toTimestampPolicy({ validAfter: grant.grantedAt, validUntil: grant.expiresAt }),
+      toCallPolicy({ policyVersion: CallPolicyVersion.V0_0_4, permissions: permissions as never }),
+    ];
+    const { serialized, sessionKey } = await sealWall({ owner, account: grant.smartAccount, policies });
+    return {
+      ...grant,
+      grantFeatures,
+      grantTokens: swap(grant.grantTokens) as string[],
+      serialized,
+      demoSessionPrivateKey: sessionKey,
+      sessionKeyAddress: privateKeyToAccount(sessionKey).address,
+    } as StoredGrant;
+  }
+
+  it("control: the same construction WITHOUT the reserve is a wall the server accepts", async () => {
+    assert.deepEqual(verdict(await preEnergyGrant([EXTRA])), { ok: true });
+  });
+
+  it("with $MERRYMEN sealed as a custom token: refused by name, with the two ways out", async () => {
+    const legacy = await preEnergyGrant([{ symbol: "MERRYMEN", address: MERRY, decimals: 18 }, EXTRA]);
+    assert.ok(legacy.grantTokens?.includes(MERRY.toLowerCase()), "premise: the old signer listed the reserve");
+    const v = refusedWith(legacy, "invalid_wall");
+    const why = v.ok ? "" : v.why;
+    assert.match(why, /\$MERRYMEN/);
+    assert.match(why, /Update the app/);
+    assert.match(why, /remove \$MERRYMEN from your custom tokens, and sign again/);
+    assert.doesNotMatch(why, /does not implement/, "the generic refusal is what left owners stuck");
+    assert.doesNotMatch(why, /\.$/, "POST /api/grants appends its own sentence");
+    assert.doesNotMatch(why, /price|returns?\b|profit|invest/i);
+  });
+
+  it("the reserve in grantTokens is refused before the bytes, whatever the wall and however it is cased", async () => {
+    // A current signer's wall (no reserve approve) with metadata naming it.
+    const { grant } = await signerGrant({ account: ACCOUNT, extraTokens: [EXTRA] });
+    for (const address of [MERRY.toLowerCase(), `0x${MERRY.slice(2).toUpperCase()}`]) {
+      const v = refusedWith({ ...grant, grantTokens: [...(grant.grantTokens ?? []), address] }, "invalid_wall");
+      assert.match(v.ok ? "" : v.why, /\$MERRYMEN is now its energy/);
     }
   });
 });

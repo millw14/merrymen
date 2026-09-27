@@ -11,11 +11,13 @@
  *
  * The route itself cannot run here (it needs the grant store, a session and a
  * chain), so its wiring is pinned in the source, and the reader it calls is
- * run against a stub ledger.
+ * run against a stub that answers only the right question for the right
+ * account, and against the real ledger schema with two tenants on it.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { describe, it } from "node:test";
+import { DatabaseSync } from "node:sqlite";
+import { before, describe, it } from "node:test";
 import type { Db } from "../../../../../worker/src/db";
 import { readAgentEnergy } from "../../../lib/agent-energy";
 
@@ -73,23 +75,92 @@ describe("the status carries energy", () => {
   });
 });
 
-describe("what the route hands back from a stub ledger", () => {
-  const stub = (row: unknown) => <T>(fn: (db: Db | null) => Promise<T>) =>
-    fn({ prepare: () => ({ get: async () => row, all: async () => [], run: async () => ({ changes: 0 }) }) } as unknown as Db);
+/**
+ * THE READER ASKS FOR THIS AGENT'S ENERGY AND NOTHING ELSE.
+ *
+ * The stub used to be `get: async () => row` — it discarded the SQL and the
+ * bound account, so it would have passed a reader that read another column or
+ * another tenant's row. Now the stub answers ONLY the one query shape, and only
+ * for the account bound to it; and the ledger case runs the real schema with
+ * two tenants on it, so reading one can never return the other's report.
+ */
+const ENERGY_READ = /^\s*SELECT\s+energy\s+FROM\s+agents\s+WHERE\s+smart_account\s*=\s*\?\s*$/i;
+const report = (level: string, at: number) => ({
+  v: 1, gated: true, mode: "enforce", level, agentTokens: null, holderTokens: null,
+  needTokens: 100_000, day: "2026-09-27", resetsAt: 1_790_553_600, reviews: null, entries: { used: 0, allowed: 2 },
+  spent: false, buy: "resign", estimateUsdg: null, at,
+});
 
-  it("a report is returned as the worker wrote it", async () => {
-    const report = {
-      v: 1, gated: true, mode: "enforce", level: "unread", agentTokens: null, holderTokens: null,
-      needTokens: 100_000, day: "2026-09-27", resetsAt: 1_790_553_600, reviews: null, entries: { used: 0, allowed: 2 },
-      spent: false, buy: "resign", estimateUsdg: null, at: 1_790_500_000,
-    };
-    const got = await readAgentEnergy("0xabc", stub({ energy: JSON.stringify(report) }));
+describe("what the route hands back from a stub ledger", () => {
+  const ACCOUNT = "0x00000000000000000000000000000000000a11ce";
+  /** A ledger holding `row` for ACCOUNT alone, which refuses any other question. */
+  const stub = (row: unknown, asked: { sql: string; params: unknown[] }[] = []) => <T>(fn: (db: Db | null) => Promise<T>) =>
+    fn({
+      prepare: (sql: string) => ({
+        get: async (...params: unknown[]) => {
+          asked.push({ sql, params });
+          assert.match(sql, ENERGY_READ, "the one read: the energy column of the agents row");
+          assert.deepEqual(params, [ACCOUNT], "bound to the account asked about, as a parameter");
+          return params[0] === ACCOUNT ? row : undefined;
+        },
+        all: async () => assert.fail("a list read is not this reader's question"),
+        run: async () => assert.fail("a reader never writes"),
+      }),
+    } as unknown as Db);
+
+  it("a report is returned as the worker wrote it — asked for by the bound account", async () => {
+    const asked: { sql: string; params: unknown[] }[] = [];
+    const got = await readAgentEnergy(ACCOUNT, stub({ energy: JSON.stringify(report("unread", 1_790_500_000)) }, asked));
+    assert.equal(asked.length, 1, "one read");
+    assert.ok(!asked[0]!.sql.toLowerCase().includes(ACCOUNT), "the account is bound, never spliced into the SQL");
     assert.equal(got?.level, "unread");
     assert.equal(got?.agentTokens, null, "unread stays unread");
   });
 
   it("and nothing is null, never a default report", async () => {
-    assert.equal(await readAgentEnergy("0xabc", stub(undefined)), null);
-    assert.equal(await readAgentEnergy("0xabc", stub({ energy: null })), null);
+    assert.equal(await readAgentEnergy(ACCOUNT, stub(undefined)), null);
+    assert.equal(await readAgentEnergy(ACCOUNT, stub({ energy: null })), null);
+  });
+
+  it("no account asks nothing at all", async () => {
+    for (const none of [null, undefined, ""]) {
+      assert.equal(await readAgentEnergy(none, () => assert.fail("no read without an account")), null);
+    }
+  });
+});
+
+describe("what the route hands back from the real ledger, with two tenants on it", () => {
+  const A = "0x00000000000000000000000000000000000000a1";
+  const B = "0x00000000000000000000000000000000000000b2";
+  const NONE = "0x00000000000000000000000000000000000000c3";
+  let readDb: <T>(fn: (db: Db | null) => Promise<T>) => Promise<T>;
+
+  before(async () => {
+    const { wrapSqlite } = await import("../../../../../worker/src/db");
+    const { applyLedgerSchema } = await import("../../../../../worker/src/store");
+    const db = wrapSqlite(new DatabaseSync(":memory:"));
+    await applyLedgerSchema(db);
+    const add = db.prepare(
+      `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, mode, epoch)
+       VALUES (?, ?, '0x1', '0x2', 4663, '{}', 0, 0, 'live', 1)`,
+    );
+    await add.run(A, "Alder");
+    await add.run(B, "Birch");
+    // The worker's own write (store.ts setAgentEnergy), for each tenant.
+    const write = db.prepare("UPDATE agents SET energy = ? WHERE smart_account = ?");
+    await write.run(JSON.stringify(report("full", 1)), A);
+    await write.run(JSON.stringify(report("low", 2)), B);
+    readDb = (fn) => fn(db);
+  });
+
+  it("each tenant reads its own report, and only its own", async () => {
+    assert.equal((await readAgentEnergy(A, readDb))?.level, "full");
+    assert.equal((await readAgentEnergy(A, readDb))?.at, 1);
+    assert.equal((await readAgentEnergy(B, readDb))?.level, "low");
+    assert.equal((await readAgentEnergy(B, readDb))?.at, 2);
+  });
+
+  it("an account with no row is null, not somebody else's report", async () => {
+    assert.equal(await readAgentEnergy(NONE, readDb), null);
   });
 });

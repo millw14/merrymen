@@ -55,6 +55,7 @@ import {
   GRANT_ENERGY,
   ENERGY_ROUTE_V1,
   TRADEABLE_V2,
+  isEnergyReserveToken,
   type StoredGrant,
 } from "@merrymen/core";
 
@@ -250,6 +251,24 @@ function verify(grant: Record<string, unknown>): void {
   const tokens = grant.grantTokens;
   if (tokens !== undefined && (!Array.isArray(tokens) || tokens.length > 50 || tokens.some((a) => typeof a !== "string" || !ADDRESS.test(a)))) {
     refuse(400, "invalid_grant", "Invalid granted token addresses");
+  }
+  // $MERRYMEN SEALED AS A TRADED TOKEN IS A SIGNER FROM BEFORE ENERGY. Every
+  // current signer drops the reserve from the sealed extras (core wall.ts
+  // usableExtraTokens), so `grantTokens` never names it; an iOS build or a tab
+  // loaded before energy shipped still seals it, with an uncapped approve that
+  // lets the key SELL the owner's energy. The rebuild below would refuse that
+  // too — as "does not implement the advertised limits", which tells the owner
+  // nothing they can act on while their grant runs out. So it is refused FIRST,
+  // by name, with the two ways out. Refused rather than accepted: the energy
+  // permission's safety case is that nothing in the wall can spend the reserve.
+  // No trailing period: POST /api/grants appends its own sentence.
+  if ((tokens as string[] | undefined)?.some((a) => isEnergyReserveToken(a))) {
+    refuse(
+      400,
+      "invalid_wall",
+      "This app version seals $MERRYMEN as a token your agent trades, but $MERRYMEN is now its energy, which the " +
+        "agent's key may only buy. Update the app, or remove $MERRYMEN from your custom tokens, and sign again",
+    );
   }
 
   // THE MARKERS ARE AN ALLOWLIST, NOT A DENYLIST. A marker the worker reads

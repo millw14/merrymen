@@ -31,6 +31,7 @@ import { OWNER_CHANGED_SETTING, ownerMismatch } from "@/lib/order-owner";
 import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { agentNameSave } from "@/lib/settings-agent-name";
+import { withoutEnergyReserve } from "@/lib/energy-reserve";
 
 export const dynamic = "force-dynamic";
 
@@ -157,6 +158,9 @@ export async function GET(req: Request) {
     rpcMainnet: redactUrl(values.rpcMainnet),
     rpcTestnet: redactUrl(values.rpcTestnet),
     telegramTranscribeBase: redactUrl(values.telegramTranscribeBase),
+    // Every signer builds its wall from this list — an old iOS engine or a
+    // stale tab would seal $MERRYMEN from it and be refused (energy-reserve.ts).
+    customTokens: withoutEnergyReserve(values.customTokens),
   };
   const view: SettingsView = {
     bundlerApiKey: mask(bundlerApiKey),

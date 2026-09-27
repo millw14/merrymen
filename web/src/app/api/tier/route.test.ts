@@ -15,14 +15,21 @@
  *   - the holder's own part is exposed (a new agent starts with only that);
  *   - the tier comes from the combined figure.
  *
- * The routes need a session, the grant store and a chain, so the reader they
- * share is run against a stub client, and each route's use of it is pinned in
- * its source.
+ * The reader the three routes share is run against a stub client, and each
+ * route's use of it is pinned in its source. /api/tier's GET is ALSO run for
+ * real (bottom of this file): a temp MERRYMEN_HOME holding settings.json and
+ * grant.json, and a JSON-RPC chain stubbed at fetch — the one seam the route
+ * already has, so nothing in it changes to be tested.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { describe, it } from "node:test";
-import { CIRCLE_TIERS, MERRYMEN_TOKEN, tierForBalance } from "@merrymen/core";
+import { randomBytes } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { after, afterEach, before, describe, it } from "node:test";
+import { decodeFunctionData, encodeFunctionResult, erc20Abi, multicall3Abi, toHex } from "viem";
+import { CIRCLE_TIERS, MERRYMEN_TOKEN, robinhoodChain, tierForBalance } from "@merrymen/core";
 import {
   AGENT_BALANCE_TTL_MS,
   HOLDER_BALANCE_TTL_MS,
@@ -268,5 +275,236 @@ describe("/api/alpha uses it", () => {
     assert.match(ALPHA, /readStanding\(\{/);
     assert.match(ALPHA, /agent: await agentAccountFor\(req, true\)/);
     assert.match(ALPHA, /raw = standing\.raw;/);
+  });
+});
+
+/**
+ * THE /api/tier GET HANDLER, RUN — self-hosted first, where the branch is new.
+ *
+ * Self-hosted the route resolves the holder from settings.json (diskHolder),
+ * the agent from grant.json (agentAccountFor(req, false)), reads through the
+ * settings file's own RPC, and returns early when there is nothing to read.
+ * None of that ran before: a wrong branch order or a thrown diskHolder passed.
+ *
+ * THE ROUTE CACHES BALANCES PER ADDRESS for the life of the module, so every
+ * case below uses addresses no other case reads.
+ */
+describe("/api/tier GET, run", () => {
+  const KEYS = ["MERRYMEN_HOME", "MERRYMEN_HOSTED", "MERRYMEN_SESSION_SECRET", "MERRYMEN_ENERGY_GATE", "DATABASE_URL"] as const;
+  const original = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  const RPC = "https://rpc.example.test/operator-own";
+  const MULTICALL = robinhoodChain.contracts!.multicall3!.address.toLowerCase();
+  const realFetch = globalThis.fetch;
+  let dir: string;
+  let GET: (req: Request) => Promise<Response>;
+
+  /** A fresh address per use, so the route's module-level cache never answers for the chain. */
+  let n = 0;
+  const fresh = () => `0x${(++n).toString(16).padStart(4, "0")}${"c".repeat(36)}` as `0x${string}`;
+
+  /** The chain, at fetch: answers the $MERRYMEN multicall per address and records who was asked, where. */
+  function chainAt(balances: Record<string, bigint>, o: { status?: number } = {}) {
+    const asked: { url: string; who: string[] }[] = [];
+    globalThis.fetch = (async (url: unknown, init?: { body?: unknown }) => {
+      if (o.status) return new Response("{}", { status: o.status });
+      const body = JSON.parse(String(init?.body)) as { id: number; method: string; params: unknown[] } | { id: number; method: string; params: unknown[] }[];
+      const one = (r: { id: number; method: string; params: unknown[] }) => {
+        if (r.method === "eth_chainId") return { jsonrpc: "2.0", id: r.id, result: toHex(robinhoodChain.id) };
+        assert.equal(r.method, "eth_call", `the stub chain was asked for ${r.method}`);
+        const { to, data } = r.params[0] as { to: string; data: `0x${string}` };
+        assert.equal(to.toLowerCase(), MULTICALL, "one multicall");
+        const calls = decodeFunctionData({ abi: multicall3Abi, data }).args[0] as readonly { target: string; callData: `0x${string}` }[];
+        const who: string[] = [];
+        const results = calls.map((c) => {
+          assert.equal(c.target.toLowerCase(), MERRYMEN_TOKEN.address.toLowerCase(), "the $MERRYMEN contract and nothing else");
+          const inner = decodeFunctionData({ abi: erc20Abi, data: c.callData });
+          assert.equal(inner.functionName, "balanceOf");
+          const address = String(inner.args![0]).toLowerCase();
+          who.push(address);
+          const raw = balances[address];
+          return raw === undefined
+            ? { success: false, returnData: "0x" as const }
+            : { success: true, returnData: encodeFunctionResult({ abi: erc20Abi, functionName: "balanceOf", result: raw }) };
+        });
+        asked.push({ url: String(url), who });
+        return { jsonrpc: "2.0", id: r.id, result: encodeFunctionResult({ abi: multicall3Abi, functionName: "aggregate3", result: results }) };
+      };
+      return Response.json(Array.isArray(body) ? body.map(one) : one(body));
+    }) as typeof fetch;
+    return asked;
+  }
+
+  const disk = (o: { settings?: Record<string, unknown> | string | null; grant?: { smartAccount: string; chainId: number } | null }) => {
+    for (const [file, v] of [["settings.json", o.settings], ["grant.json", o.grant]] as const) {
+      const at = path.join(dir, file);
+      if (v === null || v === undefined) rmSync(at, { force: true });
+      else writeFileSync(at, typeof v === "string" ? v : JSON.stringify(v));
+    }
+  };
+  const tier = async (headers: Record<string, string> = {}) => {
+    const res = await GET(new Request("https://app.example.test/api/tier", { headers }));
+    assert.equal(res.status, 200);
+    return (await res.json()) as Record<string, unknown>;
+  };
+
+  before(async () => {
+    dir = mkdtempSync(path.join(tmpdir(), "merrymen-tier-get-"));
+    process.env.MERRYMEN_HOME = dir;
+    process.env.MERRYMEN_SESSION_SECRET = randomBytes(32).toString("hex");
+    delete process.env.MERRYMEN_HOSTED;
+    delete process.env.MERRYMEN_ENERGY_GATE;
+    delete process.env.DATABASE_URL;
+    ({ GET } = await import("./route"));
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    delete process.env.MERRYMEN_HOSTED;
+  });
+  after(() => {
+    globalThis.fetch = realFetch;
+    for (const k of KEYS) {
+      if (original[k] === undefined) delete process.env[k];
+      else process.env[k] = original[k];
+    }
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  });
+
+  it("SELF-HOSTED, A NAMED WALLET AND A MAINNET GRANT: both summed, through the operator's own RPC", async () => {
+    const holder = fresh();
+    const agent = fresh();
+    disk({ settings: { holderAddress: holder, rpcMainnet: RPC }, grant: { smartAccount: agent, chainId: MAINNET } });
+    const asked = chainAt({ [holder]: 60_000n * WHOLE, [agent]: 40_000n * WHOLE });
+    const v = await tier();
+    assert.equal(v.why, "ok");
+    assert.deepEqual(
+      { tokens: v.tokens, holderTokens: v.holderTokens, agentTokens: v.agentTokens, agentAccount: v.agentAccount },
+      { tokens: 100_000, holderTokens: 60_000, agentTokens: 40_000, agentAccount: agent },
+    );
+    assert.equal(v.wallet, holder);
+    assert.equal(v.source, "settings");
+    assert.equal(v.bonusStrategies, true, "the tier comes from the sum");
+    assert.equal(v.energyGate, false, "self-hosted is never gated");
+    assert.deepEqual(asked.map((a) => a.who), [[holder, agent]], "one multicall, both halves");
+    assert.ok(asked.every((a) => a.url === RPC), "read through settings.rpcMainnet, not a default endpoint");
+  });
+
+  it("SELF-HOSTED, A TESTNET GRANT: the wallet alone — the agent's address is not even read", async () => {
+    const holder = fresh();
+    const agent = fresh();
+    disk({ settings: { holderAddress: holder, rpcMainnet: RPC }, grant: { smartAccount: agent, chainId: 46630 } });
+    const asked = chainAt({ [holder]: 10n * WHOLE, [agent]: 999_999n * WHOLE });
+    const v = await tier();
+    assert.deepEqual(
+      { why: v.why, tokens: v.tokens, holderTokens: v.holderTokens, agentTokens: v.agentTokens, agentAccount: v.agentAccount },
+      { why: "ok", tokens: 10, holderTokens: 10, agentTokens: null, agentAccount: null },
+    );
+    assert.deepEqual(asked.map((a) => a.who), [[holder]]);
+  });
+
+  it("SELF-HOSTED, NO WALLET NAMED AND A MAINNET GRANT: the agent's account alone", async () => {
+    const agent = fresh();
+    disk({ settings: { rpcMainnet: RPC }, grant: { smartAccount: agent, chainId: MAINNET } });
+    const asked = chainAt({ [agent]: 5n * WHOLE });
+    const v = await tier();
+    assert.deepEqual(
+      { why: v.why, tokens: v.tokens, holderTokens: v.holderTokens, agentTokens: v.agentTokens, wallet: v.wallet, source: v.source },
+      { why: "ok", tokens: 5, holderTokens: null, agentTokens: 5, wallet: null, source: null },
+    );
+    assert.deepEqual(asked.map((a) => a.who), [[agent]]);
+  });
+
+  it("SELF-HOSTED, NOTHING TO READ — no wallet named and only a testnet grant, or nothing on disk — asks the chain nothing", async () => {
+    for (const d of [
+      { settings: { rpcMainnet: RPC }, grant: { smartAccount: fresh(), chainId: 46630 } },
+      { settings: null, grant: null },
+      // A file that is not JSON is no wallet named, not a crash (diskHolder).
+      { settings: "{ not json", grant: null },
+    ]) {
+      disk(d);
+      const asked = chainAt({});
+      const v = await tier();
+      assert.equal(v.why, "ok", JSON.stringify(d));
+      for (const f of ["tokens", "holderTokens", "agentTokens", "agentAccount", "tierId", "wallet", "source"]) {
+        assert.equal(v[f], null, `${f} stays null: nothing read is not nothing held`);
+      }
+      assert.equal(asked.length, 0, "no read was made");
+    }
+  });
+
+  it("SELF-HOSTED, THE CHAIN REFUSES: unreadable, the wallet still named, every count null", async () => {
+    const holder = fresh();
+    disk({ settings: { holderAddress: holder, rpcMainnet: RPC }, grant: { smartAccount: fresh(), chainId: MAINNET } });
+    chainAt({}, { status: 429 });
+    const v = await tier();
+    assert.equal(v.why, "unreadable");
+    assert.equal(v.wallet, holder);
+    assert.equal(v.source, "settings");
+    for (const f of ["tokens", "holderTokens", "agentTokens", "agentAccount", "tierId"]) assert.equal(v[f], null, f);
+  });
+
+  it("SELF-HOSTED, HALF A SUM IS NOT A SUM: the agent's balance unreadable is unreadable", async () => {
+    const holder = fresh();
+    disk({ settings: { holderAddress: holder, rpcMainnet: RPC }, grant: { smartAccount: fresh(), chainId: MAINNET } });
+    chainAt({ [holder]: 100_000n * WHOLE }); // the agent's read fails inside the batch
+    const v = await tier();
+    assert.equal(v.why, "unreadable");
+    assert.equal(v.tokens, null);
+    assert.equal(v.holderTokens, null, "not the half that did read");
+  });
+
+  it("HOSTED, SIGNED OUT: sign-in, and nothing is read about anybody", async () => {
+    process.env.MERRYMEN_HOSTED = "1";
+    disk({ settings: { holderAddress: fresh() }, grant: { smartAccount: fresh(), chainId: MAINNET } });
+    const asked = chainAt({});
+    const v = await tier();
+    assert.equal(v.why, "sign-in");
+    assert.equal(v.tokens, null);
+    assert.equal(asked.length, 0, "the operator's disk is not the signed-out visitor's standing");
+  });
+
+  it("HOSTED, WHOSE WALLET COUNTS CANNOT BE READ: unreadable before any balance is asked for", async () => {
+    process.env.MERRYMEN_HOSTED = "1";
+    const { mintSession } = await import("@/lib/auth");
+    // THROUGH require, ON PURPOSE (holder/route.test.ts): the route reaches
+    // worker modules by require, and a stub on the ESM instance of the same
+    // file is a stub the route never calls.
+    const { getSettingsStore, resetSettingsStoreForTest } = createRequire(import.meta.url)(
+      "../../../../../worker/src/settings-store.ts",
+    ) as typeof import("../../../../../worker/src/settings-store");
+    resetSettingsStoreForTest();
+    const store = getSettingsStore();
+    store.holderClaims = async () => {
+      throw new Error("holder_claims unreadable");
+    };
+    try {
+      const asked = chainAt({});
+      const v = await tier({ cookie: `mm_session=${mintSession(fresh())}` });
+      assert.equal(v.why, "unreadable");
+      for (const f of ["tokens", "holderTokens", "agentTokens", "wallet", "source"]) assert.equal(v[f], null, f);
+      assert.equal(asked.length, 0);
+    } finally {
+      resetSettingsStoreForTest();
+    }
+  });
+
+  it("HOSTED, THE GRANT STORE CANNOT BE READ: unreadable — never 'no agent', which would drop half the sum", async () => {
+    process.env.MERRYMEN_HOSTED = "1";
+    const { mintSession } = await import("@/lib/auth");
+    const { getGrantStore, resetGrantStoreForTest } = createRequire(import.meta.url)(
+      "../../../../../worker/src/grant-store.ts",
+    ) as typeof import("../../../../../worker/src/grant-store");
+    resetGrantStoreForTest();
+    getGrantStore().get = async () => {
+      throw new Error("grant store unreadable");
+    };
+    try {
+      const asked = chainAt({});
+      const v = await tier({ cookie: `mm_session=${mintSession(fresh())}` });
+      assert.equal(v.why, "unreadable");
+      for (const f of ["tokens", "holderTokens", "agentTokens", "agentAccount"]) assert.equal(v[f], null, f);
+      assert.equal(asked.length, 0, "nothing is read when the account to read is unknown");
+    } finally {
+      resetGrantStoreForTest();
+    }
   });
 });
