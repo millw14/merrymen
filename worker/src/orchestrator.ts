@@ -1055,6 +1055,8 @@ async function seedEnergyForChild(tenant: `0x${string}`, smartAccount: string): 
     const local = wrapSqlite(raw);
     await local.exec(ENERGY_DAYS_SCHEMA);
     const shared = await makePgDb(url);
+    // The mirror creates this table on its first pass; a spawn can come first.
+    await shared.exec(ENERGY_DAYS_SCHEMA);
     const sinceDay = utcDay(Math.floor(Date.now() / 1000) - 86_400);
     const plan = planEnergySeed({
       shared: await readEnergyDaysSince(shared, smartAccount, sinceDay),
