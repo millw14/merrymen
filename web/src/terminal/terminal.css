@@ -8056,6 +8056,15 @@ html[lang|="ko"] .terminal-host {
 }
 :where(.terminal-host) .fund-energy + p { margin-top: 0; font-size: 13px; color: var(--tx-2); }
 
+/* A fact to know before creating an agent, not a warning: quiet, beside the
+   standing it qualifies. */
+:where(.terminal-host) .create-energy {
+  margin: 10px 0 0;
+  color: var(--tx-2);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 
 /* The owner line under an agent name. A PROVEN handle is a link; an
    unproven one, or an address, is plain text — see NameBlock. */

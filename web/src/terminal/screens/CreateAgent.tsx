@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { ArrowLeft, ArrowRight, Check, Eye, EyeOff } from "lucide-react";
 import {
   DEFAULT_BASKET_SYMBOLS,
+  ENERGY,
   STOCK_TOKENS,
   isValidCustomToken,
   type CustomToken,
@@ -17,7 +18,7 @@ import { Face } from "../ui";
 import { SkeletonRows } from "../Skeleton";
 import { CAP_FIELD, parseAmount } from "@/lib/parse-amount";
 import type { TierView } from "@/app/api/tier/route";
-import { loadTier } from "../tier";
+import { loadTier, newAgentQualifies } from "../tier";
 import { count, decimalSeparator } from "@/lib/format";
 import { useT } from "@/lib/i18n";
 
@@ -209,10 +210,15 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
                 requirement; this says whether THEY meet it, which is the only
                 half that decides whether to press the button. "I had to go to
                 /api/circle to check that and that's not good for normies." */}
+            {/* JUDGED ON THE WALLET ALONE. The standing counts the owner's
+                wallet and their current agent's account together, but a new
+                agent is a new, empty account — so a figure that includes the
+                old one would promise this agent tokens it will not have. And
+                an unread count is a dash, never `?? 0`. */}
             {STRATEGIES.find((x) => x.id === strategy)?.circle &&
               tier &&
               tier.why !== "sign-in" &&
-              !tier.bonusStrategies && (
+              !newAgentQualifies(tier) && (
                 <div className="create-locked" role="status">
                   <strong>This one won&apos;t run yet.</strong>
                   {tier.why === "unreadable" ? (
@@ -223,13 +229,42 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
                     </p>
                   ) : (
                     <p>
-                      You hold {count(tier.tokens ?? 0)} $MERRYMEN and this one
+                      Your wallet holds {count(tier.holderTokens)} $MERRYMEN and this one
                       needs {count(tier.needTokens)}. Your agent will arm, read the
                       market and stay idle until you hold enough. Steady basket and Strategist run
-                      for everyone.
+                      for everyone
+                      {tier.energyGate
+                        ? ` — on about a tenth of full daily energy below ${count(ENERGY.fullTokens)}`
+                        : ""}
+                      .
                     </p>
                   )}
                 </div>
+              )}
+            {/* WHAT A NEW AGENT DOES NOT INHERIT. $MERRYMEN in the current
+                agent's account counts toward THAT agent; it stays there, and
+                a new agent starts without it. Said here, before the owner
+                builds a second agent expecting the first one's standing. */}
+            {tier && tier.agentTokens !== null && tier.agentTokens > 0 && (
+              <p className="create-energy">
+                The {count(tier.agentTokens)} $MERRYMEN in your current agent&apos;s account stays with
+                that agent — a new agent starts without it.
+              </p>
+            )}
+            {/* AND, ON A DEPLOYMENT THAT GATES ENERGY, THE CAPACITY IT WILL
+                HAVE — said before anybody funds it, never after. */}
+            {tier &&
+              tier.energyGate &&
+              tier.why === "ok" &&
+              tier.holderTokens !== null &&
+              tier.holderTokens < ENERGY.fullTokens &&
+              !STRATEGIES.find((x) => x.id === strategy)?.circle && (
+                <p className="create-energy">
+                  Your agent runs at full energy while your wallet and its account hold{" "}
+                  {count(ENERGY.fullTokens)} $MERRYMEN between them; below that it still runs, on about a
+                  tenth of its daily AI reviews and new trades. Selling, stop-losses and your own orders
+                  are never limited.
+                </p>
               )}<button className="flow-primary" type="submit">Set trading limits <ArrowRight size={16}/></button></form></>}
     {step==="market" && <>
       {/* WHAT IT TRADES, ASKED ONCE, AT THE ONLY MOMENT IT IS FREE.

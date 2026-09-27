@@ -208,3 +208,43 @@ describe("the Circle gate is satisfiable, and the warning is visible", () => {
     assert.match(create, /That&apos;s our read failing, not your wallet/);
   });
 });
+
+/**
+ * THE STANDING COUNTS THE OWNER'S WALLET AND THE AGENT'S ACCOUNT — EXCEPT WHERE
+ * THE AGENT DOES NOT EXIST YET.
+ *
+ * /api/tier's `tokens` and `bonusStrategies` are the combined figure the worker
+ * counts. That is the right answer on the desk and in Settings, about the agent
+ * that exists. It is the wrong answer in the create flow: a new agent is a new,
+ * empty account, and the old one's $MERRYMEN stays with the old one.
+ */
+describe("whose tokens each screen counts", () => {
+  it("CREATE JUDGES THE WALLET ALONE, and says what a new agent does not inherit", async () => {
+    const create = readFileSync(new URL("./screens/CreateAgent.tsx", import.meta.url), "utf8");
+    assert.match(create, /!newAgentQualifies\(tier\)/);
+    assert.match(create, /Your wallet holds \{count\(tier\.holderTokens\)\} \$MERRYMEN/);
+    assert.match(create, /stays with\s+that agent — a new agent starts without it/);
+    assert.doesNotMatch(create, /tokens \?\? 0/, "an unread count is a dash, not a zero");
+    const { newAgentQualifies, UNREADABLE_TIER } = await import("./tier");
+    const t = { ...UNREADABLE_TIER, why: "ok" as const, needTokens: 100_000 };
+    assert.equal(newAgentQualifies({ ...t, holderTokens: 100_000, tokens: 100_000, bonusStrategies: true }), true);
+    assert.equal(
+      newAgentQualifies({ ...t, holderTokens: 60_000, agentTokens: 40_000, tokens: 100_000, bonusStrategies: true }),
+      false,
+      "the current agent's 40,000 does not come with a new one",
+    );
+    assert.equal(newAgentQualifies({ ...t, holderTokens: null }), false, "an unread wallet never qualifies");
+  });
+
+  it("SETTINGS STATES THE COMBINED FIGURE about the agent that exists", () => {
+    const settings = readFileSync(new URL("./screens/Settings.tsx", import.meta.url), "utf8");
+    assert.match(settings, /Your wallet and your agent&apos;s account hold \{count\(tier\.tokens\)\} \$MERRYMEN/);
+    assert.doesNotMatch(settings, /tier\.tokens \?\? 0/);
+  });
+
+  it("AND SAYS WHAT THE TOKEN IS FOR, and only that", () => {
+    const settings = readFileSync(new URL("./screens/Settings.tsx", import.meta.url), "utf8");
+    assert.match(settings, /\$MERRYMEN buys\s+capacity, nothing else — we make no promise about its price\./);
+    assert.match(settings, /Selling, stop-losses and your own orders are never limited\./);
+  });
+});

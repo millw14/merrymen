@@ -54,3 +54,15 @@ export async function loadTier(): Promise<TierView> {
     return UNREADABLE_TIER;
   }
 }
+
+/**
+ * WOULD A NEW AGENT RUN THE CIRCLE STRATEGIES ON THE OWNER'S WALLET ALONE?
+ *
+ * `bonusStrategies` is the COMBINED standing — the owner's wallet plus their
+ * current agent's account. A new agent is a new account, and it starts empty:
+ * whatever the current one holds stays with it. So the create flow judges the
+ * wallet alone, and an unread wallet is never a qualifying one.
+ */
+export function newAgentQualifies(tier: TierView): boolean {
+  return tier.holderTokens !== null && tier.holderTokens >= tier.needTokens;
+}
