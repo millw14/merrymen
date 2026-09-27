@@ -163,7 +163,7 @@ describe("the basis seed is inside the lease too", () => {
     const { readFileSync } = await import("node:fs");
     const src = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
     const seed = src.indexOf("await seedBasisForChild(tenant, smartAccount);");
-    const spawned = src.indexOf("const proc = spawn(", seed);
+    const spawned = src.indexOf("const proc = startWorker(tenant);", seed);
     assert.ok(seed > 0 && spawned > seed, "seed then spawn, never the other way round");
   });
 });

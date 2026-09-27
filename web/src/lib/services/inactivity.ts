@@ -182,6 +182,14 @@ export interface InactivityInputs {
   railNotice: RailNotice | null;
   pause: { state: "paused" | "resumed"; at: number } | null;
   killAt: number | null;
+  /**
+   * With no current account: the agents status of the newest account the
+   * identity has held ('killed' once the kill switch is recorded). The kill
+   * switch deletes the grant, and a missing grant is all "never signed" is
+   * judged on, so this is what tells the two apart. Null when there is a
+   * current account or no row.
+   */
+  lastAccountStatus: string | null;
   expiryNoticeAt: number | null;
   /** mirror_state.updated_at for this owner; "unavailable" when the table cannot be read. */
   mirrorUpdatedAt: number | null | "unavailable";
@@ -275,6 +283,8 @@ export async function readInactivityInputs(db: Db, a: {
   const accParams = acc.length ? acc : ["0x"];
 
   const agentRow = current ? await readAgentRow(db, current) : null;
+  // `acc` is newest first (the identity store prepends each new account).
+  const lastAccountRow = !current && acc.length ? await readAgentRow(db, acc[0]!) : null;
   const valuation = current
     ? ((await db.prepare("SELECT at, mode FROM equity WHERE lower(agent_id) = ? ORDER BY at DESC LIMIT 1").get(current)) as { at: number; mode: string | null } | undefined) ?? null
     : null;
@@ -411,6 +421,7 @@ export async function readInactivityInputs(db: Db, a: {
     railNotice: railRow ? parseRailNotice(String(railRow.message), Number(railRow.created_at)) : null,
     pause,
     killAt,
+    lastAccountStatus: lastAccountRow?.status ?? null,
     expiryNoticeAt,
     mirrorUpdatedAt,
   };
@@ -507,6 +518,9 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
   const notArmed = !i.account || expired || status === "killed" || status === "expired" || status === "error";
   // A permission signed after the worker's last report is one it has not picked up yet ("checking").
   const pendingGrant = i.permission.grantedAt !== null && beat !== null && i.permission.grantedAt > beat && !expired;
+  // No grant, and the kill switch is on record: the worker's own event, the
+  // orchestrator's when it stood the worker down, or the 'killed' row either writes.
+  const killedNoGrant = !i.account && (i.lastAccountStatus === "killed" || i.killAt !== null);
   const liveIntended = s ? s.liveTradingEnabled : row?.mode === "live";
   const blocker = row?.live_blocker ?? null;
 
@@ -529,7 +543,9 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
     const observed = { signed: !!i.account, expires_at: i.permission.expiresAt === null ? null : iso(i.permission.expiresAt), agent_status: status, expired };
     const threshold = { expires_after: iso(i.now) };
     const resign = "Re-sign your trading permission at /grant — it is free and nothing moves on-chain.";
-    if (!i.account) {
+    if (killedNoGrant) {
+      add({ category: "permission", status: "blocking", kind: "not_permitted", summary: "The kill switch was used: the stored trading key was removed, so the agent cannot sign anything. Funds stay in your smart account.", observed: { ...observed, last_account_status: i.lastAccountStatus }, threshold, recorded_at: i.killAt, since: i.killAt, remedy: ["Sign a new trading permission at /grant to start the agent again."] });
+    } else if (!i.account) {
       add({ category: "permission", status: "blocking", kind: "not_permitted", summary: "No trading permission has been signed yet, so the agent cannot run.", observed, threshold, remedy: ["Sign a trading permission for your agent at /grant."] });
     } else if (pendingGrant && (status === "killed" || status === "expired" || status === "error")) {
       add({ category: "permission", status: "warning", kind: "permission_pending", summary: `A new permission was signed at ${iso(i.permission.grantedAt)}, after the worker's last report; it is picked up on the worker's next tick.`, observed, threshold, recorded_at: i.permission.grantedAt, since: i.permission.grantedAt });
@@ -552,7 +568,7 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
     const observed = { heartbeat_at: beat === null ? null : iso(beat), heartbeat_age_s: beatAge, agent_status: status };
     const threshold = { fresh_within_s: within };
     if (!row) {
-      add({ category: "worker_liveness", status: "unknown", kind: null, summary: i.account ? "The worker has never reported for this account." : "No account yet, so there is no worker to report.", observed, threshold });
+      add({ category: "worker_liveness", status: "unknown", kind: null, summary: i.account ? "The worker has never reported for this account." : killedNoGrant ? "The kill switch stood the worker down, so there is no worker to report." : "No account yet, so there is no worker to report.", observed, threshold });
     } else if (beat === null) {
       add({ category: "worker_liveness", status: "unknown", kind: null, summary: "No heartbeat is on record.", observed, threshold });
     } else if (heartbeatFresh) {

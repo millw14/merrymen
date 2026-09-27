@@ -7,18 +7,25 @@
  * the primary cause and the per-check statuses.
  */
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, test } from "node:test";
 import { classifyEvent, diagnoseInactivity, emptyEvents, EMPTY_TALLY, parseRailNotice, type InactivityInputs } from "@/lib/services/inactivity";
 import { describeRule, pairRealizedEvidence, signalsSubsetOf } from "@/lib/services/decisions";
 import { projectSettings } from "@/lib/services/settings-view";
-import type { AgentDirectory } from "../agents";
+import { agentFromParts, type AgentDirectory } from "../agents";
 import type { Principal } from "../oauth/server";
 import { resetMetricsForTest } from "../observe";
 import { errorOf,
   ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, agentFixture, connectAs, installFixtures, makeDeps, makeTestDb, type TestDb,
 } from "../testing";
 import { makeContext, runTool, type ToolDef } from "../tool";
-import { translateQuery, type Db } from "../../../../worker/src/db";
+import { translateQuery, wrapSqlite, type Db } from "../../../../worker/src/db";
+import { MIRROR_STATE_DDL } from "../../../../worker/src/ledger-mirror";
+import { recordStandDown } from "../../../../worker/src/stand-down";
+import { applyLedgerSchema } from "../../../../worker/src/store";
 import { encodeCursor } from "./shared";
 import { DECISIONS_RESOURCES, DECISIONS_TOOLS } from "./decisions";
 import { PORTFOLIO_TOOLS } from "./portfolio";
@@ -621,6 +628,64 @@ test("inactivity: killed by the owner", async () => {
   assert.equal(r.checks.worker_liveness.status, "unknown");
 });
 
+test("inactivity: a hosted kill deletes the grant; once the stand-down is recorded it reads as the kill switch, not 'never signed'", async () => {
+  // Both kill paths (DELETE /api/grants, a hosted Telegram /kill) remove the
+  // grant row, so the agent has no current account, only its history.
+  const directory: AgentDirectory = {
+    async agentsFor(t) {
+      if (t === OWNER_A) return [agentFromParts({ slug: SLUG_A, accounts: [ACCOUNT_A, OLD_A] }, null)!];
+      return t === OWNER_B ? [agentFixture(SLUG_B, ACCOUNT_B)] : [];
+    },
+  };
+  const s = await setup({ directory });
+  agentRow(s.d, ACCOUNT_A, OWNER_A, { status: "armed", mode: "live", beat: NOW - 900 });
+
+  // THE BUG, as the owner saw it: nothing recorded the kill, so the missing grant read as never signed.
+  const before = await explain(s);
+  assert.match(before.primary.summary, /No trading permission has been signed yet/);
+
+  // The orchestrator's stand-down on a web kill (orchestrator.ts standDownKilled):
+  // the child's last rows carried up, then the kill recorded.
+  const home = mkdtempSync(path.join(os.tmpdir(), "merrymen-inactivity-kill-"));
+  try {
+    const child = new DatabaseSync(path.join(home, "merrymen.db"));
+    await applyLedgerSchema(wrapSqlite(child));
+    child.prepare("INSERT INTO events (agent_id, level, message, created_at) VALUES (?, 'ok', 'the last thing the child said', ?)").run(ACCOUNT_A, NOW - 700);
+    child.close();
+    await s.d.db.exec(MIRROR_STATE_DDL);
+    const rec = await recordStandDown({ tenant: OWNER_A, home, smartAccount: ACCOUNT_A, since: NOW - 3600, shared: s.d.db, nowSec: NOW - 600 });
+    assert.equal(rec.event, "written");
+    assert.equal(rec.marked, 1);
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+  assert.ok(s.d.raw.prepare("SELECT 1 FROM events WHERE message = 'the last thing the child said'").get(), "the child's last row reached the shared ledger");
+
+  const r = await explain(s);
+  assert.equal(r.primary.category, "permission");
+  assert.equal(r.primary.kind, "not_permitted");
+  assert.match(r.primary.summary, /kill switch was used/);
+  assert.equal(r.primary.since, new Date((NOW - 600) * 1000).toISOString());
+  assert.equal(r.checks.permission.observed.last_account_status, "killed");
+  assert.match(r.checks.worker_liveness.summary, /kill switch/);
+  assert.ok(r.sc.what_owner_can_do.some((x: string) => x.includes("/grant")));
+});
+
+test("inactivity: an identity that never signed still says so", async () => {
+  const directory: AgentDirectory = {
+    async agentsFor(t) {
+      if (t === OWNER_A) return [agentFromParts({ slug: SLUG_A, accounts: [] }, null)!];
+      return t === OWNER_B ? [agentFixture(SLUG_B, ACCOUNT_B)] : [];
+    },
+  };
+  const s = await setup({ directory });
+  // Another owner's kill is not this one's.
+  event(s.d, ACCOUNT_B, "warn", "KILL SWITCH — grant discarded, session key destroyed; trading halted", NOW - 600);
+  const r = await explain(s);
+  assert.match(r.primary.summary, /No trading permission has been signed yet/);
+  assert.match(r.checks.worker_liveness.summary, /No account yet/);
+});
+
 test("inactivity: a Telegram /pause with nothing after it; chat ids never leave", async () => {
   const s = await setup();
   agentRow(s.d, ACCOUNT_A, OWNER_A, { mode: "live" });
@@ -935,7 +1000,7 @@ test("diagnoseInactivity: a permission signed after the last heartbeat is pendin
     now: NOW, windowSec: 86_400, account: ACCOUNT_A, permission: { grantedAt: NOW - 60, expiresAt: NOW + 30 * 86_400 },
     agentRow: { smart_account: ACCOUNT_A, name: "A", chain_id: 4663, status: "expired", mode: "live", beat_at: NOW - 7200, live_blocker: null, sponsor_gas: 0, epoch: 1, granted_at: 1, expires_at: NOW - 7300, contributions_known: null, contributions_why: null },
     settings, valuation: null, liveFunding: null, decisions: { ...EMPTY_TALLY }, latestView: null, trades: { rows: [], truncated: false },
-    lastLive: null, lastPaper: null, actedAfterPause: null, events: emptyEvents(), railNotice: null, pause: null, killAt: null, expiryNoticeAt: null, mirrorUpdatedAt: "unavailable",
+    lastLive: null, lastPaper: null, actedAfterPause: null, events: emptyEvents(), railNotice: null, pause: null, killAt: null, lastAccountStatus: null, expiryNoticeAt: null, mirrorUpdatedAt: "unavailable",
   };
   const dx = diagnoseInactivity(base);
   const perm = dx.checks.find((c) => c.category === "permission")!;

@@ -55,7 +55,7 @@ describe("a fresh child gets its link back", () => {
     // Ordering matters: a link restored after the child is polling would be
     // read from a file the child has already replaced with a fresh default.
     const spawnBlock = ORCH.slice(ORCH.indexOf("await writeBootstrapForChild(tenant, smartAccount);"));
-    const beforeSpawn = spawnBlock.slice(0, spawnBlock.indexOf("const proc = spawn("));
+    const beforeSpawn = spawnBlock.slice(0, spawnBlock.indexOf("const proc = startWorker(tenant);"));
     assert.match(beforeSpawn, /await writeTelegramForChild\(tenant\);/, "seeded before the child starts");
   });
 
