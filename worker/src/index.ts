@@ -3784,8 +3784,12 @@ async function main() {
   //
   // ENERGY_OFF until decided: nothing limited, nothing counted.
   let energyNow: EnergyPlan = ENERGY_OFF;
-  /** The last reading that decided the level; undefined until loaded from the ledger once. */
-  let energyLastGood: LastGood | null | undefined;
+  /**
+   * The last reading that decided the level, for WHICH account; undefined until
+   * loaded from the ledger. Keyed, because a re-sign can arm a different smart
+   * account in the same process, and one account's reading is not another's.
+   */
+  let energyLastGood: { agentId: string; good: LastGood | null } | undefined;
   /** An entry was withheld by energy since the last plan — the moment the owner is told. */
   let energyWithheld = false;
   /**
@@ -3939,10 +3943,12 @@ async function main() {
       });
       energyEstimate = null;
     } else {
-      if (energyLastGood === undefined) energyLastGood = await lastEnergyRead(agentId, now - ENERGY.lastGoodMaxAgeSec);
-      const { level, decided } = energyLevel(parts, energyLastGood, now);
+      if (energyLastGood?.agentId !== agentId) {
+        energyLastGood = { agentId, good: await lastEnergyRead(agentId, now - ENERGY.lastGoodMaxAgeSec) };
+      }
+      const { level, decided } = energyLevel(parts, energyLastGood.good, now);
       if (decided !== null) {
-        energyLastGood = { full: decided, at: now };
+        energyLastGood = { agentId, good: { full: decided, at: now } };
         await noteEnergyRead(agentId, utcDay(now), decided, now);
       }
       // THE REVIEWERS THAT ARE ACTUALLY RUNNING, each at its HOUSE interval.

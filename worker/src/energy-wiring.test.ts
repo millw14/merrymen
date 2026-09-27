@@ -120,6 +120,13 @@ describe("deciding and telling", () => {
     assert.ok(read > 0 && refresh > read && guard > refresh);
   });
 
+  it("THE LAST GOOD READING IS THE LEDGER'S, per account — loaded once, remembered only when a read decided it", () => {
+    const refresh = body("refreshEnergy");
+    assert.match(refresh, /if \(energyLastGood\?\.agentId !== agentId\) \{/, "a re-signed account does not inherit another's reading");
+    assert.match(refresh, /await lastEnergyRead\(agentId, now - ENERGY\.lastGoodMaxAgeSec\)/);
+    assert.match(refresh, /if \(decided !== null\) \{[\s\S]*await noteEnergyRead\(agentId, utcDay\(now\), decided, now\);/);
+  });
+
   it("the agent's account counts only on Robinhood Chain", () => {
     assert.match(CODE, /const energyAccount = grant\.chainId === MERRYMEN_TOKEN\.chainId \? \(grant\.smartAccount as `0x\$\{string\}`\) : undefined;/);
   });
