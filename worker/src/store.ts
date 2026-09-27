@@ -22,6 +22,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
 import {
   CASH,
+  ENERGY_RESERVE_TOKENS,
   officialCoinCurve,
   officialCoinsFor,
   robinhoodChain,
@@ -3381,6 +3382,15 @@ export interface SubmittedOp {
   userOpHash: string;
   kind: string;
   target: string;
+  /**
+   * The legs the pre-broadcast row was written with (tokenLegs), when it had
+   * any. The resolver needs them to recognise an ENERGY purchase whose kind a
+   * rewrite may have lost, and to carry them onto the settled row — a
+   * resolution that dropped them would leave a landed energy buy the in-flight
+   * guard and every leg-keyed reader could no longer see.
+   */
+  sellToken?: string;
+  buyToken?: string;
   amountUsdg: number;
   /** unixepoch seconds, stamped at INSERT and never rewritten by a resolution. */
   createdAt: number;
@@ -3403,7 +3413,7 @@ export interface SubmittedOp {
 export async function listSubmittedOps(agentId: string): Promise<SubmittedOp[]> {
   const rows = (await getDb()
     .prepare(
-      `SELECT user_op_hash, kind, target, amount_usdg, created_at, epoch FROM trades
+      `SELECT user_op_hash, kind, target, sell_token, buy_token, amount_usdg, created_at, epoch FROM trades
        WHERE agent_id = ? AND status = 'submitted' AND user_op_hash IS NOT NULL
        ORDER BY created_at ASC`,
     )
@@ -3411,6 +3421,8 @@ export async function listSubmittedOps(agentId: string): Promise<SubmittedOp[]> 
     user_op_hash: string;
     kind: string;
     target: string;
+    sell_token: string | null;
+    buy_token: string | null;
     amount_usdg: number;
     created_at: number;
     epoch: number;
@@ -3419,10 +3431,55 @@ export async function listSubmittedOps(agentId: string): Promise<SubmittedOp[]> 
     userOpHash: r.user_op_hash.toLowerCase(),
     kind: r.kind,
     target: r.target,
+    ...(r.sell_token ? { sellToken: r.sell_token } : {}),
+    ...(r.buy_token ? { buyToken: r.buy_token } : {}),
     amountUsdg: Number(r.amount_usdg),
     createdAt: Number(r.created_at),
     epoch: Number(r.epoch),
   }));
+}
+
+/**
+ * IS AN ENERGY BUY STILL IN FLIGHT? — the ledger's half of "one at a time".
+ *
+ * The energy buy is sized from the chain every time, so the one way to buy
+ * twice is to size a second buy on a reading taken before the first one
+ * settled: an owner asking again while the first is between broadcast and
+ * receipt, or a stranded 'submitted' op the resolver has not reached. This is
+ * the question asked before any sizing: does the ledger hold a 'submitted'
+ * energy purchase from the last `sinceSec` seconds?
+ *
+ * BY KIND OR BY LEGS. The pre-broadcast row is written with kind 'energy-buy'
+ * and legs USDG → the reserve (index.ts tokenLegs), and a row whose kind was
+ * ever rewritten must still be seen — so either matches. The reserve set is
+ * every chain's (core ENERGY_RESERVE_TOKENS), because a false "in flight" costs
+ * an owner a minute and a false "clear" costs a double buy.
+ *
+ * NULL WHEN THE LEDGER WOULD NOT ANSWER, and the caller refuses on it: an
+ * unreadable ledger is not an empty one.
+ *
+ * The window exists because an op past its router deadline (ENERGY.deadlineSec)
+ * can no longer buy anything, and a row the resolver cannot settle must not
+ * block the owner forever; six hours is far past any deadline.
+ */
+export async function energyBuysInFlight(agentId: string, sinceSec: number): Promise<boolean | null> {
+  const reserve = [...new Set(Object.values(ENERGY_RESERVE_TOKENS).flat().map((a) => a.toLowerCase()))];
+  try {
+    const row = await getDb()
+      .prepare(
+        `SELECT 1 AS n FROM trades
+          WHERE agent_id = ? AND status = 'submitted' AND created_at > ?
+            AND (kind = 'energy-buy'
+                 OR (LOWER(COALESCE(sell_token, '')) = ?
+                     AND LOWER(COALESCE(buy_token, '')) IN (${reserve.map(() => "?").join(", ")})))
+          LIMIT 1`,
+      )
+      .get(agentId, Math.floor(sinceSec), (CASH.USDG as string).toLowerCase(), ...reserve);
+    return row !== undefined && row !== null;
+  } catch (e) {
+    console.error("[store] energy in-flight read failed:", e);
+    return null;
+  }
 }
 
 // ── chat turns — the conversation survives a restart ──────────────────────
