@@ -94,6 +94,13 @@ export interface AccountPreview {
    *  "no contribution ever happened" is a different and false claim. */
   grossContributionsAfterUsdg: number;
   grossWithdrawalsAfterUsdg: number;
+  /**
+   * USDG the agent spent on its energy reserve, proposed as 'energy-buy' rows.
+   * Capital that left the book but NOT a withdrawal — kept out of the figure
+   * above so "the owner took money home" and "the agent bought energy" stay
+   * two facts.
+   */
+  energyPurchasesAfterUsdg: number;
 
   /** Why this account is not being mutated, when it is not. */
   blocked: string | null;
@@ -105,8 +112,10 @@ const round6 = (n: number) => Number(n.toFixed(6));
 export function previewAccount(plan: AccountPlan, selected: readonly string[]): AccountPreview {
   let grossIn = 0;
   let grossOut = 0;
+  let energy = 0;
   for (const r of plan.insert) {
     if (r.direction === "in") grossIn += r.amountUsdg;
+    else if (r.source === "energy-buy") energy += r.amountUsdg;
     else grossOut += r.amountUsdg;
   }
   const isSelected = selected.length === 0 || selected.includes(plan.smartAccount.toLowerCase());
@@ -131,6 +140,7 @@ export function previewAccount(plan: AccountPlan, selected: readonly string[]): 
     contributionsKnownAfter: unexamined ? plan.contributionsKnownBefore : plan.contributionsKnownAfter,
     grossContributionsAfterUsdg: round6(grossIn),
     grossWithdrawalsAfterUsdg: round6(grossOut),
+    energyPurchasesAfterUsdg: round6(energy),
     blocked: unexamined ? null : plan.blocked,
   };
 }
@@ -206,14 +216,24 @@ export function accountPreviewLines(plan: AccountPlan, p: AccountPreview): strin
 
   L.push(`${t} CHAIN EVIDENCE`);
   const ins = plan.insert.filter((r) => r.direction === "in").length;
-  const outs = plan.insert.filter((r) => r.direction === "out").length;
+  const energyRows = plan.insert.filter((r) => r.source === "energy-buy").length;
+  const outs = plan.insert.filter((r) => r.direction === "out").length - energyRows;
   L.push(`${t}   ${ins} external inbound = ${p.grossContributionsAfterUsdg.toFixed(6)} USDG`);
   L.push(`${t}   ${outs} external outbound = ${p.grossWithdrawalsAfterUsdg.toFixed(6)} USDG`);
+  if (energyRows > 0) {
+    L.push(
+      `${t}   ${energyRows} energy purchase(s) = ${p.energyPurchasesAfterUsdg.toFixed(6)} USDG ` +
+        `(capital that left the book, not a withdrawal)`,
+    );
+  }
   L.push(`${t}   ${plan.chainTradeLegs} router/trade leg(s) excluded from capital flows`);
   L.push(`${t}   ambiguous = ${plan.chainAmbiguous} · scan complete = ${plan.chainComplete}`);
 
   L.push(`${t} PROPOSED`);
-  L.push(`${t}   insert ${p.inserts} chain-log contribution row(s)`);
+  L.push(
+    `${t}   insert ${p.inserts - energyRows} chain-log contribution row(s)` +
+      (energyRows > 0 ? ` and ${energyRows} energy-buy row(s) (a no-op where the worker already booked them)` : ""),
+  );
   L.push(`${t}   quarantine ${p.quarantines} legacy row(s) — moved, never deleted`);
   if (!p.selected) L.push(`${t}   NOT SELECTED by --account: nothing would run for this tenant`);
   if (p.blocked) L.push(`${t}   BLOCKED — ${p.blocked}`);
@@ -221,6 +241,7 @@ export function accountPreviewLines(plan: AccountPlan, p: AccountPreview): strin
   L.push(`${t} AFTER`);
   L.push(`${t}   gross contributions = ${p.grossContributionsAfterUsdg.toFixed(6)}`);
   L.push(`${t}   gross withdrawals = ${p.grossWithdrawalsAfterUsdg.toFixed(6)}`);
+  if (energyRows > 0) L.push(`${t}   energy purchases = ${p.energyPurchasesAfterUsdg.toFixed(6)}`);
   L.push(`${t}   net contributions = ${p.contributionsAfterUsdg.toFixed(6)}`);
   L.push(`${t}   contributionsKnown = ${p.contributionsKnownAfter}`);
   L.push(`${t}   PnL publishable = ${plan.pnlPublishableAfter}`);

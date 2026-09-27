@@ -5,7 +5,7 @@
  * changes settings.
  */
 
-import { CASH, MORPHO, STOCK_TOKENS, assetModeAllows, isHostedMode, type AssetMode, type StockToken } from "../../../packages/core/src/index";
+import { CASH, ENERGY_RESERVE_TOKENS, MORPHO, STOCK_TOKENS, assetModeAllows, isHostedMode, type AssetMode, type StockToken } from "../../../packages/core/src/index";
 import type { LlmCreds } from "../llm";
 import { createDriver, nullDriver } from "../strategist/driver";
 import { makeLlmStrategist, type StrategistDecision } from "../strategist/strategy";
@@ -140,6 +140,16 @@ export function tokensForSymbols(symbols: readonly string[]): StockToken[] {
  * The caller passes the list rather than this function reading it, so that "which
  * chain" and "did the owner opt out" are decided once, by code that knows the
  * answer, instead of being guessed here.
+ *
+ * THE ENERGY RESERVE IS NEVER WATCHED, whoever lists it. $MERRYMEN held by the
+ * account is energy, not a position: watched, it would be valued into equity
+ * (an owner sending it in would read as profit, ratchet the peak and accrue a
+ * fee), or — unpriceable — pause equity, fees and the breaker every tick; and
+ * steady-basket take-profit and the strategist stop-floor sell EVERY holding.
+ * Its address is taken before any list is read, on every chain at once, by
+ * ADDRESS — never by mode, because the watch set is never narrowed by the
+ * asset mode (asset-mode.test.ts), and never by symbol, which a list can spell
+ * any way it likes.
  */
 export function watchTokensFor(
   basketSymbols: readonly string[],
@@ -148,7 +158,10 @@ export function watchTokensFor(
 ): StockToken[] {
   const basket = tokensForSymbols(basketSymbols);
   const takenSymbols = new Set(STOCK_TOKENS.map((t) => t.symbol.toUpperCase()));
-  const takenAddresses = new Set(basket.map((t) => t.address.toLowerCase()));
+  const takenAddresses = new Set([
+    ...Object.values(ENERGY_RESERVE_TOKENS).flatMap((list) => list.map((a) => a.toLowerCase())),
+    ...basket.map((t) => t.address.toLowerCase()),
+  ]);
   const official: StockToken[] = [];
   for (const c of officialCoins) {
     if (takenSymbols.has(c.symbol.toUpperCase())) continue;

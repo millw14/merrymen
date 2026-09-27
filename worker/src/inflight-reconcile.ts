@@ -38,6 +38,7 @@
  */
 import { decodeEventLog, parseAbi, type Hex } from "viem";
 import { backoffMs, classifyRpcError } from "./rpc-error";
+import { isEnergyReserveToken } from "../../packages/core/src/index";
 import { netTokenDeltas, type ReceiptLog } from "./fills";
 import { ENTRYPOINT } from "../../packages/core/src/index";
 
@@ -128,6 +129,13 @@ export interface OrphanOp {
  * One rule, two callers: the orphan sweep reading an op it has just found, and
  * the backfill reading a transaction the ledger recorded long ago. Two copies of
  * this judgement would be two answers about the same receipt.
+ *
+ * NEVER THE ENERGY RESERVE. An energy purchase is a clean USDG-for-one-token
+ * receipt and would otherwise read as a buy — but the reserve is not a
+ * position: it has no cost basis, no fill, and no stop. Booked here it would
+ * count the spend twice (once as the 'energy-buy' capital flow, once as a
+ * position purchase in every fill-derived reader) and hand a stop-loss a basis
+ * for a holding no strategy may ever sell.
  */
 export function pickAcquiredLeg(
   deltas: ReadonlyMap<string, bigint>,
@@ -139,6 +147,7 @@ export function pickAcquiredLeg(
   const others = [...deltas].filter(([t, v]) => t !== usdg && v !== 0n);
   if (others.length !== 1) return null;
   const [token, delta] = others[0]!;
+  if (isEnergyReserveToken(token)) return null;
   const qtyRaw = delta < 0n ? -delta : delta;
   if (qtyRaw <= 0n) return null;
   if (usdgDelta < 0n ? delta <= 0n : delta >= 0n) return null;

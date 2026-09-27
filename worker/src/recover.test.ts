@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { classifyBalance, nativeSweep, sweepList } from "./recover";
-import { CASH, MORPHO, STOCK_TOKENS } from "../../packages/core/src/index";
+import { CASH, MERRYMEN_TOKEN, MORPHO, STOCK_TOKENS } from "../../packages/core/src/index";
 
 /**
  * The escape hatch, which had no tests at all.
@@ -31,6 +31,19 @@ test("the builtin floor includes the vault — a fully-parked agent is not an em
   for (const t of STOCK_TOKENS) {
     assert.ok(targets.includes(t.address.toLowerCase()), `${t.symbol} must be sweepable`);
   }
+});
+
+test("the energy reserve is always sweepable — it is on no list the owner configures", () => {
+  // $MERRYMEN is kept out of every watch set and every token list on purpose,
+  // so recovery cannot rely on one to find it.
+  const row = sweepList().find((t) => t.address.toLowerCase() === MERRYMEN_TOKEN.address.toLowerCase());
+  assert.ok(row, "MERRYMEN must be swept by the escape hatch");
+  assert.equal(row!.decimals, 18);
+  assert.equal(row!.symbol, "MERRYMEN");
+  // Builtin wins on collision: an owner-added "MERRYMEN" at another address
+  // cannot produce a second row with the same name on the confirmation screen.
+  const list = sweepList([{ symbol: "MERRYMEN", address: `0x${"9".repeat(40)}`, decimals: 18 }]);
+  assert.equal(list.filter((t) => t.symbol.toUpperCase() === "MERRYMEN").length, 1);
 });
 
 test("owner-added tokens are swept — that is the whole defect", () => {

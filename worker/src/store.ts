@@ -153,6 +153,13 @@ const SQLITE_SCHEMA = `
     -- and positions.price_source. The three are not equally good evidence:
     --   'chain-log'       a Transfer log naming this account. Exact, has a tx.
     --   'transfer-intent' our own outbound transfer. Exact, has a tx.
+    --   'energy-buy'      USDG the agent spent buying its energy reserve INTO
+    --                     its own account: capital leaving the trading BOOK
+    --                     while staying in the account (the reserve is never a
+    --                     position and never in equity, like ETH gas). Read off
+    --                     the settled receipt's USDG log, so exact, with a tx
+    --                     and log index — booked only by bookCapitalFlow, with
+    --                     both peaks in the same transaction.
     --   'epoch-carry'     the closing equity of the epoch just closed, bridged
     --                     forward as the new one's opening balance. No tx, but
     --                     not guesswork either: it is a deterministic function of
@@ -1414,6 +1421,12 @@ export async function setAgentHwm(agentId: string, hwmUsdg: number): Promise<boo
  * next tick books the owner's own money as profit and takes a fee on it. A
  * withdrawal is the mirror: leave the peak up and the account is permanently
  * "in drawdown" by the amount its owner took home, which trips the breaker.
+ *
+ * "Capital crossing the boundary" includes capital leaving the trading BOOK
+ * without leaving the account: USDG spent on the energy reserve buys something
+ * that is never a position and never in equity, so equity drops by the spend
+ * with nothing earned or lost. The peak drops with it — through
+ * `bookCapitalFlow`, which moves it in the same transaction as the flow row.
  */
 /**
  * Restore BOTH halves of the peak from the accounting anchor. Ratchets, never assigns.
@@ -1465,35 +1478,46 @@ export async function restoreAgentHwmParts(
 
 export async function adjustAgentHwm(agentId: string, deltaUsdg: number): Promise<void> {
   try {
-    await getDb().tx(async (db) => {
-      await adjustRiskCapital(db, agentId, deltaUsdg);
-      if (deltaUsdg >= 0) {
-        // A DEPOSIT RAISES THE GROSS, exactly as before.
-        await db
-          .prepare("UPDATE agents SET hwm_usdg = hwm_usdg + ? WHERE smart_account = ?")
-          .run(deltaUsdg, agentId);
-        return;
-      }
-      // A WITHDRAWAL RAISES THE WITHDRAWN TOTAL INSTEAD, which lowers the
-      // effective peak by the same amount while leaving both stored figures
-      // monotonic — so the mirror's upward-only ratchet carries the reduction
-      // instead of discarding it. See the ALTER for hwm_withdrawn_usdg.
-      //
-      // Clamped at the gross so the effective peak floors at zero, which is what
-      // `MAX(0, hwm + delta)` did and what flows.integration.test.ts pins.
-      const amount = -deltaUsdg;
-      await db
-        .prepare(
-          `UPDATE agents SET hwm_withdrawn_usdg =
-             CASE WHEN hwm_withdrawn_usdg + ? > hwm_usdg THEN hwm_usdg ELSE hwm_withdrawn_usdg + ? END
-           WHERE smart_account = ?`,
-        )
-        .run(amount, amount, agentId);
-    });
+    await getDb().tx((db) => applyHwmDelta(db, agentId, deltaUsdg));
   } catch (e) {
     console.error("[store] hwm adjust failed:", e);
     throw e;
   }
+}
+
+/**
+ * Both peaks' capital move, inside a transaction the CALLER owns.
+ *
+ * Extracted from `adjustAgentHwm` verbatim so the one non-monotonic move has one
+ * body: `adjustAgentHwm` runs it in its own transaction (exactly as before, same
+ * clamps, same throw), and `bookCapitalFlow` runs it in the SAME transaction as
+ * the flow row, so the row and the peaks land together or not at all. Two
+ * copies of these UPDATEs would be two answers to "how far did the peak move".
+ */
+async function applyHwmDelta(db: Db, agentId: string, deltaUsdg: number): Promise<void> {
+  await adjustRiskCapital(db, agentId, deltaUsdg);
+  if (deltaUsdg >= 0) {
+    // A DEPOSIT RAISES THE GROSS, exactly as before.
+    await db
+      .prepare("UPDATE agents SET hwm_usdg = hwm_usdg + ? WHERE smart_account = ?")
+      .run(deltaUsdg, agentId);
+    return;
+  }
+  // A WITHDRAWAL RAISES THE WITHDRAWN TOTAL INSTEAD, which lowers the
+  // effective peak by the same amount while leaving both stored figures
+  // monotonic — so the mirror's upward-only ratchet carries the reduction
+  // instead of discarding it. See the ALTER for hwm_withdrawn_usdg.
+  //
+  // Clamped at the gross so the effective peak floors at zero, which is what
+  // `MAX(0, hwm + delta)` did and what flows.integration.test.ts pins.
+  const amount = -deltaUsdg;
+  await db
+    .prepare(
+      `UPDATE agents SET hwm_withdrawn_usdg =
+         CASE WHEN hwm_withdrawn_usdg + ? > hwm_usdg THEN hwm_usdg ELSE hwm_withdrawn_usdg + ? END
+       WHERE smart_account = ?`,
+    )
+    .run(amount, amount, agentId);
 }
 
 // ── the audit journal ─────────────────────────────────────────────────────
@@ -1753,7 +1777,7 @@ export async function openNextEpoch(agentId: string, openingBalanceUsdg?: number
 }
 
 /** How the ledger came to know about a flow. See the flows DDL — these are not equal evidence. */
-export type FlowSource = "chain-log" | "epoch-carry" | "transfer-intent" | "inferred";
+export type FlowSource = "chain-log" | "epoch-carry" | "transfer-intent" | "inferred" | "energy-buy";
 
 export interface FlowRow {
   agentId: string;
@@ -1762,7 +1786,7 @@ export interface FlowRow {
   source: FlowSource;
   txHash?: string;
   blockNumber?: number;
-  /** Position within the block. Set only for 'chain-log' — see the migration. */
+  /** Position within the block. Set for 'chain-log' and 'energy-buy' — see the migration. */
   logIndex?: number;
   /**
    * What the agent is actually doing, when the caller knows.
@@ -1793,8 +1817,15 @@ interface FlowAccount {
   mode: string | null;
 }
 
-/** Insert into an existing transaction; a duplicate is successful but adds no journal fact. */
-async function insertFlowWithJournal(db: Db, flow: FlowRow, epoch: number, chainId: number | null): Promise<void> {
+/**
+ * Insert into an existing transaction; a duplicate is successful but adds no journal fact.
+ *
+ * RETURNS WHETHER A ROW WAS ACTUALLY INSERTED — `changes === 1`, not "did not
+ * throw". `addFlow` still answers the looser question for the deposit scanner;
+ * `bookCapitalFlow` gates the peak move on this, so a duplicate can never move
+ * the high-water mark a second time.
+ */
+async function insertFlowWithJournal(db: Db, flow: FlowRow, epoch: number, chainId: number | null): Promise<boolean> {
   const amount = Math.abs(flow.amountUsdg);
   const txHash = flow.txHash ? flow.txHash.toLowerCase() : null;
   const inserted = await db
@@ -1816,7 +1847,9 @@ async function insertFlowWithJournal(db: Db, flow: FlowRow, epoch: number, chain
     );
   // Both drivers report affected rows. An ignored INSERT must not append an
   // extra contribution to the audit book while leaving the flows table intact.
-  if (inserted.changes === 0) return;
+  // A single-row INSERT reports 0 or 1; `Number` because a driver may hand back
+  // a bigint, and a bigint 0n is not `=== 0`.
+  if (Number(inserted.changes) === 0) return false;
   await appendJournalRow(db, flow.agentId, epoch, "flow", {
     amountUsdg: amount,
     blockNumber: flow.blockNumber ?? null,
@@ -1825,6 +1858,7 @@ async function insertFlowWithJournal(db: Db, flow: FlowRow, epoch: number, chain
     source: flow.source,
     txHash,
   });
+  return true;
 }
 
 /**
@@ -1880,6 +1914,82 @@ export async function addFlow(flow: FlowRow): Promise<boolean> {
     console.error("[store] flow insert failed:", e);
     return false;
   }
+}
+
+/** What `bookCapitalFlow` did. Every arm is a decision; a database error throws instead. */
+export type CapitalBooking =
+  /** The row was inserted and both peaks moved with it, in one transaction. */
+  | { kind: "booked"; epoch: number }
+  /** This exact (chain, agent, tx, logIndex) was already on the books. NOTHING moved. */
+  | { kind: "already" }
+  /** Not written, and nothing moved. `why` is the sentence for the caller's event. */
+  | { kind: "refused"; why: string };
+
+/**
+ * Book one tx-evidenced capital flow AND move both peaks with it — atomically,
+ * and at most once.
+ *
+ * WHY THIS EXISTS BESIDE `addFlow` + `adjustAgentHwm`. The transfer path calls
+ * those two in sequence: two transactions, so a throw between them splits the
+ * flow from the peak, and `addFlow`'s `true` also means "duplicate" (see
+ * `hasChainFlow`), so a caller that moves the peak on it re-lowers the peak on
+ * every retry — Shogun's 5.000000 taken off twice. Here the row, its journal
+ * fact and both peaks (lifetime and the risk period) are ONE transaction, and
+ * the peaks move only when the INSERT actually inserted. A retry, a second
+ * booker, or an operator reconstruction that got there first all come back
+ * `already` with nothing moved.
+ *
+ * IDENTITY IS REQUIRED. The flow must carry its tx hash, block and log index,
+ * and a chain id (its own or the agent's): `flows_chain_identity` treats NULLs
+ * as distinct on both SQLite and Postgres, so a row without all four could be
+ * inserted twice and would defeat the whole "at most once" claim. Refused
+ * rather than written loosely.
+ *
+ * Admission is the same paper boundary every writer passes (`admitCapitalFlow`).
+ * The agent row is locked first with the no-op UPDATE `addFlow` uses, so the
+ * booking cannot race an epoch rollover.
+ *
+ * Database errors THROW, and roll everything back — a caller that must retry
+ * (the stranded-op resolver) needs to see them. No events are written inside
+ * the transaction; the caller writes them after it returns.
+ */
+export async function bookCapitalFlow(
+  flow: FlowRow & { txHash: string; blockNumber: number; logIndex: number },
+): Promise<CapitalBooking> {
+  const amount = flow.amountUsdg;
+  if (!(typeof amount === "number" && Number.isFinite(amount) && amount > 0)) {
+    return { kind: "refused", why: `the amount ${String(amount)} is not a positive number of USDG` };
+  }
+  if (typeof flow.txHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(flow.txHash)) {
+    return { kind: "refused", why: "no transaction hash — a capital flow booked here must be a receipt" };
+  }
+  if (!Number.isSafeInteger(flow.logIndex) || flow.logIndex < 0 || !Number.isSafeInteger(flow.blockNumber) || flow.blockNumber < 0) {
+    return { kind: "refused", why: "no log index or block number — without both it cannot be booked exactly once" };
+  }
+  return getDb().tx(async (db): Promise<CapitalBooking> => {
+    const account = (await db
+      .prepare(
+        `UPDATE agents SET epoch = epoch WHERE smart_account = ?
+         RETURNING epoch, chain_id, mode`,
+      )
+      .get(flow.agentId)) as FlowAccount | undefined;
+    if (!account) return { kind: "refused", why: `no agent row for ${flow.agentId}` };
+    const chainId = flow.chainId ?? account.chain_id ?? null;
+    if (chainId === null) {
+      return { kind: "refused", why: "no chain identity; cannot be booked exactly once" };
+    }
+    const verdict = admitCapitalFlow({
+      mode: flow.mode ?? tradingModeOf(account.mode),
+      source: flow.source,
+      txHash: flow.txHash,
+    });
+    if (!verdict.admit) return { kind: "refused", why: verdict.why };
+    const inserted = await insertFlowWithJournal(db, flow, account.epoch, chainId);
+    // THE WHOLE POINT: a duplicate moves nothing.
+    if (!inserted) return { kind: "already" };
+    await applyHwmDelta(db, flow.agentId, flow.direction === "in" ? amount : -amount);
+    return { kind: "booked", epoch: account.epoch };
+  });
 }
 
 /**
