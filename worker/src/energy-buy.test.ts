@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ENERGY, ENERGY_FULL_RAW } from "../../packages/core/src/index";
+import { ENERGY, ENERGY_FULL_RAW, MERRYMEN_TOKEN } from "../../packages/core/src/index";
 import {
   ENERGY_BUFFER_BPS,
   energyAskFor,
   energyGrossFor,
   planEnergyBuy,
+  resolveOrderToken,
   sayEnergyOutcome,
   sayEnergyPlan,
   type EnergyBook,
@@ -359,5 +360,37 @@ describe("the fixed sentences — each names what to do instead", async () => {
     for (const l of [m.ENERGY_NOT_AN_ORDER, m.ENERGY_NO_SELL, m.ENERGY_NOT_MAINNET, m.ENERGY_RESIGN, m.energyNeedsLiveLine("x")]) {
       assert.doesNotMatch(l, NO_PRICE_WORDS, l);
     }
+  });
+});
+
+/**
+ * AN ORDINARY ORDER IS RESOLVED BY ADDRESS — the watch set first.
+ *
+ * submitChatTrade refused any symbol reading MERRYMEN before it looked at the
+ * watch set, so a watched coin at another address under that name could be
+ * neither bought nor sold by its owner, and every surface told them "I never
+ * sell it" about a coin they held. resolveOrderToken is the decision it now
+ * makes first; index.ts's use of it is pinned in energy-buy-wiring.test.ts.
+ */
+describe("resolveOrderToken — the reserve by address, a lookalike like any coin", () => {
+  const CLONE = "0x00000000000000000000000000000000000c1011";
+  const TSLA = { symbol: "TSLA", address: "0x00000000000000000000000000000000000000a5" };
+
+  it("A WATCHED LOOKALIKE CALLED MERRYMEN RESOLVES TO ITS OWN ADDRESS — bought and sold like any token", () => {
+    assert.deepEqual(resolveOrderToken("MERRYMEN", [TSLA, { symbol: "MERRYMEN", address: CLONE }]), { kind: "token", address: CLONE });
+  });
+
+  it("NOTHING WATCHED ANSWERS AND THE NAME IS THE RESERVE'S: refused as the reserve, never 'unknown'", () => {
+    for (const s of ["MERRYMEN", "$MERRYMEN", "merrymen"]) assert.deepEqual(resolveOrderToken(s, [TSLA]), { kind: "reserve" }, s);
+  });
+
+  it("a watched entry AT the reserve address is refused whatever it is called (defence in depth)", () => {
+    assert.deepEqual(resolveOrderToken("MM", [{ symbol: "MM", address: MERRYMEN_TOKEN.address }]), { kind: "reserve" });
+    assert.deepEqual(resolveOrderToken("MERRYMEN", [{ symbol: "MERRYMEN", address: MERRYMEN_TOKEN.address.toUpperCase().replace("0X", "0x") }]), { kind: "reserve" });
+  });
+
+  it("an ordinary watched symbol resolves; an unwatched one is unknown", () => {
+    assert.deepEqual(resolveOrderToken("TSLA", [TSLA]), { kind: "token", address: TSLA.address });
+    assert.deepEqual(resolveOrderToken("NVDA", [TSLA]), { kind: "unknown" });
   });
 });

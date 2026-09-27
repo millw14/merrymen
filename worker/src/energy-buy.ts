@@ -37,7 +37,7 @@
  * percentage is printed: the tax is its owner's to change.
  */
 
-import { ENERGY, ENERGY_FULL_RAW, MERRYMEN_TOKEN, wholeTokens } from "../../packages/core/src/index";
+import { ENERGY, ENERGY_FULL_RAW, MERRYMEN_TOKEN, isEnergyReserveToken, wholeTokens } from "../../packages/core/src/index";
 import { energyPreTradeGate, type EnergyGateRule } from "./energy-accounting";
 import { count } from "./energy-copy";
 import type { LedgerFacts } from "./order-receipt";
@@ -177,10 +177,42 @@ export function isEnergySymbol(symbol: string | null | undefined): boolean {
 }
 
 /**
- * submitChatTrade's answer to ANY order for $MERRYMEN — the Brain's, a Telegram
- * message's, or anything else that reaches the ordinary order path. It points
- * to the one way in (the app chat's get-energy, which asks first) and the way
- * round it; it never says "add it in /settings", which would not help.
+ * WHICH TOKEN AN ORDINARY ORDER MEANS — the watch set first, the reserve only
+ * when nothing there answers to the name.
+ *
+ * submitChatTrade used to refuse any symbol reading MERRYMEN before it looked
+ * at the watch set, so a coin the owner holds or watches at ANOTHER address
+ * under that name (a lookalike added in Settings, one a snipe resolved, one
+ * the Trencher found — none of them the reserve, all kept in the watch set on
+ * purpose) could be neither bought nor sold by its owner, and every surface
+ * answered with sentences ("I never sell it") that were false for that coin.
+ * An order is resolved by ADDRESS:
+ *
+ *   'token'   — a watched token answers to the symbol and is not the reserve:
+ *               traded like any other, buys and sells alike;
+ *   'reserve' — the watched token IS a reserve address (the registry keeps it
+ *               out, so this is defence in depth), or nothing watched answers
+ *               and the symbol names the reserve: ENERGY_NOT_AN_ORDER;
+ *   'unknown' — nothing watched answers, and it is not the reserve's name.
+ *
+ * The one way the reserve itself is bought is get-energy's marked order,
+ * which never comes here (order-gate.ts orderRoute).
+ */
+export function resolveOrderToken(
+  symbol: string,
+  watch: readonly { symbol: string; address: string }[],
+): { kind: "token"; address: `0x${string}` } | { kind: "reserve" } | { kind: "unknown" } {
+  const hit = watch.find((t) => t.symbol === symbol);
+  if (hit) return isEnergyReserveToken(hit.address) ? { kind: "reserve" } : { kind: "token", address: hit.address as `0x${string}` };
+  return isEnergySymbol(symbol) ? { kind: "reserve" } : { kind: "unknown" };
+}
+
+/**
+ * submitChatTrade's answer to an order for THE RESERVE — the Brain's, a
+ * Telegram message's, a plain app buy or sell, anything that reaches the
+ * ordinary order path and resolves to it (resolveOrderToken). It points to the
+ * one way in (the app chat's get-energy, which asks first) and the way round
+ * it; it never says "add it in /settings", which would not help.
  */
 export const ENERGY_NOT_AN_ORDER =
   "$MERRYMEN is my energy, not something I trade — I never sell it, and I buy it only when you ask me to " +

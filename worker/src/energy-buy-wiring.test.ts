@@ -65,14 +65,19 @@ function energyArm(): string {
 }
 
 describe("WHO CAN REACH THE BUY", () => {
-  it("submitChatTrade refuses $MERRYMEN FIRST — before the book, the watch set, or anything else", () => {
+  it("submitChatTrade resolves BY ADDRESS against the watch set, and refuses the reserve before the book or anything else", () => {
     const trade = body("submitChatTrade");
-    const refuse = trade.indexOf("if (isEnergySymbol(symbol)) return no(ENERGY_NOT_AN_ORDER);");
-    assert.ok(refuse > 0, "the refusal exists");
-    for (const later of ["if (!active)", "tickBook.judge(side)", "watchTokens.find(", "curveFor(", "ensureDecision("]) {
+    const resolve = trade.indexOf("const resolved = resolveOrderToken(symbol, watchTokens);");
+    const refuse = trade.indexOf('if (resolved.kind === "reserve") return no(ENERGY_NOT_AN_ORDER);');
+    assert.ok(resolve > 0 && refuse > resolve, "resolved first, then the reserve refused");
+    for (const later of ["if (!active)", "tickBook.judge(side)", "curveFor(", "ensureDecision("]) {
       const at = trade.indexOf(later);
-      assert.ok(at > refuse, `${later} must come after the $MERRYMEN refusal`);
+      assert.ok(at > refuse, `${later} must come after the reserve refusal`);
     }
+    // NEVER BY NAME: a watched lookalike called MERRYMEN is an ordinary token
+    // (resolveOrderToken is run in energy-buy.test.ts).
+    assert.doesNotMatch(trade, /isEnergySymbol\(|watchTokens\.find\(/);
+    assert.match(trade, /const token = resolved\.address;/);
   });
 
   it("the sentence points to the app chat and never to /settings", async () => {

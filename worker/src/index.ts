@@ -217,6 +217,7 @@ import {
   energyNeedsLiveLine,
   isEnergySymbol,
   planEnergyBuy,
+  resolveOrderToken,
   sayEnergyOutcome,
   sayEnergyPlan,
   usdgText,
@@ -12374,18 +12375,27 @@ async function main() {
     ),
   ): Promise<OrderReply> {
     return withDecisionOutcome(active?.agentId, asked.decisionId, async () => {
-      // $MERRYMEN FIRST, before anything else is read or resolved. It is the
-      // agent's energy, never a position: this path is reached by the Brain
-      // (model-decided orders) and by Telegram buys that run WITHOUT a
-      // confirmation, and neither may spend USDG on it. The one way to buy it
-      // is the owner's confirmed get-energy order, which runOrderCommand routes
-      // to submitEnergyBuy before this function is ever called. A fixed
-      // sentence, never "add it in /settings": adding it would not help, and
-      // it is deliberately never in the watch set.
-      if (isEnergySymbol(symbol)) return no(ENERGY_NOT_AN_ORDER);
+      // WHICH TOKEN, BY ADDRESS — resolved against the watch set, not the
+      // shipped registry (otherwise a memecoin the owner added, covered by
+      // their grant and priced from its pool, came back "unknown symbol" when
+      // they asked for it by name), and BEFORE anything else is read, so the
+      // reserve is refused whatever the book says.
+      //
+      // THE RESERVE IS REFUSED BY ADDRESS, never by name (energy-buy.ts
+      // resolveOrderToken). $MERRYMEN is the agent's energy, never a position:
+      // this path is reached by the Brain (model-decided orders), by Telegram
+      // buys that run WITHOUT a confirmation, and by every app order that is
+      // not get-energy's marked one — none may spend USDG on it. But a WATCHED
+      // coin at another address that merely calls itself MERRYMEN is an
+      // ordinary token its owner may buy and sell like any other; refusing it
+      // by name left them no manual exit and told them "I never sell it" about
+      // a coin they held. A fixed sentence for the reserve, never "add it in
+      // /settings": adding it would not help, and it is never in the watch set.
+      const resolved = resolveOrderToken(symbol, watchTokens);
+      if (resolved.kind === "reserve") return no(ENERGY_NOT_AN_ORDER);
       if (!active) return no("no agent armed — sign a grant in the dashboard first.");
-      // THE BOOK THIS ORDER IS JUDGED AGAINST, before anything is resolved or
-      // sized — the latest tick's, as it stated it (order-gate.ts createTickBook
+      // THE BOOK THIS ORDER IS JUDGED AGAINST, before anything is sized — the
+      // latest tick's, as it stated it (order-gate.ts createTickBook
       // and chatOrderGate, where a test runs both). Before the first tick equity
       // is its 0n initialiser and the drawdown check would judge garbage; after
       // a tick that could not read the market, a balance or a price there is no
@@ -12398,14 +12408,11 @@ async function main() {
       // wall with is the one this same call judged.
       const judged = tickBook.judge(side);
       if (!judged.ok) return no(judged.line);
-      // Resolve against the watch set, not the shipped registry — otherwise a
-      // memecoin the owner added, covered by their grant and priced from its pool
-      // still came back "unknown symbol" when they asked for it by name.
-      const token = watchTokens.find((t) => t.symbol === symbol)?.address;
-      if (!token) {
+      if (resolved.kind === "unknown") {
         const known = watchTokens.map((t) => t.symbol).join(", ");
         return no(`I don't know ${symbol}. I'm watching: ${known || "nothing yet"}. Add it in /settings and re-sign at /grant if you want me trading it.`);
       }
+      const token = resolved.address;
       // WHERE DOES THIS TOKEN ACTUALLY TRADE? A Pons token has no pool until it
       // graduates, so routing it to the swap router would build an operation
       // against a pool that does not exist. Asked before anything is sized.
