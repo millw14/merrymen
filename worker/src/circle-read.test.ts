@@ -17,6 +17,7 @@
  * That second one is money, which is why this file exists.
  */
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
 
@@ -85,4 +86,127 @@ describe("the old shape survives for callers that only want a floor", () => {
     assert.match(src, /export async function readHolderStatus\(/);
     assert.match(src, /cannot tell you whether the\s*\*\s*answer was read or assumed/);
   });
+});
+
+/**
+ * ── THE COMBINED BALANCE: THE OWNER'S WALLET PLUS THE AGENT'S ACCOUNT ──────
+ *
+ * $MERRYMEN an agent buys, or is sent, lands in its own account — so the tier
+ * and energy both count holder + account (core energy.ts, D1). Two reads, one
+ * client, one metered transport; and the tier is still EXACT: a sum with a
+ * missing term is not a balance, so either read failing is ok:false, with the
+ * half that did answer reported beside it for the energy gate's lower bound.
+ *
+ * Driven against a local JSON-RPC stand-in so the arithmetic, the failure arms
+ * and the batching are all observed rather than assumed.
+ */
+const HOLDER = "0x1111111111111111111111111111111111111111" as const;
+const ACCOUNT = "0x2222222222222222222222222222222222222222" as const;
+const tok = (n: number) => BigInt(n) * 10n ** 18n;
+
+async function chainStub(balances: Record<string, bigint | "revert">) {
+  let requests = 0;
+  const calls: string[] = [];
+  const server = createServer(async (req, res) => {
+    let body = "";
+    for await (const c of req) body += c;
+    requests++;
+    const one = (m: { id: number; method: string; params?: { data?: string }[] }) => {
+      if (m.method !== "eth_call") return { jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "no" } };
+      const data = String(m.params?.[0]?.data ?? "");
+      const who = `0x${data.slice(34, 74)}`.toLowerCase();
+      calls.push(who);
+      const b = balances[who];
+      if (b === undefined || b === "revert") return { jsonrpc: "2.0", id: m.id, error: { code: 3, message: "execution reverted" } };
+      return { jsonrpc: "2.0", id: m.id, result: `0x${b.toString(16).padStart(64, "0")}` };
+    };
+    const parsed = JSON.parse(body);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(Array.isArray(parsed) ? parsed.map(one) : one(parsed)));
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  return { url, calls, requests: () => requests, close: () => new Promise<void>((r) => server.close(() => r())) };
+}
+
+describe("the combined read", () => {
+  it("HOLDER + ACCOUNT, SUMMED, through one client — and batched into one request", async () => {
+    const { readHolderStatusResult } = await import("./circle");
+    const chain = await chainStub({ [HOLDER]: tok(60_000), [ACCOUNT]: tok(40_000) });
+    try {
+      const r = await readHolderStatusResult(chain.url, HOLDER, ACCOUNT);
+      assert.equal(r.ok, true);
+      assert.equal(r.status.rawBalance, tok(100_000));
+      assert.equal(r.status.tier.id, "merryman", "neither half alone reaches the Merry Man tier; together they do");
+      assert.deepEqual(r.parts, { holder: tok(60_000), account: tok(40_000) });
+      assert.deepEqual([...chain.calls].sort(), [HOLDER, ACCOUNT].sort());
+      assert.equal(chain.requests(), 1, "two balanceOf calls, one HTTP request");
+    } finally {
+      await chain.close();
+    }
+  });
+
+  it("EITHER READ FAILING IS ok:false — and parts say which one", async () => {
+    const { readHolderStatusResult } = await import("./circle");
+    const chain = await chainStub({ [HOLDER]: tok(150_000), [ACCOUNT]: "revert" });
+    try {
+      const r = await readHolderStatusResult(chain.url, HOLDER, ACCOUNT);
+      assert.equal(r.ok, false, "a sum with a missing term is not a balance");
+      assert.equal(r.status.tier.id, "outsider", "still fails closed as a permission");
+      assert.deepEqual(r.parts, { holder: tok(150_000), account: null });
+    } finally {
+      await chain.close();
+    }
+    const other = await chainStub({ [HOLDER]: "revert", [ACCOUNT]: tok(5) });
+    try {
+      const r = await readHolderStatusResult(other.url, HOLDER, ACCOUNT);
+      assert.equal(r.ok, false);
+      assert.deepEqual(r.parts, { holder: null, account: tok(5) });
+    } finally {
+      await other.close();
+    }
+  });
+
+  it("THE SAME ADDRESS IS READ ONCE and counted once", async () => {
+    const { readHolderStatusResult } = await import("./circle");
+    const chain = await chainStub({ [HOLDER]: tok(70_000) });
+    try {
+      const r = await readHolderStatusResult(chain.url, HOLDER, HOLDER.toUpperCase().replace("0X", "0x") as `0x${string}`);
+      assert.equal(r.ok, true);
+      assert.equal(r.status.rawBalance, tok(70_000), "not 140,000");
+      assert.deepEqual(r.parts, { holder: tok(70_000), account: undefined });
+      assert.equal(chain.calls.length, 1);
+    } finally {
+      await chain.close();
+    }
+  });
+
+  it("an account alone (no wallet linked) is read and counted", async () => {
+    const { readHolderStatusResult } = await import("./circle");
+    const chain = await chainStub({ [ACCOUNT]: tok(1_000_000) });
+    try {
+      const r = await readHolderStatusResult(chain.url, undefined, ACCOUNT);
+      assert.equal(r.ok, true);
+      assert.equal(r.status.tier.id, "lord");
+      assert.deepEqual(r.parts, { holder: undefined, account: tok(1_000_000) });
+    } finally {
+      await chain.close();
+    }
+  });
+
+  it("NO ADDRESS AT ALL IS STILL THE KNOWABLE FLOOR, with nothing read", async () => {
+    const { readHolderStatusResult } = await import("./circle");
+    const none = await readHolderStatusResult(undefined, undefined);
+    assert.equal(none.ok, true);
+    assert.equal(none.status.tier.id, "outsider");
+    assert.deepEqual(none.parts, { holder: undefined, account: undefined });
+  });
+
+  it("an unreachable chain fails both halves, as null — never 0", async () => {
+    const { readHolderStatusResult } = await import("./circle");
+    const r = await readHolderStatusResult("http://127.0.0.1:9/none", HOLDER, ACCOUNT);
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.parts, { holder: null, account: null });
+  });
+
 });
