@@ -40,7 +40,7 @@ import { labelText, shortAddr, tokenLabel, tokenLabelSync } from "../token-label
 import { readTokenMeta, sanitizeMeta, type TokenMeta } from "../venues/pons-meta";
 import { carriedDecisionsFrom, carriedHistory, historyFileKey, overlayHistory } from "./history-overlay";
 import { accountSeries, bookOf, periodChange, type PeriodChange } from "../period-pnl";
-import { agentEpoch, energyStatusLine, openRO, readPositions, resolveAgent, type StatusContext } from "./reads";
+import { agentEpoch, energyStatusLine, openRO, readPositions, redactAddresses, resolveAgent, type StatusContext } from "./reads";
 import { settingsListText } from "./settings-chat";
 import { settleFor, signNeed, type SignNeed } from "./sign-prompt";
 import { isActiveClassState, isQuoteTokenRow } from "../class-active";
@@ -730,7 +730,11 @@ const recentActivity: ChatTool = {
           return "No log yet.";
         }
         if (!rows.length) return `Nothing logged in that window.\n${logHorizon(db, who)}`;
-        return cap(rows.map((r) => `[${when(r.created_at)}] ${eventLabel(r.message)}: ${r.message.slice(0, 220)}`).join("\n"));
+        // Redacted BEFORE the cap, so the cap cannot leave most of an address
+        // behind: this answer goes to the model (redactAddresses, reads.ts).
+        return cap(
+          rows.map((r) => `[${when(r.created_at)}] ${eventLabel(r.message)}: ${redactAddresses(r.message).slice(0, 220)}`).join("\n"),
+        );
       },
       NO_AGENT,
       false,
