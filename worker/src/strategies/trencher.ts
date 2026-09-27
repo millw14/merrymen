@@ -396,6 +396,19 @@ export function exitSize(
   return { amount: (raw * asked) / available, notional: asked };
 }
 
+/**
+ * Was the holding a buy lands on only dust — worth under one micro-USDG at the
+ * buy's own fill price? The Trencher never adds to a real position, so a buy
+ * onto dust is a fresh entry and must not inherit the old entry's clock: the
+ * stale `entry_sec` would read a brand-new position as hours old and sell it on
+ * the next tick as past its window. Priced from the fill itself, so no lookup
+ * can disagree with it.
+ */
+export function buysOntoDust(prevQtyRaw: bigint, fillQtyRaw: bigint, fillCashUsdg: bigint): boolean {
+  if (prevQtyRaw <= 0n || fillQtyRaw <= 0n || fillCashUsdg <= 0n) return false;
+  return (prevQtyRaw * fillCashUsdg) / fillQtyRaw <= 0n;
+}
+
 export interface TrencherDeps {
   /** When required, no rule-based entry may bypass a fresh Brain approval. */
   brainRequired?: boolean;

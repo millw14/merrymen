@@ -182,7 +182,7 @@ import {
   type ResolvedConfig,
 } from "./settings";
 import { BUILTIN_STRATEGIES, buildStrategy, isCircleStrategy, legsForUniverse, watchTokensFor } from "./strategies/registry";
-import { NOT_WATCHED, TRENCHER_DEFAULTS, TRENCHER_FAST, priceability, shouldEnter, type Candidate, type OpenPosition } from "./strategies/trencher";
+import { NOT_WATCHED, TRENCHER_DEFAULTS, buysOntoDust, TRENCHER_FAST, priceability, shouldEnter, type Candidate, type OpenPosition } from "./strategies/trencher";
 import { createPoolPriceReader } from "./venues/pool-prices";
 import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
 import type { Holding, Snapshot, Strategy, Tick } from "./strategies/types";
@@ -6371,6 +6371,10 @@ async function main() {
         // The row goes in with 0 when depth is unknown, which the drain guard
         // already reads as "no baseline, this check is off" — and
         // upgradeTrenchEntry fills it in the first tick a real reading arrives.
+        // A buy onto a dust remainder is a fresh entry (buysOntoDust), not a
+        // top-up: forget the old baseline first, or the new position inherits
+        // the old clock and is sold next tick as past its window.
+        if (buysOntoDust(prev.qtyRaw, f.qtyRaw, f.cashUsdg)) await clearTrenchEntry(agentId, mode, f.symbol);
         await setTrenchEntry(agentId, mode, f.symbol, depth ?? 0);
         if (depth === undefined) {
           console.log(`[trench] no depth reading for ${f.symbol} — baseline stamped unknown, will fill in later`);

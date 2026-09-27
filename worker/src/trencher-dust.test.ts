@@ -99,3 +99,46 @@ describe("what is not a sliver", () => {
     assert.equal(sells.length, 1);
   });
 });
+
+describe("re-entering on top of a sliver starts a fresh clock", () => {
+  it("a buy onto dust is recognised as a fresh entry, a top-up is not", async () => {
+    const { buysOntoDust } = await import("./strategies/trencher");
+    // The DELTA case: 4e13 raw left behind (valued at 0 USDG), then 5 USDG
+    // buys 5e21 raw. At that price the sliver is 0.04 micro-USDG: dust.
+    assert.equal(buysOntoDust(40_000_000_000_000n, 5_000_000_000_000_000_000_000n, 5_000_000n), true);
+    // A real holding of 1e21 raw at the same price is 1 USDG: a top-up keeps its baseline.
+    assert.equal(buysOntoDust(1_000_000_000_000_000_000_000n, 5_000_000_000_000_000_000_000n, 5_000_000n), false);
+    // Nothing held is not dust — there is simply no old entry to forget.
+    assert.equal(buysOntoDust(0n, 5_000_000_000_000_000_000_000n, 5_000_000n), false);
+  });
+
+  it("clearing then stamping replaces a stale entry time", async () => {
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const fs = await import("node:fs");
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "merrymen-dust-"));
+    process.env.MERRYMEN_HOME = home;
+    const store = await import("./store");
+    store.initStore();
+    const { DatabaseSync } = await import("node:sqlite");
+    const { homePaths } = await import("./home");
+    try {
+      await store.setTrenchEntry("0xa", "paper", "DELTA", 2_000_000);
+      const db = new DatabaseSync(homePaths.db());
+      db.prepare("UPDATE trench_positions SET entry_sec = unixepoch() - 7200").run();
+      db.close();
+      const stale = await store.getTrenchEntry("0xa", "paper", "DELTA");
+      // setTrenchEntry alone keeps the old clock (a top-up must not reset a stop).
+      await store.setTrenchEntry("0xa", "paper", "DELTA", 2_000_000);
+      assert.equal((await store.getTrenchEntry("0xa", "paper", "DELTA"))?.entrySec, stale?.entrySec);
+      // The re-entry path forgets it first, so the new position starts now.
+      await store.clearTrenchEntry("0xa", "paper", "DELTA");
+      await store.setTrenchEntry("0xa", "paper", "DELTA", 2_000_000);
+      const fresh = await store.getTrenchEntry("0xa", "paper", "DELTA");
+      assert.ok(fresh && stale && fresh.entrySec >= stale.entrySec + 7000);
+    } finally {
+      store.closeStoreForTest();
+      fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+});
