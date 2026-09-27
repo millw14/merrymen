@@ -263,3 +263,89 @@ describe("what the panel says", () => {
     assert.match(banner, /00:00 UTC|between them/);
   });
 });
+
+/**
+ * THE FUNDING SCREEN SAYS THE SAME THING, beside the address it is about.
+ *
+ * It is where "How to top up" lands, where the chat's open-deposit lands, and
+ * what Android shows in its /deposit WebView — so it is the one place a remedy
+ * and a copyable address reach every client at once.
+ */
+describe("the funding screen", () => {
+  async function funding(e: EnergyStatus | null, chainId = 4663): Promise<string> {
+    const { FundingPanel } = await import("./HostedControls");
+    // The panel judges the report against the real clock, so its day must
+    // still be running now.
+    if (e) e = { ...e, resetsAt: Math.floor(Date.now() / 1000) + 3_600 };
+    return text(
+      renderToStaticMarkup(
+        createElement(FundingPanel, {
+          mode: "deposit",
+          onClose: noop,
+          account: {
+            session: { hosted: true, address: "0x" + "a".repeat(40) },
+            status: {
+              exists: true,
+              energy: e,
+              grant: { smartAccount: ACCOUNT, chainId, caps: { perTradeUsdg: 10, dailyUsdg: 50 } },
+            },
+          },
+        }),
+      ),
+    );
+  }
+
+  it("SAYS NOTHING ABOUT A LIMIT THAT LIMITS NOTHING", async () => {
+    for (const e of [null, report({ level: "full" }), report({ gated: false, mode: "off" })]) {
+      assert.ok(!/Energy/.test(await funding(e)), JSON.stringify(e?.level));
+    }
+  });
+
+  it("LOW: the combined standing, what full needs, and both routes", async () => {
+    const t = await funding(report());
+    assert.match(t, /your wallet and this account hold 12,345 \$MERRYMEN between them, 87,655 short/);
+    assert.match(t, /Full strength needs 100,000 \$MERRYMEN between your wallet and this account/);
+    assert.match(t, /Selling, stop-losses and your own orders are never limited\./);
+    assert.match(t, /Send \$MERRYMEN on Robinhood Chain to this same address, or send USDG here and ask your agent in chat to get its \$MERRYMEN — you confirm the amount first\./);
+    assert.match(t, /Or change nothing/);
+    assert.match(t, /Copy deposit address/, "the existing copy button stays");
+  });
+
+  it("SPENT says the reset", async () => {
+    assert.match(await funding(report({ spent: true })), /spent for today, back at 00:00 UTC/);
+  });
+
+  it("UNREAD is our read, never a number", async () => {
+    const t = await funding(report({ level: "unread", agentTokens: null, holderTokens: null }));
+    assert.match(t, /that's our read failing, not your wallet/);
+    assert.ok(!/\bhold\b/.test(t));
+  });
+
+  it("PAPER offers no USDG route", async () => {
+    const t = await funding(report({ buy: "paper" }));
+    assert.match(t, /won't spend real USDG on it — turn on Live trading first/);
+    assert.ok(!/send USDG here/.test(t));
+  });
+
+  it("RESIGN says the key cannot buy it yet", async () => {
+    assert.match(await funding(report({ buy: "resign" })), /re-sign your agent's permission \(free — its current key can't buy it\)/);
+  });
+
+  it("ANOTHER NETWORK: never 'send it here'", async () => {
+    const t = await funding(report({ buy: "not-mainnet", agentTokens: null, holderTokens: 50 }), 46630);
+    assert.match(t, /This account is on another network, so \$MERRYMEN sent to it would not count/);
+    assert.ok(!/to this same address/.test(t));
+  });
+
+  it("AND THE SAME STANCE: no price, returns or percentages", async () => {
+    const all = (
+      await Promise.all(
+        [report(), report({ spent: true, buy: "paper" }), report({ buy: "resign" }), report({ level: "unread" })].map((e) =>
+          funding(e),
+        ),
+      )
+    ).join(" ");
+    const energyCopy = all.slice(all.indexOf("Energy"));
+    assert.doesNotMatch(energyCopy, /price|returns?\b|profit|invest|\d+(\.\d+)?\s*%/i);
+  });
+});
