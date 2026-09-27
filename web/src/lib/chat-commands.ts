@@ -385,15 +385,24 @@ const REGISTRY: ChatCommand[] = [
    * any buy, so the owner check, the hashed id, the one-at-a-time slot, the
    * expiry, the chat ceiling and the ferry all apply unchanged, and the web,
    * iOS and Android confirm it with code they already have. The WORKER is the
-   * resolver: it routes this one symbol to its energy buy, sizes it to cover
-   * the shortfall over the one sealed route, and refuses — through the ordinary
+   * resolver: it routes this card to its energy buy, sizes it to cover the
+   * shortfall over the one sealed route, and refuses — through the ordinary
    * order result — when the agent is already full, practising on paper, holding
    * a key that cannot buy it, short of cash or unable to read the balances.
    *
-   * THE MODEL CHOOSES NEITHER THE TOKEN NOR THE SIDE. Both are `fixed`, so a
-   * prompt-injected proposal cannot turn "get your energy" into a buy of
-   * something else, or a sell. The one value it supplies, `usdgAmount`, is the
-   * MOST the owner will spend on it, and it is on the card they confirm.
+   * THE MODEL CHOOSES NEITHER THE TOKEN, THE SIDE NOR THE PURPOSE. All three
+   * are `fixed`, so a prompt-injected proposal cannot turn "get your energy"
+   * into a buy of something else, or a sell. The one value it supplies,
+   * `usdgAmount`, is the MOST the owner will spend on it, and it is on the card
+   * they confirm.
+   *
+   * `purpose: "energy"` IS WHAT ROUTES IT, never the symbol. The route keeps it
+   * only when it is exactly that string and hashes it into the order id; the
+   * worker sends an order to the energy buy only when it carries it
+   * (worker/src/order-gate.ts orderRoute). A `buy` card, a snipe or an MCP
+   * proposal naming MERRYMEN carries no marker, so it is an ordinary order the
+   * worker resolves by address — never a purchase of the reserve made from a
+   * card that did not show this one's disclosure.
    *
    * IT SAYS WHAT THE SIZING DOES, NOT "ONLY WHAT'S MISSING". The planner
    * (worker/src/energy-buy.ts energyGrossFor) sizes for the shortfall plus a
@@ -410,8 +419,8 @@ const REGISTRY: ChatCommand[] = [
   {
     id: "get-energy",
     via: "order",
-    writes: ["side", "symbol", "usdgAmount"],
-    fixed: { side: "buy", symbol: MERRYMEN_TOKEN.symbol },
+    writes: ["side", "symbol", "usdgAmount", "purpose"],
+    fixed: { side: "buy", symbol: MERRYMEN_TOKEN.symbol, purpose: "energy" },
     weighty: true,
     say: (a) =>
       `Spend up to ${money(a.usdgAmount)} of my real USDG on the $MERRYMEN I'm short of ${count(ENERGY.fullTokens)} — ` +

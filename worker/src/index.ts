@@ -119,7 +119,7 @@ import { grantHasDeadRateLimit } from "./session-account";
 import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
 import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, tickPlan, tickRatchets, writeHeartbeat } from "./command-wake";
-import { createTickBook, orderReadsOf, placeOrder, type StatedReads } from "./order-gate";
+import { createTickBook, orderAsked, orderReadsOf, placeOrder, type StatedReads } from "./order-gate";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import { provenanceOf, type Provenance } from "./provenance";
@@ -5294,7 +5294,7 @@ async function main() {
     return placeOrder(
       cmd.args,
       orderReadsOf(reads, { paused: isPaused(), ceilingUsdg: cfg.telegramMaxActionUsdg }),
-      (side, symbol, size) => {
+      async (side, symbol, size, route) => {
         // And from here the wall decides. submitChatTrade reports what the
         // LEDGER said, so this returns a verdict about a trade that really
         // happened or really did not.
@@ -5309,19 +5309,33 @@ async function main() {
         // intents for minutes, so the queue judges it again when it reaches the
         // order. A command with no deadline — a legacy row — has none to carry.
         //
-        // $MERRYMEN IS NOT AN ORDINARY ORDER, and this is the ONLY place it is
-        // routed. The app's get-energy card places kind 'trade' {side:'buy',
-        // symbol:'MERRYMEN', usdgAmount: the owner's most for this ask}, and
-        // it arrives here from the command drain — the owner's click, claimed
-        // once — after placeOrder's reads, pause, shape and ceiling gates have
-        // all passed. submitEnergyBuy works the size out from the chain;
-        // usdgAmount is only ever an upper bound. submitChatTrade refuses the
-        // symbol outright, so the Brain and a Telegram message cannot reach it.
-        if (symbol === MERRYMEN_TOKEN.symbol) {
-          return submitEnergyBuy(side, size, typeof cmd.expiresAt === "number" ? { notAfterMs: cmd.expiresAt } : {});
+        // WHAT IT IS FILED UNDER comes from the order's own args (orderAsked):
+        // an approved MCP proposal says so in its reason, a typed order does
+        // not claim to be one.
+        const asked = {
+          ...orderAsked(cmd.args, side, symbol, size),
+          ...(typeof cmd.expiresAt === "number" ? { notAfterMs: cmd.expiresAt } : {}),
+        };
+        // $MERRYMEN'S ENERGY BUY IS NOT AN ORDINARY ORDER, and this is the ONLY
+        // place it is routed — on the explicit marker, never on the symbol
+        // (order-gate.ts orderRoute). The app's get-energy card places kind
+        // 'trade' {side:'buy', symbol:'MERRYMEN', usdgAmount: the owner's most
+        // for this ask, purpose:'energy'}, and it arrives here from the command
+        // drain — the owner's click, claimed once — after placeOrder's reads,
+        // pause, shape and ceiling gates have all passed. submitEnergyBuy works
+        // the size out from the chain; usdgAmount is only ever an upper bound.
+        // A marked order naming any other token is refused: the card fixes the
+        // symbol, so a mismatch means something upstream is wrong, and nothing
+        // is bought on it. An UNMARKED order for MERRYMEN — a buy card, a snipe,
+        // an MCP proposal — goes to submitChatTrade like any order, which
+        // resolves it by address and refuses the reserve itself.
+        if (route === "energy") {
+          if (!isEnergySymbol(symbol)) {
+            return no("That energy order names another token, so I bought nothing. Ask me to get my energy again.");
+          }
+          return submitEnergyBuy(side, size, asked);
         }
-        if (typeof cmd.expiresAt !== "number") return submitChatTrade(side, symbol, size);
-        return submitChatTrade(side, symbol, size, { ...chatAsked(side, symbol, size), notAfterMs: cmd.expiresAt });
+        return submitChatTrade(side, symbol, size, asked);
       },
     );
   }
@@ -12465,11 +12479,13 @@ async function main() {
   /**
    * THE OWNER'S ENERGY BUY — "get my energy", confirmed on the app's card.
    *
-   * REACHED FROM ONE PLACE: runOrderCommand's submit closure, for symbol
-   * MERRYMEN, inside the command drain — the owner's click, claimed once by the
-   * unlink, after placeOrder's reads, pause, shape and chat-ceiling gates.
-   * Never from the Brain, never from a Telegram message (submitChatTrade
-   * refuses the symbol before anything else), never from the poll loop:
+   * REACHED FROM ONE PLACE: runOrderCommand's submit closure, for an order
+   * carrying get-energy's explicit `purpose: "energy"` marker (order-gate.ts
+   * orderRoute — never the symbol), inside the command drain — the owner's
+   * click, claimed once by the unlink, after placeOrder's reads, pause, shape
+   * and chat-ceiling gates. Never from the Brain, never from a Telegram message
+   * or a plain buy/snipe/MCP order (submitChatTrade refuses the reserve), never
+   * from the poll loop:
    * running in the drain is also what keeps the purchase's booking off a tick
    * that is between its balance read and its fee accrual.
    *
@@ -12486,7 +12502,7 @@ async function main() {
   async function submitEnergyBuy(
     side: "buy" | "sell",
     maxUsdg: number,
-    asked: { notAfterMs?: number },
+    asked: { source: string; reason: string; notAfterMs?: number },
   ): Promise<OrderReply> {
     const step = () => energyBuyLocked(side, maxUsdg, asked);
     const run = energyLock.then(step, step);
@@ -12499,7 +12515,7 @@ async function main() {
   async function energyBuyLocked(
     side: "buy" | "sell",
     maxUsdg: number,
-    asked: { notAfterMs?: number },
+    asked: { source: string; reason: string; notAfterMs?: number },
   ): Promise<OrderReply> {
     if (!active) return no("no agent armed — sign a grant in the dashboard first.");
     const { agentId, grant, limits, client } = active;
@@ -12612,11 +12628,9 @@ async function main() {
       sellAmountRaw: plan.amountInRaw,
       notionalUsdg: plan.amountInRaw,
     };
-    const stamped = await ensureDecision(
-      intent,
-      "chat",
-      `owner asked to top up $MERRYMEN energy — at most ${maxUsdg} USDG, ${usdgText(plan.amountInRaw)} USDG this ask`,
-    );
+    // Filed under the ORDER's own source and reason (order-gate.ts orderAsked),
+    // never a literal: only the get-energy card's marker reaches this line.
+    const stamped = await ensureDecision(intent, asked.source, `${asked.reason}, ${usdgText(plan.amountInRaw)} USDG this ask`);
     if (!stamped.ok) return no(stamped.why);
     const outcome = await processIntentReporting(intent, judged.equityUsdg, judged.equityKnown, asked.notAfterMs);
     // Reached after its deadline: nothing was built or sent, and the line says so.

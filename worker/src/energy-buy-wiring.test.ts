@@ -87,7 +87,14 @@ describe("WHO CAN REACH THE BUY", () => {
   it("submitEnergyBuy is called from runOrderCommand's submit closure and NOWHERE else", () => {
     assert.equal(count(CODE, "submitEnergyBuy("), 2, "one definition, one call");
     const order = body("runOrderCommand");
-    assert.match(order, /if \(symbol === MERRYMEN_TOKEN\.symbol\) \{\s*return submitEnergyBuy\(side, size,/);
+    // ROUTED ON THE MARKER placeOrder decided (order-gate.ts orderRoute, run in
+    // order-gate.test.ts), never on the symbol: a buy card, a snipe or an MCP
+    // proposal naming MERRYMEN reaches submitChatTrade like any order.
+    assert.match(order, /\(side, symbol, size, route\) => \{/);
+    assert.match(order, /if \(route === "energy"\) \{\s*if \(!isEnergySymbol\(symbol\)\) \{[\s\S]*?\}\s*return submitEnergyBuy\(side, size, asked\);/);
+    assert.doesNotMatch(order, /symbol === MERRYMEN_TOKEN\.symbol|isEnergyReserveToken/, "no symbol decides the route");
+    assert.match(order, /return submitChatTrade\(side, symbol, size, asked\);/, "every unmarked order is an ordinary one");
+    assert.match(order, /\.\.\.orderAsked\(cmd\.args, side, symbol, size\),/, "filed under the order's own source and reason");
     // Routed BEFORE the ordinary submitter, inside placeOrder's submit closure
     // — so its reads, pause, shape and ceiling gates run first.
     assert.ok(order.indexOf("submitEnergyBuy(") < order.indexOf("return submitChatTrade("));
@@ -98,6 +105,10 @@ describe("WHO CAN REACH THE BUY", () => {
     }
     const tg = CODE.slice(CODE.indexOf("startTelegram({"), CODE.indexOf("notifierHandle = startNotifier({"));
     assert.doesNotMatch(tg, /submitEnergyBuy|energyBuyLocked/);
+  });
+
+  it("its decision is filed under the ORDER's source and reason, never a literal", () => {
+    assert.match(body("energyBuyLocked"), /await ensureDecision\(intent, asked\.source, `\$\{asked\.reason\}, /);
   });
 
   it("an energy intent is BUILT in exactly one place — the locked body of submitEnergyBuy", () => {
