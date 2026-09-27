@@ -32,7 +32,7 @@
  */
 import { webChainRead } from "@/lib/chain-read";
 import { NextResponse } from "next/server";
-import { isHostedMode } from "@merrymen/core";
+import { isEnergyReserveToken, isHostedMode } from "@merrymen/core";
 import { getGrantStore } from "@merrymen/grant-store";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { createPublicClient, erc20Abi } from "viem";
@@ -187,7 +187,11 @@ export async function GET(req: Request) {
   const vetted = payload.rows.filter((r) => r.verdict);
   if (!vetted.length) return answer("nothing-vetted", [], covered.size);
 
-  const fresh = vetted.filter((r) => !covered.has(r.token.toLowerCase()));
+  // NEVER THE ENERGY RESERVE. $MERRYMEN has a real pool and the scout may well
+  // rate it, but approving it would add a token every signer drops from the
+  // sealed extras: a re-sign that covers nothing, proposed again after every
+  // one. The agent buys it only through get-energy.
+  const fresh = vetted.filter((r) => !covered.has(r.token.toLowerCase()) && !isEnergyReserveToken(r.token));
   if (!fresh.length) return answer("all-covered", [], covered.size);
 
   const proposals: Proposal[] = [];
