@@ -44,8 +44,14 @@ import { addressTopic, getLogsAdaptive, type RawLog, type ReconcileChain } from 
 import { classifyUsdgMovement, type TransferLeg } from "../../packages/core/src/index";
 import type { ReceiptLog } from "./fills";
 
-/** Every ERC-20 Transfer in a receipt, as classification legs. */
-function legsFromReceiptLogs(logs: readonly ReceiptLog[]): TransferLeg[] {
+/**
+ * Every ERC-20 Transfer in a receipt, as classification legs.
+ *
+ * Exported so the energy booking (energy-accounting.ts) reads a receipt into
+ * legs exactly as this scanner does — two decoders would be two answers about
+ * which legs a transaction had, and the classifier's verdict turns on them.
+ */
+export function legsFromReceiptLogs(logs: readonly ReceiptLog[]): TransferLeg[] {
   const out: TransferLeg[] = [];
   for (const l of logs) {
     if ((l.topics?.[0] ?? "").toLowerCase() !== TRANSFER_TOPIC) continue;
