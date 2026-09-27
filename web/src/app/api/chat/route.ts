@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
-import { agentReplyResponse, type AgentChatBody } from "@/lib/agent-chat";
+import { agentReplyResponse, currentEnergy, type AgentChatBody } from "@/lib/agent-chat";
 import { diskAgent, hostedAgentFor } from "@/lib/agent-for";
 import { readAgentEnergy } from "@/lib/agent-energy";
 import { ceilingFor } from "@/lib/order-ceiling";
@@ -31,8 +31,12 @@ export async function POST(req: Request) {
   //
   // With it, the owner's chat-order ceiling: the one figure the model may use
   // to size a get-energy proposal from the worker's estimate without asking.
+  //
+  // ONLY WHILE ITS DAY LASTS. A report whose day has ended is not today's —
+  // the worker may not have published since (currentEnergy) — so it is no
+  // report, and the model says it cannot see its energy instead of blaming it.
   const account = hosted ? await hostedAgentFor(req) : await diskAgent();
-  const report = account ? await readAgentEnergy(account) : null;
+  const report = currentEnergy(account ? await readAgentEnergy(account) : null, Math.floor(Date.now() / 1000));
   const energy = report
     ? { ...report, ceilingUsdg: await ceilingFor(req, hosted).catch(() => null) }
     : null;
