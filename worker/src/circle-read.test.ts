@@ -210,3 +210,78 @@ describe("the combined read", () => {
   });
 
 });
+
+/**
+ * THE ENERGY BUY'S READ IS PINNED — both halves at one block, and never before
+ * the block the last energy purchase landed in. A load-balanced node still
+ * behind that block must answer with an ERROR (unread → the buy refuses), not
+ * a stale balance the buy would top up a second time.
+ */
+async function pinnedStub(head: bigint, balances: Record<string, bigint>, knownUpTo: bigint = head) {
+  const tags: string[] = [];
+  const server = createServer(async (req, res) => {
+    let body = "";
+    for await (const c of req) body += c;
+    const one = (m: { id: number; method: string; params?: [{ data?: string }, string?] }) => {
+      if (m.method === "eth_blockNumber") return { jsonrpc: "2.0", id: m.id, result: `0x${head.toString(16)}` };
+      if (m.method !== "eth_call") return { jsonrpc: "2.0", id: m.id, error: { code: -32601, message: "no" } };
+      const tag = String(m.params?.[1] ?? "latest");
+      tags.push(tag);
+      if (tag.startsWith("0x") && BigInt(tag) > knownUpTo) {
+        return { jsonrpc: "2.0", id: m.id, error: { code: -32000, message: "header not found" } };
+      }
+      const who = `0x${String(m.params?.[0]?.data ?? "").slice(34, 74)}`.toLowerCase();
+      const b = balances[who];
+      return b === undefined
+        ? { jsonrpc: "2.0", id: m.id, error: { code: 3, message: "execution reverted" } }
+        : { jsonrpc: "2.0", id: m.id, result: `0x${b.toString(16).padStart(64, "0")}` };
+    };
+    const parsed = JSON.parse(body);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(Array.isArray(parsed) ? parsed.map(one) : one(parsed)));
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  return { url, tags, close: () => new Promise<void>((r) => server.close(() => r())) };
+}
+
+describe("the pinned read (the energy buy's)", () => {
+  it("reads BOTH halves at the head when the head is past the last landing", async () => {
+    const { readHolderStatusResult } = await import("./circle");
+    const chain = await pinnedStub(1_000n, { [HOLDER]: tok(10), [ACCOUNT]: tok(20) });
+    try {
+      const r = await readHolderStatusResult(chain.url, HOLDER, ACCOUNT, { atLeastBlock: 900n });
+      assert.equal(r.ok, true);
+      assert.deepEqual(r.parts, { holder: tok(10), account: tok(20) });
+      assert.deepEqual(chain.tags, ["0x3e8", "0x3e8"], "one block for both halves: the head");
+    } finally {
+      await chain.close();
+    }
+  });
+
+  it("never reads BEFORE the landing block — a node behind it is an error, so the buy refuses", async () => {
+    const { readHolderStatusResult } = await import("./circle");
+    // This node's head (1,000) is behind the block the last purchase landed in (1,005).
+    const chain = await pinnedStub(1_000n, { [HOLDER]: tok(10), [ACCOUNT]: tok(20) });
+    try {
+      const r = await readHolderStatusResult(chain.url, HOLDER, ACCOUNT, { atLeastBlock: 1_005n });
+      assert.equal(r.ok, false);
+      assert.deepEqual(r.parts, { holder: null, account: null }, "unread — never the stale balance");
+      assert.ok(chain.tags.every((t) => t === "0x3ed"), "asked at the landing block, not at the lagging head");
+    } finally {
+      await chain.close();
+    }
+  });
+
+  it("without a pin, nothing changes: the tick reads at latest", async () => {
+    const { readHolderStatusResult } = await import("./circle");
+    const chain = await pinnedStub(1_000n, { [HOLDER]: tok(10), [ACCOUNT]: tok(20) });
+    try {
+      const r = await readHolderStatusResult(chain.url, HOLDER, ACCOUNT);
+      assert.equal(r.ok, true);
+      assert.ok(chain.tags.every((t) => t === "latest"));
+    } finally {
+      await chain.close();
+    }
+  });
+});

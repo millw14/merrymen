@@ -93,6 +93,16 @@ export async function readHolderStatusResult(
   rpcMainnet: string | undefined,
   holderAddress: `0x${string}` | undefined,
   account?: `0x${string}`,
+  /**
+   * PIN BOTH READS TO ONE BLOCK, no earlier than `atLeastBlock` — for the
+   * energy BUY, which sizes a spend from this answer. Both halves are read at
+   * max(this node's head, atLeastBlock): one block, so the sum is a balance at
+   * one moment; and never before the block the last energy purchase landed
+   * in, so a load-balanced node still behind that block answers with an ERROR
+   * (unread, and the buy refuses) rather than a stale balance the buy would
+   * then top up a second time. Absent — the tick's read — nothing changes.
+   */
+  pin?: { atLeastBlock: bigint },
 ): Promise<HolderRead> {
   const holder = holderAddress ? (holderAddress.toLowerCase() as `0x${string}`) : undefined;
   const acct =
@@ -106,12 +116,18 @@ export async function readHolderStatusResult(
       chain: robinhoodChain,
       transport: chainRead(rpcMainnet),
     });
+    // The pinned block, asked of the same client: a head read that fails is a
+    // read that failed, and every present half is then unread.
+    const blockNumber = pin
+      ? await client.getBlockNumber().then((head) => (head > pin.atLeastBlock ? head : pin.atLeastBlock))
+      : undefined;
     read = async (a) =>
       (await client.readContract({
         address: MERRYMEN_TOKEN.address,
         abi: erc20Abi,
         functionName: "balanceOf",
         args: [a],
+        ...(blockNumber === undefined ? {} : { blockNumber }),
       })) as bigint;
   } catch {
     return {
