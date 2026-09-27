@@ -353,6 +353,11 @@ describe("EVERY ENERGY RULE A ROW CAN CARRY HAS WORDS", () => {
     for (const r of ["energy-needs-live", "energy-not-granted", "energy-tax", "energy-tax-unreadable", "energy-no-quote"]) {
       assert.ok(rules.has(r), `${r} is written by index.ts`);
     }
+    // And the planner's own energy-* rules, read off its union.
+    const planner = /export type EnergyPlanRule =([\s\S]*?);/.exec(codeOf(read("./energy-buy.ts")));
+    assert.ok(planner, "EnergyPlanRule must stay a union of literals");
+    for (const m of planner[1]!.matchAll(/"(energy-[a-z-]+)"/g)) rules.add(m[1]!);
+    for (const r of ["energy-unreadable", "energy-in-flight", "energy-too-small"]) assert.ok(rules.has(r), r);
     for (const r of rules) assert.ok(rejectRuleLabel(r), `${r} has no label`);
     for (const r of ["energy-needs-live", "energy-not-granted", "energy-tax"]) assert.ok(rejectRuleRemedy(r), `${r} has no remedy`);
     // Utility words only — nothing about price or returns, no percentages.

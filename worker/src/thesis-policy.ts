@@ -833,6 +833,12 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   "energy-tax": "the token's own buy tax was above what the energy buy accepts",
   "energy-tax-unreadable": "the token's buy tax could not be read, so no safe floor could be set",
   "energy-no-quote": "the energy route could not be quoted",
+  // The planner's own refusals (energy-buy.ts). Today they are said to the
+  // owner before any intent exists and write no row; they are named here so
+  // that the day one does, it reaches no surface as a bare slug.
+  "energy-unreadable": "its balances could not be read, so it bought no energy",
+  "energy-in-flight": "an earlier energy buy was still settling",
+  "energy-too-small": "the most it could spend was below the smallest energy buy",
 });
 
 /**
@@ -916,6 +922,7 @@ export function rejectRuleRemedy(rule: string | null | undefined): string | null
     case "energy-needs-live":
       return "Turn on Live trading in Settings, or send $MERRYMEN to the agent's account on Robinhood Chain directly.";
     case "energy-tax":
+    case "energy-too-small":
       return "Send $MERRYMEN to the agent's account on Robinhood Chain directly — it counts the moment it lands.";
     default:
       return null;
