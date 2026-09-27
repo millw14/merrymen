@@ -12121,6 +12121,8 @@ async function main() {
       : null,
     telegramMaxActionUsdg: cfg.telegramMaxActionUsdg,
     paperStartUsdg: cfg.paperStartUsdg,
+    // The worker's own energy report (refreshEnergy), for /status's one line.
+    energy: active ? energyReport : null,
   });
 
   // One shared persisted-state handle — the poll service and the notifier both
@@ -12262,6 +12264,12 @@ async function main() {
       // fabrication. This stays because the alert's WORDING still depends on
       // it: telling a paper agent to send ETH is advice it cannot act on.
       paper: paperActive(),
+      // TODAY'S ENERGY, for the once-a-day "spent" alert (telegram/energy-alert.ts).
+      // Every address from the grant and settings — never from a model.
+      energy: active ? energyReport : null,
+      energyAccount: active?.grant.smartAccount ?? null,
+      energyChainId: active?.grant.chainId ?? null,
+      energyHolder: cfg.holderAddress ?? null,
     }),
     getChainId: () => active?.grant.chainId ?? null,
     // Scope the trade-cursor queries to THIS tenant's book. On a shared ledger an
