@@ -2,9 +2,18 @@
  * $MERRYMEN — the token, and the "Merry Circle" holder-utility layer.
  *
  * STANCE (do not drift): utility only. Nothing here — or in any copy that renders
- * these tiers — promises price, returns, buybacks, or burns. Holding earns you
- * ACCESS and a lower platform fee, full stop. merrymen itself stays free, open,
- * and self-hosted whether you hold or not; the token buys perks, never the product.
+ * these tiers or ENERGY — promises price, returns, buybacks, or burns. Holding
+ * earns ACCESS: a lower platform fee, the bonus strategies and, on the hosted
+ * service, full ENERGY — the daily capacity an agent has for paid AI reviews and
+ * the new trades it starts on its own (energy.ts). Hosted merrymen stays usable
+ * without the token, on about a tenth of that capacity, and nothing ever limits
+ * exits, stop-losses or the owner's own orders. merrymen stays open source and
+ * self-hostable; the energy gate is an operator switch (MERRYMEN_ENERGY_GATE),
+ * off unless turned on, and never on for a self-hosted install.
+ *
+ * This replaces an earlier line — "the token buys perks, never the product". On
+ * the hosted service it now buys capacity, and copy must say so plainly rather
+ * than keep a sentence that stopped being true.
  *
  * The one material perk is a discount on the platform PERFORMANCE fee (the fee is
  * only ever taken on profit above the high-water mark; see worker/src/fees.ts).
@@ -72,7 +81,9 @@ export const CIRCLE_TIERS: readonly CircleTier[] = [
     feeDiscountBps: 0,
     voteWeight: 0,
     bonusStrategies: false,
-    perks: ["merrymen is free and open to everyone — hold $MERRYMEN to join the Circle"],
+    perks: [
+      "merrymen is free and open to everyone — hosted agents run on about a tenth of their daily energy until you and your agent hold 100,000 $MERRYMEN between you",
+    ],
   },
   {
     id: "villager",
