@@ -294,10 +294,76 @@ export function enforcedCap(plan: EnergyPlan, field: "reviews" | "entries", nowS
  * Exits never do — the breaker's own exit test decides (policy.ts
  * isExitIntent). Neither does a vault deposit: steady-basket's idle-cash sweep
  * is housekeeping, reversible, and would otherwise spend a two-entry day on
- * parking cash.
+ * parking cash. Nor does a curve SALE out of a leg the book holds, back into
+ * that leg's own quote (`sellsHeld`, from sellsHeldLeg below).
  */
-export function countsAsEntry(kind: TradeIntent["kind"], isExit: boolean): boolean {
-  return !isExit && kind !== "vault-deposit";
+export function countsAsEntry(kind: TradeIntent["kind"], isExit: boolean, sellsHeld = false): boolean {
+  return !isExit && !sellsHeld && kind !== "vault-deposit";
+}
+
+/** A curve leg the book holds: the curve it trades on and the quote it sells back into, lowercase. */
+export interface HeldCurveLeg {
+  curve: string;
+  quote: string;
+}
+
+/**
+ * WHAT THE BOOK HOLDS ON A CURVE, keyed by the held token (lowercase).
+ *
+ * WHY ENERGY NEEDS ITS OWN ANSWER. isExitIntent calls a curve trade an exit
+ * only when it pays out into cash or a BUILT-IN grant target
+ * (limits.quoteAssets = builtinGrantTargets), because the breaker cannot tell
+ * a sale from a buy by the assets alone — both legs of every curve trade are
+ * sellable. On a LEGACY grant (no tradeable-v2 marker) the built-ins are USDG
+ * and three stock tokens, so a curve quoted in any other stock token the owner
+ * sealed as an extra has an exit the breaker reads as an entry. For the
+ * breaker that mattered only in a drawdown; energy asks on every low day, and
+ * would withhold the sale. The tick already knows which side is which: it
+ * holds the leg, and it recorded the leg's curve and quote.
+ *
+ *   positions  — this tick's account holdings; a leg is held only with a
+ *                non-zero balance, and its curve and quote come from this
+ *                pricing pass's curve legs (index.ts lastCurveLegs, by symbol).
+ *   class rows — the class vault's recorded positions, held only while the
+ *                vault's balance is non-zero, with the curve and quote the
+ *                entry recorded. A row missing either is not a known leg.
+ *
+ * The breaker's own test is NOT touched: this is the energy count's fact only.
+ */
+export function heldCurveLegs(i: {
+  positions: readonly { symbol: string; token: string; rawBalance: bigint }[];
+  curveLegs: ReadonlyMap<string, { curve: string; quoteToken: string }>;
+  classRows: readonly { token: string; curve: string | null; quoteToken: string | null }[] | null;
+  classBalances: ReadonlyMap<string, bigint>;
+}): Map<string, HeldCurveLeg> {
+  const held = new Map<string, HeldCurveLeg>();
+  for (const p of i.positions) {
+    if (p.rawBalance <= 0n) continue;
+    const leg = i.curveLegs.get(p.symbol);
+    if (!leg) continue;
+    held.set(p.token.toLowerCase(), { curve: leg.curve.toLowerCase(), quote: leg.quoteToken.toLowerCase() });
+  }
+  for (const r of i.classRows ?? []) {
+    if (!r.curve || !r.quoteToken) continue;
+    const token = r.token.toLowerCase();
+    if ((i.classBalances.get(token) ?? 0n) <= 0n) continue;
+    if (!held.has(token)) held.set(token, { curve: r.curve.toLowerCase(), quote: r.quoteToken.toLowerCase() });
+  }
+  return held;
+}
+
+/**
+ * A curve trade that SELLS a held leg back into its own quote, on its own
+ * curve. Direction is read from what is held, never from the assets' names:
+ * a curve BUY pays in a quote asset (USDG, or a stock token the book may well
+ * hold), and what it pays with is not a leg of THAT curve — so a buy cannot
+ * pass for a sale here, however much of its quote the book holds. All three
+ * must match: the token held, the curve it was recorded on, and its quote.
+ */
+export function sellsHeldLeg(intent: TradeIntent, held: ReadonlyMap<string, HeldCurveLeg>): boolean {
+  if (intent.kind !== "curve-trade") return false;
+  const leg = held.get(intent.assetIn.toLowerCase());
+  return leg !== undefined && leg.curve === intent.curve.toLowerCase() && leg.quote === intent.assetOut.toLowerCase();
 }
 
 /**

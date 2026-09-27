@@ -191,7 +191,9 @@ import {
   energyStatus,
   enforcedCap,
   entryAllowance,
+  heldCurveLegs,
   reviewAllowance,
+  sellsHeldLeg,
   shouldTellOwner,
   usdgCentsUp,
   utcDay,
@@ -11780,6 +11782,17 @@ async function main() {
       entriesOpen: !energyNow.enforce || energyNow.entries.open,
     });
 
+    // WHAT THE BOOK HOLDS ON A CURVE, and the curve and quote each leg sells
+    // back into — energy's own answer for a curve SALE the breaker's test reads
+    // as an entry (a quote that is an owner-added stock token on a legacy
+    // grant). The energy count only; the breaker is unchanged (energy.ts).
+    const heldLegs = heldCurveLegs({
+      positions,
+      curveLegs: lastCurveLegs,
+      classRows: await classPositions(agentId),
+      classBalances: lastClassBalances,
+    });
+
     for (const [proposedAt, intent] of proposed.entries()) {
       // The LLM strategist already journaled + stamped its survivors; this covers
       // deterministic strategies so every trade still links to a decision.
@@ -11793,12 +11806,13 @@ async function main() {
       //
       // A NEW trade this agent starts on its own is claimed against today's
       // allowance; an EXIT never is — the breaker's own exit test decides
-      // (policy.ts isExitIntent), and a vault deposit is housekeeping. Every
+      // (policy.ts isExitIntent), with a curve sale out of a held leg added for
+      // this count alone (heldLegs above), and a vault deposit is housekeeping. Every
       // producer passes through here, so a strategy that ignores the Snapshot
       // hint is held to the rule anyway. Withheld BEFORE ensureDecision, with
       // `continue` rather than a filtered array (`w` is paired with the intent
       // by index): no decision row, no public post, no refusal on the tape.
-      const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits));
+      const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits), sellsHeldLeg(intent, heldLegs));
       const energyClaim = entry ? await claimEntry() : null;
       if (energyClaim && !energyClaim.ok) {
         await withholdEntry(agentId);
@@ -11896,7 +11910,7 @@ async function main() {
       // THE SAME HARD FILTER as the strategy loop above: each class entry is
       // claimed against today's energy before its decision exists, and handed
       // back if no trade came of it. (A class exit can never reach here.)
-      const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits));
+      const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits), sellsHeldLeg(intent, heldLegs));
       const energyClaim = entry ? await claimEntry() : null;
       if (energyClaim && !energyClaim.ok) {
         await withholdEntry(agentId);
