@@ -4172,7 +4172,7 @@ async function runTenantInspectIfAsked(): Promise<void> {
 }
 
 /**
- * CLAIM THE PROOFS LINKED BEFORE CLAIMS EXISTED — once per process, at start.
+ * CLAIM THE PROOFS LINKED BEFORE CLAIMS EXISTED — once EVER, not once per process.
  *
  * effectiveHolder counts no unclaimed proof, so until this runs every holder
  * who linked a wallet reads their login wallet instead. It runs BEFORE
@@ -4180,17 +4180,29 @@ async function runTenantInspectIfAsked(): Promise<void> {
  * handed already counts the right wallet. Earliest proof wins a shared wallet
  * (planHolderBackfill); collisions are logged by name.
  *
+ * ONCE EVER, BY A RECORD IN THE CLAIMS STORE (backfillHolderClaims). Re-run
+ * at every start, it handed a wallet released on purpose back to a stale
+ * collision loser at the next deploy. After a start that read every tenant
+ * this is a no-op for good; `holderClaimsBackfilled` only spares later passes
+ * of this process the store read.
+ *
+ * RETRIED ONLY WHILE TENANTS WERE UNREADABLE, and then only those tenants,
+ * every HOLDER_BACKFILL_RETRY_MS — not every pass, or one blob that never
+ * decrypts would re-log itself every 15 s for ever. A failed run (the store
+ * or the lease unreachable) is retried next pass, as before.
+ *
  * BEHIND A LEASE, the tenant-lease advisory lock on a fixed key that is not an
- * address, so it can never be a tenant's: one replica backfills at a time.
- * Idempotent regardless — a replica that finds the lease taken simply tries
- * again next pass and finds its claims already made. A failure is loud and is
- * retried next pass; it never blocks the fleet from arming.
+ * address, so it can never be a tenant's: one replica backfills at a time. A
+ * replica that finds the lease taken simply tries again next pass and finds
+ * the record written. A failure is loud; it never blocks the fleet from arming.
  */
 let holderClaimsBackfilled = false;
+let holderBackfillRetryAt = 0;
+const HOLDER_BACKFILL_RETRY_MS = 10 * 60_000;
 const HOLDER_BACKFILL_LEASE = "0xholder-claims-backfill" as const;
 
 async function runHolderClaimsBackfill(): Promise<void> {
-  if (holderClaimsBackfilled) return;
+  if (holderClaimsBackfilled || Date.now() < holderBackfillRetryAt) return;
   let lease: TenantLease | null;
   try {
     lease = await acquireTenantLease(HOLDER_BACKFILL_LEASE);
@@ -4204,11 +4216,15 @@ async function runHolderClaimsBackfill(): Promise<void> {
   }
   try {
     const out = await backfillHolderClaims(getSettingsStore(), log);
-    holderClaimsBackfilled = true;
-    log(
-      `holder claims backfill: ${out.claimed} claimed, ${out.held} already held, ` +
-        `${out.collisions.length} collision(s), ${out.unreadable.length} tenant(s) unreadable`,
-    );
+    if (out.done) holderClaimsBackfilled = true;
+    else holderBackfillRetryAt = Date.now() + HOLDER_BACKFILL_RETRY_MS;
+    if (!out.alreadyDone) {
+      log(
+        `holder claims backfill: ${out.claimed} claimed, ${out.held} already held, ` +
+          `${out.collisions.length} collision(s), ${out.unreadable.length} tenant(s) unreadable` +
+          (out.done ? " — done for good" : " — only those are read again, in 10 min"),
+      );
+    }
   } catch (e) {
     log(`holder claims backfill: FAILED, trying again next pass — ${e instanceof Error ? e.message : String(e)}`);
   } finally {

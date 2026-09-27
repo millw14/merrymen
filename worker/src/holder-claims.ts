@@ -13,9 +13,10 @@
  *   for a pass where the claims cannot be read.
  *
  *   backfillHolderClaims — proofs linked before claims existed have no claim,
- *   and effectiveHolder counts no unclaimed proof. Claimed once at startup in
- *   the order they were proven, so where two accounts linked one wallet the
- *   earlier keeps it.
+ *   and effectiveHolder counts no unclaimed proof. Claimed ONCE EVER (a record
+ *   in the claims store says so) in the order they were proven, so where two
+ *   accounts linked one wallet the earlier keeps it — and a wallet released
+ *   since is never handed back to the proof that lost it.
  *
  * Nothing here moves money or touches a grant; the worst a fault here can do
  * is count a wallet for one account fewer or none, never one more.
@@ -91,28 +92,54 @@ export interface BackfillOutcome {
   collisions: { tenant: string; wallet: string; heldBy: string }[];
   /** Tenants whose settings could not be read; their proofs wait for the next run. */
   unreadable: string[];
+  /** An earlier run already read every tenant: this one read nothing and claimed nothing. */
+  alreadyDone: boolean;
+  /** Every tenant has now been read, so no run will ever claim again. */
+  done: boolean;
 }
 
 /**
- * CLAIM EVERY STORED PROOF, IN THE ORDER IT WAS PROVEN.
+ * CLAIM EVERY STORED PROOF, IN THE ORDER IT WAS PROVEN — ONCE EVER.
  *
- * IDEMPOTENT: a claim already held is left alone, and a lost race is a
- * collision logged, not an error — so it is safe at every orchestrator start
- * and on two replicas at once (both walk the same order, so the first claim
- * ever made on a wallet is always its earliest proof's).
+ * WHY ONCE EVER. The proofs this exists for were linked before claims
+ * existed; every proof since was claimed by /api/holder the moment it was
+ * made. So after one complete run, every claim a proof deserves exists — and
+ * a proof with no claim after that is one whose claim was LET GO on purpose
+ * (an unlink, a re-link, a wallet moved away), or the collision loser of the
+ * first run. Run again at every start, as it used to be, and the oldest such
+ * proof took the released wallet back at the next deploy with nobody signing
+ * anything: an unlink undone, and the wallet's own login account emptied
+ * again. The store's record (holderBackfill) is what remembers.
  *
- * A tenant whose settings will not open is skipped and named rather than
- * failing the whole run: one sealed blob that will not decrypt must not keep
- * every other linked holder uncounted. The listing itself failing throws —
- * nothing was learnt, so the caller tries again.
+ * RETRIED ONLY FOR WHAT IT COULD NOT READ. A tenant whose settings will not
+ * open is skipped and named rather than failing the whole run — one sealed
+ * blob that will not decrypt must not keep every other linked holder
+ * uncounted — and recorded as pending. A retry reads THOSE tenants and no
+ * others, so a proof that already lost (or won and was released since) is
+ * never looked at twice; and of theirs it claims only a proof made before the
+ * first run, since a later one was claimed by the route when it was made.
+ *
+ * Within a run it is idempotent: a claim already held is left alone, and a
+ * lost race is a collision logged, not an error — so two replicas at once
+ * agree (both walk the same order, so the first claim ever made on a wallet
+ * is always its earliest proof's). It never moves a claim.
+ *
+ * The record or the listing failing to read throws — nothing was learnt, so
+ * the caller tries again. The record is written only after every claim, so a
+ * crash mid-run re-runs the whole first pass rather than skipping any of it.
  */
 export async function backfillHolderClaims(
-  store: Pick<SettingsStore, "listTenants" | "get" | "claimHolder">,
+  store: Pick<SettingsStore, "listTenants" | "get" | "claimHolder" | "holderBackfill" | "saveHolderBackfill">,
   log: (line: string) => void = () => {},
+  now: number = Date.now(),
 ): Promise<BackfillOutcome> {
-  const out: BackfillOutcome = { claimed: 0, held: 0, collisions: [], unreadable: [] };
+  const out: BackfillOutcome = { claimed: 0, held: 0, collisions: [], unreadable: [], alreadyDone: false, done: false };
+  const prior = await store.holderBackfill();
+  if (prior && prior.pending.length === 0) return { ...out, alreadyDone: true, done: true };
+  const startedAt = prior?.startedAt ?? now;
+  const tenants = prior ? prior.pending : await store.listTenants();
   const rows: ProofRow[] = [];
-  for (const tenant of await store.listTenants()) {
+  for (const tenant of tenants) {
     let settings: MerrymenSettings | null;
     try {
       settings = await store.get(tenant);
@@ -122,7 +149,7 @@ export async function backfillHolderClaims(
       continue;
     }
     const proof = settings?.holderProof;
-    if (isHolderProof(proof)) rows.push({ tenant, proof });
+    if (isHolderProof(proof) && proof.at <= startedAt) rows.push({ tenant, proof });
   }
   for (const { tenant, proof } of planHolderBackfill(rows)) {
     const r = await store.claimHolder(proof.address, tenant);
@@ -135,5 +162,12 @@ export async function backfillHolderClaims(
     } else if (r.fresh) out.claimed += 1;
     else out.held += 1;
   }
+  // Only an address can ever hold a claim, so only an address is worth
+  // reading again.
+  const pending = out.unreadable
+    .map((t) => t.toLowerCase())
+    .filter((t): t is `0x${string}` => /^0x[0-9a-f]{40}$/.test(t));
+  await store.saveHolderBackfill({ startedAt, pending });
+  out.done = pending.length === 0;
   return out;
 }

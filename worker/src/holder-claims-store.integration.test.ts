@@ -114,6 +114,17 @@ function behavesAsAClaimsRecord(name: string, make: () => Store) {
       assert.equal((await s.holderClaims()).get(W), winners[0]);
     });
 
+    it("THE BACKFILL RECORD: none until written, then read back exactly, and replaced whole", async () => {
+      const s = make();
+      assert.equal(await s.holderBackfill(), null, "never ran");
+      await s.saveHolderBackfill({ startedAt: 1_000, pending: [A, B] });
+      assert.deepEqual(await s.holderBackfill(), { startedAt: 1_000, pending: [A, B] });
+      await s.saveHolderBackfill({ startedAt: 1_000, pending: [] });
+      assert.deepEqual(await s.holderBackfill(), { startedAt: 1_000, pending: [] });
+      assert.equal((await s.holderClaims()).size, 0, "the record is not a claim");
+      await assert.rejects(s.saveHolderBackfill({ startedAt: 1, pending: ["someone" as `0x${string}`] }), "only addresses are ever pending");
+    });
+
     it("a claim is only ever an address", async () => {
       const s = make();
       await assert.rejects(s.claimHolder("0xnothex", A));
@@ -163,6 +174,16 @@ describe("FileSettingsStore specifics", () => {
     await assert.rejects(s.releaseHolder(W, A));
   });
 
+  it("the backfill record lives beside the claims, not among them, and a torn one throws", async () => {
+    process.env.MERRYMEN_HOME = path.join(HOME, "file-backfill");
+    const s = new FileSettingsStore();
+    await s.saveHolderBackfill({ startedAt: 5, pending: [] });
+    assert.deepEqual(readdirSync(path.join(HOME, "file-backfill")).sort(), ["holder-claims-backfill.json"], "no temp file left behind");
+    assert.equal((await s.holderClaims()).size, 0);
+    writeFileSync(path.join(HOME, "file-backfill", "holder-claims-backfill.json"), "{ torn");
+    await assert.rejects(s.holderBackfill(), "an unreadable record is not 'never ran'");
+  });
+
   it("with no claims directory yet, there are simply no claims", async () => {
     process.env.MERRYMEN_HOME = path.join(HOME, "file-empty");
     assert.equal((await new FileSettingsStore().holderClaims()).size, 0);
@@ -178,6 +199,24 @@ describe("PgSettingsStore specifics", () => {
       log.some((q) => /^CREATE TABLE IF NOT EXISTS holder_claims \( wallet TEXT PRIMARY KEY, tenant TEXT NOT NULL, claimed_at BIGINT NOT NULL \)$/.test(q)),
       log.join("\n"),
     );
+  });
+
+  it("THE BACKFILL RECORD HAS ITS OWN TABLE, created with the store", async () => {
+    const log: string[] = [];
+    const s = new PgSettingsStore("postgres://stand-in", async () => sqliteClient({ log }));
+    await s.holderBackfill();
+    assert.ok(
+      log.includes("CREATE TABLE IF NOT EXISTS holder_claims_meta ( key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at BIGINT NOT NULL )"),
+      log.join("\n"),
+    );
+  });
+
+  it("a record it cannot parse throws, never reads as 'never ran'", async () => {
+    const client = sqliteClient();
+    const s = new PgSettingsStore("postgres://stand-in", async () => client);
+    await s.holderBackfill();
+    await client.query(`INSERT INTO holder_claims_meta (key, value, updated_at) VALUES ('backfill', '{"startedAt":"soon"}', 1)`);
+    await assert.rejects(s.holderBackfill(), /unreadable/);
   });
 
   it("A RACING CLAIM THAT CONFLICTS BUT IS NOT YET VISIBLE, THEN RELEASED: asked again, and won fresh", async () => {

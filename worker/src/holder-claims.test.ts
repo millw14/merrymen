@@ -13,6 +13,7 @@ import path from "node:path";
 
 import { backfillHolderClaims, childSettingsFor, lastWrittenHolder, planHolderBackfill } from "./holder-claims";
 import { FileSettingsStore } from "./settings-store";
+import { effectiveHolder } from "../../packages/core/src/index";
 
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-holder-backfill-"));
 after(() => rmSync(HOME, { recursive: true, force: true }));
@@ -23,6 +24,14 @@ const freshStore = () => {
 };
 
 const t = (i: number) => `0x${i.toString(16).padStart(40, "0")}` as `0x${string}`;
+/** The store's backfill surface as plain functions, so a case can override one. */
+const bind = (s: InstanceType<typeof FileSettingsStore>) => ({
+  listTenants: () => s.listTenants(),
+  get: (x: `0x${string}`) => s.get(x),
+  claimHolder: (w: string, x: string) => s.claimHolder(w, x),
+  holderBackfill: () => s.holderBackfill(),
+  saveHolderBackfill: (st: Parameters<typeof s.saveHolderBackfill>[0]) => s.saveHolderBackfill(st),
+});
 const W = "0x000000000000000000000000000000000000beef";
 const W2 = "0x000000000000000000000000000000000000cafe";
 
@@ -114,16 +123,120 @@ describe("backfillHolderClaims — against a real store", () => {
     assert.equal(lines.filter((l) => /COLLISION/.test(l)).length, 2, "every collision is named in the log");
   });
 
-  it("IDEMPOTENT: a second run claims nothing new and moves nothing", async () => {
+  it("ONCE EVER: a second run reads nothing, claims nothing and moves nothing", async () => {
     const store = freshStore();
     await store.put(t(2), { holderProof: { address: W, at: 2 } });
     await store.put(t(1), { holderProof: { address: W, at: 1 } });
-    await backfillHolderClaims(store);
-    const again = await backfillHolderClaims(store);
-    assert.equal(again.claimed, 0);
-    assert.equal(again.held, 1);
-    assert.equal(again.collisions.length, 1);
+    const first = await backfillHolderClaims(store);
+    assert.equal(first.done, true);
+    assert.deepEqual(await store.holderBackfill(), { startedAt: (await store.holderBackfill())!.startedAt, pending: [] });
+    let reads = 0;
+    const again = await backfillHolderClaims({ ...bind(store), get: async (x) => (reads++, store.get(x)) });
+    assert.deepEqual(
+      { claimed: again.claimed, held: again.held, collisions: again.collisions.length, alreadyDone: again.alreadyDone, done: again.done },
+      { claimed: 0, held: 0, collisions: 0, alreadyDone: true, done: true },
+    );
+    assert.equal(reads, 0, "no tenant's settings are even opened");
     assert.equal((await store.holderClaims()).get(W), t(1));
+  });
+
+  it("A WALLET RELEASED ON PURPOSE STAYS RELEASED: backfill → unlink → backfill never hands it to the proof that lost", async () => {
+    // The review's scenario. A (at 1) and B (at 2) both linked W before claims
+    // existed; W is also the login of account W. The first start gives W to A
+    // and logs B as a collision — B's proof stays in its settings for good.
+    const store = freshStore();
+    const A = t(0xa), B = t(0xb);
+    await store.put(A, { holderProof: { address: W, at: 1 } });
+    await store.put(B, { holderProof: { address: W, at: 2 } });
+    await backfillHolderClaims(store);
+    assert.equal((await store.holderClaims()).get(W), A);
+    // A unlinks (what DELETE /api/holder does): released, and A's proof dropped.
+    await store.releaseHolder(W, A);
+    await store.put(A, {});
+    // The next deploy starts the orchestrator again.
+    const next = await backfillHolderClaims(store);
+    assert.equal(next.alreadyDone, true);
+    const claims = await store.holderClaims();
+    assert.equal(claims.has(W), false, "nobody signed anything — the wallet must stay free");
+    const proofB = (await store.get(B))?.holderProof ?? null;
+    assert.deepEqual(effectiveHolder(B, proofB, (w) => claims.get(w)), { address: B, source: "login" }, "B's stale proof counts nowhere — B reads its own login");
+    assert.deepEqual(effectiveHolder(W, null, (w) => claims.get(w)), { address: W, source: "login" }, "W's own login counts W again");
+  });
+
+  it("RETRIED ONLY FOR THE TENANTS IT COULD NOT READ — never the ones that already lost", async () => {
+    const store = freshStore();
+    const A = t(0xa), B = t(0xb), C = t(0xc);
+    await store.put(A, { holderProof: { address: W, at: 1 } });
+    await store.put(B, { holderProof: { address: W, at: 2 } });
+    await store.put(C, { holderProof: { address: W2, at: 3 } });
+    let sealed = true;
+    const flaky = {
+      ...bind(store),
+      get: async (x: `0x${string}`) => {
+        if (x === C && sealed) throw new Error("unseal failed");
+        return store.get(x);
+      },
+    };
+    const first = await backfillHolderClaims(flaky, () => {}, 10_000);
+    assert.equal(first.done, false);
+    assert.deepEqual((await store.holderBackfill())?.pending, [C]);
+    // Meanwhile A unlinks W.
+    await store.releaseHolder(W, A);
+    await store.put(A, {});
+    // C's blob opens again; the retry reads C and nobody else.
+    sealed = false;
+    const opened: string[] = [];
+    const retry = await backfillHolderClaims(
+      { ...flaky, get: async (x) => (opened.push(x), flaky.get(x)) },
+      () => {},
+      20_000,
+    );
+    assert.deepEqual(opened, [C]);
+    assert.equal(retry.done, true);
+    assert.equal(retry.claimed, 1);
+    const claims = await store.holderClaims();
+    assert.equal(claims.get(W2), C, "the proof it could not read before is claimed now");
+    assert.equal(claims.has(W), false, "and B, which lost W in the first run, does not get it back");
+    assert.deepEqual(await store.holderBackfill(), { startedAt: 10_000, pending: [] }, "done for good, dated by the first run");
+  });
+
+  it("…and of a pending tenant's proofs, only one made before the first run (a later one was the route's)", async () => {
+    const store = freshStore();
+    const C = t(0xc);
+    await store.put(C, { holderProof: { address: W, at: 1 } });
+    await backfillHolderClaims({ ...bind(store), get: async () => { throw new Error("unseal failed"); } }, () => {}, 10_000);
+    // C re-linked through the route after the first run, then unlinked it
+    // with the put failing: a proof with no claim, released on purpose.
+    await store.put(C, { holderProof: { address: W, at: 15_000 } });
+    const retry = await backfillHolderClaims(store, () => {}, 20_000);
+    assert.equal(retry.done, true);
+    assert.equal((await store.holderClaims()).has(W), false);
+  });
+
+  it("AN UNREADABLE RECORD IS NOT 'NEVER RAN' — the run throws and claims nothing", async () => {
+    const store = freshStore();
+    await store.put(t(1), { holderProof: { address: W, at: 1 } });
+    writeFileSync(path.join(process.env.MERRYMEN_HOME!, "holder-claims-backfill.json"), "{ torn");
+    await assert.rejects(backfillHolderClaims(store));
+    assert.equal((await store.holderClaims()).size, 0);
+  });
+
+  it("A RUN THAT FAILS PART-WAY WRITES NO RECORD, so the next start does the whole first pass again", async () => {
+    const store = freshStore();
+    await store.put(t(1), { holderProof: { address: W, at: 1 } });
+    await store.put(t(2), { holderProof: { address: W2, at: 2 } });
+    await assert.rejects(
+      backfillHolderClaims({
+        ...bind(store),
+        claimHolder: async (w, x) => {
+          if (w === W2) throw new Error("Connection terminated unexpectedly");
+          return store.claimHolder(w, x);
+        },
+      }),
+    );
+    assert.equal(await store.holderBackfill(), null);
+    const again = await backfillHolderClaims(store);
+    assert.deepEqual([again.claimed, again.held, again.done], [1, 1, true]);
   });
 
   it("TWO REPLICAS AT ONCE STILL AGREE: the earliest proof wins", async () => {
@@ -149,17 +262,17 @@ describe("backfillHolderClaims — against a real store", () => {
     const lines: string[] = [];
     const out = await backfillHolderClaims(
       {
-        listTenants: () => store.listTenants(),
+        ...bind(store),
         get: async (tenant) => {
           if (tenant === t(1)) throw new Error("unseal failed");
           return store.get(tenant);
         },
-        claimHolder: (w, tenant) => store.claimHolder(w, tenant),
       },
       (l) => lines.push(l),
     );
     assert.deepEqual(out.unreadable, [t(1)]);
     assert.equal(out.claimed, 1);
+    assert.equal(out.done, false, "not done while a tenant was unread");
     assert.ok(lines.some((l) => l.includes(t(1)) && /unreadable/.test(l)));
   });
 
@@ -171,6 +284,8 @@ describe("backfillHolderClaims — against a real store", () => {
         },
         get: async () => null,
         claimHolder: async () => ({ ok: true, fresh: true }),
+        holderBackfill: async () => null,
+        saveHolderBackfill: async () => assert.fail("nothing was learnt, so nothing is recorded"),
       }),
     );
   });
@@ -191,14 +306,16 @@ describe("the orchestrator wiring", () => {
     assert.ok(backfill > 0 && reconcile > backfill);
   });
 
-  it("…behind a lease, once per process, and a failure is retried next pass", () => {
+  it("…behind a lease; done for this process only once EVERY tenant was read, and a failure is retried next pass", () => {
     const run = body("async function runHolderClaimsBackfill(");
-    assert.match(run, /if \(holderClaimsBackfilled\) return;/);
+    assert.match(run, /if \(holderClaimsBackfilled \|\| Date\.now\(\) < holderBackfillRetryAt\) return;/);
     assert.match(run, /acquireTenantLease\(HOLDER_BACKFILL_LEASE\)/);
     assert.match(run, /if \(!lease\) \{/);
-    const done = run.indexOf("holderClaimsBackfilled = true;");
+    const done = run.indexOf("if (out.done) holderClaimsBackfilled = true;");
     const call = run.indexOf("await backfillHolderClaims(getSettingsStore(), log);");
-    assert.ok(call > 0 && done > call, "marked done only once the run succeeded");
+    assert.ok(call > 0 && done > call, "marked done only once a run read every tenant");
+    assert.match(run, /else holderBackfillRetryAt = Date\.now\(\) \+ HOLDER_BACKFILL_RETRY_MS;/, "unread tenants are retried, not every pass");
+    assert.ok(!/holderClaimsBackfilled = true;\n/.test(run.replace("if (out.done) holderClaimsBackfilled = true;", "")), "and never unconditionally");
     assert.match(run, /finally \{\s*await lease\.release\(\);/);
     assert.match(ORCH, /const HOLDER_BACKFILL_LEASE = "0xholder-claims-backfill" as const;/, "a key no tenant can have");
   });

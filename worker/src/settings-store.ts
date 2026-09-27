@@ -19,7 +19,7 @@
  * NODE-ONLY (node:crypto, node:fs, pg). Imported by the web API and the worker,
  * never the browser bundle.
  */
-import { link, mkdir, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { merrymenHome } from "./home";
@@ -32,6 +32,27 @@ export type HolderClaim =
   | { ok: true; fresh: boolean }
   /** Another account holds it. `heldBy` is that account: never shown to the caller. */
   | { ok: false; heldBy: `0x${string}` };
+
+/**
+ * WHERE THE ONE-TIME HOLDER-CLAIMS BACKFILL STANDS (holder-claims.ts
+ * backfillHolderClaims), kept in the same store as the claims it made.
+ *
+ * ONCE EVER, NOT ONCE PER PROCESS. A per-process flag re-ran the backfill at
+ * every deploy, and a wallet whose claim had since been released on purpose
+ * (an unlink, a re-link elsewhere) went straight back to the oldest proof
+ * still sitting in some collision loser's settings — nobody signing anything.
+ * This record is what lets every later start know the job is done.
+ */
+export interface HolderBackfillState {
+  /** When the first run read the proofs, epoch ms. A retry claims no proof made after it. */
+  startedAt: number;
+  /**
+   * Tenants whose settings no run has been able to read yet — the ONLY
+   * tenants a retry reads, so a proof that lost (or was released) is never
+   * looked at twice. Empty: the backfill is finished for good.
+   */
+  pending: `0x${string}`[];
+}
 
 export interface SettingsStore {
   /** Persist (replace) a tenant's settings. */
@@ -62,9 +83,35 @@ export interface SettingsStore {
    * unreadable — an unread claim is not "nobody claims it".
    */
   holderClaims(wallets?: readonly string[]): Promise<Map<string, `0x${string}`>>;
+  /**
+   * The backfill's record, or null when no run has ever finished. Throws when
+   * it cannot be read — an unread record is not "never ran", and a re-run
+   * would hand released wallets back to stale proofs.
+   */
+  holderBackfill(): Promise<HolderBackfillState | null>;
+  /** Replace the backfill's record. */
+  saveHolderBackfill(state: HolderBackfillState): Promise<void>;
 }
 
 const CLAIM_ADDRESS = /^0x[0-9a-f]{40}$/;
+/** holder_claims_meta's row for HolderBackfillState. */
+const BACKFILL_KEY = "backfill";
+
+/** Shape-check a stored backfill record; anything else throws, never reads as "never ran". */
+function backfillState(v: unknown): HolderBackfillState {
+  const s = v as Partial<HolderBackfillState> | null;
+  if (
+    !s ||
+    typeof s !== "object" ||
+    typeof s.startedAt !== "number" ||
+    !Number.isFinite(s.startedAt) ||
+    !Array.isArray(s.pending) ||
+    !s.pending.every((t) => typeof t === "string" && CLAIM_ADDRESS.test(t))
+  ) {
+    throw new Error("holder claims backfill record is unreadable");
+  }
+  return { startedAt: s.startedAt, pending: [...s.pending] };
+}
 
 /** Lower-case and shape-check an address before it becomes a claim key. */
 function claimKey(what: "wallet" | "tenant", v: string): `0x${string}` {
@@ -214,6 +261,35 @@ export class FileSettingsStore implements SettingsStore {
     }
     return out;
   }
+
+  /**
+   * BESIDE THE CLAIMS DIRECTORY, NOT IN IT: a file in there is a wallet's
+   * claim. Replaced by rename(2), so a crash leaves the old record or the
+   * new one, never half of either.
+   */
+  private backfillFile = path.join(merrymenHome(), "holder-claims-backfill.json");
+  async holderBackfill(): Promise<HolderBackfillState | null> {
+    let raw: string;
+    try {
+      raw = await readFile(this.backfillFile, "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw e;
+    }
+    return backfillState(JSON.parse(raw));
+  }
+  async saveHolderBackfill(state: HolderBackfillState): Promise<void> {
+    const rec = backfillState(state);
+    const tmp = `${this.backfillFile}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+    await mkdir(path.dirname(this.backfillFile), { recursive: true });
+    await writeFile(tmp, JSON.stringify(rec), { encoding: "utf8", mode: 0o600 });
+    try {
+      await rename(tmp, this.backfillFile);
+    } catch (e) {
+      await unlink(tmp).catch(() => {});
+      throw e;
+    }
+  }
 }
 
 interface StoredClaim {
@@ -299,6 +375,16 @@ export class PgSettingsStore implements SettingsStore {
              claimed_at BIGINT NOT NULL
            )`,
         );
+        // One row per fact about the claims themselves — today only whether
+        // the one-time backfill has finished (HolderBackfillState).
+        await createIfAbsent(
+          c,
+          `CREATE TABLE IF NOT EXISTS holder_claims_meta (
+             key TEXT PRIMARY KEY,
+             value TEXT NOT NULL,
+             updated_at BIGINT NOT NULL
+           )`,
+        );
         return c;
       })();
     }
@@ -375,6 +461,19 @@ export class PgSettingsStore implements SettingsStore {
     const out = new Map<string, `0x${string}`>();
     for (const r of rows) out.set(String(r.wallet).toLowerCase(), claimKey("tenant", String(r.tenant)));
     return out;
+  }
+  async holderBackfill(): Promise<HolderBackfillState | null> {
+    const c = await this.client();
+    const { rows } = await c.query(`SELECT value FROM holder_claims_meta WHERE key = $1`, [BACKFILL_KEY]);
+    return rows[0] ? backfillState(JSON.parse(String(rows[0].value))) : null;
+  }
+  async saveHolderBackfill(state: HolderBackfillState): Promise<void> {
+    const c = await this.client();
+    await c.query(
+      `INSERT INTO holder_claims_meta (key, value, updated_at) VALUES ($1, $2, $3)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
+      [BACKFILL_KEY, JSON.stringify(backfillState(state)), Date.now()],
+    );
   }
 }
 
