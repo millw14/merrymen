@@ -10,7 +10,7 @@ import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
-import { ENERGY, MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
+import { ENERGY, MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isEnergyReserveToken, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 import { telegramLabel, telegramRow } from "../agent-status";
@@ -315,6 +315,16 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     };
     if (!isValidCustomToken(candidate)) {
       setTokenError("needs a short symbol, a full 0x… address (42 chars) and whole-number decimals");
+      return;
+    }
+    // $MERRYMEN IS ENERGY, NOT A COIN TO TRADE. Every signer drops it from the
+    // sealed tokens and the worker never watches it, so adding it here would
+    // only produce a token that can never be covered, whatever gets re-signed.
+    if (isEnergyReserveToken(candidate.address)) {
+      setTokenError(
+        "that's $MERRYMEN — your agent's energy, not a coin it trades, so it isn't added here. " +
+          "Ask your agent in chat to get its $MERRYMEN, or send it to the agent's account on Robinhood Chain.",
+      );
       return;
     }
     const current = tokens ?? (view?.values.customTokens as CustomToken[] | undefined) ?? [];

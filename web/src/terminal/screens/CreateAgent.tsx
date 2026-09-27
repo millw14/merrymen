@@ -6,6 +6,7 @@ import {
   DEFAULT_BASKET_SYMBOLS,
   ENERGY,
   STOCK_TOKENS,
+  isEnergyReserveToken,
   isValidCustomToken,
   type CustomToken,
   isWallTooWide,
@@ -304,6 +305,8 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
           setCoinError("");
           const candidate={symbol:newCoin.symbol.trim(),address:newCoin.address.trim(),decimals:Number(newCoin.decimals)};
           if(!isValidCustomToken(candidate)){setCoinError("Needs a short symbol, a full 0x… address (42 characters) and whole-number decimals.");return;}
+          // $MERRYMEN is energy, never a coin the permission covers (every signer drops it).
+          if(isEnergyReserveToken(candidate.address)){setCoinError("That's $MERRYMEN — your agent's energy, not a coin it trades, so it isn't added here. Once your agent exists, ask it in chat to get its $MERRYMEN, or send it to the agent's account on Robinhood Chain.");return;}
           if(wizardTokens.some(t=>t.address.toLowerCase()===candidate.address.toLowerCase())){setCoinError("That address is already on the list.");return;}
           // BOTH WRITES, as everywhere else: added AND selected. The distinction
           // between "know about this" and "trade it" is real, but hiding the
