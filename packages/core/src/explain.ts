@@ -691,7 +691,7 @@ export const CONCEPTS: readonly Concept[] = [
   {
     term: "Energy",
     aliases: ["energy", "low energy", "energy spent", "daily allowance", "why are you limited", "a tenth", "get your merrymen"],
-    plain: "Energy is how much your agent may do on its own each day. With 100,000 $MERRYMEN between your wallet and your agent's account it runs at full strength; without it, it still runs, but gets about a tenth of its usual daily AI reviews and new trades, resetting at 00:00 UTC. Stop-losses, take-profits and orders you place yourself are never limited; your agent's own AI reviews — including of its open positions — are paced along with everything else it starts on its own.",
+    plain: "Energy is how much your agent may do on its own each day. With 100,000 $MERRYMEN between your wallet and your agent's account it runs at full strength; without it, it still runs, but gets about a tenth of a standard day's AI reviews and new trades (a house figure, not a tenth of your own settings), resetting at 00:00 UTC. Stop-losses, take-profits and orders you place yourself are never limited; your agent's own AI reviews — including of its open positions — are paced along with everything else it starts on its own.",
     because: "On the hosted service the worker counts paid reviews and the new trades it starts on its own per UTC day, and stops new autonomous work at the allowance; an exit is judged by the same rule the policy wall uses and never counts as a new trade, but the AI review that would decide one is a paid review like any other and is paced.",
     confusable: "It is not the per-day spending cap sealed into your key — that one limits dollars and only your signature changes it.",
     evidence: "packages/core/src/energy.ts:1-60",

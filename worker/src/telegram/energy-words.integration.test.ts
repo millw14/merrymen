@@ -73,6 +73,7 @@ describe("agent_status carries today's energy, from the worker's report", () => 
 describe("the rule both chat prompts carry", () => {
   it("what energy is, exactly what it never limits, that AI reviews of holdings are paced, and that unread is not zero", () => {
     assert.match(ENERGY_WORDS, /resets at 00:00 UTC/);
+    assert.match(ENERGY_WORDS, /about a tenth of a STANDARD day, not of your owner's own settings/);
     assert.match(ENERGY_WORDS, /Stop-losses, take-profits and your owner's own orders are NEVER limited by it; your own AI reviews — including your reviews of your open positions — are paced/);
     assert.match(ENERGY_WORDS, /never that selling in general is unaffected/);
     assert.doesNotMatch(ENERGY_WORDS, /Selling[^.]*NEVER limited/, "the old, false promise");

@@ -238,7 +238,7 @@ export function energyStatusLine(e: EnergyStatus | null | undefined, nowSec: num
   const used: string[] = [];
   if (e.reviews) used.push(`${n(e.reviews.used)} of ${n(e.reviews.allowed)} AI reviews`);
   if (e.entries) used.push(`${n(e.entries.used)} of ${n(e.entries.allowed)} new trades`);
-  return `• energy: low — about a tenth of my usual day${used.length ? ` (${used.join(", ")} used today)` : ""}${ownWallet ? `. ${ownWallet}` : ""}`;
+  return `• energy: low — about a tenth of a standard day${used.length ? ` (${used.join(", ")} used today)` : ""}${ownWallet ? `. ${ownWallet}` : ""}`;
 }
 
 export function readStatus(ctx: StatusContext): string {

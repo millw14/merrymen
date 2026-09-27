@@ -574,8 +574,9 @@ about what the token is worth.
 
 **Energy (hosted service).** An agent runs at full strength while **your wallet and the agent's
 own account hold 100,000 $MERRYMEN between them**. Below that it still runs, on about **a tenth**
-of a normal day: a tenth of its usual paid AI reviews (paced across the day) and of the new trades
-it opens on its own, resetting at **00:00 UTC**. **Stop-losses, take-profits and orders you place
+of a normal day: a tenth of a standard day's paid AI reviews (paced across the day) and of the
+new trades it opens on its own — a house figure, not a tenth of your own preset — resetting at
+**00:00 UTC**. **Stop-losses, take-profits and orders you place
 yourself are never limited** — an allowance on new work is never a lock on the doors — but the
 agent's own AI reviews, including of its open positions, are paced with everything else it starts
 on its own, so an exit the AI would decide waits for its next review. When

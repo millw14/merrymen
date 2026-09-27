@@ -68,7 +68,7 @@ describe("the energy line — spoken only while the gate enforces", () => {
   it("low: used of allowed for both meters, today", () => {
     assert.equal(
       line({}),
-      "• energy: low — about a tenth of my usual day (3 of 29 AI reviews, 1 of 2 new trades used today)",
+      "• energy: low — about a tenth of a standard day (3 of 29 AI reviews, 1 of 2 new trades used today)",
     );
   });
 
@@ -83,7 +83,7 @@ describe("the energy line — spoken only while the gate enforces", () => {
     const noReviewer = line({ reviews: null })!;
     assert.doesNotMatch(noReviewer, /AI reviews/);
     assert.match(noReviewer, /1 of 2 new trades used today/);
-    assert.equal(line({ reviews: null, entries: null }), "• energy: low — about a tenth of my usual day");
+    assert.equal(line({ reviews: null, entries: null }), "• energy: low — about a tenth of a standard day");
   });
 
   it("spent: back at 00:00 UTC, the doors still open, and /wallet for the address", () => {

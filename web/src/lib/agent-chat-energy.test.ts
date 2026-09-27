@@ -123,6 +123,13 @@ describe("A REPORT WHOSE DAY HAS ENDED IS NOT TODAY'S", () => {
 });
 
 describe("what the model is told", () => {
+  it("A TENTH OF A STANDARD DAY, not of 'your usual' — the allowance is sized from the house baselines", async () => {
+    const { system } = await ask("hello");
+    assert.match(system, /about a tenth of a standard day's AI reviews and new trades/);
+    assert.match(system, /give the `reviews` and `entries` figures rather than calling it a tenth of your usual/);
+    assert.doesNotMatch(system, /tenth of your usual daily/);
+  });
+
   it("THE BLOCK'S DAY IS THE DAY IT DESCRIBES — never 'today is spent' from another day's report", async () => {
     const { system } = await ask("hello");
     assert.match(system, /The block's `day` is the UTC day it describes; never say today's energy is spent from a report for another day\./);

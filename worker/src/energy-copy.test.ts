@@ -58,6 +58,10 @@ describe("every variant keeps the promises", () => {
       // "Selling is never limited" was false: an exit the AI decides waits for
       // a paced review like anything else it starts on its own.
       assert.doesNotMatch(text, /\bselling\b/i, text);
+      // The allowance is a tenth of the HOUSE baselines, not of the owner's own
+      // preset or interval — "my usual" overstated it for Balanced and Bold.
+      assert.match(text, /about a tenth of a standard day's AI reviews and new trades/);
+      assert.doesNotMatch(text, /my usual/);
       assert.match(text, /00:00 UTC/);
       assert.match(text, /100,000/);
     });
@@ -87,7 +91,7 @@ describe("the arms", () => {
     assert.equal(
       t,
       "Energy spent for 27 Sep (UTC): without 100,000 $MERRYMEN between your wallet and my account I get about a " +
-        "tenth of my usual daily AI reviews and new trades, and today's are used up. Nothing is broken — stop-losses, " +
+        "tenth of a standard day's AI reviews and new trades, and today's new trades are used up. Nothing is broken — stop-losses, " +
         "take-profits and your own orders still run, and I pick up again at 00:00 UTC. My own AI reviews — including " +
         "of my open positions — are paced along with everything else I start on my own. You and I hold 12,345 between " +
         "us (87,655 short). For full strength, send $MERRYMEN on Robinhood Chain to my account " +

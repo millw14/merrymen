@@ -85,7 +85,7 @@ export function EnergyNote({
       <section className="desk-energy" role="status">
         <p>
           Low energy: without {full} $MERRYMEN between your wallet and my account I run on about a
-          tenth of my usual day{used.length > 0 ? ` — ${used.join(" and ")} used today` : ""}. It
+          tenth of a standard day{used.length > 0 ? ` — ${used.join(" and ")} used today` : ""}. It
           resets at 00:00 UTC.
         </p>
         {/* NO BAR AGAINST AN ALLOWANCE NOBODY READ — the You screen's rule. */}
@@ -113,8 +113,8 @@ export function EnergyNote({
     <section className="desk-energy spent" role="status">
       <strong>Energy spent for today — I pick up again at 00:00 UTC.</strong>
       <p>
-        Without {full} $MERRYMEN between your wallet and my account I get about a tenth of my usual
-        daily AI reviews and new trades. Stop-losses, take-profits and your own orders still run; my own
+        Without {full} $MERRYMEN between your wallet and my account I get about a tenth of a standard
+        day&apos;s AI reviews and new trades. Stop-losses, take-profits and your own orders still run; my own
         AI reviews — including of my open positions — are paced along with the rest.
       </p>
       {view.kind === "unread" ? (

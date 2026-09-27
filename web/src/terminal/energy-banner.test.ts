@@ -192,6 +192,9 @@ describe("what the panel says", () => {
     const html = await note(report({ spent: true }));
     const t = text(html);
     assert.match(t, /Energy spent for today — I pick up again at 00:00 UTC\./);
+    // A tenth of the HOUSE's standard day, not of the owner's own preset.
+    assert.match(t, /about a tenth of a standard day's AI reviews and new trades/);
+    assert.doesNotMatch(t, /my usual/);
     assert.match(t, /Stop-losses, take-profits and your own orders still run; my own AI reviews — including of my open positions — are paced along with the rest\./);
     assert.doesNotMatch(t, /\bSelling\b/, "an exit the AI decides is paced; 'selling still runs' was false");
     assert.match(t, /You and I hold 12,345 \$MERRYMEN — 87,655 short\./);
@@ -309,6 +312,7 @@ describe("the funding screen", () => {
     const t = await funding(report());
     assert.match(t, /your wallet and this account hold 12,345 \$MERRYMEN between them, 87,655 short/);
     assert.match(t, /Full strength needs 100,000 \$MERRYMEN between your wallet and this account/);
+    assert.match(t, /below that your agent gets about a tenth of a standard day's AI reviews and new trades/);
     assert.match(t, /Stop-losses, take-profits and your own orders are never limited; its own AI reviews — including of its open positions — are paced along with the rest\./);
     assert.doesNotMatch(t, /\bSelling\b/);
     assert.match(t, /Send \$MERRYMEN on Robinhood Chain to this same address, or send USDG here and ask your agent in chat to get its \$MERRYMEN — you confirm the amount first\./);

@@ -24,6 +24,10 @@
  *     account is on another network, where tokens sent to it would not count
  *     and it is not printed at all.
  *
+ * "A TENTH OF A STANDARD DAY", never "of my usual": the allowance is a tenth
+ * of the HOUSE baselines (energy.ts), which an owner on a bigger preset or a
+ * shorter strategist interval would read as far less than a tenth of theirs.
+ *
  * WHAT IT MUST NEVER SAY. Anything about the token's price, where it is going,
  * or returns (token.ts STANCE). $MERRYMEN is energy here, nothing more. The one
  * dollar figure allowed is what the shortfall would cost in USDG right now,
@@ -113,15 +117,15 @@ export function energyNotice(f: EnergyNoticeFacts, style: EnergyNoticeStyle = {}
   // ── what happened ──
   if (unread) {
     parts.push(
-      `I couldn't read the $MERRYMEN balances, so I've been on the reduced allowance — about a tenth of my usual ` +
-        `daily AI reviews and new trades — and today's is used up. That's our read failing, not your wallet: if you ` +
+      `I couldn't read the $MERRYMEN balances, so I've been on the reduced allowance — about a tenth of a standard ` +
+        `day's AI reviews and new trades — and today's new trades are used up. That's our read failing, not your wallet: if you ` +
         `already hold ${full} ${where}, it lifts on the next good read.`,
     );
     parts.push(`${STILL_RUNS.charAt(0).toUpperCase()}${STILL_RUNS.slice(1)}, and I pick up again at 00:00 UTC. ${PACED}`);
   } else {
     parts.push(
-      `without ${full} $MERRYMEN ${where} I get about a tenth of my usual daily AI reviews and new trades, ` +
-        `and today's are used up.`,
+      `without ${full} $MERRYMEN ${where} I get about a tenth of a standard day's AI reviews and new trades, ` +
+        `and today's new trades are used up.`,
     );
     parts.push(`Nothing is broken — ${STILL_RUNS}, and I pick up again at 00:00 UTC. ${PACED}`);
   }

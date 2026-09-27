@@ -1727,7 +1727,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           {tier?.energyGate && (
             <p className="mm-hint">
               On the hosted service your agent runs at full energy while your wallet and its account hold{" "}
-              {count(ENERGY.fullTokens)} $MERRYMEN between them; below that it gets about a tenth of its daily AI reviews and
+              {count(ENERGY.fullTokens)} $MERRYMEN between them; below that it gets about a tenth of a standard day&apos;s AI reviews and
               new trades. Stop-losses, take-profits and your own orders are never limited; its own AI
               reviews — including of its open positions — are paced along with the rest. $MERRYMEN buys
               capacity, nothing else — we make no promise about its price.
