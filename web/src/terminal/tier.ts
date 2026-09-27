@@ -21,11 +21,17 @@ import type { TierView } from "@/app/api/tier/route";
  * hold 0" or nothing at all because our own request failed.
  *
  * `tokens` stays null in that arm, never 0. A zero here is the number that
- * sends somebody to buy $MERRYMEN they may already hold.
+ * sends somebody to buy $MERRYMEN they may already hold. The same for both of
+ * its parts — the owner's wallet and the agent's account — and `energyGate` is
+ * false, because a flag we did not read must not add a sentence about energy.
  */
 export const UNREADABLE_TIER: TierView = {
   why: "unreadable",
   tokens: null,
+  holderTokens: null,
+  agentTokens: null,
+  agentAccount: null,
+  energyGate: false,
   tierId: null,
   tierName: null,
   bonusStrategies: false,
