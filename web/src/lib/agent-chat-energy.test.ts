@@ -136,9 +136,11 @@ describe("what the model is told", () => {
     assert.match(system, /changing nothing is a fine answer/);
   });
 
-  it("THE DOORS STAY OPEN — exits and the owner's own orders are never limited, and it says so", async () => {
+  it("THE DOORS STAY OPEN — and it says exactly which: the rules and the owner's orders, not the AI's own exits", async () => {
     const { system } = await ask("hello");
-    assert.match(system, /Selling, stop-losses, take-profits and your owner's own orders are NEVER limited by it/);
+    assert.match(system, /Stop-losses, take-profits and your owner's own orders are NEVER limited by it; your own AI reviews — including your reviews of your open positions — are paced/);
+    assert.match(system, /Say exactly that whenever you mention it, and never that selling in general is unaffected/);
+    assert.doesNotMatch(system, /Selling, stop-losses[^.]*NEVER limited/, "the old, false promise");
     assert.match(system, /never that they hold nothing; a null count is unknown, not zero/);
   });
 

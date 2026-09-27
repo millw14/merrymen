@@ -14,11 +14,14 @@
  * a store, a chain, a clock or an environment variable: the tick hands those
  * in, and this decides.
  *
- * WHAT IT NEVER TOUCHES. Exits, stop-losses, take-profits, vault housekeeping
- * and anything the owner asked for — the app's chat, the web, Telegram, MCP,
- * the energy buy itself, kill, pause, recover. An allowance on NEW autonomous
- * work is not allowed to become a lock on the doors, the same sentence the
- * drawdown breaker and the ops cap are written under (policy.ts).
+ * WHAT IT NEVER TOUCHES. Exit orders, stop-losses, take-profits, vault
+ * housekeeping and anything the owner asked for — the app's chat, the web,
+ * Telegram, MCP, the energy buy itself, kill, pause, recover. An allowance on
+ * NEW autonomous work is not allowed to become a lock on the doors, the same
+ * sentence the drawdown breaker and the ops cap are written under (policy.ts).
+ * What it DOES pace is every paid AI review, including a review of a held
+ * position — so an exit the AI would decide waits for the next one, and no
+ * copy may say "selling is never limited" (energy-copy.ts STILL_RUNS).
  *
  * THE HOUSE SETS THE BASELINES, NEVER THE OWNER. "A tenth of your own normal"
  * computed from inputs the throttled owner controls is no throttle at all:

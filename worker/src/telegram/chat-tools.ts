@@ -308,8 +308,9 @@ const agentStatus: ChatTool = {
         );
         lines.push(ctx.paused ? "The owner's PAUSE button is ON — I place no new trades until they resume." : "The pause button is off.");
         // TODAY'S ENERGY, when the gate enforces — the same line /status shows,
-        // from the worker's own report. It limits what I start on my own; it
-        // never limits selling, stop-losses or the owner's own orders.
+        // from the worker's own report. It paces what I start on my own — my
+        // AI reviews too, including of my open positions; it never limits
+        // stop-losses, take-profits or the owner's own orders.
         const energy = energyStatusLine(s.energy, ctx.now);
         if (energy) lines.push(`Energy: ${energy.replace(/^• energy: /, "")}.`);
         const alive = s.workerAliveSec !== null && s.workerAliveSec < 90;

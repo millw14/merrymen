@@ -96,7 +96,9 @@ describe("energyAlert — what it says", () => {
 
   it("leads with the headline, then the notice's own dated sentence", () => {
     assert.ok(a.text.startsWith("⚡ <b>Energy spent for today.</b> Energy spent for 21 Sep (UTC): "), a.text);
-    assert.match(a.text, /stop-losses and your own orders still run/);
+    assert.match(a.text, /stop-losses, take-profits and your own orders still run/);
+    assert.match(a.text, /My own AI reviews — including of my open positions — are paced/);
+    assert.doesNotMatch(a.text, /\bselling\b/i, "an exit the AI decides is paced; 'selling is never limited' was false");
     assert.match(a.text, /00:00 UTC/);
     assert.match(a.text, /Robinhood Chain/);
   });
@@ -144,7 +146,8 @@ describe("energyAlert — what it says", () => {
   it("nothing about the token's price or returns", () => {
     for (const over of [{}, { buy: "paper" as const }, { buy: "resign" as const }, { level: "unread" as const }]) {
       const t = energyAlert(inputs(over), PUBLIC, NOW)!.text;
-      assert.doesNotMatch(t, /price (will|to)|returns?\b|profit|moon|pump|buyback|burn|invest/i, t);
+      // "take-profit" names a sell rule; it is not a word about returns.
+      assert.doesNotMatch(t, /price (will|to)|returns?\b|(?<!take-)profit|moon|pump|buyback|burn|invest/i, t);
     }
   });
 });

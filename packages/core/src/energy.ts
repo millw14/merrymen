@@ -5,9 +5,12 @@
  * reviews it runs and the new trades it opens without being asked. While the
  * owner's wallet and the agent's own account hold ENERGY.fullTokens $MERRYMEN
  * between them it runs at full strength. Below that it still runs, on about a
- * tenth of a normal day, resetting at 00:00 UTC. Exits, stop-losses and the
- * owner's own orders are never limited by it — an allowance on NEW work is not
- * allowed to become a lock on the doors.
+ * tenth of a normal day, resetting at 00:00 UTC. Stop-losses, take-profits and
+ * the owner's own orders are never limited by it, and no exit counts as a new
+ * trade — an allowance on NEW work is not allowed to become a lock on the
+ * doors. What IS paced is the agent's own AI review, including of what it
+ * holds, so an exit the AI would decide waits for its next paced review; the
+ * copy says exactly that and never "selling is never limited".
  *
  * WHAT LIVES HERE AND WHAT DOES NOT. This file is the contract every tier
  * shares: the thresholds, the shape the worker reports and the web reads, and

@@ -263,8 +263,9 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
                 <p className="create-energy">
                   Your agent runs at full energy while your wallet and its account hold{" "}
                   {count(ENERGY.fullTokens)} $MERRYMEN between them; below that it still runs, on about a
-                  tenth of its daily AI reviews and new trades. Selling, stop-losses and your own orders
-                  are never limited.
+                  tenth of its daily AI reviews and new trades. Stop-losses, take-profits and your own
+                  orders are never limited; its own AI reviews — including of its open positions — are
+                  paced along with the rest.
                 </p>
               )}<button className="flow-primary" type="submit">Set trading limits <ArrowRight size={16}/></button></form></>}
     {step==="market" && <>

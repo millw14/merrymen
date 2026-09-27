@@ -1724,7 +1724,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           <p className="mm-hint">
             On the hosted service your agent runs at full energy while your wallet and its account hold{" "}
             {count(ENERGY.fullTokens)} $MERRYMEN between them; below that it gets about a tenth of its daily AI reviews and
-            new trades. Selling, stop-losses and your own orders are never limited. $MERRYMEN buys
+            new trades. Stop-losses, take-profits and your own orders are never limited; its own AI
+            reviews — including of its open positions — are paced along with the rest. $MERRYMEN buys
             capacity, nothing else — we make no promise about its price.
           </p>
           <div className="mm-section">{t("settings.section.connections")}</div>

@@ -62,8 +62,9 @@ export default function TokenPage() {
           <strong>$MERRYMEN is your agent&apos;s energy.</strong> On the hosted service an agent runs at
           full strength while your wallet and its own account hold 100,000 $MERRYMEN between them.
           Without it, it still runs — on about a tenth of a normal day of paid AI reviews and new trades
-          it opens on its own, resetting at 00:00 UTC — and selling, stop-losses and your own orders are
-          never limited. merrymen stays open source and self-hostable, and a self-hosted install is
+          it opens on its own, resetting at 00:00 UTC. Stop-losses, take-profits and your own orders are
+          never limited; its own AI reviews, including of its open positions, are paced with the rest.
+          merrymen stays open source and self-hostable, and a self-hosted install is
           never gated. There is no price talk, no promise of returns, no buyback or burn here. Just
           utility you can verify on-chain.
         </div>

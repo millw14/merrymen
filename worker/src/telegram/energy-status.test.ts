@@ -89,7 +89,8 @@ describe("the energy line — spoken only while the gate enforces", () => {
   it("spent: back at 00:00 UTC, the doors still open, and /wallet for the address", () => {
     const l = line({ spent: true, entries: { used: 2, allowed: 2 } })!;
     assert.match(l, /^• energy: spent for today — back at 00:00 UTC\./);
-    assert.match(l, /Selling, stop-losses and your own orders still run/);
+    assert.match(l, /Stop-losses, take-profits and your own orders still run; my own AI reviews, including of my open positions, are paced\./);
+    assert.doesNotMatch(l, /\bselling\b/i, "an exit the AI decides is paced like the rest");
     assert.match(l, /\/wallet shows my address for \$MERRYMEN/);
     assert.doesNotMatch(l, /0x[0-9a-fA-F]{40}/, "the line never types an address; /wallet prints it from the ledger");
   });
@@ -121,7 +122,8 @@ describe("the energy line — spoken only while the gate enforces", () => {
     ];
     for (const over of arms) {
       const l = line(over) ?? "";
-      assert.doesNotMatch(l, /price|returns?\b|profit|moon|pump|buyback|burn|invest/i, l);
+      // "take-profit" names a sell rule; it is not a word about returns.
+      assert.doesNotMatch(l, /price|returns?\b|(?<!take-)profit|moon|pump|buyback|burn|invest/i, l);
     }
   });
 });

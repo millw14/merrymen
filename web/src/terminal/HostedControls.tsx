@@ -179,7 +179,7 @@ function EnergyFunding({energy,chainId}:{energy:EnergyStatus|null|undefined;chai
         : remedies.usdg==="resign"
           ? "Send $MERRYMEN on Robinhood Chain to this same address, or send USDG here, re-sign your agent's permission (free — its current key can't buy it), then ask it in chat to get its $MERRYMEN."
           : "Send $MERRYMEN on Robinhood Chain to this same address.";
-  return <><p className="fund-energy" role="status">Energy{view.spent ? " — spent for today, back at 00:00 UTC" : ""}: {standing}. Full strength needs {full} $MERRYMEN between your wallet and this account; below that your agent gets about a tenth of its daily AI reviews and new trades. Selling, stop-losses and your own orders are never limited.</p><p>{route} Or change nothing — it carries on at this pace.</p></>;
+  return <><p className="fund-energy" role="status">Energy{view.spent ? " — spent for today, back at 00:00 UTC" : ""}: {standing}. Full strength needs {full} $MERRYMEN between your wallet and this account; below that your agent gets about a tenth of its daily AI reviews and new trades. Stop-losses, take-profits and your own orders are never limited; its own AI reviews — including of its open positions — are paced along with the rest.</p><p>{route} Or change nothing — it carries on at this pace.</p></>;
 }
 
 /**

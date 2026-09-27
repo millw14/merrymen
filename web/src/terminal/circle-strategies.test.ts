@@ -251,6 +251,7 @@ describe("whose tokens each screen counts", () => {
   it("AND SAYS WHAT THE TOKEN IS FOR, and only that", () => {
     const settings = readFileSync(new URL("./screens/Settings.tsx", import.meta.url), "utf8");
     assert.match(settings, /\$MERRYMEN buys\s+capacity, nothing else — we make no promise about its price\./);
-    assert.match(settings, /Selling, stop-losses and your own orders are never limited\./);
+    assert.match(settings, /Stop-losses, take-profits and your own orders are never limited; its own AI\s+reviews — including of its open positions — are paced along with the rest\./);
+    assert.doesNotMatch(settings, /Selling, stop-losses/, "an exit the AI decides is paced; 'selling is never limited' was false");
   });
 });

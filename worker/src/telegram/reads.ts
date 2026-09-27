@@ -18,7 +18,7 @@ import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 // fall back to the single-tenant guess, or must refuse.
 import { liveBlockerText, priceSourceNote, priceSourceTag, isHostedMode, ENERGY } from "../../../packages/core/src/index";
 import type { EnergyStatus } from "../../../packages/core/src/index";
-import { count as countTokens } from "../energy-copy";
+import { count as countTokens, STILL_RUNS } from "../energy-copy";
 
 export function openRO(): DatabaseSync | null {
   const file = homePaths.db();
@@ -202,6 +202,9 @@ export interface StatusContext {
  *     run since 00:00 UTC) is not today's, and "spent" from it would be false.
  *   - point at the agent's account when it is on another network: tokens sent
  *     there would not count, so that arm names the owner's own wallet instead.
+ *   - say "selling is never limited". Stop-losses, take-profits and the owner's
+ *     own orders are; the agent's own AI reviews, including of its open positions,
+ *     are paced (energy-copy.ts STILL_RUNS).
  *
  * Exported for the test; readStatus is the only caller.
  */
@@ -218,7 +221,8 @@ export function energyStatusLine(e: EnergyStatus | null | undefined, nowSec: num
         ? `Full strength: ${countTokens(ENERGY.fullTokens)} $MERRYMEN in your own wallet on Robinhood Chain`
         : "/wallet shows my address for $MERRYMEN";
     return (
-      `• energy: spent for today — back at 00:00 UTC. Selling, stop-losses and your own orders still run.${unread} ${where}`
+      `• energy: spent for today — back at 00:00 UTC. ${STILL_RUNS.charAt(0).toUpperCase()}${STILL_RUNS.slice(1)}; ` +
+      `my own AI reviews, including of my open positions, are paced.${unread} ${where}`
     );
   }
   if (e.level === "unread") {

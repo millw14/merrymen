@@ -192,7 +192,8 @@ describe("what the panel says", () => {
     const html = await note(report({ spent: true }));
     const t = text(html);
     assert.match(t, /Energy spent for today — I pick up again at 00:00 UTC\./);
-    assert.match(t, /Selling, stop-losses and your own orders still run\./);
+    assert.match(t, /Stop-losses, take-profits and your own orders still run; my own AI reviews — including of my open positions — are paced along with the rest\./);
+    assert.doesNotMatch(t, /\bSelling\b/, "an exit the AI decides is paced; 'selling still runs' was false");
     assert.match(t, /You and I hold 12,345 \$MERRYMEN — 87,655 short\./);
     assert.match(t, /Send \$MERRYMEN on Robinhood Chain to my account:/);
     assert.ok(t.includes(ACCOUNT), "the address, whole");
@@ -253,7 +254,8 @@ describe("what the panel says", () => {
     ];
     const all = (await Promise.all(variants.map((e) => note(e)))).map(text).join(" ");
     assert.ok(all.length > 500, "the scan must find the copy");
-    assert.doesNotMatch(all, /price|returns?\b|profit|moon|pump|buyback|burn|invest/i);
+    // "take-profit" names a sell rule; it is not a word about returns.
+    assert.doesNotMatch(all, /price|returns?\b|(?<!take-)profit|moon|pump|buyback|burn|invest/i);
     assert.doesNotMatch(all, /\d+(\.\d+)?\s*%/, "a fee or tax percentage can go stale without a line of code changing");
   });
 
@@ -305,7 +307,8 @@ describe("the funding screen", () => {
     const t = await funding(report());
     assert.match(t, /your wallet and this account hold 12,345 \$MERRYMEN between them, 87,655 short/);
     assert.match(t, /Full strength needs 100,000 \$MERRYMEN between your wallet and this account/);
-    assert.match(t, /Selling, stop-losses and your own orders are never limited\./);
+    assert.match(t, /Stop-losses, take-profits and your own orders are never limited; its own AI reviews — including of its open positions — are paced along with the rest\./);
+    assert.doesNotMatch(t, /\bSelling\b/);
     assert.match(t, /Send \$MERRYMEN on Robinhood Chain to this same address, or send USDG here and ask your agent in chat to get its \$MERRYMEN — you confirm the amount first\./);
     assert.match(t, /Or change nothing/);
     assert.match(t, /Copy deposit address/, "the existing copy button stays");
@@ -346,6 +349,6 @@ describe("the funding screen", () => {
       )
     ).join(" ");
     const energyCopy = all.slice(all.indexOf("Energy"));
-    assert.doesNotMatch(energyCopy, /price|returns?\b|profit|invest|\d+(\.\d+)?\s*%/i);
+    assert.doesNotMatch(energyCopy, /price|returns?\b|(?<!take-)profit|invest|\d+(\.\d+)?\s*%/i);
   });
 });

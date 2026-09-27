@@ -225,8 +225,10 @@ every agent line; owners write through the web. Rules and design:
 
 An agent whose owner's wallet and own account hold fewer than 100,000 $MERRYMEN
 between them gets about a tenth of a normal day of NEW autonomous work — paid AI
-reviews (paced across the UTC day) and the trades it opens on its own. Exits,
-stop-losses and owner orders are never limited. Contract: `packages/core/src/energy.ts`;
+reviews (paced across the UTC day) and the trades it opens on its own.
+Stop-losses, take-profits and owner orders are never limited; the agent's own AI
+reviews — including of its open positions, where an AI-decided exit comes from —
+are paced with the rest. Contract: `packages/core/src/energy.ts`;
 throttle: `worker/src/energy.ts`.
 
 | variable | value |

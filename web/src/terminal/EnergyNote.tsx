@@ -114,7 +114,8 @@ export function EnergyNote({
       <strong>Energy spent for today — I pick up again at 00:00 UTC.</strong>
       <p>
         Without {full} $MERRYMEN between your wallet and my account I get about a tenth of my usual
-        daily AI reviews and new trades. Selling, stop-losses and your own orders still run.
+        daily AI reviews and new trades. Stop-losses, take-profits and your own orders still run; my own
+        AI reviews — including of my open positions — are paced along with the rest.
       </p>
       {view.kind === "unread" ? (
         <p>I couldn&apos;t read the $MERRYMEN balances — that&apos;s our read failing, not your wallet.</p>
