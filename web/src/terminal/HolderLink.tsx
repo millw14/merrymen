@@ -28,9 +28,76 @@ interface Linked {
 /** Which wallet the tier reads, per /api/holder PATCH; null when the server could not tell. */
 type Reads = "linked" | "login" | "none" | null;
 
+/**
+ * Why the linked wallet does or does not count, per /api/holder PATCH (the
+ * same claims read as `reads`); null when the server could not tell.
+ */
+export type ProofStanding = "counting" | "claimed-elsewhere" | "unclaimed" | null;
+
+/**
+ * THE LINKED WALLET, AND THE TRUTH ABOUT WHETHER IT COUNTS.
+ *
+ * "Not counting" has two causes with opposite remedies, and one sentence for
+ * both sent people the wrong way. A proof with NO claim — linked before claims
+ * existed and not yet backfilled, or left behind by an unlink or re-link that
+ * failed half-way — belongs to nobody else: signing once more is the whole
+ * fix. Telling that owner it "already powers another account — unlink it
+ * there" pointed at an account that did not exist. Only a claim held by
+ * another account is "powers another", and even then the wallet's own
+ * signature moves it here (once a day). Unknown says only what is known.
+ */
+export function LinkedWallet({
+  address,
+  standing,
+  busy,
+  onRelink,
+  onUnlink,
+}: {
+  address: string;
+  standing: ProofStanding;
+  busy: boolean;
+  onRelink: () => void;
+  onUnlink: () => void;
+}) {
+  const relink = (
+    <button type="button" className="copy-btn" onClick={onRelink} disabled={busy}>
+      link it again
+    </button>
+  );
+  return (
+    <div className="holder-linked">
+      {standing === "counting" ? (
+        <p>
+          Your tier reads <span className="mono">{address}</span>, proved by a signature from that wallet.
+        </p>
+      ) : standing === "unclaimed" ? (
+        <p>
+          <span className="mono">{address}</span> is linked but not counting yet. Link it again — one more
+          signature from it — and it counts here.
+        </p>
+      ) : standing === "claimed-elsewhere" ? (
+        <p>
+          <span className="mono">{address}</span> is linked but not counting here: it powers another merrymen
+          account right now, and a wallet powers one at a time. Link it again with a fresh signature from it to
+          move it here — a wallet can move once a day — or link a different wallet.
+        </p>
+      ) : (
+        <p>
+          <span className="mono">{address}</span> is linked, proved by a signature from that wallet.
+        </p>
+      )}
+      {(standing === "unclaimed" || standing === "claimed-elsewhere") && relink}
+      <button type="button" className="copy-btn" onClick={onUnlink} disabled={busy}>
+        unlink
+      </button>
+    </div>
+  );
+}
+
 export function HolderLink() {
   const [linked, setLinked] = useState<Linked | null>(null);
   const [reads, setReads] = useState<Reads>(null);
+  const [standing, setStanding] = useState<ProofStanding>(null);
   const [holder, setHolder] = useState("");
   const [challenge, setChallenge] = useState<{ message: string; nonce: string } | null>(null);
   const [signature, setSignature] = useState("");
@@ -41,9 +108,10 @@ export function HolderLink() {
   const refresh = useCallback(async () => {
     try {
       const r = await fetch("/api/holder", { method: "PATCH", cache: "no-store" });
-      const j = (await r.json()) as { linked?: Linked | null; reads?: Reads };
+      const j = (await r.json()) as { linked?: Linked | null; reads?: Reads; proof?: ProofStanding };
       setLinked(j.linked ?? null);
       setReads(j.reads ?? null);
+      setStanding(j.proof ?? null);
     } catch {
       /* an unreadable link is shown as none — never as an error on a settings page */
     }
@@ -53,13 +121,13 @@ export function HolderLink() {
   }, [refresh]);
 
   /** Ask the server for the exact bytes this wallet must sign. */
-  const start = async () => {
+  const start = async (address: string = holder.trim()) => {
     setError("");
     setNote("");
     setSignature("");
     setBusy(true);
     try {
-      const r = await fetch(`/api/holder?holder=${encodeURIComponent(holder.trim())}`, { cache: "no-store" });
+      const r = await fetch(`/api/holder?holder=${encodeURIComponent(address)}`, { cache: "no-store" });
       const j = (await r.json()) as { message?: string; nonce?: string; error?: string };
       if (!r.ok || !j.message || !j.nonce) throw new Error(j.error ?? "could not start");
       setChallenge({ message: j.message, nonce: j.nonce });
@@ -158,27 +226,22 @@ export function HolderLink() {
   return (
     <div className="holder-link">
       {linked ? (
-        <div className="holder-linked">
-          {reads === "linked" || reads === null ? (
-            <p>
-              Your tier reads <span className="mono">{linked.address}</span>, proved by a signature from
-              that wallet.
-            </p>
-          ) : (
-            <p>
-              <span className="mono">{linked.address}</span> is linked but not counting here: a wallet
-              can power one merrymen account, and it already powers another. Unlink it there, or link a
-              different wallet.
-            </p>
-          )}
-          <button type="button" className="copy-btn" onClick={() => void unlink()} disabled={busy}>
-            unlink
-          </button>
-        </div>
+        <LinkedWallet
+          address={linked.address}
+          standing={standing}
+          busy={busy}
+          onRelink={() => {
+            // The same wallet, signed for again: claims it if nobody holds
+            // it, or moves it here from the account that does.
+            setHolder(linked.address);
+            void start(linked.address);
+          }}
+          onUnlink={() => void unlink()}
+        />
       ) : (
         <p className="mm-hint">
           {reads === "none"
-            ? "The wallet you sign in with already powers another merrymen account, so it does not count here. "
+            ? "The wallet you sign in with powers another merrymen account right now, so it does not count here. To bring it back, link it below with a signature from it. "
             : "By default your tier reads the wallet you sign in with. "}
           If your $MERRYMEN is somewhere else, name that wallet and prove it with a signature from it.
           A wallet powers one merrymen account at a time: signing for it here moves it from any other

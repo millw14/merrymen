@@ -50,14 +50,13 @@
 import { NextResponse } from "next/server";
 import { recoverMessageAddress } from "viem";
 import { getSettingsStore, type HolderTake } from "@merrymen/settings-store";
-import { holderProofMessage, isHolderProof, isHostedMode } from "@merrymen/core";
+import { effectiveHolder, holderProofMessage, isHolderProof, isHostedMode } from "@merrymen/core";
 import {
   consumeChallengeNonce,
   issueChallengeNonce,
   requestOrigin,
   tenantOf,
 } from "@/lib/auth";
-import { holderWalletFor } from "@/lib/holder-wallet";
 
 export const dynamic = "force-dynamic";
 
@@ -268,22 +267,45 @@ export async function DELETE(req: Request) {
 }
 
 /**
- * What the settings screen shows — the linked wallet, or nothing — and which
- * wallet this account's tier actually reads: `linked`, `login`, or `none` when
- * another account holds the claim on every candidate. Null when the claims
- * could not be read; the screen then says nothing about it rather than guess.
+ * What the settings screen shows — the linked wallet, or nothing — which
+ * wallet this account's tier actually reads (`linked`, `login`, or `none`
+ * when another account holds the claim on every candidate), and WHY the
+ * linked wallet does or does not count:
+ *
+ *   counting           its claim names this account.
+ *   claimed-elsewhere  another account holds its claim. Signing again moves
+ *                      it here (once a day).
+ *   unclaimed          nobody holds it — linked before claims existed and not
+ *                      yet backfilled, or an unlink / re-link that failed
+ *                      half-way. Signing again claims it; there is no other
+ *                      account to go and unlink it from.
+ *
+ * `reads` alone could not tell the last two apart, and the screen told an
+ * owner with an unclaimed proof that it "already powers another account".
+ *
+ * ONE CLAIMS READ answers both, through effectiveHolder — the rule
+ * holderWalletFor applies for the tier screens — so they cannot disagree with
+ * each other. Nulls when the claims could not be read; the screen then says
+ * nothing about it rather than guess.
  */
 export async function PATCH(req: Request) {
   const tenant = requireTenant(req);
-  if (!tenant) return NextResponse.json({ linked: null, reads: null });
-  const stored = (await getSettingsStore().get(tenant)) ?? {};
-  const proof = stored.holderProof;
-  let reads: "linked" | "login" | "none" | null;
+  if (!tenant) return NextResponse.json({ linked: null, reads: null, proof: null });
+  const store = getSettingsStore();
+  const stored = (await store.get(tenant)) ?? {};
+  const proof = isHolderProof(stored.holderProof) ? stored.holderProof : null;
+  let reads: "linked" | "login" | "none" | null = null;
+  let standing: "counting" | "claimed-elsewhere" | "unclaimed" | null = null;
   try {
-    // The same resolver the tier screens use, so this cannot disagree with them.
-    reads = (await holderWalletFor(tenant))?.source ?? "none";
+    const claims = await store.holderClaims(proof ? [tenant, proof.address] : [tenant]);
+    reads = effectiveHolder(tenant, proof, (w) => claims.get(w))?.source ?? "none";
+    if (proof) {
+      const holder = claims.get(proof.address);
+      standing = holder === tenant.toLowerCase() ? "counting" : holder ? "claimed-elsewhere" : "unclaimed";
+    }
   } catch {
     reads = null;
+    standing = null;
   }
-  return NextResponse.json({ linked: isHolderProof(proof) ? proof : null, reads });
+  return NextResponse.json({ linked: proof, reads, proof: standing });
 }

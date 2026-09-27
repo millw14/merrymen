@@ -125,7 +125,7 @@ async function unlink(tenant: string) {
 }
 async function patch(tenant: string) {
   const res = await route.PATCH(new Request(`${ORIGIN}/api/holder`, { method: "PATCH", headers: cookie(tenant) }));
-  return (await res.json()) as { linked: { address: string } | null; reads: string | null };
+  return (await res.json()) as { linked: { address: string } | null; reads: string | null; proof: string | null };
 }
 const proofOf = async (tenant: string) => (await store.get(lc(tenant)))?.holderProof ?? null;
 
@@ -137,7 +137,7 @@ describe("POST /api/holder claims the wallet before it stores the proof", () => 
     assert.equal(res.status, 200, JSON.stringify(res.body));
     assert.equal((await proofOf(a.address))?.address, lc(w.address));
     assert.equal((await store.holderClaims()).get(lc(w.address)), lc(a.address));
-    assert.deepEqual(await patch(a.address), { linked: await proofOf(a.address), reads: "linked" });
+    assert.deepEqual(await patch(a.address), { linked: await proofOf(a.address), reads: "linked", proof: "counting" });
   });
 
   it("THE WALLET'S OWN FRESH SIGNATURE MOVES ITS CLAIM FROM ANOTHER ACCOUNT — which is never named", async () => {
@@ -153,20 +153,24 @@ describe("POST /api/holder claims the wallet before it stores the proof", () => 
     assert.equal(second.body.moved, true, "the signer is told it moved here");
     assert.ok(!JSON.stringify(second.body).toLowerCase().includes(lc(a.address)), "the other account is never named");
     assert.equal((await store.holderClaims()).get(lc(w.address)), lc(b.address), "the claim is b's now");
-    assert.deepEqual(await patch(b.address), { linked: await proofOf(b.address), reads: "linked" });
-    assert.deepEqual(await patch(a.address), { linked: await proofOf(a.address), reads: "login" }, "a's proof counts nowhere now");
+    assert.deepEqual(await patch(b.address), { linked: await proofOf(b.address), reads: "linked", proof: "counting" });
+    assert.deepEqual(
+      await patch(a.address),
+      { linked: await proofOf(a.address), reads: "login", proof: "claimed-elsewhere" },
+      "a's proof counts nowhere now — and a is told why",
+    );
   });
 
   it("A LOGIN WALLET TAKES ITSELF BACK: the whale signs for their own account and it counts there again", async () => {
     const attacker = newWallet();
     const whale = newWallet();
     assert.equal((await link(attacker.address, whale)).status, 200, "a phished signature claimed the whale's wallet");
-    assert.deepEqual(await patch(whale.address), { linked: null, reads: "none" }, "the whale's own account counted nothing");
+    assert.deepEqual(await patch(whale.address), { linked: null, reads: "none", proof: null }, "the whale's own account counted nothing");
     const back = await link(whale.address, whale);
     assert.equal(back.status, 200, JSON.stringify(back.body));
     assert.equal(back.body.moved, true);
-    assert.deepEqual(await patch(whale.address), { linked: await proofOf(whale.address), reads: "linked" });
-    assert.deepEqual(await patch(attacker.address), { linked: await proofOf(attacker.address), reads: "login" });
+    assert.deepEqual(await patch(whale.address), { linked: await proofOf(whale.address), reads: "linked", proof: "counting" });
+    assert.deepEqual(await patch(attacker.address), { linked: await proofOf(attacker.address), reads: "login", proof: "claimed-elsewhere" });
   });
 
   it("ONE MOVE PER WALLET PER UTC DAY: the next is 429, says when, names nobody, and stores nothing", async () => {
@@ -222,7 +226,7 @@ describe("POST /api/holder claims the wallet before it stores the proof", () => 
       put.mock.restore();
     }
     assert.equal((await store.holderClaims()).get(lc(w.address)), lc(a.address), "nothing changed");
-    assert.deepEqual(await patch(a.address), { linked: await proofOf(a.address), reads: "linked" });
+    assert.deepEqual(await patch(a.address), { linked: await proofOf(a.address), reads: "linked", proof: "counting" });
     assert.equal((await link(c.address, w)).status, 200, "the day's move is still there to use");
   });
 
@@ -251,7 +255,7 @@ describe("POST /api/holder claims the wallet before it stores the proof", () => 
     const a = newWallet();
     const b = newWallet();
     assert.equal((await link(b.address, a)).status, 200, "b links a's login wallet, with a's signature");
-    assert.deepEqual(await patch(a.address), { linked: null, reads: "none" });
+    assert.deepEqual(await patch(a.address), { linked: null, reads: "none", proof: null });
   });
 
   it("AN UNREADABLE STORE REFUSES — 503, no claim, no proof", async () => {
@@ -378,7 +382,7 @@ describe("DELETE /api/holder releases the claim", () => {
     assert.equal(await proofOf(a.address), null);
     assert.equal((await store.holderClaims()).has(lc(w.address)), false);
     assert.equal((await link(b.address, w)).status, 200);
-    assert.deepEqual(await patch(a.address), { linked: null, reads: "login" });
+    assert.deepEqual(await patch(a.address), { linked: null, reads: "login", proof: null });
   });
 
   it("an account with nothing linked unlinks to no effect, and never frees someone else's claim", async () => {
@@ -405,7 +409,7 @@ describe("DELETE /api/holder releases the claim", () => {
     }
     // Released first, so the proof still stored counts nowhere meanwhile…
     assert.equal((await store.holderClaims()).has(lc(w.address)), false);
-    assert.deepEqual(await patch(a.address), { linked: await proofOf(a.address), reads: "login" });
+    assert.deepEqual(await patch(a.address), { linked: await proofOf(a.address), reads: "login", proof: "unclaimed" });
     // …and the retry finds the proof and finishes.
     assert.equal((await unlink(a.address)).status, 200);
     assert.equal(await proofOf(a.address), null);
@@ -429,14 +433,35 @@ describe("DELETE /api/holder releases the claim", () => {
   });
 });
 
-describe("PATCH says which wallet the tier reads", () => {
+describe("PATCH says which wallet the tier reads — and why a linked one is not counting", () => {
+  it("AN UNCLAIMED PROOF IS 'unclaimed', NEVER 'another account has it' — and linking it again makes it count", async () => {
+    // Linked before claims existed and not yet backfilled (or left by a
+    // half-failed unlink): nobody else holds it. The screen used to tell this
+    // owner to go and unlink it from an account that does not exist.
+    const a = newWallet();
+    const w = newWallet();
+    await store.put(lc(a.address), { holderProof: { address: lc(w.address), at: 1 } });
+    assert.deepEqual(await patch(a.address), { linked: await proofOf(a.address), reads: "login", proof: "unclaimed" });
+    assert.equal((await link(a.address, w)).status, 200, "the same wallet, signed for again");
+    assert.deepEqual(await patch(a.address), { linked: await proofOf(a.address), reads: "linked", proof: "counting" });
+  });
+
+  it("a proof whose claim another account holds is 'claimed-elsewhere'", async () => {
+    const a = newWallet();
+    const b = newWallet();
+    const w = newWallet();
+    await store.put(lc(a.address), { holderProof: { address: lc(w.address), at: 1 } });
+    await store.claimHolder(lc(w.address), lc(b.address));
+    assert.equal((await patch(a.address)).proof, "claimed-elsewhere");
+  });
+
   it("and says nothing (null) when the claims cannot be read, rather than guess", async () => {
     const a = newWallet();
     const claims = mock.method(store, "holderClaims", async () => {
       throw new Error("Connection terminated unexpectedly");
     });
     try {
-      assert.deepEqual(await patch(a.address), { linked: null, reads: null });
+      assert.deepEqual(await patch(a.address), { linked: null, reads: null, proof: null });
     } finally {
       claims.mock.restore();
     }
