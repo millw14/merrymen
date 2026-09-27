@@ -4,8 +4,11 @@ import { describe, it } from "node:test";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import * as core from "@merrymen/core";
 import {
+  ENERGY_ROUTE_V1,
+  GRANT_ENERGY,
   GRANT_TRANSFER,
   WITHDRAWAL_ALLOWLIST_LANDED_AT,
+  grantEnergyRoute,
   grantHasTransfer,
   type StoredGrant,
 } from "@merrymen/core";
@@ -49,6 +52,10 @@ describe("grants from the real signer pass", () => {
     assert.ok(grant.grantFeatures?.includes("pons-class"), "the platform class factory should be sealed by default");
     assert.equal(grant.ponsClassVaultAddress, CLASS_VAULT);
     assert.equal(grant.ponsClassVaultFactoryAddress, CLASS_FACTORY);
+    // THE ENERGY BUY rides on the default mint: mainnet, and a class-only wall
+    // with no custom tokens has room for it even while paying for deployment.
+    assert.ok(grant.grantFeatures?.includes(GRANT_ENERGY), "the default mainnet wall has room for the energy buy");
+    assert.equal(grantEnergyRoute(grant), ENERGY_ROUTE_V1, "and the worker would read the route off it");
   });
 
   it("the opt-ins — a custom token with Trencher scope, and both adapters — and between them every accepted marker", async () => {
@@ -63,7 +70,20 @@ describe("grants from the real signer pass", () => {
     const { grant: adapters } = await signerGrant({ account: ACCOUNT, v4AdapterAddress: V4_ADAPTER, ponsAdapterAddress: PONS_ADAPTER });
     assert.deepEqual(verdict(adapters), { ok: true });
 
-    const minted = new Set([...(trench.grantFeatures ?? []), ...(adapters.grantFeatures ?? [])]);
+    // NEITHER carries the energy buy, and legitimately: a class+Trencher wall
+    // with a token, and a class wall with both adapters, have no room for it
+    // on a first install. They sign exactly the wall they signed before it
+    // existed — which is the point of sealing it only when it fits.
+    assert.ok(!trench.grantFeatures?.includes(GRANT_ENERGY), "no room for the energy buy beside Trencher and a token");
+    assert.ok(!adapters.grantFeatures?.includes(GRANT_ENERGY), "no room for the energy buy beside both adapters");
+
+    // So the default mint is what carries GRANT_ENERGY into the union.
+    const { grant: plain } = await signerGrant({ account: ACCOUNT });
+    const minted = new Set([
+      ...(trench.grantFeatures ?? []),
+      ...(adapters.grantFeatures ?? []),
+      ...(plain.grantFeatures ?? []),
+    ]);
     assert.deepEqual([...minted].sort(), [...CANONICAL_GRANT_FEATURES].sort());
   });
 
@@ -142,6 +162,35 @@ describe("an owner-enabled permission that is not the Merrymen wall is refused",
     refusedWith({ ...grant, grantFeatures: (grant.grantFeatures ?? []).filter((f) => f !== "trencher-vault-v1") }, "invalid_grant");
     // Pointed at a different adapter than the one the wall was sealed with.
     refusedWith({ ...grant, ponsAdapterAddress: ATTACKER }, "invalid_wall");
+  });
+
+  it("the energy marker and the energy permission, apart — in either direction", async () => {
+    // Permission without its marker: the worker would never use it, and the
+    // metadata would hide a power the wall grants.
+    const { grant, owner } = await signerGrant({ account: ACCOUNT });
+    assert.ok(grant.grantFeatures?.includes(GRANT_ENERGY), "premise: the default mint carries the energy buy");
+    refusedWith({ ...grant, grantFeatures: (grant.grantFeatures ?? []).filter((f) => f !== GRANT_ENERGY) }, "invalid_wall");
+
+    // Marker without its permission: the mirror would build a buy the chain
+    // refuses. Once over a wall re-sealed WITHOUT the router, once over a grant
+    // the signer minted without it (no room).
+    const bare = await resealed(grant, owner, { energyBuy: false });
+    refusedWith(bare, "invalid_wall");
+    const { grant: full } = await signerGrant({ account: ACCOUNT, extraTokens: [EXTRA], trencher: true });
+    assert.ok(!full.grantFeatures?.includes(GRANT_ENERGY), "premise: no room, no marker");
+    refusedWith({ ...full, grantFeatures: [...(full.grantFeatures ?? []), GRANT_ENERGY] }, "invalid_wall");
+  });
+
+  it("the energy marker on any chain but mainnet, even over a wall that carries the permission", async () => {
+    // The rebuild cannot see the chain, and the route is mainnet addresses: on
+    // testnet the router is codeless and a buy would "land" buying nothing.
+    const { grant } = await signerGrant({ account: ACCOUNT });
+    const v = refusedWith({ ...grant, chainId: 46630 }, "invalid_grant");
+    assert.match(v.ok ? "" : v.why, /only on Robinhood Chain mainnet/);
+    refusedWith({ ...grant, chainId: undefined }, "invalid_grant");
+    // And a testnet grant WITHOUT the marker is not this check's business.
+    const { grant: full } = await signerGrant({ account: ACCOUNT, extraTokens: [EXTRA], trencher: true });
+    assert.deepEqual(verdict({ ...full, chainId: 46630 }), { ok: true });
   });
 
   it("start or expiry edited beside a signature that says otherwise", async () => {
@@ -224,6 +273,9 @@ describe("the accepted markers are exactly what the signers can mint", () => {
         "ponsAdapterAddress",
         "ponsClassVaultAddress",
         "ponsClassVaultFactoryAddress",
+        // Rebuilt from the GRANT_ENERGY marker by grantWallOptions — a
+        // versioned route, so the marker is the whole sealed fact.
+        "energyBuy",
       ]);
       for (const key of keys) assert.ok(modelled.has(key), `${who} passes ${key} to the wall, which canonical-wall.ts does not rebuild`);
       assert.doesNotMatch(block[1], /withdrawalAddresses|allowRialto/, `${who} must not widen the wall with a transfer or Rialto`);
