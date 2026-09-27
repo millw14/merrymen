@@ -148,12 +148,15 @@ describe("only the verifying route may write a proof", () => {
     assert.match(post, /status: 503/, "and an unreadable store refuses rather than letting a second account in");
   });
 
-  it("AND UNLINKING RELEASES IT, before the proof is dropped", () => {
+  it("AND UNLINKING RELEASES EVERY CLAIM THE ACCOUNT HOLDS, before the proof is dropped", () => {
+    // By the claims, not the stored proof: a stale settings write can leave
+    // the proof naming a different wallet from the one claimed.
     const src = read("../app/api/holder/route.ts");
     const del = src.slice(src.indexOf("export async function DELETE"), src.indexOf("export async function PATCH"));
-    const release = del.indexOf("store.releaseHolder(gone.address, tenant)");
+    const release = del.indexOf("store.releaseHolderClaims(tenant)");
     const put = del.indexOf("store.put(tenant, rest)");
-    assert.ok(release > 0 && put > release, "released first, so a retry can always find the proof again");
+    assert.ok(release > 0 && put > release, "released first, so a retry can always finish the job");
+    assert.ok(!del.includes("releaseHolder("), "never only the wallet the proof happens to name");
   });
 });
 

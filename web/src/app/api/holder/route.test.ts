@@ -260,6 +260,50 @@ describe("POST /api/holder claims the wallet before it stores the proof", () => 
   });
 });
 
+describe("ONE CLAIM PER ACCOUNT — by the claims, whatever the stored proof says", () => {
+  it("A STALE SETTINGS WRITE PUT BACK THE OLD PROOF: unlink still frees the wallet actually claimed", async () => {
+    // The review's race: the owner saves settings while linking W1 over W0.
+    // The settings PUT read {proof W0}, the link claimed W1 and wrote
+    // {proof W1}, then the PUT wrote back {proof W0}. The claim on W1 has no
+    // proof left to find it by.
+    const a = newWallet();
+    const w0 = newWallet();
+    const w1 = newWallet();
+    assert.equal((await link(a.address, w0)).status, 200);
+    const stale = (await store.get(lc(a.address)))!;
+    assert.equal((await link(a.address, w1)).status, 200);
+    await store.put(lc(a.address), stale);
+    assert.equal((await store.holderClaims()).get(lc(w1.address)), lc(a.address), "set-up: W1 claimed, proof names W0");
+    assert.equal((await unlink(a.address)).status, 200);
+    const claims = await store.holderClaims();
+    assert.equal(claims.has(lc(w1.address)), false, "the claim no screen showed is released too");
+    assert.equal(claims.has(lc(w0.address)), false);
+    assert.equal(await proofOf(a.address), null);
+  });
+
+  it("LINKING RELEASES EVERY OTHER CLAIM THE ACCOUNT HOLDS, not only the one its proof names", async () => {
+    const a = newWallet();
+    const w0 = newWallet();
+    const stray = newWallet();
+    const w2 = newWallet();
+    assert.equal((await link(a.address, w0)).status, 200);
+    await store.claimHolder(lc(stray.address), lc(a.address)); // left by an earlier race
+    assert.equal((await link(a.address, w2)).status, 200);
+    assert.deepEqual([...(await store.holderClaims())], [[lc(w2.address), lc(a.address)]], "one account, one claim");
+  });
+
+  it("…and never anybody else's", async () => {
+    const a = newWallet();
+    const b = newWallet();
+    const wa = newWallet();
+    const wb = newWallet();
+    assert.equal((await link(a.address, wa)).status, 200);
+    assert.equal((await link(b.address, wb)).status, 200);
+    assert.equal((await unlink(a.address)).status, 200);
+    assert.equal((await store.holderClaims()).get(lc(wb.address)), lc(b.address));
+  });
+});
+
 describe("DELETE /api/holder releases the claim", () => {
   it("UNLINKED, THE WALLET IS FREE FOR ANOTHER ACCOUNT", async () => {
     const a = newWallet();
@@ -310,7 +354,7 @@ describe("DELETE /api/holder releases the claim", () => {
     const a = newWallet();
     const w = newWallet();
     assert.equal((await link(a.address, w)).status, 200);
-    const release = mock.method(store, "releaseHolder", async () => {
+    const release = mock.method(store, "releaseHolderClaims", async () => {
       throw new Error("Connection terminated unexpectedly");
     });
     try {

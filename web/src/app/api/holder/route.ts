@@ -189,11 +189,12 @@ export async function POST(req: Request) {
 
   try {
     const stored = (await store.get(tenant)) ?? {};
-    // RE-LINKING MOVES THE CLAIM. The wallet this account linked before is
-    // released first, so a failure below leaves at worst an unclaimed old
-    // proof — which counts nowhere — and a retry finishes the move.
-    const before = stored.holderProof;
-    if (isHolderProof(before) && before.address !== wallet) await store.releaseHolder(before.address, tenant);
+    // RE-LINKING MOVES THE CLAIM, AND AN ACCOUNT HOLDS ONE. Every other claim
+    // this account holds is released first — by the claims, not by the stored
+    // proof, which a stale settings write can have put back (a claim keyed on
+    // it would strand the one it missed). A failure below leaves at worst an
+    // unclaimed old proof, which counts nowhere, and a retry finishes the move.
+    await store.releaseHolderClaims(tenant, wallet);
     await store.put(tenant, {
       ...stored,
       holderProof: { address: wallet, at: Date.now() },
@@ -222,12 +223,15 @@ export async function DELETE(req: Request) {
   const store = getSettingsStore();
   try {
     const stored = (await store.get(tenant)) ?? {};
-    const { holderProof: gone, ...rest } = stored;
+    const { holderProof: _gone, ...rest } = stored;
+    // EVERY CLAIM THIS ACCOUNT HOLDS, whatever the stored proof names. A
+    // stale settings write can leave the proof naming one wallet while the
+    // claim sits on another; releasing by the proof would free the wrong one
+    // and leave the other held by an account whose screen cannot show it.
     // RELEASED BEFORE THE PROOF IS DROPPED, so a failure at either step is
     // safe to retry: a released claim with its proof still stored counts
-    // nowhere, and asking again finds the proof and finishes the job. The
-    // other order could strand a claim with no proof left to find it by.
-    if (isHolderProof(gone)) await store.releaseHolder(gone.address, tenant);
+    // nowhere, and asking again finishes the job.
+    await store.releaseHolderClaims(tenant);
     await store.put(tenant, rest);
   } catch {
     return NextResponse.json(

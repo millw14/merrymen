@@ -77,6 +77,17 @@ export interface SettingsStore {
   /** Release a claim — only if `tenant` holds it; anyone else's is left alone. */
   releaseHolder(wallet: string, tenant: string): Promise<void>;
   /**
+   * ONE CLAIM PER ACCOUNT: release EVERY claim `tenant` holds, except `keep`.
+   *
+   * By the claims themselves, never by the stored proof. The proof lives in a
+   * settings blob that several writers read and write back whole (the
+   * settings PUT, x-proof, the orchestrator's promotions, a second tab), so a
+   * stale write can put back an old proof after a link moved on — and a
+   * release keyed on the proof then frees the wrong wallet and strands the
+   * right one: a claim no screen names and no unlink can find.
+   */
+  releaseHolderClaims(tenant: string, keep?: string): Promise<void>;
+  /**
    * wallet → the account holding it, lower-cased. Every claim, or only those
    * among `wallets` (the web asks about two; the orchestrator reads the whole
    * table once per reconcile rather than once per tenant). Throws when
@@ -234,10 +245,32 @@ export class FileSettingsStore implements SettingsStore {
     throw new Error("holder claim: the wallet's claim kept changing — try again");
   }
   async releaseHolder(wallet: string, tenant: string): Promise<void> {
-    const w = claimKey("wallet", wallet);
-    const t = claimKey("tenant", tenant);
+    await this.releaseIfHeld(claimKey("wallet", wallet), claimKey("tenant", tenant));
+  }
+  /** Remove `w`'s claim only if `t` holds it. */
+  private async releaseIfHeld(w: `0x${string}`, t: `0x${string}`): Promise<void> {
     if ((await this.claimHolderOf(w)) !== t) return; // not ours to release
     await rm(this.claimFile(w), { force: true });
+  }
+  /**
+   * No index by account on disk, so every claim is read. A claim that will
+   * not read throws, as everywhere else here: it might be this account's.
+   */
+  async releaseHolderClaims(tenant: string, keep?: string): Promise<void> {
+    const t = claimKey("tenant", tenant);
+    const k = keep === undefined ? null : claimKey("wallet", keep);
+    let names: string[];
+    try {
+      names = await readdir(this.claimsDir);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw e;
+    }
+    for (const f of names) {
+      if (!/^0x[0-9a-f]{40}\.json$/.test(f)) continue;
+      const w = f.slice(0, -5) as `0x${string}`;
+      if (w !== k) await this.releaseIfHeld(w, t);
+    }
   }
   async holderClaims(wallets?: readonly string[]): Promise<Map<string, `0x${string}`>> {
     let keys: `0x${string}`[];
@@ -445,6 +478,13 @@ export class PgSettingsStore implements SettingsStore {
       claimKey("wallet", wallet),
       claimKey("tenant", tenant),
     ]);
+  }
+  /** One DELETE on the account, so it clears strays whatever put them there. */
+  async releaseHolderClaims(tenant: string, keep?: string): Promise<void> {
+    const t = claimKey("tenant", tenant);
+    const c = await this.client();
+    if (keep === undefined) await c.query(`DELETE FROM holder_claims WHERE tenant = $1`, [t]);
+    else await c.query(`DELETE FROM holder_claims WHERE tenant = $1 AND wallet <> $2`, [t, claimKey("wallet", keep)]);
   }
   async holderClaims(wallets?: readonly string[]): Promise<Map<string, `0x${string}`>> {
     const keys = wallets

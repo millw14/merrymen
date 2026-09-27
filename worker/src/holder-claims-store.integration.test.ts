@@ -95,6 +95,20 @@ function behavesAsAClaimsRecord(name: string, make: () => Store) {
       await s.releaseHolder(W2, A); // nothing to release — not an error
     });
 
+    it("ONE CLAIM PER ACCOUNT: releaseHolderClaims frees every claim the account holds but `keep`, and nobody else's", async () => {
+      const s = make();
+      const W3 = "0x000000000000000000000000000000000000d00d";
+      await s.claimHolder(W, A);
+      await s.claimHolder(W2, A);
+      await s.claimHolder(W3, B);
+      await s.releaseHolderClaims(A, W2);
+      assert.deepEqual(new Map(await s.holderClaims()), new Map([[W2, A], [W3, B]]), "kept W2, freed W, left B's alone");
+      await s.releaseHolderClaims(A.toUpperCase().replace("0X", "0x"));
+      assert.deepEqual(new Map(await s.holderClaims()), new Map([[W3, B]]), "no keep: every claim of A's, case aside");
+      await s.releaseHolderClaims(A); // nothing left — not an error
+      await assert.rejects(s.releaseHolderClaims("someone"));
+    });
+
     it("holderClaims reads every claim, or only the wallets asked about", async () => {
       const s = make();
       await s.claimHolder(W, A);
@@ -172,6 +186,7 @@ describe("FileSettingsStore specifics", () => {
     await assert.rejects(s.holderClaims([W]));
     await assert.rejects(s.claimHolder(W, B), "B must be refused, not handed a wallet whose holder we cannot read");
     await assert.rejects(s.releaseHolder(W, A));
+    await assert.rejects(s.releaseHolderClaims(A), "it might be A's: an unlink that cannot tell must not say done");
   });
 
   it("the backfill record lives beside the claims, not among them, and a torn one throws", async () => {
@@ -262,6 +277,15 @@ describe("PgSettingsStore specifics", () => {
     const s = new PgSettingsStore("postgres://stand-in", async () => sqliteClient({ log }));
     await s.releaseHolder(W, A);
     assert.ok(log.includes("DELETE FROM holder_claims WHERE wallet = $1 AND tenant = $2"), log.join("\n"));
+  });
+
+  it("an account's claims go in ONE DELETE on the account", async () => {
+    const log: string[] = [];
+    const s = new PgSettingsStore("postgres://stand-in", async () => sqliteClient({ log }));
+    await s.releaseHolderClaims(A, W);
+    await s.releaseHolderClaims(A);
+    assert.ok(log.includes("DELETE FROM holder_claims WHERE tenant = $1 AND wallet <> $2"), log.join("\n"));
+    assert.ok(log.includes("DELETE FROM holder_claims WHERE tenant = $1"), log.join("\n"));
   });
 });
 
