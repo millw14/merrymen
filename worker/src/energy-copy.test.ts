@@ -4,7 +4,8 @@
  * The sentence reaches an owner through the notice slot on the web desk, iOS
  * and Android, and it asks them to move tokens or money. So each variant is
  * executed and held to the same rules: dated, naming Robinhood Chain, saying
- * that exits and their own orders still run, carrying the agent's address in
+ * exactly what still runs (stop-losses, take-profits, their own orders) and
+ * that the agent's own AI reviews are paced, carrying the agent's address in
  * full exactly when sending there would count — and never saying anything
  * about the token's price or returns, or "you hold 0" about a wallet nobody
  * managed to read.
@@ -52,7 +53,15 @@ describe("every variant keeps the promises", () => {
       assert.ok(text.startsWith(ENERGY_NOTICE_PREFIX), text);
       assert.ok(text.startsWith("Energy spent for 27 Sep (UTC): "), text);
       assert.match(text, /Robinhood Chain/);
-      assert.match(text, /stop-losses and your own orders still run/);
+      assert.match(text, /[Ss]top-losses, take-profits and your own orders still run/);
+      assert.match(text, /My own AI reviews — including of my open positions — are paced/);
+      // "Selling is never limited" was false: an exit the AI decides waits for
+      // a paced review like anything else it starts on its own.
+      assert.doesNotMatch(text, /\bselling\b/i, text);
+      // The allowance is a tenth of the HOUSE baselines, not of the owner's own
+      // preset or interval — "my usual" overstated it for Balanced and Bold.
+      assert.match(text, /about a tenth of a standard day's AI reviews and new trades/);
+      assert.doesNotMatch(text, /my usual/);
       assert.match(text, /00:00 UTC/);
       assert.match(text, /100,000/);
     });
@@ -62,7 +71,8 @@ describe("every variant keeps the promises", () => {
       if (!notMainnet) assert.equal(ACCOUNT.length, 42);
     });
     it(`${name}: nothing about price or returns`, () => {
-      assert.doesNotMatch(text, /price|returns?\b|profit|moon|pump|buyback|burn|investment/i, text);
+      // "take-profit" is the name of a sell rule, not a word about returns.
+      assert.doesNotMatch(text, /price|returns?\b|(?<!take-)profit|moon|pump|buyback|burn|investment/i, text);
       // The ONE dollar figure: the worker's estimate, and only when it is known.
       const dollars = text.match(/\$\d/g) ?? [];
       const known = (over.estimateUsdg === undefined ? BASE.estimateUsdg : over.estimateUsdg) !== null;
@@ -81,8 +91,9 @@ describe("the arms", () => {
     assert.equal(
       t,
       "Energy spent for 27 Sep (UTC): without 100,000 $MERRYMEN between your wallet and my account I get about a " +
-        "tenth of my usual daily AI reviews and new trades, and today's are used up. Nothing is broken — selling, " +
-        "stop-losses and your own orders still run, and I pick up again at 00:00 UTC. You and I hold 12,345 between " +
+        "tenth of a standard day's AI reviews and new trades, and today's new trades are used up. Nothing is broken — stop-losses, " +
+        "take-profits and your own orders still run, and I pick up again at 00:00 UTC. My own AI reviews — including " +
+        "of my open positions — are paced along with everything else I start on my own. You and I hold 12,345 between " +
         "us (87,655 short). For full strength, send $MERRYMEN on Robinhood Chain to my account " +
         `${ACCOUNT} (or keep it in your own wallet ${HOLDER} — both count), or send USDG to my account and ask me ` +
         "in chat to get my $MERRYMEN — you confirm the amount first (about $37.12 of USDG at the pool's current " +

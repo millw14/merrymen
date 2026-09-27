@@ -2,8 +2,9 @@
  * WHAT THE OWNER READS WHEN TODAY'S ENERGY RUNS OUT.
  *
  * One sentence-set, written by the worker and never by a model, sent once per
- * UTC day at the first new trade the limit actually withheld (index.ts, behind
- * a durable told_at claim). Pure, so every variant is executed by
+ * UTC day — when the day's new trades are used up, or at the first new trade
+ * the limit withheld, whichever comes first (index.ts tellEnergySpent, behind a
+ * durable told_at claim). Pure, so every variant is executed by
  * energy-copy.test.ts rather than read.
  *
  * WHAT IT MUST ALWAYS SAY, whichever arm it takes:
@@ -12,13 +13,20 @@
  *     midnight — "today's energy is spent" would then be false, "Energy spent
  *     for 27 Sep (UTC)" stays true. It starts with ENERGY_NOTICE_PREFIX so the
  *     desk can recognise it beside the standing banner.
- *   - that nothing is broken: selling, stop-losses and the owner's own orders
- *     still run, and the allowance comes back at 00:00 UTC.
+ *   - what still runs, EXACTLY: stop-losses, take-profits and the owner's own
+ *     orders, and the allowance comes back at 00:00 UTC. Not "selling": the
+ *     agent's own AI reviews — including its reviews of its open positions, where
+ *     an exit it would decide on comes from — are paced with everything else
+ *     it starts on its own (STILL_RUNS, PACED below).
  *   - the network by name — Robinhood Chain — whenever it asks for tokens.
  *   - the agent's FULL address, written here from the grant, never by a model:
  *     one wrong character and whatever is sent there is gone. Except when the
  *     account is on another network, where tokens sent to it would not count
  *     and it is not printed at all.
+ *
+ * "A TENTH OF A STANDARD DAY", never "of my usual": the allowance is a tenth
+ * of the HOUSE baselines (energy.ts), which an owner on a bigger preset or a
+ * shorter strategist interval would read as far less than a tenth of theirs.
  *
  * WHAT IT MUST NEVER SAY. Anything about the token's price, where it is going,
  * or returns (token.ts STANCE). $MERRYMEN is energy here, nothing more. The one
@@ -31,7 +39,7 @@ import { ENERGY, ENERGY_NOTICE_PREFIX } from "../../packages/core/src/index";
 import type { EnergyBuy, EnergyLevel } from "../../packages/core/src/index";
 
 export interface EnergyNoticeFacts {
-  /** The UTC day the entry was withheld, 'YYYY-MM-DD'. */
+  /** The UTC day whose allowance is used up, 'YYYY-MM-DD'. */
   day: string;
   /** The agent's smart account, in full. */
   account: string;
@@ -44,7 +52,7 @@ export interface EnergyNoticeFacts {
   level: EnergyLevel;
   /** The worker's reading of whether it can buy its own energy; null when not said. */
   buy: EnergyBuy | null;
-  /** USDG that would buy the shortfall now, fees and tax included; null when unknown. */
+  /** USDG the energy buy would ask now, sized as it buys (margin, slippage, fees, tax); null when unknown. */
   estimateUsdg: number | null;
 }
 
@@ -83,6 +91,19 @@ function usd(n: number): string {
 
 const MAINNET = 4663;
 
+/**
+ * WHAT STILL RUNS, AND WHAT IS PACED — said the same way in every arm.
+ *
+ * "Selling is never limited" was the old promise and it was false for exits
+ * the AI decides: a strategist window and a Brain review of a held position
+ * spend the same paced review allowance as everything else (index.ts, the
+ * Brain wake guard; strategy.ts, claimWindow). Only the mechanical rules and
+ * the owner's own orders never ask. An owner holding through a drop must not
+ * be told the AI is still managing the exit when it waits for its next window.
+ */
+export const STILL_RUNS = "stop-losses, take-profits and your own orders still run";
+export const PACED = "My own AI reviews — including of my open positions — are paced along with everything else I start on my own.";
+
 export function energyNotice(f: EnergyNoticeFacts, style: EnergyNoticeStyle = {}): string {
   const addr = style.address ?? ((a: string) => a);
   const chat = style.chatPlace ?? "in chat";
@@ -96,17 +117,17 @@ export function energyNotice(f: EnergyNoticeFacts, style: EnergyNoticeStyle = {}
   // ── what happened ──
   if (unread) {
     parts.push(
-      `I couldn't read the $MERRYMEN balances, so I've been on the reduced allowance — about a tenth of my usual ` +
-        `daily AI reviews and new trades — and today's is used up. That's our read failing, not your wallet: if you ` +
+      `I couldn't read the $MERRYMEN balances, so I've been on the reduced allowance — about a tenth of a standard ` +
+        `day's AI reviews and new trades — and today's new trades are used up. That's our read failing, not your wallet: if you ` +
         `already hold ${full} ${where}, it lifts on the next good read.`,
     );
-    parts.push("Selling, stop-losses and your own orders still run, and I pick up again at 00:00 UTC.");
+    parts.push(`${STILL_RUNS.charAt(0).toUpperCase()}${STILL_RUNS.slice(1)}, and I pick up again at 00:00 UTC. ${PACED}`);
   } else {
     parts.push(
-      `without ${full} $MERRYMEN ${where} I get about a tenth of my usual daily AI reviews and new trades, ` +
-        `and today's are used up.`,
+      `without ${full} $MERRYMEN ${where} I get about a tenth of a standard day's AI reviews and new trades, ` +
+        `and today's new trades are used up.`,
     );
-    parts.push("Nothing is broken — selling, stop-losses and your own orders still run, and I pick up again at 00:00 UTC.");
+    parts.push(`Nothing is broken — ${STILL_RUNS}, and I pick up again at 00:00 UTC. ${PACED}`);
   }
 
   // ── where they stand, only when it is known ──

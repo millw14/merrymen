@@ -192,6 +192,7 @@ import {
   entryAllowance,
   reviewAllowance,
   shouldTellOwner,
+  shouldTellOwnerSpent,
   usdgCentsUp,
   utcDay,
   type BalanceParts,
@@ -200,7 +201,7 @@ import {
 } from "./energy";
 import type { EnergyStatus } from "../../packages/core/src/index";
 import { count as countTokens, energyNotice } from "./energy-copy";
-import { energyAmountInFor, energyMinOut, grossNeededFor, quoteEnergyOut, readEnergyTaxBps } from "./venues/uniswap-v2";
+import { energyAmountInFor, energyMinOut, quoteEnergyOut, readEnergyTaxBps } from "./venues/uniswap-v2";
 // ── THE ENERGY BUY: the owner's own confirmed order for the agent's $MERRYMEN.
 // The planner and its sentences are energy-buy.ts; the two calls are
 // venues/uniswap-v2-energy.ts; the booking is energy-settle.ts. None of them is
@@ -211,6 +212,8 @@ import {
   ENERGY_NOT_MAINNET,
   ENERGY_NO_SELL,
   ENERGY_RESIGN,
+  energyAskFor,
+  energyGrossFor,
   energyNeedsLiveLine,
   isEnergySymbol,
   planEnergyBuy,
@@ -3879,7 +3882,7 @@ async function main() {
    * account in the same process, and one account's reading is not another's.
    */
   let energyLastGood: { agentId: string; good: LastGood | null } | undefined;
-  /** An entry was withheld by energy since the last plan — the moment the owner is told. */
+  /** An entry was withheld by energy since the last plan — one of the two moments the owner is told (tellEnergySpent). */
   let energyWithheld = false;
   /**
    * THE WORKER'S OWN REPORT, as published on the agents row this tick. Kept in
@@ -3949,18 +3952,19 @@ async function main() {
     await refundEnergy(claim.agentId, claim.day, "entries");
   }
   /**
-   * AN ENTRY WAS WITHHELD: note it, and tell the owner — once per UTC day.
+   * TELL THE OWNER TODAY'S ENERGY IS SPENT — at most once per UTC day, from
+   * either moment that decides it (withholdEntry, or refreshEnergy seeing the
+   * day's new trades used up). One helper, so the claim and the sentence exist
+   * once.
    *
-   * Told at the FIRST withheld entry, the moment the limit cost them a trade,
-   * not on a paced review. The durable told_at claim goes FIRST and the event
-   * second, so a crash between them loses the message rather than sending it
-   * twice, and a redeploy (which seeds told_at back) does not send it again.
-   * Never public: a warn event is the owner's register, and the sentence is
-   * worker-written — the address in it comes from the grant, never a model.
+   * The durable told_at claim goes FIRST and the event second, so a crash
+   * between them loses the message rather than sending it twice, and a
+   * redeploy (which seeds told_at back) does not send it again. Never public:
+   * a warn event is the owner's register, and the sentence is worker-written —
+   * the address in it comes from the grant, never a model.
    */
-  async function withholdEntry(agentId: string): Promise<void> {
-    energyWithheld = true;
-    if (!active || !shouldTellOwner(energyNow, energyWithheld)) return;
+  async function tellEnergySpent(agentId: string): Promise<void> {
+    if (!active) return;
     const now = Math.floor(Date.now() / 1000);
     const claimed = await claimEnergyNotice(agentId, energyNow.day, now);
     energyNow = { ...energyNow, told: true };
@@ -3981,25 +3985,37 @@ async function main() {
       }),
     );
   }
+  /**
+   * AN ENTRY WAS WITHHELD: note it, and tell the owner if today's notice has
+   * not gone — the moment the limit cost them a trade, not a paced review.
+   */
+  async function withholdEntry(agentId: string): Promise<void> {
+    energyWithheld = true;
+    if (!active || !shouldTellOwner(energyNow, energyWithheld)) return;
+    await tellEnergySpent(agentId);
+  }
 
   /**
-   * WHAT THE SHORTFALL WOULD COST IN USDG RIGHT NOW, or null when unknown.
+   * WHAT THE BUY WOULD ASK IN USDG RIGHT NOW, or null when unknown.
    *
-   * The route's own arithmetic (venues/uniswap-v2.ts) over the tick's metered
-   * mainnet client — no new transport: the $MERRYMEN still missing, grossed up
-   * for the token's buy tax read fresh, priced by getAmountsIn (both pools'
-   * fees included), rounded UP to the cent. Unknown whenever any input is: a
-   * half-read balance, an unreadable or out-of-bounds tax, a pool that will
-   * not quote. It is shown to the owner as an estimate and nothing is bought
-   * on it — the buy itself re-prices at confirmation.
+   * Sized EXACTLY as the buy itself is (energy-buy.ts energyGrossFor and
+   * energyAskFor): the $MERRYMEN still missing plus its rounding margin,
+   * grossed up for the token's buy tax read fresh and the owner's own slippage
+   * tolerance, priced by getAmountsIn over the tick's metered mainnet client
+   * (both pools' fees included), rounded UP to the cent and never under the
+   * smallest buy. It once priced the bare shortfall at zero slippage and so
+   * under-stated the ask the owner then confirmed. Unknown whenever any input
+   * is: a half-read balance, an unreadable or out-of-bounds tax, a pool that
+   * will not quote. It is shown as an estimate and nothing is bought on it —
+   * the buy itself re-prices at confirmation.
    */
   async function estimateEnergyUsdg(client: PublicClient, parts: BalanceParts): Promise<number | null> {
     const shortRaw = energyShortfallRaw(parts);
     if (shortRaw === null || shortRaw <= 0n) return null;
     const tax = await readEnergyTaxBps(client);
     if (tax === null || tax > ENERGY.maxTaxBps) return null;
-    const amountIn = await energyAmountInFor(client, grossNeededFor(shortRaw, tax, 0));
-    return amountIn === null ? null : usdgCentsUp(amountIn);
+    const amountIn = await energyAmountInFor(client, energyGrossFor(shortRaw, tax, cfg.slippageBps));
+    return amountIn === null ? null : usdgCentsUp(energyAskFor(amountIn));
   }
 
   /**
@@ -4059,7 +4075,7 @@ async function main() {
         nowSec: now,
       });
       if (grant.chainId === MERRYMEN_TOKEN.chainId && level !== "full" && active) {
-        const key = `${agentId}:${energyShortfallRaw(parts) ?? "unknown"}`;
+        const key = `${agentId}:${energyShortfallRaw(parts) ?? "unknown"}:${cfg.slippageBps}`;
         if (energyEstimate && energyEstimate.key === key && now - energyEstimate.at < ENERGY.estimateEverySec) {
           estimate = energyEstimate.value;
         } else {
@@ -4084,6 +4100,12 @@ async function main() {
       nowSec: now,
     });
     void setAgentEnergy(agentId, JSON.stringify(energyReport));
+    // THE DAY'S NEW TRADES ARE USED UP: tell the owner now, not only at a
+    // withheld entry. The Trencher, the Brain, the strategist and the class
+    // route all stop proposing entries once spent, so a withheld one may never
+    // come — and on iOS and Android this dated warn is the only word the owner
+    // gets. After the report, so the notice carries this tick's figures.
+    if (shouldTellOwnerSpent(energyNow)) await tellEnergySpent(agentId);
   }
   let lastSequencerUp = true;
   // A feedless holding never resolves, so warn ONCE while it's held rather than

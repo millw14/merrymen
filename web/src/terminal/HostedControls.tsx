@@ -165,11 +165,18 @@ function EnergyFunding({energy,chainId}:{energy:EnergyStatus|null|undefined;chai
   if(view.kind==="none") return null;
   const remedies=energyRemedies(energy,chainId);
   const full=count(ENERGY.fullTokens);
+  // "Couldn't read" ONLY for a read that failed. No wallet that counts (none
+  // linked, or it already powers another account) is a knowable nothing, and
+  // pointing the owner at an outage that does not exist sends them the wrong way.
   const standing=view.kind==="unread"
     ? "we couldn't read the $MERRYMEN balances — that's our read failing, not your wallet"
     : view.total!==null
-      ? `your wallet and this account hold ${count(view.total)} $MERRYMEN between them, ${count(view.short)} short`
-      : "we couldn't read every $MERRYMEN balance just now, so we can't say how far short";
+      ? view.noWallet
+        ? `this account holds ${count(view.total)} $MERRYMEN, ${count(view.short)} short — no wallet of yours counts toward it`
+        : `your wallet and this account hold ${count(view.total)} $MERRYMEN between them, ${count(view.short)} short`
+      : view.readFailed
+        ? "we couldn't read every $MERRYMEN balance just now, so we can't say how far short"
+        : "no wallet of yours counts toward it yet";
   const route=!remedies.sendToAgent
     ? `This account is on another network, so $MERRYMEN sent to it would not count — keep ${full} on Robinhood Chain in your own wallet.`
     : remedies.usdg==="ready"
@@ -179,7 +186,7 @@ function EnergyFunding({energy,chainId}:{energy:EnergyStatus|null|undefined;chai
         : remedies.usdg==="resign"
           ? "Send $MERRYMEN on Robinhood Chain to this same address, or send USDG here, re-sign your agent's permission (free — its current key can't buy it), then ask it in chat to get its $MERRYMEN."
           : "Send $MERRYMEN on Robinhood Chain to this same address.";
-  return <><p className="fund-energy" role="status">Energy{view.spent ? " — spent for today, back at 00:00 UTC" : ""}: {standing}. Full strength needs {full} $MERRYMEN between your wallet and this account; below that your agent gets about a tenth of its daily AI reviews and new trades. Selling, stop-losses and your own orders are never limited.</p><p>{route} Or change nothing — it carries on at this pace.</p></>;
+  return <><p className="fund-energy" role="status">Energy{view.spent ? " — spent for today, back at 00:00 UTC" : ""}: {standing}. Full strength needs {full} $MERRYMEN between your wallet and this account; below that your agent gets about a tenth of a standard day's AI reviews and new trades. Stop-losses, take-profits and your own orders are never limited; its own AI reviews — including of its open positions — are paced along with the rest.</p><p>{route} Or change nothing — it carries on at this pace.</p></>;
 }
 
 /**

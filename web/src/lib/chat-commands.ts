@@ -385,8 +385,8 @@ const REGISTRY: ChatCommand[] = [
    * any buy, so the owner check, the hashed id, the one-at-a-time slot, the
    * expiry, the chat ceiling and the ferry all apply unchanged, and the web,
    * iOS and Android confirm it with code they already have. The WORKER is the
-   * resolver: it routes this one symbol to its energy buy, buys only the
-   * shortfall over the one sealed route, and refuses — through the ordinary
+   * resolver: it routes this one symbol to its energy buy, sizes it to cover
+   * the shortfall over the one sealed route, and refuses — through the ordinary
    * order result — when the agent is already full, practising on paper, holding
    * a key that cannot buy it, short of cash or unable to read the balances.
    *
@@ -394,6 +394,13 @@ const REGISTRY: ChatCommand[] = [
    * prompt-injected proposal cannot turn "get your energy" into a buy of
    * something else, or a sell. The one value it supplies, `usdgAmount`, is the
    * MOST the owner will spend on it, and it is on the card they confirm.
+   *
+   * IT SAYS WHAT THE SIZING DOES, NOT "ONLY WHAT'S MISSING". The planner
+   * (worker/src/energy-buy.ts energyGrossFor) sizes for the shortfall plus a
+   * rounding margin, grossed up through the owner's slippage tolerance and the
+   * token's tax, and never below the smallest buy — so a typical fill lands a
+   * little over the shortfall, and the fees and tax are paid out of the USDG
+   * rather than coming out of what arrives. That is what the card says.
    *
    * THE SENTENCE PRINTS NO FEE OR TAX PERCENTAGE. The token's own trading tax is
    * set by its owner and can change without a line of our code changing; a
@@ -408,9 +415,10 @@ const REGISTRY: ChatCommand[] = [
     weighty: true,
     say: (a) =>
       `Spend up to ${money(a.usdgAmount)} of my real USDG on the $MERRYMEN I'm short of ${count(ENERGY.fullTokens)} — ` +
-      `through Uniswap on Robinhood Chain (USDG → VIRTUAL → $MERRYMEN), and only what's missing. ` +
-      `Pool fees and the token's own trading tax come out of what arrives. It stays in my account as energy; ` +
-      `my key can't sell or send it. I'll place it — my key's limits still decide whether it goes through.`,
+      `through Uniswap on Robinhood Chain (USDG → VIRTUAL → $MERRYMEN). I size it to cover what's missing, with a ` +
+      `small margin for price movement (at least $1.00); the pool fees and the token's own tax are paid out of the USDG. ` +
+      `It stays in my account as energy; my key can't sell or send it. I'll place it — my key's limits still decide ` +
+      `whether it goes through.`,
   },
   // ── the ones that only take you somewhere ────────────────────────────────
   {

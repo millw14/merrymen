@@ -59,11 +59,13 @@ export default function TokenPage() {
         </p>
 
         <div className="callout">
-          <strong>$MERRYMEN is your agent&apos;s energy.</strong> On the hosted service an agent runs at
-          full strength while your wallet and its own account hold 100,000 $MERRYMEN between them.
+          <strong>$MERRYMEN is your agent&apos;s energy.</strong> When the hosted service gates energy (an
+          operator switch, off until it is turned on), an agent runs at full strength while your wallet
+          and its own account hold 100,000 $MERRYMEN between them.
           Without it, it still runs — on about a tenth of a normal day of paid AI reviews and new trades
-          it opens on its own, resetting at 00:00 UTC — and selling, stop-losses and your own orders are
-          never limited. merrymen stays open source and self-hostable, and a self-hosted install is
+          it opens on its own, resetting at 00:00 UTC. Stop-losses, take-profits and your own orders are
+          never limited; its own AI reviews, including of its open positions, are paced with the rest.
+          merrymen stays open source and self-hostable, and a self-hosted install is
           never gated. There is no price talk, no promise of returns, no buyback or burn here. Just
           utility you can verify on-chain.
         </div>
@@ -72,8 +74,10 @@ export default function TokenPage() {
         <p>
           Send $MERRYMEN on Robinhood Chain to your agent&apos;s account (or keep it in your own linked
           wallet — both count). Or send the agent USDG and ask it in chat to get its $MERRYMEN: you
-          confirm the most it may spend, it buys only what is missing over one pinned Uniswap route
-          (USDG → VIRTUAL → $MERRYMEN), inside the limits you signed. Its key can buy $MERRYMEN into its
+          confirm the most it may spend, and it sizes the buy to cover what is missing, with a small
+          margin for price movement (at least $1.00), over one pinned Uniswap route (USDG → VIRTUAL →
+          $MERRYMEN), inside the limits you signed. The pool fees and the token&apos;s own tax are paid
+          out of the USDG. Its key can buy $MERRYMEN into its
           own account and can never sell or send it; only your owner key moves it out.
         </p>
 

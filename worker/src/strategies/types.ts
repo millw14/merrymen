@@ -158,8 +158,10 @@ export interface Snapshot {
    * strategist, so it does not pay for a model call whose only possible answer
    * is a buy that would be withheld. The rule itself is index.ts's hard filter,
    * which every producer passes through; no builtin needs to read this. It
-   * never binds an exit: exits, stop-losses and the owner's own orders are
-   * never limited by energy.
+   * never binds an exit: exit orders, stop-losses, take-profits and the
+   * owner's own orders are never withheld by energy. (The strategist's paid
+   * window itself is paced, by claimWindow — so its OWN exit decisions wait
+   * for the next window like everything else it starts.)
    *
    * Absent or NULL means NOT LIMITED — full energy, the gate off or observing,
    * a fixture. That is not zero and must not be treated as zero.

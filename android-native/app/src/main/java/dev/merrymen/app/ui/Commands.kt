@@ -213,16 +213,18 @@ val COMMANDS: Map<String, CommandSpec> = listOf(
   },
   // THE ENERGY BUY. Side AND symbol are fixed, so a card can only ever buy
   // $MERRYMEN; the model supplies nothing but the most the owner will spend,
-  // which the card states and the worker treats as a ceiling (it buys only the
-  // shortfall). Mirrors web/src/lib/chat-commands.ts get-energy word for word.
+  // which the card states and the worker treats as a ceiling (it sizes the buy
+  // to cover the shortfall, with a margin). Mirrors web/src/lib/chat-commands.ts
+  // get-energy word for word.
   CommandSpec(
     "get-energy", Via.ORDER, listOf("side", "symbol", "usdgAmount"),
     fixed = mapOf("side" to JsonPrimitive("buy"), "symbol" to JsonPrimitive("MERRYMEN")), weighty = true,
   ) {
     "Spend up to ${money(it, "usdgAmount")} of my real USDG on the \$MERRYMEN I'm short of 100,000 — " +
-      "through Uniswap on Robinhood Chain (USDG → VIRTUAL → \$MERRYMEN), and only what's missing. " +
-      "Pool fees and the token's own trading tax come out of what arrives. It stays in my account as energy; " +
-      "my key can't sell or send it. I'll place it — my key's limits still decide whether it goes through."
+      "through Uniswap on Robinhood Chain (USDG → VIRTUAL → \$MERRYMEN). I size it to cover what's missing, with a " +
+      "small margin for price movement (at least \$1.00); the pool fees and the token's own tax are paid out of the USDG. " +
+      "It stays in my account as energy; my key can't sell or send it. I'll place it — my key's limits still decide " +
+      "whether it goes through."
   },
   CommandSpec("open-deposit", Via.NAVIGATE, to = "/deposit", title = "Add funds") { "Show you where to send funds." },
   CommandSpec("open-withdraw", Via.NAVIGATE, to = "/withdraw", weighty = true, title = "Withdraw") {

@@ -104,7 +104,7 @@ describe("the forks that start NEW autonomous work ask", () => {
  * processIntentLocked) and may say "energy"; what must never appear there is
  * anything that could WITHHOLD an owner's order: the plan, a claim, a refund.
  */
-const GATE = /\benergyNow\b|\benergyWithheld\b|\bclaimEntry\b|\bclaimReview\b|\brefundEntry\b|\bwithholdEntry\b|\bclaimEnergy(For|Notice)?\b|\bgetEnergyDay\b/;
+const GATE = /\benergyNow\b|\benergyWithheld\b|\bclaimEntry\b|\bclaimReview\b|\brefundEntry\b|\bwithholdEntry\b|\btellEnergySpent\b|\bclaimEnergy(For|Notice)?\b|\bgetEnergyDay\b/;
 
 describe("THE OWNER'S PATHS ARE UNTOUCHED BY THE GATE", () => {
   for (const name of ["submitChatTrade", "submitChatTransfer", "runQueuedCommand", "processIntentLocked"]) {
@@ -157,14 +157,38 @@ describe("deciding and telling", () => {
     assert.match(refresh, /estimateEnergyUsdg\(client, parts\)/);
   });
 
+  it("THE ESTIMATE IS SIZED BY THE PLANNER'S OWN RULE — margin, tax and the owner's slippage, never the bare shortfall", () => {
+    const e = body("estimateEnergyUsdg");
+    assert.match(e, /energyAmountInFor\(client, energyGrossFor\(shortRaw, tax, cfg\.slippageBps\)\)/);
+    assert.match(e, /usdgCentsUp\(energyAskFor\(amountIn\)\)/, "rounded and floored as the ask is");
+    assert.doesNotMatch(CODE, /grossNeededFor\(/, "no second copy of the sizing lives in index.ts");
+  });
+
   it("THE CLAIM ON TODAY'S NOTICE PRECEDES THE MESSAGE — at most once, even across a crash", () => {
-    const w = body("withholdEntry");
+    const w = body("tellEnergySpent");
     const claim = w.indexOf("await claimEnergyNotice(agentId, energyNow.day, now)");
     const told = w.indexOf("await addEvent(");
     assert.ok(claim > 0 && told > claim);
     assert.match(w, /if \(!claimed\) return;/);
     assert.match(w, /"warn",\s*energyNotice\(/, "a warn — the owner's register, never a post");
+  });
+
+  it("THE NOTICE IS WRITTEN IN ONE PLACE, and both moments reach it", () => {
+    assert.equal(CODE.split("await claimEnergyNotice(").length - 1, 1, "one claim site");
+    assert.equal(CODE.split("energyNotice({").length - 1, 1, "one sentence site");
+    const w = body("withholdEntry");
     assert.match(w, /shouldTellOwner\(energyNow, energyWithheld\)/);
+    assert.match(w, /await tellEnergySpent\(agentId\);/);
+    assert.doesNotMatch(w, /claimEnergyNotice|addEvent\(/, "withholdEntry no longer writes its own copy");
+  });
+
+  it("REFRESHENERGY TELLS THE OWNER WHEN THE DAY'S NEW TRADES ARE USED UP — after the report it quotes", () => {
+    // Most agents stop proposing entries once spent, so a withheld entry may
+    // never come; without this the iOS/Android owner is never told.
+    const r = body("refreshEnergy");
+    const report = r.indexOf("energyReport = energyStatus({");
+    const tell = r.indexOf("if (shouldTellOwnerSpent(energyNow)) await tellEnergySpent(agentId);");
+    assert.ok(report > 0 && tell > report, "told after this tick's report is decided");
   });
 
   it("observe counts and never refuses; enforce refuses at the cap", () => {

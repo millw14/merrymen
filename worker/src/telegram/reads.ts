@@ -18,7 +18,7 @@ import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 // fall back to the single-tenant guess, or must refuse.
 import { liveBlockerText, priceSourceNote, priceSourceTag, isHostedMode, ENERGY } from "../../../packages/core/src/index";
 import type { EnergyStatus } from "../../../packages/core/src/index";
-import { count as countTokens } from "../energy-copy";
+import { count as countTokens, STILL_RUNS } from "../energy-copy";
 
 export function openRO(): DatabaseSync | null {
   const file = homePaths.db();
@@ -202,6 +202,9 @@ export interface StatusContext {
  *     run since 00:00 UTC) is not today's, and "spent" from it would be false.
  *   - point at the agent's account when it is on another network: tokens sent
  *     there would not count, so that arm names the owner's own wallet instead.
+ *   - say "selling is never limited". Stop-losses, take-profits and the owner's
+ *     own orders are; the agent's own AI reviews, including of its open positions,
+ *     are paced (energy-copy.ts STILL_RUNS).
  *
  * Exported for the test; readStatus is the only caller.
  */
@@ -210,26 +213,32 @@ export function energyStatusLine(e: EnergyStatus | null | undefined, nowSec: num
   if (nowSec >= e.resetsAt) return null;
   if (e.level === "full") return "• energy: full ⚡";
   const n = (v: number | null) => (v === null ? "—" : countTokens(v));
+  // ON ANOTHER NETWORK ONLY THE OWNER'S OWN WALLET COUNTS, in every arm that
+  // could lead to a remedy: the chat model reads this line, and without the
+  // marker it falls back to "/wallet shows my address" — an account whose
+  // $MERRYMEN is never read (ENERGY_WORDS says the same).
+  const ownWallet =
+    e.buy === "not-mainnet"
+      ? `Full strength: ${countTokens(ENERGY.fullTokens)} $MERRYMEN in your own wallet on Robinhood Chain — my account is on another network, so only your own wallet counts`
+      : null;
   if (e.spent) {
     const unread =
       e.level === "unread" ? " I couldn't read the $MERRYMEN balances, so I'm on the reduced allowance (our read, not your wallet)." : "";
-    const where =
-      e.buy === "not-mainnet"
-        ? `Full strength: ${countTokens(ENERGY.fullTokens)} $MERRYMEN in your own wallet on Robinhood Chain`
-        : "/wallet shows my address for $MERRYMEN";
+    const where = ownWallet ?? "/wallet shows my address for $MERRYMEN";
     return (
-      `• energy: spent for today — back at 00:00 UTC. Selling, stop-losses and your own orders still run.${unread} ${where}`
+      `• energy: spent for today — back at 00:00 UTC. ${STILL_RUNS.charAt(0).toUpperCase()}${STILL_RUNS.slice(1)}; ` +
+      `my own AI reviews, including of my open positions, are paced.${unread} ${where}`
     );
   }
   if (e.level === "unread") {
-    return "• energy: couldn't read the $MERRYMEN balances — on the reduced allowance until I can (our read, not your wallet)";
+    return `• energy: couldn't read the $MERRYMEN balances — on the reduced allowance until I can (our read, not your wallet)${ownWallet ? `. ${ownWallet}` : ""}`;
   }
   // LOW, NOT YET SPENT. A meter the worker did not report (no paid reviewer,
   // or not throttled) is left out, so this never reads "— of — AI reviews".
   const used: string[] = [];
   if (e.reviews) used.push(`${n(e.reviews.used)} of ${n(e.reviews.allowed)} AI reviews`);
   if (e.entries) used.push(`${n(e.entries.used)} of ${n(e.entries.allowed)} new trades`);
-  return `• energy: low — about a tenth of my usual day${used.length ? ` (${used.join(", ")} used today)` : ""}`;
+  return `• energy: low — about a tenth of a standard day${used.length ? ` (${used.join(", ")} used today)` : ""}${ownWallet ? `. ${ownWallet}` : ""}`;
 }
 
 export function readStatus(ctx: StatusContext): string {

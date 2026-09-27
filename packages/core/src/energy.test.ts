@@ -40,6 +40,17 @@ describe("energy thresholds come from the tier table, never a literal", () => {
     assert.equal(ENERGY.lowBps, 1_000);
   });
 
+  it("THE TIER TABLE CLAIMS NO THROTTLE — every client renders its perks whether or not the gate is on", () => {
+    // /api/circle sends these to the web, iOS and Android unconditionally, and
+    // MERRYMEN_ENERGY_GATE is off until an operator turns it on. A perk saying
+    // outsiders run on a tenth told non-holders they were throttled when nothing was.
+    const outsider = CIRCLE_TIERS.find((t) => t.id === "outsider")!;
+    assert.deepEqual(outsider.perks, ["merrymen is free and open to everyone — hold $MERRYMEN to join the Circle"]);
+    for (const t of CIRCLE_TIERS) {
+      for (const p of t.perks) assert.doesNotMatch(p, /tenth|energy|throttl/i, `${t.id}: ${p}`);
+    }
+  });
+
   it("the constants cannot be edited at runtime", () => {
     assert.ok(Object.isFrozen(ENERGY));
     assert.ok(Object.isFrozen(ENERGY_ROUTE_V1));
@@ -188,5 +199,20 @@ describe("parseEnergyStatus — a report we cannot trust is no report", () => {
     assert.equal(parseEnergyStatus("{not json"), null);
     assert.equal(parseEnergyStatus(null), null);
     assert.equal(parseEnergyStatus([good]), null);
+  });
+
+  it("HOLDERCOUNTED IS OPTIONAL — kept when a boolean, absent on older reports, refused otherwise", () => {
+    // No wallet that counts is a knowable nothing, not a failed read; the desk
+    // needs to tell them apart. Reports written before the field stay valid.
+    for (const counted of [true, false]) {
+      const r = { ...good, holderCounted: counted };
+      assert.deepEqual(parseEnergyStatus(r), r);
+      assert.deepEqual(parseEnergyStatus(JSON.stringify(r)), r);
+    }
+    const old = parseEnergyStatus(good)!;
+    assert.ok(!("holderCounted" in old), "an older report is not given a guess");
+    assert.equal(parseEnergyStatus({ ...good, holderCounted: "false" }), null);
+    assert.equal(parseEnergyStatus({ ...good, holderCounted: 0 }), null);
+    assert.equal(parseEnergyStatus({ ...good, holderCounted: null }), null);
   });
 });

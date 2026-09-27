@@ -29,10 +29,12 @@ import { redactSecrets } from "../../../worker/src/telegram/agent";
  * that about the Circle strategies, and it stopped being true when an agent
  * could turn USDG into its own $MERRYMEN (get-energy): what counts now is the
  * owner's wallet and the agent's account together. The bullet says what is
- * true instead, and the ENERGY bullets say what the new limit is, what never
- * limits (exits, stop-losses, the owner's own orders) and — because a model
- * that retypes an address can get one character wrong and lose somebody's
- * tokens for good — that the agent never types an address at all.
+ * true instead, and the ENERGY bullets say what the new limit is, what it
+ * never limits (stop-losses, take-profits, the owner's own orders), that the
+ * agent's own AI reviews — of its open positions too — are paced, and —
+ * because a model that retypes an address can get one character wrong and
+ * lose somebody's tokens for good — that the agent never types an address at
+ * all.
  */
 const FULL_ENERGY = count(ENERGY.fullTokens);
 
@@ -57,7 +59,7 @@ Reply AS YOURSELF:
   · \`not-armed\` — the key is not active yet; it arms itself on the next pass. Nothing to send.
   · \`no-executor\` — ours to fix, not theirs. Say so.
   A NULL \`liveBlocker\` IS TWO ANSWERS AND NEITHER IS A PROBLEM: trading for real, or not yet beaten. Never read null as "everything is fine" if the tape is also empty — say you can see nothing blocking you and look at the other causes above.
-- ENERGY IS YOUR DAILY CAPACITY, and the ENERGY block, when there is one, is your worker's own report — it outranks any guess. With \`gated\` true and \`level\` "low" you are running without ${FULL_ENERGY} $MERRYMEN between your owner's wallet and your account: about a tenth of your usual daily AI reviews and new trades, reset at 00:00 UTC. \`spent\` true means today's is used up and you start nothing new on your own until then. Selling, stop-losses, take-profits and your owner's own orders are NEVER limited by it — say so whenever you mention it. \`level\` "unread" means the balances could not be read: say it is our read failing, never that they hold nothing; a null count is unknown, not zero. If there is NO ENERGY block you cannot see your energy — say so rather than guessing. When \`gated\` is false energy limits nothing; do not bring it up.
+- ENERGY IS YOUR DAILY CAPACITY, and the ENERGY block, when there is one, is your worker's own report — it outranks any guess. With \`gated\` true and \`level\` "low" you are running without ${FULL_ENERGY} $MERRYMEN between your owner's wallet and your account: about a tenth of a standard day's AI reviews and new trades — a tenth of the house's standard day, not of your owner's own settings, so give the \`reviews\` and \`entries\` figures rather than calling it a tenth of your usual — reset at 00:00 UTC. \`spent\` true means today's new trades are used up and you open none on your own until then. Stop-losses, take-profits and your owner's own orders are NEVER limited by it; your own AI reviews — including your reviews of your open positions — are paced along with everything else you start on your own. Say exactly that whenever you mention it, and never that selling in general is unaffected: an exit you would decide on waits for your next review. \`level\` "unread" means the balances could not be read: say it is our read failing, never that they hold nothing; a null count is unknown, not zero — except that \`holderCounted\` false means no wallet of theirs counts at all, so there your account is the whole figure and nothing failed. If there is NO ENERGY block you cannot see your energy — say so rather than guessing. The block's \`day\` is the UTC day it describes; never say today's energy is spent from a report for another day. When \`gated\` is false energy limits nothing; do not bring it up.
   · WHEN THEY ASK WHY YOU ARE QUIET and \`spent\` is true, lead with that.
   · THE REMEDIES: send $MERRYMEN on Robinhood Chain to your account (or keep it in their own wallet — both count), or send USDG to your account and ask you to buy it — then propose get-energy. Its usdgAmount is the most they will spend: the figure they gave, or \`estimateUsdg\` if the block carries it and it is no more than \`ceilingUsdg\`; otherwise ask. If \`buy\` is "paper" you will not spend real USDG while practising — say so and do not propose it. If "resign", propose resign first. If "not-mainnet", only their own wallet on Robinhood Chain counts — do not propose get-energy and do not suggest sending anything to your account.
   · NEVER TYPE AN ADDRESS — not yours, not theirs. One wrong character and the tokens are gone for good. Propose show-address or open-deposit, which show it with a copy button.
@@ -164,6 +166,25 @@ export interface AgentChatOptions {
 }
 
 /**
+ * THE REPORT, ONLY WHILE ITS DAY LASTS — or null, which is no ENERGY block.
+ *
+ * The worker publishes its report from late in the tick, so every early
+ * return before it (an unreadable market or book, a grant that expired
+ * overnight, a crashed child) leaves the last one standing on the agents row.
+ * A "spent" from yesterday then reaches the chat as if it were today's, and
+ * the model — which has no clock and is told to lead with `spent` when asked
+ * why it is quiet — blames energy and pushes a top-up while the real cause
+ * goes unsaid. `resetsAt` is the next 00:00 UTC of the day the report counted;
+ * from then on it describes a day that is over. The desk (energy-view.ts) and
+ * Telegram (reads.ts, energy-alert.ts) already drop such a report; the chat
+ * drops it the same way, and says it cannot see its energy.
+ */
+export function currentEnergy<T extends EnergyStatus>(e: T | null | undefined, nowSec: number): T | null {
+  if (!e) return null;
+  return nowSec < e.resetsAt ? e : null;
+}
+
+/**
  * THE ENERGY BLOCK, FIELD BY FIELD — a whitelist, not a spread.
  *
  * NO ADDRESS OF ANY KIND, and that is a rule rather than a tidy-up: a model
@@ -183,6 +204,7 @@ export function energyForPrompt(e: EnergyStatus & { ceilingUsdg?: number | null 
     spent: e.spent,
     needTokens: e.needTokens,
     holderTokens: e.holderTokens,
+    holderCounted: e.holderCounted ?? null,
     agentTokens: e.agentTokens,
     reviews: e.reviews,
     entries: e.entries,

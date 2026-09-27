@@ -25,7 +25,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import type { EnergyStatus } from "@merrymen/core";
 import type { LlmCreds } from "../../../worker/src/llm";
-import { energyForPrompt, generateAgentReply, type AgentChatOptions } from "./agent-chat";
+import { currentEnergy, energyForPrompt, generateAgentReply, type AgentChatOptions } from "./agent-chat";
 
 const credentials = (): LlmCreds => ({ provider: "test", transport: "openai", baseUrl: "https://example.com/v1", model: "m", apiKey: "k", vision: false });
 
@@ -72,6 +72,11 @@ describe("the ENERGY block", () => {
     assert.equal(block.estimateUsdg, 37);
     assert.equal(block.ceilingUsdg, 25, "the one figure the model may size a proposal against");
     assert.equal(block.holderTokens, null, "an unread count stays null, never 0");
+    assert.equal(block.holderCounted, null, "an older report does not claim either way");
+    const noWallet = await ask("why are you quiet?", { energy: { ...REPORT, holderCounted: false, ceilingUsdg: 25 } });
+    const b2 = JSON.parse(noWallet.prompt.split("ENERGY (your worker's own report — authoritative):\n")[1]!.split("\n")[0]!);
+    assert.equal(b2.holderCounted, false, "no wallet counts — the model must not call that a failed read");
+    assert.match(noWallet.system, /`holderCounted` false means no wallet of theirs counts at all/);
     assert.equal(block.resetsAt, new Date(REPORT.resetsAt * 1000).toISOString(), "a time, not a bare epoch");
   });
 
@@ -96,7 +101,40 @@ describe("the ENERGY block", () => {
   });
 });
 
+describe("A REPORT WHOSE DAY HAS ENDED IS NOT TODAY'S", () => {
+  // The worker publishes late in the tick, so an early return across midnight
+  // (an unreadable book, an expired grant) leaves yesterday's "spent" on the
+  // row. The chat must drop it the way the desk and Telegram do — the model has
+  // no clock and is told to lead with `spent`.
+  it("current up to the last second of its day, gone from its reset on", () => {
+    assert.equal(currentEnergy(REPORT, REPORT.resetsAt - 1), REPORT);
+    assert.equal(currentEnergy(REPORT, REPORT.resetsAt), null, "00:00 UTC is the next day");
+    assert.equal(currentEnergy(REPORT, REPORT.resetsAt + 86_400), null);
+  });
+  it("no report is still no report, and the ceiling rides along untouched", () => {
+    assert.equal(currentEnergy(null, 0), null);
+    assert.equal(currentEnergy(undefined, 0), null);
+    const withCeiling = { ...REPORT, ceilingUsdg: 25 };
+    assert.equal(currentEnergy(withCeiling, REPORT.at), withCeiling);
+  });
+  it("a reset nobody can read is not current either", () => {
+    assert.equal(currentEnergy({ ...REPORT, resetsAt: Number.NaN }, REPORT.at), null);
+  });
+});
+
 describe("what the model is told", () => {
+  it("A TENTH OF A STANDARD DAY, not of 'your usual' — the allowance is sized from the house baselines", async () => {
+    const { system } = await ask("hello");
+    assert.match(system, /about a tenth of a standard day's AI reviews and new trades/);
+    assert.match(system, /give the `reviews` and `entries` figures rather than calling it a tenth of your usual/);
+    assert.doesNotMatch(system, /tenth of your usual daily/);
+  });
+
+  it("THE BLOCK'S DAY IS THE DAY IT DESCRIBES — never 'today is spent' from another day's report", async () => {
+    const { system } = await ask("hello");
+    assert.match(system, /The block's `day` is the UTC day it describes; never say today's energy is spent from a report for another day\./);
+  });
+
   it("IT SAYS WHAT TO DO WITHOUT A BLOCK, AND NEVER TO TYPE AN ADDRESS", async () => {
     const { system } = await ask("hello");
     assert.match(system, /If there is NO ENERGY block/);
@@ -110,9 +148,11 @@ describe("what the model is told", () => {
     assert.match(system, /changing nothing is a fine answer/);
   });
 
-  it("THE DOORS STAY OPEN — exits and the owner's own orders are never limited, and it says so", async () => {
+  it("THE DOORS STAY OPEN — and it says exactly which: the rules and the owner's orders, not the AI's own exits", async () => {
     const { system } = await ask("hello");
-    assert.match(system, /Selling, stop-losses, take-profits and your owner's own orders are NEVER limited by it/);
+    assert.match(system, /Stop-losses, take-profits and your owner's own orders are NEVER limited by it; your own AI reviews — including your reviews of your open positions — are paced/);
+    assert.match(system, /Say exactly that whenever you mention it, and never that selling in general is unaffected/);
+    assert.doesNotMatch(system, /Selling, stop-losses[^.]*NEVER limited/, "the old, false promise");
     assert.match(system, /never that they hold nothing; a null count is unknown, not zero/);
   });
 
@@ -154,6 +194,11 @@ describe("/api/chat injects it on the server", () => {
     assert.match(ROUTE, /hosted \? await hostedAgentFor\(req\) : await diskAgent\(\)/, "the caller cannot name the agent");
     assert.match(ROUTE, /ceilingFor\(req, hosted\)/);
     assert.match(ROUTE, /agentReplyResponse\(body, \{ stream, signal: req\.signal \}, \{ energy \}\)/);
+  });
+
+  it("AND ONLY WHILE ITS DAY LASTS — a stale report is no ENERGY block", () => {
+    assert.match(ROUTE, /const report = currentEnergy\(account \? await readAgentEnergy\(account\) : null, Math\.floor\(Date\.now\(\) \/ 1000\)\);/);
+    assert.match(ROUTE, /const energy = report\s*\?/, "the ceiling is only added to a current report");
   });
 
   it("AND NEVER FROM THE BODY", () => {

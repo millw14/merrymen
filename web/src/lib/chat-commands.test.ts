@@ -445,11 +445,18 @@ describe("get-energy", () => {
     const said = cmd.say({ usdgAmount: 30 });
     assert.match(said, /Spend up to \$30\.00 of my real USDG/);
     assert.match(said, /Robinhood Chain/);
-    assert.match(said, /only what's missing/);
+    // What the sizing actually does: it covers the shortfall with a margin,
+    // never "only what's missing", and the fees and tax come out of the USDG.
+    assert.match(said, /I size it to cover what's missing, with a small margin for price movement \(at least \$1\.00\)/);
+    assert.match(said, /the pool fees and the token's own tax are paid out of the USDG/);
+    assert.doesNotMatch(said, /only what's missing|come out of what arrives/, "the old, false sizing claims");
     assert.match(said, /can't sell or send it/);
     assert.match(said, /I'll place it/);
     assert.ok(!/\d\s*%/.test(said), "no fee or tax percentage — the token's owner can change the tax");
-    assert.doesNotMatch(said, /price|returns?\b|profit|invest/i, "$MERRYMEN is energy, nothing more");
+    assert.doesNotMatch(said, /\b(bought|sold|filled)\b/i, "it places; it never claims the trade happened");
+    // "price movement" is the slippage margin on the swap, not a word about
+    // what the token is worth; everything else stays banned.
+    assert.doesNotMatch(said.replace("small margin for price movement", ""), /price|returns?\b|profit|invest/i, "$MERRYMEN is energy, nothing more");
   });
 });
 

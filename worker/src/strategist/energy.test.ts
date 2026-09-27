@@ -2,7 +2,7 @@
  * THE STRATEGIST PAYS FOR A WINDOW ONLY WHEN ITS ENERGY ALLOWS — AND NEVER
  * WAITS ON ENERGY TO EXIT.
  *
- * A low-energy agent gets a tenth of its usual AI reviews (worker/src/energy.ts).
+ * A low-energy agent gets about a tenth of a standard day's AI reviews (worker/src/energy.ts).
  * For the strategist a review is a model window, so the window is CLAIMED
  * against that allowance before it is stamped:
  *

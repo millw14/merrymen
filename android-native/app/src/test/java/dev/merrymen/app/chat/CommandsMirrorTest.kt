@@ -69,9 +69,9 @@ class CommandsMirrorTest {
     )
     assertEquals(
       "Spend up to \$5.00 of my real USDG on the \$MERRYMEN I'm short of 100,000 — through Uniswap on Robinhood Chain " +
-        "(USDG → VIRTUAL → \$MERRYMEN), and only what's missing. Pool fees and the token's own trading tax come out of " +
-        "what arrives. It stays in my account as energy; my key can't sell or send it. I'll place it — my key's limits " +
-        "still decide whether it goes through.",
+        "(USDG → VIRTUAL → \$MERRYMEN). I size it to cover what's missing, with a small margin for price movement " +
+        "(at least \$1.00); the pool fees and the token's own tax are paid out of the USDG. It stays in my account as " +
+        "energy; my key can't sell or send it. I'll place it — my key's limits still decide whether it goes through.",
       COMMANDS.getValue("get-energy").say(a),
     )
     assertEquals(

@@ -14,11 +14,14 @@
  * a store, a chain, a clock or an environment variable: the tick hands those
  * in, and this decides.
  *
- * WHAT IT NEVER TOUCHES. Exits, stop-losses, take-profits, vault housekeeping
- * and anything the owner asked for — the app's chat, the web, Telegram, MCP,
- * the energy buy itself, kill, pause, recover. An allowance on NEW autonomous
- * work is not allowed to become a lock on the doors, the same sentence the
- * drawdown breaker and the ops cap are written under (policy.ts).
+ * WHAT IT NEVER TOUCHES. Exit orders, stop-losses, take-profits, vault
+ * housekeeping and anything the owner asked for — the app's chat, the web,
+ * Telegram, MCP, the energy buy itself, kill, pause, recover. An allowance on
+ * NEW autonomous work is not allowed to become a lock on the doors, the same
+ * sentence the drawdown breaker and the ops cap are written under (policy.ts).
+ * What it DOES pace is every paid AI review, including a review of a held
+ * position — so an exit the AI would decide waits for the next one, and no
+ * copy may say "selling is never limited" (energy-copy.ts STILL_RUNS).
  *
  * THE HOUSE SETS THE BASELINES, NEVER THE OWNER. "A tenth of your own normal"
  * computed from inputs the throttled owner controls is no throttle at all:
@@ -304,10 +307,32 @@ export function countsAsEntry(kind: TradeIntent["kind"], isExit: boolean): boole
  * Tell the owner now? Only when enforcing, only when an entry was actually
  * withheld — the moment the limit cost them a trade, not a pacing refusal —
  * and only if today's notice has not gone yet (the durable claim decides the
- * race; this is the cheap pre-check).
+ * race; this is the cheap pre-check). shouldTellOwnerSpent is the other
+ * moment: the day's new trades used up, withheld or not.
  */
 export function shouldTellOwner(plan: EnergyPlan, withheldEntry: boolean): boolean {
   return plan.enforce && withheldEntry && !plan.told;
+}
+
+/**
+ * Tell the owner now because today's new trades are USED UP — whether or not
+ * an entry has been withheld yet.
+ *
+ * WITHHELD ALONE IS NOT ENOUGH. Most agents stop proposing entries once the
+ * day is spent, before any reaches a withhold site: the fast Trencher's
+ * candidate list empties, the Brain's universe shrinks to what it holds, the
+ * strategist drops its buys before journaling them, and the class gate
+ * closes. Waiting for a withheld entry told those owners nothing, and on iOS
+ * and Android the dated warn event is the ONLY place they learn why the agent
+ * went quiet. So the moment the counters reach the allowance is a moment to
+ * tell them too — the same condition the report's `spent` and the Telegram
+ * alert use, and the same once-a-day claim decides the race.
+ *
+ * A count nobody could read (`used` null) is not "spent": the fail-closed plan
+ * withholds on it, but the sentence would be a guess.
+ */
+export function shouldTellOwnerSpent(plan: EnergyPlan): boolean {
+  return plan.enforce && plan.entries.used !== null && plan.entries.used >= plan.entries.allowed && !plan.told;
 }
 
 // ── the report ────────────────────────────────────────────────────────────
@@ -345,6 +370,10 @@ export function energyStatus(i: {
     level: plan.level,
     agentTokens: tokensOf(i.parts.account),
     holderTokens: tokensOf(i.parts.holder),
+    // undefined is "no such wallet" (BalanceParts): nothing to count, which is
+    // not the same as a read that failed — the desk says "couldn't read" only
+    // for the second.
+    holderCounted: i.parts.holder !== undefined,
     needTokens: ENERGY.fullTokens,
     day: plan.day,
     resetsAt: plan.resetsAt,

@@ -5,9 +5,12 @@
  * reviews it runs and the new trades it opens without being asked. While the
  * owner's wallet and the agent's own account hold ENERGY.fullTokens $MERRYMEN
  * between them it runs at full strength. Below that it still runs, on about a
- * tenth of a normal day, resetting at 00:00 UTC. Exits, stop-losses and the
- * owner's own orders are never limited by it — an allowance on NEW work is not
- * allowed to become a lock on the doors.
+ * tenth of a normal day, resetting at 00:00 UTC. Stop-losses, take-profits and
+ * the owner's own orders are never limited by it, and no exit counts as a new
+ * trade — an allowance on NEW work is not allowed to become a lock on the
+ * doors. What IS paced is the agent's own AI review, including of what it
+ * holds, so an exit the AI would decide waits for its next paced review; the
+ * copy says exactly that and never "selling is never limited".
  *
  * WHAT LIVES HERE AND WHAT DOES NOT. This file is the contract every tier
  * shares: the thresholds, the shape the worker reports and the web reads, and
@@ -198,8 +201,16 @@ export interface EnergyStatus {
   level: EnergyLevel;
   /** Whole $MERRYMEN in the agent's account; null = unread or not counted (not mainnet). */
   agentTokens: number | null;
-  /** Whole $MERRYMEN in the counted owner wallet; null = unread or no wallet. */
+  /** Whole $MERRYMEN in the counted owner wallet; null = unread or no wallet (holderCounted says which). */
   holderTokens: number | null;
+  /**
+   * Was an owner wallet counted at all? true = one was, so a null
+   * holderTokens is a read that FAILED; false = no wallet counts (none linked,
+   * or it already powers another account), so a null holderTokens is a
+   * knowable nothing and the agent's account is the whole figure. Absent on
+   * reports written before it existed: unknown, and read as before.
+   */
+  holderCounted?: boolean;
   needTokens: number;
   /** UTC day these counts belong to, 'YYYY-MM-DD'. */
   day: string;
@@ -212,7 +223,7 @@ export interface EnergyStatus {
   /** Today's new-trade allowance is used up. */
   spent: boolean;
   buy: EnergyBuy;
-  /** USDG that would buy today's shortfall now, fees and token tax included; null = unknown. */
+  /** USDG the energy buy would ask now, sized exactly as it buys (margin, slippage, fees and tax included); null = unknown. */
   estimateUsdg: number | null;
   /** Unix seconds of this report. */
   at: number;
@@ -269,6 +280,9 @@ export function parseEnergyStatus(raw: unknown): EnergyStatus | null {
   const at = numOrNull(o.at);
   const reviews = meter(o.reviews);
   const entries = meter(o.entries);
+  // OPTIONAL, so every report written before it stays valid; when present it
+  // must be exactly a boolean, like every other field here.
+  if (o.holderCounted !== undefined && typeof o.holderCounted !== "boolean") return null;
   if (
     agentTokens === undefined ||
     holderTokens === undefined ||
@@ -288,6 +302,7 @@ export function parseEnergyStatus(raw: unknown): EnergyStatus | null {
     level: o.level as EnergyLevel,
     agentTokens,
     holderTokens,
+    ...(o.holderCounted === undefined ? {} : { holderCounted: o.holderCounted }),
     needTokens,
     day: o.day,
     resetsAt,

@@ -61,7 +61,7 @@ describe("agent_status carries today's energy, from the worker's report", () => 
   it("spent: said, with the doors still open", async () => {
     const out = await toolByName("agent_status")!.run({}, ctx(SPENT));
     assert.match(out, /Energy: spent for today — back at 00:00 UTC/);
-    assert.match(out, /Selling, stop-losses and your own orders still run/);
+    assert.match(out, /Stop-losses, take-profits and your own orders still run; my own AI reviews, including of my open positions, are paced/);
   });
 
   it("no report, or an ungated one: nothing about energy", async () => {
@@ -71,11 +71,19 @@ describe("agent_status carries today's energy, from the worker's report", () => 
 });
 
 describe("the rule both chat prompts carry", () => {
-  it("what energy is, that exits and own orders are never limited, and that unread is not zero", () => {
+  it("what energy is, exactly what it never limits, that AI reviews of holdings are paced, and that unread is not zero", () => {
     assert.match(ENERGY_WORDS, /resets at 00:00 UTC/);
-    assert.match(ENERGY_WORDS, /Selling, stop-losses and your owner's own orders are NEVER limited/);
+    assert.match(ENERGY_WORDS, /about a tenth of a STANDARD day, not of your owner's own settings/);
+    assert.match(ENERGY_WORDS, /Stop-losses, take-profits and your owner's own orders are NEVER limited by it; your own AI reviews — including your reviews of your open positions — are paced/);
+    assert.match(ENERGY_WORDS, /never that selling in general is unaffected/);
+    assert.doesNotMatch(ENERGY_WORDS, /Selling[^.]*NEVER limited/, "the old, false promise");
     assert.match(ENERGY_WORDS, /never that they hold nothing/);
     assert.match(ENERGY_WORDS, /100,000 \$MERRYMEN/);
+  });
+
+  it("ON ANOTHER NETWORK only their own wallet counts — never /wallet, never the app-chat buy", () => {
+    assert.match(ENERGY_WORDS, /IF THE LINE SAYS YOUR ACCOUNT IS ON ANOTHER NETWORK, only their own wallet on Robinhood Chain counts/);
+    assert.match(ENERGY_WORDS, /never point them at \/wallet for \$MERRYMEN, never suggest sending anything to your account, and do not offer the app-chat buy/);
   });
 
   it("the buy is the app chat's, the address is /wallet's, and nothing is said about price", () => {
