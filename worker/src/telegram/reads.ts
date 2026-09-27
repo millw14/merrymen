@@ -815,7 +815,31 @@ export function readWhyEvidence(agentId?: string | null): { text: string; hasTra
   }
 }
 
-/** Recent event-feed lines (for the LLM's context). */
+/**
+ * NO ADDRESS REACHES A CHAT MODEL THROUGH EVENT TEXT.
+ *
+ * Events are written for the owner, and some carry addresses in full: the
+ * energy notice names the agent's account and the owner's own holder wallet
+ * ("send $MERRYMEN … to my account 0x…"), policy refusals name recipients.
+ * Handed to a model verbatim, those sit in its context, and a model given an
+ * address will sooner or later retype it — one wrong character and whatever
+ * is sent to it is gone for good (agent-chat.ts has the same rule for the web
+ * chat). The owner's private holder wallet would also leave for the LLM
+ * provider with every chat message. The model is told to point people to
+ * /wallet instead; this makes sure it has nothing else to go on.
+ *
+ * Every 0x run of 20–40 hex digits standing alone is replaced — 40 is an
+ * address, and a shorter run is one cut off by a length cap, still most of an
+ * address. A longer run (a 64-digit transaction hash) is left alone: nothing
+ * can be sent to it. The owner-facing alert, /status and report keep their
+ * addresses; only what a model reads is redacted.
+ */
+const ADDRESS_RUN = /\b0x[0-9a-fA-F]{20,40}(?![0-9a-fA-F])/g;
+export function redactAddresses(text: string): string {
+  return text.replace(ADDRESS_RUN, "[address]");
+}
+
+/** Recent event-feed lines (for the LLM's context) — addresses redacted. */
 export function readRecentEvents(agentId?: string | null, limit = 5): string {
   const db = openRO();
   if (!db) return "(no events)";
@@ -826,7 +850,7 @@ export function readRecentEvents(agentId?: string | null, limit = 5): string {
       .prepare("SELECT level, message, datetime(created_at,'unixepoch') AS at FROM events WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
       .all(who, limit) as { level: string; message: string; at: string }[];
     if (!rows.length) return "(no events)";
-    return rows.map((r) => `[${r.at}] ${r.level}: ${r.message}`).join("\n");
+    return rows.map((r) => `[${r.at}] ${r.level}: ${redactAddresses(r.message)}`).join("\n");
   } catch {
     return "(no events)";
   } finally {

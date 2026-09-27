@@ -29,7 +29,7 @@ import { pnlCardFromFill } from "../pnl-card";
 import { sendPnlPhoto } from "./pnl-photo";
 import { resolveLlm } from "../llm";
 import { narrateJournal, narrateTrade } from "./interpreter";
-import { dashboardBase, readReport, type StatusContext } from "./reads";
+import { dashboardBase, readReport, redactAddresses, type StatusContext } from "./reads";
 import { readResearch } from "../research-files";
 import { loadGrantFile } from "../grant";
 import { settleFor, signDecision, signMessage, signNeed } from "./sign-prompt";
@@ -932,7 +932,9 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       let opener = "";
       if (reportLlm) {
         const evidence = [
-          report.replace(/<[^>]+>/g, ""),
+          // The report quotes the newest event ("last word from camp"):
+          // addresses redacted for the model, kept in the report itself.
+          redactAddresses(report.replace(/<[^>]+>/g, "")),
           ``,
           `RELATIONSHIP: ${rel.stage}, day ${rel.daysTogether}, ${rel.messageCount} messages with my owner.`,
         ].join("\n");
@@ -955,7 +957,7 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       const hasGrant = inputs.grantExpiresAt !== null;
       const plainReport = hasGrant ? readReport(deps.buildStatusContext()).replace(/<[^>]+>/g, "") : "";
       const evidence = [
-        hasGrant ? plainReport : "No wallet armed today — a quiet day off the road.",
+        hasGrant ? redactAddresses(plainReport) : "No wallet armed today — a quiet day off the road.",
         ``,
         `RELATIONSHIP: ${rel.stage}, day ${rel.daysTogether}, ${rel.messageCount} messages with my owner.`,
       ].join("\n");
