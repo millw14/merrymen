@@ -6,6 +6,17 @@
  */
 
 import { RISK_PERIOD_SCHEMA, mergeRiskPeriod, markRiskPeriod, adjustRiskCapital, type RiskPeriod } from "./risk-period";
+import {
+  ENERGY_DAYS_SCHEMA,
+  claimEnergyDay,
+  claimEnergyNoticeDay,
+  lastEnergyReadDay,
+  noteEnergyReadDay,
+  readEnergyDay,
+  refundEnergyDay,
+  type EnergyField,
+} from "./energy-days";
+import type { EnergyCounters, LastGood } from "./energy";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
@@ -50,6 +61,7 @@ export const getRiskPeriodPeak = (account: string, equity: number | null = null)
 
 const SQLITE_SCHEMA = `
     ${RISK_PERIOD_SCHEMA};
+    ${ENERGY_DAYS_SCHEMA};
     /* agent_id (= smart_account here) threads EVERY per-agent table: trades,
        decisions, positions, cost_basis, equity, fee_accruals. On the EVM rail
        it is the ERC-4337 smart-account address; on the broker rail it is the
@@ -598,6 +610,17 @@ const SQLITE_ALTERS: string[] = [
     // NULLABLE, and null is TWO things: never beaten, or beaten and trading
     // for real. A reader must not render either as a blocker.
     "ALTER TABLE agents ADD COLUMN live_blocker TEXT",
+    // ── THE AGENT'S ENERGY, AS THE WORKER REPORTS IT ─────────────────────
+    //
+    // A JSON EnergyStatus (core energy.ts), written by setAgentEnergy every
+    // tick — its OWN statement, never folded into setAgentMode, whose argument
+    // list exec-mode-publish.test.ts pins. A standing condition cannot be
+    // carried by a log line that forty newer events push out of view, so the
+    // desk reads this column, not the notice (circle-strategies.test.ts).
+    //
+    // NULLABLE, and null means "not said yet" — never "no energy". The mirror
+    // keeps the last non-null value for the same reason it does for `mode`.
+    "ALTER TABLE agents ADD COLUMN energy TEXT",
     // WHO OWNS this agent, for a public page to credit — the X handle its owner
     // typed, nothing more.
     //
@@ -2414,6 +2437,80 @@ export async function setAgentMode(
     /* a missing heartbeat is a worse thing to crash over than to lose */
   }
 }
+/**
+ * Publish the worker's energy report (core EnergyStatus, as JSON) on the agents
+ * row. Best-effort like the heartbeat: a report that fails to write must never
+ * take a tick down — the next tick writes a fresh one.
+ */
+export async function setAgentEnergy(agentId: string, json: string | null): Promise<void> {
+  try {
+    await getDb().prepare("UPDATE agents SET energy = ? WHERE smart_account = ?").run(json, agentId);
+  } catch {
+    /* the next tick reports again */
+  }
+}
+
+// ── ENERGY: today's durable counters (energy-days.ts), on this child's ledger ──
+//
+// Every one of these fails in the SAFE direction for its own question: an
+// unreadable day is `null` (the plan then fails closed on new work, never on
+// an exit), a claim that errors is refused, a notice claim that errors is not
+// sent, and a refund or a read-note that errors only under-spends.
+
+/** Today's counters; zeros when there is no row; null when the ledger could not be read. */
+export async function getEnergyDay(agentId: string, day: string): Promise<EnergyCounters | null> {
+  try {
+    return await readEnergyDay(getDb(), agentId, day);
+  } catch {
+    return null;
+  }
+}
+
+/** Claim one review or entry against `cap`. False when the cap is reached — or the write failed. */
+export async function claimEnergy(agentId: string, day: string, field: EnergyField, cap: number): Promise<boolean> {
+  try {
+    return await claimEnergyDay(getDb(), agentId, day, field, cap);
+  } catch {
+    return false;
+  }
+}
+
+/** Return one unused claim. Never below zero. */
+export async function refundEnergy(agentId: string, day: string, field: EnergyField): Promise<void> {
+  try {
+    await refundEnergyDay(getDb(), agentId, day, field);
+  } catch {
+    /* a lost refund under-spends by one — the conservative direction */
+  }
+}
+
+/** Claim today's owner notice. True exactly once per agent per UTC day; false on any failure. */
+export async function claimEnergyNotice(agentId: string, day: string, atSec: number): Promise<boolean> {
+  try {
+    return await claimEnergyNoticeDay(getDb(), agentId, day, atSec);
+  } catch {
+    return false;
+  }
+}
+
+/** Remember a balance reading that decided the level. */
+export async function noteEnergyRead(agentId: string, day: string, full: boolean, atSec: number): Promise<void> {
+  try {
+    await noteEnergyReadDay(getDb(), agentId, day, full, atSec);
+  } catch {
+    /* the in-memory reading still stands for this process */
+  }
+}
+
+/** The newest decided reading since `sinceSec`, or null. */
+export async function lastEnergyRead(agentId: string, sinceSec: number): Promise<LastGood | null> {
+  try {
+    return await lastEnergyReadDay(getDb(), agentId, sinceSec);
+  } catch {
+    return null;
+  }
+}
+
 /** Record one accrual event and roll it into the agent's running total. */
 export async function addFeeAccrual(
   agentId: string,
