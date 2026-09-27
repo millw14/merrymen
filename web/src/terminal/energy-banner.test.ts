@@ -195,6 +195,8 @@ describe("what the panel says", () => {
     assert.match(t, /Stop-losses, take-profits and your own orders still run; my own AI reviews — including of my open positions — are paced along with the rest\./);
     assert.doesNotMatch(t, /\bSelling\b/, "an exit the AI decides is paced; 'selling still runs' was false");
     assert.match(t, /You and I hold 12,345 \$MERRYMEN — 87,655 short\./);
+    const noWallet = text(await note(report({ spent: true, holderCounted: false, holderTokens: null, agentTokens: 5_000 })));
+    assert.match(noWallet, /My account holds 5,000 \$MERRYMEN — 95,000 short\./, "the figure is not dropped when no wallet counts");
     assert.match(t, /Send \$MERRYMEN on Robinhood Chain to my account:/);
     assert.ok(t.includes(ACCOUNT), "the address, whole");
     assert.match(t, /Copy address/);
@@ -312,6 +314,17 @@ describe("the funding screen", () => {
     assert.match(t, /Send \$MERRYMEN on Robinhood Chain to this same address, or send USDG here and ask your agent in chat to get its \$MERRYMEN — you confirm the amount first\./);
     assert.match(t, /Or change nothing/);
     assert.match(t, /Copy deposit address/, "the existing copy button stays");
+  });
+
+  it("NO WALLET THAT COUNTS: the account's own figure — never 'couldn't read'", async () => {
+    const t = await funding(report({ holderCounted: false, holderTokens: null, agentTokens: 5_000 }));
+    assert.match(t, /this account holds 5,000 \$MERRYMEN, 95,000 short — no wallet of yours counts toward it/);
+    assert.doesNotMatch(t, /couldn't read/);
+    const failed = await funding(report({ holderCounted: true, holderTokens: null }));
+    assert.match(failed, /we couldn't read every \$MERRYMEN balance just now/, "a real failed read still says so");
+    const offChain = await funding(report({ buy: "not-mainnet", holderCounted: false, holderTokens: null, agentTokens: null }), 46630);
+    assert.match(offChain, /no wallet of yours counts toward it yet/);
+    assert.doesNotMatch(offChain, /couldn't read/);
   });
 
   it("SPENT says the reset", async () => {

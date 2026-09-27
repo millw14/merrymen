@@ -201,8 +201,16 @@ export interface EnergyStatus {
   level: EnergyLevel;
   /** Whole $MERRYMEN in the agent's account; null = unread or not counted (not mainnet). */
   agentTokens: number | null;
-  /** Whole $MERRYMEN in the counted owner wallet; null = unread or no wallet. */
+  /** Whole $MERRYMEN in the counted owner wallet; null = unread or no wallet (holderCounted says which). */
   holderTokens: number | null;
+  /**
+   * Was an owner wallet counted at all? true = one was, so a null
+   * holderTokens is a read that FAILED; false = no wallet counts (none linked,
+   * or it already powers another account), so a null holderTokens is a
+   * knowable nothing and the agent's account is the whole figure. Absent on
+   * reports written before it existed: unknown, and read as before.
+   */
+  holderCounted?: boolean;
   needTokens: number;
   /** UTC day these counts belong to, 'YYYY-MM-DD'. */
   day: string;
@@ -272,6 +280,9 @@ export function parseEnergyStatus(raw: unknown): EnergyStatus | null {
   const at = numOrNull(o.at);
   const reviews = meter(o.reviews);
   const entries = meter(o.entries);
+  // OPTIONAL, so every report written before it stays valid; when present it
+  // must be exactly a boolean, like every other field here.
+  if (o.holderCounted !== undefined && typeof o.holderCounted !== "boolean") return null;
   if (
     agentTokens === undefined ||
     holderTokens === undefined ||
@@ -291,6 +302,7 @@ export function parseEnergyStatus(raw: unknown): EnergyStatus | null {
     level: o.level as EnergyLevel,
     agentTokens,
     holderTokens,
+    ...(o.holderCounted === undefined ? {} : { holderCounted: o.holderCounted }),
     needTokens,
     day: o.day,
     resetsAt,

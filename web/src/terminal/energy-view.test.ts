@@ -93,6 +93,45 @@ describe("a low agent's counts", () => {
     }
   });
 
+  it("NO WALLET THAT COUNTS IS A KNOWABLE NOTHING — the account alone is the total, and nothing 'failed'", () => {
+    // A login wallet already powering another account leaves the child with no
+    // holder at all. That is not an outage, and "couldn't read" would send the
+    // owner looking for one; the worker's own notice says "My account holds …".
+    const v = energyView(report({ holderCounted: false, holderTokens: null, agentTokens: 5_000 }), NOW);
+    if (v.kind !== "low") return assert.fail("expected low");
+    assert.equal(v.total, 5_000);
+    assert.equal(v.short, 95_000);
+    assert.equal(v.noWallet, true);
+    assert.equal(v.readFailed, false);
+  });
+
+  it("…BUT A COUNTED PART THAT WAS NOT READ IS STILL A FAILED READ", () => {
+    const account = energyView(report({ holderCounted: false, holderTokens: null, agentTokens: null }), NOW);
+    if (account.kind !== "low") return assert.fail("expected low");
+    assert.equal(account.total, null);
+    assert.equal(account.readFailed, true, "the account counts and did not answer");
+    const wallet = energyView(report({ holderCounted: true, holderTokens: null }), NOW);
+    if (wallet.kind !== "low") return assert.fail("expected low");
+    assert.equal(wallet.total, null);
+    assert.equal(wallet.readFailed, true, "a wallet that counts and did not answer");
+    assert.equal(wallet.noWallet, false);
+  });
+
+  it("A REPORT FROM BEFORE holderCounted IS READ AS BEFORE — a null wallet may have failed", () => {
+    const v = energyView(report({ holderTokens: null }), NOW);
+    if (v.kind !== "low") return assert.fail("expected low");
+    assert.equal(v.total, null);
+    assert.equal(v.readFailed, true);
+    assert.equal(v.noWallet, false);
+  });
+
+  it("on another network with no wallet counted: no total, and no read failed either", () => {
+    const v = energyView(report({ buy: "not-mainnet", holderCounted: false, holderTokens: null, agentTokens: null }), NOW);
+    if (v.kind !== "low") return assert.fail("expected low");
+    assert.equal(v.total, null);
+    assert.equal(v.readFailed, false);
+  });
+
   it("on another network the owner's wallet IS the whole count", () => {
     // The agent's account is not counted there by design, so its null is not
     // a missing read.

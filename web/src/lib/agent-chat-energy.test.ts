@@ -72,6 +72,11 @@ describe("the ENERGY block", () => {
     assert.equal(block.estimateUsdg, 37);
     assert.equal(block.ceilingUsdg, 25, "the one figure the model may size a proposal against");
     assert.equal(block.holderTokens, null, "an unread count stays null, never 0");
+    assert.equal(block.holderCounted, null, "an older report does not claim either way");
+    const noWallet = await ask("why are you quiet?", { energy: { ...REPORT, holderCounted: false, ceilingUsdg: 25 } });
+    const b2 = JSON.parse(noWallet.prompt.split("ENERGY (your worker's own report — authoritative):\n")[1]!.split("\n")[0]!);
+    assert.equal(b2.holderCounted, false, "no wallet counts — the model must not call that a failed read");
+    assert.match(noWallet.system, /`holderCounted` false means no wallet of theirs counts at all/);
     assert.equal(block.resetsAt, new Date(REPORT.resetsAt * 1000).toISOString(), "a time, not a bare epoch");
   });
 

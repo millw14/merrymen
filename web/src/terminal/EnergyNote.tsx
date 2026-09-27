@@ -121,7 +121,7 @@ export function EnergyNote({
         <p>I couldn&apos;t read the $MERRYMEN balances — that&apos;s our read failing, not your wallet.</p>
       ) : view.total !== null ? (
         <p>
-          You and I hold {count(view.total)} $MERRYMEN — {count(view.short)} short.
+          {view.noWallet ? "My account holds" : "You and I hold"} {count(view.total)} $MERRYMEN — {count(view.short)} short.
         </p>
       ) : null}
       {remedies.sendToAgent && account ? (

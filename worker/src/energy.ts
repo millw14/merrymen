@@ -370,6 +370,10 @@ export function energyStatus(i: {
     level: plan.level,
     agentTokens: tokensOf(i.parts.account),
     holderTokens: tokensOf(i.parts.holder),
+    // undefined is "no such wallet" (BalanceParts): nothing to count, which is
+    // not the same as a read that failed — the desk says "couldn't read" only
+    // for the second.
+    holderCounted: i.parts.holder !== undefined,
     needTokens: ENERGY.fullTokens,
     day: plan.day,
     resetsAt: plan.resetsAt,

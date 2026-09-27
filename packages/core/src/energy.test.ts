@@ -200,4 +200,19 @@ describe("parseEnergyStatus — a report we cannot trust is no report", () => {
     assert.equal(parseEnergyStatus(null), null);
     assert.equal(parseEnergyStatus([good]), null);
   });
+
+  it("HOLDERCOUNTED IS OPTIONAL — kept when a boolean, absent on older reports, refused otherwise", () => {
+    // No wallet that counts is a knowable nothing, not a failed read; the desk
+    // needs to tell them apart. Reports written before the field stay valid.
+    for (const counted of [true, false]) {
+      const r = { ...good, holderCounted: counted };
+      assert.deepEqual(parseEnergyStatus(r), r);
+      assert.deepEqual(parseEnergyStatus(JSON.stringify(r)), r);
+    }
+    const old = parseEnergyStatus(good)!;
+    assert.ok(!("holderCounted" in old), "an older report is not given a guess");
+    assert.equal(parseEnergyStatus({ ...good, holderCounted: "false" }), null);
+    assert.equal(parseEnergyStatus({ ...good, holderCounted: 0 }), null);
+    assert.equal(parseEnergyStatus({ ...good, holderCounted: null }), null);
+  });
 });

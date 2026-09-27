@@ -33,6 +33,13 @@ export type EnergyView =
       total: number | null;
       /** How far short of full energy; null whenever `total` is. */
       short: number | null;
+      /** The worker counted no owner wallet at all, so `total` is the agent's account alone. */
+      noWallet: boolean;
+      /**
+       * A part that COUNTS was not read. Only then may a surface say "couldn't
+       * read": no wallet that counts is a knowable nothing, not an outage.
+       */
+      readFailed: boolean;
       /** Paid AI reviews today; null when this agent has no paid reviewer. */
       reviews: EnergyMeter | null;
       /** New trades started on its own today. */
@@ -43,18 +50,27 @@ export function energyView(e: EnergyStatus | null | undefined, nowSec: number): 
   if (!e || !e.gated || e.level === "full" || nowSec >= e.resetsAt) return { kind: "none" };
   if (e.level === "unread") return { kind: "unread", spent: e.spent };
   // Both parts, or no total at all. On another network the agent's account is
-  // not counted by design, so there the owner's wallet IS the whole of it.
-  const total =
-    e.buy === "not-mainnet"
-      ? e.holderTokens
+  // not counted by design, so there the owner's wallet IS the whole of it; and
+  // with no owner wallet counted (none linked, or it already powers another
+  // account) the agent's account is — energy-copy.ts holdingsLine says the
+  // same. A report from before `holderCounted` existed is read as before.
+  const noWallet = e.holderCounted === false;
+  const agentCounts = e.buy !== "not-mainnet";
+  const total = !agentCounts
+    ? e.holderTokens
+    : noWallet
+      ? e.agentTokens
       : e.holderTokens !== null && e.agentTokens !== null
         ? e.holderTokens + e.agentTokens
         : null;
+  const readFailed = (!noWallet && e.holderTokens === null) || (agentCounts && e.agentTokens === null);
   return {
     kind: "low",
     spent: e.spent,
     total,
     short: total === null ? null : Math.max(0, e.needTokens - total),
+    noWallet,
+    readFailed,
     reviews: e.reviews,
     entries: e.entries,
   };

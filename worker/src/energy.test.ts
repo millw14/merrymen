@@ -281,6 +281,7 @@ describe("the report", () => {
     assert.deepEqual(s.entries, { used: 2, allowed: 2 });
     assert.deepEqual(s.reviews, { used: 1, allowed: 5 });
     assert.equal(s.holderTokens, 12_345);
+    assert.equal(s.holderCounted, true);
     assert.equal(s.agentTokens, 0);
     assert.equal(s.needTokens, ENERGY.fullTokens);
     assert.equal(s.resetsAt, T("2026-09-28T00:00:00Z"));
@@ -288,6 +289,18 @@ describe("the report", () => {
     const noReviewer = energyStatus({ plan: enf, parts: { holder: undefined, account: undefined }, hasReviewer: false, buy: "ready", estimateUsdg: null, nowSec: now });
     assert.equal(noReviewer.reviews, null);
     assert.equal(noReviewer.holderTokens, null, "no wallet is not a count of zero either");
+    assert.equal(noReviewer.holderCounted, false, "…and it is not a failed read: no wallet counts");
+  });
+  it("HOLDERCOUNTED TELLS A FAILED WALLET READ FROM NO WALLET AT ALL", () => {
+    const enf = energyPlan({ mode: "enforce", level: "low", counters: { reviews: 0, entries: 0, toldAt: null }, reviewsAllowed: 5, entriesAllowed: 2, nowSec: now });
+    const at = (holder: bigint | null | undefined) =>
+      energyStatus({ plan: enf, parts: { holder, account: tok(5_000) }, hasReviewer: true, buy: "ready", estimateUsdg: null, nowSec: now });
+    assert.equal(at(tok(1)).holderCounted, true);
+    assert.equal(at(null).holderCounted, true, "a wallet that counts but did not answer");
+    assert.equal(at(null).holderTokens, null);
+    assert.equal(at(undefined).holderCounted, false, "no wallet counts — the account is the whole figure");
+    assert.equal(at(undefined).holderTokens, null);
+    assert.deepEqual(parseEnergyStatus(at(undefined)), at(undefined), "and the web parses it back");
   });
   it("OFF AND OBSERVE ARE STILL REPORTED, ungated — so a later report replaces a stale 'spent'", () => {
     for (const mode of ["off", "observe"] as const) {

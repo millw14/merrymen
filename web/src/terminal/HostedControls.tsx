@@ -165,11 +165,18 @@ function EnergyFunding({energy,chainId}:{energy:EnergyStatus|null|undefined;chai
   if(view.kind==="none") return null;
   const remedies=energyRemedies(energy,chainId);
   const full=count(ENERGY.fullTokens);
+  // "Couldn't read" ONLY for a read that failed. No wallet that counts (none
+  // linked, or it already powers another account) is a knowable nothing, and
+  // pointing the owner at an outage that does not exist sends them the wrong way.
   const standing=view.kind==="unread"
     ? "we couldn't read the $MERRYMEN balances — that's our read failing, not your wallet"
     : view.total!==null
-      ? `your wallet and this account hold ${count(view.total)} $MERRYMEN between them, ${count(view.short)} short`
-      : "we couldn't read every $MERRYMEN balance just now, so we can't say how far short";
+      ? view.noWallet
+        ? `this account holds ${count(view.total)} $MERRYMEN, ${count(view.short)} short — no wallet of yours counts toward it`
+        : `your wallet and this account hold ${count(view.total)} $MERRYMEN between them, ${count(view.short)} short`
+      : view.readFailed
+        ? "we couldn't read every $MERRYMEN balance just now, so we can't say how far short"
+        : "no wallet of yours counts toward it yet";
   const route=!remedies.sendToAgent
     ? `This account is on another network, so $MERRYMEN sent to it would not count — keep ${full} on Robinhood Chain in your own wallet.`
     : remedies.usdg==="ready"
