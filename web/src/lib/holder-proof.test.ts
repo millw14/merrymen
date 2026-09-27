@@ -141,10 +141,11 @@ describe("only the verifying route may write a proof", () => {
     const post = src.slice(src.indexOf("export async function POST"), src.indexOf("export async function DELETE"));
     const consume = post.indexOf("consumeChallengeNonce(");
     const recover = post.indexOf("recoverMessageAddress(");
-    const claim = post.indexOf("store.claimHolder(wallet, tenant)");
+    const claim = post.indexOf("store.takeHolder(wallet, tenant)");
     const put = post.indexOf("store.put(");
     assert.ok(consume > 0 && recover > consume && claim > recover && put > claim, "nonce, recover, claim, then store");
-    assert.match(post, /status: 409/, "another account's wallet is a conflict, not an error");
+    assert.ok(!post.includes("claimHolder("), "a verified signature from the wallet moves a claim; first-claim-wins alone locked its holder out");
+    assert.match(post, /status: 429/, "a second move the same UTC day is refused, saying when");
     assert.match(post, /status: 503/, "and an unreadable store refuses rather than letting a second account in");
   });
 

@@ -19,7 +19,7 @@
  * NODE-ONLY (node:crypto, node:fs, pg). Imported by the web API and the worker,
  * never the browser bundle.
  */
-import { link, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { merrymenHome } from "./home";
@@ -32,6 +32,28 @@ export type HolderClaim =
   | { ok: true; fresh: boolean }
   /** Another account holds it. `heldBy` is that account: never shown to the caller. */
   | { ok: false; heldBy: `0x${string}` };
+
+/** A claim as stored, for putting back exactly what a move replaced. */
+export interface HolderClaimRecord {
+  tenant: `0x${string}`;
+  /** Epoch ms. */
+  claimedAt: number;
+  /** Epoch ms of the last move onto this row, or null when it never moved. */
+  movedAt: number | null;
+}
+
+/** The outcome of a fresh signature from the wallet itself (takeHolder). */
+export type HolderTake =
+  /** Claimed now (`fresh`), or this account held it already. */
+  | { ok: true; fresh: boolean; from?: undefined }
+  /** MOVED here from `from` by this call. `was` is the claim it replaced: never shown to the caller. */
+  | { ok: true; fresh: true; from: `0x${string}`; was: HolderClaimRecord }
+  /** Another account holds it and it already moved once this UTC day; it can move from `movableAt` (epoch ms). */
+  | { ok: false; movableAt: number };
+
+/** A wallet's claim moves at most once per UTC day (takeHolder). */
+const DAY_MS = 86_400_000;
+const utcDayStart = (ms: number) => Math.floor(ms / DAY_MS) * DAY_MS;
 
 /**
  * WHERE THE ONE-TIME HOLDER-CLAIMS BACKFILL STANDS (holder-claims.ts
@@ -74,6 +96,31 @@ export interface SettingsStore {
    * See effectiveHolder (packages/core/src/holder-proof.ts) for how it is read.
    */
   claimHolder(wallet: string, tenant: string): Promise<HolderClaim>;
+  /**
+   * THE WALLET'S OWN FRESH SIGNATURE IS AUTHORITY OVER ITS CLAIM — /api/holder
+   * calls this only after burning the nonce and recovering `wallet` from a
+   * signature over a message naming `tenant`.
+   *
+   * First claim wins stays the rule between accounts that cannot sign for the
+   * wallet. But first-claim-wins alone let a claim made with a phished,
+   * borrowed or long-abandoned signature lock the wallet's own key out for
+   * good: its fresh signature met 409, and only the holding account could
+   * unlink. So when another account holds the claim, this MOVES it here, in
+   * one conditional statement — and the old account's proof then counts
+   * nowhere (effectiveHolder follows the claim).
+   *
+   * AT MOST ONE MOVE PER WALLET PER UTC DAY, recorded on the claim itself, so
+   * one bag cannot be passed round a string of agents in a day. Within it the
+   * answer is `{ ok: false, movableAt }`. Unclaimed or already ours, it is
+   * claimHolder. Throws when the store cannot be read.
+   */
+  takeHolder(wallet: string, tenant: string, now?: number): Promise<HolderTake>;
+  /**
+   * Put back what a move replaced — only while `tenant` still holds the
+   * claim. For a caller whose proof failed to save after takeHolder moved the
+   * claim: the link did not happen, so neither did the move.
+   */
+  undoTakeHolder(wallet: string, tenant: string, was: HolderClaimRecord): Promise<void>;
   /** Release a claim — only if `tenant` holds it; anyone else's is left alone. */
   releaseHolder(wallet: string, tenant: string): Promise<void>;
   /**
@@ -202,13 +249,21 @@ export class FileSettingsStore implements SettingsStore {
    * wins without a lock, and a crash can never leave a half-written claim.
    * Its own directory, so listTenants (every *.json under tenant-settings)
    * never mistakes a wallet for a tenant.
+   *
+   * CHANGING OR REMOVING AN EXISTING CLAIM TAKES THE WALLET'S LOCK. A move
+   * (takeHolder) and a conditional release are each read-then-write; without
+   * the lock a release that read "ours" could delete the claim a move had
+   * just put there, and two moves in one instant could both pass the
+   * once-a-day check. Creating a claim needs no lock: link(2) only ever
+   * succeeds on a wallet with no claim, which nothing under the lock is
+   * about to change.
    */
   private claimsDir = path.join(merrymenHome(), "holder-claims");
   private claimFile(wallet: string) {
     return path.join(this.claimsDir, `${wallet}.json`);
   }
-  /** The account holding `wallet`, or null when none. Throws on a claim it cannot read. */
-  private async claimHolderOf(wallet: `0x${string}`): Promise<`0x${string}` | null> {
+  /** `wallet`'s claim, or null when none. Throws on a claim it cannot read. */
+  private async readClaim(wallet: `0x${string}`): Promise<HolderClaimRecord | null> {
     let raw: string;
     try {
       raw = await readFile(this.claimFile(wallet), "utf8");
@@ -219,15 +274,70 @@ export class FileSettingsStore implements SettingsStore {
     const rec = JSON.parse(raw) as Partial<StoredClaim>;
     // A claim we cannot read is not "nobody claims it" — throw, and the
     // caller refuses rather than letting a second account in.
-    return claimKey("tenant", String(rec.tenant));
+    return {
+      tenant: claimKey("tenant", String(rec.tenant)),
+      claimedAt: Number(rec.claimedAt) || 0,
+      movedAt: typeof rec.movedAt === "number" && Number.isFinite(rec.movedAt) ? rec.movedAt : null,
+    };
   }
-  async claimHolder(wallet: string, tenant: string): Promise<HolderClaim> {
+  /** The account holding `wallet`, or null when none. Throws on a claim it cannot read. */
+  private async claimHolderOf(wallet: `0x${string}`): Promise<`0x${string}` | null> {
+    return (await this.readClaim(wallet))?.tenant ?? null;
+  }
+  /** Replace `w`'s claim whole: a private temp file renamed over it. Only under the wallet's lock. */
+  private async replaceClaim(w: `0x${string}`, rec: HolderClaimRecord): Promise<void> {
+    const stored: StoredClaim = { wallet: w, tenant: rec.tenant, claimedAt: rec.claimedAt, ...(rec.movedAt === null ? {} : { movedAt: rec.movedAt }) };
+    const tmp = path.join(this.claimsDir, `.${w}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+    await writeFile(tmp, JSON.stringify(stored), { encoding: "utf8", mode: 0o600 });
+    try {
+      await rename(tmp, this.claimFile(w));
+    } catch (e) {
+      await unlink(tmp).catch(() => {});
+      throw e;
+    }
+  }
+  /**
+   * THE WALLET'S LOCK: a lock file created with O_EXCL, so one holder across
+   * processes. Every holder is milliseconds of file I/O, so a lock older than
+   * CLAIM_LOCK_STALE_MS was left by a process that died holding it and is
+   * broken; a live one is waited on, briefly, then refused (the route answers
+   * 503 and the owner tries again) rather than waited on for ever.
+   */
+  private async withClaimLock<T>(w: `0x${string}`, fn: () => Promise<T>): Promise<T> {
+    await mkdir(this.claimsDir, { recursive: true });
+    const lock = path.join(this.claimsDir, `.${w}.lock`);
+    for (let attempt = 0; ; attempt++) {
+      if (attempt >= 200) throw new Error("holder claim: the wallet's claim is busy — try again");
+      try {
+        await writeFile(lock, String(process.pid), { flag: "wx", mode: 0o600 });
+        break;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      }
+      const age = await stat(lock).then(
+        (st) => Date.now() - st.mtimeMs,
+        () => -1, // released since: take it now
+      );
+      if (age < 0) continue;
+      if (age > CLAIM_LOCK_STALE_MS) {
+        await unlink(lock).catch(() => {});
+        continue;
+      }
+      await new Promise((r) => setTimeout(r, 5 + Math.floor(Math.random() * 20)));
+    }
+    try {
+      return await fn();
+    } finally {
+      await unlink(lock).catch(() => {});
+    }
+  }
+  async claimHolder(wallet: string, tenant: string, now: number = Date.now()): Promise<HolderClaim> {
     const w = claimKey("wallet", wallet);
     const t = claimKey("tenant", tenant);
     await mkdir(this.claimsDir, { recursive: true });
     for (let attempt = 0; attempt < 3; attempt++) {
       const tmp = path.join(this.claimsDir, `.${w}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
-      const rec: StoredClaim = { wallet: w, tenant: t, claimedAt: Date.now() };
+      const rec: StoredClaim = { wallet: w, tenant: t, claimedAt: now };
       await writeFile(tmp, JSON.stringify(rec), { encoding: "utf8", mode: 0o600 });
       try {
         await link(tmp, this.claimFile(w));
@@ -244,13 +354,44 @@ export class FileSettingsStore implements SettingsStore {
     }
     throw new Error("holder claim: the wallet's claim kept changing — try again");
   }
+  async takeHolder(wallet: string, tenant: string, now: number = Date.now()): Promise<HolderTake> {
+    const w = claimKey("wallet", wallet);
+    const t = claimKey("tenant", tenant);
+    const dayStart = utcDayStart(now);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const first = await this.claimHolder(w, t, now);
+      if (first.ok) return { ok: true, fresh: first.fresh };
+      const out = await this.withClaimLock(w, async (): Promise<HolderTake | null> => {
+        const was = await this.readClaim(w);
+        if (!was) return null; // released meanwhile: claim it afresh
+        if (was.tenant === t) return { ok: true, fresh: false };
+        if (was.movedAt !== null && was.movedAt >= dayStart) return { ok: false, movableAt: dayStart + DAY_MS };
+        await this.replaceClaim(w, { tenant: t, claimedAt: now, movedAt: now });
+        return { ok: true, fresh: true, from: was.tenant, was };
+      });
+      if (out) return out;
+    }
+    throw new Error("holder claim: the wallet's claim kept changing — try again");
+  }
+  async undoTakeHolder(wallet: string, tenant: string, was: HolderClaimRecord): Promise<void> {
+    const w = claimKey("wallet", wallet);
+    const t = claimKey("tenant", tenant);
+    const back: HolderClaimRecord = { tenant: claimKey("tenant", was.tenant), claimedAt: was.claimedAt, movedAt: was.movedAt };
+    await this.withClaimLock(w, async () => {
+      if ((await this.claimHolderOf(w)) === t) await this.replaceClaim(w, back);
+    });
+  }
   async releaseHolder(wallet: string, tenant: string): Promise<void> {
     await this.releaseIfHeld(claimKey("wallet", wallet), claimKey("tenant", tenant));
   }
-  /** Remove `w`'s claim only if `t` holds it. */
+  /** Remove `w`'s claim only if `t` holds it — read and removed under the wallet's lock. */
   private async releaseIfHeld(w: `0x${string}`, t: `0x${string}`): Promise<void> {
-    if ((await this.claimHolderOf(w)) !== t) return; // not ours to release
-    await rm(this.claimFile(w), { force: true });
+    // Not ours (or none): nothing to take the lock for.
+    if ((await this.claimHolderOf(w)) !== t) return;
+    await this.withClaimLock(w, async () => {
+      if ((await this.claimHolderOf(w)) !== t) return; // moved away meanwhile
+      await rm(this.claimFile(w), { force: true });
+    });
   }
   /**
    * No index by account on disk, so every claim is read. A claim that will
@@ -330,7 +471,12 @@ interface StoredClaim {
   tenant: string;
   /** Epoch ms, like HolderProof.at. */
   claimedAt: number;
+  /** Epoch ms of the last move onto this claim (takeHolder); absent when it never moved. */
+  movedAt?: number;
 }
+
+/** No lock is held for longer than a few file operations; one this old was orphaned by a crash. */
+const CLAIM_LOCK_STALE_MS = 30_000;
 
 // ── postgres backend ─────────────────────────────────────────────────────────
 
@@ -353,6 +499,24 @@ async function createIfAbsent(c: PgClientLike, ddl: string): Promise<void> {
   } catch (e) {
     const code = (e as { code?: unknown }).code;
     if (code === "23505" || code === "42P07") return;
+    throw e;
+  }
+}
+
+/**
+ * ALTER TABLE … ADD COLUMN, SAFE TO RUN AT EVERY START AND FROM TWO SERVICES.
+ *
+ * A column that is already there (this start after the first, or the other
+ * service won the race) is Postgres's duplicate_column, 42701 — which is all
+ * this wanted. The sqlite stand-in the tests run this SQL on says the same
+ * in words. Anything else is a real failure.
+ */
+async function addColumnIfAbsent(c: PgClientLike, ddl: string): Promise<void> {
+  try {
+    await c.query(ddl);
+  } catch (e) {
+    const code = (e as { code?: unknown }).code;
+    if (code === "42701" || /duplicate column/i.test(e instanceof Error ? e.message : String(e))) return;
     throw e;
   }
 }
@@ -408,6 +572,10 @@ export class PgSettingsStore implements SettingsStore {
              claimed_at BIGINT NOT NULL
            )`,
         );
+        // When the claim last MOVED between accounts (takeHolder): a wallet
+        // moves at most once per UTC day. Added, not created, so a table
+        // made before moves existed gains it; NULL = never moved.
+        await addColumnIfAbsent(c, `ALTER TABLE holder_claims ADD COLUMN moved_at BIGINT`);
         // One row per fact about the claims themselves — today only whether
         // the one-time backfill has finished (HolderBackfillState).
         await createIfAbsent(
@@ -470,6 +638,51 @@ export class PgSettingsStore implements SettingsStore {
       return holder === t ? { ok: true, fresh: false } : { ok: false, heldBy: holder };
     }
     throw new Error("holder claim: the wallet's claim kept changing — try again");
+  }
+  /**
+   * CLAIM, OR MOVE IN ONE CONDITIONAL UPDATE. The UPDATE names the holder it
+   * read and the once-a-day condition, so it changes the row only if nothing
+   * moved or released it since: two moves racing for one wallet cannot both
+   * win, and a move can never land on a claim it did not see. Changed under
+   * it, it looks again.
+   */
+  async takeHolder(wallet: string, tenant: string, now: number = Date.now()): Promise<HolderTake> {
+    const w = claimKey("wallet", wallet);
+    const t = claimKey("tenant", tenant);
+    const dayStart = utcDayStart(now);
+    const c = await this.client();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const ins = await c.query(
+        `INSERT INTO holder_claims (wallet, tenant, claimed_at) VALUES ($1, $2, $3)
+         ON CONFLICT (wallet) DO NOTHING RETURNING tenant`,
+        [w, t, now],
+      );
+      if (ins.rows[0]) return { ok: true, fresh: true };
+      const { rows } = await c.query(`SELECT tenant, claimed_at, moved_at FROM holder_claims WHERE wallet = $1`, [w]);
+      if (!rows[0]) continue; // released meanwhile: claim it afresh
+      const was: HolderClaimRecord = {
+        tenant: claimKey("tenant", String(rows[0].tenant)),
+        claimedAt: Number(rows[0].claimed_at),
+        movedAt: rows[0].moved_at === null || rows[0].moved_at === undefined ? null : Number(rows[0].moved_at),
+      };
+      if (was.tenant === t) return { ok: true, fresh: false };
+      if (was.movedAt !== null && was.movedAt >= dayStart) return { ok: false, movableAt: dayStart + DAY_MS };
+      const moved = await c.query(
+        `UPDATE holder_claims SET tenant = $2, claimed_at = $3, moved_at = $3
+         WHERE wallet = $1 AND tenant = $4 AND (moved_at IS NULL OR moved_at < $5) RETURNING tenant`,
+        [w, t, now, was.tenant, dayStart],
+      );
+      if (moved.rows[0]) return { ok: true, fresh: true, from: was.tenant, was };
+    }
+    throw new Error("holder claim: the wallet's claim kept changing — try again");
+  }
+  /** One conditional UPDATE: only while `tenant` still holds it. */
+  async undoTakeHolder(wallet: string, tenant: string, was: HolderClaimRecord): Promise<void> {
+    const c = await this.client();
+    await c.query(
+      `UPDATE holder_claims SET tenant = $3, claimed_at = $4, moved_at = $5 WHERE wallet = $1 AND tenant = $2`,
+      [claimKey("wallet", wallet), claimKey("tenant", tenant), claimKey("tenant", was.tenant), was.claimedAt, was.movedAt],
+    );
   }
   /** One conditional DELETE: only the holder's own release removes the row. */
   async releaseHolder(wallet: string, tenant: string): Promise<void> {

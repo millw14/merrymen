@@ -32,15 +32,24 @@
  * AND ONE ACCOUNT PER WALLET. The proof above bound a wallet to an account and
  * nothing bound it back: any number of accounts could link the same
  * 100,000-token wallet and each agent read the whole bag as its own. So the
- * wallet is CLAIMED (settings-store holder_claims) before the proof is stored —
- * first claim wins, a second account is refused with 409, and a store that
- * cannot answer refuses rather than letting a second account in (the grants
- * route's FIRST CLAIM WINS, same reasoning). Unlinking releases the claim.
- * effectiveHolder (packages/core/src/holder-proof.ts) is how the claim is read.
+ * wallet is CLAIMED (settings-store holder_claims) before the proof is stored,
+ * and a store that cannot answer refuses rather than letting a second account
+ * in (the grants route's FIRST CLAIM WINS, same reasoning). Unlinking releases
+ * the claim. effectiveHolder (packages/core/src/holder-proof.ts) is how the
+ * claim is read.
+ *
+ * AND THE WALLET'S OWN KEY DECIDES WHERE. Every POST here carries a fresh
+ * signature BY the wallet, over text naming this account — so when another
+ * account holds the claim, it MOVES here (takeHolder) rather than meeting a
+ * 409 nobody could get past: a claim made with a phished or borrowed
+ * signature, or held by an account its owner can no longer sign in to, would
+ * otherwise lock the wallet's real holder out for good. At most one move per
+ * wallet per UTC day, so a bag cannot be passed round a string of agents; a
+ * second answers 429 with when it can move.
  */
 import { NextResponse } from "next/server";
 import { recoverMessageAddress } from "viem";
-import { getSettingsStore, type HolderClaim } from "@merrymen/settings-store";
+import { getSettingsStore, type HolderTake } from "@merrymen/settings-store";
 import { holderProofMessage, isHolderProof, isHostedMode } from "@merrymen/core";
 import {
   consumeChallengeNonce,
@@ -159,15 +168,15 @@ export async function POST(req: Request) {
   const store = getSettingsStore();
 
   /**
-   * CLAIMED BEFORE THE PROOF IS STORED, and only now — after the nonce is
-   * burned and the signature recovered, so nobody can squat a wallet they
-   * cannot sign for, and only someone who can sign for it ever learns that
-   * it is claimed. A proof stored first would count (for however briefly)
-   * in two accounts; a claim taken first can only ever be undone.
+   * CLAIMED — OR MOVED HERE — BEFORE THE PROOF IS STORED, and only now:
+   * after the nonce is burned and the signature recovered, so nobody can
+   * squat or take a wallet they cannot sign for, and only someone who can
+   * sign for it ever learns where it is claimed. Taken first, a claim can
+   * only ever be undone; a proof alone counts nowhere (effectiveHolder).
    */
-  let claim: HolderClaim;
+  let claim: HolderTake;
   try {
-    claim = await store.claimHolder(wallet, tenant);
+    claim = await store.takeHolder(wallet, tenant);
   } catch {
     return NextResponse.json(
       // Unreadable is not "free": refuse, as the grants route does.
@@ -177,13 +186,16 @@ export async function POST(req: Request) {
   }
   if (!claim.ok) {
     // Never who: that account is somebody's login.
+    const retryAfter = Math.max(1, Math.ceil((claim.movableAt - Date.now()) / 1000));
     return NextResponse.json(
       {
         error:
-          "This wallet already powers another merrymen account, and a wallet can power one account. Unlink it there first, or link a different wallet.",
+          "This wallet powers another merrymen account, and it already moved once today — a wallet can move between " +
+          `accounts once per day (UTC). Sign again from ${utcStamp(claim.movableAt)} to move it here.`,
         ownerFacing: true,
+        movableAt: claim.movableAt,
       },
-      { status: 409 },
+      { status: 429, headers: { "retry-after": String(retryAfter) } },
     );
   }
 
@@ -200,15 +212,28 @@ export async function POST(req: Request) {
       holderProof: { address: wallet, at: Date.now() },
     });
   } catch {
-    // Undo a claim THIS call took, so a failed link does not hold the wallet
-    // hostage. One this account already held stays: it may back a stored proof.
-    if (claim.fresh) await store.releaseHolder(wallet, tenant).catch(() => {});
+    // Undo what THIS call took, so a failed link does not hold the wallet
+    // hostage: a fresh claim is released, and a move is put back exactly as
+    // it was (the other account's claim, and its day's move allowance). One
+    // this account already held stays: it may back a stored proof.
+    if (claim.from) await store.undoTakeHolder(wallet, tenant, claim.was).catch(() => {});
+    else if (claim.fresh) await store.releaseHolder(wallet, tenant).catch(() => {});
     return NextResponse.json(
       { error: "couldn't save that link just now — nothing changed, please try again", ownerFacing: true },
       { status: 503 },
     );
   }
-  return NextResponse.json({ ok: true, holder: wallet });
+  // `moved` tells the signer it came from another account — never which.
+  return NextResponse.json({ ok: true, holder: wallet, ...(claim.from ? { moved: true } : {}) });
+}
+
+/** "00:00 UTC on 29 Sep 2026" — when a wallet can move again. */
+function utcStamp(ms: number): string {
+  const d = new Date(ms);
+  const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()];
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${hh}:${mm} UTC on ${d.getUTCDate()} ${month} ${d.getUTCFullYear()}`;
 }
 
 /** DELETE — unlink, and free the wallet for another account. */

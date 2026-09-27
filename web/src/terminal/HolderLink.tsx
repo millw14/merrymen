@@ -117,12 +117,18 @@ export function HolderLink() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ holder: holder.trim(), signature: signature.trim(), nonce: challenge.nonce }),
       });
-      const j = (await r.json()) as { error?: string };
+      const j = (await r.json()) as { error?: string; moved?: boolean };
       if (!r.ok) throw new Error(j.error ?? "could not link that wallet");
       setChallenge(null);
       setSignature("");
       setHolder("");
-      setNote("Linked. Your tier now reads this wallet's balance.");
+      // `moved`: the wallet's own signature took it from another account,
+      // where it no longer counts. The server never says which account.
+      setNote(
+        j.moved
+          ? "Linked. This wallet moved here from another merrymen account, where it no longer counts. Your tier now reads its balance."
+          : "Linked. Your tier now reads this wallet's balance.",
+      );
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -175,7 +181,8 @@ export function HolderLink() {
             ? "The wallet you sign in with already powers another merrymen account, so it does not count here. "
             : "By default your tier reads the wallet you sign in with. "}
           If your $MERRYMEN is somewhere else, name that wallet and prove it with a signature from it.
-          A wallet can power one merrymen account; your agent&apos;s own account counts too. It stays
+          A wallet powers one merrymen account at a time: signing for it here moves it from any other
+          account, at most once a day. Your agent&apos;s own account counts too. The wallet stays
           read-only — it is never a spend key and never joins your agent&apos;s permission.
         </p>
       )}
@@ -203,7 +210,8 @@ export function HolderLink() {
         <div className="holder-challenge">
           <p className="mm-hint">
             Sign this exact message with <span className="mono">{holder.trim().toLowerCase()}</span>.
-            Any wallet works — extension, hardware, or a phone. It moves no funds.
+            Any wallet works — extension, hardware, or a phone. It moves no funds. If this wallet
+            powers another merrymen account, signing moves it here.
           </p>
           <textarea className="mm-input mono" readOnly rows={9} value={challenge.message} />
           <div className="holder-row">
