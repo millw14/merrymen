@@ -32,7 +32,7 @@ const SCHEMA = [
     " status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER, sponsor_gas INTEGER, live_blocker TEXT," +
     " x_handle TEXT, x_verified INTEGER DEFAULT 0, epoch INTEGER DEFAULT 1, hwm_usdg REAL DEFAULT 0," +
     " hwm_withdrawn_usdg REAL NOT NULL DEFAULT 0, accrued_fee_usdg REAL DEFAULT 0," +
-    " contributions_known INTEGER, contributions_why TEXT, gas_accounting TEXT, quality_at INTEGER);",
+    " contributions_known INTEGER, contributions_why TEXT, gas_accounting TEXT, quality_at INTEGER, energy TEXT);",
   "CREATE TABLE positions (agent_id TEXT, symbol TEXT, token TEXT, raw_balance TEXT, ui_multiplier TEXT," +
     " price_usd REAL, price_stale INTEGER, price_source TEXT DEFAULT 'chainlink', value_usdg REAL," +
     " updated_at INTEGER, PRIMARY KEY (agent_id, symbol));",
