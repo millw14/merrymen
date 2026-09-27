@@ -290,3 +290,38 @@ describe("sayEnergyOutcome — the ledger row decides the sentence", () => {
     for (const l of lines) assert.doesNotMatch(l, NO_PRICE_WORDS, l);
   });
 });
+
+describe("the fixed sentences — each names what to do instead", async () => {
+  const m = await import("./energy-buy");
+  const { liveBlockerText } = await import("./exec-mode");
+  it("not an order: the app chat's get-energy, or send it directly — never /settings", () => {
+    assert.match(m.ENERGY_NOT_AN_ORDER, /get my energy/);
+    assert.match(m.ENERGY_NOT_AN_ORDER, /Merrymen app chat/);
+    assert.match(m.ENERGY_NOT_AN_ORDER, /Robinhood Chain directly/);
+    assert.doesNotMatch(m.ENERGY_NOT_AN_ORDER, /\/settings/);
+  });
+  it("no sell: the key cannot, recover can", () => {
+    assert.match(m.ENERGY_NO_SELL, /can't sell/);
+    assert.match(m.ENERGY_NO_SELL, /merrymen recover/);
+  });
+  it("not mainnet: keep it in your own wallet on Robinhood Chain", () => {
+    assert.match(m.ENERGY_NOT_MAINNET, /own wallet on Robinhood Chain/);
+  });
+  it("resign: re-sign at /grant (free), or send it directly", () => {
+    assert.match(m.ENERGY_RESIGN, /re-sign at \/grant/);
+    assert.match(m.ENERGY_RESIGN, /free/);
+    assert.match(m.ENERGY_RESIGN, /directly/);
+  });
+  it("needs live: says why it is not live, and both ways round it", () => {
+    const line = m.energyNeedsLiveLine(liveBlockerText("live-not-enabled"));
+    assert.match(line, /only while trading live/);
+    assert.match(line, /live trading is off/);
+    assert.match(line, /Turn on Live trading, or send \$MERRYMEN to my account on Robinhood Chain directly/);
+    assert.match(m.energyNeedsLiveLine(null), /and I'm not\. Turn on/);
+  });
+  it("none of them says anything about price, returns or a percentage", () => {
+    for (const l of [m.ENERGY_NOT_AN_ORDER, m.ENERGY_NO_SELL, m.ENERGY_NOT_MAINNET, m.ENERGY_RESIGN, m.energyNeedsLiveLine("x")]) {
+      assert.doesNotMatch(l, NO_PRICE_WORDS, l);
+    }
+  });
+});
