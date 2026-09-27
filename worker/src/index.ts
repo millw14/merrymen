@@ -6237,6 +6237,12 @@ async function main() {
   function tokenLegs(intent: TradeIntent): { sell_token?: string; buy_token?: string } {
     if (intent.kind === "swap") return { sell_token: intent.sellToken, buy_token: intent.buyToken };
     if (intent.kind === "curve-trade") return { sell_token: intent.assetIn, buy_token: intent.assetOut };
+    // THE ENERGY BUY NAMES ITS LEGS, and the pre-broadcast 'submitted' row is
+    // why that is load-bearing rather than tidy: the in-flight guard
+    // (energyBuysInFlight) and the stranded-op settle both find an energy
+    // purchase by kind OR by these legs, and a row that lost its kind to a
+    // rewrite would otherwise be invisible to both after a crash.
+    if (intent.kind === "energy-buy") return { sell_token: intent.sellToken, buy_token: intent.buyToken };
     return {};
   }
 
@@ -6250,6 +6256,12 @@ async function main() {
       };
     }
     if (intent.kind === "transfer") return { action: "transfer", sizeUsdg: usdgNum(intent.amountUsdg) };
+    // Its own action word, never "buy": it is not a position and must not read
+    // as one on any surface that groups decisions by action. The symbol is the
+    // reserve's own, from the core registry — never a model's spelling.
+    if (intent.kind === "energy-buy") {
+      return { action: "energy-buy", symbol: MERRYMEN_TOKEN.symbol, sizeUsdg: usdgNum(intent.notionalUsdg) };
+    }
     if (intent.kind === "equity-order") {
       return { action: intent.side, symbol: intent.ticker, sizeUsdg: usdgNum(intent.notionalUsdg) };
     }
@@ -7008,7 +7020,10 @@ async function main() {
     };
     const verdict = checkPolicy(intent, limits, state, await scoutContextFor(intent));
     const notional =
-      intent.kind === "swap" || intent.kind === "equity-order" || intent.kind === "curve-trade"
+      intent.kind === "swap" ||
+      intent.kind === "equity-order" ||
+      intent.kind === "curve-trade" ||
+      intent.kind === "energy-buy"
         ? intent.notionalUsdg
         : intent.amountUsdg;
     // trades.target is NOT NULL and EVM-shaped; the ticker is the honest analog

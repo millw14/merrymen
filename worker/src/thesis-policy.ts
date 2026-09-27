@@ -820,6 +820,19 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   "live-not-enabled": "its owner has not turned on live trading, so it places no real orders",
   "wrong-chain": "its key was signed for a different network",
   "no-cash": "the account held no USDG to trade with",
+  // ── THE ENERGY BUY ──────────────────────────────────────────────────────
+  //
+  // Every rule the owner's energy buy can write into `reject_rule`, so none of
+  // them reaches a surface as a bare slug. Utility words only: energy is how
+  // much the agent may do on its own, and nothing here says anything about the
+  // token's price or what it might be worth. No tax or fee percentages either —
+  // the figure is the token owner's to change, and a number printed here would
+  // go stale without a line of this file changing.
+  "energy-not-granted": "its signed key has no route to buy its own energy",
+  "energy-needs-live": "it buys its own energy only while trading live",
+  "energy-tax": "the token's own buy tax was above what the energy buy accepts",
+  "energy-tax-unreadable": "the token's buy tax could not be read, so no safe floor could be set",
+  "energy-no-quote": "the energy route could not be quoted",
 });
 
 /**
@@ -892,6 +905,18 @@ export function rejectRuleRemedy(rule: string | null | undefined): string | null
       return "Re-sign at /grant on Robinhood Chain; the current key is for a different network.";
     case "live-not-enabled":
       return "Turn on Live trading in Settings when you want it to trade real funds.";
+    // THE ENERGY BUY'S TWO OWNER ACTIONS, and both of them name the way round
+    // it: $MERRYMEN sent straight to the account counts the moment it lands,
+    // whatever the key or the mode. The transient three (tax unreadable, no
+    // quote, a tax above the ceiling) are the chain's to change, not the
+    // owner's — except that sending the tokens directly is always open, which
+    // is why `energy-tax` still says so.
+    case "energy-not-granted":
+      return "Re-sign your trading permission at /grant — it is free — or send $MERRYMEN to the agent's account on Robinhood Chain directly.";
+    case "energy-needs-live":
+      return "Turn on Live trading in Settings, or send $MERRYMEN to the agent's account on Robinhood Chain directly.";
+    case "energy-tax":
+      return "Send $MERRYMEN to the agent's account on Robinhood Chain directly — it counts the moment it lands.";
     default:
       return null;
   }

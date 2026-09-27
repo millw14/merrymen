@@ -137,6 +137,31 @@ export interface AgentLimits {
    * behaviour rather than silently widening.
    */
   cashToken?: string;
+  /**
+   * THE ENERGY BUY THIS GRANT SEALED, or absent.
+   *
+   * From the GRANT and nowhere else (grantEnergyRoute: the GRANT_ENERGY marker
+   * AND chain 4663), for the reason every mirrored address here is: the wall
+   * built the permission from that marker, so it is the only record of what
+   * the chain will honour.
+   *
+   * DELIBERATELY NOT IN allowedTargets. The router is a target only for the
+   * one selector the wall pinned — swapExactTokensForTokensSupportingFee-
+   * OnTransferTokens over the frozen USDG → VIRTUAL → $MERRYMEN path into the
+   * account itself. Listing it with the other targets would let any `swap`
+   * intent name it, and the swap builder would then route that intent through
+   * a v3 router it never quoted: a mirror looser than the chain. So a `swap`
+   * aimed at it stays `target-allowlist`, and only an `energy-buy` is judged
+   * against this.
+   *
+   * ABSENT means the signature cannot buy energy at all (`energy-not-granted`).
+   */
+  energy?: {
+    /** Uniswap v2 Router02 — the one address the wall pinned the energy swap on. */
+    router: string;
+    /** The reserve token the route ends at ($MERRYMEN). */
+    token: string;
+  };
   /** Drawdown (bps from high-water mark) at which the breaker pauses the agent. */
   maxDrawdownBps: number;
   /** Unix seconds after which the session key is dead regardless of anything. */
@@ -230,6 +255,42 @@ export type TradeIntent = {
    */
   minAmountOutRaw: bigint;
   /** USDG-equivalent size (6dp) — what the caps judge. */
+  notionalUsdg: bigint;
+} | {
+  /**
+   * USDG spent buying the agent's own ENERGY ($MERRYMEN) over the one route the
+   * grant sealed (core energy.ts ENERGY_ROUTE_V1), at the owner's request.
+   *
+   * ITS OWN KIND, NOT A `swap`, for three reasons that are about safety:
+   *
+   *   BUY-ONLY. The key can never sell $MERRYMEN — it has no approve for it
+   *   anywhere in the wall — so `no-exit` would refuse every one of these, and
+   *   carving an exemption into the swap branch (the most-travelled branch in
+   *   this file) is how a looser mirror gets written by accident.
+   *
+   *   NOT A POSITION. It is never watched, never valued into equity and never
+   *   sold by a strategy; `asset-allowlist` (the watch set) and the scout
+   *   budget (unpriceable POSITIONS) are about something it is not.
+   *
+   *   CAPITAL OUT. Accounting books it as capital leaving the trading book,
+   *   not a fill — and a `swap` would fall through to the v3, Rialto or
+   *   approve-only executor arms, none of which can build this call.
+   *
+   * A new kind also makes the compiler ask every consumer that reads a
+   * notional what this means to it, which is how curve-trade was added.
+   *
+   * `target` is the v2 router; the legs are USDG → $MERRYMEN (the VIRTUAL hop
+   * is fixed by the route, not chosen here). `notionalUsdg` must EQUAL
+   * `sellAmountRaw`: the input is USDG itself, so the two are the same number
+   * and a difference could only be an intent built wrong.
+   */
+  kind: "energy-buy";
+  target: `0x${string}`;
+  sellToken: `0x${string}`;
+  buyToken: `0x${string}`;
+  /** Raw USDG (6dp) the router pulls — exactly the approve. */
+  sellAmountRaw: bigint;
+  /** The same figure, as the caps read it. */
   notionalUsdg: bigint;
 });
 
@@ -363,8 +424,68 @@ export function checkPolicy(
 
   const lc = (a: string) => a.toLowerCase();
   // Equity orders have no contract target — their allowlist is tickers, below.
-  if (intent.kind !== "equity-order" && !limits.allowedTargets.map(lc).includes(lc(intent.target))) {
+  // An energy buy's one target is judged in its own branch against the route
+  // the grant sealed, which is deliberately NOT in allowedTargets (see
+  // AgentLimits.energy) — so a `swap` naming the v2 router still stops here.
+  if (
+    intent.kind !== "equity-order" &&
+    intent.kind !== "energy-buy" &&
+    !limits.allowedTargets.map(lc).includes(lc(intent.target))
+  ) {
     return { ok: false, rule: "target-allowlist", detail: `target ${intent.target} not allowed` };
+  }
+
+  // ── the energy buy ──────────────────────────────────────────────────────
+  //
+  // A MIRROR OF ONE PERMISSION, rule for rule. The wall seals the swap on the
+  // router, with the path pinned USDG → VIRTUAL → $MERRYMEN and the output
+  // pinned to the account, and funds it through the ONE capped USDG approve —
+  // so the questions here are: did the grant seal it at all, is this that
+  // router, are these those legs, and is the size a size. What it does NOT ask
+  // is stated as carefully, because each would make this mirror STRICTER than
+  // the chain:
+  //
+  //   asset-allowlist (the watch set) — $MERRYMEN is never watched, by design;
+  //   no-exit — the key can never sell it, by design (recover moves it);
+  //   scout — the budget on unpriceable POSITIONS, and this is not one.
+  //
+  // The caps below it (ops, per-trade, daily) and the drawdown breaker DO apply
+  // — it is a spend, and not an exit — exactly as they would to any buy.
+  if (intent.kind === "energy-buy") {
+    if (!limits.energy) {
+      return {
+        ok: false,
+        rule: "energy-not-granted",
+        detail:
+          "this signed key has no energy route — it was signed before the energy buy existed, off Robinhood Chain, " +
+          "or without room for it. Re-sign at /grant, or send $MERRYMEN to the account directly.",
+      };
+    }
+    if (lc(intent.target) !== lc(limits.energy.router)) {
+      return { ok: false, rule: "target-allowlist", detail: `target ${intent.target} is not the sealed energy router` };
+    }
+    if (
+      limits.cashToken === undefined ||
+      lc(intent.sellToken) !== lc(limits.cashToken) ||
+      lc(intent.buyToken) !== lc(limits.energy.token)
+    ) {
+      return {
+        ok: false,
+        rule: "asset-allowlist",
+        detail: `the energy route is USDG → $MERRYMEN only; ${intent.sellToken} → ${intent.buyToken} is not it`,
+      };
+    }
+    // POSITIVITY, and the one identity this kind has: its input IS USDG, so the
+    // notional the caps judge and the amount the router pulls are one number.
+    // A difference could only be an intent built wrong — and the caps would
+    // then be judging a figure the chain never sees.
+    if (intent.sellAmountRaw <= 0n || intent.notionalUsdg !== intent.sellAmountRaw) {
+      return {
+        ok: false,
+        rule: "non-positive",
+        detail: `energy buy sized ${intent.sellAmountRaw} raw / ${intent.notionalUsdg} USDG is not a trade`,
+      };
+    }
   }
 
   if (intent.kind === "equity-order") {
@@ -610,6 +731,8 @@ export function checkPolicy(
   // The two venues that ACQUIRE an asset. Named explicitly rather than relying
   // on `scout` being undefined elsewhere: a vault movement has no notional to
   // judge, and a future kind that does should have to opt in here on purpose.
+  // `energy-buy` has not, deliberately: $MERRYMEN is never a position, so a
+  // budget on unpriceable POSITIONS has nothing to say about it.
   if (scout?.buyUnpriceable && (intent.kind === "swap" || intent.kind === "curve-trade")) {
     const verdict = scoutAllows(
       {
@@ -720,8 +843,16 @@ export function checkPolicy(
   if (intent.kind !== "vault-withdraw") {
     // Equity orders count on BOTH sides, like swaps: a sell is still an op and
     // still market exposure, and on this rail these caps are the only wall.
+    //
+    // AN ENERGY BUY is judged against the per-trade cap because that IS its
+    // on-chain ceiling: the router pulls USDG through the one USDG approve,
+    // which the wall caps LESS_THAN_OR_EQUAL perTradeUsdg — so an amount
+    // exactly at the cap passes here as it passes there.
     const notional =
-      intent.kind === "swap" || intent.kind === "equity-order" || intent.kind === "curve-trade"
+      intent.kind === "swap" ||
+      intent.kind === "equity-order" ||
+      intent.kind === "curve-trade" ||
+      intent.kind === "energy-buy"
         ? intent.notionalUsdg
         : intent.amountUsdg;
     const isDeposit = intent.kind === "vault-deposit";
