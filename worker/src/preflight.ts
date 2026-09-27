@@ -27,6 +27,7 @@ import {
   STOCK_TOKENS,
   TRADEABLE_SYMBOLS,
   grantHasMultihop,
+  isEnergyReserveToken,
   sellableAssets,
   type StoredGrant,
 } from "../../packages/core/src/index";
@@ -300,6 +301,10 @@ export function preflight(input: PreflightInput): Check[] {
   ]);
   const uncovered = basket.filter((sym) => {
     const address = known.get(sym);
+    // $MERRYMEN is energy, never a basket leg: no signature covers it (every
+    // signer drops it from the sealed extras) and the worker never watches it,
+    // so "re-sign to cover it" would be a blocker nothing can clear.
+    if (address && isEnergyReserveToken(address)) return false;
     return !address || !sellable.has(address.toLowerCase());
   });
   if (uncovered.length) {

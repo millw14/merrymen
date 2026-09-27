@@ -40,7 +40,7 @@ import { labelText, shortAddr, tokenLabel, tokenLabelSync } from "../token-label
 import { readTokenMeta, sanitizeMeta, type TokenMeta } from "../venues/pons-meta";
 import { carriedDecisionsFrom, carriedHistory, historyFileKey, overlayHistory } from "./history-overlay";
 import { accountSeries, bookOf, periodChange, type PeriodChange } from "../period-pnl";
-import { agentEpoch, openRO, readPositions, resolveAgent, type StatusContext } from "./reads";
+import { agentEpoch, energyStatusLine, openRO, readPositions, resolveAgent, type StatusContext } from "./reads";
 import { settingsListText } from "./settings-chat";
 import { settleFor, signNeed, type SignNeed } from "./sign-prompt";
 import { isActiveClassState, isQuoteTokenRow } from "../class-active";
@@ -307,6 +307,11 @@ const agentStatus: ChatTool = {
               : "Mode: live trading is OFF, so no real orders are placed.",
         );
         lines.push(ctx.paused ? "The owner's PAUSE button is ON — I place no new trades until they resume." : "The pause button is off.");
+        // TODAY'S ENERGY, when the gate enforces — the same line /status shows,
+        // from the worker's own report. It limits what I start on my own; it
+        // never limits selling, stop-losses or the owner's own orders.
+        const energy = energyStatusLine(s.energy, ctx.now);
+        if (energy) lines.push(`Energy: ${energy.replace(/^• energy: /, "")}.`);
         const alive = s.workerAliveSec !== null && s.workerAliveSec < 90;
         if (!alive) lines.push("My trading loop has not checked in for a while — I may be restarting.");
 

@@ -31,6 +31,7 @@ import { OWNER_CHANGED, ownerMismatch } from "@/lib/order-owner";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { sharedRead } from "@/lib/read-discoveries";
 import { usd } from "@/lib/format";
+import { snipeEnergyAnswer } from "@/lib/energy-reserve";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -168,6 +169,12 @@ export async function POST(req: Request) {
   }
 
   const t = resolved.target;
+  // $MERRYMEN IS ENERGY, NOT A COIN TO SNIPE — covered or not. Uncovered, the
+  // answer below would say "add it and re-sign", which no signature can ever
+  // satisfy; covered (an old grant), a snipe card would place an energy buy
+  // under words that never said so. It has one way in: get-energy.
+  const energy = snipeEnergyAnswer(t);
+  if (energy) return NextResponse.json(energy);
   if (!t.covered) {
     return NextResponse.json({
       outcome: "needs-signature",
