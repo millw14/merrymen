@@ -20,6 +20,10 @@ test("paper return uses its recorded book, isolates epochs and live transitions"
     await db.exec("UPDATE equity SET equity_usdg = 0 WHERE id = 7");
     assert.equal(await readPaperReturn(db, 'a', 1), -10000);
     assert.equal(await readPaperReturn(db, 'missing', 1), null);
+    // An empty live mark between paper marks is not a live period.
+    await db.exec(`INSERT INTO equity VALUES (20,'z',1,1000,'paper',20),(21,'z',1,0,'live',21),
+      (22,'z',1,1000,'paper',22),(23,'z',1,1050,'paper',23)`);
+    assert.equal(await readPaperReturn(db, 'z', 1), 500);
     await db.exec("CREATE TABLE paper_recovery_health(agent_id TEXT,blocked INTEGER); INSERT INTO paper_recovery_health VALUES('a',1)");
     assert.equal(await readPaperReturn(db, 'a', 2), null, "a failed restore must not publish its stale flat valuation");
     await db.exec("UPDATE paper_recovery_health SET blocked=0");

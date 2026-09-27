@@ -668,6 +668,7 @@ async function main() {
    */
   let lastPrices: Map<string, PriceQuote> = new Map();
   const trenchBrain = new TrenchBrainReview();
+  trenchBrain.onDrop = (why) => console.log(`[trencher] ${why}`);
   let autoTrench: Awaited<ReturnType<typeof discoverTrencherUniverse>> | null = null;
   let autoTrenchContext = "";
   let autoTrenchPending = false;
@@ -734,7 +735,8 @@ async function main() {
       armed: !!active,
       executor: !!active?.executor,
       chainId: active?.grant.chainId ?? 0,
-      cashUsdg: lastCashUsdg,
+      // The reconciler's reading once it exists; before that, the rail's own.
+      cashUsdg: lastCashUsdg ?? railCashUsdg,
       // Read on BOTH rails now — see the note at the assignment. Live-only made
       // this a latch, and a latch on a leg of the rail predicate is an agent
       // that can never come back.
@@ -3767,6 +3769,39 @@ async function main() {
   let lastGasWei: bigint | null = null; // feeds the low-gas alert AND the pre-flight refusal
   /** When the paper rail last looked at the account's REAL ETH. See the note at the assignment. */
   let lastRealGasReadAt = 0;
+  /**
+   * The account's USDG as read for the RAIL DECISION only, before the flow
+   * reconciler has made its first observation (`lastCashUsdg`).
+   *
+   * Without it, every restart of an agent with live consent and paper enabled
+   * ran its first tick LIVE — unknown is not unfunded — valued an empty live
+   * book at 0, wrote a `live` equity row, and fell back to paper a tick later.
+   * readPaperReturn restarts the paper period after any non-paper row, so the
+   * paper P&L of such an agent restarted at every redeploy: Seafish201, 16
+   * redeploys in two days, showing exactly 0 (live tick 2026-09-27 00:38:28,
+   * back to paper at 00:42:28). Kept apart from `lastCashUsdg` on purpose —
+   * that variable's first non-null value is how the reconciler books a
+   * first-seen contribution, and nothing here may touch flow accounting.
+   * Still null when the read fails, which keeps today's behaviour: a funded
+   * agent is never pushed to paper by a read that did not happen.
+   */
+  let railCashUsdg: bigint | null = null;
+  let railCashReadAt = 0;
+  const observeRailCash = async (): Promise<void> => {
+    if (!active || lastCashUsdg !== null) return;
+    if (railCashUsdg !== null && Date.now() - railCashReadAt < REAL_GAS_READ_EVERY_MS) return;
+    railCashReadAt = Date.now();
+    try {
+      railCashUsdg = (await active.client.readContract({
+        address: CASH.USDG as `0x${string}`,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [active.grant.smartAccount as `0x${string}`],
+      })) as bigint;
+    } catch {
+      // A refused read is not a zero balance.
+    }
+  };
   /**
    * THIS TICK'S CURVE RESERVES, from the pricing pass that already read them.
    *
@@ -8908,6 +8943,7 @@ async function main() {
 
     await refreshConfig();
     const armed = await syncGrant();
+    await observeRailCash();
 
     if (active && grantTrencher(active.grant)) {
       refreshTrenchTape(); refreshAutoTrench();
@@ -10716,6 +10752,14 @@ async function main() {
               brainOrderAccepted = tradeConsumesSnapshot(r.executionStatus);
               await addEvent(agentId, r.ok ? "ok" : "warn", `brain: ${r.line}`);
             }
+          } else if (!fastTrencher && outcome.ran && outcome.result.ok && outcome.result.decision.action !== "hold") {
+            // SAID, NOT SILENT. A Brain BUY on an agent outside the live
+            // allowlist (or paused) is a thought by design, but it used to leave
+            // no line at all — Gary logged 8 of 8 `[brain] BUY NVDA` on
+            // 2026-09-26 with nothing after them, which reads exactly like a
+            // decision the executor lost.
+            const why = isPaused() ? "the agent is paused" : "Brain orders are not enabled for this agent (shadow only)";
+            console.log(`[${short(agentId)}] [brain] not acting — ${why}`);
           }
         }
       } catch (e) {

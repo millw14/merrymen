@@ -258,19 +258,33 @@ export class TrenchBrainReview {
     return this.reviewedAtMs.get(symbol);
   }
 
+  /** Told why a ready order was not used, so drops are countable. */
+  onDrop?: (why: string) => void;
+
   take(symbol: string, token: string, price8: bigint, maxUsdg: number, held = false): TrenchBrainOrder | null {
     const r = this.ready;
     if (!r || r.input.market.symbol !== symbol) return null;
     this.ready = null;
     if (Boolean(r.input.positions?.some(p => p.symbol === symbol && Number(p.qtyRaw) > 0)) !== held) return null;
-    if (r.context !== this.context || this.now() - r.started > 60_000 || price8 <= 0n ||
+    // A DROPPED ORDER IS SAID, NOT SWALLOWED. These three used to return null
+    // with `ready` already cleared, so a Brain BUY that aged out or whose price
+    // moved simply never happened and nothing counted it.
+    const act = r.decision.action.toUpperCase();
+    if (r.context !== this.context) { this.onDrop?.(`Brain ${act} ${symbol} not used: the agent's context changed since the review`); return null; }
+    const age = this.now() - r.started;
+    if (age > 60_000) { this.onDrop?.(`Brain ${act} ${symbol} not used: ${Math.round(age / 1000)}s old, past the 60s a review stays valid`); return null; }
+    if (price8 <= 0n ||
         r.token.toLowerCase() !== token.toLowerCase() ||
         r.decision.instrument_id !== r.input.market.instrumentId || r.decision.symbol !== symbol ||
         typeof r.decision.agent_id !== "string" || typeof r.decision.decision_id !== "string" || !r.decision.decision_id.trim() ||
         r.decision.agent_id.toLowerCase() !== r.input.agentId.toLowerCase()) return null;
     const before = Number(r.input.market.priceUsd);
     const price = Number(price8) / 1e8;
-    if (!Number.isFinite(before) || before <= 0 || Math.abs(price / before - 1) > .02) return null;
+    if (!Number.isFinite(before) || before <= 0) return null;
+    if (Math.abs(price / before - 1) > .02) {
+      this.onDrop?.(`Brain ${act} ${symbol} not used: price moved ${((price / before - 1) * 100).toFixed(1)}% since the review (limit 2%)`);
+      return null;
+    }
     const verdict = orderFromDecision(r.decision, { maxUsdg });
     if (verdict.ok && verdict.order.side === "sell" && !held) return null;
     return verdict.ok ? { side: verdict.order.side, usdgAmount: verdict.order.usdgAmount, decisionId: r.decision.decision_id } : null;

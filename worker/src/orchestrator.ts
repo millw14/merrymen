@@ -4897,6 +4897,9 @@ async function runNewsPass(): Promise<void> {
   }
 }
 
+/** The rewind each tenant last reported, so a standing one is said once. */
+const lastRewindLogged = new Map<string, string>();
+
 async function mirrorLedgers(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url || children.size === 0) return;
@@ -4989,12 +4992,23 @@ async function mirrorLedgers(): Promise<void> {
       // counts because it is not routine: it says this tenant's child ledger
       // was rebuilt under a watermark that outlived it, and everything the
       // append-only tables held before that point is gone with the old file.
-      if (r.restarted) {
-        const what = Object.entries(r.restarted)
-          .map(([k, v]) => `${k} (was ${v.was})`)
-          .join(", ");
-        log(`ledger mirror: ${tenant} CURSOR REWOUND — the child ledger was rebuilt beneath it: ${what}`);
+      //
+      // ONCE PER REWIND, NOT ONCE PER PASS. A rebuilt child whose table is
+      // still EMPTY leaves the watermark where it was (there is no row to move
+      // it to), so the same rewind is detected again on every 15s pass until the
+      // child writes that many rows — a paper agent idle over a weekend never
+      // does. Measured 2026-09-27 03:00: 61+ tenants each printing this every
+      // pass, burying the one line that says rows were lost. The detection and
+      // what it guards (a rebuilt child must not delete the shared cost basis
+      // it has merely forgotten) are unchanged; only the repetition goes.
+      const rewind = r.restarted
+        ? Object.entries(r.restarted).map(([k, v]) => `${k} (was ${v.was})`).join(", ")
+        : null;
+      if (rewind && lastRewindLogged.get(tenant) !== rewind) {
+        log(`ledger mirror: ${tenant} CURSOR REWOUND — the child ledger was rebuilt beneath it: ${rewind}`);
       }
+      if (rewind) lastRewindLogged.set(tenant, rewind);
+      else lastRewindLogged.delete(tenant);
       if (r.failed) {
         const why = Object.entries(r.failed)
           .map(([k, v]) => `${k}: ${v}`)
