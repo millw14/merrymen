@@ -43,7 +43,7 @@ import {
 import { bookAddresses } from "../custody";
 import { mainnetClient } from "../snapshot";
 import { labelText, nonCashLeg, sideOf, tokenLabel } from "../token-label";
-import { dollars } from "./trade-rows";
+import { ENERGY_BUY_KIND, ENERGY_LABEL, dollars, isEnergyRow } from "./trade-rows";
 import type { StateRef, Watcher } from "./state";
 
 /**
@@ -226,6 +226,9 @@ const TRADE_PING_COLUMNS =
  * a name is decoration on a receipt that is already correct without it.
  */
 async function coinFor(db: DatabaseSync, t: TradeRowLite, agentId: string | null, cfg: ResolvedConfig): Promise<TradeCoin | null> {
+  // Energy is named for what it is — never its ticker read off the chain, and
+  // never a coin to look up. Only ever bought.
+  if (isEnergyRow(t)) return { label: ENERGY_LABEL, side: sideOf(t) ?? "buy" };
   try {
     const token = nonCashLeg(t);
     if (!token) return null;
@@ -357,6 +360,7 @@ export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy =
     : t.kind === "vault-deposit" ? "move into your savings vault"
     : t.kind === "vault-withdraw" ? "move out of your savings vault"
     : t.kind === "equity-order" && t.target && !/^0x/i.test(t.target) ? `${esc(t.target)} order`
+    : t.kind === ENERGY_BUY_KIND ? `top-up of ${esc(ENERGY_LABEL)}`
     : t.kind === "swap" || t.kind === "curve-trade" ? "trade"
     : esc(t.kind);
   if (t.status === "landed") {
@@ -533,7 +537,10 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
              * yesterday.
              */
             let said = "";
-            if (t.status === "landed" || t.status === "paper") {
+            // NOT FOR ENERGY. A model asked why the agent bought $MERRYMEN has
+            // only the token and the headlines to go on, and the one thing it
+            // must never say is anything about that token's price or returns.
+            if ((t.status === "landed" || t.status === "paper") && !isEnergyRow(t)) {
               const llm = resolveLlm(cfg);
               if (llm) {
                 const evidence = tradeWhyEvidence(t, decisionFor(db, t.decision_id), newsNow());
