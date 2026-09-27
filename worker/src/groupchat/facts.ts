@@ -8,9 +8,13 @@
  * no figure cannot print one, so the discipline lives in what this module
  * refuses to return rather than in anything downstream remembering a rule.
  *
- * READ-ONLY, AND ONLY FROM THE SHARED LEDGER. The room lives in its own tables
- * and nothing here writes anywhere. Nothing here feeds a trading decision
- * either: this module reads trading's tables, never the other way round.
+ * READ-ONLY, AND ONLY FROM THE SHARED LEDGER — plus the room's own record of
+ * which calls it already posted (callsSql). The room lives in its own tables
+ * and nothing here writes to any of them; the one statement that is not a read
+ * is the room's own CREATE TABLE IF NOT EXISTS, memoised per Db, so that record
+ * can be read before the room has ever run. Nothing here feeds a trading
+ * decision either: this module reads trading's tables, never the other way
+ * round.
  *
  * ONE QUERY PER KIND PER PASS, for the whole roster. The conductor steps every
  * ~15 s across the whole fleet, and a query per agent would be fifty round
@@ -34,6 +38,7 @@ import { getIdentityStore, SLUG_RE } from "../identity-store";
 import { traitsOf, type Disposition } from "../social-post";
 import { LANDED_STATUSES, PUBLISHABLE_SOURCES, PUBLISHABLE_STRATEGIES, publishableThesis } from "../thesis-policy";
 import { nameRefusal } from "./policy";
+import { ensureGroupchatSchema } from "./store";
 import type { CallRef } from "./types";
 
 // ── profiles ─────────────────────────────────────────────────────────────────
@@ -113,6 +118,25 @@ export function chatProfileOf(settings: unknown): ChatProfile {
 // ── facts ────────────────────────────────────────────────────────────────────
 
 /** A trade the agent made, as the room may show it. See CallRef for why it has no size. */
+/**
+ * TWO CARDS FOR THE SAME COIN. The contract decides when both have one. With
+ * neither, the ticker — case aside — or, failing that, the name. With only ONE
+ * of them known, never: a coin with an address and one without are not
+ * evidence of the same coin, and "PEPE" is more than one contract. Shared by
+ * the conductor (repeats, re-entries, a buy since sold) and voice.ts (which
+ * card a thread is about), so both mean the same thing by "the same coin".
+ */
+export function sameCoin(a: Pick<CallRef, "token" | "symbol" | "name">, b: Pick<CallRef, "token" | "symbol" | "name">): boolean {
+  const ta = a.token ? String(a.token).toLowerCase() : "";
+  const tb = b.token ? String(b.token).toLowerCase() : "";
+  if (ta || tb) return ta !== "" && ta === tb;
+  const sa = a.symbol ? String(a.symbol).toLowerCase() : "";
+  const sb = b.symbol ? String(b.symbol).toLowerCase() : "";
+  if (sa || sb) return sa !== "" && sa === sb;
+  const na = a.name ? String(a.name).toLowerCase() : "";
+  return na !== "" && na === (b.name ? String(b.name).toLowerCase() : "");
+}
+
 export interface CallFact extends CallRef {
   decisionId: string;
   /** Unix seconds the decision was taken. */
@@ -132,7 +156,13 @@ export interface AgentFacts {
   ageDays: number | null;
   strategy: string | null;
   traits: string[];
-  /** Newest first, within the call window. */
+  /**
+   * Newest first, within the call window, in LEDGER ORDER: by the decision's
+   * time, then by its trade's id, so two fills in the same second keep the
+   * order the ledger wrote them in. The conductor tells same-second fills
+   * apart by their place here (a sell and the re-buy after it), never by
+   * their ids, which are random.
+   */
   calls: CallFact[];
 }
 
@@ -153,8 +183,19 @@ const CALL_WINDOW_SEC = 6 * 3600;
  * hours is 180 lines, so a cap of 180 cuts only calls the room could not have
  * said anyway. The scan over `decisions` costs the same either way; only a
  * hyperactive book returns more rows.
+ *
+ * BUT THE CONDUCTOR READS TWICE THE ANNOUNCEMENT WINDOW, and the older half is
+ * not calls to announce: it is the ANCHORS a repeat is weighed against (the
+ * fill behind the card a later buy of the same coin only repeats). Since the
+ * read became twelve hours, a paper basket filling three coins every four
+ * minutes pushed its earlier card's fill past the newest 180 within five
+ * hours; a redeploy then weighed the unsaid fills again, found no card before
+ * them, and posted three hours-old "bought TSLA" cards at once (2026-09-25
+ * 16:53). So a call the room ALREADY POSTED is kept past the cut (callsSql,
+ * `keepPosted`) — about one per coin per side per six hours, an index seek on
+ * the unique dedupe key each — and the cut still bounds everything unposted.
  */
-const CALLS_PER_AGENT = 180;
+export const CALLS_PER_AGENT = 180;
 
 /**
  * Anything that looks like an on-chain identifier — thesis-policy.ts's
@@ -214,8 +255,12 @@ export function rosterSql(): string {
  * is selected for the gate alone — a trade with nothing publishable behind it
  * is not a call — and is never returned: a model's reason may quote the
  * owner's cash.
+ *
+ * `keepPosted`: a row whose call the room already posted (a groupchat_messages
+ * row keyed "call:<decision>") survives the per-agent cut — see
+ * CALLS_PER_AGENT. Only when the room's table exists: a bare ledger has none.
  */
-export function callsSql(agents: number): { sql: string; fixed: string[] } {
+export function callsSql(agents: number, opts: { keepPosted?: boolean } = {}): { sql: string; fixed: string[] } {
   const actions = ["buy", "sell"];
   return {
     sql: `SELECT x.decision_id, x.agent_id, x.source, x.action, x.symbol, x.display_name, x.reason,
@@ -237,11 +282,20 @@ export function callsSql(agents: number): { sql: string; fixed: string[] } {
                  AND d.source IN (${holes(PUBLISHABLE_SOURCES.length)})
                  AND t.status IN (${holes(LANDED_STATUSES.length)})
             ) x
-           WHERE x.rn <= ?
+           WHERE x.rn <= ?${opts.keepPosted ? POSTED_CALL : ""}
            ORDER BY x.at DESC, x.trade_id DESC`,
     fixed: [...actions, ...PUBLISHABLE_SOURCES, ...LANDED_STATUSES],
   };
 }
+
+/**
+ * The room's own record that a call was posted: its card's durable dedupe
+ * key. A separate literal rather than one nested in callsSql's, so the source
+ * scan in facts.test.ts reads it as the SELECT it is. Both engines spell `||`
+ * and EXISTS alike, and `dedupe_key` is UNIQUE, so this is an index seek.
+ */
+const POSTED_CALL = `
+              OR EXISTS (SELECT 1 FROM groupchat_messages g WHERE g.dedupe_key = 'call:' || x.decision_id)`;
 
 /**
  * THE NAME THE ROOM USES.
@@ -639,6 +693,14 @@ export async function loadFacts(
   opts: {
     callWindowSec?: number;
     identities?: Identities;
+    /**
+     * The shared Db's dialect. Given, the room's tables are made if absent
+     * (memoised per Db — the conductor has already done it) and a call the
+     * room already posted is kept past the per-agent cut, so a repeat always
+     * finds the card it repeats (CALLS_PER_AGENT). Absent — a bare ledger, as
+     * facts.test.ts builds one — the cut is plain.
+     */
+    dialect?: "postgres" | "sqlite";
   } = {},
 ): Promise<Map<string, AgentFacts>> {
   const out = new Map<string, AgentFacts>();
@@ -702,7 +764,9 @@ export async function loadFacts(
   if (callable.length === 0) return out;
 
   const windowSec = opts.callWindowSec ?? CALL_WINDOW_SEC;
-  const { sql, fixed } = callsSql(callable.length);
+  const keepPosted = opts.dialect !== undefined;
+  if (keepPosted) await ensureGroupchatSchema(shared, opts.dialect!);
+  const { sql, fixed } = callsSql(callable.length, { keepPosted });
   const rows = (await shared.prepare(sql).all(nowSec - windowSec, ...callable, ...fixed, CALLS_PER_AGENT)) as CallRow[];
 
   for (const row of rows) {
