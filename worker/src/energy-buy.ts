@@ -146,6 +146,51 @@ const FULL = count(ENERGY.fullTokens);
 
 const WAY_ROUND = "You can also send $MERRYMEN to my account on Robinhood Chain directly — it counts the moment it lands.";
 
+// ── the fixed sentences — each a refusal before anything is read or sized ──
+
+/**
+ * Is this order about $MERRYMEN? Case-insensitive, and a leading "$" is the
+ * way owners write it. Compared with the registry's own symbol, never a typed
+ * literal.
+ */
+export function isEnergySymbol(symbol: string | null | undefined): boolean {
+  return (symbol ?? "").trim().replace(/^\$/, "").toUpperCase() === MERRYMEN_TOKEN.symbol.toUpperCase();
+}
+
+/**
+ * submitChatTrade's answer to ANY order for $MERRYMEN — the Brain's, a Telegram
+ * message's, or anything else that reaches the ordinary order path. It points
+ * to the one way in (the app chat's get-energy, which asks first) and the way
+ * round it; it never says "add it in /settings", which would not help.
+ */
+export const ENERGY_NOT_AN_ORDER =
+  "$MERRYMEN is my energy, not something I trade — I never sell it, and I buy it only when you ask me to " +
+  "\"get my energy\" in the Merrymen app chat, where you see the most it would spend and confirm before anything " +
+  `moves. ${WAY_ROUND}`;
+
+/** A get-energy order that arrived as a SELL. The key has no way to sell the reserve; recover moves it. */
+export const ENERGY_NO_SELL =
+  "My key can't sell $MERRYMEN — it's my energy, not a position, and nothing I do ever sells it. " +
+  "`merrymen recover` with your owner key can move it if you need to.";
+
+/** The account is not on Robinhood Chain: tokens sent to it there would not be this agent's. */
+export const ENERGY_NOT_MAINNET =
+  "My account is on another network, where $MERRYMEN doesn't count toward my energy and the route I'd buy it on " +
+  "doesn't exist. Keep $MERRYMEN in your own wallet on Robinhood Chain instead — it counts the moment it lands.";
+
+/** A mainnet grant signed without the energy route (GRANT_ENERGY). */
+export const ENERGY_RESIGN =
+  "My signed key has no route to buy my own energy yet — re-sign at /grant (it's free, and nothing moves " +
+  `on-chain). ${WAY_ROUND}`;
+
+/** Not trading live: the energy buy spends real USDG only on the live rail. `blocker` is liveBlockerText's clause. */
+export function energyNeedsLiveLine(blocker: string | null): string {
+  return (
+    `I buy my own energy only while trading live, and I'm not${blocker ? `: ${blocker}` : ""}. ` +
+    `Turn on Live trading, or send $MERRYMEN to my account on Robinhood Chain directly — it counts the moment it lands.`
+  );
+}
+
 /** What each ceiling is, in the owner's words, for the sentence that names it. */
 function bindingWhy(b: EnergyBinding, caps: EnergyCaps): string {
   switch (b) {

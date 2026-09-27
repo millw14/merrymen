@@ -82,7 +82,7 @@ import {
 } from "../../packages/core/src/index";
 import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
 import { impactBps, judgeImpact, probeAmountIn } from "./impact";
-import { checkV3SwapCalls } from "./final-fence";
+import { checkEnergySwapCalls, checkV3SwapCalls } from "./final-fence";
 import { readPeers } from "./peer-files";
 import { peerLabel, peerView } from "./strategist/peer-view";
 import { SHADOW_SOURCES, publicationSourceFor, publishableThesis, rejectRuleLabel, rejectRuleRemedy, type PublicThesis } from "./thesis-policy";
@@ -177,7 +177,7 @@ import { checkPolicy, type AgentLimits, type AgentState, type ScoutContext, type
 // ── ENERGY: how much a low-energy agent may still do on its own today ──────
 // The contract is core energy.ts; the pure throttle is energy.ts; the owner's
 // sentence is energy-copy.ts. What is wired here is where the tick asks.
-import { ENERGY, MERRYMEN_TOKEN, grantEnergyRoute } from "../../packages/core/src/index";
+import { ENERGY, MERRYMEN_TOKEN, grantEnergyRoute, isEnergyReserveToken } from "../../packages/core/src/index";
 import { isExitIntent } from "./policy";
 import {
   ENERGY_OFF,
@@ -200,7 +200,26 @@ import {
 } from "./energy";
 import type { EnergyStatus } from "../../packages/core/src/index";
 import { count as countTokens, energyNotice } from "./energy-copy";
-import { energyAmountInFor, grossNeededFor, readEnergyTaxBps } from "./venues/uniswap-v2";
+import { energyAmountInFor, energyMinOut, grossNeededFor, quoteEnergyOut, readEnergyTaxBps } from "./venues/uniswap-v2";
+// ── THE ENERGY BUY: the owner's own confirmed order for the agent's $MERRYMEN.
+// The planner and its sentences are energy-buy.ts; the two calls are
+// venues/uniswap-v2-energy.ts; the booking is energy-settle.ts. None of them is
+// the throttle above — the buy never passes through any of its forks.
+import { buildEnergyCalls } from "./venues/uniswap-v2-energy";
+import {
+  ENERGY_NOT_AN_ORDER,
+  ENERGY_NOT_MAINNET,
+  ENERGY_NO_SELL,
+  ENERGY_RESIGN,
+  energyNeedsLiveLine,
+  isEnergySymbol,
+  planEnergyBuy,
+  sayEnergyOutcome,
+  sayEnergyPlan,
+  usdgText,
+} from "./energy-buy";
+import { bookEnergyPurchase, isEnergyIntent, isEnergyRow, settleEnergyLanding, type EnergySettleDeps } from "./energy-settle";
+import { bookCapitalFlow, energyBuysInFlight } from "./store";
 import {
   claimEnergy,
   claimEnergyNotice,
@@ -2926,10 +2945,36 @@ async function main() {
       });
       for (const r of resolved) {
         const row = mine.find((m) => m.userOpHash === r.userOpHash)!;
+        // AN ENERGY PURCHASE THAT LANDED IS BOOKED BEFORE ITS ROW IS SETTLED —
+        // by kind OR by legs, so a row whose kind was ever rewritten is still
+        // found. The order is the crash-safety: a booking whose receipt could
+        // not be read, or whose ledger write threw, leaves the row 'submitted'
+        // (still counted against the caps) and the next pass asks again, which
+        // can never move the peaks twice (bookCapitalFlow is insert-gated).
+        // Settled first and booked after, a crash between the two would leave a
+        // landed purchase no sweep ever books. Only THIS resolver books: the
+        // orphan sweep below never does (energy-settle.ts says why).
+        const energyRow = isEnergyRow(row);
+        if (energyRow && r.success) {
+          const grant = active?.grant;
+          if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase()) {
+            console.log(`[reconcile] energy purchase ${r.userOpHash.slice(0, 10)}… left submitted — no armed grant for ${smartAccount}`);
+            continue;
+          }
+          const settled = await settleEnergyLanding(energySettleDeps(agentId, grant, chain), r.txHash as `0x${string}`);
+          if (!settled.proceed) {
+            console.log(`[reconcile] energy purchase ${r.userOpHash.slice(0, 10)}… left submitted: ${settled.why}`);
+            continue;
+          }
+          if (settled.settled === "booked") capitalPeakDirty = true;
+        }
         await addTrade({
           agent_id: agentId,
           kind: row.kind as TradeRow["kind"],
           target: row.target,
+          // The legs stay on a settled energy row: the in-flight guard and
+          // every leg-keyed reader find a purchase by them.
+          ...(energyRow ? { sell_token: row.sellToken, buy_token: row.buyToken } : {}),
           // The chain's figure when it could be attributed, else the notional
           // the row was written with. Never zero-by-default: a resolved op
           // that moved money must not read as free.
@@ -3348,6 +3393,9 @@ async function main() {
           // the ledger is empty or the row aged out, which is the case this
           // whole module exists to handle.
           custodyAddresses: custodyAddressesOf(s.grant),
+          // WHICH CHAIN'S reserve tokens make an energy purchase `reserve-out`
+          // (never booked here — the worker books it at landing).
+          ...(s.grant ? { chainId: s.grant.chainId } : {}),
           log: (m) => console.log(`[flows] ${m}`),
         });
       } catch (e) {
@@ -3491,6 +3539,47 @@ async function main() {
   let highWaterMarkUsdg = 0n;
   let riskHighWaterMarkUsdg: bigint | null = null;
   const drawdownPeak = () => paperActive() ? highWaterMarkUsdg : (riskHighWaterMarkUsdg ?? highWaterMarkUsdg);
+  /**
+   * AN ENERGY PURCHASE MOVED THE PERSISTED PEAKS, and the in-memory ones have
+   * not caught up — on purpose.
+   *
+   * The booking (energy-settle.ts, through store.bookCapitalFlow) lowers both
+   * peaks in the ledger in the same transaction as the flow. It deliberately
+   * does NOT assign highWaterMarkUsdg: a booking that lowered the peak under a
+   * tick that had already read equity would accrue a performance fee on
+   * principal against a pre-purchase equity, and setAgentHwm would then
+   * re-ratchet the peak straight back over the withdrawal. So the booking only
+   * raises this flag, and the NEXT tick re-reads the persisted peaks before its
+   * book read (tick(), right after the armed check).
+   */
+  let capitalPeakDirty = false;
+  /**
+   * The block the last energy purchase landed in, from its receipt. The buy's
+   * balance reads are pinned no earlier than this, so a load-balanced node that
+   * has not caught up answers with an error rather than a pre-purchase balance
+   * the next ask would top up a second time. In memory only: across a restart
+   * the in-flight guard and the ledger carry the same protection.
+   */
+  let lastEnergyLandedBlock: bigint | null = null;
+  /**
+   * What a booking reads and writes, wired to THIS agent's ledger. The breaker's
+   * peak is the persisted risk period's, read without observing — the same
+   * figure checkPolicy judges a live intent against — so a booking made at arm,
+   * before any tick has loaded the in-memory peaks, is not judged against 0.
+   */
+  const energySettleDeps = (agentId: string, grant: StoredGrant, chain: ReconcileChain): EnergySettleDeps => ({
+    // EXACTLY grant.smartAccount: bookCapitalFlow keys the agents row on it.
+    agentId,
+    account: grant.smartAccount,
+    chainId: grant.chainId,
+    paper: paperActive(),
+    receiptLogs: (txHash) => chain.getReceiptLogs(txHash),
+    netContributionsUsdg: () => getNetContributionsUsdg(agentId),
+    lifetimePeakUsdg: async () => (await getAgentFinancials(agentId)).hwmUsdg,
+    breakerPeakUsdg: () => getRiskPeriodPeak(agentId),
+    book: (flow) => bookCapitalFlow(flow),
+    event: (level, line) => addEvent(agentId, level, line),
+  });
   // Cash as of the last live snapshot, and how many rows the ledger had then.
   // Together they are the whole basis for inferring an external flow: if cash
   // moved and NOTHING was written to the ledger in between, the money came from
@@ -5197,6 +5286,18 @@ async function main() {
         // judged it once, but the queue can hold the order behind the tick's own
         // intents for minutes, so the queue judges it again when it reaches the
         // order. A command with no deadline — a legacy row — has none to carry.
+        //
+        // $MERRYMEN IS NOT AN ORDINARY ORDER, and this is the ONLY place it is
+        // routed. The app's get-energy card places kind 'trade' {side:'buy',
+        // symbol:'MERRYMEN', usdgAmount: the owner's most for this ask}, and
+        // it arrives here from the command drain — the owner's click, claimed
+        // once — after placeOrder's reads, pause, shape and ceiling gates have
+        // all passed. submitEnergyBuy works the size out from the chain;
+        // usdgAmount is only ever an upper bound. submitChatTrade refuses the
+        // symbol outright, so the Brain and a Telegram message cannot reach it.
+        if (symbol === MERRYMEN_TOKEN.symbol) {
+          return submitEnergyBuy(side, size, typeof cmd.expiresAt === "number" ? { notAfterMs: cmd.expiresAt } : {});
+        }
         if (typeof cmd.expiresAt !== "number") return submitChatTrade(side, symbol, size);
         return submitChatTrade(side, symbol, size, { ...chatAsked(side, symbol, size), notAfterMs: cmd.expiresAt });
       },
@@ -7211,6 +7312,29 @@ async function main() {
     // trading off, a wrong-chain or empty account previously fell THROUGH this
     // block to the live rail and built a swap against a dead chain.
     const execRail = execMode();
+    // ── THE ENERGY BUY RUNS ONLY ON THE LIVE RAIL ──────────────────────────
+    //
+    // BEFORE the refuse and paper arms, because neither can hold it. A paper
+    // fill would put a purchase on the tape that no chain saw; and a REAL buy
+    // judged on the paper rail would be judged against the paper book — the
+    // daily cap and the ops count read paper rows, the breaker a simulated peak
+    // — while consent to trade real money (liveTradingEnabled) is a term with
+    // deliberately no override (exec-mode.ts). So there is no per-purchase
+    // exception: an agent that is not trading live does not buy its energy,
+    // and the owner is told the two ways round it (turn on Live trading, or
+    // send $MERRYMEN to the account directly — it counts the moment it lands).
+    if (intent.kind === "energy-buy" && execRail.mode !== "live") {
+      await recordTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: tradeTarget,
+        ...tokenLegs(intent),
+        amount_usdg: usdgNum(notional),
+        status: "rejected",
+        reject_rule: "energy-needs-live",
+      });
+      return;
+    }
     if (execRail.mode === "refuse") {
       console.log(`[policy] approved ${intent.kind} — not executed (${execRail.rule})`);
       // Leave a trace. This used to return with only a console line, so
@@ -8487,6 +8611,144 @@ async function main() {
             deadline: BigInt(Math.floor(Date.now() / 1000) + CURVE_DEADLINE_SEC),
           }),
         );
+      } else if (intent.kind === "energy-buy") {
+        // ── THE ENERGY BUY ─────────────────────────────────────────────────
+        //
+        // USDG → VIRTUAL → $MERRYMEN over the one route the GRANT sealed, into
+        // the account itself. The plan that sized this was made minutes ago at
+        // most, from reads the chain may have moved past, so NOTHING of its
+        // pricing is trusted here: the tax is read again, the route re-quoted,
+        // the impact probed, and the floor derived from THIS quote — the one
+        // that is signed. Every refusal records a row (which releases the
+        // reservation) before it returns; the explicit releaseBudget() beside
+        // each is what budget-reservation.invariant.test.ts can see.
+        const route = grantEnergyRoute(active.grant);
+        if (!route) {
+          releaseBudget();
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            ...tokenLegs(intent),
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: "energy-not-granted",
+          });
+          return;
+        }
+        // THE TAX, READ NOW. Its owner can change it without a line of our code
+        // changing, and a floor computed from a freshly read tax would silently
+        // accept a hike — so above the ceiling this refuses instead.
+        const taxBps = await readEnergyTaxBps(active.client);
+        if (taxBps === null || taxBps > ENERGY.maxTaxBps) {
+          releaseBudget();
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            ...tokenLegs(intent),
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: taxBps === null ? "energy-tax-unreadable" : "energy-tax",
+          });
+          return;
+        }
+        // THE QUOTE THAT IS SIGNED: the pool's pre-tax output for exactly this
+        // input, both hops' fees included.
+        const gross = await quoteEnergyOut(active.client, intent.sellAmountRaw);
+        const minOut = gross === null ? 0n : energyMinOut(gross, taxBps, cfg.slippageBps);
+        if (gross === null || minOut <= 0n) {
+          releaseBudget();
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            ...tokenLegs(intent),
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: "energy-no-quote",
+          });
+          return;
+        }
+        sim = { sim_quote_out: gross.toString(), sim_min_out: minOut.toString(), sim_fee_tier: 3000 };
+        // ── impact guard, as the swap lane has it ─────────────────────────
+        // minOut cannot do this job: it is derived from the very quote in
+        // question. What the pools charge for THIS size is measured by
+        // re-quoting the same route at a small probe. A purchase is never an
+        // exit, so the cap applies in full.
+        let impact: number | null = null;
+        const probeIn = probeAmountIn(intent.sellAmountRaw);
+        if (probeIn !== null) {
+          const probeOut = await quoteEnergyOut(active.client, probeIn);
+          if (probeOut !== null) {
+            impact = impactBps({ amountIn: intent.sellAmountRaw, amountOut: gross, probeIn, probeOut });
+          }
+        }
+        const impactVerdict = judgeImpact({ bps: impact, maxBps: cfg.maxImpactBps, isExit: false });
+        if (!impactVerdict.ok) {
+          releaseBudget();
+          await addEvent(agentId, "warn", `${impactVerdict.detail} ($MERRYMEN energy)`);
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            ...tokenLegs(intent),
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: impactVerdict.rule,
+            ...sim,
+          });
+          return;
+        }
+        // The router refuses the fill after this; the wall leaves it open.
+        const deadline = BigInt(Math.floor(Date.now() / 1000) + ENERGY.deadlineSec);
+        const calls = buildEnergyCalls({
+          route,
+          amountIn: intent.sellAmountRaw,
+          minOut,
+          recipient: executor.address,
+          deadline,
+        });
+        // ── THE ENERGY FENCE — ALWAYS, and before anything is signed ─────
+        //
+        // No alternative builder, no skip, no condition: the bytes about to be
+        // signed must be the canonical encoding of exactly these terms, laid
+        // out as the wall pins them. Stricter than the wall on purpose — see
+        // final-fence.ts checkEnergySwapCalls.
+        const energyFence = checkEnergySwapCalls(calls, {
+          route,
+          recipient: executor.address,
+          amountIn: intent.sellAmountRaw,
+          minOut,
+          deadline,
+        });
+        if (!energyFence.ok) {
+          releaseBudget();
+          await addEvent(
+            agentId,
+            "err",
+            `refused to sign an energy buy: ${energyFence.detail}. Nothing was sent. This is a merrymen ` +
+              `fault — the calldata did not match the buy that was approved.`,
+          );
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            ...tokenLegs(intent),
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: `fence-${energyFence.rule}`,
+            ...sim,
+          });
+          return;
+        }
+        exec = await send(calls);
+        // It LANDED (send throws on a revert or an unread receipt). Remember
+        // where, so the next ask's balances are read no earlier than this.
+        if (exec.blockNumber > 0n && (lastEnergyLandedBlock === null || exec.blockNumber > lastEnergyLandedBlock)) {
+          lastEnergyLandedBlock = exec.blockNumber;
+        }
+        await addEvent(agentId, "ok", `simulated ✓ energy route quote ${gross} min ${minOut} (after the token's buy tax)`);
       } else {
         // Every EVM kind is handled above, and this arm refuses rather than
         // falling through. It is deliberately NOT a `const never: never`
@@ -8501,6 +8763,16 @@ async function main() {
       }
 
       const txHash = exec.txHash;
+      // AN ENERGY PURCHASE IS NEVER A FILL. It is capital leaving the trading
+      // book (energy-settle.ts), booked as a flow below — a fill and a basis
+      // for it as well would count the same USDG twice, once as the flow and
+      // once as a position purchase in every fill-derived reader. Only the swap
+      // and curve arms ever assign these; this makes "never" a statement, not
+      // a coincidence of which arm ran.
+      if (isEnergyIntent(intent)) {
+        fillPair = null;
+        liveFill = null;
+      }
       // AN APPROVE THAT ACQUIRED NOTHING IS NOT A SWAP THAT LANDED.
       //
       // The selftest probe is a same-token "swap", so both of these read
@@ -8568,7 +8840,11 @@ async function main() {
                 label: short(intent.assetOut),
                 holder: classVaultHolder ?? executor.address,
               }
-            : null;
+            : // The energy buy delivers into the account itself — and the
+              // reserve that arrives is the only thing that counts as energy.
+              intent.kind === "energy-buy"
+              ? { token: intent.buyToken, label: `$${MERRYMEN_TOKEN.symbol} (energy)`, holder: executor.address }
+              : null;
       if (acquired) {
         const delivery = await checkDelivery({
           balanceOf: () =>
@@ -8683,6 +8959,22 @@ async function main() {
       if (liveFill?.side === "buy" && liveFill.qtyRaw > 0n) {
         await stampFloorFor(agentId, "live", liveFill.symbol);
       }
+      // ── THE ENERGY PURCHASE IS BOOKED BEFORE ITS LANDED ROW ──────────────
+      //
+      // From the receipt (the USDG that actually left, keyed tx#logIndex),
+      // through the booking gate, into ONE transaction with both peaks. The
+      // order is the crash-safety: a receipt that cannot be read THROWS here,
+      // the catch below leaves the op 'submitted' (still counted), and the
+      // stranded-op resolver books it on its next pass — which can never move
+      // the peaks twice. The in-memory peaks and the cash baseline are NOT
+      // touched: `booked` only marks them for the next tick to re-read.
+      if (isEnergyIntent(intent)) {
+        const energyBooked = await bookEnergyPurchase(
+          energySettleDeps(agentId, active.grant, makeReconcileChain(chainClient)),
+          { txHash: txHash as `0x${string}`, logs: exec.logs, blockNumber: exec.blockNumber },
+        );
+        if (energyBooked === "booked") capitalPeakDirty = true;
+      }
       await recordTrade({
         agent_id: agentId,
         kind: intent.kind,
@@ -8722,7 +9014,11 @@ async function main() {
         // A TRANSFER IS NOT A TRADE. Moving your own money home is not turnover
         // and must not be charged as it — the branch below books it as a flow
         // for the same reason.
-        ...(intent.kind === "transfer"
+        //
+        // AND NEITHER IS AN ENERGY PURCHASE: the owner's USDG set aside as the
+        // agent's own capacity, booked as capital leaving the book — not
+        // turnover, and never charged as it.
+        ...(intent.kind === "transfer" || isEnergyIntent(intent)
           ? {}
           : { trade_fee_usdg: usdgNum(tradeFeeUsdg(notional, cfg.tradeFeeBps)) }),
         ...sim,
@@ -8939,6 +9235,14 @@ async function main() {
       // stranded-op resolver settles it from the chain. The budget must NOT be
       // released here, which is why this sits above the rollback.
       if (submittedRow) {
+        // AND THE CALLER IS TOLD IT WENT OUT. No row was written on this path,
+        // so the outcome used to read as null — "never reached the ledger,
+        // nothing was sent; try again" — about an operation that WAS sent and
+        // may have landed. That sentence invites the second buy. The row in
+        // the ledger is 'submitted', so that is what the caller hears (the
+        // same status the unread-receipt branch above reports). An energy
+        // purchase whose receipt could not be booked lands here by design.
+        lastTradeOutcome = { status: "submitted", rejectRule: "unsettled-after-submit" };
         await refreshBudget(agentId);
         releaseBudget();
         await addEvent(
@@ -9252,7 +9556,8 @@ async function main() {
       const base = watchTokensFor(cfg.basketSymbols,cfg.customTokens,officialCoins());
       const addresses = new Set(base.map(t=>t.address.toLowerCase()));
       const symbols = new Set(base.map(t=>t.symbol));
-      const discovered = autoTrench.tokens.filter(t=>!addresses.has(t.address.toLowerCase())&&!symbols.has(t.symbol));
+      // The energy reserve is never a position, whatever a vault's tokens() says.
+      const discovered = autoTrench.tokens.filter(t=>!addresses.has(t.address.toLowerCase())&&!symbols.has(t.symbol)&&!isEnergyReserveToken(t.address));
       // A PAPER POSITION OUTLIVES THE TAPE THAT FOUND IT. Live keeps a held coin
       // in the universe through the vault's own `tokens()`; paper holds nothing
       // in the vault, so a coin that left the qualified tape vanished from
@@ -9352,6 +9657,18 @@ async function main() {
 
     if (!armed || !active) return;
     const { grant, agentId, client } = active;
+
+    // AN ENERGY PURCHASE WAS BOOKED SINCE THE LAST BOOK READ: take the peaks it
+    // lowered from the ledger now, BEFORE this tick reads balances and composes
+    // equity — so equity and the peak it is judged against are both
+    // post-purchase, and nothing mid-tick ever saw one without the other. Read
+    // only (the risk peak is asked without observing); see capitalPeakDirty.
+    if (capitalPeakDirty && !paperActive()) {
+      highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+      const risk = await getRiskPeriodPeak(agentId);
+      riskHighWaterMarkUsdg = risk === null ? null : usdg(risk);
+      capitalPeakDirty = false;
+    }
 
     // Re-read the settled budget every tick, so ops and spend age out of the
     // trailing-24h window on their own. syncGrant short-circuits on an
@@ -12021,6 +12338,15 @@ async function main() {
     ),
   ): Promise<OrderReply> {
     return withDecisionOutcome(active?.agentId, asked.decisionId, async () => {
+      // $MERRYMEN FIRST, before anything else is read or resolved. It is the
+      // agent's energy, never a position: this path is reached by the Brain
+      // (model-decided orders) and by Telegram buys that run WITHOUT a
+      // confirmation, and neither may spend USDG on it. The one way to buy it
+      // is the owner's confirmed get-energy order, which runOrderCommand routes
+      // to submitEnergyBuy before this function is ever called. A fixed
+      // sentence, never "add it in /settings": adding it would not help, and
+      // it is deliberately never in the watch set.
+      if (isEnergySymbol(symbol)) return no(ENERGY_NOT_AN_ORDER);
       if (!active) return no("no agent armed — sign a grant in the dashboard first.");
       // THE BOOK THIS ORDER IS JUDGED AGAINST, before anything is resolved or
       // sized — the latest tick's, as it stated it (order-gate.ts createTickBook
@@ -12112,6 +12438,181 @@ async function main() {
     if (!stamped.ok) return `Transfer refused: ${stamped.why}.`;
     await processIntent(intent, book.equityUsdg, book.reads.equityKnown);
     return `📤 transfer submitted — ${usdgAmount} USDG to ${to.slice(0, 6)}…${to.slice(-4)}. Watch /trades for the result (it still passes the policy wall).`;
+  }
+
+  /**
+   * THE OWNER'S ENERGY BUY — "get my energy", confirmed on the app's card.
+   *
+   * REACHED FROM ONE PLACE: runOrderCommand's submit closure, for symbol
+   * MERRYMEN, inside the command drain — the owner's click, claimed once by the
+   * unlink, after placeOrder's reads, pause, shape and chat-ceiling gates.
+   * Never from the Brain, never from a Telegram message (submitChatTrade
+   * refuses the symbol before anything else), never from the poll loop:
+   * running in the drain is also what keeps the purchase's booking off a tick
+   * that is between its balance read and its fee accrual.
+   *
+   * SERIAL, END TO END. energyLock is a promise chain like intentChain, with
+   * no timeout for the same reason: the reads, the plan, the execution and the
+   * reply of one ask finish before the next ask reads anything, so two asks can
+   * never both size a buy off the same pre-purchase balance. Across a restart,
+   * the ledger's in-flight guard carries the same rule.
+   *
+   * `maxUsdg` is the owner's MOST for this ask, never the amount: the size is
+   * derived from the chain every time (energy-buy.ts), under every cap at once.
+   */
+  let energyLock: Promise<unknown> = Promise.resolve();
+  async function submitEnergyBuy(
+    side: "buy" | "sell",
+    maxUsdg: number,
+    asked: { notAfterMs?: number },
+  ): Promise<OrderReply> {
+    const step = () => energyBuyLocked(side, maxUsdg, asked);
+    const run = energyLock.then(step, step);
+    // The lock must never hold a rejection, or the next ask inherits it.
+    energyLock = run.catch(() => {});
+    return run;
+  }
+
+  /** One ask, under energyLock. Every no here is said before anything is built or sent. */
+  async function energyBuyLocked(
+    side: "buy" | "sell",
+    maxUsdg: number,
+    asked: { notAfterMs?: number },
+  ): Promise<OrderReply> {
+    if (!active) return no("no agent armed — sign a grant in the dashboard first.");
+    const { agentId, grant, limits, client } = active;
+    // BUY-ONLY. The key has no approve for the reserve anywhere in the wall.
+    if (side !== "buy") return no(ENERGY_NO_SELL);
+    // Pause is the owner's stop button, whatever placed the order.
+    if (isPaused()) return no("you have me paused, so I did not buy anything. Un-pause and ask again.");
+    // Only on Robinhood Chain does the route exist and the account count.
+    if (grant.chainId !== MERRYMEN_TOKEN.chainId) return no(ENERGY_NOT_MAINNET);
+    // The book the purchase is judged against — the latest tick's, as it
+    // stated it: a tick that could not read, or a book that cannot be totalled,
+    // cannot judge a buy (order-gate.ts).
+    const judged = tickBook.judge("buy");
+    if (!judged.ok) return no(judged.line);
+    // THE LIVE RAIL ONLY — see processIntentLocked's energy-needs-live, which
+    // refuses the same thing again at the fork.
+    const rail = execMode();
+    if (rail.mode !== "live") return no(energyNeedsLiveLine(liveBlockerText(rail.rule)));
+    // THE PERMISSION the grant sealed, and the mirror built from it.
+    const route = grantEnergyRoute(grant);
+    if (!route || !limits.energy) return no(ENERGY_RESIGN);
+
+    // ── THE READS, fresh and pinned ─────────────────────────────────────
+    //
+    // Both $MERRYMEN halves at one block no earlier than the last energy
+    // purchase's landing (circle.ts), the account's USDG likewise on the
+    // grant's own client, and the ledger's in-flight guard. Every failure is
+    // null, and the planner refuses on any null.
+    const atLeast = lastEnergyLandedBlock ?? 0n;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const readCash = async (): Promise<bigint | null> => {
+      try {
+        const head = await client.getBlockNumber();
+        return (await client.readContract({
+          address: CASH.USDG as `0x${string}`,
+          abi: erc20Abi,
+          functionName: "balanceOf",
+          args: [grant.smartAccount as `0x${string}`],
+          blockNumber: head > atLeast ? head : atLeast,
+        })) as bigint;
+      } catch {
+        return null;
+      }
+    };
+    const readHeld = async () => {
+      try {
+        return (await readHolderStatusResult(cfg.rpcMainnet, cfg.holderAddress, grant.smartAccount as `0x${string}`, {
+          atLeastBlock: atLeast,
+        })).parts;
+      } catch {
+        return { holder: null, account: null };
+      }
+    };
+    const [held, cash, inFlight, taxBps, net, lifetime, risk] = await Promise.all([
+      readHeld(),
+      readCash(),
+      energyBuysInFlight(agentId, nowSec - 6 * 3600),
+      readEnergyTaxBps(client),
+      getNetContributionsUsdg(agentId).catch(() => undefined),
+      getAgentFinancials(agentId).then((f) => f.hwmUsdg).catch(() => undefined),
+      getRiskPeriodPeak(agentId).catch(() => undefined),
+    ]);
+    // A ledger that would not answer is not an empty one: a contribution
+    // record nobody could read is not "no record", and a peak nobody could read
+    // is not a peak of zero — the one that switches the breaker off.
+    if (net === undefined || lifetime === undefined || risk === undefined) {
+      return no("I could not read my own ledger just now, so I did not buy anything. Ask again in a minute.");
+    }
+
+    // ── THE PLAN — one chunk, under every cap at once ───────────────────
+    let plan: Awaited<ReturnType<typeof planEnergyBuy>>;
+    try {
+      plan = await planEnergyBuy(
+        { holder: held.holder, account: held.account, cashUsdg: cash, inFlight },
+        {
+          ownerMaxRaw: usdg(maxUsdg),
+          perTradeRaw: limits.perTradeUsdg,
+          dailyRaw: limits.dailyUsdg,
+          spentTodayRaw: spentToday(),
+          opsRemaining: limits.maxOpsPerDay - opsTodayCount(),
+          maxOpsPerDay: limits.maxOpsPerDay,
+        },
+        { taxBps, slippageBps: cfg.slippageBps, amountInFor: (g) => energyAmountInFor(client, g) },
+        {
+          paper: paperActive(),
+          equityKnown: judged.equityKnown,
+          equityUsdg: judged.equityUsdg,
+          netContributionsUsdg: net === null ? null : usdg(net),
+          lifetimePeakUsdg: usdg(lifetime),
+          // THE BREAKER'S OWN PEAK, the one checkPolicy will judge this intent
+          // against: the persisted risk period's, else the lifetime peak.
+          breakerPeakUsdg: risk === null ? usdg(lifetime) : usdg(risk),
+          maxDrawdownBps: limits.maxDrawdownBps,
+        },
+      );
+    } catch (e) {
+      console.log(`[${short(agentId)}] [energy-buy] could not plan: ${e instanceof Error ? e.message : String(e)}`);
+      return no("I could not work out the energy buy just now, so I bought nothing. Ask again in a minute.");
+    }
+    if (plan.kind === "full") return { ok: true, line: plan.line };
+    if (plan.kind === "refuse") return no(plan.line);
+    console.log(`[${short(agentId)}] [energy-buy] ${sayEnergyPlan(plan)}`);
+
+    // ── THE INTENT — built here and nowhere else ────────────────────────
+    const intent: TradeIntent = {
+      kind: "energy-buy",
+      target: route.router,
+      sellToken: CASH.USDG as `0x${string}`,
+      buyToken: route.path[route.path.length - 1]!,
+      sellAmountRaw: plan.amountInRaw,
+      notionalUsdg: plan.amountInRaw,
+    };
+    const stamped = await ensureDecision(
+      intent,
+      "chat",
+      `owner asked to top up $MERRYMEN energy — at most ${maxUsdg} USDG, ${usdgText(plan.amountInRaw)} USDG this ask`,
+    );
+    if (!stamped.ok) return no(stamped.why);
+    const outcome = await processIntentReporting(intent, judged.equityUsdg, judged.equityKnown, asked.notAfterMs);
+    // Reached after its deadline: nothing was built or sent, and the line says so.
+    if (outcome?.status === "late") return { ...no(outcome.line), verdict: { kind: "late" } };
+
+    // AFTER A LANDING, what the chain now says — pinned to the landing block,
+    // so the sentence is about the purchase that just happened. A read that
+    // fails says so; the plan's arithmetic is never offered in its place.
+    let heldAfter: bigint | null = null;
+    if (outcome?.status === "landed") {
+      const after = await readHolderStatusResult(cfg.rpcMainnet, cfg.holderAddress, grant.smartAccount as `0x${string}`, {
+        atLeastBlock: lastEnergyLandedBlock ?? 0n,
+      }).catch(() => null);
+      if (after && after.parts.holder !== null && after.parts.account !== null) {
+        heldAfter = (after.parts.holder ?? 0n) + (after.parts.account ?? 0n);
+      }
+    }
+    return { ...sayEnergyOutcome(outcome, plan, heldAfter), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
   }
 
   const buildStatusContext = () => ({
