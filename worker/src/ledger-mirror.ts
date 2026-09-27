@@ -881,8 +881,15 @@ export async function mirrorTenant(args: {
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (smart_account) DO UPDATE SET
              name = excluded.name, status = excluded.status, caps = excluded.caps,
-             expires_at = excluded.expires_at, mode = excluded.mode,
-             beat_at = excluded.beat_at, sponsor_gas = excluded.sponsor_gas,
+             expires_at = excluded.expires_at,
+             -- NULL IS "NOT YET", NOT "NEVER". A redeploy rebuilds the child's
+             -- agents row with no heartbeat and no mode, and the first pass after
+             -- the respawn copied those NULLs over the last known ones, so the
+             -- fleet report read "last heartbeat never — nothing would run" for
+             -- ~45 agents that were ticking (2026-09-27 00:36: Seafish201 among
+             -- them, beating again at 00:38). A later beat still replaces it.
+             mode = COALESCE(excluded.mode, agents.mode),
+             beat_at = COALESCE(excluded.beat_at, agents.beat_at), sponsor_gas = excluded.sponsor_gas,
              live_blocker = excluded.live_blocker,
              x_handle = excluded.x_handle,
              -- NOT a ratchet: a handle that loses its proof (renamed, or

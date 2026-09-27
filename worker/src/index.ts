@@ -4190,6 +4190,8 @@ async function main() {
    */
   // Once per arm — a warning repeated every 60 seconds is a log nobody reads.
   let trencherRailAnnounced = false;
+  /** Coins the fast Trencher skipped because the key cannot sell them — said once each. */
+  const noExitAnnounced = new Set<string>();
   /** Same once-per-arm discipline, for the asset-mode arm of the same feed. */
   let trencherStocksAnnounced = false;
   async function trenchCandidates(): Promise<Candidate[]> {
@@ -4267,6 +4269,13 @@ async function main() {
         } catch { autonomousBudget = false; }
       }
       const allowed = new Set(active?.limits.allowedAssets.map(a => a.toLowerCase()) ?? []);
+      // THE SAME `no-exit` LINE THE WALL DRAWS (policy.ts), drawn before the
+      // Brain is paid to review a coin it could never be allowed to buy.
+      // Measured 2026-09-25 → 27 on 0x8249ad: 501+ `no-exit` refusals, CASHCAT
+      // alone ~every 45s, each one after a paid review that said BUY. This
+      // only removes what the wall refuses anyway; the owner is told once per
+      // coin, since the refusal used to be where they learned to re-sign.
+      const sellable = active?.limits.sellableAssets ? new Set(active.limits.sellableAssets.map(a => a.toLowerCase())) : null;
       // Do not require a historical discovery row: trending records used to
       // carry firstSeen=0, so that age-window query silently excluded them all.
       const freshTape = freshTrenchTape();
@@ -4278,6 +4287,15 @@ async function main() {
         const autonomous = !!autoTrench?.qualified.some(q=>q.tokenAddress.toLowerCase()===p.tokenAddress.toLowerCase()) && !!active && !!grantTrencher(active.grant);
         if (autonomous && !autonomousBudget) continue;
         if (!t || (!autonomous && !allowed.has(t.address.toLowerCase())) || !p.createdAt || p.createdAt > nowSec || !p.fdvUsd) continue;
+        if (!autonomous && sellable && !sellable.has(t.address.toLowerCase())) {
+          if (!noExitAnnounced.has(t.address.toLowerCase()) && active) {
+            noExitAnnounced.add(t.address.toLowerCase());
+            void addEvent(active.agentId, "warn",
+              `trencher: skipping ${t.symbol} — this key can't approve it for a sell, so a buy would be refused ` +
+                `(no-exit). Re-sign the grant at /grant to cover it.`);
+          }
+          continue;
+        }
         const quote = lastPrices.get(t.symbol);
         out.push({ symbol: t.symbol, token: t.address, decimals: t.decimals ?? 18,
           ...(autonomous ? {custodyVault: autoTrench!.custody.vault} : {}),

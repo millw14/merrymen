@@ -291,6 +291,31 @@ describe("the ledger mirror", () => {
     assert.equal(Number(a.sponsor_gas), 1);
   });
 
+  it("a respawned child's blank heartbeat does not erase the last one", async () => {
+    // A redeploy rebuilds the child's agents row with beat_at and mode NULL
+    // until its first full tick. Copying those NULLs made the fleet report say
+    // "last heartbeat never" for agents that were running.
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
+    const reborn = seedChild();
+    await reborn.prepare("UPDATE agents SET beat_at = NULL, mode = NULL").run();
+    await mirrorTenant({ tenant: "0xten", child: reborn, shared });
+    const a = (await shared
+      .prepare("SELECT beat_at, mode FROM agents WHERE smart_account = ?")
+      .get("0xagent")) as { beat_at: number | null; mode: string | null };
+    assert.equal(Number(a.beat_at), 99);
+    assert.equal(a.mode, "live");
+    // And a real new beat still moves it.
+    const beating = seedChild();
+    await beating.prepare("UPDATE agents SET beat_at = 200, mode = 'paper'").run();
+    await mirrorTenant({ tenant: "0xten", child: beating, shared });
+    const b = (await shared
+      .prepare("SELECT beat_at, mode FROM agents WHERE smart_account = ?")
+      .get("0xagent")) as { beat_at: number | null; mode: string | null };
+    assert.equal(Number(b.beat_at), 200);
+    assert.equal(b.mode, "paper");
+  });
+
   it("CARRIES WHAT IS BLOCKING THE LIVE RAIL, so a funding screen can act on it", async () => {
     // Same channel and same reason as `sponsor_gas` above: only the child
     // resolves it, from its own balances, chain and executor. A column the
