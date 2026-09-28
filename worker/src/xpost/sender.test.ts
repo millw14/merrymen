@@ -158,6 +158,55 @@ test("a refresh X refuses outright revokes the connection and fails the post", a
   assert.equal(await keyStatus(db, "casual:other"), "cancelled", "every other draft is cancelled with it");
 });
 
+test("a refused refresh token that another sender already spent is not a revocation: what won is used", async (t) => {
+  const { db, post } = await setup(t, EXPIRING);
+  await schedulePost(db, { tenant: OWNER, xUserId: "111", kind: "casual", dedupeKey: "casual:other", body: "another draft", dueAtMs: NOW + 1, nowMs: NOW });
+  const seen: Seen[] = [];
+  const v = (await readTokens(db, DEK, OWNER))!.version;
+  // A lease handover: the other replica traded the same single-use token a
+  // moment earlier and stored its pair; X refuses ours as already spent.
+  const otherSpentIt: Reply = async () => {
+    assert.equal(await swapTokens(db, DEK, OWNER, v, { ...FRESH, accessToken: "access-winner", refreshToken: "refresh-winner" }, NOW), true);
+    return { status: 400, body: { error: "invalid_request", error_description: "Value passed for the token was invalid." } };
+  };
+  assert.equal(await sendOne(db, DEK, APP, post, { fetch: scripted([otherSpentIt, created()], seen), nowMs: NOW }), "posted");
+  assert.equal(seen[1]?.auth, "Bearer access-winner");
+  const a = await getAccount(db, OWNER);
+  assert.equal(a?.status, "ok");
+  assert.equal(await keyStatus(db, "casual:other"), "scheduled", "nothing is cancelled");
+  assert.equal((await readTokens(db, DEK, OWNER))?.refreshToken, "refresh-winner", "the winner's pair survives");
+});
+
+test("a refused refresh after the row moved on, with nothing fresh to use, waits — it does not revoke", async (t) => {
+  const { db, post } = await setup(t, EXPIRING);
+  const v = (await readTokens(db, DEK, OWNER))!.version;
+  const otherSpentItStale: Reply = async () => {
+    await swapTokens(db, DEK, OWNER, v, { ...EXPIRING, accessToken: "access-winner-stale", refreshToken: "refresh-winner" }, NOW);
+    return { status: 400, body: { error: "invalid_grant" } };
+  };
+  assert.equal(await sendOne(db, DEK, APP, post, { fetch: scripted([otherSpentItStale]), nowMs: NOW }), "retry");
+  assert.equal((await getAccount(db, OWNER))?.status, "ok");
+  const r = await row(db);
+  assert.equal(r.status, "scheduled");
+  assert.equal(r.dueAtMs, NOW + RETRY_AFTER_MS);
+});
+
+test("a refresh answer without a refresh token keeps the one stored, and the next refresh uses it", async (t) => {
+  const { db, post } = await setup(t, EXPIRING);
+  const accessOnly: Reply = { status: 200, body: { access_token: "access-two", expires_in: 60, scope: "tweet.write" } };
+  assert.equal(await sendOne(db, DEK, APP, post, { fetch: scripted([accessOnly, created()]), nowMs: NOW }), "posted");
+  const kept = await readTokens(db, DEK, OWNER);
+  assert.equal(kept?.accessToken, "access-two");
+  assert.equal(kept?.refreshToken, "refresh-one", "not erased");
+
+  await schedulePost(db, { tenant: OWNER, xUserId: "111", kind: "casual", dedupeKey: "casual:next", body: "another draft", dueAtMs: NOW + 1, nowMs: NOW });
+  const next = (await postsOf(db, OWNER, 0)).find((p) => p.dedupeKey === "casual:next")!;
+  const seen: Seen[] = [];
+  assert.equal(await sendOne(db, DEK, APP, next, { fetch: scripted([token("access-three", "refresh-three"), created("1840000000000000002")], seen), nowMs: NOW + 1_000 }), "posted");
+  assert.equal(new URLSearchParams(seen[0]?.body).get("refresh_token"), "refresh-one");
+  assert.equal((await getAccount(db, OWNER))?.status, "ok");
+});
+
 test("a refresh that did not land — rate, outage, a malformed answer — waits five minutes; nothing was sent", async (t) => {
   for (const reply of [{ status: 429, body: {} }, { status: 503, body: "" }, "throw" as const, { status: 400, body: { error: "unsupported_grant_type" } }]) {
     const { db, post } = await setup(t, EXPIRING);

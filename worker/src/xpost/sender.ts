@@ -36,8 +36,9 @@
  * connection lost. If the swap loses — another replica, a reconnect — what
  * won is read back and used when it is fresh; otherwise the post waits five
  * minutes. Nothing was sent either way. `invalid_grant` means the owner (or
- * X) revoked us: the account is marked revoked over the version that failed,
- * and the owner is asked to reconnect.
+ * X) revoked us — unless the row moved on while we asked, which means another
+ * sender spent the token first: only a refusal at the version still stored
+ * marks the account revoked, and the owner is asked to reconnect.
  *
  * NOTHING SECRET LEAVES. No token and no post body is logged, thrown or
  * returned: the answer is one short outcome code for the pass summary.
@@ -55,6 +56,7 @@ import {
   swapTokens,
   writeMeta,
   type StoredTokens,
+  type TokenSetPlain,
   type XPost,
 } from "./store";
 
@@ -111,38 +113,56 @@ async function freshTokens(db: Db, dek: Buffer, app: XApp, post: XPost, from: St
   if (!r.ok) {
     if (r.failure === "app") return { ok: false, outcome: "app" };
     if (r.failure === "grant") {
+      // A REFUSED REFRESH TOKEN MAY BE ONE SOMEBODY ELSE JUST SPENT. Two
+      // senders that read the same version (a lease handover) both trade the
+      // same single-use token: X rotates it for the first and refuses the
+      // second. So the row is read again first. If its version moved, the
+      // other sender (or a reconnect) won: its pair is used when it is fresh,
+      // otherwise the post waits. Only a refusal at the version still stored
+      // is the owner's (or X's) revocation.
+      const current = await readTokens(db, dek, post.tenant);
+      if (!current) return { ok: false, outcome: "retry" };
+      if (current.version !== from.version) return usableWinner(current, from, post, now) ? { ok: true, tokens: current } : { ok: false, outcome: "retry" };
       await markRevoked(db, post.tenant, from.version, now);
       return { ok: false, outcome: "revoked" };
     }
     // rate, uncertain, invalid: the refresh did not land; nothing was posted.
     return { ok: false, outcome: "retry" };
   }
-  if (await swapTokens(db, dek, post.tenant, from.version, r.value, now)) {
+  // A REFRESH ANSWER WITHOUT A REFRESH TOKEN KEEPS THE ONE STORED. X rotates
+  // with every refresh, but an answer that leaves it out (X, or a proxy) must
+  // not erase the stored one: two hours later that is a revoked account.
+  const next: TokenSetPlain = { ...r.value, refreshToken: r.value.refreshToken ?? from.refreshToken };
+  if (await swapTokens(db, dek, post.tenant, from.version, next, now)) {
     return {
       ok: true,
       tokens: {
         ...from,
         version: from.version + 1,
-        accessToken: r.value.accessToken,
-        refreshToken: r.value.refreshToken,
-        accessExpiresAtMs: r.value.accessExpiresAtMs,
+        accessToken: next.accessToken,
+        refreshToken: next.refreshToken,
+        accessExpiresAtMs: next.accessExpiresAtMs,
       },
     };
   }
   // THE SWAP LOST. Somebody else wrote a pair first; the one just obtained is
-  // dropped. What won is used if it is for the same X account, still honoured
-  // and fresh — and, when X just refused a token, not that same token again.
+  // dropped. What won is used when it may be.
   const winner = await readTokens(db, dek, post.tenant);
-  if (
-    winner &&
+  return winner && usableWinner(winner, from, post, now) ? { ok: true, tokens: winner } : { ok: false, outcome: "retry" };
+}
+
+/**
+ * A PAIR ANOTHER WRITER STORED, fit to post with: for the same X account,
+ * still honoured and fresh — and, when X just refused a token, not that same
+ * token again.
+ */
+function usableWinner(winner: StoredTokens, from: StoredTokens, post: XPost, now: number): boolean {
+  return (
     winner.status === "ok" &&
     winner.xUserId === post.xUserId &&
     winner.accessExpiresAtMs - now >= REFRESH_WITHIN_MS &&
     winner.accessToken !== from.accessToken
-  ) {
-    return { ok: true, tokens: winner };
-  }
-  return { ok: false, outcome: "retry" };
+  );
 }
 
 /**
