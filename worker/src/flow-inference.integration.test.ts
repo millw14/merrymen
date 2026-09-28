@@ -45,7 +45,7 @@ const { TRANSFER_TOPIC } = await import("./deposit-log");
 const { isEnergyRow, settleEnergyLanding, settleTransferLanding } = await import("./energy-settle");
 const { attributeSettlements, expectedCashUsdg, heldBreakerObservationUsdg, lookAtCash, opsHoldInference, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC, wroteSince } = await import("./flow-inference");
 const { planFirstObservation } = await import("./bootstrap-state");
-const { addressTopic, resolveSubmittedOps } = await import("./inflight-reconcile");
+const { addressTopic, findDroppedOps, resolveSubmittedOps } = await import("./inflight-reconcile");
 const { tickPlan, tickRatchets } = await import("./command-wake");
 const { accrueAboveHwm } = await import("./fees");
 const { checkPolicy } = await import("./policy");
@@ -113,7 +113,7 @@ const nowSec = () => Math.floor(Date.now() / 1000);
 const EP_ABI = parseAbi([
   "event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed)",
 ]);
-function opLog(userOpHash: string, success: boolean, txHash: string): RawLog {
+function opLog(userOpHash: string, success: boolean, txHash: string, nonce = 1n): RawLog {
   const topics = encodeEventTopics({
     abi: EP_ABI,
     eventName: "UserOperationEvent",
@@ -121,7 +121,7 @@ function opLog(userOpHash: string, success: boolean, txHash: string): RawLog {
   });
   const data = encodeAbiParameters(
     [{ type: "uint256" }, { type: "bool" }, { type: "uint256" }, { type: "uint256" }],
-    [1n, success, 0n, 0n],
+    [nonce, success, 0n, 0n],
   );
   return { topics: topics as readonly Hex[], data, transactionHash: txHash as Hex, blockNumber: "0x895441" };
 }
@@ -151,7 +151,8 @@ const transferLogs = (usdg6: bigint, to = OWNER): ReceiptLog[] => [transfer(USDG
  * has not been found — pending, or dropped by the bundler.
  */
 const chainState = {
-  events: new Map<string, { success: boolean; txHash: string }>(),
+  /** `nonce`: the one the op spent — its recorded `user_op_nonce` when the harness knows it. */
+  events: new Map<string, { success: boolean; txHash: string; nonce: bigint }>(),
   receipts: new Map<string, readonly ReceiptLog[] | null>(),
 };
 const chain: ReconcileChain = {
@@ -161,7 +162,7 @@ const chain: ReconcileChain = {
   async getLogs(a) {
     const want = String(a.topics[1] ?? "").toLowerCase();
     const e = chainState.events.get(want);
-    return e ? [opLog(want, e.success, e.txHash)] : [];
+    return e ? [opLog(want, e.success, e.txHash, e.nonce)] : [];
   },
   async getReceiptLogs(txHash) {
     const r = chainState.receipts.get(txHash.toLowerCase());
@@ -171,7 +172,8 @@ const chain: ReconcileChain = {
 /** The op landed (or reverted) on-chain; its receipt is readable unless `receipt` is null. */
 function lands(op: string, receipt: readonly ReceiptLog[] | null, success = true): string {
   const tx = `0x${(++n).toString(16).padStart(64, "e")}`;
-  chainState.events.set(op, { success, txHash: tx });
+  const recorded = one<{ v: string | null } | undefined>("SELECT user_op_nonce AS v FROM trades WHERE user_op_hash = ?", op)?.v;
+  chainState.events.set(op, { success, txHash: tx, nonce: recorded ? BigInt(recorded) : 1n });
   chainState.receipts.set(tx, receipt);
   return tx;
 }
@@ -427,10 +429,37 @@ async function resolvePass(opts: { failRowWrite?: boolean } = {}): Promise<void>
       status: r.success ? "landed" : "reverted",
     } as never);
   }
+  // The write-off: an unsettled op whose recorded nonce another op of ours
+  // spent on-chain can never land — 'dropped', nothing queued, nothing booked.
+  const suspects: { userOpHash: string; nonce: bigint; rivals: string[] }[] = [];
+  for (const m of mine.filter((m) => m.nonce !== undefined && !resolved.some((r) => r.userOpHash === m.userOpHash))) {
+    const rivals = await store.opsSignedWithNonce(ACCOUNT, m.nonce!, m.userOpHash);
+    if (rivals.length > 0) suspects.push({ userOpHash: m.userOpHash, nonce: m.nonce!, rivals });
+  }
+  for (const d of await findDroppedOps({ chain, smartAccount: ACCOUNT as `0x${string}`, stranded: suspects, lookbackBlocks: 1_000n })) {
+    const row = mine.find((m) => m.userOpHash === d.userOpHash)!;
+    await store.addTrade({
+      agent_id: ACCOUNT,
+      kind: row.kind,
+      target: row.target,
+      ...(row.sellToken ? { sell_token: row.sellToken } : {}),
+      ...(row.buyToken ? { buy_token: row.buyToken } : {}),
+      amount_usdg: row.amountUsdg,
+      user_op_hash: d.userOpHash,
+      status: "dropped",
+      reject_rule: "dropped: a later op used its nonce (resolved)",
+    } as never);
+  }
 }
 
 let n = 0;
-/** A pre-broadcast row the executor never heard back about. Energy by default. */
+/** A Kernel-shaped nonce: a 24-byte key over an 8-byte sequence, as the executor records it. */
+const nonceAt = (seq: number) => ((0x0102n << 240n) | BigInt(seq)).toString();
+/**
+ * A pre-broadcast row the executor never heard back about. Energy by default,
+ * signed with a nonce of its own — so no two rows here share one unless a test
+ * says so (`user_op_nonce`).
+ */
 async function stranded(over: Record<string, unknown> = {}): Promise<string> {
   const h = `0x${(++n).toString(16).padStart(64, "0")}`;
   await store.addTrade({
@@ -441,6 +470,7 @@ async function stranded(over: Record<string, unknown> = {}): Promise<string> {
     buy_token: MERRY,
     amount_usdg: 10,
     user_op_hash: h,
+    user_op_nonce: nonceAt(1_000 + n),
     status: "submitted",
     ...over,
   } as never);
@@ -699,6 +729,129 @@ describe("what a settlement explains is ITS OWN cash — nothing else in the hel
     assert.equal(proc.queue.length, 1);
     assert.equal(await tick(90n * U, 100n * U), "infer");
     assert.equal(flowsBy("inferred"), 0, "no +10 phantom deposit from a double shift");
+  });
+});
+
+/**
+ * A DROPPED userOp HOLDS ONLY UNTIL IT PROVABLY CANNOT LAND. The bundler
+ * dropped it — evicted it, or refused it at the send edge, which the executor
+ * must report as unresolved — so the chain never answers for it, and it used
+ * to hold every look for the resolver's whole window: 26 hours in which a
+ * deposit was not booked. A nonce is spent once, and the next op the agent
+ * signs after a drop is signed with the same one; when THAT op executes, the
+ * dropped one can never be included (inflight-reconcile.ts findDroppedOps),
+ * and the next resolver pass writes it off.
+ */
+describe("a dropped userOp holds inference only until it provably cannot land", () => {
+  const SHARED = nonceAt(7);
+  /** Our op B, signed with `nonce`, landed and RECORDED by the executor `ago` seconds back. */
+  async function recordedRival(nonce: string, ago: number, amount = 10): Promise<string> {
+    const h = `0x${(++n).toString(16).padStart(64, "0")}`;
+    const tx = `0x${(++n).toString(16).padStart(64, "f")}`;
+    await store.addTrade({ agent_id: ACCOUNT, ...swapRow, amount_usdg: amount, user_op_hash: h, user_op_nonce: nonce, tx_hash: tx, status: "landed" } as never);
+    exec("UPDATE trades SET created_at = ? WHERE user_op_hash = ?", nowSec() - ago, h);
+    chainState.events.set(h, { success: true, txHash: tx, nonce: BigInt(nonce) });
+    return h;
+  }
+  const statusOf = (op: string) => one<{ s: string }>("SELECT status AS s FROM trades WHERE user_op_hash = ?", op).s;
+
+  it("REFUSED AT THE SEND EDGE ON A STALE NONCE: the next pass writes it off, the hold ends, and the deposit made behind it is booked — a fee on none of it", async () => {
+    // B landed and was recorded before the baseline; A was then signed on a
+    // lagging node's nonce — B's — and the bundler refused it (AA25), which the
+    // send edge can only call unresolved.
+    await recordedRival(SHARED, 120);
+    const op = await stranded({ ...swapRow, amount_usdg: 25, user_op_nonce: SHARED });
+    assert.equal(await store.getSpentTodayUsdg(ACCOUNT, "live"), 35, "while it is 'submitted' it charges the live rail");
+    assert.equal(await store.getOpsToday(ACCOUNT, "live"), 2);
+    assert.equal(await tick(600n * U), "hold", "the owner deposits 500 behind it");
+
+    await resolvePass();
+    assert.equal(statusOf(op), "dropped", "written off on the chain's proof, one pass later — not 26 hours");
+    assert.deepEqual(await store.listSubmittedOps(ACCOUNT), [], "no longer in flight, so nothing holds on it");
+    assert.equal(proc.queue.length, 0, "it moved nothing, so it explains nothing");
+    assert.equal(await store.getSpentTodayUsdg(ACCOUNT, "live"), 10, "its spend is released — only B's stands");
+    assert.equal(await store.getOpsToday(ACCOUNT, "live"), 1);
+
+    assert.equal(await tick(600n * U), "infer");
+    assert.equal(inferredIn(), 500, "the deposit is booked");
+    assert.equal(await store.getNetContributionsUsdg(ACCOUNT), 600);
+    assert.equal(await peak(), 600);
+    assert.equal(await riskPeak(), 600);
+    assert.deepEqual(proc.fees, [], "and no fee on the owner's own money, held or after");
+  });
+
+  it("A RIVAL THAT WAS STRANDED TOO: one pass settles it (its own −10) and writes the dropped one off — only the deposit is inferred", async () => {
+    // A was accepted and evicted; B, signed with the same nonce, replaced it
+    // and landed — and B's receipt wait timed out as well.
+    const op = await stranded({ ...swapRow, user_op_nonce: SHARED });
+    const rival = await stranded({ ...swapRow, user_op_nonce: SHARED });
+    lands(rival, swapLogs(10n * U));
+    assert.equal(await tick(590n * U, 600n * U), "hold", "B's −10 and a 500 deposit, both behind the in-flight ops");
+    await resolvePass();
+    assert.equal(statusOf(rival), "landed");
+    assert.equal(statusOf(op), "dropped");
+    assert.equal(await tick(590n * U, 600n * U), "infer");
+    assert.equal(inferredIn(), 500, "B's settlement explained its own −10; the rest is the deposit");
+    assert.equal(flowsBy("inferred", "out"), 0);
+    assert.equal(await peak(), 600);
+    assert.deepEqual(proc.fees, []);
+  });
+
+  it("AN OP THAT COULD STILL LAND KEEPS HOLDING: no op of ours has spent its nonce — none recorded, one still pending, or one that spent another", async () => {
+    const op = await stranded({ ...swapRow, user_op_nonce: SHARED });
+    assert.equal(await tick(600n * U), "hold");
+    await resolvePass();
+    assert.equal(statusOf(op), "submitted", "nothing has spent its nonce: it may still be included");
+    assert.equal(await tick(600n * U), "hold");
+    // A replacement signed with the same nonce, not executed (yet).
+    const pending = await stranded({ ...swapRow, user_op_nonce: SHARED });
+    await resolvePass();
+    assert.equal(statusOf(op), "submitted", "a rival the chain has not executed proves nothing");
+    assert.equal(statusOf(pending), "submitted");
+    assert.equal(await tick(600n * U), "hold");
+    // A recorded rival whose event spent a DIFFERENT nonce: the chain's figure decides.
+    const h = await recordedRival(SHARED, 30);
+    chainState.events.set(h, { ...chainState.events.get(h)!, nonce: BigInt(nonceAt(8)) });
+    await resolvePass();
+    assert.equal(statusOf(op), "submitted");
+    assert.equal(await tick(600n * U), "hold");
+    assert.equal(inferredIn(), 0, "and nothing is inferred while it holds");
+  });
+
+  it("A ROW WITH NO RECORDED NONCE (written before the column) is never judged — it ages out of the window as before", async () => {
+    const op = await stranded({ ...swapRow, user_op_nonce: null });
+    await recordedRival(SHARED, 30);
+    await resolvePass();
+    assert.equal(statusOf(op), "submitted");
+    assert.equal(await tick(600n * U), "hold");
+  });
+
+  it("THE RIVAL THE EXECUTOR RECORDED DURING THE HOLD ends it one pass later — and its write then explains the interval (the known trade-interval limitation, R2-ACC rule 3), no longer 26 hours on", async () => {
+    const op = await stranded({ ...swapRow, user_op_nonce: SHARED });
+    assert.equal(await tick(100n * U), "hold");
+    await recordedRival(SHARED, 0);
+    proc.writes += 1; // recordTrade(landed) for B, during the hold
+    assert.equal(await tick(90n * U, 100n * U), "hold");
+    await resolvePass();
+    assert.equal(statusOf(op), "dropped");
+    assert.equal(await tick(90n * U, 100n * U), "explained", "the hold is over; B's fill explains its own interval");
+    assert.equal(flowsBy("inferred"), 0, "B's cash leg is never booked as a withdrawal");
+    assert.equal(await peak(), 100);
+  });
+
+  it("A SELF-HOSTED RESTART: the arm's resolver writes the dropped op off, and the first look judges the downtime", async () => {
+    const T0 = nowSec() - 3_600;
+    exec("DELETE FROM equity");
+    await store.addEquity(ACCOUNT, { mode: "live", ethWei: 0n, cashUsdg: 100, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 100 });
+    exec("UPDATE equity SET at = ?", T0);
+    await recordedRival(SHARED, 3_700); // landed before the reading
+    const op = await stranded({ ...swapRow, user_op_nonce: SHARED });
+    exec("UPDATE trades SET created_at = ? WHERE user_op_hash = ?", T0 + 10, op);
+    restart(T0 + 20);
+    await resolvePass(); // reconcileInFlightAtArm's resolveStrandedOps
+    assert.equal(statusOf(op), "dropped");
+    assert.equal(await tick(150n * U), "infer", "no hold on the first look");
+    assert.equal(inferredIn(), 50, "the downtime deposit is booked");
   });
 });
 

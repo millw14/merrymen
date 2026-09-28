@@ -565,6 +565,19 @@ const SQLITE_ALTERS: string[] = [
     // NULL means NOT ASSESSED, which is not zero: a trade written before this
     // column existed, or one that never landed. Only a landed trade owes a fee.
     "ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL",
+    // THE NONCE THIS OPERATION WAS SIGNED WITH — the full ERC-4337 uint256
+    // (key ‖ sequence), as a decimal string. Written once, on the pre-broadcast
+    // 'submitted' row (executor.ts onSubmitted), and never rewritten by the
+    // row's resolution.
+    //
+    // It is what lets a DROPPED userOp be written off. A nonce is spent exactly
+    // once, and the next op the agent signs after a drop reads the chain's
+    // unmoved nonce and is signed with the same one — so when that op executes,
+    // the stranded one can never be included (inflight-reconcile.ts
+    // findDroppedOps). Without it a dropped op held flow inference for the
+    // resolver's whole 26-hour window. NULL on every row written before this,
+    // and on rows that never had an operation: those are never judged dropped.
+    "ALTER TABLE trades ADD COLUMN user_op_nonce TEXT",
     // Where a Pons launch actually trades. A pre-graduation token has NO pool
     // at all — it lives on its own bonding curve — so without this the token is
     // recorded and then unreachable: there is no tier-scan fallback the way
@@ -1074,6 +1087,11 @@ export interface TradeRow {
    * be traced back to the operation that produced it. Populated since 2026-08-26.
    */
   user_op_hash?: string;
+  /**
+   * The nonce the operation was signed with, a decimal string of the full
+   * uint256 — set on the pre-broadcast row only (see the column's migration).
+   */
+  user_op_nonce?: string;
   tx_hash?: string;
   /**
    * Our coarse verdict, not the broker's. 'submitted' is the brokerage rail's
@@ -1082,8 +1100,14 @@ export interface TradeRow {
    * reconciler resolves it to landed/reverted from the wire. The broker's own
    * state words live in settlement_status, verbatim — two vocabularies, never
    * mixed.
+   *
+   * 'dropped' is a 'submitted' op the chain can provably never execute: another
+   * op of ours spent its nonce (inflight-reconcile.ts findDroppedOps). It moved
+   * nothing and burned no gas, so — like 'reverted' and 'rejected' — it counts
+   * toward no cap and enters no journal; unlike 'reverted' it never reached the
+   * chain, and unlike 'rejected' it was sent.
    */
-  status: "landed" | "reverted" | "rejected" | "paper" | "submitted";
+  status: "landed" | "reverted" | "rejected" | "paper" | "submitted" | "dropped";
   reject_rule?: string;
   /** Brokerage order id (no tx hash exists on that rail). NULL elsewhere. */
   order_id?: string;
@@ -3085,8 +3109,8 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
                              sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, decision_id,
                              fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
                              order_id, settlement_status, gas_wei, fill_slippage_bps, epoch, fill_cash_usdg, gas_usdg, gas_units,
-                             trade_fee_usdg, fill_symbol)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             trade_fee_usdg, fill_symbol, user_op_nonce)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.agent_id,
@@ -3121,6 +3145,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
         // different claims, and only one of them is about the trade.
         row.trade_fee_usdg ?? null,
         fillSymbol,
+        row.user_op_nonce ?? null,
       );
     };
     if (!moved) {
@@ -3363,6 +3388,9 @@ export type BudgetRail = "live" | "paper";
  * which is the conservative direction — budgets may under-spend, never
  * over-spend.
  */
+// An ALLOW-LIST on purpose: 'reverted', 'rejected' and 'dropped' (an op the
+// chain can never execute — see TradeRow.status) moved nothing, and a status
+// added later counts toward no cap until someone says it spends.
 const RAIL_STATUSES: Record<BudgetRail, readonly string[]> = {
   live: ["landed", "submitted"],
   paper: ["paper"],
@@ -3487,10 +3515,16 @@ export async function getSpentTodayUsdg(
  * Hashes are lowercased so the set compares cleanly against the chain's.
  */
 export async function listOpHashes(agentId: string): Promise<Set<string>> {
+  // NOR A 'dropped' ROW. It says the chain can never execute the op (another
+  // op of ours spent its nonce), and it counts toward no cap. That is proven
+  // at a depth, not assumed — but if the chain ever DID show it executed, the
+  // sweep must still see an op the ledger does not count and write it down,
+  // rather than skip it as settled. Belt and braces for a case the proof rules
+  // out; the price is nothing on every other pass.
   const rows = (await getDb()
     .prepare(
       `SELECT DISTINCT user_op_hash FROM trades
-       WHERE agent_id = ? AND user_op_hash IS NOT NULL AND status <> 'submitted'`,
+       WHERE agent_id = ? AND user_op_hash IS NOT NULL AND status NOT IN ('submitted', 'dropped')`,
     )
     .all(agentId)) as { user_op_hash: string | null }[];
   const set = new Set<string>();
@@ -3551,6 +3585,22 @@ export interface SubmittedOp {
   /** unixepoch seconds, stamped at INSERT and never rewritten by a resolution. */
   createdAt: number;
   epoch: number;
+  /**
+   * The nonce it was signed with (`user_op_nonce`), when the row recorded one
+   * and it parses. Absent on rows written before the column existed: those
+   * are never judged dropped, only aged out of the resolver's window.
+   */
+  nonce?: bigint;
+}
+
+/** A stored nonce back to a bigint; null for anything that is not one. */
+function parseNonce(v: unknown): bigint | null {
+  if (typeof v !== "string" || !/^[0-9]{1,80}$/.test(v)) return null;
+  try {
+    return BigInt(v);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -3569,7 +3619,7 @@ export interface SubmittedOp {
 export async function listSubmittedOps(agentId: string): Promise<SubmittedOp[]> {
   const rows = (await getDb()
     .prepare(
-      `SELECT user_op_hash, kind, target, sell_token, buy_token, amount_usdg, created_at, epoch FROM trades
+      `SELECT user_op_hash, kind, target, sell_token, buy_token, amount_usdg, created_at, epoch, user_op_nonce FROM trades
        WHERE agent_id = ? AND status = 'submitted' AND user_op_hash IS NOT NULL
        ORDER BY created_at ASC`,
     )
@@ -3582,17 +3632,45 @@ export async function listSubmittedOps(agentId: string): Promise<SubmittedOp[]> 
     amount_usdg: number;
     created_at: number;
     epoch: number;
+    user_op_nonce: string | null;
   }[];
-  return rows.map((r) => ({
-    userOpHash: r.user_op_hash.toLowerCase(),
-    kind: r.kind,
-    target: r.target,
-    ...(r.sell_token ? { sellToken: r.sell_token } : {}),
-    ...(r.buy_token ? { buyToken: r.buy_token } : {}),
-    amountUsdg: Number(r.amount_usdg),
-    createdAt: Number(r.created_at),
-    epoch: Number(r.epoch),
-  }));
+  return rows.map((r) => {
+    const nonce = parseNonce(r.user_op_nonce);
+    return {
+      userOpHash: r.user_op_hash.toLowerCase(),
+      kind: r.kind,
+      target: r.target,
+      ...(r.sell_token ? { sellToken: r.sell_token } : {}),
+      ...(r.buy_token ? { buyToken: r.buy_token } : {}),
+      amountUsdg: Number(r.amount_usdg),
+      createdAt: Number(r.created_at),
+      epoch: Number(r.epoch),
+      ...(nonce !== null ? { nonce } : {}),
+    };
+  });
+}
+
+/**
+ * EVERY OTHER OP OF OURS SIGNED WITH THIS NONCE — the rivals whose on-chain
+ * execution would prove a stranded op dropped (inflight-reconcile.ts
+ * findDroppedOps). Any status, any epoch: which of them the chain executed is
+ * the chain's to say, and it is asked by hash. Hashes lowercased, the stranded
+ * op itself excluded.
+ */
+export async function opsSignedWithNonce(agentId: string, nonce: bigint, exceptHash: string): Promise<string[]> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT DISTINCT user_op_hash FROM trades
+        WHERE agent_id = ? AND user_op_nonce = ? AND user_op_hash IS NOT NULL`,
+    )
+    .all(agentId, nonce.toString())) as { user_op_hash: string | null }[];
+  const except = exceptHash.toLowerCase();
+  const out = new Set<string>();
+  for (const r of rows) {
+    const h = r.user_op_hash?.toLowerCase();
+    if (h && h !== except) out.add(h);
+  }
+  return [...out];
 }
 
 /**

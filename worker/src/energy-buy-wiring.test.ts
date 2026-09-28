@@ -273,7 +273,7 @@ describe("THE EXECUTOR", () => {
   it("tokenLegs names the energy legs, so the pre-broadcast 'submitted' row carries them", () => {
     const legs = body("tokenLegs", "function");
     assert.match(legs, /if \(intent\.kind === "energy-buy"\) return \{ sell_token: intent\.sellToken, buy_token: intent\.buyToken \};/);
-    const hooks = CODE.slice(CODE.indexOf("onSubmitted: async (userOpHash) => {"));
+    const hooks = CODE.slice(CODE.indexOf("onSubmitted: async (userOpHash, op) => {"));
     assert.match(hooks.slice(0, 400), /\.\.\.tokenLegs\(intent\),/);
   });
 
@@ -436,6 +436,23 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     const deps = CODE.slice(CODE.indexOf("const energySettleDeps = "), CODE.indexOf("const energySettleDeps = ") + 1200);
     assert.match(deps, /flowBookedForTx: \(txHash\) => hasFlowForTx\(agentId, txHash\),/);
     assert.match(SETTLE, /source: "transfer-intent",/);
+  });
+
+  it("(5e) A DROPPED OP IS WRITTEN OFF ON PROOF, after the pass has settled what it could — nothing queued, nothing booked (flow-inference.integration.test.ts runs this shape)", () => {
+    // A userOp the bundler dropped held flow inference for the resolver's whole
+    // 26-hour window. The pre-broadcast row now records the nonce it was signed
+    // with, and the resolver writes the op off once another op of ours spent it.
+    const hooks = CODE.slice(CODE.indexOf("onSubmitted: async (userOpHash, op) => {"));
+    assert.match(hooks.slice(0, 700), /\.\.\.\(op\.nonce !== null \? \{ user_op_nonce: op\.nonce\.toString\(\) \} : \{\}\),\s*status: "submitted",/);
+    const r = arrow("resolveStrandedOps");
+    const settledLoop = r.indexOf("for (const r of resolved) {");
+    const suspects = r.indexOf("const unsettled = mine.filter((m) => m.nonce !== undefined && !resolved.some((r) => r.userOpHash === m.userOpHash));");
+    const find = r.indexOf("dropped = await findDroppedOps({");
+    assert.ok(settledLoop > 0 && suspects > settledLoop && find > suspects, "after every op the chain answered for is settled");
+    assert.match(r.slice(suspects, find), /const rivals = await opsSignedWithNonce\(agentId, m\.nonce!, m\.userOpHash\);/);
+    const writeOff = r.slice(find, r.indexOf("const unresolved = mine.length - resolved.length - dropped.length;"));
+    assert.match(writeOff, /status: "dropped",[\s\S]*if \(!wrote\) continue;/);
+    assert.doesNotMatch(writeOff, /settlementQueue|bookCapitalFlow|settleEnergyLanding|settleTransferLanding|ledgerWrites/, "it moved nothing: no settlement, no booking, no write");
   });
 
   it("(6) the orphan sweep NEVER books", () => {

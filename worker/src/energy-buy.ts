@@ -519,6 +519,10 @@ export function sayEnergyOutcome(
       };
     case "paper":
       return { ok: false, line: "📝 not bought — that was simulated, and your money did not move." };
+    case "dropped":
+      // Written only by the stranded-op resolver, never by the buy itself —
+      // said truthfully in case that ever changes: it was sent, not refused.
+      return { ok: false, line: "↩️ the energy buy was dropped before it reached the chain. No USDG moved and no gas was spent." };
     default: {
       const label = rejectRuleLabel(outcome.rejectRule);
       const remedy = rejectRuleRemedy(outcome.rejectRule);

@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { encodeAbiParameters, encodeEventTopics, parseAbi, toHex, type Hex } from "viem";
-import { acquiredLegOf, addressTopic, findOrphanOps, findSoleAcquisition, pickAcquiredLeg, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { acquiredLegOf, addressTopic, DROP_PROOF_CONFIRMATIONS, findDroppedOps, findOrphanOps, findSoleAcquisition, pickAcquiredLeg, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { netTokenDeltas } from "./fills";
 import { MERRYMEN_TOKEN } from "../../packages/core/src/index";
 import type { ReceiptLog } from "./fills";
@@ -571,5 +571,101 @@ describe("the deep scan is a recovery, not a habit", () => {
     assert.ok(block.indexOf("deepBasisTried.set(sym, now)") < block.indexOf("recoverReceiptBasis({"));
     assert.match(block, /await setBasis/);
     assert.doesNotMatch(block, /await bookFill/);
+  });
+});
+/**
+ * A USEROP THE BUNDLER DROPPED CAN BE WRITTEN OFF ONLY ON POSITIVE PROOF: our
+ * own other op, signed with the same nonce, executed on-chain. Nothing here may
+ * conclude "dropped" from a log that did not come back.
+ */
+describe("findDroppedOps", () => {
+  const HEAD = 10_000n;
+  /** One UserOperationEvent: which op, with which nonce, in which block. */
+  const event = (userOpHash: Hex, nonce: bigint, block: bigint, sender: string = ACCOUNT, success = true): RawLog => {
+    const topics = encodeEventTopics({
+      abi: EP_ABI,
+      eventName: "UserOperationEvent",
+      args: { userOpHash, sender: sender as Hex, paymaster: "0x0000000000000000000000000000000000000000" },
+    });
+    const data = encodeAbiParameters(
+      [{ type: "uint256" }, { type: "bool" }, { type: "uint256" }, { type: "uint256" }],
+      [nonce, success, 0n, 0n],
+    );
+    return { topics: topics as readonly Hex[], data, transactionHash: h(0x7000 + Number(block % 1000n)), blockNumber: toHex(block) };
+  };
+  /** A chain that honours the hash filter; `failFor` makes that hash's scan give up. */
+  const chainOf = (logs: RawLog[], failFor: Hex[] = []) => {
+    const asked: string[] = [];
+    const chain = {
+      async getBlockNumber() {
+        return HEAD;
+      },
+      async getLogs(a: { topics: (Hex | Hex[] | null)[] }) {
+        const want = String(a.topics[1]).toLowerCase();
+        asked.push(want);
+        if (failFor.some((f) => f.toLowerCase() === want)) throw new Error("execution reverted: not a range or rate problem");
+        return logs.filter((l) => l.topics[1]?.toLowerCase() === want);
+      },
+      async getReceiptLogs() {
+        return null;
+      },
+    } as ReconcileChain;
+    return { chain, asked };
+  };
+  // A Kernel-shaped nonce: a 24-byte key over an 8-byte sequence.
+  const NONCE = (0x0102n << 240n) | 7n;
+  const [dropped, rival] = [h(0xd1), h(0xd2)];
+  const deep = HEAD - DROP_PROOF_CONFIRMATIONS;
+
+  it("WRITES OFF an op whose nonce another op of ours spent on-chain — with the proof", async () => {
+    const { chain } = chainOf([event(rival, NONCE, deep)]);
+    const got = await findDroppedOps({ chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n });
+    assert.equal(got.length, 1);
+    assert.equal(got[0]!.userOpHash, dropped);
+    assert.equal(got[0]!.usedBy, rival);
+    assert.equal(got[0]!.nonce, NONCE);
+    assert.equal(got[0]!.blockNumber, deep);
+  });
+
+  it("a REVERTED rival spent the nonce just the same — the EntryPoint emits the event only for an op it executed", async () => {
+    const { chain } = chainOf([event(rival, NONCE, deep, ACCOUNT, false)]);
+    const got = await findDroppedOps({ chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n });
+    assert.equal(got.length, 1);
+  });
+
+  it("AN OP STILL PENDING IS NEVER WRITTEN OFF: no recorded rival, or a rival the chain has not executed", async () => {
+    const none = chainOf([]);
+    assert.deepEqual(await findDroppedOps({ chain: none.chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [] }], lookbackBlocks: 5_000n }), []);
+    assert.deepEqual(none.asked, [], "with no rival recorded, the chain is not even asked");
+    const pending = chainOf([]);
+    assert.deepEqual(await findDroppedOps({ chain: pending.chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n }), []);
+    assert.deepEqual(await findDroppedOps({ chain: pending.chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [dropped] }], lookbackBlocks: 5_000n }), [], "itself is no rival");
+  });
+
+  it("A RIVAL THAT SPENT A DIFFERENT NONCE PROVES NOTHING — the chain's figure, not the ledger's, decides", async () => {
+    const { chain } = chainOf([event(rival, NONCE + 1n, deep)]);
+    assert.deepEqual(await findDroppedOps({ chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n }), []);
+  });
+
+  it("the same sequence under ANOTHER KEY is another nonce: an enable-mode op does not spend a default-mode one", async () => {
+    const { chain } = chainOf([event(rival, (0x0002n << 240n) | 7n, deep)]);
+    assert.deepEqual(await findDroppedOps({ chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n }), []);
+  });
+
+  it("A PROOF TOO SHALLOW TO OUTLAST A REORG WAITS for the next pass", async () => {
+    const { chain } = chainOf([event(rival, NONCE, HEAD - DROP_PROOF_CONFIRMATIONS + 1n)]);
+    assert.deepEqual(await findDroppedOps({ chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n }), []);
+  });
+
+  it("IF THE STRANDED OP'S OWN EVENT IS THERE, or its scan did not finish, nothing is written off", async () => {
+    const landed = chainOf([event(rival, NONCE, deep), event(dropped, NONCE, deep)]);
+    assert.deepEqual(await findDroppedOps({ chain: landed.chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n }), []);
+    const blind = chainOf([event(rival, NONCE, deep)], [dropped]);
+    assert.deepEqual(await findDroppedOps({ chain: blind.chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n }), []);
+  });
+
+  it("an event for ANOTHER SENDER under the rival's hash is not ours and proves nothing", async () => {
+    const { chain } = chainOf([event(rival, NONCE, deep, "0x00000000000000000000000000000000000acc02")]);
+    assert.deepEqual(await findDroppedOps({ chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n }), []);
   });
 });
