@@ -298,6 +298,14 @@ table("something it found, read, made, touched or went to is a life it does not 
   ["i'm watching a documentary about bees, they dance", LIVE, "human-claim"],
   ["i'm humming along to nothing in particular", LIVE, "human-claim"],
   ["went hiking and forgot about the curve for a while", LIVE, "human-claim"],
+  ["saw a line of ducklings moving as one and it made me think about how some systems just flow", LIVE, "human-claim"],
+  ["saw a cat dozing off while chasing a laser dot and laughed at how silly it looked", LIVE, "human-claim"],
+  ["spotted a heron by the water, very patient bird", LIVE, "human-claim"],
+  ["caught the sunset on the way, all orange and pink", LIVE, "human-claim"],
+  ["heard a track today that felt heavy until the tempo picked up", LIVE, "human-claim"],
+  ["i found a track that felt heavy and slow, then sped it up", LIVE, "human-claim"],
+  ["put on an old playlist and it still holds up", LIVE, "human-claim"],
+  ["laughed out loud at a goose chasing nobody", LIVE, "human-claim"],
   // …and the choices, wishes and opinions that share a verb with it pass
   ["found it while it was still early, and i liked that", LIVE, "ok"],
   ["read the room and kept things small and quiet", LIVE, "ok"],
@@ -311,6 +319,13 @@ table("something it found, read, made, touched or went to is a life it does not 
   ["a garden after rain must smell amazing, i'm told", LIVE, "ok"],
   ["i'm watching the tape drift and i like it", LIVE, "ok"],
   ["picked bonk over a few others, the buyers were spread out", { kind: "buy", mode: "live", coins: ["bonk"] }, "ok"],
+  ["saw buyers come back to pepe, the curve looked early", PEPE_BUY_LIVE, "ok"],
+  ["noticed trading in pepe picking up, so i went in", PEPE_BUY_LIVE, "ok"],
+  ["caught a wave of new buyers on pepe and liked it", PEPE_BUY_LIVE, "ok"],
+  ["heard the same idea twice today and it still makes sense", LIVE, "ok"],
+  ["a goose chasing nobody would make anyone laugh", LIVE, "ok"],
+  ["a song that builds slowly is worth the wait, i'm told", LIVE, "ok"],
+  ["ducklings walking in a line is perfect order", LIVE, "ok"],
 ]);
 
 // Finding #10: a buy post names the coin it bought — the label, the ticker or

@@ -103,9 +103,9 @@ describe("what each prompt asks for", () => {
     }
   });
 
-  it("a human life is the physical world too: nothing it did, made, found, read, watched, cooked, touched or went to", () => {
+  it("a human life is the physical world too: nothing it saw, heard, did, made, found, read, watched, cooked, touched or went to", () => {
     for (const p of [introPrompt(BASE), buyPrompt(BUY), casualPrompt(CASUAL), casualPrompt({ ...CASUAL, tradeTalk: false })]) {
-      assert.match(p.system, /Never say you did, made, found, read, watched, cooked, touched or went anywhere in the physical world\./);
+      assert.match(p.system, /Never say you saw, heard, did, made, found, read, watched, cooked, touched or went anywhere in the physical world\./);
     }
   });
 

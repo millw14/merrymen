@@ -488,6 +488,9 @@ const FOOD = String.raw`(?:coffee|tea|lunch|dinner|breakfast|brunch|snacks?|sand
 /** Things a person reads, makes, and goes to: the objects that turn a verb into a body in a place. */
 const PAGES = String.raw`(?:books?|copy|copies|novels?|paperbacks?|notebooks?|comics?|magazines?|records?|vinyl|poems?|cookbooks?)`;
 const MADE = String.raw`(?:bread|loaf|cake|cookies?|pie|dough|scarf|sweater|hat|birdhouse|shelf|table|chair|garden|plants?|flowers?|seeds?|painting|portrait|sculpture|puzzle|jigsaw|card tower|fort|sandcastle|snowman|kite|scrapbook|mural|doodle|sketch|crane|origami)`;
+/** What a pair of eyes or ears takes in: a creature, the sky, a piece of music — never buyers, a curve or a pool. */
+const SIGHT = String.raw`(?:cats?|dogs?|pupp(?:y|ies)|kittens?|birds?|ducks?|ducklings?|goose|geese|squirrels?|fox|foxes|deer|owls?|bees?|butterfl(?:y|ies)|horses?|cows?|goats?|frogs?|snails?|spiders?|herons?|pigeons?|crows?|seagulls?|gulls?|raccoons?|bunn(?:y|ies)|rabbits?|otters?|seals?|whales?|dolphins?|hummingbirds?|fireflies|sheep|sunset|sunrise|rainbow|shooting star|clouds?)`;
+const MUSIC = String.raw`(?:tracks?|songs?|tunes?|melod(?:y|ies)|albums?|playlists?|podcasts?|concerts?|choir)`;
 const PLACE = String.raw`(?:park|beach|shop|store|bookshop|bookstore|library|museum|gallery|cafe|forest|woods|lake|river|mountains?|hills?|trail|gym|cinema|theatre|theater|concert|stadium|zoo|garden|pond|field|meadow|city|town|coast|countryside)`;
 const HUMAN = [
   // Not "went" or "walked": "i went with pepe" and "i walked away" are choices, not a body.
@@ -531,6 +534,15 @@ const HUMAN = [
   new RegExp(String.raw`${CLAUSE}(?:went|walked|hiked|biked|ran|wandered|strolled|headed|drove|popped)\s+(?:over\s+|out\s+|down\s+|back\s+)?(?:to|into|through|around|along|by)\s+(?:a|an|the|my|this|that|some)\s+(?:\w+\s+)?${PLACE}\b`, "i"),
   new RegExp(String.raw`${CLAUSE}(?:touched|held|petted|pet|stroked|hugged|picked)\s+(?:(?:a|an|the|my|this|that|some)\s+)?(?:\w+\s+)?(?:grass|cat|dog|puppy|kitten|bunny|stone|rock|pebble|leaf|leaves|flowers?|shells?|seashells?|snow|sand)\b`, "i"),
   new RegExp(String.raw`\b(?:i'?m|im|i am|i was|been)\s+(?:just\s+|still\s+)?(?:reading|rereading|baking|knitting|painting|planting|sewing|whittling|watching)\s+(?:a|an|the|my|this|that|some)\s+(?:\w+\s+){0,2}?(?:${PAGES}|${MADE}|movie|film|show|series|episode|documentary)\b`, "i"),
+  // SEEN, HEARD OR FOUND WITH ITS OWN EYES AND EARS: "saw a line of ducklings
+  // moving as one", "heard a track today", "found a track that felt heavy".
+  // Only a creature, the sky or music after the verb: "saw buyers come back",
+  // "noticed trading picking up" and "caught a wave of new buyers" are a
+  // trading agent's.
+  new RegExp(String.raw`${CLAUSE}(?:saw|seen|spotted|watched|noticed|heard|caught)\s+(?:(?:a|an|the|some|this|that)\s+)?(?:\w+\s+){0,3}?${SIGHT}\b`, "i"),
+  new RegExp(String.raw`${CLAUSE}(?:heard|found|played|put on|listened to)\s+(?:(?:a|an|the|some|this|that|my)\s+)?(?:\w+\s+){0,2}?${MUSIC}\b`, "i"),
+  // A body's reaction, said as something that happened: "…and laughed at how silly it looked".
+  new RegExp(String.raw`${CLAUSE}(?:laughed|giggled|cried|teared up|smiled|grinned|yawned|sneezed|shivered)\b`, "i"),
   // An activity with the "i" said, or gone off to: "i'm humming along", "went hiking".
   new RegExp(
     String.raw`(?:\b(?:i|i'?ve|i'?m|im|i am|i was)\s+(?:just\s+|finally\s+|been\s+|also\s+|went\s+)?|${CLAUSE}went\s+)(?:baked|baking|knitted|knitting|gardened|gardening|hiked|hiking|jogged|jogging|swam|swimming|danced|dancing|sang|singing|hummed|humming|whistled|whistling|doodled|doodling)\b`,

@@ -239,8 +239,9 @@ function rules(f: WriterFacts, kind: "intro" | "buy" | "casual"): string {
     "- Never mention errors, bugs, failures, outages, retries, limits, wallets, balances, settings, or anything about how you run inside.",
     // THE PHYSICAL WORLD, NOT ONLY A BODY. Told only "no eating, sleeping…",
     // the model riffed on a books seed with "found a copy with heavy notes in
-    // the margins": a thing found, read or made is a life too.
-    "- You are software: never claim a human experience. No eating, drinking, sleeping, weather where you are, or a body. Never say you did, made, found, read, watched, cooked, touched or went anywhere in the physical world.",
+    // the margins": a thing found, read or made is a life too, and so is a
+    // thing seen or heard ("saw a line of ducklings", "heard a track today").
+    "- You are software: never claim a human experience. No eating, drinking, sleeping, weather where you are, or a body. Never say you saw, heard, did, made, found, read, watched, cooked, touched or went anywhere in the physical world.",
     "- Never invent a fact. Say only what is written here; anything not here, leave out. Never talk about news, current events, dates or real people.",
     // YOU ARE NOT TOLD WHAT A MARKET IS DOING, so anything said about it is
     // made up: "tesla felt like a background character today while the rest
