@@ -235,7 +235,9 @@ struct XPostingScreen: View {
                 case .failed: // X's own error, not the owner's choice: say so rather than close in silence.
                     throw APIError(status: 0, message: "X couldn't finish connecting, so nothing was connected. Try again in a moment.")
                 case .approved(let code):
-                    _ = try await store.perform("/api/x/connect", body: .object(["action": .string("finish"), "code": .string(code), "state": .string(state), "owner": .string(owner)]), expectedOwner: owner)
+                    let finished = try await store.perform("/api/x/connect", body: .object(["action": .string("finish"), "code": .string(code), "state": .string(state), "owner": .string(owner)]), expectedOwner: owner)
+                    // A reconnect of the same account keeps the owner's earlier consent: say so, it posts again now.
+                    if let notice = XPostingAccount.postingBackOn(finished) { store.notice = notice }
                 case nil:
                     throw APIError(status: 0, message: "That answer from X wasn't for this connection, so nothing was connected. Try again.")
                 }
@@ -293,6 +295,19 @@ struct XPostingAccount: Equatable {
         } else { identity = nil }
         upcoming = connected ? v["upcoming"].array.compactMap { Self.post($0, time: "dueAt", link: nil) } : []
         recent = v["recent"].array.compactMap { row in Self.post(row, time: "sentAt", link: row["url"].string.flatMap(URL.init(string:)).flatMap { policy.isXPostLink($0) ? $0 : nil }) }
+    }
+
+    /// RECONNECTING CAN TURN POSTING BACK ON, AND THE OWNER IS TOLD. When X
+    /// stops accepting a connection and the owner reconnects the SAME X
+    /// account, the server keeps the consent they gave for it, so the
+    /// Merryman posts again from the next pass — with no new warning. The
+    /// finish answer says so (`postingEnabled`), and this is the sentence the
+    /// owner sees then; nil when posting is off, or the answer does not say
+    /// `true` in so many words. A handle that is not an X handle is not shown.
+    static func postingBackOn(_ finished: J) -> String? {
+        guard finished["postingEnabled"].bool == true else { return nil }
+        let handle = finished["username"].string.flatMap { $0.wholeMatch(of: #/[A-Za-z0-9_]{1,15}/#) != nil ? "@\($0)" : nil }
+        return "Posting is back on — your Merryman posts from \(handle ?? "the X account you just connected") again. You can see what's coming up, skip it, or turn posting off here."
     }
 
     /// The confirmed enable, owner aside (every write adds it): the X user id

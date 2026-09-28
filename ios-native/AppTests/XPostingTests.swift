@@ -24,4 +24,21 @@ final class XPostingTests: XCTestCase {
         let tokyo = try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo"))
         XCTAssertEqual(XPostingAccount.enableFields(identity, zone: tokyo)["tz"], .string("Asia/Tokyo"))
     }
+
+    /// Finishing a connect answers {ok, username, postingEnabled}. A reconnect
+    /// of the same account keeps the consent, so posting is on again at once:
+    /// the owner is told, naming the account. Anything short of a real `true`
+    /// says nothing (the screen then shows the switch as the server reads it).
+    func testFinishingAReconnectThatTurnsPostingBackOnSaysSo() throws {
+        let answer = { (json: String) in try JSONDecoder().decode(J.self, from: Data(json.utf8)) }
+        XCTAssertEqual(XPostingAccount.postingBackOn(try answer(#"{"ok":true,"username":"robin_trades","postingEnabled":true}"#)),
+                       "Posting is back on — your Merryman posts from @robin_trades again. You can see what's coming up, skip it, or turn posting off here.")
+        XCTAssertEqual(XPostingAccount.postingBackOn(try answer(#"{"ok":true,"username":"not a handle!","postingEnabled":true}"#)),
+                       "Posting is back on — your Merryman posts from the X account you just connected again. You can see what's coming up, skip it, or turn posting off here.")
+        for json in [#"{"ok":true,"username":"robin_trades","postingEnabled":false}"#, #"{"ok":true,"username":"robin_trades"}"#,
+                     #"{"ok":true,"username":"robin_trades","postingEnabled":"true"}"#, #"{"ok":true,"username":"robin_trades","postingEnabled":1}"#,
+                     #"{"ok":true,"username":"robin_trades","postingEnabled":null}"#] {
+            XCTAssertNil(XPostingAccount.postingBackOn(try answer(json)), json)
+        }
+    }
 }

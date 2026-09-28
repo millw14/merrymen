@@ -113,7 +113,9 @@ final class PreviewTransport: URLProtocol {
             case "start" where keys == ["action", "client", "owner"] && input["client"] as? String == "ios":
                 return ("{\"url\":\"https://x.com/i/oauth2/authorize?response_type=code&client_id=ui-test&redirect_uri=https%3A%2F%2Fapp.merrymen.dev%2Fconnect%2Fx&scope=tweet.read%20tweet.write%20users.read%20offline.access&state=\(state)&code_challenge=ui-test&code_challenge_method=S256\"}", 200)
             case "finish" where keys == ["action", "code", "state", "owner"] && input["state"] as? String == state:
-                d.set(false, forKey: "uiTest.xDisconnected"); return (#"{"ok":true,"username":"robin_trades"}"#, 200)
+                // Like the server: a reconnect of the same account answers whether posting is on again.
+                d.set(false, forKey: "uiTest.xDisconnected")
+                return ("{\"ok\":true,\"username\":\"robin_trades\",\"postingEnabled\":\(d.bool(forKey: "uiTest.xPostingEnabled"))}", 200)
             default: return (#"{"error":"Unexpected fields in X connect"}"#, 400)
             }
         }
