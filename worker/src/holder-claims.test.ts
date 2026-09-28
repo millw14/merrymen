@@ -213,6 +213,65 @@ describe("backfillHolderClaims — against a real store", () => {
     assert.equal((await store.holderClaims()).has(W), false);
   });
 
+  it("A PENDING TENANT'S RETRY NEVER HANDS A RELEASED WALLET TO THE PROOF THAT LOST IT", async () => {
+    // The review's scenario: P could not be read in the first run, so it is
+    // pending — and its proof is the loser of W, which A won. A unlinks W on
+    // purpose (W's own login account should count it again). The retry read
+    // only P, and P's proof, made before the first run, claimed W with
+    // nobody signing anything.
+    const store = freshStore();
+    const A = t(0xa), P = t(0xb);
+    await store.put(A, { holderProof: { address: W, at: 1_000 } });
+    await store.put(P, { holderProof: { address: W, at: 2_000 } });
+    let sealed = true;
+    const flaky = {
+      ...bind(store),
+      get: async (x: `0x${string}`) => {
+        if (x === P && sealed) throw new Error("transient");
+        return store.get(x);
+      },
+    };
+    const first = await backfillHolderClaims(flaky, () => {}, 5_000);
+    assert.equal(first.done, false);
+    assert.equal((await store.holderClaims()).get(W), A, "A proved it first");
+    await store.releaseHolderClaims(A); // A's unlink
+    await store.put(A, {});
+    sealed = false;
+    const lines: string[] = [];
+    const retry = await backfillHolderClaims(flaky, (l) => lines.push(l), 6_000);
+    assert.equal(retry.done, true);
+    assert.equal((await store.holderClaims()).has(W), false, "released on purpose, and it stays free");
+    assert.deepEqual(retry.released, [{ tenant: P, wallet: W }]);
+    assert.ok(lines.some((l) => l.includes(P) && /let it go/.test(l)), "and the log says why P's proof was not claimed");
+    assert.equal(retry.collisions.length, 0, "not a collision: nobody holds it");
+  });
+
+  it("…nor does a re-run after a crash that came before the record", async () => {
+    const store = freshStore();
+    const A = t(0xa), B = t(0xb), C = t(0xc);
+    await store.put(A, { holderProof: { address: W, at: 1 } });
+    await store.put(B, { holderProof: { address: W, at: 2 } });
+    await store.put(C, { holderProof: { address: W2, at: 3 } });
+    // The first run gives W to A, then dies on W2 before writing its record.
+    await assert.rejects(
+      backfillHolderClaims({
+        ...bind(store),
+        claimHolder: async (w, x) => {
+          if (w === W2) throw new Error("killed");
+          return store.claimHolder(w, x);
+        },
+      }),
+    );
+    assert.equal(await store.holderBackfill(), null);
+    await store.releaseHolderClaims(A); // A unlinks W before the next start
+    await store.put(A, {});
+    const again = await backfillHolderClaims(store);
+    assert.equal(again.done, true);
+    const claims = await store.holderClaims();
+    assert.equal(claims.has(W), false, "B lost W to A; A let it go; B does not get it for nothing");
+    assert.equal(claims.get(W2), C, "the rest of the first pass still happens");
+  });
+
   it("AN UNREADABLE RECORD IS NOT 'NEVER RAN' — the run throws and claims nothing", async () => {
     const store = freshStore();
     await store.put(t(1), { holderProof: { address: W, at: 1 } });

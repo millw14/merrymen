@@ -31,7 +31,12 @@ export type HolderClaim =
   /** Ours — `fresh` when this call created it, false when we already held it. */
   | { ok: true; fresh: boolean }
   /** Another account holds it. `heldBy` is that account: never shown to the caller. */
-  | { ok: false; heldBy: `0x${string}` };
+  | { ok: false; heldBy: `0x${string}` }
+  /**
+   * Nobody holds it, but an account held it and let it go (a HolderRelease
+   * exists): only the wallet's own fresh signature (takeHolder) claims it now.
+   */
+  | { ok: false; heldBy: null };
 
 /** A claim as stored, for putting back exactly what a move replaced. */
 export interface HolderClaimRecord {
@@ -180,6 +185,13 @@ export interface SettingsStore {
    * already holds is `{ ok: true, fresh: false }`. Throws when the store cannot
    * be read — the caller must refuse, never assume the wallet is free.
    * See effectiveHolder (packages/core/src/holder-proof.ts) for how it is read.
+   *
+   * ONLY A WALLET NO ACCOUNT HAS EVER LET GO. This claims with no signature —
+   * its one caller is the backfill of proofs made before claims existed — so
+   * a wallet some account claimed and then released on purpose (an unlink, a
+   * re-link, a move away) is `{ ok: false, heldBy: null }`, whoever asks: an
+   * old proof, or a retry after a crash, never hands it to anyone. Its owner
+   * signs again (takeHolder), which is the remedy the screen already offers.
    */
   claimHolder(wallet: string, tenant: string): Promise<HolderClaim>;
   /**
@@ -508,6 +520,7 @@ export class FileSettingsStore implements SettingsStore {
     return this.withClaimLock(w, async (): Promise<HolderClaim> => {
       const holder = await this.claimHolderOf(w);
       if (holder !== null) return holder === t ? { ok: true, fresh: false } : { ok: false, heldBy: holder };
+      if ((await this.readRelease(w)) !== null) return { ok: false, heldBy: null };
       if (await this.createClaim(w, { tenant: t, claimedAt: now, movedAt: null, movedFrom: null })) {
         return { ok: true, fresh: true };
       }
@@ -880,11 +893,13 @@ export class PgSettingsStore implements SettingsStore {
   }
   /**
    * INSERT … ON CONFLICT DO NOTHING, THEN LOOK. The insert is the atomic
-   * first-claim-wins; RETURNING says whether it was ours. When it conflicted,
-   * a SEPARATE statement reads the holder, because under READ COMMITTED a row
-   * committed by a racing claim after this statement's snapshot conflicts yet
-   * stays invisible to a SELECT inside the same statement. If the holder
-   * released it in between, the wallet is free again and we simply ask again.
+   * first-claim-wins — and only on a wallet with no release record, in the
+   * same statement; RETURNING says whether it was ours. When it did not land,
+   * SEPARATE statements read the holder and then the record, because under
+   * READ COMMITTED a row committed by a racing claim after this statement's
+   * snapshot conflicts yet stays invisible to a SELECT inside the same
+   * statement. Neither there — a claim raced in and was undone, which records
+   * no release — the wallet is free: ask again.
    */
   async claimHolder(wallet: string, tenant: string): Promise<HolderClaim> {
     const w = claimKey("wallet", wallet);
@@ -892,15 +907,19 @@ export class PgSettingsStore implements SettingsStore {
     const c = await this.client();
     for (let attempt = 0; attempt < 3; attempt++) {
       const ins = await c.query(
-        `INSERT INTO holder_claims (wallet, tenant, claimed_at) VALUES ($1, $2, $3)
+        `INSERT INTO holder_claims (wallet, tenant, claimed_at) SELECT CAST($1 AS TEXT), CAST($2 AS TEXT), CAST($3 AS BIGINT)
+         WHERE NOT EXISTS (SELECT 1 FROM holder_wallet_moves WHERE wallet = $1)
          ON CONFLICT (wallet) DO NOTHING RETURNING tenant`,
         [w, t, Date.now()],
       );
       if (ins.rows[0]) return { ok: true, fresh: true };
       const { rows } = await c.query(`SELECT tenant FROM holder_claims WHERE wallet = $1`, [w]);
-      if (!rows[0]) continue;
-      const holder = claimKey("tenant", String(rows[0].tenant));
-      return holder === t ? { ok: true, fresh: false } : { ok: false, heldBy: holder };
+      if (rows[0]) {
+        const holder = claimKey("tenant", String(rows[0].tenant));
+        return holder === t ? { ok: true, fresh: false } : { ok: false, heldBy: holder };
+      }
+      const rel = await c.query(`SELECT last_tenant FROM holder_wallet_moves WHERE wallet = $1`, [w]);
+      if (rel.rows[0]) return { ok: false, heldBy: null };
     }
     throw new Error("holder claim: the wallet's claim kept changing — try again");
   }

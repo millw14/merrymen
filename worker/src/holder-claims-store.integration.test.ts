@@ -99,7 +99,7 @@ function behavesAsAClaimsRecord(name: string, make: () => Store) {
       assert.deepEqual(await s.claimHolder(W, B), { ok: false, heldBy: A }, "B cannot free A's wallet and take it");
       await s.releaseHolder(W, A);
       assert.equal((await s.holderClaims()).size, 0);
-      assert.deepEqual(await s.claimHolder(W, B), { ok: true, fresh: true }, "released, it is free for the next account");
+      assert.deepEqual(await s.takeHolder(W, B), { ok: true, fresh: true }, "released, it is free for the next account that signs for it");
       await s.releaseHolder(W2, A); // nothing to release — not an error
     });
 
@@ -220,6 +220,18 @@ function behavesAsAClaimsRecord(name: string, make: () => Store) {
       s = await setUp();
       assert.deepEqual(await s.takeHolder(W, A, day + 3 * HOUR), { ok: true, fresh: true }, "A, which it was moved from today");
       assert.deepEqual(await s.takeHolder(W, C, day + 4 * HOUR), { ok: false, movableAt: day + DAY, held: true });
+    });
+
+    it("claimHolder (no signature) NEVER CLAIMS A WALLET AN ACCOUNT LET GO — not even for that account; a signature still can", async () => {
+      const s = make();
+      const day = Date.UTC(2026, 8, 28);
+      await s.claimHolder(W, A);
+      await s.releaseHolderClaims(A);
+      assert.deepEqual(await s.claimHolder(W, B), { ok: false, heldBy: null });
+      assert.deepEqual(await s.claimHolder(W, A), { ok: false, heldBy: null }, "an old proof of A's is not A signing again");
+      assert.equal((await s.holderClaims()).has(W), false);
+      assert.deepEqual(await s.takeHolder(W, A, day), { ok: true, fresh: true }, "the wallet's fresh signature claims it");
+      assert.deepEqual(await s.claimHolder(W2, B), { ok: true, fresh: true }, "a wallet never let go is first-claim-wins, as before");
     });
 
     it("A FRESH CLAIM UNDONE LEAVES THE WALLET'S RECORD AS IT WAS — no release recorded, no move spent", async () => {

@@ -90,6 +90,11 @@ export interface BackfillOutcome {
   held: number;
   /** Proofs whose wallet another account holds — they count nowhere now. */
   collisions: { tenant: string; wallet: string; heldBy: string }[];
+  /**
+   * Proofs whose wallet an account claimed and let go since — never handed
+   * to an old proof; its owner signs again to claim it.
+   */
+  released: { tenant: string; wallet: string }[];
   /** Tenants whose settings could not be read; their proofs wait for the next run. */
   unreadable: string[];
   /** An earlier run already read every tenant: this one read nothing and claimed nothing. */
@@ -119,6 +124,15 @@ export interface BackfillOutcome {
  * never looked at twice; and of theirs it claims only a proof made before the
  * first run, since a later one was claimed by the route when it was made.
  *
+ * AND NEVER A WALLET SOMEBODY LET GO. Remembering which tenants were read
+ * was not enough: a pending tenant's proof could be the loser of a wallet
+ * that the first run gave to another account and that account has unlinked
+ * since — and a crash after some claims but before the record re-runs the
+ * whole first pass over wallets released in between. claimHolder answers
+ * `heldBy: null` for any wallet with a release record, so neither path hands
+ * a released wallet to an old proof with nobody signing; its owner sees
+ * "linked but not counting yet" and signs again.
+ *
  * Within a run it is idempotent: a claim already held is left alone, and a
  * lost race is a collision logged, not an error — so two replicas at once
  * agree (both walk the same order, so the first claim ever made on a wallet
@@ -126,14 +140,15 @@ export interface BackfillOutcome {
  *
  * The record or the listing failing to read throws — nothing was learnt, so
  * the caller tries again. The record is written only after every claim, so a
- * crash mid-run re-runs the whole first pass rather than skipping any of it.
+ * crash mid-run re-runs the whole first pass rather than skipping any of it —
+ * safe, because a wallet released in between has a release record.
  */
 export async function backfillHolderClaims(
   store: Pick<SettingsStore, "listTenants" | "get" | "claimHolder" | "holderBackfill" | "saveHolderBackfill">,
   log: (line: string) => void = () => {},
   now: number = Date.now(),
 ): Promise<BackfillOutcome> {
-  const out: BackfillOutcome = { claimed: 0, held: 0, collisions: [], unreadable: [], alreadyDone: false, done: false };
+  const out: BackfillOutcome = { claimed: 0, held: 0, collisions: [], released: [], unreadable: [], alreadyDone: false, done: false };
   const prior = await store.holderBackfill();
   if (prior && prior.pending.length === 0) return { ...out, alreadyDone: true, done: true };
   const startedAt = prior?.startedAt ?? now;
@@ -153,7 +168,13 @@ export async function backfillHolderClaims(
   }
   for (const { tenant, proof } of planHolderBackfill(rows)) {
     const r = await store.claimHolder(proof.address, tenant);
-    if (!r.ok) {
+    if (!r.ok && r.heldBy === null) {
+      out.released.push({ tenant, wallet: proof.address });
+      log(
+        `holder claims backfill: ${tenant} linked ${proof.address} (proven ${new Date(proof.at).toISOString()}), ` +
+          `but an account has claimed and let it go since — left free; a fresh signature claims it`,
+      );
+    } else if (!r.ok) {
       out.collisions.push({ tenant, wallet: proof.address, heldBy: r.heldBy });
       log(
         `holder claims backfill: COLLISION — ${tenant} linked ${proof.address} (proven ${new Date(proof.at).toISOString()}), ` +
