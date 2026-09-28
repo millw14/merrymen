@@ -93,38 +93,65 @@ const report = (level: string, at: number) => ({
 
 describe("what the route hands back from a stub ledger", () => {
   const ACCOUNT = "0x00000000000000000000000000000000000a11ce";
-  /** A ledger holding `row` for ACCOUNT alone, which refuses any other question. */
-  const stub = (row: unknown, asked: { sql: string; params: unknown[] }[] = []) => <T>(fn: (db: Db | null) => Promise<T>) =>
+  type Asked = { sql: string; params: unknown[] }[];
+  /**
+   * A ledger holding `row` for ACCOUNT alone. It RECORDS what it was asked and
+   * never asserts inside a call: readAgentEnergy wraps the read in try/catch
+   * and turns any throw into null, so an assert.fail in here would be
+   * swallowed and every test beside it would pass whatever the reader did.
+   */
+  const stub = (row: unknown, asked: Asked, calls = { list: 0, write: 0 }) => <T>(fn: (db: Db | null) => Promise<T>) =>
     fn({
       prepare: (sql: string) => ({
         get: async (...params: unknown[]) => {
           asked.push({ sql, params });
-          assert.match(sql, ENERGY_READ, "the one read: the energy column of the agents row");
-          assert.deepEqual(params, [ACCOUNT], "bound to the account asked about, as a parameter");
           return params[0] === ACCOUNT ? row : undefined;
         },
-        all: async () => assert.fail("a list read is not this reader's question"),
-        run: async () => assert.fail("a reader never writes"),
+        all: async () => {
+          calls.list++;
+          return [];
+        },
+        run: async () => {
+          calls.write++;
+          return { changes: 0 };
+        },
       }),
     } as unknown as Db);
+  /** The one read, asked exactly once: the energy column of the agents row, bound to ACCOUNT as a parameter. */
+  const askedOnce = (asked: Asked) => {
+    assert.equal(asked.length, 1, "one read");
+    assert.match(asked[0]!.sql, ENERGY_READ, "the one read: the energy column of the agents row");
+    assert.deepEqual(asked[0]!.params, [ACCOUNT], "bound to the account asked about, as a parameter");
+    assert.ok(!asked[0]!.sql.toLowerCase().includes(ACCOUNT), "the account is bound, never spliced into the SQL");
+  };
 
   it("a report is returned as the worker wrote it — asked for by the bound account", async () => {
-    const asked: { sql: string; params: unknown[] }[] = [];
-    const got = await readAgentEnergy(ACCOUNT, stub({ energy: JSON.stringify(report("unread", 1_790_500_000)) }, asked));
-    assert.equal(asked.length, 1, "one read");
-    assert.ok(!asked[0]!.sql.toLowerCase().includes(ACCOUNT), "the account is bound, never spliced into the SQL");
+    const asked: Asked = [];
+    const calls = { list: 0, write: 0 };
+    const got = await readAgentEnergy(ACCOUNT, stub({ energy: JSON.stringify(report("unread", 1_790_500_000)) }, asked, calls));
+    askedOnce(asked);
+    assert.deepEqual(calls, { list: 0, write: 0 }, "no list read, and a reader never writes");
     assert.equal(got?.level, "unread");
     assert.equal(got?.agentTokens, null, "unread stays unread");
   });
 
-  it("and nothing is null, never a default report", async () => {
-    assert.equal(await readAgentEnergy(ACCOUNT, stub(undefined)), null);
-    assert.equal(await readAgentEnergy(ACCOUNT, stub({ energy: null })), null);
+  it("and nothing is null, never a default report — after the same one read", async () => {
+    for (const row of [undefined, { energy: null }]) {
+      const asked: Asked = [];
+      assert.equal(await readAgentEnergy(ACCOUNT, stub(row, asked)), null);
+      askedOnce(asked);
+    }
   });
 
   it("no account asks nothing at all", async () => {
     for (const none of [null, undefined, ""]) {
-      assert.equal(await readAgentEnergy(none, () => assert.fail("no read without an account")), null);
+      let calls = 0;
+      const got = await readAgentEnergy(none, async () => {
+        calls++;
+        return undefined as never;
+      });
+      assert.equal(got, null);
+      assert.equal(calls, 0, `no read without an account (${JSON.stringify(none)})`);
     }
   });
 });
