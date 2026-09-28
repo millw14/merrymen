@@ -226,6 +226,10 @@ const ALERT = new RegExp(
       "breaking out",
       "accumulat(?:e|ed|ing|ion)",
       "trade (?:update|idea|setup)s?",
+      // "in we go" is the channel's "entered": an arrival, with no coin and no why.
+      "in we go",
+      "count me in",
+      "(?:i'?m|we'?re) in(?=\\s*(?:[,.;:!?—–-]|$))",
     ].join("|") +
     ")\\b",
   "i",
@@ -514,7 +518,7 @@ function strings(list: unknown): string[] {
  *
  * Reason codes (stable, operator-only): empty · pass · too-short · too-long ·
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
- * human-claim · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
+ * human-claim · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
  * fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
  * quantity, repeat, unvouched-ticker, address, secret…).
  */
@@ -554,6 +558,13 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   const namesCoin = coins.some((c) => mentions(text, c));
   if (namesCoin && COIN_ADVICE.test(own)) return refuse("hype");
   if (CAPS_WORD.test(own)) return refuse("caps");
+
+  // A BUY POST NAMES ITS COIN: its label, its ticker or its clean name, as a
+  // whole word. Without one, "picked over others on the curve at the exit
+  // line" is a line of jargon that reads like a signal bot, and a misspelled
+  // name ("pudge penguins") is a coin nobody vouched for — the base gate only
+  // checks $cashtags.
+  if (ctx.kind === "buy" && !namesCoin) return refuse("coin-unsaid");
 
   // PAPER IS SAID, AND SO IS NOTHING FALSE ABOUT THE MONEY.
   const paperCoins = strings(ctx.paperCoins);

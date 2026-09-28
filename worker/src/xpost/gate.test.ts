@@ -269,6 +269,40 @@ table("a human life it does not have, however it is phrased", [
   ["hate pushing a price around, but love watching how things just happen", LIVE, "ok"],
 ]);
 
+// Finding #10: a buy post names the coin it bought — the label, the ticker or
+// the clean name the glue vouched (coinNames), as a whole word.
+const buyOf = (agentName: string, mode: "paper" | "live", coins: string[]): Partial<XGateCtx> => ({
+  kind: "buy",
+  agentName,
+  mode,
+  coins,
+  paperCoins: mode === "paper" ? coins : [],
+});
+table("a buy post names its coin", [
+  ["picked over others on the curve at the exit line", buyOf("Moss Otter", "live", ["Tesla", "TSLA"]), "coin-unsaid"],
+  ["the curve was at the exit line and activity was picking up so the round trip looked cheap enough to commit real cash.", buyOf("Juniper", "live", ["Dogwifhat", "WIF"]), "coin-unsaid"],
+  [
+    "picked pudge penguins because the liquidity was deep enough to enter without moving the paper price on a round trip.",
+    buyOf("Robin Vale", "paper", ["Pudgy Penguins", "PENGU"]),
+    "coin-unsaid",
+  ],
+  ["picked up some pepe on paper, the curve looked early", buyOf("Pine Stoat", "paper", ["Bonk", "BONK"]), "coin-unsaid"],
+  ["picked up a little on paper today, the curve looked early", buyOf("Pine Stoat", "paper", ["pepe"]), "coin-unsaid"],
+  // "in we go" is an arrival with no why: an alert, coin or not
+  ["activity picking up and the round trip is cheap, in we go", buyOf("Juniper", "live", ["Bonk", "BONK"]), "alert"],
+  ["bonk looked cheap to get in and out of, so i'm in.", buyOf("Juniper", "live", ["Bonk", "BONK"]), "alert"],
+  ["bonk on a cheap round trip, count me in", buyOf("Juniper", "live", ["Bonk", "BONK"]), "alert"],
+  // the ticker, the clean name, a cashtag or any casing is the coin said
+  ["picked up some TSLA on paper, the tape felt calm", buyOf("Signal Fox", "paper", ["TSLA", "Tesla"]), "ok"],
+  ["picked up some tesla on paper, the tape felt calm", buyOf("Signal Fox", "paper", ["TSLA", "Tesla"]), "ok"],
+  ["added a little pengu, the pool was deep enough that i didn't push it", buyOf("Copper Wren", "live", ["Pudgy Penguins", "PENGU"]), "ok"],
+  ["picked up pudgy penguins early while buyers were mostly new", buyOf("Copper Wren", "live", ["Pudgy Penguins", "PENGU"]), "ok"],
+  ["went with $BONK today, buyers were spread out", buyOf("Juniper", "live", ["Bonk", "BONK"]), "ok"],
+  // a casual post never has to name one, and "i'm in the mood" is not an arrival
+  ["i'm in the mood for a slow afternoon, honestly", {}, "ok"],
+  ["quiet day and i don't mind one bit", { coins: ["pepe"], paperCoins: ["pepe"] }, "ok"],
+]);
+
 describe("not the fleet's words, and not the seed's", () => {
   it("a line another account already posted is refused", () => {
     const fleet = ["the quiet stretches are my favourite part of the week"];
