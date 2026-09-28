@@ -325,6 +325,8 @@ function poster(
     fetch?: FetchLike;
     member?: XPosterDeps["member"];
     facts?: XPosterDeps["facts"];
+    /** The pass's own clock. Default: held — no time passes inside a pass. */
+    monotonic?: () => number;
   } = {},
 ) {
   const answer =
@@ -340,6 +342,7 @@ function poster(
       dialect: "sqlite",
       facts: over.facts ?? (factsOf(over.calls ?? [], "paper", over.others) as never),
       member: over.member ?? (async () => ({ tz: over.tz ?? null })),
+      monotonic: over.monotonic ?? (() => 0),
       llm: async (_creds, { prompt }) => {
         w.prompts.push(prompt);
         return answer(prompt);
@@ -773,6 +776,81 @@ describe("fleet guards", () => {
     assert.equal(await store.keyStatus(w.db, "casual:awake"), "posted", "found past the first page of sleepers");
     assert.equal(w.tweets.length, 1);
     assert.equal(await store.keyStatus(w.db, "buy:sleeper-1"), "scheduled", "the sleepers still wait");
+  });
+
+  /** Three owners, each on their own X account, each with a casual post due now. */
+  async function threeDue(w: World) {
+    await introDealtWith(w);
+    await otherOwner(w);
+    const THIRD = `0x${"12".repeat(20)}`;
+    await store.upsertAccount(w.db, w.dek, {
+      tenant: THIRD,
+      xUserId: "333",
+      username: "third_trades",
+      tokens: { accessToken: "access-third", refreshToken: "refresh-third", accessExpiresAtMs: T0 + 30 * 24 * HOUR, scope: "tweet.write" },
+      nowMs: T0 - 3 * HOUR,
+    });
+    await store.setPosting(w.db, THIRD, { enabled: true, xUserId: "333" }, T0 - 2 * HOUR);
+    await introDealtWith(w, THIRD, "333");
+    await dueCasual(w, "casual:1", { dueAtMs: T0 - 3 * MIN });
+    await dueCasual(w, "casual:2", { tenant: OTHER, xUserId: "222", dueAtMs: T0 - 2 * MIN });
+    await dueCasual(w, "casual:3", { tenant: THIRD, xUserId: "333", dueAtMs: T0 - MIN });
+    return [...BOTH, { tenant: THIRD, agentId: AGENT }];
+  }
+
+  /** X, answering after `minutes` of the pass's clock have gone by. */
+  function slowX(w: World, minutes: number) {
+    let elapsed = 0;
+    const fetch: FetchLike = async (url, init) => {
+      elapsed += minutes * MIN;
+      return w.fetch(url, init);
+    };
+    return { fetch, monotonic: () => elapsed };
+  }
+
+  it("each send is stamped when it happens, not when the pass began", async (t) => {
+    const w = await world(t, T0 - 2 * HOUR);
+    const roster = await threeDue(w);
+    const x = slowX(w, 2);
+    await poster(w, { fetch: x.fetch, monotonic: x.monotonic }).step(w.db, roster, new Map(), T0);
+    const sent = (await Promise.all([TENANT, OTHER, `0x${"12".repeat(20)}`].map((tn) => store.postsOf(w.db, tn, 0, 10))))
+      .flat()
+      .filter((p) => p.kind === "casual")
+      .sort((a, b) => a.dueAtMs - b.dueAtMs)
+      .map((p) => p.sentAtMs);
+    assert.deepEqual(sent, [T0, T0 + 2 * MIN, T0 + 4 * MIN]);
+  });
+
+  it("a pass stops starting sends after five minutes; the rest go next pass", async (t) => {
+    const w = await world(t, T0 - 2 * HOUR);
+    const roster = await threeDue(w);
+    const x = slowX(w, 3);
+    const p = poster(w, { fetch: x.fetch, monotonic: x.monotonic });
+    await p.step(w.db, roster, new Map(), T0);
+    assert.equal(w.tweets.length, 2, "the third would start six minutes into the pass");
+    assert.equal(await store.keyStatus(w.db, "casual:3"), "scheduled");
+    await p.step(w.db, roster, new Map(), T0 + 10 * MIN);
+    assert.equal(await store.keyStatus(w.db, "casual:3"), "posted");
+  });
+
+  it("a claim that outlived its pass is failed as interrupted, never resent; a live one in a long pass is left alone", async (t) => {
+    const w = await world(t, T0 - 2 * HOUR);
+    await introDealtWith(w);
+    const crashed = await dueCasual(w, "casual:crashed", { dueAtMs: T0 - HOUR });
+    const inFlight = await dueCasual(w, "casual:in-flight", { tenant: TENANT, dueAtMs: T0 - 50 * MIN });
+    assert.equal(await store.claimPost(w.db, crashed, T0 - 31 * MIN), true);
+    assert.equal(await store.claimPost(w.db, inFlight, T0 - 20 * MIN), true, "another replica, twenty minutes into a slow pass");
+    const log = (await poster(w).step(w.db, ROSTER, new Map(), T0)).log;
+    assert.match(log ?? "", /interrupted 1/);
+    const r = await rows(w);
+    assert.deepEqual(
+      r.filter((x) => x.kind === "casual").map((x) => [x.dedupeKey, x.status, x.reason]),
+      [
+        ["casual:crashed", "failed", "interrupted"],
+        ["casual:in-flight", "sending", null],
+      ],
+    );
+    assert.equal(w.tweets.length, 0);
   });
 
   it("a credits pause holds every due post, and is said once", async (t) => {

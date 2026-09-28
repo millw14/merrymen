@@ -77,8 +77,16 @@ export const DEFAULT_FLEET_PER_DAY = 1000;
 export const DEFAULT_LLM_PER_DAY = 400;
 /** Plans are drafted at most this often; sends run every pass. */
 const PLAN_EVERY_MS = MIN;
-/** A `sending` claim older than this belonged to a pass that died mid-call. */
-const INTERRUPTED_AFTER_MS = 10 * MIN;
+/**
+ * A `sending` claim older than this belonged to a pass that died mid-call.
+ * Well above the longest a live pass sends for (SEND_BUDGET_MS, plus one
+ * send's calls on X), because another replica's sweep would otherwise fail
+ * a claim that is still in flight: X creates the post, the row says it did
+ * not, and it drops out of the gap, the cap and the echo memory.
+ */
+const INTERRUPTED_AFTER_MS = 30 * MIN;
+/** A pass stops starting sends after this long; the rest go next pass. */
+const SEND_BUDGET_MS = 5 * MIN;
 /** Bounds on one pass: each send can wait ten seconds on X, each draft twenty on a model. */
 const MAX_DUE = 50;
 /** Due rows looked at in one pass, page by page, before the rest waits for the next. */
@@ -216,6 +224,12 @@ export interface XPosterDeps {
   llm?: typeof llmText;
   /** The dialect `shared` speaks, for the one-time schema. Default "postgres". */
   dialect?: "postgres" | "sqlite";
+  /**
+   * A monotonic clock in ms, for how long this pass has run. Default
+   * performance.now. The pass's own time is the instant it was handed, moved
+   * on by this: every claim, send and draft is stamped when it happens.
+   */
+  monotonic?: () => number;
   draftTimeoutMs?: number;
 }
 
@@ -323,6 +337,7 @@ function coinNames(label: string, c: { symbol: string | null; name: string | nul
 export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: XApp; dek: Buffer; deps?: XPosterDeps }): XPoster {
   const deps = o.deps ?? {};
   const dialect = deps.dialect ?? "postgres";
+  const monotonic = deps.monotonic ?? (() => performance.now());
   const factsOf = deps.facts ?? loadFacts;
   const memberOf =
     deps.member ??
@@ -359,6 +374,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     async step(shared, roster, profiles, nowMs) {
       if (running) return { log: null };
       running = true;
+      // FRESH TIME, NOT THE PASS'S START. A pass that waits on X for minutes
+      // would otherwise stamp a late claim with the time the pass began, and
+      // another replica's sweep would fail it as interrupted while it was
+      // still in flight; a draft written late would be due almost at once.
+      const started = monotonic();
+      const at = () => nowMs + Math.max(0, Math.round(monotonic() - started));
       const counts = new Map<string, number>();
       const bump = (k: string, n = 1) => counts.set(k, (counts.get(k) ?? 0) + n);
       ownerFailure = "";
@@ -424,24 +445,26 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         let scanned = 0;
         let after: { dueAtMs: number; id: number } | null = null;
         send: for (;;) {
+          if (at() - nowMs > SEND_BUDGET_MS) break;
           const page = await duePosts(shared, tenants, nowMs, MAX_DUE, after);
           for (const post of page) {
             after = { dueAtMs: post.dueAtMs, id: post.id };
+            const t = at();
             const account: XAccount | null = accountOf.get(post.tenant) ?? (await getAccount(shared, post.tenant));
             let asleep = false;
             let dayOf: ((ms: number) => string) | undefined;
             if (account?.posting && account.xUserId === post.xUserId) {
               const z = await zoneOf(post.tenant);
-              asleep = !z.ok || isAsleep(z.tz, post.tenant, nowMs);
+              asleep = !z.ok || isAsleep(z.tz, post.tenant, t);
               if (z.ok) dayOf = (ms) => localDay(z.tz, ms);
             }
-            const d = sendDecision(post, account, nowMs, asleep, dayOf);
+            const d = sendDecision(post, account, t, asleep, dayOf);
             if (d.action === "cancel") {
-              if (await cancelPost(shared, post.id, d.reason, nowMs)) bump("cancelled");
+              if (await cancelPost(shared, post.id, d.reason, t)) bump("cancelled");
               continue;
             }
             if (d.action === "skip") {
-              if (await skipScheduled(shared, post.id, d.reason, nowMs)) bump("stale");
+              if (await skipScheduled(shared, post.id, d.reason, t)) bump("stale");
               continue;
             }
             if (d.action === "wait") {
@@ -464,34 +487,34 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             // its day. The hello is exempt, both ways.
             if (post.kind !== "intro") {
               const last = await lastOutOf(post.xUserId);
-              if (last !== null && nowMs - last < GAP_MS) {
-                if (await deferPost(shared, post.id, last + GAP_MS, nowMs)) bump("deferred");
+              if (last !== null && t - last < GAP_MS) {
+                if (await deferPost(shared, post.id, last + GAP_MS, t)) bump("deferred");
                 continue;
               }
             }
-            if (sends >= MAX_SENDS_PER_PASS) break send;
-            const dayKey = `posts:${utcDay(nowMs)}`;
-            if (!(await takeAllowance(shared, dayKey, fleetPerDay, nowMs))) {
+            if (sends >= MAX_SENDS_PER_PASS || t - nowMs > SEND_BUDGET_MS) break send;
+            const dayKey = `posts:${utcDay(t)}`;
+            if (!(await takeAllowance(shared, dayKey, fleetPerDay, t))) {
               ceiling = true;
-              if (capNoted !== utcDay(nowMs)) {
-                capNoted = utcDay(nowMs);
+              if (capNoted !== utcDay(t)) {
+                capNoted = utcDay(t);
                 bump("fleet-ceiling-reached");
               }
               // Not a break: a later post may still be one to cancel or skip.
               continue;
             }
             sends++;
-            const out = await sendOne(shared, o.dek, o.app, post, { fetch: deps.fetch, nowMs });
+            const out = await sendOne(shared, o.dek, o.app, post, { fetch: deps.fetch, nowMs: t });
             // The app's credentials refused is the one line an operator must act
             // on, so it says what happened rather than an outcome code.
             bump(out === "posted" ? "sent" : out === "app" ? "x-refused-client-credentials" : out);
             // What may exist on X keeps its unit of the ceiling, not only what surely does.
-            if (!MAY_BE_ON_X.has(out)) await returnAllowance(shared, dayKey, nowMs);
-            else if (post.kind !== "intro") lastOut.set(post.xUserId, nowMs);
+            if (!MAY_BE_ON_X.has(out)) await returnAllowance(shared, dayKey, at());
+            else if (post.kind !== "intro") lastOut.set(post.xUserId, t);
             // The sender wrote the pause; this pass honours it at once, and the
             // event just said is the pause's line, so later passes stay quiet.
             if (out === "credits" || out === "app") {
-              pause = out === "credits" ? { why: "paused-for-credits", until: nowMs + CREDITS_PAUSE_MS } : { why: "paused-client-credentials-refused", until: nowMs + APP_PAUSE_MS };
+              pause = out === "credits" ? { why: "paused-for-credits", until: t + CREDITS_PAUSE_MS } : { why: "paused-client-credentials-refused", until: t + APP_PAUSE_MS };
               pauseSaidUntil = Math.max(pauseSaidUntil, pause.until);
             }
           }
@@ -505,7 +528,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // to go out together when the hold lifts.
         if (!pause && !ceiling && accounts.length > 0 && nowMs - lastPlanAt >= PLAN_EVERY_MS) {
           lastPlanAt = nowMs;
-          await planPass(shared, accounts, byTenant, profiles, nowMs, bump, zoneOf);
+          await planPass(shared, accounts, byTenant, profiles, nowMs, at, bump, zoneOf);
         }
 
         return { log: summary(counts, nowMs) };
@@ -528,6 +551,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     byTenant: Map<string, RosterEntry>,
     profiles: Map<string, ChatProfile>,
     nowMs: number,
+    at: () => number,
     bump: (k: string, n?: number) => void,
     zoneOf: (tenant: string) => Promise<{ ok: true; tz: string | null } | { ok: false }>,
   ): Promise<void> {
@@ -564,14 +588,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           bump("zone-unreadable");
           continue;
         }
+        // Planned, and drafted, at the time it happens: its ten minutes under
+        // Coming up start when the owner can first see it.
+        const planNow = at();
         // The X ACCOUNT's history, from every owner posting on it: one timeline, one cadence.
-        const posts = await postsOfXUser(shared, account.xUserId, nowMs - PLAN_HISTORY_MS, 200);
+        const posts = await postsOfXUser(shared, account.xUserId, planNow - PLAN_HISTORY_MS, 200);
         const intros = await introPostsOf(shared, account.tenant, account.xUserId);
         const intents = planPosts({
           tenant: account.tenant,
           account,
           tz: z.tz,
-          nowMs,
+          nowMs: planNow,
           clock: PLAN_CLOCK,
           intros,
           posts,
@@ -580,14 +607,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           model,
         });
         if (intents.length === 0) continue;
-        const recentOwn = await recentBodies(shared, { tenant: account.tenant, sinceMs: nowMs - OWN_MEMORY_MS, limit: 200 });
+        const recentOwn = await recentBodies(shared, { tenant: account.tenant, sinceMs: planNow - OWN_MEMORY_MS, limit: 200 });
         for (const intent of intents) {
           if (drafts >= MAX_DRAFTS_PER_PASS) {
             // Cut short inside this account: the next pass starts here.
             planResumeAt = account.tenant;
             break;
           }
-          const r = await writeIntent(shared, account, f, intent, nowMs, recentOwn, recentFleet);
+          const r = await writeIntent(shared, account, f, intent, planNow, recentOwn, recentFleet);
           bump(r.outcome);
           if (r.outcome === "no-model-budget") {
             model = false;
