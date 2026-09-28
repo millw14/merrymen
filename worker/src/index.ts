@@ -227,8 +227,8 @@ import {
 } from "./energy-buy";
 import { attributeSettlements, lookAtCash, opsHoldInference, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC, wroteSince, type Settlement } from "./flow-inference";
 import { durableNetContributionsUsdg6 } from "./net-contributions";
-import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, type EnergySettleDeps } from "./energy-settle";
-import { bookCapitalFlow, energyBuysInFlight, newestLandedEnergyBuy } from "./store";
+import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, settleTransferLanding, type EnergySettleDeps } from "./energy-settle";
+import { bookCapitalFlow, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
 import {
   claimEnergy,
   claimEnergyNotice,
@@ -2993,9 +2993,28 @@ async function main() {
           // balance reads to its landing block, like one the executor saw.
           noteEnergyLanded(r.blockNumber);
         } else if (row.kind === "transfer" && r.success) {
-          // A TRANSFER HOME IS CAPITAL, and nothing here books it: its movement
-          // is left for inference to book once, as a withdrawal.
-          capitalBooked = false;
+          // A TRANSFER HOME THAT LANDED, booked here as the executor would have
+          // booked it had it heard the receipt (energy-settle.ts
+          // settleTransferLanding) — before the row is settled, and left
+          // 'submitted' when its receipt or the ledger cannot be read, exactly
+          // like a purchase. Nothing booked it before: the peak kept the money
+          // that went home and the breaker read a drawdown.
+          const grant = active?.grant;
+          if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase()) {
+            console.log(`[reconcile] transfer ${r.userOpHash.slice(0, 10)}… left submitted — no armed grant for ${smartAccount}`);
+            continue;
+          }
+          if (r.usdgDelta6 === null) {
+            console.log(`[reconcile] transfer ${r.userOpHash.slice(0, 10)}… left submitted — its receipt could not be read`);
+            continue;
+          }
+          const settled = await settleTransferLanding(energySettleDeps(agentId, grant, chain), r.txHash as `0x${string}`);
+          if (!settled.proceed) {
+            console.log(`[reconcile] transfer ${r.userOpHash.slice(0, 10)}… left submitted: ${settled.why}`);
+            continue;
+          }
+          if (settled.settled === "booked") capitalPeakDirty = true;
+          capitalBooked = settled.settled === "booked" || settled.settled === "already";
         }
         // THE SETTLEMENT EXPLAINS ONLY ITS OWN CASH (flow-inference.ts, rule 2).
         // It used to move `ledgerWrites`, which closed the WHOLE held interval
@@ -3775,6 +3794,7 @@ async function main() {
     breakerPeakUsdg: () => getRiskPeriodPeak(agentId),
     book: (flow) => bookCapitalFlow(flow),
     event: (level, line) => addEvent(agentId, level, line),
+    flowBookedForTx: (txHash) => hasFlowForTx(agentId, txHash),
   });
   // Cash as of the last live snapshot, and how many rows the ledger had then.
   // Together they are the whole basis for inferring an external flow: if cash

@@ -2051,6 +2051,27 @@ export async function hasChainFlow(
 }
 
 /**
+ * Is ANY flow on the books for this transaction — whatever its source or log
+ * index? The executor books a transfer home with its tx hash and no log index
+ * (flows_chain_identity cannot see it), so the stranded-op resolver asks this
+ * before booking the same transfer from its receipt (energy-settle.ts
+ * settleTransferLanding).
+ *
+ * NULL WHEN THE QUESTION COULD NOT BE ASKED: the caller must not book on it.
+ */
+export async function hasFlowForTx(agentId: string, txHash: string): Promise<boolean | null> {
+  try {
+    const row = await getDb()
+      .prepare("SELECT 1 AS n FROM flows WHERE agent_id = ? AND tx_hash = ? LIMIT 1")
+      .get(agentId, txHash.toLowerCase());
+    return row !== undefined && row !== null;
+  } catch (e) {
+    console.error("[store] flow-for-tx lookup failed:", e);
+    return null;
+  }
+}
+
+/**
  * Capital the owner has put in, less what they have taken out. Subtract it from
  * equity and what remains is the only thing that deserves to be called P&L.
  *

@@ -391,6 +391,21 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     assert.doesNotMatch(first, /ledgerWrites === 0/);
   });
 
+  it("(5d) A STRANDED TRANSFER HOME is booked by the resolver BEFORE its row is settled, and left 'submitted' when it cannot be", () => {
+    const r = arrow("resolveStrandedOps");
+    const branch = r.indexOf('} else if (row.kind === "transfer" && r.success) {');
+    const settle = r.indexOf("await settleTransferLanding(energySettleDeps(agentId, grant, chain), r.txHash as `0x${string}`);");
+    const add = r.indexOf("await addTrade({");
+    assert.ok(branch > 0 && settle > branch && add > settle);
+    assert.match(r.slice(settle, add), /if \(!settled\.proceed\) \{[\s\S]*continue;/);
+    assert.match(r.slice(settle, add), /capitalBooked = settled\.settled === "booked" \|\| settled\.settled === "already";/);
+    assert.match(r.slice(branch, settle), /if \(r\.usdgDelta6 === null\) \{[\s\S]*continue;/);
+    // Through the one bookCapitalFlow caller, and it can see the executor's own booking.
+    const deps = CODE.slice(CODE.indexOf("const energySettleDeps = "), CODE.indexOf("const energySettleDeps = ") + 1200);
+    assert.match(deps, /flowBookedForTx: \(txHash\) => hasFlowForTx\(agentId, txHash\),/);
+    assert.match(SETTLE, /source: "transfer-intent",/);
+  });
+
   it("(6) the orphan sweep NEVER books", () => {
     const arm = arrow("reconcileInFlightAtArm");
     const orphans = arm.slice(arm.indexOf("const orphans = await findOrphanOps({"));

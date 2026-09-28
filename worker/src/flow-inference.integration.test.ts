@@ -36,7 +36,7 @@ const { homePaths } = await import("./home");
 const { DatabaseSync } = await import("node:sqlite");
 const { CASH, ENERGY_ROUTE_V1, MERRYMEN_TOKEN, VIRTUAL_TOKEN } = await import("../../packages/core/src/index");
 const { TRANSFER_TOPIC } = await import("./deposit-log");
-const { isEnergyRow, settleEnergyLanding } = await import("./energy-settle");
+const { isEnergyRow, settleEnergyLanding, settleTransferLanding } = await import("./energy-settle");
 const { attributeSettlements, lookAtCash, opsHoldInference, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC, wroteSince } = await import("./flow-inference");
 const { planFirstObservation } = await import("./bootstrap-state");
 const { addressTopic, resolveSubmittedOps } = await import("./inflight-reconcile");
@@ -179,6 +179,7 @@ function deps(): Deps {
     breakerPeakUsdg: () => store.getRiskPeriodPeak(ACCOUNT),
     book: (f) => store.bookCapitalFlow(f),
     event: async () => {},
+    flowBookedForTx: (h) => store.hasFlowForTx(ACCOUNT, h),
   };
 }
 
@@ -337,7 +338,10 @@ async function resolvePass(opts: { failRowWrite?: boolean } = {}): Promise<void>
       if (!settled.proceed) continue;
       capitalBooked = settled.settled === "booked" || settled.settled === "already";
     } else if (row.kind === "transfer" && r.success) {
-      capitalBooked = false;
+      if (r.usdgDelta6 === null) continue;
+      const settled = await settleTransferLanding(deps(), r.txHash as `0x${string}`);
+      if (!settled.proceed) continue;
+      capitalBooked = settled.settled === "booked" || settled.settled === "already";
     }
     const explains = settlementDelta({ success: r.success, receiptUsdgDelta6: r.usdgDelta6, capitalBooked });
     if (explains.queue && !proc.queued.has(r.userOpHash)) {
@@ -540,17 +544,36 @@ describe("what a settlement explains is ITS OWN cash — nothing else in the hel
     assert.deepEqual(proc.fees, [], "and never a fee on it");
   });
 
-  it("A STRANDED TRANSFER HOME: booked once as capital out — the peak follows the money home, so no phantom drawdown", async () => {
+  it("A STRANDED TRANSFER HOME: booked ONCE, by the resolver, as the executor would have — 'transfer-intent', both peaks with it, nothing inferred", async () => {
     const op = await stranded(transferRow);
-    lands(op, transferLogs(10n * U));
+    const tx = lands(op, transferLogs(10n * U));
     assert.equal(await tick(90n * U), "hold");
     await resolvePass();
+    assert.equal(flowsBy("transfer-intent", "out"), 1, "booked by the resolver");
+    assert.equal(one<{ t: string }>("SELECT tx_hash AS t FROM flows WHERE source = 'transfer-intent'").t, tx);
     assert.equal(await tick(90n * U), "infer");
-    const out = flowsBy("inferred", "out") + flowsBy("transfer-intent", "out");
-    assert.equal(out, 1, "booked exactly once");
+    assert.equal(flowsBy("inferred"), 0, "its settlement explained its own −10, so nothing is inferred beside it");
     assert.equal(await peak(), 90, "the lifetime peak followed the withdrawal");
     assert.equal(await riskPeak(), 90, "and the breaker's did too — 90 against 90 is no drawdown");
     assert.equal(await store.getNetContributionsUsdg(ACCOUNT), 90);
+    // A second pass (the row write failed, say) books nothing more.
+    exec("UPDATE trades SET status = 'submitted' WHERE user_op_hash = ?", op);
+    await resolvePass();
+    assert.equal(flowsBy("transfer-intent", "out"), 1);
+    assert.equal(await peak(), 90);
+  });
+
+  it("A STRANDED TRANSFER + A DEPOSIT IN THE SAME HOLD: the transfer is booked out, the deposit in — each exactly", async () => {
+    const op = await stranded(transferRow);
+    lands(op, transferLogs(10n * U));
+    assert.equal(await tick(290n * U), "hold", "−10 home, +200 in");
+    await resolvePass();
+    assert.equal(await tick(290n * U), "infer");
+    assert.equal(flowsBy("transfer-intent", "out"), 1);
+    assert.equal(inferredIn(), 200);
+    assert.equal(await store.getNetContributionsUsdg(ACCOUNT), 290);
+    assert.equal(await peak(), 290);
+    assert.deepEqual(proc.fees, []);
   });
 
   it("A MOVEMENT NOBODY COULD READ IS NOT GUESSED: contributions go unknown, the interval closes uninferred", async () => {
