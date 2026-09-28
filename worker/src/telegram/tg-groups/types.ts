@@ -13,7 +13,7 @@
 /** Where a group stands with this agent. See "Which groups it talks in". */
 export type TgRoomStatus = "approved" | "pending" | "left" | "blocked";
 
-/** How much it joins in unprompted. Settings key `telegramGroupChattiness`. */
+/** How much it joins in unprompted. Settings key `telegramGroupsChattiness`. */
 export type Chattiness = "quiet" | "normal" | "chatty";
 
 /** One remembered line of a chat. Its own lines carry `own: true`. */

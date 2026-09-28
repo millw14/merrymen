@@ -400,7 +400,7 @@ once per agent.
 |---|---|---|---|
 | `telegramGroupsEnabled` | boolean | `true` | Settings → Telegram → Telegram groups; iOS Telegram screen |
 | `telegramGroupCoinsEnabled` | boolean | `true` | same ("Look at coins people post") |
-| `telegramGroupChattiness` | `"quiet" \| "normal" \| "chatty"` | `"normal"` | same |
+| `telegramGroupsChattiness` | `"quiet" \| "normal" \| "chatty"` | `"normal"` | same |
 
 All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 "group chats", "groups", "gc", "telegram groups"), accepted by
