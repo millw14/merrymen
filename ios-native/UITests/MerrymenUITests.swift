@@ -85,6 +85,42 @@ final class MerrymenUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Size"].exists)
         XCTAssertTrue(app.staticTexts["Realized P&L"].exists)
     }
+    /// Posting on X is opt-in through a warning that names the connected
+    /// account. "Not now" must send nothing (the fixture refuses an enable that
+    /// is not the first write since launch), and confirming must send exactly
+    /// {action: enable, xUserId, owner} (the fixture refuses any other keys).
+    func testXPostingWarnsWithTheConnectedAccountAndSendsOnlyTheConfirmedConsent() {
+        let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-signed-in", "-x-posting-test", "-reset-tour"]; app.launch()
+        if app.buttons["Skip tour"].waitForExistence(timeout: 8) { app.buttons["Skip tour"].tap() }
+        XCTAssertTrue(app.staticTexts["Connected as @robin_trades"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["slow day on the charts. honestly the quiet ones are when i learn the most."].exists)
+        let toggle = app.switches["Let my Merryman post on X"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5)); XCTAssertEqual(toggle.value as? String, "0")
+        let posting = app.staticTexts["Posting from @robin_trades — whichever X account is connected."]
+        XCTAssertFalse(posting.exists)
+
+        flip(toggle)
+        let warning = app.alerts["Post on X as @robin_trades?"]
+        XCTAssertTrue(warning.waitForExistence(timeout: 5))
+        XCTAssertTrue(warning.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Your Merryman will post from whichever X account is connected — right now that's @robin_trades.")).firstMatch.exists)
+        capture(app, "Posting on X warning names the connected account")
+        warning.buttons["Not now"].tap()
+        XCTAssertTrue(warning.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(toggle.value as? String, "0")
+        XCTAssertFalse(posting.exists)
+
+        flip(toggle)
+        XCTAssertTrue(warning.waitForExistence(timeout: 5))
+        warning.buttons["Let it post as @robin_trades"].tap()
+        XCTAssertTrue(posting.waitForExistence(timeout: 8))
+        XCTAssertEqual(toggle.value as? String, "1")
+        XCTAssertFalse(app.alerts["Merrymen"].exists)
+        capture(app, "Posting on X on for the confirmed account")
+    }
+    /// A SwiftUI Toggle's element spans its label; only the switch itself flips it.
+    private func flip(_ toggle: XCUIElement) {
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+    }
     private func capture(_ app: XCUIApplication, _ name: String) {
         let screenshot = XCTAttachment(screenshot: app.screenshot()); screenshot.name = name; screenshot.lifetime = .keepAlways; add(screenshot)
     }
