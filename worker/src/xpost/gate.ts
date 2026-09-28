@@ -439,6 +439,8 @@ const PNL = new RegExp(
       // the options") — but not sizing up, or in, on its own.
       "t(?:ake|akes|aking|ook|aken)\\s+(?:on\\s+)?(?:some\\s+|more\\s+|real\\s+|big\\s+|serious\\s+|decent\\s+)?size",
       "my (?:position |trade |buy )?size",
+      // …or got to one: "enough in the pool to get a comfortable size"
+      "(?:get|got|getting|build|built|building|put on|grab|grabbed) (?:a |some )?(?:\\w+ )?size",
       "position siz(?:e|es|ed|ing)",
       "siz(?:e|es|ed|ing) (?:up|in)(?![\\s-]+(?:(?:the|an|this|that|these|those|things|everyone|everybody|each|people|someone|somebody|who|what|how|whether|options|my options)\\b|a\\b(?!\\s+(?:little|bit|touch|lot|tad)\\b)))",
       "roi",
@@ -493,7 +495,7 @@ const FOOD = String.raw`(?:coffee|tea|lunch|dinner|breakfast|brunch|snacks?|sand
 const PAGES = String.raw`(?:books?|copy|copies|novels?|paperbacks?|notebooks?|comics?|magazines?|records?|vinyl|poems?|cookbooks?)`;
 const MADE = String.raw`(?:bread|loaf|cake|cookies?|pie|dough|scarf|sweater|hat|birdhouse|shelf|table|chair|garden|plants?|flowers?|seeds?|painting|portrait|sculpture|puzzle|jigsaw|card tower|fort|sandcastle|snowman|kite|scrapbook|mural|doodle|sketch|crane|origami)`;
 /** What a pair of eyes or ears takes in: a creature, the sky, a piece of music — never buyers, a curve or a pool. */
-const SIGHT = String.raw`(?:cats?|dogs?|pupp(?:y|ies)|kittens?|birds?|ducks?|ducklings?|goose|geese|squirrels?|fox|foxes|deer|owls?|bees?|butterfl(?:y|ies)|horses?|cows?|goats?|frogs?|snails?|spiders?|herons?|pigeons?|crows?|seagulls?|gulls?|raccoons?|bunn(?:y|ies)|rabbits?|otters?|seals?|whales?|dolphins?|hummingbirds?|fireflies|sheep|sunset|sunrise|rainbow|shooting star|clouds?)`;
+const SIGHT = String.raw`(?:cats?|dogs?|doggos?|pups?|pupp(?:y|ies)|kittens?|birds?|ducks?|ducklings?|goose|geese|squirrels?|fox|foxes|deer|owls?|bees?|butterfl(?:y|ies)|horses?|cows?|goats?|frogs?|snails?|spiders?|herons?|pigeons?|crows?|seagulls?|gulls?|raccoons?|bunn(?:y|ies)|rabbits?|otters?|seals?|whales?|dolphins?|hummingbirds?|fireflies|sheep|sunset|sunrise|rainbow|shooting star|clouds?)`;
 const MUSIC = String.raw`(?:tracks?|songs?|tunes?|melod(?:y|ies)|albums?|playlists?|podcasts?|concerts?|choir)`;
 const PLACE = String.raw`(?:park|beach|shop|store|bookshop|bookstore|library|museum|gallery|cafe|forest|woods|lake|river|mountains?|hills?|trail|gym|cinema|theatre|theater|concert|stadium|zoo|garden|pond|field|meadow|city|town|coast|countryside)`;
 const HUMAN = [
@@ -543,7 +545,7 @@ const HUMAN = [
   // Only a creature, the sky or music after the verb: "saw buyers come back",
   // "noticed trading picking up" and "caught a wave of new buyers" are a
   // trading agent's.
-  new RegExp(String.raw`${CLAUSE}(?:saw|seen|spotted|watched|noticed|heard|caught)\s+(?:(?:a|an|the|some|this|that)\s+)?(?:\w+\s+){0,3}?${SIGHT}\b`, "i"),
+  new RegExp(String.raw`${CLAUSE}(?:saw|seen|spotted|watched|watching|noticed|heard|caught)\s+(?:(?:a|an|the|some|this|that)\s+)?(?:\w+\s+){0,3}?${SIGHT}\b`, "i"),
   // …or a flock of whatever the seed was about, as a pronoun: "saw a group of
   // them moving in single file", "i watched a litter of them tumble". Never
   // "a group of buyers".
