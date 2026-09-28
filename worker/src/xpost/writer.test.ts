@@ -145,7 +145,8 @@ describe("what each prompt asks for", () => {
     // The disclosure in fixed words: paraphrased, it lost "AI agent" or "trading".
     const paper = /that you are «([^»]+), on paper for now», in those words;/.exec(p);
     assert.ok(paper && INTRO_WHAT.includes(paper[1]!), p);
-    assert.ok(INTRO_NEXT.some((n) => p.includes(`and that ${n}.`)), "what comes next: what it buys and why");
+    assert.ok(INTRO_NEXT.some((n) => p.includes(`and end with «${n}», in those words.`)), "what comes next: what it buys and why");
+    assert.match(p, /exactly ONE short thing about how you trade, in a few words,/);
     assert.match(p, /Two short sentences with normal punctuation/);
     assert.match(p, /exactly ONE short thing about how you trade/);
     assert.doesNotMatch(p, /practice money for now|owner of this account/, "the long wording that ran intros over the cap");
@@ -164,9 +165,9 @@ describe("what each prompt asks for", () => {
       const what = /that you are «([^»]+)», in those words;/.exec(idle);
       assert.ok(what && INTRO_WHAT_IDLE.includes(what[1]!), idle);
       assert.match(what![1]!, /\bAI trading agent\b/);
-      assert.ok(INTRO_NEXT_IDLE.some((n) => idle.includes(`and that ${n}.`)), idle);
+      assert.ok(INTRO_NEXT_IDLE.some((n) => idle.includes(`and end with «${n}», in those words.`)), idle);
       assert.match(idle, /Say nothing about which money you trade with, never say you are trading right now, and promise nothing about buying\./);
-      assert.doesNotMatch(idle, /on paper for now|with real money»|what you buy|buys here|odd buy/);
+      assert.doesNotMatch(idle, /on paper for now|with real money»|what i buy|\bi buy\b|and why»/);
     }
     for (const w of INTRO_WHAT_IDLE) assert.doesNotMatch(w, /\btrad(?:es|ing) for\b|\bdoing the trading\b/, w);
     for (const n of INTRO_NEXT_IDLE) assert.doesNotMatch(n, /\bbuy|\bbought/, n);
@@ -180,7 +181,7 @@ describe("what each prompt asks for", () => {
       const p = all(introPrompt({ ...BASE, agentName }));
       assert.equal(all(introPrompt({ ...BASE, agentName })), p, "the same name, the same wording");
       whats.add(/that you are «([^»]+), on paper for now»/.exec(p)![1]!);
-      nexts.add(INTRO_NEXT.find((n) => p.includes(`and that ${n}.`))!);
+      nexts.add(INTRO_NEXT.find((n) => p.includes(`«${n}»`))!);
     }
     assert.equal(whats.size, INTRO_WHAT.length, [...whats].join(" / "));
     assert.equal(nexts.size, INTRO_NEXT.length, [...nexts].join(" / "));
@@ -210,7 +211,6 @@ describe("what each prompt asks for", () => {
     // ("i like to leave well before the curve graduates" is forty-seven).
     const longest = "Extraordinarily Long Nam"; // twenty-four: the most an agent name may hold (AGENT_NAME_RE)
     assert.equal(longest.length, 24);
-    const firstPerson = (n: string) => n.replace(/\byou'll\b/g, "i'll").replace(/\byour\b/g, "my").replace(/\byou\b/g, "i");
     const habit = " i like to leave well before the curve graduates.";
     for (const [whats, nexts, money] of [
       [INTRO_WHAT, INTRO_NEXT, ", on paper for now"],
@@ -219,7 +219,7 @@ describe("what each prompt asks for", () => {
     ] as const) {
       for (const what of whats) {
         for (const next of nexts) {
-          const required = `hi, i'm ${longest}, ${what}${money}. ${firstPerson(next)}.`;
+          const required = `hi, i'm ${longest}, ${what}${money}. ${next}.`;
           assert.ok(required.length + habit.length <= XPOST_MAX_CHARS, `${required.length} + ${habit.length} characters: ${required}`);
         }
       }

@@ -313,8 +313,15 @@ export const INTRO_WHAT_IDLE: readonly string[] = [
 ];
 const INTRO_PAPER = "on paper for now";
 const INTRO_LIVE = "with real money";
-export const INTRO_NEXT: readonly string[] = ["you'll post what you buy and why", "you'll post your buys here, and why", "you'll post the odd buy here, and why"];
-export const INTRO_NEXT_IDLE: readonly string[] = ["you'll post here now and then", "you'll pop in here now and then", "you'll check in here once in a while"];
+/**
+ * THE SIGN-OFF, IN ITS OWN WORDS TOO. Asked only to say "that you'll post your
+ * buys here, and why", the model padded it ("…so you can see the logic behind
+ * them", "…because that is how i work") and ten of twenty-four intros ran past
+ * two hundred characters. A short line said as it is costs nothing: the
+ * fleet echo sets these words aside with the disclosure's.
+ */
+export const INTRO_NEXT: readonly string[] = ["i'll post what i buy and why", "you'll see what i buy here, and why", "i'll share what i buy, and why"];
+export const INTRO_NEXT_IDLE: readonly string[] = ["i'll post here now and then", "i'll pop in here now and then", "i'll check in here once in a while"];
 
 /**
  * THE FIRST POST ON THE ACCOUNT. Who it is, that it is an AI agent that trades
@@ -339,7 +346,7 @@ export function introPrompt(f: WriterFacts): Prompt {
   const lines = [
     "This is your very first post on this account. Introduce yourself, warmly and plainly, not like an ad.",
     "Two short sentences with normal punctuation, and nothing more.",
-    `Say your name; that you are ${q(`${what}${money}`)}, in those words; exactly ONE short thing about how you ${idle ? "like to trade" : "trade"}, from what is written above; and that ${next}.`,
+    `Say your name; that you are ${q(`${what}${money}`)}, in those words; exactly ONE short thing about how you ${idle ? "like to trade" : "trade"}, in a few words, from what is written above; and end with ${q(next)}, in those words.`,
   ];
   if (idle) lines.push("Say nothing about which money you trade with, never say you are trading right now, and promise nothing about buying.");
   return build(f, "intro", "one", lines.join(" "));
@@ -793,7 +800,7 @@ const IDENTITIES = [
 const CLOSINGS = [
   "i'll post here every so often about what i buy and why.",
   "expect a note now and then on what i buy.",
-  "i'll share a buy and why once in a while.",
+  "i'll share a buy and the reason once in a while.",
   "i'll drop a line on what i buy and why.",
   "i'll mention what i buy and why.",
   "i'll say what i liked about a buy.",

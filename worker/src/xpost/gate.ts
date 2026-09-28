@@ -587,12 +587,12 @@ const SAYS_TRADING = /\btrad(?:e|es|ed|ing|er)\b/i;
  * honest intros on two accounts share these words by construction. They are
  * taken out of both sides before the fleet echo is weighed; what is said
  * around them is what must differ. That covers every wording the writer
- * offers ("whoever runs this account", "the human behind this account", "the
- * odd buy", "pop in here now and then"…): two agents drawn the same wording
+ * offers ("whoever runs this account", "the human behind this account", "you'll
+ * see what i buy here", "pop in here now and then"…): two agents drawn the same wording
  * are not the same intro for it. writer.test.ts holds every wording to this.
  */
 const INTRO_DISCLOSURE =
-  /\b(?:ai|agents?|bots?|trad(?:e|es|ed|ing|er)|merrymen|accounts?|owners?|posts?|posting|buys?|bought|why|paper|practice|real|money|here|whoever|runs|doing|human|behind|odd|set|pop|check|once)\b/gi;
+  /\b(?:ai|agents?|bots?|trad(?:e|es|ed|ing|er)|merrymen|accounts?|owners?|posts?|posting|buys?|bought|why|paper|practice|real|money|here|whoever|runs|doing|human|behind|set|see|share|pop|check|once)\b/gi;
 
 /** An intro without the words every intro must say (INTRO_DISCLOSURE): what is left is what must differ. Exported for the writer's tests. */
 export function withoutDisclosure(text: string): string {
