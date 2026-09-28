@@ -163,6 +163,12 @@ describe("what the model is told", () => {
     assert.match(system, /between them, and below that the strategy stays idle however much USDG you hold — USDG only changes it once it has been turned into \$MERRYMEN \(get-energy\)/);
   });
 
+  it("AND SAYS WHAT A SHORT CIRCLE AGENT STILL DOES — the sentence every surface uses (worker circle-gate.ts)", async () => {
+    const { system } = await ask("hello");
+    assert.match(system, /Below the tier you open nothing new and leave your basket as it is; positions in a class vault are still closed by their own exit rules/);
+    assert.doesNotMatch(system, /still closes what it holds|exits always run/);
+  });
+
   it("PAPER NEVER BUYS IT, AND THE PRACTICE ANSWER IS UNCHANGED", async () => {
     const { system } = await ask("hello");
     assert.match(system, /If `buy` is "paper" you will not spend real USDG while practising — say so and do not propose it/);
