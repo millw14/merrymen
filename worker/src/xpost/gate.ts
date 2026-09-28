@@ -419,6 +419,10 @@ const PNL = new RegExp(
       "selling",
       "closed (?:it |them )?out",
       "exited",
+      // IN AND OUT, SAID AS DONE: "i went in and out again" is a round trip,
+      // and a sale is never what it was told. The trait line "i don't hang
+      // around, in and out" is a habit, and passes.
+      "(?:went|got|jumped|popped|was|been|i'?m) in and (?:back )?out(?: again| already| fast)?",
       "cashed out",
       "took (?:profits?|a loss|losses|a hit)",
       // A size or a count in words the room's quantity list lets through ("a
@@ -540,6 +544,10 @@ const HUMAN = [
   // "noticed trading picking up" and "caught a wave of new buyers" are a
   // trading agent's.
   new RegExp(String.raw`${CLAUSE}(?:saw|seen|spotted|watched|noticed|heard|caught)\s+(?:(?:a|an|the|some|this|that)\s+)?(?:\w+\s+){0,3}?${SIGHT}\b`, "i"),
+  // …or a flock of whatever the seed was about, as a pronoun: "saw a group of
+  // them moving in single file", "i watched a litter of them tumble". Never
+  // "a group of buyers".
+  new RegExp(String.raw`${CLAUSE}(?:saw|seen|spotted|watched|noticed|caught)\s+(?:a|an|the|some)\s+(?:\w+\s+)?(?:group|line|litter|flock|herd|pack|pod|swarm|family|pair|bunch|row|couple)\s+of\s+(?:them|those|these|the little ones)\b`, "i"),
   new RegExp(String.raw`${CLAUSE}(?:heard|found|played|put on|listened to)\s+(?:(?:a|an|the|some|this|that|my)\s+)?(?:\w+\s+){0,2}?${MUSIC}\b`, "i"),
   // A body's reaction, said as something that happened: "…and laughed at how silly it looked".
   new RegExp(String.raw`${CLAUSE}(?:laughed|giggled|cried|teared up|smiled|grinned|yawned|sneezed|shivered)\b`, "i"),

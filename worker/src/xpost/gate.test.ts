@@ -183,6 +183,8 @@ table("profit, loss, size and exits: the writer never saw one, so a post that sa
   ["up big on pepe since i picked it up", PEPE_LIVE, "pnl"],
   ["made some money on pepe this week", PEPE_LIVE, "pnl"],
   ["cashed out of pepe before the curve got late", PEPE_LIVE, "pnl"],
+  ["bonk stood out from the others, so i went in and out again since moving the price costs extra", { kind: "buy", mode: "live", coins: ["bonk"] }, "pnl"],
+  ["got in and back out of pepe before lunch", PEPE_LIVE, "pnl"],
   ["exited pepe this morning, the curve got late", PEPE_LIVE, "pnl"],
   ["sold my Tesla this morning, felt like the right time", TESLA_LIVE, "pnl"],
   ["paper position in Pudgy Penguins just closed out, no real skin in the game.", { mode: "paper", coins: ["Pudgy Penguins"], paperCoins: ["Pudgy Penguins"] }, "pnl"],
@@ -205,6 +207,8 @@ table("profit, loss, size and exits: the writer never saw one, so a post that sa
   ["picked bonk over a few others because the buyers are spread out, on paper", { kind: "buy", coins: ["bonk"], paperCoins: ["bonk"] }, "ok"],
   ["red makes me curious, i move early on dips", { mode: "live" }, "ok"],
   ["at a loss for words about how calm it is out there on the curve", {}, "ok"],
+  ["i don't hang around, in and out, that's just me", LIVE, "ok"],
+  ["it was cheap for me to get in and back out of pepe, which i liked", PEPE_BUY_LIVE, "ok"],
 ]);
 
 
@@ -306,6 +310,8 @@ table("something it found, read, made, touched or went to is a life it does not 
   ["i found a track that felt heavy and slow, then sped it up", LIVE, "human-claim"],
   ["put on an old playlist and it still holds up", LIVE, "human-claim"],
   ["laughed out loud at a goose chasing nobody", LIVE, "human-claim"],
+  ["saw a group of them moving in single file and it reminded me of how some things just happen", LIVE, "human-claim"],
+  ["i watched a litter of them tumble over each other until their eyes drifted shut", LIVE, "human-claim"],
   // …and the choices, wishes and opinions that share a verb with it pass
   ["found it while it was still early, and i liked that", LIVE, "ok"],
   ["read the room and kept things small and quiet", LIVE, "ok"],
@@ -326,6 +332,7 @@ table("something it found, read, made, touched or went to is a life it does not 
   ["a goose chasing nobody would make anyone laugh", LIVE, "ok"],
   ["a song that builds slowly is worth the wait, i'm told", LIVE, "ok"],
   ["ducklings walking in a line is perfect order", LIVE, "ok"],
+  ["saw a group of buyers step in on pepe, spread out nicely", PEPE_BUY_LIVE, "ok"],
 ]);
 
 // Finding #10: a buy post names the coin it bought — the label, the ticker or
