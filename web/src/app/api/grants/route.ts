@@ -11,6 +11,7 @@ import { readGrantBalancesFrom, type GrantBalances } from "@/lib/grant-balances"
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
+import { writeFileAtomic } from "@merrymen/atomic-write";
 import { homePaths, merrymenHome } from "@merrymen/home";
 import { createPublicClient } from "viem";
 import {
@@ -434,9 +435,15 @@ export async function POST(req: Request) {
   await mkdir(DATA_DIR, { recursive: true });
   // Keep the outgoing wallet (and its owner key) before this one replaces it.
   await archiveCurrentGrant();
-  // grant.json holds the owner + session PRIVATE KEYS — owner-only perms (0600).
-  await writeFile(GRANT_FILE, JSON.stringify(grant, null, 2), { encoding: "utf8", mode: 0o600 });
-  await chmod(GRANT_FILE, 0o600).catch(() => {});
+  // grant.json holds the owner + session PRIVATE KEYS — owner-only perms (0600),
+  // set on the temp file before it is renamed in.
+  //
+  // REPLACED WHOLE. The worker re-reads grant.json every tick, and a read that
+  // raced writeFile's truncate got null — which an armed worker takes for the
+  // kill switch (syncGrant). And it is fsynced before the rename: self-hosted
+  // this file is the only copy of the new owner key, and a crash after a
+  // truncate-then-write could leave it empty.
+  await writeFileAtomic(GRANT_FILE, JSON.stringify(grant, null, 2), 0o600);
   return NextResponse.json({ ok: true });
 }
 

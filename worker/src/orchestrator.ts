@@ -63,7 +63,7 @@ function startHistoryRepair(): void {
   })().catch(e=>log(`historical fills: FAILED — ${e instanceof Error ? e.message : String(e)}`));
 }
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
@@ -633,13 +633,18 @@ async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db): Promis
     // An empty file would only mask a later genuine publish.
     if (!ownerId) return;
     mkdirSync(childHome(tenant), { recursive: true });
-    writeFileSync(
+    // WHOLE OR NOT AT ALL. The existsSync above makes this a one-shot: a file
+    // cut short by a crash mid-write would be there on every later pass, so it
+    // would never be restored again, and the child reads a telegram.json that
+    // does not parse as a fresh, unlinked default and saves that over it.
+    writeFileAtomicSync(
       file,
       // `ownerId` is the recovered one, which may have come from the allowlist
       // rather than the mirror. The link CODE is not recovered — it rotates on
       // every link and a stale one would be worse than none, so the child mints
       // a fresh code and the dashboard shows it.
       JSON.stringify({ linkCode: tg?.linkCode ?? "", ownerId, linkedAt: tg?.linkedAt ?? 0 }, null, 2),
+      0o600,
     );
     log(`${tenant}: telegram link restored — the owner keeps receiving alerts`);
   } catch (e) {
@@ -747,9 +752,9 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` 
   const home = childHome(tenant);
   mkdirSync(home, { recursive: true });
   // grant.json holds the SESSION key (the store already refused any owner key),
-  // so keep it owner-only. chmod is a POSIX no-op that throws on Windows — the
-  // container is Linux, and self-hosted never runs the orchestrator.
-  writeFileSync(path.join(home, "grant.json"), JSON.stringify(grant, null, 2), { encoding: "utf8", mode: 0o600 });
+  // so keep it owner-only. Replaced whole — see refreshGrantForChild for what a
+  // child makes of half a grant.
+  writeFileAtomicSync(path.join(home, "grant.json"), JSON.stringify(grant, null, 2), 0o600);
   // The SMART ACCOUNT, returned rather than discarded: it is the key every
   // ledger table is on, the caller needs it to derive the accounting anchor, and
   // the grant is the only place the orchestrator can learn it without a second
@@ -813,7 +818,13 @@ async function refreshGrantForChild(tenant: `0x${string}`): Promise<void> {
   } catch {
     // No file, or unreadable — writing it is the right answer either way.
   }
-  writeFileSync(file, next, { encoding: "utf8", mode: 0o600 });
+  // ATOMIC, because this is the one grant write that lands under a RUNNING
+  // child. It re-reads grant.json every tick, and loadGrantFile returns null for
+  // a file that does not parse — which syncGrant cannot tell from a deleted
+  // grant: an armed agent logged "KILL SWITCH — grant discarded", was marked
+  // killed, and re-armed on the next tick, all because a re-sign was half
+  // written when it looked.
+  writeFileAtomicSync(file, next, 0o600);
   // AND THE ACCOUNT WITH IT. A re-sign under a new owner key derives a new
   // smart account, and that is the address the shared tables are keyed on — so
   // a child left holding the old one would be looked up under an account that
@@ -1394,18 +1405,35 @@ export async function writeBootstrapForChild(
     // change which blocks a child scans, which is a different change.
   };
 
+  const home = childHome(tenant);
+  const file = path.join(home, BOOTSTRAP_FILE);
   try {
-    const home = childHome(tenant);
     mkdirSync(home, { recursive: true });
-    writeFileSync(path.join(home, BOOTSTRAP_FILE), JSON.stringify(state, null, 2), {
-      encoding: "utf8",
-      mode: 0o600,
-    });
+    // Whole or not at all. No child is reading yet (this runs before spawn, and
+    // the child reads its anchor once), so this is about what a failure leaves.
+    writeFileAtomicSync(file, JSON.stringify(state, null, 2), 0o600);
     if (accounting.kind === "unknown") {
       log(`${tenant}: accounting anchor UNKNOWN — ${accounting.why} (child will not book contributions)`);
     }
   } catch (e) {
-    log(`${tenant}: could not write ${BOOTSTRAP_FILE} — ${e instanceof Error ? e.message : String(e)}`);
+    // A FAILED WRITE MUST NOT LEAVE THE LAST SPAWN'S ANCHOR BEHIND. The atomic
+    // replace leaves the old file intact when it fails, and after a crash-restart
+    // in this container that file is the previous spawn's: derived before
+    // whatever the dead child booked, yet well inside BOOTSTRAP_MAX_AGE_SEC, so
+    // classifyAnchor would take it as current — at worst a
+    // `no-prior-accounting` anchor, which licenses booking an opening balance.
+    // An absent anchor fails closed (bootstrap-state.ts): book nothing, and say
+    // contributions are unknown.
+    let removed = true;
+    try {
+      rmSync(file, { force: true });
+    } catch {
+      removed = false;
+    }
+    log(
+      `${tenant}: could not write ${BOOTSTRAP_FILE} — ${e instanceof Error ? e.message : String(e)}` +
+        (removed ? " (no anchor: the child will not book contributions)" : " — AND could not remove the previous one; the child may read an earlier spawn's anchor"),
+    );
   }
 }
 
