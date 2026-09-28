@@ -912,17 +912,17 @@ describe("claimEntry / refundEntry: at most three group-sourced entries a UTC da
 
   it("claims through the durable counter with today's day and the cap", () => {
     const { book, counters } = withNominated();
-    assert.equal(book.claimEntry(addr(1)), true);
+    assert.equal(book.claimEntry(addr(1)), "taken");
     assert.equal(counters.log.at(-1), `entry:2026-09-28:${NOMINATE.groupEntriesPerDay}`);
     assert.equal(counters.entries, 1);
   });
 
   it("the fourth claim of the day is refused", () => {
     const { book } = withNominated();
-    assert.equal(book.claimEntry(addr(1)), true);
-    assert.equal(book.claimEntry(addr(2)), true);
-    assert.equal(book.claimEntry(addr(3)), true);
-    assert.equal(book.claimEntry(addr(4)), false);
+    assert.equal(book.claimEntry(addr(1)), "taken");
+    assert.equal(book.claimEntry(addr(2)), "taken");
+    assert.equal(book.claimEntry(addr(3)), "taken");
+    assert.equal(book.claimEntry(addr(4)), "cap");
   });
 
   it("a refund gives the slot back", () => {
@@ -932,12 +932,12 @@ describe("claimEntry / refundEntry: at most three group-sourced entries a UTC da
     book.claimEntry(addr(3));
     book.refundEntry(addr(2));
     assert.equal(counters.entries, 2);
-    assert.equal(book.claimEntry(addr(4)), true);
+    assert.equal(book.claimEntry(addr(4)), "taken");
   });
 
-  it("an address nobody nominated is not group-sourced: allowed, and nothing is taken", () => {
+  it("an address nobody nominated answers not-nominated, and nothing is taken", () => {
     const { book, counters } = withNominated(1);
-    assert.equal(book.claimEntry(addr(9)), true);
+    assert.equal(book.claimEntry(addr(9)), "not-nominated");
     assert.equal(counters.log.filter((l) => l.startsWith("entry")).length, 0);
     book.refundEntry(addr(9));
     assert.equal(counters.log.filter((l) => l.startsWith("refund")).length, 0);
@@ -956,7 +956,7 @@ describe("claimEntry / refundEntry: at most three group-sourced entries a UTC da
   it("a refund after the fill landed gives nothing back", () => {
     const { book, counters } = withNominated(1);
     book.onReviewed(addr(1), buy({ decisionId: "dec_b" }));
-    assert.equal(book.claimEntry(addr(1)), true);
+    assert.equal(book.claimEntry(addr(1)), "taken");
     book.onFill("dec_b", "landed", false);
     book.refundEntry(addr(1));
     assert.equal(counters.entries, 1, "a landed entry stays spent");
@@ -965,7 +965,7 @@ describe("claimEntry / refundEntry: at most three group-sourced entries a UTC da
   it("a refund after a failed fill still works (the entry path refunds after it records the trade)", () => {
     const { book, counters } = withNominated(1);
     book.onReviewed(addr(1), buy({ decisionId: "dec_b" }));
-    assert.equal(book.claimEntry(addr(1)), true);
+    assert.equal(book.claimEntry(addr(1)), "taken");
     assert.equal(book.onFill("dec_b", "rejected", false)?.kind, "skipped");
     book.refundEntry(addr(1));
     assert.equal(counters.entries, 0);
@@ -974,7 +974,7 @@ describe("claimEntry / refundEntry: at most three group-sourced entries a UTC da
   it("a refund goes back to the day the claim was taken from", () => {
     const { book, counters, clock } = setup(Date.UTC(2026, 8, 28, 23, 59, 0));
     book.nominate(nom({ address: addr(1) }, clock.t), READY_PAPER);
-    assert.equal(book.claimEntry(addr(1)), true);
+    assert.equal(book.claimEntry(addr(1)), "taken");
     clock.t = Date.UTC(2026, 8, 29, 0, 0, 30);
     book.refundEntry(addr(1));
     assert.equal(counters.log.at(-1), "refund:2026-09-28");
@@ -986,30 +986,46 @@ describe("claimEntry / refundEntry: at most three group-sourced entries a UTC da
     book.claimEntry(addr(1));
     book.claimEntry(addr(2));
     book.claimEntry(addr(3));
-    assert.equal(book.claimEntry(addr(4)), false);
+    assert.equal(book.claimEntry(addr(4)), "cap");
     clock.t = Date.UTC(2026, 8, 29, 0, 0, 0);
-    assert.equal(book.claimEntry(addr(4)), true);
+    assert.equal(book.claimEntry(addr(4)), "taken");
     assert.equal(counters.log.at(-1), `entry:2026-09-29:${NOMINATE.groupEntriesPerDay}`);
   });
 
   it("a counter that throws refuses the claim, and a throwing refund is swallowed", () => {
     const { book, counters } = withNominated(2);
     counters.throwOn = "entry";
-    assert.equal(book.claimEntry(addr(1)), false);
+    assert.equal(book.claimEntry(addr(1)), "cap");
     counters.throwOn = null;
-    assert.equal(book.claimEntry(addr(2)), true);
+    assert.equal(book.claimEntry(addr(2)), "taken");
     counters.throwOn = "refund";
     assert.doesNotThrow(() => book.refundEntry(addr(2)));
   });
 
   it("an expired nomination is no longer group-sourced, but its outstanding claim can still be refunded", () => {
     const { book, counters, clock } = withNominated(1);
-    assert.equal(book.claimEntry(addr(1)), true);
+    assert.equal(book.claimEntry(addr(1)), "taken");
     clock.t = T0 + NOMINATE.ttlMs;
     book.expire();
     assert.equal(book.nominated(addr(1)), null);
     book.refundEntry(addr(1));
     assert.equal(counters.entries, 0);
+  });
+
+  it("a TTL that runs out between nominated() and claimEntry() is not-nominated, never a claim", () => {
+    const { book, counters, clock } = withNominated(1);
+    // An earlier entry for this coin claimed and went `submitted`: its claim
+    // stays outstanding, and it is the one a wrong refund would pop.
+    book.onReviewed(addr(1), buy({ decisionId: "dec_first" }));
+    assert.equal(book.claimEntry(addr(1)), "taken");
+    // The next entry's two book calls straddle the TTL.
+    clock.t = T0 + NOMINATE.ttlMs - 1;
+    assert.ok(book.nominated(addr(1)), "still pending when the caller looked");
+    clock.t = T0 + NOMINATE.ttlMs;
+    const takes = counters.log.filter((l) => l.startsWith("entry")).length;
+    assert.equal(book.claimEntry(addr(1)), "not-nominated");
+    assert.equal(counters.log.filter((l) => l.startsWith("entry")).length, takes, "nothing is taken");
+    assert.equal(counters.entries, 1, "the earlier entry's claim stays spent");
   });
 });
 

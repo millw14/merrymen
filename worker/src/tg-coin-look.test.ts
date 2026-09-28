@@ -458,6 +458,39 @@ describe("a nominated coin's buy", () => {
     assert.deepEqual(claimGroupEntry(book, entry, (id) => reviewed.get(id)), { group: true, address: COIN, ok: false, why: "resolved" });
   });
 
+  it("a TTL that runs out inside claimEntry refuses the entry as resolved, takes nothing, and refunds no older claim", () => {
+    const base = memCounters();
+    let entryTakes = 0;
+    const counters: NominationCounters = {
+      takeNomination: (d, l) => base.takeNomination(d, l),
+      takeGroupEntry: (d, l) => { entryTakes++; return base.takeGroupEntry(d, l); },
+      refundGroupEntry: (d) => base.refundGroupEntry(d),
+    };
+    // The book reads the clock once per call; `reads` scripts those readings.
+    let reads: number[] = [];
+    const book = new NominationBook(counters, () => reads.shift() ?? NOW + NOMINATE.ttlMs);
+    reads = [NOW];
+    assert.deepEqual(book.nominate(nomination(), "ready-paper"), { ok: true });
+    // An earlier entry for this coin won its claim and went `submitted`, so
+    // the loop's settle gave nothing back: that slot is used.
+    reads = [NOW + 1, NOW + 2, NOW + 3];
+    book.onReviewed(COIN, { action: "buy", decisionId: "decision-first" });
+    const entry = { kind: "swap", buyToken: COIN, decisionId: "decision-first" };
+    assert.deepEqual(claimGroupEntry(book, entry, () => COIN), { group: true, address: COIN, ok: true });
+    assert.equal(base.entries(), 1);
+    const takesBefore = entryTakes;
+
+    // The next entry: nominated() still sees it pending, and the TTL passes
+    // before claimEntry() reads the clock.
+    reads = [NOW + NOMINATE.ttlMs - 1, NOW + NOMINATE.ttlMs];
+    const again = claimGroupEntry(book, { ...entry, decisionId: "decision-second" }, () => undefined);
+    assert.deepEqual(again, { group: true, address: COIN, ok: false, why: "resolved" });
+    assert.equal(entryTakes, takesBefore, "takeGroupEntry is never called");
+    // The loop's tgSettleGroupEntry refunds only a claim that was ok.
+    if (again.group && again.ok) book.refundEntry(COIN);
+    assert.equal(base.entries(), 1, "the earlier entry's slot stays spent");
+  });
+
   it("a claim that cannot be answered refuses the entry", () => {
     const book = { nominated: () => nomination(), claimEntry: () => { throw new Error("disk"); } };
     assert.deepEqual(claimGroupEntry(book as never, { kind: "swap", buyToken: COIN }, () => undefined), { group: true, address: COIN, ok: false, why: "cap" });

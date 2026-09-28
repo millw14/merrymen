@@ -240,6 +240,12 @@ export interface NominationCounters {
   refundGroupEntry(day: string): void;
 }
 
+/**
+ * What `claimEntry` answers. Only `taken` wrote a claim, and only a `taken`
+ * may later be refunded.
+ */
+export type EntryClaim = "taken" | "cap" | "not-nominated";
+
 /** What index.ts saw a Brain review decide about a nominated coin's token. */
 export interface ReviewedDecision {
   action: "buy" | "sell" | "hold";
@@ -466,15 +472,21 @@ export class NominationBook {
    * energy-entry pattern: a crash in between under-spends by one, never
    * over-spends.
    *
-   * An address no group nominated is not a group-sourced entry, so this cap
-   * has nothing to say about it: true, and nothing is taken. Every other gate
-   * applies to it exactly as before.
+   * Three answers, because "nothing was taken" is not one thing:
+   *   - `taken`: a claim was written, and it is the one a no-fill refund gives back;
+   *   - `cap`: the day's group entries are used up (or the counter could not answer);
+   *   - `not-nominated`: this address has no unresolved nomination NOW — never
+   *     nominated, or its TTL ran out since the caller last looked. Nothing is
+   *     taken. It is kept apart from `taken` on purpose: read as a claim, the
+   *     entry would go uncounted, and its no-fill refund would pop an OLDER
+   *     entry's claim for the same coin (one that may have become a trade)
+   *     and hand that slot back.
    */
-  claimEntry(address: string): boolean {
+  claimEntry(address: string): EntryClaim {
     const t = this.now();
     this.sweep(t);
     const a = lower(address);
-    if (!this.find(a)) return true;
+    if (!this.find(a)) return "not-nominated";
     let day = "";
     let ok = false;
     try {
@@ -483,14 +495,20 @@ export class NominationBook {
     } catch {
       ok = false;
     }
-    if (ok) push(this.claims, a, { day, atMs: t });
-    return ok;
+    if (!ok) return "cap";
+    push(this.claims, a, { day, atMs: t });
+    return "taken";
   }
 
   /**
    * Give back a group-entry claim whose entry produced no fill. It returns to
    * the day it was taken from; an address with no outstanding claim gives
    * back nothing, so a stray refund can never create an entry.
+   *
+   * Only after a `taken`: claims are a stack per address, newest last, so the
+   * claim popped here is the one this entry's own claimEntry pushed. After a
+   * `cap` or `not-nominated` there is no claim of this entry's to give back,
+   * and the one on top would belong to a different entry.
    */
   refundEntry(address: string): void {
     const c = this.spendClaim(lower(address));

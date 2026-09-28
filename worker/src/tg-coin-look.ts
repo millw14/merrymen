@@ -30,7 +30,7 @@ import { coinDisplayName } from "./coin-name";
 import { PONS_CURVE_DEX } from "./discovery";
 import { TRENCHER_FAST, shouldEnter, type Candidate } from "./strategies/trencher";
 import { highVolumePools } from "./trencher-brain";
-import { isCaAddress, type NominationBook, type ReviewedDecision } from "./trencher-nominate";
+import { isCaAddress, type EntryClaim, type NominationBook, type ReviewedDecision } from "./trencher-nominate";
 import type { GeckoPool } from "./venues/geckoterminal";
 import { aggregate3, parseTokenMeta } from "./venues/pons-meta";
 import type {
@@ -461,13 +461,20 @@ export function claimGroupEntry(
   const fromReview = typeof intent.decisionId === "string" && reviewedFor(intent.decisionId) === address;
   if (!pendingNow && !fromReview) return { group: false };
   if (!pendingNow) return { group: true, address, ok: false, why: "resolved" };
-  let ok = false;
+  let claim: EntryClaim | "failed" = "failed";
   try {
-    ok = book.claimEntry(address) === true;
+    claim = book.claimEntry(address);
   } catch {
-    ok = false;
+    claim = "failed";
   }
-  return ok ? { group: true, address, ok: true } : { group: true, address, ok: false, why: "cap" };
+  if (claim === "taken") return { group: true, address, ok: true };
+  // Each book call reads the clock once, so the TTL can run out between
+  // nominated() above and claimEntry(): the nomination resolved in between
+  // and nothing was taken. That is the same fail-closed `resolved` — an ok
+  // here would let the entry go uncounted, and its no-fill refund would give
+  // back an older entry's claim.
+  if (claim === "not-nominated") return { group: true, address, ok: false, why: "resolved" };
+  return { group: true, address, ok: false, why: "cap" };
 }
 
 /**
