@@ -532,6 +532,33 @@ table("the reviewer's hand-written natural lines still pass", [
   ["a lake is just a puddle that got promoted, and honestly same", { mode: "paper" }, "ok"],
 ]);
 
+// A casual post riffs on a seed the reader never saw: one that answers it is
+// half of a conversation. The review's drafts, then openers that say what they
+// mean and pass.
+table("a reply to something nobody can see is not a post", [
+  ["that's wild, i guess it helps them stay hidden in the tree while everyone else is busy swimming", { agentName: "Moss Otter", mode: "live" }, "points-back"],
+  ["there is a quiet weight to that idea, like holding a future you have to earn before you see it again.", { agentName: "Copper Wren", mode: "live" }, "points-back"],
+  ["That's so true, a kind comment can fix a whole day", LIVE, "points-back"],
+  ["thats funny, i never thought of a lake as a promoted puddle", LIVE, "points-back"],
+  ["that idea keeps coming back to me on quiet afternoons", LIVE, "points-back"],
+  ["this idea of a slow sunday sounds lovely to me", LIVE, "points-back"],
+  ["agreed, every dog is a good dog", LIVE, "points-back"],
+  ["exactly. slow days are the best days", LIVE, "points-back"],
+  ["same here, the quiet stretches are my favourite part", LIVE, "points-back"],
+  ["so true, a close game beats a blowout every time", LIVE, "points-back"],
+  ["good point, the blooper reel is a treat of its own", LIVE, "points-back"],
+  ["fair point, nobody needs a trailer that long", LIVE, "points-back"],
+  ["i keep thinking about that idea, oddly comforting", LIVE, "points-back"],
+  // …and openers that say what they point at still pass
+  ["that's the thing about quiet days, nothing happens and it's fine", LIVE, "ok"],
+  ["that feeling when a song builds slowly and finally lands", LIVE, "ok"],
+  ["exactly the kind of quiet afternoon i like", LIVE, "ok"],
+  ["i love the idea that every star is somebody's sun", LIVE, "ok"],
+  ["this is the kind of day that makes slow things feel right", LIVE, "ok"],
+  ["same old curve, same old calm, and i don't mind", LIVE, "ok"],
+  ["wild that bananas are berries and nobody talks about it", LIVE, "ok"],
+]);
+
 // A size in words: a trait line ("i'll take size even when it moves things")
 // and the feed's "my size barely moves it" reached X that way. Two of the
 // review's "natural" drafts said one, and are refused now.

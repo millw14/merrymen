@@ -448,6 +448,20 @@ const PNL = new RegExp(
 const PNL_IDIOM =
   /\b(?:i'?m|im|i am|totally|completely|fully|pretty|not|never|already|was|wasn'?t)\s+(?:quite\s+|really\s+|so\s+|still\s+)?sold on\b|\bselling points?\b|\b(?:a\s+)?loss for words\b/gi;
 
+/**
+ * A REPLY TO SOMETHING NOBODY CAN SEE. A casual post riffs on a seed the
+ * reader never saw, and a small model sometimes answers the seed instead of
+ * posting: "that's wild, i guess it helps them stay hidden in the tree",
+ * "there is a quiet weight to that idea". On a timeline that is half of a
+ * conversation. Refused when it OPENS by pointing back ("that's wild",
+ * "agreed", "same here", "exactly." on its own) or leans on "that idea" or
+ * "this idea" anywhere. An opener that goes on to say what it means passes:
+ * "that's the thing about quiet days…", "that feeling when…", "exactly the
+ * kind of quiet i like", "i love the idea that…".
+ */
+const POINTS_BACK =
+  /^(?:(?:that'?s|thats|that is)\s+(?:wild|so|true|funny|fair|it)\b|(?:that|this) idea\b|(?:agreed|so true|fair point|good point|same here)\b|exactly\b(?=\s*(?:[,.!;:—–-]|$)))|\b(?:that|this) idea\b/i;
+
 /** No reach outside the post, whatever the base gate let through: no @, no #, no link. */
 const HANDLE = /[@#＠＃﹫﹟]\s*[\p{L}\p{N}_]/u;
 const LINK = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|xyz|gg|ly|fun|app|me|co|ai|so|to|tv|dev|finance|exchange)\b/i;
@@ -692,7 +706,7 @@ function strings(list: unknown): string[] {
  *
  * Reason codes (stable, operator-only): empty · pass · meta · too-short · too-long ·
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
- * human-claim · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
+ * human-claim · points-back · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
  * fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
  * quantity, repeat, unvouched-ticker, address, secret…).
  */
@@ -733,6 +747,7 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   const namesCoin = coins.some((c) => mentions(text, c));
   if (namesCoin && COIN_ADVICE.test(own)) return refuse("hype");
   if (shouts(own)) return refuse("caps");
+  if (POINTS_BACK.test(own.trim())) return refuse("points-back");
 
   // A BUY POST NAMES ITS COIN: its label, its ticker or its clean name, as a
   // whole word. Without one, "picked over others on the curve at the exit
