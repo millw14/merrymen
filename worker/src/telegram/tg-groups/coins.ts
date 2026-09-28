@@ -549,8 +549,8 @@ export class CoinFlow {
     };
     // Forgotten meanwhile: the coin and its verdict are kept, who posted it
     // is not, exactly as /forgetme leaves every memo it finds.
-    const memo = (verdict: CoinVerdict, name?: string): TgCoinMemo => ({
-      address,
+    const memo = (verdict: CoinVerdict, name?: string, coin = address): TgCoinMemo => ({
+      address: coin,
       ...(name ? { name } : {}),
       byId: gone() ? 0 : m.senderId,
       byName: !gone() && typeof m.senderName === "string" ? m.senderName : "",
@@ -605,14 +605,29 @@ export class CoinFlow {
     if (!this.approvedRoom(chatId) || !this.coinsOn()) return;
     const coinName = look.name ? { coinName: look.name } : {};
 
+    // A CHART LINK CARRIES THE POOL. When the look proved the posted address
+    // is the pool of a coin, that coin is the one remembered, answered from
+    // memory and nominated from here on. The pool's claim above still stops a
+    // replay of this post; the coin is claimed for this post too, so the coin
+    // posted beside its own chart link is one coin, not two.
+    const coin = look.address ?? address;
+    if (coin !== address) {
+      if (!d.store.claim(chatId, line.messageId, coin)) return;
+      const seen = d.store.coin(chatId, coin, COIN_FLOW.seenMs);
+      if (seen && !NO_LOOK.has(seen.verdict)) {
+        await this.fromMemory(chatId, coin, line, seen, say, eyes);
+        return;
+      }
+    }
+
     if (look.kind === "held") {
-      d.store.rememberCoin(chatId, memo("held", look.name));
+      d.store.rememberCoin(chatId, memo("held", look.name, coin));
       const tag = tagSender();
       await say({ kind: "coin-seen", verdict: "held" }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
       return;
     }
     if (look.kind !== "candidate") {
-      d.store.rememberCoin(chatId, memo(look.kind, look.name));
+      d.store.rememberCoin(chatId, memo(look.kind, look.name, coin));
       const tag = tagSender();
       await say({ kind: "coin-look", look: look.kind }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
       return;
@@ -625,7 +640,7 @@ export class CoinFlow {
 
     // 6. Nominate: the address and where it came from, nothing else.
     const res = this.nominateVia(port, {
-      address,
+      address: coin,
       chatId,
       messageId: line.messageId,
       senderId: m.senderId,
@@ -633,7 +648,7 @@ export class CoinFlow {
     });
     if (res.ok) {
       // 7. Ack, thinking out loud; the verdict comes with the outcome.
-      d.store.rememberCoin(chatId, memo("candidate", look.name));
+      d.store.rememberCoin(chatId, memo("candidate", look.name, coin));
       const tag = tagSender();
       await say({ kind: "coin-ack" }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
       return;
@@ -653,8 +668,8 @@ export class CoinFlow {
     if (res.reason === "recent") {
       // Recent in the book. Answered from memory only when the memory is this
       // chat's: a coin another group nominated is never mentioned here.
-      const mine = d.store.coin(chatId, address);
-      if (mine && !NO_LOOK.has(mine.verdict)) await this.fromMemory(chatId, address, line, mine, say, eyes);
+      const mine = d.store.coin(chatId, coin);
+      if (mine && !NO_LOOK.has(mine.verdict)) await this.fromMemory(chatId, coin, line, mine, say, eyes);
       return;
     }
     // invalid / not-ready (readiness changed during the look): silence.
@@ -868,7 +883,13 @@ export class CoinFlow {
       const l = await port.look(address);
       if (!l || typeof l !== "object" || !KINDS.has(l.kind)) return { kind: "unknown" };
       const name = cleanName(l.name);
-      return name ? { kind: l.kind, name } : { kind: l.kind };
+      // The coin a posted pool trades: well-formed like any CA, or not passed on.
+      const coin = typeof l.address === "string" ? l.address.toLowerCase() : "";
+      return {
+        kind: l.kind,
+        ...(name ? { name } : {}),
+        ...(ADDRESS.test(coin) && coin !== address ? { address: coin } : {}),
+      };
     } catch (e) {
       this.fail("look", e);
       return { kind: "unknown" };

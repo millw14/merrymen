@@ -18,7 +18,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { encodeAbiParameters, type PublicClient } from "viem";
-import { CASH, MERRYMEN_TOKEN, STOCK_TOKENS } from "../../packages/core/src/index";
+import { CASH, MERRYMEN_TOKEN, STOCK_TOKENS, UNISWAP } from "../../packages/core/src/index";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
 import { makeTrencher, TRENCHER_FAST, type Candidate } from "./strategies/trencher";
 import { takeTick, type Snapshot } from "./strategies/types";
@@ -32,6 +32,7 @@ import {
   groupExitOf,
   reviewedDecisionOf,
   type CoinLookReaders,
+  type TokenProbe,
 } from "./tg-coin-look";
 import { TrenchBrainReview } from "./trencher-brain";
 import { NOMINATE, NominationBook, type NominationCounters } from "./trencher-nominate";
@@ -242,21 +243,178 @@ describe("the chain probe: one multicall, and a failed batch is not an answer", 
   const meta = encodeAbiParameters(METADATA, [ACCOUNT, "ipfs://logo", "a frog", ["", "", "", "", ""]]);
   const decimals = `0x${(18).toString(16).padStart(64, "0")}` as `0x${string}`;
   const client = (answer: () => unknown) => ({ readContract: async () => answer() }) as unknown as PublicClient;
+  const nope = { success: false, returnData: "0x" };
+  /** Pons, decimals, and a token0/token1/fee that all revert: a plain ERC-20's answer. */
+  const batch = (pons: unknown, dec: unknown) => [pons, dec, nope, nope, nope];
 
   it("reads Pons-ness and ERC-20-ness from one aggregate3", async () => {
     let calls = 0;
-    const probe = chainTokenProbe({ readContract: async () => { calls++; return [{ success: true, returnData: meta }, { success: true, returnData: decimals }]; } } as unknown as PublicClient);
+    const probe = chainTokenProbe({ readContract: async () => { calls++; return batch({ success: true, returnData: meta }, { success: true, returnData: decimals }); } } as unknown as PublicClient);
     assert.deepEqual(await probe(COIN), { pons: true, erc20: true });
     assert.equal(calls, 1);
-    assert.deepEqual(await chainTokenProbe(client(() => [{ success: false, returnData: "0x" }, { success: true, returnData: decimals }]))(COIN), { pons: false, erc20: true });
+    assert.deepEqual(await chainTokenProbe(client(() => batch(nope, { success: true, returnData: decimals })))(COIN), { pons: false, erc20: true });
     // An address with no code answers every sub-call with nothing.
-    assert.deepEqual(await chainTokenProbe(client(() => [{ success: true, returnData: "0x" }, { success: true, returnData: "0x" }]))(COIN), { pons: false, erc20: false });
+    const empty = { success: true, returnData: "0x" };
+    assert.deepEqual(await chainTokenProbe(client(() => [empty, empty, empty, empty, empty]))(COIN), { pons: false, erc20: false });
     // decimals() that is not a uint8 is not an ERC-20 answer.
-    assert.deepEqual(await chainTokenProbe(client(() => [{ success: false, returnData: "0x" }, { success: true, returnData: `0x${"f".repeat(64)}` }]))(COIN), { pons: false, erc20: false });
+    assert.deepEqual(await chainTokenProbe(client(() => batch(nope, { success: true, returnData: `0x${"f".repeat(64)}` })))(COIN), { pons: false, erc20: false });
   });
 
   it("a batch that failed is null — unknown to the look, never 'not a token'", async () => {
     assert.equal(await chainTokenProbe(client(() => { throw new Error("rpc"); }))(COIN), null);
+    assert.equal(await chainTokenProbe(client(() => [nope, nope]))(COIN), null, "a batch that did not answer every sub-call is not an answer");
+  });
+
+  const POOL = "0x0000000000000000000000000000000000000011" as const;
+  const addrWord = (a: string) => ({ success: true, returnData: `0x${a.slice(2).toLowerCase().padStart(64, "0")}` });
+  const feeWord = { success: true, returnData: `0x${(10_000).toString(16).padStart(64, "0")}` };
+
+  it("a pool-shaped address costs one more read: what the CANONICAL v3 factory names for its tokens and fee", async () => {
+    const seen: Array<{ address: string; functionName: string; args?: unknown }> = [];
+    const probe = chainTokenProbe({
+      readContract: async (q: { address: string; functionName: string; args?: unknown }) => {
+        seen.push(q);
+        if (q.functionName === "aggregate3") return [nope, nope, addrWord(CASH.WETH), addrWord(COIN), feeWord];
+        return POOL.toUpperCase().replace("0X", "0x");
+      },
+    } as unknown as PublicClient);
+    assert.deepEqual(await probe(POOL), {
+      pons: false,
+      erc20: false,
+      pool: { token0: CASH.WETH.toLowerCase(), token1: COIN, canonical: POOL },
+    });
+    assert.equal(seen.length, 2);
+    assert.equal(seen[1]!.functionName, "getPool");
+    assert.equal(seen[1]!.address.toLowerCase(), UNISWAP.v3Factory.toLowerCase(), "the canonical factory, never one the address names");
+    assert.deepEqual(seen[1]!.args, [CASH.WETH.toLowerCase(), COIN, 10_000]);
+  });
+
+  it("the factory read failing is canonical null, and a half pool is no pool with no second read", async () => {
+    let reads = 0;
+    const failing = chainTokenProbe({
+      readContract: async (q: { functionName: string }) => {
+        reads++;
+        if (q.functionName === "aggregate3") return [nope, nope, addrWord(CASH.WETH), addrWord(COIN), feeWord];
+        throw new Error("rpc");
+      },
+    } as unknown as PublicClient);
+    assert.equal((await failing(POOL))?.pool?.canonical, null);
+    assert.equal(reads, 2);
+    for (const shape of [
+      [nope, nope, addrWord(CASH.WETH), addrWord(COIN), nope],
+      [nope, nope, addrWord(CASH.WETH), nope, feeWord],
+      [nope, nope, { success: true, returnData: `0x${"f".repeat(64)}` }, addrWord(COIN), feeWord],
+      [nope, nope, addrWord(CASH.WETH), addrWord(COIN), { success: true, returnData: `0x${(0x1000000).toString(16).padStart(64, "0")}` }],
+    ]) {
+      let n = 0;
+      const p = chainTokenProbe({ readContract: async () => { n++; return shape; } } as unknown as PublicClient);
+      assert.deepEqual(await p(POOL), { pons: false, erc20: false });
+      assert.equal(n, 1, "not pool-shaped: the factory is not asked");
+    }
+  });
+});
+
+describe("a chart link carries the POOL: the look resolves it to its coin on chain provenance, never a label", () => {
+  // GeckoTerminal /robinhood/pools/<POOL> and dexscreener.com/robinhood/<POOL>
+  // both put the pool's address in the message, and it is the only address
+  // there (detect.test.ts pins that extractCas reads it out of both).
+  const POOL = "0x0000000000000000000000000000000000000011";
+  const PAIR = "0x0000000000000000000000000000000000000012";
+  const OTHER = "0x00000000000000000000000000000000000d0222";
+  const WETH = CASH.WETH.toLowerCase();
+  const USDG = CASH.USDG.toLowerCase();
+  type Pool = TokenProbe["pool"];
+
+  /** POOL is WETH/COIN (GeckoTerminal's link), PAIR is COIN/USDG (DexScreener's): both canonical. */
+  function chart(over: Partial<CoinLookReaders> = {}, pools: Record<string, Pool> = {}) {
+    const shapes: Record<string, Pool> = {
+      [POOL]: { token0: WETH, token1: COIN, canonical: POOL },
+      [PAIR]: { token0: COIN, token1: USDG, canonical: PAIR },
+      ...pools,
+    };
+    const asked: string[] = [];
+    const h = readers({
+      // The index has no token page for a pool (a 404, read as an empty page).
+      tokenPools: async (a) => { asked.push(a); return a === COIN ? [gp()] : []; },
+      probe: async (a) => (shapes[a] ? { pons: false, erc20: false, pool: shapes[a] } : { pons: false, erc20: true }),
+      ...over,
+    });
+    return { ...h, asked };
+  }
+
+  it("a GeckoTerminal pool and a DexScreener pair are looked at as the coin they trade, and carry its address", async () => {
+    for (const posted of [POOL, PAIR]) {
+      const h = chart();
+      assert.deepEqual(await createCoinLook(h.r)(posted), { kind: "candidate", name: "FROGGY", address: COIN }, posted);
+      assert.deepEqual(h.asked, [posted, COIN], "the coin's own page decides, like any posted coin");
+    }
+    // Whatever the coin's look says is the answer, with the coin's address.
+    assert.deepEqual(await createCoinLook(chart({ tokenPools: async (a) => (a === COIN ? [gp({ volume24hUsd: 50_000 })] : []) }).r)(POOL), { kind: "too-quiet", name: "FROGGY", address: COIN });
+    const stock = STOCK_TOKENS[0]!;
+    assert.deepEqual(
+      await createCoinLook(chart({}, { [POOL]: { token0: stock.address.toLowerCase(), token1: USDG, canonical: POOL } }).r)(POOL),
+      { kind: "stock", name: stock.symbol, address: stock.address.toLowerCase() },
+    );
+  });
+
+  it("the coin's look is its own: the free checks run every time, and its cache serves the coin posted bare", async () => {
+    let held = false;
+    const h = chart({ held: (a) => (held && a === COIN ? { name: "FROGGY" } : null) });
+    const look = createCoinLook(h.r);
+    assert.equal((await look(POOL)).kind, "candidate");
+    held = true;
+    assert.deepEqual(await look(POOL), { kind: "held", name: "FROGGY", address: COIN }, "bought since: held through its chart link too");
+    held = false;
+    const asked = h.asked.length;
+    assert.deepEqual(await look(COIN), { kind: "candidate", name: "FROGGY" }, "the coin itself, posted bare, needs no address of its own");
+    assert.deepEqual(await look(POOL), { kind: "candidate", name: "FROGGY", address: COIN });
+    assert.equal(h.asked.length, asked, "both answered from the cache");
+  });
+
+  it("no cash side, cash on both sides, or a pool the canonical factory does not name: not-token, and the coin is never read", async () => {
+    const cases: Array<[string, Pool]> = [
+      ["two coins", { token0: COIN, token1: OTHER, canonical: POOL }],
+      ["USDG against WETH", { token0: USDG, token1: WETH, canonical: POOL }],
+      ["an impostor the factory does not name", { token0: WETH, token1: COIN, canonical: "0x0000000000000000000000000000000000000099" }],
+      ["no such pool at the factory", { token0: WETH, token1: COIN, canonical: `0x${"0".repeat(40)}` }],
+    ];
+    for (const [why, pool] of cases) {
+      // The index even labels the impostor as COIN's pool: a label is a claim, the factory is the proof.
+      const h = chart({ tokenPools: async (a) => { h.asked.push(a); return a === COIN ? [gp()] : [gp({ tokenAddress: COIN as `0x${string}` })]; } }, { [POOL]: pool });
+      assert.deepEqual(await createCoinLook(h.r)(POOL), { kind: "not-token" }, why);
+      assert.deepEqual(h.asked, [POOL], `${why}: the coin is never looked at`);
+    }
+  });
+
+  it("UNREADABLE IS NOT ABSENT: a failed factory read, or a coin that could not be looked at, is unknown and not cached", async () => {
+    let canonical: string | null = null;
+    const h = chart({ probe: async (a) => (a === POOL ? { pons: false, erc20: false, pool: { token0: WETH, token1: COIN, canonical } } : null) });
+    const look = createCoinLook(h.r);
+    assert.deepEqual(await look(POOL), { kind: "unknown" }, "the factory could not be asked");
+    canonical = POOL;
+    assert.deepEqual(await look(POOL), { kind: "candidate", name: "FROGGY", address: COIN }, "not cached: the next look can succeed");
+
+    let fail = true;
+    const g = chart({ tokenPools: async (a) => (a === COIN ? (fail ? null : [gp()]) : []) });
+    const again = createCoinLook(g.r);
+    assert.deepEqual(await again(POOL), { kind: "unknown" }, "the coin's page could not be read");
+    fail = false;
+    assert.deepEqual(await again(POOL), { kind: "candidate", name: "FROGGY", address: COIN });
+  });
+
+  it("the coin's look spends its own slot of the allowance; none left is unknown", async () => {
+    const h = chart();
+    const look = createCoinLook(h.r);
+    const addr = (i: number) => `0x${(0xc0de00 + i).toString(16).padStart(40, "0")}`;
+    for (let i = 0; i < COIN_LOOK.maxUncached - 1; i++) await look(addr(i));
+    assert.deepEqual(await look(POOL), { kind: "unknown" }, "the pool took the last slot, and the coin found none");
+    assert.ok(!h.asked.includes(COIN), "and read nothing");
+  });
+
+  it("one level only: a pool whose coin is itself pool-shaped is not a coin", async () => {
+    const h = chart({ tokenPools: async (a) => { h.asked.push(a); return []; } }, { [COIN]: { token0: WETH, token1: OTHER, canonical: COIN } });
+    assert.deepEqual(await createCoinLook(h.r)(POOL), { kind: "not-token", address: COIN });
+    assert.ok(!h.asked.includes(OTHER), "never followed a second time");
   });
 });
 
@@ -564,7 +722,7 @@ describe("index.ts wires the seams in the order that makes them safe", () => {
   });
 
   it("the child hands the service its one store and the port", () => {
-    assert.match(CODE, /const tgGroupsStore = TgGroupsStore\.open\(merrymenHome\(\)\);\n\s+const tgBook = new NominationBook\(tgGroupsStore\);/);
+    assert.match(CODE, /const tgGroupsStore = TgGroupsStore\.open\(merrymenHome\(\), \{ ownsForgets: !isHostedMode\(\) \}\);\n\s+const tgBook = new NominationBook\(tgGroupsStore\);/);
     const tg = CODE.slice(CODE.indexOf("startTelegram({"));
     assert.match(tg.slice(0, 4000), /\n\s+tgGroupsStore,\n\s+tgCoins,\n/);
   });

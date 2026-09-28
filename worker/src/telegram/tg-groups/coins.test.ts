@@ -806,6 +806,89 @@ describe("the quick look", () => {
   });
 });
 
+// ─── A chart link ──────────────────────────────────────────────────────────
+
+describe("a chart link carries the pool: the coin it trades is the coin", () => {
+  // The look (tg-coin-look.ts) proves a posted pool is a coin's canonical
+  // pool and says which coin; here the port just answers that way.
+  const POOL = ca(0xd1);
+  const PAIR = ca(0xd2);
+  const COIN_A = ca(0xe1);
+  const COIN_B = ca(0xe2);
+  const GECKO = `https://www.geckoterminal.com/robinhood/pools/${POOL}`;
+  const DEX = `https://dexscreener.com/robinhood/${PAIR}?maker=1`;
+  beforeEach(() => {
+    port!.looks.set(POOL, { kind: "candidate", name: "Froggy", address: COIN_A });
+    port!.looks.set(PAIR, { kind: "candidate", name: "Toady", address: COIN_B });
+  });
+
+  it("a GeckoTerminal pool link and a DexScreener pair link nominate the coin, remembered under the coin", async () => {
+    const flow = makeFlow();
+    for (const [id, text, pool, coin] of [
+      [600, `this one is sending ${GECKO}`, POOL, COIN_A],
+      [601, `look at this chart ${DEX}`, PAIR, COIN_B],
+    ] as const) {
+      spoken = [];
+      const r = await post(flow, CHAT, text, { id, from: BOB });
+      assert.equal(r.r, "handled");
+      assert.equal(port!.lookCalls.at(-1), pool, "the look is asked about what was posted");
+      assert.deepEqual(port!.nominations.at(-1), { address: coin, chatId: CHAT, messageId: id, senderId: BOB, atMs: clock });
+      assert.deepEqual(intents(), [{ kind: "coin-ack" }]);
+      assert.deepEqual(spoken[0]!.o.mention, { id: BOB, name: "bob" });
+      assert.equal(spoken[0]!.o.replyTo, id);
+      assert.equal(memoOf(coin)?.verdict, "candidate");
+      assert.equal(memoOf(coin)?.messageId, id);
+      assert.equal(memoOf(pool), undefined, "the pool is not a coin to remember");
+      const claims = store.room(CHAT)!.claims;
+      assert.ok(claims[`${id}:${pool}`] && claims[`${id}:${coin}`], "the post's pool, and its coin");
+    }
+    // The outcome for the coin reaches the chart link's post and its poster.
+    spoken = [];
+    await flow.onOutcome({ kind: "bought", address: COIN_A, chatId: CHAT, messageId: 600, paper: true, decisionId: "d-1", notes: [] });
+    assert.deepEqual(intents(), [{ kind: "coin-bought", paper: true, notes: [] }]);
+    assert.equal(spoken[0]!.o.replyTo, 600);
+    assert.deepEqual(spoken[0]!.o.mention, { id: BOB, name: "bob" });
+  });
+
+  it("the coin posted beside its own chart link is one coin: one nomination, one line, either order", async () => {
+    const flow = makeFlow();
+    await post(flow, CHAT, `${COIN_A} chart ${GECKO}`, { id: 610 });
+    await post(flow, CHAT, `${DEX} ca ${COIN_B}`, { id: 611 });
+    assert.deepEqual(port!.nominations.map((n) => [n.address, n.messageId]), [[COIN_A, 610], [COIN_B, 611]]);
+    assert.deepEqual(intents(), [{ kind: "coin-ack" }, { kind: "coin-ack" }]);
+    assert.deepEqual(port!.lookCalls, [COIN_A, POOL, PAIR], "the coin claimed through its pool is not looked at again");
+  });
+
+  it("a repost of the coin, or of its chart link, is answered from memory", async () => {
+    const flow = makeFlow();
+    await post(flow, CHAT, `sending ${GECKO}`, { id: 620 });
+    await flow.onOutcome({ kind: "passed", address: COIN_A, chatId: CHAT, messageId: 620, decisionId: "d-1", notes: [] });
+    spoken = [];
+
+    clock += 2 * HOUR;
+    await post(flow, CHAT, `${COIN_A} again`, { from: BOB });
+    assert.deepEqual(intents(), [{ kind: "coin-seen", verdict: "passed" }]);
+    assert.deepEqual(port!.lookCalls, [POOL], "the coin itself: no new look");
+
+    clock += 2 * HOUR;
+    await post(flow, CHAT, `still sending ${GECKO}`, { from: BOB });
+    assert.deepEqual(intents(), [{ kind: "coin-seen", verdict: "passed" }, { kind: "coin-seen", verdict: "passed" }]);
+    assert.equal(port!.nominations.length, 1, "never nominated twice");
+    assert.equal(memoOf(COIN_A)!.byId, ANN, "the memo still names who posted it first");
+  });
+
+  it("a look that names no coin, or not a well-formed one, keeps the posted address", async () => {
+    port!.looks.set(POOL, { kind: "not-token" });
+    port!.looks.set(PAIR, { kind: "too-thin", address: "0x1234" });
+    const flow = makeFlow();
+    await post(flow, CHAT, GECKO);
+    await post(flow, CHAT, DEX);
+    assert.equal(memoOf(POOL)?.verdict, "not-token");
+    assert.equal(memoOf(PAIR)?.verdict, "too-thin");
+    assert.equal(port!.nominations.length, 0);
+  });
+});
+
 // ─── Nominating ────────────────────────────────────────────────────────────
 
 describe("nominating", () => {

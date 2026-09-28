@@ -173,6 +173,13 @@ export interface CoinLook {
   kind: CoinKind;
   /** Casual display name (coinDisplayName) or a stock ticker; never address-shaped. */
   name?: string;
+  /**
+   * The coin the look is about, lowercased 0x + 40 hex, when that is NOT the
+   * address it was asked about: a chart link carries the POOL, and the look
+   * resolved it to the token that pool trades (canonical-factory provenance,
+   * tg-coin-look.ts). Absent means the posted address is the coin.
+   */
+  address?: string;
 }
 
 /** A nomination request. Nothing else crosses into trading. */

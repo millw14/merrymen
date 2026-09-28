@@ -23,8 +23,8 @@
  * NAMING: the web room's name never appears in code here (see
  * worker/src/groupchat/boundary.test.ts). This is "Telegram groups".
  */
-import type { PublicClient } from "viem";
-import { CASH, STOCK_TOKENS, isEnergyReserveToken } from "../../packages/core/src/index";
+import { parseAbi, type PublicClient } from "viem";
+import { CASH, STOCK_TOKENS, UNISWAP, isEnergyReserveToken } from "../../packages/core/src/index";
 import type { BrainDecision } from "./brain-client";
 import { coinDisplayName } from "./coin-name";
 import { PONS_CURVE_DEX } from "./discovery";
@@ -54,7 +54,9 @@ export const COIN_LOOK = {
    * it the answer is `unknown` ("can't get a proper look rn"). Six in ten
    * minutes is a busy group's worth of fresh coins, and at most ~6 GeckoTerminal
    * slots and ~6 batched RPC requests against a governor the stop-loss tick
-   * shares — a price worth paying for chatter, and no more.
+   * shares — a price worth paying for chatter, and no more. A chart link is
+   * two looks (the pool, then the coin it trades), and the pool's costs one
+   * read more (the factory's getPool).
    */
   maxUncached: 6,
   windowMs: 10 * MIN,
@@ -71,6 +73,14 @@ export interface TokenProbe {
   pons: boolean;
   /** Answers `decimals()` with a uint8 — an ERC-20, or something shaped like one. */
   erc20: boolean;
+  /**
+   * Answers `token0()`, `token1()` and `fee()` the way a Uniswap v3 pool does:
+   * its two tokens, lowercased, and `canonical`, the pool the CANONICAL v3
+   * factory (UNISWAP.v3Factory) names for those two tokens at that fee,
+   * lowercased — null when that read failed. Absent when the address is not
+   * shaped like a pool.
+   */
+  pool?: { token0: string; token1: string; canonical: string | null };
 }
 
 /**
@@ -115,6 +125,10 @@ function displayName(address: string, pools: readonly GeckoPool[]): string | und
 }
 
 const UNKNOWN: CoinLook = Object.freeze({ kind: "unknown" });
+const NOT_TOKEN: CoinLook = Object.freeze({ kind: "not-token" });
+
+/** The quote side a pool must have to be a coin's pool — discovery's own rule (trencher-discovery.ts). */
+const CASH_SIDES: ReadonlySet<string> = new Set([CASH.USDG.toLowerCase(), CASH.WETH.toLowerCase()]);
 
 /**
  * THE QUICK LOOK — `(address) => CoinLook`, cheapest first.
@@ -131,7 +145,23 @@ const UNKNOWN: CoinLook = Object.freeze({ kind: "unknown" });
  *    depth or size → `too-thin`, on age → `too-new`; else `candidate`.
  * 5. No pool known: local curve provenance, then ONE getCode read (batched
  *    with one multicall probe): no code → `wallet`; a Pons template →
- *    `curve`; an ERC-20 → `no-pool`; anything else → `not-token`.
+ *    `curve`; an ERC-20 → `no-pool`; a Uniswap v3 pool → step 6; anything
+ *    else → `not-token`.
+ * 6. A CHART LINK CARRIES THE POOL. A GeckoTerminal `/pools/…` or DexScreener
+ *    pair link is how most coins get posted, and the only address in it is
+ *    the pool's. The index has no token page for a pool, so it lands here.
+ *    It is looked at as the coin it trades only when that is PROVEN on chain:
+ *    exactly one side is USDG or WETH, and the canonical v3 factory's
+ *    `getPool(token0, token1, fee)` is this very address. Then the answer is
+ *    the look at the OTHER token, carrying that token's `address` so the chat
+ *    side remembers and nominates the coin, never the pool. A pool of two
+ *    coins, or one the factory does not name, stays `not-token`; a factory
+ *    read that failed is `unknown`. The index's labels never resolve
+ *    anything: the address is the identity, and a label is a claim about it.
+ *    The coin's look is a look of its own — the free checks, its own cache,
+ *    and its own slot of the allowance — and a pool is remembered only as
+ *    WHICH coin it trades, so a coin bought since is `held` through its chart
+ *    link too.
  *
  * UNREADABLE IS NOT ABSENT. A page, a getCode or a probe that could not be
  * read is `unknown` — never `wallet` (viem's undefined-for-no-code conflation,
@@ -166,7 +196,34 @@ export function createCoinLook(d: CoinLookReaders): (address: string) => Promise
     return null;
   };
 
-  const read = async (a: `0x${string}`): Promise<CoinLook> => {
+  /**
+   * The coin's look, as the answer about the pool that trades it. One level
+   * only: a coin that is itself resolved to something else is not a coin.
+   */
+  const asToken = (token: string, l: CoinLook): CoinLook => {
+    if (l.kind === "unknown") return UNKNOWN;
+    if (l.address !== undefined) return NOT_TOKEN;
+    return { ...l, address: token };
+  };
+
+  /** Step 6: the coin a canonical v3 pool against USDG or WETH trades, looked at in its place. */
+  const poolLook = async (a: string, p: NonNullable<TokenProbe["pool"]>): Promise<CoinLook> => {
+    const t0 = typeof p.token0 === "string" ? p.token0.toLowerCase() : "";
+    const t1 = typeof p.token1 === "string" ? p.token1.toLowerCase() : "";
+    const cash0 = CASH_SIDES.has(t0);
+    // Exactly one cash side: two coins, or USDG against WETH, is not a coin's pool.
+    if (cash0 === CASH_SIDES.has(t1)) return NOT_TOKEN;
+    const token = cash0 ? t1 : t0;
+    if (!isCaAddress(token) || token === ZERO_ADDRESS || token === a) return NOT_TOKEN;
+    // Provenance: a contract answering token0/token1/fee proves nothing by
+    // itself, anyone can deploy one. The canonical factory naming THIS address
+    // for that pair and fee is what makes it that coin's pool.
+    if (typeof p.canonical !== "string") return UNKNOWN;
+    if (p.canonical.toLowerCase() !== a) return NOT_TOKEN;
+    return asToken(token, await lookAt(token, 1));
+  };
+
+  const read = async (a: `0x${string}`, depth: number): Promise<CoinLook> => {
     const pools = await d.tokenPools(a);
     if (pools === null) return UNKNOWN;
     const mine = pools.filter((p) => p.tokenAddress.toLowerCase() === a);
@@ -181,36 +238,49 @@ export function createCoinLook(d: CoinLookReaders): (address: string) => Promise
     if (typeof code.c !== "string" || code.c === "0x" || code.c === "") return { kind: "wallet" };
     if (probe === null) return UNKNOWN;
     if (probe.pons) return { kind: "curve" };
-    return { kind: probe.erc20 ? "no-pool" : "not-token" };
+    if (probe.erc20) return { kind: "no-pool" };
+    if (depth === 0 && probe.pool) return poolLook(a, probe.pool);
+    return NOT_TOKEN;
+  };
+
+  /** Steps 1–6 for one lowercased, well-formed address. `depth` 1 is a pool's coin, which never resolves again. */
+  const lookAt = async (a: string, depth: number): Promise<CoinLook> => {
+    const quick = free(a);
+    if (quick) return quick;
+    const t = now();
+    const hit = cache.get(a);
+    if (hit && t - hit.at < COIN_LOOK.cacheMs) {
+      // A pool is remembered as the coin it trades, and that coin is looked
+      // at afresh: free checks first, then its own cache.
+      const token = hit.look.address;
+      if (token === undefined) return hit.look;
+      return depth === 0 ? asToken(token, await lookAt(token, 1)) : NOT_TOKEN;
+    }
+    if (hit) cache.delete(a);
+    const joining = pending.get(a);
+    if (joining) return await joining;
+    started = started.filter((s) => t - s < COIN_LOOK.windowMs);
+    if (started.length >= COIN_LOOK.maxUncached) return UNKNOWN;
+    started.push(t);
+    const job = read(a as `0x${string}`, depth)
+      .catch(() => UNKNOWN)
+      .then((look) => {
+        if (look.kind !== "unknown") {
+          if (cache.size >= COIN_LOOK.cacheMax) cache.delete(cache.keys().next().value!);
+          cache.set(a, { look, at: now() });
+        }
+        return look;
+      })
+      .finally(() => pending.delete(a));
+    pending.set(a, job);
+    return await job;
   };
 
   return async (address: string): Promise<CoinLook> => {
     try {
       const a = typeof address === "string" ? address.toLowerCase() : "";
       if (!isCaAddress(a) || a === ZERO_ADDRESS) return UNKNOWN;
-      const quick = free(a);
-      if (quick) return quick;
-      const t = now();
-      const hit = cache.get(a);
-      if (hit && t - hit.at < COIN_LOOK.cacheMs) return hit.look;
-      if (hit) cache.delete(a);
-      const joining = pending.get(a);
-      if (joining) return await joining;
-      started = started.filter((s) => t - s < COIN_LOOK.windowMs);
-      if (started.length >= COIN_LOOK.maxUncached) return UNKNOWN;
-      started.push(t);
-      const job = read(a as `0x${string}`)
-        .catch(() => UNKNOWN)
-        .then((look) => {
-          if (look.kind !== "unknown") {
-            if (cache.size >= COIN_LOOK.cacheMax) cache.delete(cache.keys().next().value!);
-            cache.set(a, { look, at: now() });
-          }
-          return look;
-        })
-        .finally(() => pending.delete(a));
-      pending.set(a, job);
-      return await job;
+      return await lookAt(a, 0);
     } catch {
       return UNKNOWN;
     }
@@ -256,32 +326,74 @@ function classifyPools(a: string, mine: readonly GeckoPool[], nowSec: number): C
 const PONS_METADATA_SELECTOR = "0xabb1dc44" as const;
 /** ERC-20 `decimals()`. */
 const DECIMALS_SELECTOR = "0x313ce567" as const;
+/** Uniswap v3 pool `token0()`, `token1()`, `fee()`. */
+const TOKEN0_SELECTOR = "0x0dfe1681" as const;
+const TOKEN1_SELECTOR = "0xd21220a7" as const;
+const FEE_SELECTOR = "0xddca3f43" as const;
+
+const V3_FACTORY_ABI = parseAbi(["function getPool(address a,address b,uint24 fee) view returns (address)"]);
+
+type SubCall = { success: boolean; returnData: `0x${string}` } | undefined;
+
+/** One ABI word, when the sub-call answered exactly one. */
+function word(r: SubCall): bigint | null {
+  if (!r?.success || !/^0x[0-9a-f]{64}$/i.test(r.returnData)) return null;
+  try {
+    return BigInt(r.returnData);
+  } catch {
+    return null;
+  }
+}
+
+/** An `address` return: one word with nothing above its low 20 bytes, and not zero. */
+function wordAddress(r: SubCall): `0x${string}` | null {
+  const w = word(r);
+  if (w === null || w === 0n || w >> 160n !== 0n) return null;
+  return `0x${w.toString(16).padStart(40, "0")}`;
+}
 
 /**
  * The probe `createCoinLook` wants, over the chain: ONE Multicall3 aggregate3
- * with two sub-calls, so "is it a Pons coin" and "is it a token at all" cost one
- * eth_call. aggregate3 returns [] when the batch itself failed, which is the
- * one answer that means "could not read" — a sub-call that reverts is an
- * ordinary "no".
+ * with five sub-calls, so "is it a Pons coin", "is it a token at all" and "is
+ * it a Uniswap v3 pool" cost one eth_call. aggregate3 returns [] when the
+ * batch itself failed, which is the one answer that means "could not read" — a
+ * sub-call that reverts is an ordinary "no".
+ *
+ * Only for an address that answered like a pool, ONE more read: what the
+ * canonical v3 factory (UNISWAP.v3Factory, the factory trencher-vault.ts pins)
+ * says the pool for those two tokens at that fee is. That read failing is
+ * `canonical: null` — unknown to the look, never "not that coin's pool".
  */
 export function chainTokenProbe(client: PublicClient): (address: `0x${string}`) => Promise<TokenProbe | null> {
   return async (address) => {
     const r = await aggregate3(client, [
       { target: address, callData: PONS_METADATA_SELECTOR },
       { target: address, callData: DECIMALS_SELECTOR },
+      { target: address, callData: TOKEN0_SELECTOR },
+      { target: address, callData: TOKEN1_SELECTOR },
+      { target: address, callData: FEE_SELECTOR },
     ]);
-    if (r.length !== 2) return null;
+    if (r.length !== 5) return null;
     const pons = !!r[0]?.success && parseTokenMeta(address, r[0].returnData) !== null;
-    const dec = r[1];
-    let erc20 = false;
-    if (dec?.success && /^0x[0-9a-f]{64}$/i.test(dec.returnData)) {
-      try {
-        erc20 = BigInt(dec.returnData) <= 255n;
-      } catch {
-        erc20 = false;
-      }
+    const dec = word(r[1]);
+    const erc20 = dec !== null && dec <= 255n;
+    const token0 = wordAddress(r[2]);
+    const token1 = wordAddress(r[3]);
+    const fee = word(r[4]);
+    if (token0 === null || token1 === null || fee === null || fee > 0xffffffn) return { pons, erc20 };
+    let canonical: string | null = null;
+    try {
+      const got: unknown = await client.readContract({
+        address: UNISWAP.v3Factory as `0x${string}`,
+        abi: V3_FACTORY_ABI,
+        functionName: "getPool",
+        args: [token0, token1, Number(fee)],
+      });
+      canonical = typeof got === "string" && /^0x[0-9a-f]{40}$/i.test(got) ? got.toLowerCase() : null;
+    } catch {
+      canonical = null;
     }
-    return { pons, erc20 };
+    return { pons, erc20, pool: { token0, token1, canonical } };
   };
 }
 

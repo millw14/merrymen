@@ -588,6 +588,7 @@ describe("trading never receives message text", () => {
     "tg-coin-look.ts": [
       "TokenProbe.pons: boolean",
       "TokenProbe.erc20: boolean",
+      "TokenProbe.pool?: { token0: string; token1: string; canonical: string | null }",
       "CoinLookReaders.own: () => readonly string[]",
       "CoinLookReaders.held: (address: string) => { name?: string | null } | null",
       "CoinLookReaders.tokenPools: (address: string) => Promise<GeckoPool[] | null>",
