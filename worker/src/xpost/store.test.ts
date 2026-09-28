@@ -401,3 +401,16 @@ test("every statement the store sends translates to Postgres with matching, bind
     }
   }
 });
+
+test("the zone the owner consented from is kept, and a consent without one keeps the last", async (t) => {
+  const { db } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "robin_trades", tokens: TOKENS, nowMs: 1 });
+  assert.equal((await getAccount(db, OWNER_A))?.tz, null);
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111", tz: "Europe/Paris" }, 2);
+  assert.equal((await getAccount(db, OWNER_A))?.tz, "Europe/Paris");
+  await setPosting(db, OWNER_A, { enabled: false }, 3);
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111", tz: null }, 4);
+  assert.equal((await getAccount(db, OWNER_A))?.tz, "Europe/Paris", "no zone this time is not a new zone");
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111", tz: "Asia/Tokyo" }, 5);
+  assert.equal((await getAccount(db, OWNER_A))?.tz, "Asia/Tokyo");
+});

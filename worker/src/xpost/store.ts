@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS xpost_accounts (
   posting_enabled INTEGER NOT NULL DEFAULT 0,
   consent_at_ms INTEGER,
   consent_x_user_id TEXT,                  -- the account named in the warning the owner confirmed
+  tz TEXT,                                 -- the zone the owner consented from, for quiet hours
   status TEXT NOT NULL DEFAULT 'ok',       -- ok or revoked
   updated_at_ms INTEGER NOT NULL
 );
@@ -221,6 +222,13 @@ export interface XAccount {
   connectedAtMs: number;
   consentAtMs: number | null;
   consentXUserId: string | null;
+  /**
+   * THE ZONE THE OWNER CONSENTED FROM (an IANA name the web or the app read off
+   * the device when the owner turned posting on), or null. The quiet-hours
+   * fallback when the room has no zone for this owner: without it, an owner
+   * the room never met is never asleep, and their account posts at 4am.
+   */
+  tz: string | null;
   status: AccountStatus;
   updatedAtMs: number;
   /**
@@ -234,7 +242,7 @@ export interface XAccount {
 
 const ACCOUNT_COLUMNS =
   "tenant, x_user_id, username, access_expires_at_ms, scope, version, connected_at_ms, posting_enabled, " +
-  "consent_at_ms, consent_x_user_id, status, updated_at_ms";
+  "consent_at_ms, consent_x_user_id, tz, status, updated_at_ms";
 
 interface AccountRow {
   tenant: unknown;
@@ -247,6 +255,7 @@ interface AccountRow {
   posting_enabled: unknown;
   consent_at_ms: unknown;
   consent_x_user_id: unknown;
+  tz: unknown;
   status: unknown;
   updated_at_ms: unknown;
 }
@@ -266,6 +275,7 @@ function accountOf(r: AccountRow): XAccount {
     connectedAtMs: num(r.connected_at_ms),
     consentAtMs: r.consent_at_ms === null || r.consent_at_ms === undefined ? null : num(r.consent_at_ms),
     consentXUserId,
+    tz: strOrNull(r.tz),
     status,
     updatedAtMs: num(r.updated_at_ms),
     posting: enabled && status === "ok" && xUserId !== "" && consentXUserId === xUserId,
@@ -359,11 +369,16 @@ export async function upsertAccount(
  * if the connected account is no longer that one, nothing changes and the
  * answer is false, so the owner is shown the new account before it can post.
  * Turning it off always works, and cancels every drafted post.
+ *
+ * `tz` is the zone the device reported when the owner confirmed — already
+ * validated by the caller (a canonical IANA name, and never a placeless one
+ * like UTC that a privacy browser reports for everybody), or null to keep
+ * whatever was stored before.
  */
 export async function setPosting(
   db: Db,
   tenant: string,
-  change: { enabled: true; xUserId: string } | { enabled: false },
+  change: { enabled: true; xUserId: string; tz?: string | null } | { enabled: false },
   nowMs: number,
 ): Promise<boolean> {
   const key = tenantKey(tenant);
@@ -371,10 +386,11 @@ export async function setPosting(
     const r = await db
       .prepare(
         `UPDATE xpost_accounts
-            SET posting_enabled = 1, consent_at_ms = ?, consent_x_user_id = x_user_id, updated_at_ms = ?
+            SET posting_enabled = 1, consent_at_ms = ?, consent_x_user_id = x_user_id,
+                tz = COALESCE(?, tz), updated_at_ms = ?
           WHERE tenant = ? AND x_user_id = ? AND status = 'ok'`,
       )
-      .run(int(nowMs), int(nowMs), key, change.xUserId);
+      .run(int(nowMs), typeof change.tz === "string" && change.tz !== "" ? change.tz : null, int(nowMs), key, change.xUserId);
     return r.changes === 1;
   }
   return db.tx(async (tx) => {
