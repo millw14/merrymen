@@ -237,6 +237,9 @@ struct NativeShell: View {
             tourProgress.settle(store)
         }
         .onChange(of: phase) { _, phase in if phase == .active { Task { await tourProgress.sync(store) } } }
+        .onChange(of: store.tab) { old, new in TourProbe.log("tab \(old) -> \(new) active=\(tourProgress.active)") }
+        .onChange(of: store.generation) { old, new in TourProbe.log("generation \(old) -> \(new) active=\(tourProgress.active)") }
+        .onChange(of: tourProgress.active) { _, active in TourProbe.log("overlay active=\(active)") }
         .environmentObject(tourProgress)
         .sensoryFeedback(.selection, trigger: store.likes)
         .sensoryFeedback(.selection, trigger: store.following)

@@ -135,6 +135,27 @@ final class MerrymenUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["slow day on the charts. honestly the quiet ones are when i learn the most."].exists)
         XCTAssertFalse(app.alerts["Merrymen"].exists)
     }
+    // TEMPORARY diagnostics for the iOS 18 lost-tab-tap failure. Remove before merging.
+    private func diagSkipThenChat(_ arguments: [String], wait: TimeInterval = 0) -> Bool {
+        let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-reset-tour", "-reset-chat"] + arguments; app.launch()
+        XCTAssertTrue(app.buttons["Skip tour"].waitForExistence(timeout: 8)); app.buttons["Skip tour"].tap()
+        if wait > 0 { Thread.sleep(forTimeInterval: wait) }
+        app.tabBars.buttons["Chat"].tap()
+        return app.textFields["Message your agent"].waitForExistence(timeout: 5)
+    }
+    func testDiag1SignedInSkipThenChatImmediately() { XCTAssertTrue(diagSkipThenChat(["-signed-in"])) }
+    func testDiag2SignedInSkipThenChatAfterThreeSeconds() { XCTAssertTrue(diagSkipThenChat(["-signed-in"], wait: 3)) }
+    func testDiag3SignedInNoTapGestureSkipThenChatImmediately() { XCTAssertTrue(diagSkipThenChat(["-signed-in", "-tour-no-tap-gesture"])) }
+    func testDiag4GuestSkipThenChatImmediately() { XCTAssertTrue(diagSkipThenChat([])) }
+    private func diagTabTapDuringTour(_ arguments: [String]) {
+        let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-signed-in", "-reset-tour"] + arguments; app.launch()
+        XCTAssertTrue(app.buttons["Skip tour"].waitForExistence(timeout: 8))
+        app.tabBars.buttons["Chat"].tap()
+        XCTAssertFalse(app.textFields["Message your agent"].waitForExistence(timeout: 3), "a tab tap reached the app through the tour")
+        XCTAssertTrue(app.buttons["Skip tour"].exists)
+    }
+    func testDiag5TapGestureBlocksTabsDuringTour() { diagTabTapDuringTour([]) }
+    func testDiag6NoTapGestureStillBlocksTabsDuringTour() { diagTabTapDuringTour(["-tour-no-tap-gesture"]) }
     /// A SwiftUI Toggle's element spans its label; only the switch itself flips it.
     private func flip(_ toggle: XCUIElement) {
         toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()

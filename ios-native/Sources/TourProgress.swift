@@ -52,11 +52,14 @@ final class TourProgress: ObservableObject {
         replaying = replay
         if replay { record.step = 0; save() }
         active = true
+        TourProbe.log("begin generation=\(store.generation) owner=\(store.owner ?? "nil") tab=\(store.tab)")
+        TourProbe.sample("begin", after: [0.5])
     }
     /// The first read can run before the session loads and start the tour for
     /// a "new" guest; once the account's record says it is done, close an
     /// automatic tour without recording anything. A replay stays open.
     func settle(_ store: AppStore) {
+        TourProbe.log("settle generation=\(store.generation) owner=\(store.owner ?? "nil") done=\(done) active=\(active)")
         if done { if active && !replaying { restore(store); active = false } }
         else { begin(store, replay: false) }
     }
@@ -65,6 +68,8 @@ final class TourProgress: ObservableObject {
         origin = nil
     }
     func finish(_ store: AppStore) {
+        TourProbe.log("finish generation=\(store.generation) owner=\(store.owner ?? "nil") active=\(active) tab=\(store.tab)")
+        TourProbe.sample("finish", after: [0, 0.1, 0.3, 0.6, 1, 2, 4])
         if active { restore(store) }
         active = false; replaying = false
         record.done = true; record.pending = tenant != nil; save()

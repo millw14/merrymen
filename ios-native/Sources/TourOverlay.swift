@@ -93,9 +93,15 @@ struct TourOverlay: View {
                 .map { $0.offsetBy(dx: -origin.x, dy: -origin.y).insetBy(dx: -8, dy: -8) }
                 .flatMap { $0.intersects(CGRect(origin: .zero, size: size)) ? $0 : nil }
             ZStack(alignment: .topLeading) {
-                Spotlight(hole: target).fill(Color.black.opacity(stop.place == nil ? 0.78 : 0.62), style: FillStyle(eoFill: true))
-                    .contentShape(Rectangle()).onTapGesture {}
-                    .accessibilityHidden(true)
+                if TourProbe.noTapGesture {
+                    Spotlight(hole: target).fill(Color.black.opacity(stop.place == nil ? 0.78 : 0.62), style: FillStyle(eoFill: true))
+                        .contentShape(Rectangle())
+                        .accessibilityHidden(true)
+                } else {
+                    Spotlight(hole: target).fill(Color.black.opacity(stop.place == nil ? 0.78 : 0.62), style: FillStyle(eoFill: true))
+                        .contentShape(Rectangle()).onTapGesture {}
+                        .accessibilityHidden(true)
+                }
                 if let target {
                     RoundedRectangle(cornerRadius: 16).strokeBorder(Brand.accent, lineWidth: 2)
                         .shadow(color: Brand.accent.opacity(0.6), radius: 10)
