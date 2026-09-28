@@ -804,6 +804,24 @@ export async function postsOf(db: Db, tenant: string, sinceMs: number, limit = 1
 }
 
 /**
+ * EVERY INTRO ONE OWNER EVER WROTE FOR ONE X ACCOUNT, oldest first, any status
+ * and any age — the first hello's key and each redraft's. Whether the hello
+ * has been dealt with is a fact about the account's whole history, not about
+ * the last few days the planner otherwise weighs.
+ */
+export async function introPostsOf(db: Db, tenant: string, xUserId: string): Promise<XPost[]> {
+  const rows = (await db
+    .prepare(
+      `SELECT ${POST_COLUMNS} FROM xpost_posts
+        WHERE tenant = ? AND x_user_id = ? AND kind = 'intro'
+        ORDER BY created_at_ms, id
+        LIMIT 100`,
+    )
+    .all(tenantKey(tenant), String(xUserId))) as PostRow[];
+  return rows.map(postOf);
+}
+
+/**
  * Bodies that went out, or are about to, since `sinceMs`, newest first —
  * every account's when `tenant` is null. What a new draft must not repeat: its
  * own account's history, and the fleet's (X: never "identical or substantially

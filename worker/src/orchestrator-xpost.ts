@@ -45,7 +45,7 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp } from "./xpost/client";
 import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { coinOf, hash32, introKey, planPosts, sendDecision, type PlanClock, type PlanIntent } from "./xpost/planner";
+import { coinOf, hash32, planPosts, sendDecision, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, sendOne } from "./xpost/sender";
 import {
   cancelPost,
@@ -54,7 +54,7 @@ import {
   ensureXpostSchema,
   failInterrupted,
   getAccount,
-  keyStatus,
+  introPostsOf,
   postingAccounts,
   postsOf,
   readMeta,
@@ -492,14 +492,14 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           continue;
         }
         const posts = await postsOf(shared, account.tenant, nowMs - PLAN_HISTORY_MS, 200);
-        const introStatus = await keyStatus(shared, introKey(account.tenant, account.xUserId));
+        const intros = await introPostsOf(shared, account.tenant, account.xUserId);
         const intents = planPosts({
           tenant: account.tenant,
           account,
           tz: z.tz,
           nowMs,
           clock: PLAN_CLOCK,
-          introStatus,
+          intros,
           posts,
           calls: f.calls,
           perDay,
@@ -621,7 +621,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     }
     if (!body && intent.kind === "intro") {
       for (let attempt = 0; attempt < TEMPLATE_TRIES && !body; attempt++) {
-        const text = introTemplate({ agentName: f.name, mode: f.mode, style: facts.style }, seeded(`intro|${account.tenant}|${account.xUserId}|${attempt}`));
+        // A redraft rolls fresh dice: the draw that was refused last time is not drawn again.
+        const redraft = intent.attempt > 0 ? `|redraft-${intent.attempt}` : "";
+        const text = introTemplate({ agentName: f.name, mode: f.mode, style: facts.style }, seeded(`intro|${account.tenant}|${account.xUserId}|${attempt}${redraft}`));
         const v = admitXPost(text, gate, BASE_GATE);
         if (v.ok) body = v.text;
         else reason = `template:${v.reason}`;

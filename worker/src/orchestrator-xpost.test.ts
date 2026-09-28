@@ -393,6 +393,29 @@ describe("one step after another", () => {
     for (const secret of ["pepe", "curve", "Pine", "access-token", "refresh-token", "gsk_x"]) assert.ok(!said.includes(secret), `the log says ${secret}`);
   });
 
+  it("a hello cancelled by switching off and on is drafted again, and still goes out before any coin post", async (t) => {
+    const w = await world(t, T0);
+    const p = poster(w, { calls: [call({ decisionId: "d-pepe", atSec: (T0 + 5 * MIN) / 1000 })] });
+    await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+    assert.equal(await store.keyStatus(w.db, `intro:${TENANT}:111`), "scheduled");
+    // Off inside the review window cancels the hello; on again is a new consent.
+    await store.setPosting(w.db, TENANT, { enabled: false }, T0 + 3 * MIN);
+    await store.setPosting(w.db, TENANT, { enabled: true, xUserId: "111" }, T0 + 4 * MIN);
+    await p.step(w.db, ROSTER, new Map(), T0 + 6 * MIN);
+    let r = await rows(w);
+    assert.deepEqual(r.map((x) => [x.dedupeKey, x.status, x.reason]), [
+      [`intro:${TENANT}:111`, "cancelled", "turned-off"],
+      [`intro:${TENANT}:111:1`, "scheduled", null],
+    ]);
+    assert.equal(r[1]?.dueAtMs, T0 + 16 * MIN);
+    await p.step(w.db, ROSTER, new Map(), T0 + 16 * MIN);
+    r = await rows(w);
+    const buy = r.find((x) => x.kind === "buy");
+    assert.ok(buy, "the buy is planned only once the hello is out");
+    await p.step(w.db, ROSTER, new Map(), buy.dueAtMs);
+    assert.deepEqual(w.tweets, [INTRO, BUY], "the hello first, then the coin");
+  });
+
   it("without a model, the intro comes from the template pool, and nothing else is planned", async (t) => {
     const w = await world(t, T0);
     const p = poster(w, { creds: null, calls: [call({ decisionId: "d-pepe", atSec: (T0 + 2 * MIN) / 1000 })] });

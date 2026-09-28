@@ -19,6 +19,7 @@ import {
   ensureXpostSchema,
   failInterrupted,
   getAccount,
+  introPostsOf,
   keyStatus,
   markFailed,
   markPosted,
@@ -317,6 +318,20 @@ test("the orchestrator cancels a scheduled post whose account moved on, and noth
   assert.equal(await cancelPost(db, claimed, "account-gone", 5), false, "a claimed post is the sender's to finish");
 });
 
+test("every intro one owner wrote for one X account, any status and any age, oldest first", async (t) => {
+  const { db } = await open(t);
+  const base = `intro:${OWNER_A.toLowerCase()}:111`;
+  await schedulePost(db, post({ kind: "intro", dedupeKey: base, nowMs: 10, status: "skipped", reason: "template:echo" }));
+  await schedulePost(db, post({ kind: "intro", dedupeKey: `${base}:1`, nowMs: 20 }));
+  await schedulePost(db, post({ kind: "intro", dedupeKey: `intro:${OWNER_A.toLowerCase()}:222`, xUserId: "222", nowMs: 30 }));
+  await schedulePost(db, post({ kind: "intro", dedupeKey: `intro:${OWNER_B}:111`, tenant: OWNER_B, nowMs: 40 }));
+  await schedulePost(db, post({ kind: "casual", nowMs: 50 }));
+  assert.deepEqual((await introPostsOf(db, OWNER_A, "111")).map((p) => [p.dedupeKey, p.status]), [
+    [base, "skipped"],
+    [`${base}:1`, "scheduled"],
+  ]);
+});
+
 test("recent bodies: one account's, or the fleet's, never the ones that did not go out", async (t) => {
   const { db } = await open(t);
   await schedulePost(db, post({ dedupeKey: "a1", body: "one", nowMs: 10 }));
@@ -395,6 +410,7 @@ test("every statement the store sends translates to Postgres with matching, bind
   await ownerCancel(db, OWNER_A, id, 12.5);
   await failInterrupted(db, 13.5, 13.5);
   await postsOf(db, OWNER_A, 0.5, 20.5);
+  await introPostsOf(db, OWNER_A, "111");
   await recentBodies(db, { tenant: OWNER_A, sinceMs: 0.5, limit: 5.5 });
   await recentBodies(db, { tenant: null, sinceMs: 0.5, limit: 5.5 });
   await countPostedSince(db, 0.5);
