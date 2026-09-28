@@ -38,6 +38,7 @@ import { basisUsdg } from "../basis-usdg";
 import { readCostFromQuote } from "../desk-positions";
 import { distinctTrades, OP_COPY_REACH_SEC } from "../distinct-trades";
 import { drawdownBps, growthIndex } from "../growth-index";
+import { heldSql } from "../held-marks";
 import { OP_KEY, readEvidencedSells } from "../profile-trades";
 import { readAgentRow } from "./agent-status";
 
@@ -1224,19 +1225,46 @@ async function bookPerformance(db: Db, scope: LedgerScope, book: Book, w: Window
   // valuation before it (else its first inside it), as the worker's
   // periodChange does; a RUN period opens inside itself. Neither opens from a
   // mark of an earlier run.
-  const close = await markAt(db, scope, book, "at <= ?", "DESC", w.until);
-  if (!close) return out;
+  //
+  // MEASURED MARKS ONLY (held-marks.ts). A mark taken while flow inference was
+  // held can carry an energy buy's USDG or a top-up the flows table has not
+  // booked yet: the growth index below divides out only what was booked, so
+  // over a held mark it dips (or spikes) and the drawdown keeps the dip; and
+  // its cash is no baseline for the attribution, which judges steps from cash.
+  // So every mark this measurement stands on — open, close, series, the raw
+  // marks the attribution replays — is a measured one, and the flows are the
+  // ones booked by the close. The newest mark of any kind still names the run.
+  const held = await heldSql(db);
+  const measured = held.measurable();
+  const newest = await markAt(db, scope, book, "at <= ?", "DESC", w.until);
+  if (!newest) return out;
   out.has_valuation = true;
-  if (close.at < w.since || (close.at === w.since && w.period !== "run")) {
+  const valuedInWindow = (m: MarkPoint) => !(m.at < w.since || (m.at === w.since && w.period !== "run"));
+  if (!valuedInWindow(newest)) {
     out.attribution = noAttr("this book has no valuation in the window");
-    caveats.push(`This book was not valued during the window; its last valuation was at ${iso(close.at)}.`);
+    caveats.push(`This book was not valued during the window; its last valuation was at ${iso(newest.at)}.`);
     return out;
   }
-  const run: RunKey = { account: close.account, epoch: close.epoch };
+  const run: RunKey = { account: newest.account, epoch: newest.epoch };
   const rw = runWhere(run);
+  const heldRow = (await db
+    .prepare(`SELECT COUNT(*) AS n FROM equity WHERE ${rw.sql} AND mode = ? AND at >= ? AND at <= ? AND NOT (${measured})`)
+    .get(...rw.args, book, w.since, w.until)) as Row | undefined;
+  const heldMarks = Number(heldRow?.n ?? 0) || 0;
+  const close = await runMarkAt(db, run, book, `at <= ? AND ${measured}`, "DESC", w.until);
+  if (heldMarks > 0) {
+    caveats.push(
+      `${heldMarks} valuation(s) in the window were taken while flow inference was held (an operation was in flight, so a deposit, withdrawal or settlement in their cash may not be booked yet); the change, return, drawdown and attribution leave them out` +
+        (close && valuedInWindow(close) ? ` and end at ${iso(close.at)}.` : "."),
+    );
+  }
+  if (!close || !valuedInWindow(close)) {
+    out.attribution = noAttr("this book was valued in the window only while flow inference was held");
+    return out;
+  }
   out.measured_run = { account: run.account, epoch: run.epoch };
-  const before = w.period === "run" ? null : await runMarkAt(db, run, book, "at <= ?", "DESC", w.since);
-  const open = before ?? (await runMarkAt(db, run, book, w.period === "run" ? "at >= ? AND at <= ?" : "at > ? AND at <= ?", "ASC", w.since, w.until));
+  const before = w.period === "run" ? null : await runMarkAt(db, run, book, `at <= ? AND ${measured}`, "DESC", w.since);
+  const open = before ?? (await runMarkAt(db, run, book, `${w.period === "run" ? "at >= ? AND at <= ?" : "at > ? AND at <= ?"} AND ${measured}`, "ASC", w.since, w.until));
   if (!open) return out;
   out.valued_in_window = true;
   out.start = { at: open.at, equity_usdg: money(open.equity)! };
@@ -1244,7 +1272,7 @@ async function bookPerformance(db: Db, scope: LedgerScope, book: Book, w: Window
   if (!before && w.period !== "run") {
     // The run began after the window opened. Any earlier mark of this book —
     // inside the window or before it — is another run's.
-    const earlier = await markAt(db, scope, book, "at < ?", "DESC", open.at);
+    const earlier = await markAt(db, scope, book, `at < ? AND ${measured}`, "DESC", open.at);
     if (earlier) caveats.push(`Measured from the first valuation of this book's current run (${iso(open.at)}): the valuations before it belong to an earlier run (a paper reset, an accounting change or another smart account) and are not joined to this one.`);
   }
   if (open.at === close.at) {
@@ -1258,7 +1286,7 @@ async function bookPerformance(db: Db, scope: LedgerScope, book: Book, w: Window
   if (open.at < w.since) caveats.push(`Measured from the last valuation before the window opened (${iso(open.at)}).`);
 
   const shape = (await db
-    .prepare(`SELECT COUNT(*) AS n FROM equity WHERE ${rw.sql} AND mode = ? AND at >= ? AND at <= ?`)
+    .prepare(`SELECT COUNT(*) AS n FROM equity WHERE ${rw.sql} AND mode = ? AND at >= ? AND at <= ? AND ${measured}`)
     .get(...rw.args, book, open.at, close.at)) as Row | undefined;
   const rawCount = Number(shape?.n ?? 0) || 0;
 
@@ -1320,7 +1348,7 @@ async function bookPerformance(db: Db, scope: LedgerScope, book: Book, w: Window
   const closes = (await db
     .prepare(`SELECT at, equity_usdg FROM (
         SELECT at, id, equity_usdg, ROW_NUMBER() OVER (PARTITION BY CAST(at / ${bucket} AS INTEGER) ORDER BY at DESC, id DESC) AS r
-          FROM equity WHERE ${rw.sql} AND mode = ? AND at > ? AND at <= ?
+          FROM equity WHERE ${rw.sql} AND mode = ? AND at > ? AND at <= ? AND ${measured}
       ) b WHERE r = 1 ORDER BY at ASC LIMIT ${SERIES_MAX_POINTS + 5}`)
     .all(...rw.args, book, open.at, close.at)) as Row[];
   let series: SeriesPoint[] = [{ at: open.at, equity_usdg: money(open.equity)! }];
@@ -1349,7 +1377,7 @@ async function bookPerformance(db: Db, scope: LedgerScope, book: Book, w: Window
     out.attribution = noAttr(`the window holds more than ${ATTRIBUTION_MAX_MARKS} valuations; choose a shorter period`);
   } else {
     const raw = (await db
-      .prepare(`SELECT at, equity_usdg, cash_usdg FROM equity WHERE ${rw.sql} AND mode = ? AND at >= ? AND at <= ?
+      .prepare(`SELECT at, equity_usdg, cash_usdg FROM equity WHERE ${rw.sql} AND mode = ? AND at >= ? AND at <= ? AND ${measured}
           ORDER BY at ASC, id ASC LIMIT ${ATTRIBUTION_MAX_MARKS + 1}`)
       .all(...rw.args, book, open.at, close.at)) as Row[];
     const marks: BookMark[] = raw

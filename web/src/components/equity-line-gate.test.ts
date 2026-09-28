@@ -58,9 +58,10 @@ describe("the equity chart is behind the same gate as the return", () => {
   });
 
   it("`funded` alone is NOT the gate — that was the bug", () => {
-    // `funded` is `contributed !== null`: it only says rows exist, and three
-    // phantom rows satisfy it.
-    assert.match(READ, /funded: contributed !== null/);
+    // `funded` is `onRecord !== null`: it only says rows exist this run, and
+    // three phantom rows satisfy it. (`contributed` is what the return divides
+    // by: the flows booked by the newest measured mark, held-marks.ts.)
+    assert.match(READ, /funded: onRecord !== null/);
     const fundedGate = CHART_CODE.indexOf("!paper && !agent.funded");
     const evidenceGate = CHART_CODE.indexOf("!paper && !agent.contributionsEvidenced");
     assert.ok(fundedGate > 0, "the funded guard still exists for the no-flows case");
