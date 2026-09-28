@@ -31,6 +31,7 @@ import { OWNER_CHANGED_SETTING, ownerMismatch } from "@/lib/order-owner";
 import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { agentNameSave } from "@/lib/settings-agent-name";
+import { withoutEnergyReserve, withoutReserveBasket } from "@/lib/energy-reserve";
 
 export const dynamic = "force-dynamic";
 
@@ -150,6 +151,7 @@ export async function GET(req: Request) {
   const tenant = isHostedMode() ? tenantOf(req) : null;
   const stored: MerrymenSettings = isHostedMode() && !tenant ? {} : await readStored(tenant);
   const { bundlerApiKey, groqApiKey, anthropicApiKey, llmApiKey, rialtoApiKey, telegramBotToken, telegramTranscribeKey, virtualsApiKey, bitqueryApiKey, merrymenToken, ...values } = stored;
+  const servedTokens = withoutEnergyReserve(values.customTokens);
   // These URL fields can embed API keys — redact before they leave the server.
   const safeValues = {
     ...values,
@@ -157,6 +159,13 @@ export async function GET(req: Request) {
     rpcMainnet: redactUrl(values.rpcMainnet),
     rpcTestnet: redactUrl(values.rpcTestnet),
     telegramTranscribeBase: redactUrl(values.telegramTranscribeBase),
+    // Every signer builds its wall from this list — an old iOS engine or a
+    // stale tab would seal $MERRYMEN from it and be refused (energy-reserve.ts).
+    customTokens: servedTokens,
+    // AND THE BASKET SYMBOL ONLY THAT RESERVE ENTRY SUPPLIED, or every client
+    // that saves both fields is refused for a coin its own list no longer
+    // has (energy-reserve.ts withoutReserveBasket). Read-side, like the above.
+    basketSymbols: withoutReserveBasket(values.basketSymbols, values.customTokens, selectableSymbols(servedTokens)),
   };
   const view: SettingsView = {
     bundlerApiKey: mask(bundlerApiKey),
@@ -181,6 +190,11 @@ export async function GET(req: Request) {
 }
 
 const KNOWN_SYMBOLS = new Set(STOCK_TOKENS.map((t) => t.symbol));
+/** What a basket may name: the registry's stocks plus these custom tokens' symbols — the PUT's own rule. */
+function selectableSymbols(custom: unknown): Set<string> {
+  const customSymbols = Array.isArray(custom) ? custom.filter(isValidCustomToken).map((t) => t.symbol) : [];
+  return new Set([...KNOWN_SYMBOLS, ...customSymbols]);
+}
 const URL_FIELDS = ["bundlerUrl", "rpcMainnet", "rpcTestnet"] as const;
 
 const NUM_FIELDS: Record<string, [number, number]> = {
@@ -711,14 +725,20 @@ export async function PUT(req: Request) {
       // saving (or, absent that, what's already stored), so adding a token and
       // selecting it in one save works.
       const custom = ("customTokens" in body ? body.customTokens : stored.customTokens) ?? [];
-      const customSymbols = Array.isArray(custom)
-        ? custom.filter(isValidCustomToken).map((t) => t.symbol)
-        : [];
-      const selectable = new Set([...KNOWN_SYMBOLS, ...customSymbols]);
-      const bad = v.filter((s) => typeof s !== "string" || !selectable.has(s));
+      const selectable = selectableSymbols(custom);
+      // A SYMBOL ONLY THE ENERGY RESERVE SUPPLIED IS DROPPED, NOT REFUSED. GET
+      // no longer serves the reserve, so a client built on an older view (or a
+      // stored basket that outlived its reserve entry) still sends MERRYMEN
+      // with nothing left to select it by — refusing it left the owner a basket
+      // they could not edit from any client (energy-reserve.ts).
+      const legs = withoutReserveBasket(v as unknown[], [
+        ...(Array.isArray(stored.customTokens) ? stored.customTokens : []),
+        ...(Array.isArray(body.customTokens) ? body.customTokens : []),
+      ], selectable) ?? [];
+      const bad = legs.filter((s) => typeof s !== "string" || !selectable.has(s));
       if (bad.length > 0) errors.push(`basketSymbols: unknown symbols ${bad.join(", ")}`);
-      else if (v.length > 10) errors.push("basketSymbols: at most 10 legs");
-      else setOrClear("basketSymbols", v as string[]);
+      else if (legs.length > 10) errors.push("basketSymbols: at most 10 legs");
+      else setOrClear("basketSymbols", legs.length > 0 ? (legs as string[]) : undefined);
     } else {
       errors.push("basketSymbols: must be an array of symbols");
     }

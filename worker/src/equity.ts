@@ -41,6 +41,24 @@ export interface BookParts {
  * So the book is the USDG book, and ETH is fuel: its CONSUMPTION is charged
  * against P&L at the price on the day it was burned (trades.gas_usdg, priced
  * from the WETH pool TWAP), rather than its BALANCE being marked. See pnlUsdg.
+ *
+ * ALSO ABSENT: THE ENERGY RESERVE ($MERRYMEN in the account). It sits outside
+ * the book exactly as ETH does — never watched, never a position, never valued
+ * here, never sold by a strategy — and for the same reasons: marked, an owner's
+ * in-kind top-up would ratchet the peak as profit, and a refused price read
+ * would read as a drawdown. But it is not fuel. It is BOUGHT with book capital
+ * and KEPT, not burned, so its purchase is not an expense charged to P&L (that
+ * would show a loss equal to the spend and could trip the breaker). It is booked
+ * as capital leaving the book: an 'energy-buy' out-flow with both peaks lowered
+ * by the same amount in one transaction (store.bookCapitalFlow,
+ * energy-accounting.ts). Equity and the peak drop together, so P&L and the
+ * drawdown are what they were.
+ *
+ * KNOWN LIMITS, both of which the operator tools cover: a purchase made with
+ * the OWNER's key out of the account's USDG is not booked by the worker (owners
+ * are told to send $MERRYMEN directly instead), and a redeploy during the
+ * purchase's receipt wait leaves it unbooked until hwm-repair / reconstruction
+ * restore it — the audit's envelope floor is the detector.
  */
 export function composeEquityUsdg(parts: BookParts): bigint {
   return parts.cashUsdg + parts.vaultUsdg + parts.positionsUsdg + parts.quarantinedCostUsdg;

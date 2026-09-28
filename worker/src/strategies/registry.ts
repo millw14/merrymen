@@ -5,7 +5,7 @@
  * changes settings.
  */
 
-import { CASH, MORPHO, STOCK_TOKENS, assetModeAllows, isHostedMode, type AssetMode, type StockToken } from "../../../packages/core/src/index";
+import { CASH, ENERGY_RESERVE_TOKENS, MORPHO, STOCK_TOKENS, assetModeAllows, isHostedMode, type AssetMode, type StockToken } from "../../../packages/core/src/index";
 import type { LlmCreds } from "../llm";
 import { createDriver, nullDriver } from "../strategist/driver";
 import { makeLlmStrategist, type StrategistDecision } from "../strategist/strategy";
@@ -80,6 +80,12 @@ export interface StrategyBuildOpts {
     /** Persist each strategist decision (survivor + drop) — see makeLlmStrategist. */
     onDecision?: (d: StrategistDecision) => void | Promise<void>;
     /**
+     * The energy allowance's claim on a paid model window — see
+     * makeLlmStrategist's `claimWindow`. Forwarded ONLY when there is a real
+     * model: the null driver pays for nothing, so it must spend nothing.
+     */
+    claimWindow?: () => Promise<boolean>;
+    /**
      * Research instead of one-shot. Present only when the owner turned it on
      * AND there is a model to run it — see makeLlmStrategist's `desk`.
      */
@@ -140,6 +146,16 @@ export function tokensForSymbols(symbols: readonly string[]): StockToken[] {
  * The caller passes the list rather than this function reading it, so that "which
  * chain" and "did the owner opt out" are decided once, by code that knows the
  * answer, instead of being guessed here.
+ *
+ * THE ENERGY RESERVE IS NEVER WATCHED, whoever lists it. $MERRYMEN held by the
+ * account is energy, not a position: watched, it would be valued into equity
+ * (an owner sending it in would read as profit, ratchet the peak and accrue a
+ * fee), or — unpriceable — pause equity, fees and the breaker every tick; and
+ * steady-basket take-profit and the strategist stop-floor sell EVERY holding.
+ * Its address is taken before any list is read, on every chain at once, by
+ * ADDRESS — never by mode, because the watch set is never narrowed by the
+ * asset mode (asset-mode.test.ts), and never by symbol, which a list can spell
+ * any way it likes.
  */
 export function watchTokensFor(
   basketSymbols: readonly string[],
@@ -148,7 +164,10 @@ export function watchTokensFor(
 ): StockToken[] {
   const basket = tokensForSymbols(basketSymbols);
   const takenSymbols = new Set(STOCK_TOKENS.map((t) => t.symbol.toUpperCase()));
-  const takenAddresses = new Set(basket.map((t) => t.address.toLowerCase()));
+  const takenAddresses = new Set([
+    ...Object.values(ENERGY_RESERVE_TOKENS).flatMap((list) => list.map((a) => a.toLowerCase())),
+    ...basket.map((t) => t.address.toLowerCase()),
+  ]);
   const official: StockToken[] = [];
   for (const c of officialCoins) {
     if (takenSymbols.has(c.symbol.toUpperCase())) continue;
@@ -293,6 +312,10 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
       decisionIntervalMs: opts.llm.intervalMin * 60_000,
       onNote: opts.onNote,
       onDecision: opts.llm.onDecision,
+      // Only a real model is a review worth claiming. The null driver answers
+      // nothing and costs nothing; claiming for it would spend a low-energy
+      // agent's reviews on silence.
+      ...(driver !== nullDriver && opts.llm.claimWindow ? { claimWindow: opts.llm.claimWindow } : {}),
       // The desk needs a real model: with the null driver there is nothing to
       // research WITH, and a loop around no provider is just a slower no-op.
       ...(opts.llm.desk && opts.llm.creds

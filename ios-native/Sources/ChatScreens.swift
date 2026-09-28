@@ -160,7 +160,16 @@ struct CommandCard: View {
         case "settings":
             guard let data = try? JSONEncoder().encode(command) else { return }
             store.path.append(.settingsProposal(String(decoding: data, as: UTF8.self)))
-        case "order": store.path.append(.tradeRequest(payload["symbol"].text, payload["side"].text, payload["usdgAmount"].text, nil))
+        case "order":
+            // THE ENERGY MARKER comes from the command's own fixed values
+            // (feed.ts → commandPayload), never the model: get-energy's card
+            // opens the energy review, which sends it; every other order card
+            // opens an ordinary one, which never does.
+            if payload["purpose"].text == "energy" {
+                store.path.append(.energyRequest(payload["symbol"].text, payload["usdgAmount"].text))
+            } else {
+                store.path.append(.tradeRequest(payload["symbol"].text, payload["side"].text, payload["usdgAmount"].text, nil))
+            }
         case "snipe": store.path.append(.snipe(payload["query"].text, payload["usdgAmount"].text))
         case "navigate":
             switch proposal["id"].text {

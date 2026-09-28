@@ -83,7 +83,10 @@ export async function startRiskPeriod(db: Db, account: string, id: string, reaso
     }
     const agent = await tx.prepare("SELECT epoch, mode, contributions_known FROM agents WHERE smart_account = ?").get(account) as { epoch: number; mode: string; contributions_known: number } | undefined;
     if (!agent || agent.mode !== "live" || agent.contributions_known !== 1) throw new Error("Live, evidenced accounting required");
-    const mark = await tx.prepare("SELECT equity_usdg, at FROM equity WHERE agent_id = ? AND epoch = ? AND mode = 'live' ORDER BY at DESC, id DESC LIMIT 1").get(account, agent.epoch) as { equity_usdg: number; at: number } | undefined;
+    // Never a mark taken while flow inference was held (store.ts `flows_held`):
+    // its equity may hold a deposit not yet booked, which would sit in the
+    // baseline once and then be added to the peak again when it is.
+    const mark = await tx.prepare("SELECT equity_usdg, at FROM equity WHERE agent_id = ? AND epoch = ? AND mode = 'live' AND COALESCE(flows_held, 0) = 0 ORDER BY at DESC, id DESC LIMIT 1").get(account, agent.epoch) as { equity_usdg: number; at: number } | undefined;
     if (!mark || mark.at > now || now - mark.at > 300 || !(mark.equity_usdg > 0)) throw new Error("Fresh positive equity mark required");
     const r: RiskPeriod = { id, agent_id: account, started_at: now, baseline_usdg: mark.equity_usdg, hwm_usdg: mark.equity_usdg, withdrawn_usdg: 0, reason };
     await mergeRiskPeriod(tx, r);

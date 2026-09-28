@@ -53,7 +53,7 @@ export interface OrderReceipt {
  * that could disagree.
  */
 export interface LedgerFacts {
-  status: "landed" | "reverted" | "rejected" | "paper" | "submitted";
+  status: "landed" | "reverted" | "rejected" | "paper" | "submitted" | "dropped";
   rejectRule?: string;
   txHash?: string;
   sellToken?: string;
@@ -181,6 +181,12 @@ export function orderReceipt(
       // It reached the chain and turned back: nothing moved but the gas, so no
       // USDG figure — and the hash, because the owner can look the revert up.
       return { status: "failed", ...base, token, usdgActual: null, txHash: f.txHash || null, rejectRule: rule(f.rejectRule) };
+    case "dropped":
+      // Sent, and provably never executed (a later op used its nonce): it did
+      // not fill and nothing moved — not even gas — so no figure and no hash.
+      // Only the stranded-op resolver writes this, never the order's own
+      // row write, so an order meets it only if that ever changes.
+      return { status: "failed", ...base, token, usdgActual: null, txHash: null, rejectRule: rule(f.rejectRule) };
     case "submitted":
     case "paper":
       return undefined;

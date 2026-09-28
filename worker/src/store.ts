@@ -6,16 +6,30 @@
  */
 
 import { RISK_PERIOD_SCHEMA, mergeRiskPeriod, markRiskPeriod, adjustRiskCapital, type RiskPeriod } from "./risk-period";
+import {
+  ENERGY_DAYS_ALTERS,
+  ENERGY_DAYS_SCHEMA,
+  claimEnergyDay,
+  claimEnergyNoticeDay,
+  lastEnergyReadDay,
+  noteEnergyReadDay,
+  readEnergyDay,
+  refundEnergyDay,
+  type EnergyField,
+} from "./energy-days";
+import type { EnergyCounters, LastGood } from "./energy";
+import { energyDayUnrestored } from "./energy-seed";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
 import {
   CASH,
+  ENERGY_RESERVE_TOKENS,
   officialCoinCurve,
   officialCoinsFor,
   robinhoodChain,
 } from "../../packages/core/src/index";
-import { ensureHome, homePaths } from "./home";
+import { ensureHome, homePaths, merrymenHome } from "./home";
 import { wrapSqlite, makePgDb, type Db } from "./db";
 import { paperBrainCapital } from "./paper-brain-capital";
 export const getPaperBrainCapital = (agentId: string, epoch: number) => paperBrainCapital(getDb(), agentId, epoch);
@@ -50,6 +64,7 @@ export const getRiskPeriodPeak = (account: string, equity: number | null = null)
 
 const SQLITE_SCHEMA = `
     ${RISK_PERIOD_SCHEMA};
+    ${ENERGY_DAYS_SCHEMA};
     /* agent_id (= smart_account here) threads EVERY per-agent table: trades,
        decisions, positions, cost_basis, equity, fee_accruals. On the EVM rail
        it is the ERC-4337 smart-account address; on the broker rail it is the
@@ -153,6 +168,13 @@ const SQLITE_SCHEMA = `
     -- and positions.price_source. The three are not equally good evidence:
     --   'chain-log'       a Transfer log naming this account. Exact, has a tx.
     --   'transfer-intent' our own outbound transfer. Exact, has a tx.
+    --   'energy-buy'      USDG the agent spent buying its energy reserve INTO
+    --                     its own account: capital leaving the trading BOOK
+    --                     while staying in the account (the reserve is never a
+    --                     position and never in equity, like ETH gas). Read off
+    --                     the settled receipt's USDG log, so exact, with a tx
+    --                     and log index — booked only by bookCapitalFlow, with
+    --                     both peaks in the same transaction.
     --   'epoch-carry'     the closing equity of the epoch just closed, bridged
     --                     forward as the new one's opening balance. No tx, but
     --                     not guesswork either: it is a deterministic function of
@@ -433,6 +455,26 @@ const SQLITE_ALTERS: string[] = [
     // behaviour they had for a NULL series and split on it once it is known,
     // which is what makes this migration cost nothing on the way in.
     "ALTER TABLE equity ADD COLUMN mode TEXT",
+    // A MARK TAKEN WHILE FLOW INFERENCE WAS HELD (command-wake.ts tickRatchets
+    // `held`): an op the resolver may still settle was in flight, so this row's
+    // cash may carry that op's movement, or a deposit not yet booked. It is a
+    // true valuation — the curve and freshness read it like any other — but it
+    // is NOT a cash baseline, and the two readers that take one from the newest
+    // row (lastKnownCashReading, bootstrap-source.ts) skip it. Those rows used
+    // not to be written at all, which left a dropped op's 26-hour hold as a gap
+    // in the curve and a day-old anchor. 1 held, 0 not; NULL predates the
+    // question, and every reader treats NULL as not held — which is what every
+    // such row was, because a held tick wrote nothing.
+    "ALTER TABLE equity ADD COLUMN flows_held INTEGER",
+    // WHEN THIS ROW'S CASH WAS READ, unix seconds — the tick's balance read,
+    // which comes before its flow look's ledger read, where `at` is the INSERT
+    // at the end of the tick. A restart's `since` must be the read: a chat trade
+    // can join the intent chain mid-tick, so an op created between the read and
+    // the INSERT is not in `cash_usdg`, yet `at` called it "already in the
+    // reading" — its settlement was dropped and its movement booked a second
+    // time as money "changed while the worker was stopped". NULL on every row
+    // written before this; readers fall back to `at`, exactly as before.
+    "ALTER TABLE equity ADD COLUMN cash_read_at INTEGER",
     "ALTER TABLE flows ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE fee_accruals ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
     // The epoch this agent is currently writing into.
@@ -525,6 +567,19 @@ const SQLITE_ALTERS: string[] = [
     // NULL means NOT ASSESSED, which is not zero: a trade written before this
     // column existed, or one that never landed. Only a landed trade owes a fee.
     "ALTER TABLE trades ADD COLUMN trade_fee_usdg REAL",
+    // THE NONCE THIS OPERATION WAS SIGNED WITH — the full ERC-4337 uint256
+    // (key ‖ sequence), as a decimal string. Written once, on the pre-broadcast
+    // 'submitted' row (executor.ts onSubmitted), and never rewritten by the
+    // row's resolution.
+    //
+    // It is what lets a DROPPED userOp be written off. A nonce is spent exactly
+    // once, and the next op the agent signs after a drop reads the chain's
+    // unmoved nonce and is signed with the same one — so when that op executes,
+    // the stranded one can never be included (inflight-reconcile.ts
+    // findDroppedOps). Without it a dropped op held flow inference for the
+    // resolver's whole 26-hour window. NULL on every row written before this,
+    // and on rows that never had an operation: those are never judged dropped.
+    "ALTER TABLE trades ADD COLUMN user_op_nonce TEXT",
     // Where a Pons launch actually trades. A pre-graduation token has NO pool
     // at all — it lives on its own bonding curve — so without this the token is
     // recorded and then unreachable: there is no tier-scan fallback the way
@@ -598,6 +653,22 @@ const SQLITE_ALTERS: string[] = [
     // NULLABLE, and null is TWO things: never beaten, or beaten and trading
     // for real. A reader must not render either as a blocker.
     "ALTER TABLE agents ADD COLUMN live_blocker TEXT",
+    // ── THE AGENT'S ENERGY, AS THE WORKER REPORTS IT ─────────────────────
+    //
+    // A JSON EnergyStatus (core energy.ts), written by setAgentEnergy every
+    // tick — its OWN statement, never folded into setAgentMode, whose argument
+    // list exec-mode-publish.test.ts pins. A standing condition cannot be
+    // carried by a log line that forty newer events push out of view, so the
+    // desk reads this column, not the notice (circle-strategies.test.ts).
+    //
+    // NULLABLE, and null means "not said yet" — never "no energy". The mirror
+    // keeps the last non-null value for the same reason it does for `mode`.
+    "ALTER TABLE agents ADD COLUMN energy TEXT",
+    // THE DAY'S HANDED-BACK ENTRY CLAIMS, a counter of their own that only
+    // rises — so a refund survives the mirror's larger-wins copy up and the
+    // seed's copy back down (energy-days.ts). Here for both the child's sqlite
+    // and the shared Postgres the mirror migrates with this list.
+    ...ENERGY_DAYS_ALTERS,
     // WHO OWNS this agent, for a public page to credit — the X handle its owner
     // typed, nothing more.
     //
@@ -936,7 +1007,7 @@ function initSqlite(): Db {
  * initSqlite and initPostgres already swallow it.
  */
 export async function applyLedgerSchema(db: Db): Promise<void> {
-  await db.exec(SQLITE_SCHEMA);
+  await execSchemaBatch(db);
   for (const ddl of SQLITE_ALTERS) {
     try {
       await db.exec(ddl);
@@ -945,12 +1016,43 @@ export async function applyLedgerSchema(db: Db): Promise<void> {
     }
   }
 }
+
+/**
+ * THE SCHEMA BATCH, SAFE AGAINST A SECOND PROCESS RUNNING IT AT THE SAME TIME.
+ *
+ * Postgres's CREATE TABLE IF NOT EXISTS is not atomic against a concurrent
+ * one: the loser fails on the catalog's unique index (23505), sees the table
+ * appear mid-statement (42P07), or finds its row type already made (42710,
+ * duplicate_object — seen on Postgres 17). And SQLITE_SCHEMA is one
+ * multi-statement batch, which Postgres runs as ONE implicit transaction — so
+ * the loser's whole batch rolled back and the caller threw before a single
+ * ALTER ran. Measured on the deploy that adds a table (`energy_days`), with
+ * three processes booting over the previous release's schema: two losers
+ * every time. The mirror then skipped its pass, and startHistoryRepair — once
+ * per process — never ran.
+ *
+ * Each of those means the other process created it, so the batch is run again
+ * and finds everything there. Anything else is thrown, and a batch that keeps
+ * losing gives up after three runs rather than spinning.
+ */
+async function execSchemaBatch(db: Db): Promise<void> {
+  for (let run = 1; ; run++) {
+    try {
+      await db.exec(SQLITE_SCHEMA);
+      return;
+    } catch (e) {
+      const code = (e as { code?: unknown }).code;
+      if (run >= 3 || (code !== "23505" && code !== "42P07" && code !== "42710")) throw e;
+    }
+  }
+}
+
 /** Open the shared Postgres ledger (hosted, multi-tenant): connect, then run the
  *  same schema + migrations through the async driver, which translates each to the
  *  Postgres dialect. Selected by DATABASE_URL, mirroring the grant store. */
 async function initPostgres(url: string): Promise<Db> {
   const d = await makePgDb(url);
-  await d.exec(SQLITE_SCHEMA);
+  await execSchemaBatch(d);
   for (const ddl of SQLITE_ALTERS) {
     try {
       await d.exec(ddl);
@@ -1023,6 +1125,11 @@ export interface TradeRow {
    * be traced back to the operation that produced it. Populated since 2026-08-26.
    */
   user_op_hash?: string;
+  /**
+   * The nonce the operation was signed with, a decimal string of the full
+   * uint256 — set on the pre-broadcast row only (see the column's migration).
+   */
+  user_op_nonce?: string;
   tx_hash?: string;
   /**
    * Our coarse verdict, not the broker's. 'submitted' is the brokerage rail's
@@ -1031,8 +1138,14 @@ export interface TradeRow {
    * reconciler resolves it to landed/reverted from the wire. The broker's own
    * state words live in settlement_status, verbatim — two vocabularies, never
    * mixed.
+   *
+   * 'dropped' is a 'submitted' op the chain can provably never execute: another
+   * op of ours spent its nonce (inflight-reconcile.ts findDroppedOps). It moved
+   * nothing and burned no gas, so — like 'reverted' and 'rejected' — it counts
+   * toward no cap and enters no journal; unlike 'reverted' it never reached the
+   * chain, and unlike 'rejected' it was sent.
    */
-  status: "landed" | "reverted" | "rejected" | "paper" | "submitted";
+  status: "landed" | "reverted" | "rejected" | "paper" | "submitted" | "dropped";
   reject_rule?: string;
   /** Brokerage order id (no tx hash exists on that rail). NULL elsewhere. */
   order_id?: string;
@@ -1414,6 +1527,12 @@ export async function setAgentHwm(agentId: string, hwmUsdg: number): Promise<boo
  * next tick books the owner's own money as profit and takes a fee on it. A
  * withdrawal is the mirror: leave the peak up and the account is permanently
  * "in drawdown" by the amount its owner took home, which trips the breaker.
+ *
+ * "Capital crossing the boundary" includes capital leaving the trading BOOK
+ * without leaving the account: USDG spent on the energy reserve buys something
+ * that is never a position and never in equity, so equity drops by the spend
+ * with nothing earned or lost. The peak drops with it — through
+ * `bookCapitalFlow`, which moves it in the same transaction as the flow row.
  */
 /**
  * Restore BOTH halves of the peak from the accounting anchor. Ratchets, never assigns.
@@ -1465,35 +1584,46 @@ export async function restoreAgentHwmParts(
 
 export async function adjustAgentHwm(agentId: string, deltaUsdg: number): Promise<void> {
   try {
-    await getDb().tx(async (db) => {
-      await adjustRiskCapital(db, agentId, deltaUsdg);
-      if (deltaUsdg >= 0) {
-        // A DEPOSIT RAISES THE GROSS, exactly as before.
-        await db
-          .prepare("UPDATE agents SET hwm_usdg = hwm_usdg + ? WHERE smart_account = ?")
-          .run(deltaUsdg, agentId);
-        return;
-      }
-      // A WITHDRAWAL RAISES THE WITHDRAWN TOTAL INSTEAD, which lowers the
-      // effective peak by the same amount while leaving both stored figures
-      // monotonic — so the mirror's upward-only ratchet carries the reduction
-      // instead of discarding it. See the ALTER for hwm_withdrawn_usdg.
-      //
-      // Clamped at the gross so the effective peak floors at zero, which is what
-      // `MAX(0, hwm + delta)` did and what flows.integration.test.ts pins.
-      const amount = -deltaUsdg;
-      await db
-        .prepare(
-          `UPDATE agents SET hwm_withdrawn_usdg =
-             CASE WHEN hwm_withdrawn_usdg + ? > hwm_usdg THEN hwm_usdg ELSE hwm_withdrawn_usdg + ? END
-           WHERE smart_account = ?`,
-        )
-        .run(amount, amount, agentId);
-    });
+    await getDb().tx((db) => applyHwmDelta(db, agentId, deltaUsdg));
   } catch (e) {
     console.error("[store] hwm adjust failed:", e);
     throw e;
   }
+}
+
+/**
+ * Both peaks' capital move, inside a transaction the CALLER owns.
+ *
+ * Extracted from `adjustAgentHwm` verbatim so the one non-monotonic move has one
+ * body: `adjustAgentHwm` runs it in its own transaction (exactly as before, same
+ * clamps, same throw), and `bookCapitalFlow` runs it in the SAME transaction as
+ * the flow row, so the row and the peaks land together or not at all. Two
+ * copies of these UPDATEs would be two answers to "how far did the peak move".
+ */
+async function applyHwmDelta(db: Db, agentId: string, deltaUsdg: number): Promise<void> {
+  await adjustRiskCapital(db, agentId, deltaUsdg);
+  if (deltaUsdg >= 0) {
+    // A DEPOSIT RAISES THE GROSS, exactly as before.
+    await db
+      .prepare("UPDATE agents SET hwm_usdg = hwm_usdg + ? WHERE smart_account = ?")
+      .run(deltaUsdg, agentId);
+    return;
+  }
+  // A WITHDRAWAL RAISES THE WITHDRAWN TOTAL INSTEAD, which lowers the
+  // effective peak by the same amount while leaving both stored figures
+  // monotonic — so the mirror's upward-only ratchet carries the reduction
+  // instead of discarding it. See the ALTER for hwm_withdrawn_usdg.
+  //
+  // Clamped at the gross so the effective peak floors at zero, which is what
+  // `MAX(0, hwm + delta)` did and what flows.integration.test.ts pins.
+  const amount = -deltaUsdg;
+  await db
+    .prepare(
+      `UPDATE agents SET hwm_withdrawn_usdg =
+         CASE WHEN hwm_withdrawn_usdg + ? > hwm_usdg THEN hwm_usdg ELSE hwm_withdrawn_usdg + ? END
+       WHERE smart_account = ?`,
+    )
+    .run(amount, amount, agentId);
 }
 
 // ── the audit journal ─────────────────────────────────────────────────────
@@ -1753,7 +1883,7 @@ export async function openNextEpoch(agentId: string, openingBalanceUsdg?: number
 }
 
 /** How the ledger came to know about a flow. See the flows DDL — these are not equal evidence. */
-export type FlowSource = "chain-log" | "epoch-carry" | "transfer-intent" | "inferred";
+export type FlowSource = "chain-log" | "epoch-carry" | "transfer-intent" | "inferred" | "energy-buy";
 
 export interface FlowRow {
   agentId: string;
@@ -1762,7 +1892,7 @@ export interface FlowRow {
   source: FlowSource;
   txHash?: string;
   blockNumber?: number;
-  /** Position within the block. Set only for 'chain-log' — see the migration. */
+  /** Position within the block. Set for 'chain-log' and 'energy-buy' — see the migration. */
   logIndex?: number;
   /**
    * What the agent is actually doing, when the caller knows.
@@ -1793,8 +1923,15 @@ interface FlowAccount {
   mode: string | null;
 }
 
-/** Insert into an existing transaction; a duplicate is successful but adds no journal fact. */
-async function insertFlowWithJournal(db: Db, flow: FlowRow, epoch: number, chainId: number | null): Promise<void> {
+/**
+ * Insert into an existing transaction; a duplicate is successful but adds no journal fact.
+ *
+ * RETURNS WHETHER A ROW WAS ACTUALLY INSERTED — `changes === 1`, not "did not
+ * throw". `addFlow` still answers the looser question for the deposit scanner;
+ * `bookCapitalFlow` gates the peak move on this, so a duplicate can never move
+ * the high-water mark a second time.
+ */
+async function insertFlowWithJournal(db: Db, flow: FlowRow, epoch: number, chainId: number | null): Promise<boolean> {
   const amount = Math.abs(flow.amountUsdg);
   const txHash = flow.txHash ? flow.txHash.toLowerCase() : null;
   const inserted = await db
@@ -1816,7 +1953,9 @@ async function insertFlowWithJournal(db: Db, flow: FlowRow, epoch: number, chain
     );
   // Both drivers report affected rows. An ignored INSERT must not append an
   // extra contribution to the audit book while leaving the flows table intact.
-  if (inserted.changes === 0) return;
+  // A single-row INSERT reports 0 or 1; `Number` because a driver may hand back
+  // a bigint, and a bigint 0n is not `=== 0`.
+  if (Number(inserted.changes) === 0) return false;
   await appendJournalRow(db, flow.agentId, epoch, "flow", {
     amountUsdg: amount,
     blockNumber: flow.blockNumber ?? null,
@@ -1825,6 +1964,7 @@ async function insertFlowWithJournal(db: Db, flow: FlowRow, epoch: number, chain
     source: flow.source,
     txHash,
   });
+  return true;
 }
 
 /**
@@ -1882,6 +2022,82 @@ export async function addFlow(flow: FlowRow): Promise<boolean> {
   }
 }
 
+/** What `bookCapitalFlow` did. Every arm is a decision; a database error throws instead. */
+export type CapitalBooking =
+  /** The row was inserted and both peaks moved with it, in one transaction. */
+  | { kind: "booked"; epoch: number }
+  /** This exact (chain, agent, tx, logIndex) was already on the books. NOTHING moved. */
+  | { kind: "already" }
+  /** Not written, and nothing moved. `why` is the sentence for the caller's event. */
+  | { kind: "refused"; why: string };
+
+/**
+ * Book one tx-evidenced capital flow AND move both peaks with it — atomically,
+ * and at most once.
+ *
+ * WHY THIS EXISTS BESIDE `addFlow` + `adjustAgentHwm`. The transfer path calls
+ * those two in sequence: two transactions, so a throw between them splits the
+ * flow from the peak, and `addFlow`'s `true` also means "duplicate" (see
+ * `hasChainFlow`), so a caller that moves the peak on it re-lowers the peak on
+ * every retry — Shogun's 5.000000 taken off twice. Here the row, its journal
+ * fact and both peaks (lifetime and the risk period) are ONE transaction, and
+ * the peaks move only when the INSERT actually inserted. A retry, a second
+ * booker, or an operator reconstruction that got there first all come back
+ * `already` with nothing moved.
+ *
+ * IDENTITY IS REQUIRED. The flow must carry its tx hash, block and log index,
+ * and a chain id (its own or the agent's): `flows_chain_identity` treats NULLs
+ * as distinct on both SQLite and Postgres, so a row without all four could be
+ * inserted twice and would defeat the whole "at most once" claim. Refused
+ * rather than written loosely.
+ *
+ * Admission is the same paper boundary every writer passes (`admitCapitalFlow`).
+ * The agent row is locked first with the no-op UPDATE `addFlow` uses, so the
+ * booking cannot race an epoch rollover.
+ *
+ * Database errors THROW, and roll everything back — a caller that must retry
+ * (the stranded-op resolver) needs to see them. No events are written inside
+ * the transaction; the caller writes them after it returns.
+ */
+export async function bookCapitalFlow(
+  flow: FlowRow & { txHash: string; blockNumber: number; logIndex: number },
+): Promise<CapitalBooking> {
+  const amount = flow.amountUsdg;
+  if (!(typeof amount === "number" && Number.isFinite(amount) && amount > 0)) {
+    return { kind: "refused", why: `the amount ${String(amount)} is not a positive number of USDG` };
+  }
+  if (typeof flow.txHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(flow.txHash)) {
+    return { kind: "refused", why: "no transaction hash — a capital flow booked here must be a receipt" };
+  }
+  if (!Number.isSafeInteger(flow.logIndex) || flow.logIndex < 0 || !Number.isSafeInteger(flow.blockNumber) || flow.blockNumber < 0) {
+    return { kind: "refused", why: "no log index or block number — without both it cannot be booked exactly once" };
+  }
+  return getDb().tx(async (db): Promise<CapitalBooking> => {
+    const account = (await db
+      .prepare(
+        `UPDATE agents SET epoch = epoch WHERE smart_account = ?
+         RETURNING epoch, chain_id, mode`,
+      )
+      .get(flow.agentId)) as FlowAccount | undefined;
+    if (!account) return { kind: "refused", why: `no agent row for ${flow.agentId}` };
+    const chainId = flow.chainId ?? account.chain_id ?? null;
+    if (chainId === null) {
+      return { kind: "refused", why: "no chain identity; cannot be booked exactly once" };
+    }
+    const verdict = admitCapitalFlow({
+      mode: flow.mode ?? tradingModeOf(account.mode),
+      source: flow.source,
+      txHash: flow.txHash,
+    });
+    if (!verdict.admit) return { kind: "refused", why: verdict.why };
+    const inserted = await insertFlowWithJournal(db, flow, account.epoch, chainId);
+    // THE WHOLE POINT: a duplicate moves nothing.
+    if (!inserted) return { kind: "already" };
+    await applyHwmDelta(db, flow.agentId, flow.direction === "in" ? amount : -amount);
+    return { kind: "booked", epoch: account.epoch };
+  });
+}
+
 /**
  * Has this exact chain log already been booked as a flow?
  *
@@ -1912,6 +2128,27 @@ export async function hasChainFlow(
     return row !== undefined && row !== null;
   } catch (e) {
     console.error("[store] flow lookup failed:", e);
+    return null;
+  }
+}
+
+/**
+ * Is ANY flow on the books for this transaction — whatever its source or log
+ * index? The executor books a transfer home with its tx hash and no log index
+ * (flows_chain_identity cannot see it), so the stranded-op resolver asks this
+ * before booking the same transfer from its receipt (energy-settle.ts
+ * settleTransferLanding).
+ *
+ * NULL WHEN THE QUESTION COULD NOT BE ASKED: the caller must not book on it.
+ */
+export async function hasFlowForTx(agentId: string, txHash: string): Promise<boolean | null> {
+  try {
+    const row = await getDb()
+      .prepare("SELECT 1 AS n FROM flows WHERE agent_id = ? AND tx_hash = ? LIMIT 1")
+      .get(agentId, txHash.toLowerCase());
+    return row !== undefined && row !== null;
+  } catch (e) {
+    console.error("[store] flow-for-tx lookup failed:", e);
     return null;
   }
 }
@@ -1952,6 +2189,33 @@ export async function getNetContributionsUsdg(agentId: string): Promise<number |
     .get(agentId, epoch) as { n: number; net: number } | undefined;
   if (!row || row.n === 0) return null;
   return row.net;
+}
+
+/**
+ * The same epoch-scoped sum, and the part of it booked at or after `sinceSec` —
+ * the two halves net-contributions.ts durableNetContributionsUsdg6 needs.
+ *
+ * `netUsdg` is exactly getNetContributionsUsdg (null when no flow is on record
+ * in this epoch). `sinceUsdg` is the signed sum of this epoch's flows whose
+ * `at` is at or after `sinceSec` (0 when none): on a hosted child, the flows
+ * this process booked after the orchestrator wrote its accounting anchor —
+ * which the anchor's own figure cannot contain.
+ */
+export async function getNetContributionsSince(
+  agentId: string,
+  sinceSec: number,
+): Promise<{ epoch: number; netUsdg: number | null; sinceUsdg: number }> {
+  const epoch = await epochOf(agentId);
+  const row = (await getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n,
+              COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net,
+              COALESCE(SUM(CASE WHEN at >= ? THEN (CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END) ELSE 0 END), 0) AS since
+       FROM flows WHERE agent_id = ? AND epoch = ?`,
+    )
+    .get(Math.floor(sinceSec), agentId, epoch)) as { n: number; net: number; since: number } | undefined;
+  const n = Number(row?.n ?? 0);
+  return { epoch, netUsdg: n === 0 ? null : Number(row!.net), sinceUsdg: n === 0 ? 0 : Number(row!.since) };
 }
 
 /**
@@ -2210,7 +2474,8 @@ export async function getGasPaidWei(agentId: string): Promise<bigint> {
 }
 
 /**
- * Cash as of the most recent equity row for this agent's current epoch.
+ * Cash as of the most recent equity row for this agent's current epoch that was
+ * not taken while flow inference was held (see lastKnownCashReading).
  *
  * The worker's in-memory `lastCashUsdg` resets to null on every restart, so
  * without this a top-up made while the worker was stopped is invisible to flow
@@ -2221,17 +2486,78 @@ export async function getGasPaidWei(agentId: string): Promise<bigint> {
  * from "cash was zero": a brand-new agent has nothing to compare against.
  */
 export async function lastKnownCashUsdg(agentId: string): Promise<number | null> {
+  const r = await lastKnownCashReading(agentId);
+  return r === null ? null : r.cashUsdg;
+}
+
+/**
+ * The same reading, AND WHEN ITS CASH WAS READ — the restart's cash baseline and
+ * its `since` (flow-inference.ts): an op submitted at or after `at` is not in
+ * `cashUsdg`, so its settlement shifts that baseline, and a landed row created
+ * at or after it is a write in the downtime interval (landedOpsBetween).
+ *
+ * `at` IS THE READ, NOT THE WRITE (`cash_read_at`, falling back to the row's
+ * INSERT time for rows that predate it). The row is inserted at the END of a
+ * tick, after its flow look listed the ledger, and a chat trade can submit an
+ * op in between: stamped by the insert, such an op read as already in this
+ * cash, so after a restart its settlement was skipped, it was no write either,
+ * and its movement was inferred a second time — contributions short by it and
+ * a performance fee charged on the owner's own money. An op whose movement IS
+ * in the cash landed before the read, so it was either in flight at the list
+ * (that tick held, and its row is skipped below) or already recorded.
+ *
+ * NEVER A HELD READING. A tick whose flow look held writes its row flagged
+ * `flows_held` (command-wake.ts tickRatchets `held`), and it is skipped here:
+ * its cash may already carry a stranded op's movement, which the op's
+ * settlement would then shift a second time. So this is always a reading taken
+ * with no op in flight.
+ */
+export async function lastKnownCashReading(agentId: string): Promise<{ cashUsdg: number; at: number } | null> {
   try {
     const epoch = await epochOf(agentId);
     const row = await getDb()
       .prepare(
-        "SELECT cash_usdg FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 1",
+        // Ordered by the INSERT (`at`, id) as always — the alias is `read_at`
+        // so ORDER BY cannot resolve to it on either engine.
+        `SELECT cash_usdg, COALESCE(cash_read_at, at) AS read_at FROM equity
+          WHERE agent_id = ? AND epoch = ? AND COALESCE(flows_held, 0) = 0
+          ORDER BY at DESC, id DESC LIMIT 1`,
       )
-      .get(agentId, epoch) as { cash_usdg: number } | undefined;
-    return row ? row.cash_usdg : null;
+      .get(agentId, epoch) as { cash_usdg: number; read_at: number } | undefined;
+    return row ? { cashUsdg: Number(row.cash_usdg), at: Number(row.read_at) } : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * THE LEDGER WRITES AN EARLIER PROCESS MADE after a cash reading: the op hashes
+ * (lowercased; null for a row without one) of this epoch's LANDED rows
+ * created in [fromSec, beforeSec).
+ *
+ * The durable half of `ledgerWrites` for the first look after a restart. That
+ * counter is process memory and starts at 0, so a fill the last process
+ * recorded after its final equity row — or a stranded op its resolver settled
+ * before it stopped — was invisible, and its cash leg was booked as money
+ * "changed while the worker was stopped". The caller drops the hashes its own
+ * resolver settled (those explain exactly their own movement) and treats any
+ * other as a write in the interval. `fromSec` is when the reading's cash was
+ * READ (lastKnownCashReading), so a fill recorded mid-tick — after the read,
+ * before that tick's row was inserted — is inside the interval too.
+ *
+ * THROWS WHEN THE QUESTION COULD NOT BE ASKED, like listSubmittedOps: an
+ * unreadable ledger is not an empty one, and the caller's pass must abort and
+ * retry rather than infer on it.
+ */
+export async function landedOpsBetween(agentId: string, fromSec: number, beforeSec: number): Promise<(string | null)[]> {
+  const epoch = await epochOf(agentId);
+  const rows = (await getDb()
+    .prepare(
+      `SELECT user_op_hash FROM trades
+        WHERE agent_id = ? AND epoch = ? AND status = 'landed' AND created_at >= ? AND created_at < ?`,
+    )
+    .all(agentId, epoch, fromSec, beforeSec)) as { user_op_hash: string | null }[];
+  return rows.map((r) => (r.user_op_hash ? r.user_op_hash.toLowerCase() : null));
 }
 
 /**
@@ -2414,6 +2740,90 @@ export async function setAgentMode(
     /* a missing heartbeat is a worse thing to crash over than to lose */
   }
 }
+/**
+ * Publish the worker's energy report (core EnergyStatus, as JSON) on the agents
+ * row. Best-effort like the heartbeat: a report that fails to write must never
+ * take a tick down — the next tick writes a fresh one.
+ */
+export async function setAgentEnergy(agentId: string, json: string | null): Promise<void> {
+  try {
+    await getDb().prepare("UPDATE agents SET energy = ? WHERE smart_account = ?").run(json, agentId);
+  } catch {
+    /* the next tick reports again */
+  }
+}
+
+// ── ENERGY: today's durable counters (energy-days.ts), on this child's ledger ──
+//
+// Every one of these fails in the SAFE direction for its own question: an
+// unreadable day is `null` (the plan then fails closed on new work, never on
+// an exit), a claim that errors is refused, a notice claim that errors is not
+// sent, and a refund or a read-note that errors only under-spends.
+
+/**
+ * Today's counters; zeros when there is no row; null when the ledger could not
+ * be read — OR when this is a day whose history the orchestrator could not put
+ * back after a rebuild (energy-seed.ts). The table is empty then, but empty is
+ * not "nothing used": the day's durable counts are somewhere this child cannot
+ * see, and reading zeros would hand out the day's allowance again.
+ */
+export async function getEnergyDay(agentId: string, day: string): Promise<EnergyCounters | null> {
+  if (energyDayUnrestored(merrymenHome(), day)) return null;
+  try {
+    return await readEnergyDay(getDb(), agentId, day);
+  } catch {
+    return null;
+  }
+}
+
+/** Claim one review or entry against `cap`. False when the cap is reached — or the write failed. */
+export async function claimEnergy(agentId: string, day: string, field: EnergyField, cap: number): Promise<boolean> {
+  try {
+    return await claimEnergyDay(getDb(), agentId, day, field, cap);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Return one unused ENTRY claim. Never below zero. Entries only: a review that
+ * ran was paid for, and so is never given back.
+ */
+export async function refundEnergy(agentId: string, day: string, _field: "entries"): Promise<void> {
+  try {
+    await refundEnergyDay(getDb(), agentId, day);
+  } catch {
+    /* a lost refund under-spends by one — the conservative direction */
+  }
+}
+
+/** Claim today's owner notice. True exactly once per agent per UTC day; false on any failure. */
+export async function claimEnergyNotice(agentId: string, day: string, atSec: number): Promise<boolean> {
+  try {
+    return await claimEnergyNoticeDay(getDb(), agentId, day, atSec);
+  } catch {
+    return false;
+  }
+}
+
+/** Remember a balance reading that decided the level. */
+export async function noteEnergyRead(agentId: string, day: string, full: boolean, atSec: number): Promise<void> {
+  try {
+    await noteEnergyReadDay(getDb(), agentId, day, full, atSec);
+  } catch {
+    /* the in-memory reading still stands for this process */
+  }
+}
+
+/** The newest decided reading since `sinceSec`, or null. */
+export async function lastEnergyRead(agentId: string, sinceSec: number): Promise<LastGood | null> {
+  try {
+    return await lastEnergyReadDay(getDb(), agentId, sinceSec);
+  } catch {
+    return null;
+  }
+}
+
 /** Record one accrual event and roll it into the agent's running total. */
 export async function addFeeAccrual(
   agentId: string,
@@ -2747,8 +3157,8 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
                              sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, decision_id,
                              fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
                              order_id, settlement_status, gas_wei, fill_slippage_bps, epoch, fill_cash_usdg, gas_usdg, gas_units,
-                             trade_fee_usdg, fill_symbol)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                             trade_fee_usdg, fill_symbol, user_op_nonce)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.agent_id,
@@ -2783,6 +3193,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
         // different claims, and only one of them is about the trade.
         row.trade_fee_usdg ?? null,
         fillSymbol,
+        row.user_op_nonce ?? null,
       );
     };
     if (!moved) {
@@ -2878,6 +3289,19 @@ export async function addEquity(
      * lines earlier.
      */
     mode: "paper" | "live";
+    /**
+     * TAKEN WHILE FLOW INFERENCE WAS HELD (command-wake.ts tickRatchets
+     * `held`). A true valuation, but not a cash baseline: see the `flows_held`
+     * column. Written 1 or 0, and journalled only when true, so every other
+     * mark's evidence reads exactly as it did.
+     */
+    flowsHeld?: boolean;
+    /**
+     * WHEN THE CASH WAS READ, unix seconds — the tick's balance read. What a
+     * restart takes as this reading's `since` (lastKnownCashReading); the row's
+     * own `at` is the insert, which a mid-tick op can precede.
+     */
+    cashReadAt?: number;
   },
 ): Promise<void> {
   try {
@@ -2891,6 +3315,8 @@ export async function addEquity(
         cashUsdg: b.cashUsdg,
         equityUsdg: b.equityUsdg,
         ethWei: b.ethWei.toString(),
+        // Only when held: undefined is dropped by canonicalJson's stringify.
+        flowsHeld: b.flowsHeld === true ? true : undefined,
         marks: (b.marks ?? []).map((m) => ({
           priceUsd: m.priceUsd,
           source: m.source,
@@ -2911,9 +3337,20 @@ export async function addEquity(
       async (db: Db) => {
         await db
           .prepare(
-            "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, cash_read_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           )
-          .run(agentId, b.ethWei.toString(), b.cashUsdg, b.vaultUsdg, b.positionsUsdg, b.equityUsdg, epoch, b.mode);
+          .run(
+            agentId,
+            b.ethWei.toString(),
+            b.cashUsdg,
+            b.vaultUsdg,
+            b.positionsUsdg,
+            b.equityUsdg,
+            epoch,
+            b.mode,
+            b.flowsHeld === true ? 1 : 0,
+            b.cashReadAt ?? null,
+          );
       },
     );
   } catch (e) {
@@ -2999,6 +3436,9 @@ export type BudgetRail = "live" | "paper";
  * which is the conservative direction — budgets may under-spend, never
  * over-spend.
  */
+// An ALLOW-LIST on purpose: 'reverted', 'rejected' and 'dropped' (an op the
+// chain can never execute — see TradeRow.status) moved nothing, and a status
+// added later counts toward no cap until someone says it spends.
 const RAIL_STATUSES: Record<BudgetRail, readonly string[]> = {
   live: ["landed", "submitted"],
   paper: ["paper"],
@@ -3123,10 +3563,16 @@ export async function getSpentTodayUsdg(
  * Hashes are lowercased so the set compares cleanly against the chain's.
  */
 export async function listOpHashes(agentId: string): Promise<Set<string>> {
+  // NOR A 'dropped' ROW. It says the chain can never execute the op (another
+  // op of ours spent its nonce), and it counts toward no cap. That is proven
+  // at a depth, not assumed — but if the chain ever DID show it executed, the
+  // sweep must still see an op the ledger does not count and write it down,
+  // rather than skip it as settled. Belt and braces for a case the proof rules
+  // out; the price is nothing on every other pass.
   const rows = (await getDb()
     .prepare(
       `SELECT DISTINCT user_op_hash FROM trades
-       WHERE agent_id = ? AND user_op_hash IS NOT NULL AND status <> 'submitted'`,
+       WHERE agent_id = ? AND user_op_hash IS NOT NULL AND status NOT IN ('submitted', 'dropped')`,
     )
     .all(agentId)) as { user_op_hash: string | null }[];
   const set = new Set<string>();
@@ -3174,10 +3620,35 @@ export interface SubmittedOp {
   userOpHash: string;
   kind: string;
   target: string;
+  /**
+   * The legs the pre-broadcast row was written with (tokenLegs), when it had
+   * any. The resolver needs them to recognise an ENERGY purchase whose kind a
+   * rewrite may have lost, and to carry them onto the settled row — a
+   * resolution that dropped them would leave a landed energy buy the in-flight
+   * guard and every leg-keyed reader could no longer see.
+   */
+  sellToken?: string;
+  buyToken?: string;
   amountUsdg: number;
   /** unixepoch seconds, stamped at INSERT and never rewritten by a resolution. */
   createdAt: number;
   epoch: number;
+  /**
+   * The nonce it was signed with (`user_op_nonce`), when the row recorded one
+   * and it parses. Absent on rows written before the column existed: those
+   * are never judged dropped, only aged out of the resolver's window.
+   */
+  nonce?: bigint;
+}
+
+/** A stored nonce back to a bigint; null for anything that is not one. */
+function parseNonce(v: unknown): bigint | null {
+  if (typeof v !== "string" || !/^[0-9]{1,80}$/.test(v)) return null;
+  try {
+    return BigInt(v);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -3196,7 +3667,7 @@ export interface SubmittedOp {
 export async function listSubmittedOps(agentId: string): Promise<SubmittedOp[]> {
   const rows = (await getDb()
     .prepare(
-      `SELECT user_op_hash, kind, target, amount_usdg, created_at, epoch FROM trades
+      `SELECT user_op_hash, kind, target, sell_token, buy_token, amount_usdg, created_at, epoch, user_op_nonce FROM trades
        WHERE agent_id = ? AND status = 'submitted' AND user_op_hash IS NOT NULL
        ORDER BY created_at ASC`,
     )
@@ -3204,18 +3675,134 @@ export async function listSubmittedOps(agentId: string): Promise<SubmittedOp[]> 
     user_op_hash: string;
     kind: string;
     target: string;
+    sell_token: string | null;
+    buy_token: string | null;
     amount_usdg: number;
     created_at: number;
     epoch: number;
+    user_op_nonce: string | null;
   }[];
-  return rows.map((r) => ({
-    userOpHash: r.user_op_hash.toLowerCase(),
-    kind: r.kind,
-    target: r.target,
-    amountUsdg: Number(r.amount_usdg),
-    createdAt: Number(r.created_at),
-    epoch: Number(r.epoch),
-  }));
+  return rows.map((r) => {
+    const nonce = parseNonce(r.user_op_nonce);
+    return {
+      userOpHash: r.user_op_hash.toLowerCase(),
+      kind: r.kind,
+      target: r.target,
+      ...(r.sell_token ? { sellToken: r.sell_token } : {}),
+      ...(r.buy_token ? { buyToken: r.buy_token } : {}),
+      amountUsdg: Number(r.amount_usdg),
+      createdAt: Number(r.created_at),
+      epoch: Number(r.epoch),
+      ...(nonce !== null ? { nonce } : {}),
+    };
+  });
+}
+
+/**
+ * EVERY OTHER OP OF OURS SIGNED WITH THIS NONCE — the rivals whose on-chain
+ * execution would prove a stranded op dropped (inflight-reconcile.ts
+ * findDroppedOps). Any status, any epoch: which of them the chain executed is
+ * the chain's to say, and it is asked by hash. Hashes lowercased, the stranded
+ * op itself excluded.
+ */
+export async function opsSignedWithNonce(agentId: string, nonce: bigint, exceptHash: string): Promise<string[]> {
+  const rows = (await getDb()
+    .prepare(
+      `SELECT DISTINCT user_op_hash FROM trades
+        WHERE agent_id = ? AND user_op_nonce = ? AND user_op_hash IS NOT NULL`,
+    )
+    .all(agentId, nonce.toString())) as { user_op_hash: string | null }[];
+  const except = exceptHash.toLowerCase();
+  const out = new Set<string>();
+  for (const r of rows) {
+    const h = r.user_op_hash?.toLowerCase();
+    if (h && h !== except) out.add(h);
+  }
+  return [...out];
+}
+
+/**
+ * IS AN ENERGY BUY STILL IN FLIGHT? — the ledger's half of "one at a time".
+ *
+ * The energy buy is sized from the chain every time, so the one way to buy
+ * twice is to size a second buy on a reading taken before the first one
+ * settled: an owner asking again while the first is between broadcast and
+ * receipt, or a stranded 'submitted' op the resolver has not reached. This is
+ * the question asked before any sizing: does the ledger hold a 'submitted'
+ * energy purchase from the last `sinceSec` seconds?
+ *
+ * BY KIND OR BY LEGS. The pre-broadcast row is written with kind 'energy-buy'
+ * and legs USDG → the reserve (index.ts tokenLegs), and a row whose kind was
+ * ever rewritten must still be seen — so either matches. The reserve set is
+ * every chain's (core ENERGY_RESERVE_TOKENS), because a false "in flight" costs
+ * an owner a minute and a false "clear" costs a double buy.
+ *
+ * NULL WHEN THE LEDGER WOULD NOT ANSWER, and the caller refuses on it: an
+ * unreadable ledger is not an empty one.
+ *
+ * The window exists because an op past its router deadline (ENERGY.deadlineSec)
+ * can no longer buy anything, and a row the resolver cannot settle must not
+ * block the owner forever; six hours is far past any deadline.
+ */
+export async function energyBuysInFlight(agentId: string, sinceSec: number): Promise<boolean | null> {
+  const reserve = [...new Set(Object.values(ENERGY_RESERVE_TOKENS).flat().map((a) => a.toLowerCase()))];
+  try {
+    const row = await getDb()
+      .prepare(
+        `SELECT 1 AS n FROM trades
+          WHERE agent_id = ? AND status = 'submitted' AND created_at > ?
+            AND (kind = 'energy-buy'
+                 OR (LOWER(COALESCE(sell_token, '')) = ?
+                     AND LOWER(COALESCE(buy_token, '')) IN (${reserve.map(() => "?").join(", ")})))
+          LIMIT 1`,
+      )
+      .get(agentId, Math.floor(sinceSec), (CASH.USDG as string).toLowerCase(), ...reserve);
+    return row !== undefined && row !== null;
+  } catch (e) {
+    console.error("[store] energy in-flight read failed:", e);
+    return null;
+  }
+}
+
+/**
+ * THE NEWEST ENERGY PURCHASE THAT LANDED, and the block it landed in when the
+ * ledger knows it — what the buy's balance-read pin is seeded from at arm.
+ *
+ * The pin (index.ts lastEnergyLandedBlock) makes the next ask read both
+ * $MERRYMEN halves and the cash no earlier than the last purchase's landing,
+ * so a load-balanced node still behind it answers with an error rather than a
+ * pre-purchase balance the planner would top up a second time. It was held in
+ * memory only, so a restart after a landing forgot it — and the in-flight
+ * guard does not cover a LANDED row.
+ *
+ * The block comes from the purchase's own 'energy-buy' flow row (booked from
+ * the receipt's USDG log, before the landed row was written). A landed
+ * purchase with no flow row — its booking was refused or skipped — answers
+ * `blockNumber: null` with its tx hash, and the caller reads that one receipt.
+ * By kind OR by legs, like energyBuysInFlight. Throws when the ledger will not
+ * answer; the caller treats that as "no pin" (fail-soft: the pin is a
+ * freshness floor, never a gate).
+ */
+export async function newestLandedEnergyBuy(agentId: string): Promise<{ txHash: string; blockNumber: number | null } | null> {
+  const reserve = [...new Set(Object.values(ENERGY_RESERVE_TOKENS).flat().map((a) => a.toLowerCase()))];
+  const row = (await getDb()
+    .prepare(
+      `SELECT t.tx_hash AS tx_hash,
+              (SELECT MAX(f.block_number) FROM flows f
+                WHERE f.agent_id = t.agent_id AND f.source = 'energy-buy'
+                  AND LOWER(COALESCE(f.tx_hash, '')) = LOWER(t.tx_hash)) AS block_number
+         FROM trades t
+        WHERE t.agent_id = ? AND t.status = 'landed' AND t.tx_hash IS NOT NULL
+          AND (t.kind = 'energy-buy'
+               OR (LOWER(COALESCE(t.sell_token, '')) = ?
+                   AND LOWER(COALESCE(t.buy_token, '')) IN (${reserve.map(() => "?").join(", ")})))
+        ORDER BY t.created_at DESC, t.id DESC
+        LIMIT 1`,
+    )
+    .get(agentId, (CASH.USDG as string).toLowerCase(), ...reserve)) as { tx_hash: string; block_number: number | string | null } | undefined;
+  if (!row) return null;
+  const block = row.block_number === null || row.block_number === undefined ? null : Number(row.block_number);
+  return { txHash: String(row.tx_hash).toLowerCase(), blockNumber: block !== null && Number.isSafeInteger(block) && block > 0 ? block : null };
 }
 
 // ── chat turns — the conversation survives a restart ──────────────────────

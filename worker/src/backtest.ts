@@ -184,7 +184,10 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
       executed += 1;
       if (intent.kind !== "vault-withdraw") {
         spentToday +=
-          intent.kind === "swap" || intent.kind === "equity-order" || intent.kind === "curve-trade"
+          intent.kind === "swap" ||
+          intent.kind === "equity-order" ||
+          intent.kind === "curve-trade" ||
+          intent.kind === "energy-buy"
             ? intent.notionalUsdg
             : intent.amountUsdg;
       }
@@ -208,6 +211,9 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
           vault -= amt;
           cash += amt;
         }
+        // An energy buy falls through for the same reason as below, and one
+        // more: no strategy emits it (only an owner's confirmed order does),
+        // so a replay of strategies never sees one. Counted, never filled.
         // A curve trade falls through deliberately: the backtest replays
         // Chainlink history, and a bonding curve has none — no feed, no
         // reserves at a past block (this chain keeps no archive state beyond a

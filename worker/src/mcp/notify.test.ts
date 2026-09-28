@@ -716,6 +716,109 @@ test("summary: only money moved between the two readings is said to be inside th
   assert.ok(text!.split("\n").some((l) => l.startsWith(`LIVE: equity 1300.00 USDG as of ${utcOf(end - 100)} (1000.00 at the start, +300.00). Deposits 200.00 USDG and withdrawals 50.00 USDG are inside that change.`)), text);
 });
 
+/**
+ * USDG SET ASIDE AS ENERGY IS NOT A WITHDRAWAL.
+ *
+ * The worker books an energy purchase as an 'out' flow with source
+ * 'energy-buy' (capital leaving the trading book), so the change arithmetic
+ * already includes it. What changes is the SENTENCE: counted under
+ * "withdrawals" it sent an owner looking for money they never took out.
+ */
+test("summary: energy bought is said apart from withdrawals, and the arithmetic is unchanged", async () => {
+  const f = await setup();
+  const { start, end } = summaryPeriod("day", 0, NOW);
+  f.sub("summary", { period: "day", hour_utc: 0 }, { createdAt: start - 3600 });
+  equity(f, "live", 1000, start - 100);
+  equity(f, "live", 1130, end - 100);
+  const flow = f.raw.prepare("INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, log_index, chain_id, source, at, epoch) VALUES (?, ?, ?, ?, ?, 4663, ?, ?, 1)");
+  flow.run(ACCOUNT_A, "in", 200, tx(60), 1, "chain-log", start + 100);
+  flow.run(ACCOUNT_A, "out", 50, tx(61), 1, "transfer-intent", start + 200);
+  flow.run(ACCOUNT_A, "out", 20, tx(62), 4, "energy-buy", start + 300);
+  await f.pass();
+  const [text] = texts(f);
+  const live = text!.split("\n").find((l) => l.startsWith("LIVE:"))!;
+  assert.ok(live.includes("(1000.00 at the start, +130.00)."), live);
+  assert.ok(live.includes("Deposits 200.00 USDG and withdrawals 50.00 USDG are inside that change."), live);
+  assert.ok(live.includes("So is 20.00 USDG set aside as energy ($MERRYMEN)"), live);
+  assert.doesNotMatch(live, /withdrawals 70\.00/, "energy is not counted as a withdrawal");
+});
+
+test("summary: an energy purchase alone is said on its own, never as 'withdrawals'", async () => {
+  const f = await setup();
+  const { start, end } = summaryPeriod("day", 0, NOW);
+  f.sub("summary", { period: "day", hour_utc: 0 }, { createdAt: start - 3600 });
+  equity(f, "live", 1000, start - 100);
+  equity(f, "live", 980, end - 100);
+  f.raw.prepare("INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, log_index, chain_id, source, at, epoch) VALUES (?, 'out', 20, ?, 4, 4663, 'energy-buy', ?, 1)")
+    .run(ACCOUNT_A, tx(63), start + 300);
+  await f.pass();
+  const [text] = texts(f);
+  const live = text!.split("\n").find((l) => l.startsWith("LIVE:"))!;
+  assert.ok(live.includes("Inside that change is 20.00 USDG set aside as energy ($MERRYMEN)"), live);
+  assert.doesNotMatch(live, /withdrawals|Deposits/);
+  assert.doesNotMatch(live, /price|returns?\b|profit/i);
+});
+
+/**
+ * A VALUATION TAKEN WHILE FLOW INFERENCE WAS HELD IS NEITHER END OF THE CHANGE.
+ *
+ * The worker writes it flagged `flows_held` (store.ts): its cash can carry a
+ * deposit or a withdrawal the flows table has not booked yet. Measured to it,
+ * a top-up still settling was part of the change with no deposit listed
+ * beside it — trading, to anybody reading the line. It is still the book's
+ * value, so the line states it.
+ */
+function heldEquity(f: Fixture, mode: string, value: number, at: number, account = ACCOUNT_A): void {
+  f.raw.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, mode, epoch, flows_held) VALUES (?, '0', ?, 0, ?, ?, ?, 1, 1)").run(account, value, value, at, mode);
+}
+
+test("summary: a held newest valuation is stated, and the change stops at the last measured one", async () => {
+  const f = await setup();
+  const { start, end } = summaryPeriod("day", 0, NOW);
+  f.sub("summary", { period: "day", hour_utc: 0 }, { createdAt: start - 3600 });
+  equity(f, "live", 1000, start - 100);
+  equity(f, "live", 1100, end - 200);
+  heldEquity(f, "live", 1150, end - 100); // a 50 USDG top-up the flows table has not booked yet
+  await f.pass();
+  const [text] = texts(f);
+  const live = text!.split("\n").find((l) => l.startsWith("LIVE:"))!;
+  assert.equal(
+    live,
+    `LIVE: equity 1150.00 USDG as of ${utcOf(end - 100)} (1000.00 at the start, +100.00 by ${utcOf(end - 200)}; valuations after that were taken while a deposit, withdrawal or purchase was still settling and are not measured). 0 trades landed.`,
+  );
+  assert.doesNotMatch(live, /\+150\.00/, "the owner's own top-up is not part of the change");
+});
+
+test("summary: a held valuation is never the opening either, so a deposit booked after it is inside the change", async () => {
+  const f = await setup();
+  const { start, end } = summaryPeriod("day", 0, NOW);
+  f.sub("summary", { period: "day", hour_utc: 0 }, { createdAt: start - 3600 });
+  equity(f, "live", 1000, start - 100);
+  heldEquity(f, "live", 1200, start - 50); // 200 arrived; booked only after the period opened
+  f.raw.prepare("INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, log_index, chain_id, source, at, epoch) VALUES (?, 'in', 200, ?, 0, 4663, 'chain-log', ?, 1)")
+    .run(ACCOUNT_A, tx(64), start + 10);
+  equity(f, "live", 1300, end - 100);
+  await f.pass();
+  const live = texts(f)[0]!.split("\n").find((l) => l.startsWith("LIVE:"))!;
+  // Opened on the held valuation it read +100 with a 200 deposit inside: a 100 loss that never happened.
+  assert.ok(live.includes("(1000.00 at the start, +300.00). Deposits 200.00 USDG and withdrawals 0.00 USDG are inside that change."), live);
+});
+
+test("summary: a period valued only while held measures no change, and says why", async () => {
+  const f = await setup();
+  const { start, end } = summaryPeriod("day", 0, NOW);
+  f.sub("summary", { period: "day", hour_utc: 0 }, { createdAt: start - 3600 });
+  equity(f, "live", 1000, start - 100);
+  heldEquity(f, "live", 1050, start + 100);
+  heldEquity(f, "live", 1060, end - 100);
+  await f.pass();
+  const live = texts(f)[0]!.split("\n").find((l) => l.startsWith("LIVE:"))!;
+  assert.equal(
+    live,
+    `LIVE: equity 1060.00 USDG as of ${utcOf(end - 100)} (no change is measured: the valuations after the start were taken while a deposit, withdrawal or purchase was still settling). 0 trades landed.`,
+  );
+});
+
 test("summary: one on-chain deposit recorded under both spellings of the account is counted once", async () => {
   const f = await setup();
   const { start, end } = summaryPeriod("day", 0, NOW);

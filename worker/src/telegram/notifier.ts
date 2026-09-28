@@ -29,17 +29,30 @@ import { pnlCardFromFill } from "../pnl-card";
 import { sendPnlPhoto } from "./pnl-photo";
 import { resolveLlm } from "../llm";
 import { narrateJournal, narrateTrade } from "./interpreter";
-import { dashboardBase, readReport, type StatusContext } from "./reads";
+import { dashboardBase, readReport, redactAddresses, type StatusContext } from "./reads";
 import { readResearch } from "../research-files";
 import { loadGrantFile } from "../grant";
 import { settleFor, signDecision, signMessage, signNeed } from "./sign-prompt";
+import {
+  ENERGY_ALERT_RETRY_SEC,
+  energyAlert,
+  energyAlertDue,
+  recordEnergyAlert,
+  type EnergyAlertInputs,
+} from "./energy-alert";
 import { bookAddresses } from "../custody";
 import { mainnetClient } from "../snapshot";
 import { labelText, nonCashLeg, sideOf, tokenLabel } from "../token-label";
-import { dollars } from "./trade-rows";
+import { ENERGY_BUY_KIND, ENERGY_LABEL, dollars, isEnergyRow } from "./trade-rows";
 import type { StateRef, Watcher } from "./state";
 
-export interface AlertInputs {
+/**
+ * The energy fields (`energy`, `energyAccount`, `energyChainId`,
+ * `energyHolder`) come from energy-alert.ts: the worker's own report this tick
+ * and the addresses the alert may print, all from the grant and settings —
+ * never from a model. See energy-alert.ts for when it speaks.
+ */
+export interface AlertInputs extends EnergyAlertInputs {
   /** Grant expiry (unix) or null when not armed. */
   grantExpiresAt: number | null;
   /**
@@ -213,6 +226,9 @@ const TRADE_PING_COLUMNS =
  * a name is decoration on a receipt that is already correct without it.
  */
 async function coinFor(db: DatabaseSync, t: TradeRowLite, agentId: string | null, cfg: ResolvedConfig): Promise<TradeCoin | null> {
+  // Energy is named for what it is — never its ticker read off the chain, and
+  // never a coin to look up. Only ever bought.
+  if (isEnergyRow(t)) return { label: ENERGY_LABEL, side: sideOf(t) ?? "buy" };
   try {
     const token = nonCashLeg(t);
     if (!token) return null;
@@ -344,6 +360,7 @@ export function tradeLine(t: TradeRowLite, explorer: string | null, withRemedy =
     : t.kind === "vault-deposit" ? "move into your savings vault"
     : t.kind === "vault-withdraw" ? "move out of your savings vault"
     : t.kind === "equity-order" && t.target && !/^0x/i.test(t.target) ? `${esc(t.target)} order`
+    : t.kind === ENERGY_BUY_KIND ? `top-up of ${esc(ENERGY_LABEL)}`
     : t.kind === "swap" || t.kind === "curve-trade" ? "trade"
     : esc(t.kind);
   if (t.status === "landed") {
@@ -461,6 +478,8 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
   let stopped = false;
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   let latestPrices: Map<string, number> = new Map();
+  /** A refused energy alert, and when it may be tried again (energy-alert.ts). In memory: a restart just tries now. */
+  let energyRetry: { key: string; at: number } | null = null;
 
   const pass = async (): Promise<void> => {
     const cfg = deps.getCfg();
@@ -518,7 +537,10 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
              * yesterday.
              */
             let said = "";
-            if (t.status === "landed" || t.status === "paper") {
+            // NOT FOR ENERGY. A model asked why the agent bought $MERRYMEN has
+            // only the token and the headlines to go on, and the one thing it
+            // must never say is anything about that token's price or returns.
+            if ((t.status === "landed" || t.status === "paper") && !isEnergyRow(t)) {
               const llm = resolveLlm(cfg);
               if (llm) {
                 const evidence = tradeWhyEvidence(t, decisionFor(db, t.decision_id), newsNow());
@@ -745,6 +767,29 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       );
     }
 
+    // ── TODAY'S ENERGY IS SPENT — ONCE PER UTC DAY, READ-ONLY ──────────────
+    //
+    // Not through fire(): its six-hour cooldown would say it again the same
+    // afternoon. Everything that decides is in energy-alert.ts; this only
+    // sends and records. No buy button and no parked action — the buy is the
+    // app chat's, where the owner confirms the amount (design D6).
+    {
+      const alert = energyAlert(inputs, dashboardBase(), now());
+      if (alert && energyAlertDue(alert.key, deps.stateRef.get().firedAlerts, energyRetry, now())) {
+        const sent = await sendMessage({ token }, chatId, alert.text, alert.keyboard ? { keyboard: alert.keyboard } : {});
+        if (sent.ok) {
+          // THE KEY ONLY, NEVER THE MESSAGE — it carries the owner's addresses.
+          console.log(`[notify] energy alert sent — ${alert.key}`);
+          energyRetry = null;
+          // RE-READ AFTER THE SEND, for the same reason as fire().
+          const fresh = deps.stateRef.get();
+          deps.stateRef.set({ ...fresh, firedAlerts: recordEnergyAlert(fresh.firedAlerts, alert.key, now()) });
+        } else {
+          energyRetry = { key: alert.key, at: now() + ENERGY_ALERT_RETRY_SEC };
+        }
+      }
+    }
+
     // ── relationship milestones (fire once, ever) ───────────────────────────
     const fireOnce = async (key: string, message: string): Promise<void> => {
       const st = deps.stateRef.get();
@@ -887,7 +932,9 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       let opener = "";
       if (reportLlm) {
         const evidence = [
-          report.replace(/<[^>]+>/g, ""),
+          // The report quotes the newest event ("last word from camp"):
+          // addresses redacted for the model, kept in the report itself.
+          redactAddresses(report.replace(/<[^>]+>/g, "")),
           ``,
           `RELATIONSHIP: ${rel.stage}, day ${rel.daysTogether}, ${rel.messageCount} messages with my owner.`,
         ].join("\n");
@@ -910,7 +957,7 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       const hasGrant = inputs.grantExpiresAt !== null;
       const plainReport = hasGrant ? readReport(deps.buildStatusContext()).replace(/<[^>]+>/g, "") : "";
       const evidence = [
-        hasGrant ? plainReport : "No wallet armed today — a quiet day off the road.",
+        hasGrant ? redactAddresses(plainReport) : "No wallet armed today — a quiet day off the road.",
         ``,
         `RELATIONSHIP: ${rel.stage}, day ${rel.daysTogether}, ${rel.messageCount} messages with my owner.`,
       ].join("\n");

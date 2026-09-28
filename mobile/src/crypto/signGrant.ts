@@ -16,6 +16,9 @@ import {
   buildCallPermissions,
   wallShape,
   wallSignable,
+  energyBuyFits,
+  GRANT_ENERGY,
+  ENERGY_ROUTE_V1,
   WALL_POLICY_FLAG,
   robinhoodChain,
   usableExtraTokens,
@@ -195,6 +198,25 @@ export async function signGrant(args: {
   const sealedTokens = [...officialCoinTokens(chain.id), ...(args.extraTokens ?? [])];
   const sealedPonsAdapter = ponsAdapterForSigning(chain.id, args.ponsAdapterAddress);
 
+  // IS THIS A FIRST INSTALL OR A RE-SIGN? A fact about the account, and the
+  // same one the other signer reads. `deploying` was hardcoded inside
+  // `wallSignable`, so both signers charged every re-sign for a CREATE2 and an
+  // initCode it will never pay. A cap only one signer gets right is not a cap,
+  // and neither is a cap both get wrong the same way.
+  //
+  // Unreadable counts as undeployed: over-charging refuses a wall the owner can
+  // retry, under-charging mints one the executor refuses forever.
+  //
+  // Read BEFORE the wall options, because the energy buy below is sealed only
+  // when the wall still fits, and that depends on this.
+  let alreadyDeployed = false;
+  try {
+    const code = await publicClient.getBytecode({ address: sudoOnlyAccount.address });
+    alreadyDeployed = code !== undefined && code !== "0x";
+  } catch {
+    alreadyDeployed = false;
+  }
+
   const wallOpts = {
     extraTokens: sealedTokens,
     allowUniswapV4,
@@ -205,28 +227,24 @@ export async function signGrant(args: {
     // factory — two of three class permissions is a key that can reach a vault
     // it can never create, and a CALL to a codeless address succeeds silently.
     ponsClassVaultFactoryAddress: args.ponsClassVaultFactory,
+    // Decided just below, by energyBuyFits, and nowhere else.
+    energyBuy: false as boolean,
   };
+  // THE ENERGY BUY, decided exactly as web/src/lib/session.ts decides it:
+  // mainnet only (elsewhere the router is codeless and a buy would land having
+  // bought nothing), and only when this wall still fits with it, so a full
+  // basket's re-sign is never refused for it. ONE boolean builds the permission
+  // and mints GRANT_ENERGY below — marker and permission move together.
+  wallOpts.energyBuy = energyBuyFits(args.caps, sudoOnlyAccount.address, chain.id, !alreadyDeployed, wallOpts);
+  if (!wallOpts.energyBuy && chain.id === ENERGY_ROUTE_V1.chainId) {
+    say("no room in this permission for the agent to buy its own energy — $MERRYMEN can still be sent to it directly");
+  }
 
   // CAN THIS WALL EVER BE INSTALLED? The same question the other signer asks,
   // through the same function, over the same permission objects — because a cap
   // only one signer enforces is not a cap. Both signers already move in lockstep
   // on what they MINT (signer-lockstep.test.ts); this is the same rule applied
-  // to what they REFUSE.
-  // AND ON THE SAME FACT ABOUT THE ACCOUNT. `deploying` was hardcoded inside
-  // `wallSignable`, so both signers charged every re-sign for a CREATE2 and an
-  // initCode it will never pay. A cap only one signer gets right is not a cap,
-  // and neither is a cap both get wrong the same way.
-  //
-  // Unreadable counts as undeployed: over-charging refuses a wall the owner can
-  // retry, under-charging mints one the executor refuses forever.
-  let alreadyDeployed = false;
-  try {
-    const code = await publicClient.getBytecode({ address: sudoOnlyAccount.address });
-    alreadyDeployed = code !== undefined && code !== "0x";
-  } catch {
-    alreadyDeployed = false;
-  }
-
+  // to what they REFUSE — and on the same `deploying` fact, read above.
   const sealedForWall = (wallOpts.extraTokens ?? []) as readonly unknown[];
   const signable = wallSignable(
     wallShape(buildCallPermissions(args.caps, sudoOnlyAccount.address, wallOpts)),
@@ -311,6 +329,9 @@ export async function signGrant(args: {
         // the factory is the request, the vault address is the evidence. See
         // the same line in web/src/lib/session.ts.
         ...(ponsClassVaultAddress ? [GRANT_PONS_CLASS] : []),
+        // From the SAME boolean that built the router permission above —
+        // identical to web/src/lib/session.ts.
+        ...(wallOpts.energyBuy ? [GRANT_ENERGY] : []),
       ],
       ...(args.v4AdapterAddress ? { v4AdapterAddress: args.v4AdapterAddress.toLowerCase() } : {}),
       ...(sealedPonsAdapter ? { ponsAdapterAddress: sealedPonsAdapter.toLowerCase() } : {}),

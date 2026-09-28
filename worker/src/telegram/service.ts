@@ -70,6 +70,7 @@ import {
   readTrades,
   readWallet,
   readWhyEvidence,
+  redactAddresses,
   dashboardBase,
   type StatusContext,
 } from "./reads";
@@ -409,7 +410,10 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
           if (!ev.hasTrade || !llm) return ev.text;
           // Model text, sent as HTML: escaped, or a "<" in it (or in a
           // decision's reason it quotes) makes Telegram refuse the message.
-          const plain = ev.text.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+          // Addresses redacted: the evidence quotes event lines (reads.ts).
+          const plain = redactAddresses(
+            ev.text.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"),
+          );
           return esc(await narrateWhy(plain, llm));
         },
         settings: () => settingsListText(cfg as unknown as Record<string, unknown>),

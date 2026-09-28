@@ -39,6 +39,7 @@ import { basisUsdg } from "../basis-usdg";
 import { distinctTrades, OP_COPY_REACH_SEC } from "../distinct-trades";
 import { OP_KEY, readEvidencedSells } from "../profile-trades";
 import { readDeskPositions } from "../desk-positions";
+import { heldSql } from "../held-marks";
 import { readAgentStatus, type AgentStatusView } from "./agent-status";
 import { readTradeSpelling } from "./portfolio";
 import { explanationOf, FILL_KINDS } from "./decisions";
@@ -127,7 +128,11 @@ export interface Mark {
 export interface BookValuation {
   /** The last mark at or before the window opened (else the run's first inside it). */
   start: Mark | null;
-  /** The newest mark at or before the window closed. */
+  /**
+   * The newest MEASURED mark at or before the window closed: never one taken
+   * while flow inference was held (held-marks.ts), whose cash may carry a
+   * movement not booked yet. A note says when newer ones exist.
+   */
   end: Mark | null;
   change_usdg: number | null;
   /**
@@ -284,45 +289,78 @@ function markOf(r: Record<string, unknown> | undefined): Mark | null {
  * account and one run. A different account (a re-signed agent) or a different
  * run (a paper reset, an accounting epoch) is not the same money, so the change
  * is never measured across either.
+ *
+ * AND ONLY MEASURED MARKS (held-marks.ts). A mark taken while flow inference
+ * was held can carry a top-up, a withdrawal or an energy buy the flows table
+ * has not booked yet; a change measured to it and split by the BOOKED flows
+ * reports the owner's own money as trading. The newest mark of any kind still
+ * names the run, and the count of what was left out is a note.
  */
 async function readBookValuation(db: Db, scope: Scope, book: BookName, since: number, until: number): Promise<BookValuation> {
   const notes: string[] = [];
-  const end = markOf(await db.prepare(
+  const held = await heldSql(db);
+  const measured = held.measurable("e.");
+  const newest = markOf(await db.prepare(
     `SELECT e.agent_id, e.at, e.equity_usdg, e.cash_usdg, e.epoch FROM equity e
       WHERE ${scope.on("e.agent_id")} AND e.mode = ? AND e.at <= ? ORDER BY e.at DESC, e.id DESC LIMIT 1`,
   ).get(...scope.args, book, until) as Record<string, unknown> | undefined);
-  if (!end) {
+  if (!newest) {
     return { start: null, end: null, change_usdg: null, attribution: null, marks_in_window: 0, notes: [`No ${book} valuation has been recorded for this agent.`] };
   }
-  const acct = end.account.toLowerCase();
-  const run = end.epoch === null ? "" : " AND e.epoch = ?";
-  const runArg = end.epoch === null ? [] : [end.epoch];
+  const acct = newest.account.toLowerCase();
+  const run = newest.epoch === null ? "" : " AND e.epoch = ?";
+  const runArg = newest.epoch === null ? [] : [newest.epoch];
   const inWindow = await db.prepare(
     `SELECT COUNT(*) AS n FROM equity e WHERE lower(e.agent_id) = ? AND e.mode = ?${run} AND e.at >= ? AND e.at <= ?`,
   ).get(acct, book, ...runArg, since, until) as Record<string, unknown> | undefined;
   const marksInWindow = num(inWindow?.n) ?? 0;
   const others = await db.prepare(
     `SELECT COUNT(*) AS n FROM equity e WHERE ${scope.on("e.agent_id")} AND e.mode = ? AND e.at >= ? AND e.at <= ?
-       AND NOT (lower(e.agent_id) = ?${end.epoch === null ? "" : " AND e.epoch = ?"})`,
+       AND NOT (lower(e.agent_id) = ?${newest.epoch === null ? "" : " AND e.epoch = ?"})`,
   ).get(...scope.args, book, since, until, acct, ...runArg) as Record<string, unknown> | undefined;
   const otherMarks = num(others?.n) ?? 0;
   if (otherMarks > 0) {
     notes.push(`${otherMarks} ${book} valuation(s) in this window belong to an earlier run or account and are not compared with the current one.`);
   }
   if (marksInWindow === 0) {
-    notes.push(`No ${book} valuation was recorded in this window; the last one was at ${iso(end.at)}, so no change is reported.`);
-    return { start: null, end, change_usdg: null, attribution: null, marks_in_window: 0, notes };
+    notes.push(`No ${book} valuation was recorded in this window; the last one was at ${iso(newest.at)}, so no change is reported.`);
+    return { start: null, end: newest, change_usdg: null, attribution: null, marks_in_window: 0, notes };
+  }
+  const heldIn = await db.prepare(
+    `SELECT COUNT(*) AS n FROM equity e WHERE lower(e.agent_id) = ? AND e.mode = ?${run} AND e.at >= ? AND e.at <= ? AND NOT (${measured})`,
+  ).get(acct, book, ...runArg, since, until) as Record<string, unknown> | undefined;
+  const heldMarks = num(heldIn?.n) ?? 0;
+  const end = markOf(await db.prepare(
+    `SELECT e.agent_id, e.at, e.equity_usdg, e.cash_usdg, e.epoch FROM equity e
+      WHERE lower(e.agent_id) = ? AND e.mode = ?${run} AND e.at <= ? AND ${measured} ORDER BY e.at DESC, e.id DESC LIMIT 1`,
+  ).get(acct, book, ...runArg, until) as Record<string, unknown> | undefined);
+  const endInWindow = end !== null && end.at >= since;
+  if (heldMarks > 0) {
+    notes.push(
+      `${heldMarks} ${book} valuation(s) in this window were taken while flow inference was held (an operation was in flight, so a deposit, withdrawal or settlement in their cash may not be booked yet); the change and its split leave them out` +
+        (endInWindow ? ` and end at ${iso(end.at)}.` : "."),
+    );
+  }
+  if (!end || !endInWindow) {
+    notes.push(`No ${book} valuation in this window was taken outside a flow-inference hold, so no change is reported.`);
+    return { start: null, end: null, change_usdg: null, attribution: null, marks_in_window: marksInWindow, notes };
   }
   let start = markOf(await db.prepare(
     `SELECT e.agent_id, e.at, e.equity_usdg, e.cash_usdg, e.epoch FROM equity e
-      WHERE lower(e.agent_id) = ? AND e.mode = ?${run} AND e.at <= ? ORDER BY e.at DESC, e.id DESC LIMIT 1`,
+      WHERE lower(e.agent_id) = ? AND e.mode = ?${run} AND e.at <= ? AND ${measured} ORDER BY e.at DESC, e.id DESC LIMIT 1`,
   ).get(acct, book, ...runArg, since) as Record<string, unknown> | undefined);
   if (!start) {
     start = markOf(await db.prepare(
       `SELECT e.agent_id, e.at, e.equity_usdg, e.cash_usdg, e.epoch FROM equity e
-        WHERE lower(e.agent_id) = ? AND e.mode = ?${run} AND e.at >= ? ORDER BY e.at ASC, e.id ASC LIMIT 1`,
+        WHERE lower(e.agent_id) = ? AND e.mode = ?${run} AND e.at >= ? AND ${measured} ORDER BY e.at ASC, e.id ASC LIMIT 1`,
     ).get(acct, book, ...runArg, since) as Record<string, unknown> | undefined);
-    if (start) notes.push(`This ${book} run began inside the window; the change is measured from its first valuation at ${iso(start.at)}.`);
+    // Began inside the window only if NO mark of the run precedes it; a run
+    // whose earlier marks were all held began before and is measured from
+    // its first measured one, which the held note above already explains.
+    const earlier = await db.prepare(
+      `SELECT COUNT(*) AS n FROM equity e WHERE lower(e.agent_id) = ? AND e.mode = ?${run} AND e.at <= ?`,
+    ).get(acct, book, ...runArg, since) as Record<string, unknown> | undefined;
+    if (start && (num(earlier?.n) ?? 0) === 0) notes.push(`This ${book} run began inside the window; the change is measured from its first valuation at ${iso(start.at)}.`);
   }
   if (!start || start.at >= end.at) {
     notes.push(`Only one ${book} valuation falls in this window, so no change is reported.`);
@@ -335,7 +373,7 @@ async function readBookValuation(db: Db, scope: Scope, book: BookName, since: nu
   // its cash is simulated) and its trade times, restart copies excluded.
   const markRows = (await db.prepare(
     `SELECT e.at, e.equity_usdg, e.cash_usdg FROM equity e
-      WHERE lower(e.agent_id) = ? AND e.mode = ?${run} AND e.at >= ? AND e.at <= ? ORDER BY e.at ASC, e.id ASC LIMIT ?`,
+      WHERE lower(e.agent_id) = ? AND e.mode = ?${run} AND e.at >= ? AND e.at <= ? AND ${measured} ORDER BY e.at ASC, e.id ASC LIMIT ?`,
   ).all(acct, book, ...runArg, start.at, end.at, SUMMARY_MARKS_MAX + 1)) as Record<string, unknown>[];
   if (markRows.length > SUMMARY_MARKS_MAX) {
     notes.push(`Too many valuations to attribute the change (over ${SUMMARY_MARKS_MAX}); only the total change is reported.`);

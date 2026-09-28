@@ -70,6 +70,9 @@ const ALIASES: Readonly<Record<string, readonly string[]>> = Object.freeze({
   classMaxPositions: ["max positions", "max coins"],
   classExitAtGraduationPct: ["graduation exit", "exit at graduation"],
   strategy: ["playbook"],
+  // Posting on X is dashboard-only (DASHBOARD_ONLY.xPosting): these words
+  // reach the refusal and its Settings button, never a change.
+  xPosting: ["post on x", "posting on x", "x posting", "posts on x", "post on twitter", "twitter", "tweets", "tweeting", "x account"],
 });
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "");

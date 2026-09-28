@@ -41,6 +41,7 @@ struct AccountScreen: View {
                 Card {
                     MenuRow(title: "Settings", systemImage: "gearshape", route: .settings)
                     MenuRow(title: "Verify your X profile", systemImage: "checkmark.seal", route: .xProof)
+                    MenuRow(title: "Posting on X", systemImage: "megaphone", route: .xPosting)
                     MenuRow(title: "Connected AI apps", systemImage: "sparkles.rectangle.stack", route: .connectedApps)
                     MenuRow(title: "Telegram", systemImage: "paperplane", route: .telegram)
                     MenuRow(title: "The Merry Circle", systemImage: "circle.hexagongrid", route: .circle)

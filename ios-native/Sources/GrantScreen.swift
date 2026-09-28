@@ -44,7 +44,7 @@ struct GrantScreen: View {
                             }
                             if ["even-keel", "dip-hunter"].contains(strategy) {
                                 Remote(path: "/api/tier") { tier in
-                                    Text(tier["bonusStrategies"].bool == true ? "Your current tier includes this strategy." : "This strategy stays idle until your wallet meets its Merry Circle tier. Choose Steady basket or AI strategist to start without it.").foregroundStyle(.orange)
+                                    Text(tier["bonusStrategies"].bool == true ? "Your current tier includes this strategy." : "Below its Merry Circle tier this strategy opens nothing new and leaves its basket as it is; positions in a class vault are still closed by their own exit rules. Choose Steady basket or AI strategist to start without it.").foregroundStyle(.orange)
                                 }
                             }
                             Picker(words("mode.legend"), selection: $paper) { Text(words("mode.paperOption")).tag(true); Text(words("mode.liveOption")).tag(false) }

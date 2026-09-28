@@ -34,6 +34,7 @@
 import { randomBytes } from "node:crypto";
 import { getAddress, isAddress } from "viem";
 import type { Db } from "../db";
+import { heldSql, isHeld } from "../held-marks";
 import { STOCK_TOKENS } from "../../../packages/core/src/tokens";
 import { esc, sendMessage, type FetchLike } from "../telegram/api";
 import { readTenantTelegram } from "../telegram-store";
@@ -1176,12 +1177,23 @@ const hoursBefore = (sec: number) => {
   return `${h} hour${h === 1 ? "" : "s"}`;
 };
 
+/**
+ * WHY A CHANGE STOPS SHORT OF THE NEWEST VALUATION. One taken while flow
+ * inference was held (held-marks.ts) can carry a deposit, a withdrawal or a
+ * purchase the flows table has not booked yet: a change measured to it, with
+ * the booked flows listed beside it as "inside that change", reads the
+ * owner's own money as trading. It is still the book's value, so the line
+ * states it; the change is measured between valuations that are not held.
+ */
+const SETTLING = "a deposit, withdrawal or purchase was still settling";
+
 async function bookLine(shared: Db, scope: AgentScope, book: "live" | "paper", start: number, end: number): Promise<string | null> {
   const ids = scope.ids;
   const idsIn = placeholders(ids.length);
+  const held = await heldSql(shared);
   const last = (await shared
-    .prepare(`SELECT agent_id, equity_usdg, at, epoch FROM equity WHERE agent_id IN (${idsIn}) AND mode = ? AND at <= ? ORDER BY at DESC LIMIT 1`)
-    .get(...ids, book, end)) as { agent_id: string; equity_usdg: unknown; at: unknown; epoch: unknown } | undefined;
+    .prepare(`SELECT agent_id, equity_usdg, at, epoch, ${held.flag()} AS held FROM equity WHERE agent_id IN (${idsIn}) AND mode = ? AND at <= ? ORDER BY at DESC LIMIT 1`)
+    .get(...ids, book, end)) as { agent_id: string; equity_usdg: unknown; at: unknown; epoch: unknown; held: unknown } | undefined;
   const status = book === "live" ? "landed" : "paper";
   // Fills only (a transfer or a vault move is not a trade), one per operation:
   // a redeploy's copy of an operation is not a second trade. The collapse
@@ -1200,14 +1212,28 @@ async function bookLine(shared: Db, scope: AgentScope, book: "live" | "paper", s
     // A book with neither a valuation nor a fill in the period is not part of this summary.
     return fills > 0 ? `${label}: no valuation was recorded in the period. ${fillsText}` : null;
   }
-  // The opening figure must be of the same account and the same run: a reset
-  // opens a new epoch at a new balance, and that step is not performance.
-  const opening = ((await shared
-    .prepare("SELECT equity_usdg, at FROM equity WHERE agent_id = ? AND mode = ? AND epoch = ? AND at <= ? ORDER BY at DESC LIMIT 1")
-    .get(last.agent_id, book, last.epoch, start)) ??
-    (await shared
-      .prepare("SELECT equity_usdg, at FROM equity WHERE agent_id = ? AND mode = ? AND epoch = ? AND at >= ? ORDER BY at ASC LIMIT 1")
-      .get(last.agent_id, book, last.epoch, start))) as { equity_usdg: unknown; at: unknown } | undefined;
+  // THE CHANGE'S TWO ENDS ARE MEASURED VALUATIONS (SETTLING above), of the
+  // same account and the same run: a reset opens a new epoch at a new
+  // balance, and that step is not performance.
+  const measured = held.measurable();
+  const lastHeld = isHeld(last.held);
+  const closing = lastHeld
+    ? ((await shared
+        .prepare(`SELECT equity_usdg, at FROM equity WHERE agent_id = ? AND mode = ? AND epoch = ? AND at <= ? AND ${measured} ORDER BY at DESC LIMIT 1`)
+        .get(last.agent_id, book, last.epoch, end)) as { equity_usdg: unknown; at: unknown } | undefined)
+    : last;
+  const closeAt = num(closing?.at);
+  const closeEq = num(closing?.equity_usdg);
+  // No measured valuation inside the period: nothing to open against either.
+  const opening =
+    closeAt === null || closeAt < start
+      ? undefined
+      : (((await shared
+          .prepare(`SELECT equity_usdg, at FROM equity WHERE agent_id = ? AND mode = ? AND epoch = ? AND at <= ? AND ${measured} ORDER BY at DESC LIMIT 1`)
+          .get(last.agent_id, book, last.epoch, start)) ??
+          (await shared
+            .prepare(`SELECT equity_usdg, at FROM equity WHERE agent_id = ? AND mode = ? AND epoch = ? AND at >= ? AND ${measured} ORDER BY at ASC LIMIT 1`)
+            .get(last.agent_id, book, last.epoch, start))) as { equity_usdg: unknown; at: unknown } | undefined);
   const open = num(opening?.equity_usdg);
   const openAt = num(opening?.at);
   // The figure is the last valuation, stated with its time. One taken well
@@ -1218,11 +1244,19 @@ async function bookLine(shared: Db, scope: AgentScope, book: "live" | "paper", s
     ? `last valued at ${utc(lastAt)}, ${hoursBefore(end - lastAt)} before the period ended, and not since: equity then ${usd(lastEq)} USDG`
     : `equity ${usd(lastEq)} USDG as of ${utc(lastAt)}`;
   let change = "";
-  if (open !== null && openAt !== null && openAt !== lastAt) {
-    change = ` (${usd(open)} ${openAt <= start ? "at the start" : "at the first reading in the period"}, ${signed(lastEq - open)}${stale ? " by then" : ""})`;
+  const measuredChange = open !== null && openAt !== null && closeEq !== null && closeAt !== null && openAt !== closeAt;
+  if (measuredChange) {
+    const upTo = lastHeld
+      ? ` by ${utc(closeAt)}; valuations after that were taken while ${SETTLING} and are not measured`
+      : stale
+        ? " by then"
+        : "";
+    change = ` (${usd(open)} ${openAt <= start ? "at the start" : "at the first reading in the period"}, ${signed(closeEq - open)}${upTo})`;
+  } else if (lastHeld) {
+    change = ` (no change is measured: the valuations after the start were taken while ${SETTLING})`;
   }
   let flowsText = "";
-  if (book === "live" && change && openAt !== null && lastAt !== null) {
+  if (book === "live" && measuredChange && openAt !== null && closeAt !== null) {
     // Only money that crossed the account BETWEEN the two readings the change
     // is measured from, on the same account and run, is "inside that change".
     // An epoch-carry is the opening balance of a new run, not a deposit, and a
@@ -1232,11 +1266,17 @@ async function bookLine(shared: Db, scope: AgentScope, book: "live" | "paper", s
     // on-chain log can be recorded once per spelling. De-duplicated by chain
     // identity (tx, log index), as the web's reports flowRows does.
     const flows = (await shared
-      .prepare(`SELECT direction, amount_usdg, tx_hash, log_index FROM flows
+      .prepare(`SELECT direction, amount_usdg, tx_hash, log_index, source FROM flows
         WHERE agent_id IN (${placeholders(acct.length)}) AND epoch = ? AND source <> 'epoch-carry' AND at > ? AND at <= ?`)
-      .all(...acct, last.epoch, openAt, lastAt)) as Array<{ direction: string; amount_usdg: unknown; tx_hash: unknown; log_index: unknown }>;
+      .all(...acct, last.epoch, openAt, closeAt)) as Array<{ direction: string; amount_usdg: unknown; tx_hash: unknown; log_index: unknown; source: unknown }>;
     let inflow = 0;
     let outflow = 0;
+    // USDG SET ASIDE AS ENERGY is capital leaving the trading book — the P&L
+    // arithmetic is right to count it with the withdrawals — but it is not a
+    // withdrawal: nothing reached the owner's wallet. Said apart, by the flow's
+    // own source (the worker books it 'energy-buy'), so "withdrawals 40 USDG"
+    // never sends an owner looking for forty dollars they never took out.
+    let energy = 0;
     const seenLogs = new Set<string>();
     for (const f of flows) {
       const amount = num(f.amount_usdg);
@@ -1248,9 +1288,13 @@ async function bookLine(shared: Db, scope: AgentScope, book: "live" | "paper", s
         seenLogs.add(k);
       }
       if (f.direction === "in") inflow += amount;
+      else if (f.source === "energy-buy") energy += amount;
       else outflow += amount;
     }
     if (inflow > 0 || outflow > 0) flowsText = ` Deposits ${usd(inflow)} USDG and withdrawals ${usd(outflow)} USDG are inside that change.`;
+    if (energy > 0) {
+      flowsText += ` ${flowsText ? "So is" : "Inside that change is"} ${usd(energy)} USDG set aside as energy ($MERRYMEN) — capital leaving the trading book, not a loss.`;
+    }
   }
   return `${label}: ${valued}${change}.${flowsText} ${fillsText}`;
 }

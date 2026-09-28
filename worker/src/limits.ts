@@ -4,6 +4,7 @@ import {
   RIALTO,
   STOCK_TOKENS,
   UNISWAP,
+  grantEnergyRoute,
   grantHasTransfer,
   grantTrencher,
   grantHasV4,
@@ -130,6 +131,18 @@ export function limitsFromGrant(
     // transfer intent rather than just the Telegram command — and it turns an
     // opaque on-chain revert into the sentence checkPolicy already writes.
     ...(grantHasTransfer(grant) ? {} : { withdrawalAddresses: [] as string[] }),
+    // THE ENERGY BUY, MIRRORED — from the GRANT, and NOT into allowedTargets.
+    //
+    // grantEnergyRoute answers only for the GRANT_ENERGY marker on chain 4663,
+    // which is exactly when the wall sealed the v2 swap permission (both signers
+    // mint the marker from the same boolean that built it). The router is kept
+    // OUT of allowedTargets on purpose: there it would let any `swap` intent
+    // name it, and the swap builder would route that through a v3 router it
+    // never quoted. Only an `energy-buy` is judged against this (policy.ts).
+    ...((): { energy?: { router: string; token: string } } => {
+      const route = grantEnergyRoute(grant);
+      return route ? { energy: { router: route.router, token: route.path[route.path.length - 1]! } } : {};
+    })(),
     // So the breaker can tell a de-risking sell (swap INTO cash) from a buy.
     cashToken: CASH.USDG as string,
     maxDrawdownBps: grant.caps.maxDrawdownPct * 100,

@@ -1,5 +1,5 @@
 import { erc20Abi, parseAbi, type Address, type PublicClient } from "viem";
-import { CASH, TRENCHER_VAULT_ABI, type StockToken, type StoredGrant } from "../../packages/core/src/index";
+import { CASH, TRENCHER_VAULT_ABI, isEnergyReserveToken, type StockToken, type StoredGrant } from "../../packages/core/src/index";
 import { highVolumePools } from "./trencher-brain";
 import { verifyTrencherCustody } from "./venues/trencher-vault";
 import type { GeckoPool } from "./venues/geckoterminal";
@@ -20,6 +20,11 @@ export async function discoverTrencherUniverse(client: PublicClient, grant: Stor
   // must not erase an otherwise eligible V3 route for the same token.
   for (const p of highVolumePools(pools.filter(p => p.dex === "uniswap-v3-robinhood")).slice(0,20)) {
     if (p.dex !== "uniswap-v3-robinhood" || !p.poolAddress || !/^0x[0-9a-fA-F]{40}$/.test(p.poolAddress)) continue;
+    // The energy reserve is never a trencher candidate: it is held as energy,
+    // never watched, bought or sold as a coin. Excluded here, where a NEW token
+    // would enter; `held` is left alone — the vault's own tokens() cannot hold
+    // a coin it never bought, and a held-token read must never be narrowed.
+    if (isEnergyReserveToken(p.tokenAddress)) continue;
     try {
       const address = p.poolAddress as Address;
       const [a,b,fee] = await Promise.all([

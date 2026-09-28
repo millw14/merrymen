@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { wrapSqlite } from "./db";
 import { MIRROR_STATE_DDL, mirrorTenant } from "./ledger-mirror";
+import { ENERGY_DAYS_SCHEMA } from "./energy-days";
 
 /**
  * THE HOLE THIS FILLS, and why exactly-once is the whole point.
@@ -25,7 +26,7 @@ const SRC = [
   "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, level TEXT, message TEXT, created_at INTEGER);",
   "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, decision_id TEXT UNIQUE, body TEXT, created_at INTEGER);",
   "CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, kind TEXT, target TEXT, sell_token TEXT, buy_token TEXT, amount_usdg REAL, user_op_hash TEXT, tx_hash TEXT, status TEXT, reject_rule TEXT, decision_id TEXT, fill_side TEXT, fill_qty_raw TEXT, fill_price_usd REAL, realized_pnl_usdg REAL, basis_source TEXT, gas_wei TEXT, sponsored_gas_wei TEXT, gas_usdg REAL, gas_units TEXT, fill_cash_usdg REAL, fill_symbol TEXT, epoch INTEGER DEFAULT 1, created_at INTEGER);",
-  "CREATE TABLE equity (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, eth_wei TEXT, cash_usdg REAL, vault_usdg REAL, positions_usdg REAL, equity_usdg REAL, epoch INTEGER DEFAULT 1, mode TEXT, at INTEGER);",
+  "CREATE TABLE equity (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, eth_wei TEXT, cash_usdg REAL, vault_usdg REAL, positions_usdg REAL, equity_usdg REAL, epoch INTEGER DEFAULT 1, mode TEXT, flows_held INTEGER, cash_read_at INTEGER, at INTEGER);",
   "CREATE TABLE flows (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, direction TEXT, amount_usdg REAL, tx_hash TEXT, block_number INTEGER, log_index INTEGER, source TEXT, epoch INTEGER DEFAULT 1, chain_id INTEGER, at INTEGER);",
   "CREATE TABLE fee_accruals (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, profit_usdg REAL, fee_usdg REAL, hwm_before_usdg REAL, hwm_after_usdg REAL, epoch INTEGER DEFAULT 1, at INTEGER);",
   // `hold_kind` is on here because a migrated database has it, and this fixture
@@ -44,7 +45,7 @@ const SRC = [
   // `mark_usd` and `mcap_usd` caught four tests the same way when they were
   // added. A child without them is its own case (mirror-decision-marks.test).
   "CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, source TEXT, strategy TEXT, provider TEXT, model TEXT, symbol TEXT, action TEXT, size_usdg REAL, reason TEXT, dropped_rule TEXT, signals_json TEXT, hold_kind TEXT, evidence_json TEXT, provenance TEXT, display_name TEXT, mark_usd REAL, mcap_usd REAL, at INTEGER);",
-  "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER, sponsor_gas INTEGER, live_blocker TEXT, x_handle TEXT, x_verified INTEGER DEFAULT 0, epoch INTEGER DEFAULT 1, hwm_usdg REAL DEFAULT 0, hwm_withdrawn_usdg REAL NOT NULL DEFAULT 0, accrued_fee_usdg REAL DEFAULT 0, contributions_known INTEGER, contributions_why TEXT, gas_accounting TEXT, quality_at INTEGER);",
+  "CREATE TABLE agents (smart_account TEXT PRIMARY KEY, name TEXT, owner_address TEXT, session_key_address TEXT, chain_id INTEGER, caps TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT, created_at INTEGER, mode TEXT, beat_at INTEGER, sponsor_gas INTEGER, live_blocker TEXT, x_handle TEXT, x_verified INTEGER DEFAULT 0, epoch INTEGER DEFAULT 1, hwm_usdg REAL DEFAULT 0, hwm_withdrawn_usdg REAL NOT NULL DEFAULT 0, accrued_fee_usdg REAL DEFAULT 0, contributions_known INTEGER, contributions_why TEXT, gas_accounting TEXT, quality_at INTEGER, energy TEXT);",
   "CREATE TABLE positions (agent_id TEXT, symbol TEXT, token TEXT, raw_balance TEXT, ui_multiplier TEXT, price_usd REAL, price_stale INTEGER, price_source TEXT DEFAULT 'chainlink', value_usdg REAL, updated_at INTEGER, PRIMARY KEY (agent_id, symbol));",
   "CREATE TABLE cost_basis (agent_id TEXT, mode TEXT, symbol TEXT, qty_raw TEXT, cost_usdg TEXT, updated_at INTEGER, PRIMARY KEY (agent_id, mode, symbol));",
   // THE GRADED FLOOR, which this fixture has never had — so the snapshot pass
@@ -722,6 +723,26 @@ describe("the ledger mirror", () => {
     const e = (await shared.prepare("SELECT mode FROM equity").get()) as { mode: string | null };
     assert.equal(e.mode, "live");
   });
+
+  it("AND WHETHER THE FLOWS WERE HELD, and WHEN THE CASH WAS READ — the hosted anchor's baseline and its `since`", async () => {
+    // A mark taken while flow inference was held (store.ts `flows_held`) is a
+    // true valuation but never a cash baseline, and bootstrap-source.ts reads
+    // the baseline from THIS side. Dropped by the column list, every held mark
+    // would land here unflagged and the anchor would take its cash.
+    const child = seedChild();
+    await child.prepare(
+      "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, cash_read_at, at)" +
+        " VALUES ('0xagent','1000',80.0,0.0,70.0,150.0,2,'live',1,128,130)",
+    ).run();
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    const rows = (await shared.prepare("SELECT flows_held, cash_read_at, at FROM equity ORDER BY at").all()) as {
+      flows_held: number | null;
+      cash_read_at: number | null;
+      at: number;
+    }[];
+    assert.deepEqual(rows.map((r) => [r.at, r.flows_held, r.cash_read_at]), [[120, null, null], [130, 1, 128]]);
+  });
 });
 
 /**
@@ -810,5 +831,152 @@ describe("a rebuilt child does not empty the book it has merely forgotten", () =
     await child.prepare("DELETE FROM positions WHERE symbol = ?").run("PEPE");
     await mirrorTenant({ tenant: "0xten", child, shared });
     assert.equal(await count(shared, "positions"), 0, "a flat book must clear");
+  });
+});
+
+/**
+ * ── THE AGENT'S ENERGY: THE REPORT, AND THE COUNTERS BEHIND IT ─────────────
+ *
+ * The report (agents.energy) is what the web reads; the counters (energy_days)
+ * are what stop a redeploy handing out a fresh daily allowance. Both live in a
+ * child whose sqlite a redeploy empties, so both must survive the copy up —
+ * and neither may be LOWERED by it: a rebuilt child reports nothing yet, and
+ * zero counters, and the shared copy must keep what it knew.
+ */
+describe("the energy report on the agents row", () => {
+  const REPORT = JSON.stringify({ v: 1, gated: true, level: "low", spent: true });
+
+  it("reaches the shared row", async () => {
+    const child = seedChild();
+    await child.prepare("UPDATE agents SET energy = ?").run(REPORT);
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    const a = (await shared.prepare("SELECT energy FROM agents WHERE smart_account = ?").get("0xagent")) as { energy: string | null };
+    assert.equal(a.energy, REPORT);
+  });
+
+  it("A REBUILT CHILD'S NULL DOES NOT ERASE IT — null is 'not yet', never 'no energy'", async () => {
+    const child = seedChild();
+    await child.prepare("UPDATE agents SET energy = ?").run(REPORT);
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    const reborn = seedChild(); // energy NULL, as a fresh child's row is
+    await mirrorTenant({ tenant: "0xten", child: reborn, shared });
+    const a = (await shared.prepare("SELECT energy FROM agents WHERE smart_account = ?").get("0xagent")) as { energy: string | null };
+    assert.equal(a.energy, REPORT);
+  });
+
+  it("but a newer report replaces it", async () => {
+    const child = seedChild();
+    await child.prepare("UPDATE agents SET energy = ?").run(REPORT);
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    const later = JSON.stringify({ v: 1, gated: false, level: "full", spent: false });
+    await child.prepare("UPDATE agents SET energy = ?").run(later);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    const a = (await shared.prepare("SELECT energy FROM agents WHERE smart_account = ?").get("0xagent")) as { energy: string | null };
+    assert.equal(a.energy, later);
+  });
+});
+
+describe("the energy counters", () => {
+  const NOW = Math.floor(Date.parse("2026-09-27T12:00:00Z") / 1000);
+  const withEnergy = () => {
+    const child = seedChild();
+    return { child, ready: child.exec(ENERGY_DAYS_SCHEMA) };
+  };
+  const sharedWithEnergy = async () => {
+    const shared = mem(DEST);
+    await shared.exec(ENERGY_DAYS_SCHEMA);
+    return shared;
+  };
+  const day = async (db: ReturnType<typeof mem>, d: string) =>
+    (await db.prepare("SELECT reviews, entries, told_at, read_at, read_full FROM energy_days WHERE agent_id = ? AND day = ?").get("0xagent", d)) as
+      | { reviews: number; entries: number; told_at: number | null; read_at: number | null; read_full: number | null }
+      | undefined;
+  const put = (db: ReturnType<typeof mem>, d: string, r: number, e: number, told: number | null, readAt: number | null, full: number | null) =>
+    db
+      .prepare("INSERT OR REPLACE INTO energy_days (agent_id, day, reviews, entries, told_at, read_at, read_full) VALUES ('0xagent', ?, ?, ?, ?, ?, ?)")
+      .run(d, r, e, told, readAt, full);
+
+  it("TODAY'S AND YESTERDAY'S ROWS ARE COPIED; older ones stay behind", async () => {
+    const { child, ready } = withEnergy();
+    await ready;
+    await put(child, "2026-09-27", 3, 1, null, NOW - 10, 1);
+    await put(child, "2026-09-26", 29, 2, NOW - 90_000, null, null);
+    await put(child, "2026-09-20", 9, 9, null, null, null);
+    const shared = await sharedWithEnergy();
+    const r = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: NOW });
+    assert.equal(r.copied.energy_days, 2);
+    assert.equal(JSON.stringify(r.failed ?? {}), "{}");
+    const today = (await day(shared, "2026-09-27"))!;
+    assert.deepEqual([Number(today.reviews), Number(today.entries), Number(today.read_at), Number(today.read_full)], [3, 1, NOW - 10, 1]);
+    assert.ok(await day(shared, "2026-09-26"));
+    assert.equal(await day(shared, "2026-09-20"), undefined);
+  });
+
+  it("A LATER, LOWER CHILD VALUE NEVER LOWERS THE SHARED ONE — a copy never un-spends", async () => {
+    const { child, ready } = withEnergy();
+    await ready;
+    await put(child, "2026-09-27", 5, 2, null, null, null);
+    const shared = await sharedWithEnergy();
+    await mirrorTenant({ tenant: "0xten", child, shared, nowSec: NOW });
+    // A rebuilt child: zeros.
+    await put(child, "2026-09-27", 0, 0, null, null, null);
+    await mirrorTenant({ tenant: "0xten", child, shared, nowSec: NOW });
+    const t = (await day(shared, "2026-09-27"))!;
+    assert.deepEqual([Number(t.reviews), Number(t.entries)], [5, 2]);
+    // And a higher one still carries.
+    await put(child, "2026-09-27", 6, 2, null, null, null);
+    await mirrorTenant({ tenant: "0xten", child, shared, nowSec: NOW });
+    assert.equal(Number((await day(shared, "2026-09-27"))!.reviews), 6);
+  });
+
+  it("THE FIRST NOTICE STAMP IS KEPT once set", async () => {
+    const { child, ready } = withEnergy();
+    await ready;
+    await put(child, "2026-09-27", 0, 2, NOW - 100, null, null);
+    const shared = await sharedWithEnergy();
+    await mirrorTenant({ tenant: "0xten", child, shared, nowSec: NOW });
+    await put(child, "2026-09-27", 0, 2, null, null, null);
+    await mirrorTenant({ tenant: "0xten", child, shared, nowSec: NOW });
+    await put(child, "2026-09-27", 0, 2, NOW - 5, null, null);
+    await mirrorTenant({ tenant: "0xten", child, shared, nowSec: NOW });
+    assert.equal(Number((await day(shared, "2026-09-27"))!.told_at), NOW - 100);
+  });
+
+  it("THE NEWER BALANCE READ WINS, and an older one does not replace it", async () => {
+    const { child, ready } = withEnergy();
+    await ready;
+    await put(child, "2026-09-27", 0, 0, null, NOW - 50, 1);
+    const shared = await sharedWithEnergy();
+    await mirrorTenant({ tenant: "0xten", child, shared, nowSec: NOW });
+    await put(child, "2026-09-27", 0, 0, null, NOW - 10, 0);
+    await mirrorTenant({ tenant: "0xten", child, shared, nowSec: NOW });
+    let t = (await day(shared, "2026-09-27"))!;
+    assert.deepEqual([Number(t.read_at), Number(t.read_full)], [NOW - 10, 0]);
+    await put(child, "2026-09-27", 0, 0, null, NOW - 40, 1);
+    await mirrorTenant({ tenant: "0xten", child, shared, nowSec: NOW });
+    t = (await day(shared, "2026-09-27"))!;
+    assert.deepEqual([Number(t.read_at), Number(t.read_full)], [NOW - 10, 0], "an older read does not win");
+  });
+
+  it("A CHILD WITHOUT THE TABLE IS SKIPPED, and every other snapshot still copies", async () => {
+    const shared = await sharedWithEnergy();
+    const r = await mirrorTenant({ tenant: "0xten", child: seedChild(), shared, nowSec: NOW });
+    assert.equal(r.copied.energy_days, undefined);
+    assert.equal(JSON.stringify(r.failed ?? {}), "{}");
+    assert.equal(r.copied.positions, 1);
+    assert.equal(r.copied.cost_basis, 1);
+  });
+
+  it("and a shared side that cannot take the rows fails ONLY energy_days", async () => {
+    const { child, ready } = withEnergy();
+    await ready;
+    await put(child, "2026-09-27", 1, 1, null, null, null);
+    const r = await mirrorTenant({ tenant: "0xten", child, shared: mem(DEST), nowSec: NOW }); // no energy_days in shared
+    assert.ok(r.failed?.energy_days, "reported under its own name");
+    assert.equal(r.failed?.snapshots, undefined, "positions, basis and the class book are not collateral");
+    assert.equal(r.copied.positions, 1);
   });
 });

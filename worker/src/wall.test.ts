@@ -1,20 +1,26 @@
 import assert from "node:assert/strict";
 import { PolicyFlags } from "@zerodev/permissions";
-import { ParamCondition } from "@zerodev/permissions/policies";
-import { encodeFunctionData, pad, toFunctionSelector } from "viem";
+import { CallPolicyVersion, ParamCondition, toCallPolicy } from "@zerodev/permissions/policies";
+import { decodeFunctionData, encodeFunctionData, pad, toFunctionSelector, type Hex } from "viem";
 import test from "node:test";
 import {
   CASH,
+  ENERGY_ROUTE_V1,
+  ENERGY_SWAP_SELECTOR,
+  MERRYMEN_TOKEN,
   MORPHO,
   RIALTO,
   STOCK_TOKENS,
   TRADEABLE_SYMBOLS,
   UNISWAP,
   UNISWAP_SWAP_ROUTER_ABI,
+  UNISWAP_V2_ENERGY_ABI,
+  VIRTUAL_TOKEN,
   PONS_SELFTRADE_ABI, V4SELFSWAP_ABI,
   allowedSpenders,
   buildCallPermissions,
   buildWallPolicies,
+  energyCallWords,
   grantHasMultihop,
   WALL_POLICY_FLAG,
   usableExtraTokens,
@@ -302,6 +308,50 @@ test("the wall carries exactly the expected permission set — no more, no less"
   assert.equal(withV4.length, list.length + 2, "v4 is a PAIR — Permit2 approve plus UniversalRouter execute");
   // Nothing may authorise sending native value.
   for (const p of list) assert.equal(p.valueLimit, 0n, `${p.target} must not be allowed to move native ETH`);
+
+  // THE ENERGY BUY adds exactly ONE permission and exactly ONE spender entry,
+  // and the spender entry lands in the USDG approve and nowhere else. The
+  // stock and extra approves carry no amount condition, so the router joining
+  // THEIR ONE_OF would be an uncapped allowance over the whole book — inert
+  // only while Router02 pulls from msg.sender alone, which is an argument, not
+  // a construction. An owner extra rides along to prove the extras are spared
+  // too, and $MERRYMEN is listed as an extra to prove it is refused.
+  const CUSTOM = { symbol: "MEME", address: "0x00000000000000000000000000000000000000dd" as const, decimals: 18 };
+  const MERRY = { symbol: "MERRYMEN", address: MERRYMEN_TOKEN.address, decimals: 18 };
+  const plain = buildCallPermissions(CAPS, SELF, { extraTokens: [CUSTOM, MERRY] }) as unknown as Perm[];
+  const withEnergy = buildCallPermissions(CAPS, SELF, { extraTokens: [CUSTOM, MERRY], energyBuy: true }) as unknown as Perm[];
+  assert.equal(withEnergy.length, plain.length + 1, "the energy buy is ONE permission");
+  for (const p of withEnergy) assert.equal(p.valueLimit, 0n, `${p.target} must not be allowed to move native ETH`);
+  const router = ENERGY_ROUTE_V1.router.toLowerCase();
+  const spendersOf = (l: Perm[], target: string) => {
+    const p = l.find((x) => x.target.toLowerCase() === target.toLowerCase() && x.functionName === "approve");
+    assert.ok(p, `${target} must have an approve`);
+    return ((p.args as { value: string[] }[])[0]!.value).map((a) => a.toLowerCase());
+  };
+  assert.deepEqual(
+    spendersOf(withEnergy, CASH.USDG),
+    [...spendersOf(plain, CASH.USDG), router],
+    "the USDG approve grows by exactly the router",
+  );
+  const approvesOf = (l: Perm[]) => l.filter((p) => p.functionName === "approve").map((p) => p.target.toLowerCase());
+  assert.deepEqual(approvesOf(withEnergy), approvesOf(plain), "no new approve permission — only a wider USDG spender list");
+  for (const target of approvesOf(withEnergy).filter((t) => t !== CASH.USDG.toLowerCase())) {
+    assert.deepEqual(spendersOf(withEnergy, target), spendersOf(plain, target), `${target}'s approve must not change`);
+    assert.ok(!spendersOf(withEnergy, target).includes(router), `${target} must never name the energy router`);
+  }
+  assert.ok(
+    !approvesOf(withEnergy).includes(MERRYMEN_TOKEN.address.toLowerCase()),
+    "$MERRYMEN has no approve anywhere — the reserve is buy-only",
+  );
+  const [single] = withEnergy.filter(
+    (p) => p.target.toLowerCase() === UNISWAP.swapRouter02.toLowerCase() && p.functionName === "exactInputSingle",
+  );
+  for (const leg of (single!.args as { value?: string[] }[]).slice(0, 2)) {
+    assert.ok(
+      !leg.value!.map((a) => a.toLowerCase()).includes(MERRYMEN_TOKEN.address.toLowerCase()),
+      "$MERRYMEN is not a v3 leg either — the energy route is its only way in",
+    );
+  }
 });
 
 test("the wall carries a hard expiry and a call policy — and NO rate limit", () => {
@@ -704,15 +754,40 @@ test("buildWallPolicies forwards EVERY adapter into the call policy", () => {
     "ponsAdapterAddress must survive buildWallPolicies — it did not, and the grant still carried the marker",
   );
 
+  // THE ENERGY BUY, the same trap with a boolean: a signer mints GRANT_ENERGY
+  // off `wallOpts.energyBuy`, so a wrapper that dropped the flag would seal a
+  // marker over a wall with no router permission.
+  const ROUTER = ENERGY_ROUTE_V1.router.toLowerCase();
+  assert.ok(!bare.includes(ROUTER), "no energy buy asked for, none granted");
+  assert.ok(
+    call({ caps: CAPS, smartAccount: SELF, energyBuy: true }).includes(ROUTER),
+    "energyBuy must survive buildWallPolicies",
+  );
+
   // And together, because forwarding one is what made the other's absence invisible.
-  const both = call({ caps: CAPS, smartAccount: SELF, v4AdapterAddress: V4, ponsAdapterAddress: PONS });
+  const both = call({ caps: CAPS, smartAccount: SELF, v4AdapterAddress: V4, ponsAdapterAddress: PONS, energyBuy: true });
   assert.ok(both.includes(V4) && both.includes(PONS), "both adapters must reach the chain");
+  assert.ok(both.includes(ROUTER), "and the energy router with them");
 
   // The wrapper must agree with the function it wraps — no path may be looser.
-  const direct = buildCallPermissions(CAPS, SELF, { v4AdapterAddress: V4, ponsAdapterAddress: PONS }).map((p) =>
-    p.target.toLowerCase(),
+  const direct = buildCallPermissions(CAPS, SELF, { v4AdapterAddress: V4, ponsAdapterAddress: PONS, energyBuy: true }).map(
+    (p) => p.target.toLowerCase(),
   );
   assert.deepEqual(both, direct, "buildWallPolicies must mirror buildCallPermissions exactly");
+
+  // Not only the target: the router must reach the USDG approve's spender
+  // list through the wrapper too, or the swap could never pull its input.
+  const { policies } = buildWallPolicies({ caps: CAPS, smartAccount: SELF, energyBuy: true });
+  const callPolicy = policies[policies.length - 1] as unknown as {
+    policyParams: { permissions: { target: string; functionName?: string; args?: { value?: unknown }[] }[] };
+  };
+  const usdgApprove = callPolicy.policyParams.permissions.find(
+    (p) => p.target.toLowerCase() === CASH.USDG.toLowerCase() && p.functionName === "approve",
+  )!;
+  assert.ok(
+    (usdgApprove.args![0]!.value as string[]).map((a) => a.toLowerCase()).includes(ROUTER),
+    "the energy router must be a USDG spender in the wall the signer actually seals",
+  );
 });
 
 test("the swap's pinned asset set IS the approve set — they cannot drift", () => {
@@ -730,7 +805,15 @@ test("the swap's pinned asset set IS the approve set — they cannot drift", () 
     symbol: "MEME",
     decimals: 18,
   };
-  for (const opts of [{}, { extraTokens: [CUSTOM] }]) {
+  // The energy buy is in the loop because it is the one opt-in that touches an
+  // APPROVE: it widens the USDG spender list. It must not add an approve target
+  // (the set) nor a swap leg — $MERRYMEN is reached only by its own pinned route.
+  for (const opts of [
+    {},
+    { extraTokens: [CUSTOM] },
+    { energyBuy: true },
+    { extraTokens: [CUSTOM, { symbol: "MERRYMEN", address: MERRYMEN_TOKEN.address, decimals: 18 }], energyBuy: true },
+  ]) {
     const list = buildCallPermissions(CAPS, SELF, opts) as unknown as Perm[];
     const approved = new Set(
       list.filter((p) => p.functionName === "approve").map((p) => p.target.toLowerCase()),
@@ -904,4 +987,302 @@ test("no class option means no class permission, which is every grant today", ()
     assert.notEqual(p.target.toLowerCase(), CLASS_VAULT);
     assert.notEqual(p.target.toLowerCase(), CLASS_FACTORY);
   }
+});
+
+/**
+ * THE ENERGY BUY — one permission, six EQUAL pins, on a FIVE-parameter
+ * function with a DYNAMIC array argument.
+ *
+ * Every other offset proof in this file is over static words. This one is not,
+ * which is exactly why it gets the most evidence: the pins only mean what the
+ * comment says if (a) the library places args[i] at offset i*32 even past the
+ * ABI's arity, (b) the values it encodes byte-equal what viem's encoder puts in
+ * those words, and (c) no calldata that satisfies the pins can decode to a
+ * different path or recipient. (a) and (b) are proven here against the real
+ * library and the real encoder; (c) by the adversarial test that follows.
+ */
+const ROUTE = ENERGY_ROUTE_V1;
+const ENERGY_FN = "swapExactTokensForTokensSupportingFeeOnTransferTokens" as const;
+const EVIL = "0x00000000000000000000000000000000000e0111" as const;
+const energyPerm = (opts: Parameters<typeof buildCallPermissions>[2] = {}) => {
+  const list = buildCallPermissions(CAPS, SELF, { ...opts, energyBuy: true }) as unknown as Perm[];
+  const mine = list.filter((p) => p.target.toLowerCase() === ROUTE.router.toLowerCase());
+  assert.equal(mine.length, 1, "exactly one permission on the energy router");
+  return mine[0]!;
+};
+const encodeEnergy = (amountIn: bigint, minOut: bigint, path: readonly `0x${string}`[], to: `0x${string}`, deadline: bigint) =>
+  encodeFunctionData({ abi: UNISWAP_V2_ENERGY_ABI, functionName: ENERGY_FN, args: [amountIn, minOut, path as `0x${string}`[], to, deadline] });
+/** Word i of a calldata body, as the 32-byte hex the policy compares. */
+const wordHex = (data: Hex, i: number) => `0x${data.slice(10 + i * 64, 10 + (i + 1) * 64)}`.toLowerCase();
+
+test("ENERGY BUY opt-in: absent by default, one pinned permission when sealed, at proven offsets", () => {
+  // CLOSED by default — like every opt-in here, and more than most: a signer
+  // seals it only on 4663 and only when the wall still fits (energyBuyFits).
+  assert.equal(find(ROUTE.router).length, 0, "no energy permission without the opt-in");
+  const [usdgApprove] = find(CASH.USDG, "approve");
+  assert.equal((usdgApprove!.args as { value: string[] }[])[0]!.value.length, 2, "and the USDG approve keeps its two spenders");
+
+  const p = energyPerm();
+  assert.equal(p.functionName, ENERGY_FN);
+  assert.equal(p.valueLimit, 0n, "the energy buy moves no native value");
+  const args = p.args as (null | { condition: number; value: unknown })[];
+  assert.equal(args.length, 9, "nine words for five parameters: the array's length and elements are words 5..8");
+
+  // The conditions, word by word: EQ on 2, 3, 5, 6, 7, 8 and nothing else.
+  assert.deepEqual(
+    args.map((a) => (a === null ? null : a.condition)),
+    [null, null, ParamCondition.EQUAL, ParamCondition.EQUAL, null, ParamCondition.EQUAL, ParamCondition.EQUAL, ParamCondition.EQUAL, ParamCondition.EQUAL],
+  );
+  assert.equal(args[2]!.value, 0xa0n);
+  assert.deepEqual(args[3], { condition: ParamCondition.EQUAL, value: SELF });
+  assert.equal(args[5]!.value, 3n);
+  assert.deepEqual([args[6]!.value, args[7]!.value, args[8]!.value], [...ROUTE.path]);
+  // BIGINT, NEVER A DECIMAL STRING. The library encodes a non-hex value with
+  // toHex, and toHex("160") is the UTF-8 bytes 0x313630 — a pin that can never
+  // match and reads as strict. Nothing type-checks this, so it is asserted.
+  assert.equal(typeof args[2]!.value, "bigint", "w2 must be a bigint");
+  assert.equal(typeof args[5]!.value, "bigint", "w5 must be a bigint");
+  for (const i of [6, 7, 8]) assert.match(String(args[i]!.value), /^0x[0-9a-f]{40}$/, `w${i} must be a hex address`);
+  // The route is the one the marker names, and it is the registry's today.
+  assert.deepEqual([...ROUTE.path], [CASH.USDG.toLowerCase(), VIRTUAL_TOKEN, MERRYMEN_TOKEN.address.toLowerCase()]);
+  assert.equal(ROUTE.router, UNISWAP.v2Router02.toLowerCase());
+
+  // (b) PROVE THE WORDS against viem's encoder.
+  const DEADLINE = 1_800_000_000n;
+  const data = encodeEnergy(1_000_000n, 999n, ROUTE.path, SELF, DEADLINE);
+  assert.equal(data.slice(0, 10), ENERGY_SWAP_SELECTOR, "selector 0x5c11d795");
+  assert.equal(data.length, 10 + 9 * 64, "exactly nine words: five head words, then the array's length and three elements");
+  const words = energyCallWords(data);
+  assert.ok(words, "the shared word reader must read an honest energy call");
+  assert.equal(words.words.length, 9);
+  for (const i of [2, 3, 5, 6, 7, 8]) {
+    const v = args[i]!.value as bigint | `0x${string}`;
+    const expected = typeof v === "bigint" ? pad(`0x${v.toString(16)}`, { size: 32 }) : pad(v, { size: 32 });
+    assert.equal(wordHex(data, i), expected.toLowerCase(), `word ${i} must be exactly what the pin compares`);
+  }
+  assert.equal(words.words[0], 1_000_000n, "word 0 = amountIn");
+  assert.equal(words.words[1], 999n, "word 1 = amountOutMin");
+  assert.equal(words.words[4], DEADLINE, "word 4 = deadline");
+
+  // (a) PROVE THE LIBRARY'S OFFSETS AND ENCODING of words past the ABI's
+  // arity: run the permission through toCallPolicy — the function both signers
+  // seal with — and read the rules it actually encodes.
+  const policy = toCallPolicy({ policyVersion: CallPolicyVersion.V0_0_4, permissions: [p] as never });
+  const [encoded] = (policy.policyParams as unknown as { permissions: { selector: Hex; rules: EnergyRule[] }[] }).permissions;
+  assert.equal(encoded!.selector.toLowerCase(), ENERGY_SWAP_SELECTOR, "the library resolves the selector from the one-function ABI");
+  assert.equal(encoded!.rules.length, 6, "six rules — w0, w1 and w4 are open");
+  const pinned = [2, 3, 5, 6, 7, 8];
+  for (const [k, rule] of encoded!.rules.entries()) {
+    const i = pinned[k]!;
+    assert.equal(rule.offset, i * 32, `rule ${k} must sit at word ${i}`);
+    assert.equal(rule.condition, ParamCondition.EQUAL);
+    assert.equal(rule.params.length, 1);
+    assert.equal(rule.params[0]!.toLowerCase(), wordHex(data, i), `rule ${k}'s param must byte-equal viem's word ${i}`);
+  }
+});
+
+/** A call-policy rule as @zerodev/permissions encodes it for V0_0_4. */
+type EnergyRule = { condition: number; offset: number; params: Hex[] };
+
+/**
+ * A MODEL OF CallPolicy V0_0_4's check, faithful to the contract rather than to
+ * our intent: the permission is keyed by selector, each rule reads
+ * `bytes32(data[4 + offset : 4 + offset + 32])` and compares it as a whole
+ * word, and an out-of-range slice REVERTS — which for the account is a refusal.
+ */
+function callPolicyAdmits(rules: readonly EnergyRule[], selector: string, data: Hex): boolean {
+  if (data.slice(0, 10).toLowerCase() !== selector.toLowerCase()) return false;
+  const bytes = (data.length - 2) / 2;
+  for (const r of rules) {
+    const start = 4 + r.offset;
+    if (start + 32 > bytes) return false; // calldata slice out of range: the policy reverts
+    const w = BigInt(`0x${data.slice(2 + start * 2, 2 + (start + 32) * 2)}`);
+    const p = r.params.map((x) => BigInt(x));
+    switch (r.condition) {
+      case ParamCondition.EQUAL: if (w !== p[0]) return false; break;
+      case ParamCondition.GREATER_THAN: if (!(w > p[0]!)) return false; break;
+      case ParamCondition.LESS_THAN: if (!(w < p[0]!)) return false; break;
+      case ParamCondition.GREATER_THAN_OR_EQUAL: if (!(w >= p[0]!)) return false; break;
+      case ParamCondition.LESS_THAN_OR_EQUAL: if (!(w <= p[0]!)) return false; break;
+      case ParamCondition.NOT_EQUAL: if (w === p[0]) return false; break;
+      case ParamCondition.ONE_OF: if (!p.includes(w)) return false; break;
+      default: return false; // not modelled: refuse rather than guess
+    }
+  }
+  return true;
+}
+
+/** What Router02 would actually execute, per viem's decoder (null = it would revert decoding). */
+function decodedEnergy(data: Hex): { path: string[]; to: string } | null {
+  try {
+    const d = decodeFunctionData({ abi: UNISWAP_V2_ENERGY_ABI, data });
+    const [, , path, to] = d.args as unknown as [bigint, bigint, string[], string, bigint];
+    return { path: path.map((a) => a.toLowerCase()), to: to.toLowerCase() };
+  } catch {
+    return null;
+  }
+}
+
+const hexWord = (v: bigint) => v.toString(16).padStart(64, "0");
+const addrWord = (a: string) => a.slice(2).toLowerCase().padStart(64, "0");
+const withWords = (data: Hex, edits: Record<number, string>, append: string[] = []) => {
+  const body = data.slice(10).match(/.{64}/g)!;
+  for (const [i, w] of Object.entries(edits)) body[Number(i)] = w;
+  return `${data.slice(0, 10)}${body.join("")}${append.join("")}` as Hex;
+};
+
+test("ENERGY BUY adversarial: every counterexample is refused, and every pin is load-bearing", () => {
+  const p = energyPerm();
+  const policy = toCallPolicy({ policyVersion: CallPolicyVersion.V0_0_4, permissions: [p] as never });
+  const [encoded] = (policy.policyParams as unknown as { permissions: { selector: Hex; rules: EnergyRule[] }[] }).permissions;
+  const rules = encoded!.rules;
+  const sel = encoded!.selector;
+  const admits = (data: Hex) => callPolicyAdmits(rules, sel, data);
+  /** The same policy with ONE pin removed — to prove that pin is what refuses. */
+  const admitsWithout = (word: number, data: Hex) => callPolicyAdmits(rules.filter((r) => r.offset !== word * 32), sel, data);
+  const PATH = [...ROUTE.path];
+  const canonical = encodeEnergy(1_000_000n, 999n, ROUTE.path, SELF, 1_800_000_000n);
+  assert.ok(admits(canonical), "the honest call is admitted");
+  assert.deepEqual(decodedEnergy(canonical), { path: PATH, to: SELF });
+
+  // w2 — THE ARRAY RELOCATED. The head points at 0x120; words 5..8 still hold
+  // the pinned decoy, and the array the router actually reads sits after them
+  // and ends in a token nobody named.
+  const relocated = withWords(canonical, { 2: hexWord(0x120n) }, [hexWord(3n), addrWord(CASH.USDG), addrWord(VIRTUAL_TOKEN), addrWord(EVIL)]);
+  assert.equal(admits(relocated), false, "w2 = 0x120 must be refused");
+  assert.equal(admitsWithout(2, relocated), true, "premise: without the w2 pin this passes every other pin");
+  assert.equal(decodedEnergy(relocated)!.path[2], EVIL, "…and the router would buy the attacker's token");
+
+  // w5 — LENGTH 2 buys VIRTUAL. A trailing word keeps the w8 slice in range,
+  // so the refusal is the length pin, not the calldata being short.
+  const two = `${encodeEnergy(1_000_000n, 0n, [ROUTE.path[0], ROUTE.path[1]], SELF, 1_800_000_000n)}${addrWord(ROUTE.path[2])}` as Hex;
+  assert.equal(admits(two), false, "path length 2 must be refused");
+  assert.equal(admitsWithout(5, two), true, "premise: the length pin is what refuses it");
+  assert.deepEqual(decodedEnergy(two)!.path, [ROUTE.path[0], ROUTE.path[1]], "…it would buy VIRTUAL");
+
+  // w5 — LENGTH 4 appends an unpinned hop into a pair the attacker seeded.
+  const four = encodeEnergy(1_000_000n, 0n, [...ROUTE.path, EVIL], SELF, 1_800_000_000n);
+  assert.equal(admits(four), false, "path length 4 must be refused");
+  assert.equal(admitsWithout(5, four), true, "premise: the length pin is what refuses it");
+  assert.equal(decodedEnergy(four)!.path[3], EVIL);
+
+  // w3 — THE RECIPIENT.
+  const elsewhere = encodeEnergy(1_000_000n, 0n, ROUTE.path, EVIL, 1_800_000_000n);
+  assert.equal(admits(elsewhere), false, "to = EVIL must be refused");
+  assert.equal(admitsWithout(3, elsewhere), true, "premise: the recipient pin is what refuses it");
+
+  // w3 — DIRTY HIGH BITS. A masking decoder reads the low 20 bytes and sees
+  // SELF; EQUAL compares the whole word and does not.
+  const dirty = withWords(canonical, { 3: `ff${addrWord(SELF).slice(2)}` });
+  assert.equal(admits(dirty), false, "a dirty high byte in `to` must be refused");
+  assert.equal(admitsWithout(3, dirty), true, "premise: only the full-word pin catches it");
+
+  // w7 — THE MIDDLE HOP, which pins the intermediate pair.
+  const middle = encodeEnergy(1_000_000n, 0n, [ROUTE.path[0], EVIL, ROUTE.path[2]], SELF, 1_800_000_000n);
+  assert.equal(admits(middle), false, "a swapped path[1] must be refused");
+  assert.equal(admitsWithout(7, middle), true, "premise: the middle-hop pin is what refuses it");
+
+  // w6 and w8 — either end of the route.
+  for (const [w, path] of [
+    [6, [EVIL, ROUTE.path[1], ROUTE.path[2]]],
+    [8, [ROUTE.path[0], ROUTE.path[1], EVIL]],
+  ] as const) {
+    const swapped = encodeEnergy(1_000_000n, 0n, path, SELF, 1_800_000_000n);
+    assert.equal(admits(swapped), false, `a swapped word ${w} must be refused`);
+    assert.equal(admitsWithout(w, swapped), true, `premise: the w${w} pin is what refuses it`);
+  }
+
+  // TRUNCATED: 291 bytes cannot hold word 8, and the slice reverts.
+  assert.equal((canonical.length - 2) / 2, 292, "the honest call is 4 + 9 × 32 bytes");
+  assert.equal(admits(canonical.slice(0, -2) as Hex), false, "291 bytes must be refused");
+
+  // ACCEPTED: arbitrary amountIn, amountOutMin and deadline, and trailing
+  // bytes the router never reads — all still the fixed path, to SELF.
+  const open = withWords(canonical, { 0: "f".repeat(64), 1: "0".repeat(64), 4: hexWord(1n) }, ["ab".repeat(32), "cd".repeat(7)]);
+  assert.equal(admits(open), true, "open words and trailing data are admitted");
+  assert.deepEqual(decodedEnergy(open), { path: PATH, to: SELF }, "…and still decode to the one route, into this account");
+
+  // AND A FUZZ, seeded so a failure reproduces: from the honest call, randomise
+  // the open words, sometimes corrupt a pinned word with a random or small value
+  // (small numbers are what offsets and lengths look like), sometimes append a
+  // tail, sometimes truncate. Everything the policy admits must decode to the
+  // fixed path and to SELF; nothing may decode to anything else.
+  let seed = 0x5c11d795;
+  const rand = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const randWord = () => Array.from({ length: 64 }, () => "0123456789abcdef"[Math.floor(rand() * 16)]).join("");
+  let admitted = 0;
+  let refused = 0;
+  let decoded = 0;
+  for (let n = 0; n < 4_000; n++) {
+    const edits: Record<number, string> = { 0: randWord(), 1: randWord(), 4: randWord() };
+    for (const i of [2, 3, 5, 6, 7, 8]) {
+      const r = rand();
+      if (r < 0.05) edits[i] = randWord();
+      else if (r < 0.1) edits[i] = hexWord(BigInt(Math.floor(rand() * 0x200)));
+    }
+    const tail = Array.from({ length: Math.floor(rand() * 5) }, () =>
+      rand() < 0.3 ? hexWord(BigInt(Math.floor(rand() * 0x200))) : randWord(),
+    );
+    let data = withWords(canonical, edits, tail);
+    if (rand() < 0.05) data = data.slice(0, data.length - 2 * (1 + Math.floor(rand() * 40))) as Hex;
+    if (!admits(data)) {
+      refused++;
+      continue;
+    }
+    admitted++;
+    const d = decodedEnergy(data);
+    if (d === null) continue; // the router's own decoder would revert: nothing moves
+    decoded++;
+    assert.deepEqual(d, { path: PATH, to: SELF }, `admitted calldata decoded to something else: ${data}`);
+  }
+  assert.ok(admitted > 1_000, `the fuzz must exercise admitted calls (${admitted})`);
+  assert.ok(decoded > 1_000, `and admitted calls must actually decode, or the check above is vacuous (${decoded})`);
+  assert.ok(refused > 100, `and refused ones (${refused})`);
+});
+
+test("$MERRYMEN is never an owner extra — no approve, no swap leg, no curve leg, on any venue", () => {
+  // The energy reserve's safety case is that NOTHING in the wall can spend it.
+  // As an ordinary extra it would get an uncapped approve to every spender and
+  // a place in curveAssets, where the Pons adapter's unpinnable curve and open
+  // minAmountOut could take the whole balance for one wei.
+  const lower = { symbol: "MERRYMEN", address: MERRYMEN_TOKEN.address.toLowerCase() as `0x${string}`, decimals: 18 };
+  const upper = { ...lower, address: `0x${MERRYMEN_TOKEN.address.slice(2).toUpperCase()}` as `0x${string}` };
+  const OK = { symbol: "OK", address: "0x1111111111111111111111111111111111111111" as const, decimals: 18 };
+  const usable = usableExtraTokens([lower, upper, OK]);
+  assert.deepEqual(usable.map((t) => t.symbol), ["OK"], "$MERRYMEN is dropped in any case; the owner's other token survives");
+
+  const MERRY = MERRYMEN_TOKEN.address.toLowerCase();
+  const list = buildCallPermissions(CAPS, SELF, {
+    extraTokens: [lower, upper, OK],
+    v4AdapterAddress: "0x00000000000000000000000000000000000000d4",
+    ponsAdapterAddress: "0x00000000000000000000000000000000000000d5",
+    ...classOpts,
+    energyBuy: true,
+  }) as unknown as Perm[];
+  assert.ok(
+    !list.some((p) => p.target.toLowerCase() === MERRY),
+    "no permission of any kind targets $MERRYMEN — above all, no approve",
+  );
+  // Every ONE_OF in the wall — swap legs, adapter legs, curve legs, the class
+  // funding leg — must leave it out. Only the energy route's own EQUAL pin names it.
+  for (const p of list) {
+    for (const [i, a] of ((p.args ?? []) as (null | { condition: number; value: unknown })[]).entries()) {
+      if (a?.condition !== ParamCondition.ONE_OF) continue;
+      assert.ok(
+        !(a.value as string[]).map((x) => x.toLowerCase()).includes(MERRY),
+        `${p.target}.${p.functionName} arg ${i} must not admit $MERRYMEN`,
+      );
+    }
+  }
+  const named = list.filter((p) =>
+    ((p.args ?? []) as (null | { condition: number; value: unknown })[]).some(
+      (a) => a?.condition === ParamCondition.EQUAL && String(a.value).toLowerCase() === MERRY,
+    ),
+  );
+  assert.deepEqual(named.map((p) => p.functionName), [ENERGY_FN], "only the energy route names $MERRYMEN, as its output");
 });

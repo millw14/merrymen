@@ -575,12 +575,29 @@ private fun CircleLockBanner(tier: Loaded<TierView>, nav: NavHostController) {
     )
     t.why == "ok" && !t.bonusStrategies -> Notice(
       title = "Holder-only strategies are locked",
-      body = "even-keel and dip-hunter run only while you hold ${t.needTokens} \$MERRYMEN" +
+      // THE COMBINED FIGURE, and the remedy is no longer "not money": the
+      // standing counts the owner's wallet PLUS the agent's own account, and
+      // USDG the agent turns into $MERRYMEN (get-energy in chat) lands there.
+      body = "even-keel and dip-hunter run only while your wallet and your agent's account hold " +
+        "${t.needTokens} \$MERRYMEN between them" +
         // NULL TOKENS IS "—", NOT "0". A self-hosted origin (and any read that
         // did not resolve a balance) sends no token count; `?: 0` printed "you
         // hold 0", a confident zero the sibling screens never allow. Omit the
         // clause entirely when the balance is unknown.
-        (t.tokens?.let { " — you hold $it. Adding cash won't change it." } ?: "."),
+        (t.tokens?.let { " — right now $it." } ?: ".") +
+        // THE REMEDY ONLY WHERE IT WORKS. `agentAccount` is null exactly when
+        // /api/tier does not count the agent's account — no agent yet, or a
+        // grant on another network, where $MERRYMEN sent to that address is
+        // never read and sits stranded. Then only the owner's own wallet on
+        // Robinhood Chain counts, as the web funding panel says.
+        (
+          if (t.agentAccount != null) {
+            " Send \$MERRYMEN on Robinhood Chain to your agent's account, or ask your agent in chat to get its \$MERRYMEN."
+          } else {
+            " Keep \$MERRYMEN on Robinhood Chain in your own wallet."
+          }
+        ) +
+        " Or change nothing — Steady basket and Strategist run for everyone.",
       actionLabel = "See the Circle",
       onAction = { nav.navigate(Routes.CIRCLE) },
       modifier = Modifier.padding(bottom = 28.dp),

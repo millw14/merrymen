@@ -10,8 +10,9 @@ import { PrivySignIn } from "@/terminal/PrivySignIn";
 import { announceSignedIn } from "@/lib/resign-anchor";
 import { privyEnabled } from "@/lib/privy-client";
 import { blockerAdvice } from "@/lib/live-blocker";
-import { RISK_LEVELS, RISK_PROFILES, levelOf, type RiskLevel } from "@merrymen/core";
-import { usd } from "@/lib/format";
+import { ENERGY, RISK_LEVELS, RISK_PROFILES, levelOf, type EnergyStatus, type RiskLevel } from "@merrymen/core";
+import { count, usd } from "@/lib/format";
+import { energyRemedies, energyView } from "./energy-view";
 import type { GrantBalances } from "@/lib/grant-balances";
 import { requestJson } from "./request-json";
 import { SkeletonRows } from "./Skeleton";
@@ -40,8 +41,12 @@ export interface AccountState {
    * the grant store the POST writes synchronously, `workerAliveAt` from the
    * mirrored `agents` row that also carries `liveBlocker`. That pairing is what
    * makes the comparison sound: the blocker and the beat are the same row.
+   *
+   * `energy` is the worker's own report of what the agent may start on its own
+   * today (AgentStatus.energy). Null or absent is "not said yet", never an
+   * empty allowance and never a zero balance.
    */
-  status: {exists: boolean; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; balances?: GrantBalances; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number; grantedAt?:number}};
+  status: {exists: boolean; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; balances?: GrantBalances; energy?: EnergyStatus | null; grant?: {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}; expiresAt?:number; grantedAt?:number}};
 }
 // Moved to its own module so it can be executed in a test; re-exported so no import moves.
 export { requestJson } from "./request-json";
@@ -134,7 +139,54 @@ export function FundingPanel({mode,account,onClose}:{mode:"deposit"|"withdraw";a
           {advice.say}
         </p>
       );
-    })()}<label>Agent account</label><p className="funding-address">{grant.smartAccount}</p><button className="flow-primary" onClick={()=>{void navigator.clipboard.writeText(grant.smartAccount).then(()=>setCopied(true)).catch(()=>setError("Could not copy. Select the address above to copy it."));}}>{copied ? "Address copied" : "Copy deposit address"}</button>{error && <p role="alert">{error}</p>}<a className="flow-secondary" href="/grant">Wallet setup and funding details</a></> : <a href="/grant">Set up an agent wallet</a>}</section>;
+    })()}<EnergyFunding energy={account.status.energy} chainId={grant.chainId}/><label>Agent account</label><p className="funding-address">{grant.smartAccount}</p><button className="flow-primary" onClick={()=>{void navigator.clipboard.writeText(grant.smartAccount).then(()=>setCopied(true)).catch(()=>setError("Could not copy. Select the address above to copy it."));}}>{copied ? "Address copied" : "Copy deposit address"}</button>{error && <p role="alert">{error}</p>}<a className="flow-secondary" href="/grant">Wallet setup and funding details</a></> : <a href="/grant">Set up an agent wallet</a>}</section>;
+}
+
+/**
+ * ENERGY, ON THE SCREEN WITH THE ADDRESS IT IS ABOUT.
+ *
+ * This is where an owner arrives from "How to top up" on the desk, from the
+ * chat's open-deposit, and — through its /deposit WebView — from Android. So
+ * it says the same thing the desk says, from the same worker report, in the
+ * owner's voice rather than the agent's: where the account stands, what full
+ * strength needs, and the two routes to it, each only where it would work.
+ *
+ * WHAT IT LEAVES OUT. Nothing about the token's price or returns — $MERRYMEN
+ * here is capacity. No fee or tax percentage, which the token's owner can
+ * change without a line of our code changing. And on another network, not
+ * "send it here": tokens sent to this account there would not count.
+ *
+ * Shown only while the deployment is gating and the agent is below full, for
+ * the reported UTC day (energyView): nothing is said about a limit that limits
+ * nothing, and an unread balance is said to be unread — never 0.
+ */
+function EnergyFunding({energy,chainId}:{energy:EnergyStatus|null|undefined;chainId:number}) {
+  const view=energyView(energy,Date.now()/1000);
+  if(view.kind==="none") return null;
+  const remedies=energyRemedies(energy,chainId);
+  const full=count(ENERGY.fullTokens);
+  // "Couldn't read" ONLY for a read that failed. No wallet that counts (none
+  // linked, or it already powers another account) is a knowable nothing, and
+  // pointing the owner at an outage that does not exist sends them the wrong way.
+  const standing=view.kind==="unread"
+    ? "we couldn't read the $MERRYMEN balances — that's our read failing, not your wallet"
+    : view.total!==null
+      ? view.noWallet
+        ? `this account holds ${count(view.total)} $MERRYMEN, ${count(view.short)} short — no wallet of yours counts toward it`
+        : `your wallet and this account hold ${count(view.total)} $MERRYMEN between them, ${count(view.short)} short`
+      : view.readFailed
+        ? "we couldn't read every $MERRYMEN balance just now, so we can't say how far short"
+        : "no wallet of yours counts toward it yet";
+  const route=!remedies.sendToAgent
+    ? `This account is on another network, so $MERRYMEN sent to it would not count — keep ${full} on Robinhood Chain in your own wallet.`
+    : remedies.usdg==="ready"
+      ? "Send $MERRYMEN on Robinhood Chain to this same address, or send USDG here and ask your agent in chat to get its $MERRYMEN — you confirm the amount first."
+      : remedies.usdg==="paper"
+        ? "Send $MERRYMEN on Robinhood Chain to this same address. Your agent is in Paper mode, so it won't spend real USDG on it — turn on Live trading first if you'd rather it got them itself."
+        : remedies.usdg==="resign"
+          ? "Send $MERRYMEN on Robinhood Chain to this same address, or send USDG here, re-sign your agent's permission (free — its current key can't buy it), then ask it in chat to get its $MERRYMEN."
+          : "Send $MERRYMEN on Robinhood Chain to this same address.";
+  return <><p className="fund-energy" role="status">Energy{view.spent ? " — spent for today, back at 00:00 UTC" : ""}: {standing}. Full strength needs {full} $MERRYMEN between your wallet and this account; below that your agent gets about a tenth of a standard day's AI reviews and new trades. Stop-losses, take-profits and your own orders are never limited; its own AI reviews — including of its open positions — are paced along with the rest.</p><p>{route} Or change nothing — it carries on at this pace.</p></>;
 }
 
 /**
