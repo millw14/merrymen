@@ -94,6 +94,20 @@ const UPSERT_SQL =
   "ON CONFLICT (tenant) DO UPDATE SET sealed = excluded.sealed, bytes = excluded.bytes, updated_at_ms = excluded.updated_at_ms";
 const SELECT_SQL = "SELECT sealed FROM tenant_tg_groups WHERE tenant = ?";
 const DELETE_SQL = "DELETE FROM tenant_tg_groups WHERE tenant = ?";
+/**
+ * The sweep's pair. Both carry the `updated_at_ms` bound so a row published
+ * after the grant listing was read (a tenant granted since, armed by another
+ * replica) is never taken for a removed one; see forgetUnwantedTgGroups.
+ */
+const SWEEP_SELECT_SQL = "SELECT tenant FROM tenant_tg_groups WHERE updated_at_ms < ?";
+const SWEEP_DELETE_SQL = "DELETE FROM tenant_tg_groups WHERE tenant = ? AND updated_at_ms < ?";
+
+/**
+ * At most this many rows are deleted per reconcile pass. The sweep runs inside
+ * the loop that supervises every child, so a backlog (the first deploy of the
+ * sweep, a long outage) drains over a few passes instead of holding one.
+ */
+export const TG_GROUPS_FORGET_BATCH = 25;
 
 /** What the sealed text starts with: the format and the tenant it belongs to, then a newline, then the file. */
 const ENVELOPE = "tg-groups/v1";
@@ -365,18 +379,24 @@ export async function publishTgGroups(o: {
  * home that is gone belongs to a tenant being removed, and writing would bring
  * the directory back holding its groups.
  *
+ * `shared` may be a function that opens the database. It is called only once
+ * the home is known to have no file, so a database that cannot be reached
+ * never turns a home that kept its file into `failed`: `failed` always means
+ * there was no file, which is what tgGroupsHeldOff relies on.
+ *
  *   restored   — written (temp file then rename, mode 0600)
  *   present    — the home already has the file; nothing written
  *   none       — no stored copy; nothing written
  *   unreadable — a stored copy that will not open under this DEK for this
  *                tenant, or opens to something that is not version 1 JSON;
  *                nothing written, and the child's next publish replaces it
- *   failed     — the read or the write failed; nothing written
+ *   failed     — the home had no file and the read or the write failed;
+ *                nothing written
  */
 export async function restoreTgGroups(o: {
   tenant: string;
   home: string;
-  shared: Db;
+  shared: Db | (() => Promise<Db>);
   dek: Buffer;
   log?: TgGroupsLog;
 }): Promise<TgGroupsRestore> {
@@ -391,7 +411,8 @@ export async function restoreTgGroups(o: {
 
   let sealed: unknown;
   try {
-    const row = (await o.shared.prepare(SELECT_SQL).get(tenant)) as { sealed?: unknown } | undefined;
+    const shared = typeof o.shared === "function" ? await o.shared() : o.shared;
+    const row = (await shared.prepare(SELECT_SQL).get(tenant)) as { sealed?: unknown } | undefined;
     if (!row) return "none";
     sealed = row.sealed;
   } catch (e) {
@@ -458,12 +479,42 @@ async function exists(file: string, log: TgGroupsLog, tenant: string): Promise<b
   }
 }
 
+/**
+ * MUST THIS CHILD RUN WITH ITS GROUPS HELD OFF? Decided at each spawn from the
+ * restore's answer and whether the previous spawn held them off. While held,
+ * the orchestrator spawns the child with MERRYMEN_TG_GROUPS=0 and publishes
+ * nothing for it, so the stored row stands until a spawn can put it back.
+ *
+ * FAILED: the home has no file and the row could not be brought down. A child
+ * started on an empty memory would write that memory, and the next mirror pass
+ * would seal it over the good row: owner-approved rooms back to pending (then
+ * asked about and left), and today's model, nomination and entry allowances
+ * handed out afresh. Off, it can do none of that.
+ *
+ * PRESENT, WHILE HELD: the file is the held child's own. The switch still
+ * lets it record who added or removed it (docs/tg-groups.md "Operator
+ * switch"), so a held child can write a nearly empty file; were that file
+ * taken as the child's memory, it would be published over the row the hold
+ * exists to protect. It stays held until a spawn finds the home without it —
+ * the next redeploy at the latest — and restores the row.
+ *
+ * Anything else lets go: restored and none leave nothing to protect, and
+ * unreadable is a row the child's next publish is meant to replace.
+ */
+export function tgGroupsHeldOff(r: TgGroupsRestore, heldBefore: boolean): boolean {
+  if (r === "failed") return true;
+  if (r === "present") return heldBefore;
+  return false;
+}
+
 // ── the kill switch ─────────────────────────────────────────────────────────
 
 /**
  * Forget a tenant's stored group memory. The kill switch calls this beside
- * removing the child's home: an agent whose grant is gone must not leave
- * strangers' words behind in shared Postgres. Never throws.
+ * removing the child's home, and when a /kill removes the grant or a spawn
+ * finds none: an agent whose grant is gone must not leave strangers' words
+ * behind in shared Postgres. forgetUnwantedTgGroups catches whatever these
+ * miss. Never throws.
  */
 export async function deleteTgGroups(tenant: string, shared: Db, log: TgGroupsLog = defaultLog): Promise<void> {
   const key = tenantKey(tenant);
@@ -476,4 +527,79 @@ export async function deleteTgGroups(tenant: string, shared: Db, log: TgGroupsLo
   } catch (e) {
     log(`tg-groups: ${key} stored memory could not be deleted — ${why(e)}`);
   }
+}
+
+/**
+ * Which stored rows belong to a tenant the grant store no longer lists. Pure.
+ * Only keys the ferry could have written (tenantKey), each once, at most
+ * `max`. A malformed key is skipped rather than retried every pass: no
+ * publish wrote it, so it holds nothing of an agent's.
+ */
+export function tgGroupsToForget(
+  stored: readonly unknown[],
+  wanted: ReadonlySet<string>,
+  max: number = TG_GROUPS_FORGET_BATCH,
+): string[] {
+  const keep = new Set<string>();
+  for (const w of wanted) keep.add(tenantKey(w) ?? String(w));
+  const out: string[] = [];
+  for (const s of stored) {
+    if (out.length >= max) break;
+    const key = typeof s === "string" ? tenantKey(s) : null;
+    if (!key || keep.has(key) || out.includes(key)) continue;
+    out.push(key);
+  }
+  return out;
+}
+
+/**
+ * THE KILL SWITCH, FOLLOWING THE GRANT STORE. Delete every stored row whose
+ * tenant is not in `wanted`, the grant store's own list, read this pass.
+ *
+ * Deleting beside the home only reached a child running on this replica at
+ * that moment. A grant discarded during a redeploy, a restart back-off, a
+ * crash-loop stand-down or a fleet halt, or a delete that failed once, left
+ * strangers' words sealed in shared Postgres for good, and a later grant by
+ * the same wallet restored them. The listing is fleet-wide, so this is right
+ * on any replica, and whatever fails here is simply tried on the next pass.
+ *
+ * `listedAtMs` is when the listing was requested. Only rows last written
+ * before it are touched: a row published since belongs to a child armed from a
+ * newer listing (a tenant granted a moment ago, running on another replica)
+ * and is not this listing's to judge. A removed tenant's child that is still
+ * publishing somewhere is caught by a later pass, once it has been stood down.
+ *
+ * Returns the tenants whose rows were deleted. Never throws.
+ */
+export async function forgetUnwantedTgGroups(o: {
+  shared: Db;
+  wanted: ReadonlySet<string>;
+  listedAtMs: number;
+  log?: TgGroupsLog;
+  max?: number;
+}): Promise<string[]> {
+  const log = o.log ?? defaultLog;
+  let doomed: string[];
+  try {
+    const rows = (await o.shared.prepare(SWEEP_SELECT_SQL).all(o.listedAtMs)) as { tenant?: unknown }[];
+    doomed = tgGroupsToForget(
+      rows.map((r) => r?.tenant),
+      o.wanted,
+      o.max,
+    );
+  } catch (e) {
+    log(`tg-groups: stored memory of removed agents not swept this pass — ${why(e)}`);
+    return [];
+  }
+  const gone: string[] = [];
+  for (const tenant of doomed) {
+    try {
+      await o.shared.prepare(SWEEP_DELETE_SQL).run(tenant, o.listedAtMs);
+      gone.push(tenant);
+      log(`tg-groups: ${tenant} grant is gone — stored memory deleted`);
+    } catch (e) {
+      log(`tg-groups: ${tenant} stored memory could not be deleted — ${why(e)} (tried again next pass)`);
+    }
+  }
+  return gone;
 }
