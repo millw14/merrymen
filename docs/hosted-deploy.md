@@ -393,9 +393,9 @@ tenant_tg_groups (tenant TEXT PRIMARY KEY, sealed TEXT NOT NULL,
 
 | When | What happens |
 |---|---|
-| Each mirror pass (~15 s) | for tenants whose lease this replica holds, when the file's mtime or size changed: read it (read only), seal it with the store DEK (`sealSecret`), upsert the row |
-| Spawn | when the child home has no `tg-groups.json`, restore it from the row, opened with the DEK. If that restore fails, the child runs with `MERRYMEN_TG_GROUPS=0` and nothing is published for it until a later spawn restores the row, so an empty memory never overwrites the stored one |
-| The grant goes | the kill switch deletes the row with the child home; a `/kill` that removes the grant deletes it at once; and every reconcile pass deletes the row of any tenant the grant store no longer lists (a grant discarded while its child was not running here, or a delete that failed once), a bounded batch per pass, judging only rows written before that pass read the grant listing |
+| Each mirror pass (~15 s) | for tenants whose lease this replica holds, when the file's mtime or size changed: read it (read only), apply the home's forget requests (`tg-groups-forget.json`, below), seal it with the store DEK (`sealSecret`), upsert the row. When nothing is published (the child is held, or its file is absent, refused or failed), the forget requests are applied to the stored row itself, in place |
+| Spawn | when the child home has no `tg-groups.json`, restore it from the row, opened with the DEK, with the home's forget requests applied. If that restore fails (or those requests cannot be read), the child runs with `MERRYMEN_TG_GROUPS=0` and nothing is published for it until a later spawn restores the row, so an empty memory never overwrites the stored one |
+| The grant goes | the kill switch deletes the row with the child home; a `/kill` that removes the grant deletes it at once; and every reconcile pass deletes the row of any tenant the grant store no longer lists (a grant discarded while its child was not running here, or a delete that failed once), a bounded batch per pass, judging only rows written before that pass read the grant listing. The group files in a home no child of that tenant runs in go at the same moments (a `/kill`, a spawn that finds no grant, and each reconcile pass for every home neither wanted nor running), so a re-grant never finds the old file and seals it back |
 
 > The orchestrator already holds `DATABASE_URL` and `MERRYMEN_STORE_DEK`;
 > children get neither and never read the table. The row holds other
@@ -404,6 +404,15 @@ tenant_tg_groups (tenant TEXT PRIMARY KEY, sealed TEXT NOT NULL,
 > is deleted with the grant rather than left behind. The privacy policy
 > states these limits; change them together. The loss window is one mirror
 > pass. Self-hosted there is no ferry: the file is the store.
+>
+> **Forget requests have their own file.** Each `/forget` and `/forgetme` is
+> appended to `<child home>/tg-groups-forget.json` (`{chatId, userId, atMs}`)
+> and fsynced before the wipe, even while the child's groups are held off. A
+> held child started with an empty store, so its own wipe erases nothing the
+> row holds; the mirror applies the requests to the row instead, and the
+> restore that ends the hold applies them again before writing the file. The
+> ferry takes the file away only after a publish of a memory file that
+> already reflected every request in it.
 
 **What owners must do: privacy mode.** Each owner's bot is their own, so
 there is nothing to configure on Telegram as the operator — but a bot in a
@@ -425,9 +434,11 @@ dashboard, the iOS Telegram screen and the site docs repeat:
 
 > `getMe`'s `can_read_all_group_messages` reports only the BotFather setting,
 > not what a group the bot joined before the change delivers — hence the
-> re-add. When the flag is false at the moment the bot is added, the agent DMs
-> its owner these steps once per group. Leave `/setjoingroups` enabled
-> (BotFather's default) or the bot cannot be added to a group at all.
+> re-add. When the flag is false at the moment the bot is added as a plain
+> member, the agent DMs its owner these steps once per group. Added as an
+> admin it hears every line, so nothing is sent then; a later change to a
+> plain member of a group it talks in sends them. Leave `/setjoingroups`
+> enabled (BotFather's default) or the bot cannot be added to a group at all.
 
 ## 5. Create the two services
 Both build from the same repo + `Dockerfile`. The image is role-by-variable: its

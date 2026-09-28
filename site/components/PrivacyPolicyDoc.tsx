@@ -79,10 +79,16 @@ import type { ReactNode } from "react";
  * tenant_tg_groups (worker/src/tg-groups-ferry.ts), restored at spawn and
  * deleted with the grant: by the orchestrator's kill switch with the child
  * home, when a /kill removes the grant (honourKill), and by every reconcile
- * pass for any tenant the grant store no longer lists (sweepTgGroups) — which
- * is why a redeploy does not clear it, unlike the soul files above, but
- * discarding the permission does. Who writes the lines is
- * worker/src/telegram/tg-groups/model.ts: the dedicated key, else the owner's
+ * pass for any tenant the grant store no longer lists (sweepTgGroups), from
+ * the row and from a home no child of that tenant runs in — which is why a
+ * redeploy does not clear it, unlike the soul files above, but discarding the
+ * permission does. Each /forget and /forgetme is also written to its own file
+ * beside the memory (store.ts TG_GROUPS_FORGET_FILE: the group id, the
+ * person's Telegram id or "*", and when), so the deletion reaches the sealed
+ * copy even while a child's groups are held off; hosted, the ferry removes it
+ * once a publish shows the memory reflects it; self-hosted it is kept,
+ * compacted past 64 KB (TG_FORGET_LIMITS). Keep the forget rows with it.
+ * Who writes the lines is worker/src/telegram/tg-groups/model.ts: the dedicated key, else the owner's
  * own saved key, else (hosted) the house key only under
  * MERRYMEN_TG_GROUPS_SHARE_HOUSE_KEY=1, else templates. Its provider is
  * MERRYMEN_TG_GROUPS_LLM_PROVIDER (Groq by default): a provider other than Groq
@@ -300,8 +306,9 @@ export function PrivacyPolicyDoc() {
         </ul>
         <p>
           What your bot receives at all is up to Telegram. With Telegram&apos;s privacy mode on, the
-          default for every bot, it gets only commands and replies to its own messages in a group,
-          and can remember only those; turned off, it reads the whole group.
+          default for every bot, and your bot not an admin of the group, it gets only commands and
+          replies to its own messages there, and can remember only those; with privacy mode turned
+          off, or your bot made an admin of the group, it reads the whole group.
         </p>
         <p>
           The memory lives in your agent&apos;s working files on the hosted worker and, so that it
@@ -318,7 +325,8 @@ export function PrivacyPolicyDoc() {
         <p>
           <strong>Trading.</strong> A group message cannot order a trade. The only thing that can
           pass from a group to your agent&apos;s trading is the contract address of a coin someone
-          posts, and only if your agent trades memecoins on its own (trencher mode) and you left
+          posts (for a chart link, the coin its trading pool is for, read from the blockchain), and
+          only if your agent trades memecoins on its own (trencher mode) and you left
           “Look at coins people post” on. The address only tells your agent which coin to look at.
           Its coin review (its Brain) judges that coin from market data like any other and is never
           given the message, who posted it or which group it came from, and a buy still has to pass
@@ -335,7 +343,10 @@ export function PrivacyPolicyDoc() {
           to take their display name and Telegram user id off the coins they posted there (the
           coin and what your agent decided about it stay). If the group&apos;s summary mentions them
           by name, the summary is deleted too, and later rewritten from the messages that are left.
-          You can wipe everything your agent remembers of a group with{" "}
+          So that the deletion also reaches the encrypted copy in our database, your agent keeps a
+          short record of the request itself: the group&apos;s Telegram id, their Telegram user id,
+          and when they asked. It is deleted once that copy reflects the request, normally within a
+          minute. You can wipe everything your agent remembers of a group with{" "}
           <code className="inline">/forget</code> (section 8). Someone in a group with a Merrymen
           agent who wants more deleted can ask its owner, or email us with the group&apos;s name and
           the bot&apos;s @username.
@@ -484,6 +495,7 @@ export function PrivacyPolicyDoc() {
             ["Telegram chat with your agent", "The latest 40 messages in each chat."],
             ["Your agent's memory of a Telegram group it is in: recent messages with their senders' display names and Telegram ids, a summary, notes on people, and the coins posted", "The latest 60 messages in each group, none older than 14 days. The coins posted there and what your agent decided, 14 days. The summary and the notes on people (up to 40 per group), while your bot stays in the group. At most 30 groups: to make room, a group your bot was removed from goes first, then one still waiting for your answer, the quietest first; a group you approved or told it to leave is dropped only to make room for one you added it to or wrote in yourself. Kept in your agent's working files and, encrypted, in our database, so a redeploy of the hosted worker does not clear it. All of it is deleted when you discard the trading permission or stop your agent with /kill; a group's memory at once with /forget in the group or Forget in /groups; one person's messages and note, and their name and Telegram id on the coins they posted, when they send /forgetme there (with the summary, if it names them)."],
             ["Your agent's memory of a Telegram group your bot was removed from", "30 days, in case it is added back, then deleted. Forget in /groups deletes it sooner."],
+            ["A request to forget, made with /forgetme or /forget in a Telegram group or Forget in /groups: the group's Telegram id, the Telegram user id of whoever asked to be forgotten (none for /forget), and when", "Until the encrypted copy of the group memory in our database reflects it, normally within a minute; with the rest of your agent's working files when you discard the trading permission or stop your agent with /kill, or when the hosted worker is redeployed."],
             ["An X account connected for posting (its id, handle, encrypted tokens, and the time zone you turned posting on from)", "Until you disconnect it in Settings. Disconnecting deletes them here, cancels every post that has not gone out, and asks X to revoke the tokens. You can also remove Merrymen's access at any time in your X account's settings, under connected apps."],
             ["Your agent's X posts, and the drafts it wrote for X", "Kept with your account history. Posts already on X stay there until you delete them on X."],
             ["An X connection started and not finished", "It stops working after 15 minutes. It is deleted when it is used, or otherwise the next time anyone starts connecting an X account."],
@@ -671,7 +683,12 @@ export function PrivacyPolicyDoc() {
             Telegram groups, with the same limits, in a file in that directory
             (<code className="inline">tg-groups.json</code>). The people in those groups can use{" "}
             <code className="inline">/forgetme</code>, and you can use{" "}
-            <code className="inline">/forget</code> or delete the file.
+            <code className="inline">/forget</code> or delete the file. Each of those requests is
+            also recorded, with the group&apos;s id, the Telegram user id of whoever asked (none for{" "}
+            <code className="inline">/forget</code>) and when, in{" "}
+            <code className="inline">tg-groups-forget.json</code> beside it, so a deletion is not
+            undone by a crash. That record is removed as soon as the memory file reflects the
+            deletion.
           </li>
           <li><strong>A transcription provider</strong>, if you enable voice: your voice notes are sent to the endpoint you configure.</li>
         </ul>
