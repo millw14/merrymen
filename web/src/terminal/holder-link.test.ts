@@ -40,12 +40,13 @@ describe("LinkedWallet — the linked wallet, and whether it counts", () => {
     assert.doesNotMatch(t, /another/, "there is no other account to go and unlink it from");
   });
 
-  it("CLAIMED ELSEWHERE: another account has it now, and a fresh signature moves it here (once a day)", () => {
+  it("CLAIMED ELSEWHERE: another account has it now, and a fresh signature moves it here (once every 24 hours)", () => {
     const t = text("claimed-elsewhere");
     assert.match(t, /powers another merrymen account right now/);
     assert.match(t, /move it here/);
-    assert.match(t, /once a day/);
-    assert.match(t, /can always come back to the account it last left/, "a phished move is not a lock-out until midnight");
+    assert.match(t, /once every 24 hours/, "a rolling 24 hours from the last move, not a calendar day");
+    assert.doesNotMatch(t, /once a day|midnight|UTC day/);
+    assert.match(t, /can always come back to the account it last left/, "a phished move is not a lock-out for a day");
     assert.match(t, /link it again/);
     assert.doesNotMatch(t, /Unlink it there/, "the wallet's own signature is the remedy now");
   });
@@ -78,7 +79,7 @@ describe("unlinkedNote — what an unlink leaves the tier reading, from the PATC
     assert.match(t, /powers another merrymen account right now/);
     assert.match(t, /reads no wallet/);
     assert.match(t, /link it below with a signature from it/);
-    assert.doesNotMatch(t, /once a day/, "its own sign-in account is never held to the daily limit");
+    assert.doesNotMatch(t, /once a day|24 hours/, "its own sign-in account is never held to the move limit");
   });
 
   it("UNKNOWN: claims nothing about which wallet counts", () => {
