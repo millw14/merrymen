@@ -77,7 +77,8 @@ export interface TokenBalance {
   /**
    * Human-readable amount, for display only. "unknown" when the holding is
    * real but not expressible — see the vault leg, where the share count is
-   * meaningless and the USDG value could not be read.
+   * meaningless and the USDG value could not be read. "<n> raw units" when the
+   * count is exact but the token will not state its decimals.
    */
   amount: string;
   /** Extra context for the owner when the number needs it. */
@@ -536,7 +537,13 @@ export async function planRecovery(opts: {
         // 18, and a 9-decimal memecoin formatted at 18 is shown to the owner a
         // billion times smaller than what they are agreeing to move. Bounded as
         // isValidCustomToken bounds a typed-in figure; outside that, or no
-        // answer, the amount is "unknown" rather than something plausible.
+        // answer, the amount is the exact raw count rather than a guess.
+        //
+        // NOT `unreadable`. That list says a BALANCE could not be read, so the
+        // plan may be missing money — and the phone refuses to start a
+        // withdrawal while it is non-empty. Here the balance was read and the
+        // token sweeps; only its display unit is missing, and letting that veto
+        // the whole withdrawal would strand everything else over a cosmetic gap.
         const decimals = await publicClient
           .readContract({ address: t.address, abi: erc20Abi, functionName: "decimals" })
           .then((d) => Number(d))
@@ -544,14 +551,13 @@ export async function planRecovery(opts: {
         if (decimals !== null && Number.isInteger(decimals) && decimals >= 0 && decimals <= 36) {
           return { symbol: t.symbol, address: t.address, raw, decimals, amount: formatUnits(raw, decimals) };
         }
-        unreadable.push(`${t.symbol} decimals`);
         return {
           symbol: t.symbol,
           address: t.address,
           raw,
           decimals: t.decimals,
-          amount: "unknown",
-          note: `${raw} base units — held, but the token would not state its decimals. It sweeps regardless.`,
+          amount: `${raw} raw units`,
+          note: "held, but the token would not state its decimals, so this is its raw count. It sweeps regardless.",
         };
       }
       if (t.address.toLowerCase() !== (MORPHO.steakhouseUsdgVault as string).toLowerCase()) {

@@ -155,13 +155,20 @@ describe("grantTokens reach the browser recovery", () => {
     assert.equal(meme.amount, formatUnits(MEME_HELD, 9));
   });
 
-  it("a token that will not state its decimals is disclosed as unknown, never formatted at a guess", async () => {
+  it("a token that will not state its decimals is disclosed by raw count, never formatted at a guess", async () => {
     const plan = await planFromBrowser(wallet);
     const mute = plan.balances.find((b) => b.address.toLowerCase() === MUTE);
     assert.ok(mute, "held is held: an unreadable decimals figure must not hide the balance");
-    assert.equal(mute.amount, "unknown");
+    assert.equal(mute.amount, `${MUTE_HELD} raw units`, "the exact count, since no unit could be established");
     assert.equal(mute.raw, MUTE_HELD);
-    assert.ok(plan.unreadable.includes(`${mute.symbol} decimals`), "and the plan must say what it could not read");
+    // NOT in `unreadable`: that list means a balance could not be read, and the
+    // phone disables "Review withdrawal" while it is non-empty
+    // (WithdrawScreen.swift). A missing display unit must not veto a
+    // withdrawal that would move this token and everything else.
+    assert.ok(
+      !plan.unreadable.some((u) => u.includes(mute.symbol)),
+      `a read balance is not an unreadable one: ${JSON.stringify(plan.unreadable)}`,
+    );
   });
 
   it("sweepFromBrowser moves it", async () => {
