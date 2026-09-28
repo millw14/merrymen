@@ -25,9 +25,11 @@
  * MERRYMEN_XPOST_LLM_KEY and nothing else of the environment's keys, and
  * refuses it when it IS one of the fleet's keys (trading's allowance is
  * shared). When it is unset the caller's fallback is used — in production the
- * orchestrator hands in the group room's own dedicated credentials, which the
- * room has already refused to build from a fleet key. It never calls
- * resolveLlm, which would hand back an owner's key with an Opus default.
+ * orchestrator hands in the group room's own credentials — and held to the
+ * SAME check: the room may have been allowed to share a fleet key
+ * (MERRYMEN_GROUPCHAT_SHARE_HOUSE_KEY=1), and that says nothing about X. It
+ * never calls resolveLlm, which would hand back an owner's key with an Opus
+ * default.
  *
  * WITHOUT A MODEL, ONLY THE INTRO — from `introTemplate`'s small pool. Every
  * other post needs a model; a casual line or a buy post from a template would
@@ -311,22 +313,36 @@ export interface XpostModel {
  * MERRYMEN_XPOST_MODEL overriding the provider's default. A key that IS a
  * fleet key is refused unless MERRYMEN_XPOST_SHARE_HOUSE_KEY=1.
  *
- * Unset: `fallback`, as it is — the caller's own dedicated credentials, with
- * their own model. The X knobs above are not applied to somebody else's key.
+ * Unset: `fallback` — the caller's credentials (the room's), with their own
+ * model; the X knobs above are not applied to somebody else's key. HELD TO
+ * THE SAME FLEET-KEY CHECK: the room may share a fleet key when ITS operator
+ * flag says so (MERRYMEN_GROUPCHAT_SHARE_HOUSE_KEY=1), and before this check
+ * X silently spent that key too — up to a day's allowance of calls on
+ * trading's key — while the boot line called it "the room's dedicated key".
+ * Only MERRYMEN_XPOST_SHARE_HOUSE_KEY=1 lets X share one, and then the line
+ * names the fleet key it is on.
  *
  * Neither: no model, and the line says only the intro will be posted.
  */
 export function xpostModel(env: Env, fallback: LlmCreds | null): XpostModel {
   const key = env.MERRYMEN_XPOST_LLM_KEY?.trim() ?? "";
   const scrub = (line: string) => [key, fallback?.apiKey?.trim() ?? ""].reduce((l, secret) => (secret ? l.split(secret).join("[key]") : l), line);
+  const shareOk = env.MERRYMEN_XPOST_SHARE_HOUSE_KEY?.trim() === "1";
   if (!key) {
     if (fallback) {
-      return { creds: fallback, line: scrub(`xpost writer: model ${fallback.provider} ${fallback.model} on the room's dedicated key (MERRYMEN_XPOST_LLM_KEY unset)`) };
+      const fb = fleetKeyMatching(String(fallback.apiKey ?? "").trim(), env);
+      if (fb && !shareOk) {
+        return {
+          creds: null,
+          line: `xpost writer: no model — MERRYMEN_XPOST_LLM_KEY is unset and the room's key is the fleet's ${fb}; X posts never spend a fleet key (MERRYMEN_XPOST_SHARE_HOUSE_KEY=1 allows it); only intros are posted, from templates`,
+        };
+      }
+      const on = fb ? `the fleet's ${fb}, through the room's key (MERRYMEN_XPOST_SHARE_HOUSE_KEY=1)` : "the room's dedicated key";
+      return { creds: fallback, line: scrub(`xpost writer: model ${fallback.provider} ${fallback.model} on ${on} (MERRYMEN_XPOST_LLM_KEY unset)`) };
     }
     return { creds: null, line: "xpost writer: no model (MERRYMEN_XPOST_LLM_KEY unset and no fallback) — only intros are posted, from templates" };
   }
   const fleet = fleetKeyMatching(key, env);
-  const shareOk = env.MERRYMEN_XPOST_SHARE_HOUSE_KEY?.trim() === "1";
   if (fleet && !shareOk) {
     return {
       creds: null,

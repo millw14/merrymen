@@ -178,6 +178,29 @@ describe("the writer spends only its own key", () => {
     assert.match(describeXpostCreds({}, null), /only intros are posted, from templates/);
   });
 
+  it("the fallback is held to the same check: a room allowed to share a fleet key does not let X share it", () => {
+    // MERRYMEN_GROUPCHAT_SHARE_HOUSE_KEY=1 lets the ROOM build from a fleet
+    // key; before this check X then spent that key too, logged as "the
+    // room's dedicated key". Only X's own flag lets X share one.
+    for (const name of ["GROQ_API_KEY", "MERRYMEN_LLM_API_KEY", "ANTHROPIC_API_KEY"]) {
+      const env = { [name]: " gsk_fleet ", MERRYMEN_GROUPCHAT_SHARE_HOUSE_KEY: "1" };
+      const roomOnFleet = { ...ROOM, apiKey: "gsk_fleet" };
+      const refused = xpostModel(env, roomOnFleet);
+      assert.equal(refused.creds, null, name);
+      assert.match(refused.line, new RegExp(`the room's key is the fleet's ${name}`));
+      assert.match(refused.line, /MERRYMEN_XPOST_SHARE_HOUSE_KEY=1 allows it/);
+      assert.doesNotMatch(refused.line, /dedicated/);
+
+      const allowed = xpostModel({ ...env, MERRYMEN_XPOST_SHARE_HOUSE_KEY: "1" }, roomOnFleet);
+      assert.equal(allowed.creds, roomOnFleet, name);
+      assert.match(allowed.line, new RegExp(`on the fleet's ${name}, through the room's key \\(MERRYMEN_XPOST_SHARE_HOUSE_KEY=1\\)`));
+      assert.doesNotMatch(allowed.line, /dedicated/);
+      for (const line of [refused.line, allowed.line]) assert.ok(!line.includes("gsk_fleet"), line);
+    }
+    // A room key that is not a fleet key is still used as it is.
+    assert.equal(xpostCreds({ GROQ_API_KEY: "gsk_fleet" }, ROOM), ROOM);
+  });
+
   it("the boot line never carries a key", () => {
     const envs = [
       { MERRYMEN_XPOST_LLM_KEY: "gsk_secret_value" },
