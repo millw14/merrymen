@@ -53,6 +53,9 @@ const OTHER = "0x00000000000000000000000000000000000000a9" as const;
 const ACCOUNT = "0x00000000000000000000000000000000000000c8" as const;
 const NEWER = "paper fills are newer than the recoverable valuation";
 const NO_BASIS = "invalid paper checkpoint: MU is held with no paper cost basis";
+/** What a database blip looks like to the restore: no rule of the book's. */
+const BLIP = "Connection terminated unexpectedly";
+const NEWER_CLASS = "trades newer than the last valuation";
 
 const grant = (): StoredGrant =>
   ({
@@ -156,6 +159,8 @@ async function withClock(fn: () => Promise<void>) {
 }
 
 const paperWithBot = { paperTradingEnabled: true, telegramEnabled: true, telegramBotToken: "111:a", telegramAllowlist: [4242] };
+const readSettings = (t: string) =>
+  JSON.parse(readFileSync(path.join(childHome(t), "settings.json"), "utf8")) as { telegramBotToken?: string };
 
 beforeEach(async () => {
   // With no stored grant, a pass stands down whatever an earlier test left.
@@ -276,6 +281,63 @@ describe("the restore is retried on a backoff, and the owner told once per class
       assert.deepEqual(proc.signals, [], "the hold process keeps answering");
     });
   });
+
+  it("A HOLD WHOSE RETRIES FLAP BETWEEN ITS CAUSE AND A DATABASE BLIP ALERTS ONCE PER CLASS AND TELLS THE OWNER ONCE", async () => {
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      await reconcile();
+      const flap = async (reason: string, wait: number) => {
+        restoreSays = { ok: false, reason };
+        mock.timers.tick(wait + 1);
+        await reconcile();
+      };
+      await flap(BLIP, 2 * 60_000);
+      assert.equal(restores, 2);
+      assert.equal(readRestoreBlocked(childHome(TENANT))?.class, NEWER_CLASS, "a blip does not replace the cause the hold process says");
+      // A blip is tried again about a pass later, not on the book's backoff.
+      await flap(NEWER, 15_000);
+      assert.equal(restores, 3, "the blip was retried a pass later");
+      await flap(BLIP, 4 * 60_000);
+      await flap(NEWER, 15_000);
+      assert.equal(restores, 5);
+      assert.deepEqual(notices, [NEWER_CLASS], "the owner is told once, and never about the blip");
+      assert.deepEqual(
+        alerts(),
+        [
+          `[orchestrator] [alert] paper restore blocked: ${TENANT} — ${NEWER_CLASS}`,
+          `[orchestrator] [alert] paper restore blocked: ${TENANT} — restore error`,
+        ],
+        "one alert per class, not one per flip",
+      );
+      assert.equal(readRestoreBlocked(childHome(TENANT))?.class, NEWER_CLASS);
+      // And between two real causes: each is news once, a return to the first is not.
+      await flap(NO_BASIS, 8 * 60_000);
+      await flap(NEWER, 16 * 60_000);
+      assert.equal(restores, 7);
+      assert.deepEqual(notices, [NEWER_CLASS, "a holding has no cost basis"]);
+      assert.equal(alerts().length, 3);
+      assert.equal(readRestoreBlocked(childHome(TENANT))?.class, NEWER_CLASS, "the hold process says the cause of the day");
+      assert.equal(holds().length, 1);
+      assert.equal(workers().length, 0);
+    });
+  });
+
+  it("A BLIP AT SPAWN HOLDS A HEALTHY BOOK ONLY UNTIL THE NEXT PASS OR SO, AND SAYS NOTHING TO ITS OWNER", async () => {
+    restoreSays = { ok: false, reason: BLIP };
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      await reconcile();
+      assert.ok(isHeldForTest(TENANT), "held, so the bot is answered while the database is away");
+      assert.deepEqual(notices, [], "a dropped connection is not a broken book, and the owner is not told it is");
+      restoreSays = { ok: true, line: "paper cash, holdings and basis restored" };
+      mock.timers.tick(15_000 + 1);
+      await reconcile();
+      await settle();
+      assert.equal(workers().length, 1, `trading resumes a pass later, not two minutes later:\n${said.join("\n")}`);
+      assert.ok(!isHeldForTest(TENANT));
+      assert.deepEqual(notices, []);
+    });
+  });
 });
 
 describe("when the restore takes, trading comes back", () => {
@@ -305,6 +367,39 @@ describe("when the restore takes, trading comes back", () => {
       mock.timers.tick(15_000);
       await reconcile();
       assert.equal(spawned.length, 2);
+    });
+  });
+
+  it("PRACTICE SWITCHED OFF WHILE HELD: THE HOLD IS HANDED BACK, ONCE, AND THE WORKER STARTS AS IT DID BEFORE HOLDS", async () => {
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      await reconcile();
+      const hold = holds()[0]!;
+      hold.slowExit = true;
+      // The restore still fails: the book is as broken as it was. What changed
+      // is that the gate no longer holds a tenant for it.
+      await getSettingsStore().put(TENANT, { ...paperWithBot, paperTradingEnabled: false } as never);
+      mock.timers.tick(15_000);
+      const pass = reconcile();
+      await settle(50);
+      assert.equal(workers().length, 0, "no worker while the hold process is still up");
+      mock.timers.tick(1_000);
+      await pass;
+      await settle();
+      assert.deepEqual(hold.signals.filter((s) => s === "SIGTERM"), ["SIGTERM"], "stopped once");
+      assert.deepEqual(events, ["hold-spawn", "hold-exit", "worker-spawn"], "gone before the worker started");
+      assert.ok(!isHeldForTest(TENANT));
+      assert.equal(readRestoreBlocked(childHome(TENANT)), null, "and the hold's record with it");
+      assert.ok(said.some((l) => l.includes(`${TENANT}: practice mode is off`)), said.join("\n"));
+      assert.equal(readSettings(TENANT).telegramBotToken, "111:a", "the worker keeps the bot its hold answered");
+      for (let i = 0; i < 3; i++) {
+        mock.timers.tick(15_000);
+        await reconcile();
+      }
+      assert.equal(workers().length, 1, "exactly one worker");
+      assert.equal(holds().length, 1);
+      assert.equal(readSettings(TENANT).telegramBotToken, "111:a", "and it is not taken from it by its own claim");
+      assert.ok(!said.some((l) => l.includes("already claimed")), said.join("\n"));
     });
   });
 });
@@ -354,9 +449,36 @@ describe("a held tenant is stood down like any other", () => {
     await reconcile();
     assert.ok(isHeldForTest(TENANT));
     assert.equal(workers().length, 1, "the other login trades");
-    const read = (t: string) => JSON.parse(readFileSync(path.join(childHome(t), "settings.json"), "utf8")) as { telegramBotToken?: string };
-    assert.equal(read(TENANT).telegramBotToken, "111:a", "the held tenant keeps answering its bot");
-    assert.equal(read(OTHER).telegramBotToken, undefined, "and a second poller on it is refused the token");
+    assert.equal(readSettings(TENANT).telegramBotToken, "111:a", "the held tenant keeps answering its bot");
+    assert.equal(readSettings(OTHER).telegramBotToken, undefined, "and a second poller on it is refused the token");
     assert.ok(said.some((l) => l.includes(`${OTHER}: telegram bot token already claimed by another tenant`)), said.join("\n"));
+  });
+
+  it("A HELD TENANT WITH TELEGRAM OFF CLAIMS NO BOT: A TRADING LOGIN ON THE SAME TOKEN KEEPS IT", async () => {
+    await getSettingsStore().put(TENANT, { paperTradingEnabled: true, telegramEnabled: false, telegramBotToken: "111:a" } as never);
+    await getSettingsStore().put(OTHER, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
+    await store.put(TENANT, grant());
+    await store.put(OTHER, { ...grant(), smartAccount: "0x00000000000000000000000000000000000000c9" } as never);
+    await reconcile();
+    await reconcile();
+    assert.ok(isHeldForTest(TENANT));
+    assert.equal(holds().length, 0, "nothing answers the held tenant's bot");
+    assert.equal(workers().length, 1);
+    assert.equal(readSettings(OTHER).telegramBotToken, "111:a", "so the one login that polls it keeps it: somebody answers");
+    assert.ok(!said.some((l) => l.includes("already claimed")), said.join("\n"));
+  });
+
+  it("A HELD TENANT REVOKED IN THE PASS ITS OWNER SWITCHES TELEGRAM ON GETS NO HOLD PROCESS", async () => {
+    await getSettingsStore().put(TENANT, { paperTradingEnabled: true } as never);
+    await store.put(TENANT, grant());
+    await reconcile();
+    assert.ok(isHeldForTest(TENANT));
+    await getSettingsStore().put(TENANT, paperWithBot as never);
+    await store.remove(TENANT);
+    await reconcile();
+    await settle();
+    assert.equal(spawned.length, 0, "no process started to poll a revoked tenant's bot, only to be killed in a wiped home");
+    assert.ok(!isHeldForTest(TENANT));
+    assert.equal(existsSync(childHome(TENANT)), false);
   });
 });

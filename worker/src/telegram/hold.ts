@@ -58,7 +58,7 @@ import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { homePaths, merrymenHome } from "../home";
 import { loadGrantFile } from "../grant";
 import { hostedKillFromChat } from "../kill-request";
-import { holdText, readRestoreBlocked, type RestoreBlock } from "../restore-block";
+import { UNCLASSIFIED_BLOCK, holdText, readRestoreBlocked, type RestoreBlock } from "../restore-block";
 
 /** What the hold loop reads of the config. The real one is settings.ts resolveConfig. */
 export type HoldConfig = Pick<
@@ -81,8 +81,6 @@ export interface HoldDeps {
   now?: () => number;
 }
 
-/** The class an owner is told when the hold's own record cannot be read. */
-const UNKNOWN_CLASS = "restore error";
 
 /** Only the last four digits of a chat id go to the fleet's log. */
 const redact = (chatId: number): string => `…${String(Math.abs(chatId)).slice(-4)}`;
@@ -94,7 +92,8 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
   const note = deps.note ?? ((level, message) => console.log(`[telegram${level === "warn" ? " warn" : ""}] ${message}`));
   const blocker = deps.blocker ?? (() => readRestoreBlocked(merrymenHome()));
   const kill = deps.kill ?? (() => hostedKillFromChat(merrymenHome(), homePaths.grant(), loadGrantFile(), now()));
-  const cls = (): string => blocker()?.class ?? UNKNOWN_CLASS;
+  // The hold's own record unreadable: the class that names no cause.
+  const cls = (): string => blocker()?.class ?? UNCLASSIFIED_BLOCK;
   const holdReply = (): string => esc(holdText(cls()));
 
   // The same loop state as the child's (service.ts startTelegram says what

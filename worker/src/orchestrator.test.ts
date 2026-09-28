@@ -20,7 +20,7 @@ process.env.MERRYMEN_SESSION_SECRET = "SECRET-session-never-to-a-child";
 process.env.DATABASE_URL = "postgres://SECRET-never-to-a-child";
 process.env.MERRYMEN_HOLDER_ADDRESS = "0x00000000000000000000000000000000000Wha1e";
 
-const { childHome, childEnv, fleetHaltFile, dedupeBotToken } = await import("./orchestrator");
+const { childHome, childEnv, fleetHaltFile, dedupeBotToken, botWillPoll } = await import("./orchestrator");
 
 const T = "0xABCDef0000000000000000000000000000000001" as const;
 
@@ -69,8 +69,8 @@ describe("orchestrator env curation", () => {
 describe("telegram bot-token collision guard", () => {
   it("the first tenant keeps a token; a second tenant sharing it is stripped", () => {
     const seen = new Set<string>();
-    const a: any = { telegramBotToken: "111:AAA", strategy: "trencher" };
-    const b: any = { telegramBotToken: "111:AAA", strategy: "even-keel" };
+    const a: any = { telegramEnabled: true, telegramBotToken: "111:AAA", strategy: "trencher" };
+    const b: any = { telegramEnabled: true, telegramBotToken: "111:AAA", strategy: "even-keel" };
     assert.equal(dedupeBotToken(a, seen), false, "first claim keeps it");
     assert.equal(a.telegramBotToken, "111:AAA");
     assert.equal(dedupeBotToken(b, seen), true, "the duplicate is stripped");
@@ -80,14 +80,46 @@ describe("telegram bot-token collision guard", () => {
 
   it("distinct tokens both survive; no token is a no-op", () => {
     const seen = new Set<string>();
-    const a: any = { telegramBotToken: "111:AAA" };
-    const b: any = { telegramBotToken: "222:BBB" };
+    const a: any = { telegramEnabled: true, telegramBotToken: "111:AAA" };
+    const b: any = { telegramEnabled: true, telegramBotToken: "222:BBB" };
     const c: any = { strategy: "steady-basket" };
     assert.equal(dedupeBotToken(a, seen), false);
     assert.equal(dedupeBotToken(b, seen), false);
     assert.equal(dedupeBotToken(c, seen), false);
     assert.equal(a.telegramBotToken, "111:AAA");
     assert.equal(b.telegramBotToken, "222:BBB");
+  });
+
+  it("only a tenant whose process will poll claims the bot: a token saved with Telegram off takes nothing", () => {
+    // The order the pass meets them in used to decide it: a login with the bot
+    // switched off, met first, stripped the bot from the one that had it on,
+    // and nobody polled it at all.
+    const seen = new Set<string>();
+    const off: any = { telegramEnabled: false, telegramBotToken: "111:AAA" };
+    const unset: any = { telegramBotToken: "111:AAA" };
+    const on: any = { telegramEnabled: true, telegramBotToken: "111:AAA" };
+    assert.equal(dedupeBotToken(off, seen), false);
+    assert.equal(dedupeBotToken(unset, seen), false, "unset resolves to the default, which is off");
+    assert.equal(dedupeBotToken(on, seen), false, "the one that polls keeps it");
+    assert.equal(on.telegramBotToken, "111:AAA");
+    assert.equal(off.telegramBotToken, "111:AAA", "and a tenant that does not poll keeps its own file as it was");
+  });
+
+  it("botWillPoll resolves telegramEnabled as the child does: the file, then the env, then off", () => {
+    const prev = process.env.MERRYMEN_TELEGRAM_ENABLED;
+    try {
+      delete process.env.MERRYMEN_TELEGRAM_ENABLED;
+      assert.equal(botWillPoll({ telegramBotToken: "111:A" } as any), false);
+      assert.equal(botWillPoll({ telegramEnabled: true, telegramBotToken: "111:A" } as any), true);
+      assert.equal(botWillPoll({ telegramEnabled: true, telegramBotToken: "  " } as any), false, "no token, nothing to poll");
+      assert.equal(botWillPoll(null), false);
+      process.env.MERRYMEN_TELEGRAM_ENABLED = "true";
+      assert.equal(botWillPoll({ telegramBotToken: "111:A" } as any), true, "an env the child inherits turns it on");
+      assert.equal(botWillPoll({ telegramEnabled: false, telegramBotToken: "111:A" } as any), false, "and the file still wins");
+    } finally {
+      if (prev === undefined) delete process.env.MERRYMEN_TELEGRAM_ENABLED;
+      else process.env.MERRYMEN_TELEGRAM_ENABLED = prev;
+    }
   });
 });
 

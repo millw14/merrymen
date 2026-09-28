@@ -74,7 +74,7 @@ import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
-import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
+import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, SETTINGS_DEFAULTS, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
 import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
 import { makePgDb, translateSchema, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
@@ -97,12 +97,11 @@ import {
   TELEGRAM_HOLD_NOTIFIED_DDL,
   TELEGRAM_STATE_DDL,
   clearHoldNotified,
-  holdNotifiedClass,
   publishTenantTelegram,
   readTenantTelegram,
-  recordHoldNotified,
 } from "./telegram-store";
-import { clearRestoreBlocked, holdNoticeText, readRestoreBlocked, restoreBlockClass, writeRestoreBlocked } from "./restore-block";
+import { clearRestoreBlocked, isNamedBlock, readRestoreBlocked, restoreBlockClass, writeRestoreBlocked } from "./restore-block";
+import { notifyHoldOnce, type HoldNoticeOutcome } from "./hold-notice";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
 import { addressesOf, makeBuilderDesk, type BuilderDesk } from "./builder-pass";
@@ -421,6 +420,22 @@ export function fleetHaltFile(): string {
 }
 
 /**
+ * WILL THE PROCESS THESE SETTINGS ARE WRITTEN FOR POLL THE BOT? The child and
+ * the hold process each resolve it as settings.ts does: the file's own
+ * `telegramEnabled`, else MERRYMEN_TELEGRAM_ENABLED from the env they inherit
+ * from this one (childEnv does not strip it), else the default, which is off;
+ * and neither polls without a token.
+ */
+export function botWillPoll(settings: MerrymenSettings | null): boolean {
+  const token = settings?.telegramBotToken;
+  if (!settings || typeof token !== "string" || token.trim() === "") return false;
+  if (typeof settings.telegramEnabled === "boolean") return settings.telegramEnabled;
+  const env = process.env.MERRYMEN_TELEGRAM_ENABLED;
+  if (env !== undefined) return env === "1" || env.toLowerCase() === "true";
+  return SETTINGS_DEFAULTS.telegramEnabled;
+}
+
+/**
  * TELEGRAM BOT COLLISION GUARD. A Telegram bot accepts exactly ONE long-poll
  * getUpdates loop per token — two children polling the same token would steal
  * each other's updates, and one tenant's bot could surface another's replies.
@@ -428,10 +443,21 @@ export function fleetHaltFile(): string {
  * first (by the caller's iteration order) keeps it and the rest get Telegram
  * stripped rather than clobbering. Mutates `settings` and returns true when it
  * stripped a duplicate.
+ *
+ * ONLY A TENANT THAT WILL POLL CLAIMS. A token saved with Telegram switched off
+ * is a token nobody reads updates for, and it used to claim the bot all the
+ * same: whichever tenant came first in the pass kept it, so a login with the
+ * bot switched off could strip the bot from the one login that had it on, and
+ * nobody polled it at all. That is the silence this branch exists to end, and
+ * the settings refresh walks held tenants first, many of them with no bot on.
+ * A tenant that does not poll keeps its token in its file, as the first tenant
+ * of a pass always did, and claims nothing; the pass its owner switches
+ * Telegram on, it is judged like any other, in the same write that hands its
+ * process the switch.
  */
 export function dedupeBotToken(settings: MerrymenSettings, seen: Set<string>): boolean {
   const token = settings.telegramBotToken;
-  if (!token) return false;
+  if (!token || !botWillPoll(settings)) return false;
   if (seen.has(token)) {
     delete settings.telegramBotToken;
     return true;
@@ -607,12 +633,20 @@ interface Holder {
   proc: ChildProcess | null;
   /** Resolves when `proc` has exited. */
   exited: Promise<void> | null;
-  /** The restore's own error, and the class of it an owner may be told. */
+  /**
+   * The restore's own error, and the class of it an owner may be told: the
+   * last NAMED one once there has been one. A failure that names no rule of
+   * the book's (a dropped connection) never replaces it. See UNCLASSIFIED_BLOCK.
+   */
   reason: string;
   cls: string;
-  /** When the restore is tried again, ms, and the wait after the next failure. */
+  /**
+   * When the restore is tried again, ms, and the waits after the next named
+   * and the next unclassified failure. See scheduleHoldRetry.
+   */
   nextRetryAt: number;
   backoffMs: number;
+  quickMs: number;
   /** A retry is running. Two passes must not both hand the tenant over. */
   retrying: boolean;
 }
@@ -636,6 +670,8 @@ const holders = new Map<string, Holder>();
 /** The first wait before a held tenant's restore is tried again, doubling to HOLD_RETRY_MAX_MS. */
 const HOLD_RETRY_FIRST_MS = 2 * 60_000;
 const HOLD_RETRY_MAX_MS = 30 * 60_000;
+/** After a failure that names no rule of the book's, about a pass; doubling only to HOLD_RETRY_FIRST_MS. */
+const HOLD_RETRY_QUICK_MS = 15_000;
 /** A hold process that exits this many times inside HOLDER_CRASH_WINDOW_MS is stood down for GIVE_UP_COOLOFF_MS. */
 const HOLDER_MAX_CRASHES = 3;
 const HOLDER_CRASH_WINDOW_MS = 60_000;
@@ -661,8 +697,9 @@ export async function adoptHolderForTest(
   }
   const held: Holder = {
     tenant: lc, smartAccount, proc: null, exited: null, reason, cls: restoreBlockClass(reason),
-    nextRetryAt: Date.now() + HOLD_RETRY_FIRST_MS, backoffMs: HOLD_RETRY_FIRST_MS, retrying: false,
+    nextRetryAt: 0, backoffMs: HOLD_RETRY_FIRST_MS, quickMs: HOLD_RETRY_QUICK_MS, retrying: false,
   };
+  scheduleHoldRetry(held, held.cls);
   holders.set(lc, held);
   if (proc) watchHolder(held, proc as ChildProcess);
 }
@@ -1869,9 +1906,13 @@ async function tryPaperRestore(tenant: `0x${string}`, smartAccount: `0x${string}
   }
 }
 
-/** Would these stored settings have a bot for a hold process to answer? */
+/**
+ * Would these stored settings have a bot for a hold process to answer? The
+ * hold process's own rule (botWillPoll), and so also the rule for whether a
+ * held tenant's token counts as taken in the bot de-duplication.
+ */
 function holderBotReady(settings: MerrymenSettings | null): boolean {
-  return settings?.telegramEnabled === true && typeof settings.telegramBotToken === "string" && settings.telegramBotToken.trim() !== "";
+  return botWillPoll(settings);
 }
 
 /**
@@ -1896,11 +1937,14 @@ function holderBotReady(settings: MerrymenSettings | null): boolean {
  * - when the stored settings have a bot switched on, a hold process answers it
  *   (telegram-hold.ts) with this tenant's childEnv: no DATABASE_URL, none of the
  *   orchestrator's secrets, only its own token;
- * - an [alert] line goes to the log, and the owner a message, once per class.
+ * - an [alert] line goes to the log once per class, and the owner a message
+ *   once per class that names a rule of the book's (noteHold).
  *
  * NOT the seeds (basis, energy) or the history files: those are for a worker,
  * and none is starting. The restore is retried from reconcile (retryHold); when
- * it takes, the hold process is stopped and a worker starts in the same home.
+ * it takes, or the gate would no longer hold the tenant (practice switched
+ * off), the hold process is stopped and a worker starts in the same home
+ * (handHoldBack).
  */
 async function spawnHolder(
   tenant: `0x${string}`,
@@ -1921,19 +1965,23 @@ async function spawnHolder(
     return;
   }
   const home = childHome(tenant);
-  const cls = restoreBlockClass(reason);
   // Since the hold began, not since this attempt: a hold process that died and
-  // was put back by the next pass is the same hold.
-  const since = readRestoreBlocked(home)?.since ?? Math.floor(Date.now() / 1000);
-  writeRestoreBlocked(home, { reason, class: cls, since });
+  // was put back by the next pass is the same hold. And so is its cause: a
+  // failure that names no rule of the book's does not replace one that did.
+  const prev = readRestoreBlocked(home);
+  const why = !isNamedBlock(restoreBlockClass(reason)) && prev && isNamedBlock(prev.class) ? prev.reason : reason;
+  const cls = restoreBlockClass(why);
+  writeRestoreBlocked(home, { reason: why, class: cls, since: prev?.since ?? Math.floor(Date.now() / 1000) });
   const held: Holder = {
-    tenant, smartAccount, proc: null, exited: null, reason, cls,
-    nextRetryAt: Date.now() + HOLD_RETRY_FIRST_MS, backoffMs: HOLD_RETRY_FIRST_MS, retrying: false,
+    tenant, smartAccount, proc: null, exited: null, reason: why, cls,
+    nextRetryAt: 0, backoffMs: HOLD_RETRY_FIRST_MS, quickMs: HOLD_RETRY_QUICK_MS, retrying: false,
   };
+  // Paced by what this restore said, not by the cause the hold keeps.
+  scheduleHoldRetry(held, restoreBlockClass(reason));
   holders.set(tenant, held);
-  noteHold(tenant, reason);
+  noteHold(tenant, reason, cls);
   if (!holderBotReady(settings)) {
-    log(`${tenant}: trading held, with no bot to answer (Telegram off or no token) — the restore is tried again in ${HOLD_RETRY_FIRST_MS / 60_000}m`);
+    log(`${tenant}: trading held, with no bot to answer (Telegram off or no token) — the restore is tried again in ${Math.round((held.nextRetryAt - Date.now()) / 1000)}s`);
     return;
   }
   startHolderProcess(held);
@@ -2022,24 +2070,47 @@ function standDownHolder(tenant: string): void {
 }
 
 /**
+ * WHEN A HELD TENANT'S RESTORE IS TRIED NEXT, after a failure of class `cls`.
+ *
+ * A class the book's own rules produced backs off, 2 minutes doubling to 30: a
+ * book that broke stays broken until somebody fixes it, and trying every pass
+ * is what filled the log before. A failure that names no rule of the book's
+ * (UNCLASSIFIED_BLOCK: a dropped connection, a statement timeout) is tried
+ * again about a pass later, doubling only to the named ladder's first rung.
+ * Before holds, a blip at spawn cost one pass; it should not now cost two
+ * minutes of a healthy book held, and a real outage still backs off.
+ */
+function scheduleHoldRetry(held: Holder, cls: string): void {
+  if (isNamedBlock(cls)) {
+    held.nextRetryAt = Date.now() + held.backoffMs;
+    held.backoffMs = Math.min(HOLD_RETRY_MAX_MS, held.backoffMs * 2);
+    held.quickMs = HOLD_RETRY_QUICK_MS;
+  } else {
+    held.nextRetryAt = Date.now() + held.quickMs;
+    held.quickMs = Math.min(HOLD_RETRY_FIRST_MS, held.quickMs * 2);
+  }
+}
+
+/**
+ * May a held tenant leave the hold now? spawnChild asks all of this again; it
+ * is asked first so that a hold process is not stopped for a spawn that would
+ * refuse, which would leave the bot unanswered until the next pass.
+ */
+function holdMayLeave(tenant: `0x${string}`): boolean {
+  const lease = leases.get(tenant);
+  return !stopping && !haltRequested() && !!lease && lease.healthy() && !killRequested(childHome(tenant));
+}
+
+/**
  * TRY A HELD TENANT'S RESTORE AGAIN, and hand it back to trading if it takes.
  *
- * On reconcile's clock, once its backoff is up: 2 minutes, doubling to 30. The
- * restore runs against the home's merrymen.db while the hold process keeps
- * answering the bot; the hold process never opens that file.
- *
- * THE HANDOVER, IN ORDER. The hold process is stopped and its exit awaited
- * BEFORE the worker is spawned, so the two never poll the bot at once (they
- * would take its updates from each other, 409 against 409). The tenant stays in
- * `holders` through that wait, so no pass spawns it meanwhile, and leaves it
- * only on the line that calls spawnChild, which claims `spawning` before it
- * awaits anything. That spawn restores again and finds the book it just
- * wrote: "local book retained".
+ * On reconcile's clock, once its wait is up (scheduleHoldRetry). The restore
+ * runs against the home's merrymen.db while the hold process keeps answering
+ * the bot; the hold process never opens that file.
  */
 async function retryHold(held: Holder): Promise<void> {
   const tenant = held.tenant;
-  const lease = leases.get(tenant);
-  if (stopping || haltRequested() || !lease || !lease.healthy() || killRequested(childHome(tenant))) return;
+  if (!holdMayLeave(tenant)) return;
   held.retrying = true;
   let restore: PaperRestore;
   try {
@@ -2049,21 +2120,42 @@ async function retryHold(held: Holder): Promise<void> {
   }
   if (holders.get(tenant) !== held) return; // stood down while it ran
   if (!restore.ok) {
-    held.backoffMs = Math.min(HOLD_RETRY_MAX_MS, held.backoffMs * 2);
-    held.nextRetryAt = Date.now() + held.backoffMs;
     const cls = restoreBlockClass(restore.reason);
-    if (cls !== held.cls) {
+    scheduleHoldRetry(held, cls);
+    // A new NAMED cause is what the hold process says from now on. A failure
+    // that names none keeps the one the hold has: an owner told "trades newer
+    // than the last valuation" is not then told "restore error" because the
+    // database dropped a connection on one retry.
+    if (isNamedBlock(cls) && cls !== held.cls) {
       const home = childHome(tenant);
       held.cls = cls;
       held.reason = restore.reason;
       writeRestoreBlocked(home, { reason: restore.reason, class: cls, since: readRestoreBlocked(home)?.since ?? Math.floor(Date.now() / 1000) });
     }
-    noteHold(tenant, restore.reason);
+    noteHold(tenant, restore.reason, held.cls);
     return;
   }
   const since = readRestoreBlocked(childHome(tenant))?.since;
   const heldFor = since ? ` after ${Math.max(1, Math.round((Date.now() / 1000 - since) / 60))}m held` : "";
   log(`paper restore: ${tenant} — ${restore.line ?? "restored"}${heldFor}; handing the bot back to trading`);
+  await handHoldBack(held);
+}
+
+/**
+ * HAND A HELD TENANT BACK TO TRADING: its restore took (retryHold), or the
+ * gate that held it no longer would (practice mode switched off; reconcile).
+ *
+ * THE HANDOVER, IN ORDER. The hold process is stopped and its exit awaited
+ * BEFORE the worker is spawned, so the two never poll the bot at once (they
+ * would take its updates from each other, 409 against 409). The tenant stays in
+ * `holders` through that wait, so no pass spawns it meanwhile, and leaves it
+ * only on the line that calls spawnChild, which claims `spawning` before it
+ * awaits anything. That spawn restores again: after a retry it finds the book
+ * it just wrote, "local book retained"; with practice off, the gate lets the
+ * worker start as it always did.
+ */
+async function handHoldBack(held: Holder): Promise<void> {
+  const tenant = held.tenant;
   // Kept out of every other pass until it is handed over.
   held.retrying = true;
   const proc = held.proc;
@@ -2094,81 +2186,88 @@ async function retryHold(held: Holder): Promise<void> {
   await spawnChild(tenant);
 }
 
-/** The class each held tenant's [alert] last named, so a standing hold is said once, not every pass. */
-const holdAlerted = new Map<string, string>();
-/** The class each held tenant's owner is known to have been told about, in this process. */
-const holdNoticed = new Map<string, string>();
+/** The classes each held tenant's [alert] has named during this hold: each is said once, not every pass or every flip. */
+const holdAlerted = new Map<string, Set<string>>();
+/** The classes each held tenant's owner is known to have been told about during this hold, in this process. */
+const holdNoticed = new Map<string, Set<string>>();
 /** Tenants whose owner notice is being sent. One at a time each. */
 const holdNoticeInFlight = new Set<string>();
 
 /**
  * SAY A HOLD ONCE: one [alert] line per tenant per reason class, and one
- * message to the owner.
+ * message to the owner per NAMED class.
  *
  * The gate's FAILED line used to repeat every pass, about every 17 seconds per
  * blocked tenant, which buried it; an alert said once per class is one an
- * operator can grep for and act on. The owner's message is tried on every
- * failed restore until it lands, and its dedupe is durable
- * (tenant_telegram.hold_notified), so a redeploy does not repeat it.
+ * operator can grep for and act on. Once per class per hold, not "when the
+ * class changes": a hold whose retries alternate between a cause and a
+ * dropped connection would otherwise alert, and message its owner, on every
+ * flip.
+ *
+ * `reason` is what this restore said, for the alert; `tell` is the hold's own
+ * class, for the owner (see Holder.cls). An unclassified one is never sent:
+ * it is what a database blip looks like, and a message saying the book could
+ * not be restored would be false. The owner's message is tried on every failed
+ * restore until it lands, and its dedupe is durable (notifyHoldOnce), so a
+ * redeploy does not repeat it.
  */
-function noteHold(tenant: `0x${string}`, reason: string): void {
+function noteHold(tenant: `0x${string}`, reason: string, tell: string): void {
   const cls = restoreBlockClass(reason);
-  if (holdAlerted.get(tenant) !== cls) {
-    holdAlerted.set(tenant, cls);
+  const alerted = holdAlerted.get(tenant) ?? new Set<string>();
+  holdAlerted.set(tenant, alerted);
+  if (!alerted.has(cls)) {
+    alerted.add(cls);
     log(`[alert] paper restore blocked: ${tenant} — ${cls}`);
     // The figures are the operator's, and only ever here.
-    log(`paper restore: ${tenant} FAILED — ${reason} (trading held; retried from ${HOLD_RETRY_FIRST_MS / 60_000}m, backing off to ${HOLD_RETRY_MAX_MS / 60_000}m)`);
+    const pace = isNamedBlock(cls)
+      ? `retried from ${HOLD_RETRY_FIRST_MS / 60_000}m, backing off to ${HOLD_RETRY_MAX_MS / 60_000}m`
+      : `no rule of the book's named, so retried from ${HOLD_RETRY_QUICK_MS / 1000}s and the owner is not messaged`;
+    log(`paper restore: ${tenant} FAILED — ${reason} (trading held; ${pace})`);
   }
-  if (holdNoticed.get(tenant) === cls || holdNoticeInFlight.has(tenant)) return;
+  if (!isNamedBlock(tell) || holdNoticed.get(tenant)?.has(tell) || holdNoticeInFlight.has(tenant)) return;
   holdNoticeInFlight.add(tenant);
-  void sendHoldNotice(tenant, cls)
+  void sendHoldNotice(tenant, tell)
     .then((outcome) => {
-      if (outcome === "sent" || outcome === "told") holdNoticed.set(tenant, cls);
+      if (outcome !== "sent" && outcome !== "told") return;
+      const told = holdNoticed.get(tenant) ?? new Set<string>();
+      told.add(tell);
+      holdNoticed.set(tenant, told);
     })
     .catch((e) => log(`${tenant}: trading held, but the owner could not be told — ${e instanceof Error ? e.message : String(e)}`))
     .finally(() => holdNoticeInFlight.delete(tenant));
 }
 
 /**
- * What became of one attempt to tell an owner their trading is held: `sent`
- * now, `told` already (this class, durably), or neither this time: `no-owner`
- * (no linked chat, no bot, or Telegram or alerts switched off) and `failed`.
- * Only the first two stop the attempts.
- */
-export type HoldNoticeOutcome = "sent" | "told" | "no-owner" | "failed";
-
-/**
- * Tell the owner, through their own bot, to the chat that proved the /link
- * code: the path the kill confirmation takes (confirmKillDone). Unlike that
- * one, this obeys the alert switches, because nobody asked for it.
- *
- * AT LEAST ONCE, NOT AT MOST: the class is recorded after the send. A repeat
- * after a crash between the two is a nuisance; a notice lost to a failed send
- * is the silence this exists to end. Only the replica holding the tenant's
- * lease gets here, so two replicas do not both send.
+ * Tell the owner, through their own bot: notifyHoldOnce's rules (hold-notice.ts)
+ * over Postgres, hostedRecipient, the stored allowlist and telegramSend. Only
+ * the replica holding the tenant's lease gets here, so two replicas do not
+ * both send.
  */
 let sendHoldNotice = async (tenant: `0x${string}`, cls: string): Promise<HoldNoticeOutcome> => {
   const url = process.env.DATABASE_URL;
   if (!url) return "no-owner";
   try {
     const shared = await makePgDb(url);
-    const to = await hostedRecipient(shared)(tenant);
-    if (!to || !to.enabled) return "no-owner";
     await shared.exec(translateSchema(TELEGRAM_STATE_DDL));
     try {
       await shared.exec(TELEGRAM_HOLD_NOTIFIED_DDL);
     } catch {
       /* already there */
     }
-    if ((await holdNotifiedClass(shared, tenant)) === cls) return "told";
-    const sent = await telegramSend()(to.botToken, to.chatId, holdNoticeText(cls));
-    if (!sent.ok) {
-      log(`${tenant}: trading held, but the owner notice did not send — ${sent.reason ?? "unknown"}`);
-      return "failed";
-    }
-    await recordHoldNotified(shared, tenant, cls);
-    log(`${tenant}: owner told that trading is held (${cls})`);
-    return "sent";
+    return await notifyHoldOnce(
+      {
+        db: shared,
+        recipient: hostedRecipient(shared),
+        allowlist: async (t) => {
+          const stored = await getSettingsStore().get(t);
+          return Array.isArray(stored?.telegramAllowlist) ? stored.telegramAllowlist : [];
+        },
+        send: telegramSend(),
+        log,
+      },
+      tenant,
+      cls,
+    );
   } catch (e) {
     log(`${tenant}: trading held, but the owner notice failed — ${e instanceof Error ? e.message : String(e)}`);
     return "failed";
@@ -2432,13 +2531,35 @@ export async function reconcile(): Promise<void> {
   // would a worker, and a held tenant's bot token is as much in use as a
   // trading one's, so the de-duplication below must see it. First, so that a
   // tenant held since before another took up the same bot keeps answering it.
+  // (A held tenant with Telegram off claims nothing: see dedupeBotToken.)
+  const released: Holder[] = [];
   for (const [tenant, held] of [...holders]) {
+    // NOT WANTED ANY MORE, and stood down below, this pass: its settings are
+    // not refreshed, its token claims no bot from a tenant that trades, and no
+    // hold process is started only to be killed a few lines later in a home
+    // that is about to be wiped.
+    if (!wanted.has(tenant)) continue;
     const stored = await writeSettingsForChild(tenant as `0x${string}`, seenBotTokens, holderClaims);
     await refreshGrantForChild(tenant as `0x${string}`);
+    if (holders.get(tenant) !== held || held.retrying) continue;
+    /**
+     * THE GATE, ASKED AGAIN. spawnChild holds a tenant only while its stored
+     * settings say practice (`paperTradingEnabled === true`), and before holds
+     * it asked that every pass: an owner who switched practice off had a
+     * worker on the next one. A hold must not outlive its reason, or whether a
+     * now-live owner can trade would depend on how long this process has been
+     * up, and their bot would go on saying their practice book is broken.
+     * Handed back below, after the children's refresh. Unreadable settings
+     * (null) keep the hold: holding trades nothing, and the next pass asks again.
+     */
+    if (stored && stored.paperTradingEnabled !== true) {
+      released.push(held);
+      continue;
+    }
     // Held with no bot, and now there is one: the owner has just switched
     // Telegram on. Answer it from this pass, not from the next failed restore.
     const lease = leases.get(tenant);
-    if (holders.get(tenant) !== held || held.proc || held.retrying || !lease || !holderBotReady(stored)) continue;
+    if (held.proc || !lease || !holderBotReady(stored)) continue;
     const late = lateSpawnRefusal(tenant as `0x${string}`, lease);
     if (late) continue;
     startHolderProcess(held);
@@ -2453,6 +2574,15 @@ export async function reconcile(): Promise<void> {
     // AND ITS ENERGY HISTORY, if the seed before it armed could not put it
     // back: until then its store reads those days as unreadable.
     await retryEnergySeed(tenant as `0x${string}`);
+  }
+  // HELD TENANTS THE GATE NO LONGER HOLDS, handed back to trading. After the
+  // children's refresh and not inside the holders' loop: the worker each one
+  // becomes must not meet the children's loop this pass, where the bot token
+  // its own hold just claimed would be read as taken, and stripped from it.
+  for (const held of released) {
+    if (holders.get(held.tenant) !== held || held.retrying || !holdMayLeave(held.tenant)) continue;
+    log(`${held.tenant}: practice mode is off, so trading is no longer held — handing the bot back to trading`);
+    await handHoldBack(held);
   }
   // Stop (and forget) any running child whose grant is gone — the kill switch.
   for (const tenant of [...children.keys()]) {

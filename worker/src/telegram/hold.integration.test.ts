@@ -37,7 +37,7 @@ const STRANGER = 777;
 const REASON =
   "invalid paper checkpoint: NVDA basis 71971347499786536 raw disagrees with 0.07197134749978654 shares at multiplier 1.0007751591646306";
 const CLASS = restoreBlockClass(REASON);
-const HOLD = /^I'm not trading right now: your practice book couldn't be restored after a server update \(cost basis and holdings disagree\)\. Nothing was traded or lost, and the team has been alerted\. To start practice over, use Practice reset in the app \(web: Wallet → Start over\)\. \/link still works\.$/;
+const HOLD = /^I'm not trading right now: your practice book couldn't be restored after a server update \(cost basis and holdings disagree\)\. Nothing was traded or lost, you don't need to do anything, and the team has been alerted\. \/link still works\.$/;
 const REFUSED = new RegExp(`^🚫 not authorized — your chat id is ${STRANGER}\\.`);
 const LOCKED = /too many wrong codes from this chat — try again in about \d+ min/;
 

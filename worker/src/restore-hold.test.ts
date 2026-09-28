@@ -27,7 +27,7 @@ import {
   TELEGRAM_HOLD_NOTIFIED_DDL,
   TELEGRAM_STATE_DDL,
   clearHoldNotified,
-  holdNotifiedClass,
+  holdNotifiedClasses,
   recordHoldNotified,
 } from "./telegram-store";
 import { holdNoticeText, holdText, restoreBlockClass } from "./restore-block";
@@ -98,7 +98,7 @@ describe("the restore gate holds instead of returning", () => {
   });
 
   it("A HELD TENANT IS NEVER A CHILD: spawnHolder and the retry never touch `children`", () => {
-    for (const name of ["spawnHolder", "startHolderProcess", "watchHolder", "retryHold", "standDownHolder"]) {
+    for (const name of ["spawnHolder", "startHolderProcess", "watchHolder", "retryHold", "handHoldBack", "standDownHolder"]) {
       assert.doesNotMatch(fn(name).body!.getText(), /children\.set\(/, `${name} must not put a held tenant in children`);
     }
   });
@@ -125,6 +125,7 @@ describe("held tenants reach only the loops they belong in", () => {
       .sort();
     assert.deepEqual(readers, [
       "adoptHolderForTest",
+      "handHoldBack",
       "isHeldForTest",
       "mirrorLedgers",
       "reconcile",
@@ -180,17 +181,36 @@ describe("held tenants reach only the loops they belong in", () => {
   });
 
   it("THE HANDOVER STOPS THE HOLD PROCESS AND WAITS FOR IT BEFORE A WORKER STARTS", () => {
-    const retry = fn("retryHold");
-    const kill = all(retry, (n) => ts.isCallExpression(n) && n.expression.getText() === "proc.kill" && n.arguments[0]?.getText() === '"SIGTERM"')[0];
-    const wait = all(retry, (n) => ts.isAwaitExpression(n) && /Promise\.race/.test(n.getText()))[0];
-    const leave = all(retry, (n) => ts.isCallExpression(n) && n.expression.getText() === "holders.delete")[0];
-    const spawn = calls(retry, "spawnChild")[0];
+    const hand = fn("handHoldBack");
+    const kill = all(hand, (n) => ts.isCallExpression(n) && n.expression.getText() === "proc.kill" && n.arguments[0]?.getText() === '"SIGTERM"')[0];
+    const wait = all(hand, (n) => ts.isAwaitExpression(n) && /Promise\.race/.test(n.getText()))[0];
+    const leave = all(hand, (n) => ts.isCallExpression(n) && n.expression.getText() === "holders.delete")[0];
+    const spawn = calls(hand, "spawnChild")[0];
     assert.ok(kill && wait && leave && spawn, "stop, wait, leave, spawn");
     assert.ok(kill.getEnd() < wait.getStart() && wait.getEnd() < leave.getStart() && leave.getEnd() < spawn.getStart());
     // Nothing between leaving `holders` and spawnChild's own claim can interleave.
     const spawnAt = ts.isAwaitExpression(spawn.parent) ? spawn.parent.getStart() : spawn.getStart();
-    const between = retry.body!.getText().slice(leave.getEnd() - retry.body!.getStart(), spawnAt - retry.body!.getStart());
+    const between = hand.body!.getText().slice(leave.getEnd() - hand.body!.getStart(), spawnAt - hand.body!.getStart());
     assert.doesNotMatch(between, /\bawait\b/);
+    // And it is the only way out of a hold into trading: a restore that took,
+    // or a gate that no longer holds. Neither spawns a worker itself.
+    assert.equal(calls(fn("retryHold"), "spawnChild").length, 0);
+    assert.equal(calls(fn("retryHold"), "handHoldBack").length, 1);
+    const rec = fn("reconcile");
+    const release = loopsOver(rec, "released")[0];
+    assert.ok(release && calls(release, "handHoldBack").length === 1, "reconcile hands back what the gate no longer holds");
+    const childRefresh = loopsOver(rec, "children").find((l) => /writeSettingsForChild/.test(l.statement.getText()));
+    assert.ok(childRefresh && childRefresh.getEnd() < release.getStart(), "after the children's refresh, which would strip the worker's own token");
+  });
+
+  it("THE HOLDERS' REFRESH SKIPS A TENANT NO LONGER WANTED, AND ASKS THE GATE AGAIN", () => {
+    const refresh = loopsOver(fn("reconcile"), "holders").find((l) => /writeSettingsForChild/.test(l.statement.getText()));
+    assert.ok(refresh && ts.isBlock(refresh.statement));
+    const first = refresh.statement.statements[0]!;
+    assert.equal(first.getText(), "if (!wanted.has(tenant)) continue;", "before its settings are written or its token claims a bot");
+    assert.match(refresh.statement.getText(), /if \(stored && stored\.paperTradingEnabled !== true\) \{\s*released\.push\(held\);/);
+    // The same test spawnChild's gate makes, or the two would disagree about who is held.
+    assert.ok(all(fn("spawnChild"), (n) => ts.isIfStatement(n) && n.expression.getText() === "settings?.paperTradingEnabled === true").length === 1);
   });
 });
 
@@ -289,7 +309,7 @@ describe("what an owner is told", () => {
  * through wrapSqlite; the Postgres side runs the same statements.
  */
 describe("the durable notice record", () => {
-  it("records a class, reads it back, clears it when the book restores, and survives its ALTER running twice", async () => {
+  it("records each class once, reads them back, clears them when the book restores, and survives its ALTER running twice", async () => {
     const raw = new DatabaseSync(":memory:");
     const db = wrapSqlite(raw);
     try {
@@ -297,13 +317,22 @@ describe("the durable notice record", () => {
       await db.exec(TELEGRAM_HOLD_NOTIFIED_DDL);
       await assert.rejects(db.exec(TELEGRAM_HOLD_NOTIFIED_DDL), "the second ALTER throws, which the callers swallow");
       await db.prepare("INSERT INTO tenant_telegram (tenant, owner_id, updated_at) VALUES (?, ?, 0)").run("0xabc", 4242);
-      assert.equal(await holdNotifiedClass(db, "0xABC"), null);
+      assert.deepEqual(await holdNotifiedClasses(db, "0xABC"), []);
       await recordHoldNotified(db, "0xABC", "a holding has no cost basis");
-      assert.equal(await holdNotifiedClass(db, "0xabc"), "a holding has no cost basis", "told: the next pass and the next deploy say nothing");
-      assert.notEqual(await holdNotifiedClass(db, "0xabc"), "trades newer than the last valuation", "a new class is news");
+      assert.deepEqual(await holdNotifiedClasses(db, "0xabc"), ["a holding has no cost basis"], "told: the next pass and the next deploy say nothing");
+      await recordHoldNotified(db, "0xabc", "trades newer than the last valuation");
+      await recordHoldNotified(db, "0xabc", "a holding has no cost basis");
+      assert.deepEqual(
+        await holdNotifiedClasses(db, "0xabc"),
+        ["a holding has no cost basis", "trades newer than the last valuation"],
+        "a set: a hold that goes back to an earlier cause has already said it",
+      );
       await clearHoldNotified(db, "0xabc");
-      assert.equal(await holdNotifiedClass(db, "0xabc"), null, "restored: the next hold is news again");
-      assert.equal(await holdNotifiedClass(db, "0xnobody"), null);
+      assert.deepEqual(await holdNotifiedClasses(db, "0xabc"), [], "restored: the next hold is news again");
+      assert.deepEqual(await holdNotifiedClasses(db, "0xnobody"), []);
+      // A bare class, as a value that is not a list reads.
+      await db.prepare("UPDATE tenant_telegram SET hold_notified = ? WHERE tenant = ?").run("restore error", "0xabc");
+      assert.deepEqual(await holdNotifiedClasses(db, "0xabc"), ["restore error"]);
     } finally {
       raw.close();
     }

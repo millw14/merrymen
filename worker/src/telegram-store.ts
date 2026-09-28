@@ -132,33 +132,50 @@ export async function publishTenantTelegram(
 }
 
 /**
- * WHICH HOLD THE OWNER HAS ALREADY BEEN TOLD ABOUT: the reason class of the
- * last "your agent has stopped trading" notice, or null.
+ * WHICH HOLDS THE OWNER HAS ALREADY BEEN TOLD ABOUT: every reason class a
+ * "your agent has stopped trading" notice has named since the book last
+ * restored, as a JSON array, or null.
  *
  * Durable because the memory of it is not: a hold outlives the process that
  * noticed it, and every redeploy (they come in bursts while something is being
  * fixed) would otherwise tell the owner the same thing again. Keyed on the
- * class, so a hold whose cause changes is a new thing to say, and cleared when
- * the book restores (clearHoldNotified), so the next incident is told too.
+ * class, so a hold whose cause changes is a new thing to say; a SET of them,
+ * not the last one, so a hold whose retries alternate between two causes says
+ * each once rather than on every flip; and cleared when the book restores
+ * (clearHoldNotified), so the next incident is told too.
  *
  * On this table because it is about the owner's chat and nothing else, and
- * like the rest of it, written only by the orchestrator. Added with an ALTER,
- * as mirror_state's columns are: CREATE TABLE IF NOT EXISTS adds nothing to a
- * table every deployment already has. The ALTER throws once the column is
- * there, which the caller swallows.
+ * like the rest of it, written only by the orchestrator, by the replica
+ * holding the tenant's lease (so the read-then-write below has one writer).
+ * Added with an ALTER, as mirror_state's columns are: CREATE TABLE IF NOT
+ * EXISTS adds nothing to a table every deployment already has. The ALTER
+ * throws once the column is there, which the caller swallows.
  */
 export const TELEGRAM_HOLD_NOTIFIED_DDL = "ALTER TABLE tenant_telegram ADD COLUMN hold_notified TEXT";
 
-export async function holdNotifiedClass(db: Db, tenant: string): Promise<string | null> {
+/** The classes this tenant's owner has been told about, in the order they were told. */
+export async function holdNotifiedClasses(db: Db, tenant: string): Promise<string[]> {
   const row = (await db.prepare("SELECT hold_notified FROM tenant_telegram WHERE tenant = ?").get(tenant.toLowerCase())) as
     | { hold_notified: string | null }
     | undefined;
-  return row?.hold_notified ?? null;
+  const raw = row?.hold_notified;
+  if (typeof raw !== "string" || raw === "") return [];
+  try {
+    const list = JSON.parse(raw) as unknown;
+    if (Array.isArray(list)) return list.filter((c): c is string => typeof c === "string");
+  } catch {
+    /* not a list: a bare class */
+  }
+  return [raw];
 }
 
 /** Record that the owner was told about a hold of class `cls`. Needs the tenant's row, which a recipient implies. */
 export async function recordHoldNotified(db: Db, tenant: string, cls: string): Promise<void> {
-  await db.prepare("UPDATE tenant_telegram SET hold_notified = ? WHERE tenant = ?").run(cls, tenant.toLowerCase());
+  const told = await holdNotifiedClasses(db, tenant);
+  if (told.includes(cls)) return;
+  await db
+    .prepare("UPDATE tenant_telegram SET hold_notified = ? WHERE tenant = ?")
+    .run(JSON.stringify([...told, cls]), tenant.toLowerCase());
 }
 
 /** The book restored: the next hold, whatever its class, is news again. */

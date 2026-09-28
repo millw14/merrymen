@@ -35,9 +35,28 @@ export interface RestoreBlock {
 }
 
 /**
+ * The class of a restore that failed for no rule of the book's: a database
+ * that dropped the connection or timed a statement out looks like this, and so
+ * would a rejection this file has not learned to name yet.
+ *
+ * It is not announced as a blocker. The owner is not messaged about it (a blip
+ * would tell them their book is broken when it is not), it never replaces a
+ * named class a hold already has, and the orchestrator tries the restore again
+ * on the next pass or so rather than backing off (orchestrator.ts retryHold).
+ * The hold process still says it, because something has to be said to a
+ * message while trading is held.
+ */
+export const UNCLASSIFIED_BLOCK = "restore error";
+
+/** Is this a class the book's own rules produced, as opposed to UNCLASSIFIED_BLOCK? */
+export function isNamedBlock(cls: string): boolean {
+  return cls !== UNCLASSIFIED_BLOCK;
+}
+
+/**
  * The short, figure-free name for why a restore failed. Ordered most specific
- * first; anything unrecognised is a plain "restore error", which is also what
- * a database that could not be reached looks like.
+ * first; anything unrecognised is UNCLASSIFIED_BLOCK, which is also what a
+ * database that could not be reached looks like.
  */
 export function restoreBlockClass(reason: string): string {
   const r = reason.toLowerCase();
@@ -49,7 +68,7 @@ export function restoreBlockClass(reason: string): string {
     return "cost basis and holdings disagree";
   }
   if (r.includes("invalid paper checkpoint")) return "the saved book is unreadable";
-  return "restore error";
+  return UNCLASSIFIED_BLOCK;
 }
 
 export function writeRestoreBlocked(home: string, block: RestoreBlock): void {
@@ -81,24 +100,34 @@ export function clearRestoreBlocked(home: string): void {
 /**
  * What the bot says to its owner while trading is held. The plan's wording,
  * with the class and nothing else from the reason.
+ *
+ * LESS ONE SENTENCE OF THE PLAN'S: it sent the owner to Practice reset, and
+ * nothing may yet. A paper-reset is an agent_commands row, and while the
+ * tenant is held nothing delivers it (the ferries walk trading children
+ * only), nothing expires it (only orders are closed when stale), and the web's
+ * "Start over" deletes the grant as well. So the row waits for the first
+ * worker after the hold, which is usually there because a retry has just
+ * restored the book: the reset the owner pressed because we said the book was
+ * lost would wipe the book we had just got back. The instruction returns with
+ * plan §3.4, which honours a reset while held, under a 7-day bound and with
+ * fresh consent. Until then the owner is told the truth: nothing to do.
  */
 export function holdText(cls: string): string {
   return (
     `I'm not trading right now: your practice book couldn't be restored after a server update (${cls}). ` +
-    "Nothing was traded or lost, and the team has been alerted. " +
-    "To start practice over, use Practice reset in the app (web: Wallet → Start over). /link still works."
+    "Nothing was traded or lost, you don't need to do anything, and the team has been alerted. /link still works."
   );
 }
 
 /**
  * The one message the orchestrator sends the owner, unasked, when a hold
- * begins (or its class changes). Plain text: the sender escapes it.
+ * begins (or its class changes to one they have not heard). Plain text: the
+ * sender escapes it. Without Practice reset, for holdText's reason.
  */
 export function holdNoticeText(cls: string): string {
   return (
     `⏸️ Your agent has stopped trading: your practice book couldn't be restored after a server update (${cls}). ` +
-    "Nothing was traded or lost, and the team has been alerted. " +
-    "To start practice over, use Practice reset in the app (web: Wallet → Start over). " +
+    "Nothing was traded or lost, you don't need to do anything, and the team has been alerted. " +
     "I'll keep answering here in the meantime."
   );
 }
