@@ -326,29 +326,46 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     const settle = r.indexOf("await settleEnergyLanding(energySettleDeps(agentId, grant, chain), r.txHash as `0x${string}`);");
     const add = r.indexOf("await addTrade({");
     assert.ok(settle > 0 && add > settle);
-    assert.match(r, /const energyRow = isEnergyRow\(row\);\s*if \(energyRow && r\.success\) \{/);
+    assert.match(r, /const energyRow = isEnergyRow\(row\);\s*let capitalBooked: boolean \| null = null;\s*if \(energyRow && r\.success\) \{/);
     assert.match(r.slice(settle, add), /if \(!settled\.proceed\) \{[\s\S]*continue;/);
     assert.match(r.slice(settle, add), /if \(settled\.settled === "booked"\) capitalPeakDirty = true;/);
     assert.match(r.slice(add, add + 600), /\.\.\.\(energyRow \? \{ sell_token: row\.sellToken, buy_token: row\.buyToken \} : \{\}\),/);
   });
 
-  it("(5b) NOTHING IS INFERRED WHILE AN OP IS IN FLIGHT, and the resolver's settlement explains the interval (flow-inference.integration.test.ts runs this shape)", () => {
-    // A stranded purchase was booked twice: inferred as a withdrawal by the
-    // next tick, then booked as energy by the resolver.
+  it("(5b) A SETTLEMENT EXPLAINS ONLY ITS OWN CASH: the look holds first, folds the queued settlements, and a held tick ratchets nothing (flow-inference.integration.test.ts runs this shape)", () => {
+    // A stranded purchase was booked twice (inferred, then by the resolver);
+    // the fix for that bumped ledgerWrites on every settlement, which closed
+    // the whole held interval — deposits, transfers home, reverts — as
+    // "explained". Now the resolver queues the op's own movement.
     const f = arrow("reconcileFlows");
-    assert.match(f, /opsHoldInference\(await listSubmittedOps\(agentId\), \{\s*epoch: await getAgentEpoch\(agentId\),/);
-    assert.match(f, /const verdict = steadyStateInference\(\{ lastCashUsdg, cashUsdg, ledgerWrites, ledgerWritesAtSnapshot, opsInFlight \}\);/);
-    const hold = f.indexOf('if (verdict.action === "hold") {');
-    const baseline = f.lastIndexOf("lastCashUsdg = cashUsdg;");
-    assert.ok(hold > 0 && baseline > hold);
-    assert.match(f.slice(hold, baseline), /return;\s*\}\s*if \(verdict\.action === "infer"\) await record\(verdict\.deltaUsdg, "no trade explains this"\);/);
-    assert.doesNotMatch(f, /ledgerWrites === ledgerWritesAtSnapshot\) \{\s*await record\(/, "the old unconditional inference is gone");
-    // The downtime inference across a restart obeys the same rule.
-    assert.match(f, /\} else if \(ledgerWrites === 0\) \{[\s\S]*?const prior = await lastKnownCashUsdg\(agentId\);/);
-    // The resolver moves the count for every op it settles, before the row is written.
+    const listed = f.indexOf("const listedAt = Math.floor(Date.now() / 1000);");
+    assert.match(f.slice(listed), /^const listedAt = Math\.floor\(Date\.now\(\) \/ 1000\);\s*const opsInFlight = opsHoldInference\(await listSubmittedOps\(agentId\), \{\s*epoch: await getAgentEpoch\(agentId\),\s*nowSec: listedAt,/);
+    // The queue is taken only AFTER the ledger read (the resolver queues before its row write).
+    assert.ok(f.indexOf("takeSettlements()") > f.indexOf("await listSubmittedOps(agentId)"));
+    // The steady look: hold before the write rule is pure (lookAtCash); the fold is kept; a hold returns "held" before any record().
+    const steady = f.slice(f.lastIndexOf("const l = lookAtCash({"));
+    assert.match(steady, /baselineUsdg: lastCashUsdg,\s*since: baselineSince,\s*unattributed: baselineUnattributed,\s*settled: takeSettlements\(\),\s*cashUsdg,\s*opsInFlight,\s*writesInInterval: ledgerWrites !== ledgerWritesAtSnapshot,/);
+    const fold = steady.indexOf("lastCashUsdg = l.baselineUsdg;");
+    const hold = steady.indexOf('if (l.verdict.action === "hold") {');
+    const infer = steady.indexOf('if (l.verdict.action === "infer") await record(l.verdict.deltaUsdg, "no trade explains this");');
+    assert.ok(fold > 0 && hold > fold && infer > hold);
+    assert.match(steady.slice(hold, infer), /return "held";/);
+    assert.match(f, /lastCashUsdg = cashUsdg;\s*baselineSince = listedAt;\s*baselineUnattributed = false;\s*ledgerWritesAtSnapshot = ledgerWrites;/);
+    // The resolver never moves the write count; it queues, once per op, BEFORE the row is written.
     const r = arrow("resolveStrandedOps");
-    const bump = r.indexOf("ledgerWrites += 1;");
-    assert.ok(bump > r.indexOf("await settleEnergyLanding(") && bump < r.indexOf("await addTrade({"));
+    assert.doesNotMatch(r, /ledgerWrites\s*\+?=/);
+    const queue = r.indexOf("settlementQueue.push({ userOpHash: r.userOpHash, createdAt: row.createdAt, usdgDelta6: explains.usdgDelta6 });");
+    assert.ok(queue > r.indexOf("await settleEnergyLanding(") && queue < r.indexOf("await addTrade({"));
+    assert.match(r, /const explains = settlementDelta\(\{ success: r\.success, receiptUsdgDelta6: r\.usdgDelta6, capitalBooked \}\);\s*if \(explains\.queue && !settlementsQueued\.has\(r\.userOpHash\)\) \{\s*settlementsQueued\.add\(r\.userOpHash\);/);
+    // A capital op's movement is read before it is booked.
+    assert.match(r, /if \(energyRow && r\.success\) \{[\s\S]*?if \(r\.usdgDelta6 === null\) \{[\s\S]*?continue;[\s\S]*?await settleEnergyLanding\(/);
+    // The tick: a held look (or an aborted one) ratchets nothing.
+    const t = body("tick");
+    assert.match(t, /const flows = await reconcileFlowsOrRetry\(/);
+    assert.match(t, /if \(flows === "held"\) ratchet = tickRatchets\(plan, \{ incomplete: bookIncomplete, curveMarked: curveMarked\.length, held: true \}\);/);
+    assert.ok(t.indexOf('if (flows === "held") ratchet') < t.indexOf("const riskPeak = await ratchet.riskPeak("));
+    const retry = arrow("reconcileFlowsOrRetry");
+    assert.match(retry, /catch \(e\) \{[\s\S]*return "held";/);
   });
 
   it("(6) the orphan sweep NEVER books", () => {
