@@ -335,6 +335,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   const creds = llmPerDay > 0 ? o.creds : null;
 
   let lastPlanAt = Number.NEGATIVE_INFINITY;
+  /** The tenant the last plan pass's draft cap cut it short at; "" when it reached everyone. */
+  let planResumeAt = "";
   let running = false;
   let lastFail: { text: string; at: number } | null = null;
   /** Said once per UTC day, and once per pause: a ceiling reached is news, not a line every fifteen seconds. */
@@ -482,9 +484,28 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     const roster = accounts.map((a) => byTenant.get(a.tenant)!);
     const facts = await factsOf(shared, roster, profiles, Math.floor(nowMs / 1000), { dialect });
     const recentFleet = await recentBodies(shared, { tenant: null, sinceMs: nowMs - FLEET_MEMORY_MS, limit: FLEET_MEMORY_MAX });
+    // THE MODEL'S ALLOWANCE, READ ONCE A PASS. Once it is spent, only intros
+    // are planned (they fall back to the template pool): a buy or casual
+    // intent the model cannot write writes nothing, so it would come back
+    // every minute, and on a big enough fleet fill every draft slot before
+    // the accounts further on — a newly consented owner's hello among them —
+    // were reached. Spent partway through a pass, the rest of it plans
+    // intros only.
+    let model = creds !== null && ((await readMeta(shared, `llm:${utcDay(nowMs)}`))?.n ?? 0) < llmPerDay;
+    if (creds !== null && !model) bump("no-model-budget");
+    // A ROTATING START. Accounts in tenant order, starting where the last
+    // pass's draft cap cut it short, so no owner is always last in line.
+    const ordered = [...accounts].sort((a, b) => (a.tenant < b.tenant ? -1 : a.tenant > b.tenant ? 1 : 0));
+    const from = ordered.findIndex((a) => a.tenant >= planResumeAt);
+    const turn = from > 0 ? [...ordered.slice(from), ...ordered.slice(0, from)] : ordered;
+    planResumeAt = "";
+    // Only REAL work counts against the cap: a model call made, or a row written.
     let drafts = 0;
-    for (const account of accounts) {
-      if (drafts >= MAX_DRAFTS_PER_PASS) break;
+    for (const account of turn) {
+      if (drafts >= MAX_DRAFTS_PER_PASS) {
+        planResumeAt = account.tenant;
+        break;
+      }
       try {
         const f = facts.get(account.tenant);
         if (!f) continue;
@@ -506,15 +527,23 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           posts,
           calls: f.calls,
           perDay,
-          model: creds !== null,
+          model,
         });
         if (intents.length === 0) continue;
         const recentOwn = await recentBodies(shared, { tenant: account.tenant, sinceMs: nowMs - OWN_MEMORY_MS, limit: 200 });
         for (const intent of intents) {
-          if (drafts >= MAX_DRAFTS_PER_PASS) break;
-          drafts++;
+          if (drafts >= MAX_DRAFTS_PER_PASS) {
+            // Cut short inside this account: the next pass starts here.
+            planResumeAt = account.tenant;
+            break;
+          }
           const r = await writeIntent(shared, account, f, intent, nowMs, recentOwn, recentFleet);
           bump(r.outcome);
+          if (r.outcome === "no-model-budget") {
+            model = false;
+            continue;
+          }
+          if (r.outcome !== "call-gone") drafts++;
           if (r.body) {
             recentOwn.unshift(r.body);
             recentFleet.unshift(r.body);

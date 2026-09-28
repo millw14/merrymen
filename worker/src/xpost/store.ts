@@ -290,7 +290,7 @@ export async function getAccount(db: Db, tenant: string): Promise<XAccount | nul
   return row ? accountOf(row) : null;
 }
 
-/** The accounts among `tenants` that may post right now (XAccount.posting). */
+/** The accounts among `tenants` that may post right now (XAccount.posting), in tenant order. */
 export async function postingAccounts(db: Db, tenants: readonly string[]): Promise<XAccount[]> {
   const keys = [...new Set(tenants.map(tenantKey).filter((t) => t !== ""))];
   if (keys.length === 0) return [];
@@ -298,7 +298,8 @@ export async function postingAccounts(db: Db, tenants: readonly string[]): Promi
     .prepare(
       `SELECT ${ACCOUNT_COLUMNS} FROM xpost_accounts
         WHERE posting_enabled = 1 AND status = 'ok' AND consent_x_user_id = x_user_id
-          AND tenant IN (${keys.map(() => "?").join(", ")})`,
+          AND tenant IN (${keys.map(() => "?").join(", ")})
+        ORDER BY tenant`,
     )
     .all(...keys)) as AccountRow[];
   return rows.map(accountOf).filter((a) => a.posting);

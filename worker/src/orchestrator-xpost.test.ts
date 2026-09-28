@@ -601,6 +601,62 @@ describe("fleet guards", () => {
     assert.equal(await store.keyStatus(w.db, "buy:d-pepe"), null, "the coin the X account posted about yesterday is folded");
   });
 
+  /** Ten owners ahead of TENANT in tenant order, each with a fresh buy to post about, and one who just consented, last. */
+  async function crowd(w: World) {
+    const others: Record<string, CallFact[]> = {};
+    const roster = [...ROSTER];
+    for (let i = 1; i <= 10; i++) {
+      const tenant = `0x${i.toString(16).padStart(40, "0")}`;
+      const xUserId = String(3000 + i);
+      await store.upsertAccount(w.db, w.dek, {
+        tenant,
+        xUserId,
+        username: `owner_${i}`,
+        tokens: { accessToken: `access-${i}`, refreshToken: `refresh-${i}`, accessExpiresAtMs: T0 + 30 * 24 * HOUR, scope: "tweet.write" },
+        nowMs: T0 - 3 * HOUR,
+      });
+      await store.setPosting(w.db, tenant, { enabled: true, xUserId }, T0 - 2 * HOUR);
+      await introDealtWith(w, tenant, xUserId);
+      others[tenant] = [call({ decisionId: `d-${i}`, symbol: "BONK", name: "Bonk", atSec: (T0 - MIN) / 1000 })];
+      roster.push({ tenant, agentId: AGENT });
+    }
+    const newcomer = `0x${"f".repeat(40)}`;
+    await store.upsertAccount(w.db, w.dek, {
+      tenant: newcomer,
+      xUserId: "4000",
+      username: "newcomer",
+      tokens: { accessToken: "access-new", refreshToken: "refresh-new", accessExpiresAtMs: T0 + 30 * 24 * HOUR, scope: "tweet.write" },
+      nowMs: T0 - 5 * MIN,
+    });
+    await store.setPosting(w.db, newcomer, { enabled: true, xUserId: "4000" }, T0 - MIN);
+    others[newcomer] = [];
+    roster.push({ tenant: newcomer, agentId: AGENT });
+    return { others, roster, newcomerIntro: `intro:${newcomer}:4000` };
+  }
+
+  it("with the model's allowance spent, recurring buys use no draft slots: a newcomer's hello is still drafted", async (t) => {
+    const w = await world(t, T0 - 2 * HOUR);
+    await introDealtWith(w);
+    const { others, roster, newcomerIntro } = await crowd(w);
+    assert.equal(await store.takeAllowance(w.db, "llm:2026-09-28", 1, T0 - HOUR), true);
+    const p = poster(w, { llmPerDay: 1, others });
+    const log = (await p.step(w.db, roster, new Map(), T0)).log;
+    assert.equal(await store.keyStatus(w.db, newcomerIntro), "scheduled", "the template hello, first pass");
+    assert.equal(w.prompts.length, 0);
+    assert.match(log ?? "", /drafted-intro 1/);
+    assert.match(log ?? "", /no-model-budget 1\b/, "said once, not once per refused buy");
+  });
+
+  it("an allowance that runs out partway through a pass plans only hellos after that", async (t) => {
+    const w = await world(t, T0 - 2 * HOUR);
+    await introDealtWith(w);
+    const { others, roster, newcomerIntro } = await crowd(w);
+    const p = poster(w, { llmPerDay: 2, others });
+    await p.step(w.db, roster, new Map(), T0);
+    assert.equal(w.prompts.length, 2, "two buys drafted on the day's two calls");
+    assert.equal(await store.keyStatus(w.db, newcomerIntro), "scheduled");
+  });
+
   it("a credits pause holds every due post, and is said once", async (t) => {
     const w = await world(t, T0 - 2 * HOUR);
     await introDealtWith(w);
