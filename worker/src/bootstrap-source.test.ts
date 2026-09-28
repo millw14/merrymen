@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Db } from "./db";
+import { DatabaseSync } from "node:sqlite";
+import { wrapSqlite } from "./db";
+import { applyLedgerSchema } from "./store";
 import { deriveBootstrapAccounting, usdgRealToMicro } from "./bootstrap-source";
 import {
   accountingLicence,
@@ -373,5 +376,56 @@ describe("B5 — the REAL to micro conversion", () => {
     // cannot make a downstream total larger than the truth.
     assert.equal(usdgRealToMicro(Number.NaN), 0n);
     assert.equal(usdgRealToMicro(Number.POSITIVE_INFINITY), 0n);
+  });
+});
+
+/**
+ * A MARK TAKEN WHILE THE FLOWS WERE HELD IS NO CASH BASELINE. A held tick writes
+ * its valuation flagged `flows_held` (store.ts): the curve keeps it, but its
+ * cash may carry a stranded op's movement, which that op's settlement would
+ * then shift a second time — so the anchor's downtime baseline skips it. It is
+ * still a durable trace of a funded account, though. Real schema, real SQL.
+ */
+describe("B7 — the anchor's cash is never a held mark", () => {
+  async function ledger(marks: { cash: number; at: number; held: number | null }[], hwm = 100): Promise<Db> {
+    const db = wrapSqlite(new DatabaseSync(":memory:"));
+    await applyLedgerSchema(db);
+    await db.prepare(
+      `INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, hwm_usdg, epoch)
+       VALUES (?, ?, ?, 4663, '{}', 1, 2, ?, 2)`,
+    ).run(SMART.toLowerCase(), OWNER, OWNER, hwm);
+    for (const m of marks) {
+      await db.prepare(
+        `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, at)
+         VALUES (?, '0', ?, 0, 0, ?, 2, 'live', ?, ?)`,
+      ).run(SMART.toLowerCase(), m.cash, m.cash, m.held, m.at);
+    }
+    return db;
+  }
+
+  it("takes the newest UNHELD mark's cash and time, however many held marks are newer", async () => {
+    const a = await deriveBootstrapAccounting(
+      await ledger([
+        { cash: 100, at: NOW - 3_600, held: null },
+        { cash: 95, at: NOW - 1_800, held: 0 },
+        { cash: 85, at: NOW - 600, held: 1 },
+        { cash: 85, at: NOW - 60, held: 1 },
+      ]),
+      SMART,
+      NOW,
+    );
+    assert.equal(a.kind, "established");
+    if (a.kind !== "established") return;
+    assert.equal(a.lastObservedCashUsdg, "95000000", "the held marks' 85 is never the baseline");
+    assert.equal(a.observedAt, NOW - 1_800);
+  });
+
+  it("ONLY held marks: no cash reading on record — and still NOT a new account, with nothing else on record", async () => {
+    // No peak, no flow, no fee: the held mark is the only trace, and it must
+    // refuse the one claim that licenses booking the balance as a contribution.
+    const a = await deriveBootstrapAccounting(await ledger([{ cash: 85, at: NOW - 60, held: 1 }], 0), SMART, NOW);
+    assert.equal(a.kind, "established");
+    if (a.kind !== "established") return;
+    assert.equal(a.lastObservedCashUsdg, null);
   });
 });

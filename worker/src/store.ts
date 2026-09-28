@@ -453,6 +453,17 @@ const SQLITE_ALTERS: string[] = [
     // behaviour they had for a NULL series and split on it once it is known,
     // which is what makes this migration cost nothing on the way in.
     "ALTER TABLE equity ADD COLUMN mode TEXT",
+    // A MARK TAKEN WHILE FLOW INFERENCE WAS HELD (command-wake.ts tickRatchets
+    // `held`): an op the resolver may still settle was in flight, so this row's
+    // cash may carry that op's movement, or a deposit not yet booked. It is a
+    // true valuation — the curve and freshness read it like any other — but it
+    // is NOT a cash baseline, and the two readers that take one from the newest
+    // row (lastKnownCashReading, bootstrap-source.ts) skip it. Those rows used
+    // not to be written at all, which left a dropped op's 26-hour hold as a gap
+    // in the curve and a day-old anchor. 1 held, 0 not; NULL predates the
+    // question, and every reader treats NULL as not held — which is what every
+    // such row was, because a held tick wrote nothing.
+    "ALTER TABLE equity ADD COLUMN flows_held INTEGER",
     "ALTER TABLE flows ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE fee_accruals ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
     // The epoch this agent is currently writing into.
@@ -2392,7 +2403,8 @@ export async function getGasPaidWei(agentId: string): Promise<bigint> {
 }
 
 /**
- * Cash as of the most recent equity row for this agent's current epoch.
+ * Cash as of the most recent equity row for this agent's current epoch that was
+ * not taken while flow inference was held (see lastKnownCashReading).
  *
  * The worker's in-memory `lastCashUsdg` resets to null on every restart, so
  * without this a top-up made while the worker was stopped is invisible to flow
@@ -2412,16 +2424,19 @@ export async function lastKnownCashUsdg(agentId: string): Promise<number | null>
  * its `since` (flow-inference.ts): an op submitted at or after `at` is not in
  * `cashUsdg`, so its settlement shifts that baseline; one submitted before is.
  *
- * A tick whose flow look HELD writes no equity row (command-wake.ts
- * tickRatchets `held`), so this is always a reading taken with no op in flight
- * — never one that already carries a stranded op's movement.
+ * NEVER A HELD READING. A tick whose flow look held writes its row flagged
+ * `flows_held` (command-wake.ts tickRatchets `held`), and it is skipped here:
+ * its cash may already carry a stranded op's movement, which the op's
+ * settlement would then shift a second time. So this is always a reading taken
+ * with no op in flight.
  */
 export async function lastKnownCashReading(agentId: string): Promise<{ cashUsdg: number; at: number } | null> {
   try {
     const epoch = await epochOf(agentId);
     const row = await getDb()
       .prepare(
-        "SELECT cash_usdg, at FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 1",
+        `SELECT cash_usdg, at FROM equity WHERE agent_id = ? AND epoch = ? AND COALESCE(flows_held, 0) = 0
+          ORDER BY at DESC, id DESC LIMIT 1`,
       )
       .get(agentId, epoch) as { cash_usdg: number; at: number } | undefined;
     return row ? { cashUsdg: Number(row.cash_usdg), at: Number(row.at) } : null;
@@ -3176,6 +3191,13 @@ export async function addEquity(
      * lines earlier.
      */
     mode: "paper" | "live";
+    /**
+     * TAKEN WHILE FLOW INFERENCE WAS HELD (command-wake.ts tickRatchets
+     * `held`). A true valuation, but not a cash baseline: see the `flows_held`
+     * column. Written 1 or 0, and journalled only when true, so every other
+     * mark's evidence reads exactly as it did.
+     */
+    flowsHeld?: boolean;
   },
 ): Promise<void> {
   try {
@@ -3189,6 +3211,8 @@ export async function addEquity(
         cashUsdg: b.cashUsdg,
         equityUsdg: b.equityUsdg,
         ethWei: b.ethWei.toString(),
+        // Only when held: undefined is dropped by canonicalJson's stringify.
+        flowsHeld: b.flowsHeld === true ? true : undefined,
         marks: (b.marks ?? []).map((m) => ({
           priceUsd: m.priceUsd,
           source: m.source,
@@ -3209,9 +3233,9 @@ export async function addEquity(
       async (db: Db) => {
         await db
           .prepare(
-            "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
           )
-          .run(agentId, b.ethWei.toString(), b.cashUsdg, b.vaultUsdg, b.positionsUsdg, b.equityUsdg, epoch, b.mode);
+          .run(agentId, b.ethWei.toString(), b.cashUsdg, b.vaultUsdg, b.positionsUsdg, b.equityUsdg, epoch, b.mode, b.flowsHeld === true ? 1 : 0);
       },
     );
   } catch (e) {

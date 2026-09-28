@@ -7,6 +7,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   attributeSettlements,
+  expectedCashUsdg,
+  heldBreakerObservationUsdg,
   lookAtCash,
   opsHoldInference,
   settlementDelta,
@@ -105,5 +107,31 @@ describe("wroteSince — the first look's durable write rule", () => {
     assert.equal(wroteSince(["0xa"], mine), false, "settled here: explained by its own movement");
     assert.equal(wroteSince(["0xa", "0xb"], mine), true, "a fill, or a settlement, by the earlier process");
     assert.equal(wroteSince([null], mine), true, "a row with no op hash still counts");
+  });
+});
+
+describe("heldBreakerObservationUsdg — what a held look may still show the breaker", () => {
+  const obs = (equity: bigint, cash: bigint, expected: bigint | null) =>
+    heldBreakerObservationUsdg({ equityUsdg: equity * U, cashUsdg: cash * U, expectedCashUsdg: expected === null ? null : expected * U });
+
+  it("equity as it is when cash is at or below the expected baseline: a gain in positions is observed", () => {
+    assert.equal(obs(150n, 50n, 100n), 150n * U, "bought stock, and it ran");
+    assert.equal(obs(100n, 100n, 100n), 100n * U);
+  });
+
+  it("CASH ABOVE THE BASELINE IS TAKEN BACK OUT — so an unbooked deposit never reaches a peak", () => {
+    assert.equal(obs(600n, 600n, 100n), 100n * U, "a 500 deposit in the hold");
+    assert.equal(obs(140n, 140n, 100n), 100n * U, "a sell's proceeds too: the observation errs low, never high");
+  });
+
+  it("NO BASELINE: every dollar of cash is treated as possibly unbooked, and it never goes below zero", () => {
+    assert.equal(obs(150n, 50n, null), 100n * U);
+    assert.equal(obs(10n, 20n, 0n), 0n);
+  });
+
+  it("the expected cash folds only what the look itself would: settlements at or after `since`, unread ones not guessed", () => {
+    const queued = [s(900, -5n * U), s(1_000, -10n * U), s(1_100, null)];
+    assert.equal(expectedCashUsdg({ cashUsdg: 100n * U, since: 1_000 }, queued), 90n * U);
+    assert.equal(expectedCashUsdg(null, queued), null);
   });
 });

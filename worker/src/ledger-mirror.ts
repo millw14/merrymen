@@ -114,9 +114,15 @@ const LOG_TABLES = [
   // anybody can see it — and the daily change, the chart, the growth index and
   // the published drawdown would all go on measuring the step between two books
   // as performance.
+  //
+  // AND `flows_held`, for the same reason one step further on: the hosted
+  // anchor (bootstrap-source.ts) takes the downtime cash baseline from the
+  // newest SHARED row and must skip a mark taken while flow inference was held.
+  // Left behind in the child, every mirrored held mark would land here as an
+  // ordinary one and become the anchor.
   {
     table: "equity", probe: true, stamp: "at",
-    cols: ["agent_id", "eth_wei", "cash_usdg", "vault_usdg", "positions_usdg", "equity_usdg", "epoch", "mode", "at"],
+    cols: ["agent_id", "eth_wei", "cash_usdg", "vault_usdg", "positions_usdg", "equity_usdg", "epoch", "mode", "flows_held", "at"],
   },
   // THE FLOW TERM. Without it equity is a bare balance reading and a deposit is
   // arithmetically indistinguishable from a gain — the bug that once reported

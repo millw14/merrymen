@@ -339,7 +339,7 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     assert.match(r.slice(add, add + 600), /\.\.\.\(energyRow \? \{ sell_token: row\.sellToken, buy_token: row\.buyToken \} : \{\}\),/);
   });
 
-  it("(5b) A SETTLEMENT EXPLAINS ONLY ITS OWN CASH: the look holds first, folds the queued settlements, and a held tick ratchets nothing (flow-inference.integration.test.ts runs this shape)", () => {
+  it("(5b) A SETTLEMENT EXPLAINS ONLY ITS OWN CASH: the look holds first, folds the queued settlements, and a held tick accrues no fee and moves no lifetime peak while the breaker still observes (flow-inference.integration.test.ts runs this shape)", () => {
     // A stranded purchase was booked twice (inferred, then by the resolver);
     // the fix for that bumped ledgerWrites on every settlement, which closed
     // the whole held interval — deposits, transfers home, reverts — as
@@ -366,11 +366,29 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     assert.match(r, /const explains = settlementDelta\(\{ success: r\.success, receiptUsdgDelta6: r\.usdgDelta6, capitalBooked \}\);\s*if \(explains\.queue && !settlementsQueued\.has\(r\.userOpHash\)\) \{\s*settlementsQueued\.add\(r\.userOpHash\);/);
     // A capital op's movement is read before it is booked.
     assert.match(r, /if \(energyRow && r\.success\) \{[\s\S]*?if \(r\.usdgDelta6 === null\) \{[\s\S]*?continue;[\s\S]*?await settleEnergyLanding\(/);
-    // The tick: a held look (or an aborted one) ratchets nothing.
+    // The tick: a held look (or an aborted one) accrues no fee and moves no
+    // lifetime peak — but the breaker observes the held figure, never the raw
+    // equity, and the valuation is written flagged.
     const t = body("tick");
     assert.match(t, /const flows = await reconcileFlowsOrRetry\(/);
-    assert.match(t, /if \(flows === "held"\) ratchet = tickRatchets\(plan, \{ incomplete: bookIncomplete, curveMarked: curveMarked\.length, held: true \}\);/);
-    assert.ok(t.indexOf('if (flows === "held") ratchet') < t.indexOf("const riskPeak = await ratchet.riskPeak("));
+    assert.match(
+      t,
+      /if \(flows === "held"\) \{\s*ratchet = tickRatchets\(plan, \{\s*incomplete: bookIncomplete,\s*curveMarked: curveMarked\.length,\s*held: true,\s*breakerObservationUsdg: heldBreakerObservationUsdg\(\{\s*equityUsdg,\s*cashUsdg: balances\.cashUsdg,\s*expectedCashUsdg: await heldCashBaseline\(agentId\),\s*\}\),\s*\}\);\s*\}/,
+    );
+    assert.ok(t.indexOf('if (flows === "held") {') < t.indexOf("const riskPeak = await ratchet.riskPeak("));
+    // The breaker's lift moves after the mark, from the mark on either side of the accrual.
+    const accrue = t.indexOf("highWaterMarkUsdg = await ratchet.accrue(accrual, highWaterMarkUsdg, async () => {");
+    assert.ok(t.indexOf("const markBeforeAccrual = highWaterMarkUsdg;") < accrue);
+    assert.ok(t.indexOf("heldBreakerLiftUsdg = ratchet.breakerLift(heldBreakerLiftUsdg, markBeforeAccrual, highWaterMarkUsdg);") > accrue);
+    assert.match(t, /await ratchet\.equityRow\(\(\{ flowsHeld \}\) =>\s*addEquity\(agentId, \{[\s\S]{0,300}flowsHeld,/);
+    // Every breaker read takes the lift when no risk period stands.
+    assert.match(CODE, /const lifetimeBreakerPeak = \(\) => highWaterMarkUsdg \+ heldBreakerLiftUsdg;/);
+    assert.match(CODE, /const drawdownPeak = \(\) => paperActive\(\) \? highWaterMarkUsdg : \(riskHighWaterMarkUsdg \?\? lifetimeBreakerPeak\(\)\);/);
+    assert.match(CODE, /highWaterMarkUsdg: paperActive\(\) \? highWaterMarkUsdg : usdg\(\(await getRiskPeriodPeak\(agentId\)\) \?\? usdgNum\(lifetimeBreakerPeak\(\)\)\),/);
+    // The expected cash: the kept baseline with the queue folded (read, not taken).
+    const expected = arrow("heldCashBaseline");
+    assert.match(expected, /if \(lastCashUsdg !== null\) return expectedCashUsdg\(\{ cashUsdg: lastCashUsdg, since: baselineSince \}, settlementQueue\);/);
+    assert.doesNotMatch(expected, /takeSettlements\(\)/);
     const retry = arrow("reconcileFlowsOrRetry");
     assert.match(retry, /catch \(e\) \{[\s\S]*return "held";/);
   });

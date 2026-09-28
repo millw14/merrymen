@@ -173,9 +173,26 @@ export async function deriveBootstrapAccounting(
             .get(agentId, epoch - 1)) as { equity_usdg: number | string | null } | undefined)
         : undefined;
 
+    // THE CASH BASELINE IS NEVER A HELD MARK. A tick whose flow look held (an
+    // op the resolver may still settle was in flight) writes its row flagged
+    // `flows_held` (store.ts): a true valuation, whose cash may carry that op's
+    // movement. As the downtime baseline it would be shifted again by the op's
+    // own settlement and read as drift. Before the flag those rows were not
+    // written at all, so skipping them leaves this read where it always was —
+    // without a dropped op's 26-hour hold leaving the curve a day stale.
     const equity = (await shared
-      .prepare("SELECT cash_usdg, at FROM equity WHERE LOWER(agent_id) = ? ORDER BY at DESC, id DESC LIMIT 1")
+      .prepare(
+        "SELECT cash_usdg, at FROM equity WHERE LOWER(agent_id) = ? AND COALESCE(flows_held, 0) = 0 " +
+          "ORDER BY at DESC, id DESC LIMIT 1",
+      )
       .get(agentId)) as EquityRow | undefined;
+    // But a held mark IS a durable trace of a funded account: it must refuse the
+    // new-account claim below exactly as any other mark does.
+    const anyMark =
+      equity ??
+      ((await shared
+        .prepare("SELECT cash_usdg, at FROM equity WHERE LOWER(agent_id) = ? ORDER BY at DESC, id DESC LIMIT 1")
+        .get(agentId)) as EquityRow | undefined);
 
     const accruals = (await shared
       .prepare("SELECT COUNT(*) AS n FROM fee_accruals WHERE LOWER(agent_id) = ?")
@@ -185,7 +202,8 @@ export async function deriveBootstrapAccounting(
     const hwmWithdrawn = usdgRealToMicro(num(agent?.hwm_withdrawn_usdg));
     const flowCount = num(flows?.n);
     const accrualCount = num(accruals?.n);
-    const hasEquity = equity !== undefined && equity !== null;
+    const hasEquity = anyMark !== undefined && anyMark !== null;
+    const hasCashReading = equity !== undefined && equity !== null;
 
     // NO PRIOR ACCOUNTING is asserted only when every durable trace is absent.
     // A zero HWM on its own is not enough — an agent can be underwater — and
@@ -234,7 +252,7 @@ export async function deriveBootstrapAccounting(
       // Null rather than zero when there is no mark: "no cash reading on
       // record" and "the account held nothing" are different claims, and the
       // child branches on which one it got.
-      lastObservedCashUsdg: hasEquity ? bigintToMicro(usdgRealToMicro(num(equity?.cash_usdg))) : null,
+      lastObservedCashUsdg: hasCashReading ? bigintToMicro(usdgRealToMicro(num(equity?.cash_usdg))) : null,
       accountingEpoch: epoch,
       observedAt,
       ...(carryNote === null ? {} : { carryNote }),
