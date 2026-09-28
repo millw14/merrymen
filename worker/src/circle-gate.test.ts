@@ -17,7 +17,20 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
-import { CIRCLE_SHORT_CLASS_GATE, circleNote, circleNoteStep, circleStrategyTick, type CircleNoted } from "./circle-gate";
+import { DatabaseSync } from "node:sqlite";
+
+import { CIRCLE_TIERS, ENERGY, effectivePerfFeeBps, tierForBalance } from "../../packages/core/src/index";
+import {
+  CIRCLE_SHORT_CLASS_GATE,
+  circleNote,
+  circleNoteStep,
+  circleStanding,
+  circleStrategyTick,
+  type CircleNoted,
+} from "./circle-gate";
+import { wrapSqlite } from "./db";
+import { ENERGY_DAYS_SCHEMA, lastEnergyReadDay, mergeEnergyDayRow, noteEnergyReadDay, readEnergyDaysSince } from "./energy-days";
+import { energyLevel, planEnergySeed, utcDay } from "./energy";
 import { evenKeelTick, type EvenKeelConfig } from "./strategies/even-keel";
 import type { Holding, Snapshot, Tick } from "./strategies/types";
 
@@ -231,7 +244,7 @@ const codeOf = (src: string) =>
 const CODE = codeOf(readFileSync(new URL("./index.ts", import.meta.url), "utf8"));
 
 describe("the tick's wiring below the tier", () => {
-  const gate = CODE.indexOf("const circleShort = isCircleStrategy(strategy.name) && !holderTier.bonusStrategies;");
+  const gate = CODE.indexOf("const circleShort = isCircleStrategy(strategy.name) && !circle.unlocked;");
   const tick = CODE.indexOf("await circleStrategyTick(circleShort, async () => takeTick(await strategy.tick(snap)))");
   const exits = CODE.indexOf("const exits = await proposeClassExits();");
 
@@ -258,10 +271,133 @@ describe("the tick's wiring below the tier", () => {
 
   it("the owner is told once per change of reason, in the words for this grant's chain", () => {
     const block = CODE.slice(gate, tick);
-    assert.match(block, /const circleStep = circleNoteStep\(circleNoted, \{ short: circleShort, readOk: holderReadOk \}\);\s*circleNoted = circleStep\.noted;\s*if \(circleStep\.say\) \{/);
+    assert.match(block, /const circleStep = circleNoteStep\(circleNoted, \{ short: circleShort, readOk: circle\.known \}\);\s*circleNoted = circleStep\.noted;\s*if \(circleStep\.say\) \{/);
     assert.match(block, /circleNote\(circleStep\.say, \{ strategyName: strategy\.name, accountCounts: grant\.chainId === MERRYMEN_TOKEN\.chainId \}\)/);
     // The same test that decides whether the account is read at all.
     assert.match(CODE, /const energyAccount = grant\.chainId === MERRYMEN_TOKEN\.chainId \?/);
     assert.doesNotMatch(CODE, /circleBlockedNoted/, "the boolean latch that stuck on 'our read failed' is gone");
+  });
+});
+
+/**
+ * A RESTART WHOSE FIRST $MERRYMEN READ FAILS DOES NOT LOCK A MERRY MAN OUT.
+ *
+ * holderTier starts at the outsider in every new process and moves only on a
+ * read where every part answered — right for the fee discount, which is money,
+ * and wrong for the gate: after a hosted redeploy whose first mainnet read was
+ * refused, a genuine Merry Man's even-keel stopped rebalancing and was told
+ * "we could not read", until the chain answered. The gate now also takes
+ * energy's standing: the lower bound of what answered, or the durable last
+ * good within ENERGY.lastGoodMaxAgeSec (energy_days read_at/read_full, which
+ * the mirror carries up and the seed puts back — energy-durability.test.ts
+ * drives the real mirror; here the mirror's own merge statement stands in).
+ */
+describe("the Circle gate across a restart", () => {
+  const AGENT = "0xa96bf429888e1aab4255762d17d29c53f6a0370d";
+  const NOW = Math.floor(Date.parse("2026-09-27T15:00:00Z") / 1000);
+  const TODAY = utcDay(NOW);
+  const OUTSIDER = CIRCLE_TIERS[0]!;
+  const FAILED = { holder: null, account: null } as const;
+  const tok = (n: number) => BigInt(n) * 10n ** 18n;
+  const open = () => {
+    const raw = new DatabaseSync(":memory:");
+    raw.exec(ENERGY_DAYS_SCHEMA);
+    return { raw, db: wrapSqlite(raw) };
+  };
+
+  it("circleStanding: the exact tier or a full standing unlocks; a shortfall says whether it was read", () => {
+    assert.deepEqual(circleStanding({ tierUnlocks: true, level: "unread" }), { unlocked: true, known: true });
+    assert.deepEqual(circleStanding({ tierUnlocks: false, level: "full" }), { unlocked: true, known: true });
+    assert.deepEqual(circleStanding({ tierUnlocks: false, level: "low" }), { unlocked: false, known: true });
+    assert.deepEqual(circleStanding({ tierUnlocks: false, level: "unread" }), { unlocked: false, known: false });
+  });
+
+  it("THE CARRIED READING STANDS: a Merry Man read before the redeploy runs their Circle strategy on the first, failed read after it", async () => {
+    // ── the old child read the owner at the tier, and noted it ──
+    const a = open();
+    await noteEnergyReadDay(a.db, AGENT, TODAY, true, NOW - 3_600);
+    // ── the mirror carries it up; the redeploy destroys the child ──
+    const shared = open();
+    for (const row of await readEnergyDaysSince(a.db, AGENT, utcDay(NOW - 86_400))) await mergeEnergyDayRow(shared.db, AGENT, row);
+    a.raw.close();
+    // ── the rebuilt child is seeded exactly as seedEnergyForChild seeds it ──
+    const b = open();
+    const sinceDay = utcDay(NOW - 86_400);
+    for (const row of planEnergySeed({ shared: await readEnergyDaysSince(shared.db, AGENT, sinceDay), child: [], sinceDay })) {
+      await mergeEnergyDayRow(b.db, AGENT, row);
+    }
+    // ── its first tick: holderTier is still the outsider, and the read fails ──
+    const lastGood = await lastEnergyReadDay(b.db, AGENT, NOW - ENERGY.lastGoodMaxAgeSec);
+    const level = energyLevel(FAILED, lastGood, NOW).level;
+    const standing = circleStanding({ tierUnlocks: OUTSIDER.bonusStrategies, level });
+    assert.equal(standing.unlocked, true, "the carried reading unlocks the gate");
+    let asked = 0;
+    await circleStrategyTick(!standing.unlocked, async () => {
+      asked++;
+      return { intents: [], why: [] };
+    });
+    assert.equal(asked, 1, "the Circle strategy is asked, as it was before the restart");
+    // ...AND THE FEE STAYS EXACT: nothing here moves holderTier, and the
+    // discount is priced on it alone (index.ts effFeeBps), so it waits for a
+    // read that answered.
+    assert.equal(effectivePerfFeeBps(2_000, OUTSIDER), 2_000, "no discount on a reading that did not answer");
+    b.raw.close();
+    shared.raw.close();
+  });
+
+  it("control: with no carried reading the same restart is short — and says our read failed, not 'go and hold'", () => {
+    const standing = circleStanding({ tierUnlocks: OUTSIDER.bonusStrategies, level: energyLevel(FAILED, null, NOW).level });
+    assert.deepEqual(standing, { unlocked: false, known: false });
+    assert.deepEqual(circleNoteStep(null, { short: true, readOk: standing.known }).say, "unread");
+  });
+
+  it("a reading older than a day no longer stands", () => {
+    const stale = { full: true, at: NOW - ENERGY.lastGoodMaxAgeSec - 1 };
+    assert.equal(circleStanding({ tierUnlocks: false, level: energyLevel(FAILED, stale, NOW).level }).unlocked, false);
+  });
+
+  it("a carried SHORT reading is a shortfall that was read — the owner is told to hold, not that a read failed", () => {
+    const level = energyLevel(FAILED, { full: false, at: NOW - 600 }, NOW).level;
+    const standing = circleStanding({ tierUnlocks: false, level });
+    assert.deepEqual(standing, { unlocked: false, known: true });
+    assert.equal(circleNoteStep(null, { short: true, readOk: standing.known }).say, "short");
+  });
+
+  it("THE LOWER BOUND: a wallet that answered at the line unlocks even while the account's read fails", () => {
+    const level = energyLevel({ holder: tok(100_000), account: null }, null, NOW).level;
+    assert.equal(circleStanding({ tierUnlocks: false, level }).unlocked, true);
+    // The exact tier is the same line — so the gate and energy never disagree.
+    assert.equal(tierForBalance(tok(ENERGY.fullTokens)).bonusStrategies, true);
+    assert.equal(tierForBalance(tok(ENERGY.fullTokens - 1)).bonusStrategies, false);
+  });
+});
+
+describe("the standing's wiring in main()", () => {
+  const fn = (name: string) => {
+    const at = CODE.indexOf(`async function ${name}(`);
+    assert.ok(at > 0, `${name} moved — re-anchor this test`);
+    return CODE.slice(at, CODE.indexOf("\n  }\n", at));
+  };
+
+  it("THE GATE READS THE STANDING, AND THE FEE READS THE EXACT TIER", () => {
+    const standing = CODE.indexOf("holderStanding = await holderStandingFor(agentId, holderRead.parts);");
+    const gate = CODE.indexOf("const circle = circleStanding({ tierUnlocks: holderTier.bonusStrategies, level: holderStanding.level });");
+    const short = CODE.indexOf("const circleShort = isCircleStrategy(strategy.name) && !circle.unlocked;");
+    assert.ok(standing > 0 && gate > standing && short > gate, "standing, then the gate from it");
+    assert.match(CODE, /const effFeeBps = effectivePerfFeeBps\(cfg\.perfFeeBps, holderTier\);/);
+    assert.equal(CODE.split("holderTier = ").length - 1, 1, "the exact tier still moves in one place");
+    assert.match(CODE, /if \(holderRead\.ok\) holderTier = holderRead\.status\.tier;/);
+  });
+
+  it("THE LAST GOOD READING IS KEPT IN EVERY MODE — not inside the energy switch", () => {
+    const f = fn("holderStandingFor");
+    assert.doesNotMatch(f, /energyGate|mode/, "the Circle gate needs it whatever the energy switch says");
+    assert.match(f, /await lastEnergyRead\(agentId, now - ENERGY\.lastGoodMaxAgeSec\)/);
+    assert.match(f, /await noteEnergyRead\(agentId, utcDay\(now\), decided, now\)/);
+    // It is computed before the energy decision, and outside its try, so an
+    // energy failure cannot take the Circle's reading with it.
+    const standing = CODE.indexOf("holderStanding = await holderStandingFor(agentId, holderRead.parts);");
+    const refresh = CODE.indexOf("await refreshEnergy(agentId, grant, holderRead.parts, holderStanding);");
+    assert.ok(standing > 0 && refresh > standing);
   });
 });

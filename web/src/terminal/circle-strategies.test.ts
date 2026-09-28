@@ -73,7 +73,10 @@ describe("the picker marks what the worker gates", () => {
     // If the worker stops gating, this whole file is obsolete rather than
     // quietly passing over a check that no longer applies.
     const src = read("../../../worker/src/index.ts");
-    assert.match(src, /isCircleStrategy\(strategy\.name\) && !holderTier\.bonusStrategies/);
+    assert.match(src, /isCircleStrategy\(strategy\.name\) && !circle\.unlocked/);
+    // Unlocked by the exact tier or by the standing energy reads — the same
+    // 100,000 line, so the badge's threshold is the worker's (circle-gate.ts).
+    assert.match(src, /circleStanding\(\{ tierUnlocks: holderTier\.bonusStrategies, level: holderStanding\.level \}\)/);
   });
 });
 

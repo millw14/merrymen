@@ -123,9 +123,18 @@ const WALLET = /^0x[0-9a-f]{40}$/;
  * THE RULE, in the order it is applied:
  *
  *   THE LINKED PROOF COUNTS ONLY IF THE CLAIM NAMES THIS ACCOUNT. The claim is
- *   the cross-account record (`holder_claims`), taken first-come by /api/holder
- *   before the proof is stored. A proof whose claim belongs to someone else —
- *   or to nobody yet — is a signature, not a holding.
+ *   the cross-account record (`holder_claims`), made by /api/holder before the
+ *   proof is stored, and only on a fresh signature BY the wallet over text
+ *   naming this account. The first claim is not final: a wallet nobody holds
+ *   is claimed by that signature, and one another account holds MOVES to the
+ *   signer's account (settings-store takeHolder) — at most one move per wallet
+ *   in any rolling 24 hours, counted from the last move and not reset by an
+ *   unlink, except that the wallet's own sign-in account (and the account it
+ *   was last moved from) may always take it back, so a phished signature
+ *   cannot lock the real holder out. (Proofs linked before claims existed
+ *   were claimed once, earliest proof first, by the orchestrator's backfill —
+ *   worker/src/holder-claims.ts.) A proof whose claim belongs to someone
+ *   else — or to nobody yet — is a signature, not a holding.
  *
  *   OTHERWISE THE LOGIN WALLET, ONLY IF NO OTHER ACCOUNT CLAIMS IT. Linking
  *   your login wallet to a second account moves it there; it cannot count in

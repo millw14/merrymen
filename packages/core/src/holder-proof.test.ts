@@ -8,6 +8,7 @@
  * told on screen AND what their agent is throttled on.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import { effectiveHolder, type HolderClaimOf } from "./holder-proof";
@@ -80,5 +81,28 @@ describe("effectiveHolder", () => {
   it("an account that is not an address gets nothing, never a garbage holderAddress", () => {
     assert.equal(effectiveHolder("not-an-address", null, claims({})), null);
     assert.equal(effectiveHolder("", proofOf(W), claims({ [W]: "" })), null);
+  });
+});
+
+/**
+ * THE RULE'S OWN WORDS MATCH HOW A CLAIM IS MADE. This header is where a
+ * reader learns what a claim is, and it said claims were "taken first-come" —
+ * the rule before a fresh signature by the wallet could MOVE a claim
+ * (settings-store takeHolder). A reader who believed it would think a
+ * squatter's claim was permanent, or that the first account wins a dispute.
+ * The web's copy of the rule (holder-wallet.ts) says the same.
+ */
+describe("how a claim is made, as the rule's comment tells it", () => {
+  const src = readFileSync(new URL("./holder-proof.ts", import.meta.url), "utf8");
+  const web = readFileSync(new URL("../../../web/src/lib/holder-wallet.ts", import.meta.url), "utf8");
+
+  it("NOT FIRST-COME: a fresh signature by the wallet moves it, once in any rolling 24 hours, the wallet's own login exempt", () => {
+    for (const text of [src, web]) {
+      assert.doesNotMatch(text, /first-come|first come/i);
+      assert.match(text, /mov(e|ed) (there )?(from another\s+\*\s+account )?/);
+      assert.match(text, /rolling\s+(\*\s+)?24 hours/);
+      assert.match(text, /own sign-in account/);
+    }
+    assert.match(src, /takeHolder/, "names where the move is made");
   });
 });

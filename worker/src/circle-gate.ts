@@ -38,8 +38,43 @@
  * inline in it can be reverted with every test still green.
  */
 import { ENERGY } from "../../packages/core/src/index";
+import type { EnergyLevel } from "../../packages/core/src/index";
 import { count } from "./energy-copy";
 import type { Tick } from "./strategies/types";
+
+// ── is the owner at the tier? ──────────────────────────────────────────────
+
+/**
+ * THE GATE'S ANSWER, WHICH IS NOT THE FEE'S.
+ *
+ * THE FEE STAYS EXACT. `holderTier` (index.ts) moves only on a read where
+ * every part answered and prices the performance-fee discount: a discount is
+ * money, so it is granted on nothing less, and an outage keeps the last one
+ * read. `tierUnlocks` is that tier's own answer, and it still unlocks.
+ *
+ * THE GATE MAY NOT FALL SHORT BECAUSE A READ FAILED. holderTier starts at the
+ * outsider in every new process and is set only when a read answers — so after
+ * a restart (every hosted redeploy) whose first $MERRYMEN read failed, routine
+ * on a fleet whose mainnet reads are refused, a Merry Man's Circle strategy
+ * stopped rebalancing, told them "we could not read", and waited for the
+ * chain. So the gate also takes energy's standing (energy.ts energyLevel over
+ * the same read): full when what WAS read already clears the line (the parts
+ * that answered are a lower bound), or, when a part failed, the last reading
+ * that decided it within ENERGY.lastGoodMaxAgeSec — energy_days.read_at /
+ * read_full, which the mirror and the seed carry across a redeploy. It is the
+ * same line (ENERGY.fullTokens is the Merry Man tier's minTokens) read the
+ * same way, so energy and the Circle cannot disagree about whether this owner
+ * holds enough; and it grants nothing that was not read, at least in part, in
+ * the last day.
+ *
+ * `known` says whether a shortfall rests on a reading — this tick's or the
+ * carried one — which picks the honest Circle note: "you are short" or "we
+ * could not read" (circleNoteStep's `readOk`).
+ */
+export function circleStanding(i: { tierUnlocks: boolean; level: EnergyLevel }): { unlocked: boolean; known: boolean } {
+  if (i.tierUnlocks || i.level === "full") return { unlocked: true, known: true };
+  return { unlocked: false, known: i.level !== "unread" };
+}
 
 /**
  * The Circle strategy's tick for this window: its own when the owner is at the

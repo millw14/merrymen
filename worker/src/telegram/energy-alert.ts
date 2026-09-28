@@ -20,10 +20,18 @@
  * is never re-sent, and a send Telegram refused is retried after half an hour
  * (sign-prompt.ts's rule) rather than every pass or never.
  *
- * NOT DURABLE ACROSS A REDEPLOY, and accepted: firedAlerts lives in
- * telegram.json, which a hosted redeploy does not restore, so a redeploy on a
- * spent day may send it once more. It is not a financial message; the owner's
- * notice (the warn event) is the durable one, behind energy_days.told_at.
+ * ONCE PER DAY ACROSS A REDEPLOY, BY RIDING THE NOTICE'S CLAIM. firedAlerts
+ * lives in telegram.json, which a hosted redeploy does not restore (the
+ * orchestrator puts back the link, never the alert keys), so on its own it
+ * re-sent this on every deploy of a spent day. The owner's notice already has
+ * a durable once-a-day claim — energy_days.told_at, carried up by the mirror
+ * and seeded back into a rebuilt child before it arms — so the alert speaks
+ * only for a day whose notice claim THIS PROCESS won (`energyToldDay`, set by
+ * index.ts tellEnergySpent after the claim and never before). A rebuilt child
+ * finds today's stamp already there, wins nothing, and says nothing again.
+ * The same trade the notice makes: a crash between the claim and the send
+ * loses the alert, never repeats it. firedAlerts still stops a second send
+ * within the process, and the half-hour retry still covers a refused one.
  *
  * Pure — no network client, no clock, no state — so every rule is executed by
  * energy-alert.test.ts; notifier.ts only reads, sends and records.
@@ -44,6 +52,27 @@ export interface EnergyAlertInputs {
   energyChainId?: number | null;
   /** The owner's counted wallet (cfg.holderAddress), in full, or null. */
   energyHolder?: string | null;
+  /**
+   * The UTC day whose owner notice THIS PROCESS claimed (energy_days.told_at),
+   * or null — energyToldDayOf. The alert speaks for that day and no other; see
+   * the header for why a claim another process made is silence here.
+   */
+  energyToldDay?: string | null;
+}
+
+/** Which agent's notice this process claimed, and for which UTC day (index.ts tellEnergySpent). */
+export interface EnergyToldHere {
+  agentId: string;
+  day: string;
+}
+
+/**
+ * The day the alert may speak for: the notice claim this process won, and
+ * only while the SAME agent is armed — a re-sign can arm another account in
+ * this process, and one account's claim is not another's.
+ */
+export function energyToldDayOf(told: EnergyToldHere | null, agentId: string | null | undefined): string | null {
+  return told && agentId && told.agentId === agentId ? told.day : null;
 }
 
 /** Every key this alert uses starts with this; see recordEnergyAlert. */
@@ -69,11 +98,14 @@ export interface EnergyAlert {
  * (spent). Not full — a full agent is never throttled. Not a report from a day
  * that has already reset, which would tell the owner yesterday's news as
  * today's. Not without an armed account: an unarmed agent starts nothing.
+ * And not for a day whose notice claim this process did not win — after a
+ * redeploy the seeded told_at says the owner was already told.
  */
 export function energyAlert(i: EnergyAlertInputs, base: string, nowSec: number): EnergyAlert | null {
   const e = i.energy;
   if (!e || !e.gated || !e.spent || e.level === "full") return null;
   if (nowSec >= e.resetsAt) return null;
+  if (!i.energyToldDay || i.energyToldDay !== e.day) return null;
   if (!i.energyAccount || i.energyChainId == null) return null;
   const body = energyNotice(
     {

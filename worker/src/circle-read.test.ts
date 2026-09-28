@@ -75,7 +75,9 @@ describe("the tick charges nobody for our outage", () => {
     // advice they cannot act on — they already did it. The note is written in
     // circle-gate.ts (circleNote) and chosen by whether the read answered.
     const src = read("./index.ts");
-    assert.match(src, /circleNoteStep\(circleNoted, \{ short: circleShort, readOk: holderReadOk \}\)/);
+    // Chosen by whether the shortfall rests on a reading — this tick's, or
+    // the durable last good (circle-gate.ts circleStanding).
+    assert.match(src, /circleNoteStep\(circleNoted, \{ short: circleShort, readOk: circle\.known \}\)/);
     const { circleNote } = await import("./circle-gate");
     const unread = circleNote("unread", { strategyName: "even-keel", accountCounts: true });
     assert.match(unread, /could not read your \$MERRYMEN balance this tick/);

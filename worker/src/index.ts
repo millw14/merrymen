@@ -152,7 +152,7 @@ import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus, readHolderStatusResult } from "./circle";
-import { CIRCLE_SHORT_CLASS_GATE, circleNote, circleNoteStep, circleStrategyTick, type CircleNoted } from "./circle-gate";
+import { CIRCLE_SHORT_CLASS_GATE, circleNote, circleNoteStep, circleStanding, circleStrategyTick, type CircleNoted } from "./circle-gate";
 import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
 import { killHosted, killRequested } from "./kill-request";
@@ -199,6 +199,7 @@ import {
   usdgCentsUp,
   utcDay,
   type BalanceParts,
+  type EnergyLevel,
   type EnergyPlan,
   type LastGood,
 } from "./energy";
@@ -252,6 +253,7 @@ import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
 import type { Holding, Snapshot, Strategy, Tick } from "./strategies/types";
 import { isPaused, startTelegram } from "./telegram/service";
 import { startNotifier } from "./telegram/notifier";
+import { energyToldDayOf, type EnergyToldHere } from "./telegram/energy-alert";
 import { startVirtualsStreamer } from "./virtuals-streamer";
 import { createStateRef, ensureLinkCode } from "./telegram/state";
 import { readPositionRaw } from "./telegram/reads";
@@ -4237,8 +4239,6 @@ async function main() {
   let circleNoted: CircleNoted = null;
   /** So the bricked-breaker note is said once per change, not once per tick, for ever. */
   let breakerBrickNoted = false;
-  /** Did the last $MERRYMEN read actually answer? A failed read must not be reported as a wallet. */
-  let holderReadOk = true;
   // ── ENERGY: TODAY'S ALLOWANCE, DECIDED ONCE PER TICK ────────────────────
   //
   // Decided right after the $MERRYMEN read (refreshEnergy) and read at every
@@ -4266,6 +4266,13 @@ async function main() {
    * startNotifier's getAlertInputs read it — wired by the Telegram slice).
    */
   let energyReport: EnergyStatus | null = null;
+  /**
+   * The notice claim THIS PROCESS won (energy_days.told_at), and for which
+   * agent and day — the one thing the Telegram alert speaks on
+   * (telegram/energy-alert.ts). A rebuilt child finds the stamp the seed put
+   * back, wins nothing, and so does not repeat the alert after a redeploy.
+   */
+  let energyToldHere: EnergyToldHere | null = null;
   /** The last USDG estimate, the shortfall it priced, and when. At most one re-price per ENERGY.estimateEverySec. */
   let energyEstimate: { key: string; value: number | null; at: number } | null = null;
 
@@ -4342,14 +4349,18 @@ async function main() {
   async function tellEnergySpent(agentId: string): Promise<void> {
     if (!active) return;
     const now = Math.floor(Date.now() / 1000);
-    const claimed = await claimEnergyNotice(agentId, energyNow.day, now);
+    const day = energyNow.day;
+    const claimed = await claimEnergyNotice(agentId, day, now);
     energyNow = { ...energyNow, told: true };
     if (!claimed) return;
+    // AFTER THE CLAIM, NEVER BEFORE: the Telegram alert rides it, so it goes
+    // once per UTC day however many redeploys the day sees.
+    energyToldHere = { agentId, day };
     await addEvent(
       agentId,
       "warn",
       energyNotice({
-        day: energyNow.day,
+        day,
         account: active.grant.smartAccount,
         chainId: active.grant.chainId,
         holder: cfg.holderAddress ?? null,
@@ -4396,19 +4407,57 @@ async function main() {
   }
 
   /**
+   * THE $MERRYMEN STANDING THIS TICK — full, low or unread — from the one
+   * read and the durable last-good, IN EVERY MODE.
+   *
+   * Two readers: energy (observe / enforce, refreshEnergy) and the Circle
+   * gate (circle-gate.ts circleStanding), which reads it whatever the energy
+   * switch says — self-hosted is always off, and a hosted fleet starts off —
+   * because a restart whose first read fails must not lock a Merry Man's
+   * Circle strategy any more than it may throttle them. So the last reading
+   * that decided it is loaded once per account from the ledger
+   * (energy_days.read_at/read_full, which a redeploy's seed puts back) and
+   * noted whenever a read decides it, in every mode. It is a reading, never a
+   * counter: nothing here limits, counts or refunds anything.
+   *
+   * Never throws into the tick: the store's reads and notes fail to null and
+   * to nothing, and energyLevel is arithmetic.
+   */
+  async function holderStandingFor(agentId: string, parts: BalanceParts): Promise<{ level: EnergyLevel; decided: boolean | null }> {
+    const now = Math.floor(Date.now() / 1000);
+    if (energyLastGood?.agentId !== agentId) {
+      energyLastGood = { agentId, good: await lastEnergyRead(agentId, now - ENERGY.lastGoodMaxAgeSec) };
+    }
+    const { level, decided } = energyLevel(parts, energyLastGood.good, now);
+    if (decided !== null) {
+      energyLastGood = { agentId, good: { full: decided, at: now } };
+      await noteEnergyRead(agentId, utcDay(now), decided, now);
+    }
+    return { level, decided };
+  }
+
+  /**
    * DECIDE TODAY'S ENERGY from this tick's $MERRYMEN read, and publish it.
    *
-   * OFF: nothing is limited, nothing is counted, no ledger is read — but a
-   * report is still published (gated false), so the last one on the agents
-   * row is always this process's and a stale "spent" from an enforcing day
-   * cannot outlive a switch-off (the mirror keeps the last non-null report).
+   * OFF: nothing is limited and nothing is counted, and the report's level is
+   * this read alone — but a report is still published (gated false), so the
+   * last one on the agents row is always this process's and a stale "spent"
+   * from an enforcing day cannot outlive a switch-off (the mirror keeps the
+   * last non-null report). (The durable reading is still kept, by
+   * holderStandingFor, for the Circle gate.)
    *
    * OBSERVE / ENFORCE: the level from the combined read with the durable
-   * last-good standing in for a failed one, the house-baseline allowances,
-   * today's counters, and — while low on a Robinhood Chain grant — the USDG
-   * estimate, re-priced at most every ENERGY.estimateEverySec.
+   * last-good standing in for a failed one (`standing`, holderStandingFor),
+   * the house-baseline allowances, today's counters, and — while low on a
+   * Robinhood Chain grant — the USDG estimate, re-priced at most every
+   * ENERGY.estimateEverySec.
    */
-  async function refreshEnergy(agentId: string, grant: StoredGrant, parts: BalanceParts): Promise<void> {
+  async function refreshEnergy(
+    agentId: string,
+    grant: StoredGrant,
+    parts: BalanceParts,
+    standing: { level: EnergyLevel },
+  ): Promise<void> {
     const now = Math.floor(Date.now() / 1000);
     energyWithheld = false;
     const mode = cfg.energyGate;
@@ -4425,14 +4474,7 @@ async function main() {
       });
       energyEstimate = null;
     } else {
-      if (energyLastGood?.agentId !== agentId) {
-        energyLastGood = { agentId, good: await lastEnergyRead(agentId, now - ENERGY.lastGoodMaxAgeSec) };
-      }
-      const { level, decided } = energyLevel(parts, energyLastGood.good, now);
-      if (decided !== null) {
-        energyLastGood = { agentId, good: { full: decided, at: now } };
-        await noteEnergyRead(agentId, utcDay(now), decided, now);
-      }
+      const { level } = standing;
       // THE REVIEWERS THAT ARE ACTUALLY RUNNING, each at its HOUSE interval.
       const brainConfigured = !!cfg.brainUrl && !!cfg.brainToken;
       const trencherBrain = cfg.strategy === "trencher" && cfg.trencherFastEnabled && brainConfigured;
@@ -10843,7 +10885,6 @@ async function main() {
     // every part answered, so the tier stays exact and the rule above holds.
     const energyAccount = grant.chainId === MERRYMEN_TOKEN.chainId ? (grant.smartAccount as `0x${string}`) : undefined;
     const holderRead = await readHolderStatusResult(cfg.rpcMainnet, cfg.holderAddress, energyAccount);
-    holderReadOk = holderRead.ok;
     if (holderRead.ok) holderTier = holderRead.status.tier;
     if (holderRead.ok && holderTier.id !== lastTierId) {
       lastTierId = holderTier.id;
@@ -10856,12 +10897,25 @@ async function main() {
       );
     }
     const effFeeBps = effectivePerfFeeBps(cfg.perfFeeBps, holderTier);
-    // AND TODAY'S ENERGY, from the same read — the parts, so a half that
-    // answered can still prove full energy where the tier may not. Decided
-    // here, once, before anything this tick could spend it. It never throws
-    // into the tick: energy is never the reason a tick fails.
+    // THE STANDING, from the same read — the parts, so a half that answered
+    // can still prove the line where the exact tier may not — and the durable
+    // last-good for a read that failed. In EVERY mode: energy reads it, and so
+    // does the Circle gate below (circle-gate.ts circleStanding), so a restart
+    // whose first read fails neither throttles a holder nor locks a Merry
+    // Man's Circle strategy. The fee above stays on the exact tier.
+    let holderStanding: { level: EnergyLevel; decided: boolean | null };
     try {
-      await refreshEnergy(agentId, grant, holderRead.parts);
+      holderStanding = await holderStandingFor(agentId, holderRead.parts);
+    } catch (e) {
+      // This read alone: a part that failed stays unread, never a guess.
+      holderStanding = energyLevel(holderRead.parts, null, Math.floor(Date.now() / 1000));
+      console.error(`[${short(agentId)}] [energy] could not load the last good reading — this read alone decides:`, e);
+    }
+    // AND TODAY'S ENERGY, from that standing. Decided here, once, before
+    // anything this tick could spend it. It never throws into the tick:
+    // energy is never the reason a tick fails.
+    try {
+      await refreshEnergy(agentId, grant, holderRead.parts, holderStanding);
     } catch (e) {
       console.error(`[${short(agentId)}] [energy] could not decide this tick — keeping the last plan:`, e);
     }
@@ -12143,12 +12197,20 @@ async function main() {
     // the book down to cash), the class route proposes no entries, and the
     // class exits run exactly as they do for everyone. Nothing below may
     // `return` before them (circle-gate.test.ts).
-    const circleShort = isCircleStrategy(strategy.name) && !holderTier.bonusStrategies;
+    //
+    // AT THE TIER BY THE STANDING, NOT ONLY BY THE EXACT TIER. holderTier
+    // starts at the outsider in every new process, so after a restart whose
+    // first read failed it locked a genuine Merry Man out of their own Circle
+    // strategy until the chain answered. The gate also takes the standing
+    // above — the lower bound, or the durable last good within a day — while
+    // the fee discount stays on the exact tier (circle-gate.ts circleStanding).
+    const circle = circleStanding({ tierUnlocks: holderTier.bonusStrategies, level: holderStanding.level });
+    const circleShort = isCircleStrategy(strategy.name) && !circle.unlocked;
     // ONCE PER CHANGE OF REASON (circle-gate.ts circleNoteStep): a first
     // read that failed and a later one that shows a real shortfall are two
     // different notes. AND WHICH KIND OF NO IT IS: telling a holder to go and
     // hold $MERRYMEN because our own read failed is advice they cannot act on.
-    const circleStep = circleNoteStep(circleNoted, { short: circleShort, readOk: holderReadOk });
+    const circleStep = circleNoteStep(circleNoted, { short: circleShort, readOk: circle.known });
     circleNoted = circleStep.noted;
     if (circleStep.say) {
       await addEvent(
@@ -13316,6 +13378,9 @@ async function main() {
       energyAccount: active?.grant.smartAccount ?? null,
       energyChainId: active?.grant.chainId ?? null,
       energyHolder: cfg.holderAddress ?? null,
+      // ONLY FOR A DAY WHOSE NOTICE CLAIM THIS PROCESS WON — the durable
+      // once-a-day rule; telegram.json's keys do not survive a redeploy.
+      energyToldDay: energyToldDayOf(energyToldHere, active?.agentId),
     }),
     getChainId: () => active?.grant.chainId ?? null,
     // Scope the trade-cursor queries to THIS tenant's book. On a shared ledger an
