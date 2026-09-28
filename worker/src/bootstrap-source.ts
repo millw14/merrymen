@@ -73,6 +73,54 @@ interface CountRow {
   n: number | string | null;
 }
 
+/**
+ * IS THIS THE ERROR A SHARED LEDGER FROM BEFORE `flows_held`/`cash_read_at`
+ * GIVES — AND ONLY THAT?
+ *
+ * The orchestrator derives every anchor at spawn, and its first reconcile
+ * spawns the fleet BEFORE its first mirror pass runs applyLedgerSchema on
+ * shared Postgres. So on the first pass after the deploy that adds these two
+ * columns, the shared `equity` table does not have them yet, the cash read
+ * fails, and every child armed on that pass got an UNKNOWN anchor — no peak
+ * restored, no epoch adopted, contributions unknown — for as long as it ran.
+ * Measured on a Postgres built by the previous release's own boot code.
+ *
+ * SQLite says `no such column: cash_read_at`; Postgres says undefined_column
+ * (42703) and names the column. The name is required in both, so a missing
+ * `cash_usdg`, a locked file or a timeout is still a failure, never forgiven
+ * (the same contract as ledger-mirror.ts missingMarkColumn).
+ */
+export function missingHeldColumns(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  if (!/\b(flows_held|cash_read_at)\b/.test(e.message)) return false;
+  return /no such column/i.test(e.message) || (e as { code?: unknown }).code === "42703";
+}
+
+/**
+ * The downtime cash baseline: the newest mark that was NOT held, and when its
+ * cash was read. See the call site for why each half is what it is.
+ *
+ * On a ledger the migration has not reached, the pre-column query IS this
+ * query: without the columns nothing could have flagged a row held, and no
+ * row has a read time but its insert — so it reads exactly what the anchor
+ * read before them, and a held mark cannot slip in through it.
+ */
+async function cashBaseline(shared: Db, agentId: string): Promise<EquityRow | undefined> {
+  try {
+    return (await shared
+      .prepare(
+        "SELECT cash_usdg, COALESCE(cash_read_at, at) AS read_at FROM equity " +
+          "WHERE LOWER(agent_id) = ? AND COALESCE(flows_held, 0) = 0 ORDER BY at DESC, id DESC LIMIT 1",
+      )
+      .get(agentId)) as EquityRow | undefined;
+  } catch (e) {
+    if (!missingHeldColumns(e)) throw e;
+    return (await shared
+      .prepare("SELECT cash_usdg, at AS read_at FROM equity WHERE LOWER(agent_id) = ? ORDER BY at DESC, id DESC LIMIT 1")
+      .get(agentId)) as EquityRow | undefined;
+  }
+}
+
 const num = (v: number | string | null | undefined): number => {
   if (v === null || v === undefined) return 0;
   const n = typeof v === "number" ? v : Number(v);
@@ -187,12 +235,7 @@ export async function deriveBootstrapAccounting(
     // in this cash, and the hosted resume's `since` must let its settlement
     // shift the baseline rather than read it as drift. Older rows fall back to
     // `at`. Aliased `read_at` so ORDER BY still means the insert.
-    const equity = (await shared
-      .prepare(
-        "SELECT cash_usdg, COALESCE(cash_read_at, at) AS read_at FROM equity " +
-          "WHERE LOWER(agent_id) = ? AND COALESCE(flows_held, 0) = 0 ORDER BY at DESC, id DESC LIMIT 1",
-      )
-      .get(agentId)) as EquityRow | undefined;
+    const equity = await cashBaseline(shared, agentId);
     // But a held mark IS a durable trace of a funded account: it must refuse the
     // new-account claim below exactly as any other mark does.
     const anyMark: unknown =
