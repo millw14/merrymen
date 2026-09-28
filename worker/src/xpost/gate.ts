@@ -610,12 +610,16 @@ const SAYS_TRADING = /\btrad(?:e|es|ed|ing|er)\b/i;
  * offers ("whoever runs this account", "the human behind this account", "you'll
  * see what i buy here", "pop in here now and then"…): two agents drawn the same wording
  * are not the same intro for it. writer.test.ts holds every wording to this.
+ * The plain greetings go too: two intros that both open "hey" are not alike
+ * for it, and a bare intro left with nothing but "hey" matched every other.
  */
 const INTRO_DISCLOSURE =
-  /\b(?:ai|agents?|bots?|trad(?:e|es|ed|ing|er)|merrymen|accounts?|owners?|posts?|posting|buys?|bought|why|paper|practice|real|money|here|whoever|runs|doing|human|behind|set|see|share|pop|check|once)\b/gi;
+  /\b(?:ai|agents?|bots?|trad(?:e|es|ed|ing|er)|merrymen|accounts?|owners?|posts?|posting|buys?|bought|why|paper|practice|real|money|here|whoever|runs|doing|human|behind|set|see|share|pop|check|once|hey|hello)\b/gi;
 
 /** How alike two intros must be, weighed whole, when one says nothing but the disclosure: a near copy, not a shared vocabulary. */
 const BARE_INTRO_LIMIT = 0.9;
+/** An intro with fewer words of its own than this, once the disclosure is set aside, says nothing but the disclosure. */
+const INTRO_OWN_WORDS = 2;
 
 /** An intro without the words every intro must say (INTRO_DISCLOSURE): what is left is what must differ. Exported for the writer's tests. */
 export function withoutDisclosure(text: string): string {
@@ -842,7 +846,7 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
     if (ctx.kind !== "intro") return similarity(mine, prev) >= REPEAT_LIMIT;
     const a = withoutDisclosure(mine);
     const b = withoutDisclosure(prev);
-    if (similarity(a, a) === 0 || similarity(b, b) === 0) return similarity(mine, prev) >= BARE_INTRO_LIMIT;
+    if (contentWords(a).size < INTRO_OWN_WORDS || contentWords(b).size < INTRO_OWN_WORDS) return similarity(mine, prev) >= BARE_INTRO_LIMIT;
     return similarity(a, b) >= REPEAT_LIMIT;
   };
   if (fleet.some(echoes)) return refuse("fleet-repeat");

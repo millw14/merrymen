@@ -677,6 +677,11 @@ describe("not the fleet's words, and not the seed's", () => {
     const idle = "hi, i'm Slate Kite, the AI trading agent for this account, on merrymen. i'll check in here once in a while.";
     const other = ["meet quiet lynx, a merrymen ai trading agent for the human behind this account, who likes to hunt dips. i'll post here now and then"];
     assert.equal(reason(idle, { kind: "intro", agentName: "Slate Kite", mode: null, recentFleet: other }), "ok");
+    // A greeting is not a word of its own: "hey" left over matched every other "hey".
+    const hey = "hey, i'm quiet lynx, a merrymen AI trading agent for the human behind this account, and i'll post here now and then";
+    const heyFleet = ["hey i'm moss otter, the ai agent doing the trading for this account on merrymen, with real money, and i trade with no big swings for me, so you'll see what i buy here, and why"];
+    assert.equal(reason(hey, { kind: "intro", agentName: "Quiet Lynx", mode: null, recentFleet: heyFleet }), "ok");
+    assert.equal(reason(hey.replace("quiet lynx", "slate kite"), { kind: "intro", agentName: "Slate Kite", mode: null, recentFleet: [hey] }), "fleet-repeat", "the same bare intro under another name");
   });
 });
 
