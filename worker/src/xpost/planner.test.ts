@@ -11,6 +11,7 @@ import {
   BUY_STALE_MS,
   GAP_MS,
   INTRO_DELAY_MS,
+  MIN_LEAD_MS,
   buyKey,
   casualKey,
   coinOf,
@@ -103,12 +104,15 @@ const buys = (plan: PlanIntent[]) => plan.filter((p): p is Extract<PlanIntent, {
 // ── the intro ───────────────────────────────────────────────────────────────
 
 describe("the intro comes first, and alone", () => {
-  it("is planned once consent exists, ten minutes after it, and never sooner than a minute from now", () => {
+  it("is planned once consent exists, ten minutes after it, and never sooner than ten minutes from now", () => {
     const now = DAY0 + 10 * HOUR;
-    const fresh = planPosts(input({ introStatus: null, nowMs: now, account: { xUserId: "111", consentAtMs: now - 2 * MIN }, calls: [call({ atSec: (now - MIN) / 1000 })] }));
-    assert.deepEqual(fresh, [{ kind: "intro", dedupeKey: `intro:${TENANT}:111`, dueAtMs: now - 2 * MIN + INTRO_DELAY_MS }]);
+    const fresh = planPosts(input({ introStatus: null, nowMs: now, account: { xUserId: "111", consentAtMs: now }, calls: [call({ atSec: (now - MIN) / 1000 })] }));
+    assert.deepEqual(fresh, [{ kind: "intro", dedupeKey: `intro:${TENANT}:111`, dueAtMs: now + INTRO_DELAY_MS }]);
+    assert.equal(INTRO_DELAY_MS, 10 * MIN);
+    const next = planPosts(input({ introStatus: null, nowMs: now, account: { xUserId: "111", consentAtMs: now - 2 * MIN } }));
+    assert.equal(next[0]?.dueAtMs, now + MIN_LEAD_MS, "the next pass after consent still leaves the whole review window");
     const late = planPosts(input({ introStatus: null, nowMs: now, account: { xUserId: "111", consentAtMs: now - HOUR } }));
-    assert.equal(late[0]?.dueAtMs, now + MIN, "a late pass still shows it before it goes");
+    assert.equal(late[0]?.dueAtMs, now + 10 * MIN, "a late pass (the owner consented at night) still shows it ten minutes before it goes");
     assert.equal(introKey(TENANT.toUpperCase(), "111"), `intro:${TENANT}:111`, "keyed by the lowercased owner");
   });
 
@@ -179,8 +183,8 @@ describe("a buy post is about a fresh buy after consent, once", () => {
     assert.equal(buys(plan)[0]?.coinKey, "fresh coin");
   });
 
-  it("goes out ten to forty minutes after the fill, by the decision's own hash, and never before a minute from now", () => {
-    const fill = now - 5 * MIN;
+  it("goes out ten to forty minutes after the fill, by the decision's own hash, and never before ten minutes from now", () => {
+    const fill = now;
     for (const id of ["a", "b", "c", "d", "e", "f"]) {
       const [b] = buys(planPosts(input({ nowMs: now, calls: [call({ decisionId: id, atSec: fill / 1000 })] })));
       const jitter = 10 + (hash32(`buy|${id}`) % 31);
@@ -188,7 +192,11 @@ describe("a buy post is about a fresh buy after consent, once", () => {
       assert.ok(b!.dueAtMs >= fill + 10 * MIN && b!.dueAtMs <= fill + 40 * MIN);
     }
     const [old] = buys(planPosts(input({ nowMs: now, calls: [call({ decisionId: "old", atSec: at(100 * MIN) })] })));
-    assert.equal(old?.dueAtMs, now + MIN, "a fill found late is still shown before it goes");
+    assert.equal(old?.dueAtMs, now + 10 * MIN, "a fill found late still waits the whole review window");
+    for (const id of ["a", "b", "c", "d", "e", "f", "g", "h"]) {
+      const [b] = buys(planPosts(input({ nowMs: now, calls: [call({ decisionId: id, atSec: at(5 * MIN) })] })));
+      assert.ok(b!.dueAtMs >= now + MIN_LEAD_MS, `${id}: a fill five minutes old is still due ten minutes after it is drafted`);
+    }
   });
 
   it("never twice for one decision", () => {
@@ -243,7 +251,7 @@ describe("a buy post is about a fresh buy after consent, once", () => {
   });
 
   it("the intro is exempt from the gap", () => {
-    const fill = now - MIN;
+    const fill = now;
     const intro = post({ kind: "intro", status: "posted", sentAtMs: now - 5 * MIN });
     const [b] = buys(planPosts(input({ nowMs: now, calls: [call({ decisionId: "after-intro", atSec: fill / 1000 })], posts: [intro] })));
     assert.equal(b?.dueAtMs, fill + (10 + (hash32("buy|after-intro") % 31)) * MIN);
@@ -322,7 +330,7 @@ describe("one casual post at the account's own afternoon slot, most days", () =>
     const [c] = planPosts(input({ tenant, nowMs: now }));
     assert.equal(c?.kind, "casual");
     assert.equal(c?.dedupeKey, casualKey(tenant, new Date(day).toISOString().slice(0, 10)));
-    assert.ok(c!.dueAtMs >= now + 2 * MIN && c!.dueAtMs <= now + 10 * MIN);
+    assert.ok(c!.dueAtMs >= now + 20 * MIN && c!.dueAtMs <= now + 45 * MIN, "twenty to forty-five minutes under Coming up");
     assert.deepEqual(planPosts(input({ tenant, nowMs: now + HOUR, posts: [post({ kind: "casual", dedupeKey: c!.dedupeKey, status: "skipped" })] })), [], "the key is spent");
     assert.deepEqual(planPosts(input({ tenant, nowMs: day + 22 * HOUR })), [], "the window has closed");
   });

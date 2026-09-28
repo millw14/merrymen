@@ -358,7 +358,7 @@ describe("one step after another", () => {
     let r = await rows(w);
     assert.deepEqual(r.map((x) => [x.kind, x.status]), [["intro", "scheduled"]]);
     assert.equal(r[0]?.body, INTRO);
-    assert.equal(r[0]?.dueAtMs, T0 + 10 * MIN, "ten minutes after consent, drafted and visible first");
+    assert.equal(r[0]?.dueAtMs, T0 + 11 * MIN, "ten minutes after it is drafted, visible under Coming up first");
     assert.equal(w.tweets.length, 0);
 
     await step(T0 + 3 * MIN);

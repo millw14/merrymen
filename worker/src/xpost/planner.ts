@@ -30,10 +30,16 @@ import type { XAccount, XPost, XPostStatus } from "./store";
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 
+/**
+ * THE REVIEW WINDOW. The owner was told every post waits under "Coming up" for
+ * at least ten minutes, and can be skipped there. So no post of any kind is
+ * due sooner than this after it is drafted — an intro drafted late, a buy
+ * found late, a casual post at its slot — and the intro is due no sooner than
+ * this after consent either.
+ */
+export const MIN_LEAD_MS = 10 * MIN;
 /** The intro goes out this long after consent, so the owner sees it drafted first. */
-export const INTRO_DELAY_MS = 10 * MIN;
-/** A post is never due sooner than this after it is drafted: Settings shows every post before it goes. */
-export const MIN_LEAD_MS = MIN;
+export const INTRO_DELAY_MS = MIN_LEAD_MS;
 /** A buy is posted about only while it is this fresh. */
 export const BUY_FRESH_MS = 2 * HOUR;
 /** One buy post per coin in this long: a basket re-buying the same stock is not a feed of the same post. */
@@ -53,6 +59,9 @@ export const CASUAL_WINDOW_LOCAL = [12 * 60, 20 * 60] as const;
 export const CASUAL_WINDOW_UTC = [14 * 60, 22 * 60] as const;
 /** How many days in ten have no casual post at all. */
 export const CASUAL_QUIET_DAYS_IN_TEN = 3;
+/** A casual post is due this many minutes after it is drafted, by the account's own dice: always inside the review window's promise. */
+export const CASUAL_LEAD_MIN = 20;
+export const CASUAL_LEAD_MAX = 45;
 export const DEFAULT_PER_DAY = 3;
 
 /** What the planner asks of time. The glue binds it to the owner-local clock the room also uses. */
@@ -244,7 +253,7 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     // The slot leaves half an hour of window after it, so a pass that lands late still finds it.
     const slot = start + (Math.floor(h / 10) % (end - start - 30));
     if (!quiet && minutes >= slot && minutes < end) {
-      const lead = 2 + (hash32(`casual-lead|${cKey}`) % 9);
+      const lead = CASUAL_LEAD_MIN + (hash32(`casual-lead|${cKey}`) % (CASUAL_LEAD_MAX - CASUAL_LEAD_MIN + 1));
       const due = pushedPast(now + lead * MIN, slots);
       const day = dayOf(due);
       if (due - now <= CASUAL_MAX_PUSH_MS && onDay(day) < perDay) {
