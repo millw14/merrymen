@@ -30,6 +30,7 @@ const {
   ENERGY_ALERT_RETRY_SEC,
   energyAlert,
   energyAlertDue,
+  energyToldDayOf,
   recordEnergyAlert,
 } = await import("./energy-alert");
 const { startNotifier } = await import("./notifier");
@@ -62,6 +63,8 @@ const inputs = (over: Partial<EnergyStatus> = {}, rest: Record<string, unknown> 
   energyAccount: ACCOUNT,
   energyChainId: 4663,
   energyHolder: HOLDER,
+  // This process won the day's notice claim (energy_days.told_at).
+  energyToldDay: over.day ?? REPORT.day,
   ...rest,
 });
 
@@ -88,6 +91,21 @@ describe("energyAlert — it speaks only when today's energy is spent", () => {
 
   it("never yesterday's news: a report whose day has reset says nothing", () => {
     assert.equal(energyAlert(inputs(), PUBLIC, REPORT.resetsAt), null);
+  });
+
+  it("ONLY FOR A DAY WHOSE NOTICE CLAIM THIS PROCESS WON — after a redeploy the seeded stamp means silence", () => {
+    assert.equal(energyAlert(inputs({}, { energyToldDay: null }), PUBLIC, NOW), null, "claimed elsewhere, or not yet");
+    assert.equal(energyAlert(inputs({}, { energyToldDay: undefined }), PUBLIC, NOW), null);
+    assert.equal(energyAlert(inputs({}, { energyToldDay: "2026-09-20" }), PUBLIC, NOW), null, "yesterday's claim is not today's");
+    assert.ok(energyAlert(inputs({}, { energyToldDay: REPORT.day }), PUBLIC, NOW));
+  });
+
+  it("energyToldDayOf: the claim counts only for the agent that won it", () => {
+    const told = { agentId: ACCOUNT, day: "2026-09-21" };
+    assert.equal(energyToldDayOf(told, ACCOUNT), "2026-09-21");
+    assert.equal(energyToldDayOf(told, HOLDER), null, "a re-sign armed another account in this process");
+    assert.equal(energyToldDayOf(told, null), null, "unarmed");
+    assert.equal(energyToldDayOf(null, ACCOUNT), null, "nothing claimed here");
   });
 });
 
@@ -208,6 +226,7 @@ describe("through the real notifier", () => {
           energyAccount: ACCOUNT,
           energyChainId: 4663,
           energyHolder: HOLDER,
+          energyToldDay: REPORT.day,
         };
       },
       getChainId: () => 4663,

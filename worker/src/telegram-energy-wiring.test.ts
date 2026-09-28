@@ -39,6 +39,20 @@ describe("index.ts hands the Telegram surfaces the tick's energy report", () => 
     assert.match(inputs, /energyHolder: cfg\.holderAddress \?\? null,/);
   });
 
+  it("THE ALERT RIDES THE NOTICE'S DURABLE CLAIM — set only after this process wins it, for the armed agent", () => {
+    // telegram.json does not survive a hosted redeploy, so its alert keys
+    // cannot keep the alert to once a day; energy_days.told_at can, because
+    // the orchestrator seeds it back before the rebuilt child arms.
+    const inputs = literal("getAlertInputs: () => ({", "\n    }),");
+    assert.match(inputs, /energyToldDay: energyToldDayOf\(energyToldHere, active\?\.agentId\),/);
+    const tell = literal("async function tellEnergySpent(", "\n  }\n");
+    const claim = tell.indexOf("const claimed = await claimEnergyNotice(agentId, day, now);");
+    const gate = tell.indexOf("if (!claimed) return;");
+    const set = tell.indexOf("energyToldHere = { agentId, day };");
+    assert.ok(claim > 0 && gate > claim && set > gate, "the marker is set only once the claim is won");
+    assert.equal(INDEX.split("energyToldHere = ").length - 1, 1, "and nowhere else");
+  });
+
   it("the report they read is the one refreshEnergy publishes", () => {
     // The report on the agents row and the report Telegram reads are the same
     // object, so they cannot disagree.

@@ -176,7 +176,7 @@ describe("deciding and telling", () => {
 
   it("THE CLAIM ON TODAY'S NOTICE PRECEDES THE MESSAGE — at most once, even across a crash", () => {
     const w = body("tellEnergySpent");
-    const claim = w.indexOf("await claimEnergyNotice(agentId, energyNow.day, now)");
+    const claim = w.indexOf("await claimEnergyNotice(agentId, day, now)");
     const told = w.indexOf("await addEvent(");
     assert.ok(claim > 0 && told > claim);
     assert.match(w, /if \(!claimed\) return;/);

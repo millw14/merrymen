@@ -252,6 +252,7 @@ import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
 import type { Holding, Snapshot, Strategy, Tick } from "./strategies/types";
 import { isPaused, startTelegram } from "./telegram/service";
 import { startNotifier } from "./telegram/notifier";
+import { energyToldDayOf, type EnergyToldHere } from "./telegram/energy-alert";
 import { startVirtualsStreamer } from "./virtuals-streamer";
 import { createStateRef, ensureLinkCode } from "./telegram/state";
 import { readPositionRaw } from "./telegram/reads";
@@ -4204,6 +4205,13 @@ async function main() {
    * startNotifier's getAlertInputs read it — wired by the Telegram slice).
    */
   let energyReport: EnergyStatus | null = null;
+  /**
+   * The notice claim THIS PROCESS won (energy_days.told_at), and for which
+   * agent and day — the one thing the Telegram alert speaks on
+   * (telegram/energy-alert.ts). A rebuilt child finds the stamp the seed put
+   * back, wins nothing, and so does not repeat the alert after a redeploy.
+   */
+  let energyToldHere: EnergyToldHere | null = null;
   /** The last USDG estimate, the shortfall it priced, and when. At most one re-price per ENERGY.estimateEverySec. */
   let energyEstimate: { key: string; value: number | null; at: number } | null = null;
 
@@ -4280,14 +4288,18 @@ async function main() {
   async function tellEnergySpent(agentId: string): Promise<void> {
     if (!active) return;
     const now = Math.floor(Date.now() / 1000);
-    const claimed = await claimEnergyNotice(agentId, energyNow.day, now);
+    const day = energyNow.day;
+    const claimed = await claimEnergyNotice(agentId, day, now);
     energyNow = { ...energyNow, told: true };
     if (!claimed) return;
+    // AFTER THE CLAIM, NEVER BEFORE: the Telegram alert rides it, so it goes
+    // once per UTC day however many redeploys the day sees.
+    energyToldHere = { agentId, day };
     await addEvent(
       agentId,
       "warn",
       energyNotice({
-        day: energyNow.day,
+        day,
         account: active.grant.smartAccount,
         chainId: active.grant.chainId,
         holder: cfg.holderAddress ?? null,
@@ -13247,6 +13259,9 @@ async function main() {
       energyAccount: active?.grant.smartAccount ?? null,
       energyChainId: active?.grant.chainId ?? null,
       energyHolder: cfg.holderAddress ?? null,
+      // ONLY FOR A DAY WHOSE NOTICE CLAIM THIS PROCESS WON — the durable
+      // once-a-day rule; telegram.json's keys do not survive a redeploy.
+      energyToldDay: energyToldDayOf(energyToldHere, active?.agentId),
     }),
     getChainId: () => active?.grant.chainId ?? null,
     // Scope the trade-cursor queries to THIS tenant's book. On a shared ledger an
