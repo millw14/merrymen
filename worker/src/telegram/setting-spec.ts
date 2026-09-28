@@ -117,8 +117,15 @@ export const DASHBOARD_ONLY: Readonly<Record<string, string>> = Object.freeze({
    * from; a chat reached by a bearer link code cannot show that warning to the
    * owner, and anyone holding the code could otherwise make the agent post
    * under the owner's name.
+   *
+   * ONE REPLY FOR "ON" AND "OFF" ALIKE, SO IT SAYS BOTH. The owner most likely
+   * to type "tweets off" is one whose Merryman just posted something they
+   * did not like: the reply has to say the chat changed nothing and where
+   * posting IS stopped — on the dashboard or in the app, which both have the
+   * switch — and that a waiting post can be skipped there.
    */
-  xPosting: "Posting on X is only switched on in Settings on the dashboard.",
+  xPosting:
+    "I can't turn posting on X on or off from chat. That's done only in Settings → Posting on X, on the dashboard or in the app, where you can also skip a post before it goes out.",
 });
 
 /** Limits sealed in the signed permission — a signature is the only way to change them. */
