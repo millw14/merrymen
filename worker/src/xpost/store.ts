@@ -678,6 +678,19 @@ export async function skipScheduled(db: Db, id: number, reason: string, nowMs: n
 }
 
 /**
+ * A SCHEDULED POST WHOSE ACCOUNT MOVED ON — gone, switched off, or a different
+ * X account now. The web cancels drafts on each of those as it happens; this
+ * is the orchestrator's backstop for a draft written in the same instant.
+ * Conditional, like every transition out of scheduled.
+ */
+export async function cancelPost(db: Db, id: number, reason: string, nowMs: number): Promise<boolean> {
+  const r = await db
+    .prepare(`UPDATE xpost_posts SET status = 'cancelled', reason = ?, updated_at_ms = ? WHERE id = ? AND status = 'scheduled'`)
+    .run(reason, int(nowMs), int(id));
+  return r.changes === 1;
+}
+
+/**
  * THE OWNER'S SKIP. Only their own post, and only while it is still
  * scheduled: a post already claimed for sending cannot be half-skipped.
  */

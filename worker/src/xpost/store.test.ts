@@ -10,6 +10,7 @@ import test from "node:test";
 import { translateQuery, translateSchema, wrapSqlite, type Db } from "../db";
 import {
   XPOST_SCHEMA,
+  cancelPost,
   cancelScheduled,
   claimPost,
   countPostedSince,
@@ -275,6 +276,18 @@ test("the owner can skip only their own post, and only while it is scheduled", a
   assert.equal(await skipScheduled(db, other, "stale", 5), false);
 });
 
+test("the orchestrator cancels a scheduled post whose account moved on, and nothing already claimed", async (t) => {
+  const { db } = await open(t);
+  const id = (await schedulePost(db, post()))!;
+  assert.equal(await cancelPost(db, id, "account-off", 2), true);
+  assert.equal(await keyStatus(db, post().dedupeKey), "cancelled");
+  assert.equal((await postsOf(db, OWNER_A, 0))[0]?.reason, "account-off");
+  assert.equal(await cancelPost(db, id, "account-off", 3), false, "already cancelled");
+  const claimed = (await schedulePost(db, post({ dedupeKey: "buy:d3", kind: "buy" })))!;
+  await claimPost(db, claimed, 4);
+  assert.equal(await cancelPost(db, claimed, "account-gone", 5), false, "a claimed post is the sender's to finish");
+});
+
 test("recent bodies: one account's, or the fleet's, never the ones that did not go out", async (t) => {
   const { db } = await open(t);
   await schedulePost(db, post({ dedupeKey: "a1", body: "one", nowMs: 10 }));
@@ -349,6 +362,7 @@ test("every statement the store sends translates to Postgres with matching, bind
   await markPosted(db, id, "1", 10.5);
   await markFailed(db, id, "x", 11.5);
   await skipScheduled(db, id, "stale", 11.5);
+  await cancelPost(db, id, "account-off", 12.5);
   await ownerCancel(db, OWNER_A, id, 12.5);
   await failInterrupted(db, 13.5, 13.5);
   await postsOf(db, OWNER_A, 0.5, 20.5);
