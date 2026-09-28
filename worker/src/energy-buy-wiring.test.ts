@@ -384,7 +384,12 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     // Every breaker read takes the lift when no risk period stands.
     assert.match(CODE, /const lifetimeBreakerPeak = \(\) => highWaterMarkUsdg \+ heldBreakerLiftUsdg;/);
     assert.match(CODE, /const drawdownPeak = \(\) => paperActive\(\) \? highWaterMarkUsdg : \(riskHighWaterMarkUsdg \?\? lifetimeBreakerPeak\(\)\);/);
-    assert.match(CODE, /highWaterMarkUsdg: paperActive\(\) \? highWaterMarkUsdg : usdg\(\(await getRiskPeriodPeak\(agentId\)\) \?\? usdgNum\(lifetimeBreakerPeak\(\)\)\),/);
+    // (The wall's own read takes the ledger's mark while the in-memory one is
+    // still the paper book's — paper-live-mark.test.ts.)
+    assert.match(
+      CODE,
+      /highWaterMarkUsdg: paperActive\(\)\s*\? highWaterMarkUsdg\s*: usdg\(\s*\(await getRiskPeriodPeak\(agentId\)\) \?\?\s*\(markBook === "paper" \? \(await getAgentFinancials\(agentId\)\)\.hwmUsdg : usdgNum\(lifetimeBreakerPeak\(\)\)\),\s*\),/,
+    );
     // The expected cash: the kept baseline with the queue folded (read, not taken).
     const expected = arrow("heldCashBaseline");
     assert.match(expected, /if \(lastCashUsdg !== null\) return expectedCashUsdg\(\{ cashUsdg: lastCashUsdg, since: baselineSince \}, settlementQueue\);/);
@@ -480,9 +485,12 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
   it("(9) the capitalPeakDirty refresh runs at the top of the tick, BEFORE the book read", () => {
     const t = body("tick");
     const armed = t.indexOf("if (!armed || !active) return;");
-    const refresh = t.indexOf("if (capitalPeakDirty && !paperActive()) {");
+    // On the tick's own paper reading, and shared with the paper-mark reload
+    // (paper-live-mark.test.ts).
+    const paper = t.indexOf("const paper = paperActive();");
+    const refresh = t.indexOf("if (livePeaksStale(paper, markBook, capitalPeakDirty)) {");
     const balances = t.indexOf("readAccountBalances(client, grant.smartAccount)");
-    assert.ok(armed > 0 && refresh > armed && balances > refresh);
+    assert.ok(armed > 0 && paper > armed && refresh > paper && balances > refresh);
     assert.match(t.slice(refresh, refresh + 400), /highWaterMarkUsdg = usdg\(\(await getAgentFinancials\(agentId\)\)\.hwmUsdg\);[\s\S]*capitalPeakDirty = false;/);
   });
 

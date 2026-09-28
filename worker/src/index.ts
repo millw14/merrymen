@@ -118,7 +118,7 @@ import { breakerTripped, drawdownOf, opsHeadroomOf, takeTick } from "./strategie
 import { grantHasDeadRateLimit } from "./session-account";
 import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
-import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, tickPlan, tickRatchets, writeHeartbeat } from "./command-wake";
+import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, livePeaksStale, tickPlan, tickRatchets, writeHeartbeat, type MarkBook } from "./command-wake";
 import { createTickBook, orderAsked, orderReadsOf, placeOrder, type StatedReads } from "./order-gate";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
@@ -3821,6 +3821,13 @@ async function main() {
   let highWaterMarkUsdg = 0n;
   let riskHighWaterMarkUsdg: bigint | null = null;
   /**
+   * WHICH BOOK `highWaterMarkUsdg` WAS LAST TAKEN FROM. A paper tick puts the
+   * paper book's peak in it, and the first live tick after one re-reads the
+   * live mark before it reads a balance (command-wake.ts livePeaksStale) —
+   * or it charges a fee, and judges the breaker, against the paper book.
+   */
+  let markBook: MarkBook = "live";
+  /**
    * WHAT HELD LOOKS SAW ABOVE THE LIFETIME MARK — the breaker's, not the fee's.
    *
    * With no risk period standing, the live breaker judges against
@@ -3852,7 +3859,7 @@ async function main() {
    * principal against a pre-purchase equity, and setAgentHwm would then
    * re-ratchet the peak straight back over the withdrawal. So the booking only
    * raises this flag, and the NEXT tick re-reads the persisted peaks before its
-   * book read (tick(), right after the armed check).
+   * book read (tick(), at livePeaksStale, before the balances are read).
    */
   let capitalPeakDirty = false;
   /**
@@ -6752,6 +6759,7 @@ async function main() {
     // HWM is persistent — a restart must not forget the peak, or the breaker
     // re-arms low and the fee ledger double-charges old profit.
     highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+    markBook = "live";
     // A lift is relative to the mark it was observed above; a fresh arm starts
     // from the persisted mark alone.
     heldBreakerLiftUsdg = 0n;
@@ -7585,7 +7593,15 @@ async function main() {
     const state: AgentState = {
       spentTodayUsdg: spentToday(),
       opsToday: opsTodayCount(),
-      highWaterMarkUsdg: paperActive() ? highWaterMarkUsdg : usdg((await getRiskPeriodPeak(agentId)) ?? usdgNum(lifetimeBreakerPeak())),
+      // A LIVE INTENT NEVER MEETS THE PAPER PEAK. The tick re-reads the live
+      // mark before it trades (livePeaksStale), but a trade typed in Telegram
+      // can join in the reads before that; until then the ledger's is the mark.
+      highWaterMarkUsdg: paperActive()
+        ? highWaterMarkUsdg
+        : usdg(
+            (await getRiskPeriodPeak(agentId)) ??
+              (markBook === "paper" ? (await getAgentFinancials(agentId)).hwmUsdg : usdgNum(lifetimeBreakerPeak())),
+          ),
       equityUsdg,
       equityKnown,
       nowSec: Math.floor(Date.now() / 1000),
@@ -10130,18 +10146,6 @@ async function main() {
     if (!armed || !active) return;
     const { grant, agentId, client } = active;
 
-    // AN ENERGY PURCHASE WAS BOOKED SINCE THE LAST BOOK READ: take the peaks it
-    // lowered from the ledger now, BEFORE this tick reads balances and composes
-    // equity — so equity and the peak it is judged against are both
-    // post-purchase, and nothing mid-tick ever saw one without the other. Read
-    // only (the risk peak is asked without observing); see capitalPeakDirty.
-    if (capitalPeakDirty && !paperActive()) {
-      highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
-      const risk = await getRiskPeriodPeak(agentId);
-      riskHighWaterMarkUsdg = risk === null ? null : usdg(risk);
-      capitalPeakDirty = false;
-    }
-
     // Re-read the settled budget every tick, so ops and spend age out of the
     // trailing-24h window on their own. syncGrant short-circuits on an
     // unchanged grant, so before this existed the counters were seeded once at
@@ -10165,6 +10169,21 @@ async function main() {
     lastPrices = market.prices;
 
     const paper = paperActive();
+    // THE LIVE PEAKS, FROM THE LEDGER, BEFORE THIS TICK READS BALANCES AND
+    // COMPOSES EQUITY — when an energy purchase lowered them since the last book
+    // read (see capitalPeakDirty), or when the mark in memory is the PAPER
+    // book's because the last tick was paper (see markBook). Either way equity
+    // and the peak it is judged against come from the same side of the change,
+    // and the fee, the breaker and flow inference's first look below never see
+    // the other. Decided on `paper`, the same reading the accounting branch
+    // forks on. Read only (the risk peak is asked without observing).
+    if (livePeaksStale(paper, markBook, capitalPeakDirty)) {
+      highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+      const risk = await getRiskPeriodPeak(agentId);
+      riskHighWaterMarkUsdg = risk === null ? null : usdg(risk);
+      capitalPeakDirty = false;
+      markBook = "live";
+    }
     if (paper) autoTrenchBalances.clear();
     let balances: { ethWei: bigint; cashUsdg: bigint; vaultUsdg: bigint };
     let positions: Position[];
@@ -10964,8 +10983,10 @@ async function main() {
       // curve mark: an owner's order is not a sample of the cadence the peak is
       // measured on. See command-wake.ts tickRatchets.
       highWaterMarkUsdg = usdg(await ratchet.paperPeak(bookRow, usdgNum(equityUsdg), (b) => setPaperBook(agentId, b)));
-      // The mark is the paper book's now; a live lift observed above the live
-      // mark means nothing on top of it. Paper never holds a flow look.
+      markBook = "paper";
+      // The mark is the paper book's now, until a live tick re-reads the live
+      // one (livePeaksStale); a live lift observed above the live mark means
+      // nothing on top of it. Paper never holds a flow look.
       heldBreakerLiftUsdg = 0n;
     } else {
       // Capital first, performance second. Any deposit or withdrawal since the
