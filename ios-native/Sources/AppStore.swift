@@ -12,7 +12,7 @@ enum Route: Hashable {
     /// get-energy's card: (symbol, amount). Its own case so the energy marker
     /// can only ever come from that card, never from a trade route.
     case energyRequest(String, String)
-    case markets, search, searchFor(String), approval(String), connectedApps, agent(String), token(String), settings, telegram, circle, groupchat, proposals, xProof
+    case markets, search, searchFor(String), approval(String), connectedApps, agent(String), token(String), settings, telegram, circle, groupchat, proposals, xProof, xPosting
     case trade(String), deposit, permissions, create, limits, withdraw, signIn
 }
 
@@ -55,6 +55,10 @@ final class AppStore: ObservableObject {
         if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-approval-test") {
             path = [.connectedApps]
             UserDefaults.standard.removeObject(forKey: "uiTest.approvalDecided")
+        }
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-x-posting-test") {
+            path = [.xPosting]
+            for key in ["uiTest.xPostingEnabled", "uiTest.xWrites", "uiTest.xSkipped", "uiTest.xDisconnected"] { UserDefaults.standard.removeObject(forKey: key) }
         }
         if ProcessInfo.processInfo.arguments.contains("-ui-testing"), ProcessInfo.processInfo.arguments.contains("-snipe-test") {
             path = [.snipe("NEON", "5.00")]

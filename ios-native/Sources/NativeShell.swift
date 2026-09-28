@@ -215,6 +215,7 @@ struct NativeShell: View {
                 case .groupchat: GroupChatScreen()
                 case .proposals: ProposalsScreen()
                 case .xProof: XProofScreen()
+                case .xPosting: XPostingScreen()
                 case .holderWallet: WalletProofScreen(linking: true)
                 case .walletSignIn: WalletProofScreen(linking: false)
                 case .trade(let symbol): TradeScreen(symbol: symbol)

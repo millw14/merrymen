@@ -53,6 +53,11 @@ const nextConfig = {
     // The MCP consent and Connected apps pages grant and revoke access to an
     // owner's agent; they must never render inside another site's frame
     // (clickjacking an "Allow" click).
+    //
+    // /connect/x is X's OAuth callback: it arrives with the authorization
+    // code in its query. no-referrer is the load-bearing header there — the
+    // page scrubs its URL on load, but anything fetched before that must not
+    // carry the code to another host in a Referer.
     const noFrame = [
       { key: "X-Frame-Options", value: "DENY" },
       { key: "Content-Security-Policy", value: "frame-ancestors 'none'" },
@@ -66,7 +71,8 @@ const nextConfig = {
     { source: "/connect/apps", headers: noFrame },
     { source: "/connect/mcp", headers: noFrame },
     { source: "/connect/approve/:id", headers: noFrame },
-    { source: "/connect/export/:id", headers: noFrame }];
+    { source: "/connect/export/:id", headers: noFrame },
+    { source: "/connect/x", headers: noFrame }];
   },
   experimental: {
     externalDir: true,

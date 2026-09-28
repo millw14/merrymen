@@ -120,6 +120,9 @@ struct SettingsScreen: View {
                 }
                 Button("Review changes") { prepareReview() }.buttonStyle(PrimaryButtonStyle()).disabled(draft.isEmpty || busy)
                 NavigationLink("Telegram connection", value: Route.telegram)
+                // Its own screen and routes: the X switch is not a settings key
+                // and never rides in this form's reviewed save.
+                NavigationLink("Posting on X", value: Route.xPosting)
                 NavigationLink("Wallet & signed limits", value: Route.permissions)
             } else if data.refreshing { ProgressView() }
             if let error = data.error { Text(error).foregroundStyle(Brand.down); Button("Retry") { Task { await load() } } }

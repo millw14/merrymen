@@ -251,6 +251,62 @@ throttle: `worker/src/energy.ts`.
 > (`0x89e5db8b5aa49aa85ac63f691524311aeb649eba`) before telling owners it works;
 > the policy is not in this repo.
 
+### Posting on X (opt-in per owner; off until the X app is configured)
+
+An owner can connect an X account in Settings and let their Merryman post on
+it: a hello first, the odd casual thought, and now and then a coin it bought
+and why — never alerts, errors, prices or amounts. Nothing posts until the
+owner turns it on through a warning that names the connected account. Rules
+and design: [`docs/x-posting.md`](x-posting.md). Hosted only; self-hosted, the
+routes answer 404 and the section does not render.
+
+**The X app** (developer.x.com → your project → the app → *User authentication settings*):
+- **Type of App:** *Web App, Automated App or Bot* — a **confidential** client (it has a client secret).
+- **App permissions:** *Read and write*.
+- **Callback URI / Redirect URL:** exactly `${MERRYMEN_PUBLIC_ORIGIN}/connect/x`, e.g. `https://app.merrymen.dev/connect/x` — byte for byte, no trailing slash. It is a page, not an `/api` route (the callback is a cross-site navigation that carries no session cookie). The iOS app finishes through the same page.
+- **Scopes** requested: `tweet.read tweet.write users.read offline.access` (`offline.access` is what makes X issue a refresh token; without it every connection dies in two hours).
+- **Website URL:** the portal requires one — use your `MERRYMEN_PUBLIC_ORIGIN`.
+- **Buy pay-per-use credits (or enable billing) before owners turn posting on.** Each post spends the X app's API credits; until there are some, every send answers credits-depleted and the orchestrator pauses the whole fleet for an hour at a time while drafts wait under Coming up.
+- A 401 from X's token endpoint means X refused the **app's** client id or secret (rotated on one service, or mistyped): the orchestrator pauses the fleet for fifteen minutes and logs it once; no owner is disconnected.
+
+| Var | Service | Value |
+|---|---|---|
+| `MERRYMEN_X_CLIENT_ID` | **web + orchestrator** | the app's OAuth 2.0 client id. Unset = the feature is unavailable (Settings says so), not broken |
+| `MERRYMEN_X_CLIENT_SECRET` | **web + orchestrator** | the app's OAuth 2.0 client secret. Read in one file only, and stripped from every worker child |
+| `MERRYMEN_PUBLIC_ORIGIN` | web (already set above) | builds the callback `${origin}/connect/x`; the orchestrator does not need it for X |
+| `MERRYMEN_X_REDIRECT_URI` *(optional)* | web | an explicit callback instead of the one built from the origin (https, or http on loopback for local testing). It must still be this web service's own `/connect/x` page — the finish needs its session — and be registered on the X app byte for byte |
+| `MERRYMEN_XPOST` *(optional)* | orchestrator | `0` stops all posting. Owners can still connect and see their drafts; drafts stay pending while posting is off, and a casual one past its day is skipped as stale when it comes back |
+| `MERRYMEN_XPOST_LLM_KEY` *(optional)* | **orchestrator only** | a key used **only** for X posts. Unset: the room's `MERRYMEN_GROUPCHAT_LLM_KEY` is used as it is — unless it is a fleet key, which X refuses. Neither: only intros are posted, from templates |
+| `MERRYMEN_XPOST_LLM_PROVIDER` *(optional)* | orchestrator | `groq` (default), `anthropic` (default model `claude-opus-5`), or `openai` for any OpenAI-compatible endpoint. **A provider other than Groq receives the writer's inputs: name it in the privacy policy (`site/components/PrivacyPolicyDoc.tsx`, section 5) before deploying it** |
+| `MERRYMEN_XPOST_MODEL` *(optional)* | orchestrator | the writer's model; default `qwen/qwen3.8-27b` on Groq. Required for `openai` |
+| `MERRYMEN_XPOST_LLM_BASE_URL` *(optional)* | orchestrator | the `…/v1` base for `openai` (https) |
+| `MERRYMEN_XPOST_LLM_PER_DAY` *(optional)* | orchestrator | model calls per UTC day across the fleet, default `400`; `0` means template intros only |
+| `MERRYMEN_XPOST_PER_DAY` *(optional)* | orchestrator | posts per X account per local day, default `3` (at most two of them buy posts); `0` switches posting off |
+| `MERRYMEN_XPOST_FLEET_PER_DAY` *(optional)* | orchestrator | posts per UTC day across the fleet, default `1000` (X's app ceiling is 10,000 per 24 h, and each post costs money); `0` switches posting off |
+| `MERRYMEN_XPOST_SHARE_HOUSE_KEY` *(optional)* | orchestrator | `1` lets the writer use a fleet key (`GROQ_API_KEY`, `MERRYMEN_LLM_API_KEY`, `ANTHROPIC_API_KEY`), its own or the room's. Not recommended |
+
+> **The orchestrator also needs `DATABASE_URL` and `MERRYMEN_STORE_DEK`** (it
+> has both already): the connections, sealed tokens and posts live in
+> `xpost_*` tables, and the tokens are sealed under the DEK. Without either,
+> the orchestrator logs `xpost: off — …` once and posts nothing.
+>
+> **Give the writer its own key, from its own organization**, for the room's
+> reason: trading's model allowance is rationed per organization and model,
+> and a background feature has exhausted it before. The boot log says
+> `xpost: WARNING …` when the writer's Groq model is trading's own. A value an operator
+> cannot read is said once at boot and fails closed: an unreadable fleet
+> ceiling switches posting off, an unreadable model allowance is none.
+>
+> **Without a model only intros go out**, from a small template pool, and a
+> pool is finite: X forbids substantially similar posts across accounts, so
+> on a large fleet more template intros are skipped as echoes. A model key
+> is what makes posting work at scale.
+>
+> **What the boot log says**: `xpost: on — …` with the ceilings, and one
+> `xpost writer: …` line naming the provider and model (never the key). Each
+> pass that did something logs counts only — `xpost: sent 1, drafted-buy 1` —
+> never a post's text and never a token.
+
 ## 5. Create the two services
 Both build from the same repo + `Dockerfile`. The image is role-by-variable: its
 `CMD` runs `npm run ${MERRYMEN_START:-start:web}`, and `railway.json` sets no

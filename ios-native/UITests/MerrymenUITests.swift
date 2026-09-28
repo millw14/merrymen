@@ -85,6 +85,60 @@ final class MerrymenUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Size"].exists)
         XCTAssertTrue(app.staticTexts["Realized P&L"].exists)
     }
+    /// Posting on X is opt-in through a warning that names the connected
+    /// account. "Not now" must send nothing (the fixture refuses an enable that
+    /// is not the first write since launch), and confirming must send exactly
+    /// {action: enable, xUserId, owner, tz} with tz the device's own zone (the
+    /// fixture refuses any other keys or zone). The app runs in Tokyo so the
+    /// zone is a real place whatever the simulator is set to. The waiting
+    /// post's Skip is named for VoiceOver and skips exactly that post.
+    func testXPostingWarnsWithTheConnectedAccountAndSendsOnlyTheConfirmedConsent() {
+        let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-signed-in", "-x-posting-test", "-reset-tour"]
+        app.launchEnvironment["TZ"] = "Asia/Tokyo"; app.launch()
+        if app.buttons["Skip tour"].waitForExistence(timeout: 8) { app.buttons["Skip tour"].tap() }
+        XCTAssertTrue(app.staticTexts["Connected as @robin_trades"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["slow day on the charts. honestly the quiet ones are when i learn the most."].exists)
+        let toggle = app.switches["Let my Merryman post on X"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5)); XCTAssertEqual(toggle.value as? String, "0")
+        let posting = app.staticTexts["Posting from @robin_trades — whichever X account is connected."]
+        XCTAssertFalse(posting.exists)
+
+        flip(toggle)
+        let warning = app.alerts["Post on X as @robin_trades?"]
+        XCTAssertTrue(warning.waitForExistence(timeout: 5))
+        XCTAssertTrue(warning.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Your Merryman will post from whichever X account is connected — right now that's @robin_trades.")).firstMatch.exists)
+        // The review window it promises is the planner's ten-minute floor, not "you'll see each one".
+        XCTAssertTrue(warning.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.")).firstMatch.exists)
+        XCTAssertFalse(warning.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "You'll see each one here")).firstMatch.exists)
+        capture(app, "Posting on X warning names the connected account")
+        warning.buttons["Not now"].tap()
+        XCTAssertTrue(warning.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(toggle.value as? String, "0")
+        XCTAssertFalse(posting.exists)
+
+        flip(toggle)
+        XCTAssertTrue(warning.waitForExistence(timeout: 5))
+        warning.buttons["Let it post as @robin_trades"].tap()
+        XCTAssertTrue(posting.waitForExistence(timeout: 8))
+        XCTAssertEqual(toggle.value as? String, "1")
+        XCTAssertFalse(app.alerts["Merrymen"].exists)
+        capture(app, "Posting on X on for the confirmed account")
+
+        // Skip says which post it skips (label "Skip post", the post as its
+        // hint), never a bare "Skip" repeated once per draft.
+        let skip = app.buttons["Skip post"]
+        XCTAssertTrue(skip.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Skip"].exists)
+        for _ in 0..<6 { if skip.isHittable { break }; app.swipeUp() }
+        skip.tap()
+        XCTAssertTrue(app.staticTexts["Nothing waiting to go out."].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.staticTexts["slow day on the charts. honestly the quiet ones are when i learn the most."].exists)
+        XCTAssertFalse(app.alerts["Merrymen"].exists)
+    }
+    /// A SwiftUI Toggle's element spans its label; only the switch itself flips it.
+    private func flip(_ toggle: XCUIElement) {
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+    }
     private func capture(_ app: XCUIApplication, _ name: String) {
         let screenshot = XCTAttachment(screenshot: app.screenshot()); screenshot.name = name; screenshot.lifetime = .keepAlways; add(screenshot)
     }
