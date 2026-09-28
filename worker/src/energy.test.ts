@@ -441,7 +441,7 @@ describe("the report", () => {
 });
 
 describe("durability: merge and seed", () => {
-  const row = (over: Partial<EnergyDayRow>): EnergyDayRow => ({ day: "2026-09-27", reviews: 0, entries: 0, toldAt: null, readAt: null, readFull: null, ...over });
+  const row = (over: Partial<EnergyDayRow>): EnergyDayRow => ({ day: "2026-09-27", reviews: 0, entries: 0, entriesRefunded: 0, toldAt: null, readAt: null, readFull: null, ...over });
   it("counters take the larger, the first notice stands, the newer read wins — symmetric", () => {
     const a = row({ reviews: 5, entries: 1, toldAt: 100, readAt: 50, readFull: true });
     const b = row({ reviews: 3, entries: 2, toldAt: 200, readAt: 60, readFull: false });
@@ -467,9 +467,29 @@ describe("durability: merge and seed", () => {
       ],
     });
     assert.deepEqual(plan, [
-      { day: "2026-09-26", reviews: 7, entries: 0, toldAt: 5, readAt: null, readFull: null },
-      { day: "2026-09-27", reviews: 4, entries: 2, toldAt: null, readAt: 99, readFull: true },
+      { day: "2026-09-26", reviews: 7, entries: 0, entriesRefunded: 0, toldAt: 5, readAt: null, readFull: null },
+      { day: "2026-09-27", reviews: 4, entries: 2, entriesRefunded: 0, toldAt: null, readAt: 99, readFull: true },
     ]);
+  });
+  it("A REFUND IS ITS OWN RISING COUNT, so the larger of each keeps it — whichever copy is ahead", () => {
+    // The child claimed two and gave one back; shared was mirrored between
+    // the claim and the refund. The old decrement lost the refund here.
+    const child = row({ entries: 2, entriesRefunded: 1 });
+    const stale = row({ entries: 2, entriesRefunded: 0 });
+    for (const m of [mergeEnergyDay(child, stale), mergeEnergyDay(stale, child)]) {
+      assert.equal(m.entries - m.entriesRefunded, 1, "one used, in either order");
+    }
+    // A later claim on the child and an older refund elsewhere still add up.
+    assert.deepEqual(
+      [mergeEnergyDay(row({ entries: 3, entriesRefunded: 1 }), row({ entries: 2, entriesRefunded: 1 }))].map((m) => [m.entries, m.entriesRefunded]),
+      [[3, 1]],
+    );
+  });
+  it("a table from before the refund counter reads as none refunded; an unreadable one drops the row", () => {
+    assert.equal(energyDayRowOf({ day: "2026-09-27", reviews: 0, entries: 2, told_at: null, read_at: null, read_full: null })?.entriesRefunded, 0);
+    assert.equal(energyDayRowOf({ day: "2026-09-27", reviews: 0, entries: 2, entries_refunded: "1", told_at: null, read_at: null, read_full: null })?.entriesRefunded, 1);
+    assert.equal(energyDayRowOf({ day: "2026-09-27", reviews: 0, entries: 2, entries_refunded: -1, told_at: null, read_at: null, read_full: null }), null);
+    assert.equal(energyDayRowOf({ day: "2026-09-27", reviews: 0, entries: 2, entriesRefunded: "x", toldAt: null, readAt: null, readFull: null }), null);
   });
   it("a row with a read time reports its read; without one, read_full means nothing", () => {
     assert.equal(energyDayRowOf({ day: "2026-09-27", reviews: 0, entries: 0, told_at: null, read_at: null, read_full: 1 })?.readFull, null);
@@ -479,7 +499,7 @@ describe("durability: merge and seed", () => {
 
 describe("the seed reads both shapes of a row", () => {
   it("A PARSED ROW KEEPS ITS NOTICE AND ITS READ — the round trip that once dropped them", () => {
-    const parsed: EnergyDayRow = { day: "2026-09-27", reviews: 1, entries: 2, toldAt: 123, readAt: 500, readFull: true };
+    const parsed: EnergyDayRow = { day: "2026-09-27", reviews: 1, entries: 2, entriesRefunded: 1, toldAt: 123, readAt: 500, readFull: true };
     assert.deepEqual(energyDayRowOf(parsed), parsed);
     assert.deepEqual(planEnergySeed({ shared: [parsed], sinceDay: "2026-09-26" }), [parsed]);
   });

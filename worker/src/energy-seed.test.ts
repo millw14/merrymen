@@ -73,7 +73,7 @@ const TOMORROW = utcDay(NOW + 86_400);
 const sharedRaw = new DatabaseSync(":memory:");
 sharedRaw.exec(ENERGY_DAYS_SCHEMA);
 const shared = wrapSqlite(sharedRaw);
-await mergeEnergyDayRow(shared, AGENT, { day: TODAY, reviews: 3, entries: 2, toldAt: NOW - 3_600, readAt: NOW - 600, readFull: false });
+await mergeEnergyDayRow(shared, AGENT, { day: TODAY, reviews: 3, entries: 2, entriesRefunded: 0, toldAt: NOW - 3_600, readAt: NOW - 600, readFull: false });
 
 const outage = () => Promise.reject(new Error("Connection terminated unexpectedly"));
 const seed = (when: "spawn" | "retry", sharedDb: () => Promise<Db>, nowSec = NOW, localDb: () => Db = () => local) =>

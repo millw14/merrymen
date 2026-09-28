@@ -40,7 +40,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node
 import path from "node:path";
 
 import type { Db } from "./db";
-import { ENERGY_DAYS_SCHEMA, mergeEnergyDayRow, readEnergyDaysSince } from "./energy-days";
+import { ensureEnergyDays, mergeEnergyDayRow, readEnergyDaysSince } from "./energy-days";
 import { planEnergySeed, utcDay } from "./energy";
 
 /** In the child's home, beside merrymen.db. Present = some day's energy history was not put back. */
@@ -144,10 +144,12 @@ export async function seedEnergyDays(i: {
   const sinceDay = utcDay(i.nowSec - 86_400);
   try {
     const local = i.local();
-    await local.exec(ENERGY_DAYS_SCHEMA);
+    // With every column: a child's sqlite kept across a crash-restart, and the
+    // shared table, can both predate the refund counter.
+    await ensureEnergyDays(local);
     const shared = await i.shared();
     // The mirror creates this table on its first pass; a spawn can come first.
-    await shared.exec(ENERGY_DAYS_SCHEMA);
+    await ensureEnergyDays(shared);
     const plan = planEnergySeed({
       shared: await readEnergyDaysSince(shared, i.agent, sinceDay),
       child: await readEnergyDaysSince(local, i.agent, sinceDay),

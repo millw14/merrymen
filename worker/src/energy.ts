@@ -508,7 +508,10 @@ export function usdgCentsUp(raw: bigint): number {
 export interface EnergyDayRow {
   day: string;
   reviews: number;
+  /** Entry claims made — gross. The day's use is entries − entriesRefunded. */
   entries: number;
+  /** Entry claims handed back unused. Monotonic like `entries`, so a refund survives every copy. */
+  entriesRefunded: number;
   toldAt: number | null;
   readAt: number | null;
   readFull: boolean | null;
@@ -516,9 +519,10 @@ export interface EnergyDayRow {
 
 /**
  * Two copies of one day, merged the way the mirror and the seed both merge:
- * counters take the larger (a copy never un-spends), the first notice stands,
- * and the newer read wins. Symmetric, so it does not matter which side is
- * "ours".
+ * counters take the larger (a copy never un-spends — nor un-refunds: the
+ * refunds are a counter of their own for exactly this reason), the first
+ * notice stands, and the newer read wins. Symmetric, so it does not matter
+ * which side is "ours".
  */
 export function mergeEnergyDay(a: EnergyDayRow, b: EnergyDayRow): EnergyDayRow {
   const aRead = a.readAt ?? 0;
@@ -528,6 +532,7 @@ export function mergeEnergyDay(a: EnergyDayRow, b: EnergyDayRow): EnergyDayRow {
     day: a.day,
     reviews: Math.max(a.reviews, b.reviews),
     entries: Math.max(a.entries, b.entries),
+    entriesRefunded: Math.max(a.entriesRefunded, b.entriesRefunded),
     toldAt: a.toldAt ?? b.toldAt,
     readAt: newer.readAt,
     readFull: newer.readFull,
@@ -584,10 +589,15 @@ export function energyDayRowOf(raw: unknown): EnergyDayRow | null {
   if (typeof o.day !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(o.day)) return null;
   const reviews = count(o.reviews);
   const entries = count(o.entries);
+  // ABSENT is zero: a table from before the refund counter kept `entries`
+  // already net of its refunds. PRESENT BUT UNREADABLE drops the row, as any
+  // other bad count does — never a guess at how many were handed back.
+  const rawRefunded = col("entries_refunded", "entriesRefunded");
+  const entriesRefunded = rawRefunded === undefined || rawRefunded === null ? 0 : count(rawRefunded);
   const toldAt = stamp(col("told_at", "toldAt"));
   const readAt = stamp(col("read_at", "readAt"));
-  if (reviews === null || entries === null || toldAt === undefined || readAt === undefined) return null;
+  if (reviews === null || entries === null || entriesRefunded === null || toldAt === undefined || readAt === undefined) return null;
   const rf = col("read_full", "readFull");
   const readFull = rf === null || rf === undefined ? null : rf === true || rf === 1 || rf === "1" || rf === 1n;
-  return { day: o.day, reviews, entries, toldAt, readAt, readFull: readAt === null ? null : readFull };
+  return { day: o.day, reviews, entries, entriesRefunded, toldAt, readAt, readFull: readAt === null ? null : readFull };
 }

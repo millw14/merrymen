@@ -125,7 +125,7 @@ describe("a redeploy does not hand out a fresh allowance", () => {
 
   it("A SEED NEVER LOWERS WHAT A RUNNING CHILD ALREADY COUNTED", async () => {
     const shared = open(SCHEMA + MIRROR_STATE_DDL);
-    await mergeEnergyDayRow(shared.db, AGENT, { day: TODAY, reviews: 2, entries: 1, toldAt: null, readAt: NOW - 500, readFull: true });
+    await mergeEnergyDayRow(shared.db, AGENT, { day: TODAY, reviews: 2, entries: 1, entriesRefunded: 0, toldAt: null, readAt: NOW - 500, readFull: true });
     const b = open(SCHEMA);
     for (let i = 0; i < 5; i++) await claimEnergyDay(b.db, AGENT, TODAY, "reviews", 29);
     await noteEnergyReadDay(b.db, AGENT, TODAY, false, NOW - 10);
@@ -138,8 +138,8 @@ describe("a redeploy does not hand out a fresh allowance", () => {
 
   it("only today and yesterday travel back", async () => {
     const shared = open(SCHEMA + MIRROR_STATE_DDL);
-    await mergeEnergyDayRow(shared.db, AGENT, { day: utcDay(NOW - 3 * 86_400), reviews: 9, entries: 9, toldAt: null, readAt: null, readFull: null });
-    await mergeEnergyDayRow(shared.db, AGENT, { day: utcDay(NOW - 86_400), reviews: 7, entries: 0, toldAt: null, readAt: NOW - 80_000, readFull: false });
+    await mergeEnergyDayRow(shared.db, AGENT, { day: utcDay(NOW - 3 * 86_400), reviews: 9, entries: 9, entriesRefunded: 0, toldAt: null, readAt: null, readFull: null });
+    await mergeEnergyDayRow(shared.db, AGENT, { day: utcDay(NOW - 86_400), reviews: 7, entries: 0, entriesRefunded: 0, toldAt: null, readAt: NOW - 80_000, readFull: false });
     const b = open(SCHEMA);
     assert.equal(await seed(b.db, shared.db), 1);
     assert.equal((await readEnergyDay(b.db, AGENT, utcDay(NOW - 86_400))).reviews, 7);

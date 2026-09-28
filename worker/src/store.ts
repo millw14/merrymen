@@ -7,6 +7,7 @@
 
 import { RISK_PERIOD_SCHEMA, mergeRiskPeriod, markRiskPeriod, adjustRiskCapital, type RiskPeriod } from "./risk-period";
 import {
+  ENERGY_DAYS_ALTERS,
   ENERGY_DAYS_SCHEMA,
   claimEnergyDay,
   claimEnergyNoticeDay,
@@ -663,6 +664,11 @@ const SQLITE_ALTERS: string[] = [
     // NULLABLE, and null means "not said yet" — never "no energy". The mirror
     // keeps the last non-null value for the same reason it does for `mode`.
     "ALTER TABLE agents ADD COLUMN energy TEXT",
+    // THE DAY'S HANDED-BACK ENTRY CLAIMS, a counter of their own that only
+    // rises — so a refund survives the mirror's larger-wins copy up and the
+    // seed's copy back down (energy-days.ts). Here for both the child's sqlite
+    // and the shared Postgres the mirror migrates with this list.
+    ...ENERGY_DAYS_ALTERS,
     // WHO OWNS this agent, for a public page to credit — the X handle its owner
     // typed, nothing more.
     //
@@ -2779,10 +2785,13 @@ export async function claimEnergy(agentId: string, day: string, field: EnergyFie
   }
 }
 
-/** Return one unused claim. Never below zero. */
-export async function refundEnergy(agentId: string, day: string, field: EnergyField): Promise<void> {
+/**
+ * Return one unused ENTRY claim. Never below zero. Entries only: a review that
+ * ran was paid for, and so is never given back.
+ */
+export async function refundEnergy(agentId: string, day: string, _field: "entries"): Promise<void> {
   try {
-    await refundEnergyDay(getDb(), agentId, day, field);
+    await refundEnergyDay(getDb(), agentId, day);
   } catch {
     /* a lost refund under-spends by one — the conservative direction */
   }
