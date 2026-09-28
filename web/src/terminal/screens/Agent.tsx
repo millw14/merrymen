@@ -809,7 +809,7 @@ export function Agent({
         {circleLocked && (
           <section className="desk-circle-locked" role="status">
             <strong>
-              {strategyName(mine.glance.id)} is a Merry Circle strategy — it isn&apos;t running.
+              {strategyName(mine.glance.id)} is a Merry Circle strategy — it opens nothing new right now.
             </strong>
             {/* THE REMEDIES, NONE OF THEM "ADD FUNDS". This used to tell the
                 owner that money was not the fix, which stopped being true the
@@ -821,11 +821,11 @@ export function Agent({
             <p>
               {tier?.why === "unreadable"
                 ? "We couldn't read your $MERRYMEN balance just now, so this may clear on its own. That's our read failing, not your wallet."
-                : `Your agent is armed and watching, but this strategy only runs while your wallet and my account hold ${count(
+                : `Your agent is armed and watching, but this strategy only opens new trades while your wallet and my account hold ${count(
                     tier?.needTokens ?? null,
                   )} $MERRYMEN between them — right now ${
                     tier?.tokens == null ? "I couldn't read how many" : count(tier.tokens)
-                  }. Switch to Steady basket or Strategist, which run for everyone, or top up: ${
+                  }. It still closes what it holds. Switch to Steady basket or Strategist, which run for everyone, or top up: ${
                     remedies.sendToAgent
                       ? `send $MERRYMEN on Robinhood Chain to my account${
                           remedies.usdg === "ready" ? ", or send USDG there and ask me to get my $MERRYMEN" : ""

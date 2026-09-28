@@ -267,3 +267,21 @@ describe("whose tokens each screen counts", () => {
     assert.doesNotMatch(settings, /Selling, stop-losses/, "an exit the AI decides is paced; 'selling is never limited' was false");
   });
 });
+
+/**
+ * A SHORT CIRCLE AGENT STILL CLOSES WHAT IT HOLDS (worker/src/circle-gate.ts).
+ *
+ * The worker's Circle gate used to end the tick, and the banner said the
+ * strategy "isn't running" — true then, and it meant the agent's own sells and
+ * its class exits never ran. The gate is now a brake on NEW work only, so the
+ * banner says exactly that: nothing new opens, and what it holds is still
+ * closed by its own rules.
+ */
+describe("the Circle banner says what a short Circle agent still does", () => {
+  it("IT OPENS NOTHING NEW, AND STILL CLOSES WHAT IT HOLDS", () => {
+    const agent = read("./screens/Agent.tsx");
+    assert.match(agent, /is a Merry Circle strategy — it opens nothing new right now\./);
+    assert.match(agent, /It still closes what it holds\./);
+    assert.doesNotMatch(agent, /it isn&apos;t running/, "exits now run below the tier");
+  });
+});
