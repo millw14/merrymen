@@ -5,7 +5,8 @@
  * is rendered in a DOM against a scripted fetch, because the properties that
  * matter are about ORDER and ABSENCE — the code is out of the address bar
  * before anything is sent, a web finish is one same-origin POST, an iOS state
- * sends nothing at all, and nothing here ever claims posting is on.
+ * sends nothing at all, and the page says posting is on only when the finish
+ * answered that it is (a same-account reconnect keeps its consent).
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -98,6 +99,28 @@ describe("the page, rendered", () => {
     assert.match(text(), /Connected as @merry_poster/);
     assert.match(text(), /won.t post anything yet/);
     assert.ok(ui.container.querySelector('a[href="/settings#x-posting"]'));
+  });
+
+  it("says posting is BACK ON when the finish says so — a same-account reconnect keeps the consent — never 'won't post anything yet'", async () => {
+    answer = () => json({ ok: true, username: "merry_poster", postingEnabled: true });
+    at(`?code=the-code&state=${W}`);
+    await ui.render(createElement(XConnectClient));
+    await settle();
+    assert.match(text(), /Connected as @merry_poster/);
+    assert.match(text(), /Posting is back on: you allowed your Merryman to post from @merry_poster before, so it posts from it again\./);
+    assert.match(text(), /skip it or turn posting off/);
+    assert.doesNotMatch(text(), /won.t post anything yet/);
+  });
+
+  it("an answer that does not say posting is on is 'not yet' (an older server, or anything but true)", async () => {
+    for (const postingEnabled of [undefined, "true", 1, null]) {
+      answer = () => json({ ok: true, username: "merry_poster", postingEnabled });
+      at(`?code=the-code&state=${W}`);
+      await ui.remount(createElement(XConnectClient));
+      await settle();
+      assert.match(text(), /won.t post anything yet/, String(postingEnabled));
+      assert.doesNotMatch(text(), /back on/);
+    }
   });
 
   it("promises only the review window the planner keeps: at least ten minutes under Coming up", async () => {

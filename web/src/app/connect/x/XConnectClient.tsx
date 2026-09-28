@@ -19,8 +19,13 @@
  * WHAT THIS DELIBERATELY DOES NOT DO: retry. The finish spends the pending
  * connect on its first arrival and X's code lives about thirty seconds, so a
  * second try can only fail; the owner is sent back to Settings to start again.
- * And it never says posting is on — connecting is not consent, and the
- * Settings switch, behind its warning, is the only way on.
+ *
+ * IT SAYS POSTING IS ON ONLY WHEN THE FINISH SAYS SO. Connecting is not
+ * consent, and the Settings switch, behind its warning, is the only way on —
+ * but a reconnect of the SAME X account after X revoked it keeps the consent
+ * the owner already gave that account, so posting resumes from the next pass.
+ * The finish reads back `postingEnabled` after its write; when it is true the
+ * page says posting is back on, and never "won't post anything yet".
  */
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, ShieldCheck } from "lucide-react";
@@ -31,7 +36,7 @@ import { readCallback } from "./callback";
 type Phase =
   | { kind: "working" }
   | { kind: "handoff"; href: string }
-  | { kind: "connected"; handle: string | null }
+  | { kind: "connected"; handle: string | null; postingEnabled: boolean }
   | { kind: "declined" }
   | { kind: "nothing" }
   | { kind: "failed"; message: string };
@@ -53,9 +58,16 @@ async function finishConnect(code: string, state: string): Promise<Phase> {
   } catch {
     return { kind: "failed", message: "Couldn't reach merrymen to finish connecting X. Start again from Settings." };
   }
-  const data = (await res.json().catch(() => null)) as { ok?: unknown; username?: unknown; error?: unknown } | null;
+  const data = (await res.json().catch(() => null)) as
+    | { ok?: unknown; username?: unknown; postingEnabled?: unknown; error?: unknown }
+    | null;
   if (res.ok && data?.ok === true) {
-    return { kind: "connected", handle: xHandleTag(typeof data.username === "string" ? data.username : null) };
+    return {
+      kind: "connected",
+      handle: xHandleTag(typeof data.username === "string" ? data.username : null),
+      // Only a plain true is "on"; an older server's answer without it is off.
+      postingEnabled: data.postingEnabled === true,
+    };
   }
   if (res.status === 401) {
     return { kind: "failed", message: "Sign in to merrymen in this browser, then connect X again from Settings." };
@@ -117,7 +129,15 @@ export function XConnectClient() {
           {phase.kind === "connected" && (
             <>
               <h2>{phase.handle ? `Connected as ${phase.handle}` : "Connected."}</h2>
-              <p>Your Merryman won&apos;t post anything yet. Turn posting on in Settings when you&apos;re ready — you&apos;ll see exactly which account it posts from first.</p>
+              {phase.postingEnabled ? (
+                <p>
+                  Posting is back on: you allowed your Merryman to post from {phase.handle ?? "this account"} before, so it
+                  posts from it again. Each post waits under Coming up in Settings for at least ten minutes, where you can
+                  skip it or turn posting off.
+                </p>
+              ) : (
+                <p>Your Merryman won&apos;t post anything yet. Turn posting on in Settings when you&apos;re ready — you&apos;ll see exactly which account it posts from first.</p>
+              )}
               <a className="flow-primary" href={SETTINGS}><ArrowLeft size={16} aria-hidden /> Back to Settings</a>
             </>
           )}

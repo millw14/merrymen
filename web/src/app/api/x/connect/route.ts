@@ -19,12 +19,15 @@
  *           authorize URL (or the reverse) and an X account lands on the
  *           wrong merrymen owner. Then the code is exchanged at once (X codes
  *           live about thirty seconds), X is asked which account the token
- *           posts as, and the sealed tokens are stored.
+ *           posts as, and the sealed tokens are stored. The answer is
+ *           {ok, username, postingEnabled}: whether posting is on NOW.
  *
  * CONNECTING IS NOT CONSENT. Nothing here turns posting on; a new connection
  * starts off, and a reconnect of a DIFFERENT X account clears the consent the
  * owner gave for the old one (store.ts upsertAccount). The switch is
- * POST /api/x/account {action:"enable"}, behind the warning.
+ * POST /api/x/account {action:"enable"}, behind the warning. A reconnect of
+ * the SAME account (after X revoked it) keeps the consent that owner already
+ * gave it, so posting resumes — which is why finish says whether it is on.
  *
  * NOTHING X SAYS AND NO SECRET IS ECHOED OR LOGGED. A failure is logged as its
  * classification and status only — never the code, the state, a token or X's
@@ -61,7 +64,7 @@ import {
   type XApp,
   type XTokens,
 } from "../../../../../../worker/src/xpost/client";
-import { prunePending, putPending, takePending, upsertAccount } from "../../../../../../worker/src/xpost/store";
+import { getAccount, prunePending, putPending, takePending, upsertAccount } from "../../../../../../worker/src/xpost/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -172,22 +175,28 @@ async function finish(tenant: `0x${string}`, input: Record<string, unknown>): Pr
     return refuse(502, X_COPY.xFailed);
   }
 
+  // WHETHER POSTING IS ON NOW, read back after the write. A reconnect of the
+  // SAME X account keeps the consent the owner gave it (store.ts
+  // upsertAccount), so a connection X had revoked starts posting again from
+  // the next pass; the page must say so rather than "won't post anything yet".
+  let postingEnabled: boolean;
   try {
     const stored = await withXpostDb(async (db) => {
-      if (!db) return false;
+      if (!db) return null;
       await upsertAccount(db, dek, { tenant, xUserId: me.value.id, username: me.value.username, tokens, nowMs: now });
-      return true;
+      return { posting: (await getAccount(db, tenant))?.posting === true };
     });
     if (!stored) {
       await giveBack(app, tokens);
       return refuse(503, X_COPY.unavailable);
     }
+    postingEnabled = stored.posting;
   } catch {
     console.warn("[x-connect] finish: could not store the connection");
     await giveBack(app, tokens);
     return refuse(503, X_COPY.storeDown);
   }
-  return json({ ok: true, username: me.value.username });
+  return json({ ok: true, username: me.value.username, postingEnabled });
 }
 
 export async function POST(req: Request) {
