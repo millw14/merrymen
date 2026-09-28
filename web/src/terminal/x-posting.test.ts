@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { act, createElement } from "react";
-import type { XAccountBody } from "@/lib/x-connect";
+import { X_COPY, type XAccountBody } from "@/lib/x-connect";
 import { json, testDom } from "./test-dom";
 import { XPosting } from "./XPosting";
 
@@ -285,11 +285,60 @@ describe("connecting", () => {
     assert.equal(buttons("Reconnect X account").length, 1);
   });
 
-  it("unavailable here: one line, nothing to press", async () => {
+  it("unavailable here with nothing connected: one line, nothing to press", async () => {
     routes["GET /api/x/account"] = () => json({ ...CONNECTED, available: false, connected: false, username: null, xUserId: null, status: null });
     await shown();
-    assert.match(text(), /isn't available on this server yet/);
+    assert.equal(ui.container.querySelector(".xpost")?.textContent, "Posting on X isn't available right now.");
+    assert.doesNotMatch(text(), /yet/, "it may have worked before; 'yet' says it never did");
     assert.equal(ui.container.querySelectorAll("button").length, 0);
+  });
+
+  it("UNAVAILABLE HERE, BUT CONNECTED AND POSTING: the switch still turns it off, and Coming up still skips", async () => {
+    // The web lost its X app (an origin, a secret); the orchestrator did not, and is posting.
+    let enabled = true;
+    let upcoming = [{ id: 7, kind: "casual", body: "a thought", dueAt: DUE_SOON() }];
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, available: false, postingEnabled: enabled, upcoming });
+    routes["POST /api/x/account"] = (_u, init) => {
+      const body = JSON.parse(String(init?.body)) as { action: string; id?: number };
+      if (body.action === "skip") upcoming = upcoming.filter((p) => p.id !== body.id);
+      if (body.action === "disable") {
+        enabled = false;
+        upcoming = [];
+        return json({ ok: true, postingEnabled: false });
+      }
+      return json({ ok: true });
+    };
+    await shown();
+    assert.match(text(), /Posting from @merry_poster — whichever X account is connected\./);
+    assert.equal(theSwitch()?.getAttribute("aria-checked"), "true");
+    assert.match(text(), /Coming up/);
+    assert.equal(buttons("Disconnect").length, 1);
+    assert.equal(buttons("Reconnect X account").length + buttons("Connect X account").length, 0, "nothing that needs the X app");
+
+    await press(buttons("Skip")[0], "Skip");
+    assert.deepEqual(writes(), [{ method: "POST", url: "/api/x/account", body: { action: "skip", id: 7, owner: OWNER } }]);
+    await until(() => !text().includes("a thought"), "the skipped post gone");
+
+    await press(theSwitch(), "the switch");
+    assert.equal(ui.container.querySelector("dialog"), null);
+    assert.deepEqual(writes()[1], { method: "POST", url: "/api/x/account", body: { action: "disable", owner: OWNER } });
+    await until(() => theSwitch()?.getAttribute("aria-checked") === "false", "off");
+
+    // Back on is what needs the X app: refused here, in one line, with nothing sent.
+    await press(theSwitch(), "the switch, on");
+    assert.equal(ui.container.querySelector("dialog"), null, "no warning for a consent that cannot be taken");
+    assert.equal(writes().length, 2);
+    assert.match(text(), /Turning posting on isn't available right now\./);
+    assert.equal(theSwitch()?.getAttribute("aria-checked"), "false");
+  });
+
+  it("unavailable here with a revoked connection: no Reconnect, which would fail on the first press", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, available: false, status: "revoked" });
+    await shown();
+    assert.match(text(), /X stopped accepting this connection/);
+    assert.equal(buttons("Reconnect X account").length, 0);
+    assert.match(text(), /Posting on X isn't available right now\./);
+    assert.equal(buttons("Disconnect").length, 1);
   });
 });
 
@@ -485,6 +534,10 @@ describe("the warning keeps its words", () => {
     const inside = SRC.lastIndexOf("\n  const confirmWarning", at);
     const next = SRC.indexOf("\n  const ", inside + 1);
     assert.ok(inside > 0 && at < next, "the enable write lives in the warning's confirm");
+  });
+
+  it("says 'unavailable' in the routes' own words (X_COPY.unavailable), as iOS does", () => {
+    assert.ok(SRC.includes(`unavailable: "${X_COPY.unavailable}"`));
   });
 
   it("re-reads well inside the ten minutes every post waits, and once more past the first plan pass after enabling", () => {

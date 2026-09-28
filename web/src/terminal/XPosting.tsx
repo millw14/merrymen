@@ -31,6 +31,13 @@
  * same mistake once told Telegram owners they had never saved their token
  * (see "AN UNREAD BRIDGE IS NOT A MISSING TOKEN" in screens/Settings.tsx).
  *
+ * "UNAVAILABLE" ONLY STOPS WHAT NEEDS THIS SERVER'S X APP. `available` is
+ * the web's own configuration; the orchestrator posts on its own, so an
+ * owner connected on a web that lost (say) its public origin may still have a
+ * Merryman posting. Unavailable hides Connect and Reconnect and refuses
+ * turning posting ON; the off switch, Coming up with its Skip, Posted and
+ * Disconnect stay, because every one of them works without the X app.
+ *
  * IT NEVER SEES A TOKEN. GET /api/x/account has no field that could hold one
  * (lib/x-connect.ts accountBody). Handles render only through xHandleTag, and
  * a "View on X" link only when it is exactly an x.com status URL.
@@ -68,7 +75,9 @@ const COPY = {
     "You'll approve it on X. Your Merryman will post from whichever X account you approve there, so check which account you're signed into on X first.",
   toggle: "Let my Merryman post on X",
   revoked: "X stopped accepting this connection. Reconnect to keep posting.",
-  unavailable: "Posting on X isn't available on this server yet.",
+  /** lib/x-connect.ts X_COPY.unavailable, word for word (the routes and iOS say it too). */
+  unavailable: "Posting on X isn't available right now.",
+  cannotTurnOn: "Turning posting on isn't available right now.",
   comingUp: "Coming up",
   nothingWaiting: "Nothing waiting to go out.",
   posted: "Posted",
@@ -332,6 +341,12 @@ export function XPosting({
     if (busy || !account.connected || account.status !== "ok" || !handle || !account.xUserId) return;
     setNote(null);
     if (next) {
+      // Turning ON needs this server's X app (the route would refuse it too);
+      // turning OFF never does, and must never be the switch that is missing.
+      if (!account.available) {
+        setNote({ text: COPY.cannotTurnOn, alert: true });
+        return;
+      }
       // NOTHING IS SENT HERE. The warning names the account; its button writes.
       setAsking({ xUserId: account.xUserId, handle });
       return;
@@ -432,20 +447,17 @@ export function XPosting({
     </div>
   );
 
-  // ── not here at all ──
-  if (!account.available) {
-    return (
-      <div className="xpost" ref={root}>
-        <p className="mm-hint">{COPY.unavailable}</p>
-        {account.connected && connectedRow}
-        {disconnectConfirm}
-        {noteLine}
-      </div>
-    );
-  }
-
   // ── nothing connected ──
   if (!account.connected) {
+    // Nothing to stop, and nothing can be started here: one line.
+    if (!account.available) {
+      return (
+        <div className="xpost" ref={root}>
+          <p className="mm-hint">{COPY.unavailable}</p>
+          {noteLine}
+        </div>
+      );
+    }
     return (
       <div className="xpost" ref={root}>
         <p className="mm-hint" style={{ marginTop: 0 }}>{COPY.blurb}</p>
@@ -477,7 +489,7 @@ export function XPosting({
         {connectedRow}
         {disconnectConfirm}
         <p className="mm-danger" role="status">{COPY.revoked}</p>
-        {connectButton(COPY.reconnect)}
+        {account.available ? connectButton(COPY.reconnect) : <p className="mm-hint">{COPY.unavailable}</p>}
         {noteLine}
       </div>
     );
