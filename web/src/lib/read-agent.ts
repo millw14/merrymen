@@ -25,6 +25,7 @@ import { readPaperReturn } from "./paper-return";
 import { readProfileTrades, readRoundTrips, readTopTrades, type ProfileTrade, type TradeBook } from "./profile-trades";
 import { readOperationCounts } from "./distinct-trades";
 import { readEquityCloses } from "./equity-closes";
+import { measuredMarks, netFlowsUpTo } from "./held-marks";
 import { everyLandedOpSponsored } from "./gasless";
 import { averageHoldSec } from "./hold-time";
 import type { Db } from "../../../worker/src/db";
@@ -35,7 +36,7 @@ import { rankPnl, type UnrankedWhy } from "@/lib/rank-pnl";
 import { growthIndex, drawdownBps } from "@/lib/growth-index";
 import { PUBLISHABLE_STRATEGIES } from "@/lib/thesis";
 import { getIdentityStore } from "@merrymen/identity-store";
-import { isEvidencedFlow, sameBookAsLatest } from "@merrymen/core";
+import { isEvidencedFlow } from "@merrymen/core";
 import { getSettingsStore } from "@merrymen/settings-store";
 
 export interface Holding {
@@ -433,6 +434,8 @@ export async function profileOf(
   let growthFull: number[] = [];
   let growthComplete = false;
   let latest: number | null = null;
+  /** When `latest` was taken: the flows the return may pair with it are those booked by then. */
+  let latestAt: number | null = null;
   let equityRead = false;
   let sinceAt = 0;
   try {
@@ -446,10 +449,17 @@ export async function profileOf(
     // funded one holds what was sent, and both write here. A growth index
     // computed across the step between them measures a change of ledger, not
     // a change in value.
-    const clean = sameBookAsLatest(pts)
+    //
+    // AND ONLY MEASURED MARKS (held-marks.ts). A mark taken while flow
+    // inference was held can carry a withdrawal or an energy buy not booked
+    // yet; the index read over it dips until the booking lands, and the
+    // drawdown below keeps the dip for good. The book is still the NEWEST
+    // mark's, held or not.
+    const clean = measuredMarks(pts)
       .map((p) => ({ v: Number(p.equity_usdg), at: Number(p.at) }))
       .filter((p) => Number.isFinite(p.v));
     latest = clean.length ? clean[clean.length - 1]!.v : null;
+    latestAt = clean.length ? clean[clean.length - 1]!.at : null;
     sinceAt = clean.length ? clean[0]!.at : 0;
 
     // Every flow is attributed to the hour it fell in: growthIndex takes the
@@ -646,7 +656,14 @@ export async function profileOf(
     /* the column arrives with a worker migration; unknown until it does */
   }
 
-  const { pnlBps, unrankedWhy } = rankPnl({ contributed, latest, gasUsdg, landed, contributionsKnown });
+  // THE RETURN'S DENOMINATOR IS WHAT WAS ON RECORD BY ITS NUMERATOR. `latest`
+  // is the newest measured mark, which during a hold is older than the flows
+  // booked since — an owner transfer that landed, a settled energy buy — and
+  // those are not in its cash. Pairing them publishes the transfer as profit
+  // for as long as the hold lasts. With no measured mark there is no numerator
+  // either, and the reason rankPnl gives is decided as before, on every flow.
+  const contributedByLatest = latestAt === null ? contributed : netFlowsUpTo(flows, latestAt);
+  const { pnlBps, unrankedWhy } = rankPnl({ contributed: contributedByLatest, latest, gasUsdg, landed, contributionsKnown });
 
   return {
     slug: identity.slug,

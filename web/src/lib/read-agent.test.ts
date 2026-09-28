@@ -300,3 +300,59 @@ test("a paper period is flat only when nothing was held at all — priced, or ke
     assert.equal((await profileOf(db, identity, false))!.avgHoldSec, 60, "a cut read of the past does not undo a valuation that proves the opening");
   } finally { raw.close(); }
 });
+
+async function heldMark(db: Db, at: number, equity: number) {
+  await db.prepare(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode, flows_held) VALUES (?, '0', 0, 0, ?, ?, 2, 'live', 1)`).run(ACCOUNT, equity, at);
+}
+let flowTx = 0;
+async function flow(db: Db, direction: "in" | "out", amount: number, at: number, source: string) {
+  flowTx += 1;
+  await db.prepare(`INSERT INTO flows (agent_id, epoch, direction, amount_usdg, tx_hash, source, at) VALUES (?, 2, ?, ?, ?, ?, ?)`).run(ACCOUNT, direction, amount, `0xheld${flowTx}`, source, at);
+}
+
+test("a held dip is no drawdown: the growth index and max drawdown skip marks taken while flow inference was held", async () => {
+  // An energy buy spends 11 USDG and its receipt wait times out: the next
+  // tick holds (store.ts `flows_held`) and values the book at 99 with the 11
+  // not yet booked as capital out. The resolver books it; the next measured
+  // mark reads 99 with the flow divided out, which is flat. Over the held row
+  // the index read 0.99 — a 10% "drawdown" the page would have kept for good.
+  const { raw, db } = await ledger();
+  try {
+    await mark(db, T0 + 60, 100);
+    await fill(db, { side: "buy", coin: "CASH", qty: "1", at: T0 + 100, sponsored: true });
+    await mark(db, T0 + H + 60, 110);
+    await heldMark(db, T0 + 2 * H + 60, 99);
+    await flow(db, "out", 11, T0 + 2 * H + 120, "energy-buy");
+    await mark(db, T0 + 3 * H + 60, 99);
+
+    const p = (await profileOf(db, identity, false))!;
+    assert.deepEqual(p.growth.map((g) => g.at), [T0 + 60, T0 + H + 60, T0 + 3 * H + 60], "the held mark is not a point");
+    assert.ok(p.growth.every((g, i) => i === 0 || g.g >= p.growth[i - 1]!.g - 1e-12), "no dip anywhere");
+    assert.ok(Math.abs(p.growth.at(-1)!.g - 1.1) < 1e-9);
+    assert.equal(p.maxDdBps, 0);
+    // The return: the newest measured mark over the flows booked by then.
+    assert.equal(p.pnlBps, Math.round(((99 - 89) / 89) * 10_000));
+  } finally { raw.close(); }
+});
+
+test("a return is the newest MEASURED mark over the flows booked by then, while a hold goes on", async () => {
+  // A dropped op holds for up to 26 hours. Meanwhile the owner's transfer of
+  // 10 lands and is booked, and a 50 USDG top-up arrives that only the look
+  // closing the hold can book. The held marks read 140: calling that a return
+  // over the 90 now on record publishes +55.6% nobody earned. The measured
+  // mark is 100, and what was on record by it is the first 100 — flat. Pairing
+  // 100 with the 90 booked since would be +11% the other way.
+  const { raw, db } = await ledger();
+  try {
+    await fill(db, { side: "buy", coin: "CASH", qty: "1", at: T0 + 30, sponsored: true });
+    await mark(db, T0 + 60, 100);
+    await flow(db, "out", 10, T0 + H, "transfer-intent");
+    await heldMark(db, T0 + H + 60, 140);
+    await heldMark(db, T0 + 2 * H + 60, 140);
+
+    const p = (await profileOf(db, identity, false))!;
+    assert.equal(p.pnlBps, 0);
+    assert.deepEqual(p.growth.map((g) => g.at), [T0 + 60]);
+    assert.equal(p.funded, true, "funded still says flow rows exist");
+  } finally { raw.close(); }
+});
