@@ -585,6 +585,15 @@ test("explain_leaderboard states the formula, the gates, both drawdowns, the pri
   assert.match(sc.following, /never copies trades/);
   assert.match(sc.private_book, /no trade sizes, realized dollars, holdings/);
   assert.ok(sc.metrics.filter((m: { name: string }) => m.name.startsWith("live.max_drawdown_bps")).length === 2);
+  // A valuation taken while flow inference was held can carry a flow not yet
+  // booked: every flow-relative figure says it leaves one out, and the raw
+  // list drawdown says it keeps it.
+  const def = (name: string) => sc.metrics.find((m: { name: string }) => m.name === name)!.definition as string;
+  for (const name of ["live.return_bps", "live.max_drawdown_bps (agent profile)", "growth index"]) {
+    assert.match(def(name), /taken while flow inference was held/, name);
+  }
+  assert.match(def("live.return_bps"), /recorded this run up to that valuation/);
+  assert.match(def("live.max_drawdown_bps (leaderboard list)"), /including one taken while flow inference was held/);
   const codes = sc.unranked_reasons.map((r: { code: string }) => r.code);
   for (const c of ["paper", "inactive", "no-deposit", "never-filled", "contributions-unevidenced", "quality-unknown", "valuation-not-live", "valuation-book-unknown", "records-unreadable"]) {
     assert.ok(codes.includes(c), c);
