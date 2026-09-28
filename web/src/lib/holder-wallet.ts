@@ -30,7 +30,9 @@ export type HolderWallet =
  *
  *   A PROVEN WALLET FIRST — ONLY IF ITS CLAIM NAMES THIS ACCOUNT. Written only
  *   by /api/holder after recovering a signature over a message naming both the
- *   wallet and this account, and claimed there first-come, so one wallet powers
+ *   wallet and this account, and claimed there — or moved there from another
+ *   account by that fresh signature, at most once per wallet in any rolling
+ *   24 hours, the wallet's own sign-in account exempt — so one wallet powers
  *   one agent rather than every account that ever linked it.
  *
  *   THE SESSION WALLET OTHERWISE — ONLY IF NO OTHER ACCOUNT CLAIMS IT. Linked

@@ -25,7 +25,7 @@
   "packages/core/src/gas-basis.ts": "18952769bb3a77402f78b0cd576c49f1948995553eaf9c2f6c5fe658d352eaac",
   "packages/core/src/grant-installable.ts": "1382f8f2312d3d27923485a8ba628594d942b62a894858a3a34afdf3e1b063a5",
   "packages/core/src/grant.ts": "46650d33d20979b965a6defadf23ba1cb77d269b107327c5847c0fa184115738",
-  "packages/core/src/holder-proof.ts": "60a65ebd5240486d3b3aaf9f97546ed24ad033322cc0aa0845012cd49932abed",
+  "packages/core/src/holder-proof.ts": "d2885862e4046593072f3f6fdf27c9617be73a2169a0cb7517e63300a51bb030",
   "packages/core/src/hosted.ts": "d62f64a1f165939969fe6f27fa8cdbd2a34e91a238526792fb4d1d5fa5c0e0e0",
   "packages/core/src/index.ts": "424e1e43652ba0a8c6af3a607e0bcdbaaf32d8796ad4b04ff0e4e8bcb5c34f3b",
   "packages/core/src/llm-providers.ts": "b4811d9aea402c6d545ccde66a1e8a96b7bb4d24061abe19b09b89bd0be5449d",
