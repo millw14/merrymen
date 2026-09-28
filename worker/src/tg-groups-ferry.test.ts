@@ -51,6 +51,7 @@ import {
   publishTgGroups,
   restoreTgGroups,
 } from "./tg-groups-ferry";
+import { TG_GROUPS_FILE, TG_LIMITS } from "./telegram/tg-groups/store";
 
 const A = `0x${"ab".repeat(20)}`;
 const B = `0x${"cd".repeat(20)}`;
@@ -758,6 +759,20 @@ describe("isTgGroupsText", () => {
 });
 
 // ── the orchestrator's wiring ───────────────────────────────────────────────
+
+describe("the ferry and the child's store agree", () => {
+  // The ferry keeps its own copy of the name on purpose (it treats the file as
+  // opaque and imports nothing of the chat side), so the two can drift apart
+  // silently: a ferry reading a different name restores nothing and publishes
+  // nothing, and every redeploy would wipe every agent's group memory.
+  test("the same file name", () => {
+    assert.equal(TG_GROUPS_FILE_NAME, TG_GROUPS_FILE);
+  });
+
+  test("the ferry's size refusal sits above anything the store writes", () => {
+    assert.ok(TG_GROUPS_MAX_BYTES > TG_LIMITS.fileBytes, "a real file is never refused as too big");
+  });
+});
 
 describe("the orchestrator ferries it where the contract says", () => {
   const ORCH = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");

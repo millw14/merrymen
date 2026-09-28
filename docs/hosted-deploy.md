@@ -329,11 +329,13 @@ environment (self-hosted, it goes in the worker's own environment).
 
 | Var | Value |
 |---|---|
-| `MERRYMEN_TG_GROUPS_LLM_KEY` *(optional)* | a key used **only** for Telegram group lines, from a **separate organization**. Refused when it equals `GROQ_API_KEY`, `MERRYMEN_LLM_API_KEY` or `ANTHROPIC_API_KEY`, unless the share flag below is set |
+| `MERRYMEN_TG_GROUPS` *(optional)* | `0` turns Telegram groups off for **every** agent on the host, read by each child on every update: no group lines, no reactions, no coin looks, no memory writes. Membership changes are still recorded (so switching back on works) and `/forgetme` still deletes. Unset or anything else: on, and each owner's own setting decides |
+| `MERRYMEN_TG_GROUPS_LLM_KEY` *(optional)* | a key used **only** for Telegram group lines, from a **separate organization**. Refused when it equals `GROQ_API_KEY`, `MERRYMEN_LLM_API_KEY` or `ANTHROPIC_API_KEY`, unless the share flag below is set. A refused or misconfigured key falls through to the owner's own key — never the house key — and the boot log names the variable at fault, never its value |
 | `MERRYMEN_TG_GROUPS_LLM_PROVIDER` *(optional)* | `groq` (default), `anthropic` or `openai`. **A provider other than Groq receives other people's group messages: name it in the privacy policy (`site/components/PrivacyPolicyDoc.tsx`, section 5) before deploying it** |
-| `MERRYMEN_TG_GROUPS_MODEL` *(optional)* | the model for group lines; unset, the provider's default |
+| `MERRYMEN_TG_GROUPS_MODEL` *(optional)* | the model for group lines; unset, `qwen/qwen3.8-27b` on Groq and `claude-opus-5` on Anthropic. **Required** for `openai`, which has no default |
+| `MERRYMEN_TG_GROUPS_LLM_BASE_URL` *(openai only)* | the OpenAI-compatible endpoint for `openai`: `https://…`, or `http://` on `localhost` / `127.0.0.1`, with no credentials in the URL. Without it (or the model) the `openai` key is not used. Ignored for Groq and Anthropic |
 | `MERRYMEN_TG_GROUPS_SHARE_HOUSE_KEY` *(optional)* | `1` lets group lines use a fleet key — as the dedicated key, or, for a hosted agent with neither a dedicated key nor a key its owner saved, the agent's house model. Not recommended |
-| `MERRYMEN_TG_GROUPS_LLM_PER_DAY` *(optional)* | model calls per agent per UTC day, default `300` hosted (`1000` self-hosted), on top of a fixed 40 per chat per hour |
+| `MERRYMEN_TG_GROUPS_LLM_PER_DAY` *(optional)* | model calls per agent per UTC day, default `300` hosted (`1000` self-hosted), clamped to 0–20000 (`0`: templates only), on top of a fixed 40 per chat per hour |
 
 > **The dedicated key is forwarded to every child, on purpose.** The room's and
 > X's keys are on `CHILD_SECRET_STRIP` because only the orchestrator spends
@@ -361,10 +363,11 @@ environment (self-hosted, it goes in the worker's own environment).
 >
 > **The allowance survives redeploys.** Calls are counted in the agent's
 > durable group store (below), so a redeploy does not hand out a fresh day. A
-> 429 pauses group model calls for 10 minutes; a daily-cap or rejected-key
-> failure pauses them until UTC midnight. Each call is time-boxed at 20 s, at
-> most 2 run at once per agent, and group work runs off the serial poll loop,
-> so a slow model never delays an owner's DMs, buttons or `/kill`. None of it
+> 429 pauses group model calls for 10 minutes; a daily-cap, rejected-key or
+> unknown-model failure pauses them until UTC midnight. Each call is
+> time-boxed at 20 s, at most 2 run at once per agent, and group work runs off
+> the serial poll loop, so a slow model never delays an owner's DMs, buttons
+> or `/kill`. None of it
 > is ever said in a group: a failure there is silence or a template.
 >
 > **A posted coin can nominate, never order.** The only thing that crosses from

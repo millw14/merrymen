@@ -8,9 +8,10 @@ and every trencher limit allows it) or says why it is passing. It never posts
 trade alerts, error messages, sizes, prices or P&L.
 
 This file is the contract the modules under `worker/src/telegram/tg-groups/`,
-`worker/src/trencher-nominate.ts`, `worker/src/tg-groups-ferry.ts` and the
-settings surfaces are built against. Types live in
-`worker/src/telegram/tg-groups/types.ts`.
+`worker/src/trencher-nominate.ts`, `worker/src/tg-coin-look.ts`,
+`worker/src/tg-groups-ferry.ts` and the settings surfaces are built against.
+Types live in `worker/src/telegram/tg-groups/types.ts`. The boundary of rule 1
+is pinned by `worker/src/telegram/tg-groups/boundary.test.ts`.
 
 "Telegram groups" is the product term everywhere (UI, docs, privacy policy).
 It is never "group chat": that name belongs to the public web room
@@ -218,20 +219,26 @@ Per posted CA, in order:
    anything else. A replayed or duplicate update finds the claim and stops
    (at-most-once). A message older than 10 minutes (Telegram `date`) is
    recorded but never nominated.
-2. **Seen before in this chat** within 24 h → it answers from memory
+2. **Coins off** (`telegramGroupCoinsEnabled` false) → an opinion-free
+   reaction (👀) at most; no look, no ask, and no answer from memory either
+   (an answer from memory is a coin opinion too).
+3. **Seen before in this chat** within 24 h → it answers from memory
    ("already looked at that one, still not for me" / "already got some 🤝"),
-   no new look.
-3. **Coins off** (`telegramGroupCoinsEnabled` false) → an opinion-free
-   reaction (👀) at most; no look, no ask.
+   no new look. Only a coin it actually looked at counts: one recorded while
+   coins were off, while it was not ready, from a stale post or with a failed
+   look is looked at afresh when it is posted again.
 4. **Readiness** (`trencherReadiness`, below). Not `ready-*` → the **owner
    ask**: in the group, tagging the owner, a fixed-template line with no
    reason ("{owner} put me on trencher mode and i'll get in on stuff like this
    with you 👀"), at most once per chat per 12 h (later CAs while not ready
-   get a light line or a 👀 reaction, at most once per hour); and in the
-   owner's DM, once per 12 h, the private reason and a
+   get a light line or a 👀 reaction, at most once per hour, and never within
+   an hour of the ask); and in the owner's DM, once per chat per 12 h, the
+   private reason and a
    **⚙️ Open Settings** button to `${dashboardBase()}/settings#trencher-mode`.
    Real-money switches stay dashboard acts (`setting-spec.ts` DASHBOARD_ONLY).
-5. **Quick look** (`classifyCoin`, cheap, cached 30 min per address): kinds
+5. **Quick look** (`createCoinLook` in `tg-coin-look.ts`, reached through
+   `TgCoinsPort.look`; cheap, cached 30 min per address, and at most 6 looks
+   that read the network per 10 minutes, past which the answer is `unknown`): kinds
    `own` (its own wallet/vault), `cash` (USDG/WETH), `energy` ($MERRYMEN),
    `stock` (a STOCK_TOKENS address), `wallet` (no code), `not-token`,
    `curve` (a Pons bonding-curve coin), `v4-only`, `no-pool`, `too-new`,
@@ -242,7 +249,11 @@ Per posted CA, in order:
    "still on the curve, can't touch those yet", "that's a wallet lol"), never
    a figure. `unknown` → "can't get a proper look rn, sitting it out".
 6. **Nominate** (`NominationBook.nominate`). Refusals are caps, answered as
-   "one at a time lol" at most once per chat per hour, else silence.
+   "one at a time lol" at most once per chat per hour, else silence; a capped
+   coin leaves no memo, so a later repost gets its turn. A coin the book
+   already holds or decided in the last 6 h (`recent`) is answered from
+   memory only when this chat has its own memo of it: a coin another group
+   nominated is never mentioned.
 7. **Ack** right away, tagging the sender: a short model line in the
    "hmm is this good? i think i like it" register (thinking out loud, no
    verdict yet), or a template.
@@ -272,8 +283,9 @@ Per posted CA, in order:
    `GATE_FORCED_HOLD` or `STALE_MARK_HOLD` are not market views and are
    reported as `skipped`, never voiced as a take.
 
-A ticker without a CA ("$PEPE?") → "drop the ca" (at most once per chat per
-hour). A command-shaped message from a non-owner ("buy this", "ape 100") is a
+A ticker without a CA ("$PEPE?": a line that is only tickers, or one addressed
+to it) → "drop the ca" (at most once per chat per hour); a ticker mentioned in
+passing is ordinary chatter. A command-shaped message from a non-owner ("buy this", "ape 100") is a
 nomination at most; the words never size anything.
 
 ### Trencher readiness
@@ -328,15 +340,16 @@ Per chat, durable (survives hosted redeploys via the orchestrator ferry):
   chat (running jokes, what coins they shill, whether they roasted it).
   No sensitive categories (health, religion, politics, sexuality, finances
   beyond "shills frogs"), no contact details, no addresses.
-* `coins`: up to 60 per chat, `{address, name?, byId, byName, atMs, verdict,
-  decisionId?, outcome?}` for 14 days.
+* `coins`: up to 60 per chat, `{address, name?, byId, byName, messageId, atMs,
+  verdict, decisionId?, paper?, exitSaid?}` for 14 days.
 * Memory never crosses chats: what was said in one group is never used in
   another, and never in the owner's DMs.
 * `/forget` (owner, in a group) wipes that chat's memory and nothing else
   (the owner's DM memory is untouched). `/forgetme` (anyone) removes their
-  lines and person note from that chat, blanks their name on that chat's coin
-  memos, rewrites the summary without them at the next memory pass, and says
-  "done 🫡".
+  lines and person note from that chat, blanks their name and user id on that
+  chat's coin memos (the coin and its verdict stay), drops that chat's summary
+  when it names them (the next memory pass rewrites it from the lines that are
+  left), and says "done 🫡".
 * Edited and deleted messages: edits are ignored; Telegram does not report
   deletions to bots.
 * A group upgraded to a supergroup (`migrate_to_chat_id`) moves its state to
@@ -368,10 +381,16 @@ ferry.
 `tg-groups/model.ts` resolves creds for group lines:
 
 1. `MERRYMEN_TG_GROUPS_LLM_KEY` (+ `MERRYMEN_TG_GROUPS_LLM_PROVIDER` groq |
-   anthropic | openai, default groq; `MERRYMEN_TG_GROUPS_MODEL`) when set.
+   anthropic | openai, default groq; `MERRYMEN_TG_GROUPS_MODEL`, default
+   `qwen/qwen3.8-27b` on groq and `claude-opus-5` on anthropic) when set.
+   `openai` has no default model and also needs
+   `MERRYMEN_TG_GROUPS_LLM_BASE_URL` (an OpenAI-compatible endpoint: https,
+   or http on localhost / 127.0.0.1, no credentials in the URL).
    It is refused when it equals a fleet key (`GROQ_API_KEY`,
    `MERRYMEN_LLM_API_KEY`, `ANTHROPIC_API_KEY`) unless
-   `MERRYMEN_TG_GROUPS_SHARE_HOUSE_KEY=1`.
+   `MERRYMEN_TG_GROUPS_SHARE_HOUSE_KEY=1`. A refused or misconfigured
+   dedicated key falls through to step 2 (never to the house key), and the
+   boot log names the variable at fault, never its value.
 2. Else the owner's own key: in self-hosted mode `resolveLlm(cfg)`; hosted,
    only a key the owner saved in their own settings (never an env house key).
 3. Else, hosted, `resolveLlm(cfg)` only when
@@ -386,9 +405,9 @@ never printed; the boot line names only provider and model.
 Allowance: `MERRYMEN_TG_GROUPS_LLM_PER_DAY` model calls per agent per UTC day
 (default 300 hosted, 1000 self-hosted), plus 40 per chat per hour, held in the
 durable store (so a redeploy does not hand out a fresh day). A 429 pauses the
-model 10 min; a daily-cap or rejected-key failure pauses it until UTC
-midnight. Every call is time-boxed at 20 s. At most 2 group model calls run at
-once per agent.
+model 10 min; a daily-cap, rejected-key or unknown-model failure pauses it
+until UTC midnight. Every call is time-boxed at 20 s. At most 2 group model
+calls run at once per agent.
 
 ## Operator switch
 
@@ -402,12 +421,16 @@ recorded so switching it back on works.
 * Slash commands keep going through the existing handler with its sender
   rules. `/cmd@OtherBot` is ignored (today's `parseSlash` strips any `@bot`).
 * Private reads (`/status`, `/positions`, `/pnl`, `/trades`, `/wallet`,
-  `/why`, `/report`, `/soul`, `/depth`) asked in a group by the owner (or an
+  `/why`, `/report`, `/soul`, `/depth`, and the other reads rule 3 keeps out
+  of a group: `/brag`, `/settings`, `/alerts`, `/reminders`, `/watchers`,
+  `/pc`) asked in a group by the owner (or an
   allowlisted sender) are answered in that person's DM, with "sent it to your
   DMs 🤫" in the group. From anyone else: "that's between me and {owner} 🙃"
   at most once per person per hour.
 * `/name`, `/remember`, `/forget`, `/soul` need an allowlisted sender in a
-  group (today any member of an allowlisted group can run them).
+  group (today any member of an allowlisted group can run them). `/soul` is
+  also a private read (answered in their DM), and `/forget` in a group is the
+  owner's alone and wipes only that group's memory (see Memory).
 * Non-slash messages from the owner in a group go through the group persona,
   not the DM pipeline (today they run the full DM pipeline with private state
   and the answer is posted to the group).
@@ -468,7 +491,7 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | Message in another language | Answers in that language |
 | Model down / out of allowance / key rejected | Templates or silence; nothing about it in the group |
 | Brain slow or down | "sitting this one out" when the TTL runs out |
-| `/forgetme` | Removes that person's lines and note in that chat |
+| `/forgetme` | Removes that person's lines and note in that chat, and their name and id on the coins they posted there |
 | Owner `/groups` in DM | Lists groups with Stay / Leave / Forget |
 
 ## Known limits
@@ -484,4 +507,5 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
   durable claim makes a replayed CA a no-op, and a claim written just before a
   crash means that CA is dropped rather than repeated.
 * The owner's first name for tagging is taken from what it has seen in that
-  chat; before the owner speaks there, it says "my owner".
+  chat; before the owner speaks there, it says "my owner", and the tag in the
+  owner ask (a link to the owner's account) reads "boss".
