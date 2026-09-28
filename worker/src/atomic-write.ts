@@ -13,11 +13,29 @@
  * Temp file in the SAME directory, then rename: rename is atomic within a
  * filesystem (POSIX and Windows alike), and a temp file anywhere else could
  * sit on another filesystem, where rename is a copy.
+ *
+ * TWO SPELLINGS, ONE PROCEDURE. The worker and orchestrator write synchronously
+ * (writeFileAtomicSync); the web tier writes from a request handler and must
+ * not block the event loop on an fsync, so it gets writeFileAtomic. Both take
+ * their temp name from `tempPathFor`, and settings-atomic.test.ts runs the same
+ * behaviour tests and the same race against each.
  */
 
 import { randomBytes } from "node:crypto";
 import { closeSync, fchmodSync, fsyncSync, openSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { open, realpath, rename, rm, type FileHandle } from "node:fs/promises";
 import path from "node:path";
+
+/**
+ * The temp file for `target`: beside it, so the rename never crosses a
+ * filesystem. pid AND random: two processes write the same settings.json
+ * (orchestrator and child, or web and worker self-hosted), and pids repeat
+ * across containers and restarts. Never matched by anything that lists a
+ * home — every lister filters on its own names.
+ */
+function tempPathFor(target: string): string {
+  return path.join(path.dirname(target), `${path.basename(target)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+}
 
 /**
  * Write `data` to `file` atomically, with exactly `mode` (default 0600 — every
@@ -34,10 +52,7 @@ export function writeFileAtomicSync(file: string, data: string, mode = 0o600): v
   } catch {
     // Not there yet (or a dangling link): create it at the name given.
   }
-  // pid AND random: two processes write the same settings.json (orchestrator
-  // and child), and pids repeat across containers and restarts. Never matched
-  // by anything that lists a home — every lister filters on its own names.
-  const tmp = path.join(path.dirname(target), `${path.basename(target)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  const tmp = tempPathFor(target);
   let fd: number | null = null;
   let created = false;
   try {
@@ -74,6 +89,58 @@ export function writeFileAtomicSync(file: string, data: string, mode = 0o600): v
     if (created) {
       try {
         rmSync(tmp, { force: true });
+      } catch {
+        /* the original error is the one to report */
+      }
+    }
+    throw e;
+  }
+}
+
+/**
+ * writeFileAtomicSync for a request handler: the same temp file, fchmod, fsync
+ * and rename, without holding the event loop through the fsync. Same contract —
+ * throws on failure, having removed its temp file; `file` is then untouched.
+ */
+export async function writeFileAtomic(file: string, data: string, mode = 0o600): Promise<void> {
+  // Through a symlink, not over it — see writeFileAtomicSync.
+  let target = file;
+  try {
+    target = await realpath(file);
+  } catch {
+    // Not there yet (or a dangling link): create it at the name given.
+  }
+  const tmp = tempPathFor(target);
+  let fh: FileHandle | null = null;
+  let created = false;
+  try {
+    fh = await open(tmp, "wx", mode);
+    created = true;
+    try {
+      await fh.chmod(mode);
+    } catch {
+      /* non-POSIX — the mode on open is the best there is */
+    }
+    await fh.writeFile(data, "utf8");
+    try {
+      await fh.sync();
+    } catch {
+      /* a filesystem that cannot fsync still gets the atomic replace */
+    }
+    await fh.close();
+    fh = null;
+    await rename(tmp, target);
+  } catch (e) {
+    if (fh !== null) {
+      try {
+        await fh.close();
+      } catch {
+        /* already failing — the original error is the one to report */
+      }
+    }
+    if (created) {
+      try {
+        await rm(tmp, { force: true });
       } catch {
         /* the original error is the one to report */
       }

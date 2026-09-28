@@ -30,8 +30,9 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
+import { writeFile } from "node:fs/promises";
 import { Worker } from "node:worker_threads";
-import { writeFileAtomicSync } from "./atomic-write";
+import { writeFileAtomic, writeFileAtomicSync } from "./atomic-write";
 import { patchSettingsFile } from "./settings";
 
 const codeOf = (src: string) =>
@@ -78,14 +79,24 @@ describe("neither settings.json writer truncates the file in place", () => {
   });
 });
 
-describe("writeFileAtomicSync", () => {
-  it("replaces the file whole, owner-only even over a looser file, and leaves no temp file", () => {
+/**
+ * EVERY IMPLEMENTATION OF THE PROCEDURE, held to the same tests. The web tier
+ * cannot block on an fsync, so it has an async spelling; each one is run here
+ * rather than trusted to match the one that was.
+ */
+const WRITERS: ReadonlyArray<{ name: string; write: (file: string, data: string, mode?: number) => void | Promise<void> }> = [
+  { name: "writeFileAtomicSync", write: writeFileAtomicSync },
+  { name: "writeFileAtomic (async, the web tier's)", write: writeFileAtomic },
+];
+
+for (const { name, write } of WRITERS) describe(name, () => {
+  it("replaces the file whole, owner-only even over a looser file, and leaves no temp file", async () => {
     const dir = tmpDir();
     try {
       const file = path.join(dir, "settings.json");
       writeFileSync(file, '{"strategy":"old"}');
       if (posix) chmodSync(file, 0o644);
-      writeFileAtomicSync(file, '{"strategy":"new"}', 0o600);
+      await write(file, '{"strategy":"new"}', 0o600);
       assert.equal(readFileSync(file, "utf8"), '{"strategy":"new"}');
       if (posix) assert.equal(statSync(file).mode & 0o777, 0o600);
       assert.deepEqual(readdirSync(dir), ["settings.json"]);
@@ -94,7 +105,7 @@ describe("writeFileAtomicSync", () => {
     }
   });
 
-  it("writes THROUGH a symlink — the link survives, as it did under writeFileSync", { skip: !posix }, () => {
+  it("writes THROUGH a symlink — the link survives, as it did under writeFileSync", { skip: !posix }, async () => {
     const dir = tmpDir();
     try {
       mkdirSync(path.join(dir, "real"));
@@ -103,7 +114,7 @@ describe("writeFileAtomicSync", () => {
       const link = path.join(dir, "home", "settings.json");
       writeFileSync(real, "{}");
       symlinkSync(real, link);
-      writeFileAtomicSync(link, '{"a":1}');
+      await write(link, '{"a":1}');
       assert.ok(lstatSync(link).isSymbolicLink(), "rename must not replace the link with a regular file");
       assert.equal(readFileSync(real, "utf8"), '{"a":1}');
       assert.deepEqual(leftovers(path.join(dir, "real")), []);
@@ -113,14 +124,14 @@ describe("writeFileAtomicSync", () => {
     }
   });
 
-  it("a failed replace throws, removes its temp file, and leaves the target alone", () => {
+  it("a failed replace throws, removes its temp file, and leaves the target alone", async () => {
     const dir = tmpDir();
     try {
       // A directory at the name: the temp file is written, the rename is refused.
       const file = path.join(dir, "settings.json");
       mkdirSync(file);
       writeFileSync(path.join(file, "keep"), "x");
-      assert.throws(() => writeFileAtomicSync(file, "{}"));
+      await assert.rejects(async () => write(file, "{}"));
       assert.deepEqual(readdirSync(dir), ["settings.json"]);
       assert.equal(readFileSync(path.join(file, "keep"), "utf8"), "x");
     } finally {
@@ -226,7 +237,7 @@ const payload = (version: number) => {
   return { version, padLength, pad: "x".repeat(padLength) };
 };
 
-async function race(write: (file: string, version: number) => void, iterations: number, stopOnTear = false): Promise<RaceResult> {
+async function race(write: (file: string, version: number) => void | Promise<void>, iterations: number, stopOnTear = false): Promise<RaceResult> {
   const dir = tmpDir();
   const file = path.join(dir, "settings.json");
   writeFileAtomicSync(file, JSON.stringify(payload(0)));
@@ -249,7 +260,7 @@ async function race(write: (file: string, version: number) => void, iterations: 
     }
     let writes = 0;
     for (let v = 1; v <= iterations; v++) {
-      write(file, v);
+      await write(file, v);
       writes++;
       if (stopOnTear && Atomics.load(flags, 1) > 0) break;
     }
@@ -268,11 +279,18 @@ describe("a reader racing a settings.json write never gets a file that does not 
     assert.ok(r.torn > 0, `no torn read in ${r.writes} plain writes / ${r.reads} reads — the harness cannot see the bug`);
   });
 
-  it("writeFileAtomicSync: every read parses, and the reader saw the file change under it", async () => {
-    const r = await race((file, v) => writeFileAtomicSync(file, JSON.stringify(payload(v))), 150);
-    assert.equal(r.torn, 0, `${r.torn} of ${r.reads} reads failed — last: ${r.lastError}`);
-    assert.ok(r.versions >= 3, `the reader saw ${r.versions} version(s) in ${r.reads} reads — it never raced the writes`);
+  it("CONTROL: the async truncate-then-write (fs/promises writeFile) tears too — the web route's old writer", async () => {
+    const r = await race((file, v) => writeFile(file, JSON.stringify(payload(v)), { encoding: "utf8", mode: 0o600 }), 5_000, true);
+    assert.ok(r.torn > 0, `no torn read in ${r.writes} plain writes / ${r.reads} reads — the harness cannot see the bug`);
   });
+
+  for (const { name, write } of WRITERS) {
+    it(`${name}: every read parses, and the reader saw the file change under it`, async () => {
+      const r = await race((file, v) => write(file, JSON.stringify(payload(v))), 150);
+      assert.equal(r.torn, 0, `${r.torn} of ${r.reads} reads failed — last: ${r.lastError}`);
+      assert.ok(r.versions >= 3, `the reader saw ${r.versions} version(s) in ${r.reads} reads — it never raced the writes`);
+    });
+  }
 
   it("patchSettingsFile, the child's writer: the same", async () => {
     const saved = { home: process.env.MERRYMEN_HOME, file: process.env.MERRYMEN_SETTINGS_FILE };
