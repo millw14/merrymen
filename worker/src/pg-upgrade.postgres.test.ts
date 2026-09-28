@@ -64,7 +64,11 @@ interface PgClient extends PgClientLike {
   connect(): Promise<void>;
   end(): Promise<void>;
 }
-const pg = createRequire(import.meta.url)("pg") as { Client: new (c: { connectionString: string }) => PgClient };
+// LOADED ONLY WHEN A DATABASE IS NAMED. `pg` is not a dependency — the
+// production image installs it at build time (Dockerfile) — so CI and a
+// plain `npm test` have no driver. A top-level require failed the whole file
+// there instead of skipping it.
+const pg = (url ? createRequire(import.meta.url)("pg") : null) as { Client: new (c: { connectionString: string }) => PgClient } | null;
 
 const FIXTURE = path.join(path.dirname(new URL(import.meta.url).pathname), "testdata", "shared-schema-75995697.sql");
 const ANNOUNCEMENT = path.join(
@@ -108,7 +112,7 @@ test("Postgres: the energy release over production's schema", { skip: !url, time
 
   const clients: PgClient[] = [];
   const connect = async (u: string): Promise<PgClient> => {
-    const c = new pg.Client({ connectionString: u });
+    const c = new pg!.Client({ connectionString: u });
     await c.connect();
     clients.push(c);
     return c;
