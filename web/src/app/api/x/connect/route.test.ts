@@ -190,6 +190,14 @@ describe("finish", () => {
     assert.equal(pendingRows().length, 0, "the pending connect is spent");
   });
 
+  it("accepts a code in any printable alphabet X might use, and sends it form-encoded", async () => {
+    const { state } = await started(OWNER_A);
+    const code = "VGNibzFW+SWRE/Zm01bj==&x=1";
+    assert.equal((await post(OWNER_A, { action: "finish", code, state })).status, 200);
+    assert.equal(new URLSearchParams(w.x.calls[0]!.body).get("code"), code);
+    assert.equal(new URLSearchParams(w.x.calls[0]!.body).get("x"), null, "a code cannot add a field");
+  });
+
   it("works exactly once for a state: a replay is refused without asking X again", async () => {
     const { state } = await started(OWNER_A);
     assert.equal((await post(OWNER_A, { action: "finish", code: "the-code-from-x", state })).status, 200);

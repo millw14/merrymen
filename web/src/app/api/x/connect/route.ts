@@ -72,8 +72,13 @@ const BODY_MAX_BYTES = 4096;
 /** X's own login plus 2FA can outlast five minutes; fifteen is the contract. */
 const PENDING_TTL_MS = 15 * 60_000;
 
-/** An authorization code as X issues it: URL-safe text, nothing that could smuggle a separator. */
-const CODE = /^[A-Za-z0-9._~-]{8,1024}$/;
+/**
+ * An authorization code: printable ASCII with no spaces, of a sane length. Not
+ * narrower — X does not document its alphabet, and a code refused here is an
+ * owner told their link expired when it had not. It only ever travels
+ * form-encoded (URLSearchParams), so no character in it can split a field.
+ */
+const CODE = /^[\x21-\x7e]{8,1024}$/;
 
 const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: X_PRIVATE_HEADERS });
 /** `ownerFacing` marks a 5xx sentence as written for the owner (terminal/request-json.ts shows it). */

@@ -246,6 +246,15 @@ describe("connecting", () => {
     assert.match(text(), /didn't send a way to X/);
   });
 
+  it("a connection it cannot name is still a connection: no switch, no Connect, a way to disconnect", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, username: null });
+    await shown();
+    assert.match(text(), /An X account is connected, but merrymen can't show which one/);
+    assert.equal(theSwitch(), null, "the warning must name the account, so there is nothing to turn on");
+    assert.equal(buttons("Connect X account").length, 0);
+    assert.equal(buttons("Disconnect").length, 1);
+  });
+
   it("a revoked connection asks for a reconnect and offers no switch", async () => {
     routes["GET /api/x/account"] = () => json({ ...CONNECTED, status: "revoked" });
     await shown();

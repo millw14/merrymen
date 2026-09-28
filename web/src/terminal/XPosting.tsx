@@ -377,11 +377,26 @@ export function XPosting({
   }
 
   // ── nothing connected ──
-  if (!account.connected || !handle || !account.xUserId) {
+  if (!account.connected) {
     return (
       <div className="xpost" ref={root}>
         <p className="mm-hint" style={{ marginTop: 0 }}>{COPY.blurb}</p>
         {connectButton(COPY.connect)}
+        {noteLine}
+      </div>
+    );
+  }
+
+  // ── connected, but to an account this screen cannot name ──
+  // The warning must name the account, so without a handle there is no switch —
+  // and it is still CONNECTED, never offered as "Connect X account".
+  if (!handle || !account.xUserId) {
+    return (
+      <div className="xpost" ref={root}>
+        <div className="xpost-row">
+          <span className="xpost-account">An X account is connected, but merrymen can&apos;t show which one. Disconnect it and connect again.</span>
+          <button type="button" className="mm-btn" disabled={busy} onClick={() => void disconnect()}>Disconnect</button>
+        </div>
         {noteLine}
       </div>
     );
