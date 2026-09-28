@@ -451,10 +451,107 @@ describe("seen before in this chat", () => {
     spoken = [];
     await post(flow, CHAT, `${CA1}?`, { from: BOB });
     assert.deepEqual(intents(), [{ kind: "coin-seen", verdict: "candidate" }], "still under review");
-    clock += 25 * MIN;
+    // Past the hour an answer from memory waits for (see below).
+    clock += 61 * MIN;
     spoken = [];
-    await post(flow, CHAT, `${CA1}??`, { from: BOB });
+    await post(flow, CHAT, `${CA1}??`, { from: BOB, id: 900 });
     assert.deepEqual(intents(), [{ kind: "coin-seen", verdict: "expired" }]);
+  });
+
+  it("a reposted CA is answered from memory once an hour: then one 👀, then nothing", async () => {
+    const flow = makeFlow();
+    await post(flow, CHAT, `ape ${CA1}`, { id: 300 });
+    await flow.onOutcome({ kind: "passed", address: CA1, chatId: CHAT, messageId: 300, decisionId: "d-1", notes: [] });
+    spoken = [];
+    const reposts: number[] = [];
+    for (let i = 0; i < 8; i++) {
+      clock += 20_000;
+      reposts.push((await post(flow, CHAT, CA1, { from: BOB })).line.messageId);
+    }
+    assert.deepEqual(intents(), [{ kind: "coin-seen", verdict: "passed" }], "eight reposts, one line");
+    assert.equal(spoken[0]!.o.replyTo, reposts[0]);
+    assert.deepEqual(reacts, [{ chatId: CHAT, messageId: reposts[1]!, emoji: "👀" }], "one 👀, on the first repost past the line");
+    assert.equal(port!.lookCalls.length, 1, "and never a new look");
+
+    // Its own clock per coin and per chat.
+    approve(OTHER, "Other");
+    await post(flow, OTHER, `ape ${CA1}`, { id: 301 });
+    await flow.onOutcome({ kind: "passed", address: CA1, chatId: OTHER, messageId: 301, decisionId: "d-2", notes: [] });
+    await post(flow, OTHER, CA1, { from: BOB });
+    assert.equal(spoken.filter((s) => s.intent.kind === "coin-seen").length, 2);
+
+    clock += HOUR;
+    spoken = [];
+    await post(flow, CHAT, CA1, { from: BOB });
+    assert.deepEqual(intents(), [{ kind: "coin-seen", verdict: "passed" }], "an hour on, again");
+  });
+
+  it("an answer from memory that did not go out does not use up the hour", async () => {
+    const flow = makeFlow();
+    await post(flow, CHAT, `ape ${CA1}`, { id: 300 });
+    await flow.onOutcome({ kind: "passed", address: CA1, chatId: CHAT, messageId: 300, decisionId: "d-1", notes: [] });
+    speakOk = false;
+    spoken = [];
+    await post(flow, CHAT, CA1, { from: BOB });
+    speakOk = true;
+    clock += MIN;
+    await post(flow, CHAT, CA1, { from: BOB });
+    assert.equal(spoken.length, 2);
+    assert.deepEqual(reacts, []);
+  });
+});
+
+describe("a sender forgotten mid-flow (/forgetme)", () => {
+  it("forgotten while the look was out: no nomination, nothing said, and no memo naming them", async () => {
+    const flow = makeFlow();
+    let gone = false;
+    port!.onLook = () => {
+      gone = true;
+    };
+    const { line, info } = msg(CHAT, `ape ${CA1}`);
+    assert.equal(await flow.onPost(CHAT, line, { ...info, forgotten: () => gone }), "handled");
+    assert.equal(port!.nominations.length, 0, "their id is not handed across");
+    assert.deepEqual(spoken, []);
+    assert.equal(memoOf(CA1), undefined, "a candidate never nominated leaves no memo");
+  });
+
+  it("a coin that is not a candidate keeps its verdict, but not who posted it", async () => {
+    const flow = makeFlow();
+    port!.looks.set(CA1, { kind: "too-quiet", name: "Slowcoin" });
+    let gone = false;
+    port!.onLook = () => {
+      gone = true;
+    };
+    const { line, info } = msg(CHAT, CA1);
+    await flow.onPost(CHAT, line, { ...info, forgotten: () => gone });
+    const m = memoOf(CA1)!;
+    assert.equal(m.verdict, "too-quiet");
+    assert.equal(m.byId, 0);
+    assert.equal(m.byName, "");
+    assert.deepEqual(spoken, [], "no line tagging someone who asked to be forgotten");
+    assert.deepEqual(reacts, []);
+  });
+
+  it("not forgotten: the same post is looked at, nominated and answered as ever", async () => {
+    const flow = makeFlow();
+    const { line, info } = msg(CHAT, `ape ${CA1}`);
+    await flow.onPost(CHAT, line, { ...info, forgotten: () => false });
+    assert.equal(port!.nominations.length, 1);
+    assert.deepEqual(intents(), [{ kind: "coin-ack" }]);
+    assert.equal(memoOf(CA1)!.byId, ANN);
+  });
+
+  it("a forgotten() that throws reads as forgotten: silence is the safe side", async () => {
+    const flow = makeFlow();
+    const { line, info } = msg(CHAT, `ape ${CA1}`);
+    await flow.onPost(CHAT, line, {
+      ...info,
+      forgotten: () => {
+        throw new Error("boom");
+      },
+    });
+    assert.equal(port!.nominations.length, 0);
+    assert.deepEqual(spoken, []);
   });
 });
 

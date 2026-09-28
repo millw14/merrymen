@@ -406,6 +406,23 @@ describe("memoryPass", () => {
     await memoryPass(store.room(CHAT)!, "Pine", model, gate);
     assert.match(sent[0]!.system, /asked to be forgotten/);
   });
+
+  it("given the clock, a line past the 14-day window never reaches the model, and aliases skip whoever only said old things", async () => {
+    store.addLine(CHAT, line(7_770_009, "olly", "ancient xyzzy", T0 - 15 * DAY));
+    answer = JSON.stringify({ summary: "frogs.", people: [{ id: "p1", note: "says gm" }] });
+    const r = await memoryPass(store.room(CHAT)!, "Pine", model, gate, T0);
+    const { prompt } = sent[0]!;
+    assert.ok(!prompt.includes("xyzzy") && !prompt.includes("olly"), prompt);
+    assert.match(prompt, /p1 alice: gm frens/, "p1 is still the first person with a fresh line");
+    assert.deepEqual(r?.people, [{ id: ALICE, note: "says gm" }]);
+  });
+
+  it("only old lines left: nothing to read, no call", async () => {
+    const r = room({ lines: [line(ALICE, "alice", "gm", T0 - 20 * DAY)] });
+    store.ensureRoom(r.chatId, { title: "x", kind: "group" });
+    assert.equal(await memoryPass(r, "Pine", model, gate, T0), null);
+    assert.equal(fetches, 0);
+  });
 });
 
 describe("applyMemoryPass", () => {
@@ -466,6 +483,32 @@ describe("applyMemoryPass", () => {
     const r = store.room(CHAT)!;
     assert.equal(r.summary, "the old summary.");
     assert.equal(r.sinceSummary, 0, "the pass still counts as done");
+  });
+
+  it("a wipe since the pass read the room (/forget, /forgetme): nothing of the result is written, only the count resets", () => {
+    store.update(CHAT, (r) => {
+      r.sinceSummary = 12;
+    });
+    const gen = store.forgetGen(CHAT);
+    store.forgetChat(CHAT);
+    store.addLine(CHAT, line(ALICE, "alice", "gm again", T0));
+    applyMemoryPass(store, CHAT, { summary: "alice and bob shill frogs.", people: [{ id: ALICE, note: "says gm" }] }, T0 + 5, gen);
+    const r = store.room(CHAT)!;
+    assert.equal(r.summary, "", "the wiped chat's summary does not come back");
+    assert.equal(store.person(CHAT, ALICE), undefined);
+    assert.equal(r.sinceSummary, 0);
+    assert.equal(r.lastSummaryAtMs, undefined);
+
+    // Read after the wipe: written as ever.
+    applyMemoryPass(store, CHAT, { summary: "a fresh start.", people: [] }, T0 + 6, store.forgetGen(CHAT));
+    assert.equal(store.room(CHAT)!.summary, "a fresh start.");
+  });
+
+  it("…a /forgetme counts as a wipe too", () => {
+    const gen = store.forgetGen(CHAT);
+    store.forgetPerson(CHAT, BOB);
+    applyMemoryPass(store, CHAT, { summary: "bob posts coins all day.", people: [] }, T0, gen);
+    assert.equal(store.room(CHAT)!.summary, "");
   });
 
   it("an unknown room or a junk result is ignored", () => {

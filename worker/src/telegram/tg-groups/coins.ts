@@ -74,6 +74,13 @@ export const COIN_FLOW = {
   dropCaMs: HOUR,
   /** "not on my chain", per chat. */
   notMyChainMs: HOUR,
+  /**
+   * Not in the contract: an answer from memory ("already looked at that
+   * one…") at most once per coin per chat this often. A CA reposted eight
+   * times in three minutes is not eight things to say; later reposts get one
+   * 👀 inside the window, then nothing.
+   */
+  seenLineMs: HOUR,
   /** An `expired` outcome is said only when a human spoke in the chat this recently. */
   expiredLiveMs: 30 * MIN,
   /**
@@ -154,6 +161,13 @@ export interface CoinPostInfo {
   cashtags: string[];
   /** The line addresses the bot (mention, reply, name). */
   addressed: boolean;
+  /**
+   * True once the sender has run /forgetme since this line arrived. A look
+   * takes seconds; a person forgotten meanwhile must not have their name and
+   * id written back onto a memo, be tagged, be answered, or have their id
+   * handed across in a nomination. Absent means never.
+   */
+  forgotten?: () => boolean;
 }
 
 const ADDRESS = /^0x[0-9a-f]{40}$/;
@@ -326,6 +340,12 @@ export class CoinFlow {
    * worst a restart does is one extra "not on my chain" within the hour.
    */
   private readonly notMyChainAt = new Map<number, number>();
+  /**
+   * Answers from memory per `${chatId}:${address}` (COIN_FLOW.seenLineMs), and
+   * whether a repost inside the window already got its 👀. In memory for the
+   * same reason as notMyChainAt: a restart costs one extra line at most.
+   */
+  private readonly seenSaidAt = new Map<string, { at: number; eyed: boolean }>();
 
   constructor(private readonly d: CoinFlowDeps) {}
 
@@ -518,17 +538,31 @@ export class CoinFlow {
   private async oneCa(chatId: number, line: TgLine, m: CoinPostInfo, address: string, ctx: PostCtx): Promise<void> {
     const d = this.d;
     const postedAt = this.postedAt(line, m);
+    // Asked at every step, not once: a look takes seconds, and /forgetme
+    // can land while it is out. A predicate that throws reads as forgotten.
+    const gone = (): boolean => {
+      try {
+        return typeof m.forgotten === "function" && m.forgotten() === true;
+      } catch {
+        return true;
+      }
+    };
+    // Forgotten meanwhile: the coin and its verdict are kept, who posted it
+    // is not, exactly as /forgetme leaves every memo it finds.
     const memo = (verdict: CoinVerdict, name?: string): TgCoinMemo => ({
       address,
       ...(name ? { name } : {}),
-      byId: m.senderId,
-      byName: typeof m.senderName === "string" ? m.senderName : "",
+      byId: gone() ? 0 : m.senderId,
+      byName: !gone() && typeof m.senderName === "string" ? m.senderName : "",
       messageId: line.messageId,
       atMs: postedAt,
       verdict,
     });
-    const tagSender: CoinSpeakOpts["mention"] =
-      isInt(m.senderId) && typeof m.senderName === "string" && m.senderName ? { id: m.senderId, name: m.senderName } : undefined;
+    const tagSender = (): CoinSpeakOpts["mention"] =>
+      !gone() && isInt(m.senderId) && typeof m.senderName === "string" && m.senderName ? { id: m.senderId, name: m.senderName } : undefined;
+    // Nothing is said, or reacted, to a post whose sender asked to be forgotten.
+    const say = (intent: CoinIntent, o: CoinSpeakOpts): Promise<boolean> => (gone() ? Promise.resolve(false) : this.say(chatId, intent, o));
+    const eyes = (): Promise<void> => (gone() ? Promise.resolve() : this.eyes(chatId, line.messageId, ctx));
 
     // 1. Stale: recorded, never nominated, nothing said. An existing memo is
     // kept — it may be waiting for an outcome, and this post changes nothing.
@@ -543,7 +577,7 @@ export class CoinFlow {
     // 3 before 2: with coins off, even an answer from memory is a coin line,
     // and the contract's coins-off is "an opinion-free reaction at most".
     if (!this.coinsOn()) {
-      await this.eyes(chatId, line.messageId, ctx);
+      await eyes();
       if (!looked) d.store.rememberCoin(chatId, memo("coins-off"));
       return;
     }
@@ -552,11 +586,7 @@ export class CoinFlow {
     // The memo stays the original one: it names who posted it first and is
     // the one an outcome still on its way will look for.
     if (looked) {
-      await this.say(
-        chatId,
-        { kind: "coin-seen", verdict: this.seenVerdict(looked) },
-        { replyTo: line.messageId, trigger: line, ...(looked.name ? { coinName: looked.name } : {}) },
-      );
+      await this.fromMemory(chatId, address, line, looked, say, eyes);
       return;
     }
 
@@ -565,7 +595,7 @@ export class CoinFlow {
     const readiness = port ? this.readinessOf(port) : null;
     if (!port || !readiness || !READY.has(readiness.kind)) {
       d.store.rememberCoin(chatId, memo("not-ready"));
-      await this.askOwner(chatId, line, readiness, ctx);
+      if (!gone()) await this.askOwner(chatId, line, readiness, ctx);
       return;
     }
 
@@ -577,22 +607,21 @@ export class CoinFlow {
 
     if (look.kind === "held") {
       d.store.rememberCoin(chatId, memo("held", look.name));
-      await this.say(
-        chatId,
-        { kind: "coin-seen", verdict: "held" },
-        { replyTo: line.messageId, trigger: line, ...(tagSender ? { mention: tagSender } : {}), ...coinName },
-      );
+      const tag = tagSender();
+      await say({ kind: "coin-seen", verdict: "held" }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
       return;
     }
     if (look.kind !== "candidate") {
       d.store.rememberCoin(chatId, memo(look.kind, look.name));
-      await this.say(
-        chatId,
-        { kind: "coin-look", look: look.kind },
-        { replyTo: line.messageId, trigger: line, ...(tagSender ? { mention: tagSender } : {}), ...coinName },
-      );
+      const tag = tagSender();
+      await say({ kind: "coin-look", look: look.kind }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
       return;
     }
+
+    // Forgotten while the look was out: their id is not handed across in a
+    // nomination either. No memo, like a capped coin: nothing was reviewed,
+    // and a later post of it gets its turn.
+    if (gone()) return;
 
     // 6. Nominate: the address and where it came from, nothing else.
     const res = this.nominateVia(port, {
@@ -605,11 +634,8 @@ export class CoinFlow {
     if (res.ok) {
       // 7. Ack, thinking out loud; the verdict comes with the outcome.
       d.store.rememberCoin(chatId, memo("candidate", look.name));
-      await this.say(
-        chatId,
-        { kind: "coin-ack" },
-        { replyTo: line.messageId, trigger: line, ...(tagSender ? { mention: tagSender } : {}), ...coinName },
-      );
+      const tag = tagSender();
+      await say({ kind: "coin-ack" }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
       return;
     }
     if (CAP_REFUSALS.has(res.reason)) {
@@ -620,7 +646,7 @@ export class CoinFlow {
         chatId,
         "lastCapLineAtMs",
         (r, t) => elapsed(r.lastCapLineAtMs, t, COIN_FLOW.capLineMs),
-        () => this.say(chatId, { kind: "coin-cap" }, { replyTo: line.messageId, trigger: line }),
+        () => say({ kind: "coin-cap" }, { replyTo: line.messageId, trigger: line }),
       );
       return;
     }
@@ -628,16 +654,51 @@ export class CoinFlow {
       // Recent in the book. Answered from memory only when the memory is this
       // chat's: a coin another group nominated is never mentioned here.
       const mine = d.store.coin(chatId, address);
-      if (mine && !NO_LOOK.has(mine.verdict)) {
-        await this.say(
-          chatId,
-          { kind: "coin-seen", verdict: this.seenVerdict(mine) },
-          { replyTo: line.messageId, trigger: line, ...(mine.name ? { coinName: mine.name } : {}) },
-        );
-      }
+      if (mine && !NO_LOOK.has(mine.verdict)) await this.fromMemory(chatId, address, line, mine, say, eyes);
       return;
     }
     // invalid / not-ready (readiness changed during the look): silence.
+  }
+
+  /**
+   * AN ANSWER FROM MEMORY, at most once per coin per chat per
+   * COIN_FLOW.seenLineMs. A repost inside the window gets one 👀 (the first
+   * such repost) and then nothing: a shill reposting a CA every twenty
+   * seconds is not a conversation. Reserved before the send and given back
+   * when it did not go out, like every rate-limited line here.
+   */
+  private async fromMemory(
+    chatId: number,
+    address: string,
+    line: TgLine,
+    memo: TgCoinMemo,
+    say: (intent: CoinIntent, o: CoinSpeakOpts) => Promise<boolean>,
+    eyes: () => Promise<void>,
+  ): Promise<void> {
+    const k = `${chatId}:${address}`;
+    const t = this.d.now();
+    const prev = this.seenSaidAt.get(k);
+    if (prev && !elapsed(prev.at, t, COIN_FLOW.seenLineMs)) {
+      if (!prev.eyed) {
+        prev.eyed = true;
+        await eyes();
+      }
+      return;
+    }
+    const mine = { at: t, eyed: false };
+    this.seenSaidAt.set(k, mine);
+    const ok = await say(
+      { kind: "coin-seen", verdict: this.seenVerdict(memo) },
+      { replyTo: line.messageId, trigger: line, ...(memo.name ? { coinName: memo.name } : {}) },
+    );
+    if (!ok && this.seenSaidAt.get(k) === mine) {
+      if (prev) this.seenSaidAt.set(k, prev);
+      else this.seenSaidAt.delete(k);
+    }
+    // Bounded like the store's 30 chats of 60 coins: old stamps decide nothing.
+    if (this.seenSaidAt.size > 512) {
+      for (const [key, v] of this.seenSaidAt) if (elapsed(v.at, t, COIN_FLOW.seenLineMs)) this.seenSaidAt.delete(key);
+    }
   }
 
   /**

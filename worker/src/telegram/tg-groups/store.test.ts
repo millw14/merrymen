@@ -82,7 +82,7 @@ const memo = (address: string, over: Partial<TgCoinMemo> = {}): TgCoinMemo => ({
   ...over,
 });
 const approvedRoom = (s: TgGroupsStore, chatId = CHAT, title = "frogs"): TgRoom => {
-  const r = s.ensureRoom(chatId, { title, kind: "supergroup" });
+  const r = s.ensureRoom(chatId, { title, kind: "supergroup" })!;
   s.setStatus(chatId, "approved");
   return r;
 };
@@ -576,14 +576,14 @@ describe("debounced writes", () => {
 describe("ensureRoom and setStatus", () => {
   it("creates a pending room stamped with now, and refreshes an existing one's title", () => {
     const s = open();
-    const r = s.ensureRoom(CHAT, { title: "  frogs\n and  toads ", kind: "group" });
+    const r = s.ensureRoom(CHAT, { title: "  frogs\n and  toads ", kind: "group" })!;
     assert.equal(r.status, "pending");
     assert.equal(r.statusAtMs, T0);
     assert.equal(r.title, "frogs and toads");
     assert.equal(r.isForum, undefined);
     s.setStatus(CHAT, "approved");
     clock += HOUR;
-    const same = s.ensureRoom(CHAT, { title: "frogs 2", kind: "supergroup", isForum: true });
+    const same = s.ensureRoom(CHAT, { title: "frogs 2", kind: "supergroup", isForum: true })!;
     assert.equal(same, r);
     assert.equal(same.status, "approved");
     assert.equal(same.title, "frogs 2");
@@ -595,7 +595,7 @@ describe("ensureRoom and setStatus", () => {
     assert.equal(s.rooms().length, 1);
   });
 
-  it("holds 30 chats, evicting the longest-gone left/blocked room, then the quietest", () => {
+  it("holds 30 chats, evicting the longest-gone left room, then the quietest pending one — never the owner's blocked room", () => {
     const s = open();
     for (let i = 1; i <= 30; i++) {
       clock = T0 + i * MIN;
@@ -613,11 +613,41 @@ describe("ensureRoom and setStatus", () => {
     assert.equal(s.room(-20), undefined, "the room left longest ago goes first");
     assert.ok(s.room(-10));
     s.ensureRoom(-32, { title: "g32", kind: "group" });
-    assert.equal(s.room(-10), undefined, "then the next left/blocked room");
-    s.ensureRoom(-33, { title: "g33", kind: "group" });
     assert.ok(s.room(-1), "a room with recent lines stays");
-    assert.equal(s.room(-2), undefined, "then the least recently active");
+    assert.equal(s.room(-2), undefined, "then the pending room quiet for longest");
+    assert.ok(s.room(-10), "the owner's Leave outlasts every pending room");
     assert.equal(s.rooms().length, TG_LIMITS.chats);
+  });
+
+  it("a stranger's new room never pushes out the owner's approved or blocked rooms", () => {
+    // Anyone can add a bot to a group: thirty strangers' groups must not
+    // evict the owner's own. Found full of decisions, nothing is created.
+    const s = open();
+    for (let i = 1; i <= 30; i++) {
+      clock = T0 + i * MIN;
+      s.ensureRoom(-i, { title: `g${i}`, kind: "group" });
+      s.setStatus(-i, i === 5 ? "blocked" : "approved", 42);
+    }
+    clock = T0 + 10 * HOUR;
+    assert.equal(s.ensureRoom(-31, { title: "stranger", kind: "group" }), undefined);
+    assert.equal(s.room(-31), undefined);
+    assert.equal(s.rooms().length, TG_LIMITS.chats);
+    for (let i = 1; i <= 30; i++) assert.ok(s.room(-i), `room ${i} kept`);
+    // A room already there is found as ever.
+    assert.equal(s.ensureRoom(-7, { title: "g7", kind: "group" })?.chatId, -7);
+
+    // The owner's own act may make room: the blocked one first, then the quietest approved.
+    assert.equal(s.ensureRoom(-32, { title: "mine", kind: "group" }, { owner: true })?.status, "pending");
+    assert.equal(s.room(-5), undefined);
+    s.setStatus(-32, "approved", 42);
+    assert.equal(s.ensureRoom(-33, { title: "mine too", kind: "group" }, { owner: true })?.status, "pending");
+    assert.equal(s.room(-1), undefined, "the quietest approved room");
+
+    // With a pending room in the store, a stranger's room takes its place, never an approved one's.
+    const approved = s.rooms().filter((r) => r.status === "approved").length;
+    assert.ok(s.ensureRoom(-34, { title: "stranger", kind: "group" }));
+    assert.equal(s.room(-33), undefined, "the pending room made way");
+    assert.equal(s.rooms().filter((r) => r.status === "approved").length, approved);
   });
 
   it("setStatus flushes, moves statusAtMs only on a change, and records who added it", () => {
@@ -640,6 +670,26 @@ describe("ensureRoom and setStatus", () => {
     assert.equal(s.room(CHAT)!.status, "left");
     s.setStatus(OTHER, "approved");
     assert.equal(s.room(OTHER), undefined);
+  });
+
+  it("a real change clears the owner's Stay/Leave ask, so a new pending spell gets its own question and its own 24 h", () => {
+    const s = open();
+    s.ensureRoom(CHAT, { title: "frogs", kind: "group" });
+    s.update(CHAT, (r) => {
+      r.askedOwnerAtMs = T0;
+    });
+    clock += MIN;
+    s.setStatus(CHAT, "pending", 55);
+    assert.equal(s.room(CHAT)!.askedOwnerAtMs, T0, "pending → pending is the same spell: the ask stands");
+    s.setStatus(CHAT, "approved");
+    assert.equal(s.room(CHAT)!.askedOwnerAtMs, undefined);
+    assert.equal(onDisk().rooms[String(CHAT)].askedOwnerAtMs, undefined, "on disk at once");
+    s.update(CHAT, (r) => {
+      r.askedOwnerAtMs = T0;
+    });
+    s.setStatus(CHAT, "left");
+    s.setStatus(CHAT, "pending", 77);
+    assert.equal(s.room(CHAT)!.askedOwnerAtMs, undefined, "re-added: not asked yet");
   });
 });
 
@@ -901,6 +951,23 @@ describe("forgetChat and forgetPerson", () => {
     assert.deepEqual(disk.lines.map((l: TgLine) => l.fromId), [8], "written before returning");
     assert.equal(s.forgetPerson(CHAT, 7), 0);
     assert.equal(s.forgetPerson(OTHER, 7), 0);
+  });
+
+  it("every wipe moves the chat's forget generation, so a memory pass that read before it can tell", () => {
+    const s = open();
+    approvedRoom(s);
+    approvedRoom(s, OTHER, "others");
+    assert.equal(s.forgetGen(CHAT), 0);
+    s.forgetChat(CHAT);
+    assert.equal(s.forgetGen(CHAT), 1);
+    s.forgetPerson(CHAT, 7);
+    assert.equal(s.forgetGen(CHAT), 2, "a /forgetme counts, even with nothing of theirs left");
+    assert.equal(s.forgetGen(OTHER), 0, "per chat");
+    s.addLine(CHAT, line(1));
+    s.update(CHAT, (r) => {
+      r.summary = "new";
+    });
+    assert.equal(s.forgetGen(CHAT), 2, "ordinary changes do not");
   });
 });
 

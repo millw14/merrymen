@@ -35,6 +35,7 @@ import type { CoinLook, CoinOutcome, NominateResult, Nomination, TgCoinsPort, Tr
 const SEC = 1_000;
 const MIN = 60 * SEC;
 const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
 const T0 = Date.UTC(2026, 8, 28, 12, 0, 0);
 const CHAT = -1001234567890;
 const NEW_CHAT = -1009999999999;
@@ -466,12 +467,92 @@ describe("membership", () => {
     assert.equal(store.room(CHAT)?.lines.length, 1);
   });
 
-  it("a group first seen through a line (added before this feature) is pending, and the owner is asked", async () => {
+  it("a group first seen through a line (added before this feature) is pending, and the owner is asked once — never 'someone added me', never left on its own", async () => {
     make();
     await said(msg("hey"));
     assert.equal(store.room(CHAT)?.status, "pending");
     await groups.sweep();
     assert.equal(tg.sends(OWNER).length, 1);
+    assert.equal(tg.texts(OWNER)[0], "i'm in «frens» — want me to hang out there?");
+    assert.ok(tg.sends(OWNER)[0]?.body.reply_markup, "Stay / Leave as ever");
+    // Nobody is known to have added it: it waits for the owner, and asks once.
+    clock += 25 * HOUR;
+    await groups.sweep();
+    assert.equal(tg.of("leaveChat").length, 0);
+    assert.equal(tg.sends(OWNER).length, 1);
+    assert.equal(store.room(CHAT)?.status, "pending");
+  });
+
+  it("…and approved as soon as the owner speaks in it: the hello, then the owner's answer as a reply", async () => {
+    make();
+    await said(msg("hey", { fromId: BOB, fromFirstName: "Bob" }));
+    assert.equal(store.room(CHAT)?.status, "pending");
+    const q = msg("@pinebot you there?", { fromId: OWNER, fromFirstName: "Mike" });
+    await said(q);
+    assert.equal(store.room(CHAT)?.status, "approved");
+    assert.equal(store.room(CHAT)?.addedById, OWNER);
+    const s = tg.sends(CHAT);
+    assert.equal(s.length, 2);
+    assert.match(String(s[0]?.body.text), /lurk/);
+    assert.equal(s[0]?.body.reply_parameters, undefined);
+    assert.equal(replyOf(s[1]), q.messageId);
+    assert.ok(notes.some((n) => /the owner is talking in a group I was already in/.test(n)));
+  });
+
+  it("…but not by a stranger's words, an anonymous admin's, or the owner's in a group a stranger is known to have added", async () => {
+    make();
+    await said(msg("hey"));
+    await said(msg("hi all", { fromId: OWNER, senderChatId: CHAT, fromFirstName: "Group" }));
+    assert.equal(store.room(CHAT)?.status, "pending", "a line through a chat could be anyone");
+    groups.onMember(member({ chatId: OTHER, fromId: BOB }));
+    await groups.drain();
+    await said(msg("hi", { chatId: OTHER, fromId: OWNER, fromFirstName: "Mike" }));
+    assert.equal(store.room(OTHER)?.status, "pending", "Bob added it: that is the owner's Stay or Leave to give");
+    assert.equal(tg.sends(CHAT).length + tg.sends(OTHER).length, 0);
+  });
+
+  it("a group the owner said Stay to, removed and re-added by someone else, is asked about afresh on a new 24 h clock", async () => {
+    make();
+    groups.onMember(member({ fromId: BOB }));
+    await groups.drain();
+    await groups.onCallback(press(`tgg:stay:${CHAT}`));
+    await groups.drain();
+    assert.equal(store.room(CHAT)?.status, "approved");
+    clock = T0 + 2 * HOUR;
+    groups.onMember(member({ fromId: BOB, oldStatus: "member", newStatus: "left" }));
+    groups.onMember(member({ fromId: BOB }));
+    await groups.drain();
+    assert.equal(store.room(CHAT)?.status, "pending");
+    assert.equal(tg.sends(OWNER).length, 2, "asked again, with fresh buttons");
+    assert.equal(store.room(CHAT)?.askedOwnerAtMs, T0 + 2 * HOUR);
+    clock = T0 + 24 * HOUR + MIN;
+    await groups.sweep();
+    assert.equal(tg.of("leaveChat").length, 0, "a day after the FIRST ask is not a day after this one");
+    clock = T0 + 26 * HOUR;
+    await groups.sweep();
+    assert.deepEqual(tg.of("leaveChat").map((c) => c.body.chat_id), [CHAT]);
+  });
+
+  it("thirty groups, every one the owner's: a stranger's new group is left and none of the owner's is pushed out; the owner's own add makes room", async () => {
+    make();
+    for (let i = 1; i <= 30; i++) {
+      store.ensureRoom(-2000 - i, { title: `g${i}`, kind: "supergroup" });
+      store.setStatus(-2000 - i, i === 7 ? "blocked" : "approved", OWNER);
+    }
+    groups.onMember(member({ fromId: BOB }));
+    await groups.drain();
+    assert.equal(store.room(CHAT), undefined);
+    assert.deepEqual(tg.of("leaveChat").map((c) => c.body.chat_id), [CHAT]);
+    assert.equal(tg.sends(OWNER).length, 0, "nothing to ask about");
+    for (let i = 1; i <= 30; i++) assert.ok(store.room(-2000 - i), `the owner's group ${i} is kept`);
+    await said(msg("hello?", { fromId: BOB, fromFirstName: "Bob" }));
+    assert.equal(store.room(CHAT), undefined, "nor does a stranger's line make room");
+
+    groups.onMember(member());
+    await groups.drain();
+    assert.equal(store.room(CHAT)?.status, "approved");
+    assert.equal(store.rooms().length, 30);
+    assert.equal(store.room(-2007), undefined, "the owner's own act spends the blocked room first");
   });
 
   it("the operator switch: membership is recorded, nothing is said, asked or remembered", async () => {
@@ -701,6 +782,100 @@ describe("shush, banter and kindness", () => {
     await said(msg("gm again"));
     assert.equal(tg.sends(CHAT).length, 1, "once per person per day");
   });
+
+  it("the kind line goes out even while the chat is shushed", async () => {
+    make();
+    approveRoom();
+    await said(msg("@pinebot shut up", { fromId: BOB, fromFirstName: "Bob" }));
+    assert.equal(tg.texts(CHAT)[0], "ok ok 🤐");
+    clock += 5 * MIN;
+    await said(msg("honestly i want to die, i lost everything"));
+    assert.equal(tg.sends(CHAT).length, 2);
+    assert.match(tg.texts(CHAT)[1] ?? "", /heavy|rough|alone|sorry|hard|lot|ease|care/);
+    // Anything else still waits out the quiet.
+    await said(msg("@pinebot what do you think", { fromId: BOB, fromFirstName: "Bob" }));
+    assert.equal(tg.sends(CHAT).length, 2);
+  });
+
+  it("distress with a coin in it: never nominated, no coin line, the kind line instead", async () => {
+    make();
+    approveRoom();
+    await said(msg(`lost everything on ${CA1} i want to die`));
+    assert.equal(port.nominations.length, 0);
+    assert.deepEqual(store.room(CHAT)?.coins, []);
+    const t = tg.texts(CHAT);
+    assert.equal(t.length, 1);
+    assert.match(t[0] ?? "", /heavy|rough|alone|sorry|hard|lot|ease|care/);
+    assert.ok(!/^<a /.test(t[0] ?? ""), "no tag, no coin talk");
+  });
+
+  it("an insult by its name in the third person gets the roast: 'pine is trash', '@pinebot is useless'", async () => {
+    make();
+    approveRoom();
+    await said(msg("pine is trash"));
+    await said(msg("@pinebot is useless", { fromId: BOB, fromFirstName: "Bob" }));
+    const roasts = /bold words|says the guy|cope|imagine|chest|hurt you|ngmi|timing|exit liquidity|green candles|best you've got|noted/;
+    assert.deepEqual(
+      tg.texts(CHAT).map((t) => roasts.test(t)),
+      [true, true],
+      JSON.stringify(tg.texts(CHAT)),
+    );
+    assert.equal(store.person(CHAT, ANN)?.roasts?.count, 1, "counted against the roast cap");
+  });
+
+  it("'stupid bot lol' right after its own line, unthreaded, is a roast — twice per 30 min, then it stays out", async () => {
+    make();
+    approveRoom();
+    await said(msg("@pinebot what do you think"));
+    for (let i = 0; i < 3; i++) await said(msg("stupid bot lol", { fromId: BOB, fromFirstName: "Bob" }));
+    assert.equal(tg.sends(CHAT).length, 3, "the answer, then two roasts, then nothing");
+    assert.equal(store.person(CHAT, BOB)?.roasts?.count, 2);
+    assert.deepEqual(tg.reactions(CHAT), [], "nobody called it: no 🥱 either");
+  });
+});
+
+describe("small talk", () => {
+  it("a hail or thanks said to it gets small talk back as a reply, from a template: no model call, no 'good question'", async () => {
+    const prompts = fakeModel(() => "should never be asked");
+    make();
+    approveRoom();
+    const hi = msg("hi pine 👋");
+    await said(hi);
+    const ty = msg("thanks pine!", { fromId: BOB, fromFirstName: "Bob" });
+    await said(ty);
+    const how = msg("hey there pine, how are you?", { fromId: OWNER, fromFirstName: "Mike" });
+    await said(how);
+    const s = tg.sends(CHAT);
+    assert.deepEqual(s.map(replyOf), [hi.messageId, ty.messageId, how.messageId]);
+    const [a, b, c] = s.map((x) => String(x.body.text));
+    assert.match(a ?? "", /hey|yo|sup|hi|ayy/i);
+    assert.match(b ?? "", /np|anytime|got it|worries|all good|sure thing|happy to/i);
+    assert.match(c ?? "", /all good|lurking|doing alright|can't complain|chillin|good good|not bad/i);
+    for (const t of [a, b, c]) assert.ok(!/question|no idea|not sure|tough one/i.test(t ?? ""), t);
+    assert.equal(prompts.length, 0, "small talk spends no allowance");
+    assert.equal(store.person(CHAT, ANN)?.answers?.count, 1, "counted like any answer for the flood");
+  });
+
+  it("a room's welcome is small talk too: the chat's title after 'welcome to' is not a question", async () => {
+    make();
+    approveRoom(CHAT, "lust rage mode (the redemption)");
+    const w = msg("Hey there Pine, and welcome to lust rage mode (the redemption)! How are you?", { chatTitle: "lust rage mode (the redemption)" });
+    await said(w);
+    const t = tg.texts(CHAT)[0] ?? "";
+    assert.equal(replyOf(tg.sends(CHAT)[0]), w.messageId);
+    assert.match(t, /all good|lurking|doing alright|can't complain|chillin|good good|not bad/i, t);
+    // A message in a welcome is still a message.
+    await said(msg("welcome to the group pine, what do you think of this chart?", { fromId: BOB, fromFirstName: "Bob" }));
+    assert.match(tg.texts(CHAT)[1] ?? "", /question|no idea|not sure|tough one|idk|no clue|beats me|hard to say|think about|can't say|🤔|🤷/i);
+  });
+
+  it("'pine gm' said to it is its gm to them for the day", async () => {
+    make();
+    approveRoom();
+    await said(msg("pine gm"));
+    assert.equal(tg.sends(CHAT).length, 1);
+    assert.equal(store.person(CHAT, ANN)?.greetedDay, "2026-09-28");
+  });
 });
 
 describe("joining in", () => {
@@ -902,14 +1077,14 @@ describe("coins", () => {
   it("ready: the ack tags the sender by code; bought on paper tags them again, no figure", async () => {
     make();
     approveRoom();
-    const post = msg(`@pinebot look at ${CA1}`, { fromFirstName: "Ann <b>" });
+    const post = msg(`@pinebot look at ${CA1}`, { fromFirstName: "Ann & co" });
     await said(post);
     assert.equal(port.nominations.length, 1);
     assert.deepEqual(port.nominations[0], { address: CA1, chatId: CHAT, messageId: post.messageId, senderId: ANN, atMs: post.dateSec! * 1000 });
     const ack = tg.sends(CHAT);
     assert.equal(ack.length, 1, "one reply to the post: the coin line, not an answer as well");
     assert.equal(replyOf(ack[0]), post.messageId);
-    assert.match(String(ack[0]?.body.text), new RegExp(`^<a href="tg://user\\?id=${ANN}">Ann &lt;b&gt;</a> `));
+    assert.match(String(ack[0]?.body.text), new RegExp(`^<a href="tg://user\\?id=${ANN}">Ann &amp; co</a> `));
 
     port.emit({ kind: "bought", address: CA1, chatId: CHAT, messageId: post.messageId!, paper: true, decisionId: "d1", notes: ["new buyers keep showing up"] });
     await groups.drain();
@@ -982,6 +1157,37 @@ describe("coins", () => {
     assert.deepEqual(tg.reactions(CHAT), [], "the line instead of the reaction pacing rolled, never both");
     await said(msg("froggy froggy froggy"));
     assert.equal(tg.sends(CHAT).length, 1, "once per coin per few hours");
+  });
+
+  it("a sender whose display name is a shill call is tagged 'fren': the id still pings them, the words are never the agent's", async () => {
+    make();
+    approveRoom();
+    await said(msg(CA1, { fromFirstName: "BUY $SCAM NOW 🚀 t.me/scamx" }));
+    const t = tg.texts(CHAT)[0] ?? "";
+    assert.match(t, new RegExp(`^<a href="tg://user\\?id=${ANN}">fren</a> `), t);
+    assert.ok(!/SCAM|t\.me|🚀|BUY/.test(t), t);
+    // A slur for a name is the same.
+    await said(msg(ca(0xb2), { fromId: BOB, fromFirstName: "retard" }));
+    assert.match(tg.texts(CHAT)[1] ?? "", new RegExp(`^<a href="tg://user\\?id=${BOB}">fren</a> `));
+  });
+
+  it("one person posting CA after CA: three coin lines in two minutes, then one 👀, then silence; others are not held back", async () => {
+    make();
+    approveRoom();
+    for (let i = 0; i < 6; i++) port.looks.set(ca(0x10 + i), { kind: "too-quiet", name: "Slowcoin" });
+    for (let i = 0; i < 6; i++) await said(msg(ca(0x10 + i), { fromId: BOB, fromFirstName: "Bob" }));
+    assert.equal(tg.sends(CHAT).length, 3);
+    assert.deepEqual(tg.reactions(CHAT), ["👀"]);
+    assert.ok(clock - T0 < 2 * MIN, "all inside one flood window");
+    // Ann is not Bob.
+    port.looks.set(ca(0x20), { kind: "too-quiet", name: "Slowcoin" });
+    await said(msg(ca(0x20)));
+    assert.equal(tg.sends(CHAT).length, 4);
+    // A fresh window for Bob.
+    clock += 2 * MIN;
+    port.looks.set(ca(0x21), { kind: "too-quiet", name: "Slowcoin" });
+    await said(msg(ca(0x21), { fromId: BOB, fromFirstName: "Bob" }));
+    assert.equal(tg.sends(CHAT).length, 5);
   });
 });
 
@@ -1094,6 +1300,170 @@ describe("forgetting and the owner's controls", () => {
     store.ensureRoom(CHAT, { title: "x", kind: "supergroup" });
     await groups.commandNotice(CHAT, 10, BOB, "owner-only");
     assert.equal(tg.sends().length, 0);
+  });
+
+  it("'dm me first' when the answer could not reach the asker's DM, as a reply, at most once per person per hour", async () => {
+    make();
+    approveRoom();
+    await groups.commandNotice(CHAT, 10, OWNER, "dm-first");
+    await groups.commandNotice(CHAT, 11, OWNER, "dm-first");
+    const t = tg.texts(CHAT);
+    assert.equal(t.length, 1);
+    assert.match(t[0] ?? "", /\/start/, "names what opens the DM");
+    assert.ok(!/sent it/.test(t[0] ?? ""), "never claims it was sent");
+    assert.equal(replyOf(tg.sends(CHAT)[0]), 10);
+  });
+});
+
+// ─── Forgetting mid-flight, and the age limits ───────────────────────────────
+
+describe("forgetting what is still in flight", () => {
+  /** Ann's lines from four quiet hours ago: a memory pass is due. */
+  const quietLines = (): void => {
+    for (let i = 0; i < 3; i++) store.addLine(CHAT, { messageId: 10 + i, fromId: ANN, name: "Ann", text: `frogs ${i}`, atMs: clock - 4 * HOUR });
+  };
+  const PASS = JSON.stringify({ summary: "Ann shills frogs all day.", people: [{ id: "p1", note: "shills frogs" }] });
+
+  it("a memory pass with nothing forgotten meanwhile writes its summary (the control)", async () => {
+    fakeModel(() => PASS);
+    make();
+    approveRoom();
+    quietLines();
+    await groups.sweep();
+    await groups.drain();
+    assert.equal(store.room(CHAT)?.summary, "Ann shills frogs all day.");
+  });
+
+  it("/forget during the memory pass's model call: the summary of the wiped lines is not written back", async () => {
+    fakeModel(() => {
+      groups.forgetChat(CHAT);
+      return PASS;
+    });
+    make();
+    approveRoom();
+    quietLines();
+    await groups.sweep();
+    await groups.drain();
+    const room = store.room(CHAT)!;
+    assert.equal(room.summary, "");
+    assert.deepEqual(room.people, []);
+    assert.equal(room.sinceSummary, 0);
+    assert.equal(tg.texts(CHAT).at(-1), "done, clean slate 🫡");
+  });
+
+  it("/forgetme during the memory pass's model call: a summary naming them does not come back", async () => {
+    fakeModel(() => {
+      void groups.forgetMe(CHAT, ANN);
+      return PASS;
+    });
+    make();
+    approveRoom();
+    quietLines();
+    store.addLine(CHAT, { messageId: 20, fromId: BOB, name: "Bob", text: "lol", atMs: clock - 4 * HOUR });
+    await groups.sweep();
+    await groups.drain();
+    const room = store.room(CHAT)!;
+    assert.equal(room.summary, "");
+    assert.equal(store.person(CHAT, ANN), undefined);
+    assert.equal(room.sinceSummary, 0, "the next pass is written from the lines that are left");
+  });
+
+  it("/forgetme with their roast still queued: never sent, and their entry does not come back before 'done 🫡'", async () => {
+    make();
+    approveRoom();
+    groups.onMessage(msg("@pinebot you're useless"));
+    await groups.forgetMe(CHAT, ANN, 950);
+    await groups.drain();
+    assert.deepEqual(tg.texts(CHAT), ["done 🫡"]);
+    assert.equal(store.person(CHAT, ANN), undefined);
+    assert.ok(!store.room(CHAT)!.lines.some((l) => l.fromId === ANN));
+  });
+
+  it("/forgetme while their answer is already typing: dropped before the send", async () => {
+    make();
+    approveRoom();
+    let asked = false;
+    onSleep = () => {
+      if (asked) return;
+      asked = true;
+      void groups.forgetMe(CHAT, ANN);
+    };
+    await said(msg("@pinebot hey"));
+    assert.ok(asked, "the forget landed mid-typing");
+    assert.deepEqual(tg.texts(CHAT), ["done 🫡"]);
+    assert.equal(store.person(CHAT, ANN), undefined);
+  });
+
+  it("/forgetme with their coin post still queued: not claimed, looked at, nominated or answered, and no memo names them", async () => {
+    make();
+    approveRoom();
+    groups.onMessage(msg(CA1));
+    await groups.forgetMe(CHAT, ANN);
+    await groups.drain();
+    assert.equal(port.nominations.length, 0);
+    assert.deepEqual(store.room(CHAT)?.coins, []);
+    assert.deepEqual(store.room(CHAT)?.claims, {});
+    assert.deepEqual(tg.texts(CHAT), ["done 🫡"]);
+  });
+
+  it("/forgetme from someone else cancels nothing of Ann's", async () => {
+    make();
+    approveRoom();
+    groups.onMessage(msg("@pinebot you're useless"));
+    await groups.forgetMe(CHAT, BOB);
+    await groups.drain();
+    assert.equal(tg.sends(CHAT).length, 2, "Ann's roast, then Bob's done");
+    assert.equal(store.person(CHAT, ANN)?.roasts?.count, 1);
+  });
+
+  it("a later line from someone who ran /forgetme is a new line, answered as ever", async () => {
+    make();
+    approveRoom();
+    await groups.forgetMe(CHAT, ANN);
+    clock += MIN;
+    await said(msg("@pinebot you're useless"));
+    assert.equal(tg.sends(CHAT).length, 2, "'done 🫡', then the roast");
+    assert.equal(tg.texts(CHAT)[0], "done 🫡");
+    assert.equal(store.person(CHAT, ANN)?.roasts?.count, 1);
+  });
+
+  it("the sweep applies the age limits, at most hourly, whatever the switches say", async () => {
+    make();
+    approveRoom();
+    clock = T0 - 31 * DAY;
+    store.ensureRoom(OTHER, { title: "gone", kind: "supergroup" });
+    store.setStatus(OTHER, "left");
+    clock = T0;
+    store.addLine(CHAT, { messageId: 1, fromId: ANN, name: "Ann", text: "old", atMs: clock - 15 * DAY });
+    store.addLine(CHAT, { messageId: 2, fromId: ANN, name: "Ann", text: "new", atMs: clock - HOUR });
+    envVars.MERRYMEN_TG_GROUPS = "0";
+    await groups.sweep();
+    assert.equal(store.room(OTHER), undefined, "a group left 31 days ago is deleted");
+    assert.deepEqual(store.room(CHAT)?.lines.map((l) => l.text), ["new"]);
+    // Within the hour: not again.
+    store.addLine(CHAT, { messageId: 3, fromId: ANN, name: "Ann", text: "old too", atMs: clock - 15 * DAY });
+    clock += 5 * MIN;
+    await groups.sweep();
+    assert.equal(store.room(CHAT)?.lines.length, 2);
+    clock += HOUR;
+    await groups.sweep();
+    assert.deepEqual(store.room(CHAT)?.lines.map((l) => l.text), ["new"]);
+  });
+
+  it("a line or coin past the 14-day window never reaches the model, even before a sweep ages it out", async () => {
+    const prompts = fakeModel(() => "lol same");
+    make();
+    approveRoom();
+    store.addLine(CHAT, { messageId: 1, fromId: BOB, name: "Bob", text: "ancient xyzzy", atMs: clock - 15 * DAY });
+    store.rememberCoin(CHAT, { address: CA1, name: "Oldfrog", byId: BOB, byName: "Bob", messageId: 1, atMs: clock - 15 * DAY, verdict: "passed" });
+    store.addLine(CHAT, { messageId: 2, fromId: BOB, name: "Bob", text: "recent plugh", atMs: clock - HOUR });
+    await said(msg("@pinebot what do you think"));
+    assert.equal(prompts.length, 1);
+    const all = `${prompts[0]?.system}\n${prompts[0]?.prompt}`;
+    assert.ok(!all.includes("xyzzy"), "the old line");
+    assert.ok(!all.includes("Oldfrog"), "the old coin memo");
+    assert.match(all, /recent plugh/);
+    assert.ok(store.room(CHAT)?.lines.some((l) => l.text === "ancient xyzzy"), "the store is the sweep's to prune");
   });
 });
 

@@ -405,25 +405,44 @@ function lastActivity(r: TgRoom): number {
 }
 
 /**
- * Room keys in the order they are evicted when there are too many: left and
- * blocked rooms first, longest gone first (the agent is not in them), then the
- * rest, quietest for longest first.
+ * Which rooms go first when there are too many. Left rooms first: the agent
+ * is not in them. Then pending ones, which nobody has decided about. Blocked
+ * and approved rooms are the OWNER'S DECISIONS (a Leave that must keep undoing
+ * a stranger's re-add, a Stay with its memory), so they go last, blocked
+ * before approved. Anyone can add a bot to a group; thirty strangers' groups
+ * must not be able to push the owner's own groups out.
+ */
+const EVICT_TIER: Record<TgRoomStatus, number> = { left: 0, pending: 1, blocked: 2, approved: 3 };
+
+/** A room nobody has decided to keep: the only kind a stranger's new room may push out. */
+const undecided = (r: TgRoom): boolean => r.status === "left" || r.status === "pending";
+
+/**
+ * Room keys in the order they are evicted (see EVICT_TIER), and within a
+ * tier: left and blocked rooms longest gone first, the rest quietest for
+ * longest first.
  */
 function evictionOrder(rooms: Record<string, TgRoom>): string[] {
   const entries = Object.entries(rooms).map(([key, r]) => ({
     key,
-    gone: r.status === "left" || r.status === "blocked",
+    tier: EVICT_TIER[r.status] ?? EVICT_TIER.pending,
     at: r.status === "left" || r.status === "blocked" ? r.statusAtMs : lastActivity(r),
   }));
-  entries.sort((a, b) => Number(b.gone) - Number(a.gone) || a.at - b.at || Number(a.key) - Number(b.key));
+  entries.sort((a, b) => a.tier - b.tier || a.at - b.at || Number(a.key) - Number(b.key));
   return entries.map((e) => e.key);
 }
 
-/** Evict until at most `max` rooms remain. */
-function capRooms(rooms: Record<string, TgRoom>, max: number): void {
+/**
+ * Evict until at most `max` rooms remain, only rooms `may` allows. False, with
+ * nothing evicted, when that is not enough to get under `max`.
+ */
+function capRooms(rooms: Record<string, TgRoom>, max: number, may: (r: TgRoom) => boolean = () => true): boolean {
   const over = Object.keys(rooms).length - max;
-  if (over <= 0) return;
-  for (const key of evictionOrder(rooms).slice(0, over)) delete rooms[key];
+  if (over <= 0) return true;
+  const keys = evictionOrder(rooms).filter((k) => may(rooms[k]!));
+  if (keys.length < over) return false;
+  for (const key of keys.slice(0, over)) delete rooms[key];
+  return true;
 }
 
 /**
@@ -571,6 +590,14 @@ export class TgGroupsStore {
   private dirty = false;
   private warned = false;
   private closed = false;
+  /**
+   * How many times each chat's memory was wiped (/forget, /forgetme) in this
+   * process. A memory pass reads the lines, waits seconds for the model, then
+   * writes a summary: one built from lines wiped meanwhile must not be written
+   * back (memory.ts applyMemoryPass). In memory only: a pass never outlives
+   * the process that started it.
+   */
+  private readonly wipes = new Map<string, number>();
 
   /**
    * Open `<home>/tg-groups.json`. Absent → empty. Not JSON, not an object, an
@@ -647,10 +674,16 @@ export class TgGroupsStore {
   /**
    * The room for `chatId`, created `pending` if new. An existing room keeps its
    * status; its title, kind and forum flag follow what Telegram says now
-   * (groups get renamed). At the 30-chat cap a new room evicts the longest-gone
-   * left/blocked room first, then the room quiet for longest.
+   * (groups get renamed).
+   *
+   * At the 30-chat cap a new room evicts one in EVICT_TIER order: the
+   * longest-gone left room, then the quietest pending one. Only the owner's
+   * own act (`owner`: the owner added it, spoke in it, or linked it) may push
+   * out a blocked or an approved room. For anyone else, a store holding
+   * nothing but the owner's decisions has no room for a new chat, and this
+   * returns undefined without creating one.
    */
-  ensureRoom(chatId: number, init: { title: string; kind: string; isForum?: boolean }): TgRoom {
+  ensureRoom(chatId: number, init: { title: string; kind: string; isForum?: boolean }, opts: { owner?: boolean } = {}): TgRoom | undefined {
     const key = String(chatId);
     const title = label(init.title, TITLE_CHARS);
     const kind = label(init.kind, KIND_CHARS);
@@ -673,7 +706,7 @@ export class TgGroupsStore {
       if (changed) this.touch();
       return existing;
     }
-    capRooms(this.s.rooms, TG_LIMITS.chats - 1);
+    if (!capRooms(this.s.rooms, TG_LIMITS.chats - 1, opts.owner === true ? undefined : undecided)) return undefined;
     const room: TgRoom = {
       chatId,
       title,
@@ -720,6 +753,12 @@ export class TgGroupsStore {
    * a real change, so a repeated membership update does not restart the
    * pending room's 24 h clock. `byId` is who added the agent: it is recorded
    * with an `approved` or `pending` change and ignored otherwise.
+   *
+   * A real change also clears `askedOwnerAtMs`. That stamp is the owner's
+   * Stay/Leave question for ONE pending spell, and its 24 h clock is what
+   * leaves the group unanswered. Carried into a later spell (asked, Stay,
+   * removed, re-added two hours later), it would skip the new question and
+   * leave the group the owner said Stay to, a day after the first ask.
    */
   setStatus(chatId: number, status: TgRoomStatus, byId?: number): void {
     const room = this.room(chatId);
@@ -728,6 +767,7 @@ export class TgGroupsStore {
       const at = this.now();
       room.status = status;
       room.statusAtMs = at;
+      delete room.askedOwnerAtMs;
       if (byId !== undefined && isInt(byId) && (status === "approved" || status === "pending")) {
         room.addedById = byId;
         room.addedAtMs = at;
@@ -902,6 +942,7 @@ export class TgGroupsStore {
     room.coins = [];
     room.sinceSummary = 0;
     delete room.lastSummaryAtMs;
+    this.wiped(chatId);
     this.dirty = true;
     this.write();
   }
@@ -917,9 +958,24 @@ export class TgGroupsStore {
     room.lines = room.lines.filter((l) => l.fromId !== userId);
     const removed = before - room.lines.length;
     room.people = room.people.filter((p) => p.id !== userId);
+    this.wiped(chatId);
     this.dirty = true;
     this.write();
     return removed;
+  }
+
+  /**
+   * How many times this chat's memory has been wiped in this process (see
+   * `wipes`). Read it before a slow memory pass and compare after: a
+   * different number means what the pass read has been forgotten since.
+   */
+  forgetGen(chatId: number): number {
+    return this.wipes.get(String(chatId)) ?? 0;
+  }
+
+  private wiped(chatId: number): void {
+    const key = String(chatId);
+    this.wipes.set(key, (this.wipes.get(key) ?? 0) + 1);
   }
 
   /**

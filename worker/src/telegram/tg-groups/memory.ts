@@ -326,11 +326,16 @@ const PASS_SYSTEM = [
  * A note is kept only for an id that appears in the room's lines, so a person
  * who ran /forgetme (their lines are gone) cannot get a note back; notes and
  * summary are sanitised here and again when applied.
+ *
+ * `nowMs` (the caller's clock) keeps lines older than the 14-day window out of
+ * the prompt. The store ages them out on a sweep, and between two sweeps a
+ * line past the promise must not reach a model provider.
  */
-export async function memoryPass(room: TgRoom, agentName: string, model: TgModel, gate: TgModelGate): Promise<MemoryPassResult | null> {
+export async function memoryPass(room: TgRoom, agentName: string, model: TgModel, gate: TgModelGate, nowMs?: number): Promise<MemoryPassResult | null> {
   try {
     if (!room || !model || !gate) return null;
-    const lines = (Array.isArray(room.lines) ? room.lines : []).slice(-TG_LIMITS.lines);
+    const fresh = (l: { atMs: number }): boolean => typeof nowMs !== "number" || !(nowMs - l.atMs > TG_LIMITS.lineMaxAgeMs);
+    const lines = (Array.isArray(room.lines) ? room.lines : []).filter(fresh).slice(-TG_LIMITS.lines);
     if (!lines.some((l) => !l.own)) return null;
     const now = Date.now();
     const last = attempts.get(room.chatId);
@@ -436,11 +441,24 @@ function parseMemoryAnswer(raw: string, byAlias: ReadonlyMap<string, number>): M
  * person who ran /forgetme meanwhile has no lines left, and their note is not
  * written back. A summary that sanitises to nothing keeps the old one rather
  * than wiping the chat's memory.
+ *
+ * `readAtGen` is `store.forgetGen(chatId)` as it was when the pass read the
+ * room. When the chat was wiped since (/forget, /forgetme), the result was
+ * written from what was just forgotten: a summary of the whole chat, or one
+ * naming the person, that the agent already said was gone. Nothing of it is
+ * written. Only the count resets, as after any pass, so the next one is
+ * written from the lines that are left.
  */
-export function applyMemoryPass(store: TgGroupsStore, chatId: number, r: MemoryPassResult, nowMs: number = Date.now()): void {
+export function applyMemoryPass(store: TgGroupsStore, chatId: number, r: MemoryPassResult, nowMs: number = Date.now(), readAtGen?: number): void {
   try {
     const room = store.room(chatId);
     if (!room || !r || typeof r !== "object") return;
+    if (typeof readAtGen === "number" && store.forgetGen(chatId) !== readAtGen) {
+      store.update(chatId, (rm) => {
+        rm.sinceSummary = 0;
+      });
+      return;
+    }
     const summary = typeof r.summary === "string" ? sanitizeMemoryText(r.summary, TG_LIMITS.summaryChars) : null;
 
     const authors = new Map<number, { name: string; atMs: number }>();

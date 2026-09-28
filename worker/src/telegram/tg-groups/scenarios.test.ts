@@ -462,9 +462,10 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
   it("Wallet / its own address / USDG / $MERRYMEN / a stock → casual one-liner, no look beyond the quick one", async () => {
     make();
     approve();
+    // Five different people: one person's fourth CA in two minutes is the flood (a 👀 at most).
     for (const [i, kind] of (["wallet", "own", "cash", "energy", "stock"] as const).entries()) {
       port.looks.set(ca(10 + i), { kind });
-      await said(msg(ca(10 + i), { fromId: BOB, fromFirstName: "Bob" }));
+      await said(msg(ca(10 + i), { fromId: BOB + i, fromFirstName: `Bob${i}` }));
     }
     assert.equal(port.nominations.length, 0);
     assert.equal(tg.sends(CHAT).length, 5);
@@ -476,7 +477,7 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     approve();
     for (const [i, kind] of (["curve", "v4-only", "no-pool", "too-thin", "too-quiet"] as const).entries()) {
       port.looks.set(ca(20 + i), { kind, name: "Meh" });
-      await said(msg(ca(20 + i), { fromId: CAT, fromFirstName: "Cat" }));
+      await said(msg(ca(20 + i), { fromId: CAT + i, fromFirstName: `Cat${i}` }));
     }
     assert.equal(port.nominations.length, 0);
     assert.equal(tg.sends(CHAT).length, 5);
@@ -651,10 +652,12 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
   });
 
   it("Model down / out of allowance / key rejected → templates or silence; nothing about it in the group", async () => {
-    fakeModel(() => ({ status: 401, body: '{"error":{"message":"invalid api key"}}' }));
+    const prompts = fakeModel(() => ({ status: 401, body: '{"error":{"message":"invalid api key"}}' }));
     make();
     approve();
-    await said(msg("@pinebot hi"));
+    // A question, so it goes to the model (a hail would be small talk from a template).
+    await said(msg("@pinebot thoughts?"));
+    assert.equal(prompts.length, 1, "the rejected call was made");
     const t = tg.texts(CHAT)[0] ?? "";
     assert.equal(t, "hmm good question");
     assert.ok(!/key|error|model|401|provider/i.test(t));
@@ -690,6 +693,61 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     await groups.groupsCommand(OWNER);
     const kb = tg.sends(OWNER)[0]?.body.reply_markup as { inline_keyboard: Array<Array<{ text: string }>> };
     assert.deepEqual(kb.inline_keyboard[0]?.map((b) => b.text), ["1 · Leave", "1 · Forget"]);
+  });
+
+  it("The owner's live group, joined before this feature → silent until the owner speaks, then approved; never 'someone added me', never a code; its welcome gets small talk", async () => {
+    // What really happened: the owner added the bot to her group before this
+    // build, so no my_chat_member was ever seen for it. The room's admin
+    // welcomes it, a member answers her, and then the owner speaks.
+    const LIVE = -1003377889900;
+    const TITLE = "lust rage mode (the redemption)";
+    const ROSE = 515151;
+    const XFYT = 616161;
+    const WELCOME = "Hey there Merryman, and welcome to lust rage mode (the redemption)! How are you?";
+    const inLive = (text: string, over: Partial<TgMessage>): TgMessage => msg(text, { chatId: LIVE, chatTitle: TITLE, ...over });
+    make();
+
+    const rose = inLive(WELCOME, { fromId: ROSE, fromFirstName: "Rose" });
+    await said(rose);
+    await said(inLive("yoooo", { fromId: XFYT, fromFirstName: "xfyt", replyTo: { messageId: rose.messageId!, fromId: ROSE, fromIsBot: false } }));
+    // Nobody has vouched for the group yet: silent, and nothing remembered.
+    assert.equal(store.room(LIVE)?.status, "pending");
+    assert.equal(tg.sends(LIVE).length, 0);
+    assert.equal(store.room(LIVE)?.lines.length, 0);
+
+    // The owner's question never claims a stranger added it: nobody knows who did.
+    await groups.sweep();
+    const dm = tg.texts(OWNER);
+    assert.equal(dm.length, 1);
+    assert.ok(!/someone added me/.test(dm[0] ?? ""), dm[0]);
+    assert.equal(dm[0], "i'm in «lust rage mode (the redemption)» — want me to hang out there?");
+    // A day on it has not left on its own, and has not asked again.
+    clock += 25 * HOUR;
+    await groups.sweep();
+    assert.equal(tg.of("leaveChat").length, 0);
+    assert.equal(tg.sends(OWNER).length, 1);
+    assert.equal(store.room(LIVE)?.status, "pending");
+
+    // The owner speaks: her own words are as strong as adding it.
+    await said(inLive("ok who's around tonight", { fromId: OWNER, fromFirstName: "Milla" }));
+    assert.equal(store.room(LIVE)?.status, "approved");
+    assert.equal(store.room(LIVE)?.addedById, OWNER);
+    assert.equal(tg.sends(LIVE).length, 1, "the one hello");
+    assert.match(tg.texts(LIVE)[0] ?? "", /lurk/);
+
+    // The admin's welcome, now that it may talk: warm small talk as a reply,
+    // not "hmm good question" (no model here, as on a hosted agent without a key).
+    const again = inLive(WELCOME, { fromId: ROSE, fromFirstName: "Rose" });
+    await said(again);
+    const answer = tg.sends(LIVE).at(-1);
+    assert.equal(tg.sends(LIVE).length, 2);
+    assert.equal(replyOf(answer), again.messageId);
+    const t = String(answer?.body.text);
+    assert.match(t, /all good|lurking|doing alright|can't complain|chillin|good good|not bad/i, t);
+    assert.ok(!/question|no idea|not sure|tough one|beats me|hard to say|think about|idk|no clue/i.test(t), t);
+
+    const everything = tg.calls.filter((c) => c.method === "sendMessage").map((c) => String(c.body.text));
+    assert.ok(!everything.some((x) => /not authorized|\/link|code/i.test(x)), JSON.stringify(everything));
   });
 });
 
@@ -986,5 +1044,40 @@ describe("docs/tg-groups.md Scenarios, through the poll service", () => {
     });
     await waitFor(() => calls.some((c) => c.method === "answerCallbackQuery" && c.body.callback_query_id === "q1"));
     assert.equal(store.room(CHAT)?.lines.filter((l) => !l.own).length, 0);
+  });
+
+  it("the owner's live group, joined before this feature: never refused or asked for a code, approved when the owner speaks, its welcome answered", async () => {
+    const LIVE = -1003377889900;
+    const chat = { id: LIVE, type: "supergroup", title: "lust rage mode (the redemption)" };
+    const WELCOME = "Hey there Merryman, and welcome to lust rage mode (the redemption)! How are you?";
+    const line = (text: string, from: { id: number; first: string }, extra: Record<string, unknown> = {}) => {
+      const mid = nextMid++;
+      return {
+        mid,
+        update: {
+          update_id: nextUpdate++,
+          message: { message_id: mid, date: Math.floor(clock / 1000), chat, from: { id: from.id, is_bot: false, first_name: from.first }, text, ...extra },
+        },
+      };
+    };
+    const before = calls.length;
+    const rose = line(WELCOME, { id: 515151, first: "Rose" });
+    await deliver(rose.update);
+    await deliver(
+      line("yoooo", { id: 616161, first: "xfyt" }, { reply_to_message: { message_id: rose.mid, chat, from: { id: 515151, is_bot: false, first_name: "Rose" } } }).update,
+    );
+    assert.equal(store.room(LIVE)?.status, "pending");
+    assert.equal(sendsTo(LIVE).length, 0);
+
+    await deliver(line("ok who's around tonight", { id: OWNER, first: "Milla" }).update);
+    await waitFor(() => store.room(LIVE)?.status === "approved");
+
+    const again = line(WELCOME, { id: 515151, first: "Rose" });
+    await deliver(again.update);
+    await waitFor(() => sendsTo(LIVE).some((c) => replyOf(c) === again.mid));
+    const answer = String(sendsTo(LIVE).find((c) => replyOf(c) === again.mid)?.body.text);
+    assert.ok(!/question|no idea|not sure|tough one|beats me|hard to say|think about|idk|no clue/i.test(answer), answer);
+    const sent = calls.slice(before).filter((c) => c.method === "sendMessage").map((c) => String(c.body.text));
+    assert.ok(!sent.some((t) => /not authorized|link code|\/link|someone added me/i.test(t)), JSON.stringify(sent));
   });
 });
