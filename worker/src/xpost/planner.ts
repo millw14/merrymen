@@ -57,7 +57,7 @@ export const BUY_JITTER_MAX = 40;
 export const BUY_STALE_MS = 8 * HOUR;
 /** The least time between two posts of one account. The intro is exempt, both ways. */
 export const GAP_MS = 3 * HOUR;
-/** A casual post pushed further than this by the gap waits for another day instead. */
+/** A casual post pushed further than this by the gap waits for another day instead; one held this long past due is stale. */
 export const CASUAL_MAX_PUSH_MS = 6 * HOUR;
 /** The owner's afternoon, in local minutes; with no known zone, the same length of UTC afternoon. */
 export const CASUAL_WINDOW_LOCAL = [12 * 60, 20 * 60] as const;
@@ -366,15 +366,33 @@ export type SendDecision =
  *            web cancels drafts on each of those already; this is the
  *            backstop for a draft planned in the same instant.
  *   skip   — a buy post still waiting eight hours after it was drafted is
- *            news nobody asked for any more.
+ *            news nobody asked for any more; a casual post held past the
+ *            owner-local day it was due on, or more than six hours past due
+ *            (a fleet pause, the fleet's ceiling, the owner's night, posting
+ *            switched off fleet-wide for days), is yesterday's afternoon
+ *            thought and would land at an arbitrary hour. The intro never
+ *            goes stale: a late hello is still the right first post.
  *   wait   — the owner is asleep, or it is not due yet.
  *   send   — otherwise.
+ *
+ * `dayOf` is the owner's local day, from the zone the glue reads; without
+ * one (the zone could not be read) only the six hours apply.
  */
-export function sendDecision(post: Pick<XPost, "kind" | "xUserId" | "createdAtMs" | "dueAtMs">, account: Pick<XAccount, "xUserId" | "posting"> | null, nowMs: number, asleep: boolean): SendDecision {
+export function sendDecision(
+  post: Pick<XPost, "kind" | "xUserId" | "createdAtMs" | "dueAtMs">,
+  account: Pick<XAccount, "xUserId" | "posting"> | null,
+  nowMs: number,
+  asleep: boolean,
+  dayOf?: (ms: number) => string,
+): SendDecision {
   if (!account) return { action: "cancel", reason: "account-gone" };
   if (account.xUserId !== post.xUserId) return { action: "cancel", reason: "account-changed" };
   if (!account.posting) return { action: "cancel", reason: "account-off" };
   if (post.kind === "buy" && nowMs - post.createdAtMs > BUY_STALE_MS) return { action: "skip", reason: "stale" };
+  if (post.kind === "casual" && post.dueAtMs <= nowMs) {
+    if (nowMs - post.dueAtMs > CASUAL_MAX_PUSH_MS) return { action: "skip", reason: "stale" };
+    if (dayOf && dayOf(nowMs) !== dayOf(post.dueAtMs)) return { action: "skip", reason: "stale" };
+  }
   if (asleep || post.dueAtMs > nowMs) return { action: "wait" };
   return { action: "send" };
 }

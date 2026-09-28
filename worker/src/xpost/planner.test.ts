@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   BUY_STALE_MS,
+  CASUAL_MAX_PUSH_MS,
   GAP_MS,
   INTRO_DELAY_MS,
   MIN_LEAD_MS,
@@ -469,6 +470,22 @@ describe("sendDecision", () => {
     assert.deepEqual(sendDecision({ ...p, createdAtMs: now - BUY_STALE_MS - 1 }, on, now, false), { action: "skip", reason: "stale" });
     assert.deepEqual(sendDecision({ ...p, createdAtMs: now - BUY_STALE_MS }, on, now, false), { action: "send" });
     assert.deepEqual(sendDecision({ ...p, kind: "casual", createdAtMs: now - 20 * HOUR }, on, now, false), { action: "send" });
+  });
+
+  it("skips a casual post held past its owner-local day, or six hours past due; never the intro", () => {
+    const utcDay = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+    const casual = { ...p, kind: "casual" as const, createdAtMs: now - 2 * HOUR, dueAtMs: now - HOUR };
+    assert.deepEqual(sendDecision(casual, on, now, false, utcDay), { action: "send" });
+    assert.deepEqual(sendDecision({ ...casual, dueAtMs: now - CASUAL_MAX_PUSH_MS }, on, now, false, utcDay), { action: "send" });
+    assert.deepEqual(sendDecision({ ...casual, dueAtMs: now - CASUAL_MAX_PUSH_MS - 1 }, on, now, false), { action: "skip", reason: "stale" }, "held six hours, even with no day to read");
+    // Due 23:30 on the 28th, held (a pause, the ceiling, the owner's night) to 00:05 on the 29th.
+    const late = Date.UTC(2026, 8, 28, 23, 30);
+    const past = Date.UTC(2026, 8, 29, 0, 5);
+    assert.deepEqual(sendDecision({ ...casual, dueAtMs: late }, on, past, false, utcDay), { action: "skip", reason: "stale" }, "yesterday's thought");
+    assert.deepEqual(sendDecision({ ...casual, dueAtMs: late }, on, past, true, utcDay), { action: "skip", reason: "stale" }, "retired while the owner sleeps, before it blocks anything");
+    assert.deepEqual(sendDecision({ ...casual, dueAtMs: now + HOUR }, on, now, false, utcDay), { action: "wait" }, "not due is not stale");
+    const hello = { ...p, kind: "intro" as const, createdAtMs: now - 3 * 24 * HOUR, dueAtMs: now - 3 * 24 * HOUR };
+    assert.deepEqual(sendDecision(hello, on, now, false, utcDay), { action: "send" }, "a late hello is still the right first post");
   });
 
   it("waits while the owner sleeps, or until it is due; otherwise sends", () => {

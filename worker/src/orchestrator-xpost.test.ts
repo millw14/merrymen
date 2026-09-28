@@ -493,19 +493,24 @@ describe("asleep and stale", () => {
     assert.equal(isAsleep(TZ, TENANT, NIGHT + 9 * HOUR), false);
     const w = await world(t, NIGHT - 10 * 24 * HOUR);
     const introKey = `intro:${TENANT}:111`;
-    await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "intro", dedupeKey: introKey, body: "", dueAtMs: 0, nowMs: NIGHT - 9 * 24 * HOUR, status: "skipped", reason: "test" });
+    const hello = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "intro", dedupeKey: introKey, body: "hello", dueAtMs: 0, nowMs: NIGHT - 9 * 24 * HOUR });
+    await store.ownerCancel(w.db, TENANT, hello!, NIGHT - 9 * 24 * HOUR);
     await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "buy", dedupeKey: "buy:late", body: BUY, coin: "pepe", decisionId: "late", dueAtMs: NIGHT - MIN, nowMs: NIGHT - 30 * MIN });
-    await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "casual", dedupeKey: "casual:late", body: "slow afternoons make me weirdly calm", dueAtMs: NIGHT - MIN, nowMs: NIGHT - 30 * MIN });
+    // Due at 07:00 in Tokyo on the 29th: while (or just after) the owner sleeps, and the same local day as noon.
+    await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "casual", dedupeKey: "casual:morning", body: "slow afternoons make me weirdly calm", dueAtMs: NIGHT + 4 * HOUR, nowMs: NIGHT - 30 * MIN });
+    // Due at 22:30 in Tokyo on the 28th, and still waiting after midnight there: yesterday's thought.
+    await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "casual", dedupeKey: "casual:yesterday", body: "yesterday's thought", dueAtMs: NIGHT - 4 * HOUR - 30 * MIN, nowMs: NIGHT - 5 * HOUR });
     const p = poster(w, { tz: TZ });
 
     const night = await p.step(w.db, ROSTER, new Map(), NIGHT);
     assert.equal(w.tweets.length, 0);
-    assert.equal(night.log, null, "waiting is not news");
+    assert.equal(night.log, "xpost: stale 1", "waiting is not news; a post retired is");
     assert.equal(await store.keyStatus(w.db, "buy:late"), "scheduled");
+    assert.equal(await store.keyStatus(w.db, "casual:yesterday"), "skipped", "a casual post held past its local day is stale");
 
     await p.step(w.db, ROSTER, new Map(), NIGHT + 9 * HOUR);
     assert.equal(await store.keyStatus(w.db, "buy:late"), "skipped", "a buy post waiting eight hours is stale");
-    assert.equal(await store.keyStatus(w.db, "casual:late"), "posted");
+    assert.equal(await store.keyStatus(w.db, "casual:morning"), "posted");
     assert.deepEqual(w.tweets, ["slow afternoons make me weirdly calm"]);
   });
 });

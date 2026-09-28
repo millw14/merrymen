@@ -400,11 +400,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         for (const post of await duePosts(shared, tenants, nowMs, MAX_DUE)) {
           const account: XAccount | null = accountOf.get(post.tenant) ?? (await getAccount(shared, post.tenant));
           let asleep = false;
+          let dayOf: ((ms: number) => string) | undefined;
           if (account?.posting && account.xUserId === post.xUserId) {
             const z = await zoneOf(post.tenant);
             asleep = !z.ok || isAsleep(z.tz, post.tenant, nowMs);
+            if (z.ok) dayOf = (ms) => localDay(z.tz, ms);
           }
-          const d = sendDecision(post, account, nowMs, asleep);
+          const d = sendDecision(post, account, nowMs, asleep, dayOf);
           if (d.action === "cancel") {
             if (await cancelPost(shared, post.id, d.reason, nowMs)) bump("cancelled");
             continue;
