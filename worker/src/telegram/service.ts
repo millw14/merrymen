@@ -1222,9 +1222,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    *     any @name without checking it is ours).
    *   - Someone who may not run commands gets one casual line per hour at
    *     most, never "🚫 not authorized" — with privacy mode off that was one
-   *     refusal per message. /link keeps today's behaviour.
-   *   - A private read (rule 3) is answered in the asker's own DM, with a
-   *     "sent it to your DMs" in the room; the room never sees the report.
+   *     refusal per message.
+   *   - /link never works in a group: codes are for DMs (see below).
+   *   - Every command's answer — a private read (rule 3) or an order's
+   *     receipt (rule 2) — goes to the asker's own DM, with a "sent it to
+   *     your DMs" in the room; the room never sees a report or a figure.
    *   - /name, /remember and /soul need the SENDER on the allowlist, like
    *     every state-changing command (today any member of a linked group
    *     could run them, and /remember writes owner facts).
@@ -1251,7 +1253,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // NOT AWAITED. The group line takes typing time, the flood pacer and maybe
     // a 429 pause; the poll loop must not wait on any of it (rule 7). Neither
     // call ever rejects.
-    const notice = (what: "dm-sent" | "private-refused" | "owner-only"): void => {
+    const notice = (what: "dm-sent" | "private-refused" | "owner-only" | "link-here"): void => {
       if (tgGroups) void tgGroups.commandNotice(msg.chatId, msg.messageId, msg.fromId, what, thread);
     };
 
@@ -1263,18 +1265,27 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     }
     const slash = parseSlash(text);
     if (slash?.kind === "link") {
-      await handle(msg, cfg);
+      // LINK CODES ARE FOR DMs ONLY. In a group there is nothing to link: the
+      // owner approves a group by adding the bot or pressing Stay, and nobody
+      // in it needs a code to talk to it. A code typed here is never consumed
+      // — linking from a group used to allowlist the whole group, handing
+      // every member the chat-level private reads (/pnl, /positions …). And
+      // when it is the live code, everyone in the room has just seen a bearer
+      // credential, so it is replaced and the owner told why.
+      const token = cfg.telegramBotToken;
+      if (token && slash.code) {
+        const state = ensureLinkCode(stateRef.get(), token);
+        if (slash.code.toUpperCase() === state.linkCode.toUpperCase()) {
+          stateRef.set(rotateLinkCode(state, token));
+          deps.note("warn", "Telegram: a link code was typed in a group; it was replaced");
+          if (tgGroups) void tgGroups.codeLeaked(msg.chatId);
+        }
+      }
+      notice("link-here");
       return;
     }
     if (!isOwner && !senderListed) {
       notice(slash && PRIVATE_READS.has(slash.kind) ? "private-refused" : "owner-only");
-      return;
-    }
-    if (slash && PRIVATE_READS.has(slash.kind)) {
-      // The same command, as if they had sent it to the bot directly: every
-      // DM rule applies, and the answer lands in their DM.
-      await handle({ updateId: msg.updateId, chatId: msg.fromId, fromId: msg.fromId, fromUsername: msg.fromUsername, text: msg.text }, cfg);
-      notice("dm-sent");
       return;
     }
     if (slash?.kind === "forget") {
@@ -1286,7 +1297,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       notice("owner-only");
       return;
     }
-    await handle(msg, cfg);
+    // EVERY OTHER ANSWER GOES TO THE ASKER'S DM, reads and orders alike. The
+    // same command, as if they had sent it to the bot directly: every DM rule
+    // applies (confirm buttons included), and the answer lands in their DM.
+    // A private read in the room would publish the owner's book (rule 3), and
+    // an order's receipt — "bought 10 USDG of …" — is exactly the figure a
+    // group must never see (rule 2).
+    await handle({ updateId: msg.updateId, chatId: msg.fromId, fromId: msg.fromId, fromUsername: msg.fromUsername, text: msg.text }, cfg);
+    notice("dm-sent");
   };
 
   /**

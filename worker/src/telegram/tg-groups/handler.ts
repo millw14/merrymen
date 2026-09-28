@@ -147,6 +147,21 @@ const OWNER_ONLY_LINES: readonly string[] = [
   "sorry, that's my owner's button 🙃",
 ];
 
+/**
+ * /link typed in a group. Link codes are for DMs only: in a group there is
+ * nothing to link (the owner approves a group by adding the bot or pressing
+ * Stay), and a code typed here has just been shown to everyone in the room.
+ * The service never consumes it; this is what the room hears instead.
+ */
+const LINK_HERE_LINES: readonly string[] = [
+  "no code needed in here 🤝",
+  "you don't need a code in here, i'm already around",
+  "codes are a DM thing, in here i'm just hanging out",
+  "all good, no code needed here 👋",
+  "nah no codes in here, i'm already in",
+  "no code needed, i'm already hanging out in here",
+];
+
 // ─── The handler's surface ─────────────────────────────────────────────────
 
 export interface TgGroupsDeps {
@@ -177,7 +192,7 @@ export interface TgGroupsDeps {
 }
 
 /** What a group notice after a slash command is for (the service's group rules). */
-export type TgCommandNotice = "dm-sent" | "private-refused" | "owner-only";
+export type TgCommandNotice = "dm-sent" | "private-refused" | "owner-only" | "link-here";
 
 export interface TgGroups {
   /** A group line anyone typed (never a slash command: those are the service's). */
@@ -196,6 +211,12 @@ export interface TgGroups {
   forgetMe(chatId: number, userId: number, messageId?: number): Promise<void>;
   /** The casual group line after a slash command (see TgCommandNotice). Rate-limited here. */
   commandNotice(chatId: number, messageId: number | undefined, fromId: number, what: TgCommandNotice, threadId?: number): Promise<void>;
+  /**
+   * The owner's live link code was typed in this group. The service has
+   * already replaced it; this tells the owner, in their DM, why the code on
+   * their Settings page changed.
+   */
+  codeLeaked(chatId: number): Promise<void>;
   isApproved(chatId: number): boolean;
   /** One background pass now (it also runs every few minutes). */
   sweep(): Promise<void>;
@@ -1743,14 +1764,15 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         await enqueue(
           chatId,
           async () => {
-            if (what === "owner-only") {
+            if (what === "owner-only" || what === "link-here") {
               // Its own small fixed pool, gated like every template.
+              const pool = what === "owner-only" ? OWNER_ONLY_LINES : LINK_HERE_LINES;
               const room = store.room(chatId);
               const recentOwn = (room?.lines ?? []).filter((l) => l.own).slice(-8).map((l) => l.text);
-              const start = Math.floor(roll() * OWNER_ONLY_LINES.length);
+              const start = Math.floor(roll() * pool.length);
               let text: string | null = null;
-              for (let i = 0; i < OWNER_ONLY_LINES.length && text === null; i++) {
-                const cand = OWNER_ONLY_LINES[(start + i) % OWNER_ONLY_LINES.length] ?? "";
+              for (let i = 0; i < pool.length && text === null; i++) {
+                const cand = pool[(start + i) % pool.length] ?? "";
                 const v = admitTgLine(cand, { agentName: selfNow()?.name ?? "", kind: "fixed", recentOwn, names: [] });
                 if (v.ok) text = v.text;
               }
@@ -1774,6 +1796,20 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         );
       } catch (e) {
         fail("notice", e);
+      }
+    },
+
+    async codeLeaked(chatId: number): Promise<void> {
+      try {
+        const room = store.room(chatId);
+        const settings = `${d.dashboardBase()}/settings#telegram`;
+        const button = /^https?:\/\//i.test(settings) ? [[{ text: "⚙️ Open Settings", url: settings }]] : undefined;
+        await dmOwner(
+          `your link code got posted in ${titleOf(room)}, so i swapped it for a new one. link codes only work here in DMs, and there's no need for one in a group.`,
+          button,
+        );
+      } catch (e) {
+        fail("code leaked", e);
       }
     },
 

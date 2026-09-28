@@ -158,6 +158,7 @@ describe("trencherReadiness: the first failing row wins", () => {
     ["a whitespace Brain URL", { brainUrl: "   " }, "no-brain"],
     ["an empty Brain token", { brainToken: "" }, "no-brain"],
     ["live without the vault permission", { hasTrencherGrant: false }, "no-vault"],
+    ["paper without the vault permission", { paper: true, hasTrencherGrant: false }, "no-vault"],
     ["live with the live switch off", { trencherLiveEnabled: false }, "live-off"],
     ["paper", { paper: true }, "ready-paper"],
     ["live, everything satisfied", {}, "ready-live"],
@@ -189,8 +190,12 @@ describe("trencherReadiness: the first failing row wins", () => {
     );
   });
 
-  it("paper needs neither the vault permission nor the live switch", () => {
-    assert.equal(trencherReadiness({ ...readyLive, paper: true, hasTrencherGrant: false, trencherLiveEnabled: false }).kind, "ready-paper");
+  it("paper does not need the live switch", () => {
+    assert.equal(trencherReadiness({ ...readyLive, paper: true, trencherLiveEnabled: false }).kind, "ready-paper");
+  });
+
+  it("paper still needs the vault permission: discovery only runs for a grant that carries it", () => {
+    assert.equal(trencherReadiness({ ...readyLive, paper: true, hasTrencherGrant: false, trencherLiveEnabled: false }).kind, "no-vault");
   });
 
   it("paper still needs everything above the live rows", () => {

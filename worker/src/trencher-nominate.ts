@@ -89,7 +89,7 @@ const OWNER_REASON: Record<TrencherReadinessKind, string> = {
   "stocks-only": "I'm set to trade stocks only, so I can't look at coins from your groups: switch what I trade to crypto in Settings.",
   "slow": "Fast Trencher is off, and it's the Brain-reviewed path that looks at coins from your groups: turn on fast Trencher exits in Settings.",
   "no-brain": "Trencher needs Brain connected: add your Brain URL and token in Settings.",
-  "no-vault": "Trencher can't trade for real without the Autonomous Trencher permission: update your trading permission from Settings and select Autonomous Trencher.",
+  "no-vault": "Trencher can't look at coins without the Autonomous Trencher permission, on paper or for real: update your trading permission from Settings and select Autonomous Trencher.",
   "live-off": "Trencher isn't allowed to trade for real yet: turn on let trencher trade for real in Settings.",
   "ready-paper": "Trencher mode is ready, and coins from your groups are traded on paper.",
   "ready-live": "Trencher mode is ready, and coins from your groups can be traded for real.",
@@ -104,8 +104,12 @@ const present = (s: string | null | undefined) => typeof s === "string" && s.tri
  * for a vault permission for a strategy that is not trencher. `slow` sits
  * above the Brain rows because the fast path is the only one that reviews a
  * nominated coin; without it the legacy discovery path trades on rules alone
- * and a nomination would have nothing to wait for. Paper needs neither the
- * vault permission nor the live switch — nothing it does reaches the chain.
+ * and a nomination would have nothing to wait for. Paper needs the vault
+ * permission too: trencher discovery — the only thing that turns a posted
+ * address into a coin the Brain can review — runs only for a grant that
+ * carries it (index.ts refreshAutoTrench), so a paper agent without it would
+ * be told "ready" and every nomination would quietly expire. Paper does not
+ * need the live switch: nothing it does reaches the chain.
  */
 export function trencherReadiness(i: ReadinessInput): TrencherReadiness {
   const kind = ((): TrencherReadinessKind => {
@@ -115,8 +119,8 @@ export function trencherReadiness(i: ReadinessInput): TrencherReadiness {
     if (!present(i.brainUrl) || !present(i.brainToken)) return "no-brain";
     // Anything but an explicit `true` is live: paper is the claim that must be
     // proven, because a live agent read as paper would skip the live rows.
-    if (i.paper === true) return "ready-paper";
     if (i.hasTrencherGrant !== true) return "no-vault";
+    if (i.paper === true) return "ready-paper";
     if (i.trencherLiveEnabled !== true) return "live-off";
     return "ready-live";
   })();

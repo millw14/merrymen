@@ -18,7 +18,7 @@ import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { resolveConfig, type ResolvedConfig } from "../../settings";
 import type { FetchLike, TgCallback, TgMemberUpdate, TgMessage, TgServiceMessage } from "../api";
 import { startTelegram } from "../service";
-import { loadTelegramState, type StateRef, type TelegramState } from "../state";
+import { ensureLinkCode, loadTelegramState, type StateRef, type TelegramState } from "../state";
 import type { BotSelf } from "./detect";
 import { createTgGroups, type TgGroups } from "./handler";
 import { __resetMemoryPassThrottleForTest } from "./memory";
@@ -877,6 +877,51 @@ describe("docs/tg-groups.md Scenarios, through the poll service", () => {
     assert.ok(!calls.some((c) => c.method === "sendMessage" && /not authorized/.test(String(c.body.text))));
     assert.equal(readFileSync(ownerFile, "utf8"), ownerBefore);
     assert.equal(readFileSync(path.join(home, "soul", "IDENTITY.md"), "utf8"), identityBefore);
+  });
+
+  it("the owner's order typed in a group is answered in their DM; the room gets no receipt and no figure", async () => {
+    const dmBefore = sendsTo(OWNER).length;
+    const groupBefore = sendsTo(CHAT).length;
+    const { mid, update } = groupMsg("/buy 5 QQQ", { id: OWNER, first: "Mike" });
+    await deliver(update);
+    await waitFor(() => sendsTo(OWNER).length > dmBefore && sendsTo(CHAT).length === groupBefore + 1);
+    const inRoom = sendsTo(CHAT).slice(groupBefore);
+    assert.equal(inRoom.length, 1);
+    assert.match(String(inRoom[0]?.body.text), /DMs/);
+    assert.equal(replyOf(inRoom[0]), mid);
+    assert.ok(!inRoom.some((c) => /\d/.test(String(c.body.text)) || c.body.reply_markup !== undefined), "no figure and no confirm button in the room");
+  });
+
+  it("/link in a group: no code is asked for or taken; the room hears 'no code needed'; nothing is allowlisted", async () => {
+    const groupBefore = sendsTo(CHAT).length;
+    tstate = ensureLinkCode(tstate, TOKEN);
+    const codeBefore = tstate.linkCode;
+    const l = groupMsg("/link WRONGCODE", { id: CAT, first: "Xfyt" });
+    await deliver(l.update);
+    await waitFor(() => sendsTo(CHAT).length === groupBefore + 1);
+    const line = sendsTo(CHAT).at(-1);
+    assert.match(String(line?.body.text), /code/);
+    assert.equal(replyOf(line), l.mid);
+    assert.ok(!calls.some((c) => c.method === "sendMessage" && /couldn't link|bad or expired|not authorized/.test(String(c.body.text))));
+    assert.equal(tstate.linkCode, codeBefore, "a wrong code in a group changes nothing");
+    assert.ok(!tstate.linkedChats.includes(CHAT), "linking from a group never allowlists the group");
+    // Once per person per hour, like every refusal line.
+    await deliver(groupMsg("/link AGAIN", { id: CAT, first: "Xfyt" }).update);
+    assert.equal(sendsTo(CHAT).length, groupBefore + 1);
+  });
+
+  it("the live link code typed in a group is never consumed: it is replaced, and the owner is told in their DM", async () => {
+    tstate = ensureLinkCode(tstate, TOKEN);
+    const live = tstate.linkCode;
+    const ownerBefore = tstate.ownerId;
+    const dmBefore = sendsTo(OWNER).length;
+    await deliver(groupMsg(`/link ${live}`, { id: ANN, first: "Ann" }).update);
+    await waitFor(() => sendsTo(OWNER).length === dmBefore + 1);
+    assert.notEqual(tstate.linkCode, live, "the code everyone just saw no longer works");
+    assert.equal(tstate.ownerId, ownerBefore, "nobody became the owner");
+    assert.ok(!tstate.linkedChats.includes(CHAT));
+    assert.match(String(sendsTo(OWNER).at(-1)?.body.text), /link code got posted/);
+    assert.ok(!String(sendsTo(OWNER).at(-1)?.body.text).includes(live), "the old code is not repeated");
   });
 
   it("'/cmd@OtherBot' is another bot's: ignored", async () => {

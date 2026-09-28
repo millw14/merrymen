@@ -298,7 +298,7 @@ nomination at most; the words never size anything.
 | `stocks-only` | `cfg.assetMode === "stocks"` |
 | `slow` | `!cfg.trencherFastEnabled` (the Brain-gated fast path is what reviews a nominated coin) |
 | `no-brain` | no `brainUrl` or `brainToken` |
-| `no-vault` | live, and the grant carries no Autonomous Trencher permission (`grantTrencher(grant)` null) |
+| `no-vault` | the grant carries no Autonomous Trencher permission (`grantTrencher(grant)` null) — paper too: trencher discovery, the only path from a posted address to a Brain review, runs only for a grant that carries it |
 | `live-off` | live, and `cfg.trencherLiveEnabled` false |
 | `ready-paper` | paper mode, everything above satisfied |
 | `ready-live` | live mode, everything above satisfied |
@@ -420,13 +420,26 @@ recorded so switching it back on works.
 
 * Slash commands keep going through the existing handler with its sender
   rules. `/cmd@OtherBot` is ignored (today's `parseSlash` strips any `@bot`).
-* Private reads (`/status`, `/positions`, `/pnl`, `/trades`, `/wallet`,
-  `/why`, `/report`, `/soul`, `/depth`, and the other reads rule 3 keeps out
-  of a group: `/brag`, `/settings`, `/alerts`, `/reminders`, `/watchers`,
-  `/pc`) asked in a group by the owner (or an
-  allowlisted sender) are answered in that person's DM, with "sent it to your
-  DMs 🤫" in the group. From anyone else: "that's between me and {owner} 🙃"
-  at most once per person per hour.
+* **Every command's answer goes to the asker's DM.** A command typed in a
+  group by the owner (or an allowlisted sender) runs exactly as if they had
+  sent it to the bot directly — every DM rule, confirm buttons included — and
+  the answer lands in their DM, with "sent it to your DMs 🤫" in the group.
+  That covers private reads (`/status`, `/positions`, `/pnl`, `/trades`,
+  `/wallet`, `/why`, `/report`, `/soul`, `/depth`, `/brag`, `/settings`,
+  `/alerts`, `/reminders`, `/watchers`, `/pc`; rule 3) and orders alike: an
+  order's receipt ("bought 10 USDG of …") is a figure a group never sees
+  (rule 2). From anyone else: a private read gets "that's between me and
+  {owner} 🙃", anything else "only my owner can do that 🙃", each at most
+  once per person per hour.
+* **Link codes are for DMs only.** In a group there is nothing to link: the
+  owner approves a group by adding the bot or pressing Stay, and nobody in it
+  needs a code to talk to it. `/link` typed in a group is never consumed and
+  never allowlists anything (linking from a group used to allowlist the whole
+  group, handing every member the chat-level private reads). The room hears a
+  casual "no code needed in here 🤝" (once per person per hour; nothing in a
+  group that is not approved). When the code typed is the live one, everyone
+  in the room has just seen a bearer credential: it is replaced at once and
+  the owner is told in their DM.
 * `/name`, `/remember`, `/forget`, `/soul` need an allowlisted sender in a
   group (today any member of an allowlisted group can run them). `/soul` is
   also a private read (answered in their DM), and `/forget` in a group is the
