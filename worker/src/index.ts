@@ -152,7 +152,7 @@ import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus, readHolderStatusResult } from "./circle";
-import { CIRCLE_SHORT_CLASS_GATE, circleExitsOnly } from "./circle-gate";
+import { CIRCLE_SHORT_CLASS_GATE, circleStrategyTick } from "./circle-gate";
 import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
 import { killHosted, killRequested } from "./kill-request";
@@ -11790,18 +11790,17 @@ async function main() {
     }
     breakerBrickNoted = false;
 
-    // Merry Circle strategies run in full only for holders (Merry Man+). A
-    // non-holder may select one; it starts nothing new, with a one-time note,
-    // until they hold $MERRYMEN.
+    // Merry Circle strategies run only for holders (Merry Man+). A non-holder
+    // may select one; it opens nothing new and leaves its basket as it is,
+    // with a one-time note, until they hold $MERRYMEN.
     //
-    // A BRAKE ON NEW WORK, NEVER A RETURN. This used to end the tick here, ahead
-    // of the strategy's own sells and ahead of the class route's exits, so an
-    // owner who fell below the tier with positions open had an agent that could
-    // not close anything — while every energy surface says exits are never
-    // limited. Below the tier the strategy still ticks and only its exits go on
-    // (circle-gate.ts), the class route proposes no entries, and the class
-    // exits run exactly as they do for everyone. Nothing below may `return`
-    // before them (circle-gate.test.ts).
+    // NEVER A RETURN. This used to end the tick here, ahead of the class
+    // route's exits too, so a class position with a deadline was never closed
+    // while its owner was short. Below the tier the Circle strategy is not
+    // ticked at all (circle-gate.ts — a rebalancer allowed only its trims sells
+    // the book down to cash), the class route proposes no entries, and the
+    // class exits run exactly as they do for everyone. Nothing below may
+    // `return` before them (circle-gate.test.ts).
     const circleShort = isCircleStrategy(strategy.name) && !holderTier.bonusStrategies;
     if (circleShort) {
       if (!circleBlockedNoted) {
@@ -11857,13 +11856,11 @@ async function main() {
 
     // A submitted Brain order invalidates this tick's pre-trade holdings.
     // Do not run another discretionary strategy against the old book.
-    // Below the Circle tier the strategy still ticks — its exits are the
-    // point — and only what the breaker's own exit test calls an exit survives.
-    const ticked: Tick = brainOrderAccepted ? { intents: [], why: [] } : takeTick(await strategy.tick(snap));
-    const exitLimits = active.limits;
-    const { intents: proposed, why: proposedWhy, idle } = circleShort
-      ? circleExitsOnly(ticked, (intent) => isExitIntent(intent, exitLimits))
-      : ticked;
+    // Below the Circle tier the strategy is not asked at all — not for its
+    // trims either: half a rebalance is a liquidation (circle-gate.ts).
+    const { intents: proposed, why: proposedWhy, idle }: Tick = brainOrderAccepted
+      ? { intents: [], why: [] }
+      : await circleStrategyTick(circleShort, async () => takeTick(await strategy.tick(snap)));
 
     // ── AND WHY IT PROPOSED NOTHING ─────────────────────────────────────
     //

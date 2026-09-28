@@ -1,46 +1,52 @@
 /**
- * THE MERRY CIRCLE GATE IS A BRAKE ON NEW WORK, NEVER A LOCK ON THE DOORS.
+ * BELOW THE MERRY CIRCLE TIER A CIRCLE STRATEGY DOES NOTHING OF ITS OWN, AND
+ * THE CLASS EXITS STILL RUN.
  *
- * even-keel and dip-hunter run in full only for a Merry Man holder
- * (registry.ts CIRCLE_STRATEGIES, 100,000 $MERRYMEN between the owner's wallet
- * and the agent's account — the same line energy calls "full"). Below it the
- * tick used to RETURN at the gate, before the strategy ticked and before the
- * class route's exits. So an agent already on one of them when its owner fell
- * short — tokens sold, a holder wallet now counted for another account, or a
- * restart whose first $MERRYMEN read had not answered yet — ran NO exits
- * at all: even-keel's trims never fired, and a class position on a curve with
- * a graduation deadline was never closed. Every energy surface meanwhile tells
- * that same owner exits are never limited.
+ * even-keel and dip-hunter run only for a Merry Man holder (registry.ts
+ * CIRCLE_STRATEGIES, 100,000 $MERRYMEN between the owner's wallet and the
+ * agent's account — the same line energy calls "full"). Below it the tick used
+ * to RETURN at the gate, before the strategy ticked AND before the class
+ * route's exits — so a class position on a curve with a graduation deadline was
+ * never closed while the owner was short. The class exits are not the
+ * strategy's: they run for every agent with a class vault, and they now run
+ * below the tier exactly as above it (the wiring in main() is pinned in
+ * circle-gate.test.ts).
  *
- * So below the tier the strategy still ticks, and what the breaker's own exit
- * test calls an exit (policy.ts isExitIntent — passed in, never copied) goes
- * on to the same path it always had. Everything else is dropped HERE, before
- * any decision row exists: no post, no refusal on the tape, the shape energy's
- * hard filter already has. The owner hears it once, from the Circle note.
+ * THE STRATEGY ITSELF DOES NOT TICK — NOT EVEN FOR ITS "EXITS". The first cut
+ * of that fix let the strategy tick and passed on only what the breaker calls
+ * an exit. For even-keel that is a rebalancer run one-sided: its target is
+ * invested/N with cash excluded, so a trim with no top-up lowers the target,
+ * which makes the other legs overweight, which trims them — every tick, into
+ * USDG, the WHOLE book once any basket leg is empty (a real-code simulation
+ * sold 200 USDG to cash in 114 ticks). Each of those sells is a public post, a
+ * trade fee and one of the day's ops, which then refuses the owner's own buys.
+ * A trim is not a risk exit; it is half of a rebalance, and half a rebalance is
+ * a liquidation. dip-hunter only ever buys, so it had nothing to pass anyway.
  *
- * `idle` is dropped too. A locked strategy's idle reason ("the feeds are
- * stale", "under one buy") would tell the owner the wrong reason for a quiet
- * book: the Circle is why nothing new is bought, and the note says so.
+ * So below the tier the Circle strategy is not asked at all — no rebalancing
+ * in either direction, its basket left exactly as it is, which is what the gate
+ * always did to the strategy — and the class route proposes no entries. The owner hears it once,
+ * from the Circle note in main(), and every surface says the same
+ * sentence: it opens nothing new and leaves its basket as it is; positions in
+ * the class vault are still closed by their own exit rules.
+ *
+ * `idle` goes with it. A locked strategy's idle reason ("the feeds are stale",
+ * "under one buy") would tell the owner the wrong reason for a quiet book: the
+ * Circle is why nothing moves, and the note says so.
  *
  * Pure, and in its own file: main() cannot be booted by a test, and a flag
  * inline in it can be reverted with every test still green.
  */
-import type { TradeIntent } from "./policy";
 import type { Tick } from "./strategies/types";
 
 /**
- * The exits of a tick, each still paired with its own reason — `why` is
- * positional, so the two arrays are filtered together or not at all.
+ * The Circle strategy's tick for this window: its own when the owner is at the
+ * tier, and NOTHING — the strategy not even asked — when they are short.
+ * `run` is the strategy's tick, called at most once.
  */
-export function circleExitsOnly(tick: Tick, isExit: (intent: TradeIntent) => boolean): Tick {
-  const intents: TradeIntent[] = [];
-  const why: Tick["why"] = [];
-  for (const [at, intent] of tick.intents.entries()) {
-    if (!isExit(intent)) continue;
-    intents.push(intent);
-    why.push(tick.why[at] ?? null);
-  }
-  return { intents, why };
+export async function circleStrategyTick(circleShort: boolean, run: () => Promise<Tick>): Promise<Tick> {
+  if (circleShort) return { intents: [], why: [] };
+  return await run();
 }
 
 /**
