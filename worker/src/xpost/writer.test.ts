@@ -8,9 +8,14 @@ import { describe, it } from "node:test";
 import { SETTINGS_DEFAULTS } from "../../../packages/core/src/index";
 import { everyBand } from "../class-evidence";
 import type { LlmCreds } from "../llm";
-import { admitXPost, vocabularyRefusal, XPOST_MAX_CHARS, type BaseGate } from "./gate";
+import { similarity } from "../social-post";
+import { admitXPost, vocabularyRefusal, withoutDisclosure, XPOST_MAX_CHARS, type BaseGate } from "./gate";
 import {
   BUY_GLOSS,
+  INTRO_NEXT,
+  INTRO_NEXT_IDLE,
+  INTRO_WHAT,
+  INTRO_WHAT_IDLE,
   XPOST_ANTHROPIC_DEFAULT_MODEL,
   XPOST_GROQ_DEFAULT_MODEL,
   buyPrompt,
@@ -138,19 +143,63 @@ describe("what each prompt asks for", () => {
   it("the intro says who it is, what it does, which money, and what comes next — in two short sentences", () => {
     const p = all(introPrompt(BASE));
     // The disclosure in fixed words: paraphrased, it lost "AI agent" or "trading".
-    assert.match(p, /that you are «an AI agent trading for this account's owner on merrymen, on paper for now», in those words;/);
-    assert.match(p, /and that you'll post what you buy and why\./);
+    const paper = /that you are «([^»]+), on paper for now», in those words;/.exec(p);
+    assert.ok(paper && INTRO_WHAT.includes(paper[1]!), p);
+    assert.ok(INTRO_NEXT.some((n) => p.includes(`and that ${n}.`)), "what comes next: what it buys and why");
     assert.match(p, /Two short sentences with normal punctuation/);
     assert.match(p, /exactly ONE short thing about how you trade/);
     assert.doesNotMatch(p, /practice money for now|owner of this account/, "the long wording that ran intros over the cap");
     const live = all(introPrompt({ ...BASE, mode: "live" }));
-    assert.match(live, /«an AI agent trading for this account's owner on merrymen, with real money», in those words;/);
+    const real = /that you are «([^»]+), with real money», in those words;/.exec(live);
+    assert.ok(real && INTRO_WHAT.includes(real[1]!), live);
     assert.doesNotMatch(live, /on paper for now/);
-    const idle = all(introPrompt({ ...BASE, mode: "idle" }));
-    assert.match(idle, /not trading right now/);
-    assert.match(idle, /«an AI agent trading for this account's owner on merrymen», in those words;/);
-    assert.match(idle, /Say nothing about which money you trade with/);
-    assert.doesNotMatch(idle, /on paper for now|with real money»/);
+  });
+
+  it("an agent that is not trading says it is an AI trading agent, never that it trades now, and promises no buys", () => {
+    // It was told "never say you are trading" and made to say "an AI agent
+    // trading for this account's owner… i'll post what i buy and why".
+    for (const agentName of ["Quiet Lynx", "Slate Kite", "Pine Stoat", "Robin", "Wren"]) {
+      const idle = all(introPrompt({ ...BASE, agentName, mode: "idle" }));
+      assert.match(idle, /not trading right now/);
+      const what = /that you are «([^»]+)», in those words;/.exec(idle);
+      assert.ok(what && INTRO_WHAT_IDLE.includes(what[1]!), idle);
+      assert.match(what![1]!, /\bAI trading agent\b/);
+      assert.ok(INTRO_NEXT_IDLE.some((n) => idle.includes(`and that ${n}.`)), idle);
+      assert.match(idle, /Say nothing about which money you trade with, never say you are trading right now, and promise nothing about buying\./);
+      assert.doesNotMatch(idle, /on paper for now|with real money»|what you buy|buys here|odd buy/);
+    }
+    for (const w of INTRO_WHAT_IDLE) assert.doesNotMatch(w, /\btrad(?:es|ing) for\b|\bdoing the trading\b/, w);
+    for (const n of INTRO_NEXT_IDLE) assert.doesNotMatch(n, /\bbuy|\bbought/, n);
+  });
+
+  it("the intro's wording and sign-off are drawn by the name: the same for an account, different across a fleet", () => {
+    const names = ["Pine Stoat", "Amber Heron", "Signal Fox", "Moss Otter", "Juniper", "Robin Vale", "Copper Wren", "Birch Marten", "Tamsin Vole", "Bartholomew Thistlewood", "Wren", "Old Oak"];
+    const whats = new Set<string>();
+    const nexts = new Set<string>();
+    for (const agentName of names) {
+      const p = all(introPrompt({ ...BASE, agentName }));
+      assert.equal(all(introPrompt({ ...BASE, agentName })), p, "the same name, the same wording");
+      whats.add(/that you are «([^»]+), on paper for now»/.exec(p)![1]!);
+      nexts.add(INTRO_NEXT.find((n) => p.includes(`and that ${n}.`))!);
+    }
+    assert.equal(whats.size, INTRO_WHAT.length, [...whats].join(" / "));
+    assert.equal(nexts.size, INTRO_NEXT.length, [...nexts].join(" / "));
+  });
+
+  it("every wording discloses an AI agent, trading and merrymen, never in the form's words, and the fleet echo sets all of it aside", () => {
+    for (const w of [...INTRO_WHAT, ...INTRO_WHAT_IDLE]) {
+      assert.match(w, /\bAI\b/);
+      assert.match(w, /\btrad(?:e|es|ing)\b/);
+      assert.match(w, /\bmerrymen\b/);
+      assert.match(w, /\bthis account\b/);
+      assert.doesNotMatch(w, /this account's owner|owner of this account/, w);
+    }
+    // Two agents drawn the same wording are not the same intro for it: every
+    // word of every wording and sign-off is taken out before the echo is weighed.
+    for (const w of [...INTRO_WHAT, ...INTRO_WHAT_IDLE, ...INTRO_NEXT, ...INTRO_NEXT_IDLE, "on paper for now", "with real money"]) {
+      const left = withoutDisclosure(w);
+      assert.equal(similarity(left, left), 0, `"${w}" leaves "${left.replace(/\s+/g, " ").trim()}" for the fleet echo to weigh`);
+    }
   });
 
   it("the intro's required words fit the cap with the longest name, with room for how it trades", () => {
@@ -161,18 +210,24 @@ describe("what each prompt asks for", () => {
     // ("i like to leave well before the curve graduates" is forty-seven).
     const longest = "Extraordinarily Long Nam"; // twenty-four: the most an agent name may hold (AGENT_NAME_RE)
     assert.equal(longest.length, 24);
-    for (const [mode, money] of [
-      ["paper", "on paper for now"],
-      ["live", "with real money"],
+    const firstPerson = (n: string) => n.replace(/\byou'll\b/g, "i'll").replace(/\byour\b/g, "my").replace(/\byou\b/g, "i");
+    const habit = " i like to leave well before the curve graduates.";
+    for (const [whats, nexts, money] of [
+      [INTRO_WHAT, INTRO_NEXT, ", on paper for now"],
+      [INTRO_WHAT, INTRO_NEXT, ", with real money"],
+      [INTRO_WHAT_IDLE, INTRO_NEXT_IDLE, ""],
     ] as const) {
-      const p = all(introPrompt({ ...BASE, agentName: longest, mode }));
-      const what = "an AI agent trading for this account's owner on merrymen";
-      assert.ok(p.includes(`«${what}, ${money}», in those words;`), "the test builds the intro from the words the prompt asks for");
-      assert.ok(p.includes("and that you'll post what you buy and why."));
-      const required = `hi, i'm ${longest}, ${what}, ${money}. i'll post what i buy and why.`;
-      const habit = " i like to leave well before the curve graduates.";
-      assert.ok(required.length + habit.length <= XPOST_MAX_CHARS, `${required.length} + ${habit.length} characters`);
+      for (const what of whats) {
+        for (const next of nexts) {
+          const required = `hi, i'm ${longest}, ${what}${money}. ${firstPerson(next)}.`;
+          assert.ok(required.length + habit.length <= XPOST_MAX_CHARS, `${required.length} + ${habit.length} characters: ${required}`);
+        }
+      }
     }
+    // …and the prompt asks for exactly those words.
+    const p = all(introPrompt({ ...BASE, agentName: longest, mode: "paper" }));
+    const what = /that you are «([^»]+), on paper for now», in those words;/.exec(p)?.[1];
+    assert.ok(what && INTRO_WHAT.includes(what));
   });
 
   it("the intro is told ONE thing about how it trades: its strategy and one habit, the same one every time", () => {
@@ -557,6 +612,8 @@ describe("the intro pool, used only when there is no model", () => {
             assert.ok(v.ok, `${v.ok ? "" : v.reason}: ${text}`);
             if (mode === "paper") assert.match(text, /paper/i);
             if (mode === "live") assert.match(text, /real money/i);
+            // Not trading: what it is, never that it trades now, and no buy promised.
+            if (mode === "idle") assert.doesNotMatch(text, /\bbuy|\bbought|\btrades\b|\btrading for\b|\bdoing the trading\b/i, text);
           }
         }
       }

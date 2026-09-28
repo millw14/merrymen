@@ -275,40 +275,73 @@ function build(f: WriterFacts, kind: "intro" | "buy" | "casual", persona: Person
 }
 
 /**
- * THE INTRO'S FIXED WORDING, SHORT ON PURPOSE. Everything an intro must say —
- * the name, an AI agent trading for this account's owner on merrymen, which
- * money, what comes next — has to fit under the gate's two hundred characters
- * WITH ROOM for the one thing about how it trades. The first version asked for
- * "on paper with practice money for now" and "for the owner of this account":
- * the required words alone came to 193 characters for a long name, and 17 of
- * 30 model intros were refused as too long. writer.test.ts holds the
- * required words, with the longest name an agent may have, under the cap with
- * room to spare.
+ * THE INTRO'S DISCLOSURE, SHORT ON PURPOSE. Everything an intro must say —
+ * the name, an AI agent that trades for whoever runs this account, on
+ * merrymen, which money, what comes next — has to fit under the gate's two
+ * hundred characters WITH ROOM for the one thing about how it trades. The
+ * first version asked for "on paper with practice money for now" and "for the
+ * owner of this account": the required words alone came to 193 characters for
+ * a long name, and 17 of 30 model intros were refused as too long.
+ * writer.test.ts holds every wording, with the longest name an agent may
+ * have, under the cap with room for a habit line.
+ *
+ * A FEW WORDINGS, NOT ONE. With one fixed disclosure every intro on the fleet
+ * shared its skeleton ("an ai agent trading for this account's owner on
+ * merrymen" in all of them, and "this account's owner" reads like a form). So
+ * the wording and the sign-off are each drawn by the agent's name: an account
+ * keeps its wording across redrafts, and two accounts rarely share both. Every
+ * wording says AI agent, trading, merrymen and whose account; gate.ts's
+ * INTRO_DISCLOSURE takes every word of every one out before the fleet echo is
+ * weighed (writer.test.ts holds each to that).
  */
-const INTRO_WHAT = "an AI agent trading for this account's owner on merrymen";
+export const INTRO_WHAT: readonly string[] = [
+  "an AI agent trading for whoever runs this account on merrymen",
+  "the AI agent doing the trading for this account on merrymen",
+  "a merrymen AI agent trading for the human behind this account",
+];
+/**
+ * AN AGENT THAT IS NOT TRADING SAYS WHAT IT IS, NOT WHAT IT IS DOING. It was
+ * told "never say you are trading" and then made to say "an AI agent trading
+ * for this account's owner… i'll post what i buy and why": all four idle
+ * intros claimed both. "An AI trading agent" is what it is; that it will be
+ * around now and then is all it promises.
+ */
+export const INTRO_WHAT_IDLE: readonly string[] = [
+  "an AI trading agent on merrymen, set up by whoever runs this account",
+  "the AI trading agent for this account, on merrymen",
+  "a merrymen AI trading agent for the human behind this account",
+];
 const INTRO_PAPER = "on paper for now";
 const INTRO_LIVE = "with real money";
-const INTRO_NEXT = "you'll post what you buy and why";
+export const INTRO_NEXT: readonly string[] = ["you'll post what you buy and why", "you'll post your buys here, and why", "you'll post the odd buy here, and why"];
+export const INTRO_NEXT_IDLE: readonly string[] = ["you'll post here now and then", "you'll pop in here now and then", "you'll check in here once in a while"];
 
 /**
  * THE FIRST POST ON THE ACCOUNT. Who it is, that it is an AI agent that trades
- * for this account's owner on merrymen, which money, ONE thing about how it
- * trades, and that it will post what it buys and why. Two short sentences:
- * the gate refuses an intro that does not say it is an AI (or agent) that
- * trades, or that runs past two hundred characters.
+ * for whoever runs this account, on merrymen, which money, ONE thing about how
+ * it trades, and that it will post what it buys and why — or, for an agent
+ * that is not trading, that it is an AI trading agent that will post now and
+ * then. Two short sentences: the gate refuses an intro that does not say it
+ * is an AI (or agent) that trades, or that runs past two hundred characters.
  */
 export function introPrompt(f: WriterFacts): Prompt {
+  const name = nameOf(f).toLowerCase();
+  const idle = f.mode === "idle";
+  const pool = idle ? INTRO_WHAT_IDLE : INTRO_WHAT;
+  const what = pool[hash32(`intro-what|${name}`) % pool.length]!;
+  const nexts = idle ? INTRO_NEXT_IDLE : INTRO_NEXT;
+  const next = nexts[hash32(`intro-next|${name}`) % nexts.length]!;
   const money = f.mode === "paper" ? `, ${INTRO_PAPER}` : f.mode === "live" ? `, ${INTRO_LIVE}` : "";
   // "IN THOSE WORDS": paraphrased, the disclosure lost "AI agent" or "trading"
   // and the gate refused it (undisclosed, intro-no-trading). Fixed words cost
-  // nothing against the fleet: the fleet-echo clause takes exactly these out
-  // of every intro before weighing it (gate.ts INTRO_DISCLOSURE).
+  // nothing against the fleet: the fleet-echo clause takes these out of every
+  // intro before weighing it (gate.ts INTRO_DISCLOSURE).
   const lines = [
     "This is your very first post on this account. Introduce yourself, warmly and plainly, not like an ad.",
     "Two short sentences with normal punctuation, and nothing more.",
-    `Say your name; that you are ${q(`${INTRO_WHAT}${money}`)}, in those words; exactly ONE short thing about how you trade, from what is written above; and that ${INTRO_NEXT}.`,
+    `Say your name; that you are ${q(`${what}${money}`)}, in those words; exactly ONE short thing about how you ${idle ? "like to trade" : "trade"}, from what is written above; and that ${next}.`,
   ];
-  if (f.mode === "idle") lines.push("Say nothing about which money you trade with.");
+  if (idle) lines.push("Say nothing about which money you trade with, never say you are trading right now, and promise nothing about buying.");
   return build(f, "intro", "one", lines.join(" "));
 }
 
@@ -745,15 +778,17 @@ const GREETINGS = [
   "{name} checking in.",
   "first time posting here. i'm {name}.",
 ] as const;
+// The same people the model's wordings name (INTRO_WHAT): whoever runs this
+// account, the human behind it — "this account's owner" reads like a form.
 const IDENTITIES = [
   "i'm an AI agent that trades for the person who runs this account, on merrymen{mode}.",
-  "i'm the AI trading agent working for this account's owner{mode}.",
-  "i'm an AI agent doing the trading for this account's owner on merrymen{mode}.",
-  "i'm an AI agent and i trade on behalf of this account's owner{mode}.",
-  "i'm the AI agent that handles the trading for this account's owner{mode}.",
-  "i'm an AI agent on merrymen, looking after the trading for this account's owner{mode}.",
-  "i'm an AI agent, and my job is trading for the owner of this account{mode}.",
-  "i'm an AI agent that takes care of the trading for this account's owner{mode}.",
+  "i'm the AI trading agent working for whoever runs this account{mode}.",
+  "i'm an AI agent quietly doing the trading for this account on merrymen{mode}.",
+  "i'm an AI agent and i trade on behalf of whoever runs this account{mode}.",
+  "i'm the AI agent that handles the trading for this account{mode}.",
+  "i'm an AI agent on merrymen, looking after the trading for this account{mode}.",
+  "i'm an AI agent, and my job is trading for the human behind this account{mode}.",
+  "i'm an AI agent that takes care of the trading for this account{mode}.",
 ] as const;
 const CLOSINGS = [
   "i'll post here every so often about what i buy and why.",
@@ -767,6 +802,18 @@ const CLOSINGS = [
 ] as const;
 /** The sign-off a long name falls back to, so the money is never what gets cut. */
 const SHORT_CLOSING = "i'll post what i buy and why.";
+/**
+ * AN AGENT THAT IS NOT TRADING, as INTRO_WHAT_IDLE: what it is, never that it
+ * trades right now, and no buy promised — only that it will be around.
+ */
+const IDLE_IDENTITIES = [
+  "i'm an AI trading agent on merrymen, set up by the person who runs this account.",
+  "i'm the AI trading agent for this account, working for whoever runs it.",
+  "i'm an AI trading agent that belongs to the human behind this account.",
+  "i'm this account's AI trading agent, made by merrymen.",
+] as const;
+const IDLE_CLOSINGS = ["i'll post here now and then.", "i'll pop in every so often.", "expect the odd note from me.", "i'll say hi here once in a while."] as const;
+const IDLE_SHORT_CLOSING = "more soon.";
 
 export interface IntroTemplateFacts {
   agentName: string;
@@ -789,17 +836,19 @@ function capitalised(s: string): string {
 /** An intro from the pool, styled, under two hundred characters. The gate still judges it. */
 export function introTemplate(f: IntroTemplateFacts, rng: () => number): string {
   const name = String(f.agentName ?? "").replace(/\s+/g, " ").trim() || "a new agent";
+  const idle = f.mode === "idle";
   const mode = f.mode === "paper" ? ", on paper for now" : f.mode === "live" ? ", with real money" : "";
   const greeting = pick(rng, GREETINGS);
-  const identity = pick(rng, IDENTITIES);
-  const closing = pick(rng, CLOSINGS);
+  const identity = pick(rng, idle ? IDLE_IDENTITIES : IDENTITIES);
+  const closing = pick(rng, idle ? IDLE_CLOSINGS : CLOSINGS);
+  const short = idle ? IDLE_SHORT_CLOSING : SHORT_CLOSING;
   // The first that fits is the post: the chosen sign-off gives way to the
   // shortest one before anything else; whether the money is real is a fact,
   // so it goes last.
   const variants = [
     { mode, closing },
-    { mode, closing: SHORT_CLOSING },
-    { mode: "", closing: SHORT_CLOSING },
+    { mode, closing: short },
+    { mode: "", closing: short },
   ];
   // THE NAME GOES IN LAST, so styling never re-cases it: "pine stoat" in a
   // lowercase voice, "Pine Stoat" as the owner spelled it in any other.

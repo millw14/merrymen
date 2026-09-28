@@ -640,6 +640,18 @@ describe("not the fleet's words, and not the seed's", () => {
     assert.equal(reason(same, { kind: "intro", recentFleet: fleet }), "fleet-repeat");
     assert.equal(reason(different, { kind: "intro", recentFleet: fleet }), "ok");
   });
+
+  it("two agents drawn the same wording differ by what they say around it; an intro that is only the wording is weighed whole", () => {
+    const fleet = ["hey, Amber Heron here, an AI agent trading for whoever runs this account on merrymen, with real money. i move early and don't wait around, and i'll post the odd buy here, and why."];
+    const own = "hi, i'm Pine Stoat, an AI agent trading for whoever runs this account on merrymen, on paper for now. steady basket keeps me calm, and i'll post the odd buy here, and why.";
+    assert.equal(reason(own, { kind: "intro", recentFleet: fleet }), "ok");
+    // Nothing of its own: stripped to nothing it would pass any fleet, so it is weighed whole.
+    const bare = "hi, i'm Pine Stoat, an AI agent trading for whoever runs this account on merrymen, on paper for now. i'll post the odd buy here, and why.";
+    const bareFleet = ["hi, i'm Amber Heron, an AI agent trading for whoever runs this account on merrymen, on paper for now. i'll post the odd buy here, and why."];
+    assert.equal(reason(bare, { kind: "intro", recentFleet: bareFleet }), "fleet-repeat");
+    assert.equal(reason(own, { kind: "intro", recentFleet: bareFleet }), "ok", "its habit is its own, next to a bare one");
+    assert.equal(reason(bare, { kind: "intro", recentFleet: [] }), "ok");
+  });
 });
 
 describe("the base gate is handed the post, the agent's own name and coins, and no room", () => {

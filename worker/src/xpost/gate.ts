@@ -586,10 +586,18 @@ const SAYS_TRADING = /\btrad(?:e|es|ed|ing|er)\b/i;
  * that trades posts here, and that it will post what it buys and why — so two
  * honest intros on two accounts share these words by construction. They are
  * taken out of both sides before the fleet echo is weighed; what is said
- * around them is what must differ.
+ * around them is what must differ. That covers every wording the writer
+ * offers ("whoever runs this account", "the human behind this account", "the
+ * odd buy", "pop in here now and then"…): two agents drawn the same wording
+ * are not the same intro for it. writer.test.ts holds every wording to this.
  */
 const INTRO_DISCLOSURE =
-  /\b(?:ai|agents?|bots?|trad(?:e|es|ed|ing|er)|merrymen|accounts?|owners?|posts?|posting|buys?|bought|why|paper|practice|real|money|here)\b/gi;
+  /\b(?:ai|agents?|bots?|trad(?:e|es|ed|ing|er)|merrymen|accounts?|owners?|posts?|posting|buys?|bought|why|paper|practice|real|money|here|whoever|runs|doing|human|behind|odd|set|pop|check|once)\b/gi;
+
+/** An intro without the words every intro must say (INTRO_DISCLOSURE): what is left is what must differ. Exported for the writer's tests. */
+export function withoutDisclosure(text: string): string {
+  return String(text ?? "").replace(INTRO_DISCLOSURE, " ");
+}
 
 const PICTOGRAPH = /\p{Extended_Pictographic}/gu;
 /** Three capitals or more as a word. A $cashtag is the base gate's business (vouched or refused). */
@@ -799,9 +807,18 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   const fleet = strings(ctx.recentFleet);
   // An intro is weighed without the words every intro must say: two honest
   // intros share those by construction, and what is said around them is what
-  // must differ.
-  const weigh = (s: string) => (ctx.kind === "intro" ? s.replace(INTRO_DISCLOSURE, " ") : s);
-  if (fleet.some((prev) => similarity(weigh(mine), weigh(prev)) >= REPEAT_LIMIT)) return refuse("fleet-repeat");
+  // must differ. AN INTRO THAT IS NOTHING BUT THE DISCLOSURE has nothing of
+  // its own left to tell it apart, and weighed as nothing it would pass any
+  // fleet: then the two are weighed whole, so the same intro under another
+  // name is still the same intro.
+  const echoes = (prev: string): boolean => {
+    if (ctx.kind !== "intro") return similarity(mine, prev) >= REPEAT_LIMIT;
+    const a = withoutDisclosure(mine);
+    const b = withoutDisclosure(prev);
+    if (similarity(a, a) === 0 || similarity(b, b) === 0) return similarity(mine, prev) >= REPEAT_LIMIT;
+    return similarity(a, b) >= REPEAT_LIMIT;
+  };
+  if (fleet.some(echoes)) return refuse("fleet-repeat");
   if (strings(ctx.seeds).some((seed) => echoesSeed(text, seed))) return refuse("seed-echo");
 
   return { ok: true, text };
