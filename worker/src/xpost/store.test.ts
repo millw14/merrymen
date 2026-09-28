@@ -13,25 +13,29 @@ import {
   cancelPost,
   cancelScheduled,
   claimPost,
-  countPostedSince,
+  deferPost,
   deleteAccount,
   duePosts,
   ensureXpostSchema,
   failInterrupted,
   getAccount,
+  introPostsOf,
   keyStatus,
+  lastOutAt,
   markFailed,
   markPosted,
   markRevoked,
   ownerCancel,
   postingAccounts,
   postsOf,
+  postsOfXUser,
   prunePending,
   putPending,
   readMeta,
   readTokens,
   recentBodies,
   reschedulePost,
+  returnAllowance,
   schedulePost,
   setPosting,
   skipScheduled,
@@ -236,20 +240,47 @@ test("a post is claimed by exactly one sender and never sent twice", async (t) =
   assert.equal(p?.status, "posted");
   assert.equal(p?.tweetId, "1840000000000000001");
   assert.equal(p?.sentAtMs, 1_003);
-  assert.equal(await countPostedSince(db, 1_000), 1);
-  assert.equal(await countPostedSince(db, 2_000), 0);
 });
 
 test("a rate-limited post goes back to scheduled; a failure is final", async (t) => {
   const { db } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "robin_trades", tokens: TOKENS, nowMs: 1 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 400);
   const id = (await schedulePost(db, post()))!;
   await claimPost(db, id, 1_001);
-  await reschedulePost(db, id, 9_000, 1_002);
+  assert.equal(await reschedulePost(db, id, 9_000, 1_002), true);
   assert.deepEqual((await duePosts(db, [OWNER_A], 9_000)).map((p) => p.id), [id]);
   await claimPost(db, id, 9_001);
   await markFailed(db, id, "uncertain", 9_002);
   assert.equal(await claimPost(db, id, 9_003), false, "failed is final");
   assert.equal((await postsOf(db, OWNER_A, 0))[0]?.reason, "uncertain");
+});
+
+test("a post in flight when its account stopped posting is cancelled, never put back to scheduled", async (t) => {
+  const cases: [string, (db: Db) => Promise<unknown>][] = [
+    ["switched off", (db) => setPosting(db, OWNER_A, { enabled: false }, 1_010)],
+    ["switched off and on again before the reschedule", async (db) => {
+      await setPosting(db, OWNER_A, { enabled: false }, 1_010);
+      await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 1_011);
+    }],
+    ["disconnected", (db) => deleteAccount(db, DEK, OWNER_A, 1_010)],
+    ["revoked", async (db) => markRevoked(db, OWNER_A, (await getAccount(db, OWNER_A))!.version, 1_010)],
+    ["another X account connected", (db) => upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "222", username: "someone_else", tokens: TOKENS, nowMs: 1_010 })],
+  ];
+  for (const [label, change] of cases) {
+    const { db } = await open(t);
+    await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "robin_trades", tokens: TOKENS, nowMs: 1 });
+    await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 400);
+    const id = (await schedulePost(db, post()))!;
+    assert.equal(await claimPost(db, id, 1_001), true);
+    await change(db);
+    assert.equal(await keyStatus(db, post().dedupeKey), "sending", `${label}: the web cancels only scheduled rows`);
+    assert.equal(await reschedulePost(db, id, 9_000, 1_020), false, label);
+    const [p] = await postsOf(db, OWNER_A, 0);
+    assert.equal(p?.status, "cancelled", label);
+    assert.equal(p?.reason, "account-off", label);
+    assert.deepEqual(await duePosts(db, [OWNER_A], 9_000), [], `${label}: nothing to send later`);
+  }
 });
 
 test("a claim that outlived its process fails as interrupted, never resent", async (t) => {
@@ -288,6 +319,79 @@ test("the orchestrator cancels a scheduled post whose account moved on, and noth
   assert.equal(await cancelPost(db, claimed, "account-gone", 5), false, "a claimed post is the sender's to finish");
 });
 
+test("one X account's posts, from every owner posting on it, newest first", async (t) => {
+  const { db } = await open(t);
+  await schedulePost(db, post({ dedupeKey: "a-old", nowMs: 5 }));
+  await schedulePost(db, post({ dedupeKey: "a", nowMs: 10 }));
+  await schedulePost(db, post({ dedupeKey: "b", tenant: OWNER_B, nowMs: 20 }));
+  await schedulePost(db, post({ dedupeKey: "a-other-account", xUserId: "222", nowMs: 30 }));
+  assert.deepEqual((await postsOfXUser(db, "111", 10)).map((p) => [p.dedupeKey, p.tenant]), [
+    ["b", OWNER_B],
+    ["a", OWNER_A.toLowerCase()],
+  ]);
+});
+
+test("when an X account last posted, from any owner, what went out or may have; never a hello", async (t) => {
+  const { db } = await open(t);
+  assert.equal(await lastOutAt(db, "111", 0), null);
+  const out = async (key: string, over: Partial<NewPost>, end: (id: number) => Promise<unknown>) => {
+    const id = (await schedulePost(db, post({ dedupeKey: key, ...over })))!;
+    await claimPost(db, id, over.nowMs ?? 500);
+    await end(id);
+  };
+  await out("hello", { kind: "intro", nowMs: 100 }, (id) => markPosted(db, id, "1", 9_000));
+  assert.equal(await lastOutAt(db, "111", 0), null, "a hello is exempt");
+  await out("a", { nowMs: 100 }, (id) => markPosted(db, id, "2", 1_000));
+  await out("b", { tenant: OWNER_B, nowMs: 200 }, (id) => markPosted(db, id, "3", 2_000));
+  assert.equal(await lastOutAt(db, "111", 0), 2_000, "the other owner's post on the same X account");
+  await out("maybe", { nowMs: 300 }, (id) => markFailed(db, id, "uncertain", 3_000));
+  assert.equal(await lastOutAt(db, "111", 0), 3_000, "an uncertain post may be on the timeline");
+  await out("refused", { nowMs: 400 }, (id) => markFailed(db, id, "forbidden", 4_000));
+  await schedulePost(db, post({ dedupeKey: "waiting", nowMs: 400, dueAtMs: 5_000 }));
+  assert.equal(await lastOutAt(db, "111", 0), 3_000, "X refused it, and a draft is not out");
+  assert.equal(await lastOutAt(db, "222", 0), null);
+  assert.equal(await lastOutAt(db, "111", 250), 3_000, "only posts drafted since");
+});
+
+test("due posts page on from the last row seen, by due time then id", async (t) => {
+  const { db } = await open(t);
+  const ids: number[] = [];
+  for (const [key, due] of [["p1", 100], ["p2", 100], ["p3", 200], ["p4", 300], ["later", 9_000]] as const) {
+    ids.push((await schedulePost(db, post({ dedupeKey: key, dueAtMs: due })))!);
+  }
+  const first = await duePosts(db, [OWNER_A], 1_000, 2);
+  assert.deepEqual(first.map((p) => p.dedupeKey), ["p1", "p2"]);
+  const last = first[first.length - 1]!;
+  const second = await duePosts(db, [OWNER_A], 1_000, 2, { dueAtMs: last.dueAtMs, id: last.id });
+  assert.deepEqual(second.map((p) => p.dedupeKey), ["p3", "p4"]);
+  assert.deepEqual(await duePosts(db, [OWNER_A], 1_000, 2, { dueAtMs: 300, id: ids[3]! }), [], "nothing due past the last");
+  assert.deepEqual((await duePosts(db, [OWNER_A], 1_000, 5, { dueAtMs: 100, id: ids[0]! })).map((p) => p.dedupeKey), ["p2", "p3", "p4"], "a tie on due time goes by id");
+});
+
+test("a scheduled post can be moved later; a claimed one cannot", async (t) => {
+  const { db } = await open(t);
+  const id = (await schedulePost(db, post()))!;
+  assert.equal(await deferPost(db, id, 9_000, 600), true);
+  assert.deepEqual(await duePosts(db, [OWNER_A], 8_999), []);
+  assert.equal((await duePosts(db, [OWNER_A], 9_000))[0]?.id, id);
+  await claimPost(db, id, 9_001);
+  assert.equal(await deferPost(db, id, 20_000, 9_002), false);
+});
+
+test("every intro one owner wrote for one X account, any status and any age, oldest first", async (t) => {
+  const { db } = await open(t);
+  const base = `intro:${OWNER_A.toLowerCase()}:111`;
+  await schedulePost(db, post({ kind: "intro", dedupeKey: base, nowMs: 10, status: "skipped", reason: "template:echo" }));
+  await schedulePost(db, post({ kind: "intro", dedupeKey: `${base}:1`, nowMs: 20 }));
+  await schedulePost(db, post({ kind: "intro", dedupeKey: `intro:${OWNER_A.toLowerCase()}:222`, xUserId: "222", nowMs: 30 }));
+  await schedulePost(db, post({ kind: "intro", dedupeKey: `intro:${OWNER_B}:111`, tenant: OWNER_B, nowMs: 40 }));
+  await schedulePost(db, post({ kind: "casual", nowMs: 50 }));
+  assert.deepEqual((await introPostsOf(db, OWNER_A, "111")).map((p) => [p.dedupeKey, p.status]), [
+    [base, "skipped"],
+    [`${base}:1`, "scheduled"],
+  ]);
+});
+
 test("recent bodies: one account's, or the fleet's, never the ones that did not go out", async (t) => {
   const { db } = await open(t);
   await schedulePost(db, post({ dedupeKey: "a1", body: "one", nowMs: 10 }));
@@ -309,6 +413,12 @@ test("an allowance is taken atomically and stops at its limit", async (t) => {
   assert.equal(await takeAllowance(db, "llm:2026-09-29", 2, 4), true, "a new day is a new counter");
   assert.equal(await takeAllowance(db, "zero", 0, 5), false);
   assert.equal((await readMeta(db, "llm:2026-09-28"))?.n, 2);
+  await returnAllowance(db, "llm:2026-09-28", 3);
+  assert.equal(await takeAllowance(db, "llm:2026-09-28", 2, 3), true, "one given back can be taken again");
+  for (let i = 0; i < 4; i++) await returnAllowance(db, "llm:2026-09-29", 4);
+  assert.equal((await readMeta(db, "llm:2026-09-29"))?.n, 0, "never below zero");
+  await returnAllowance(db, "never-taken", 4);
+  assert.equal(await readMeta(db, "never-taken"), null);
   await writeMeta(db, "pause", "123", 6);
   await writeMeta(db, "pause", "456", 7);
   assert.equal((await readMeta(db, "pause"))?.v, "456");
@@ -356,6 +466,7 @@ test("every statement the store sends translates to Postgres with matching, bind
   const id = (await schedulePost(db, post({ dueAtMs: 5.5, nowMs: 5.5 })))!;
   await keyStatus(db, post().dedupeKey);
   await duePosts(db, [OWNER_A], 6.5, 10.5);
+  await duePosts(db, [OWNER_A], 6.5, 10.5, { dueAtMs: 1.5, id: 1 });
   await claimPost(db, id, 7.5);
   await reschedulePost(db, id, 8.5, 8.5);
   await claimPost(db, id, 9.5);
@@ -366,9 +477,13 @@ test("every statement the store sends translates to Postgres with matching, bind
   await ownerCancel(db, OWNER_A, id, 12.5);
   await failInterrupted(db, 13.5, 13.5);
   await postsOf(db, OWNER_A, 0.5, 20.5);
+  await introPostsOf(db, OWNER_A, "111");
+  await postsOfXUser(db, "111", 0.5, 20.5);
+  await lastOutAt(db, "111", 0.5);
+  await deferPost(db, id, 21.5, 21.5);
   await recentBodies(db, { tenant: OWNER_A, sinceMs: 0.5, limit: 5.5 });
   await recentBodies(db, { tenant: null, sinceMs: 0.5, limit: 5.5 });
-  await countPostedSince(db, 0.5);
+  await returnAllowance(db, "k", 14.7);
   await takeAllowance(db, "k", 3.5, 14.5);
   await readMeta(db, "k");
   await writeMeta(db, "k", "v", 15.5);

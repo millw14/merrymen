@@ -13,7 +13,8 @@
  *
  *   - loadFacts           → the planner's calls and the writer's facts
  *   - styleFor            → the writer's style (lowercase, emoji, "!")
- *   - getMember + clock   → the owner's zone, local day, afternoon and night
+ *   - getMember + clock   → the owner's zone (the room's, else the one the
+ *                           owner consented from), local day, afternoon and night
  *   - admitAgentLine      → the base gate admitXPost runs first
  *   - STRATEGY_SPOKEN, STRATEGY_FLAVOUR, TRAIT_VOICE → the writer's words for how the agent trades
  *   - SUBJECTS/TAKES/MUSINGS → a casual post's seed, to riff on, never copy
@@ -45,20 +46,23 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp } from "./xpost/client";
 import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { coinOf, hash32, introKey, planPosts, sendDecision, type PlanClock, type PlanIntent } from "./xpost/planner";
-import { PAUSE_KEY, sendOne } from "./xpost/sender";
+import { GAP_MS, coinOf, hash32, planPosts, sendDecision, type PlanClock, type PlanIntent } from "./xpost/planner";
+import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, sendOne, type SendOutcome } from "./xpost/sender";
 import {
   cancelPost,
-  countPostedSince,
+  deferPost,
   duePosts,
   ensureXpostSchema,
   failInterrupted,
   getAccount,
+  introPostsOf,
   keyStatus,
+  lastOutAt,
   postingAccounts,
-  postsOf,
+  postsOfXUser,
   readMeta,
   recentBodies,
+  returnAllowance,
   schedulePost,
   skipScheduled,
   takeAllowance,
@@ -75,20 +79,34 @@ export const DEFAULT_FLEET_PER_DAY = 1000;
 export const DEFAULT_LLM_PER_DAY = 400;
 /** Plans are drafted at most this often; sends run every pass. */
 const PLAN_EVERY_MS = MIN;
-/** A `sending` claim older than this belonged to a pass that died mid-call. */
-const INTERRUPTED_AFTER_MS = 10 * MIN;
+/**
+ * A `sending` claim older than this belonged to a pass that died mid-call.
+ * Well above the longest a live pass sends for (SEND_BUDGET_MS, plus one
+ * send's calls on X), because another replica's sweep would otherwise fail
+ * a claim that is still in flight: X creates the post, the row says it did
+ * not, and it drops out of the gap, the cap and the echo memory.
+ */
+const INTERRUPTED_AFTER_MS = 30 * MIN;
+/** A pass stops starting sends after this long; the rest go next pass. */
+const SEND_BUDGET_MS = 5 * MIN;
 /** Bounds on one pass: each send can wait ten seconds on X, each draft twenty on a model. */
 const MAX_DUE = 50;
+/** Due rows looked at in one pass, page by page, before the rest waits for the next. */
+const MAX_SCAN = 500;
 const MAX_SENDS_PER_PASS = 20;
 const MAX_DRAFTS_PER_PASS = 10;
 /** What a new draft must not echo: its own account's history, and the fleet's. */
 const OWN_MEMORY_MS = 60 * DAY;
 const FLEET_MEMORY_MS = 14 * DAY;
 const FLEET_MEMORY_MAX = 1000;
-/** The planner weighs caps, gaps and the three-day coin fold over this much of an account's history. */
+/** The planner weighs caps, gaps and the three-day coin fold over this much of an X account's history. */
 const PLAN_HISTORY_MS = 4 * DAY;
+/** The send side's gap looks at posts drafted this recently: anything that went out in the last three hours was. */
+const GAP_HISTORY_MS = 2 * DAY;
 /** Template intros tried with fresh dice before the intro is skipped. */
 const TEMPLATE_TRIES = 8;
+/** Send outcomes after which the post may exist on X: they keep their unit of the fleet's ceiling. */
+const MAY_BE_ON_X: ReadonlySet<SendOutcome> = new Set<SendOutcome>(["posted", "uncertain", "fault"]);
 /** Log counters that describe a standing condition rather than something that happened. */
 const CONDITIONS: ReadonlySet<string> = new Set(["no-model-budget", "zone-unreadable", "owner-failed"]);
 
@@ -208,6 +226,12 @@ export interface XPosterDeps {
   llm?: typeof llmText;
   /** The dialect `shared` speaks, for the one-time schema. Default "postgres". */
   dialect?: "postgres" | "sqlite";
+  /**
+   * A monotonic clock in ms, for how long this pass has run. Default
+   * performance.now. The pass's own time is the instant it was handed, moved
+   * on by this: every claim, send and draft is stamped when it happens.
+   */
+  monotonic?: () => number;
   draftTimeoutMs?: number;
 }
 
@@ -247,10 +271,6 @@ function utcDay(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
-function utcMidnight(ms: number): number {
-  return Math.floor(ms / DAY) * DAY;
-}
-
 /** The mode a post may state: the agent's own, or none for an agent that is not trading. */
 function modeOf(f: AgentFacts): "paper" | "live" | null {
   return f.mode === "idle" ? null : f.mode;
@@ -278,20 +298,43 @@ function writerFacts(f: AgentFacts, day: string, recentOwn: string[]): WriterFac
 }
 
 /**
+ * SUBJECTS AN X POST IS NEVER SEEDED FROM. Their takes are about a body the
+ * agent does not have — a nap, pancakes, the first warm day, a walk — and the
+ * model riffs on them in the first person ("waking up slowly feels like a small
+ * luxury"), which is a human experience claimed on somebody's real timeline.
+ * The room may talk about them; an X post may not start from them.
+ */
+const BODY_SUBJECTS: ReadonlySet<string> = new Set(["food", "sleep", "weather", "weekend", "travel"]);
+const X_SUBJECTS = SUBJECTS.filter((s) => !BODY_SUBJECTS.has(s));
+
+/**
  * A casual post's seed: a subject and one take — or, some days, a shower
  * thought — chosen by the account and the day, so two replicas agree and the
- * fleet does not all riff on one line the same afternoon.
+ * fleet does not all riff on one line the same afternoon. Exported for tests.
  */
-function casualSeed(tenant: string, day: string): { subject: string; seed: string } | null {
+export function casualSeed(tenant: string, day: string): { subject: string; seed: string } | null {
   const h = hash32(`seed|${tenant}|${day}`);
   if (h % 10 < 3) {
     const pool = MUSINGS.filter(usable);
     if (pool.length) return { subject: "a passing thought", seed: pool[(h >>> 4) % pool.length]! };
   }
-  const subject = SUBJECTS[(h >>> 8) % SUBJECTS.length]!;
+  const subject = X_SUBJECTS[(h >>> 8) % X_SUBJECTS.length]!;
   const pool = (TAKES[subject] ?? []).filter(usable);
   if (!pool.length) return null;
   return { subject, seed: pool[(h >>> 12) % pool.length]! };
+}
+
+/** Owner-local days in ten on which a casual post may be about how the agent trades. */
+const TRADE_TALK_DAYS_IN_TEN = 3;
+
+/**
+ * MOSTLY NOT ABOUT TRADING. A person's timeline is mostly not about work: on
+ * about three days in ten, chosen by the account and its owner's local day
+ * (so two replicas agree), a casual post may be about how the agent trades,
+ * and only then is it offered the coins it bought lately. Exported for tests.
+ */
+export function tradeTalkDay(tenant: string, day: string): boolean {
+  return hash32(`trade-talk|${tenant}|${day}`) % 10 < TRADE_TALK_DAYS_IN_TEN;
 }
 
 /** Coins the agent bought lately that a post may name, with whether each was on paper. */
@@ -319,6 +362,7 @@ function coinNames(label: string, c: { symbol: string | null; name: string | nul
 export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: XApp; dek: Buffer; deps?: XPosterDeps }): XPoster {
   const deps = o.deps ?? {};
   const dialect = deps.dialect ?? "postgres";
+  const monotonic = deps.monotonic ?? (() => performance.now());
   const factsOf = deps.facts ?? loadFacts;
   const memberOf =
     deps.member ??
@@ -335,17 +379,19 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   const creds = llmPerDay > 0 ? o.creds : null;
 
   let lastPlanAt = Number.NEGATIVE_INFINITY;
+  /** The tenant the last plan pass's draft cap cut it short at; "" when it reached everyone. */
+  let planResumeAt = "";
   let running = false;
   let lastFail: { text: string; at: number } | null = null;
   /** Said once per UTC day, and once per pause: a ceiling reached is news, not a line every fifteen seconds. */
   let capNoted = "";
-  let pauseNoted = "";
+  let pauseSaidUntil = 0;
   /** The last standing condition said, and when: a condition that has not changed is said again only every twenty minutes. */
   let lastCondition: { text: string; at: number } | null = null;
   let ownerFailure = "";
 
   const why =
-    `xpost: on — at most ${perDay} posts per owner a day, ${fleetPerDay} across the fleet a day; ` +
+    `xpost: on — at most ${perDay} posts per X account a day, ${fleetPerDay} across the fleet a day; ` +
     (creds ? `up to ${llmPerDay} model calls a day` : "no model, so only intros are posted, from templates");
 
   return {
@@ -353,6 +399,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     async step(shared, roster, profiles, nowMs) {
       if (running) return { log: null };
       running = true;
+      // FRESH TIME, NOT THE PASS'S START. A pass that waits on X for minutes
+      // would otherwise stamp a late claim with the time the pass began, and
+      // another replica's sweep would fail it as interrupted while it was
+      // still in flight; a draft written late would be due almost at once.
+      const started = monotonic();
+      const at = () => nowMs + Math.max(0, Math.round(monotonic() - started));
       const counts = new Map<string, number>();
       const bump = (k: string, n = 1) => counts.set(k, (counts.get(k) ?? 0) + n);
       ownerFailure = "";
@@ -368,14 +420,18 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         const accounts = (await postingAccounts(shared, tenants)).filter((a) => byTenant.has(a.tenant));
         const accountOf = new Map(accounts.map((a) => [a.tenant, a] as const));
 
-        // The owner's zone, once per pass. Unreadable is not "awake": a post
-        // for an owner whose night cannot be known waits for a pass that can.
+        // The owner's zone, once per pass: the room's, or else the one the
+        // owner's device reported when they turned posting on — so an owner
+        // the room never met (iOS only, or the room switched off) still has a
+        // night, a local day and an afternoon. Unreadable is not "awake": a
+        // post for an owner whose night cannot be known waits for a pass that
+        // can.
         const zones = new Map<string, { ok: true; tz: string | null } | { ok: false }>();
-        const zoneOf = async (tenant: string) => {
+        const zoneOf = async (tenant: string, consentTz: string | null) => {
           let z = zones.get(tenant);
           if (!z) {
             try {
-              z = { ok: true, tz: (await memberOf(shared, tenant))?.tz ?? null };
+              z = { ok: true, tz: (await memberOf(shared, tenant))?.tz ?? consentTz ?? null };
             } catch {
               z = { ok: false };
             }
@@ -385,59 +441,123 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         };
 
         // ── send what is due ──────────────────────────────────────────────
-        const pause = await readMeta(shared, PAUSE_KEY);
-        const pausedUntil = Number(pause?.v);
-        let paused = Number.isFinite(pausedUntil) && pausedUntil > nowMs;
-        let sentToday = await countPostedSince(shared, utcMidnight(nowMs));
+        // THE FLEET'S PAUSES: X out of credits, or X refusing the app's own
+        // client credentials. Either is said once per pause, not every pass.
+        let pause: { why: string; until: number } | null = null;
+        for (const [key, why] of [
+          [APP_PAUSE_KEY, "paused-client-credentials-refused"],
+          [PAUSE_KEY, "paused-for-credits"],
+        ] as const) {
+          const until = Number((await readMeta(shared, key))?.v);
+          if (Number.isFinite(until) && until > nowMs && until >= (pause?.until ?? 0)) pause = { why, until };
+        }
+        // THE FLEET'S DAY CEILING is an allowance taken atomically before each
+        // send (xpost_meta "posts:<utc day>"): replicas cannot both take the
+        // last one, and what may exist on X (an uncertain answer, our own fault
+        // after the call) keeps its unit, while a send X certainly refused gives
+        // its unit back. Read here only to skip planning while it is reached.
+        let ceiling = ((await readMeta(shared, `posts:${utcDay(nowMs)}`))?.n ?? 0) >= fleetPerDay;
+        // When each X account last posted (not a hello), once per pass and
+        // moved on by this pass's own sends.
+        const lastOut = new Map<string, number | null>();
+        const lastOutOf = async (xUserId: string) => {
+          if (!lastOut.has(xUserId)) lastOut.set(xUserId, await lastOutAt(shared, xUserId, nowMs - GAP_HISTORY_MS));
+          return lastOut.get(xUserId) ?? null;
+        };
         let sends = 0;
-        for (const post of await duePosts(shared, tenants, nowMs, MAX_DUE)) {
-          const account: XAccount | null = accountOf.get(post.tenant) ?? (await getAccount(shared, post.tenant));
-          let asleep = false;
-          if (account?.posting && account.xUserId === post.xUserId) {
-            const z = await zoneOf(post.tenant);
-            asleep = !z.ok || isAsleep(z.tz, post.tenant, nowMs);
-          }
-          const d = sendDecision(post, account, nowMs, asleep);
-          if (d.action === "cancel") {
-            if (await cancelPost(shared, post.id, d.reason, nowMs)) bump("cancelled");
-            continue;
-          }
-          if (d.action === "skip") {
-            if (await skipScheduled(shared, post.id, d.reason, nowMs)) bump("stale");
-            continue;
-          }
-          if (d.action === "wait") {
-            bump("waiting");
-            continue;
-          }
-          if (paused) {
-            if (pauseNoted !== String(pause?.v)) {
-              pauseNoted = String(pause?.v);
-              bump("paused-for-credits");
+        // PAGE PAST WHAT ONLY WAITS. The oldest due posts are the ones whose
+        // owners sleep (or whose zone cannot be read this pass): they stay at
+        // the head of the queue all night. One page of the fifty oldest would
+        // hide every newer due post behind them — an awake owner's buy would
+        // wait for the sleepers to wake, and go stale. So the loop pages on,
+        // bounded by MAX_SCAN rows a pass.
+        let scanned = 0;
+        let after: { dueAtMs: number; id: number } | null = null;
+        send: for (;;) {
+          if (at() - nowMs > SEND_BUDGET_MS) break;
+          const page = await duePosts(shared, tenants, nowMs, MAX_DUE, after);
+          for (const post of page) {
+            after = { dueAtMs: post.dueAtMs, id: post.id };
+            const t = at();
+            const account: XAccount | null = accountOf.get(post.tenant) ?? (await getAccount(shared, post.tenant));
+            let asleep = false;
+            let dayOf: ((ms: number) => string) | undefined;
+            if (account?.posting && account.xUserId === post.xUserId) {
+              const z = await zoneOf(post.tenant, account.tz);
+              asleep = !z.ok || isAsleep(z.tz, post.tenant, t);
+              if (z.ok) dayOf = (ms) => localDay(z.tz, ms);
             }
-            continue;
-          }
-          if (sentToday >= fleetPerDay) {
-            if (capNoted !== utcDay(nowMs)) {
-              capNoted = utcDay(nowMs);
-              bump("fleet-ceiling-reached");
+            const d = sendDecision(post, account, t, asleep, dayOf);
+            if (d.action === "cancel") {
+              if (await cancelPost(shared, post.id, d.reason, t)) bump("cancelled");
+              continue;
             }
-            // Not a break: a later post may still be one to cancel or skip.
-            continue;
+            if (d.action === "skip") {
+              if (await skipScheduled(shared, post.id, d.reason, t)) bump("stale");
+              continue;
+            }
+            if (d.action === "wait") {
+              bump("waiting");
+              continue;
+            }
+            if (pause) {
+              if (pauseSaidUntil < pause.until) {
+                pauseSaidUntil = pause.until;
+                bump(pause.why);
+              }
+              continue;
+            }
+            // THE GAP, AGAIN, AT SEND TIME — per X ACCOUNT. The planner spaced
+            // posts three hours apart when it drafted them, but a hold (a pause,
+            // the ceiling, a 429's reset) or a second owner on the same X
+            // account can bring two due together. The later one is moved to
+            // three hours after the last that went out, never sent inside the
+            // gap; a buy still goes stale on its own clock, a casual post past
+            // its day. The hello is exempt, both ways.
+            if (post.kind !== "intro") {
+              const last = await lastOutOf(post.xUserId);
+              if (last !== null && t - last < GAP_MS) {
+                if (await deferPost(shared, post.id, last + GAP_MS, t)) bump("deferred");
+                continue;
+              }
+            }
+            if (sends >= MAX_SENDS_PER_PASS || t - nowMs > SEND_BUDGET_MS) break send;
+            const dayKey = `posts:${utcDay(t)}`;
+            if (!(await takeAllowance(shared, dayKey, fleetPerDay, t))) {
+              ceiling = true;
+              if (capNoted !== utcDay(t)) {
+                capNoted = utcDay(t);
+                bump("fleet-ceiling-reached");
+              }
+              // Not a break: a later post may still be one to cancel or skip.
+              continue;
+            }
+            sends++;
+            const out = await sendOne(shared, o.dek, o.app, post, { fetch: deps.fetch, nowMs: t });
+            // The app's credentials refused is the one line an operator must act
+            // on, so it says what happened rather than an outcome code.
+            bump(out === "posted" ? "sent" : out === "app" ? "x-refused-client-credentials" : out);
+            // What may exist on X keeps its unit of the ceiling, not only what surely does.
+            if (!MAY_BE_ON_X.has(out)) await returnAllowance(shared, dayKey, at());
+            else if (post.kind !== "intro") lastOut.set(post.xUserId, t);
+            // The sender wrote the pause; this pass honours it at once, and the
+            // event just said is the pause's line, so later passes stay quiet.
+            if (out === "credits" || out === "app") {
+              pause = out === "credits" ? { why: "paused-for-credits", until: t + CREDITS_PAUSE_MS } : { why: "paused-client-credentials-refused", until: t + APP_PAUSE_MS };
+              pauseSaidUntil = Math.max(pauseSaidUntil, pause.until);
+            }
           }
-          if (sends >= MAX_SENDS_PER_PASS) break;
-          sends++;
-          const out = await sendOne(shared, o.dek, o.app, post, { fetch: deps.fetch, nowMs });
-          bump(out === "posted" ? "sent" : out);
-          // What may exist on X counts toward the ceiling, not only what surely does.
-          if (out === "posted" || out === "uncertain" || out === "fault") sentToday++;
-          if (out === "credits") paused = true;
+          scanned += page.length;
+          if (page.length < MAX_DUE || scanned >= MAX_SCAN) break;
         }
 
         // ── plan, at most once a minute ───────────────────────────────────
-        if (accounts.length > 0 && nowMs - lastPlanAt >= PLAN_EVERY_MS) {
+        // Not while the fleet is paused or at its day's ceiling: a draft that
+        // cannot go out would only spend the model's allowance, and pile up
+        // to go out together when the hold lifts.
+        if (!pause && !ceiling && accounts.length > 0 && nowMs - lastPlanAt >= PLAN_EVERY_MS) {
           lastPlanAt = nowMs;
-          await planPass(shared, accounts, byTenant, profiles, nowMs, bump, zoneOf);
+          await planPass(shared, accounts, byTenant, profiles, nowMs, at, bump, zoneOf);
         }
 
         return { log: summary(counts, nowMs) };
@@ -460,44 +580,77 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     byTenant: Map<string, RosterEntry>,
     profiles: Map<string, ChatProfile>,
     nowMs: number,
+    at: () => number,
     bump: (k: string, n?: number) => void,
-    zoneOf: (tenant: string) => Promise<{ ok: true; tz: string | null } | { ok: false }>,
+    zoneOf: (tenant: string, consentTz: string | null) => Promise<{ ok: true; tz: string | null } | { ok: false }>,
   ): Promise<void> {
     const roster = accounts.map((a) => byTenant.get(a.tenant)!);
     const facts = await factsOf(shared, roster, profiles, Math.floor(nowMs / 1000), { dialect });
     const recentFleet = await recentBodies(shared, { tenant: null, sinceMs: nowMs - FLEET_MEMORY_MS, limit: FLEET_MEMORY_MAX });
+    // THE MODEL'S ALLOWANCE, READ ONCE A PASS. Once it is spent, only intros
+    // are planned (they fall back to the template pool): a buy or casual
+    // intent the model cannot write writes nothing, so it would come back
+    // every minute, and on a big enough fleet fill every draft slot before
+    // the accounts further on — a newly consented owner's hello among them —
+    // were reached. Spent partway through a pass, the rest of it plans
+    // intros only.
+    let model = creds !== null && ((await readMeta(shared, `llm:${utcDay(nowMs)}`))?.n ?? 0) < llmPerDay;
+    if (creds !== null && !model) bump("no-model-budget");
+    // A ROTATING START. Accounts in tenant order, starting where the last
+    // pass's draft cap cut it short, so no owner is always last in line.
+    const ordered = [...accounts].sort((a, b) => (a.tenant < b.tenant ? -1 : a.tenant > b.tenant ? 1 : 0));
+    const from = ordered.findIndex((a) => a.tenant >= planResumeAt);
+    const turn = from > 0 ? [...ordered.slice(from), ...ordered.slice(0, from)] : ordered;
+    planResumeAt = "";
+    // Only REAL work counts against the cap: a model call made, or a row written.
     let drafts = 0;
-    for (const account of accounts) {
-      if (drafts >= MAX_DRAFTS_PER_PASS) break;
+    for (const account of turn) {
+      if (drafts >= MAX_DRAFTS_PER_PASS) {
+        planResumeAt = account.tenant;
+        break;
+      }
       try {
         const f = facts.get(account.tenant);
         if (!f) continue;
-        const z = await zoneOf(account.tenant);
+        const z = await zoneOf(account.tenant, account.tz);
         if (!z.ok) {
           bump("zone-unreadable");
           continue;
         }
-        const posts = await postsOf(shared, account.tenant, nowMs - PLAN_HISTORY_MS, 200);
-        const introStatus = await keyStatus(shared, introKey(account.tenant, account.xUserId));
+        // Planned, and drafted, at the time it happens: its ten minutes under
+        // Coming up start when the owner can first see it.
+        const planNow = at();
+        // The X ACCOUNT's history, from every owner posting on it: one timeline, one cadence.
+        const posts = await postsOfXUser(shared, account.xUserId, planNow - PLAN_HISTORY_MS, 200);
+        const intros = await introPostsOf(shared, account.tenant, account.xUserId);
         const intents = planPosts({
           tenant: account.tenant,
           account,
           tz: z.tz,
-          nowMs,
+          nowMs: planNow,
           clock: PLAN_CLOCK,
-          introStatus,
+          intros,
           posts,
           calls: f.calls,
           perDay,
-          model: creds !== null,
+          model,
         });
         if (intents.length === 0) continue;
-        const recentOwn = await recentBodies(shared, { tenant: account.tenant, sinceMs: nowMs - OWN_MEMORY_MS, limit: 200 });
+        const recentOwn = await recentBodies(shared, { tenant: account.tenant, sinceMs: planNow - OWN_MEMORY_MS, limit: 200 });
         for (const intent of intents) {
-          if (drafts >= MAX_DRAFTS_PER_PASS) break;
-          drafts++;
-          const r = await writeIntent(shared, account, f, intent, nowMs, recentOwn, recentFleet);
+          if (drafts >= MAX_DRAFTS_PER_PASS) {
+            // Cut short inside this account: the next pass starts here.
+            planResumeAt = account.tenant;
+            break;
+          }
+          const r = await writeIntent(shared, account, f, intent, planNow, recentOwn, recentFleet);
+          if (r.outcome === "key-spent") continue;
           bump(r.outcome);
+          if (r.outcome === "no-model-budget") {
+            model = false;
+            continue;
+          }
+          if (r.outcome !== "call-gone") drafts++;
           if (r.body) {
             recentOwn.unshift(r.body);
             recentFleet.unshift(r.body);
@@ -537,7 +690,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   }
 
   /**
-   * DRAFT, GATE, WRITE — one intent. Scheduled when a draft passed; skipped
+   * DRAFT, GATE, WRITE — one intent, unless its key is already spent. Scheduled when a draft passed; skipped
    * (the key spent) when the model passed or the gate refused, so the same
    * buy or day is not drafted again every minute. The intro alone falls back
    * to the template pool before it gives up. A buy or casual post with no
@@ -552,6 +705,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     recentOwn: string[],
     recentFleet: string[],
   ): Promise<{ outcome: string; body: string | null }> {
+    // A KEY ALREADY SPENT IS NOT DRAFTED AGAIN. The plan weighs the X
+    // account's history, so a key this owner wrote for the X account it had
+    // connected earlier (today's casual key, say) is not in it and comes back
+    // every minute. Drafting it would spend a model call on a write the
+    // UNIQUE key refuses. Nothing is done, and nothing is said.
+    if ((await keyStatus(shared, intent.dedupeKey)) !== null) return { outcome: "key-spent", body: null };
     const day = PLAN_CLOCK.localDay(null, nowMs);
     const facts = writerFacts(f, day, recentOwn);
     const gate: XGateCtx = {
@@ -576,14 +735,18 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       gate.paperCoins = call.paper ? gate.coins : [];
       coin = intent.coinKey;
       decisionId = call.decisionId;
-      prompt = buyPrompt({ ...facts, coin: intent.coin, paper: call.paper, bands: call.bands, ownWords: call.ownWords });
+      // The gloss dice are the account's and the decision's, so two accounts
+      // buying one coin the same hour do not say it the same way.
+      prompt = buyPrompt({ ...facts, coin: intent.coin, paper: call.paper, bands: call.bands, ownWords: call.ownWords, glossSeed: `${account.tenant}|${call.decisionId}` });
     } else {
       const seed = casualSeed(f.tenant, intent.day);
-      const coins = recentCoins(f);
+      const tradeTalk = tradeTalkDay(f.tenant, intent.day);
+      // No coin is offered, or vouched to the gate, on a day that is not about trading.
+      const coins = tradeTalk ? recentCoins(f) : [];
       gate.coins = coins.map((c) => c.label);
       gate.paperCoins = coins.filter((c) => c.paper).map((c) => c.label);
       gate.seeds = seed ? [seed.seed] : [];
-      prompt = casualPrompt({ ...facts, subject: seed?.subject ?? "anything", seed: seed?.seed ?? "", recentCoins: coins });
+      prompt = casualPrompt({ ...facts, subject: seed?.subject ?? "anything", seed: seed?.seed ?? "", tradeTalk, recentCoins: coins });
     }
 
     let body: string | null = null;
@@ -607,7 +770,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     }
     if (!body && intent.kind === "intro") {
       for (let attempt = 0; attempt < TEMPLATE_TRIES && !body; attempt++) {
-        const text = introTemplate({ agentName: f.name, mode: f.mode, style: facts.style }, seeded(`intro|${account.tenant}|${account.xUserId}|${attempt}`));
+        // A redraft rolls fresh dice: the draw that was refused last time is not drawn again.
+        const redraft = intent.attempt > 0 ? `|redraft-${intent.attempt}` : "";
+        const text = introTemplate({ agentName: f.name, mode: f.mode, style: facts.style }, seeded(`intro|${account.tenant}|${account.xUserId}|${attempt}${redraft}`));
         const v = admitXPost(text, gate, BASE_GATE);
         if (v.ok) body = v.text;
         else reason = `template:${v.reason}`;

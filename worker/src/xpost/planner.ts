@@ -21,7 +21,12 @@
  *     first thing on their timeline at 3am local, or a stale draft by morning;
  *   - plan anything but the intro before the intro has been dealt with — a
  *     coin post as the account's first ever post is how a timeline becomes a
- *     bot's;
+ *     bot's, and it is the intro that says an AI trading agent is posting.
+ *     "Dealt with" is: it went out, the owner skipped it, or it may have gone
+ *     out (X's answer was unknown, or a duplicate). An intro that was
+ *     cancelled for any other reason (switched off, disconnected, revoked),
+ *     skipped by the gate, or refused by X is drafted AGAIN under a new key,
+ *     at most three times per consent (introState);
  *   - use a coin label that could be derived from an address. A ticker like
  *     "T7631DACC21B" is an id, not a name anybody would tweet.
  */
@@ -30,10 +35,16 @@ import type { XAccount, XPost, XPostStatus } from "./store";
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 
+/**
+ * THE REVIEW WINDOW. The owner was told every post waits under "Coming up" for
+ * at least ten minutes, and can be skipped there. So no post of any kind is
+ * due sooner than this after it is drafted — an intro drafted late, a buy
+ * found late, a casual post at its slot — and the intro is due no sooner than
+ * this after consent either.
+ */
+export const MIN_LEAD_MS = 10 * MIN;
 /** The intro goes out this long after consent, so the owner sees it drafted first. */
-export const INTRO_DELAY_MS = 10 * MIN;
-/** A post is never due sooner than this after it is drafted: Settings shows every post before it goes. */
-export const MIN_LEAD_MS = MIN;
+export const INTRO_DELAY_MS = MIN_LEAD_MS;
 /** A buy is posted about only while it is this fresh. */
 export const BUY_FRESH_MS = 2 * HOUR;
 /** One buy post per coin in this long: a basket re-buying the same stock is not a feed of the same post. */
@@ -46,13 +57,16 @@ export const BUY_JITTER_MAX = 40;
 export const BUY_STALE_MS = 8 * HOUR;
 /** The least time between two posts of one account. The intro is exempt, both ways. */
 export const GAP_MS = 3 * HOUR;
-/** A casual post pushed further than this by the gap waits for another day instead. */
+/** A casual post pushed further than this by the gap waits for another day instead; one held this long past due is stale. */
 export const CASUAL_MAX_PUSH_MS = 6 * HOUR;
 /** The owner's afternoon, in local minutes; with no known zone, the same length of UTC afternoon. */
 export const CASUAL_WINDOW_LOCAL = [12 * 60, 20 * 60] as const;
 export const CASUAL_WINDOW_UTC = [14 * 60, 22 * 60] as const;
 /** How many days in ten have no casual post at all. */
 export const CASUAL_QUIET_DAYS_IN_TEN = 3;
+/** A casual post is due this many minutes after it is drafted, by the account's own dice: always inside the review window's promise. */
+export const CASUAL_LEAD_MIN = 20;
+export const CASUAL_LEAD_MAX = 45;
 export const DEFAULT_PER_DAY = 3;
 
 /** What the planner asks of time. The glue binds it to the owner-local clock the room also uses. */
@@ -77,20 +91,29 @@ export interface PlanCall {
 }
 
 export type PlanIntent =
-  | { kind: "intro"; dedupeKey: string; dueAtMs: number }
+  /** `attempt` is 0 for the account's first hello, n for the n-th redraft. */
+  | { kind: "intro"; dedupeKey: string; dueAtMs: number; attempt: number }
   | { kind: "buy"; dedupeKey: string; dueAtMs: number; call: PlanCall; coin: string; coinKey: string }
   | { kind: "casual"; dedupeKey: string; dueAtMs: number; day: string };
 
+/** An intro row, as introState weighs it. */
+export type IntroRow = Pick<XPost, "dedupeKey" | "status" | "reason" | "createdAtMs" | "updatedAtMs">;
+
 export interface PlanInput {
   tenant: string;
-  account: Pick<XAccount, "xUserId" | "consentAtMs">;
+  /** `connectedAtMs`, when given, counts as the owner acting again, like a new consent. */
+  account: Pick<XAccount, "xUserId" | "consentAtMs"> & Partial<Pick<XAccount, "connectedAtMs">>;
   /** The owner's IANA zone, or null when never learned. */
   tz: string | null;
   nowMs: number;
   clock: PlanClock;
-  /** The status the intro's key was written with, or null when it is unused. */
-  introStatus: XPostStatus | null;
-  /** This account's posts over at least the last four days, any status. */
+  /** EVERY intro row this owner ever wrote for this X account, any status, any age. */
+  intros: readonly IntroRow[];
+  /**
+   * The X ACCOUNT's posts over at least the last four days, any status — from
+   * every owner that posts on it, so one X account connected to two owners
+   * still gets one cadence.
+   */
   posts: readonly XPost[];
   /** The agent's recent calls. Only fresh buys after consent are weighed. */
   calls: readonly PlanCall[];
@@ -104,8 +127,10 @@ export interface PlanInput {
 
 const key = (tenant: string) => String(tenant ?? "").trim().toLowerCase();
 
-export function introKey(tenant: string, xUserId: string): string {
-  return `intro:${key(tenant)}:${xUserId}`;
+/** The intro's key: the first hello's is `intro:<tenant>:<xUserId>`, the n-th redraft's adds `:<n>`. */
+export function introKey(tenant: string, xUserId: string, attempt = 0): string {
+  const base = `intro:${key(tenant)}:${xUserId}`;
+  return attempt > 0 ? `${base}:${attempt}` : base;
 }
 export function buyKey(decisionId: string): string {
   return `buy:${decisionId}`;
@@ -146,6 +171,69 @@ export function coinOf(call: Pick<PlanCall, "name" | "symbol">): { label: string
   const label = CLEAN_NAME.test(name) ? name : CLEAN_TICKER.test(symbol) ? symbol : null;
   if (!label) return null;
   return { label, key: (name || symbol).toLowerCase() };
+}
+
+// ── the intro ───────────────────────────────────────────────────────────────
+
+/** Hellos drafted per consent before the account stays quiet until the owner acts again. */
+export const INTRO_ATTEMPTS = 3;
+
+/** A failed intro that may be on X all the same — never drafted again, so never said twice. */
+const INTRO_MAYBE_OUT: ReadonlySet<string> = new Set(["uncertain", "interrupted", "duplicate", "fault"]);
+
+export type IntroState =
+  /** It went out, the owner skipped it, or it may have gone out: the rest may follow. */
+  | { state: "done" }
+  /** Drafted and not out yet: it holds everything else. */
+  | { state: "waiting" }
+  /** Draft one now, under this key. */
+  | { state: "draft"; dedupeKey: string; attempt: number }
+  /** Not dealt with, and not to be drafted now: everything else is held. */
+  | { state: "held" };
+
+function introDealtWith(r: IntroRow): boolean {
+  if (r.status === "posted") return true;
+  if (r.status === "cancelled" && r.reason === "owner") return true;
+  return r.status === "failed" && INTRO_MAYBE_OUT.has(r.reason ?? "");
+}
+
+/**
+ * HAS THIS ACCOUNT'S HELLO BEEN DEALT WITH — AND IF NOT, MAY ONE BE DRAFTED NOW?
+ *
+ * Each draft has its own key (the first is the historic `intro:<t>:<x>`, so
+ * rows written before redrafts existed keep their meaning), because a key is
+ * spent once written. A hello that did not go out for a reason the owner did
+ * not choose — switched off before it was due, a disconnect or a revoke, the
+ * gate or the template pool refusing it, X refusing the account — is drafted
+ * again:
+ *   - at once when the owner acted since it ended (consented again, or
+ *     reconnected): a new consent is a new plan;
+ *   - otherwise not before the owner's next local day, so an account X
+ *     refused is not asked again every minute;
+ *   - at most INTRO_ATTEMPTS times per consent. After that nothing else is
+ *     planned either — a coin post is never the first post — until the owner
+ *     acts again.
+ */
+export function introState(p: {
+  tenant: string;
+  account: PlanInput["account"];
+  intros: readonly IntroRow[];
+  nowMs: number;
+  dayOf: (ms: number) => string;
+}): IntroState {
+  const base = introKey(p.tenant, p.account.xUserId);
+  const mine = p.intros.filter((r) => r.dedupeKey === base || r.dedupeKey.startsWith(`${base}:`));
+  if (mine.length === 0) return { state: "draft", dedupeKey: base, attempt: 0 };
+  if (mine.some(introDealtWith)) return { state: "done" };
+  if (mine.some((r) => r.status === "scheduled" || r.status === "sending")) return { state: "waiting" };
+  const since = Math.max(p.account.consentAtMs ?? 0, p.account.connectedAtMs ?? 0);
+  if (mine.filter((r) => r.createdAtMs >= since).length >= INTRO_ATTEMPTS) return { state: "held" };
+  const lastEnded = Math.max(...mine.map((r) => r.updatedAtMs));
+  const ownerActed = lastEnded < since;
+  const nextDay = p.nowMs > lastEnded && p.dayOf(p.nowMs) !== p.dayOf(lastEnded);
+  if (!ownerActed && !nextDay) return { state: "held" };
+  const attempt = 1 + Math.max(...mine.map((r) => (r.dedupeKey === base ? 0 : Number.parseInt(r.dedupeKey.slice(base.length + 1), 10) || 0)));
+  return { state: "draft", dedupeKey: introKey(p.tenant, p.account.xUserId, attempt), attempt };
 }
 
 // ── the plan ────────────────────────────────────────────────────────────────
@@ -198,16 +286,18 @@ export function planPosts(input: PlanInput): PlanIntent[] {
   // NOTHING IS PLANNED WHILE THE OWNER SLEEPS — the intro included.
   if (clock.isAsleep(tz, key(tenant), now)) return [];
 
+  const dayOf = (ms: number) => clock.localDay(tz, ms);
+
   // THE INTRO FIRST, AND ALONE.
-  if (input.introStatus === null) {
-    return [{ kind: "intro", dedupeKey: introKey(tenant, account.xUserId), dueAtMs: Math.max(now + MIN_LEAD_MS, account.consentAtMs + INTRO_DELAY_MS) }];
+  const intro = introState({ tenant, account, intros: input.intros, nowMs: now, dayOf });
+  if (intro.state === "draft") {
+    return [{ kind: "intro", dedupeKey: intro.dedupeKey, attempt: intro.attempt, dueAtMs: Math.max(now + MIN_LEAD_MS, account.consentAtMs + INTRO_DELAY_MS) }];
   }
-  if (input.introStatus === "scheduled" || input.introStatus === "sending") return [];
+  if (intro.state !== "done") return [];
   if (input.model === false) return [];
 
   const slots: Slot[] = input.posts.filter((p) => LIVE_STATUSES.has(p.status)).map(slotOf);
   const used = new Set(input.posts.map((p) => p.dedupeKey));
-  const dayOf = (ms: number) => clock.localDay(tz, ms);
   const onDay = (day: string, kind?: XPost["kind"]) => slots.filter((s) => dayOf(s.atMs) === day && (!kind || s.kind === kind)).length;
   const out: PlanIntent[] = [];
 
@@ -233,18 +323,22 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     used.add(dedupeKey);
   }
 
-  // ONE CASUAL POST, at the account's own slot in the owner's afternoon, most days.
+  // ONE CASUAL POST, at the account's own slot in the owner's afternoon, most
+  // days. "One" is counted on the owner's local day as the zone reads NOW, not
+  // only by key: the key carries the day under whatever zone was known when it
+  // was written, so learning or changing the zone could otherwise give one
+  // local day two casual posts under two keys.
   const today = dayOf(now);
   const cKey = casualKey(tenant, today);
   const minutes = clock.localMinutes(tz, now);
-  if (!used.has(cKey) && minutes !== null) {
+  if (!used.has(cKey) && onDay(today, "casual") === 0 && minutes !== null) {
     const [start, end] = tz ? CASUAL_WINDOW_LOCAL : CASUAL_WINDOW_UTC;
     const h = hash32(`casual|${key(tenant)}|${today}`);
     const quiet = h % 10 < CASUAL_QUIET_DAYS_IN_TEN;
     // The slot leaves half an hour of window after it, so a pass that lands late still finds it.
     const slot = start + (Math.floor(h / 10) % (end - start - 30));
     if (!quiet && minutes >= slot && minutes < end) {
-      const lead = 2 + (hash32(`casual-lead|${cKey}`) % 9);
+      const lead = CASUAL_LEAD_MIN + (hash32(`casual-lead|${cKey}`) % (CASUAL_LEAD_MAX - CASUAL_LEAD_MIN + 1));
       const due = pushedPast(now + lead * MIN, slots);
       const day = dayOf(due);
       if (due - now <= CASUAL_MAX_PUSH_MS && onDay(day) < perDay) {
@@ -272,15 +366,33 @@ export type SendDecision =
  *            web cancels drafts on each of those already; this is the
  *            backstop for a draft planned in the same instant.
  *   skip   — a buy post still waiting eight hours after it was drafted is
- *            news nobody asked for any more.
+ *            news nobody asked for any more; a casual post held past the
+ *            owner-local day it was due on, or more than six hours past due
+ *            (a fleet pause, the fleet's ceiling, the owner's night, posting
+ *            switched off fleet-wide for days), is yesterday's afternoon
+ *            thought and would land at an arbitrary hour. The intro never
+ *            goes stale: a late hello is still the right first post.
  *   wait   — the owner is asleep, or it is not due yet.
  *   send   — otherwise.
+ *
+ * `dayOf` is the owner's local day, from the zone the glue reads; without
+ * one (the zone could not be read) only the six hours apply.
  */
-export function sendDecision(post: Pick<XPost, "kind" | "xUserId" | "createdAtMs" | "dueAtMs">, account: Pick<XAccount, "xUserId" | "posting"> | null, nowMs: number, asleep: boolean): SendDecision {
+export function sendDecision(
+  post: Pick<XPost, "kind" | "xUserId" | "createdAtMs" | "dueAtMs">,
+  account: Pick<XAccount, "xUserId" | "posting"> | null,
+  nowMs: number,
+  asleep: boolean,
+  dayOf?: (ms: number) => string,
+): SendDecision {
   if (!account) return { action: "cancel", reason: "account-gone" };
   if (account.xUserId !== post.xUserId) return { action: "cancel", reason: "account-changed" };
   if (!account.posting) return { action: "cancel", reason: "account-off" };
   if (post.kind === "buy" && nowMs - post.createdAtMs > BUY_STALE_MS) return { action: "skip", reason: "stale" };
+  if (post.kind === "casual" && post.dueAtMs <= nowMs) {
+    if (nowMs - post.dueAtMs > CASUAL_MAX_PUSH_MS) return { action: "skip", reason: "stale" };
+    if (dayOf && dayOf(nowMs) !== dayOf(post.dueAtMs)) return { action: "skip", reason: "stale" };
+  }
   if (asleep || post.dueAtMs > nowMs) return { action: "wait" };
   return { action: "send" };
 }

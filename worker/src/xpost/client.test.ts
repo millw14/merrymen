@@ -128,6 +128,28 @@ test("a refused grant, a malformed request and an outage are three different ans
   assert.deepEqual(await refreshTokens(APP, "old", { fetch: scripted(200, { nope: true }) }), { ok: false, failure: "uncertain", status: 200 });
 });
 
+test("the token endpoint refusing the APP's own credentials is never read as the owner's grant", async () => {
+  // A rotated or mistyped client secret: RFC 6749 answers 401 invalid_client.
+  // Read as "grant", every owner's connection would be revoked in turn.
+  for (const [status, body] of [
+    [401, { error: "unauthorized_client", error_description: "Missing valid authorization header" }],
+    [401, { error: "invalid_client" }],
+    [401, {}],
+    [400, { error: "invalid_client" }],
+    [400, { error: "unauthorized_client" }],
+    [401, { error: "invalid_grant" }],
+  ] as const) {
+    assert.deepEqual(await refreshTokens(APP, "old", { fetch: scripted(status, body) }), { ok: false, failure: "app", status }, JSON.stringify([status, body]));
+  }
+  assert.deepEqual(await exchangeCode(APP, { code: "c", verifier: "v", redirectUri: APP.redirectUri! }, { fetch: scripted(401, { error: "invalid_client" }) }), {
+    ok: false,
+    failure: "app",
+    status: 401,
+  });
+  // Only a 400 names the grant itself.
+  assert.deepEqual(await refreshTokens(APP, "old", { fetch: scripted(403, { error: "invalid_request" }) }), { ok: false, failure: "invalid", status: 403 });
+});
+
 test("a missing or absurd lifetime reads as X's documented two hours", async () => {
   const r = await refreshTokens(APP, "old", { fetch: scripted(200, { access_token: "acc-12345", expires_in: "soon" }), nowMs: 0 });
   assert.equal(r.ok && r.value.accessExpiresAtMs, 7_200_000);

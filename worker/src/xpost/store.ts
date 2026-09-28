@@ -11,7 +11,7 @@
  *     cancelled or failed. The UNIQUE dedupe_key and the conditional claim are
  *     what make a post at-most-once across crashes and replicas.
  *   xpost_meta     — fleet counters: the model's daily budget, the day's post
- *     count, the credits breaker.
+ *     allowance, the fleet's pauses.
  *
  * NOT THE SETTINGS BLOB, AND THAT IS THE POINT. The orchestrator copies every
  * tenant's decrypted settings into its child's plaintext settings.json each
@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS xpost_posts (
 );
 CREATE INDEX IF NOT EXISTS xpost_posts_tenant ON xpost_posts (tenant, created_at_ms);
 CREATE INDEX IF NOT EXISTS xpost_posts_due ON xpost_posts (status, due_at_ms);
+CREATE INDEX IF NOT EXISTS xpost_posts_x_user ON xpost_posts (x_user_id, created_at_ms);
 CREATE TABLE IF NOT EXISTS xpost_meta (
   k TEXT PRIMARY KEY,
   n INTEGER NOT NULL DEFAULT 0,
@@ -289,7 +290,7 @@ export async function getAccount(db: Db, tenant: string): Promise<XAccount | nul
   return row ? accountOf(row) : null;
 }
 
-/** The accounts among `tenants` that may post right now (XAccount.posting). */
+/** The accounts among `tenants` that may post right now (XAccount.posting), in tenant order. */
 export async function postingAccounts(db: Db, tenants: readonly string[]): Promise<XAccount[]> {
   const keys = [...new Set(tenants.map(tenantKey).filter((t) => t !== ""))];
   if (keys.length === 0) return [];
@@ -297,7 +298,8 @@ export async function postingAccounts(db: Db, tenants: readonly string[]): Promi
     .prepare(
       `SELECT ${ACCOUNT_COLUMNS} FROM xpost_accounts
         WHERE posting_enabled = 1 AND status = 'ok' AND consent_x_user_id = x_user_id
-          AND tenant IN (${keys.map(() => "?").join(", ")})`,
+          AND tenant IN (${keys.map(() => "?").join(", ")})
+        ORDER BY tenant`,
     )
     .all(...keys)) as AccountRow[];
   return rows.map(accountOf).filter((a) => a.posting);
@@ -676,13 +678,38 @@ export async function markFailed(db: Db, id: number, reason: string, nowMs: numb
 }
 
 /**
- * X REFUSED BEFORE CREATING ANYTHING (a 429, or a 401 a refresh then fixed):
- * back to scheduled, due again at `dueAtMs`. Never for an ambiguous answer.
+ * X REFUSED BEFORE CREATING ANYTHING (a 429, credits, a refresh that did not
+ * land): back to scheduled, due again at `dueAtMs`. Never for an ambiguous
+ * answer.
+ *
+ * ONLY WHILE THE ACCOUNT STILL POSTS FOR THAT X USER, under a consent given
+ * before the post was drafted. Switching off, disconnecting and a revoke
+ * cancel only `scheduled` rows; a post in flight at that moment is `sending`
+ * and was left alone. Put back to `scheduled` regardless, it would sit as a
+ * live draft while posting is off — and go out if the owner switched on again
+ * before it came due, which the owner's "off" was meant to prevent. Such a
+ * post is cancelled ("account-off") instead. True when it was put back.
  */
-export async function reschedulePost(db: Db, id: number, dueAtMs: number, nowMs: number): Promise<void> {
-  await db
-    .prepare(`UPDATE xpost_posts SET status = 'scheduled', due_at_ms = ?, updated_at_ms = ? WHERE id = ? AND status = 'sending'`)
-    .run(int(dueAtMs), int(nowMs), int(id));
+export async function reschedulePost(db: Db, id: number, dueAtMs: number, nowMs: number): Promise<boolean> {
+  return db.tx(async (tx) => {
+    const back = await tx
+      .prepare(
+        `UPDATE xpost_posts SET status = 'scheduled', due_at_ms = ?, updated_at_ms = ?
+          WHERE id = ? AND status = 'sending'
+            AND EXISTS (
+              SELECT 1 FROM xpost_accounts a
+               WHERE a.tenant = xpost_posts.tenant AND a.x_user_id = xpost_posts.x_user_id
+                 AND a.posting_enabled = 1 AND a.status = 'ok' AND a.consent_x_user_id = a.x_user_id
+                 AND a.consent_at_ms <= xpost_posts.created_at_ms
+            )`,
+      )
+      .run(int(dueAtMs), int(nowMs), int(id));
+    if (back.changes === 1) return true;
+    await tx
+      .prepare(`UPDATE xpost_posts SET status = 'cancelled', reason = 'account-off', updated_at_ms = ? WHERE id = ? AND status = 'sending'`)
+      .run(int(nowMs), int(id));
+    return false;
+  });
 }
 
 /** A scheduled post that will not go out (stale, the owner's night ran past it…). */
@@ -703,6 +730,17 @@ export async function cancelPost(db: Db, id: number, reason: string, nowMs: numb
   const r = await db
     .prepare(`UPDATE xpost_posts SET status = 'cancelled', reason = ?, updated_at_ms = ? WHERE id = ? AND status = 'scheduled'`)
     .run(reason, int(nowMs), int(id));
+  return r.changes === 1;
+}
+
+/**
+ * NOT YET: a scheduled post moved later (the three-hour gap, found at send
+ * time). Conditional on still being scheduled, like every change to one.
+ */
+export async function deferPost(db: Db, id: number, dueAtMs: number, nowMs: number): Promise<boolean> {
+  const r = await db
+    .prepare(`UPDATE xpost_posts SET due_at_ms = ?, updated_at_ms = ? WHERE id = ? AND status = 'scheduled'`)
+    .run(int(dueAtMs), int(nowMs), int(id));
   return r.changes === 1;
 }
 
@@ -735,18 +773,32 @@ export function cancelScheduled(db: Db, tenant: string, nowMs: number, reason: s
   return cancelScheduledIn(db, tenant, nowMs, reason);
 }
 
-/** Scheduled posts of these owners whose time has come, oldest due first. */
-export async function duePosts(db: Db, tenants: readonly string[], nowMs: number, limit = 50): Promise<XPost[]> {
+/**
+ * Scheduled posts of these owners whose time has come, oldest due first — one
+ * page of them. `after` is the last row of the page before (keyset paging on
+ * due time, then id), so a caller can look past the posts at the head that
+ * only wait (owners asleep) instead of being blocked by them.
+ */
+export async function duePosts(
+  db: Db,
+  tenants: readonly string[],
+  nowMs: number,
+  limit = 50,
+  after: { dueAtMs: number; id: number } | null = null,
+): Promise<XPost[]> {
   const keys = [...new Set(tenants.map(tenantKey).filter((t) => t !== ""))];
   if (keys.length === 0) return [];
+  const page = after ? "AND (due_at_ms > ? OR (due_at_ms = ? AND id > ?))" : "";
+  const cursor = after ? [int(after.dueAtMs), int(after.dueAtMs), int(after.id)] : [];
   const rows = (await db
     .prepare(
       `SELECT ${POST_COLUMNS} FROM xpost_posts
         WHERE status = 'scheduled' AND due_at_ms <= ? AND tenant IN (${keys.map(() => "?").join(", ")})
+          ${page}
         ORDER BY due_at_ms, id
         LIMIT ?`,
     )
-    .all(int(nowMs), ...keys, int(Math.max(1, Math.min(500, limit))))) as PostRow[];
+    .all(int(nowMs), ...keys, ...cursor, int(Math.max(1, Math.min(500, limit))))) as PostRow[];
   return rows.map(postOf);
 }
 
@@ -779,6 +831,60 @@ export async function postsOf(db: Db, tenant: string, sinceMs: number, limit = 1
 }
 
 /**
+ * WHEN ONE X ACCOUNT LAST POSTED something other than a hello — from any owner
+ * posting on it — or null. What went out (its sent time), and what may have
+ * (an uncertain answer, a crashed claim, our own fault after the call: the
+ * time it ended). Only posts drafted since `sinceMs` are looked at. The send
+ * side's three-hour gap is kept against this.
+ */
+export async function lastOutAt(db: Db, xUserId: string, sinceMs: number): Promise<number | null> {
+  const row = (await db
+    .prepare(
+      `SELECT MAX(CASE WHEN status = 'posted' THEN sent_at_ms ELSE updated_at_ms END) AS at FROM xpost_posts
+        WHERE x_user_id = ? AND created_at_ms >= ? AND kind <> 'intro'
+          AND (status = 'posted' OR (status = 'failed' AND reason IN ('uncertain', 'interrupted', 'fault')))`,
+    )
+    .get(String(xUserId), int(sinceMs))) as { at: unknown } | undefined;
+  return row && row.at !== null && row.at !== undefined ? num(row.at) : null;
+}
+
+/**
+ * ONE X ACCOUNT'S POSTS since `sinceMs`, newest first — from every owner that
+ * posts on it. What the cadence weighs: one X account connected to two owners
+ * (one person with two wallets) is still one timeline, with one day's cap, one
+ * three-hour gap and one coin fold, not two.
+ */
+export async function postsOfXUser(db: Db, xUserId: string, sinceMs: number, limit = 100): Promise<XPost[]> {
+  const rows = (await db
+    .prepare(
+      `SELECT ${POST_COLUMNS} FROM xpost_posts
+        WHERE x_user_id = ? AND created_at_ms >= ?
+        ORDER BY created_at_ms DESC, id DESC
+        LIMIT ?`,
+    )
+    .all(String(xUserId), int(sinceMs), int(Math.max(1, Math.min(500, limit))))) as PostRow[];
+  return rows.map(postOf);
+}
+
+/**
+ * EVERY INTRO ONE OWNER EVER WROTE FOR ONE X ACCOUNT, oldest first, any status
+ * and any age — the first hello's key and each redraft's. Whether the hello
+ * has been dealt with is a fact about the account's whole history, not about
+ * the last few days the planner otherwise weighs.
+ */
+export async function introPostsOf(db: Db, tenant: string, xUserId: string): Promise<XPost[]> {
+  const rows = (await db
+    .prepare(
+      `SELECT ${POST_COLUMNS} FROM xpost_posts
+        WHERE tenant = ? AND x_user_id = ? AND kind = 'intro'
+        ORDER BY created_at_ms, id
+        LIMIT 100`,
+    )
+    .all(tenantKey(tenant), String(xUserId))) as PostRow[];
+  return rows.map(postOf);
+}
+
+/**
  * Bodies that went out, or are about to, since `sinceMs`, newest first —
  * every account's when `tenant` is null. What a new draft must not repeat: its
  * own account's history, and the fleet's (X: never "identical or substantially
@@ -804,17 +910,6 @@ export async function recentBodies(db: Db, opts: { tenant: string | null; sinceM
   return rows.map((r) => String(r.body ?? "")).filter((b) => b !== "");
 }
 
-/**
- * Posts X created since `sinceMs`, fleet-wide — plus every claim in flight,
- * which may be about to be one. The fleet's daily ceiling counts these.
- */
-export async function countPostedSince(db: Db, sinceMs: number): Promise<number> {
-  const row = (await db
-    .prepare(`SELECT COUNT(*) AS n FROM xpost_posts WHERE (status = 'posted' AND sent_at_ms >= ?) OR status = 'sending'`)
-    .get(int(sinceMs))) as { n: unknown } | undefined;
-  return row ? num(row.n) : 0;
-}
-
 // ── meta ────────────────────────────────────────────────────────────────────
 
 /**
@@ -834,6 +929,14 @@ export async function takeAllowance(db: Db, key: string, limit: number, nowMs: n
     )
     .get(key, int(nowMs), int(limit))) as { n: unknown } | undefined;
   return row !== undefined;
+}
+
+/**
+ * GIVE ONE BACK to a daily allowance taken for something that then certainly
+ * did not happen (X refused before creating anything). Never below zero.
+ */
+export async function returnAllowance(db: Db, key: string, nowMs: number): Promise<void> {
+  await db.prepare(`UPDATE xpost_meta SET n = n - 1, updated_at_ms = ? WHERE k = ? AND n > 0`).run(int(nowMs), key);
 }
 
 export async function readMeta(db: Db, key: string): Promise<{ n: number; v: string | null } | null> {
