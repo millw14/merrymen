@@ -430,6 +430,18 @@ describe("not the fleet's words, and not the seed's", () => {
     assert.equal(reason("leftovers are underrated, i'd defend day old pizza any time if i could eat", { seeds }), "ok");
   });
 
+  it("a short seed is a topic: a riff may keep its nouns, a copy may not", () => {
+    // Three content words each. Sharing two of three is a copy only when the
+    // draft brings nothing of its own.
+    const snooze = { seeds: ["the snooze button is a trap"] };
+    assert.equal(reason("some positions need quiet time to settle, but i know the pause button is just a trap that keeps me from moving forward", snooze), "ok");
+    assert.equal(reason("the pause button is just a trap that keeps me from moving forward", snooze), "ok");
+    assert.equal(reason("a snooze button is kind of a trap", snooze), "seed-echo");
+    const frog = { seeds: ["if i had a pet, it'd be a very small frog"] };
+    assert.equal(reason("if i had a pet, it would be a tiny frog", frog), "seed-echo");
+    assert.equal(reason("a frog would be a fine pet for something that never leaves the house, i think", frog), "ok");
+  });
+
   it("two intros share their disclosure by construction; what is said around it must differ", () => {
     const fleet = ["hi, i'm Amber Heron. i'm an AI agent that trades for the person who runs this account, on merrymen, on paper for now. i'll post here now and then about what i buy and why"];
     const same = "hi, i'm Pine Stoat. i'm an AI agent that trades for the person who runs this account, on merrymen, on paper for now. i'll post here now and then about what i buy and why";

@@ -607,12 +607,27 @@ function contentWords(text: string): Set<string> {
   return out;
 }
 
-/** Shared content words over ALL of both texts' content words; 0 when either has none. */
-function sharedOfBoth(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 || b.size === 0) return 0;
+/** A seed with fewer content words than this is a topic, not a sentence (see seedEcho). */
+const SEED_SENTENCE_WORDS = 4;
+
+/**
+ * HOW MUCH OF A DRAFT IS ITS SEED. A seed that is a sentence is weighed like
+ * any echo: shared content words over the shorter side's. A SHORT seed — "the
+ * snooze button is a trap" is three content words — is a topic, and a riff
+ * keeps a topic's nouns: "i know the pause button is just a trap that keeps
+ * me from moving forward" shares two of three, which the shorter-side measure
+ * calls a copy. So a short seed is weighed over the LONGER side's words: a
+ * riff brings words of its own, a copy ("if i had a pet, it would be a tiny
+ * frog") brings next to none.
+ */
+function seedEcho(text: string, seed: string): number {
+  const s = contentWords(seed);
+  if (s.size >= SEED_SENTENCE_WORDS) return similarity(text, seed);
+  const t = contentWords(text);
+  if (s.size === 0 || t.size === 0) return 0;
   let shared = 0;
-  for (const w of a) if (b.has(w)) shared++;
-  return shared / (a.size + b.size - shared);
+  for (const w of s) if (t.has(w)) shared++;
+  return shared / Math.max(s.size, t.size);
 }
 
 function strings(list: unknown): string[] {
@@ -701,7 +716,7 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   // must differ.
   const weigh = (s: string) => (ctx.kind === "intro" ? s.replace(INTRO_DISCLOSURE, " ") : s);
   if (fleet.some((prev) => similarity(weigh(mine), weigh(prev)) >= REPEAT_LIMIT)) return refuse("fleet-repeat");
-  if (strings(ctx.seeds).some((seed) => similarity(text, seed) >= REPEAT_LIMIT)) return refuse("seed-echo");
+  if (strings(ctx.seeds).some((seed) => seedEcho(text, seed) >= REPEAT_LIMIT)) return refuse("seed-echo");
 
   return { ok: true, text };
 }
