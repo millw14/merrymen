@@ -394,14 +394,14 @@ tenant_tg_groups (tenant TEXT PRIMARY KEY, sealed TEXT NOT NULL,
 | When | What happens |
 |---|---|
 | Each mirror pass (~15 s) | for tenants whose lease this replica holds, when the file's mtime or size changed: read it (read only), seal it with the store DEK (`sealSecret`), upsert the row |
-| Spawn | when the child home has no `tg-groups.json`, restore it from the row, opened with the DEK |
-| Kill switch | the row is deleted with the child home |
+| Spawn | when the child home has no `tg-groups.json`, restore it from the row, opened with the DEK. If that restore fails, the child runs with `MERRYMEN_TG_GROUPS=0` and nothing is published for it until a later spawn restores the row, so an empty memory never overwrites the stored one |
+| The grant goes | the kill switch deletes the row with the child home; a `/kill` that removes the grant deletes it at once; and every reconcile pass deletes the row of any tenant the grant store no longer lists (a grant discarded while its child was not running here, or a delete that failed once), a bounded batch per pass, judging only rows written before that pass read the grant listing |
 
 > The orchestrator already holds `DATABASE_URL` and `MERRYMEN_STORE_DEK`;
 > children get neither and never read the table. The row holds other
 > people's messages — members of a Telegram group who never signed up to
-> Merrymen — which is why it is sealed rather than stored as JSON, and why the
-> kill switch deletes it rather than leaving it behind. The privacy policy
+> Merrymen — which is why it is sealed rather than stored as JSON, and why it
+> is deleted with the grant rather than left behind. The privacy policy
 > states these limits; change them together. The loss window is one mirror
 > pass. Self-hosted there is no ferry: the file is the store.
 
@@ -414,7 +414,9 @@ dashboard, the iOS Telegram screen and the site docs repeat:
 
 1. Add the bot to the group. It only talks in groups its owner added it to or
    approved: added by anyone else, it stays silent and DMs the owner **Stay** /
-   **Leave**, and leaves on its own after 24 h without an answer.
+   **Leave**, and leaves on its own after 24 h without an answer. A group it
+   was already in before it knew who added it is approved as soon as the
+   owner writes there.
 2. `@BotFather` → `/setprivacy` → the bot → **Disable**.
 3. Remove the bot from the group and add it back — Telegram applies the change
    only when the bot re-joins. Making the bot a group admin also works.

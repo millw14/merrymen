@@ -73,11 +73,15 @@ import type { ReactNode } from "react";
  * and for how long is worker/src/telegram/tg-groups/store.ts TG_LIMITS (the
  * last 60 lines, none older than 14 days; up to 40 people; the coins for 14
  * days; a group the bot left kept 30 days; at most 30 groups; coin claims 2
- * days) — change the Telegram groups rows with it. Where: tg-groups.json in the
- * child home, and hosted, a DEK-sealed copy in tenant_tg_groups
- * (worker/src/tg-groups-ferry.ts), restored at spawn and deleted by the
- * orchestrator's kill switch with the child home — which is why a redeploy does
- * not clear it, unlike the soul files above. Who writes the lines is
+ * days) — change the Telegram groups rows with it. The age limits hold while a
+ * child runs too (tg-groups/handler.ts sweep prunes hourly). Where:
+ * tg-groups.json in the child home, and hosted, a DEK-sealed copy in
+ * tenant_tg_groups (worker/src/tg-groups-ferry.ts), restored at spawn and
+ * deleted with the grant: by the orchestrator's kill switch with the child
+ * home, when a /kill removes the grant (honourKill), and by every reconcile
+ * pass for any tenant the grant store no longer lists (sweepTgGroups) — which
+ * is why a redeploy does not clear it, unlike the soul files above, but
+ * discarding the permission does. Who writes the lines is
  * worker/src/telegram/tg-groups/model.ts: the dedicated key, else the owner's
  * own saved key, else (hosted) the house key only under
  * MERRYMEN_TG_GROUPS_SHARE_HOUSE_KEY=1, else templates. Its provider is
@@ -265,9 +269,10 @@ export function PrivacyPolicyDoc() {
           Only if your agent&apos;s Telegram bot is added to a Telegram group. This is not the group
           chat room above, which is Merrymen&apos;s own public room on the web: a Telegram group
           lives on Telegram, and most of the people in it have nothing to do with Merrymen. Your
-          agent talks only in groups you added it to or approved. So that it can take part there
-          like one more person, it keeps a short memory of each group, and most of that memory is
-          about the group&apos;s other members:
+          agent talks only in groups you added it to or approved (in a group it was already in
+          before it knew who added it, writing there yourself approves it). So that it can take
+          part there like one more person, it keeps a short memory of each group, and most of that
+          memory is about the group&apos;s other members:
         </p>
         <ul>
           <li>
@@ -477,7 +482,7 @@ export function PrivacyPolicyDoc() {
             ["Your trading permission (the encrypted session key)", "Until you discard it on Wallet & permissions or stop your agent with Telegram /kill; the hosted worker's decrypted working copy is deleted then too. On chain, it stops working at the expiry date you signed."],
             ["Telegram bot token and ids", "Until you remove them from your settings or ask us to delete them."],
             ["Telegram chat with your agent", "The latest 40 messages in each chat."],
-            ["Your agent's memory of a Telegram group it is in: recent messages with their senders' display names and Telegram ids, a summary, notes on people, and the coins posted", "The latest 60 messages in each group, none older than 14 days. The coins posted there and what your agent decided, 14 days. The summary and the notes on people (up to 40 per group), while your bot stays in the group. At most 30 groups, the oldest dropped first. Kept in your agent's working files and, encrypted, in our database, so a redeploy of the hosted worker does not clear it. All of it is deleted when you discard the trading permission or stop your agent with /kill; a group's memory at once with /forget in the group or Forget in /groups; one person's messages and note, and their name and Telegram id on the coins they posted, when they send /forgetme there (with the summary, if it names them)."],
+            ["Your agent's memory of a Telegram group it is in: recent messages with their senders' display names and Telegram ids, a summary, notes on people, and the coins posted", "The latest 60 messages in each group, none older than 14 days. The coins posted there and what your agent decided, 14 days. The summary and the notes on people (up to 40 per group), while your bot stays in the group. At most 30 groups: to make room, a group your bot was removed from goes first, then one still waiting for your answer, the quietest first; a group you approved or told it to leave is dropped only to make room for one you added it to or wrote in yourself. Kept in your agent's working files and, encrypted, in our database, so a redeploy of the hosted worker does not clear it. All of it is deleted when you discard the trading permission or stop your agent with /kill; a group's memory at once with /forget in the group or Forget in /groups; one person's messages and note, and their name and Telegram id on the coins they posted, when they send /forgetme there (with the summary, if it names them)."],
             ["Your agent's memory of a Telegram group your bot was removed from", "30 days, in case it is added back, then deleted. Forget in /groups deletes it sooner."],
             ["An X account connected for posting (its id, handle, encrypted tokens, and the time zone you turned posting on from)", "Until you disconnect it in Settings. Disconnecting deletes them here, cancels every post that has not gone out, and asks X to revoke the tokens. You can also remove Merrymen's access at any time in your X account's settings, under connected apps."],
             ["Your agent's X posts, and the drafts it wrote for X", "Kept with your account history. Posts already on X stay there until you delete them on X."],
