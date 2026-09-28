@@ -14,7 +14,7 @@ import { describe, it } from "node:test";
 import * as React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { LinkedWallet, type ProofStanding } from "./HolderLink";
+import { LinkedWallet, unlinkedNote, type ProofStanding } from "./HolderLink";
 
 // See wire-ring.test.ts: tsx compiles `.tsx` against a global React.
 (globalThis as unknown as { React: typeof React }).React = React;
@@ -61,5 +61,31 @@ describe("LinkedWallet — the linked wallet, and whether it counts", () => {
       assert.match(text(s), /unlink/);
       assert.doesNotMatch(text(s), /price|returns?\b|profit|invest/i);
     }
+  });
+});
+
+describe("unlinkedNote — what an unlink leaves the tier reading, from the PATCH that follows", () => {
+  it("LOGIN: the tier reads the sign-in wallet again", () => {
+    assert.equal(unlinkedNote("login"), "Unlinked. Your tier reads the wallet you sign in with again.");
+  });
+
+  it("NONE: never 'reads the wallet you sign in with again' — that wallet powers another account, and signing brings it back", () => {
+    // The review's contradiction: the note said the login wallet counts again
+    // while the hint above said it powers another account, and the tier read
+    // no wallet at all.
+    const t = unlinkedNote("none");
+    assert.doesNotMatch(t, /reads the wallet you sign in with again/);
+    assert.match(t, /powers another merrymen account right now/);
+    assert.match(t, /reads no wallet/);
+    assert.match(t, /link it below with a signature from it/);
+    assert.doesNotMatch(t, /once a day/, "its own sign-in account is never held to the daily limit");
+  });
+
+  it("UNKNOWN: claims nothing about which wallet counts", () => {
+    assert.equal(unlinkedNote(null), "Unlinked.");
+  });
+
+  it("none of them speaks of price", () => {
+    for (const r of ["login", "none", "linked", null] as const) assert.doesNotMatch(unlinkedNote(r), /price|returns?\b|profit|invest/i);
   });
 });
