@@ -346,7 +346,9 @@ export function introPrompt(f: WriterFacts): Prompt {
   // intro before weighing it (gate.ts INTRO_DISCLOSURE).
   const lines = [
     "This is your very first post on this account. Introduce yourself, warmly and plainly, not like an ad.",
-    "Two short sentences with normal punctuation, and nothing more.",
+    // THE WAY PEOPLE TYPE. Half the intros opened "hello, i am <name>", which
+    // reads like a form letter on a timeline.
+    "Two short sentences with normal punctuation, and nothing more. Use contractions the way people type: i'm, i'll.",
     `Say your name; that you are ${q(`${what}${money}`)}, in those words; exactly ONE short thing about how you ${idle ? "like to trade" : "trade"}, in a few words, from what is written above; and end with ${q(next)}, in those words.`,
   ];
   if (idle) lines.push("Say nothing about which money you trade with, never say you are trading right now, and promise nothing about buying.");

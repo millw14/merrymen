@@ -148,6 +148,7 @@ describe("what each prompt asks for", () => {
     assert.ok(INTRO_NEXT.some((n) => p.includes(`and end with «${n}», in those words.`)), "what comes next: what it buys and why");
     assert.match(p, /exactly ONE short thing about how you trade, in a few words,/);
     assert.match(p, /Two short sentences with normal punctuation/);
+    assert.match(p, /Use contractions the way people type: i'm, i'll\./);
     assert.match(p, /exactly ONE short thing about how you trade/);
     assert.doesNotMatch(p, /practice money for now|owner of this account/, "the long wording that ran intros over the cap");
     const live = all(introPrompt({ ...BASE, mode: "live" }));
