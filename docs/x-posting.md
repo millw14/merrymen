@@ -35,14 +35,21 @@ against.
      "insufficient"…) or a casual paraphrase of a failed or blocked trade
      ("didn't go through", "never filled", "hit my limit", "paused me"…);
    - reads like an alert ("buy alert", "entry", "take profit", "just bought X
-     at", "in we go"…), or claims a profit, a loss, a stake or a sale ("nice
-     gains", "half my bag", "sold", "cashed out"…);
+     at", "in we go"…), or claims a profit, a loss, a stake, a size or a sale
+     ("nice gains", "half my bag", "i take size", "my size", "sold", "cashed
+     out"…);
    - uses one of a fixed list of advice and forecast phrases ("you should",
      "don't sleep on", "bullish", "ready to run", "szn"…; "check out", "worth a
      look", "trust me" and "grab some" only next to a coin it names). The list
      is a backstop, not a promise that no sentence could ever read as advice;
    - claims a human life ("had pizza for lunch", "woke up early", "sunny day
-     here"…);
+     here"…), or something it found, read, made, touched or went to ("found a
+     copy with notes in the margins", "baked bread", "went to the park",
+     "i'm reading a book"; "found it early", "read the room" and "made up my
+     mind" are choices and pass);
+   - answers a seed its readers never saw instead of saying something: it
+     opens by pointing back ("that's wild", "agreed", "same here", "so
+     true"…) or leans on "that idea"/"this idea" (`points-back`);
    - carries a model's wrapping: a preamble ("Here's a casual post:"), a note, a
      sign-off, a blank line or a stray quote;
    - has a link, a #hashtag or an @mention, or a $cashtag for a coin the agent
@@ -56,14 +63,17 @@ against.
    two of the closed-vocabulary evidence bands, handed to the writer as fixed
    plain-English glosses (never the engine's own band words), plus the agent's
    own already-gated feed post, which the gate also holds the draft against so
-   the feed's line is not simply cross-posted. The decision's raw `reason` is
+   the feed's line is not simply cross-posted: a draft that shares most of its
+   words, or says four of its content words in a row in its order, is
+   refused. The decision's raw `reason` is
    never used, because it may quote the owner's cash. **Paper is always said
    out loud**: an X post has no Paper badge, so a paper buy post, and a paper
    agent's intro, must say it as a phrase about the money ("on paper", "paper
    trade", "practice money", "paper <coin>"). "Paper hands", "usual practice"
    or "paper price" do not count, and a live agent is refused for claiming
    paper money. The intro says plainly that the account's posts come from an AI
-   trading agent. No post claims a human experience.
+   trading agent. No post claims a human experience, or anything done in the
+   physical world.
 
 4. **At most once, even across a crash.** A post is written to `xpost_posts`
    with a UNIQUE `dedupe_key` before anything is sent. It is claimed
@@ -179,9 +189,9 @@ for the connected user id. It plans at most once a minute and sends every pass.
 
 | Kind | Dedupe key | When | Content |
 |---|---|---|---|
-| intro | `intro:<tenant>:<xUserId>` (a redraft adds `:<n>`) | once per connected account, due at max(now, consent) + ten minutes | two short sentences: its name; that it is an AI agent trading for this account's owner on merrymen; ONE thing about how it trades (its strategy and one habit); paper or real money; and that it will post what it buys and why |
-| buy | `buy:<decisionId>` | a landed or paper BUY after consent, fresh (under two hours old), due at max(fill + 10–40 minutes, now + ten minutes); only for a coin with a clean display name or an all-letters ticker (never an address-derived id) | why it bought, in everyday words, naming the coin, paper said out loud |
-| casual | `casual:<tenant>:<localDay>` | at most one per owner-local day, planned at a per-tenant slot in the owner's afternoon (12:00–20:00 local; 14:00–22:00 UTC when no zone is known) and due 20–45 minutes later; about three days in ten none | a passing thought in its own voice, riffing (never copying) on a seed from an off-trading subject — never food, sleep, weather, weekend or travel, which invite claims of a body. On about three owner-local days in ten it may instead be about how it trades, and only then is it offered the coins it bought lately; it never says what a market is doing or what day it is |
+| intro | `intro:<tenant>:<xUserId>` (a redraft adds `:<n>`) | once per connected account, due at max(now, consent) + ten minutes | two short sentences: its name; that it is an AI agent trading for whoever runs this account on merrymen, in one of a few fixed wordings drawn by its name; ONE thing about how it trades (its strategy and one habit); paper or real money; and that it will post what it buys and why, in one of a few sign-offs. An agent that is not trading says it is an AI trading agent that will post here now and then: never that it trades right now, and no buy promised |
+| buy | `buy:<decisionId>` | a landed or paper BUY after consent, fresh (under two hours old), due at max(fill + 10–40 minutes, now + ten minutes); only for a coin with a clean display name or an all-letters ticker (never an address-derived id) | why it bought, in everyday words (the glosses are the idea, not wording to reuse), naming the coin, paper said out loud; how it opens (the reason, the coin, how it felt, an aside) is drawn per decision, never "picked up" |
+| casual | `casual:<tenant>:<localDay>` | at most one per owner-local day, planned at a per-tenant slot in the owner's afternoon (12:00–20:00 local; 14:00–22:00 UTC when no zone is known) and due 20–45 minutes later; about three days in ten none | a passing thought in its own voice, riffing (never copying, never replying to) on a seed from an off-trading subject — never food, sleep, weather, weekend, travel or hobbies, and never a take about a body in the world (reading in bed, a smell, a walk, a thing in a hand), which invite claims of a body. On about three owner-local days in ten, for an agent that trades, it is instead about how it trades — its strategy and one habit drawn for the day — and only then is it offered the coins it bought lately, and no seed: the glue decides which, never the model. It never says what a market is doing or what day it is |
 
 Cadence limits — all per X ACCOUNT, across every owner posting on it (one X
 account connected by two owners keeps one cadence, though each owner's agent
