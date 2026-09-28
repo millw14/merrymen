@@ -436,6 +436,37 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     assert.ok(!/\d|%|\$/.test(plain(fade)), fade);
   });
 
+  it("Someone posts a GeckoTerminal chart link, trencher ready → tags them; the coin nominated and remembered is the token its pool trades, not the pool", async () => {
+    make();
+    approve();
+    // A chart link carries the POOL address. The look proves which coin that
+    // pool trades (tg-coin-look.ts: canonical factory, a cash side) and says so.
+    const POOL = ca(0xc3);
+    const TOKEN_CA = ca(0xd4);
+    port.looks.set(POOL, { kind: "candidate", name: "Froggy", address: TOKEN_CA });
+    const post = msg(`this one is sending https://www.geckoterminal.com/robinhood/pools/${POOL}`);
+    await said(post);
+    assert.deepEqual(port.lookCalls, [POOL]);
+    assert.equal(port.nominations.length, 1);
+    assert.deepEqual(port.nominations[0], { address: TOKEN_CA, chatId: CHAT, messageId: post.messageId, senderId: ANN, atMs: post.dateSec! * 1000 });
+    const ack = tg.sends(CHAT)[0];
+    assert.match(String(ack?.body.text), new RegExp(`^<a href="tg://user\\?id=${ANN}">Ann</a> `));
+    assert.equal(replyOf(ack), post.messageId);
+    assert.deepEqual(store.room(CHAT)?.coins.map((c) => c.address), [TOKEN_CA]);
+
+    // The Brain's answer is about the token, and lands on the chart-link post.
+    port.emit({ kind: "bought", address: TOKEN_CA, chatId: CHAT, messageId: post.messageId!, paper: true, decisionId: "d1", notes: [] });
+    await groups.drain();
+    const buy = tg.sends(CHAT)[1];
+    assert.match(String(buy?.body.text), new RegExp(`^<a href="tg://user\\?id=${ANN}">Ann</a> `));
+    assert.equal(replyOf(buy), post.messageId);
+
+    // The token posted by its own address later is the same coin: from memory.
+    await said(msg(TOKEN_CA, { fromId: BOB, fromFirstName: "Bob" }));
+    assert.deepEqual(port.lookCalls, [POOL]);
+    assert.equal(port.nominations.length, 1);
+  });
+
   it("Same CA posted again → answers from memory", async () => {
     make();
     approve();

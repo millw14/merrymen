@@ -93,7 +93,7 @@ const DAY = 24 * HOUR;
 
 /** A line that waited longer than this to go out is dropped (coin outcomes excepted). */
 const STALE_MS = 90 * SEC;
-/** Addressed lines closer together than this are one burst: only the last is answered. */
+/** One person's addressed lines closer together than this are one burst: only their last is answered. */
 const BURST_MS = 15 * SEC;
 /** A question to the room waits this long, so pacing can see whether anyone answered it. */
 const QUESTION_WAIT_MS = MIN;
@@ -111,6 +111,12 @@ const FADED_ODDS = 0.15;
 const FADED_EVERY_MS = 6 * HOUR;
 /** Casual refusals ("that's between me and {owner}", "only my owner can do that"): once per person per hour. */
 const REFUSE_EVERY_MS = HOUR;
+/**
+ * /forgetme's "done 🫡": at most once per person per chat this often. The
+ * wipe itself is never limited; only the words are, so one member typing
+ * /forgetme over and over cannot fill the chat, or its queue, with them.
+ */
+const FORGOT_ME_EVERY_MS = 10 * MIN;
 /** A stranger's group the owner never answered about is left after this. */
 const PENDING_LEAVE_MS = DAY;
 /** A failed Stay/Leave DM is tried again at most this often. */
@@ -199,6 +205,21 @@ const DM_FIRST_LINES: readonly string[] = [
 ];
 
 /**
+ * A command that changes something RAN, but its answer (the receipt) did not
+ * reach the asker's DM, although that DM was proved reachable just before
+ * (a blip, or the bot blocked in between). Never "dm me first": those words
+ * say it did not run, and someone who believes them sends the order again.
+ * Every line says it went through; none carries anything of the receipt.
+ */
+const DONE_NO_DM_LINES: readonly string[] = [
+  "done 🤝 couldn't get the details to your DMs tho",
+  "went through, but my DM with the details bounced",
+  "got it, done. couldn't DM you the details",
+  "handled 🫡 the details didn't make it to your DMs",
+  "done, just couldn't reach your DMs with the details",
+];
+
+/**
  * A room welcoming it ("and welcome to the group", "welcome aboard"): what
  * comes before the place. The place is added per room (smallTalkOf), because
  * the one people name most is the chat's own title.
@@ -237,9 +258,11 @@ export interface TgGroupsDeps {
 
 /**
  * What a group notice after a slash command is for (the service's group
- * rules). "dm-first": the answer could not be delivered to the asker's DM.
+ * rules). "dm-first": the answer could not be delivered to the asker's DM,
+ * and nothing that changes anything ran. "done-no-dm": a command that changes
+ * something ran, but its receipt did not reach their DM.
  */
-export type TgCommandNotice = "dm-sent" | "dm-first" | "private-refused" | "owner-only" | "link-here";
+export type TgCommandNotice = "dm-sent" | "dm-first" | "done-no-dm" | "private-refused" | "owner-only" | "link-here";
 
 export interface TgGroups {
   /** A group line anyone typed (never a slash command: those are the service's). */
@@ -450,8 +473,20 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const received = new Lru<string, number>(LRU_MAX);
   /** The forum topic of each recent message, so an outcome minutes later lands in the same topic. */
   const threads = new Lru<string, number>(LRU_MAX);
-  /** The newest addressed line per chat: a burst answers only its last line. */
-  const lastAddressed = new Map<number, { messageId: number; atMs: number }>();
+  /**
+   * The newest addressed line per person per chat (`${chatId}:${fromId}`): a
+   * burst answers only its last line. Per person: someone else calling it a
+   * few seconds later is a second conversation, not a newer line of the first,
+   * and must not drop an answer already being written for the first.
+   */
+  const lastAddressed = new Lru<string, { messageId: number; atMs: number }>(LRU_MAX);
+  /**
+   * The bot's own status per chat as the last my_chat_member said: true when
+   * it is an admin there. An admin hears every line whatever privacy mode
+   * says, so the privacy-mode steps would be false (privacyHint). Unknown
+   * (never told this process) is not an admin.
+   */
+  const adminIn = new Lru<number, boolean>(LRU_MAX);
   /** Casual refusals, per person per chat. */
   const refusedAt = new Lru<string, number>(LRU_MAX);
   /** "still not sold on that one", per chat and coin. */
@@ -733,6 +768,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           store.migrate(chatId, r.migrateToChatId);
           chatId = r.migrateToChatId;
           replyTo = undefined;
+          threadId = undefined;
+          continue;
+        }
+        // A topic Telegram no longer knows (deleted since, or a thread id that
+        // was never a topic): once more without it. The reply, when there is
+        // one, still puts the line next to the message it answers.
+        if (isMsgId(threadId) && typeof r.reason === "string" && /thread not found/i.test(r.reason)) {
           threadId = undefined;
           continue;
         }
@@ -1109,7 +1151,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
 
   const titleOf = (room: TgRoom | undefined): string => (room?.title ? `«${esc(room.title)}»` : "your group");
 
-  /** The privacy-mode steps, once per group, when getMe says privacy mode is on. */
+  /**
+   * The privacy-mode steps, once per group, when getMe says privacy mode is
+   * on and the bot is not an admin there (an admin hears every line anyway).
+   * Skipped for an admin without being marked sent, so a later demotion to a
+   * plain member sends them then (onMember).
+   */
   const privacyHint = async (chatId: number): Promise<void> => {
     let off: boolean | null = null;
     try {
@@ -1117,7 +1164,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     } catch {
       off = null;
     }
-    if (off !== false) return;
+    if (off !== false || adminIn.get(chatId) === true) return;
     const room = store.room(chatId);
     if (!room || room.privacyHintSent || !featureOn(cfgNow()) || ownerId() === null) return;
     // Reserved before the send, so two adds in one batch cannot both DM.
@@ -1218,7 +1265,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const prefix = `${chatId}:`;
     repliedTo.deleteWhere((k) => k.startsWith(prefix));
     fadedAt.deleteWhere((k) => k.startsWith(prefix));
-    lastAddressed.delete(chatId);
+    lastAddressed.deleteWhere((k) => k.startsWith(prefix));
   };
 
   // ─── The memory pass ─────────────────────────────────────────────────────
@@ -1325,9 +1372,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     };
   };
 
-  /** A newer addressed line arrived within the burst: this one is not the one to answer. */
+  /** A newer addressed line from the same person arrived within the burst: this one is not the one to answer. */
   const burstPassed = (chatId: number, j: LineJob): boolean => {
-    const last = lastAddressed.get(chatId);
+    const last = lastAddressed.get(`${chatId}:${j.line.fromId}`);
     return !!last && last.messageId !== j.line.messageId && last.atMs >= j.bornAtMs && last.atMs - j.bornAtMs <= BURST_MS;
   };
 
@@ -1671,8 +1718,27 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     forgottenAt.set(`${chatId}:${userId === undefined ? "*" : userId}`, clock());
   };
 
+  /**
+   * THE REQUEST ITSELF, ON DISK, BEFORE ANYTHING ELSE (store.recordForget).
+   * This store is not always the memory: a hosted child whose memory could not
+   * be restored runs with its groups held off, on an empty store, and a wipe
+   * of that store erases nothing the sealed copy holds. The record is what
+   * reaches that copy. So it is written whatever the switches say and whether
+   * or not this store knows the chat. A failed write is logged by the store;
+   * the wipe below happens all the same.
+   */
+  const recordForget = (chatId: number, userId: number | "*"): void => {
+    if (!Number.isSafeInteger(chatId)) return;
+    try {
+      store.recordForget({ chatId, userId, atMs: clock() });
+    } catch (e) {
+      fail("forget record", e);
+    }
+  };
+
   const forgetChat = (chatId: number, messageId?: number): void => {
     try {
+      recordForget(chatId, "*");
       if (!store.room(chatId)) return;
       markForgotten(chatId);
       store.forgetChat(chatId);
@@ -1797,10 +1863,15 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         }
         const key = msgKey(chatId, messageId);
         received.set(key, now);
-        const threadId = (msg.isTopicMessage === true || room.isForum === true) && isMsgId(msg.messageThreadId) ? msg.messageThreadId : undefined;
+        // THE TOPIC ONLY WHEN TELEGRAM SAYS IT IS ONE. A reply in a forum's
+        // General topic carries message_thread_id too — the reply thread's,
+        // with no is_topic_message — and a send naming it is refused ("message
+        // thread not found"), so the answer was lost. The reply itself lands
+        // next to the message it answers.
+        const threadId = msg.isTopicMessage === true && isMsgId(msg.messageThreadId) ? msg.messageThreadId : undefined;
         if (threadId !== undefined) threads.set(key, threadId);
         const addressed = me ? addressedHow(msg, me) : null;
-        if (addressed !== null) lastAddressed.set(chatId, { messageId, atMs: now });
+        if (addressed !== null) lastAddressed.set(`${chatId}:${msg.fromId}`, { messageId, atMs: now });
         maybeMemoryPass(chatId);
 
         const job: LineJob = { msg, line, addressed, isOwner, via, bornAtMs: now, seenAtMs: now, ...(threadId !== undefined ? { threadId } : {}) };
@@ -1819,6 +1890,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         if (u.chatType !== "group" && u.chatType !== "supergroup") return;
         const chatId = u.chatId;
         const nowIn = isIn(u.newStatus, u.newIsMember);
+        const admin = u.newStatus === "administrator" || u.newStatus === "creator";
+        const wasAdmin = u.oldStatus === "administrator" || u.oldStatus === "creator";
+        if (nowIn) adminIn.set(chatId, admin);
+        else adminIn.delete(chatId);
         const cfg = cfgNow();
         const existing = store.room(chatId);
         if (!nowIn) {
@@ -1864,6 +1939,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
             r.addedById = u.fromId;
             r.addedAtMs = at;
           });
+        }
+        // No longer an admin in a group it talks in: from now on privacy mode
+        // decides what it hears, so the steps it skipped as an admin are due.
+        if (!added && wasAdmin && !admin && room.status === "approved") {
+          enqueue(chatId, () => privacyHint(chatId), { force: true });
         }
         if (byOwner) {
           if (room.status !== "approved" || added) approve(chatId, u.fromId, "added to a group by the owner");
@@ -1969,6 +2049,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         }
         const what = m[1];
         const chatId = Number(m[2]);
+        // Forget is recorded before the room is looked up: a store holding no
+        // memory (held off, see recordForget) may not know a group the owner
+        // pressed Forget for on an older listing.
+        if (what === "forget") recordForget(chatId, "*");
         const room = Number.isSafeInteger(chatId) ? store.room(chatId) : undefined;
         if (!room) {
           await answer("I don't know that group any more.");
@@ -2044,39 +2128,47 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
 
     async forgetMe(chatId: number, userId: number, messageId?: number): Promise<void> {
       try {
+        if (!Number.isSafeInteger(userId)) return;
+        // The "done 🫡" is as old as the request: a backlog of them goes stale
+        // like any other line instead of holding the chat's queue.
+        const born = clock();
+        // Honoured whatever the switches say: a request to be forgotten is not
+        // a line. On disk first (recordForget), whether or not this store
+        // knows the chat.
+        recordForget(chatId, userId);
         const room = store.room(chatId);
-        if (!room || !Number.isSafeInteger(userId)) return;
-        const person = store.person(chatId, userId);
-        const names = [person?.name, ...room.lines.filter((l) => l.fromId === userId).map((l) => l.name)].filter(
-          (n): n is string => typeof n === "string" && [...n.trim()].length >= 2,
-        );
-        // Honoured whatever the switches say: a request to be forgotten is not a line.
-        // Marked first, so their lines still queued or typing are dropped too.
+        if (!room) return;
+        // Marked before the wipe, so their lines still queued or typing are dropped too.
         markForgotten(chatId, userId);
+        // Their lines and entry go; their coin posts keep the coin and its
+        // verdict (an outcome may still be on its way to that memo) but no
+        // longer say who posted it, name or user id, so an outcome for such a
+        // memo is said without a tag (coins.ts); a summary that names them is
+        // dropped whole (store.ts forgetPerson, the code the forget record
+        // is applied with too).
         store.forgetPerson(chatId, userId);
-        // Their coin posts keep the coin and its verdict (an outcome may still
-        // be on its way to that memo), but no longer say who posted it: the
-        // name goes, and so does the user id, which names them just as well.
-        // An outcome for such a memo is then said without a tag (coins.ts).
-        for (const c of room.coins) if (c.byId === userId) store.updateCoin(chatId, c.address, { byName: "", byId: 0 });
-        store.update(
-          chatId,
-          (r) => {
-            // A summary that names them is dropped whole; the next memory pass
-            // rebuilds it from the lines that are left, which no longer hold theirs.
-            const s = r.summary.normalize("NFKC").toLowerCase();
-            if (names.some((n) => new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRe(n.normalize("NFKC").toLowerCase().trim())}(?![\\p{L}\\p{N}_])`, "u").test(s))) {
-              r.summary = "";
-            }
-            if (userId === ownerId()) delete r.ownerName;
-          },
-          { flush: true },
-        );
+        if (userId === ownerId()) {
+          store.update(
+            chatId,
+            (r) => {
+              delete r.ownerName;
+            },
+            { flush: true },
+          );
+        }
         if (!canTalk(chatId)) return;
+        // The words at most once per person per chat per FORGOT_ME_EVERY_MS;
+        // a second /forgetme inside it is wiped all the same, silently.
+        const k = `forgetme:${chatId}:${userId}`;
+        const last = refusedAt.get(k);
+        if (last !== undefined && born - last < FORGOT_ME_EVERY_MS) return;
+        refusedAt.set(k, born);
         await enqueue(
           chatId,
           async () => {
-            await speak(chatId, { kind: "forgot-me" }, { ...(isMsgId(messageId) ? { replyTo: messageId } : {}), bornAtMs: clock() });
+            const sent = await speak(chatId, { kind: "forgot-me" }, { ...(isMsgId(messageId) ? { replyTo: messageId } : {}), bornAtMs: born });
+            // Not said (stale, shushed, a refused send): the next one may say it.
+            if (!sent && refusedAt.get(k) === born) refusedAt.delete(k);
           },
           { force: true },
         );
@@ -2089,27 +2181,40 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       try {
         if (!canTalk(chatId)) return;
         const now = clock();
-        if (what !== "dm-sent") {
+        // "sent it to your DMs" and "done, couldn't DM you" each answer one
+        // command that ran for someone entitled to run it: every one is said.
+        // Refusals and "dm me first" at most once per person per hour.
+        if (what !== "dm-sent" && what !== "done-no-dm") {
           const k = `${what}:${chatId}:${fromId}`;
           const last = refusedAt.get(k);
           if (last !== undefined && now - last < REFUSE_EVERY_MS) return;
           refusedAt.set(k, now);
         }
-        // Both answer a command the sender was entitled to run, so they go out
-        // in a shushed chat like the owner calling it.
-        const entitled = what === "dm-sent" || what === "dm-first";
+        // These answer a command the sender was entitled to run, so they go
+        // out in a shushed chat like the owner calling it.
+        const entitled = what === "dm-sent" || what === "dm-first" || what === "done-no-dm";
         const reply: SpeakOpts = {
           ...(isMsgId(messageId) ? { replyTo: messageId } : {}),
           ...(isMsgId(threadId) ? { threadId } : {}),
           bornAtMs: now,
           ownerAddressed: entitled,
         };
+        const fixedPool: readonly string[] | null =
+          what === "owner-only"
+            ? OWNER_ONLY_LINES
+            : what === "link-here"
+              ? LINK_HERE_LINES
+              : what === "dm-first"
+                ? DM_FIRST_LINES
+                : what === "done-no-dm"
+                  ? DONE_NO_DM_LINES
+                  : null;
         await enqueue(
           chatId,
           async () => {
-            if (what === "owner-only" || what === "link-here" || what === "dm-first") {
+            if (fixedPool) {
               // Its own small fixed pool, gated like every template.
-              const pool = what === "owner-only" ? OWNER_ONLY_LINES : what === "link-here" ? LINK_HERE_LINES : DM_FIRST_LINES;
+              const pool = fixedPool;
               const room = store.room(chatId);
               const recentOwn = (room?.lines ?? []).filter((l) => l.own).slice(-8).map((l) => l.text);
               const start = Math.floor(roll() * pool.length);

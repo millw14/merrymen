@@ -19,7 +19,7 @@
  *     where it must not, and that no method throws.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -327,6 +327,39 @@ describe("membership", () => {
       groups.stop();
     }
     assert.equal(tg.sends(OWNER).length, 0);
+  });
+
+  it("added straight in as an admin: no privacy-mode DM (an admin hears every line); demoted later, the steps once", async () => {
+    privacy = false;
+    make();
+    groups.onMember(member({ newStatus: "administrator" }));
+    await groups.drain();
+    assert.equal(store.room(CHAT)?.status, "approved");
+    assert.equal(tg.sends(CHAT).length, 1, "the hello");
+    assert.equal(tg.sends(OWNER).length, 0, "'I can't follow the chat' would be false");
+    assert.equal(store.room(CHAT)?.privacyHintSent, undefined, "skipped, not sent: still due if it stops being an admin");
+
+    // Demoted to a plain member (by anyone): privacy mode decides what it hears now.
+    groups.onMember(member({ fromId: BOB, oldStatus: "administrator", newStatus: "member" }));
+    await groups.drain();
+    assert.equal(tg.sends(OWNER).length, 1);
+    assert.match(String(tg.sends(OWNER)[0]?.body.text), /BotFather/);
+    assert.equal(store.room(CHAT)?.privacyHintSent, true);
+    // Promoted and demoted again: once per group.
+    groups.onMember(member({ oldStatus: "member", newStatus: "administrator" }));
+    groups.onMember(member({ oldStatus: "administrator", newStatus: "member" }));
+    await groups.drain();
+    assert.equal(tg.sends(OWNER).length, 1);
+    assert.equal(tg.sends(CHAT).length, 1, "no second hello either");
+
+    // A stranger's group it was made an admin of: Stay approves it without the steps.
+    groups.onMember(member({ chatId: OTHER, chatTitle: "others", fromId: BOB, newStatus: "administrator" }));
+    await groups.drain();
+    assert.equal(tg.sends(OWNER).length, 2, "the Stay / Leave question");
+    await groups.onCallback(press(`tgg:stay:${OTHER}`));
+    await groups.drain();
+    assert.equal(store.room(OTHER)?.status, "approved");
+    assert.equal(tg.sends(OWNER).length, 2, "no privacy-mode steps");
   });
 
   it("added by a stranger: pending, silent in the group, one DM with Stay / Leave", async () => {
@@ -669,6 +702,32 @@ describe("answering", () => {
     const s = tg.sends(CHAT);
     assert.equal(s.length, 1);
     assert.equal(replyOf(s[0]), c.messageId);
+  });
+
+  it("two people calling it seconds apart are two conversations: neither answer drops the other, even one already typing", async () => {
+    make();
+    approveRoom();
+    // Both queued before either is looked at.
+    const a = msg("@pinebot what's your take on eth today?");
+    groups.onMessage(a);
+    clock += 4 * SEC;
+    const b = msg("@pinebot thoughts on sol?", { fromId: BOB, fromFirstName: "Bob" });
+    groups.onMessage(b);
+    await groups.drain();
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), [a.messageId, b.messageId]);
+
+    // Bob calls it while Ann's next answer is already typing: hers still goes out.
+    clock += 5 * MIN;
+    let c: TgMessage | null = null;
+    onSleep = () => {
+      if (c) return;
+      c = msg("@pinebot and btc?", { fromId: BOB, fromFirstName: "Bob" });
+      groups.onMessage(c);
+    };
+    const d = msg("@pinebot and what about sol?");
+    await said(d);
+    assert.ok(c, "Bob's line landed mid-typing");
+    assert.deepEqual(tg.sends(CHAT).slice(2).map(replyOf), [d.messageId, (c as TgMessage | null)?.messageId]);
   });
 
   it("flood: after three answers to one person in two minutes, the fourth call is skipped", async () => {
@@ -1042,6 +1101,47 @@ describe("sending", () => {
     assert.ok(store.room(NEW_CHAT)?.lines.some((l) => l.own));
   });
 
+  it("a reply in a forum's General topic is answered without the reply thread's id, which Telegram refuses", async () => {
+    make();
+    approveRoom();
+    store.ensureRoom(CHAT, { title: "frens", kind: "supergroup", isForum: true });
+    // Telegram's side: a reply in General carries message_thread_id (the
+    // thread of the message it replies to) and no is_topic_message, and a
+    // send naming that id is refused.
+    const orig = tg.fetchFn;
+    tg.fetchFn = async (url, init) => {
+      const r = await orig(url, init);
+      const body = init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+      if (body.message_thread_id !== 60 && body.message_thread_id !== 61) return r;
+      const refused = { ok: false, error_code: 400, description: "Bad Request: message thread not found" };
+      return { ok: false, status: 400, json: async () => refused };
+    };
+    const reply = msg("fair, but why", { isForum: true, messageThreadId: 60, replyTo: { messageId: 60, fromId: BOT.id, fromIsBot: true } });
+    await said(reply);
+    // A coin posted as a reply in General: its ack, and later its outcome, the same.
+    const post = msg(CA1, { isForum: true, messageThreadId: 61, replyTo: { messageId: 61, fromId: BOB, fromIsBot: false } });
+    await said(post);
+    port.emit({ kind: "skipped", address: CA1, chatId: CHAT, messageId: post.messageId! });
+    await groups.drain();
+    const s = tg.sends(CHAT);
+    assert.deepEqual(s.map(replyOf), [reply.messageId, post.messageId, post.messageId]);
+    for (const c of [...s, ...tg.of("sendChatAction")]) assert.equal(c.body.message_thread_id, undefined, JSON.stringify(c.body));
+  });
+
+  it("a topic Telegram no longer knows: the line goes out once more without it, still as a reply", async () => {
+    tg.script.set("sendMessage", [{ ok: false, error_code: 400, description: "Bad Request: message thread not found" }]);
+    make();
+    approveRoom();
+    const m = msg("@pinebot hi", { isTopicMessage: true, messageThreadId: 77 });
+    await said(m);
+    const s = tg.sends(CHAT);
+    assert.equal(s.length, 2);
+    assert.equal(s[0]?.body.message_thread_id, 77);
+    assert.equal(s[1]?.body.message_thread_id, undefined);
+    assert.equal(replyOf(s[1]), m.messageId);
+    assert.ok(store.room(CHAT)?.lines.some((l) => l.own), "and it is remembered as said");
+  });
+
   it("the migration notice moves the room too", async () => {
     make();
     approveRoom();
@@ -1312,6 +1412,103 @@ describe("forgetting and the owner's controls", () => {
     assert.match(t[0] ?? "", /\/start/, "names what opens the DM");
     assert.ok(!/sent it/.test(t[0] ?? ""), "never claims it was sent");
     assert.equal(replyOf(tg.sends(CHAT)[0]), 10);
+  });
+
+  it("'done, couldn't DM you' when an order ran but its receipt was lost: never 'first', one per order, as a reply, shushed or not", async () => {
+    make();
+    approveRoom();
+    store.update(CHAT, (r) => {
+      r.shushedUntilMs = clock + HOUR;
+    });
+    // Each start of the pool in turn: every line passes the gate.
+    for (let i = 0; i < 5; i++) {
+      dice = () => i / 5 + 0.01;
+      await groups.commandNotice(CHAT, 10 + i, OWNER, "done-no-dm", 42);
+    }
+    const t = tg.texts(CHAT);
+    assert.equal(t.length, 5, "every order that ran is answered: no hourly limit");
+    assert.equal(new Set(t).size, 5);
+    for (const line of t) {
+      assert.match(line, /\b(done|got it|went through|handled)\b/i, line);
+      assert.doesNotMatch(line, /\bfirst\b|sent it to your DMs|\/start|\d/, line);
+    }
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), [10, 11, 12, 13, 14]);
+    assert.ok(tg.sends(CHAT).every((c) => c.body.message_thread_id === 42), "in the topic the command came from");
+  });
+
+  it("/forgetme typed over and over: every one wipes, but 'done 🫡' comes once per person per ten minutes", async () => {
+    make();
+    approveRoom();
+    for (let i = 0; i < 25; i++) {
+      store.addLine(CHAT, { messageId: 200 + i, fromId: ANN, name: "Ann", text: `hi ${i}`, atMs: clock });
+      await groups.forgetMe(CHAT, ANN, 300 + i);
+      assert.ok(!store.room(CHAT)!.lines.some((l) => l.fromId === ANN), `wiped on try ${i}`);
+    }
+    await groups.drain();
+    assert.deepEqual(tg.texts(CHAT), ["done 🫡"]);
+    assert.equal(replyOf(tg.sends(CHAT)[0]), 300);
+    // Someone else's is theirs.
+    await groups.forgetMe(CHAT, BOB, 400);
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), [300, 400]);
+    clock += 10 * MIN;
+    await groups.forgetMe(CHAT, ANN, 500);
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), [300, 400, 500]);
+  });
+
+  it("a 'done 🫡' stuck behind a slow chat goes stale from when /forgetme arrived; the next one may say it", async () => {
+    make();
+    approveRoom();
+    store.addLine(CHAT, { messageId: 1, fromId: ANN, name: "Ann", text: "hi", atMs: clock });
+    // Bob's answer ahead of it in the queue takes 100 s (a long flood pause).
+    let slowed = false;
+    onSleep = () => {
+      if (slowed) return;
+      slowed = true;
+      clock += 100 * SEC;
+    };
+    groups.onMessage(msg("@pinebot hey", { fromId: BOB, fromFirstName: "Bob" }));
+    await groups.forgetMe(CHAT, ANN, 950);
+    await groups.drain();
+    assert.ok(slowed);
+    assert.deepEqual(tg.texts(CHAT), [], "nothing past 90 s goes out");
+    assert.ok(!store.room(CHAT)!.lines.some((l) => l.fromId === ANN), "the wipe did not wait for the words");
+    await groups.forgetMe(CHAT, ANN, 951);
+    assert.deepEqual(tg.texts(CHAT), ["done 🫡"]);
+    assert.equal(replyOf(tg.sends(CHAT)[0]), 951);
+  });
+
+  it("/forgetme, /forget and the Forget button reach the memory even when this store is not holding it", async () => {
+    // A hosted child whose memory could not be restored: groups held off, an
+    // empty store. The sealed copy holds everything.
+    envVars = { MERRYMEN_TG_GROUPS: "0" };
+    make();
+    await groups.forgetMe(CHAT, ANN, 5);
+    groups.forgetChat(OTHER, 6);
+    await groups.onCallback(press(`tgg:forget:${NEW_CHAT}`));
+    await groups.drain();
+    assert.equal(tg.sends().filter((c) => c.body.chat_id !== OWNER).length, 0, "nothing said in any group");
+
+    // A later spawn restores the sealed copy into this home.
+    const sealed = new TgGroupsStore(path.join(home, "sealed", "tg-groups.json"), emptyTgGroupsState(), { now: () => clock, debounceMs: 60_000 });
+    for (const id of [CHAT, OTHER, NEW_CHAT]) {
+      sealed.ensureRoom(id, { title: "frens", kind: "supergroup" });
+      sealed.setStatus(id, "approved", OWNER);
+      sealed.addLine(id, { messageId: 1, fromId: ANN, name: "Ann", text: "ann was here", atMs: clock - MIN });
+      sealed.addLine(id, { messageId: 2, fromId: BOB, name: "Bob", text: "bob too", atMs: clock - MIN });
+      sealed.upsertPerson(id, { id: ANN, name: "Ann", lastSeenMs: clock - MIN });
+    }
+    sealed.close();
+    writeFileSync(path.join(home, "tg-groups.json"), JSON.stringify(sealed.state));
+    const restored = TgGroupsStore.open(home, { now: () => clock, debounceMs: 60_000 });
+    try {
+      assert.deepEqual(restored.room(CHAT)?.lines.map((l) => l.fromId), [BOB], "/forgetme: her line goes, Bob's stays");
+      assert.equal(restored.person(CHAT, ANN), undefined);
+      assert.deepEqual(restored.room(OTHER)?.lines, [], "/forget: that chat's memory");
+      assert.deepEqual(restored.room(NEW_CHAT)?.lines, [], "the Forget button: that chat's memory");
+      assert.equal(restored.room(OTHER)?.status, "approved", "the owner's decision is not memory");
+    } finally {
+      restored.close();
+    }
   });
 });
 
