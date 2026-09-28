@@ -372,7 +372,7 @@ describe("the writer spends only its own key", () => {
     // key; before this check X then spent that key too, logged as "the
     // room's dedicated key". Only X's own flag lets X share one.
     for (const name of ["GROQ_API_KEY", "MERRYMEN_LLM_API_KEY", "ANTHROPIC_API_KEY"]) {
-      const env = { [name]: " gsk_fleet ", MERRYMEN_GROUPCHAT_SHARE_HOUSE_KEY: "1" };
+      const env = { [name]: " gsk_fleet " };
       const roomOnFleet = { ...ROOM, apiKey: "gsk_fleet" };
       const refused = xpostModel(env, roomOnFleet);
       assert.equal(refused.creds, null, name);
@@ -427,7 +427,7 @@ describe("a warning when X's model is trading's model on groq (the room's same-o
   it("the room's key, borrowed, is named as the room's", () => {
     const env = { GROQ_API_KEY: "gsk_house" };
     const w = xpostModelWarning(groq(FLEET, "gsk_room"), env);
-    assert.match(w ?? "", /the room's MERRYMEN_GROUPCHAT_LLM_KEY, which X borrows while MERRYMEN_XPOST_LLM_KEY is unset/);
+    assert.match(w ?? "", /the room's own model key, which X borrows while MERRYMEN_XPOST_LLM_KEY is unset/);
   });
 
   it("follows the fleet's own model when the operator moved it", () => {

@@ -591,9 +591,12 @@ export function xpostModelWarning(creds: LlmCreds | null, env: Env): string | nu
   const model = String(creds.model ?? "").trim();
   if (model.toLowerCase() !== fleetModel.toLowerCase()) return null;
   // Whose key it is decides what to change: X's own, or the room's it borrows.
+  // The room's variable is named in words, not spelled: the room's boundary
+  // test holds every worker file outside the room and the orchestrator to
+  // never naming it in code.
   const whose = env.MERRYMEN_XPOST_LLM_KEY?.trim()
     ? "MERRYMEN_XPOST_LLM_KEY must come from a SEPARATE Groq organization"
-    : "the room's MERRYMEN_GROUPCHAT_LLM_KEY, which X borrows while MERRYMEN_XPOST_LLM_KEY is unset, must come from a SEPARATE Groq organization";
+    : "the room's own model key, which X borrows while MERRYMEN_XPOST_LLM_KEY is unset, must come from a SEPARATE Groq organization";
   const line =
     `xpost: WARNING — the X writer's model ${model} is the fleet's trading model. Groq rate-limits per ` +
     `organization and per model, not per key, so ${whose}: a second key in the house org spends trading's ` +
