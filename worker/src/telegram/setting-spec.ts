@@ -28,7 +28,9 @@
  *     (`minPoolLiquidityUsdg`, `maxPriceDivergenceBps`, `maxImpactBps`,
  *     `classMinDepthUsdg`) — lowering one is how a pushed price gets through;
  *   - anything remote-execution, secret, house-owned, the allowlist, transfers,
- *     or Telegram's own on/off switches.
+ *     or Telegram's own on/off switches;
+ *   - how it behaves in Telegram groups (DASHBOARD_ONLY.telegramGroups), since
+ *     a group is a chat anyone in it can type into.
  * Those answer with a button to the dashboard instead (DASHBOARD_ONLY).
  *
  * The limits SEALED in the signed permission — per-trade cap, daily cap,
@@ -126,6 +128,25 @@ export const DASHBOARD_ONLY: Readonly<Record<string, string>> = Object.freeze({
    */
   xPosting:
     "I can't turn posting on X on or off from chat. That's done only in Settings → Posting on X, on the dashboard or in the app, where you can also skip a post before it goes out.",
+  /**
+   * TELEGRAM GROUPS, never by text (docs/tg-groups.md "Settings"): whether it
+   * hangs out in groups at all (`telegramGroupsEnabled`), whether it looks at
+   * coins people post there (`telegramGroupCoinsEnabled`) and how often it
+   * joins in unprompted (`telegramGroupsChattiness`).
+   *
+   * A GROUP IS A CHAT ANYONE IN IT CAN TYPE INTO. Rule 4 of the contract is
+   * that only the owner shapes the agent, and the settings that decide how it
+   * behaves in those rooms are the last thing a room should be able to reach —
+   * "look at coins people post" is the door a group's coin nominations come
+   * through. So all three are one pseudo-key here, and none is in
+   * SETTING_SPECS (chat-settings.test.ts pins them as forbidden).
+   *
+   * ONE REPLY FOR ON, OFF AND "LESS CHATTY" ALIKE, and it names all three, so
+   * an owner asking to quieten it down learns where the dial is rather than
+   * reading a refusal about a switch they did not mention.
+   */
+  telegramGroups:
+    "Telegram groups are switched in Settings → Telegram on the dashboard (or Settings in the app): whether I hang out in groups, whether I look at coins people post there, and how chatty I am. Anyone in a group can talk to me, so none of that changes by text.",
 });
 
 /** Limits sealed in the signed permission — a signature is the only way to change them. */

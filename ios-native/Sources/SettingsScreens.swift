@@ -25,7 +25,11 @@ struct SettingsScreen: View {
         ("virtualsEnabled", "Publish landed trades and activity to Virtuals"),
         ("telegramEnabled", "Telegram"), ("telegramControlEnabled", "Telegram controls"),
         ("telegramTransferEnabled", "Allow Telegram transfers within the daily budget"),
-        ("telegramNotifyEnabled", "Telegram notifications"), ("trencherLiveEnabled", "Live Trencher"),
+        ("telegramNotifyEnabled", "Telegram notifications"),
+        // Telegram groups (docs/tg-groups.md): both default on, so the default
+        // behind `setting(_:)` is what shows them on for an owner who never saved.
+        ("telegramGroupsEnabled", "Hang out in Telegram groups"), ("telegramGroupCoinsEnabled", "Look at coins people post"),
+        ("trencherLiveEnabled", "Live Trencher"),
         ("trencherFastEnabled", "Fast Trencher review"), ("deskEnabled", "Trading desk"),
         ("scoutEnabled", "Scout"), ("classSnipeEnabled", "Class sniping")
     ]
@@ -75,6 +79,14 @@ struct SettingsScreen: View {
                     ForEach(flags, id: \.0) { key, label in
                         Toggle(label, isOn: Binding(get: { (draft[key] ?? settings.setting(key)).bool ?? false }, set: { draft[key] = .bool($0) }))
                     }
+                    // How often it joins a Telegram group conversation unprompted.
+                    // The same three levels the settings route accepts; the review
+                    // sheet and the PUT carry the string as is.
+                    Text("How chatty in Telegram groups").font(.caption).foregroundStyle(.secondary)
+                    Picker("How chatty in Telegram groups", selection: text("telegramGroupsChattiness", settings)) {
+                        Text("Quiet").tag("quiet"); Text("Normal").tag("normal"); Text("Chatty").tag("chatty")
+                    }.pickerStyle(.segmented)
+                    Text("Looking at coins people post works only in trencher mode. Its Brain decides and every trencher limit still applies. Telegram groups can't be changed by texting your bot.").font(.caption).foregroundStyle(.secondary)
                     if draft["liveTradingEnabled"] != nil {
                         Text("Live mode permits real orders within the existing grant. Switching it off also stops management of existing real positions; it does not sell them.").foregroundStyle(.orange).font(.caption)
                     }
@@ -142,7 +154,7 @@ struct SettingsScreen: View {
     private func basket(_ settings: J) -> Set<String> { Set((draft["basketSymbols"] ?? settings.setting("basketSymbols")).array.compactMap(\.string)) }
     private func tokens(_ settings: J) -> [J] { (draft["customTokens"] ?? settings.setting("customTokens")).array }
     private func secret(_ key: String) -> Binding<String> { Binding(get: { draft[key]?.string ?? "" }, set: { draft[key] = .string($0) }) }
-    private func label(_ key: String) -> String { (flags + numbers).first { $0.0 == key }?.1 ?? ["agentName": "Agent name", "strategy": "Strategy", "customTokens": "Custom tokens", "basketSymbols": "Basket", "llmProvider": "AI provider", "llmProviderModel": "Model" ][key] ?? key }
+    private func label(_ key: String) -> String { (flags + numbers).first { $0.0 == key }?.1 ?? ["agentName": "Agent name", "strategy": "Strategy", "customTokens": "Custom tokens", "basketSymbols": "Basket", "llmProvider": "AI provider", "llmProviderModel": "Model", "telegramGroupsChattiness": "How chatty in Telegram groups" ][key] ?? key }
     private func reviewValue(_ key: String, _ value: J) -> String {
         if ["groqApiKey", "anthropicApiKey", "llmApiKey", "telegramBotToken"].contains(key) { return value.text.isEmpty ? "Clear saved override" : "Replace saved credential" }
         if key == "customTokens" { return value.array.map { $0["symbol"].text + " · " + $0["address"].text }.joined(separator: "\n") }
@@ -269,6 +281,26 @@ struct TelegramScreen: View {
                     }.disabled(busy)
                     if let result { Text(result).font(.caption) }
                     NavigationLink("Edit Telegram settings", value: Route.settings)
+                }
+                // WHAT IT CAN HEAR IN A GROUP (docs/tg-groups.md), from the
+                // server's live getMe. Three states, as on the web: only an
+                // explicit false says privacy mode is on; unknown (no token, a
+                // failed getMe, an older server) shows the steps with no verdict,
+                // because "it's on" sends an owner to BotFather for nothing.
+                Card {
+                    Text("Telegram groups").font(.headline)
+                    if status["canReadAllGroupMessages"].bool == true {
+                        Text("Privacy mode is off: your bot can follow the whole chat in its groups. If it was already in a group before you turned privacy off, remove it from that group and add it back.").font(.caption)
+                    } else {
+                        Text(status["canReadAllGroupMessages"].bool == false
+                             ? "Privacy mode is on, so in a group your bot only hears commands and replies to its own messages. To change that: @BotFather → /setprivacy → your bot → Disable, then remove the bot from the group and add it back. Making it a group admin works too."
+                             : "To let your bot follow the whole chat in a group, turn privacy mode off: @BotFather → /setprivacy → your bot → Disable, then remove the bot from the group and add it back. Making it a group admin works too.")
+                            .font(.caption).foregroundStyle(status["canReadAllGroupMessages"].bool == false ? Color.orange : Color.secondary)
+                    }
+                    if status["canJoinGroups"].bool == false {
+                        Text("Your bot can't be added to groups right now: @BotFather → /setjoingroups → your bot → Enable.").font(.caption).foregroundStyle(.orange)
+                    }
+                    Text("Hanging out in groups, looking at coins people post and how chatty it is are all set in Settings.").font(.caption).foregroundStyle(.secondary)
                 }
             } }
         }.navigationTitle("Telegram")

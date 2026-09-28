@@ -19,6 +19,7 @@ import {
   SETTINGS_DEFAULTS,
   SLIPPAGE_BPS_MAX,
   STOCK_TOKENS,
+  TELEGRAM_GROUPS_CHATTINESS,
   isHostedMode,
   isValidCustomToken,
   officialCoinsFor,
@@ -315,6 +316,14 @@ const BOOL_FIELDS = [
   // MerrymenSettings.officialCoinsEnabled.
   "officialCoinsEnabled",
   "discoveryEnabled",
+  // TELEGRAM GROUPS (docs/tg-groups.md "Settings"). Both default ON, so — like
+  // officialCoinsEnabled above — this entry is what makes OFF reachable: missing
+  // here, an owner's "stop looking at coins people post" would come back
+  // {ok:true, ignored} while the bot kept looking. Dashboard-only by design
+  // (the chat refuses them, DASHBOARD_ONLY.telegramGroups), and tenant-settable:
+  // how the owner's bot behaves in the owner's groups is the owner's call.
+  "telegramGroupsEnabled",
+  "telegramGroupCoinsEnabled",
 ] as const;
 /** Telegram PC string-array allowlists: (field, per-entry maxLen). */
 const STR_ARRAY_FIELDS: Record<string, number> = {
@@ -643,6 +652,24 @@ export async function PUT(req: Request) {
     if (v === null || v === undefined || v === "") setOrClear("assetMode", undefined);
     else if (v === "all" || v === "stocks" || v === "crypto") setOrClear("assetMode", v as never);
     else errors.push("assetMode: must be all, stocks or crypto");
+  }
+
+  /**
+   * ── Telegram groups: how often it joins in ───────────────────────────
+   *
+   * ITS OWN BRANCH for the reason assetMode has one: a string enum fits
+   * neither table, and a key no branch reads is dropped with {ok:true}.
+   * Validated against core's one list, the same one the worker resolves with,
+   * so a level this route accepts is never one the worker quietly reads as
+   * "normal". Anything else is REFUSED rather than stored — the resolver would
+   * silently fall back, and the screen would go on showing a level that is not
+   * the one in force. Null or "" clears back to the default.
+   */
+  if ("telegramGroupsChattiness" in body) {
+    const v = body.telegramGroupsChattiness;
+    if (v === null || v === undefined || v === "") setOrClear("telegramGroupsChattiness", undefined);
+    else if (typeof v === "string" && (TELEGRAM_GROUPS_CHATTINESS as readonly string[]).includes(v)) setOrClear("telegramGroupsChattiness", v as never);
+    else errors.push("telegramGroupsChattiness: must be quiet, normal or chatty");
   }
 
   /**
