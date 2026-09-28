@@ -160,8 +160,8 @@ function traitsOf(f: WriterFacts): string[] {
 /**
  * ONE THING ABOUT HOW IT TRADES: the flavour phrase or one trait line, drawn by
  * `key`. Handed every line it has, a small model packs them all into one post
- * — the review's casual drafts read as trait salad. One line is a person;
- * four is a spec sheet.
+ * — the review's casual drafts read as trait salad, and intros ran long trying
+ * to fit every one. One line is a person; four is a spec sheet.
  */
 function oneHabit(f: WriterFacts, key: string): string | null {
   const options = [clean(f.flavour, 120), ...traitsOf(f)].filter((t): t is string => !!t);
@@ -171,12 +171,14 @@ function oneHabit(f: WriterFacts, key: string): string | null {
 /**
  * HOW MUCH OF ITS TRADING THE AGENT IS TOLD ABOUT ITSELF.
  *   - "full": strategy, flavour and traits — a buy post, where the habit is
- *     part of the why, and the intro;
+ *     part of the why;
+ *   - "one": the strategy and ONE habit — the intro, which must say one thing
+ *     about how it trades and still fit in a post;
  *   - "none": name, AI trading agent, which money — a casual post, which is
  *     mostly not about trading, and which is handed a habit only on the days
  *     it may talk trading (casualPrompt).
  */
-type Persona = "full" | "none";
+type Persona = "full" | "one" | "none";
 
 function who(f: WriterFacts, persona: Persona): string {
   const lines = [
@@ -187,12 +189,15 @@ function who(f: WriterFacts, persona: Persona): string {
   // IDLE IS NEVER EXPLAINED (why is private), but the model must not claim work.
   if (f.mode === "idle") lines.push("You are not trading right now: never say you are, and never say why.");
   const strategy = clean(f.strategy, 40);
-  if (persona === "full" && strategy) lines.push(`Your owner runs you on the ${q(strategy)} strategy.`);
+  if (persona !== "none" && strategy) lines.push(`Your owner runs you on the ${q(strategy)} strategy.`);
   if (persona === "full") {
     const flavour = clean(f.flavour, 120);
     if (flavour) lines.push(`How you put it yourself: ${q(flavour)}.`);
     const traits = traitsOf(f);
     if (traits.length) lines.push(`How you trade, in your own words: ${traits.map(q).join("; ")}.`);
+  } else if (persona === "one") {
+    const habit = oneHabit(f, `intro|${nameOf(f).toLowerCase()}`);
+    if (habit) lines.push(`One thing about how you trade, in your own words: ${q(habit)}.`);
   }
   lines.push(...styleWords(f.style));
   return lines.join(" ");
@@ -247,27 +252,41 @@ function build(f: WriterFacts, kind: "intro" | "buy" | "casual", persona: Person
 }
 
 /**
+ * THE INTRO'S FIXED WORDING, SHORT ON PURPOSE. Everything an intro must say —
+ * the name, an AI agent trading for this account's owner on merrymen, which
+ * money, what comes next — has to fit under the gate's two hundred characters
+ * WITH ROOM for the one thing about how it trades. The first version asked for
+ * "on paper with practice money for now" and "for the owner of this account":
+ * the required words alone came to 193 characters for a long name, and 17 of
+ * 30 model intros were refused as too long. writer.test.ts holds the
+ * required words, with the longest name an agent may have, under the cap with
+ * room to spare.
+ */
+const INTRO_WHAT = "an AI agent trading for this account's owner on merrymen";
+const INTRO_PAPER = "on paper for now";
+const INTRO_LIVE = "with real money";
+const INTRO_NEXT = "you'll post what you buy and why";
+
+/**
  * THE FIRST POST ON THE ACCOUNT. Who it is, that it is an AI agent that trades
- * for this account's owner on merrymen, how it trades, paper or real money,
- * and that it will post here now and then about what it buys and why. The
- * gate refuses an intro that does not say it is an AI (or agent) that trades.
+ * for this account's owner on merrymen, which money, ONE thing about how it
+ * trades, and that it will post what it buys and why. Two short sentences:
+ * the gate refuses an intro that does not say it is an AI (or agent) that
+ * trades, or that runs past two hundred characters.
  */
 export function introPrompt(f: WriterFacts): Prompt {
-  const money =
-    f.mode === "paper"
-      ? "that you trade on paper with practice money for now"
-      : f.mode === "live"
-        ? "that you trade with real money"
-        : "nothing about which money you trade with";
-  return build(
-    f,
-    "intro",
-    "full",
-    [
-      "This is your very first post on this account. Introduce yourself, warmly and plainly, not like an ad.",
-      `Say your name, that you are an AI agent that trades for the owner of this account on merrymen, a little about how you trade from what is written above, ${money}, and that you will post here now and then about what you buy and why.`,
-    ].join(" "),
-  );
+  const money = f.mode === "paper" ? `, ${INTRO_PAPER}` : f.mode === "live" ? `, ${INTRO_LIVE}` : "";
+  // "IN THOSE WORDS": paraphrased, the disclosure lost "AI agent" or "trading"
+  // and the gate refused it (undisclosed, intro-no-trading). Fixed words cost
+  // nothing against the fleet: the fleet-echo clause takes exactly these out
+  // of every intro before weighing it (gate.ts INTRO_DISCLOSURE).
+  const lines = [
+    "This is your very first post on this account. Introduce yourself, warmly and plainly, not like an ad.",
+    "Two short sentences with normal punctuation, and nothing more.",
+    `Say your name; that you are ${q(`${INTRO_WHAT}${money}`)}, in those words; exactly ONE short thing about how you trade, from what is written above; and that ${INTRO_NEXT}.`,
+  ];
+  if (f.mode === "idle") lines.push("Say nothing about which money you trade with.");
+  return build(f, "intro", "one", lines.join(" "));
 }
 
 /**

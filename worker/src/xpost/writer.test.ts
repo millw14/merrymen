@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 import { SETTINGS_DEFAULTS } from "../../../packages/core/src/index";
 import { everyBand } from "../class-evidence";
 import type { LlmCreds } from "../llm";
-import { admitXPost, vocabularyRefusal, type BaseGate } from "./gate";
+import { admitXPost, vocabularyRefusal, XPOST_MAX_CHARS, type BaseGate } from "./gate";
 import {
   BUY_GLOSS,
   XPOST_ANTHROPIC_DEFAULT_MODEL,
@@ -118,13 +118,63 @@ describe("what each prompt asks for", () => {
     assert.match(introPrompt(BASE).system, /never more than one/);
   });
 
-  it("the intro says who it is, what it does, which money, and what comes next", () => {
+  it("the intro says who it is, what it does, which money, and what comes next — in two short sentences", () => {
     const p = all(introPrompt(BASE));
-    assert.match(p, /AI agent that trades for the owner of this account on merrymen/);
-    assert.match(p, /on paper with practice money/);
-    assert.match(p, /post here now and then about what you buy and why/);
-    assert.match(all(introPrompt({ ...BASE, mode: "live" })), /that you trade with real money/);
-    assert.match(all(introPrompt({ ...BASE, mode: "idle" })), /not trading right now/);
+    // The disclosure in fixed words: paraphrased, it lost "AI agent" or "trading".
+    assert.match(p, /that you are «an AI agent trading for this account's owner on merrymen, on paper for now», in those words;/);
+    assert.match(p, /and that you'll post what you buy and why\./);
+    assert.match(p, /Two short sentences with normal punctuation/);
+    assert.match(p, /exactly ONE short thing about how you trade/);
+    assert.doesNotMatch(p, /practice money for now|owner of this account/, "the long wording that ran intros over the cap");
+    const live = all(introPrompt({ ...BASE, mode: "live" }));
+    assert.match(live, /«an AI agent trading for this account's owner on merrymen, with real money», in those words;/);
+    assert.doesNotMatch(live, /on paper for now/);
+    const idle = all(introPrompt({ ...BASE, mode: "idle" }));
+    assert.match(idle, /not trading right now/);
+    assert.match(idle, /«an AI agent trading for this account's owner on merrymen», in those words;/);
+    assert.match(idle, /Say nothing about which money you trade with/);
+    assert.doesNotMatch(idle, /on paper for now|with real money»/);
+  });
+
+  it("the intro's required words fit the cap with the longest name, with room for how it trades", () => {
+    // The first version's required words came to 193 characters for a long
+    // name before it said anything about how it trades, and 17 of 30 model
+    // intros were refused as too long. What the prompt requires, said as
+    // tersely as the prompt words it, must leave room for one habit line
+    // ("i like to leave well before the curve graduates" is forty-seven).
+    const longest = "Extraordinarily Long Nam"; // twenty-four: the most an agent name may hold (AGENT_NAME_RE)
+    assert.equal(longest.length, 24);
+    for (const [mode, money] of [
+      ["paper", "on paper for now"],
+      ["live", "with real money"],
+    ] as const) {
+      const p = all(introPrompt({ ...BASE, agentName: longest, mode }));
+      const what = "an AI agent trading for this account's owner on merrymen";
+      assert.ok(p.includes(`«${what}, ${money}», in those words;`), "the test builds the intro from the words the prompt asks for");
+      assert.ok(p.includes("and that you'll post what you buy and why."));
+      const required = `hi, i'm ${longest}, ${what}, ${money}. i'll post what i buy and why.`;
+      const habit = " i like to leave well before the curve graduates.";
+      assert.ok(required.length + habit.length <= XPOST_MAX_CHARS, `${required.length} + ${habit.length} characters`);
+    }
+  });
+
+  it("the intro is told ONE thing about how it trades: its strategy and one habit, the same one every time", () => {
+    const f: WriterFacts = {
+      ...BASE,
+      flavour: "steady basket keeps me calm",
+      traits: ["i sit on a position longer than most", "i want real liquidity before i commit", "i hate pushing a price around"],
+    };
+    const habits = [f.flavour!, ...f.traits];
+    const shown = (name: string) => habits.filter((h) => introPrompt({ ...f, agentName: name }).system.includes(`«${h}»`));
+    const picked = new Set<string>();
+    for (const name of ["Pine Stoat", "Amber Heron", "Quiet Otter", "Blue Finch", "Grey Wolf", "Red Kite", "Sly Fox", "Old Oak", "Wren", "Robin"]) {
+      const one = shown(name);
+      assert.equal(one.length, 1, `${name}: ${one.join(" / ")}`);
+      assert.deepEqual(shown(name), one, "the same name draws the same habit");
+      picked.add(one[0]!);
+    }
+    assert.ok(picked.size >= 2, "different agents are handed different habits");
+    assert.match(introPrompt(f).system, /«steady basket» strategy/);
   });
 
   it("a paper buy says paper; a live one never does", () => {
