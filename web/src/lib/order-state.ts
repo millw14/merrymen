@@ -292,7 +292,8 @@ export function readOrder(body: OrderBody): { order: OrderAsked } | { error: str
   // symbol said. The worker refuses the same mismatch again.
   if (body.purpose === "energy") {
     if (side !== "buy" || symbol !== MERRYMEN_TOKEN.symbol) {
-      return { error: `an energy order is a buy of $${MERRYMEN_TOKEN.symbol} and nothing else` };
+      // "$" + the ticker — a token's name, not a currency amount.
+      return { error: `an energy order is a buy of ${"$" + MERRYMEN_TOKEN.symbol} and nothing else` };
     }
     order.purpose = "energy";
   }

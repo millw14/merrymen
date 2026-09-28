@@ -146,7 +146,8 @@ describe("a verdict, not a sentence somebody reads a verdict out of", () => {
     // through rather than re-deriving one.
     const trade = CODE.slice(CODE.indexOf("async function submitChatTrade"), CODE.indexOf("async function submitChatTransfer"));
     assert.match(trade, /Promise<OrderReply>/);
-    assert.match(CODE, /return submitChatTrade\(side, symbol, size\);/);
+    // (With the order's own source and deadline — order-gate.ts orderAsked.)
+    assert.match(CODE, /return submitChatTrade\(side, symbol, size, asked\);/);
   });
 
   it("and PAPER is not a success either", () => {
