@@ -606,6 +606,9 @@ const SAYS_TRADING = /\btrad(?:e|es|ed|ing|er)\b/i;
 const INTRO_DISCLOSURE =
   /\b(?:ai|agents?|bots?|trad(?:e|es|ed|ing|er)|merrymen|accounts?|owners?|posts?|posting|buys?|bought|why|paper|practice|real|money|here|whoever|runs|doing|human|behind|set|see|share|pop|check|once)\b/gi;
 
+/** How alike two intros must be, weighed whole, when one says nothing but the disclosure: a near copy, not a shared vocabulary. */
+const BARE_INTRO_LIMIT = 0.9;
+
 /** An intro without the words every intro must say (INTRO_DISCLOSURE): what is left is what must differ. Exported for the writer's tests. */
 export function withoutDisclosure(text: string): string {
   return String(text ?? "").replace(INTRO_DISCLOSURE, " ");
@@ -822,12 +825,16 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   // must differ. AN INTRO THAT IS NOTHING BUT THE DISCLOSURE has nothing of
   // its own left to tell it apart, and weighed as nothing it would pass any
   // fleet: then the two are weighed whole, so the same intro under another
-  // name is still the same intro.
+  // name is still the same intro. Whole, any two intros share the disclosure's
+  // own words ("ai", "agent", "trading", "account", "merrymen"), so only a
+  // near copy counts: at the ordinary limit a bare "…the AI trading agent for
+  // this account, on merrymen. i'll check in here once in a while." was
+  // refused next to an unrelated intro that happened to disclose too.
   const echoes = (prev: string): boolean => {
     if (ctx.kind !== "intro") return similarity(mine, prev) >= REPEAT_LIMIT;
     const a = withoutDisclosure(mine);
     const b = withoutDisclosure(prev);
-    if (similarity(a, a) === 0 || similarity(b, b) === 0) return similarity(mine, prev) >= REPEAT_LIMIT;
+    if (similarity(a, a) === 0 || similarity(b, b) === 0) return similarity(mine, prev) >= BARE_INTRO_LIMIT;
     return similarity(a, b) >= REPEAT_LIMIT;
   };
   if (fleet.some(echoes)) return refuse("fleet-repeat");

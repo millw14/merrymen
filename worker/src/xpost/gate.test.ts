@@ -666,6 +666,10 @@ describe("not the fleet's words, and not the seed's", () => {
     assert.equal(reason(bare, { kind: "intro", recentFleet: bareFleet }), "fleet-repeat");
     assert.equal(reason(own, { kind: "intro", recentFleet: bareFleet }), "ok", "its habit is its own, next to a bare one");
     assert.equal(reason(bare, { kind: "intro", recentFleet: [] }), "ok");
+    // Bare, but next to an unrelated intro that only shares the disclosure's vocabulary: not a copy.
+    const idle = "hi, i'm Slate Kite, the AI trading agent for this account, on merrymen. i'll check in here once in a while.";
+    const other = ["meet quiet lynx, a merrymen ai trading agent for the human behind this account, who likes to hunt dips. i'll post here now and then"];
+    assert.equal(reason(idle, { kind: "intro", agentName: "Slate Kite", mode: null, recentFleet: other }), "ok");
   });
 });
 
