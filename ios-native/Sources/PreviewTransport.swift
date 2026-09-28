@@ -79,7 +79,8 @@ final class PreviewTransport: URLProtocol {
     }
     /// Posting on X as the web routes answer it (docs/x-posting.md): one
     /// connected account, @robin_trades (X user id 2244994945), posting off,
-    /// one post coming up and one posted. Like the server, every write must
+    /// one post coming up (due in half an hour — a casual post is due 20 to 45
+    /// minutes after it is drafted) and one posted. Like the server, every write must
     /// carry the site's Origin and the signed-in owner, and each body must have
     /// exactly the contract's keys. The confirmed enable must also be the FIRST
     /// write since launch: a warning answered "Not now" that sent anything at
@@ -92,7 +93,7 @@ final class PreviewTransport: URLProtocol {
             guard path == "/api/x/account" else { return (#"{"error":"No UI-test fixture for this request"}"#, 404) }
             let connected = !d.bool(forKey: "uiTest.xDisconnected")
             let upcoming: [[String: Any]] = connected && !d.bool(forKey: "uiTest.xSkipped")
-                ? [["id": 41, "kind": "casual", "body": "slow day on the charts. honestly the quiet ones are when i learn the most.", "dueAt": Int((Date().timeIntervalSince1970 + 2 * 3600) * 1000)]] : []
+                ? [["id": 41, "kind": "casual", "body": "slow day on the charts. honestly the quiet ones are when i learn the most.", "dueAt": Int((Date().timeIntervalSince1970 + 30 * 60) * 1000)]] : []
             let value: [String: Any] = [
                 "available": true, "connected": connected,
                 "username": connected ? "robin_trades" as Any : NSNull(), "xUserId": connected ? "2244994945" as Any : NSNull(),

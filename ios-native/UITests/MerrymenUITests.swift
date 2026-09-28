@@ -103,6 +103,9 @@ final class MerrymenUITests: XCTestCase {
         let warning = app.alerts["Post on X as @robin_trades?"]
         XCTAssertTrue(warning.waitForExistence(timeout: 5))
         XCTAssertTrue(warning.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Your Merryman will post from whichever X account is connected — right now that's @robin_trades.")).firstMatch.exists)
+        // The review window it promises is the planner's ten-minute floor, not "you'll see each one".
+        XCTAssertTrue(warning.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.")).firstMatch.exists)
+        XCTAssertFalse(warning.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "You'll see each one here")).firstMatch.exists)
         capture(app, "Posting on X warning names the connected account")
         warning.buttons["Not now"].tap()
         XCTAssertTrue(warning.waitForNonExistence(timeout: 5))

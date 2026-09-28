@@ -295,11 +295,17 @@ struct XPostingAccount: Equatable {
 
     /// The warning the owner confirms, in the words the web uses. It names the
     /// account because that account is what the Merryman will post from.
+    ///
+    /// THE REVIEW WINDOW IT PROMISES IS THE PLANNER'S FLOOR. Every post is
+    /// drafted at least ten minutes before it is due (worker/src/xpost/
+    /// planner.ts), and this screen re-reads every minute while it is open —
+    /// so "at least ten minutes" is a promise the code keeps, where "you'll see
+    /// each one" was not: nothing tells the owner to look.
     static func warning(_ handle: String) -> String {
         [
             "Your Merryman will post from whichever X account is connected — right now that's @\(handle).",
             "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
-            "Posts go out on their own, a few a day at most. You'll see each one here before it goes out and can skip it. Turn this off or disconnect X at any time.",
+            "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
             "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto."
         ].joined(separator: "\n\n")
     }
