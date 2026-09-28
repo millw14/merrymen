@@ -500,6 +500,49 @@ describe("handle", () => {
   ]);
 });
 
+describe("cashtag: a shill's $TICKER is never echoed", () => {
+  refuses("cashtag", [
+    ["banter", "$PEPE szn"],
+    ["banter", "ngl $pepe looks fun"],
+    ["coin", "ooh $FROG 👀"],
+    ["fade", "not sold on $wojak tbh"],
+    ["answer", "is it $PEPE2?"],
+    ["banter", "lol $ab"],
+    ["banter", "$ABCDEFGHIJ lol"],
+    ["banter", "$$PEPE"],
+    ["fixed", "$PEPE"],
+    // Every reading: fullwidth and small signs fold to "$", an invisible after
+    // the sign is taken out, lookalike letters are still letters.
+    ["banter", "＄PEPE lol"],
+    ["banter", "﹩PEPE lol"],
+    ["banter", "$​PEPE lol"],
+    ["banter", "$ΡΕΡΕ lol"],
+    // A name the line may say only unlocks that exact word.
+    ["banter", "$PEPE lol", { names: ["pepe classic"] }],
+    ["banter", "$PEPEX lol", { names: ["pepe"] }],
+  ]);
+  passes([
+    ["banter", "pepe szn"],
+    ["banter", "a$ap lol"],
+    ["banter", "$ lol"],
+    ["banter", "$ pepe"],
+    ["banter", "the $ sign lol"],
+    ["banter", "$A is not a ticker"],
+    ["banter", "$ABCDEFGHIJK is too long to be one"],
+    // The word, without the $, is a name the line may say.
+    ["banter", "$Pine lol", { names: ["$Pine"] }],
+    ["banter", "lol $pine", { names: ["Pine"] }],
+    ["banter", "$FROG lol", { names: ["frog"] }],
+  ]);
+  it("money stays money: $5 is a figure, not a ticker", () => {
+    assert.equal(reason("$5 lol"), "money");
+    assert.equal(reason("$5k lol"), "money");
+  });
+  it("holds for every kind", () => {
+    for (const kind of ALL_KINDS) assert.equal(reason("$PEPE", { kind, paper: kind === "buy" ? false : undefined }), "cashtag", kind);
+  });
+});
+
 describe("hateful: slurs by hash, with stand-in words", () => {
   const STAND_IN = "bramblewort";
   function withStandIn(word: string, run: () => void): void {

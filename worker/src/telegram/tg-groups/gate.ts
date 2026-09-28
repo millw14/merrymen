@@ -540,6 +540,31 @@ const LINK_SHAPES: readonly RegExp[] = [
 /** Any @word or #tag, in any form of the sign. A mention is added by code as an entity, never written by the model. */
 const HANDLE = /[@#＠＃﹫﹟]\s*[\p{L}\p{N}_]/u;
 
+/**
+ * A $TICKER: a dollar sign, a letter, then one to nine letters or digits, as
+ * a word of its own ("$PEPE", "$$pepe2"; not "a$ap", not "$5" — that is money).
+ * Read on every reading, so "＄PEPE" (fullwidth, folded by NFKC), "$ΡΕΡΕ"
+ * (Greek lookalikes, folded) and a zero-width space after the sign are the
+ * cashtag they spell. The group persona never writes one: a shill's cashtag
+ * echoed by the bot is amplification (docs/tg-groups.md, "How it talks").
+ */
+const CASHTAG = /(?<![\p{L}\p{N}_$])\$+(\p{L}[\p{L}\p{N}]{1,9})(?![\p{L}\p{N}_])/gu;
+
+/**
+ * A cashtag refused unless its word, without the "$", is one of the names the
+ * line may say — a person who chose "$Pine" as a display name can be named.
+ * Compared case-folded, the way every reading is lowercased.
+ */
+function cashtagRefusal(readings: readonly string[], names: readonly string[]): boolean {
+  const allowed = new Set(names.map((n) => canonOf(n).toLowerCase().replace(/^\$+/, "")).filter((n) => n !== ""));
+  for (const t of readings) {
+    for (const m of t.matchAll(CASHTAG)) {
+      if (!allowed.has(m[1]!.toLowerCase())) return true;
+    }
+  }
+  return false;
+}
+
 // ── money and figures ───────────────────────────────────────────────────────
 
 /** A spelled-out number, for the money clause ("fifty bucks", "a couple hundred usdg", "half a mil"). */
@@ -1197,7 +1222,7 @@ function lowNames(agentName: string, names: readonly string[]): string[] {
  * MAY THE AGENT SAY THIS IN A GROUP? `ok` carries the exact text to send.
  *
  * Reason codes (stable, log-only): empty · pass · hidden-chars · meta ·
- * too-long · secret · address · link · handle · hateful · selfharm · threat ·
+ * too-long · secret · address · link · handle · cashtag · hateful · selfharm · threat ·
  * sexual · profanity · appearance · money · figures · alert · advice · accuse ·
  * private · ops · human · emoji · paper-unsaid · repeat.
  *
@@ -1234,6 +1259,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   }
   if (r.cased.some((t) => LINK_SHAPES.some((re) => re.test(t))) || r.joined.some((t) => LINK_SHAPES.some((re) => re.test(t)))) return refuse("link");
   if (some(r.cased, HANDLE)) return refuse("handle");
+  if (cashtagRefusal([...r.cased, ...r.low], names)) return refuse("cashtag");
   if (markupRefusal(r, lowNames(agentName, names))) return refuse("meta");
 
   // The worst first: hate, harm, threats, sex — then looks.
