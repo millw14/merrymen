@@ -254,6 +254,7 @@ describe("what each prompt asks for", () => {
     assert.match(buyPrompt({ ...BUY, paper: false }).prompt, /Do not call it paper/);
     assert.match(buyPrompt(BUY).prompt, /Why, roughly: «[^»]+»; «[^»]+»\./);
     assert.match(buyPrompt(BUY).prompt, /ONE thing/);
+    assert.match(buyPrompt(BUY).prompt, /Name the coin in the post: call it «pepe»\./);
   });
 
   it("a casual post gets a seed to riff on, not to copy, that its readers never saw; a trade-talk day gets the paper rule for its coins", () => {
@@ -262,7 +263,7 @@ describe("what each prompt asks for", () => {
     assert.match(p, /Do not restate it: take it somewhere new with a thought of your own, and use none of its words/);
     assert.match(p, /Nobody who reads your post will have seen that line, so the post must make sense on its own: do not answer it, agree with it or point back at it\./);
     const talk = casualPrompt(CASUAL).prompt;
-    assert.match(talk, /«pepe», «Tesla»/);
+    assert.match(talk, /at most one, only that you bought it, never as advice\) or ignore: «pepe», «Tesla»/);
     assert.match(talk, /say it was on paper/);
     assert.doesNotMatch(casualPrompt({ ...CASUAL, recentCoins: [{ label: "Tesla", paper: false }] }).prompt, /on paper/);
   });
@@ -331,7 +332,7 @@ describe("a buy's why is in everyday words, never the engine's", () => {
   });
 
   it("how a buy post opens is an instruction drawn per decision, never a sentence to copy", () => {
-    const OPENINGS = [/Open with the reason\./, /Open with the coin's name\./, /Open with how it felt to you\./, /Say it as a passing aside\./];
+    const OPENINGS = [/Open with the reason\./, /Open with the coin's name\./, /Open with how it felt to you\./, /Keep it to one short sentence\./];
     const drawn = new Set<number>();
     for (let i = 0; i < 30; i++) {
       const p = buyPrompt({ ...BUY, glossSeed: `tenant-${i}|decision-${i}` }).prompt;
@@ -348,7 +349,7 @@ describe("a buy's why is in everyday words, never the engine's", () => {
   it("its own feed words are shown only when they carry no band and no we", () => {
     // The feed post was written from the raw bands; copied onto X it is the
     // engine talking ("activity picking up and the round trip is cheap, in we go").
-    assert.match(buyPrompt(BUY).prompt, /What you said about it at the time: «liked how early the curve was»/);
+    assert.match(buyPrompt(BUY).prompt, /What you said about it at the time, already posted elsewhere, so never repeat it: «liked how early the curve was»/);
     for (const own of ["activity picking up and the round trip is cheap", "our size barely moves it, easy in", "in we go, the curve is early"]) {
       assert.doesNotMatch(buyPrompt({ ...BUY, ownWords: own }).prompt, /What you said about it/, own);
     }

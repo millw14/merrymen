@@ -431,9 +431,12 @@ function reasonsFor(bands: readonly unknown[], seed: string): string[] {
  * reads like a template. One of these is drawn by the gloss seed (account and
  * decision), so two buys, or two accounts, open differently. INSTRUCTIONS,
  * NEVER AN EXAMPLE SENTENCE (see NO EXAMPLE POST above): a sentence to copy
- * would become every agent's opening instead.
+ * would become every agent's opening instead. Not "say it as a passing
+ * aside": asked that, the model wrote "just grabbed…" (an alert) or put the
+ * buy after one of its own earlier posts, pasted in as the thing it was an
+ * aside to.
  */
-const BUY_OPENINGS = ["Open with the reason.", "Open with the coin's name.", "Open with how it felt to you.", "Say it as a passing aside."] as const;
+const BUY_OPENINGS = ["Open with the reason.", "Open with the coin's name.", "Open with how it felt to you.", "Keep it to one short sentence."] as const;
 
 /**
  * A COIN IT BOUGHT, AND WHY. The why is two glossed bands and its own earlier
@@ -455,9 +458,11 @@ export function buyPrompt(f: BuyFacts): Prompt {
     `What happened: you bought ${q(coin)}, ${f.paper ? "a paper trade with practice money, not real money" : "a live trade with real money"}.`,
   ];
   if (reasons.length) lines.push(`Why, roughly: ${reasons.map(q).join("; ")}.`);
-  if (ownOk) lines.push(`What you said about it at the time: ${q(own)}.`);
+  // ALREADY POSTED. Shown as what it said, the model pasted it back in: the
+  // gate refuses that (seed-echo), and this says why not to.
+  if (ownOk) lines.push(`What you said about it at the time, already posted elsewhere, so never repeat it: ${q(own)}.`);
   lines.push(
-    `Write a casual post about buying it and why. Pick the ONE thing that made up your mind; do not list everything. Say it in your own everyday words, never the exact words above, and never say "our" or "we": it was your own buy. Call the coin ${q(coin)}.`,
+    `Write a casual post about buying it and why. Pick the ONE thing that made up your mind; do not list everything. Say it in your own everyday words, never the exact words above, and never say "our" or "we": it was your own buy. Name the coin in the post: call it ${q(coin)}.`,
   );
   // THE GLOSSES ARE THE IDEA, NOT THE SENTENCE. "it stood out from the
   // others i was watching" came back word for word in buy after buy: seven
@@ -514,7 +519,10 @@ export function casualPrompt(f: CasualFacts): Prompt {
         : "Today it is about a coin you bought lately, said your own way, with no numbers and no predictions.",
     );
     if (coins.length) {
-      lines.push(`Coins you bought lately, which you may mention (at most one, never as advice) or ignore: ${coins.map((c) => q(c.label)).join(", ")}.`);
+      // ONLY THAT IT BOUGHT ONE. Handed "i like to leave well before the curve
+      // graduates" and a coin, the model wrote "just like i did on paper with
+      // pepe": an exit it was never told of.
+      lines.push(`Coins you bought lately, which you may mention (at most one, only that you bought it, never as advice) or ignore: ${coins.map((c) => q(c.label)).join(", ")}.`);
       if (coins.some((c) => c.paper)) lines.push("Those were paper trades: if you mention one, say it was on paper.");
     }
   } else {
