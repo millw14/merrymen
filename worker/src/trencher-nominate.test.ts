@@ -560,15 +560,29 @@ describe("nominate: what it refuses, and in what order", () => {
 // ─── one under review, and its priority ─────────────────────────────────────
 
 describe("one nomination under review at a time", () => {
-  it("active is the oldest waiting one, and priority holds only its address", () => {
+  it("active is the oldest waiting one, and priority holds every waiting one in queue order", () => {
+    // Not only the head: the chat-side look does not pre-screen depth, flow or
+    // discovery's verification, so the head may never be eligible at the
+    // tick, and a hint naming only it would starve the coins behind it
+    // until their TTL (the reviewer takes the first ELIGIBLE one).
     const { book } = setup();
     assert.equal(book.active(), null);
     assert.equal(book.priority().size, 0);
+    book.nominate(nom({ address: addr(3), chatId: -3, senderId: 3 }), READY_PAPER);
     book.nominate(nom({ address: addr(1), chatId: -1, senderId: 1 }), READY_PAPER);
     book.nominate(nom({ address: addr(2), chatId: -2, senderId: 2 }), READY_PAPER);
-    book.nominate(nom({ address: addr(3), chatId: -3, senderId: 3 }), READY_PAPER);
-    assert.equal(book.active()?.address, addr(1));
-    assert.deepEqual([...book.priority()], [addr(1)]);
+    assert.equal(book.active()?.address, addr(3));
+    assert.deepEqual([...book.priority()], [addr(3), addr(1), addr(2)]);
+  });
+
+  it("priority leaves out a nomination past its TTL even while its claimed entry keeps it for the fill", () => {
+    const { book, clock } = setup();
+    book.nominate(nom({ address: addr(1), chatId: -1, senderId: 1 }), READY_PAPER);
+    assert.equal(book.claimEntry(addr(1)), "taken");
+    clock.t = T0 + NOMINATE.ttlMs;
+    book.nominate(nom({ address: addr(2), chatId: -2, senderId: 2 }, clock.t), READY_PAPER);
+    assert.deepEqual([...book.priority()], [addr(2)]);
+    assert.equal(book.active()?.address, addr(2));
   });
 
   it("a BUY ends the review: the next one becomes active while the first waits for its fill", () => {
@@ -581,10 +595,11 @@ describe("one nomination under review at a time", () => {
     assert.equal(book.nominated(addr(1))?.address, addr(1), "still nominated until its fill");
   });
 
-  it("a verdict moves priority to the next, and nothing is left when the queue empties", () => {
+  it("a verdict takes a coin out of priority, and nothing is left when the queue empties", () => {
     const { book } = setup();
     book.nominate(nom({ address: addr(1), chatId: -1, senderId: 1 }), READY_PAPER);
     book.nominate(nom({ address: addr(2), chatId: -2, senderId: 2 }), READY_PAPER);
+    assert.deepEqual([...book.priority()], [addr(1), addr(2)]);
     book.onReviewed(addr(1), hold());
     assert.deepEqual([...book.priority()], [addr(2)]);
     book.onReviewed(addr(2), hold({ action: "sell" }));
@@ -799,6 +814,88 @@ describe("expire: the TTL sweep", () => {
     assert.equal(book.onExit(addr(1)), null, "not remembered as bought");
   });
 
+  it("a claimed entry in flight outlives the TTL: a fill just past it is told as a buy and remembered for the exit", () => {
+    // BUY at ttl-20s, the entry claimed at ttl-10s, its live receipt at
+    // ttl+10s. Ended by the TTL, the group would hear "sat this one out"
+    // about a coin just bought, and the exit line would never come.
+    const { book, clock, counters } = setup();
+    book.nominate(nom({ address: addr(1), chatId: -9, messageId: 99 }), READY_PAPER);
+    clock.t = T0 + NOMINATE.ttlMs - 20_000;
+    assert.equal(book.onReviewed(addr(1), buy({ decisionId: "dec_b" })), null);
+    clock.t = T0 + NOMINATE.ttlMs - 10_000;
+    assert.equal(book.claimEntry(addr(1)), "taken");
+    clock.t = T0 + NOMINATE.ttlMs + 10_000;
+    assert.deepEqual(book.expire(), [], "not expired while its entry is in flight");
+    const o = book.onFill("dec_b", "landed", false);
+    assert.equal(o?.kind, "bought");
+    assert.equal(o?.kind === "bought" && o.paper, false);
+    assert.deepEqual(book.expire(), [], "one outcome, never a second");
+    book.refundEntry(addr(1));
+    assert.equal(counters.entries, 1, "the claim is spent by the fill");
+    assert.equal(book.onExit(addr(1))?.kind, "exited", "remembered as bought");
+  });
+
+  it("past the TTL, a nomination kept for its fill starts nothing new", () => {
+    // The grace is for the entry already claimed: no second claim, no
+    // review answer, not group-sourced for a new entry, not in priority.
+    const { book, clock, counters } = setup();
+    book.nominate(nom({ address: addr(1) }), READY_PAPER);
+    book.onReviewed(addr(1), buy({ decisionId: "dec_b" }));
+    assert.equal(book.claimEntry(addr(1)), "taken");
+    clock.t = T0 + NOMINATE.ttlMs;
+    const takes = counters.log.filter((l) => l.startsWith("entry")).length;
+    assert.equal(book.claimEntry(addr(1)), "not-nominated");
+    assert.equal(counters.log.filter((l) => l.startsWith("entry")).length, takes, "nothing is taken");
+    assert.equal(book.nominated(addr(1)), null);
+    assert.equal(book.onReviewed(addr(1), buy({ decisionId: "dec_late" })), null);
+    assert.equal(book.onFill("dec_late", "landed", false), null, "a later decision does not speak for it");
+    assert.equal(book.priority().size, 0);
+    // It is still held, so the coin is not re-nominated under it.
+    assert.deepEqual(book.nominate(nom({ address: addr(1), chatId: -2, senderId: 2 }, clock.t), READY_PAPER), { ok: false, reason: "recent" });
+    assert.equal(book.onFill("dec_b", "paper", true)?.kind, "bought");
+  });
+
+  it("the grace has a hard bound: an entry that never answers is expired at TTL plus the grace", () => {
+    const { book, clock } = setup();
+    book.nominate(nom({ address: addr(1), chatId: -1, messageId: 10 }), READY_PAPER);
+    book.onReviewed(addr(1), buy({ decisionId: "dec_b" }));
+    assert.equal(book.claimEntry(addr(1)), "taken");
+    assert.equal(book.onFill("dec_b", "submitted", false), null, "submitted is not an answer");
+    clock.t = T0 + NOMINATE.ttlMs + NOMINATE.entryInFlightGraceMs - 1;
+    assert.deepEqual(book.expire(), []);
+    clock.t = T0 + NOMINATE.ttlMs + NOMINATE.entryInFlightGraceMs;
+    assert.deepEqual(book.expire(), [{ kind: "expired", address: addr(1), chatId: -1, messageId: 10 }]);
+    assert.equal(book.onFill("dec_b", "landed", false), null, "too late to speak for it");
+  });
+
+  it("a refund ends the grace: no fill is coming, so the TTL applies again", () => {
+    const { book, clock, counters } = setup();
+    book.nominate(nom({ address: addr(1), chatId: -1, messageId: 10 }), READY_PAPER);
+    book.onReviewed(addr(1), buy({ decisionId: "dec_b" }));
+    assert.equal(book.claimEntry(addr(1)), "taken");
+    clock.t = T0 + NOMINATE.ttlMs + MIN;
+    assert.deepEqual(book.expire(), []);
+    book.refundEntry(addr(1));
+    assert.equal(counters.entries, 0);
+    assert.deepEqual(book.expire(), [{ kind: "expired", address: addr(1), chatId: -1, messageId: 10 }]);
+  });
+
+  it("an older unspent claim for the same coin does not keep a new nomination of it alive", () => {
+    const { book, clock } = setup();
+    // The first nomination's entry went `submitted` and never answered: its
+    // claim stays outstanding after the hard bound expires the nomination.
+    book.nominate(nom({ address: addr(1), chatId: -1, senderId: 1 }), READY_PAPER);
+    book.onReviewed(addr(1), buy({ decisionId: "dec_first" }));
+    assert.equal(book.claimEntry(addr(1)), "taken");
+    clock.t = T0 + NOMINATE.ttlMs + NOMINATE.entryInFlightGraceMs;
+    assert.equal(book.expire().length, 1);
+    // The coin is posted again (expired is not a verdict) and nobody claims.
+    const again = clock.t;
+    assert.ok(book.nominate(nom({ address: addr(1), chatId: -2, messageId: 20, senderId: 2 }, again), READY_PAPER).ok);
+    clock.t = again + NOMINATE.ttlMs;
+    assert.deepEqual(book.expire(), [{ kind: "expired", address: addr(1), chatId: -2, messageId: 20 }]);
+  });
+
   it("an expiry found by another call is kept for expire(), never lost", () => {
     const { book, clock } = setup();
     book.nominate(nom({ address: addr(1), chatId: -1, messageId: 10 }), READY_PAPER);
@@ -831,6 +928,17 @@ describe("reset: a context change", () => {
     assert.equal(book.onFill("dec_b", "landed", false), null);
     assert.deepEqual(book.reset(), []);
     assert.deepEqual(book.expire(), []);
+  });
+
+  it("spares a nomination whose claimed entry is in flight: its order was already taken, and its fill answers it", () => {
+    const { book } = setup();
+    book.nominate(nom({ address: addr(1), chatId: -1, messageId: 1, senderId: 1 }), READY_PAPER);
+    book.nominate(nom({ address: addr(2), chatId: -2, messageId: 2, senderId: 2 }), READY_PAPER);
+    book.onReviewed(addr(1), buy({ decisionId: "dec_b" }));
+    assert.equal(book.claimEntry(addr(1)), "taken");
+    assert.deepEqual(book.reset(), [{ kind: "expired", address: addr(2), chatId: -2, messageId: 2 }]);
+    assert.equal(book.onFill("dec_b", "paper", true)?.kind, "bought");
+    assert.equal(book.onExit(addr(1))?.kind, "exited");
   });
 
   it("includes expiries already found but not yet collected", () => {

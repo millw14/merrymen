@@ -27,9 +27,10 @@ export const HELD_REVIEW_MAX_GAP_MS = 5 * 60_000;
 
 export const TRENCH_REVIEW_INTERVAL_MS = 30_000;
 /**
- * A priority (nominated) coin is preferred again only this long after its
- * last review launched: two review intervals, so it can hold at most every
- * other slot and the rotation keeps the rest. See `TrenchBrainReview.candidate`.
+ * A priority (nominated) coin is preferred only this long after the last
+ * review launched for ANY nominated coin, and after its own last review: two
+ * review intervals, so nominations together hold at most every other slot and
+ * the rotation keeps the rest. See `TrenchBrainReview.candidate`.
  */
 export const PRIORITY_RETRY_MS = 2 * TRENCH_REVIEW_INTERVAL_MS;
 
@@ -223,6 +224,15 @@ export class TrenchBrainReview {
    * only to space out a priority coin's retries (see `candidate`).
    */
   private launchedAtMs = new Map<string, number>();
+  /** The priority hint the last `candidate` call was given (lowercased), for `launch`. */
+  private priorityKeys: ReadonlySet<string> = new Set();
+  /**
+   * When a review last launched for a token in that hint, ms epoch — the
+   * spacing that keeps nominations TOGETHER to every other slot. Its own
+   * stamp, not read off `launchedAtMs`: a nomination that resolved on its
+   * review leaves the hint, and its slot must still count.
+   */
+  private priorityLaunchedAtMs: number | undefined;
   private reviewSequence = 0;
   constructor(private now = Date.now) {}
 
@@ -240,6 +250,8 @@ export class TrenchBrainReview {
     this.reviewed.clear();
     this.reviewedAtMs.clear();
     this.launchedAtMs.clear();
+    this.priorityKeys = new Set();
+    this.priorityLaunchedAtMs = undefined;
     this.reviewSequence = 0;
     return true;
   }
@@ -275,34 +287,46 @@ export class TrenchBrainReview {
    * ── A NOMINATED COIN GOES FIRST, AND ONLY FIRST ──────────────────────
    *
    * `priority` is the nomination book's hint (trencher-nominate.ts
-   * `priority()`: at most one address, the coin a Telegram group posted that
-   * is now under review). An ELIGIBLE coin in it is picked ahead of the
-   * rotation — eligible meaning it already passed everything the caller
-   * filters on (tape, verification, `shouldEnter`), so the hint moves a coin
-   * up the queue and never onto it. Held positions are untouched: this only
-   * picks the entry candidate, and `chooseFocus`'s overdue rule still decides
-   * between it and a holding.
+   * `priority()`: the coins Telegram groups posted that still wait for a
+   * review, in queue order). The FIRST of them that is ELIGIBLE is picked
+   * ahead of the rotation — eligible meaning it already passed everything the
+   * caller filters on (tape, verification, `shouldEnter`), so the hint moves a
+   * coin up the queue and never onto it. First eligible, not first: the head
+   * of the queue may never pass the tick's filters, and it must not hold the
+   * preference away from a coin behind it that does. Held positions are
+   * untouched: this only picks the entry candidate, and `chooseFocus`'s
+   * overdue rule still decides between it and a holding.
    *
-   * SPACED, SO A NOMINATION CANNOT TAKE EVERY SLOT. A review that produced no
-   * decision (the Brain down, a refusal) leaves the nomination unresolved, and
-   * an unspaced preference would re-ask about that one coin every 30s until its
-   * TTL, starving the tape. So a priority coin is preferred again only once
-   * `PRIORITY_RETRY_MS` has passed since its last launch — at most every other
+   * SPACED, SO NOMINATIONS CANNOT TAKE EVERY SLOT. A review that produced no
+   * decision (the Brain down, a refusal) leaves a nomination unresolved, and
+   * an unspaced preference would re-ask every 30s until the TTL, starving the
+   * tape; several nominations taking turns would do the same. So nothing is
+   * preferred until `PRIORITY_RETRY_MS` has passed since a review last
+   * launched for any coin in the hint, and a coin is not preferred again
+   * until that long after its own last launch — together, at most every other
    * review slot — and in between the rotation runs exactly as before.
    */
   candidate<T extends { token: string; volume24hUsd?: number }>(eligible: readonly T[], priority?: ReadonlySet<string>): T | undefined {
     const current = new Set(eligible.map(c => c.token.toLowerCase()));
     for (const key of this.reviewed.keys()) if (!current.has(key)) this.reviewed.delete(key);
+    const wanted = new Set([...(priority ?? [])].map(a => a.toLowerCase()));
+    this.priorityKeys = wanted;
     if (eligible.length === 0) return undefined;
-    if (priority && priority.size > 0) {
-      const wanted = new Set([...priority].map(a => a.toLowerCase()));
+    if (wanted.size > 0) {
       const now = this.now();
-      const preferred = eligible.find(c => {
-        const key = c.token.toLowerCase();
-        const last = this.launchedAtMs.get(key);
-        return wanted.has(key) && (last === undefined || now - last >= PRIORITY_RETRY_MS);
-      });
-      if (preferred) return preferred;
+      const spaced = (last: number | undefined) => last === undefined || now - last >= PRIORITY_RETRY_MS;
+      if (spaced(this.priorityLaunchedAtMs)) {
+        const byToken = new Map<string, T>();
+        for (const c of eligible) {
+          const key = c.token.toLowerCase();
+          if (!byToken.has(key)) byToken.set(key, c);
+        }
+        // Queue order: the hint's order, never the order discovery returned.
+        for (const key of wanted) {
+          const c = byToken.get(key);
+          if (c && spaced(this.launchedAtMs.get(key))) return c;
+        }
+      }
     }
     const seq = (c: T) => this.reviewed.get(c.token.toLowerCase()) ?? 0;
     const busy = (c: T) => (typeof c.volume24hUsd === "number" && Number.isFinite(c.volume24hUsd) ? c.volume24hUsd : -1);
@@ -338,6 +362,9 @@ export class TrenchBrainReview {
     // protect would look permanently current.
     this.reviewedAtMs.set(input.market.symbol, started);
     this.launchedAtMs.set(token.toLowerCase(), started);
+    // Any review of a nominated coin takes a nomination slot, picked through
+    // the hint or reached by the rotation on its own.
+    if (this.priorityKeys.has(token.toLowerCase())) this.priorityLaunchedAtMs = started;
     // The map is read only for currently-held symbols; anything older than an
     // hour is past every gap that could be asked about and is just growth.
     for (const [sym, at] of this.reviewedAtMs) if (started - at > 3_600_000) this.reviewedAtMs.delete(sym);

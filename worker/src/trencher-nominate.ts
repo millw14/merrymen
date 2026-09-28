@@ -37,6 +37,12 @@ import type {
 export const NOMINATE = {
   /** A nomination with no outcome by now is reported `expired`. */
   ttlMs: 15 * 60_000,
+  /**
+   * How much longer than the TTL a nomination whose claimed entry is still in
+   * flight waits for that entry's fill. A hard bound, counted from the
+   * nomination, so an entry that never answers cannot hold its slot forever.
+   */
+  entryInFlightGraceMs: 10 * 60_000,
   /** Unresolved nominations the book holds at once, the one under review included. */
   queueMax: 5,
   perChatHour: 4,
@@ -272,6 +278,16 @@ interface Pending {
   queuedAtMs: number;
   /** Set once the Brain answered BUY: the review is done and a fill is awaited. */
   awaitingFill: boolean;
+  /**
+   * When a group-entry claim was `taken` for THIS nomination, until its
+   * refund. Money may be on its way into the coin, so neither the TTL nor a
+   * reset may end the nomination before the fill says how it went, up to
+   * `entryInFlightGraceMs` past the TTL (see `sweep`; past the TTL it can
+   * start nothing new, see `open`). Kept on the nomination, not read off
+   * `claims`: an older unspent claim for the same address belongs to an
+   * earlier nomination and must not keep a new one alive.
+   */
+  entryInFlightAtMs?: number;
 }
 
 interface BuyReview {
@@ -288,9 +304,9 @@ const validId = (id: unknown): id is string => typeof id === "string" && id.trim
 /**
  * THE NOMINATIONS ONE AGENT IS HOLDING, and every cap on them.
  *
- * One nomination is under review at a time (the oldest waiting one); its
- * address alone is the priority hint, so a held position's overdue review
- * still wins (`chooseFocus` is unchanged). Outcomes are keyed by ADDRESS for
+ * One review runs at a time; every nomination still waiting for one is in the
+ * priority hint, in queue order, and a held position's overdue review still
+ * wins (`chooseFocus` is unchanged). Outcomes are keyed by ADDRESS for
  * reviews and by DECISION ID for fills — never by "the latest decision" —
  * because the review rotation may well have picked a different coin in
  * between.
@@ -372,26 +388,40 @@ export class NominationBook {
 
   /** The nomination under review: the oldest one still waiting for its review. */
   active(): Nomination | null {
-    this.sweep(this.now());
-    const p = this.queue.find((q) => !q.awaitingFill);
+    const t = this.now();
+    this.sweep(t);
+    const p = this.queue.find((q) => this.waiting(q, t));
     return p ? { ...p.n } : null;
   }
 
   /**
-   * The ACTIVE nomination's address only (lowercased), for the review
-   * rotation. One address, not the queue: a hint that covered every pending
-   * coin would crowd out the tape, and held positions' overdue reviews keep
-   * priority over it in `chooseFocus` either way.
+   * EVERY NOMINATION STILL WAITING FOR ITS REVIEW (lowercased addresses), in
+   * queue order, for the review rotation. Not just the oldest: the chat-side
+   * look does not pre-screen depth, flow or discovery's verification, so the
+   * head of the queue may be a coin the tick never finds eligible, and a hint
+   * naming only it would leave every coin queued behind it competing with the
+   * whole tape until its TTL ran out. The reviewer (trencher-brain.ts
+   * `candidate`) takes the first of these that is eligible, and spaces them so
+   * nominations hold at most every other review slot; held positions' overdue
+   * reviews keep priority over all of them in `chooseFocus`.
    */
   priority(): ReadonlySet<string> {
-    const a = this.active();
-    return new Set(a ? [a.address] : []);
+    const t = this.now();
+    this.sweep(t);
+    return new Set(
+      this.queue.filter((q) => this.waiting(q, t)).slice(0, NOMINATE.queueMax).map((q) => q.n.address),
+    );
   }
 
-  /** The unresolved nomination for this address (waiting or awaiting its fill), if any. */
+  /**
+   * The unresolved nomination for this address (waiting or awaiting its
+   * fill) that is still inside its TTL, if any. One kept past the TTL only for
+   * its in-flight entry's fill is not it: see `open`.
+   */
   nominated(address: string): Nomination | null {
-    this.sweep(this.now());
-    const p = this.find(lower(address));
+    const t = this.now();
+    this.sweep(t);
+    const p = this.open(lower(address), t);
     return p ? { ...p.n } : null;
   }
 
@@ -399,7 +429,8 @@ export class NominationBook {
    * A BRAIN REVIEW OF A NOMINATED COIN'S TOKEN.
    *
    * BUY says nothing yet: a buy is only said once a fill lands, so the
-   * decision id is remembered for `onFill` and the TTL keeps running. Once a
+   * decision id is remembered for `onFill` and the TTL keeps running (until
+   * an entry is claimed for it: see `claimEntry`). Once a
    * BUY is recorded, a later HOLD or SELL for the same coin is ignored — a
    * trade for the first decision may be in flight, and "passed" followed by a
    * fill would be a lie told first. A later BUY adds its id, so whichever
@@ -411,7 +442,7 @@ export class NominationBook {
   onReviewed(address: string, d: ReviewedDecision): CoinOutcome | null {
     const t = this.now();
     this.sweep(t);
-    const p = this.find(lower(address));
+    const p = this.open(lower(address), t);
     if (!p || !d) return null;
     const where = { address: p.n.address, chatId: p.n.chatId, messageId: p.n.messageId };
     if (d.action === "buy") {
@@ -481,12 +512,19 @@ export class NominationBook {
    *     entry would go uncounted, and its no-fill refund would pop an OLDER
    *     entry's claim for the same coin (one that may have become a trade)
    *     and hand that slot back.
+   *
+   * A `taken` marks the nomination as having an entry in flight, so the TTL
+   * cannot end it between the claim and the fill (`sweep`): a buy that lands
+   * a moment past the TTL is still told as a buy, not as "sat this one out".
+   * That grace is for the entry already claimed, never for a new one: past
+   * its TTL the nomination answers `not-nominated` here like an expired one.
    */
   claimEntry(address: string): EntryClaim {
     const t = this.now();
     this.sweep(t);
     const a = lower(address);
-    if (!this.find(a)) return "not-nominated";
+    const p = this.open(a, t);
+    if (!p) return "not-nominated";
     let day = "";
     let ok = false;
     try {
@@ -497,6 +535,7 @@ export class NominationBook {
     }
     if (!ok) return "cap";
     push(this.claims, a, { day, atMs: t });
+    p.entryInFlightAtMs = t;
     return "taken";
   }
 
@@ -509,9 +548,15 @@ export class NominationBook {
    * claim popped here is the one this entry's own claimEntry pushed. After a
    * `cap` or `not-nominated` there is no claim of this entry's to give back,
    * and the one on top would belong to a different entry.
+   *
+   * No fill is coming, so the nomination's entry is no longer in flight: the
+   * TTL applies to it again from here.
    */
   refundEntry(address: string): void {
-    const c = this.spendClaim(lower(address));
+    const a = lower(address);
+    const p = this.find(a);
+    if (p) p.entryInFlightAtMs = undefined;
+    const c = this.spendClaim(a);
     if (!c) return;
     try {
       this.counters.refundGroupEntry(c.day);
@@ -555,11 +600,17 @@ export class NominationBook {
    * The caps are NOT reset: rolling windows, the re-nominate memory and
    * outstanding entry claims all survive, so flipping a setting never hands
    * out fresh allowance.
+   *
+   * A nomination whose claimed entry is in flight is the exception: its
+   * order was already taken, so the reset review state is not what answers
+   * it — the entry's trade row is. It stays for that fill, under the same hard
+   * bound as the TTL gives it.
    */
   reset(): CoinOutcome[] {
     const t = this.now();
     this.sweep(t);
     for (const p of [...this.queue]) {
+      if (p.entryInFlightAtMs !== undefined) continue;
       this.outbox.push({ kind: "expired", address: p.n.address, chatId: p.n.chatId, messageId: p.n.messageId });
       this.retire(p);
     }
@@ -570,6 +621,22 @@ export class NominationBook {
 
   private find(address: string): Pending | undefined {
     return address ? this.queue.find((p) => p.n.address === address) : undefined;
+  }
+
+  /**
+   * The nomination for this address while it is inside its TTL: the one a
+   * review may answer and an entry may be claimed against. Past the TTL a
+   * nomination still held for its in-flight entry is only waiting for that
+   * fill; it can start nothing new.
+   */
+  private open(address: string, t: number): Pending | undefined {
+    const p = this.find(address);
+    return p && t - p.queuedAtMs < NOMINATE.ttlMs ? p : undefined;
+  }
+
+  /** Still waiting for its review: not answered BUY, and inside its TTL. */
+  private waiting(p: Pending, t: number): boolean {
+    return !p.awaitingFill && t - p.queuedAtMs < NOMINATE.ttlMs;
   }
 
   private recentVerdict(address: string, t: number): boolean {
@@ -601,10 +668,18 @@ export class NominationBook {
    * Move every nomination past its TTL to the outbox, and forget whatever has
    * aged out of every window. Called at the top of every public method with
    * that call's one reading of the clock.
+   *
+   * A nomination whose claimed entry is still in flight is not ended by the
+   * TTL: the fill that follows (landed, paper, or a final status) resolves it,
+   * and ending it first would tell the group "sat this one out" about a coin
+   * it had just bought and forget the buy. `entryInFlightGraceMs` past the TTL
+   * it expires anyway, so an entry that never answers cannot hold its slot.
    */
   private sweep(t: number): void {
     for (const p of [...this.queue]) {
-      if (t - p.queuedAtMs < NOMINATE.ttlMs) continue;
+      const age = t - p.queuedAtMs;
+      if (age < NOMINATE.ttlMs) continue;
+      if (p.entryInFlightAtMs !== undefined && age < NOMINATE.ttlMs + NOMINATE.entryInFlightGraceMs) continue;
       this.outbox.push({ kind: "expired", address: p.n.address, chatId: p.n.chatId, messageId: p.n.messageId });
       this.retire(p);
     }

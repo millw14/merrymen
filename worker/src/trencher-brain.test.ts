@@ -11,6 +11,7 @@ import { applyPaperIntent } from "./paper";
 import { applyFill, ZERO_BASIS } from "./basis";
 import { checkPolicy, type AgentLimits } from "./policy";
 import { CASH } from "../../packages/core/src/index";
+import { NominationBook } from "./trencher-nominate";
 
 const TOKEN = "0x0000000000000000000000000000000000000011" as const;
 const USDG = "0x0000000000000000000000000000000000000022" as const;
@@ -274,12 +275,63 @@ test("a nominated coin cannot take every review slot: it is re-preferred only af
   assert.equal(PRIORITY_RETRY_MS, 2 * TRENCH_REVIEW_INTERVAL_MS, "at most every other slot");
 });
 
+const HEAD = "0x00000000000000000000000000000000000000bb" as const;
+const SECOND = "0x00000000000000000000000000000000000000cc" as const;
+const noDecision = async () => ({ ran: true, result: { ok: false, kind: "unavailable", detail: "down" } }) as unknown as ShadowOutcome;
+
+test("an ineligible head of the queue does not hold the preference: the first ELIGIBLE nomination, in queue order, goes first", () => {
+  // The chat-side look does not pre-screen depth, flow or discovery's
+  // verification, so the oldest nomination may never be eligible at the tick.
+  const review = new TrenchBrainReview(() => 1000);
+  review.reset("live");
+  // Discovery happened to return NOMINATED before SECOND; HEAD is filtered out.
+  const eligible = [{ token: TOKEN, volume24hUsd: 900_000 }, { token: NOMINATED, volume24hUsd: 300_000 }, { token: SECOND, volume24hUsd: 150_000 }];
+  assert.equal(review.candidate(eligible, new Set([HEAD, SECOND, NOMINATED]))?.token, SECOND, "queue order, not discovery order");
+});
+
+test("the book's hint names every waiting nomination, so the coin behind an ineligible head is looked at first", () => {
+  let now = 1_000_000;
+  const book = new NominationBook({ takeNomination: () => true, takeGroupEntry: () => true, refundGroupEntry: () => {} }, () => now);
+  assert.ok(book.nominate({ address: HEAD, chatId: -1, messageId: 1, senderId: 1, atMs: now }, "ready-paper").ok);
+  now += 60_000;
+  assert.ok(book.nominate({ address: SECOND, chatId: -2, messageId: 2, senderId: 2, atMs: now }, "ready-paper").ok);
+  const review = new TrenchBrainReview(() => now);
+  review.reset("live");
+  const tape = [{ token: TOKEN, volume24hUsd: 900_000 }, { token: SECOND, volume24hUsd: 150_000 }];
+  assert.equal(review.candidate(tape, book.priority())?.token, SECOND);
+});
+
+test("nominations TOGETHER hold at most every other slot, and one that resolved on its review still took its slot", async () => {
+  let now = 1000;
+  const review = new TrenchBrainReview(() => now);
+  review.reset("live");
+  const eligible = [{ token: TOKEN, volume24hUsd: 900_000 }, { token: ROUTER, volume24hUsd: 800_000 }, { token: NOMINATED, volume24hUsd: 150_000 }, { token: SECOND, volume24hUsd: 100_000 }];
+  let priority = new Set<string>([NOMINATED, SECOND]);
+  assert.equal(review.candidate(eligible, priority)?.token, NOMINATED);
+  review.launch("live", input, NOMINATED, noDecision, () => {});
+  await setImmediate();
+  now += TRENCH_REVIEW_INTERVAL_MS;
+  assert.equal(review.candidate(eligible, priority)?.token, TOKEN, "the other nomination does not take the very next slot");
+  review.launch("live", input, TOKEN, noDecision, () => {});
+  await setImmediate();
+  now += TRENCH_REVIEW_INTERVAL_MS;
+  assert.equal(review.candidate(eligible, priority)?.token, NOMINATED, "the slot after that is a nomination's again");
+  review.launch("live", input, NOMINATED, noDecision, () => {});
+  await setImmediate();
+  // That review answered it, so it left the hint; its slot still counts.
+  priority = new Set([SECOND]);
+  now += TRENCH_REVIEW_INTERVAL_MS;
+  assert.equal(review.candidate(eligible, priority)?.token, ROUTER, "the rotation's slot: its busiest coin not yet seen this pass");
+  now += TRENCH_REVIEW_INTERVAL_MS;
+  assert.equal(review.candidate(eligible, priority)?.token, SECOND);
+});
+
 test("the hint picks the ENTRY candidate only: an overdue held position still wins the focus", () => {
   // chooseFocus is untouched: the nominated candidate is just the universe it
   // is offered, and a holding past its review gap takes the slot regardless.
   const review = new TrenchBrainReview(() => 1_000_000);
   review.reset("live");
-  const cand = review.candidate([{ token: NOMINATED }], new Set([NOMINATED]));
+  const cand = review.candidate([{ token: NOMINATED }], new Set([HEAD, NOMINATED]));
   assert.equal(cand?.token, NOMINATED);
   const focus = chooseFocus({
     agentId: AGENT,
