@@ -135,16 +135,21 @@ describe("THE OWNER'S PATHS ARE UNTOUCHED BY THE GATE", () => {
 describe("deciding and telling", () => {
   it("THE PLAN IS DECIDED FROM THE $MERRYMEN READ, before anything this tick could spend it", () => {
     const read = CODE.indexOf("const holderRead = await readHolderStatusResult(cfg.rpcMainnet, cfg.holderAddress, energyAccount);");
-    const refresh = CODE.indexOf("await refreshEnergy(agentId, grant, holderRead.parts);");
+    const refresh = CODE.indexOf("await refreshEnergy(agentId, grant, holderRead.parts, holderStanding);");
     const guard = CODE.indexOf("plan.brain && energyNow.reviews.open");
     assert.ok(read > 0 && refresh > read && guard > refresh);
   });
 
   it("THE LAST GOOD READING IS THE LEDGER'S, per account — loaded once, remembered only when a read decided it", () => {
+    // Kept by holderStandingFor in every mode (the Circle gate reads it too);
+    // refreshEnergy takes the standing it produced and loads nothing itself.
+    const standing = body("holderStandingFor");
+    assert.match(standing, /if \(energyLastGood\?\.agentId !== agentId\) \{/, "a re-signed account does not inherit another's reading");
+    assert.match(standing, /await lastEnergyRead\(agentId, now - ENERGY\.lastGoodMaxAgeSec\)/);
+    assert.match(standing, /if \(decided !== null\) \{[\s\S]*await noteEnergyRead\(agentId, utcDay\(now\), decided, now\);/);
     const refresh = body("refreshEnergy");
-    assert.match(refresh, /if \(energyLastGood\?\.agentId !== agentId\) \{/, "a re-signed account does not inherit another's reading");
-    assert.match(refresh, /await lastEnergyRead\(agentId, now - ENERGY\.lastGoodMaxAgeSec\)/);
-    assert.match(refresh, /if \(decided !== null\) \{[\s\S]*await noteEnergyRead\(agentId, utcDay\(now\), decided, now\);/);
+    assert.match(refresh, /const \{ level \} = standing;/, "observe and enforce decide on that standing");
+    assert.doesNotMatch(refresh, /lastEnergyRead|noteEnergyRead/, "one keeper of the reading");
   });
 
   it("the agent's account counts only on Robinhood Chain", () => {
@@ -213,6 +218,10 @@ describe("deciding and telling", () => {
     const gate = readFileSync(new URL("./circle-gate.ts", import.meta.url), "utf8");
     assert.match(gate, /hold \$\{count\(ENERGY\.fullTokens\)\} \$MERRYMEN \$\{where\} /);
     assert.match(gate, /"between your wallet and my account"/);
-    assert.match(CODE, /isCircleStrategy\(strategy\.name\) && !holderTier\.bonusStrategies/, "the Circle gate itself is unchanged");
+    // The gate unlocks on the exact tier OR the standing energy reads (a
+    // restart's failed first read must not lock a Merry Man out — the pins
+    // and the restart are in circle-gate.test.ts); the line is the same one.
+    assert.match(CODE, /circleStanding\(\{ tierUnlocks: holderTier\.bonusStrategies, level: holderStanding\.level \}\)/);
+    assert.match(CODE, /isCircleStrategy\(strategy\.name\) && !circle\.unlocked/);
   });
 });
