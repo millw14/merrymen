@@ -35,6 +35,19 @@
  * (lib/x-connect.ts accountBody). Handles render only through xHandleTag, and
  * a "View on X" link only when it is exactly an x.com status URL.
  *
+ * ── "COMING UP" IS A PROMISE, SO IT IS KEPT CURRENT ──────────────────────
+ *
+ * The warning tells the owner every post waits under Coming up for at least
+ * ten minutes (the planner's MIN_LEAD_MS) and can be skipped there. That is
+ * only true of a list that shows what the server has: nothing tells an owner
+ * a draft was written, and the orchestrator drafts on its own, at most once a
+ * minute. So while the section is open and posting is on, it re-reads quietly
+ * every POLL_MS (a hidden tab skips its turn and re-reads when it is shown
+ * again), and once more AFTER_ENABLE_MS after the owner turns posting on —
+ * by then the next plan pass has drafted the hello, which is due ten minutes
+ * after the consent. A list read once and left open would show "Nothing
+ * waiting" while the hello was queued, and a Skip on a post that already went.
+ *
  * Hosted only: renders nothing anywhere else. Literal English, like the rest
  * of the Settings screen, which is not in the translated set.
  */
@@ -77,7 +90,7 @@ const warningLead = (handle: string) =>
   `Your Merryman will post from whichever X account is connected — right now that's ${handle}.`;
 const WARNING_BODY = [
   "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
-  "Posts go out on their own, a few a day at most. You'll see each one here before it goes out and can skip it. Turn this off or disconnect X at any time.",
+  "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
   "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto.",
 ] as const;
 const warningYes = (handle: string) => `Let it post as ${handle}`;
@@ -88,6 +101,15 @@ const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post",
 const AUTHORIZE = "https://x.com/i/oauth2/authorize?";
 /** The only link "View on X" may be. */
 const STATUS_URL = /^https:\/\/x\.com\/[A-Za-z0-9_]{1,15}\/status\/\d{1,25}$/;
+
+/**
+ * How often an open section re-reads while posting is on. Well inside the
+ * ten minutes every post waits, so a draft shows within a minute of being
+ * written, and a post that went out stops offering a Skip.
+ */
+const POLL_MS = 45_000;
+/** The one extra re-read after posting is turned on: past the orchestrator's next plan pass (once a minute), so the hello is on screen. */
+const AFTER_ENABLE_MS = 70_000;
 
 // ── talking to the routes ───────────────────────────────────────────────────
 
@@ -100,6 +122,7 @@ type Read =
 type Sent = { ok: true; data: Record<string, unknown> } | { ok: false; status: number; message: string };
 
 const UNREACHABLE = "Couldn't reach merrymen just now. Try again in a moment.";
+const REFRESH_FAILED = "Couldn't refresh this just now.";
 
 /** A 200 is only an answer if it is the shape the route promises; anything else is unread. */
 function accountOf(data: unknown): XAccountBody | null {
@@ -163,12 +186,15 @@ export function XPosting({
   owner,
   hosted,
   navigate = (url: string) => window.location.assign(url),
+  timing = { pollMs: POLL_MS, afterEnableMs: AFTER_ENABLE_MS },
 }: {
   /** The signed-in owner, as the Settings answer named it (SettingsView.owner). Sent with every change. */
   owner: string | null;
   hosted: boolean | null;
   /** Where "Connect X account" sends the browser. A seam for tests; the default leaves for X. */
   navigate?: (url: string) => void;
+  /** The re-read clocks. A seam for tests; the defaults are POLL_MS and AFTER_ENABLE_MS. */
+  timing?: { pollMs: number; afterEnableMs: number };
 }) {
   const [read, setRead] = useState<Read>({ kind: "checking" });
   const [busy, setBusy] = useState(false);
@@ -176,22 +202,27 @@ export function XPosting({
   /** The account the open warning names, captured when the switch was pressed. */
   const [asking, setAsking] = useState<{ xUserId: string; handle: string } | null>(null);
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
+  /** Whether the Settings group this sits in is open (true when it sits in none). */
+  const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
+  const afterEnable = useRef<ReturnType<typeof setTimeout> | null>(null);
   const on = hosted === true;
+  const { pollMs, afterEnableMs } = timing;
 
   /**
    * Read the connection. `quiet` keeps what is on screen while it reads (after
    * a change the screen already shows what the server confirmed), and a quiet
-   * failure says so rather than blanking it.
+   * failure says so rather than blanking it — until a later read works.
    */
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setRead({ kind: "checking" });
     const next = await readAccount();
     if (quiet && next.kind === "failed") {
-      setNote({ text: "Couldn't refresh this just now.", alert: false });
+      setNote({ text: REFRESH_FAILED, alert: false });
       return;
     }
+    if (quiet) setNote((n) => (n?.text === REFRESH_FAILED ? null : n));
     setRead(next);
   }, []);
 
@@ -203,17 +234,50 @@ export function XPosting({
   // section, and re-reading whenever it is opened keeps "Coming up" current.
   useEffect(() => {
     const details = root.current?.closest("details");
-    if (!details) return;
+    if (!details) {
+      setOpen(on);
+      return;
+    }
     if (window.location.hash === "#x-posting") {
       details.open = true;
       details.scrollIntoView?.({ block: "start" });
     }
+    setOpen(details.open);
     const reread = () => {
+      setOpen(details.open);
       if (details.open) void load(true);
     };
     details.addEventListener("toggle", reread);
     return () => details.removeEventListener("toggle", reread);
   }, [load, on]);
+
+  // KEEPING "COMING UP" TRUE: re-read while the owner can see the list and
+  // something may be drafted into it. Not while a change of theirs is in
+  // flight — that change re-reads when it lands.
+  const polling =
+    on && open && !busy && read.kind === "ready" && read.account.connected && read.account.postingEnabled;
+  useEffect(() => {
+    if (!polling) return;
+    const tick = () => {
+      if (document.visibilityState !== "hidden") void load(true);
+    };
+    const shown = () => {
+      if (document.visibilityState === "visible") void load(true);
+    };
+    const timer = setInterval(tick, pollMs);
+    document.addEventListener("visibilitychange", shown);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", shown);
+    };
+  }, [polling, pollMs, load]);
+
+  useEffect(
+    () => () => {
+      if (afterEnable.current) clearTimeout(afterEnable.current);
+    },
+    [],
+  );
 
   // The warning is a native modal: focus is held in it and Escape closes it.
   useEffect(() => {
@@ -301,6 +365,10 @@ export function XPosting({
     if (r.ok && r.data.postingEnabled === true) {
       patch({ postingEnabled: true });
       void load(true);
+      // The hello is drafted on the orchestrator's next plan pass, after this
+      // read: read once more when it will be there, open section or not.
+      if (afterEnable.current) clearTimeout(afterEnable.current);
+      afterEnable.current = setTimeout(() => void load(true), afterEnableMs);
       return;
     }
     setNote({ text: r.ok ? "merrymen didn't confirm that, so posting is still off." : r.message, alert: true });

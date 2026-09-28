@@ -100,6 +100,13 @@ describe("the page, rendered", () => {
     assert.ok(ui.container.querySelector('a[href="/settings#x-posting"]'));
   });
 
+  it("promises only the review window the planner keeps: at least ten minutes under Coming up", async () => {
+    at("");
+    await ui.render(createElement(XConnectClient));
+    assert.match(text(), /Each post then waits there under Coming up for at least ten minutes, and you can skip it\./);
+    assert.doesNotMatch(text(), /you see every post/);
+  });
+
   it("shows the route's own sentence when the finish is refused", async () => {
     answer = () => json({ error: "That sign-in link expired or was already used — start again." }, 400);
     at(`?code=the-code&state=${W}`);

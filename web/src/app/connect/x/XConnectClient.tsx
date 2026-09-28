@@ -102,7 +102,7 @@ export function XConnectClient() {
         <div className="connect-context">
           <span className="connect-eyebrow">YOUR MERRYMAN, ON X</span>
           <h1>Connect X.</h1>
-          <p>Your Merryman posts only after you turn posting on in Settings, and you see every post before it goes out.</p>
+          <p>Your Merryman posts only after you turn posting on in Settings. Each post then waits there under Coming up for at least ten minutes, and you can skip it.</p>
         </div>
         <section className="connect-panel" aria-busy={phase.kind === "working"} aria-live="polite">
           {phase.kind === "working" && (

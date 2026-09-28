@@ -96,7 +96,9 @@ async function press(el: Element | null | undefined, what: string) {
   await settle();
 }
 
-const section = (props: Partial<{ owner: string | null; hosted: boolean | null }> = {}) =>
+type Props = Partial<{ owner: string | null; hosted: boolean | null; timing: { pollMs: number; afterEnableMs: number } }>;
+
+const section = (props: Props = {}) =>
   createElement(
     "details",
     { className: "settings-group", id: "x-posting" },
@@ -104,10 +106,30 @@ const section = (props: Partial<{ owner: string | null; hosted: boolean | null }
     createElement(XPosting, { owner: OWNER, hosted: true, navigate: (url: string) => went.push(url), ...props }),
   );
 
-async function shown(props: Partial<{ owner: string | null; hosted: boolean | null }> = {}) {
+async function shown(props: Props = {}) {
   await ui.render(section(props));
   await until(() => !text().includes("Checking your X connection"), "the first read");
 }
+
+/** Open or close the Settings group, as the owner clicking its summary would. */
+async function setOpen(open: boolean) {
+  const details = ui.container.querySelector("details")!;
+  await act(async () => {
+    details.open = open;
+    details.dispatchEvent(new ui.dom.window.Event("toggle"));
+  });
+  await settle();
+}
+
+const reads = () => calls.filter((c) => c.method === "GET").length;
+/** A wall-clock wait for the re-read clocks, which tests shrink to a few milliseconds. */
+async function settleFor(ms: number) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) await settle(1);
+}
+const FAST = { pollMs: 25, afterEnableMs: 60 };
+/** A draft as the planner writes one now: at least ten minutes before it is due. */
+const DUE_SOON = () => Date.now() + 20 * 60_000;
 
 describe("the switch and the warning", () => {
   it("PRESSING THE SWITCH ON SENDS NOTHING: the warning names the account, and only its button writes", async () => {
@@ -177,7 +199,7 @@ describe("the switch and the warning", () => {
 
   it("turning it OFF writes at once, with no warning", async () => {
     let enabled = true;
-    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: enabled, upcoming: [{ id: 7, kind: "casual", body: "a thought", dueAt: Date.now() + 3_600_000 }] });
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: enabled, upcoming: [{ id: 7, kind: "casual", body: "a thought", dueAt: DUE_SOON() }] });
     routes["POST /api/x/account"] = () => {
       enabled = false;
       return json({ ok: true, postingEnabled: false });
@@ -274,8 +296,8 @@ describe("connecting", () => {
 describe("the lists", () => {
   it("shows what is coming up with a Skip that names the post and the owner, and what was posted with a link to X", async () => {
     let upcoming = [
-      { id: 7, kind: "buy", body: "picked up some paper TSLA, earnings chatter looked good", dueAt: Date.now() + 3_600_000 },
-      { id: 8, kind: "casual", body: "quiet market today", dueAt: Date.now() + 7_200_000 },
+      { id: 7, kind: "buy", body: "picked up some paper TSLA, earnings chatter looked good", dueAt: DUE_SOON() },
+      { id: 8, kind: "casual", body: "quiet market today", dueAt: Date.now() + 35 * 60_000 },
     ];
     routes["GET /api/x/account"] = () =>
       json({
@@ -316,6 +338,75 @@ describe("the lists", () => {
     routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: true });
     await shown();
     assert.match(text(), /Nothing waiting to go out\./);
+  });
+});
+
+describe("keeping Coming up current (every post waits there ten minutes; the list must show it)", () => {
+  it("re-reads on its own while the section is open and posting is on: a new draft appears, a sent one loses its Skip", async () => {
+    let upcoming: { id: number; kind: string; body: string; dueAt: number }[] = [];
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: true, upcoming });
+    await shown({ timing: FAST });
+    await setOpen(true);
+    assert.match(text(), /Nothing waiting to go out\./);
+
+    // The orchestrator drafts; nobody touches the screen.
+    upcoming = [{ id: 9, kind: "casual", body: "the quiet hour before the open", dueAt: DUE_SOON() }];
+    await until(() => text().includes("the quiet hour before the open"), "the new draft, without an owner action");
+    assert.equal(buttons("Skip").length, 1);
+    // It goes out; the list stops offering to skip it.
+    upcoming = [];
+    await until(() => buttons("Skip").length === 0, "the sent post gone from Coming up");
+    assert.deepEqual(writes(), [], "re-reading is only reading");
+  });
+
+  it("stops re-reading when the section is closed, and never re-reads while posting is off", async () => {
+    let enabled = true;
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: enabled });
+    await shown({ timing: FAST });
+    await setOpen(true);
+    await until(() => reads() >= 4, "a few re-reads while open");
+    await setOpen(false);
+    let before = reads();
+    await settleFor(FAST.pollMs * 6);
+    assert.equal(reads(), before, "a closed section kept reading");
+
+    enabled = false;
+    await setOpen(true);
+    before = reads();
+    await settleFor(FAST.pollMs * 6);
+    assert.equal(reads(), before, "posting is off: nothing can be drafted, so nothing to re-read");
+  });
+
+  it("a re-read that fails says so quietly, keeps the list, and clears the note when the next one works", async () => {
+    let down = false;
+    routes["GET /api/x/account"] = () =>
+      down ? json({ error: "boom" }, 500) : json({ ...CONNECTED, postingEnabled: true, upcoming: [{ id: 7, kind: "casual", body: "a thought", dueAt: DUE_SOON() }] });
+    await shown({ timing: FAST });
+    await setOpen(true);
+    down = true;
+    await until(() => text().includes("Couldn't refresh this just now."), "the quiet failure");
+    assert.match(text(), /a thought/, "a failed re-read never blanks the list");
+    down = false;
+    await until(() => !text().includes("Couldn't refresh this just now."), "the note cleared by a read that worked");
+  });
+
+  it("reads once more after posting is turned on, so the hello drafted on the next plan pass is on screen", async () => {
+    let enabled = false;
+    let upcoming: { id: number; kind: string; body: string; dueAt: number }[] = [];
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: enabled, upcoming });
+    routes["POST /api/x/account"] = () => {
+      enabled = true;
+      return json({ ok: true, postingEnabled: true });
+    };
+    // A long poll, so only the one re-read after enabling can find the hello.
+    await shown({ timing: { pollMs: 60_000, afterEnableMs: FAST.afterEnableMs } });
+    await press(theSwitch(), "the switch");
+    await press(buttons("Let it post as @merry_poster")[0], "the warning's confirm");
+    await until(() => theSwitch()?.getAttribute("aria-checked") === "true", "on");
+    assert.match(text(), /Nothing waiting to go out\./, "the read right after enabling is before the plan pass");
+    // The next plan pass drafts the hello, due ten minutes after the consent.
+    upcoming = [{ id: 1, kind: "intro", body: "hi, I'm an AI trading agent", dueAt: Date.now() + 10 * 60_000 }];
+    await until(() => text().includes("hi, I'm an AI trading agent"), "the hello, read without an owner action");
   });
 });
 
@@ -376,7 +467,7 @@ describe("the warning keeps its words", () => {
       "Post on X as ${handle}?",
       "Your Merryman will post from whichever X account is connected — right now that's ${handle}.",
       "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
-      "Posts go out on their own, a few a day at most. You'll see each one here before it goes out and can skip it. Turn this off or disconnect X at any time.",
+      "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
       "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto.",
       "Let it post as ${handle}",
       "Not now",
@@ -394,6 +485,11 @@ describe("the warning keeps its words", () => {
     const inside = SRC.lastIndexOf("\n  const confirmWarning", at);
     const next = SRC.indexOf("\n  const ", inside + 1);
     assert.ok(inside > 0 && at < next, "the enable write lives in the warning's confirm");
+  });
+
+  it("re-reads well inside the ten minutes every post waits, and once more past the first plan pass after enabling", () => {
+    assert.match(SRC, /const POLL_MS = 45_000;/);
+    assert.match(SRC, /const AFTER_ENABLE_MS = 70_000;/);
   });
 
   it("the caption and the 'on' line both say whichever account is connected", () => {
