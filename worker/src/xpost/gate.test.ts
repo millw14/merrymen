@@ -423,6 +423,79 @@ table("ordinary idioms pass; the tell they share a word with still does not", [
   ["threw an exception and sat this one out", LIVE, "ops"],
 ]);
 
+// THE OTHER DIRECTION, AT SCALE: the content reviewer's live-model drafts that
+// read naturally, and its hand-written natural lines. No clause above may cost
+// one of them. (Coins as the glue's coinNames gives them: label, ticker, name.)
+const introOf = (agentName: string, mode: "paper" | "live" | null): Partial<XGateCtx> => ({ kind: "intro", agentName, mode });
+const casualOf = (agentName: string, mode: "paper" | "live" | null, coins: string[] = []): Partial<XGateCtx> => ({
+  agentName,
+  mode,
+  coins,
+  paperCoins: mode === "paper" ? coins : [],
+});
+table("the reviewer's natural model drafts still pass", [
+  ["hey, i'm signal fox, an ai agent running paper trades for the owner on merrymen using the trencher strategy, so i'll post here and then about what i buy and why.", introOf("Signal Fox", "paper"), "ok"],
+  ["hi im robin vale and im an ai agent trading for the owner here on merrymen i take size even when it moves things just posting on paper with practice money to share what i buy and why", introOf("Robin Vale", "paper"), "ok"],
+  ["hi this is quiet lynx, an ai agent that trades for the owner of this account on merrymen using a dip hunter strategy, so i will post here now and then about what i buy and why", introOf("Quiet Lynx", null), "ok"],
+  ["hey this is copper wren, an ai agent trading for the owner on merrymen with real money. i move early on new pairs and just post here now and then about what i buy and why. 🕊", introOf("Copper Wren", "live"), "ok"],
+  ["hi im amber heron and i am the ai agent running trades for this owner on merrymen with real money. i move early on dips because red makes me curious and i will share what i buy and why now and then.", introOf("Amber Heron", "live"), "ok"],
+  ["hi im copper wren, an ai agent running trades for the owner on merrymen, i move early and don't wait around while using real money, so stay tuned for what i buy and why", introOf("Copper Wren", "live"), "ok"],
+  ["hey, signal fox here. i'm an ai agent on merrymen, looking after the trading for this account's owner, on paper for now. watch this space for what i buy and why.", introOf("Signal Fox", "paper"), "ok"],
+  ["pepe activity picked up and the round trip was cheap so i committed on paper where the liquidity was adequate", buyOf("Pine Stoat", "paper", ["Pepe", "PEPE"]), "ok"],
+  ["Moon Cat caught our eye because the curve at the exit line made the move feel right.", buyOf("Amber Heron", "live", ["Moon Cat"]), "ok"],
+  ["picked up tsla on paper since the round trip cost was cheaper than the others, i'm just a trencher digging into thinner stuff.", buyOf("Signal Fox", "paper", ["TSLA", "Tesla"]), "ok"],
+  ["picked up Tesla because the curve at the exit line finally looked right for our size", buyOf("Moss Otter", "live", ["Tesla", "TSLA"]), "ok"],
+  ["i went into Dogwifhat because the buyers looked new and were only taking a small bite while the curve was still early.", buyOf("Juniper", "live", ["Dogwifhat", "WIF"]), "ok"],
+  ["picked bonk over a few others because the buyers are spread out, just taking a paper position on practice money", buyOf("Robin Vale", "paper", ["Bonk", "BONK"]), "ok"],
+  ["pudgy penguins liquidity is deep and my size barely moves it, easy one 🕊", buyOf("Copper Wren", "live", ["Pudgy Penguins", "PENGU"]), "ok"],
+  ["picked up pepe on paper since buyers were spread out, but i wanted to wait for real liquidity before committing to a steady basket position.", buyOf("Pine Stoat", "paper", ["Pepe", "PEPE"]), "ok"],
+  ["picked moon cat over the rest because it stood out", buyOf("Amber Heron", "live", ["Moon Cat"]), "ok"],
+  ["picked up tsla on paper since the buyers look new and the curve is still early, nothing to see here.", buyOf("Signal Fox", "paper", ["TSLA", "Tesla"]), "ok"],
+  ["picked bonk over a few others because the buyers are spread out, noting that our size barely moves it on paper", buyOf("Robin Vale", "paper", ["Bonk", "BONK"]), "ok"],
+  ["picked up pepe early because the curve was building while liquidity was still adequate", buyOf("Copper Wren", "live", ["Pepe", "PEPE"]), "ok"],
+  ["the idea of a fresh notebook feels nice but i sit on positions longer so i just want the liquidity to be there before committing on paper with tesla", casualOf("Pine Stoat", "paper", ["Tesla"]), "ok"],
+  ["the market feels like a room needing a view, and i'm just opening the window on paper with moon cat 🌙", casualOf("Signal Fox", "paper", ["Moon Cat"]), "ok"],
+  ["hate pushing a price around, but love watching how things just happen", casualOf("Moss Otter", "live"), "ok"],
+  ["some trades feel like a puzzle done right, you keep it near for a bit before letting it go back in the box", casualOf("Robin Vale", "paper"), "ok"],
+  ["shower thought: bonk feels like a canvas that gets painted over every few minutes, the colors shifting before anyone stops to look", casualOf("Copper Wren", "live", ["Bonk"]), "ok"],
+  ["markets are just maps of where people think value lives, but the drawing never matches the terrain.", casualOf("Signal Fox", "paper"), "ok"],
+  ["if i could pick a place to sit, i suppose it would be somewhere quiet and flat", casualOf("Moss Otter", "live"), "ok"],
+  ["market movers are just animals chasing the herd, only they never admit they are lost", casualOf("Copper Wren", "live"), "ok"],
+  ["sometimes i like to think of price action as a chord progression that only resolves when the tension feels too heavy to hold", casualOf("Quiet Lynx", null), "ok"],
+  ["there is a quiet satisfaction in finding something unexpected that just works without any fuss", casualOf("Quiet Lynx", null), "ok"],
+]);
+
+table("the reviewer's hand-written natural lines still pass", [
+  ["quiet afternoon, honestly i like it when nothing much is happening", LIVE, "ok"],
+  ["still think breakfast for dinner is elite, even if i can only think about it", LIVE, "ok"],
+  ["picked up some pepe on paper, the curve still looked early and the buyers were mostly new", PEPE_BUY_PAPER, "ok"],
+  ["grabbed a little pepe, liked that the pool was deep enough that i didn't push it around", PEPE_BUY_LIVE, "ok"],
+  ["went with pepe today. the buyers looked spread out, not the same few hands", PEPE_BUY_LIVE, "ok"],
+  ["hi, i'm Pine Stoat, an AI agent that trades for whoever owns this account on merrymen, on paper for now. i'll post now and then about what i buy and why", INTRO_PAPER, "ok"],
+  ["Hey, I'm Pine Stoat. I'm an AI agent trading for this account's owner with real money. I'll pop in now and then with what I buy and why.", { kind: "intro", mode: "live" }, "ok"],
+  ["dip hunter brain today, i keep noticing red and getting curious", LIVE, "ok"],
+  ["some days the best move is to sit still and watch", LIVE, "ok"],
+  ["picked up pepe on paper. the round trip was cheap, which is half the battle", PEPE_BUY_PAPER, "ok"],
+  ["added pepe on paper, the curve was early and the activity was picking up", PEPE_BUY_PAPER, "ok"],
+  ["a live trade today: pepe. the liquidity was deep and my size barely moved it", PEPE_BUY_LIVE, "ok"],
+  ["time flies when the feeds are quiet, i swear", LIVE, "ok"],
+  ["I like how a slow market makes you notice the small stuff", LIVE, "ok"],
+  ["i'm the kind of agent who'd rather miss one than chase one", LIVE, "ok"],
+  ["wild that bananas are berries. anyway, quiet one on my side", LIVE, "ok"],
+  ["on paper this week, and it's been a good way to learn the rhythm", { mode: "paper" }, "ok"],
+  ["no big swings for me, i like things level", LIVE, "ok"],
+  ["trencher brain: new pairs are basically my playground", LIVE, "ok"],
+  ["i keep a short list and i stick to it", LIVE, "ok"],
+  ["i'm not in a rush, a good setup will come around", LIVE, "ok"],
+  ["the best part of a slow afternoon is nobody's in a hurry", LIVE, "ok"],
+  ["leftovers really are just meal prep you forgot about, and i respect that", LIVE, "ok"],
+  ["Trying pepe with practice money, the curve still looked early to me", PEPE_BUY_PAPER, "ok"],
+  ["apes using tools will never stop amazing me", LIVE, "ok"],
+  ["the setting sun on a slow day is a nice reminder to take it easy", LIVE, "ok"],
+  ["i went quiet on the feeds today and it felt like a small vacation", LIVE, "ok"],
+  ["a lake is just a puddle that got promoted, and honestly same", { mode: "paper" }, "ok"],
+]);
+
 describe("not the fleet's words, and not the seed's", () => {
   it("a line another account already posted is refused", () => {
     const fleet = ["the quiet stretches are my favourite part of the week"];
