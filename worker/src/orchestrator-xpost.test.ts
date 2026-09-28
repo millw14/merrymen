@@ -853,6 +853,36 @@ describe("fleet guards", () => {
     assert.equal(w.tweets.length, 0);
   });
 
+  it("plans at most once a minute, however often it sends", async (t) => {
+    const w = await world(t, T0 - 2 * HOUR);
+    let factsCalls = 0;
+    const counting: XPosterDeps["facts"] = async (...args) => {
+      factsCalls++;
+      return factsOf([])(...(args as [Db, unknown, unknown, number]));
+    };
+    const p = poster(w, { facts: counting });
+    await p.step(w.db, ROSTER, new Map(), T0);
+    await p.step(w.db, ROSTER, new Map(), T0 + 15_000);
+    await p.step(w.db, ROSTER, new Map(), T0 + 30_000);
+    assert.equal(factsCalls, 1);
+    await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+    assert.equal(factsCalls, 2);
+  });
+
+  it("an owner whose zone cannot be read this pass is not awake: nothing is sent or planned for them", async (t) => {
+    const w = await world(t, T0 - 2 * HOUR);
+    await dueCasual(w, "casual:unknown-night", { dueAtMs: T0 - MIN });
+    const unreadable: XPosterDeps["member"] = async () => {
+      throw new Error("the room's table is unreachable");
+    };
+    const p = poster(w, { member: unreadable });
+    const log = (await p.step(w.db, ROSTER, new Map(), T0)).log;
+    assert.equal(w.tweets.length, 0);
+    assert.equal(await store.keyStatus(w.db, "casual:unknown-night"), "scheduled", "held, not sent");
+    assert.equal(await store.keyStatus(w.db, `intro:${TENANT}:111`), null, "no hello planned either");
+    assert.equal(log, "xpost: zone-unreadable 1");
+  });
+
   it("a credits pause holds every due post, and is said once", async (t) => {
     const w = await world(t, T0 - 2 * HOUR);
     await introDealtWith(w);
