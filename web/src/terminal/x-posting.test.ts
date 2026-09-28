@@ -169,6 +169,34 @@ describe("the switch and the warning", () => {
     assert.equal(ui.container.querySelector("dialog"), null);
   });
 
+  it("THE WARNING OPENS ON ITS LEAD SENTENCE, NOT ITS CONSENT BUTTON: a second Enter on the switch sends nothing", async () => {
+    // jsdom has no showModal. This one does what a browser's does: open, and
+    // focus the first thing in the dialog that Tab would reach — which, left
+    // alone, is "Let it post as @h".
+    const proto = ui.dom.window.HTMLDialogElement.prototype as HTMLDialogElement & Record<string, unknown>;
+    proto.showModal = function (this: HTMLDialogElement) {
+      this.setAttribute("open", "");
+      this.querySelector<HTMLElement>("[autofocus], button:not([disabled]), a[href], input, select, textarea, [tabindex]:not([tabindex='-1'])")?.focus();
+    };
+    proto.close = function (this: HTMLDialogElement) {
+      this.removeAttribute("open");
+    };
+    await shown();
+    theSwitch()!.focus();
+    await press(theSwitch(), "the switch (Enter)");
+    const dialog = ui.container.querySelector("dialog")!;
+    const active = ui.dom.window.document.activeElement;
+    assert.notEqual(active, buttons("Let it post as @merry_poster")[0], "focus landed on the consent");
+    assert.equal(active?.id, "xpost-warning-lead");
+    assert.match(active?.textContent ?? "", /whichever X account is connected/);
+    // The warning is announced by the sentence that matters.
+    assert.equal(dialog.getAttribute("aria-describedby"), "xpost-warning-lead");
+    // Key repeat, or a second press: the next Enter lands on whatever has focus.
+    await press(ui.dom.window.document.activeElement, "the second Enter");
+    assert.deepEqual(writes(), [], "two presses of the switch consented");
+    assert.equal(theSwitch()?.getAttribute("aria-checked"), "false");
+  });
+
   it("the confirm sends the account the warning NAMED, even if a re-read changed the screen underneath", async () => {
     routes["POST /api/x/account"] = () => json({ error: "The connected X account changed — check which account is connected and try again." }, 409);
     await shown();

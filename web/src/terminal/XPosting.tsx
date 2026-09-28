@@ -215,6 +215,8 @@ export function XPosting({
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
+  /** The warning's lead sentence, where focus goes when the warning opens. */
+  const lead = useRef<HTMLParagraphElement>(null);
   const afterEnable = useRef<ReturnType<typeof setTimeout> | null>(null);
   const on = hosted === true;
   const { pollMs, afterEnableMs } = timing;
@@ -289,6 +291,14 @@ export function XPosting({
   );
 
   // The warning is a native modal: focus is held in it and Escape closes it.
+  //
+  // FOCUS GOES TO THE SENTENCE, NOT THE BUTTON. Left to itself, showModal
+  // focuses the first button in the dialog — "Let it post as @h" — so an
+  // Enter held a moment too long on the switch (key repeat), or pressed
+  // twice, would consent without the warning being read, and a screen reader
+  // would announce the button and skip the one sentence this flow exists to
+  // say. The lead is focused instead (tabIndex -1: reachable by script, not
+  // by Tab), and it is the dialog's description.
   useEffect(() => {
     const node = dialog.current;
     if (!node) return;
@@ -297,6 +307,7 @@ export function XPosting({
     } else {
       node.setAttribute("open", "");
     }
+    lead.current?.focus();
   }, [asking]);
 
   if (!on) return null;
@@ -557,6 +568,7 @@ export function XPosting({
           ref={dialog}
           className="portfolio-dialog xpost-dialog"
           aria-labelledby="xpost-warning-title"
+          aria-describedby="xpost-warning-lead"
           onCancel={(event) => {
             event.preventDefault();
             closeWarning();
@@ -566,7 +578,9 @@ export function XPosting({
             <h2 id="xpost-warning-title">{warningTitle(asking.handle)}</h2>
           </div>
           <div className="portfolio-body">
-            <p><strong>{warningLead(asking.handle)}</strong></p>
+            <p id="xpost-warning-lead" ref={lead} tabIndex={-1}>
+              <strong>{warningLead(asking.handle)}</strong>
+            </p>
             {WARNING_BODY.map((line) => <p key={line}>{line}</p>)}
             <div className="resign-actions">
               <button type="button" className="mm-btn primary" disabled={busy} onClick={() => void confirmWarning()}>
