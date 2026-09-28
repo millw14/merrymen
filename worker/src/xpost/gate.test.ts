@@ -609,6 +609,21 @@ describe("not the fleet's words, and not the seed's", () => {
     assert.equal(reason("a frog would be a fine pet for something that never leaves the house, i think", frog), "ok");
   });
 
+  it("any seed's phrase — four of its content words in its order — is its words, however little else is shared", () => {
+    // The review's leak: four of seven words shared (0.57, under the limit),
+    // but they were the feed post's clause, lifted whole.
+    const feed = { kind: "buy" as const, mode: "live" as const, coins: ["Moon Cat", "MCAT"], seeds: ["small bite here, the pool looked healthy and it's early"] };
+    assert.equal(reason("picked up moon cat because the pool looked healthy and it was early.", feed), "seed-echo");
+    const faces = { kind: "buy" as const, mode: "live" as const, coins: ["Bonk", "BONK"], seeds: ["liked how fresh this one felt, lots of new faces buying"] };
+    assert.equal(reason("went with bonk while lots of new faces were buying it", faces), "seed-echo");
+    const turtles = { seeds: ["thinking about how sea turtles find their way back to the beach they hatched on"] };
+    assert.equal(reason("somehow sea turtles find their way back home, and i think about that a lot", turtles), "seed-echo");
+    // …the same words, not in a row or not in its order, are a riff
+    assert.equal(reason("moon cat had a healthy pool when i went in, early enough that i liked it", feed), "ok");
+    assert.equal(reason("new faces kept showing up to buy bonk, and it felt fresh to me", faces), "ok");
+    assert.equal(reason("instinct is a strange compass, carrying a creature across oceans to where it began", turtles), "ok");
+  });
+
   it("a short seed pasted in whole, with a tail after it, is still the seed's sentence", () => {
     const berries = { mode: "paper" as const, coins: ["tsla"], paperCoins: ["tsla"], seeds: ["wild that avocados are berries"] };
     assert.equal(reason("wild that avocados are berries but im still watching tsla on paper since i like holding through the noise", berries), "seed-echo");

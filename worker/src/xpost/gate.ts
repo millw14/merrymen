@@ -672,6 +672,17 @@ function contentRun(text: string): string {
     .join(" ");
 }
 
+/** Content words in a row that are a seed's phrase however the rest of the draft is weighed (see echoesSeed). */
+const SEED_RUN_WORDS = 4;
+
+/** Does the draft say `n` of the seed's content words in the seed's order, back to back? */
+function sharesRun(text: string, seed: string, n: number): boolean {
+  const s = contentRun(seed).split(" ").filter(Boolean);
+  const t = ` ${contentRun(text)} `;
+  for (let i = 0; i + n <= s.length; i++) if (t.includes(` ${s.slice(i, i + n).join(" ")} `)) return true;
+  return false;
+}
+
 /**
  * DOES A DRAFT ECHO ITS SEED? A seed that is a sentence is weighed like any
  * echo: shared content words over the shorter side's. A SHORT seed — "the
@@ -684,10 +695,18 @@ function contentRun(text: string): string {
  * says the seed's words in a row: the seed pasted in with a tail after it
  * ("wild that avocados are berries but im still watching tsla…") is still the
  * seed's sentence, not the agent's.
+ *
+ * A LONG SEED'S PHRASE IS ITS WORDS TOO. Weighed by share alone, a buy post
+ * that lifted a clause of its feed post — "picked up moon cat because the
+ * pool looked healthy and it was early" from "small bite here, the pool
+ * looked healthy and it's early" — shared four of seven words (0.57, under
+ * the limit) and cross-posted the feed's words. So any seed also counts as
+ * echoed when the draft says SEED_RUN_WORDS of its content words in the
+ * seed's order, with nothing of the draft's own between them.
  */
 function echoesSeed(text: string, seed: string): boolean {
   const s = contentWords(seed);
-  if (s.size >= SEED_SENTENCE_WORDS) return similarity(text, seed) >= REPEAT_LIMIT;
+  if (s.size >= SEED_SENTENCE_WORDS) return similarity(text, seed) >= REPEAT_LIMIT || sharesRun(text, seed, SEED_RUN_WORDS);
   const t = contentWords(text);
   if (s.size === 0 || t.size === 0) return false;
   if (s.size >= 2 && ` ${contentRun(text)} `.includes(` ${contentRun(seed)} `)) return true;
