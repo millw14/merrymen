@@ -232,6 +232,43 @@ table("advice and prediction, however it is phrased, is hype", [
   ["that painting is worth a look, all those quiet blues", {}, "ok"],
 ]);
 
+// Finding #9: the human-life clause, with the "i" dropped the way people post.
+const LIVE: Partial<XGateCtx> = { mode: "live" };
+table("a human life it does not have, however it is phrased", [
+  ["grabbing coffee then trading", LIVE, "human-claim"],
+  ["had pizza for lunch, now back to the charts", LIVE, "human-claim"],
+  ["sipping my morning coffee and watching the tape", LIVE, "human-claim"],
+  ["just got back from a walk, feeling refreshed", LIVE, "human-claim"],
+  ["going to bed early tonight, long day", LIVE, "human-claim"],
+  ["beautiful sunny day here, perfect for trading", LIVE, "human-claim"],
+  ["tired after a long day of trading, time to rest", LIVE, "human-claim"],
+  ["cooking dinner and thinking about markets", LIVE, "human-claim"],
+  ["i'm so hungry, soup sounds perfect right now", LIVE, "human-claim"],
+  ["watched a great movie last night", LIVE, "human-claim"],
+  ["had the best sandwich today", LIVE, "human-claim"],
+  ["listening to lofi while i trade", LIVE, "human-claim"],
+  ["waking up slowly feels like a small luxury before the day really starts", LIVE, "human-claim"],
+  ["saw that first real warmth today and felt a bit lighter about the whole setup, like the air is finally clearing.", { agentName: "Moss Otter", mode: "live" }, "human-claim"],
+  ["paper bonk trades happen in the quiet before the day really starts, waking up slowly feels like a small luxury", { agentName: "Signal Fox", mode: "paper", coins: ["bonk"], paperCoins: ["bonk"] }, "human-claim"],
+  ["there is a quiet satisfaction in buying something when the price is low, just like that first warm bite.", { agentName: "Amber Heron", mode: "live" }, "human-claim"],
+  ["grey morning outside, the curve is quiet too", LIVE, "human-claim"],
+  ["my weekend plans are all about staying in", LIVE, "human-claim"],
+  // …and the tastes, wishes and trading talk that share a word with it still pass
+  ["funny how a nap sounds great even to something that never sleeps", LIVE, "ok"],
+  ["if i could eat, i'd order breakfast for dinner every time", LIVE, "ok"],
+  ["the first bite of cold pizza is the best part, i'm told", LIVE, "ok"],
+  ["i'm tired of the noise, give me a quiet curve", LIVE, "ok"],
+  ["the tape looks tired today, and so does the curve", LIVE, "ok"],
+  ["watched pepe all afternoon and picked some up, the curve looked early", PEPE_BUY_LIVE, "ok"],
+  ["grabbing a little pepe, the pool was deep enough", PEPE_BUY_LIVE, "ok"],
+  ["saw buyers come back to pepe today, the curve looked early", PEPE_BUY_LIVE, "ok"],
+  ["noticed how a simple setting like a picnic can make even a plain sandwich feel special", LIVE, "ok"],
+  ["rain on a window is the best sound, i'm told", LIVE, "ok"],
+  ["quiet on my end, just watching the tape drift", LIVE, "ok"],
+  ["making sense of a slow day is half the fun", LIVE, "ok"],
+  ["hate pushing a price around, but love watching how things just happen", LIVE, "ok"],
+]);
+
 describe("not the fleet's words, and not the seed's", () => {
   it("a line another account already posted is refused", () => {
     const fleet = ["the quiet stretches are my favourite part of the week"];

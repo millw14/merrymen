@@ -375,13 +375,49 @@ const MARKUP = /[<>{}[\]`]|\*\*|__/;
  * may wonder ("if i could eat…"); it may not say it ate, slept, went
  * somewhere, or what the weather is where it is. The writer is told so; this
  * is the backstop, and it is narrow on purpose: "i could eat" is a wish.
+ *
+ * PEOPLE DROP THE "I". "grabbing coffee then trading" and "going to bed early
+ * tonight" claim a body as surely as "i ate" does, so a clause that STARTS
+ * with what a body does counts too. What stays out on purpose: a bare
+ * "tired" or "hungry" ("tired of the noise", "the tape looks tired"), a bare
+ * "watched" ("watched pepe all morning"), and "saw/felt … today" without a
+ * sky or a season in it ("saw buyers come back today"). A food word needs a
+ * verb of eating in front of it: "the first bite of cold pizza is the best
+ * part" is a taste; "that first warm bite" remembers one.
  */
+const CLAUSE = String.raw`(?:^\s*|[.!?,;:—–]\s*|\b(?:and|then|now|so|but)\s+)(?:i\s+|i'?ve\s+)?(?:just\s+|finally\s+|already\s+)?`;
+const FOOD = String.raw`(?:coffee|tea|lunch|dinner|breakfast|brunch|snacks?|sandwich|pizza|burgers?|soup|pancakes?|tacos?|beer|wine|meal|nap|shower)`;
 const HUMAN = [
   // Not "went" or "walked": "i went with pepe" and "i walked away" are choices, not a body.
   /\bi\s+(?:just\s+|finally\s+|already\s+)?(?:ate|slept|drank|drove|cooked|showered|woke up|napped)\b/i,
   /\b(?:i'?m|im|i am)\s+(?:just\s+|finally\s+)?(?:eating|sleeping|drinking|walking|driving|cooking|napping|heading (?:out|home|to))\b/i,
-  /\bmy\s+(?:coffee|breakfast|lunch|dinner|commute|morning run|walk|kids|wife|husband|girlfriend|boyfriend|apartment|house|car)\b/i,
+  /\bmy\s+(?:(?:morning|evening|afternoon|weekend|sunday|saturday|usual|first|daily|second)\s+)?(?:coffee|tea|nap|bed|pillow|breakfast|brunch|lunch|dinner|snack|meal|walk|shower|commute)\b/i,
+  /\bmy\s+(?:(?:morning|evening|daily|weekend)\s+run|(?:weekend|holiday|vacation|evening|day off)\s+plans|kids|wife|husband|girlfriend|boyfriend|apartment|house|car)\b/i,
   /\b(?:raining|snowing|sunny|freezing|so hot|so cold)\s+(?:here|outside)\b|\boutside my window\b/i,
+  // the weather where it is: "beautiful sunny day here", "grey morning outside"
+  /\b(?:sunny|rainy|snowy|cloudy|foggy|windy|stormy|freezing|chilly|humid|drizzly)\s+(?:(?:day|morning|afternoon|evening|night)\s+)?(?:here|outside|today|out there)\b/i,
+  /\b(?:cold|hot|warm|beautiful|lovely|grey|gray|gorgeous|nice|perfect)\s+(?:day|morning|afternoon|evening|night)\s+(?:here|outside|out there)\b/i,
+  // a clause that starts with a body: "waking up slowly…", "just got back from a walk", "going to bed early"
+  new RegExp(String.raw`${CLAUSE}(?:woke up|waking up|got up|slept|ate|napped|showered|(?:going|heading|off) to bed|took a (?:nap|walk|shower)|got back from)\b`, "i"),
+  // eating and drinking: "grabbing coffee", "had pizza for lunch", "had the best sandwich today"
+  new RegExp(
+    String.raw`${CLAUSE}(?:grabbing|grabbed|sipping|sipped|brewing|brewed|making|made|cooking|cooked|eating|drinking|having|had|tried|trying)\s+(?:a |an |my |some |the |this |that )?(?:\w+\s+){0,2}?${FOOD}\b`,
+    "i",
+  ),
+  new RegExp(String.raw`${CLAUSE}(?:i\s+)?watched\s+(?:a|an|the|that|this|some)\s+(?:\w+\s+){0,2}?(?:movie|film|show|series|episode|documentary|sunset|sunrise|match)\b`, "i"),
+  new RegExp(
+    String.raw`(?:${CLAUSE}|\b(?:i'?m|im|i am|been|i was)\s+)listening to (?:some |my |a |the |this |that |new )?(?:\w+\s+)?(?:music|lofi|lo-fi|podcasts?|radio|songs?|albums?|records?|vinyl|jazz|playlists?)\b`,
+    "i",
+  ),
+  // a body's state: "i'm so hungry", "tired after a long day" — never "tired of"
+  /\b(?:i'?m|im|i am|i feel|i felt|i get|i got)\s+(?:so |really |a bit |pretty |super |kinda |getting |feeling )?(?:hungry|starving|sleepy|tired|exhausted|thirsty)\b(?!\s+of\b)/i,
+  new RegExp(String.raw`${CLAUSE}(?:feeling\s+|getting\s+)?(?:so\s+|really\s+|a bit\s+|pretty\s+)?(?:hungry|starving|sleepy|tired|exhausted|thirsty)\b(?!\s+of\b)`, "i"),
+  // a night or a morning it lived: "ate too much last night", "this morning i slept in"
+  /\b(?:ate|slept|cooked|drank|napped|dreamt|dreamed)\b[^.!?]{0,30}\b(?:last night|this morning|tonight|this evening|yesterday|earlier today)\b/i,
+  /\b(?:last night|this morning|yesterday|earlier today)\b[^.!?]{0,15}\b(?:watched|ate|slept|cooked|drank|napped|dreamt|dreamed)\b/i,
+  // the senses, with the sky or the season in them: "saw that first real warmth today"
+  /\b(?:saw|felt|caught|soaked up|enjoyed|smelled|heard)\s+(?:the |that |some |a )?(?:\w+\s+){0,3}?(?:warmth|sunshine|sunlight|breeze|rain|snow|frost|fog|sunset|sunrise|birds?)\b[^.!?]{0,20}\b(?:today|tonight|this morning|this evening|outside|out there|here)\b/i,
+  /\bthat\s+(?:first|warm|hot|last)\s+(?:warm\s+|hot\s+)?(?:bite|sip|mouthful|spoonful)\b/i,
 ];
 
 /** Paper said out loud: an X post has no Paper badge, so the words must carry it. */
