@@ -346,6 +346,18 @@ describe("DELETE — disconnect", () => {
     assert.equal(w.x.calls.length, 0);
   });
 
+  it("STILL FORGETS THE CONNECTION AND CANCELS THE DRAFTS ON A WEB WITHOUT THE DEK — only the revoke is skipped", async () => {
+    // The orchestrator holds the DEK and is posting; this web process does not.
+    await connect(OWNER_A);
+    await post(OWNER_A, { action: "enable", xUserId: X_USER.id, owner: OWNER_A });
+    const waiting = await draft(OWNER_A);
+    delete process.env.MERRYMEN_STORE_DEK;
+    assert.deepEqual(await read(await del(OWNER_A, { owner: OWNER_A })), { ok: true });
+    assert.equal(await getAccount(w.db, OWNER_A), null);
+    assert.equal(statusOf(waiting), "cancelled");
+    assert.equal(w.x.calls.length, 0, "a token nobody here can open is not sent anywhere");
+  });
+
   it("leaves another owner's connection alone", async () => {
     await connect(OWNER_A);
     await connect(OWNER_B);

@@ -14,7 +14,8 @@
  *           their own, only while it is still scheduled (a post already
  *           claimed for sending cannot be half-skipped).
  *   DELETE  {owner} — forget the connection: the row goes, every draft is
- *           cancelled, and the tokens are revoked at X, best effort.
+ *           cancelled, and X is asked to revoke the tokens, best effort (not
+ *           at all when this process has no X app or no DEK to open them).
  *
  * THE SWITCH IS HERE AND NOWHERE ELSE. Chat, Telegram and MCP have no path to
  * `enable`; it needs a browser session (or the iOS app's) and a body naming
@@ -28,6 +29,7 @@
  *
  * Hosted only (404 otherwise), signed-in only (401), private and never cached.
  */
+import { randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
@@ -145,13 +147,18 @@ export async function DELETE(req: Request) {
   const refused = ownerRefusal(read.value, tenant);
   if (refused) return refused;
 
-  // The DEK opens the tokens so they can be revoked. Nothing was ever sealed
-  // without one, so a deploy with none has nothing here to forget.
+  // THE DEK ONLY OPENS THE TOKENS SO THEY CAN BE REVOKED; forgetting the
+  // connection never needs it. A web process without one can still sit in
+  // front of an orchestrator that has it and is posting, and "Disconnect"
+  // must stop that. Without the DEK the store is handed a throwaway key that
+  // opens nothing (store.ts openOrNull answers null for every token), so the
+  // row goes and the drafts are cancelled, and only the revoke is skipped.
   const dek = xpostDek();
-  if (!dek) return refuse(503, X_COPY.unavailable);
   let tokens: Awaited<ReturnType<typeof deleteAccount>>;
   try {
-    const gone = await withXpostDb(async (db) => (db ? { tokens: await deleteAccount(db, dek, tenant, xpostNow()) } : null));
+    const gone = await withXpostDb(async (db) =>
+      db ? { tokens: await deleteAccount(db, dek ?? randomBytes(32), tenant, xpostNow()) } : null,
+    );
     if (!gone) return refuse(503, X_COPY.unavailable);
     tokens = gone.tokens;
   } catch {
@@ -163,7 +170,7 @@ export async function DELETE(req: Request) {
   // not depend on X: the connection is forgotten here either way, and a
   // revoke X refused only leaves a token nobody holds to expire on its own.
   const app = xpostApp();
-  if (tokens && app) {
+  if (tokens && app && dek) {
     const xFetch = xpostFetch();
     await Promise.all([
       tokens.refreshToken ? revokeToken(app, tokens.refreshToken, "refresh_token", { fetch: xFetch }) : null,
