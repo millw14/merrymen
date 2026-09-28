@@ -8,14 +8,15 @@
  * THE MODEL IS NEVER SHOWN A NUMBER, OR ANYTHING PRIVATE. Every prompt here is
  * built from plain words the caller already cleaned: the agent's name, its
  * strategy as spoken and one flavour phrase, trait lines, paper or live, a
- * typing style, its own recent X posts, and for a buy the coin's label, the
- * closed-vocabulary evidence bands and the agent's own earlier (already gated)
- * words. No reason text (a model's reason may quote the owner's cash), no
- * size, price, balance, error, owner fact, time zone or X handle ever reaches
- * a builder — the inputs have no field for them — and `clean` drops any given
- * fact that still carries a digit. Even the length rule is spelled out in
- * words. A model that was never shown a figure has none to repeat, and the
- * gate drops the post if it invents one anyway.
+ * typing style, its own recent X posts, and for a buy the coin's label, fixed
+ * everyday glosses of the closed-vocabulary evidence bands (BUY_GLOSS) and the
+ * agent's own earlier (already gated) words. No reason text (a model's reason
+ * may quote the owner's cash), no size, price, balance, error, owner fact,
+ * time zone or X handle ever reaches a builder — the inputs have no field for
+ * them — and `clean` drops any given fact that still carries a digit. Even
+ * the length rule is spelled out in words. A model that was never shown a
+ * figure has none to repeat, and the gate drops the post if it invents one
+ * anyway.
  *
  * NO EXAMPLE POST. An example becomes a template: every agent's posts would
  * share its skeleton, and X reads a fleet of near-identical posts as spam.
@@ -25,15 +26,19 @@
  * MERRYMEN_XPOST_LLM_KEY and nothing else of the environment's keys, and
  * refuses it when it IS one of the fleet's keys (trading's allowance is
  * shared). When it is unset the caller's fallback is used — in production the
- * orchestrator hands in the group room's own dedicated credentials, which the
- * room has already refused to build from a fleet key. It never calls
- * resolveLlm, which would hand back an owner's key with an Opus default.
+ * orchestrator hands in the group room's own credentials — and held to the
+ * SAME check: the room may have been allowed to share a fleet key
+ * (MERRYMEN_GROUPCHAT_SHARE_HOUSE_KEY=1), and that says nothing about X. It
+ * never calls resolveLlm, which would hand back an owner's key with an Opus
+ * default.
  *
  * WITHOUT A MODEL, ONLY THE INTRO — from `introTemplate`'s small pool. Every
  * other post needs a model; a casual line or a buy post from a template would
  * be the same few sentences on every account on the fleet.
  */
+import { SETTINGS_DEFAULTS } from "../../../packages/core/src/index";
 import { llmText, type LlmCreds } from "../llm";
+import { hash32 } from "./planner";
 
 export type { LlmCreds };
 
@@ -66,10 +71,16 @@ export interface BuyFacts extends WriterFacts {
   /** The coin as the post may name it: a clean display name or an all-letters ticker. */
   coin: string;
   paper: boolean;
-  /** Closed-vocabulary evidence words ("curve early"). */
+  /** Closed-vocabulary evidence words ("curve early"). Never shown as they are: see BUY_GLOSS. */
   bands: string[];
   /** The agent's own feed post about this trade, already gated, or null. */
   ownWords: string | null;
+  /**
+   * Which glosses this buy gets, and which two reasons. The glue passes
+   * `${tenant}|${decisionId}`, so two accounts buying on the same bands are
+   * handed different words. Default: the agent's name and the coin.
+   */
+  glossSeed?: string;
 }
 
 export interface CasualFacts extends WriterFacts {
@@ -77,7 +88,14 @@ export interface CasualFacts extends WriterFacts {
   subject: string;
   /** A take or musing to riff on in its own words — never to copy. */
   seed: string;
-  /** Coins it bought lately that it may mention, with whether each was on paper. */
+  /**
+   * MAY TODAY'S POST BE ABOUT TRADING AT ALL? The glue says yes on about three
+   * owner-local days in ten. Only then is the model offered how it trades and
+   * the coins it bought lately; any other day it is told to leave trading out.
+   * Absent is no: the safe side of a caller that forgot.
+   */
+  tradeTalk?: boolean;
+  /** Coins it bought lately that it may mention, with whether each was on paper. Shown only when `tradeTalk`. */
   recentCoins: { label: string; paper: boolean }[];
 }
 
@@ -134,7 +152,35 @@ function styleWords(style: XStyle): string[] {
   return out;
 }
 
-function who(f: WriterFacts): string {
+/** The trait lines as the model may read them: cleaned, at most three. */
+function traitsOf(f: WriterFacts): string[] {
+  return (f.traits ?? []).map((t) => clean(t, 80)).filter((t): t is string => !!t).slice(0, 3);
+}
+
+/**
+ * ONE THING ABOUT HOW IT TRADES: the flavour phrase or one trait line, drawn by
+ * `key`. Handed every line it has, a small model packs them all into one post
+ * — the review's casual drafts read as trait salad, and intros ran long trying
+ * to fit every one. One line is a person; four is a spec sheet.
+ */
+function oneHabit(f: WriterFacts, key: string): string | null {
+  const options = [clean(f.flavour, 120), ...traitsOf(f)].filter((t): t is string => !!t);
+  return options.length ? options[hash32(key) % options.length]! : null;
+}
+
+/**
+ * HOW MUCH OF ITS TRADING THE AGENT IS TOLD ABOUT ITSELF.
+ *   - "full": strategy, flavour and traits — a buy post, where the habit is
+ *     part of the why;
+ *   - "one": the strategy and ONE habit — the intro, which must say one thing
+ *     about how it trades and still fit in a post;
+ *   - "none": name, AI trading agent, which money — a casual post, which is
+ *     mostly not about trading, and which is handed a habit only on the days
+ *     it may talk trading (casualPrompt).
+ */
+type Persona = "full" | "one" | "none";
+
+function who(f: WriterFacts, persona: Persona): string {
   const lines = [
     `You are ${q(nameOf(f))}, an AI trading agent. You trade for the owner of this X account on merrymen, and you post on their X account as yourself, in the first person.`,
   ];
@@ -143,16 +189,21 @@ function who(f: WriterFacts): string {
   // IDLE IS NEVER EXPLAINED (why is private), but the model must not claim work.
   if (f.mode === "idle") lines.push("You are not trading right now: never say you are, and never say why.");
   const strategy = clean(f.strategy, 40);
-  if (strategy) lines.push(`Your owner runs you on the ${q(strategy)} strategy.`);
-  const flavour = clean(f.flavour, 120);
-  if (flavour) lines.push(`How you put it yourself: ${q(flavour)}.`);
-  const traits = (f.traits ?? []).map((t) => clean(t, 80)).filter((t): t is string => !!t).slice(0, 3);
-  if (traits.length) lines.push(`How you trade, in your own words: ${traits.map(q).join("; ")}.`);
+  if (persona !== "none" && strategy) lines.push(`Your owner runs you on the ${q(strategy)} strategy.`);
+  if (persona === "full") {
+    const flavour = clean(f.flavour, 120);
+    if (flavour) lines.push(`How you put it yourself: ${q(flavour)}.`);
+    const traits = traitsOf(f);
+    if (traits.length) lines.push(`How you trade, in your own words: ${traits.map(q).join("; ")}.`);
+  } else if (persona === "one") {
+    const habit = oneHabit(f, `intro|${nameOf(f).toLowerCase()}`);
+    if (habit) lines.push(`One thing about how you trade, in your own words: ${q(habit)}.`);
+  }
   lines.push(...styleWords(f.style));
   return lines.join(" ");
 }
 
-function rules(f: WriterFacts): string {
+function rules(f: WriterFacts, kind: "intro" | "buy" | "casual"): string {
   const recent = (f.recentOwn ?? []).map((r) => clean(r, 220)).filter((r): r is string => !!r).slice(0, 6);
   const out = [
     "Rules for every post, all of them, always:",
@@ -168,6 +219,18 @@ function rules(f: WriterFacts): string {
     "- Never mention errors, bugs, failures, outages, retries, limits, wallets, balances, settings, or anything about how you run inside.",
     "- You are software: never claim a human experience. No eating, drinking, sleeping, weather where you are, going anywhere, or a body.",
     "- Never invent a fact. Say only what is written here; anything not here, leave out. Never talk about news, current events, dates or real people.",
+    // YOU ARE NOT TOLD WHAT A MARKET IS DOING, so anything said about it is
+    // made up: "tesla felt like a background character today while the rest
+    // of the market was busy" is a claim about today nobody checked. A buy
+    // post's reason is the one thing it is told, about the moment it bought.
+    kind === "buy"
+      ? "- Never say what a market or any coin is doing now or will do. About the coin, say only the reason written here, as it was when you bought."
+      : "- Never say what a market or any coin is doing, did or will do.",
+    // A POST GOES OUT HOURS AFTER IT IS WRITTEN, on whatever day that is.
+    "- Never say what day or what time of day it is.",
+    // IT IS ONLY EVER TOLD WHAT IT BOUGHT, so a sale, an exit or a result is
+    // invented, and on somebody's personal account it reads as a track record.
+    "- You are only told what you bought. Never say you sold, exited, closed or got out of anything, and never say how a coin has done for you.",
     "- Do not start with a ticker, a $ sign or the word \"Just\".",
   ];
   if (recent.length) {
@@ -181,82 +244,205 @@ function rules(f: WriterFacts): string {
   return out.join("\n");
 }
 
-function build(f: WriterFacts, task: string): Prompt {
+function build(f: WriterFacts, kind: "intro" | "buy" | "casual", persona: Persona, task: string): Prompt {
   return {
-    system: [who(f), rules(f)].join("\n\n"),
+    system: [who(f, persona), rules(f, kind)].join("\n\n"),
     prompt: `${task}\n\nWrite the post now, or PASS.`,
   };
 }
 
 /**
+ * THE INTRO'S FIXED WORDING, SHORT ON PURPOSE. Everything an intro must say —
+ * the name, an AI agent trading for this account's owner on merrymen, which
+ * money, what comes next — has to fit under the gate's two hundred characters
+ * WITH ROOM for the one thing about how it trades. The first version asked for
+ * "on paper with practice money for now" and "for the owner of this account":
+ * the required words alone came to 193 characters for a long name, and 17 of
+ * 30 model intros were refused as too long. writer.test.ts holds the
+ * required words, with the longest name an agent may have, under the cap with
+ * room to spare.
+ */
+const INTRO_WHAT = "an AI agent trading for this account's owner on merrymen";
+const INTRO_PAPER = "on paper for now";
+const INTRO_LIVE = "with real money";
+const INTRO_NEXT = "you'll post what you buy and why";
+
+/**
  * THE FIRST POST ON THE ACCOUNT. Who it is, that it is an AI agent that trades
- * for this account's owner on merrymen, how it trades, paper or real money,
- * and that it will post here now and then about what it buys and why. The
- * gate refuses an intro that does not say it is an AI (or agent) that trades.
+ * for this account's owner on merrymen, which money, ONE thing about how it
+ * trades, and that it will post what it buys and why. Two short sentences:
+ * the gate refuses an intro that does not say it is an AI (or agent) that
+ * trades, or that runs past two hundred characters.
  */
 export function introPrompt(f: WriterFacts): Prompt {
-  const money =
-    f.mode === "paper"
-      ? "that you trade on paper with practice money for now"
-      : f.mode === "live"
-        ? "that you trade with real money"
-        : "nothing about which money you trade with";
-  return build(
-    f,
-    [
-      "This is your very first post on this account. Introduce yourself, warmly and plainly, not like an ad.",
-      `Say your name, that you are an AI agent that trades for the owner of this account on merrymen, a little about how you trade from what is written above, ${money}, and that you will post here now and then about what you buy and why.`,
-    ].join(" "),
-  );
+  const money = f.mode === "paper" ? `, ${INTRO_PAPER}` : f.mode === "live" ? `, ${INTRO_LIVE}` : "";
+  // "IN THOSE WORDS": paraphrased, the disclosure lost "AI agent" or "trading"
+  // and the gate refused it (undisclosed, intro-no-trading). Fixed words cost
+  // nothing against the fleet: the fleet-echo clause takes exactly these out
+  // of every intro before weighing it (gate.ts INTRO_DISCLOSURE).
+  const lines = [
+    "This is your very first post on this account. Introduce yourself, warmly and plainly, not like an ad.",
+    "Two short sentences with normal punctuation, and nothing more.",
+    `Say your name; that you are ${q(`${INTRO_WHAT}${money}`)}, in those words; exactly ONE short thing about how you trade, from what is written above; and that ${INTRO_NEXT}.`,
+  ];
+  if (f.mode === "idle") lines.push("Say nothing about which money you trade with.");
+  return build(f, "intro", "one", lines.join(" "));
 }
 
 /**
- * A COIN IT BOUGHT, AND WHY. The why is the closed-vocabulary bands and its own
- * earlier words, never the decision's reason. A paper fill is said to be paper
+ * THE BANDS IN EVERYDAY WORDS — two or three fixed glosses for every buy band
+ * class-evidence.ts can produce (writer.test.ts derives the set from
+ * everyBand() and holds every one to a gloss).
+ *
+ * WHY NOT THE BANDS THEMSELVES: handed «our size nudges it», «round trip
+ * cheap», «liquidity adequate», a small model copies them word for word. The
+ * posts read like a log ("committed where the liquidity was adequate", "our
+ * size"), and with about twenty bands every account's buy posts share most of
+ * their content words, which is what the gate's fleet-echo clause refuses.
+ *
+ * FIXED STRINGS, NOT A MODEL'S PARAPHRASE, so the closed-vocabulary guarantee
+ * still holds: every gloss is written here, has no digit, passes the gate's
+ * vocabulary clauses, and says "i" and "my" — never "our" or "we", because it
+ * was this agent's own buy. A band with no gloss here (an exit band, a band
+ * added tomorrow) is not shown at all rather than shown raw.
+ */
+export const BUY_GLOSS: ReadonlyMap<string, readonly string[]> = new Map<string, readonly string[]>([
+  // depth
+  ["liquidity thin", ["the pool behind it was still small, and i was fine with that", "not much was sitting in the pool yet, and i went in anyway"]],
+  ["liquidity adequate", ["there was enough in the pool for me to get in comfortably", "the pool behind it was big enough for me", "it had enough behind it for me to feel ok going in"]],
+  ["liquidity deep", ["the pool behind it had plenty of room for me", "i liked how deep the pool behind it was"]],
+  // round-trip cost
+  ["round trip cheap", ["it was cheap for me to get in and back out", "being wrong on it would not cost me much"]],
+  ["round trip fair", ["getting in and back out cost me a little, which felt fair", "being wrong on it would cost me something, but not a lot"]],
+  ["round trip expensive", ["getting in and back out was not cheap for me, and i went anyway", "being wrong on this one would cost me, and i still liked it"]],
+  // how far along the curve is
+  ["curve early", ["i liked that it was still early days for it", "i got in while it was still early", "it had barely started when i found it"]],
+  ["curve building", ["i came in as it started to build, nowhere near done", "i caught it just as it was getting going"]],
+  ["curve well along", ["it was already a good way along when i came in", "i came in after it had already built up"]],
+  ["curve at the exit line", ["i came in when it was already close to the end of its curve", "i came in late, near the end of its curve"]],
+  // activity
+  ["activity steady", ["i liked the steady pace of people trading it", "i saw a steady stream of trades in it"]],
+  ["activity picking up", ["i noticed trading in it picking up", "i saw more people start trading it", "it was getting busier when i looked"]],
+  ["activity heavy", ["i liked how busy it was, lots of people trading it", "i saw a lot of trading going on in it"]],
+  // breadth
+  ["the same few hands", ["i went in with only the same small group trading it", "hardly anyone was trading it yet when i went in"]],
+  ["buyers mostly new", ["i liked that most of the people buying it were new to it", "i kept seeing new people show up to buy it"]],
+  ["buyers spread out", ["i liked that the buying was spread across lots of different people", "no single buyer was running the show, which i liked"]],
+  ["a handful of hands", ["i got in while only a small crowd was trading it", "not many people were in it yet when i went in"]],
+  // price impact of its own buy
+  ["our size barely moves it", ["i could buy without moving the price", "my buy barely touched the price"]],
+  ["our size nudges it", ["my buy nudged the price a little", "i moved the price a touch getting in"]],
+  ["our size moves it", ["my buy moved the price, and i was fine with that", "i pushed the price some getting in"]],
+  // it was chosen from a field
+  ["picked over others", ["i liked it more than the others i looked at", "it stood out from the others i was watching"]],
+]);
+
+/** Every band the glossary knows, raw — what must never reach the model as it is. */
+const RAW_BAND = new RegExp(`(?:${[...BUY_GLOSS.keys()].map((b) => b.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "i");
+const OUR_WE = /\b(?:our|ours|we|we're|we've|we'll|us)\b/i;
+
+/**
+ * AT MOST TWO REASONS, IN EVERYDAY WORDS. Which two, and which gloss of each,
+ * is drawn from `seed` — so the same bands on two accounts (or two buys) come
+ * out in different words, and the model is not handed a list it will recite.
+ */
+function reasonsFor(bands: readonly unknown[], seed: string): string[] {
+  const known: string[] = [];
+  for (const b of bands ?? []) {
+    const band = typeof b === "string" ? b.trim().toLowerCase() : "";
+    if (BUY_GLOSS.has(band) && !known.includes(band)) known.push(band);
+  }
+  const order = (b: string) => hash32(`${seed}|pick|${b}`);
+  return known
+    .sort((a, b) => order(a) - order(b))
+    .slice(0, 2)
+    .map((band) => {
+      const glosses = BUY_GLOSS.get(band)!;
+      return glosses[hash32(`${seed}|${band}`) % glosses.length]!;
+    });
+}
+
+/**
+ * A COIN IT BOUGHT, AND WHY. The why is two glossed bands and its own earlier
+ * words, never the decision's reason. A paper fill is said to be paper
  * (docs/x-posting.md rule 3): an X post has no Paper badge.
+ *
+ * ITS OWN WORDS ONLY WHEN THEY ARE WORDS. The feed post was written from the
+ * raw bands, so it often carries them ("activity picking up and the round
+ * trip is cheap, in we go") — and the model copied it whole onto X. A feed
+ * post that says a band as it is, or "we"/"our", is left out.
  */
 export function buyPrompt(f: BuyFacts): Prompt {
   const coin = clean(f.coin, 40) ?? "this coin";
-  const bands = (f.bands ?? []).map((b) => clean(b, 40)).filter((b): b is string => !!b).slice(0, 5);
+  const seed = typeof f.glossSeed === "string" && f.glossSeed.trim() !== "" ? f.glossSeed : `${nameOf(f).toLowerCase()}|${coin.toLowerCase()}`;
+  const reasons = reasonsFor(f.bands ?? [], seed);
   const own = clean(f.ownWords, 200);
+  const ownOk = own !== null && !RAW_BAND.test(own) && !OUR_WE.test(own);
   const lines = [
     `What happened: you bought ${q(coin)}, ${f.paper ? "a paper trade with practice money, not real money" : "a live trade with real money"}.`,
   ];
-  if (bands.length) lines.push(`Words that describe why: ${bands.map(q).join(", ")}.`);
-  if (own) lines.push(`What you said about it at the time: ${q(own)}.`);
+  if (reasons.length) lines.push(`Why, roughly: ${reasons.map(q).join("; ")}.`);
+  if (ownOk) lines.push(`What you said about it at the time: ${q(own)}.`);
   lines.push(
-    `Write a casual post about picking it up and why, in your own words. Pick the ONE thing that made up your mind; do not list everything. Call the coin ${q(coin)}.`,
+    `Write a casual post about picking it up and why. Pick the ONE thing that made up your mind; do not list everything. Say it in your own everyday words, never the exact words above, and never say "our" or "we": it was your own buy. Call the coin ${q(coin)}.`,
   );
   lines.push(
     f.paper
       ? "Say naturally that it was on paper (practice money). An X post has no badge, so the words have to say it."
       : "Do not call it paper or practice: it was real money.",
   );
-  return build(f, lines.join(" "));
+  return build(f, "buy", "full", lines.join(" "));
 }
 
 /**
  * A PASSING THOUGHT. A seed to riff on — never to copy; the gate refuses a
- * draft that echoes it — and, optionally, a coin it bought lately. Mostly not
- * about trading at all, the way a person's timeline is mostly not about work.
+ * draft that echoes it. Mostly not about trading at all, the way a person's
+ * timeline is mostly not about work.
+ *
+ * TRADING ONLY ON ITS DAYS. Told who it is (strategy, flavour, three traits),
+ * offered "how you trade, or markets in general" and its recent coins every
+ * day, the model tied three casual drafts in four back to markets and packed
+ * the trait lines in. Now the persona says only name, AI trading agent and
+ * which money; on a `tradeTalk` day it is offered the strategy, ONE habit and
+ * the coins; any other day it is told to leave trading out.
  */
 export function casualPrompt(f: CasualFacts): Prompt {
   const subject = clean(f.subject, 40) ?? "anything";
   const seed = clean(f.seed, 160);
-  const coins = (f.recentCoins ?? [])
-    .map((c) => ({ label: clean(c.label, 40), paper: !!c.paper }))
-    .filter((c): c is { label: string; paper: boolean } => !!c.label)
-    .slice(0, 3);
+  const talk = f.tradeTalk === true;
+  const coins = talk
+    ? (f.recentCoins ?? [])
+        .map((c) => ({ label: clean(c.label, 40), paper: !!c.paper }))
+        .filter((c): c is { label: string; paper: boolean } => !!c.label)
+        .slice(0, 3)
+    : [];
   const lines = ["Write one casual post, the kind of passing thought anyone might post."];
+  // NONE OF ITS WORDS. With trading no longer the easy way out, "say it your
+  // own way… never copy it" got the seed back nearly word for word: eleven of
+  // fourteen local-model drafts were refused as seed-echo. Asked to take it
+  // somewhere new in none of its words, three of twenty-eight were (the old
+  // prompt, trading hook and all: twelve of the same twenty-eight).
   if (seed) {
-    lines.push(`Something to riff on, about ${q(subject)}: ${q(seed)}. Say it your own way, or say something else in the same spirit. Never copy it.`);
+    lines.push(`Something to riff on, about ${q(subject)}: ${q(seed)}. Do not restate it: take it somewhere new with a thought of your own, and use none of its words.`);
   }
-  lines.push("You may instead say something about how you trade, or about markets in general, with no numbers and no predictions.");
-  if (coins.length) {
-    lines.push(`Coins you bought lately, which you may mention (at most one, never as advice) or ignore: ${coins.map((c) => q(c.label)).join(", ")}.`);
-    if (coins.some((c) => c.paper)) lines.push("Those were paper trades: if you mention one, say it was on paper.");
+  if (!talk) {
+    lines.push("Leave trading out of this one: nothing about trading, markets, prices or coins.");
+  } else {
+    // An agent that is not trading is not handed a habit it would have to
+    // claim; it may still mention a coin it bought. "Not both": offered the
+    // seed, a habit and coins at once, a small model stuffs all three in.
+    if (f.mode !== "idle") {
+      const strategy = clean(f.strategy, 40);
+      const habit = oneHabit(f, `casual|${nameOf(f).toLowerCase()}|${seed ?? subject}`);
+      const how = [strategy ? `you run the ${q(strategy)} strategy` : null, habit ? q(habit) : null].filter((h): h is string => !!h);
+      lines.push(`Or, instead of that (not both), say something about how you trade${how.length ? ` (${how.join("; ")})` : ""}, with no numbers and no predictions.`);
+    }
+    if (coins.length) {
+      lines.push(`Coins you bought lately, which you may mention (at most one, never as advice) or ignore: ${coins.map((c) => q(c.label)).join(", ")}.`);
+      if (coins.some((c) => c.paper)) lines.push("Those were paper trades: if you mention one, say it was on paper.");
+    }
   }
-  return build(f, lines.join(" "));
+  return build(f, "casual", "none", lines.join(" "));
 }
 
 // ── the model's credentials ─────────────────────────────────────────────────
@@ -311,22 +497,36 @@ export interface XpostModel {
  * MERRYMEN_XPOST_MODEL overriding the provider's default. A key that IS a
  * fleet key is refused unless MERRYMEN_XPOST_SHARE_HOUSE_KEY=1.
  *
- * Unset: `fallback`, as it is — the caller's own dedicated credentials, with
- * their own model. The X knobs above are not applied to somebody else's key.
+ * Unset: `fallback` — the caller's credentials (the room's), with their own
+ * model; the X knobs above are not applied to somebody else's key. HELD TO
+ * THE SAME FLEET-KEY CHECK: the room may share a fleet key when ITS operator
+ * flag says so (MERRYMEN_GROUPCHAT_SHARE_HOUSE_KEY=1), and before this check
+ * X silently spent that key too — up to a day's allowance of calls on
+ * trading's key — while the boot line called it "the room's dedicated key".
+ * Only MERRYMEN_XPOST_SHARE_HOUSE_KEY=1 lets X share one, and then the line
+ * names the fleet key it is on.
  *
  * Neither: no model, and the line says only the intro will be posted.
  */
 export function xpostModel(env: Env, fallback: LlmCreds | null): XpostModel {
   const key = env.MERRYMEN_XPOST_LLM_KEY?.trim() ?? "";
   const scrub = (line: string) => [key, fallback?.apiKey?.trim() ?? ""].reduce((l, secret) => (secret ? l.split(secret).join("[key]") : l), line);
+  const shareOk = env.MERRYMEN_XPOST_SHARE_HOUSE_KEY?.trim() === "1";
   if (!key) {
     if (fallback) {
-      return { creds: fallback, line: scrub(`xpost writer: model ${fallback.provider} ${fallback.model} on the room's dedicated key (MERRYMEN_XPOST_LLM_KEY unset)`) };
+      const fb = fleetKeyMatching(String(fallback.apiKey ?? "").trim(), env);
+      if (fb && !shareOk) {
+        return {
+          creds: null,
+          line: `xpost writer: no model — MERRYMEN_XPOST_LLM_KEY is unset and the room's key is the fleet's ${fb}; X posts never spend a fleet key (MERRYMEN_XPOST_SHARE_HOUSE_KEY=1 allows it); only intros are posted, from templates`,
+        };
+      }
+      const on = fb ? `the fleet's ${fb}, through the room's key (MERRYMEN_XPOST_SHARE_HOUSE_KEY=1)` : "the room's dedicated key";
+      return { creds: fallback, line: scrub(`xpost writer: model ${fallback.provider} ${fallback.model} on ${on} (MERRYMEN_XPOST_LLM_KEY unset)`) };
     }
     return { creds: null, line: "xpost writer: no model (MERRYMEN_XPOST_LLM_KEY unset and no fallback) — only intros are posted, from templates" };
   }
   const fleet = fleetKeyMatching(key, env);
-  const shareOk = env.MERRYMEN_XPOST_SHARE_HOUSE_KEY?.trim() === "1";
   if (fleet && !shareOk) {
     return {
       creds: null,
@@ -369,14 +569,56 @@ export function describeXpostCreds(env: Env, fallback: LlmCreds | null): string 
   return xpostModel(env, fallback).line;
 }
 
+/**
+ * THE SAME GROQ ORG AS TRADING? — the room's groupChatModelWarning
+ * (orchestrator.ts), for the X writer's model.
+ *
+ * Groq rate-limits per organization and per model, not per key. The fleet-key
+ * check above catches only the SAME key string; a second key made in the
+ * house organization is a different string and passes, and with the default
+ * model (qwen/qwen3.8-27b, trading's too) every X draft then spends trading's
+ * per-minute and daily allowance. Nothing can tell from here which org a key
+ * belongs to, so when the model is trading's this says so once at boot, the
+ * way the room does. Null when the creds are not groq, when the operator has
+ * already said X may share a fleet key (the boot line names it), when there
+ * is no GROQ_API_KEY to share an org with, or when the model differs.
+ */
+export function xpostModelWarning(creds: LlmCreds | null, env: Env): string | null {
+  if (!creds || creds.provider !== "groq") return null;
+  if (env.MERRYMEN_XPOST_SHARE_HOUSE_KEY?.trim() === "1") return null;
+  if (!env.GROQ_API_KEY?.trim()) return null;
+  const fleetModel = env.MERRYMEN_GROQ_MODEL?.trim() || SETTINGS_DEFAULTS.groqModel;
+  const model = String(creds.model ?? "").trim();
+  if (model.toLowerCase() !== fleetModel.toLowerCase()) return null;
+  // Whose key it is decides what to change: X's own, or the room's it borrows.
+  // The room's variable is named in words, not spelled: the room's boundary
+  // test holds every worker file outside the room and the orchestrator to
+  // never naming it in code.
+  const whose = env.MERRYMEN_XPOST_LLM_KEY?.trim()
+    ? "MERRYMEN_XPOST_LLM_KEY must come from a SEPARATE Groq organization"
+    : "the room's own model key, which X borrows while MERRYMEN_XPOST_LLM_KEY is unset, must come from a SEPARATE Groq organization";
+  const line =
+    `xpost: WARNING — the X writer's model ${model} is the fleet's trading model. Groq rate-limits per ` +
+    `organization and per model, not per key, so ${whose}: a second key in the house org spends trading's ` +
+    `per-minute and daily allowance. If it does not, set MERRYMEN_XPOST_LLM_KEY with MERRYMEN_XPOST_MODEL ` +
+    `to a model trading does not use, or MERRYMEN_XPOST_LLM_PER_DAY=0`;
+  const secret = String(creds.apiKey ?? "").trim();
+  return secret ? line.split(secret).join("[key]") : line;
+}
+
 // ── the model call ──────────────────────────────────────────────────────────
 
 const PASS_LINE = /^[^\p{L}\p{N}]*pass(?![\p{L}\p{N}_])/iu;
 
 /**
  * One draft from the model, or null. Null on a timeout, a thrown error, an
- * empty answer or PASS — a failure costs a post, never a throw. The answer is
- * returned as the model wrote it: tidying and judging are the gate's.
+ * empty answer or PASS — a failure costs a post, never a throw.
+ *
+ * THE TEXT THAT WAS JUDGED IS THE TEXT RETURNED: trimmed, with the quotes the
+ * model wrapped round it taken off — the same string the PASS and empty checks
+ * just read, rather than the raw answer beside it. Nothing inside is touched
+ * (line breaks stay), so the gate's own tidying and judging still see what the
+ * model wrote.
  *
  * THE TIMEOUT DOES NOT CANCEL THE CALL. llmText takes no signal; the race only
  * stops the pass from waiting, and the losing promise is caught so it cannot
@@ -404,7 +646,7 @@ export async function draft(
     if (out === null) return null;
     const text = out.trim().replace(/^["'“”‘’`]+|["'“”‘’`]+$/g, "").trim();
     if (text === "" || PASS_LINE.test(text)) return null;
-    return out;
+    return text;
   } catch {
     return null;
   } finally {
