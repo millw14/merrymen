@@ -427,6 +427,63 @@ describe("ONE CLAIM PER ACCOUNT — by the claims, whatever the stored proof say
     assert.deepEqual([...(await store.holderClaims())], [[lc(w2.address), lc(a.address)]], "one account, one claim");
   });
 
+  it("RE-LINKING TO WALLET B WHEN B'S PROOF FAILS TO SAVE KEEPS WALLET A — claimed, named by the proof, and counting", async () => {
+    // The review's case: a linked A, a new signature for B, then the proof
+    // write fails. The old order released A before that write, so "nothing
+    // changed" left A unclaimed while the stored proof still named it.
+    const a = newWallet();
+    const wa = newWallet();
+    const wb = newWallet();
+    const c = newWallet();
+    assert.equal((await link(a.address, wa)).status, 200);
+    const put = mock.method(store, "put", async () => {
+      throw new Error("disk full");
+    });
+    try {
+      const res = await link(a.address, wb);
+      assert.equal(res.status, 503);
+      assert.match(res.body.error ?? "", /nothing changed/);
+    } finally {
+      put.mock.restore();
+    }
+    const claims = await store.holderClaims();
+    assert.equal(claims.get(lc(wa.address)), lc(a.address), "A is still this account's");
+    assert.equal(claims.has(lc(wb.address)), false, "and only the claim this call took is undone");
+    assert.equal((await proofOf(a.address))?.address, lc(wa.address));
+    assert.deepEqual(await patch(a.address), { linked: await proofOf(a.address), reads: "linked", proof: "counting" });
+    const moved = await link(c.address, wa);
+    assert.equal(moved.status, 200);
+    assert.equal(moved.body.moved, true, "A was never released: another account taking it is a move from this one");
+    assert.equal((await link(a.address, wb)).status, 200, "and B is still free to link");
+  });
+
+  it("A RELEASE THAT FAILS AFTER THE PROOF IS STORED LEAVES THE NEW LINK COUNTING — and the next unlink clears the leftover", async () => {
+    const a = newWallet();
+    const wa = newWallet();
+    const wb = newWallet();
+    assert.equal((await link(a.address, wa)).status, 200);
+    const release = mock.method(store, "releaseHolderClaims", async () => {
+      throw new Error("Connection terminated unexpectedly");
+    });
+    const warn = mock.method(console, "warn", () => {});
+    try {
+      const res = await link(a.address, wb);
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      assert.equal(warn.mock.callCount(), 1, "said out loud");
+      assert.ok(!String(warn.mock.calls[0]!.arguments[0]).toLowerCase().includes(lc(wa.address)), "naming no wallet");
+    } finally {
+      release.mock.restore();
+      warn.mock.restore();
+    }
+    assert.equal((await proofOf(a.address))?.address, lc(wb.address));
+    assert.deepEqual(await patch(a.address), { linked: await proofOf(a.address), reads: "linked", proof: "counting" });
+    const claims = await store.holderClaims();
+    assert.equal(claims.get(lc(wb.address)), lc(a.address));
+    assert.equal(claims.get(lc(wa.address)), lc(a.address), "the leftover: it backs no proof, so it counts nowhere");
+    assert.equal((await unlink(a.address)).status, 200);
+    assert.equal((await store.holderClaims()).size, 0, "one unlink releases both");
+  });
+
   it("…and never anybody else's", async () => {
     const a = newWallet();
     const b = newWallet();

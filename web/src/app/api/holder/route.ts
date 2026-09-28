@@ -212,12 +212,6 @@ export async function POST(req: Request) {
 
   try {
     const stored = (await store.get(tenant)) ?? {};
-    // RE-LINKING MOVES THE CLAIM, AND AN ACCOUNT HOLDS ONE. Every other claim
-    // this account holds is released first — by the claims, not by the stored
-    // proof, which a stale settings write can have put back (a claim keyed on
-    // it would strand the one it missed). A failure below leaves at worst an
-    // unclaimed old proof, which counts nowhere, and a retry finishes the move.
-    await store.releaseHolderClaims(tenant, wallet);
     await store.put(tenant, {
       ...stored,
       holderProof: { address: wallet, at: Date.now() },
@@ -234,6 +228,29 @@ export async function POST(req: Request) {
     return NextResponse.json(
       { error: "couldn't save that link just now — nothing changed, please try again", ownerFacing: true },
       { status: 503 },
+    );
+  }
+  /**
+   * RE-LINKING MOVES THE CLAIM, AND AN ACCOUNT HOLDS ONE — so every other
+   * claim this account holds is released, by the claims rather than by the
+   * stored proof, which a stale settings write can have put back (a claim
+   * keyed on it would strand the one it missed).
+   *
+   * ONLY NOW, AFTER THE NEW PROOF IS STORED. Released first, a proof write
+   * that then failed left the account with its old wallet released while
+   * its stored proof still named it — "nothing changed", the answer said,
+   * and the old wallet had stopped counting and was free for anyone. In this
+   * order a failed write changes nothing (the catch above undoes only the
+   * new claim), and a failed release changes nothing that counts: the new
+   * proof and its claim are both in, and the leftover claim on the old
+   * wallet backs no proof. The next link or unlink releases it (both release
+   * every claim the account holds), so it is logged and the link stands.
+   */
+  try {
+    await store.releaseHolderClaims(tenant, wallet);
+  } catch (e) {
+    console.warn(
+      `[holder] linked, but the account's other claims were not released (the next link or unlink releases them): ${e instanceof Error ? e.message : String(e)}`,
     );
   }
   // `moved` tells the signer it came from another account — never which.
