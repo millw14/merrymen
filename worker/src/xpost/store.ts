@@ -11,7 +11,7 @@
  *     cancelled or failed. The UNIQUE dedupe_key and the conditional claim are
  *     what make a post at-most-once across crashes and replicas.
  *   xpost_meta     — fleet counters: the model's daily budget, the day's post
- *     count, the credits breaker.
+ *     allowance, the fleet's pauses.
  *
  * NOT THE SETTINGS BLOB, AND THAT IS THE POINT. The orchestrator copies every
  * tenant's decrypted settings into its child's plaintext settings.json each
@@ -867,17 +867,6 @@ export async function recentBodies(db: Db, opts: { tenant: string | null; sinceM
   return rows.map((r) => String(r.body ?? "")).filter((b) => b !== "");
 }
 
-/**
- * Posts X created since `sinceMs`, fleet-wide — plus every claim in flight,
- * which may be about to be one. The fleet's daily ceiling counts these.
- */
-export async function countPostedSince(db: Db, sinceMs: number): Promise<number> {
-  const row = (await db
-    .prepare(`SELECT COUNT(*) AS n FROM xpost_posts WHERE (status = 'posted' AND sent_at_ms >= ?) OR status = 'sending'`)
-    .get(int(sinceMs))) as { n: unknown } | undefined;
-  return row ? num(row.n) : 0;
-}
-
 // ── meta ────────────────────────────────────────────────────────────────────
 
 /**
@@ -897,6 +886,14 @@ export async function takeAllowance(db: Db, key: string, limit: number, nowMs: n
     )
     .get(key, int(nowMs), int(limit))) as { n: unknown } | undefined;
   return row !== undefined;
+}
+
+/**
+ * GIVE ONE BACK to a daily allowance taken for something that then certainly
+ * did not happen (X refused before creating anything). Never below zero.
+ */
+export async function returnAllowance(db: Db, key: string, nowMs: number): Promise<void> {
+  await db.prepare(`UPDATE xpost_meta SET n = n - 1, updated_at_ms = ? WHERE k = ? AND n > 0`).run(int(nowMs), key);
 }
 
 export async function readMeta(db: Db, key: string): Promise<{ n: number; v: string | null } | null> {

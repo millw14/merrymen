@@ -657,6 +657,54 @@ describe("fleet guards", () => {
     assert.equal(await store.keyStatus(w.db, newcomerIntro), "scheduled");
   });
 
+  it("the fleet's day ceiling is taken atomically before each send, across replicas", async (t) => {
+    const w = await world(t, T0 - 2 * HOUR);
+    await introDealtWith(w);
+    await otherOwner(w);
+    await dueCasual(w, "casual:a");
+    await dueCasual(w, "casual:b", { tenant: OTHER, xUserId: "222" });
+    const a = poster(w, { fleetPerDay: 1 });
+    const log = (await a.step(w.db, BOTH, new Map(), T0)).log;
+    assert.equal(w.tweets.length, 1, "one post, the day's one");
+    assert.match(log ?? "", /sent 1/);
+    assert.match(log ?? "", /fleet-ceiling-reached 1/);
+    assert.equal((await store.readMeta(w.db, "posts:2026-09-28"))?.n, 1);
+    // Another replica, its own process and counters, the same database.
+    await poster(w, { fleetPerDay: 1 }).step(w.db, BOTH, new Map(), T0 + 20_000);
+    assert.equal(w.tweets.length, 1, "no replica can take a unit that is not there");
+    const waiting = [await store.keyStatus(w.db, "casual:a"), await store.keyStatus(w.db, "casual:b")].sort();
+    assert.deepEqual(waiting, ["posted", "scheduled"]);
+  });
+
+  it("a send X may have acted on keeps its unit of the ceiling; one X certainly refused gives it back", async (t) => {
+    const w = await world(t, T0 - 2 * HOUR);
+    await introDealtWith(w);
+    await dueCasual(w, "casual:maybe");
+    const outage: FetchLike = async () => ({ status: 503, headers: { get: () => null }, text: async () => "" });
+    await poster(w, { fetch: outage }).step(w.db, ROSTER, new Map(), T0);
+    assert.equal(await store.keyStatus(w.db, "casual:maybe"), "failed");
+    assert.equal((await store.readMeta(w.db, "posts:2026-09-28"))?.n, 1, "an uncertain post may be on X: it counts");
+    await dueCasual(w, "casual:limited", { tenant: TENANT, dueAtMs: T0 + MIN });
+    const limited: FetchLike = async () => ({ status: 429, headers: { get: () => null }, text: async () => "{}" });
+    // Four hours on, clear of the gap after the uncertain one.
+    await poster(w, { fetch: limited }).step(w.db, ROSTER, new Map(), T0 + 4 * HOUR);
+    assert.equal(await store.keyStatus(w.db, "casual:limited"), "scheduled", "a 429 waits for X's reset");
+    assert.equal((await store.readMeta(w.db, "posts:2026-09-28"))?.n, 1, "and gives its unit back");
+  });
+
+  it("nothing is drafted while the fleet is at its ceiling or paused", async (t) => {
+    for (const hold of ["ceiling", "paused"] as const) {
+      const w = await world(t, T0 - 2 * HOUR);
+      await introDealtWith(w);
+      if (hold === "ceiling") assert.equal(await store.takeAllowance(w.db, "posts:2026-09-28", 1, T0 - MIN), true);
+      else await store.writeMeta(w.db, PAUSE_KEY, String(T0 + HOUR), T0 - MIN);
+      const p = poster(w, { fleetPerDay: 1, calls: [call({ decisionId: "d-held", atSec: (T0 - MIN) / 1000 })] });
+      await p.step(w.db, ROSTER, new Map(), T0);
+      assert.equal(await store.keyStatus(w.db, "buy:d-held"), null, `${hold}: no draft that cannot go out`);
+      assert.equal(w.prompts.length, 0, `${hold}: no model call spent on one`);
+    }
+  });
+
   it("a credits pause holds every due post, and is said once", async (t) => {
     const w = await world(t, T0 - 2 * HOUR);
     await introDealtWith(w);

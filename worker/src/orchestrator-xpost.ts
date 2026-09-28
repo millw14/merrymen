@@ -46,10 +46,9 @@ import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp } from "./xpost/client";
 import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
 import { coinOf, hash32, planPosts, sendDecision, type PlanClock, type PlanIntent } from "./xpost/planner";
-import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, sendOne } from "./xpost/sender";
+import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, sendOne, type SendOutcome } from "./xpost/sender";
 import {
   cancelPost,
-  countPostedSince,
   duePosts,
   ensureXpostSchema,
   failInterrupted,
@@ -59,6 +58,7 @@ import {
   postsOfXUser,
   readMeta,
   recentBodies,
+  returnAllowance,
   schedulePost,
   skipScheduled,
   takeAllowance,
@@ -89,6 +89,8 @@ const FLEET_MEMORY_MAX = 1000;
 const PLAN_HISTORY_MS = 4 * DAY;
 /** Template intros tried with fresh dice before the intro is skipped. */
 const TEMPLATE_TRIES = 8;
+/** Send outcomes after which the post may exist on X: they keep their unit of the fleet's ceiling. */
+const MAY_BE_ON_X: ReadonlySet<SendOutcome> = new Set<SendOutcome>(["posted", "uncertain", "fault"]);
 /** Log counters that describe a standing condition rather than something that happened. */
 const CONDITIONS: ReadonlySet<string> = new Set(["no-model-budget", "zone-unreadable", "owner-failed"]);
 
@@ -247,10 +249,6 @@ function utcDay(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
-function utcMidnight(ms: number): number {
-  return Math.floor(ms / DAY) * DAY;
-}
-
 /** The mode a post may state: the agent's own, or none for an agent that is not trading. */
 function modeOf(f: AgentFacts): "paper" | "live" | null {
   return f.mode === "idle" ? null : f.mode;
@@ -397,7 +395,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           const until = Number((await readMeta(shared, key))?.v);
           if (Number.isFinite(until) && until > nowMs && until >= (pause?.until ?? 0)) pause = { why, until };
         }
-        let sentToday = await countPostedSince(shared, utcMidnight(nowMs));
+        // THE FLEET'S DAY CEILING is an allowance taken atomically before each
+        // send (xpost_meta "posts:<utc day>"): replicas cannot both take the
+        // last one, and what may exist on X (an uncertain answer, our own fault
+        // after the call) keeps its unit, while a send X certainly refused gives
+        // its unit back. Read here only to skip planning while it is reached.
+        let ceiling = ((await readMeta(shared, `posts:${utcDay(nowMs)}`))?.n ?? 0) >= fleetPerDay;
         let sends = 0;
         for (const post of await duePosts(shared, tenants, nowMs, MAX_DUE)) {
           const account: XAccount | null = accountOf.get(post.tenant) ?? (await getAccount(shared, post.tenant));
@@ -428,7 +431,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             }
             continue;
           }
-          if (sentToday >= fleetPerDay) {
+          if (sends >= MAX_SENDS_PER_PASS) break;
+          const dayKey = `posts:${utcDay(nowMs)}`;
+          if (!(await takeAllowance(shared, dayKey, fleetPerDay, nowMs))) {
+            ceiling = true;
             if (capNoted !== utcDay(nowMs)) {
               capNoted = utcDay(nowMs);
               bump("fleet-ceiling-reached");
@@ -436,14 +442,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             // Not a break: a later post may still be one to cancel or skip.
             continue;
           }
-          if (sends >= MAX_SENDS_PER_PASS) break;
           sends++;
           const out = await sendOne(shared, o.dek, o.app, post, { fetch: deps.fetch, nowMs });
           // The app's credentials refused is the one line an operator must act
           // on, so it says what happened rather than an outcome code.
           bump(out === "posted" ? "sent" : out === "app" ? "x-refused-client-credentials" : out);
-          // What may exist on X counts toward the ceiling, not only what surely does.
-          if (out === "posted" || out === "uncertain" || out === "fault") sentToday++;
+          // What may exist on X keeps its unit of the ceiling, not only what surely does.
+          if (!MAY_BE_ON_X.has(out)) await returnAllowance(shared, dayKey, nowMs);
           // The sender wrote the pause; this pass honours it at once, and the
           // event just said is the pause's line, so later passes stay quiet.
           if (out === "credits" || out === "app") {
@@ -453,7 +458,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         }
 
         // ── plan, at most once a minute ───────────────────────────────────
-        if (accounts.length > 0 && nowMs - lastPlanAt >= PLAN_EVERY_MS) {
+        // Not while the fleet is paused or at its day's ceiling: a draft that
+        // cannot go out would only spend the model's allowance, and pile up
+        // to go out together when the hold lifts.
+        if (!pause && !ceiling && accounts.length > 0 && nowMs - lastPlanAt >= PLAN_EVERY_MS) {
           lastPlanAt = nowMs;
           await planPass(shared, accounts, byTenant, profiles, nowMs, bump, zoneOf);
         }

@@ -13,7 +13,6 @@ import {
   cancelPost,
   cancelScheduled,
   claimPost,
-  countPostedSince,
   deleteAccount,
   duePosts,
   ensureXpostSchema,
@@ -34,6 +33,7 @@ import {
   readTokens,
   recentBodies,
   reschedulePost,
+  returnAllowance,
   schedulePost,
   setPosting,
   skipScheduled,
@@ -238,8 +238,6 @@ test("a post is claimed by exactly one sender and never sent twice", async (t) =
   assert.equal(p?.status, "posted");
   assert.equal(p?.tweetId, "1840000000000000001");
   assert.equal(p?.sentAtMs, 1_003);
-  assert.equal(await countPostedSince(db, 1_000), 1);
-  assert.equal(await countPostedSince(db, 2_000), 0);
 });
 
 test("a rate-limited post goes back to scheduled; a failure is final", async (t) => {
@@ -366,6 +364,12 @@ test("an allowance is taken atomically and stops at its limit", async (t) => {
   assert.equal(await takeAllowance(db, "llm:2026-09-29", 2, 4), true, "a new day is a new counter");
   assert.equal(await takeAllowance(db, "zero", 0, 5), false);
   assert.equal((await readMeta(db, "llm:2026-09-28"))?.n, 2);
+  await returnAllowance(db, "llm:2026-09-28", 3);
+  assert.equal(await takeAllowance(db, "llm:2026-09-28", 2, 3), true, "one given back can be taken again");
+  for (let i = 0; i < 4; i++) await returnAllowance(db, "llm:2026-09-29", 4);
+  assert.equal((await readMeta(db, "llm:2026-09-29"))?.n, 0, "never below zero");
+  await returnAllowance(db, "never-taken", 4);
+  assert.equal(await readMeta(db, "never-taken"), null);
   await writeMeta(db, "pause", "123", 6);
   await writeMeta(db, "pause", "456", 7);
   assert.equal((await readMeta(db, "pause"))?.v, "456");
@@ -427,7 +431,7 @@ test("every statement the store sends translates to Postgres with matching, bind
   await postsOfXUser(db, "111", 0.5, 20.5);
   await recentBodies(db, { tenant: OWNER_A, sinceMs: 0.5, limit: 5.5 });
   await recentBodies(db, { tenant: null, sinceMs: 0.5, limit: 5.5 });
-  await countPostedSince(db, 0.5);
+  await returnAllowance(db, "k", 14.7);
   await takeAllowance(db, "k", 3.5, 14.5);
   await readMeta(db, "k");
   await writeMeta(db, "k", "v", 15.5);
