@@ -40,6 +40,7 @@ import {
   STOCK_TOKENS,
   USDG_DECIMALS,
   isValidCustomToken,
+  shortAddress,
 } from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
 
@@ -188,7 +189,20 @@ export interface RecoverResult extends RecoverPlan {
  * question. The amount an owner confirms a sweep against must not be a number
  * we made up, so the vault row is priced in USDG instead (see planRecovery).
  */
-const BUILTIN_SWEEPABLE: { symbol: string; address: Address; decimals: number }[] = [
+interface SweepToken {
+  symbol: string;
+  address: Address;
+  decimals: number;
+  /**
+   * True for an owner token known only by its ADDRESS, whose `decimals` is then
+   * a placeholder. The transfer never reads it — it moves `raw` — but the amount
+   * the owner confirms against does, so `planRecovery` reads the real figure on
+   * chain rather than formatting at a number nothing established.
+   */
+  decimalsUnknown?: true;
+}
+
+const BUILTIN_SWEEPABLE: SweepToken[] = [
   { symbol: "USDG", address: CASH.USDG as Address, decimals: USDG_DECIMALS },
   ...STOCK_TOKENS.map((t) => ({ symbol: t.symbol, address: t.address as Address, decimals: 18 })),
   { symbol: "vault", address: MORPHO.steakhouseUsdgVault as Address, decimals: USDG_DECIMALS },
@@ -215,26 +229,63 @@ const BUILTIN_SWEEPABLE: { symbol: string; address: Address; decimals: number }[
  * demanding a typed value here would only push a cast onto callers holding data
  * they have not checked — which is how an unvalidated address reaches an atomic
  * sweep of someone's whole account.
+ *
+ * AN ADDRESS WITH NO NAME IS NOT MALFORMED. The browser and the phone recover
+ * signed out, so the only token list they hold is the grant's `grantTokens` —
+ * addresses, nothing else — and they pass each as `{ address, symbol: "" }`.
+ * isValidCustomToken refuses an empty symbol, which is right for settings,
+ * where a ticker is required; here it silently dropped every owner-added token
+ * from those sweeps and left it in the account. So an address-only entry is
+ * accepted, with its address checked exactly as strictly as any other.
+ *
+ * It is labelled BY ADDRESS, never by a symbol read off the token: a contract
+ * chooses its own `symbol()`, and one calling itself USDG would put a second
+ * USDG row in the confirmation — the collision the symbol rule above exists to
+ * refuse. A short address cannot collide with a ticker (the `…` is outside the
+ * ticker alphabet), and if two share one, the later falls back to its full
+ * address, which cannot collide at all because addresses are already unique.
  */
-export function sweepList(
-  extra: readonly unknown[] = [],
-): { symbol: string; address: Address; decimals: number }[] {
+export function sweepList(extra: readonly unknown[] = []): SweepToken[] {
   const out = [...BUILTIN_SWEEPABLE];
   const addresses = new Set(out.map((t) => t.address.toLowerCase()));
   const symbols = new Set(out.map((t) => t.symbol.toUpperCase()));
   for (const t of extra) {
-    if (!isValidCustomToken(t)) continue;
-    const addr = t.address.toLowerCase();
-    if (addresses.has(addr) || symbols.has(t.symbol.toUpperCase())) continue;
+    let token: SweepToken;
+    if (isValidCustomToken(t)) {
+      token = { symbol: t.symbol, address: t.address as Address, decimals: t.decimals };
+    } else if (isAddressOnly(t)) {
+      const short = shortAddress(t.address);
+      token = {
+        symbol: symbols.has(short.toUpperCase()) ? t.address.toLowerCase() : short,
+        address: t.address,
+        decimals: 18,
+        decimalsUnknown: true,
+      };
+    } else {
+      continue;
+    }
+    const addr = token.address.toLowerCase();
+    if (addresses.has(addr) || symbols.has(token.symbol.toUpperCase())) continue;
     addresses.add(addr);
-    symbols.add(t.symbol.toUpperCase());
-    out.push({ symbol: t.symbol, address: t.address as Address, decimals: t.decimals });
+    symbols.add(token.symbol.toUpperCase());
+    out.push(token);
     // The same ceiling settings.ts puts on customTokens. A recovery is one
     // atomic UserOp, and an unbounded call list is one that runs out of gas
     // and moves nothing at all.
     if (out.length >= BUILTIN_SWEEPABLE.length + 50) break;
   }
   return out;
+}
+
+/** `{ address, symbol: "" }` (or no symbol at all), with a well-formed address. */
+function isAddressOnly(t: unknown): t is { address: Address } {
+  if (!t || typeof t !== "object") return false;
+  const c = t as { symbol?: unknown; address?: unknown };
+  return (
+    (c.symbol === undefined || c.symbol === "") &&
+    typeof c.address === "string" &&
+    /^0x[0-9a-fA-F]{40}$/.test(c.address)
+  );
 }
 
 export type BalanceOutcome =
@@ -479,6 +530,30 @@ export async function planRecovery(opts: {
 
   const balances: TokenBalance[] = await Promise.all(
     held.map(async ({ t, raw }) => {
+      if (t.decimalsUnknown) {
+        // ITS OWN DECIMALS, asked of the token, for the same reason the vault
+        // row below is priced: an address-only entry used to carry a guessed
+        // 18, and a 9-decimal memecoin formatted at 18 is shown to the owner a
+        // billion times smaller than what they are agreeing to move. Bounded as
+        // isValidCustomToken bounds a typed-in figure; outside that, or no
+        // answer, the amount is "unknown" rather than something plausible.
+        const decimals = await publicClient
+          .readContract({ address: t.address, abi: erc20Abi, functionName: "decimals" })
+          .then((d) => Number(d))
+          .catch(() => null);
+        if (decimals !== null && Number.isInteger(decimals) && decimals >= 0 && decimals <= 36) {
+          return { symbol: t.symbol, address: t.address, raw, decimals, amount: formatUnits(raw, decimals) };
+        }
+        unreadable.push(`${t.symbol} decimals`);
+        return {
+          symbol: t.symbol,
+          address: t.address,
+          raw,
+          decimals: t.decimals,
+          amount: "unknown",
+          note: `${raw} base units — held, but the token would not state its decimals. It sweeps regardless.`,
+        };
+      }
       if (t.address.toLowerCase() !== (MORPHO.steakhouseUsdgVault as string).toLowerCase()) {
         return { symbol: t.symbol, address: t.address, raw, decimals: t.decimals, amount: formatUnits(raw, t.decimals) };
       }
