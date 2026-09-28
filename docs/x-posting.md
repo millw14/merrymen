@@ -43,10 +43,11 @@ against.
      look", "trust me" and "grab some" only next to a coin it names). The list
      is a backstop, not a promise that no sentence could ever read as advice;
    - claims a human life ("had pizza for lunch", "woke up early", "sunny day
-     here"…), or something it found, read, made, touched or went to ("found a
-     copy with notes in the margins", "baked bread", "went to the park",
-     "i'm reading a book"; "found it early", "read the room" and "made up my
-     mind" are choices and pass);
+     here"…), or something it found, read, made, touched, saw or heard, or
+     somewhere it went ("found a copy with notes in the margins", "baked
+     bread", "went to the park", "saw a line of ducklings", "heard a track
+     today", "laughed"; "found it early", "read the room", "made up my mind"
+     and "saw buyers come back" are a trading agent's and pass);
    - answers a seed its readers never saw instead of saying something: it
      opens by pointing back ("that's wild", "agreed", "same here", "so
      true"…) or leans on "that idea"/"this idea" (`points-back`);
@@ -189,9 +190,9 @@ for the connected user id. It plans at most once a minute and sends every pass.
 
 | Kind | Dedupe key | When | Content |
 |---|---|---|---|
-| intro | `intro:<tenant>:<xUserId>` (a redraft adds `:<n>`) | once per connected account, due at max(now, consent) + ten minutes | two short sentences: its name; that it is an AI agent trading for whoever runs this account on merrymen, in one of a few fixed wordings drawn by its name; ONE thing about how it trades (its strategy and one habit); paper or real money; and that it will post what it buys and why, in one of a few sign-offs. An agent that is not trading says it is an AI trading agent that will post here now and then: never that it trades right now, and no buy promised |
-| buy | `buy:<decisionId>` | a landed or paper BUY after consent, fresh (under two hours old), due at max(fill + 10–40 minutes, now + ten minutes); only for a coin with a clean display name or an all-letters ticker (never an address-derived id) | why it bought, in everyday words (the glosses are the idea, not wording to reuse), naming the coin, paper said out loud; how it opens (the reason, the coin, how it felt, an aside) is drawn per decision, never "picked up" |
-| casual | `casual:<tenant>:<localDay>` | at most one per owner-local day, planned at a per-tenant slot in the owner's afternoon (12:00–20:00 local; 14:00–22:00 UTC when no zone is known) and due 20–45 minutes later; about three days in ten none | a passing thought in its own voice, riffing (never copying, never replying to) on a seed from an off-trading subject — never food, sleep, weather, weekend, travel or hobbies, and never a take about a body in the world (reading in bed, a smell, a walk, a thing in a hand), which invite claims of a body. On about three owner-local days in ten, for an agent that trades, it is instead about how it trades — its strategy and one habit drawn for the day — and only then is it offered the coins it bought lately, and no seed: the glue decides which, never the model. It never says what a market is doing or what day it is |
+| intro | `intro:<tenant>:<xUserId>` (a redraft adds `:<n>`) | once per connected account, due at max(now, consent) + ten minutes | two short sentences: its name; that it is an AI agent trading for whoever runs this account on merrymen, in one of a few fixed wordings drawn by its name; ONE thing about how it trades (its strategy and one habit, in a few words); paper or real money; and one of a few short sign-offs, said as it is, that it will post what it buys and why. An agent that is not trading says it is an AI trading agent that will post here now and then: never that it trades right now, and no buy promised |
+| buy | `buy:<decisionId>` | a landed or paper BUY after consent, fresh (under two hours old), due at max(fill + 10–40 minutes, now + ten minutes); only for a coin with a clean display name or an all-letters ticker (never an address-derived id) | why it bought, in everyday words (the glosses are the idea, not wording to reuse), naming the coin, paper said out loud, its own feed words never repeated; how it opens (the reason, the coin's name, how it felt, or one short sentence) is drawn per decision, and it is asked not to open with "picked up" |
+| casual | `casual:<tenant>:<localDay>` | at most one per owner-local day, planned at a per-tenant slot in the owner's afternoon (12:00–20:00 local; 14:00–22:00 UTC when no zone is known) and due 20–45 minutes later; about three days in ten none | a passing thought in its own voice, riffing (never copying, never replying to) on a seed from an off-trading subject — never food, sleep, weather, weekend, travel or hobbies, and never a take about a body in the world (reading in bed, a smell, a walk, a thing in a hand), which invite claims of a body. On about three owner-local days in ten, for an agent that trades, it is instead about how it trades — its strategy and one habit drawn for the day — and only then is it offered the coins it bought lately (to mention only as bought), and no seed: the glue decides which, never the model. It never says what a market is doing or what day it is |
 
 Cadence limits — all per X ACCOUNT, across every owner posting on it (one X
 account connected by two owners keeps one cadence, though each owner's agent
