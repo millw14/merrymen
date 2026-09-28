@@ -255,7 +255,7 @@ import { isPaused, startTelegram } from "./telegram/service";
 import { startNotifier } from "./telegram/notifier";
 import { energyToldDayOf, type EnergyToldHere } from "./telegram/energy-alert";
 import { startVirtualsStreamer } from "./virtuals-streamer";
-import { createStateRef, ensureLinkCode } from "./telegram/state";
+import { createStateRef, ensureLinkCode, retireLegacyCode } from "./telegram/state";
 import { readPositionRaw } from "./telegram/reads";
 import { formatDepth, formatNoDepth } from "./telegram/depth-format";
 import { bestCashPool } from "./venues/pool-price";
@@ -13250,8 +13250,13 @@ async function main() {
   // claim itself. Reported by @Victory-byte (PR #3); fixed on the worker side.
   if (cfg.telegramBotToken) {
     const before = tgState.get().linkCode;
-    tgState.set(ensureLinkCode(tgState.get()));
-    if (!before && tgState.get().linkCode) {
+    // A code the old scheme derived from this token is replaced first: it can
+    // be computed from the token, and hosted it was printed into the fleet's
+    // logs (state.ts retireLegacyCode). Here rather than only in the poll loop,
+    // so the code this prints, and the one the dashboard shows, is the one
+    // that works.
+    tgState.set(ensureLinkCode(retireLegacyCode(tgState.get(), cfg.telegramBotToken)));
+    if (tgState.get().linkCode && tgState.get().linkCode !== before) {
       // HOSTED, NEVER THE CODE. The code is a bearer credential: whoever sends
       // it first becomes the agent's owner. Hosted, this line lands in the
       // fleet's shared logs, where every tenant who had not linked yet had a

@@ -88,7 +88,6 @@ export function tryLink(deps: LinkDeps, who: Linker, code: string): LinkOutcome 
     deps.fails.set(who.chatId, { fails: prev + 1, until: t + LINK_LOCKOUT_SEC });
     return { ok: false, locked: false };
   }
-  deps.fails.clear();
   // First-come owner + allowlist the chat; the code is consumed (rotates).
   // linkedAt marks day zero of the relationship — the bond grows from here.
   deps.allow(who.chatId);
@@ -109,6 +108,10 @@ export function tryLink(deps: LinkDeps, who: Linker, code: string): LinkOutcome 
     deps.rng,
   );
   deps.stateRef.set(state);
+  // Only now. Forgiven before the rotation was saved, a failed settings write
+  // in `allow` left every chat's count cleared and the same code still live:
+  // five fresh guesses at it for whoever had been locked out.
+  deps.fails.clear();
   deps.onLinked?.(who);
   return { ok: true };
 }

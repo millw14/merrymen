@@ -411,6 +411,66 @@ export function rotateLinkCode(state: TelegramState, rng: LinkRng = randomBytes)
 }
 
 /**
+ * How far past the stored round a code from the old derivation is looked for.
+ * The old restore put the round back to 0 on every redeploy while the code it
+ * restored could be from any round, so the stored round says little. Each
+ * round costs one short hash, once per token per process.
+ */
+const LEGACY_ROUNDS_PAST = 64;
+
+/**
+ * The code the old scheme gave `token` at `round`: FNV-1a over
+ * `${token}:${round}`, exactly as ensureLinkCode computed it before codes were
+ * random. Kept for one thing only, recognising such a code so it can be
+ * retired. Nothing may mint with it.
+ */
+function legacyCode(token: string, round: number): string {
+  let h = 2166136261 >>> 0;
+  for (const ch of `${token}:${round}`) {
+    h ^= ch.charCodeAt(0);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  let code = "";
+  for (let i = 0; i < CODE_LENGTH; i++) {
+    code += CODE_ALPHABET[h % CODE_ALPHABET.length];
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return code;
+}
+
+/**
+ * RETIRE A CODE THE OLD SCHEME DERIVED FROM THIS TOKEN: rotated, like any
+ * rotation, so the caller should forgive lockouts. Anything else is returned
+ * as it is, the same object.
+ *
+ * Random codes alone did not end the exposure they were meant to end. Every
+ * code minted before them is a hash of the token, which anyone holding the
+ * token can compute, and hosted each one was also printed into the fleet's
+ * shared logs as it was minted ("link code ready — send /link XXXXXX"). Such a
+ * code survives the upgrade: it sits in telegram.json, or the orchestrator
+ * restores it from the mirror, and ensureLinkCode keeps a code that is there.
+ * For a tenant who had not linked yet, whoever read that log line could still
+ * send it and become the owner. So a stored code that the old scheme gives
+ * this token, at any round up to the stored one plus LEGACY_ROUNDS_PAST, is
+ * replaced once; the random code that replaces it is then published and
+ * restored like any other, and is never matched again.
+ *
+ * What this cannot see is a code the old scheme derived from a token the bot
+ * no longer has. The token is never stored, so there is nothing to derive it
+ * from.
+ */
+export function retireLegacyCode(state: TelegramState, token: string, rng: LinkRng = randomBytes): TelegramState {
+  if (!state.linkCode) return state;
+  // A corrupt round must not shrink the search to nothing, or stretch it without end.
+  const stored = Number.isSafeInteger(state.linkRound) && state.linkRound > 0 ? Math.min(state.linkRound, 10_000) : 0;
+  const code = state.linkCode.toUpperCase();
+  for (let round = 0; round <= stored + LEGACY_ROUNDS_PAST; round++) {
+    if (legacyCode(token, round) === code) return rotateLinkCode(state, rng);
+  }
+  return state;
+}
+
+/**
  * Shared mutable handle over the persisted state. The poll service and the
  * notifier both read AND write telegram.json; giving each its own in-memory
  * copy would lose writes (last save wins). One ref, every set() persists.

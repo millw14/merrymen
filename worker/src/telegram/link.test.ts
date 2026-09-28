@@ -85,6 +85,20 @@ describe("tryLink", () => {
     assert.deepEqual(r.link(999, r.state().linkCode), { ok: true });
   });
 
+  it("a link that fails part way forgives nobody: the counts stand until the rotation is saved", () => {
+    // `allow` writes settings.json, and a full disk throws there. The code has
+    // not rotated, so a locked-out guesser must not get five fresh guesses at it.
+    const r = rig();
+    for (let i = 0; i < LINK_MAX_FAILS; i++) r.link(999, "WRONG");
+    r.deps.allow = () => {
+      throw new Error("ENOSPC");
+    };
+    assert.throws(() => r.link(555, "ABCDEF"), /ENOSPC/);
+    assert.equal(r.state().linkCode, "ABCDEF", "premise: nothing rotated");
+    assert.equal(r.fails.get(999)?.fails, LINK_MAX_FAILS);
+    assert.deepEqual(r.link(999, "ABCDEF"), { ok: false, locked: true, until: T + LINK_LOCKOUT_SEC });
+  });
+
   it("a code minted on the spot is kept, not thrown away with the wrong guess", () => {
     const r = rig({ linkCode: "" });
     r.link(999, "WRONG");

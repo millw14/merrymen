@@ -77,7 +77,7 @@ import {
   dashboardBase,
   type StatusContext,
 } from "./reads";
-import { botIdOf, ensureLinkCode, rotateLinkCode, switchBot, tokenTagOf, type StateRef } from "./state";
+import { botIdOf, ensureLinkCode, retireLegacyCode, rotateLinkCode, switchBot, tokenTagOf, type StateRef } from "./state";
 import { linkReply, tryLink, type LinkFails } from "./link";
 import {
   ageDays,
@@ -250,6 +250,13 @@ const CONFLICT_WAIT_SEC = 10;
 const CONFLICT_RETELL_SEC = 3_600;
 /** A long wait is taken in slices this long, so a token fixed on the dashboard is used within one. */
 const WAKE_SLICE_MS = 5_000;
+/**
+ * A silence this long re-arms the backlog boundary (pollOnce). About as long
+ * as an owner waits for a reply before giving up on it; a blip the backoff
+ * retries through (2s, 4s, 8s …) is well inside it, and anything that failed
+ * for a 401's five minutes is well past it.
+ */
+const REARM_AFTER_SEC = 60;
 /** Failed pushes of one menu fingerprint before it drops to one try per MENU_RETRY_SEC. */
 const MENU_MAX_ATTEMPTS = 3;
 const MENU_RETRY_SEC = 600;
@@ -351,10 +358,23 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   /**
    * When this process started listening to the current bot: the moment the
    * first getUpdates that worked was sent, unix seconds. Null until then, and
-   * again after a change of bot or while Telegram is switched off. Anything
-   * dated before it waited out a silence, and pollOnce holds it back.
+   * again after a change of bot or while Telegram is switched off; moved on
+   * after a silence of REARM_AFTER_SEC or more. Anything dated before it
+   * waited out a silence, and pollOnce holds it back.
    */
   let armedAt: number | null = null;
+  /**
+   * When this process stopped hearing the bot, unix seconds: the first poll
+   * since the last good one that failed or threw. Null while polls work. Not
+   * cleared by a change of token, so the 401s before a renewed secret count.
+   */
+  let deafSince: number | null = null;
+  /**
+   * Reads in a row that found Telegram switched off. One alone may be
+   * settings.json caught half-written by the orchestrator's rewrite, which
+   * reads as the defaults, with Telegram off.
+   */
+  let offReads = 0;
   const history = new Map<number, { role: "user" | "assistant"; content: string }[]>();
   // Memory ids surfaced on the previous turn, per chat. A follow-up like "is it
   // done?" shares no words with anything on disk, so without carrying the last
@@ -797,7 +817,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // Transcribed text then flows through the SAME path as a typed message.
     if (msg.voiceFileId && !msg.text) {
       if (!allowed) {
-        await sendMessage({ token }, msg.chatId, "🚫 not authorized.");
+        await sendMessage({ token }, msg.chatId, refusalText(msg.chatId));
         return;
       }
       if (!cfg.telegramPcControlEnabled || !cfg.telegramCapabilities.includes("voice")) {
@@ -1304,6 +1324,18 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * either way and is treated as live, as before. A message from before a
    * change of bot is the stricter case, and holdEarly has it.
    *
+   * LISTENING BEGINS AGAIN AFTER A SILENCE, not only at the start. Armed once
+   * per process, an outage inside it went unseen: hours of 502s, or a revoked
+   * token's 401s until the owner pasted a renewed secret, and the backlog they
+   * left was all dated after `armedAt`. It ran as live, a /buy from an hour
+   * before bought, and five /link attempts from the silence locked out the
+   * owner's live code, the incident over again. So a good poll that ends
+   * REARM_AFTER_SEC or more of polls failing or throwing re-arms at its own
+   * send time. A shorter blip does not: whoever typed into it is still
+   * waiting for the answer. This weakens nothing: what is held is never
+   * compared, and a guesser cannot make polls fail. Switched off re-arms too,
+   * once a second read confirms it (offReads).
+   *
    * EACH UPDATE IS SAVED AS SEEN BEFORE IT RUNS, and each reads the config
    * afresh.
    * - At most once, on purpose. The offset used to be saved after the whole
@@ -1324,14 +1356,23 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   const pollOnce = async (): Promise<number> => {
     const cfg = deps.getCfg();
     if (!cfg.telegramEnabled || !cfg.telegramBotToken) {
-      // Switched off is not an outage, and time spent off must not be counted
-      // into one when it is switched back on.
-      outage = null;
-      // Nor is anything sent while it was off live when it comes back on:
-      // nobody was listening, which is what backlog means.
-      armedAt = null;
+      // Only on a second read in a row. The orchestrator rewrites settings.json
+      // every 15 seconds, and a read that catches it half-written parses as
+      // nothing: the defaults, Telegram off. Taken at its word, that one read
+      // re-armed the boundary, and whatever the owner typed in the idle gap
+      // that followed was held as if the bot had been off.
+      offReads += 1;
+      if (offReads >= 2) {
+        // Switched off is not an outage, and time spent off must not be
+        // counted into one when it is switched back on.
+        outage = null;
+        // Nor is anything sent while it was off live when it comes back on:
+        // nobody was listening, which is what backlog means.
+        armedAt = null;
+      }
       return IDLE_GAP_MS; // idle until enabled
     }
+    offReads = 0;
     const token = cfg.telegramBotToken;
     await bindBot(token);
     stateRef.set(ensureLinkCode(stateRef.get()));
@@ -1344,6 +1385,10 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     const polled = await getUpdates({ token }, stateRef.get().offset);
     if (polled.reason) return pollFailed(polled);
     pollWorked();
+    // The backlog rule's silence: this poll ends one long enough that what
+    // waited through it is backlog, so listening begins again now.
+    if (deafSince !== null && askedAt - deafSince >= REARM_AFTER_SEC) armedAt = null;
+    deafSince = null;
     if (armedAt === null) armedAt = askedAt;
     const armed = armedAt;
     const { messages, callbacks, nextOffset } = polled;
@@ -1504,6 +1549,10 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * - NO stored bot, a file from before this existed or one the orchestrator
    *   restored, adopts the current bot and resets nothing. A reset there would
    *   replay the backlog and void a code the dashboard may be showing.
+   * - Whichever of those it is, a code the OLD SCHEME derived from this token
+   *   is retired first, once per token per process (retireLegacyCode): it is
+   *   computable from the token and was printed into the fleet's logs, and
+   *   the adoption above would otherwise keep it for good.
    *
    * The new code is minted in the same write that clears the old one, so
    * telegram.json never holds an empty code for the orchestrator to publish as
@@ -1511,9 +1560,19 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * dashboard shows the new code.
    */
   const bindBot = async (token: string): Promise<void> => {
+    const firstUse = boundToken !== token;
     // A new token is a new question, so it starts the backoff from the bottom.
-    if (boundToken !== null && boundToken !== token && outage) outage.streak = 0;
+    if (boundToken !== null && firstUse && outage) outage.streak = 0;
     boundToken = token;
+    if (firstUse) {
+      const held = stateRef.get();
+      const retired = retireLegacyCode(held, token);
+      if (retired !== held) {
+        stateRef.set(retired);
+        linkFails.clear();
+        deps.note("ok", "Telegram: the link code was one derived from the bot token, so it was re-minted");
+      }
+    }
     const botId = botIdOf(token);
     if (!botId) return; // not a token Telegram would accept; getUpdates says so
     const tag = tokenTagOf(token);
@@ -1556,6 +1615,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     const t = now();
     outage = outage ?? { since: t, streak: 0, told: new Set() };
     outage.streak += 1;
+    deafSince ??= t;
     const reason = r.reason ?? "unknown error";
     let kind: string;
     let waitSec: number;
@@ -1681,6 +1741,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       .catch((e) => {
         deps.note("warn", `Telegram: poll loop — ${e instanceof Error ? e.message : String(e)}`);
         crashStreak += 1;
+        // A poll that threw heard nothing either (telegram.json unwritable, say),
+        // and a long run of them is a silence like any failed poll's.
+        deafSince ??= now();
         return Math.min(BACKOFF_MAX_SEC, 2 ** crashStreak) * 1000;
       })
       .then((ms) => waitThenPoll(ms, token));

@@ -66,6 +66,17 @@ describe("link codes stay out of hosted logs", () => {
     assert.equal(previous.trim(), 'if (isHostedMode()) console.log("[telegram] link code ready (shown on the dashboard)");');
   });
 
+  it("…and a code those lines already printed is retired before anything prints or publishes one", () => {
+    // Redaction stops new codes reaching the logs; the ones already there were
+    // derived from each token and are restored from the mirror, so the child
+    // replaces any such code on start (state.ts retireLegacyCode, pinned in
+    // state.test.ts and backlog.integration.test.ts).
+    const src = readFileSync(path.join(ROOT, "index.ts"), "utf8");
+    const retire = src.indexOf("tgState.set(ensureLinkCode(retireLegacyCode(tgState.get(), cfg.telegramBotToken)));");
+    assert.ok(retire > 0, "index.ts no longer retires a legacy code at startup");
+    assert.ok(retire < src.indexOf('console.log("[telegram] link code ready'), "retired before the line that reports the code");
+  });
+
   it("the orchestrator's restore says a code came back without saying which", () => {
     const src = readFileSync(path.join(ROOT, "orchestrator.ts"), "utf8");
     assert.match(src, /log\(`\$\{tenant\}: telegram link code restored \(shown on the dashboard\)`\)/);

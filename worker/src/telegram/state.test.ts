@@ -8,6 +8,7 @@ import {
   botIdOf,
   ensureLinkCode,
   loadTelegramState,
+  retireLegacyCode,
   rotateLinkCode,
   saveTelegramState,
   switchBot,
@@ -106,6 +107,63 @@ describe("link code — random, rotating, unambiguous", () => {
   it("an rng that never gives a usable byte throws rather than spinning the poll loop", () => {
     assert.throws(() => ensureLinkCode(base, scripted(255)), /no usable bytes/);
     assert.throws(() => rotateLinkCode({ ...base, linkCode: "ABCDEF" }, scripted(0, 1, 2, 3, 4, 5)), /keeps repeating/);
+  });
+});
+
+/**
+ * The old scheme, as it stood at 350d0882, copied here as an oracle so the
+ * test does not trust the copy it is testing.
+ */
+function oldScheme(token: string, round: number): string {
+  const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  let h = 2166136261 >>> 0;
+  for (const ch of `${token}:${round}`) {
+    h ^= ch.charCodeAt(0);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  let code = "";
+  for (let i = 0; i < 6; i++) {
+    code += ALPHABET[h % ALPHABET.length];
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return code;
+}
+
+describe("retireLegacyCode — a code the old scheme derived from the token does not survive the upgrade", () => {
+  it("the oracle is the old scheme: these are the codes 350d0882 minted for these tokens", () => {
+    assert.deepEqual([0, 1, 2, 3].map((r) => oldScheme("111:a", r)), ["U8D9W3", "BMXBHV", "TZGDZP", "AD6KGG"]);
+    assert.equal(oldScheme("222:secret", 7), "PHW6TW");
+  });
+
+  it("a never-linked tenant's code, hash(token:0), restored or kept, is replaced by a random one", () => {
+    // Exactly what index.ts printed into the fleet's logs for every tenant that
+    // had a token and had not linked.
+    const kept = { ...base, linkCode: "U8D9W3" };
+    const retired = retireLegacyCode(kept, "111:a", scripted(0, 1, 2, 3, 4, 5));
+    assert.equal(retired.linkCode, "ABCDEF");
+    assert.equal(retired.linkRound, 1, "a rotation like any other");
+  });
+
+  it("a code from any round is found, although a restore put the stored round back to 0", () => {
+    for (const round of [1, 3, 17, 64]) {
+      const restored = { ...base, linkCode: oldScheme("111:a", round), linkRound: 0 };
+      assert.notEqual(retireLegacyCode(restored, "111:a").linkCode, restored.linkCode, `round ${round}`);
+    }
+    // Past the stored round too, and with a round a corrupt file made nonsense of.
+    assert.notEqual(retireLegacyCode({ ...base, linkCode: oldScheme("111:a", 90), linkRound: 40 }, "111:a").linkCode, oldScheme("111:a", 90));
+    assert.notEqual(retireLegacyCode({ ...base, linkCode: "U8D9W3", linkRound: Number.NaN }, "111:a").linkCode, "U8D9W3");
+    assert.notEqual(retireLegacyCode({ ...base, linkCode: "u8d9w3" }, "111:a").linkCode, "u8d9w3", "the compare ignores case, as /link does");
+  });
+
+  it("a random code, no code, and another token's hash are left exactly as they are", () => {
+    const random = ensureLinkCode(base);
+    assert.equal(retireLegacyCode(random, "111:a"), random, "the same object, so a caller can tell nothing changed");
+    const none = { ...base, linkCode: "" };
+    assert.equal(retireLegacyCode(none, "111:a"), none);
+    // Derived from a token this bot no longer has: the token was never stored,
+    // so there is nothing to recognise it by.
+    const other = { ...base, linkCode: "PHW6TW", linkRound: 7 };
+    assert.equal(retireLegacyCode(other, "111:a"), other);
   });
 });
 

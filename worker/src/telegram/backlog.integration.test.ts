@@ -49,7 +49,8 @@ interface Call {
   body: Record<string, unknown>;
   at: number;
 }
-type Reply = { status?: number; body: unknown } | "hang";
+/** `delayMs`: answered that long after it was asked, on the mocked clock, as a long poll is. */
+type Reply = { status?: number; body: unknown; delayMs?: number } | "hang";
 
 function blankState(over: Partial<TelegramState> = {}): TelegramState {
   return {
@@ -97,11 +98,14 @@ interface Harness {
   state: () => TelegramState;
   polls: () => Call[];
   sentTo: (chat: number) => string[];
-  advance: (ms: number) => Promise<void>;
+  /** Tick the mocked clock `ms`, `step` at a time, letting everything due run between ticks. */
+  advance: (ms: number, step?: number) => Promise<void>;
   /** Called from inside the grant-cap read, which every allowlisted message makes before its command runs. */
   onGrantRead?: () => void;
   /** What submitTrade does, when a test wants it to do more than record. */
   onTrade?: () => Promise<string>;
+  /** Every write of telegram.json throws while this is set, as on a full disk. */
+  stateWriteFails?: boolean;
 }
 
 /**
@@ -145,9 +149,9 @@ async function withService(
     state: () => state,
     polls: () => calls.filter((c) => c.method === "getUpdates"),
     sentTo: (chat) => calls.filter((c) => c.method === "sendMessage" && c.body.chat_id === chat).map((c) => String(c.body.text)),
-    advance: async (ms) => {
-      for (let t = 0; t < ms; t += 250) {
-        mock.timers.tick(Math.min(250, ms - t));
+    advance: async (ms, step = 250) => {
+      for (let t = 0; t < ms; t += step) {
+        mock.timers.tick(Math.min(step, ms - t));
         await settle();
       }
     },
@@ -169,12 +173,19 @@ async function withService(
     }
     const r = opts.script?.(call, h) ?? defaultReply(call);
     if (r === "hang") return new Promise(() => {});
+    if (r.delayMs) await new Promise((res) => setTimeout(res, r.delayMs));
     const status = r.status ?? 200;
     return { ok: status < 400, status, json: async () => r.body };
   }) as typeof fetch;
   const svc = startTelegram({
     getCfg: () => ({ ...cfg, telegramAllowlist: [...cfg.telegramAllowlist] }) as never,
-    stateRef: { get: () => state, set: (s) => { state = s; } },
+    stateRef: {
+      get: () => state,
+      set: (s) => {
+        if (h.stateWriteFails) throw new Error("ENOSPC: no space left on device, write telegram.json");
+        state = s;
+      },
+    },
     note: (_level, message) => notes.push(message),
     buildStatusContext: () => ({}) as never,
     setStrategy: () => ({ ok: true }),
@@ -298,6 +309,36 @@ describe("the backlog rule (a message dated before this process started listenin
         assert.ok(served, "premise: the batch was handed over");
         assert.match(h.sentTo(999)[5]!, LOCKED, "late is not stale: the guess limit holds");
         assert.ok(!h.sentTo(999).some((t) => LATE_CODE.test(t)));
+      },
+    );
+  });
+
+  it("4b. a /link typed while the first long poll was out is live: listening began when that poll was SENT", async () => {
+    // Telegram holds a long poll open until something arrives. One sent at T0
+    // that comes back at +20s with a message typed at +10s delivered it the
+    // moment it was typed. Arming at the answer would call it late, and a
+    // guess made then would be neither compared nor counted.
+    let asked = 0;
+    await withService(
+      {
+        script: (c, h) => {
+          if (c.method !== "getUpdates" || ++asked > 1) return undefined;
+          return {
+            ...(ok([
+              ...[1, 2, 3, 4, 5].map((i) => text(i, 999, `/link WRONG${i}`, NOW + 10)),
+              text(6, 999, `/link ${h.state().linkCode}`, NOW + 10),
+            ]) as { body: unknown }),
+            delayMs: 20_000,
+          };
+        },
+      },
+      async (h) => {
+        assert.equal(h.sentTo(999).length, 0, "premise: the first poll is still out");
+        await h.advance(21_000);
+        assert.equal(h.polls()[0]!.at, T0, "premise: sent at T0");
+        assert.equal(h.sentTo(999).length, 6);
+        assert.ok(!h.sentTo(999).some((t) => LATE_CODE.test(t)), "compared, not held");
+        assert.match(h.sentTo(999)[5]!, LOCKED, "and counted");
       },
     );
   });
@@ -451,6 +492,166 @@ describe("the backlog rule (a message dated before this process started listenin
   });
 });
 
+const HOUR_MS = 3_600_000;
+const BAD_GATEWAY: Reply = { status: 502, body: { ok: false, error_code: 502, description: "Bad Gateway" } };
+const REVOKED: Reply = { status: 401, body: { ok: false, error_code: 401, description: "Unauthorized" } };
+
+/**
+ * What the owner sent into an hour-long silence, the way it arrives when the
+ * bot is heard again: five guesses at codes long gone and a /buy, all dated
+ * inside the silence, then the code the dashboard shows now, typed live.
+ */
+const silenceBatch = (h: Harness) => [
+  ...[1, 2, 3, 4, 5].map((i) => text(i, 999, `/link WRONG${i}`, NOW + 3_600)),
+  text(6, 555, "/buy NVDA 5", NOW + 3_600),
+  text(7, 999, `/link ${h.state().linkCode}`),
+];
+
+/** Neither half of the incident: nothing bought, one summary, one late-code notice, and the live code links. */
+function assertHeldAndLinked(h: Harness): void {
+  assert.deepEqual(h.trades, [], "no trade from the silence");
+  const to555 = h.sentTo(555);
+  assert.equal(to555.length, 1);
+  assert.match(to555[0]!, /^I was offline; 1 message arrived late \(oldest 13:00 UTC\)\./);
+  const to999 = h.sentTo(999);
+  assert.equal(to999.filter((t) => LATE_CODE.test(t)).length, 1, "one late-code notice for five guesses");
+  assert.ok(!to999.some((t) => LOCKED.test(t)), "the guesses from the silence counted toward nothing");
+  assert.match(to999.at(-1)!, LINKED);
+  assert.deepEqual(h.state().linkedChats, [999]);
+}
+
+describe("a silence inside this process re-arms the backlog boundary", () => {
+  it("hours of 502s: what waited through them is backlog, not live", async () => {
+    let served = false;
+    await withService(
+      {
+        allowlist: [555],
+        script: (c, h) => {
+          if (c.method !== "getUpdates") return undefined;
+          if (c.at === T0) return ok([]); // listening, armed at T0
+          if (c.at < T0 + 2 * HOUR_MS) return BAD_GATEWAY;
+          if (served) return undefined;
+          served = true;
+          return ok(silenceBatch(h));
+        },
+      },
+      async (h) => {
+        await h.advance(2 * HOUR_MS + 90_000, 1_000);
+        assert.ok(served, "premise: the backlog was handed over");
+        assert.ok(h.notes.some((n) => /receiving updates again after 2h/.test(n)), "premise: an outage, in this process");
+        assertHeldAndLinked(h);
+      },
+    );
+  });
+
+  it("a revoked token's 401s, then a renewed secret for the same bot: the 401s were the silence", async () => {
+    // 0xfe0db6 in the plan: a token revoked in BotFather loops on 401 until
+    // the owner pastes the new one.
+    let served = false;
+    await withService(
+      {
+        allowlist: [555],
+        script: (c, h) => {
+          if (c.method !== "getUpdates") return undefined;
+          if (c.token === "111:a") return c.at === T0 ? ok([]) : REVOKED;
+          if (served) return undefined;
+          served = true;
+          return ok(silenceBatch(h));
+        },
+      },
+      async (h) => {
+        await h.advance(2 * HOUR_MS, 1_000);
+        h.cfg.telegramBotToken = "111:b";
+        await h.advance(20_000);
+        assert.ok(served, "premise: the renewed secret polled");
+        assert.equal(h.polls().at(-1)!.token, "111:b");
+        assertHeldAndLinked(h);
+      },
+    );
+  });
+
+  it("a poll loop that throws for minutes (telegram.json unwritable) is a silence too", async () => {
+    let served = false;
+    await withService(
+      {
+        allowlist: [555],
+        script: (c) => {
+          if (c.method !== "getUpdates") return undefined;
+          if (c.at === T0 || served) return undefined;
+          served = true;
+          return ok([text(1, 555, "/buy NVDA 5", NOW + 60)]);
+        },
+      },
+      async (h) => {
+        h.stateWriteFails = true;
+        await h.advance(180_000);
+        assert.ok(h.notes.some((n) => /^Telegram: poll loop — ENOSPC/.test(n)), "premise: the loop threw");
+        assert.equal(h.polls().length, 1, "premise: nothing was heard while it did");
+        h.stateWriteFails = false;
+        await h.advance(70_000);
+        assert.ok(served);
+        assert.deepEqual(h.trades, []);
+        assert.match(h.sentTo(555)[0]!, SUMMARY);
+      },
+    );
+  });
+
+  it("a blip the backoff retries within seconds is not a silence: what was typed into it runs", async () => {
+    // Whoever typed it is still waiting for the answer. Holding it would only
+    // make them type it again.
+    let failed = false;
+    let served = false;
+    await withService(
+      {
+        allowlist: [555],
+        script: (c) => {
+          if (c.method !== "getUpdates" || c.at === T0) return undefined;
+          if (!failed) {
+            failed = true;
+            return BAD_GATEWAY;
+          }
+          if (served) return undefined;
+          served = true;
+          return ok([text(1, 555, "/buy NVDA 5", NOW + 1)]);
+        },
+      },
+      async (h) => {
+        await h.advance(5_000);
+        assert.ok(failed && served);
+        assert.deepEqual(h.trades, ["buy NVDA 5"]);
+        assert.ok(!h.sentTo(555).some((t) => SUMMARY.test(t)));
+      },
+    );
+  });
+
+  it("one read of settings.json caught half-written is not Telegram switched off", async () => {
+    // The orchestrator rewrites the file every 15 seconds, and a torn read
+    // parses as the defaults, Telegram off. Taken at its word, the owner's
+    // /buy in the idle gap after it was held as if the bot had been off.
+    let served = false;
+    await withService(
+      {
+        allowlist: [555],
+        script: (c) => {
+          if (c.method !== "getUpdates" || c.at === T0 || served) return undefined;
+          served = true;
+          return ok([text(1, 555, "/buy NVDA 5", NOW + 3)]);
+        },
+      },
+      async (h) => {
+        h.cfg.telegramEnabled = false;
+        await h.advance(600); // one poll reads it
+        h.cfg.telegramEnabled = true;
+        await h.advance(9_000);
+        assert.ok(served, "premise: the next poll came after the idle gap");
+        assert.ok(h.polls()[1]!.at >= T0 + 8_000, "premise: that one read did idle the loop");
+        assert.deepEqual(h.trades, ["buy NVDA 5"]);
+        assert.ok(!h.sentTo(555).some((t) => SUMMARY.test(t)));
+      },
+    );
+  });
+});
+
 describe("the config is read per update; the batch keeps its token", () => {
   it("a chat removed on the dashboard mid-batch is refused from its next message", async () => {
     const poll = firstPoll(() => [text(1, 555, "/reminders"), text(2, 555, "/reminders")]);
@@ -569,6 +770,48 @@ describe("/start <code>, the deep link", () => {
         assert.match(h.sentTo(999)[0]!, LATE_CODE);
         assert.deepEqual(h.state().linkedChats, []);
         assert.equal(h.state().linkCode, "ABCDEF");
+      },
+    );
+  });
+});
+
+describe("a stranger's voice note", () => {
+  it("gets the same refusal as a typed message: their chat id and where the code is", async () => {
+    const voice = { update_id: 1, message: { voice: { file_id: "v1" }, date: NOW, chat: { id: 777 }, from: { id: 777 } } };
+    await withService({ script: firstPoll(() => [voice]) }, async (h) => {
+      assert.deepEqual(h.sentTo(777), [
+        "🚫 not authorized — your chat id is 777. Ask the owner to add you, or send /link &lt;code&gt; with the code shown in Settings → Telegram.",
+      ]);
+    });
+  });
+});
+
+describe("a code from before random codes", () => {
+  it("is retired on the way up: the code the old scheme derived from this token, printed into the logs, links nobody", async () => {
+    // U8D9W3 is what 350d0882 minted for "111:a" at round 0, and what index.ts
+    // printed into the fleet's logs for a tenant that had not linked. The
+    // orchestrator restores it from the mirror like any other code.
+    await withService(
+      { state: { linkCode: "U8D9W3" }, script: firstPoll(() => [text(1, 4242, "/link U8D9W3")]) },
+      async (h) => {
+        assert.deepEqual(h.sentTo(4242), ["couldn't link: bad or expired code"]);
+        assert.equal(h.state().ownerId, null);
+        assert.deepEqual(h.state().linkedChats, []);
+        assert.match(h.state().linkCode, /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/);
+        assert.notEqual(h.state().linkCode, "U8D9W3");
+        assert.ok(h.notes.includes("Telegram: the link code was one derived from the bot token, so it was re-minted"));
+        assert.ok(!h.notes.some((n) => n.includes(h.state().linkCode) || n.includes("U8D9W3")), "and neither code is logged");
+      },
+    );
+  });
+
+  it("a random code restored the same way is kept, and links", async () => {
+    await withService(
+      { state: { linkCode: "ABCDEF" }, script: firstPoll(() => [text(1, 4242, "/link ABCDEF")]) },
+      async (h) => {
+        assert.match(h.sentTo(4242)[0]!, LINKED);
+        assert.equal(h.state().ownerId, 4242);
+        assert.ok(!h.notes.some((n) => /re-minted/.test(n)));
       },
     );
   });

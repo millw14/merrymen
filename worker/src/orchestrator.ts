@@ -706,6 +706,12 @@ function readChildTelegram(tenant: string): {
  * rotation, so it is an unused code unless a redeploy lands inside those
  * fifteen seconds. That window is accepted: without the restore, every
  * redeploy would void the code of every tenant who has not linked yet.
+ *
+ * A code from before random codes comes back like any other, and the child
+ * retires it on start (state.ts retireLegacyCode): it was a hash of the token,
+ * and was printed into these logs as it was minted. The random code that
+ * replaces it is published by the next pass, and that is what later restores
+ * bring back.
  */
 export async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db): Promise<void> {
   const file = path.join(childHome(tenant), "telegram.json");
