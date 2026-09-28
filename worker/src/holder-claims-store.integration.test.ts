@@ -863,6 +863,79 @@ describe("PgSettingsStore specifics", () => {
     }
   });
 
+  /**
+   * THE THIRD SHAPE OF THE SAME RACE. Web and the orchestrator open this store
+   * together on the deploy that adds these tables; a real Postgres 17 then
+   * reports the loser's CREATE TABLE IF NOT EXISTS as 23505, 42P07 — or
+   * 42710 `type "holder_claims_meta" already exists` (duplicate_object, the
+   * table's row type), seen in one of eighteen racing boots over the previous
+   * release's schema (pg-upgrade.postgres.test.ts). All three mean the table
+   * is there now.
+   */
+  it("…a racing creator's 42710 `type … already exists` is the table being there too", async () => {
+    const real = sqliteClient();
+    const client: Client = {
+      async query(sql, params) {
+        if (/^\s*CREATE TABLE IF NOT EXISTS holder_claims_meta/.test(sql)) {
+          await real.query(sql, params);
+          throw Object.assign(new Error('type "holder_claims_meta" already exists'), { code: "42710" });
+        }
+        return real.query(sql, params);
+      },
+    };
+    const s = new PgSettingsStore("postgres://stand-in", async () => client);
+    assert.equal(await s.holderBackfill(), null);
+    assert.deepEqual(await s.takeHolder(W, A), { ok: true, fresh: true });
+  });
+
+  /**
+   * A FAILED START IS TRIED AGAIN, NEVER KEPT. The connection and its DDL are
+   * made once and shared, and the promise of them was cached whether it
+   * resolved or not — so one refused connection, or one lost CREATE race,
+   * failed every later call on the store for the life of the process: in the
+   * web that is every settings read, every holder link, every tier. The next
+   * call must start afresh.
+   */
+  it("A FAILED START IS TRIED AGAIN by the next call, not cached for the life of the process", async () => {
+    let attempts = 0;
+    const s = new PgSettingsStore("postgres://stand-in", async () => {
+      attempts += 1;
+      if (attempts === 1) throw Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:5432"), { code: "ECONNREFUSED" });
+      return sqliteClient();
+    });
+    await assert.rejects(s.holderClaims(), /ECONNREFUSED/);
+    assert.equal((await s.holderClaims()).size, 0, "the second call connects afresh");
+    assert.deepEqual(await s.takeHolder(W, A), { ok: true, fresh: true });
+    assert.equal(attempts, 2, "and a good connection is kept");
+  });
+
+  it("…and a start whose tables fail CLOSES its connection, so retries cannot pile connections up", async () => {
+    let opened = 0;
+    let closed = 0;
+    const s = new PgSettingsStore("postgres://stand-in", async () => {
+      opened += 1;
+      const real = sqliteClient();
+      const failing = opened <= 2;
+      return {
+        async query(sql: string, params?: unknown[]) {
+          if (failing && /^\s*CREATE TABLE IF NOT EXISTS holder_wallet_moves/.test(sql)) {
+            throw Object.assign(new Error("permission denied for schema public"), { code: "42501" });
+          }
+          return real.query(sql, params);
+        },
+        async end() {
+          closed += 1;
+        },
+      };
+    });
+    await assert.rejects(s.holderClaims(), /permission denied/);
+    await assert.rejects(s.holderClaims(), /permission denied/);
+    assert.equal(closed, 2, "each failed start closed the connection it opened");
+    assert.equal((await s.holderClaims()).size, 0);
+    assert.equal(opened, 3);
+    assert.equal(closed, 2, "the good one stays open");
+  });
+
   it("THE MOVE IS ONE CONDITIONAL UPDATE on the holder and the last move it read", async () => {
     const log: string[] = [];
     const s = new PgSettingsStore("postgres://stand-in", async () => sqliteClient({ log }));
