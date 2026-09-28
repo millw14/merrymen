@@ -97,6 +97,10 @@ export function XConnectClient() {
       setPhase({ kind: callback.kind });
       return;
     }
+    if (callback.kind === "failed") {
+      setPhase(callback);
+      return;
+    }
     // No cleanup that drops the answer: under StrictMode the effect's first
     // run is torn down and the second returns early above, so a "still
     // mounted?" flag here would leave the page on "Finishing…" for good. A

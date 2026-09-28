@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { createElement } from "react";
 import { json, testDom } from "@/terminal/test-dom";
 import { newState, stateClient } from "../../../../../worker/src/xpost/client";
-import { callbackClient, readCallback } from "./callback";
+import { X_DID_NOT_FINISH, callbackClient, readCallback } from "./callback";
 import { XConnectClient } from "./XConnectClient";
 
 const W = `w.${"a".repeat(32)}`;
@@ -32,6 +32,15 @@ describe("what the redirect means", () => {
 
   it("a web connect the owner said no to is declined, and nothing is sent", () => {
     assert.deepEqual(readCallback(`?error=access_denied&state=${W}`), { kind: "declined" });
+  });
+
+  it("any other error from X is X failing, not the owner saying no", () => {
+    for (const error of ["server_error", "temporarily_unavailable", "invalid_scope", "unauthorized_client", "invalid_request", "ACCESS_DENIED"]) {
+      assert.deepEqual(readCallback(`?error=${error}&state=${W}`), { kind: "failed", message: X_DID_NOT_FINISH }, error);
+      // Even alongside a code: an error answer is never finished.
+      assert.equal(readCallback(`?code=abc&error=${error}&state=${W}`).kind, "failed", error);
+    }
+    assert.equal(X_DID_NOT_FINISH, "X couldn't finish connecting. Nothing was saved — try again in a moment.");
   });
 
   it("an iOS connect is handed to the app with only the keys it needs", () => {
@@ -144,6 +153,16 @@ describe("the page, rendered", () => {
     await ui.render(createElement(XConnectClient));
     assert.equal(calls.length, 0);
     assert.match(text(), /You didn.t connect an X account\./);
+    assert.equal(ui.dom.window.location.search, "");
+  });
+
+  it("an X failure sends nothing and says X couldn't finish — never that the owner didn't connect", async () => {
+    at(`?error=server_error&state=${W}`);
+    await ui.render(createElement(XConnectClient));
+    assert.equal(calls.length, 0);
+    assert.match(text(), /X couldn.t finish connecting\. Nothing was saved — try again in a moment\./);
+    assert.doesNotMatch(text(), /You didn.t connect/);
+    assert.ok(ui.container.querySelector('a[href="/settings#x-posting"]'));
     assert.equal(ui.dom.window.location.search, "");
   });
 
