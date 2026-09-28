@@ -56,6 +56,7 @@ import {
   failInterrupted,
   getAccount,
   introPostsOf,
+  keyStatus,
   lastOutAt,
   postingAccounts,
   postsOfXUser,
@@ -643,6 +644,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             break;
           }
           const r = await writeIntent(shared, account, f, intent, planNow, recentOwn, recentFleet);
+          if (r.outcome === "key-spent") continue;
           bump(r.outcome);
           if (r.outcome === "no-model-budget") {
             model = false;
@@ -688,7 +690,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   }
 
   /**
-   * DRAFT, GATE, WRITE — one intent. Scheduled when a draft passed; skipped
+   * DRAFT, GATE, WRITE — one intent, unless its key is already spent. Scheduled when a draft passed; skipped
    * (the key spent) when the model passed or the gate refused, so the same
    * buy or day is not drafted again every minute. The intro alone falls back
    * to the template pool before it gives up. A buy or casual post with no
@@ -703,6 +705,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     recentOwn: string[],
     recentFleet: string[],
   ): Promise<{ outcome: string; body: string | null }> {
+    // A KEY ALREADY SPENT IS NOT DRAFTED AGAIN. The plan weighs the X
+    // account's history, so a key this owner wrote for the X account it had
+    // connected earlier (today's casual key, say) is not in it and comes back
+    // every minute. Drafting it would spend a model call on a write the
+    // UNIQUE key refuses. Nothing is done, and nothing is said.
+    if ((await keyStatus(shared, intent.dedupeKey)) !== null) return { outcome: "key-spent", body: null };
     const day = PLAN_CLOCK.localDay(null, nowMs);
     const facts = writerFacts(f, day, recentOwn);
     const gate: XGateCtx = {

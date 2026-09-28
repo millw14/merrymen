@@ -29,7 +29,7 @@ const { admitXPost } = await import("./xpost/gate");
 const { wrapSqlite } = await import("./db");
 const store = await import("./xpost/store");
 const { PAUSE_KEY } = await import("./xpost/sender");
-const { GAP_MS } = await import("./xpost/planner");
+const { GAP_MS, hash32 } = await import("./xpost/planner");
 
 import type { AgentFacts, CallFact } from "./groupchat/facts";
 import type { Db } from "./db";
@@ -979,6 +979,35 @@ describe("what a casual post starts from", () => {
   it("a buy post's gloss dice are the account's and the decision's", () => {
     const src = readFileSync(path.join(HERE, "orchestrator-xpost.ts"), "utf8");
     assert.match(src, /buyPrompt\(\{[^}]*glossSeed: `\$\{account\.tenant\}\|\$\{call\.decisionId\}`/);
+  });
+});
+
+describe("an owner who connected another X account today", () => {
+  it("is not drafted today's casual post again under the key the old account spent", async (t) => {
+    // A day this owner's casual slot is not a quiet one.
+    let day = Date.UTC(2026, 8, 28);
+    const dayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+    while (hash32(`casual|${TENANT}|${dayOf(day)}`) % 10 < 3) day += 24 * HOUR;
+    const w = await world(t, day);
+    const key = `casual:${TENANT}:${dayOf(day)}`;
+    await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "casual", dedupeKey: key, body: "an old draft", dueAtMs: day + 13 * HOUR, nowMs: day + 12 * HOUR });
+    // Another X account connected (the old account's drafts are cancelled) and consented to.
+    await store.upsertAccount(w.db, w.dek, {
+      tenant: TENANT,
+      xUserId: "222",
+      username: "second_account",
+      tokens: { accessToken: "access-2", refreshToken: "refresh-2", accessExpiresAtMs: day + 30 * 24 * HOUR, scope: "tweet.write" },
+      nowMs: day + 13 * HOUR,
+    });
+    assert.equal(await store.keyStatus(w.db, key), "cancelled");
+    await store.setPosting(w.db, TENANT, { enabled: true, xUserId: "222" }, day + 13 * HOUR);
+    const hello = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "222", kind: "intro", dedupeKey: `intro:${TENANT}:222`, body: "hello", dueAtMs: day + 14 * HOUR, nowMs: day + 13 * HOUR });
+    await store.ownerCancel(w.db, TENANT, hello!, day + 13 * HOUR);
+    const p = poster(w);
+    const logs: (string | null)[] = [];
+    for (let m = 14 * 60; m < 22 * 60; m += 10) logs.push((await p.step(w.db, ROSTER, new Map(), day + m * MIN)).log);
+    assert.equal(w.prompts.length, 0, "no model call on a key already spent");
+    assert.deepEqual(logs.filter((l) => l !== null), [], "and nothing to say about it");
   });
 });
 
