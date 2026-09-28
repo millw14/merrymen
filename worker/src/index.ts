@@ -3894,9 +3894,11 @@ async function main() {
   /**
    * When that observation was made — the hosted resume's `since` (flow-
    * inference.ts): an op created at or after it is not in `anchorCashUsdg`.
-   * The anchor's time is its NEWEST durable row, flow or equity, so it can
-   * only fall after the cash reading: an op in between counts as already in
-   * it, and its settlement shows as drift — which doubts, never books.
+   * The anchor's time is its NEWEST durable row, flow or equity — the equity
+   * row's by when its cash was READ (`cash_read_at`), not when it was written —
+   * so it can only fall at or after the cash reading: an op in between counts
+   * as already in it, and its settlement shows as drift — which doubts, never
+   * books.
    */
   let anchorObservedAtSec: number | null = null;
   /** The peak the anchor says was already reached, restored into the local store. */
@@ -10087,6 +10089,14 @@ async function main() {
       symbols: [],
       tokens: [],
     };
+    // WHEN THIS TICK'S CASH WAS READ — taken before the book read below, so it
+    // is at or before the balance it stamps and before the flow look's ledger
+    // read. The equity row carries it as `cash_read_at`, and a restart takes it
+    // (not the row's INSERT time) as its reading's `since`: an op a chat trade
+    // submitted mid-tick, after this read but before the row was written, is
+    // not in this cash, and its settlement must shift the baseline rather than
+    // be skipped as "already in the reading" (store.ts lastKnownCashReading).
+    const cashReadAtSec = Math.floor(Date.now() / 1000);
     if (paper) {
       // The book IS the paper ledger, marked to market at the live oracle px.
       const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
@@ -11047,6 +11057,8 @@ async function main() {
         // TAKEN WHILE FLOW INFERENCE WAS HELD: the restart baseline and the
         // hosted anchor skip it, the curve does not.
         flowsHeld,
+        // WHEN ITS CASH WAS READ, which is what a restart's `since` must be.
+        cashReadAt: cashReadAtSec,
         // WHICH BOOK THIS MARK IS OF. `balances` is the paper ledger above and
         // the chain below, and until now the row said nothing about which — so
         // an agent that practised at 1,000 USDG and then went live wrote one

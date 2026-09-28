@@ -46,10 +46,12 @@
  *
  * WHICH SETTLEMENTS A BASELINE MAY TAKE — `since`. A settlement shifts a
  * baseline only when the op was created at or after the moment that baseline's
- * cash was established (the look's ledger read, or the restart's durable
- * reading). An op created before it was either settled and in that cash
- * already, or was not holding when the baseline advanced over it — shifting by
- * it again would book its movement a second time with the opposite sign.
+ * cash was established (the look's ledger read, or when the restart's durable
+ * reading's cash was READ — store.ts `cash_read_at`, never the row's later
+ * insert, which a mid-tick op can precede). An op created before it was either
+ * settled and in that cash already, or was not holding when the baseline
+ * advanced over it — shifting by it again would book its movement a second
+ * time with the opposite sign.
  */
 
 /**

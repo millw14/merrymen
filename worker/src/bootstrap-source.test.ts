@@ -91,7 +91,7 @@ const FUNDED = [
   { match: "tx_hash IS NOT NULL", row: { net: 10, n: 1, last_at: NOW - 100 } },
   { match: "FROM flows", row: { net: 10, n: 1, last_at: NOW - 100 } },
   { match: "SELECT equity_usdg FROM equity", row: { equity_usdg: 0 } },
-  { match: "FROM equity", row: { cash_usdg: 3.334, at: NOW - 50 } },
+  { match: "FROM equity", row: { cash_usdg: 3.334, read_at: NOW - 50 } },
   { match: "FROM fee_accruals", row: { n: 0 } },
 ];
 
@@ -133,7 +133,7 @@ describe("B2 — 'no prior accounting' is a positive finding, not a default", ()
     const cases: [string, { match: string; row: unknown }[]][] = [
       ["a high-water mark", [{ match: "FROM agents", row: { hwm_usdg: 10, epoch: 2 } }]],
       ["a flow row", [{ match: "FROM flows", row: { net: 10, n: 1, last_at: NOW } }]],
-      ["an equity mark", [{ match: "FROM equity", row: { cash_usdg: 0, at: NOW } }]],
+      ["an equity mark", [{ match: "FROM equity", row: { cash_usdg: 0, read_at: NOW } }]],
       ["a fee accrual", [{ match: "FROM fee_accruals", row: { n: 1 } }]],
     ];
     for (const [what, override] of cases) {
@@ -220,7 +220,7 @@ describe("B4 — the receipts-only total is computed separately and reported hon
       { match: "tx_hash IS NOT NULL", row: { net: 0, n: 0, last_at: 0 } },
       { match: "FROM flows", row: { net: 30, n: 3, last_at: NOW } },
       { match: "SELECT equity_usdg FROM equity", row: { equity_usdg: 0 } },
-      { match: "FROM equity", row: { cash_usdg: 3.334, at: NOW } },
+      { match: "FROM equity", row: { cash_usdg: 3.334, read_at: NOW } },
       { match: "FROM fee_accruals", row: { n: 0 } },
     ];
     const a = await deriveBootstrapAccounting(fakeDb(rows).db, SMART, NOW);
@@ -237,7 +237,7 @@ describe("B4 — the receipts-only total is computed separately and reported hon
     assert.equal(a.kind === "established" && a.lastObservedCashUsdg, null);
 
     const zero = FUNDED.map((e) =>
-      e.match === "FROM equity" ? { match: "FROM equity", row: { cash_usdg: 0, at: NOW } } : e,
+      e.match === "FROM equity" ? { match: "FROM equity", row: { cash_usdg: 0, read_at: NOW } } : e,
     );
     const b = await deriveBootstrapAccounting(fakeDb(zero).db, SMART, NOW);
     assert.equal(b.kind === "established" && b.lastObservedCashUsdg, "0");
@@ -261,7 +261,7 @@ describe("B4 — the receipts-only total is computed separately and reported hon
       { match: "FROM agents", row: { hwm_usdg: "10", epoch: "2" } },
       { match: "tx_hash IS NOT NULL", row: { net: "10", n: "1", last_at: "0" } },
       { match: "FROM flows", row: { net: "10", n: "1", last_at: String(NOW) } },
-      { match: "FROM equity", row: { cash_usdg: "3.334", at: String(NOW) } },
+      { match: "FROM equity", row: { cash_usdg: "3.334", read_at: String(NOW) } },
       { match: "FROM fee_accruals", row: { n: "0" } },
     ];
     const a = await deriveBootstrapAccounting(fakeDb(rows).db, SMART, NOW);
@@ -294,7 +294,7 @@ describe("B6 — THE PRE-DEPLOY GATE: the polluted Postgres, as it actually is",
     // All four rows: the deposit plus three phantoms.
     { match: "FROM flows", row: { net: 40, n: 4, last_at: NOW - 100 } },
     { match: "SELECT equity_usdg FROM equity", row: undefined },
-    { match: "FROM equity", row: { cash_usdg: 3.334, at: NOW - 50 } },
+    { match: "FROM equity", row: { cash_usdg: 3.334, read_at: NOW - 50 } },
     { match: "FROM fee_accruals", row: { n: 0 } },
   ];
 
@@ -387,7 +387,7 @@ describe("B5 — the REAL to micro conversion", () => {
  * still a durable trace of a funded account, though. Real schema, real SQL.
  */
 describe("B7 — the anchor's cash is never a held mark", () => {
-  async function ledger(marks: { cash: number; at: number; held: number | null }[], hwm = 100): Promise<Db> {
+  async function ledger(marks: { cash: number; at: number; held: number | null; readAt?: number }[], hwm = 100): Promise<Db> {
     const db = wrapSqlite(new DatabaseSync(":memory:"));
     await applyLedgerSchema(db);
     await db.prepare(
@@ -396,9 +396,9 @@ describe("B7 — the anchor's cash is never a held mark", () => {
     ).run(SMART.toLowerCase(), OWNER, OWNER, hwm);
     for (const m of marks) {
       await db.prepare(
-        `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, at)
-         VALUES (?, '0', ?, 0, 0, ?, 2, 'live', ?, ?)`,
-      ).run(SMART.toLowerCase(), m.cash, m.cash, m.held, m.at);
+        `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, cash_read_at, at)
+         VALUES (?, '0', ?, 0, 0, ?, 2, 'live', ?, ?, ?)`,
+      ).run(SMART.toLowerCase(), m.cash, m.cash, m.held, m.readAt ?? null, m.at);
     }
     return db;
   }
@@ -418,6 +418,26 @@ describe("B7 — the anchor's cash is never a held mark", () => {
     if (a.kind !== "established") return;
     assert.equal(a.lastObservedCashUsdg, "95000000", "the held marks' 85 is never the baseline");
     assert.equal(a.observedAt, NOW - 1_800);
+  });
+
+  it("ITS TIME IS WHEN THE CASH WAS READ, not when the row was inserted — the hosted resume's `since`", async () => {
+    // The row is inserted at the end of its tick, after the flow look listed
+    // the ledger; an op a chat trade submitted in between is not in this cash.
+    // Stamped by the insert, its settlement read as already in the anchor's
+    // cash, and the resume doubted contributions over a movement it could
+    // explain.
+    const a = await deriveBootstrapAccounting(
+      await ledger([
+        { cash: 100, at: NOW - 3_600, held: null },
+        { cash: 95, at: NOW - 600, held: 0, readAt: NOW - 602 },
+      ]),
+      SMART,
+      NOW,
+    );
+    assert.equal(a.kind, "established");
+    if (a.kind !== "established") return;
+    assert.equal(a.lastObservedCashUsdg, "95000000");
+    assert.equal(a.observedAt, NOW - 602);
   });
 
   it("ONLY held marks: no cash reading on record — and still NOT a new account, with nothing else on record", async () => {

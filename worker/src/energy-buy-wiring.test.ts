@@ -414,6 +414,13 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     assert.match(first, /if \(l\.verdict\.action === "infer"\) await record\(l\.verdict\.deltaUsdg, "changed while the worker was stopped"\);/);
     assert.doesNotMatch(first, /record\(cashUsdg - usdg\(prior\)/);
     assert.doesNotMatch(first, /ledgerWrites === 0/);
+    // The durable reading is dated by its READ: the tick takes the time before
+    // its balance read and stamps the row with it (store.ts cash_read_at), so a
+    // mid-tick op is after the reading's `since`, not "already in" its cash.
+    const t = body("tick");
+    const readAt = t.indexOf("const cashReadAtSec = Math.floor(Date.now() / 1000);");
+    assert.ok(readAt > 0 && readAt < t.indexOf("readAccountBalances(client, grant.smartAccount)") && readAt < t.indexOf("getPaperBook(agentId, cfg.paperStartUsdg)"));
+    assert.match(t, /await ratchet\.equityRow\(\(\{ flowsHeld \}\) =>\s*addEquity\(agentId, \{[\s\S]{0,400}cashReadAt: cashReadAtSec,/);
   });
 
   it("(5d) A STRANDED TRANSFER HOME is booked by the resolver BEFORE its row is settled, and left 'submitted' when it cannot be", () => {

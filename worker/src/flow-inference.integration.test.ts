@@ -240,12 +240,13 @@ async function record(deltaUsdg: bigint): Promise<void> {
  * `equity` defaults to cash: a book of only USDG.
  */
 async function tick(cash: bigint, equity = cash): Promise<"hold" | "explained" | "infer" | "resume-clean" | "resume-with-drift"> {
+  const readAt = nowSec(); // index.ts cashReadAtSec: the balance read, before the ledger's
   const listedAt = nowSec();
   const opsInFlight = opsHoldInference(await store.listSubmittedOps(ACCOUNT), {
     epoch: await store.getAgentEpoch(ACCOUNT),
     nowSec: listedAt,
   });
-  if (proc.lastCash === null) return firstLook(cash, equity, listedAt, opsInFlight);
+  if (proc.lastCash === null) return firstLook(cash, equity, readAt, listedAt, opsInFlight);
   const l = lookAtCash({
     baselineUsdg: proc.lastCash,
     since: proc.since,
@@ -267,7 +268,7 @@ async function tick(cash: bigint, equity = cash): Promise<"hold" | "explained" |
     proc.snapshot = proc.writes;
     held = opsInFlight;
   }
-  await ratchet(cash, equity, held);
+  await ratchet(cash, equity, held, readAt);
   return l.verdict.action;
 }
 
@@ -276,9 +277,9 @@ async function tick(cash: bigint, equity = cash): Promise<"hold" | "explained" |
  * durable reads, then the self-hosted look against the last durable reading
  * (legacy-local) or the hosted resume's drift against its anchor.
  */
-async function firstLook(cash: bigint, equity: bigint, listedAt: number, opsInFlight: boolean): Promise<"hold" | "explained" | "infer" | "resume-clean" | "resume-with-drift"> {
+async function firstLook(cash: bigint, equity: bigint, readAt: number, listedAt: number, opsInFlight: boolean): Promise<"hold" | "explained" | "infer" | "resume-clean" | "resume-with-drift"> {
   if (opsInFlight) {
-    await ratchet(cash, equity, true);
+    await ratchet(cash, equity, true, readAt);
     return "hold";
   }
   const prior = proc.anchor ? null : await store.lastKnownCashReading(ACCOUNT);
@@ -309,7 +310,7 @@ async function firstLook(cash: bigint, equity: bigint, listedAt: number, opsInFl
   proc.since = listedAt;
   proc.unattributed = false;
   proc.snapshot = proc.writes;
-  await ratchet(cash, equity, false);
+  await ratchet(cash, equity, false, readAt);
   return out;
 }
 
@@ -331,7 +332,7 @@ async function heldCashBaseline(): Promise<bigint | null> {
  * held observation, the risk period's observation, the fee and the mark, the
  * breaker's lift, and the (flagged, when held) equity row.
  */
-async function ratchet(cash: bigint, equity: bigint, held: boolean): Promise<void> {
+async function ratchet(cash: bigint, equity: bigint, held: boolean, readAt: number): Promise<void> {
   const ratchet = tickRatchets(tickPlan("regular"), {
     incomplete: false,
     curveMarked: 0,
@@ -349,7 +350,7 @@ async function ratchet(cash: bigint, equity: bigint, held: boolean): Promise<voi
   });
   proc.lift = ratchet.breakerLift(proc.lift, mark, after);
   await ratchet.equityRow(({ flowsHeld }) =>
-    store.addEquity(ACCOUNT, { mode: "live", ethWei: 0n, cashUsdg: Number(cash) / 1e6, vaultUsdg: 0, positionsUsdg: Number(equity - cash) / 1e6, equityUsdg: Number(equity) / 1e6, flowsHeld }),
+    store.addEquity(ACCOUNT, { mode: "live", ethWei: 0n, cashUsdg: Number(cash) / 1e6, vaultUsdg: 0, positionsUsdg: Number(equity - cash) / 1e6, equityUsdg: Number(equity) / 1e6, flowsHeld, cashReadAt: readAt }),
   );
 }
 
@@ -810,6 +811,87 @@ describe("the first look after a restart follows the same rule", () => {
     await resolvePass();
     assert.equal(await tick(90n * U), "hold");
     assert.equal(proc.doubted, false, "not doubted on a stranded op's movement");
+  });
+});
+
+/**
+ * THE RESTART'S `since` IS WHEN THE READING'S CASH WAS READ, not when its row
+ * was inserted. The last process's final tick read the balance (cash 100) and
+ * listed the ledger at T0−1 with nothing in flight, so the look settled. A
+ * Telegram transfer home of 10 then joined the intent chain mid-tick (chat
+ * trades can), its pre-broadcast row stamped T0−1; the tick wrote its equity
+ * row — the cash it read BEFORE the transfer — and the INSERT landed at T0.
+ * Stamped by the insert, the transfer read as "already in the reading": its
+ * settlement was skipped, it was no write either, and its −10 was inferred a
+ * second time — contributions 80 for a book holding 90 of the owner's money,
+ * and 2 USDG of fee charged on the owner's own 10.
+ */
+describe("a restart's reading is dated by when its cash was read", () => {
+  const T0 = nowSec() - 3_600;
+  /** The last process's final row: cash 100 read at T0−1, inserted at T0; the transfer created in between. */
+  async function midTickTransfer(): Promise<string> {
+    exec("DELETE FROM equity");
+    const op = await stranded(transferRow);
+    exec("UPDATE trades SET created_at = ? WHERE user_op_hash = ?", T0 - 1, op);
+    await store.addEquity(ACCOUNT, { mode: "live", ethWei: 0n, cashUsdg: 100, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 100, cashReadAt: T0 - 1 });
+    exec("UPDATE equity SET at = ?", T0);
+    return op;
+  }
+
+  it("A STRANDED TRANSFER SENT MID-TICK (created at the row's `at` − 1) is booked ONCE after a self-hosted restart — by the resolver, never again as downtime movement", async () => {
+    const op = await midTickTransfer();
+    lands(op, transferLogs(10n * U)); // it landed; the process stopped before the receipt came back
+    restart(T0 + 20);
+    await resolvePass(); // the arm's resolver books it as transfer-intent and queues its −10
+    assert.equal(flowsBy("transfer-intent", "out"), 1);
+    assert.equal(await peak(), 90);
+    assert.equal(await tick(90n * U), "infer", "the settlement is folded into the reading, so the residual is 0");
+    assert.equal(flowsBy("inferred"), 0, "its −10 is not inferred a second time");
+    assert.equal(await store.getNetContributionsUsdg(ACCOUNT), 90);
+    assert.equal(await peak(), 90);
+    assert.deepEqual(proc.fees, [], "and no fee on the owner's own 10");
+    // Because the reading is dated by its read (T0−1), not its insert (T0).
+    exec("DELETE FROM equity WHERE at <> ?", T0);
+    assert.deepEqual(await store.lastKnownCashReading(ACCOUNT), { cashUsdg: 100, at: T0 - 1 });
+  });
+
+  it("THE SAME WINDOW, EXECUTOR'S PATH: a transfer it booked mid-tick is a write after the reading, so the downtime is explained, not inferred", async () => {
+    const op = await midTickTransfer();
+    const tx = `0x${"ab".repeat(32)}`;
+    // recordTrade(landed) + addFlow('transfer-intent') + adjustAgentHwm(−10), as index.ts's transfer arm does.
+    exec("UPDATE trades SET status = 'landed', tx_hash = ? WHERE user_op_hash = ?", tx, op);
+    assert.equal(await store.addFlow({ agentId: ACCOUNT, direction: "out", amountUsdg: 10, source: "transfer-intent", txHash: tx, mode: "live" }), true);
+    await store.adjustAgentHwm(ACCOUNT, -10);
+    restart(T0 + 20); // stopped before the next tick's row
+    assert.equal(await tick(90n * U), "explained", "landedOpsBetween from the read finds the row");
+    assert.equal(flowsBy("transfer-intent", "out"), 1);
+    assert.equal(flowsBy("inferred"), 0);
+    assert.equal(await store.getNetContributionsUsdg(ACCOUNT), 90);
+  });
+
+  it("control: a row written before `cash_read_at` existed is dated by its insert, as before — an op in its own second still shifts once", async () => {
+    exec("DELETE FROM equity");
+    const op = await stranded(transferRow);
+    exec("UPDATE trades SET created_at = ? WHERE user_op_hash = ?", T0, op);
+    await store.addEquity(ACCOUNT, { mode: "live", ethWei: 0n, cashUsdg: 100, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 100 });
+    exec("UPDATE equity SET at = ?", T0);
+    assert.deepEqual(await store.lastKnownCashReading(ACCOUNT), { cashUsdg: 100, at: T0 });
+    lands(op, transferLogs(10n * U));
+    restart(T0 + 20);
+    await resolvePass();
+    assert.equal(await tick(90n * U), "infer");
+    assert.equal(flowsBy("inferred"), 0);
+    assert.equal(await store.getNetContributionsUsdg(ACCOUNT), 90);
+  });
+
+  it("the tick stamps its row with the read: a later restart's `since` is that, not the insert", async () => {
+    exec("DELETE FROM equity");
+    const before = nowSec();
+    await tick(100n * U);
+    const r = await store.lastKnownCashReading(ACCOUNT);
+    assert.ok(r !== null && r.at >= before && r.at <= nowSec());
+    const row = one<{ cash_read_at: number | null }>("SELECT cash_read_at FROM equity WHERE agent_id = ?", ACCOUNT);
+    assert.equal(row.cash_read_at, r!.at);
   });
 });
 

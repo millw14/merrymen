@@ -66,7 +66,8 @@ interface FlowAgg {
 }
 interface EquityRow {
   cash_usdg: number | string | null;
-  at: number | string | null;
+  /** When the cash was read: `cash_read_at`, or the row's `at` before that existed. */
+  read_at: number | string | null;
 }
 interface CountRow {
   n: number | string | null;
@@ -180,19 +181,23 @@ export async function deriveBootstrapAccounting(
     // own settlement and read as drift. Before the flag those rows were not
     // written at all, so skipping them leaves this read where it always was —
     // without a dropped op's 26-hour hold leaving the curve a day stale.
+    //
+    // AND ITS TIME IS WHEN THE CASH WAS READ (`cash_read_at`), not when the row
+    // was inserted at the end of that tick: an op submitted in between is not
+    // in this cash, and the hosted resume's `since` must let its settlement
+    // shift the baseline rather than read it as drift. Older rows fall back to
+    // `at`. Aliased `read_at` so ORDER BY still means the insert.
     const equity = (await shared
       .prepare(
-        "SELECT cash_usdg, at FROM equity WHERE LOWER(agent_id) = ? AND COALESCE(flows_held, 0) = 0 " +
-          "ORDER BY at DESC, id DESC LIMIT 1",
+        "SELECT cash_usdg, COALESCE(cash_read_at, at) AS read_at FROM equity " +
+          "WHERE LOWER(agent_id) = ? AND COALESCE(flows_held, 0) = 0 ORDER BY at DESC, id DESC LIMIT 1",
       )
       .get(agentId)) as EquityRow | undefined;
     // But a held mark IS a durable trace of a funded account: it must refuse the
     // new-account claim below exactly as any other mark does.
-    const anyMark =
+    const anyMark: unknown =
       equity ??
-      ((await shared
-        .prepare("SELECT cash_usdg, at FROM equity WHERE LOWER(agent_id) = ? ORDER BY at DESC, id DESC LIMIT 1")
-        .get(agentId)) as EquityRow | undefined);
+      (await shared.prepare("SELECT at FROM equity WHERE LOWER(agent_id) = ? ORDER BY at DESC, id DESC LIMIT 1").get(agentId));
 
     const accruals = (await shared
       .prepare("SELECT COUNT(*) AS n FROM fee_accruals WHERE LOWER(agent_id) = ?")
@@ -217,7 +222,7 @@ export async function deriveBootstrapAccounting(
     // consumer can see how old the underlying evidence is, separately from how
     // old the FILE is — a recently written anchor over month-old rows is a
     // different situation from a month-old file.
-    const observedAt = Math.max(num(flows?.last_at), num(equity?.at)) || nowSec;
+    const observedAt = Math.max(num(flows?.last_at), num(equity?.read_at)) || nowSec;
 
     let unanchoredFlows = flowCount - num(anchored?.n);
 
