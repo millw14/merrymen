@@ -70,6 +70,7 @@ export interface BuyFacts extends WriterFacts {
   bands: string[];
   /** The agent's own feed post about this trade, already gated, or null. */
   ownWords: string | null;
+  glossSeed?: string; // the account's and the decision's dice for how the why is glossed
 }
 
 export interface CasualFacts extends WriterFacts {
@@ -79,6 +80,7 @@ export interface CasualFacts extends WriterFacts {
   seed: string;
   /** Coins it bought lately that it may mention, with whether each was on paper. */
   recentCoins: { label: string; paper: boolean }[];
+  tradeTalk?: boolean; // one of the ~3 owner-local days in 10 it may talk about how it trades
 }
 
 export interface Prompt {

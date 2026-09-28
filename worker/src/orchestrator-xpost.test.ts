@@ -22,7 +22,7 @@ process.env.MERRYMEN_X_CLIENT_SECRET = "x-client-secret-never-to-a-child";
 process.env.MERRYMEN_XPOST_LLM_KEY = "gsk_x_only_key_never_to_a_child";
 
 const { childEnv } = await import("./orchestrator");
-const { makeXPoster, xpostEnv, xpostSetup } = await import("./orchestrator-xpost");
+const { casualSeed, makeXPoster, tradeTalkDay, xpostEnv, xpostSetup } = await import("./orchestrator-xpost");
 const { admitAgentLine } = await import("./groupchat/policy");
 const { isAsleep } = await import("./groupchat/clock");
 const { admitXPost } = await import("./xpost/gate");
@@ -895,6 +895,60 @@ describe("fleet guards", () => {
     assert.equal(await store.keyStatus(w.db, "casual:second"), "scheduled");
     assert.equal((await p.step(w.db, BOTH, new Map(), T0 + MIN)).log, null, "the pause it set is not said again");
     assert.equal(calls.length, 1);
+  });
+});
+
+describe("what a casual post starts from", () => {
+  const BODY = new Set(["food", "sleep", "weather", "weekend", "travel"]);
+  const days = Array.from({ length: 120 }, (_, i) => new Date(Date.UTC(2026, 8, 1) + i * 24 * HOUR).toISOString().slice(0, 10));
+  const tenants = Array.from({ length: 12 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}`);
+
+  it("never a subject that invites a body the agent does not have", () => {
+    const subjects = new Set<string>();
+    for (const tenant of tenants) {
+      for (const day of days) {
+        const seed = casualSeed(tenant, day);
+        if (seed) subjects.add(seed.subject);
+      }
+    }
+    for (const s of subjects) assert.ok(!BODY.has(s), `seeded from ${s}`);
+    assert.ok(subjects.has("a passing thought") && subjects.has("space") && subjects.has("animals"), [...subjects].join(", "));
+  });
+
+  it("about three owner-local days in ten may be about trading, the same on every replica", () => {
+    let n = 0;
+    for (const tenant of tenants) for (const day of days) if (tradeTalkDay(tenant, day)) n++;
+    const share = n / (tenants.length * days.length);
+    assert.ok(share > 0.25 && share < 0.35, `${share}`);
+    assert.equal(tradeTalkDay(TENANT, "2026-09-28"), tradeTalkDay(TENANT, "2026-09-28"));
+  });
+
+  it("the coins it bought lately are offered only on a day that may be about trading", async (t) => {
+    const START = Date.UTC(2026, 8, 1);
+    const w = await world(t, START);
+    const hello = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "intro", dedupeKey: `intro:${TENANT}:111`, body: "hello", dueAtMs: START, nowMs: START });
+    await store.ownerCancel(w.db, TENANT, hello!, START);
+    // Bought before consent: never a buy post, but a coin it may mention.
+    const p = poster(w, { calls: [call({ decisionId: "d-old", atSec: (START - HOUR) / 1000 })] });
+    const seen = { trade: 0, other: 0 };
+    for (let d = 0; d < 30; d++) {
+      const day = START + d * 24 * HOUR;
+      const dayKey = new Date(day).toISOString().slice(0, 10);
+      const before = w.prompts.length;
+      // Every half hour through the UTC afternoon: a slot leaves half an hour of window after it.
+      for (let m = 14 * 60; m < 22 * 60 && w.prompts.length === before; m += 30) await p.step(w.db, ROSTER, new Map(), day + m * MIN);
+      if (w.prompts.length === before) continue; // a quiet day
+      const prompt = w.prompts.at(-1)!;
+      const talk = tradeTalkDay(TENANT, dayKey);
+      assert.equal(/\bPepe\b/.test(prompt), talk, `${dayKey}: coins offered ${!talk ? "on a day not about trading" : "missing on a trading day"}`);
+      seen[talk ? "trade" : "other"]++;
+    }
+    assert.ok(seen.trade > 0 && seen.other > 0, JSON.stringify(seen));
+  });
+
+  it("a buy post's gloss dice are the account's and the decision's", () => {
+    const src = readFileSync(path.join(HERE, "orchestrator-xpost.ts"), "utf8");
+    assert.match(src, /buyPrompt\(\{[^}]*glossSeed: `\$\{account\.tenant\}\|\$\{call\.decisionId\}`/);
   });
 });
 

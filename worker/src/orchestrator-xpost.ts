@@ -297,20 +297,43 @@ function writerFacts(f: AgentFacts, day: string, recentOwn: string[]): WriterFac
 }
 
 /**
+ * SUBJECTS AN X POST IS NEVER SEEDED FROM. Their takes are about a body the
+ * agent does not have — a nap, pancakes, the first warm day, a walk — and the
+ * model riffs on them in the first person ("waking up slowly feels like a small
+ * luxury"), which is a human experience claimed on somebody's real timeline.
+ * The room may talk about them; an X post may not start from them.
+ */
+const BODY_SUBJECTS: ReadonlySet<string> = new Set(["food", "sleep", "weather", "weekend", "travel"]);
+const X_SUBJECTS = SUBJECTS.filter((s) => !BODY_SUBJECTS.has(s));
+
+/**
  * A casual post's seed: a subject and one take — or, some days, a shower
  * thought — chosen by the account and the day, so two replicas agree and the
- * fleet does not all riff on one line the same afternoon.
+ * fleet does not all riff on one line the same afternoon. Exported for tests.
  */
-function casualSeed(tenant: string, day: string): { subject: string; seed: string } | null {
+export function casualSeed(tenant: string, day: string): { subject: string; seed: string } | null {
   const h = hash32(`seed|${tenant}|${day}`);
   if (h % 10 < 3) {
     const pool = MUSINGS.filter(usable);
     if (pool.length) return { subject: "a passing thought", seed: pool[(h >>> 4) % pool.length]! };
   }
-  const subject = SUBJECTS[(h >>> 8) % SUBJECTS.length]!;
+  const subject = X_SUBJECTS[(h >>> 8) % X_SUBJECTS.length]!;
   const pool = (TAKES[subject] ?? []).filter(usable);
   if (!pool.length) return null;
   return { subject, seed: pool[(h >>> 12) % pool.length]! };
+}
+
+/** Owner-local days in ten on which a casual post may be about how the agent trades. */
+const TRADE_TALK_DAYS_IN_TEN = 3;
+
+/**
+ * MOSTLY NOT ABOUT TRADING. A person's timeline is mostly not about work: on
+ * about three days in ten, chosen by the account and its owner's local day
+ * (so two replicas agree), a casual post may be about how the agent trades,
+ * and only then is it offered the coins it bought lately. Exported for tests.
+ */
+export function tradeTalkDay(tenant: string, day: string): boolean {
+  return hash32(`trade-talk|${tenant}|${day}`) % 10 < TRADE_TALK_DAYS_IN_TEN;
 }
 
 /** Coins the agent bought lately that a post may name, with whether each was on paper. */
@@ -704,14 +727,18 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       gate.paperCoins = call.paper ? gate.coins : [];
       coin = intent.coinKey;
       decisionId = call.decisionId;
-      prompt = buyPrompt({ ...facts, coin: intent.coin, paper: call.paper, bands: call.bands, ownWords: call.ownWords });
+      // The gloss dice are the account's and the decision's, so two accounts
+      // buying one coin the same hour do not say it the same way.
+      prompt = buyPrompt({ ...facts, coin: intent.coin, paper: call.paper, bands: call.bands, ownWords: call.ownWords, glossSeed: `${account.tenant}|${call.decisionId}` });
     } else {
       const seed = casualSeed(f.tenant, intent.day);
-      const coins = recentCoins(f);
+      const tradeTalk = tradeTalkDay(f.tenant, intent.day);
+      // No coin is offered, or vouched to the gate, on a day that is not about trading.
+      const coins = tradeTalk ? recentCoins(f) : [];
       gate.coins = coins.map((c) => c.label);
       gate.paperCoins = coins.filter((c) => c.paper).map((c) => c.label);
       gate.seeds = seed ? [seed.seed] : [];
-      prompt = casualPrompt({ ...facts, subject: seed?.subject ?? "anything", seed: seed?.seed ?? "", recentCoins: coins });
+      prompt = casualPrompt({ ...facts, subject: seed?.subject ?? "anything", seed: seed?.seed ?? "", tradeTalk, recentCoins: coins });
     }
 
     let body: string | null = null;
