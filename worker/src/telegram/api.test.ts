@@ -333,7 +333,7 @@ describe("setMyCommands", () => {
  * surface-or-hide consciously. This is what caught /depth going missing.
  */
 const HIDDEN_ALIASES = new Set([
-  "start", // Telegram convention; /help covers it
+  "start", // Telegram convention and the deep-link carrier (/start <code>); /help covers the bare form
   "grant", "restore", "recover", "reconnect", "fund", // wallet signpost synonyms
   "book", // positions
   "liquidity", "levels", // depth

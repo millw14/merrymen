@@ -5,17 +5,20 @@
  * setInterval, NEVER inside the trading tick) started once from the worker's
  * main(). It reads the live config each iteration (so token/allowlist/enable
  * changes from the dashboard apply with no restart), gates every message on the
- * allowlist (except /link), routes obeyed messages through the interpreter →
- * executor, and replies. Every action is logged to the event feed so the
- * dashboard shows "Telegram: …".
+ * allowlist (except /link, and /start <code>, its deep-link form), routes
+ * obeyed messages through the interpreter → executor, and replies. Every
+ * action is logged to the event feed so the dashboard shows "Telegram: …".
  *
  * Safety: a chat message can only produce one enumerated Command; trades still
  * pass the policy wall via the injected submitTrade; /cap and caps clamp to the
  * signed grant. Transfers additionally require the dashboard toggle, a grant
  * that carries the transfer permission, and an explicit /confirm after the full
  * recipient address is echoed back. The link code rotates after every
- * successful /link and guesses are rate-limited. Nothing here can exceed the
- * grant.
+ * successful /link and guesses are rate-limited (link.ts). Nothing here can
+ * exceed the grant.
+ *
+ * Messages that waited out an outage are not live messages: see pollOnce's
+ * backlog rule before changing how a batch is handled.
  */
 
 import { existsSync, rmSync, writeFileSync } from "node:fs";
@@ -75,6 +78,7 @@ import {
   type StatusContext,
 } from "./reads";
 import { botIdOf, ensureLinkCode, rotateLinkCode, switchBot, tokenTagOf, type StateRef } from "./state";
+import { linkReply, tryLink, type LinkFails } from "./link";
 import {
   ageDays,
   ensureSoul,
@@ -152,13 +156,77 @@ export function isPaused(): boolean {
   return existsSync(homePaths.paused());
 }
 
-const LINK_MAX_FAILS = 5;
-const LINK_LOCKOUT_SEC = 600;
 const HISTORY_TURNS = 6; // user+assistant pairs kept per chat for follow-ups
 
-/** What a chat that is not on the allowlist is told. */
-const REFUSAL_TEXT =
-  "🚫 not authorized. Ask the owner to add you, or /link &lt;code&gt; if you have the code from the dashboard.";
+/**
+ * What a chat that is not on the allowlist is told. Its own chat id, which is
+ * what the owner would add by hand, and where the code is. Nothing about the
+ * agent.
+ */
+const refusalText = (chatId: number): string =>
+  `🚫 not authorized — your chat id is ${chatId}. Ask the owner to add you, or send /link &lt;code&gt; with the code shown in Settings → Telegram.`;
+/**
+ * A bare /start or /help from a chat not on the allowlist: the first thing
+ * anyone who finds the bot sees. What to do if the bot is theirs, and nothing
+ * about the agent behind it.
+ */
+const onboardingText = (chatId: number): string =>
+  `This is a private Merrymen bot. If it's yours, send the /link code shown in Settings → Telegram. Your chat id is ${chatId}.`;
+/**
+ * A /link or /start <code> that waited out an outage (holdStale). Never
+ * compared, never counted. Any chat may get it, so it says nothing more than
+ * that the bot was offline.
+ */
+const STALE_LINK_TEXT =
+  "that code reached me after I'd been offline, so I didn't use it — send the code shown in Settings → Telegram now.";
+
+/**
+ * What the backlog rule does with one message that waited out a silence
+ * (holdStale): answer a late code, refuse a stranger, run it (only /pause and
+ * /kill, which can only reduce risk), or hold it back.
+ */
+function staleAction(text: string, allowed: boolean): "late-code" | "refuse" | "run" | "hold" {
+  const kind = parseSlash(text)?.kind;
+  if (kind === "link" || kind === "start") return "late-code";
+  if (!allowed) return "refuse";
+  if (kind === "pause" || kind === "kill") return "run";
+  return "hold";
+}
+
+/** One batch's backlog bookkeeping: who has been answered, and what each allowlisted chat had held back. */
+interface StaleBatch {
+  /** `${chatId}:${action}` for each answer already given in this batch. */
+  told: Set<string>;
+  /** Per chat, how many messages were held back and the oldest one's date. */
+  held: Map<number, { n: number; oldest: number }>;
+}
+
+function heldPerChat(stale: TgMessage[], cfg: ResolvedConfig): Map<number, { n: number; oldest: number }> {
+  const held = new Map<number, { n: number; oldest: number }>();
+  for (const m of stale) {
+    const allowed = cfg.telegramAllowlist.includes(m.chatId) || cfg.telegramAllowlist.includes(m.fromId);
+    if (staleAction(m.text, allowed) !== "hold") continue;
+    const h = held.get(m.chatId);
+    held.set(m.chatId, h ? { n: h.n + 1, oldest: Math.min(h.oldest, m.date) } : { n: 1, oldest: m.date });
+  }
+  return held;
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "14:36 UTC" today, "Sep 27 14:36 UTC" on another day: a backlog can be a day old. */
+function utcStamp(sec: number, nowSec: number): string {
+  const d = new Date(sec * 1000).toISOString();
+  const hm = `${d.slice(11, 16)} UTC`;
+  if (d.slice(0, 10) === new Date(nowSec * 1000).toISOString().slice(0, 10)) return hm;
+  return `${MONTHS[Number(d.slice(5, 7)) - 1]} ${Number(d.slice(8, 10))} ${hm}`;
+}
+
+/** The one note an allowlisted chat gets about what it sent while the bot was not listening. */
+function staleSummaryText(n: number, oldest: number, nowSec: number): string {
+  const what = n === 1 ? "1 message arrived late" : `${n} messages arrived late`;
+  return `I was offline; ${what} (oldest ${utcStamp(oldest, nowSec)}). I didn't act on ${n === 1 ? "it" : "them"} — resend anything you still need.`;
+}
 /**
  * A /link sent to the bot before this agent was switched onto it (holdEarly).
  * Any chat may get this, so it says nothing about the switch itself.
@@ -279,7 +347,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * read as a trade with no ticker.
    */
   const awaitingValue = new Map<string, { key: string; expiresAt: number }>();
-  const linkFails = new Map<number, { fails: number; until: number }>();
+  const linkFails: LinkFails = new Map();
+  /**
+   * When this process started listening to the current bot: the moment the
+   * first getUpdates that worked was sent, unix seconds. Null until then, and
+   * again after a change of bot or while Telegram is switched off. Anything
+   * dated before it waited out a silence, and pollOnce holds it back.
+   */
+  let armedAt: number | null = null;
   const history = new Map<number, { role: "user" | "assistant"; content: string }[]>();
   // Memory ids surfaced on the previous turn, per chat. A follow-up like "is it
   // done?" shares no words with anything on disk, so without carrying the last
@@ -405,47 +480,32 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     token: string,
     extras: ReplyExtras,
   ): CommandDeps => {
-    const linkDep = (code: string): { ok: boolean; reason?: string } => {
-      const lock = linkFails.get(msg.chatId);
-      if (lock && lock.fails >= LINK_MAX_FAILS && now() < lock.until) {
-        return { ok: false, reason: "too many attempts — try again in a few minutes" };
-      }
-      let state = ensureLinkCode(stateRef.get(), token);
-      if (!code || code.toUpperCase() !== state.linkCode.toUpperCase()) {
-        const prev = lock && now() < lock.until ? lock.fails : 0;
-        linkFails.set(msg.chatId, { fails: prev + 1, until: now() + LINK_LOCKOUT_SEC });
-        return { ok: false, reason: "bad or expired code" };
-      }
-      linkFails.delete(msg.chatId);
-      // First-come owner + allowlist the chat; the code is consumed (rotates).
-      // linkedAt marks day zero of the relationship — the bond grows from here.
-      const next = new Set(cfg.telegramAllowlist);
-      next.add(msg.chatId);
-      patchSettingsFile({ telegramAllowlist: [...next] });
-      state = rotateLinkCode(
-        {
-          ...state,
-          ownerId: state.ownerId ?? msg.fromId,
-          linkedAt: state.linkedAt ?? now(),
-          // AND IN THE ONE FILE NOBODY OVERWRITES. patchSettingsFile above
-          // wrote the chat into the child’s settings.json, which hosted the
-          // orchestrator replaces wholesale from the tenant store every 15
-          // seconds — so the link above, on its own, is undone before the
-          // owner can send a second command, and the code that bought it has
-          // already been consumed by this very rotation. This file is
-          // child-owned; the parent reads it and unions these ids back into
-          // the stored allowlist, which is what makes the link durable.
-          linkedChats: state.linkedChats.includes(msg.chatId)
-            ? state.linkedChats
-            : [...state.linkedChats, msg.chatId],
-        },
-        token,
+    // The decision lives in link.ts, so a process that answers the bot while
+    // trading is held links a chat exactly as this one does. What a link means
+    // HERE is handed in: the allowlist in settings.json, the owner's handle
+    // remembered, and a line in the event feed.
+    const linkDep = (code: string): { ok: boolean; reason?: string } =>
+      linkReply(
+        tryLink(
+          {
+            stateRef,
+            fails: linkFails,
+            now,
+            allow: (chatId) => {
+              const next = new Set(cfg.telegramAllowlist);
+              next.add(chatId);
+              patchSettingsFile({ telegramAllowlist: [...next] });
+            },
+            onLinked: (who) => {
+              if (who.fromUsername) rememberOwnerFact(`Their Telegram handle is @${who.fromUsername}.`, now());
+              deps.note("ok", `Telegram: linked chat ${who.chatId}${who.fromUsername ? ` (@${who.fromUsername})` : ""}`);
+            },
+          },
+          msg,
+          code,
+        ),
+        now(),
       );
-      stateRef.set(state);
-      if (msg.fromUsername) rememberOwnerFact(`Their Telegram handle is @${msg.fromUsername}.`, now());
-      deps.note("ok", `Telegram: linked chat ${msg.chatId}${msg.fromUsername ? ` (@${msg.fromUsername})` : ""}`);
-      return { ok: true };
-    };
 
     const statusCtx = () => deps.buildStatusContext();
     const cmdDeps: CommandDeps = {
@@ -760,12 +820,21 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       await sendMessage({ token }, msg.chatId, `🎙️ <i>heard:</i> ${esc(t.text)}`);
     }
 
-    const slash = parseSlash(msg.text);
+    let slash = parseSlash(msg.text);
 
     // /link is the only command an unlisted chat may use — and it's rate-limited.
-    if (!allowed && !(slash?.kind === "link")) {
-      await sendMessage({ token }, msg.chatId, REFUSAL_TEXT);
-      return;
+    if (!allowed) {
+      // A deep link (t.me/<bot>?start=<code>) arrives as /start <code>. The
+      // same code as /link, so the same path: compared, counted and locked
+      // out exactly as a typed /link is, or the button would be a way round
+      // the lockout.
+      if (slash?.kind === "start") slash = { kind: "link", code: slash.payload };
+      if (slash?.kind !== "link") {
+        // A bare /start or /help is how anyone meets the bot, so it gets the
+        // way in rather than a refusal.
+        await sendMessage({ token }, msg.chatId, slash?.kind === "help" ? onboardingText(msg.chatId) : refusalText(msg.chatId));
+        return;
+      }
     }
 
     // Launch a detached agent task (from /agent OR natural language). Streams its
@@ -1217,6 +1286,40 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   /**
    * One poll. Returns how long to wait before the next, in ms. The bot
    * binding, the backoff and the menu push it calls are defined just below.
+   *
+   * THE BACKLOG RULE. Telegram keeps what a bot is sent for up to a day, so
+   * after a restart, a redeploy or an outage the first poll hands over
+   * everything that waited, all at once. It used to be handled as if it had
+   * just been typed. In the incident this came from, five /link attempts the
+   * owner had sent over a day of silence were compared against a code minted
+   * seconds earlier, counted as five wrong guesses, and locked the owner out
+   * the moment the bot came back. A /buy sent yesterday would have bought
+   * today, at today's price.
+   *
+   * So a message dated before `armedAt`, the moment this process started
+   * listening to this bot, is backlog (holdStale). The line is when listening
+   * began and nothing else: there is no age threshold. A live /link that is
+   * merely handled late, behind a slow batch, still counts toward the lockout,
+   * or waiting would be a way round the guess limit. A date of 0 says nothing
+   * either way and is treated as live, as before. A message from before a
+   * change of bot is the stricter case, and holdEarly has it.
+   *
+   * EACH UPDATE IS SAVED AS SEEN BEFORE IT RUNS, and each reads the config
+   * afresh.
+   * - At most once, on purpose. The offset used to be saved after the whole
+   *   batch, so a crash part way through replayed every update in it on the
+   *   restart, including a trade or a transfer that had already gone through.
+   *   A command lost to a crash can be sent again; one run twice cannot be
+   *   undone. After a redeploy that wipes the offset, the date rule above is
+   *   what stops the replayed backlog from running.
+   * - The allowlist is read per update, so a chat removed on the dashboard is
+   *   refused from its next message, not after the rest of a batch that can
+   *   run to a hundred.
+   * - The token is not. The batch came from one bot, and its replies must go
+   *   through that bot. If the token changes, or Telegram is switched off,
+   *   the batch stops where it is, and whatever is left is asked for again
+   *   under the new token (or found where it was left, on a return to this
+   *   bot).
    */
   const pollOnce = async (): Promise<number> => {
     const cfg = deps.getCfg();
@@ -1224,40 +1327,68 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       // Switched off is not an outage, and time spent off must not be counted
       // into one when it is switched back on.
       outage = null;
+      // Nor is anything sent while it was off live when it comes back on:
+      // nobody was listening, which is what backlog means.
+      armedAt = null;
       return IDLE_GAP_MS; // idle until enabled
     }
     const token = cfg.telegramBotToken;
     await bindBot(token);
-    stateRef.set(ensureLinkCode(stateRef.get(), token));
+    stateRef.set(ensureLinkCode(stateRef.get()));
 
+    // When the request was SENT, not when it came back. A long poll that
+    // returns 20 seconds later with one message returns it the moment it was
+    // typed; that message is live, and the answer's own clock would call it
+    // late whenever the reply crossed a second.
+    const askedAt = now();
     const polled = await getUpdates({ token }, stateRef.get().offset);
     if (polled.reason) return pollFailed(polled);
     pollWorked();
+    if (armedAt === null) armedAt = askedAt;
+    const armed = armedAt;
     const { messages, callbacks, nextOffset } = polled;
-    // Sent to this bot before this agent was switched onto it (boundAt). A date
-    // of 0 says nothing either way and is treated as live, as before.
+    // Sent to this bot before this agent was switched onto it (boundAt).
     const boundAt = stateRef.get().boundAt;
     const early = (date: number) => boundAt !== null && date > 0 && date < boundAt;
+    const stale = (date: number) => !early(date) && date > 0 && date < armed;
+    const batch: StaleBatch = { told: new Set(), held: heldPerChat(messages.filter((m) => stale(m.date)), cfg) };
     // In the order they happened: a press and a typed message in the same
     // batch must not overtake each other.
     const updates = [
-      ...messages.map((m) => ({ at: m.updateId, run: () => (early(m.date) ? holdEarly(m, cfg) : handle(m, cfg)) })),
-      ...callbacks.map((c) => ({
-        at: c.updateId,
+      ...messages.map((m) => ({
+        at: m.updateId,
+        run: (c: ResolvedConfig) => (early(m.date) ? holdEarly(m, c) : stale(m.date) ? holdStale(m, c, batch) : handle(m, c)),
+      })),
+      ...callbacks.map((cb) => ({
+        at: cb.updateId,
         // A button on a message from before the switch answers a question this
-        // agent may never have asked. Answered, so it stops spinning, and dropped.
-        run: () =>
-          early(c.date) ? answerCallbackQuery({ token }, c.id, "That button has expired.").then(() => {}) : handleCallback(c, cfg),
+        // agent may never have asked, and one from before this process started
+        // listening answers a question whose parked action died with the last
+        // process. Answered, so it stops spinning, and dropped.
+        run: (c: ResolvedConfig) =>
+          early(cb.date) || stale(cb.date)
+            ? answerCallbackQuery({ token }, cb.id, "That button has expired.").then(() => {})
+            : handleCallback(cb, c),
       })),
     ].sort((a, b) => a.at - b.at);
+    let whole = true;
     for (const u of updates) {
+      const live = freshCfg();
+      if (!live?.telegramEnabled || live.telegramBotToken !== token) {
+        whole = false;
+        break;
+      }
+      if (u.at + 1 > stateRef.get().offset) stateRef.set({ ...stateRef.get(), offset: u.at + 1 });
       try {
-        await u.run();
+        await u.run(live);
       } catch (e) {
         deps.note("warn", `Telegram: error handling message — ${e instanceof Error ? e.message : String(e)}`);
       }
     }
-    if (nextOffset !== stateRef.get().offset) {
+    // Past the updates that were neither a message nor a press too, but only
+    // when the batch ran to its end: a stopped batch leaves the rest to be
+    // asked for again.
+    if (whole && nextOffset > stateRef.get().offset) {
       stateRef.set({ ...stateRef.get(), offset: nextOffset });
     }
     // With the allowlist as it is NOW. A /link in this batch has just grown it,
@@ -1267,6 +1398,49 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     const fresh = freshCfg();
     if (fresh?.telegramEnabled && fresh.telegramBotToken === token) await pushMenus(fresh, token);
     return POLL_GAP_MS;
+  };
+
+  /**
+   * A MESSAGE THAT WAITED OUT A SILENCE (the backlog rule in pollOnce): at most
+   * one answer per chat of each kind per batch, and nothing run but what only
+   * reduces risk. What each message gets is staleAction's.
+   *
+   * - A /link or /start <code> is never compared and never counted, from any
+   *   chat. The code in it was for whatever the dashboard showed when it was
+   *   typed, which may be long gone; comparing it could only count a wrong
+   *   guess. One prompt to send the current code.
+   * - Anyone not on the allowlist gets the ordinary refusal once, and hears
+   *   nothing about the outage: whether the bot was down is not a stranger's
+   *   business.
+   * - From an allowlisted chat, /pause and /kill run, through the same path
+   *   as a live message and every gate on it. /kill still only asks for a
+   *   /confirm, which must be sent live. Everything else is held back: trades,
+   *   transfers, /confirm, settings, and anything a model would answer. One
+   *   summary per chat says how many and since when, so the owner knows to
+   *   resend what they still want.
+   */
+  const holdStale = async (msg: TgMessage, cfg: ResolvedConfig, batch: StaleBatch): Promise<void> => {
+    const token = cfg.telegramBotToken!;
+    const allowed = cfg.telegramAllowlist.includes(msg.chatId) || cfg.telegramAllowlist.includes(msg.fromId);
+    const action = staleAction(msg.text, allowed);
+    if (action === "run") {
+      await handle(msg, cfg);
+      return;
+    }
+    const key = `${msg.chatId}:${action}`;
+    if (batch.told.has(key)) return;
+    batch.told.add(key);
+    let reply: string;
+    if (action === "late-code") reply = STALE_LINK_TEXT;
+    else if (action === "refuse") reply = refusalText(msg.chatId);
+    else {
+      // Counted up front from the whole batch. A chat added to the allowlist
+      // part way through (a live /link earlier in it) was counted as refused
+      // there, so it falls back to this one message.
+      const held = batch.held.get(msg.chatId) ?? { n: 1, oldest: msg.date };
+      reply = staleSummaryText(held.n, held.oldest, now());
+    }
+    await sendMessage({ token }, msg.chatId, reply);
   };
 
   /**
@@ -1294,11 +1468,12 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   const holdEarly = async (msg: TgMessage, cfg: ResolvedConfig): Promise<void> => {
     const token = cfg.telegramBotToken!;
     const allowed = cfg.telegramAllowlist.includes(msg.chatId) || cfg.telegramAllowlist.includes(msg.fromId);
-    const kind = parseSlash(msg.text)?.kind === "link" ? "link" : allowed ? "held" : "refused";
+    const slashKind = parseSlash(msg.text)?.kind;
+    const kind = slashKind === "link" || slashKind === "start" ? "link" : allowed ? "held" : "refused";
     const key = `${msg.chatId}:${kind}`;
     if (earlyTold.has(key)) return;
     earlyTold.add(key);
-    const reply = kind === "link" ? EARLY_LINK_TEXT : kind === "held" ? EARLY_HELD_TEXT : REFUSAL_TEXT;
+    const reply = kind === "link" ? EARLY_LINK_TEXT : kind === "held" ? EARLY_HELD_TEXT : refusalText(msg.chatId);
     await sendMessage({ token }, msg.chatId, reply);
   };
 
@@ -1316,14 +1491,16 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    *   RETURN: the last batch handled on a bot is still pending at Telegram
    *   until the next poll of that bot asks past it, so polling from 0 after
    *   A → B → A handed it over again and ran its /buy a second time. Whatever
-   *   the bot was sent before the switch is held (holdEarly). The code is
+   *   the bot was sent before the switch is held (holdEarly), and the backlog
+   *   boundary is re-armed by the new bot's first good poll. The code is
    *   fresh, and link lockouts are cleared: they counted guesses at a code
    *   that no longer exists.
    * - The SAME bot with a new secret keeps its offset, since its updates are
-   *   the same stream. The code is re-minted all the same, because it was
-   *   derived from the token, and whoever held the replaced token could derive
-   *   it. Told by the token's fingerprint in telegram.json, so a secret that
-   *   changed while the process was down is caught on the way back up.
+   *   the same stream. The code is rotated all the same: a secret is renewed
+   *   because the old one got out, and a code issued while it was out is not
+   *   worth keeping. Told by the token's fingerprint in telegram.json, so a
+   *   secret that changed while the process was down is caught on the way
+   *   back up.
    * - NO stored bot, a file from before this existed or one the orchestrator
    *   restored, adopts the current bot and resets nothing. A reset there would
    *   replay the backlog and void a code the dashboard may be showing.
@@ -1346,9 +1523,10 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       return;
     }
     if (st.botId !== botId) {
-      stateRef.set(ensureLinkCode(switchBot(st, botId, tag, now()), token));
+      stateRef.set(ensureLinkCode(switchBot(st, botId, tag, now())));
       linkFails.clear();
       earlyTold.clear();
+      armedAt = null;
       commandsRegisteredKey = "";
       menuTry = freshMenuTry();
       const me = await getMe({ token });
@@ -1357,9 +1535,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     }
     if (st.tokenTag === tag) return;
     // A different fingerprint, or none next to a stored bot (every path above
-    // writes the two together): the code on file cannot be shown to come from
-    // this token, so it is re-minted.
-    stateRef.set(ensureLinkCode({ ...st, tokenTag: tag, linkCode: "" }, token));
+    // writes the two together): the code on file cannot be shown to have been
+    // issued under this token, so it is rotated, and like any rotation it
+    // forgives the lockouts that counted guesses at the old one.
+    stateRef.set(rotateLinkCode({ ...st, tokenTag: tag }));
+    linkFails.clear();
     if (st.tokenTag !== null) deps.note("ok", "Telegram: bot token renewed, so the link code was re-minted");
   };
 

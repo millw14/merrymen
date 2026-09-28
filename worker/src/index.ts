@@ -13250,9 +13250,16 @@ async function main() {
   // claim itself. Reported by @Victory-byte (PR #3); fixed on the worker side.
   if (cfg.telegramBotToken) {
     const before = tgState.get().linkCode;
-    tgState.set(ensureLinkCode(tgState.get(), cfg.telegramBotToken));
+    tgState.set(ensureLinkCode(tgState.get()));
     if (!before && tgState.get().linkCode) {
-      console.log(`[telegram] link code ready — send "/link ${tgState.get().linkCode}" to your bot to claim it`);
+      // HOSTED, NEVER THE CODE. The code is a bearer credential: whoever sends
+      // it first becomes the agent's owner. Hosted, this line lands in the
+      // fleet's shared logs, where every tenant who had not linked yet had a
+      // working code sitting in plain text. The owner reads theirs on the
+      // dashboard. Self-hosted, the log is the owner's own terminal, and the
+      // code there is how they link.
+      if (isHostedMode()) console.log("[telegram] link code ready (shown on the dashboard)");
+      else console.log(`[telegram] link code ready — send "/link ${tgState.get().linkCode}" to your bot to claim it`);
     }
   }
 

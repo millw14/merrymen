@@ -368,7 +368,7 @@ describe("the command menu waits for the messages, and gives up politely", () =>
 
 describe("the offset and the link code belong to one bot", () => {
   it("a DIFFERENT bot starts from offset 0 with a new code, and says so without the token or the code", async () => {
-    const oldCode = ensureLinkCode(blankState(), "111:a").linkCode;
+    const oldCode = ensureLinkCode(blankState()).linkCode;
     await withService({ token: "222:x", state: { offset: 900_000_000, botId: "111", linkCode: oldCode } }, async (h) => {
       assert.equal(h.polls()[0]!.body.offset, 0, "the old bot's offset would have hidden every update");
       assert.equal(h.polls()[0]!.token, "222:x");
@@ -403,7 +403,7 @@ describe("the offset and the link code belong to one bot", () => {
         },
       },
       async (h) => {
-        assert.match(h.sent()[5]!, /too many attempts/, "premise: the chat is locked out on the first bot");
+        assert.match(h.sent()[5]!, /too many wrong codes/, "premise: the chat is locked out on the first bot");
         h.cfg.telegramBotToken = "222:b";
         await h.advance(1_000);
         assert.match(h.sent()[6]!, /you're linked/);
@@ -414,7 +414,7 @@ describe("the offset and the link code belong to one bot", () => {
   });
 
   it("the SAME bot with a new secret keeps its offset, but the code is re-minted", async () => {
-    const code = ensureLinkCode(blankState(), "111:a").linkCode;
+    const code = ensureLinkCode(blankState()).linkCode;
     await withService({ token: "111:a", state: { offset: 500, botId: "111", tokenTag: tokenTagOf("111:a"), linkCode: code } }, async (h) => {
       assert.equal(h.polls()[0]!.body.offset, 500);
       assert.equal(h.state().linkCode, code, "nothing changes while the token does not");
@@ -423,7 +423,7 @@ describe("the offset and the link code belong to one bot", () => {
       const last = h.polls().at(-1)!;
       assert.equal(last.token, "111:b");
       assert.equal(last.body.offset, 500, "the same bot's updates are the same stream");
-      assert.notEqual(h.state().linkCode, code, "the code was derived from the replaced token");
+      assert.notEqual(h.state().linkCode, code, "a code issued under the replaced token is not kept");
       assert.ok(h.notes.some((x) => /bot token renewed/.test(x.message)));
       assert.ok(!h.notes.some((x) => /bot changed/.test(x.message)));
     });
@@ -543,9 +543,9 @@ describe("a change of bot never runs a command twice, or one that was not sent t
     );
   });
 
-  it("the same bot, restarted with a new secret: a code derived from the replaced token no longer links", async () => {
+  it("the same bot, restarted with a new secret: a code issued under the replaced token no longer links", async () => {
     const leaked = "111:LEAKED";
-    const derived = ensureLinkCode(blankState({ linkRound: 2 }), leaked).linkCode;
+    const derived = ensureLinkCode(blankState({ linkRound: 2 })).linkCode;
     let n = 0;
     await withService(
       {

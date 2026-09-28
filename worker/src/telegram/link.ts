@@ -1,0 +1,131 @@
+/**
+ * THE /link DECISION: whether a code links this chat, and what a link does.
+ *
+ * Lifted out of service.ts so that any process answering a bot decides the same
+ * way: the trading child today, and a process that answers the owner while
+ * trading is held (plan §1.1), which must not import the trading service to do
+ * it. So this file imports nothing but the state it reads and writes. Whatever
+ * else a link means to the process running it (writing the allowlist into
+ * settings.json, remembering the owner's handle, a line in the event feed) is
+ * handed in as a callback.
+ *
+ * The rules, in order:
+ * - A LOCKED chat is refused before its code is looked at. Checking the code
+ *   first would let a locked chat keep guessing and learn when it was right.
+ * - A wrong code counts toward the lockout: LINK_MAX_FAILS wrong codes, each
+ *   within LINK_LOCKOUT_SEC of the last, lock the chat for LINK_LOCKOUT_SEC.
+ * - The right code links: the chat is allowlisted, the first linker becomes the
+ *   owner, and the code rotates, so it can never link a second chat. Every
+ *   chat's lockout is forgiven, since each counted guesses at a code that no
+ *   longer exists.
+ *
+ * Nothing here decides WHICH messages reach it. A /link that waited out an
+ * outage is never compared or counted (service.ts, the backlog rule); that is
+ * the caller's to hold back.
+ */
+
+import { ensureLinkCode, rotateLinkCode, type LinkRng, type StateRef } from "./state";
+
+export const LINK_MAX_FAILS = 5;
+export const LINK_LOCKOUT_SEC = 600;
+
+/** Wrong codes one chat has sent, and until when they count. */
+export interface LinkLock {
+  fails: number;
+  /** Unix seconds. */
+  until: number;
+}
+
+/**
+ * Wrong codes per chat. In memory on purpose, as before: a restart forgives
+ * them, and a restart is not something a guesser can cause.
+ */
+export type LinkFails = Map<number, LinkLock>;
+
+/** Who sent the code. */
+export interface Linker {
+  chatId: number;
+  fromId: number;
+  fromUsername?: string;
+}
+
+export type LinkOutcome =
+  | { ok: true }
+  /** Locked out; the code was not looked at. */
+  | { ok: false; locked: true; until: number }
+  | { ok: false; locked: false };
+
+export interface LinkDeps {
+  stateRef: StateRef;
+  fails: LinkFails;
+  now: () => number;
+  /**
+   * Put the chat on the allowlist the gate reads. Runs before the code is
+   * spent, as it always did.
+   */
+  allow: (chatId: number) => void;
+  /** Anything else a link means to the caller: remembering the handle, the event line. */
+  onLinked?: (who: Linker) => void;
+  /** Injectable for tests; crypto.randomBytes otherwise. */
+  rng?: LinkRng;
+}
+
+/** Try `code` for `who`. Every effect of a link happens here, or through `deps`. */
+export function tryLink(deps: LinkDeps, who: Linker, code: string): LinkOutcome {
+  const t = deps.now();
+  const lock = deps.fails.get(who.chatId);
+  if (lock && lock.fails >= LINK_MAX_FAILS && t < lock.until) {
+    return { ok: false, locked: true, until: lock.until };
+  }
+  const before = deps.stateRef.get();
+  let state = ensureLinkCode(before, deps.rng);
+  // A code minted just now is the code, so it is kept. It used to be dropped
+  // on a wrong guess, which cost nothing while the code was a hash of the
+  // token and came out the same next time. A random one would not.
+  if (state !== before) deps.stateRef.set(state);
+  if (!code || code.toUpperCase() !== state.linkCode.toUpperCase()) {
+    const prev = lock && t < lock.until ? lock.fails : 0;
+    deps.fails.set(who.chatId, { fails: prev + 1, until: t + LINK_LOCKOUT_SEC });
+    return { ok: false, locked: false };
+  }
+  deps.fails.clear();
+  // First-come owner + allowlist the chat; the code is consumed (rotates).
+  // linkedAt marks day zero of the relationship — the bond grows from here.
+  deps.allow(who.chatId);
+  state = rotateLinkCode(
+    {
+      ...state,
+      ownerId: state.ownerId ?? who.fromId,
+      linkedAt: state.linkedAt ?? t,
+      // AND IN THE ONE FILE NOBODY OVERWRITES. `allow` wrote the chat into
+      // the child's settings.json, which hosted the orchestrator replaces
+      // wholesale from the tenant store every 15 seconds — so the link, on its
+      // own, is undone before the owner can send a second command, and the
+      // code that bought it has already been consumed by this very rotation.
+      // This file is child-owned; the parent reads it and unions these ids
+      // back into the stored allowlist, which is what makes the link durable.
+      linkedChats: state.linkedChats.includes(who.chatId) ? state.linkedChats : [...state.linkedChats, who.chatId],
+    },
+    deps.rng,
+  );
+  deps.stateRef.set(state);
+  deps.onLinked?.(who);
+  return { ok: true };
+}
+
+/**
+ * The outcome as the executor's /link reply wants it. A lockout says how long
+ * and until when, and where the right code is: the owner locked out in the
+ * incident this came from was told "try again in a few minutes", tried again
+ * sooner with a code that could not work, and was locked out again.
+ */
+export function linkReply(outcome: LinkOutcome, now: number): { ok: boolean; reason?: string } {
+  if (outcome.ok) return { ok: true };
+  if (!outcome.locked) return { ok: false, reason: "bad or expired code" };
+  const minutes = Math.max(1, Math.ceil((outcome.until - now) / 60));
+  const at = new Date(outcome.until * 1000).toISOString().slice(11, 16);
+  return {
+    ok: false,
+    reason: `too many wrong codes from this chat — try again in about ${minutes} min (after ${at} UTC). Use the code in Settings → Telegram.`,
+  };
+}

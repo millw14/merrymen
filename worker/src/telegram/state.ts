@@ -3,7 +3,7 @@
  *   - the getUpdates offset (so a restart doesn't replay old messages), the bot
  *     it belongs to, and where any other bot this agent polled got to
  *   - the link code (shown in the dashboard; consumed by /link) and its round —
- *     the round increments on every successful link so the code ROTATES and a
+ *     a random code, replaced by a different one on every successful link, so a
  *     used code can't link a second chat
  *   - the owner chat id (first successful /link) — also the notifier's recipient
  *   - notifier bookkeeping: last trade row pinged, per-condition alert dedupe,
@@ -14,7 +14,7 @@
  * is worker-managed runtime bookkeeping.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { ensureHome, homePaths } from "../home";
 
@@ -77,11 +77,12 @@ export interface TelegramState {
    * (tokenTagOf), never the token. Null in a file written before this existed,
    * or restored by the orchestrator.
    *
-   * The code is derived from the token, so a new secret for the same bot must
-   * re-mint it, or whoever held the replaced token can derive the live code.
-   * Held in memory only, that was missed whenever the token changed while the
-   * process was down: the restarted child adopted the stored code, still
-   * derived from the old token.
+   * A new secret for the same bot re-mints the code. The code used to be
+   * derived from the token, so whoever held the replaced token could derive
+   * it; it is random now, but a secret is replaced because the old one got
+   * out, and a code issued while it was out is not worth keeping. Held in
+   * memory only, a change made while the process was down was missed: the
+   * restarted child adopted the stored code.
    */
   tokenTag: string | null;
   /**
@@ -95,7 +96,10 @@ export interface TelegramState {
    */
   boundAt: number | null;
   linkCode: string;
-  /** Increments on each successful /link so the code rotates. */
+  /**
+   * How many times the code has been rotated. A count and nothing more: the
+   * code used to be a hash of the token and this round, and is random now.
+   */
   linkRound: number;
   ownerId: number | null;
   /** Unix seconds of the FIRST successful /link — the relationship’s day zero. */
@@ -345,33 +349,65 @@ export function switchBot(state: TelegramState, botId: string, tokenTag: string,
   };
 }
 
+/** Where a link code's randomness comes from: `n` random bytes. Injectable so a test can pin a code. */
+export type LinkRng = (n: number) => Uint8Array;
+
+/** Six characters from 31 that cannot be misread for each other: no 0/O/1/I/L. */
+const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const CODE_LENGTH = 6;
+/** The largest multiple of the alphabet's size that fits in a byte (8 × 31). */
+const CODE_BYTE_LIMIT = 248;
+
 /**
- * Ensure a link code exists (6-char, unambiguous alphabet). Deterministic input
- * is required — pass a seed so this stays pure/testable and avoids Math.random
- * (which is unavailable in some sandboxes and non-reproducible). The linkRound
- * is folded into the hash so consuming a code (round++) yields a fresh one.
+ * A fresh code from `rng`. Bytes of 248 and over are thrown away rather than
+ * folded in with `%`, which would make the first eight letters likelier than
+ * the rest. Bounded, so an rng that only ever returns unusable bytes throws
+ * rather than spinning the poll loop for ever.
  */
-export function ensureLinkCode(state: TelegramState, seed: string): TelegramState {
-  if (state.linkCode) return state;
-  const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // no 0/O/1/I/L
-  const input = `${seed}:${state.linkRound}`;
-  let h = 2166136261 >>> 0;
-  for (const ch of input) {
-    h ^= ch.charCodeAt(0);
-    h = Math.imul(h, 16777619) >>> 0;
-  }
+function mintCode(rng: LinkRng): string {
   let code = "";
-  for (let i = 0; i < 6; i++) {
-    code += ALPHABET[h % ALPHABET.length];
-    h = Math.imul(h, 16777619) >>> 0;
+  for (let round = 0; round < 64 && code.length < CODE_LENGTH; round++) {
+    for (const b of rng(CODE_LENGTH * 2)) {
+      if (b >= CODE_BYTE_LIMIT) continue;
+      code += CODE_ALPHABET[b % CODE_ALPHABET.length];
+      if (code.length === CODE_LENGTH) break;
+    }
   }
-  return { ...state, linkCode: code };
+  if (code.length < CODE_LENGTH) throw new Error("link code: the random source gave no usable bytes");
+  return code;
 }
 
-/** Consume the current link code: bump the round and clear it so the next
- * ensureLinkCode() mints a fresh one. Call after every successful /link. */
-export function rotateLinkCode(state: TelegramState, seed: string): TelegramState {
-  return ensureLinkCode({ ...state, linkCode: "", linkRound: state.linkRound + 1 }, seed);
+/**
+ * Ensure a link code exists: six random characters from an unambiguous
+ * alphabet. A code already there is kept, so the one on the dashboard stays
+ * valid until it is used.
+ *
+ * RANDOM, NOT DERIVED. It used to be a hash of the token and `linkRound`, which
+ * did not rotate the way it claimed. A hosted redeploy loads telegram.json with
+ * the round back at 0, so the first link after one minted hash(token:1), a code
+ * that had already been issued and perhaps already used. And when the restored
+ * code was itself that round-1 code, "rotating" after a link re-minted the very
+ * code just spent. Anyone holding the token could also compute every code.
+ */
+export function ensureLinkCode(state: TelegramState, rng: LinkRng = randomBytes): TelegramState {
+  if (state.linkCode) return state;
+  return { ...state, linkCode: mintCode(rng) };
+}
+
+/**
+ * Consume the current link code: a new one that is never the one just used,
+ * and one more round. Call after every successful /link.
+ *
+ * A repeat of six random characters is one in 887 million, but "a used code
+ * cannot link again" is the whole point of rotating, so it is ruled out
+ * rather than left to chance. Bounded like mintCode, for the same reason.
+ */
+export function rotateLinkCode(state: TelegramState, rng: LinkRng = randomBytes): TelegramState {
+  for (let i = 0; i < 16; i++) {
+    const code = mintCode(rng);
+    if (code !== state.linkCode) return { ...state, linkCode: code, linkRound: state.linkRound + 1 };
+  }
+  throw new Error("link code: the random source keeps repeating the code just used");
 }
 
 /**

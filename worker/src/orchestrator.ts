@@ -697,8 +697,17 @@ function readChildTelegram(tenant: string): {
  * ONLY WHEN THE CHILD HAS NO FILE. A running child is the authority on its own
  * link — it may have just been re-linked to a different chat — and this must
  * restore a lost link, never overwrite a live one.
+ *
+ * THE PUBLISHED CODE COMES BACK TOO, linked or not. Codes are random now
+ * (state.ts), so a child that starts with no code mints a new one, and a tenant
+ * who has not linked yet would find the code on the dashboard replaced by every
+ * redeploy, perhaps while they were typing it. The code the mirror holds is the
+ * one the dashboard shows. A link rotates it and the next pass publishes the
+ * rotation, so it is an unused code unless a redeploy lands inside those
+ * fifteen seconds. That window is accepted: without the restore, every
+ * redeploy would void the code of every tenant who has not linked yet.
  */
-async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db): Promise<void> {
+export async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db): Promise<void> {
   const file = path.join(childHome(tenant), "telegram.json");
   if (existsSync(file)) return;
   const url = process.env.DATABASE_URL;
@@ -734,24 +743,49 @@ async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db): Promis
         log(`${tenant}: telegram owner recovered from the stored allowlist — no mirrored link survived`);
       }
     }
-    // Nothing to restore is the ordinary state of a tenant who never linked.
-    // An empty file would only mask a later genuine publish.
-    if (!ownerId) return;
+    const restored = restoredTelegramFile(tg, ownerId);
+    // Nothing to restore is the ordinary state of a tenant whose bot the child
+    // has never run. An empty file would only mask a later genuine publish.
+    if (!restored) return;
     mkdirSync(childHome(tenant), { recursive: true });
-    writeFileSync(
-      file,
-      // `ownerId` is the recovered one, which may have come from the allowlist
-      // rather than the mirror. The link CODE is not recovered — it rotates on
-      // every link and a stale one would be worse than none, so the child mints
-      // a fresh code and the dashboard shows it.
-      JSON.stringify({ linkCode: tg?.linkCode ?? "", ownerId, linkedAt: tg?.linkedAt ?? 0 }, null, 2),
-    );
-    log(`${tenant}: telegram link restored — the owner keeps receiving alerts`);
+    writeFileSync(file, JSON.stringify(restored, null, 2));
+    // Never the code itself: it is a bearer credential, and this log is the
+    // fleet's (index.ts, "link code ready").
+    if (restored.ownerId) log(`${tenant}: telegram link restored — the owner keeps receiving alerts`);
+    else log(`${tenant}: telegram link code restored (shown on the dashboard)`);
   } catch (e) {
     // Never fatal. A child with no telegram link still trades; it just cannot
     // tell anyone about it, which is the status quo this repairs.
     log(`${tenant}: could not restore telegram state — ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+/**
+ * What a fresh child's telegram.json is seeded with: only what there is.
+ *
+ * `ownerId` is the recovered one, which may have come from the allowlist rather
+ * than the mirror; with it goes the mirror's `linkedAt`, when it has one. The
+ * link code is the published one, restored whether or not anyone has linked
+ * (writeTelegramForChild says why). A field with nothing to restore is left
+ * out, and the child fills it in as for a first run. Nothing at all is null,
+ * and no file is written.
+ *
+ * NEVER `linkedChats`. It is the list the parent promotes into the stored
+ * allowlist, and restoring it would put back every chat the owner has since
+ * removed on the dashboard. Nor the offset: the date rule in service.ts is
+ * what keeps a replayed backlog from running.
+ */
+export function restoredTelegramFile(
+  tg: { linkCode: string | null; linkedAt: number | null } | null,
+  ownerId: number | null,
+): { linkCode?: string; ownerId?: number; linkedAt?: number } | null {
+  const out: { linkCode?: string; ownerId?: number; linkedAt?: number } = {};
+  if (tg?.linkCode) out.linkCode = tg.linkCode;
+  if (ownerId) {
+    out.ownerId = ownerId;
+    if (typeof tg?.linkedAt === "number") out.linkedAt = tg.linkedAt;
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 async function publishChildTelegram(tenant: `0x${string}`, shared: Db): Promise<void> {

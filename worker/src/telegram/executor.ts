@@ -185,6 +185,12 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
     }
     case "help":
       return deps.help();
+    // Only a chat already on the allowlist gets here with a payload: the
+    // service hands an unlisted chat's payload to /link, with its counting and
+    // lockout. Someone already linked is shown what they can do, and the
+    // payload is not looked at, so it counts toward nothing.
+    case "start":
+      return deps.help();
     // Static signpost — no state, no gating: it only tells you where the
     // dashboard is. Safe to answer even unlinked/read-only.
     case "wallet":

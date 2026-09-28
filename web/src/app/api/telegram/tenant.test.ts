@@ -104,7 +104,9 @@ describe("a hosted request with no session gets nothing", () => {
 describe("the link survives the orchestrator's next pass", () => {
   const ORCH = readFileSync(new URL("../../../../../worker/src/orchestrator.ts", import.meta.url), "utf8");
   const STATE = readFileSync(new URL("../../../../../worker/src/telegram/state.ts", import.meta.url), "utf8");
-  const SERVICE = readFileSync(new URL("../../../../../worker/src/telegram/service.ts", import.meta.url), "utf8");
+  // The /link decision moved out of service.ts so a held tenant's bot links
+  // the same way; the record it keeps moved with it.
+  const LINK = readFileSync(new URL("../../../../../worker/src/telegram/link.ts", import.meta.url), "utf8");
 
   it("A LINKED CHAT IS RECORDED WHERE NOTHING OVERWRITES IT", () => {
     // The child authorizes a chat by patching its own settings.json, and
@@ -113,7 +115,7 @@ describe("the link survives the orchestrator's next pass", () => {
     // second command, with the code already spent by the rotation. telegram.json
     // is child-owned and never written from above.
     assert.match(STATE, /linkedChats: number\[\]/);
-    assert.match(SERVICE, /linkedChats: state\.linkedChats\.includes\(msg\.chatId\)/);
+    assert.match(LINK, /linkedChats: state\.linkedChats\.includes\(who\.chatId\)/);
   });
 
   it("and the orchestrator promotes it into the stored allowlist", () => {

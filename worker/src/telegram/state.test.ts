@@ -41,36 +41,71 @@ const base: TelegramState = {
   nextId: 1,
 };
 
-describe("link code — deterministic, rotating, unambiguous", () => {
-  it("is deterministic for a given seed + round", () => {
-    const a = ensureLinkCode(base, "123:token");
-    const b = ensureLinkCode(base, "123:token");
-    assert.equal(a.linkCode, b.linkCode);
-    assert.match(a.linkCode, /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/);
+/** An rng that hands out `bytes` in order, looping, so a test can say exactly which code comes next. */
+function scripted(...bytes: number[]) {
+  let i = 0;
+  return (n: number): Uint8Array => Uint8Array.from({ length: n }, () => bytes[i++ % bytes.length]!);
+}
+const CODE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/;
+
+describe("link code — random, rotating, unambiguous", () => {
+  it("is six characters from the unambiguous alphabet, taken from the random source", () => {
+    const a = ensureLinkCode(base, scripted(0, 1, 2, 3, 4, 30));
+    assert.equal(a.linkCode, "ABCDE9");
+    assert.match(ensureLinkCode(base).linkCode, CODE);
+  });
+
+  it("is not derived from anything: two mints from the real source differ", () => {
+    // The old code was a hash of the token and the round, so anyone holding
+    // the token could compute every code, and a restore that reset the round
+    // re-issued one already used.
+    const seen = new Set(Array.from({ length: 50 }, () => ensureLinkCode(base).linkCode));
+    assert.ok(seen.size > 45, `${seen.size} distinct codes out of 50`);
+  });
+
+  it("drops bytes that would bias the alphabet instead of folding them in", () => {
+    // 248..255 would make A–H likelier than the rest if taken mod 31.
+    assert.equal(ensureLinkCode(base, scripted(248, 255, 0, 250, 1, 2, 3, 4, 5)).linkCode, "ABCDEF");
   });
 
   it("does not regenerate when a code already exists", () => {
-    const a = ensureLinkCode(base, "123:token");
-    const again = ensureLinkCode(a, "different-seed");
+    const a = ensureLinkCode(base);
+    const again = ensureLinkCode(a, scripted(9));
     assert.equal(again.linkCode, a.linkCode);
   });
 
   it("rotateLinkCode consumes the code — a used code can't link twice", () => {
-    const a = ensureLinkCode(base, "123:token");
-    const rotated = rotateLinkCode(a, "123:token");
+    const a = ensureLinkCode(base);
+    const rotated = rotateLinkCode(a);
     assert.equal(rotated.linkRound, 1);
-    assert.notEqual(rotated.linkCode, a.linkCode); // fresh code, new round
-    assert.match(rotated.linkCode, /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/);
+    assert.notEqual(rotated.linkCode, a.linkCode);
+    assert.match(rotated.linkCode, CODE);
   });
 
-  it("each rotation yields a different code", () => {
-    let st = ensureLinkCode(base, "seed");
-    const seen = new Set<string>([st.linkCode]);
-    for (let i = 0; i < 5; i++) {
-      st = rotateLinkCode(st, "seed");
-      assert.ok(!seen.has(st.linkCode), `round ${st.linkRound} repeated a code`);
-      seen.add(st.linkCode);
-    }
+  it("a rotation never lands on the code just used, even when the random source repeats it", () => {
+    const a = ensureLinkCode(base, scripted(0, 1, 2, 3, 4, 5));
+    assert.equal(a.linkCode, "ABCDEF");
+    // Each mint draws twelve bytes. The first draw repeats ABCDEF; the
+    // rotation must draw again.
+    const rotated = rotateLinkCode(a, scripted(0, 1, 2, 3, 4, 5, 0, 0, 0, 0, 0, 0, 6, 7, 8, 9, 10, 11, 0, 0, 0, 0, 0, 0));
+    assert.equal(rotated.linkCode, "GHJKMN");
+  });
+
+  it("a restored code X, then a link: the new code is not X, and two rotations differ", () => {
+    // What a hosted redeploy does: telegram.json comes back with the published
+    // code and the round at 0. The old hash minted hash(token:1) next, which
+    // could be X itself.
+    const restored = { ...base, linkCode: "NTE49D", linkRound: 0 };
+    const once = rotateLinkCode(restored);
+    const twice = rotateLinkCode(once);
+    assert.notEqual(once.linkCode, "NTE49D");
+    assert.notEqual(twice.linkCode, once.linkCode);
+    assert.notEqual(twice.linkCode, "NTE49D");
+  });
+
+  it("an rng that never gives a usable byte throws rather than spinning the poll loop", () => {
+    assert.throws(() => ensureLinkCode(base, scripted(255)), /no usable bytes/);
+    assert.throws(() => rotateLinkCode({ ...base, linkCode: "ABCDEF" }, scripted(0, 1, 2, 3, 4, 5)), /keeps repeating/);
   });
 });
 
