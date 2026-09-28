@@ -1142,7 +1142,20 @@ describe("sendChatAction", () => {
     const boom: FetchLike = async () => {
       throw new Error("down");
     };
-    await sendChatAction({ token: "t", fetchFn: boom }, GROUP, "typing", 7);
+    const r = await sendChatAction({ token: "t", fetchFn: boom }, GROUP, "typing", 7);
+    assert.equal(r.ok, false);
+    assert.match(r.reason!, /down/);
+  });
+
+  it("says whether the chat can be written to: ok when Telegram took it", async () => {
+    assert.deepEqual(await sendChatAction({ token: "t", fetchFn: fakeFetch(200, OK(true)) }, 555), { ok: true });
+  });
+
+  it("a person who never opened a DM, or blocked the bot, is not ok, with Telegram's reason", async () => {
+    const notFound = fakeFetch(400, { ok: false, error_code: 400, description: "Bad Request: chat not found" });
+    assert.deepEqual(await sendChatAction({ token: "t", fetchFn: notFound }, 555), { ok: false, reason: "Bad Request: chat not found" });
+    const blocked = fakeFetch(403, { ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user" });
+    assert.deepEqual(await sendChatAction({ token: "t", fetchFn: blocked }, 555), { ok: false, reason: "Forbidden: bot was blocked by the user" });
   });
 });
 

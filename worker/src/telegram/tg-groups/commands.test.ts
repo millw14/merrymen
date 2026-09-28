@@ -3,7 +3,8 @@
  *
  * The rows scenarios.test.ts does not pin: which slash commands typed in a
  * group are this bot's at all, when the room may be told "sent it to your
- * DMs", and that the live link code is replaced whoever the /link names.
+ * DMs", that nothing is run for someone whose DM the bot cannot reach, and
+ * that the live link code is replaced wherever a group line shows it.
  * Same harness as scenarios.test.ts's poll-service block: every Telegram call
  * is answered by a fake behind global fetch, the child's home is a temp dir,
  * and the group handler runs on a fake clock with no waits.
@@ -28,6 +29,10 @@ const OWNER = 424242;
 const ANN = 717171;
 const BOB = 818181;
 const CAT = 919191;
+/** Allowlisted by id in the dashboard; the bot can never write to them. */
+const DAN = 616161;
+/** Allowlisted, DM open, but the receipt of their command is lost on the way. */
+const EVE = 515151;
 const TOKEN = "123456:SECRET-TOKEN-XYZ";
 const BOT = { id: 999999, username: "pinebot", firstName: "Zorblax" };
 
@@ -71,6 +76,10 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
   const batches: unknown[][] = [];
   /** DMs Telegram refuses: people who never opened a DM with the bot. */
   const neverStarted = new Set<number>();
+  /** DMs whose "typing…" lands but whose messages are lost (a blip, or blocked in between). */
+  const receiptLost = new Set<number>();
+  /** Every order that reached trading. */
+  const trades: string[] = [];
   let nextUpdate = 1;
   let nextMid = 1_000;
   let nextSent = 90_000;
@@ -93,11 +102,17 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
     } else if (method === "sendMessage" && neverStarted.has(Number(body.chat_id))) {
       const refused = { ok: false, error_code: 403, description: "Forbidden: bot can't initiate conversation with a user" };
       return { ok: false, status: 403, json: async () => refused };
+    } else if (method === "sendChatAction" && neverStarted.has(Number(body.chat_id))) {
+      const refused = { ok: false, error_code: 400, description: "Bad Request: chat not found" };
+      return { ok: false, status: 400, json: async () => refused };
+    } else if (method === "sendMessage" && receiptLost.has(Number(body.chat_id))) {
+      throw new Error("ECONNRESET");
     } else if (method === "sendMessage") env = { ok: true, result: { message_id: nextSent++ } };
     return { ok: true, status: 200, json: async () => env };
   };
 
   const sendsTo = (chatId: number): Call[] => calls.filter((c) => c.method === "sendMessage" && c.body.chat_id === chatId);
+  const typingTo = (chatId: number): Call[] => calls.filter((c) => c.method === "sendChatAction" && c.body.chat_id === chatId);
   const allSends = (): Call[] => calls.filter((c) => c.method === "sendMessage");
 
   async function waitFor(pred: () => boolean, ms = 6_000): Promise<void> {
@@ -146,6 +161,8 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
       telegramEnabled: true,
       telegramBotToken: TOKEN,
       telegramAllowlist: [OWNER],
+      telegramControlEnabled: true,
+      telegramMaxActionUsdg: 10,
       groqApiKey: undefined,
       anthropicApiKey: undefined,
       llmApiKey: undefined,
@@ -178,7 +195,10 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
       grantPerTradeUsdg: () => undefined,
       grantHasTransfer: () => false,
       readDepth: async () => "",
-      submitTrade: async () => "refused in tests",
+      submitTrade: async (side, symbol, usdg) => {
+        trades.push(`${side} ${symbol} ${usdg}`);
+        return `✅ ${side} ${usdg} USDG of ${symbol} (paper)`;
+      },
       submitTransfer: async () => "refused in tests",
       kill: () => ({ ok: false }) as never,
       tgGroupsStore: store,
@@ -208,6 +228,7 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
     cfg = { ...cfg, telegramAllowlist: [OWNER] };
     tstate = { ...tstate, ownerId: OWNER };
     neverStarted.clear();
+    receiptLost.clear();
   });
 
   after(() => {
@@ -245,6 +266,73 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
     assert.notEqual(tstate.linkCode, live);
     assert.ok(!tstate.linkedChats.includes(CHAT));
     assert.match(String(sendsTo(CHAT).at(-1)?.body.text), /code/);
+  });
+
+  it("the live code with punctuation, backticks or brackets round it after /link is replaced, once per showing", async () => {
+    const shapes: ((code: string) => string)[] = [
+      (c) => `/link ${c}.`,
+      (c) => `/link \`${c}\``,
+      (c) => `/link (${c})`,
+      (c) => `/link ${c}!`,
+      // Glued inside a longer run: a handful of guesses finds where it starts.
+      (c) => `/link x${c.toLowerCase()}y`,
+    ];
+    for (const shape of shapes) {
+      tstate = ensureLinkCode(tstate, TOKEN);
+      const live = tstate.linkCode;
+      const dmBefore = sendsTo(OWNER).length;
+      await deliver(groupMsg(shape(live), { id: CAT, first: "Cat" }).update);
+      await waitFor(() => sendsTo(OWNER).length === dmBefore + 1);
+      assert.notEqual(tstate.linkCode, live, `${shape("CODE")}: the code the room just saw no longer works`);
+      assert.ok(!tstate.linkedChats.includes(CHAT));
+      assert.match(String(sendsTo(OWNER).at(-1)?.body.text), /link code got posted/);
+    }
+    // One showing, one replacement and one DM: the line check and the /link
+    // check never both fire on the same code.
+    const dmAfter = sendsTo(OWNER).length;
+    await deliver();
+    assert.equal(sendsTo(OWNER).length, dmAfter);
+  });
+
+  it("the live code shown as a word in any group line is replaced; an ordinary line leaves it alone", async () => {
+    tstate = ensureLinkCode(tstate, TOKEN);
+    const kept = tstate.linkCode;
+    const quietBefore = sendsTo(OWNER).length;
+    await deliver(groupMsg("anyone around? market's slow today", { id: BOB, first: "Bob" }).update);
+    assert.equal(tstate.linkCode, kept, "no code in the line, nothing replaced");
+    assert.equal(sendsTo(OWNER).length, quietBefore);
+
+    const photo = (caption: string) => {
+      const mid = nextMid++;
+      return {
+        update_id: nextUpdate++,
+        message: {
+          message_id: mid,
+          date: Math.floor(clock / 1000),
+          chat: { id: CHAT, type: "supergroup", title: "frens" },
+          from: { id: BOB, is_bot: false, first_name: "Bob" },
+          photo: [{ file_id: "p1", file_unique_id: "u1", width: 90, height: 90 }],
+          caption,
+        },
+      };
+    };
+    const shapes: ((code: string) => unknown)[] = [
+      (c) => groupMsg(`try /link ${c}`, { id: CAT, first: "Cat" }).update,
+      (c) => groupMsg(`the code is ${c.toLowerCase()}, go`, { id: CAT, first: "Cat" }).update,
+      // Not a /link at all as far as parseSlash goes ("link:…" is no command).
+      (c) => groupMsg(`/link:${c}`, { id: CAT, first: "Cat" }).update,
+      (c) => photo(`dm the bot ${c} lol`),
+    ];
+    for (const shape of shapes) {
+      tstate = ensureLinkCode(tstate, TOKEN);
+      const live = tstate.linkCode;
+      const dmBefore = sendsTo(OWNER).length;
+      await deliver(shape(live));
+      await waitFor(() => sendsTo(OWNER).length === dmBefore + 1);
+      assert.notEqual(tstate.linkCode, live, JSON.stringify(shape("CODE")));
+      assert.ok(!tstate.linkedChats.includes(CHAT));
+      assert.equal(tstate.ownerId, OWNER);
+    }
   });
 
   it("a bare command that is not ours ('/ban @spammer') is another bot's: nothing in the DM, nothing in the room", async () => {
@@ -306,6 +394,56 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
     assert.doesNotMatch(String(line?.body.text), /sent it to your DMs/);
     assert.match(String(line?.body.text), /\/start/);
     assert.equal(replyOf(line), mid);
+  });
+
+  it("an allowlisted member the bot cannot DM types /buy: nothing is bought, and the room is asked to DM first", async () => {
+    cfg = { ...cfg, telegramAllowlist: [OWNER, DAN] };
+    neverStarted.add(DAN);
+    const tradesBefore = trades.length;
+    const groupBefore = sendsTo(CHAT).length;
+    const { mid, update } = groupMsg("/buy NVDA 5", { id: DAN, first: "Dan" });
+    await deliver(update);
+    await waitFor(() => sendsTo(CHAT).length === groupBefore + 1);
+    assert.deepEqual(trades.slice(tradesBefore), [], "nothing runs whose receipt cannot land");
+    assert.equal(typingTo(DAN).length, 1, "their DM was tried first");
+    assert.equal(sendsTo(DAN).length, 0, "and no receipt was written");
+    const line = sendsTo(CHAT).at(-1);
+    assert.match(String(line?.body.text), /\/start/);
+    assert.doesNotMatch(String(line?.body.text), /sent it to your DMs/);
+    assert.equal(replyOf(line), mid);
+  });
+
+  it("the owner's /buy with their DM open: the DM is proved, the order runs once, the receipt lands, and the room hears it's in their DMs", async () => {
+    const tradesBefore = trades.length;
+    const dmBefore = sendsTo(OWNER).length;
+    const groupBefore = sendsTo(CHAT).length;
+    await deliver(groupMsg("/buy NVDA 5", { id: OWNER, first: "Mike" }).update);
+    await waitFor(() => sendsTo(OWNER).length === dmBefore + 1 && sendsTo(CHAT).length === groupBefore + 1);
+    assert.deepEqual(trades.slice(tradesBefore), ["buy NVDA 5"]);
+    const probe = calls.lastIndexOf(typingTo(OWNER).at(-1)!);
+    const receipt = calls.lastIndexOf(sendsTo(OWNER).at(-1)!);
+    assert.ok(probe >= 0 && probe < receipt, "the DM is proved before the order runs");
+    assert.match(String(sendsTo(OWNER).at(-1)?.body.text), /NVDA/);
+    const line = String(sendsTo(CHAT).at(-1)?.body.text);
+    assert.match(line, /DM/, "one of the 'sent it to your DMs 🤫' lines");
+    assert.doesNotMatch(line, /\bfirst\b|NVDA|USDG|\d/, "no 'dm me first', and nothing of the receipt in the room");
+  });
+
+  it("an order that ran but whose receipt was lost tells the room it went through, never 'dm me first'", async () => {
+    cfg = { ...cfg, telegramAllowlist: [OWNER, EVE] };
+    receiptLost.add(EVE);
+    const tradesBefore = trades.length;
+    const groupBefore = sendsTo(CHAT).length;
+    const { mid, update } = groupMsg("/buy NVDA 5", { id: EVE, first: "Eve" });
+    await deliver(update);
+    await waitFor(() => sendsTo(CHAT).length === groupBefore + 1);
+    assert.deepEqual(trades.slice(tradesBefore), ["buy NVDA 5"], "it ran, once");
+    assert.ok(sendsTo(EVE).length > 0, "the receipt was tried");
+    const line = String(sendsTo(CHAT).at(-1)?.body.text);
+    assert.doesNotMatch(line, /\bfirst\b/, "'dm me /start first' reads as 'it did not run', and invites a second /buy");
+    assert.doesNotMatch(line, /sent it to your DMs/);
+    assert.match(line, /\b(done|got it|went through|handled)\b/i);
+    assert.equal(replyOf(sendsTo(CHAT).at(-1)), mid);
   });
 
   it("the bot's display name from getMe calls it like its name does", async () => {

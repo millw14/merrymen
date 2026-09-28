@@ -1225,6 +1225,25 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   };
 
   /**
+   * THE LIVE LINK CODE, ONCE A ROOM HAS SEEN IT, IS REPLACED (docs/tg-groups.md
+   * "Link codes are for DMs only"), and the owner is told why the code on
+   * their Settings page changed. Anyone who read it could DM "/link CODE" and
+   * be allowlisted — on a bot never linked, made its owner. `shows` says
+   * whether a text carries the live code (upper-cased); a false positive only
+   * costs a fresh code and one DM to the owner, so a caller errs that way.
+   */
+  const replaceShownCode = (chatId: number, cfg: ResolvedConfig, shows: (live: string) => boolean): void => {
+    const token = cfg.telegramBotToken;
+    if (!token) return;
+    const state = ensureLinkCode(stateRef.get(), token);
+    const live = state.linkCode.toUpperCase();
+    if (!live || !shows(live)) return;
+    stateRef.set(rotateLinkCode(state, token));
+    deps.note("warn", "Telegram: a link code was typed in a group; it was replaced");
+    if (tgGroups) void tgGroups.codeLeaked(chatId);
+  };
+
+  /**
    * A SLASH COMMAND TYPED IN A GROUP (docs/tg-groups.md "Commands in groups").
    *
    * It still goes through `handle` and its sender rules; what changes is who
@@ -1240,7 +1259,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    *   - Every command's answer — a private read (rule 3) or an order's
    *     receipt (rule 2) — goes to the asker's own DM, with a "sent it to
    *     your DMs" in the room once it arrived there (else "dm me /start
-   *     first"); the room never sees a report or a figure.
+   *     first"); the room never sees a report or a figure. A command that
+   *     changes something runs only once their DM is proved reachable, and
+   *     one that ran is never answered "dm me first".
    *   - A command reaches the DM only from a SENDER on the allowlist, as a
    *     DM would need; that covers /name, /remember and /soul (today any
    *     member of a linked group could run them, and /remember writes owner
@@ -1285,18 +1306,13 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       // the code just the same — whether it names another bot, an old username
       // of this one, or this one before getMe has answered — and a code left
       // live would let any member DM "/link CODE" later and be allowlisted. For
-      // the same reason the code counts anywhere in the words, not only alone.
+      // the same reason the code counts ANYWHERE in what follows /link, not
+      // only as a word of its own: "/link CODE.", "/link `CODE`" and
+      // "/link (CODE)" show the room the same six characters, and so does a
+      // longer run holding them (a handful of guesses finds where it starts).
       // Only the "no code needed" line waits for the command to be ours.
-      const token = cfg.telegramBotToken;
-      if (token && slash.code) {
-        const state = ensureLinkCode(stateRef.get(), token);
-        const live = state.linkCode.toUpperCase();
-        if (slash.code.split(/\s+/).some((w) => w.toUpperCase() === live)) {
-          stateRef.set(rotateLinkCode(state, token));
-          deps.note("warn", "Telegram: a link code was typed in a group; it was replaced");
-          if (tgGroups) void tgGroups.codeLeaked(msg.chatId);
-        }
-      }
+      const shown = slash.code.toUpperCase();
+      if (shown) replaceShownCode(msg.chatId, cfg, (live) => shown.includes(live));
       if (ours) notice("link-here");
       return;
     }
@@ -1352,11 +1368,32 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // group must never see (rule 2). The room hears "sent it to your DMs" only
     // when the DM arrived: a bot cannot write first to someone who never
     // opened a DM with it.
+    //
+    // ANYTHING THAT CHANGES SOMETHING RUNS ONLY ONCE THE DM IS PROVED. /buy
+    // has no confirm step, so it used to trade first and try the DM after:
+    // for someone the bot cannot write to (added by id in the dashboard and
+    // never pressed /start, or who blocked it) the buy went through, the
+    // receipt bounced, and the room said "dm me /start first" — words that
+    // say it did not run, and that a person follows by sending /buy again.
+    // Now a "typing…" goes to their DM first, which Telegram refuses exactly
+    // where it would refuse the receipt, and when it is refused nothing runs.
+    // A read changes nothing, so it keeps the old order.
+    const readOnly = slash !== null && (PRIVATE_READS.has(slash.kind) || slash.kind === "help");
+    if (!readOnly) {
+      const token = cfg.telegramBotToken;
+      if (!token || !(await sendChatAction({ token }, msg.fromId)).ok) {
+        notice("dm-first");
+        return;
+      }
+    }
     let delivered = false;
     await handle({ updateId: msg.updateId, chatId: msg.fromId, fromId: msg.fromId, fromUsername: msg.fromUsername, text: msg.text }, cfg, (ok) => {
       if (ok) delivered = true;
     });
-    notice(delivered ? "dm-sent" : "dm-first");
+    // Once something ran, the room never hears "dm me first": a receipt that
+    // bounced after the DM was proved (a blip, or blocked in between) is "done,
+    // couldn't DM you the details", so nobody sends the order twice.
+    notice(delivered ? "dm-sent" : readOnly ? "dm-first" : "done-no-dm");
   };
 
   /**
@@ -1479,6 +1516,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
      */
     const route = (m: TgMessage): Promise<void> => {
       if (isGroupMessage(m)) {
+        // THE LIVE CODE IN ANY GROUP LINE, as a word of its own ("try /link
+        // CODE", "code: CODE!", a caption, even another bot's line): the room
+        // has seen it wherever it sits, so it is replaced before anything
+        // else looks at the line. /link itself gets a wider check below.
+        if (m.text) {
+          const text = m.text;
+          replaceShownCode(m.chatId, cfg, (live) => new RegExp(`(?<![A-Z0-9])${escapeRe(live)}(?![A-Z0-9])`, "i").test(text));
+        }
         // Voice notes are not transcribed in groups: nobody asked the owner's
         // transcription key to listen to a room.
         if (m.voiceFileId && !m.text) return Promise.resolve();

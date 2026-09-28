@@ -937,20 +937,26 @@ export async function editMessageText(
 
 /**
  * Show "typing…" in the chat while an answer is being looked up — the lookups
- * take a few seconds, and silence reads as a dead bot. Best-effort. In a forum
- * the status shows only in the topic named by `messageThreadId`.
+ * take a few seconds, and silence reads as a dead bot. Best-effort, never
+ * throws. In a forum the status shows only in the topic named by
+ * `messageThreadId`.
+ *
+ * `ok` is also the cheapest proof that a chat can be written to, with nothing
+ * left behind in it: Telegram refuses it where it would refuse a message (a
+ * person who never opened a DM with the bot, or who blocked it).
  */
 export async function sendChatAction(
   opts: TelegramOpts,
   chatId: number,
   action: "typing" = "typing",
   messageThreadId?: number,
-): Promise<void> {
-  await call(opts, "sendChatAction", {
+): Promise<{ ok: boolean; reason?: string }> {
+  const r = await call(opts, "sendChatAction", {
     chat_id: chatId,
     action,
     ...(isId(messageThreadId) ? { message_thread_id: messageThreadId } : {}),
   });
+  return r.result != null ? { ok: true } : { ok: false, reason: r.reason };
 }
 
 /**
