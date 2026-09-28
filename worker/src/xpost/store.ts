@@ -773,18 +773,32 @@ export function cancelScheduled(db: Db, tenant: string, nowMs: number, reason: s
   return cancelScheduledIn(db, tenant, nowMs, reason);
 }
 
-/** Scheduled posts of these owners whose time has come, oldest due first. */
-export async function duePosts(db: Db, tenants: readonly string[], nowMs: number, limit = 50): Promise<XPost[]> {
+/**
+ * Scheduled posts of these owners whose time has come, oldest due first — one
+ * page of them. `after` is the last row of the page before (keyset paging on
+ * due time, then id), so a caller can look past the posts at the head that
+ * only wait (owners asleep) instead of being blocked by them.
+ */
+export async function duePosts(
+  db: Db,
+  tenants: readonly string[],
+  nowMs: number,
+  limit = 50,
+  after: { dueAtMs: number; id: number } | null = null,
+): Promise<XPost[]> {
   const keys = [...new Set(tenants.map(tenantKey).filter((t) => t !== ""))];
   if (keys.length === 0) return [];
+  const page = after ? "AND (due_at_ms > ? OR (due_at_ms = ? AND id > ?))" : "";
+  const cursor = after ? [int(after.dueAtMs), int(after.dueAtMs), int(after.id)] : [];
   const rows = (await db
     .prepare(
       `SELECT ${POST_COLUMNS} FROM xpost_posts
         WHERE status = 'scheduled' AND due_at_ms <= ? AND tenant IN (${keys.map(() => "?").join(", ")})
+          ${page}
         ORDER BY due_at_ms, id
         LIMIT ?`,
     )
-    .all(int(nowMs), ...keys, int(Math.max(1, Math.min(500, limit))))) as PostRow[];
+    .all(int(nowMs), ...keys, ...cursor, int(Math.max(1, Math.min(500, limit))))) as PostRow[];
   return rows.map(postOf);
 }
 

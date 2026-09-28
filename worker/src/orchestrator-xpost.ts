@@ -81,6 +81,8 @@ const PLAN_EVERY_MS = MIN;
 const INTERRUPTED_AFTER_MS = 10 * MIN;
 /** Bounds on one pass: each send can wait ten seconds on X, each draft twenty on a model. */
 const MAX_DUE = 50;
+/** Due rows looked at in one pass, page by page, before the rest waits for the next. */
+const MAX_SCAN = 500;
 const MAX_SENDS_PER_PASS = 20;
 const MAX_DRAFTS_PER_PASS = 10;
 /** What a new draft must not echo: its own account's history, and the fleet's. */
@@ -413,74 +415,88 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           return lastOut.get(xUserId) ?? null;
         };
         let sends = 0;
-        for (const post of await duePosts(shared, tenants, nowMs, MAX_DUE)) {
-          const account: XAccount | null = accountOf.get(post.tenant) ?? (await getAccount(shared, post.tenant));
-          let asleep = false;
-          let dayOf: ((ms: number) => string) | undefined;
-          if (account?.posting && account.xUserId === post.xUserId) {
-            const z = await zoneOf(post.tenant);
-            asleep = !z.ok || isAsleep(z.tz, post.tenant, nowMs);
-            if (z.ok) dayOf = (ms) => localDay(z.tz, ms);
-          }
-          const d = sendDecision(post, account, nowMs, asleep, dayOf);
-          if (d.action === "cancel") {
-            if (await cancelPost(shared, post.id, d.reason, nowMs)) bump("cancelled");
-            continue;
-          }
-          if (d.action === "skip") {
-            if (await skipScheduled(shared, post.id, d.reason, nowMs)) bump("stale");
-            continue;
-          }
-          if (d.action === "wait") {
-            bump("waiting");
-            continue;
-          }
-          if (pause) {
-            if (pauseSaidUntil < pause.until) {
-              pauseSaidUntil = pause.until;
-              bump(pause.why);
+        // PAGE PAST WHAT ONLY WAITS. The oldest due posts are the ones whose
+        // owners sleep (or whose zone cannot be read this pass): they stay at
+        // the head of the queue all night. One page of the fifty oldest would
+        // hide every newer due post behind them — an awake owner's buy would
+        // wait for the sleepers to wake, and go stale. So the loop pages on,
+        // bounded by MAX_SCAN rows a pass.
+        let scanned = 0;
+        let after: { dueAtMs: number; id: number } | null = null;
+        send: for (;;) {
+          const page = await duePosts(shared, tenants, nowMs, MAX_DUE, after);
+          for (const post of page) {
+            after = { dueAtMs: post.dueAtMs, id: post.id };
+            const account: XAccount | null = accountOf.get(post.tenant) ?? (await getAccount(shared, post.tenant));
+            let asleep = false;
+            let dayOf: ((ms: number) => string) | undefined;
+            if (account?.posting && account.xUserId === post.xUserId) {
+              const z = await zoneOf(post.tenant);
+              asleep = !z.ok || isAsleep(z.tz, post.tenant, nowMs);
+              if (z.ok) dayOf = (ms) => localDay(z.tz, ms);
             }
-            continue;
-          }
-          // THE GAP, AGAIN, AT SEND TIME — per X ACCOUNT. The planner spaced
-          // posts three hours apart when it drafted them, but a hold (a pause,
-          // the ceiling, a 429's reset) or a second owner on the same X
-          // account can bring two due together. The later one is moved to
-          // three hours after the last that went out, never sent inside the
-          // gap; a buy still goes stale on its own clock, a casual post past
-          // its day. The hello is exempt, both ways.
-          if (post.kind !== "intro") {
-            const last = await lastOutOf(post.xUserId);
-            if (last !== null && nowMs - last < GAP_MS) {
-              if (await deferPost(shared, post.id, last + GAP_MS, nowMs)) bump("deferred");
+            const d = sendDecision(post, account, nowMs, asleep, dayOf);
+            if (d.action === "cancel") {
+              if (await cancelPost(shared, post.id, d.reason, nowMs)) bump("cancelled");
               continue;
             }
-          }
-          if (sends >= MAX_SENDS_PER_PASS) break;
-          const dayKey = `posts:${utcDay(nowMs)}`;
-          if (!(await takeAllowance(shared, dayKey, fleetPerDay, nowMs))) {
-            ceiling = true;
-            if (capNoted !== utcDay(nowMs)) {
-              capNoted = utcDay(nowMs);
-              bump("fleet-ceiling-reached");
+            if (d.action === "skip") {
+              if (await skipScheduled(shared, post.id, d.reason, nowMs)) bump("stale");
+              continue;
             }
-            // Not a break: a later post may still be one to cancel or skip.
-            continue;
+            if (d.action === "wait") {
+              bump("waiting");
+              continue;
+            }
+            if (pause) {
+              if (pauseSaidUntil < pause.until) {
+                pauseSaidUntil = pause.until;
+                bump(pause.why);
+              }
+              continue;
+            }
+            // THE GAP, AGAIN, AT SEND TIME — per X ACCOUNT. The planner spaced
+            // posts three hours apart when it drafted them, but a hold (a pause,
+            // the ceiling, a 429's reset) or a second owner on the same X
+            // account can bring two due together. The later one is moved to
+            // three hours after the last that went out, never sent inside the
+            // gap; a buy still goes stale on its own clock, a casual post past
+            // its day. The hello is exempt, both ways.
+            if (post.kind !== "intro") {
+              const last = await lastOutOf(post.xUserId);
+              if (last !== null && nowMs - last < GAP_MS) {
+                if (await deferPost(shared, post.id, last + GAP_MS, nowMs)) bump("deferred");
+                continue;
+              }
+            }
+            if (sends >= MAX_SENDS_PER_PASS) break send;
+            const dayKey = `posts:${utcDay(nowMs)}`;
+            if (!(await takeAllowance(shared, dayKey, fleetPerDay, nowMs))) {
+              ceiling = true;
+              if (capNoted !== utcDay(nowMs)) {
+                capNoted = utcDay(nowMs);
+                bump("fleet-ceiling-reached");
+              }
+              // Not a break: a later post may still be one to cancel or skip.
+              continue;
+            }
+            sends++;
+            const out = await sendOne(shared, o.dek, o.app, post, { fetch: deps.fetch, nowMs });
+            // The app's credentials refused is the one line an operator must act
+            // on, so it says what happened rather than an outcome code.
+            bump(out === "posted" ? "sent" : out === "app" ? "x-refused-client-credentials" : out);
+            // What may exist on X keeps its unit of the ceiling, not only what surely does.
+            if (!MAY_BE_ON_X.has(out)) await returnAllowance(shared, dayKey, nowMs);
+            else if (post.kind !== "intro") lastOut.set(post.xUserId, nowMs);
+            // The sender wrote the pause; this pass honours it at once, and the
+            // event just said is the pause's line, so later passes stay quiet.
+            if (out === "credits" || out === "app") {
+              pause = out === "credits" ? { why: "paused-for-credits", until: nowMs + CREDITS_PAUSE_MS } : { why: "paused-client-credentials-refused", until: nowMs + APP_PAUSE_MS };
+              pauseSaidUntil = Math.max(pauseSaidUntil, pause.until);
+            }
           }
-          sends++;
-          const out = await sendOne(shared, o.dek, o.app, post, { fetch: deps.fetch, nowMs });
-          // The app's credentials refused is the one line an operator must act
-          // on, so it says what happened rather than an outcome code.
-          bump(out === "posted" ? "sent" : out === "app" ? "x-refused-client-credentials" : out);
-          // What may exist on X keeps its unit of the ceiling, not only what surely does.
-          if (!MAY_BE_ON_X.has(out)) await returnAllowance(shared, dayKey, nowMs);
-          else if (post.kind !== "intro") lastOut.set(post.xUserId, nowMs);
-          // The sender wrote the pause; this pass honours it at once, and the
-          // event just said is the pause's line, so later passes stay quiet.
-          if (out === "credits" || out === "app") {
-            pause = out === "credits" ? { why: "paused-for-credits", until: nowMs + CREDITS_PAUSE_MS } : { why: "paused-client-credentials-refused", until: nowMs + APP_PAUSE_MS };
-            pauseSaidUntil = Math.max(pauseSaidUntil, pause.until);
-          }
+          scanned += page.length;
+          if (page.length < MAX_DUE || scanned >= MAX_SCAN) break;
         }
 
         // ── plan, at most once a minute ───────────────────────────────────

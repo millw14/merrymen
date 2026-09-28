@@ -353,6 +353,21 @@ test("when an X account last posted, from any owner, what went out or may have; 
   assert.equal(await lastOutAt(db, "111", 250), 3_000, "only posts drafted since");
 });
 
+test("due posts page on from the last row seen, by due time then id", async (t) => {
+  const { db } = await open(t);
+  const ids: number[] = [];
+  for (const [key, due] of [["p1", 100], ["p2", 100], ["p3", 200], ["p4", 300], ["later", 9_000]] as const) {
+    ids.push((await schedulePost(db, post({ dedupeKey: key, dueAtMs: due })))!);
+  }
+  const first = await duePosts(db, [OWNER_A], 1_000, 2);
+  assert.deepEqual(first.map((p) => p.dedupeKey), ["p1", "p2"]);
+  const last = first[first.length - 1]!;
+  const second = await duePosts(db, [OWNER_A], 1_000, 2, { dueAtMs: last.dueAtMs, id: last.id });
+  assert.deepEqual(second.map((p) => p.dedupeKey), ["p3", "p4"]);
+  assert.deepEqual(await duePosts(db, [OWNER_A], 1_000, 2, { dueAtMs: 300, id: ids[3]! }), [], "nothing due past the last");
+  assert.deepEqual((await duePosts(db, [OWNER_A], 1_000, 5, { dueAtMs: 100, id: ids[0]! })).map((p) => p.dedupeKey), ["p2", "p3", "p4"], "a tie on due time goes by id");
+});
+
 test("a scheduled post can be moved later; a claimed one cannot", async (t) => {
   const { db } = await open(t);
   const id = (await schedulePost(db, post()))!;
@@ -451,6 +466,7 @@ test("every statement the store sends translates to Postgres with matching, bind
   const id = (await schedulePost(db, post({ dueAtMs: 5.5, nowMs: 5.5 })))!;
   await keyStatus(db, post().dedupeKey);
   await duePosts(db, [OWNER_A], 6.5, 10.5);
+  await duePosts(db, [OWNER_A], 6.5, 10.5, { dueAtMs: 1.5, id: 1 });
   await claimPost(db, id, 7.5);
   await reschedulePost(db, id, 8.5, 8.5);
   await claimPost(db, id, 9.5);

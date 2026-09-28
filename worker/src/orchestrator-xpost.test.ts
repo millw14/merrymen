@@ -747,6 +747,34 @@ describe("fleet guards", () => {
     assert.equal((await rows(v)).find((x) => x.dedupeKey === "casual:too-soon")?.dueAtMs, T0 - HOUR + GAP_MS);
   });
 
+  it("fifty-odd older posts waiting for sleeping owners do not hide an awake owner's due post", async (t) => {
+    // 03:00 in Tokyo: inside every agent's night there. The awake owner has no zone.
+    const NIGHT = Date.UTC(2026, 8, 28, 18, 0);
+    const w = await world(t, NIGHT - 2 * HOUR);
+    await introDealtWith(w);
+    const roster = [...ROSTER];
+    for (let i = 1; i <= 55; i++) {
+      const tenant = `0x${i.toString(16).padStart(40, "0")}`;
+      const xUserId = String(5000 + i);
+      await store.upsertAccount(w.db, w.dek, {
+        tenant,
+        xUserId,
+        username: `sleeper_${i}`,
+        tokens: { accessToken: `access-${i}`, refreshToken: `refresh-${i}`, accessExpiresAtMs: NIGHT + 30 * 24 * HOUR, scope: "tweet.write" },
+        nowMs: NIGHT - 3 * HOUR,
+      });
+      await store.setPosting(w.db, tenant, { enabled: true, xUserId }, NIGHT - 2 * HOUR);
+      await store.schedulePost(w.db, { tenant, xUserId, kind: "buy", dedupeKey: `buy:sleeper-${i}`, body: BUY, coin: "pepe", decisionId: `sleeper-${i}`, dueAtMs: NIGHT - 30 * MIN, nowMs: NIGHT - HOUR });
+      roster.push({ tenant, agentId: AGENT });
+    }
+    await dueCasual(w, "casual:awake", { dueAtMs: NIGHT - MIN });
+    const p = poster(w, { member: async (_db, tenant) => ({ tz: tenant === TENANT ? null : "Asia/Tokyo" }) });
+    await p.step(w.db, roster, new Map(), NIGHT);
+    assert.equal(await store.keyStatus(w.db, "casual:awake"), "posted", "found past the first page of sleepers");
+    assert.equal(w.tweets.length, 1);
+    assert.equal(await store.keyStatus(w.db, "buy:sleeper-1"), "scheduled", "the sleepers still wait");
+  });
+
   it("a credits pause holds every due post, and is said once", async (t) => {
     const w = await world(t, T0 - 2 * HOUR);
     await introDealtWith(w);
