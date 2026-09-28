@@ -1,0 +1,408 @@
+/**
+ * POSTING ON X, ON THE SETTINGS SCREEN: the real section, in a DOM, against a
+ * scripted network — and the warning's words, read from the source.
+ *
+ * The properties are the ones an owner cannot see go wrong:
+ *
+ *   - pressing the switch ON sends NOTHING; only the warning's own button
+ *     writes, and it sends the X user id of the account the warning named;
+ *   - the warning names the connected handle and says the Merryman posts from
+ *     "whichever X account is connected";
+ *   - the switch shows only what the server confirmed;
+ *   - a status that could not be read — a 404, a 500, no network, a body of
+ *     the wrong shape — never reads as "not connected" (no Connect button).
+ *
+ * The render tests pass on a branch that never fired; the source scan below
+ * pins the prose itself (the honesty.test.ts idiom), and mounted.test.ts
+ * checks this file is on a live screen.
+ */
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, it } from "node:test";
+import { act, createElement } from "react";
+import type { XAccountBody } from "@/lib/x-connect";
+import { json, testDom } from "./test-dom";
+import { XPosting } from "./XPosting";
+
+const OWNER = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const HANDLE = "merry_poster";
+const X_ID = "1234567890";
+
+let ui: ReturnType<typeof testDom>;
+const originalFetch = globalThis.fetch;
+type Handler = (url: string, init?: RequestInit) => Response | Promise<Response>;
+let routes: Record<string, Handler>;
+let calls: { method: string; url: string; body: Record<string, unknown> | null }[];
+let went: string[];
+
+const CONNECTED: XAccountBody = {
+  available: true,
+  connected: true,
+  username: HANDLE,
+  xUserId: X_ID,
+  status: "ok",
+  postingEnabled: false,
+  upcoming: [],
+  recent: [],
+};
+
+beforeEach(() => {
+  ui = testDom();
+  calls = [];
+  went = [];
+  routes = { "GET /api/x/account": () => json(CONNECTED) };
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    calls.push({ method, url, body: typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null });
+    const handler = routes[`${method} ${url.split("?")[0]}`];
+    // Unscripted routes answer 404, as the chat harness does: an old server,
+    // a self-hosted one, a route that moved.
+    return handler ? handler(url, init) : json({ error: "not scripted" }, 404);
+  }) as typeof fetch;
+});
+
+afterEach(async () => {
+  await ui.close();
+  globalThis.fetch = originalFetch;
+});
+
+const text = () => ui.container.textContent ?? "";
+const buttons = (label: string) => Array.from(ui.container.querySelectorAll("button")).filter((b) => b.textContent?.trim() === label);
+const theSwitch = () => ui.container.querySelector<HTMLButtonElement>('button[role="switch"]');
+const writes = () => calls.filter((c) => c.method !== "GET");
+
+async function settle(rounds = 3) {
+  for (let i = 0; i < rounds; i++) {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 2));
+    });
+  }
+}
+
+async function until(cond: () => boolean, what: string, rounds = 100) {
+  for (let i = 0; i < rounds; i++) {
+    if (cond()) return;
+    await settle(1);
+  }
+  assert.fail(`never happened: ${what}\n--- screen ---\n${text()}`);
+}
+
+async function press(el: Element | null | undefined, what: string) {
+  assert.ok(el, `missing: ${what}`);
+  await act(async () => {
+    (el as HTMLElement).click();
+  });
+  await settle();
+}
+
+const section = (props: Partial<{ owner: string | null; hosted: boolean | null }> = {}) =>
+  createElement(
+    "details",
+    { className: "settings-group", id: "x-posting" },
+    createElement("summary", null, "Posting on X"),
+    createElement(XPosting, { owner: OWNER, hosted: true, navigate: (url: string) => went.push(url), ...props }),
+  );
+
+async function shown(props: Partial<{ owner: string | null; hosted: boolean | null }> = {}) {
+  await ui.render(section(props));
+  await until(() => !text().includes("Checking your X connection"), "the first read");
+}
+
+describe("the switch and the warning", () => {
+  it("PRESSING THE SWITCH ON SENDS NOTHING: the warning names the account, and only its button writes", async () => {
+    let enabled = false;
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: enabled });
+    routes["POST /api/x/account"] = () => {
+      enabled = true;
+      return json({ ok: true, postingEnabled: true });
+    };
+    await shown();
+    assert.match(text(), /Connected as @merry_poster/);
+    assert.equal(theSwitch()?.getAttribute("aria-checked"), "false");
+
+    await press(theSwitch(), "the switch");
+    assert.deepEqual(writes(), [], "the switch itself sent something");
+    const dialog = ui.container.querySelector("dialog");
+    assert.ok(dialog, "the warning opened");
+    const said = dialog.textContent ?? "";
+    assert.match(said, /Post on X as @merry_poster\?/);
+    assert.match(said, /whichever X account is connected/);
+    assert.match(said, /right now that's @merry_poster\./);
+    assert.match(said, /never posts trade alerts, error messages, prices or amounts/);
+    assert.match(said, /may ask an account to verify itself the first time it posts about crypto/);
+    assert.equal(theSwitch()?.getAttribute("aria-checked"), "false", "still off while the owner reads");
+
+    await press(buttons("Not now")[0], "Not now");
+    assert.equal(ui.container.querySelector("dialog"), null);
+    assert.deepEqual(writes(), [], "declining the warning sent something");
+
+    await press(theSwitch(), "the switch again");
+    await press(buttons("Let it post as @merry_poster")[0], "the warning's confirm");
+    assert.deepEqual(writes(), [
+      { method: "POST", url: "/api/x/account", body: { action: "enable", xUserId: X_ID, owner: OWNER } },
+    ]);
+    await until(() => theSwitch()?.getAttribute("aria-checked") === "true", "the confirmed state");
+    assert.match(text(), /Posting from @merry_poster — whichever X account is connected\./);
+    assert.equal(ui.container.querySelector("dialog"), null);
+  });
+
+  it("the confirm sends the account the warning NAMED, even if a re-read changed the screen underneath", async () => {
+    routes["POST /api/x/account"] = () => json({ error: "The connected X account changed — check which account is connected and try again." }, 409);
+    await shown();
+    await press(theSwitch(), "the switch");
+    // Another tab reconnects a different account; the page re-reads.
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, username: "someone_else", xUserId: "999" });
+    await act(async () => {
+      ui.container.querySelector("details")!.dispatchEvent(new ui.dom.window.Event("toggle"));
+    });
+    await settle();
+    await press(buttons("Let it post as @merry_poster")[0], "the warning's confirm");
+    assert.equal(writes()[0]?.body?.xUserId, X_ID);
+    // Refused: the switch stays off, the owner is told, and the account now connected is shown.
+    await until(() => text().includes("Connected as @someone_else"), "the re-read after the refusal");
+    assert.match(text(), /The connected X account changed/);
+    assert.equal(theSwitch()?.getAttribute("aria-checked"), "false");
+  });
+
+  it("the switch shows only what the server confirmed: a failed confirm leaves it off", async () => {
+    routes["POST /api/x/account"] = () => json({ error: "nope" }, 500);
+    await shown();
+    await press(theSwitch(), "the switch");
+    await press(buttons("Let it post as @merry_poster")[0], "confirm");
+    assert.equal(theSwitch()?.getAttribute("aria-checked"), "false");
+    assert.match(text(), /merrymen answered with an error \(500\)/);
+    assert.doesNotMatch(text(), /nope/, "an unmarked 5xx body is not an owner-facing sentence");
+  });
+
+  it("turning it OFF writes at once, with no warning", async () => {
+    let enabled = true;
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: enabled, upcoming: [{ id: 7, kind: "casual", body: "a thought", dueAt: Date.now() + 3_600_000 }] });
+    routes["POST /api/x/account"] = () => {
+      enabled = false;
+      return json({ ok: true, postingEnabled: false });
+    };
+    await shown();
+    assert.equal(theSwitch()?.getAttribute("aria-checked"), "true");
+    await press(theSwitch(), "the switch");
+    assert.equal(ui.container.querySelector("dialog"), null);
+    assert.deepEqual(writes(), [{ method: "POST", url: "/api/x/account", body: { action: "disable", owner: OWNER } }]);
+    await until(() => theSwitch()?.getAttribute("aria-checked") === "false", "off");
+    assert.doesNotMatch(text(), /a thought/);
+  });
+});
+
+describe("an unread status is not 'not connected'", () => {
+  for (const [what, answer] of [
+    ["an unscripted route (404)", null],
+    ["a 500", () => json({ error: "boom" }, 500)],
+    ["no network", () => { throw new TypeError("Failed to fetch"); }],
+    ["a 200 of the wrong shape", () => json({ connected: false })],
+    ["a 200 that is not JSON", () => new Response("<html>", { status: 200, headers: { "content-type": "text/html" } })],
+  ] as const) {
+    it(`${what} says it could not check, and offers a retry — never "Connect X account"`, async () => {
+      if (answer) routes["GET /api/x/account"] = answer as Handler;
+      else delete routes["GET /api/x/account"];
+      await shown();
+      assert.match(text(), /Couldn't check your X connection/);
+      assert.doesNotMatch(text(), /Connect X account|Let my Merryman post on X/);
+      assert.equal(theSwitch(), null);
+      assert.deepEqual(writes(), []);
+      routes["GET /api/x/account"] = () => json(CONNECTED);
+      await press(buttons("Try again")[0], "retry");
+      await until(() => text().includes("Connected as @merry_poster"), "the retried read");
+    });
+  }
+
+  it("says 'checking' while the first read is out", async () => {
+    let release!: () => void;
+    routes["GET /api/x/account"] = () => new Promise<Response>((r) => { release = () => r(json(CONNECTED)); });
+    await ui.render(section());
+    assert.match(text(), /Checking your X connection/);
+    assert.doesNotMatch(text(), /Connect X account/);
+    release();
+    await until(() => text().includes("Connected as"), "the read");
+  });
+});
+
+describe("connecting", () => {
+  it("offers Connect with the caption, sends start for the web with the owner, and goes only to X", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, connected: false, username: null, xUserId: null, status: null });
+    routes["POST /api/x/connect"] = () => json({ url: "https://x.com/i/oauth2/authorize?response_type=code&state=w.x" });
+    await shown();
+    assert.match(text(), /a hello when it starts, the odd casual thought/);
+    assert.match(text(), /whichever X account you approve there/);
+    await press(buttons("Connect X account")[0], "Connect");
+    assert.deepEqual(writes(), [{ method: "POST", url: "/api/x/connect", body: { action: "start", client: "web", owner: OWNER } }]);
+    assert.deepEqual(went, ["https://x.com/i/oauth2/authorize?response_type=code&state=w.x"]);
+  });
+
+  it("does not follow a start that points anywhere but X's authorize page", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, connected: false, username: null, xUserId: null, status: null });
+    routes["POST /api/x/connect"] = () => json({ url: "https://evil.example/i/oauth2/authorize?" });
+    await shown();
+    await press(buttons("Connect X account")[0], "Connect");
+    assert.deepEqual(went, []);
+    assert.match(text(), /didn't send a way to X/);
+  });
+
+  it("a connection it cannot name is still a connection: no switch, no Connect, a way to disconnect", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, username: null });
+    await shown();
+    assert.match(text(), /An X account is connected, but merrymen can't show which one/);
+    assert.equal(theSwitch(), null, "the warning must name the account, so there is nothing to turn on");
+    assert.equal(buttons("Connect X account").length, 0);
+    assert.equal(buttons("Disconnect").length, 1);
+  });
+
+  it("a revoked connection asks for a reconnect and offers no switch", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, status: "revoked" });
+    await shown();
+    assert.match(text(), /X stopped accepting this connection\. Reconnect to keep posting\./);
+    assert.equal(theSwitch(), null);
+    assert.equal(buttons("Reconnect X account").length, 1);
+  });
+
+  it("unavailable here: one line, nothing to press", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, available: false, connected: false, username: null, xUserId: null, status: null });
+    await shown();
+    assert.match(text(), /isn't available on this server yet/);
+    assert.equal(ui.container.querySelectorAll("button").length, 0);
+  });
+});
+
+describe("the lists", () => {
+  it("shows what is coming up with a Skip that names the post and the owner, and what was posted with a link to X", async () => {
+    let upcoming = [
+      { id: 7, kind: "buy", body: "picked up some paper TSLA, earnings chatter looked good", dueAt: Date.now() + 3_600_000 },
+      { id: 8, kind: "casual", body: "quiet market today", dueAt: Date.now() + 7_200_000 },
+    ];
+    routes["GET /api/x/account"] = () =>
+      json({
+        ...CONNECTED,
+        postingEnabled: true,
+        upcoming,
+        recent: [
+          { id: 3, kind: "intro", body: "hello, I'm an AI trading agent", sentAt: Date.now() - 60_000, url: `https://x.com/${HANDLE}/status/1111` },
+          { id: 4, kind: "casual", body: "sneaky link", sentAt: Date.now() - 60_000, url: "javascript:alert(1)" },
+        ],
+      });
+    routes["POST /api/x/account"] = (_u, init) => {
+      const id = (JSON.parse(String(init?.body)) as { id: number }).id;
+      upcoming = upcoming.filter((p) => p.id !== id);
+      return json({ ok: true });
+    };
+    await shown();
+    assert.match(text(), /Coming up/);
+    assert.match(text(), /picked up some paper TSLA/);
+    assert.equal(buttons("Skip").length, 2);
+    await press(buttons("Skip")[0], "Skip");
+    assert.deepEqual(writes(), [{ method: "POST", url: "/api/x/account", body: { action: "skip", id: 7, owner: OWNER } }]);
+    await until(() => !text().includes("picked up some paper TSLA"), "the skipped post gone");
+    assert.match(text(), /Posted/);
+    const links = Array.from(ui.container.querySelectorAll("a")).map((a) => a.getAttribute("href"));
+    assert.deepEqual(links, [`https://x.com/${HANDLE}/status/1111`], "only an x.com status URL becomes a link");
+  });
+
+  it("a Skip for a post already on its way says so", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: true, upcoming: [{ id: 7, kind: "casual", body: "a thought", dueAt: Date.now() }] });
+    routes["POST /api/x/account"] = () => json({ error: "That post is already on its way." }, 409);
+    await shown();
+    await press(buttons("Skip")[0], "Skip");
+    assert.match(text(), /That post is already on its way\./);
+  });
+
+  it("an empty queue says nothing is waiting", async () => {
+    routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: true });
+    await shown();
+    assert.match(text(), /Nothing waiting to go out\./);
+  });
+});
+
+describe("disconnecting", () => {
+  it("asks first, naming the account, then DELETEs with the owner", async () => {
+    let connected = true;
+    routes["GET /api/x/account"] = () => json(connected ? CONNECTED : { ...CONNECTED, connected: false, username: null, xUserId: null, status: null });
+    routes["DELETE /api/x/account"] = () => {
+      connected = false;
+      return json({ ok: true });
+    };
+    await shown();
+    await press(buttons("Disconnect")[0], "Disconnect");
+    assert.deepEqual(writes(), [], "asking is not doing");
+    assert.match(text(), /Disconnect @merry_poster\? Your Merryman stops posting and anything waiting to go out is cancelled\./);
+    await press(buttons("Keep it")[0], "Keep it");
+    assert.deepEqual(writes(), []);
+    await press(buttons("Disconnect")[0], "Disconnect");
+    await press(buttons("Yes, disconnect")[0], "confirm");
+    assert.deepEqual(writes(), [{ method: "DELETE", url: "/api/x/account", body: { owner: OWNER } }]);
+    await until(() => buttons("Connect X account").length === 1, "the disconnected section");
+  });
+});
+
+describe("where it appears", () => {
+  it("renders nothing and reads nothing off hosted", async () => {
+    await ui.render(section({ hosted: false }));
+    await settle();
+    assert.equal(ui.container.querySelector(".xpost"), null);
+    assert.deepEqual(calls, []);
+    await ui.render(section({ hosted: null }));
+    await settle();
+    assert.deepEqual(calls, []);
+  });
+
+  it("signed out, it says so and offers nothing to press", async () => {
+    routes["GET /api/x/account"] = () => json({ error: "Sign in to change this." }, 401);
+    await shown({ owner: "" });
+    assert.match(text(), /Sign in to connect an X account/);
+    assert.equal(ui.container.querySelectorAll(".xpost button").length, 0);
+  });
+
+  it("opens itself when the page is /settings#x-posting, where /connect/x sends an owner back", async () => {
+    ui.dom.reconfigure({ url: "https://app.example.test/settings#x-posting" });
+    await shown();
+    assert.equal(ui.container.querySelector("details")?.open, true);
+  });
+});
+
+// ── the words ───────────────────────────────────────────────────────────────
+
+const SRC = readFileSync(new URL("./XPosting.tsx", import.meta.url), "utf8");
+const SETTINGS = readFileSync(new URL("./screens/Settings.tsx", import.meta.url), "utf8");
+
+describe("the warning keeps its words", () => {
+  it("every sentence of the warning is in the source, verbatim", () => {
+    for (const said of [
+      "Post on X as ${handle}?",
+      "Your Merryman will post from whichever X account is connected — right now that's ${handle}.",
+      "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
+      "Posts go out on their own, a few a day at most. You'll see each one here before it goes out and can skip it. Turn this off or disconnect X at any time.",
+      "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto.",
+      "Let it post as ${handle}",
+      "Not now",
+    ]) {
+      assert.ok(SRC.includes(said), `the warning lost: "${said}"`);
+    }
+  });
+
+  it("the lead sentence is bold, and the warning is the only place that sends 'enable'", () => {
+    assert.match(SRC, /<strong>\{warningLead\(asking\.handle\)\}<\/strong>/);
+    assert.equal(SRC.split('action: "enable"').length - 1, 1, "one write turns posting on");
+    const at = SRC.indexOf('action: "enable"');
+    // Bounded by the next declaration at the component's own indentation, so
+    // the write must sit inside confirmWarning's body and nowhere after it.
+    const inside = SRC.lastIndexOf("\n  const confirmWarning", at);
+    const next = SRC.indexOf("\n  const ", inside + 1);
+    assert.ok(inside > 0 && at < next, "the enable write lives in the warning's confirm");
+  });
+
+  it("the caption and the 'on' line both say whichever account is connected", () => {
+    assert.ok(SRC.includes("Your Merryman will post from whichever X account you approve there, so check which account you're signed into on X first."));
+    assert.ok(SRC.includes("Posting from ${handle} — whichever X account is connected."));
+    assert.ok(SRC.includes("No trade alerts, no error messages, no numbers."));
+  });
+
+  it("is mounted on Settings as its own section, hosted only, with the form's owner", () => {
+    assert.match(SETTINGS, /\{hosted === true && \(\s*<details className="settings-group" id="x-posting"><summary>Posting on X<\/summary>\s*<XPosting owner=\{view\.owner\} hosted=\{hosted\} \/>/);
+  });
+});

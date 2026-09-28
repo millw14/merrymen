@@ -49,10 +49,19 @@ import type { ReactNode } from "react";
  * (what is stored, PARTNER_HISTORY_EXCHANGES) and partner-service.ts `view`
  * (what a partner receives). The holder gateway's state is gateway/lib/store.mjs.
  *
+ * Posting on X (docs/x-posting.md): what is stored is worker/src/xpost/store.ts
+ * — the connection and its sealed tokens (deleteAccount removes them; the web's
+ * DELETE /api/x/account revokes them at X), the owner's consent bound to one X
+ * user id, the pending connect (15 minutes, PENDING_TTL_MS in
+ * web/src/app/api/x/connect/route.ts) and every post, which nothing deletes. A
+ * browser never receives a token (web/src/lib/x-connect.ts accountBody). What
+ * the post writer is given, and the gate that refuses a post with a number in
+ * it, are worker/src/xpost/ — keep the Groq row in step with them.
+ *
  * The date is fixed, not `new Date()`: a policy's date says when its words
  * last changed, and a build-time date claimed a new policy on every deploy.
  */
-const LAST_UPDATED = "September 26, 2026";
+const LAST_UPDATED = "September 28, 2026";
 
 const CONNECTED_APPS = "https://app.merrymen.dev/connect/apps";
 
@@ -219,6 +228,29 @@ export function PrivacyPolicyDoc() {
         </p>
         <p><em>Why:</em> to deliver the alerts and chats you asked for, through your own bot.</p>
 
+        <h3>Posting on X</h3>
+        <p>Only if you connect an X account in Settings for your agent to post from:</p>
+        <ul>
+          <li>
+            That account&apos;s X user id and handle, as X reports them, and the access and refresh
+            tokens X issues for it, encrypted (section 7). The tokens are never sent to your browser.
+          </li>
+          <li>
+            Whether you turned posting on, when, and for which X account. Connecting an account does
+            not turn posting on.
+          </li>
+          <li>
+            Each post your agent writes for X: its text, what kind of post it is (a hello, a casual
+            post, or a coin it bought), when it is due and when it went out, X&apos;s id for it once
+            posted, and whether it was skipped, cancelled or failed.
+          </li>
+          <li>While you are connecting, for up to 15 minutes, a one-time value that ties the approval on X to your account.</li>
+        </ul>
+        <p>
+          <em>Why:</em> to post only when you allowed it, only from the account you chose, and to
+          show you each post before it goes out.
+        </p>
+
         <h3>AI assistant connections (MCP)</h3>
         <ul>
           <li>
@@ -296,6 +328,10 @@ export function PrivacyPolicyDoc() {
             without signing in, for the 14 days it is kept (section 4). Taking back a line of your
             own hides it from the room.
           </li>
+          <li>
+            If you connect an X account for posting, the posts your agent makes there, under that
+            account, for as long as they stay on X.
+          </li>
         </ul>
         <p>
           Keeping your book private, the default, hides your agent&apos;s trade sizes, its dollar
@@ -327,6 +363,9 @@ export function PrivacyPolicyDoc() {
             ["Your trading permission (the encrypted session key)", "Until you discard it on Wallet & permissions or stop your agent with Telegram /kill; the hosted worker's decrypted working copy is deleted then too. On chain, it stops working at the expiry date you signed."],
             ["Telegram bot token and ids", "Until you remove them from your settings or ask us to delete them."],
             ["Telegram chat with your agent", "The latest 40 messages in each chat."],
+            ["An X account connected for posting (its id, handle and encrypted tokens)", "Until you disconnect it in Settings. Disconnecting also revokes the tokens at X and cancels every post that has not gone out."],
+            ["Your agent's X posts, and the drafts it wrote for X", "Kept with your account history. Posts already on X stay there until you delete them on X."],
+            ["An X connection started and not finished", "It stops working after 15 minutes and is deleted after that."],
             ["What your agent notes about you in Telegram, and its journal", "Up to 60 facts at a time (older ones move to an archive file beside them) and about 40,000 characters of journal, in your agent's working files on the hosted worker. Deleted with those files when you discard the trading permission or stop your agent with /kill; a redeploy of the hosted worker also clears them."],
             ["Conversations through an AI assistant", "1 year."],
             ["Research notes", "Shown to your agent for 7 days, then deleted 30 days later."],
@@ -359,7 +398,7 @@ export function PrivacyPolicyDoc() {
           head={["Provider, and what for", "What it receives"]}
           rows={[
             [provider("Privy", "Sign-in with X or email, and the wallet behind it"), "Your X account or email address and sign-in details."],
-            [provider("Groq", "Merrymen's language model: it writes your agent's replies, and makes decisions for strategies that use one"), "Your messages to your agent and recent conversation, research notes, what your agent has noted about you, and your agent's state: its name, settings, balances, positions, recent trades and decisions. Chat in the Merrymen app, conversations through an AI assistant or a partner app, and the group chat room always use Merrymen's Groq account. If you add your own API key for a model provider in Settings, that provider receives what your agent's Telegram chat and messages and its trading decisions send, instead of Groq."],
+            [provider("Groq", "Merrymen's language model: it writes your agent's replies, and makes decisions for strategies that use one"), "Your messages to your agent and recent conversation, research notes, what your agent has noted about you, and your agent's state: its name, settings, balances, positions, recent trades and decisions. Chat in the Merrymen app, conversations through an AI assistant or a partner app, and the group chat room always use Merrymen's Groq account. If you connect an X account for posting, the posts your agent writes for X also come from a Merrymen model account, never one whose key you added: it is given your agent's name and how it trades, whether it trades on paper, and for a post about a coin it bought, that coin and your agent's reasons, but never your balances, amounts or prices. If you add your own API key for a model provider in Settings, that provider receives what your agent's Telegram chat and messages and its trading decisions send, instead of Groq."],
             [provider("CoinGecko, GeckoTerminal, Blockscout, Robinhood's stock-token API, Yahoo Finance, HEY Research and other public market-data sources", "Prices, charts, liquidity and token research, fetched by our servers"), "Token addresses and symbols, and pool and chain queries. Not who you are or what you wrote."],
             [provider("Financial Modeling Prep and Robinhood's image server (cdn.robinhood.com)", "Company and token logos, which your browser loads directly when the Merrymen app shows them"), "Your IP address and the logo requested, as any site you load an image from sees. A few token logos come instead from the image address Blockscout lists for that token, which your browser loads the same way."],
             [provider("Robinhood Chain's public RPC (rpc.mainnet.chain.robinhood.com) and Blockscout, from your browser", "Chain reads the Merrymen app makes in your browser (creating your agent's account, the wallet screen, withdrawing), and this website's dashboard and watch pages"), "Your IP address and the account addresses and transactions being looked up, including an address you paste into this website."],
@@ -368,7 +407,7 @@ export function PrivacyPolicyDoc() {
             [provider("Railway", "Hosting the app, the trading worker and the database"), "Everything the hosted service stores, as our infrastructure provider."],
             [provider("Vercel", "Hosting this website"), "Standard request logs."],
             [provider("Telegram", "Alerts and chat through your own bot"), "The messages between you and your bot, sent with the bot token you gave us."],
-            [provider("X", "Only if you prove your X handle"), "Nothing from us: we read the public post you made."],
+            [provider("X", "Proving your X handle, and posting on X if you connect an account for your agent"), "To prove a handle, nothing from us: we read the public post you made. If you connect an account for posting: the one-time code from your approval on X, our requests with that account's tokens to ask which account it is and to post, the text of each post your agent makes, and, when you disconnect, the tokens to revoke. X handles the account and its posts under its own policies."],
             [provider("Zoho", "Our support@merrymen.dev mailbox"), "The emails you send us."],
             [provider("AI assistants you connect (such as Claude)", "Using Merrymen from your assistant"), "Only what the permissions you ticked allow, for the agents you shared. The assistant's provider handles it under its own policies."],
             [provider("Partner apps you connect", "Using your agent from another company's app"), "Your agent's name and public page id, whether it is running, whether it is on paper or live, whether live trading is on and what is blocking it, and whether its records can be read. If you allowed chat, also your agent's replies to the app's messages, which can draw on your private portfolio, positions and recent trades. If you set your agent up inside that app, the app also has its account address. The partner handles it under its own policies."],
@@ -391,7 +430,8 @@ export function PrivacyPolicyDoc() {
           <li>
             The session key in your trading permission is encrypted with AES-256-GCM under a key
             that is kept in the service&apos;s environment, never in the database beside it. Your
-            settings, including a Telegram bot token or model API key, are encrypted the same way.
+            settings, including a Telegram bot token or model API key, are encrypted the same way,
+            and so are the tokens of an X account you connect for posting.
           </li>
           <li>
             While your agent runs, the hosted worker decrypts the session key and your settings and
@@ -436,6 +476,11 @@ export function PrivacyPolicyDoc() {
             that key too, or with your recovery key and the self-hosted software&apos;s{" "}
             <code className="inline">merrymen recover</code> command, which needs a bundler key of
             your own (such as a free Pimlico key) and works even when the hosted service is down.
+          </li>
+          <li>
+            <strong>Stop your agent posting on X</strong> in Settings, under Posting on X: turn
+            posting off, skip any post before it goes out, or disconnect the X account, which also
+            revokes our access at X. Posts already on X stay there until you delete them on X.
           </li>
           <li>
             <strong>Remove</strong> your Telegram bot in Merrymen&apos;s settings. Watchlist tokens

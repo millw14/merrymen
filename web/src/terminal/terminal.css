@@ -8558,3 +8558,65 @@ html[lang|="ko"] .terminal-host {
   margin-top: 2px;
 }
 /* ══ end Wave 2 — the feed row ═══════════════════════════════════════════ */
+
+/* ── POSTING ON X (Settings) ────────────────────────────────────────────────
+   terminal/XPosting.tsx. A quiet list of facts and one switch, in the form
+   page's own vocabulary (.mm-btn, .mm-hint); only the layout is new. The
+   warning reuses .portfolio-dialog and the re-sign prompt's .resign-actions
+   row, because a prompt that decides what goes out under an owner's name
+   should look like the other thing in this product that covers the screen.
+   Drafts wrap on any character: a post body is the one thing here whose
+   width nobody chose. */
+:where(.terminal-host) .xpost { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+:where(.terminal-host) .xpost > p { margin: 0; }
+:where(.terminal-host) .xpost-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+:where(.terminal-host) .xpost-account { font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+:where(.terminal-host) .xpost-connect { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+:where(.terminal-host) .xpost-connect .mm-hint { margin: 0; }
+:where(.terminal-host) .xpost-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+:where(.terminal-host) .xpost-confirm p { margin: 0; font-size: 13px; }
+:where(.terminal-host) .xpost-confirm .xpost-row { justify-content: flex-start; }
+:where(.terminal-host) .xpost-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+:where(.terminal-host) .xpost-switch > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+:where(.terminal-host) .xpost-switch strong { font-size: 14px; font-weight: 500; }
+:where(.terminal-host) .xpost-switch .switch { flex-shrink: 0; }
+:where(.terminal-host) .xpost-list-block { display: flex; flex-direction: column; gap: 8px; }
+:where(.terminal-host) .xpost-list-title { margin: 6px 0 0; font-size: 13px; font-weight: 500; color: var(--tx-2); }
+:where(.terminal-host) .xpost-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+:where(.terminal-host) .xpost-post {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  min-width: 0;
+}
+:where(.terminal-host) .xpost-post > p { margin: 0; font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+:where(.terminal-host) .xpost-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .xpost-meta a { color: var(--tx); text-decoration: underline; text-underline-offset: 3px; }
+:where(.terminal-host) .xpost-dialog .portfolio-body p { margin: 0 0 12px; font-size: 13px; line-height: 1.6; }

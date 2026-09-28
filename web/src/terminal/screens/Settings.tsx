@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { CircleHelp } from "lucide-react";
 import { HolderLink } from "../HolderLink";
+import { XPosting } from "../XPosting";
 import { AgentImageField } from "../AgentImageField";
 import { basketAfterAdd, basketNow } from "../basket";
 import { isCircleStrategyId } from "../strategy";
@@ -1405,6 +1406,17 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           </div>
 
           </details>
+          {/* POSTING ON X — hosted only, and only on a RESOLVED `hosted`, so a
+              self-hosted page never flashes a section it cannot use. The whole
+              section is its own component (terminal/XPosting.tsx): it reads
+              and writes /api/x/*, never this form's `draft`, and nothing here
+              is saved by "Save changes". The owner it sends is the one this
+              form was read for (SettingsView.owner). */}
+          {hosted === true && (
+            <details className="settings-group" id="x-posting"><summary>Posting on X</summary>
+              <XPosting owner={view.owner} hosted={hosted} />
+            </details>
+          )}
 
           {/* ── ADVANCED (collapsed by default) ────────────────────────── */}
           <details className="mm-advanced">
