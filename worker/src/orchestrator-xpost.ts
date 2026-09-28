@@ -46,7 +46,7 @@ import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp } from "./xpost/client";
 import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
 import { coinOf, hash32, introKey, planPosts, sendDecision, type PlanClock, type PlanIntent } from "./xpost/planner";
-import { PAUSE_KEY, sendOne } from "./xpost/sender";
+import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, sendOne } from "./xpost/sender";
 import {
   cancelPost,
   countPostedSince,
@@ -339,7 +339,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   let lastFail: { text: string; at: number } | null = null;
   /** Said once per UTC day, and once per pause: a ceiling reached is news, not a line every fifteen seconds. */
   let capNoted = "";
-  let pauseNoted = "";
+  let pauseSaidUntil = 0;
   /** The last standing condition said, and when: a condition that has not changed is said again only every twenty minutes. */
   let lastCondition: { text: string; at: number } | null = null;
   let ownerFailure = "";
@@ -385,9 +385,16 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         };
 
         // ── send what is due ──────────────────────────────────────────────
-        const pause = await readMeta(shared, PAUSE_KEY);
-        const pausedUntil = Number(pause?.v);
-        let paused = Number.isFinite(pausedUntil) && pausedUntil > nowMs;
+        // THE FLEET'S PAUSES: X out of credits, or X refusing the app's own
+        // client credentials. Either is said once per pause, not every pass.
+        let pause: { why: string; until: number } | null = null;
+        for (const [key, why] of [
+          [APP_PAUSE_KEY, "paused-client-credentials-refused"],
+          [PAUSE_KEY, "paused-for-credits"],
+        ] as const) {
+          const until = Number((await readMeta(shared, key))?.v);
+          if (Number.isFinite(until) && until > nowMs && until >= (pause?.until ?? 0)) pause = { why, until };
+        }
         let sentToday = await countPostedSince(shared, utcMidnight(nowMs));
         let sends = 0;
         for (const post of await duePosts(shared, tenants, nowMs, MAX_DUE)) {
@@ -410,10 +417,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             bump("waiting");
             continue;
           }
-          if (paused) {
-            if (pauseNoted !== String(pause?.v)) {
-              pauseNoted = String(pause?.v);
-              bump("paused-for-credits");
+          if (pause) {
+            if (pauseSaidUntil < pause.until) {
+              pauseSaidUntil = pause.until;
+              bump(pause.why);
             }
             continue;
           }
@@ -428,10 +435,17 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           if (sends >= MAX_SENDS_PER_PASS) break;
           sends++;
           const out = await sendOne(shared, o.dek, o.app, post, { fetch: deps.fetch, nowMs });
-          bump(out === "posted" ? "sent" : out);
+          // The app's credentials refused is the one line an operator must act
+          // on, so it says what happened rather than an outcome code.
+          bump(out === "posted" ? "sent" : out === "app" ? "x-refused-client-credentials" : out);
           // What may exist on X counts toward the ceiling, not only what surely does.
           if (out === "posted" || out === "uncertain" || out === "fault") sentToday++;
-          if (out === "credits") paused = true;
+          // The sender wrote the pause; this pass honours it at once, and the
+          // event just said is the pause's line, so later passes stay quiet.
+          if (out === "credits" || out === "app") {
+            pause = out === "credits" ? { why: "paused-for-credits", until: nowMs + CREDITS_PAUSE_MS } : { why: "paused-client-credentials-refused", until: nowMs + APP_PAUSE_MS };
+            pauseSaidUntil = Math.max(pauseSaidUntil, pause.until);
+          }
         }
 
         // ── plan, at most once a minute ───────────────────────────────────

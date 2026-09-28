@@ -13,6 +13,11 @@
  *                  connection is dead: revoked, and the post failed.
  *   credits      → back to scheduled in an hour, AND the whole fleet pauses
  *                  for that hour (xpost_meta "pause"): the APP may not post.
+ *   app          → the token endpoint refused OUR client credentials (a
+ *                  rotated or mistyped secret): back to scheduled, and the
+ *                  fleet pauses a quarter of an hour (xpost_meta "pause:app")
+ *                  so one bad secret is not a refresh per due post. Never a
+ *                  revocation: every owner's grant is still good.
  *   duplicate    → failed. X will never take this text.
  *   forbidden    → failed. The ACCOUNT may not post (locked, restricted).
  *   invalid      → failed. Our request was wrong; resending it is wrong too.
@@ -44,6 +49,7 @@ import {
   markFailed,
   markPosted,
   markRevoked,
+  readMeta,
   readTokens,
   reschedulePost,
   swapTokens,
@@ -60,6 +66,10 @@ export const RETRY_AFTER_MS = 5 * 60_000;
 export const CREDITS_PAUSE_MS = 60 * 60_000;
 /** The xpost_meta key holding the fleet pause, as epoch ms in `v`. */
 export const PAUSE_KEY = "pause";
+/** The token endpoint refused the app's own credentials: the fleet, and the post, wait this long. */
+export const APP_PAUSE_MS = 15 * 60_000;
+/** The xpost_meta key holding that pause, as epoch ms in `v`. Its own key, so the log can say which. */
+export const APP_PAUSE_KEY = "pause:app";
 
 export type SendOutcome =
   | "posted"
@@ -67,6 +77,7 @@ export type SendOutcome =
   | "retry" // back to scheduled, nothing was sent
   | "rate"
   | "credits"
+  | "app" // the token endpoint refused our client credentials; back to scheduled, the fleet pauses
   | "revoked"
   | "duplicate"
   | "forbidden"
@@ -80,7 +91,8 @@ export interface SendDeps {
   nowMs: number;
 }
 
-type Fresh = { ok: true; tokens: StoredTokens } | { ok: false; outcome: "revoked" | "retry" };
+type Unsent = "revoked" | "retry" | "app";
+type Fresh = { ok: true; tokens: StoredTokens } | { ok: false; outcome: Unsent };
 
 /**
  * A pair fresh enough to post with, refreshed and stored first when needed.
@@ -97,6 +109,7 @@ async function freshTokens(db: Db, dek: Buffer, app: XApp, post: XPost, from: St
   }
   const r = await refreshTokens(app, from.refreshToken, { fetch: deps.fetch, nowMs: now });
   if (!r.ok) {
+    if (r.failure === "app") return { ok: false, outcome: "app" };
     if (r.failure === "grant") {
       await markRevoked(db, post.tenant, from.version, now);
       return { ok: false, outcome: "revoked" };
@@ -192,6 +205,7 @@ export async function sendOne(db: Db, dek: Buffer, app: XApp, post: XPost, deps:
         return "forbidden";
       case "invalid":
       case "grant":
+      case "app":
         await markFailed(db, post.id, "invalid", now);
         return "invalid";
       default:
@@ -215,12 +229,27 @@ export async function sendOne(db: Db, dek: Buffer, app: XApp, post: XPost, deps:
   }
 }
 
-/** Nothing reached X: revoked is final, anything else waits five minutes. */
-async function settleUnsent(db: Db, post: XPost, outcome: "revoked" | "retry", now: number): Promise<SendOutcome> {
+/**
+ * Nothing reached X: revoked is final; the app's credentials refused waits out
+ * the fleet pause it sets; anything else waits five minutes.
+ */
+async function settleUnsent(db: Db, post: XPost, outcome: Unsent, now: number): Promise<SendOutcome> {
   if (outcome === "revoked") {
     await markFailed(db, post.id, "revoked", now);
     return "revoked";
   }
+  if (outcome === "app") {
+    await reschedulePost(db, post.id, now + APP_PAUSE_MS, now);
+    await pauseUntil(db, APP_PAUSE_KEY, now + APP_PAUSE_MS, now);
+    return "app";
+  }
   await reschedulePost(db, post.id, now + RETRY_AFTER_MS, now);
   return "retry";
+}
+
+/** Pause the fleet until `untilMs` under `key` — never shortening a pause already longer. */
+async function pauseUntil(db: Db, key: string, untilMs: number, now: number): Promise<void> {
+  const current = Number((await readMeta(db, key))?.v);
+  if (Number.isFinite(current) && current >= untilMs) return;
+  await writeMeta(db, key, String(untilMs), now);
 }

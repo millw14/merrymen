@@ -10,7 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { wrapSqlite, type Db } from "../db";
 import type { FetchLike, XApp } from "./client";
-import { CREDITS_PAUSE_MS, PAUSE_KEY, RETRY_AFTER_MS, sendOne } from "./sender";
+import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, RETRY_AFTER_MS, sendOne } from "./sender";
 import {
   ensureXpostSchema,
   getAccount,
@@ -167,6 +167,28 @@ test("a refresh that did not land — rate, outage, a malformed answer — waits
     const r = await row(db);
     assert.equal(r.status, "scheduled");
     assert.equal(r.dueAtMs, NOW + RETRY_AFTER_MS);
+  }
+});
+
+test("a token endpoint that refuses the APP's credentials revokes nobody: the post waits and the fleet pauses", async (t) => {
+  for (const [label, replies] of [
+    ["expiring token", [{ status: 401, body: { error: "unauthorized_client" } }]],
+    ["forced refresh after a 401", [{ status: 401, body: {} }, { status: 401, body: { error: "invalid_client" } }]],
+  ] as [string, Reply[]][]) {
+    const { db, post } = await setup(t, label === "expiring token" ? EXPIRING : FRESH);
+    await schedulePost(db, { tenant: OWNER, xUserId: "111", kind: "casual", dedupeKey: "casual:other", body: "another draft", dueAtMs: NOW + 1, nowMs: NOW });
+    const seen: Seen[] = [];
+    assert.equal(await sendOne(db, DEK, APP, post, { fetch: scripted(replies, seen), nowMs: NOW }), "app", label);
+    assert.equal(seen.filter((s) => s.url.endsWith("/tweets")).length, label === "expiring token" ? 0 : 1, `${label}: no second post call`);
+    const a = await getAccount(db, OWNER);
+    assert.equal(a?.status, "ok", `${label}: the owner's grant is still good`);
+    assert.equal(a?.posting, true);
+    assert.equal(await keyStatus(db, "casual:other"), "scheduled", `${label}: no draft is cancelled`);
+    const r = (await postsOf(db, OWNER, 0)).find((p) => p.dedupeKey === "buy:d1")!;
+    assert.equal(r.status, "scheduled");
+    assert.equal(r.dueAtMs, NOW + APP_PAUSE_MS);
+    assert.equal((await readMeta(db, APP_PAUSE_KEY))?.v, String(NOW + APP_PAUSE_MS), `${label}: the fleet pauses`);
+    assert.equal(await readMeta(db, PAUSE_KEY), null, `${label}: not the credits pause`);
   }
 });
 

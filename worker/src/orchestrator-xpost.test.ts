@@ -28,6 +28,7 @@ const { isAsleep } = await import("./groupchat/clock");
 const { admitXPost } = await import("./xpost/gate");
 const { wrapSqlite } = await import("./db");
 const store = await import("./xpost/store");
+const { PAUSE_KEY } = await import("./xpost/sender");
 
 import type { AgentFacts, CallFact } from "./groupchat/facts";
 import type { Db } from "./db";
@@ -308,7 +309,10 @@ function factsOf(calls: CallFact[], mode: AgentFacts["mode"] = "paper") {
     ]);
 }
 
-function poster(w: World, over: { calls?: CallFact[]; tz?: string | null; creds?: LlmCreds | null; answer?: (prompt: string) => string; llmPerDay?: number } = {}) {
+function poster(
+  w: World,
+  over: { calls?: CallFact[]; tz?: string | null; creds?: LlmCreds | null; answer?: (prompt: string) => string; llmPerDay?: number; fetch?: FetchLike } = {},
+) {
   const answer =
     over.answer ??
     ((prompt: string) => (/very first post/.test(prompt) ? INTRO : /What happened: you bought/.test(prompt) ? BUY : "slow afternoons make me weirdly calm, nothing to prove"));
@@ -318,7 +322,7 @@ function poster(w: World, over: { calls?: CallFact[]; tz?: string | null; creds?
     app: APP,
     dek: w.dek,
     deps: {
-      fetch: w.fetch,
+      fetch: over.fetch ?? w.fetch,
       dialect: "sqlite",
       facts: factsOf(over.calls ?? []) as never,
       member: async () => ({ tz: over.tz ?? null }),
@@ -480,6 +484,91 @@ describe("asleep and stale", () => {
     assert.equal(await store.keyStatus(w.db, "buy:late"), "skipped", "a buy post waiting eight hours is stale");
     assert.equal(await store.keyStatus(w.db, "casual:late"), "posted");
     assert.deepEqual(w.tweets, ["slow afternoons make me weirdly calm"]);
+  });
+});
+
+// ── the fleet's guards ──────────────────────────────────────────────────────
+
+describe("fleet guards", () => {
+  // 08:00 UTC, no zone: never asleep, and hours before any casual slot, so
+  // only the posts a test schedules itself are in play.
+  const T0 = Date.UTC(2026, 8, 28, 8, 0);
+  const OTHER = `0x${"ef".repeat(20)}`;
+  const BOTH = [...ROSTER, { tenant: OTHER, agentId: AGENT }];
+
+  /** A second owner, posting from their own X account, intro already dealt with. */
+  async function otherOwner(w: World, xUserId = "222") {
+    await store.upsertAccount(w.db, w.dek, {
+      tenant: OTHER,
+      xUserId,
+      username: "other_trades",
+      tokens: { accessToken: "access-other", refreshToken: "refresh-other", accessExpiresAtMs: T0 + 30 * 24 * HOUR, scope: "tweet.write" },
+      nowMs: T0 - 3 * HOUR,
+    });
+    await store.setPosting(w.db, OTHER, { enabled: true, xUserId }, T0 - 2 * HOUR);
+    await introDealtWith(w, OTHER, xUserId);
+  }
+
+  /** The owner skipped the hello: nothing is held for it, and nothing plans one. */
+  async function introDealtWith(w: World, tenant = TENANT, xUserId = "111") {
+    const id = await store.schedulePost(w.db, { tenant, xUserId, kind: "intro", dedupeKey: `intro:${tenant}:${xUserId}`, body: "hello", dueAtMs: T0 - HOUR, nowMs: T0 - 2 * HOUR });
+    assert.equal(await store.ownerCancel(w.db, tenant, id!, T0 - 2 * HOUR), true);
+  }
+
+  async function dueCasual(w: World, key: string, over: { tenant?: string; xUserId?: string; dueAtMs?: number; body?: string } = {}) {
+    return (await store.schedulePost(w.db, {
+      tenant: over.tenant ?? TENANT,
+      xUserId: over.xUserId ?? "111",
+      kind: "casual",
+      dedupeKey: key,
+      body: over.body ?? `slow afternoons make me weirdly calm, ${key}`,
+      dueAtMs: over.dueAtMs ?? T0 - MIN,
+      nowMs: T0 - 30 * MIN,
+    }))!;
+  }
+
+  it("a credits pause holds every due post, and is said once", async (t) => {
+    const w = await world(t, T0 - 2 * HOUR);
+    await introDealtWith(w);
+    await dueCasual(w, "casual:paused");
+    await store.writeMeta(w.db, PAUSE_KEY, String(T0 + HOUR), T0 - MIN);
+    const p = poster(w);
+    assert.equal((await p.step(w.db, ROSTER, new Map(), T0)).log, "xpost: paused-for-credits 1");
+    assert.equal((await p.step(w.db, ROSTER, new Map(), T0 + MIN)).log, null, "the same pause is not said again");
+    assert.equal(w.tweets.length, 0);
+    assert.equal(await store.keyStatus(w.db, "casual:paused"), "scheduled");
+    await p.step(w.db, ROSTER, new Map(), T0 + HOUR + MIN);
+    assert.equal(await store.keyStatus(w.db, "casual:paused"), "posted", "and it goes once the pause is over");
+  });
+
+  it("the token endpoint refusing the app's credentials pauses the fleet in the same pass, revokes nobody, and is one line", async (t) => {
+    const w = await world(t, T0 - 2 * HOUR);
+    // Near expiry, so the send refreshes first.
+    await store.upsertAccount(w.db, w.dek, {
+      tenant: TENANT,
+      xUserId: "111",
+      username: "robin_trades",
+      tokens: { accessToken: "access-token", refreshToken: "refresh-token", accessExpiresAtMs: T0 + 30_000, scope: "tweet.write" },
+      nowMs: T0 - HOUR,
+    });
+    await introDealtWith(w);
+    await otherOwner(w);
+    await dueCasual(w, "casual:first", { dueAtMs: T0 - 2 * MIN });
+    await dueCasual(w, "casual:second", { tenant: OTHER, xUserId: "222" });
+    const calls: string[] = [];
+    const refused: FetchLike = async (url) => {
+      calls.push(url);
+      const text = url.endsWith("/oauth2/token") ? JSON.stringify({ error: "unauthorized_client" }) : JSON.stringify({ data: { id: "1840000000000000001" } });
+      return { status: url.endsWith("/oauth2/token") ? 401 : 201, headers: { get: () => null }, text: async () => text };
+    };
+    const p = poster(w, { fetch: refused });
+    assert.equal((await p.step(w.db, BOTH, new Map(), T0)).log, "xpost: x-refused-client-credentials 1");
+    assert.deepEqual(calls, ["https://api.x.com/2/oauth2/token"], "one refresh, and nothing after it in that pass");
+    assert.equal((await store.getAccount(w.db, TENANT))?.status, "ok", "the owner's grant is not revoked");
+    assert.equal(await store.keyStatus(w.db, "casual:first"), "scheduled");
+    assert.equal(await store.keyStatus(w.db, "casual:second"), "scheduled");
+    assert.equal((await p.step(w.db, BOTH, new Map(), T0 + MIN)).log, null, "the pause it set is not said again");
+    assert.equal(calls.length, 1);
   });
 });
 
