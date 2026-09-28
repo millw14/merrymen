@@ -220,6 +220,7 @@ struct NativeShell: View {
                 case .walletSignIn: WalletProofScreen(linking: false)
                 case .trade(let symbol): TradeScreen(symbol: symbol)
                 case .tradeRequest(let symbol, let side, let amount, let address): TradeScreen(symbol: symbol, side: side, amount: amount, address: address)
+                case .energyRequest(let symbol, let amount): TradeScreen(symbol: symbol, side: "buy", amount: amount, purpose: "energy")
                 case .snipe(let query, let amount): SnipeScreen(query: query, amount: amount)
                 case .deposit: DepositScreen()
                 case .permissions: PermissionsScreen()

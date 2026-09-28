@@ -251,3 +251,49 @@ describe("mergeSettings — the basket can name an owner-added token", () => {
     assert.deepEqual(c.basketSymbols, [...SETTINGS_DEFAULTS.basketSymbols]);
   });
 });
+
+/**
+ * THE ENERGY GATE IS THE OPERATOR'S SWITCH, AND ONLY ON THE HOSTED SERVICE.
+ *
+ * A tenant must not be able to switch off the throttle they are under, so the
+ * file is never read for it; and self-hosted it is always off, whatever the
+ * environment says — the owner there pays their own model and runs open code.
+ */
+describe("energyGate — env only, hosted only", () => {
+  const withHosted = <T>(on: boolean, fn: () => T): T => {
+    const before = process.env.MERRYMEN_HOSTED;
+    if (on) process.env.MERRYMEN_HOSTED = "1";
+    else delete process.env.MERRYMEN_HOSTED;
+    try {
+      return fn();
+    } finally {
+      if (before === undefined) delete process.env.MERRYMEN_HOSTED;
+      else process.env.MERRYMEN_HOSTED = before;
+    }
+  };
+
+  it("SELF-HOSTED IS OFF even with MERRYMEN_ENERGY_GATE=1", () => {
+    withHosted(false, () => {
+      assert.equal(mergeSettings({}, { MERRYMEN_ENERGY_GATE: "1" }).energyGate, "off");
+      assert.equal(mergeSettings({}, { MERRYMEN_ENERGY_GATE: "enforce" }).energyGate, "off");
+    });
+  });
+
+  it("hosted: unset is off; 'observe' and '1' parse", () => {
+    withHosted(true, () => {
+      assert.equal(mergeSettings({}, {}).energyGate, "off", "default off in code — the operator flips it");
+      assert.equal(mergeSettings({}, { MERRYMEN_ENERGY_GATE: "observe" }).energyGate, "observe");
+      assert.equal(mergeSettings({}, { MERRYMEN_ENERGY_GATE: "1" }).energyGate, "enforce");
+      assert.equal(mergeSettings({}, { MERRYMEN_ENERGY_GATE: "0" }).energyGate, "off");
+    });
+  });
+
+  it("A FILE KEY IS IGNORED — the throttled party cannot set their own switch", () => {
+    withHosted(true, () => {
+      const file = { energyGate: "off", MERRYMEN_ENERGY_GATE: "0" } as unknown as Parameters<typeof mergeSettings>[0];
+      assert.equal(mergeSettings(file, { MERRYMEN_ENERGY_GATE: "1" }).energyGate, "enforce");
+      const upgrade = { energyGate: "enforce" } as unknown as Parameters<typeof mergeSettings>[0];
+      assert.equal(mergeSettings(upgrade, {}).energyGate, "off", "nor switch one on for somebody else to be billed");
+    });
+  });
+});

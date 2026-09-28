@@ -9,6 +9,9 @@ enum Route: Hashable {
     case settingsProposal(String)
     case holderWallet, walletSignIn
     case snipe(String, String), tradeRequest(String, String, String, String?)
+    /// get-energy's card: (symbol, amount). Its own case so the energy marker
+    /// can only ever come from that card, never from a trade route.
+    case energyRequest(String, String)
     case markets, search, searchFor(String), approval(String), connectedApps, agent(String), token(String), settings, telegram, circle, groupchat, proposals, xProof, xPosting
     case trade(String), deposit, permissions, create, limits, withdraw, signIn
 }

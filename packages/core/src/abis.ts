@@ -282,3 +282,78 @@ export const PONS_SELFTRADE_ABI = [
     outputs: [{ name: "amountOut", type: "uint256" }],
   },
 ] as const;
+
+/**
+ * Uniswap v2 Router02 — the ONE function the energy buy may call (see
+ * ENERGY_ROUTE_V1 in energy.ts and the energy permission in wall.ts).
+ *
+ * THIS LIST MUST HOLD EXACTLY ONE FUNCTION. The call-policy builder resolves the
+ * selector from the ABI by name and refuses overloads without an explicit one;
+ * the read functions the worker needs for quoting live in their own constant
+ * below so they can never be granted by accident.
+ *
+ * `address[] path` is a DYNAMIC array, which is why multi-hop through
+ * SwapRouter02 was removed from the wall and why this one is pinnable anyway:
+ * with the offset word (w2) and the length word (w5) pinned, the elements are
+ * right-aligned words at fixed offsets (w6..w8), each individually EQUAL-pinned.
+ * A packed `bytes` path has no such words. wall.test.ts proves the offsets
+ * against viem's encoder.
+ *
+ * SupportingFeeOnTransferTokens because $MERRYMEN charges a buy tax: this
+ * variant checks amountOutMin against what actually ARRIVES at `to`, not the
+ * pre-tax amount the pool sent.
+ */
+export const UNISWAP_V2_ENERGY_ABI = [
+  {
+    type: "function",
+    name: "swapExactTokensForTokensSupportingFeeOnTransferTokens",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "amountIn", type: "uint256" },
+      { name: "amountOutMin", type: "uint256" },
+      { name: "path", type: "address[]" },
+      { name: "to", type: "address" },
+      { name: "deadline", type: "uint256" },
+    ],
+    outputs: [],
+  },
+] as const;
+
+/** Uniswap v2 Router02 views the worker quotes the energy route with. Never granted. */
+export const UNISWAP_V2_ROUTER_READ_ABI = [
+  {
+    type: "function",
+    name: "getAmountsOut",
+    stateMutability: "view",
+    inputs: [
+      { name: "amountIn", type: "uint256" },
+      { name: "path", type: "address[]" },
+    ],
+    outputs: [{ name: "amounts", type: "uint256[]" }],
+  },
+  {
+    type: "function",
+    name: "getAmountsIn",
+    stateMutability: "view",
+    inputs: [
+      { name: "amountOut", type: "uint256" },
+      { name: "path", type: "address[]" },
+    ],
+    outputs: [{ name: "amounts", type: "uint256[]" }],
+  },
+] as const;
+
+/**
+ * Virtuals agent-token tax, in bps. $MERRYMEN answered 100 (1%) on 2026-09-27;
+ * the token's owner can change it, which is why the energy buy reads it fresh
+ * and refuses above ENERGY.maxTaxBps rather than trusting a remembered figure.
+ */
+export const AGENT_TOKEN_TAX_ABI = [
+  {
+    type: "function",
+    name: "totalBuyTaxBasisPoints",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;

@@ -36,10 +36,13 @@ import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
 import { assertDerivedAccount } from "../../packages/core/src/index";
 import {
   CASH,
+  MERRYMEN_TOKEN,
   MORPHO,
   STOCK_TOKENS,
   USDG_DECIMALS,
+  energyReserveTokens,
   isValidCustomToken,
+  shortAddress,
 } from "../../packages/core/src/index";
 import { userOpGasConfig } from "./gas";
 
@@ -187,6 +190,8 @@ export interface RecoverResult extends RecoverPlan {
  * them, and snapshot.ts goes through convertToAssets precisely to avoid the
  * question. The amount an owner confirms a sweep against must not be a number
  * we made up, so the vault row is priced in USDG instead (see planRecovery).
+ *
+ * $MERRYMEN IS SWEPT TOO, BUT ONLY WHERE IT EXISTS — see `reserveRows`.
  */
 const BUILTIN_SWEEPABLE: { symbol: string; address: Address; decimals: number }[] = [
   { symbol: "USDG", address: CASH.USDG as Address, decimals: USDG_DECIMALS },
@@ -195,7 +200,32 @@ const BUILTIN_SWEEPABLE: { symbol: string; address: Address; decimals: number }[
 ];
 
 /**
- * The builtin set plus whatever the owner added themselves.
+ * The energy reserve's row(s) on THIS chain — none where it is not deployed.
+ *
+ * The reserve is the agent's energy: bought into the account on the owner's
+ * say-so, and deliberately never watched, never a position and never on any
+ * token list the owner configures — so without this row the one command that
+ * exists to get money out would leave it behind. A sweep of it moves no USDG,
+ * so no capital flow is written, which is right: the reserve left the trading
+ * book when it was bought.
+ *
+ * PER CHAIN, FROM `energyReserveTokens`, never a mainnet constant everywhere.
+ * An unconditional row on testnet read `absent` (the mainnet address has no
+ * code there) and, worse, TOOK THE NAME: an owner whose own custom token was
+ * their testnet "MERRYMEN" had it dropped from the sweep as a symbol collision,
+ * and was told nothing was left while it sat in the account. The reserve IS
+ * $MERRYMEN wherever it is listed, so its label and decimals are the token's.
+ */
+function reserveRows(chainId: number): { symbol: string; address: Address; decimals: number }[] {
+  return energyReserveTokens(chainId).map((address) => ({
+    symbol: MERRYMEN_TOKEN.symbol,
+    address: address as Address,
+    decimals: MERRYMEN_TOKEN.decimals,
+  }));
+}
+
+/**
+ * The builtin set for this chain plus whatever the owner added themselves.
  *
  * Recovery is the escape hatch, and it swept a list frozen at ship time — so
  * the exact tokens an owner chose, and every quarantined scout position (an
@@ -203,11 +233,16 @@ const BUILTIN_SWEEPABLE: { symbol: string; address: Address; decimals: number }[
  * exists to get money out. The wall has nothing to do with it: this path signs
  * with the sudo validator and can move any ERC-20 the account holds.
  *
- * Builtin entries WIN on collision, and collision means symbol OR address —
- * the rule strategies/registry.ts already applies. Address-only dedupe would
- * let `{symbol:"AAPL", address:<anything>}` produce two identical-looking AAPL
- * rows in the confirmation prose with no way for the owner to tell which is
- * which, on the one screen where they are agreeing to move real money.
+ * AN ADDRESS IS A TOKEN; A SYMBOL IS A LABEL. Same address as a row already
+ * here → the same token, already swept, so it is skipped. Same SYMBOL at a
+ * different address → a different token, and it is swept: dropping it would
+ * strand the owner's money on the one path that exists to rescue it, which is
+ * what a builtin $MERRYMEN row did to every other token called MERRYMEN. What
+ * symbol-dedupe was protecting still holds: no two rows carry the same label.
+ * The first row keeps the bare symbol — builtins come first, so the curated
+ * address always does — and a later one is labelled with its address, so the
+ * confirmation never shows two identical-looking "AAPL" rows on the one screen
+ * where the owner is agreeing to move real money.
  *
  * Shape is re-validated here rather than trusted, because a caller reads
  * settings.json off disk directly. That is also why the parameter is `unknown`
@@ -215,24 +250,36 @@ const BUILTIN_SWEEPABLE: { symbol: string; address: Address; decimals: number }[
  * demanding a typed value here would only push a cast onto callers holding data
  * they have not checked — which is how an unvalidated address reaches an atomic
  * sweep of someone's whole account.
+ *
+ * `chainId` IS REQUIRED: a caller that forgot it would silently never sweep
+ * the reserve on mainnet, or sweep a codeless one elsewhere.
  */
 export function sweepList(
+  chainId: number,
   extra: readonly unknown[] = [],
 ): { symbol: string; address: Address; decimals: number }[] {
-  const out = [...BUILTIN_SWEEPABLE];
+  const out = [...BUILTIN_SWEEPABLE, ...reserveRows(chainId)];
+  const floor = out.length;
   const addresses = new Set(out.map((t) => t.address.toLowerCase()));
-  const symbols = new Set(out.map((t) => t.symbol.toUpperCase()));
+  const labels = new Set(out.map((t) => t.symbol.toUpperCase()));
   for (const t of extra) {
     if (!isValidCustomToken(t)) continue;
     const addr = t.address.toLowerCase();
-    if (addresses.has(addr) || symbols.has(t.symbol.toUpperCase())) continue;
+    if (addresses.has(addr)) continue;
+    // A shortened address can itself repeat; the full one cannot.
+    const short = `${t.symbol} (${shortAddress(addr)})`;
+    const symbol = !labels.has(t.symbol.toUpperCase())
+      ? t.symbol
+      : !labels.has(short.toUpperCase())
+        ? short
+        : `${t.symbol} (${addr})`;
     addresses.add(addr);
-    symbols.add(t.symbol.toUpperCase());
-    out.push({ symbol: t.symbol, address: t.address as Address, decimals: t.decimals });
+    labels.add(symbol.toUpperCase());
+    out.push({ symbol, address: t.address as Address, decimals: t.decimals });
     // The same ceiling settings.ts puts on customTokens. A recovery is one
     // atomic UserOp, and an unbounded call list is one that runs out of gas
     // and moves nothing at all.
-    if (out.length >= BUILTIN_SWEEPABLE.length + 50) break;
+    if (out.length >= floor + 50) break;
   }
   return out;
 }
@@ -428,7 +475,7 @@ export async function planRecovery(opts: {
     );
   }
 
-  const tokens = sweepList(opts.extraTokens);
+  const tokens = sweepList(opts.chain.id, opts.extraTokens);
   const unreadable: string[] = [];
 
   // THREE OUTCOMES, NOT TWO. A read can succeed, or find no contract at that

@@ -372,5 +372,119 @@ describe("a class vault's legs are the account's own trades", () => {
       usdgToken: USDG,
     });
     assert.deepEqual(withField, without);
+    // And an EMPTY reserve list is the same as none: the energy rule only
+    // exists when a caller names the reserve.
+    const withReserve = classifyUsdgMovement({
+      account: ME,
+      usdg: swapLegs[0]!,
+      txLegs: swapLegs,
+      usdgToken: USDG,
+      custodyAddresses: [],
+      reserveTokens: [],
+    });
+    assert.deepEqual(withReserve, without);
+  });
+});
+
+/**
+ * BUYING ENERGY IS CAPITAL LEAVING THE BOOK, NOT A TRADE AND NOT A WITHDRAWAL.
+ *
+ * The energy route is USDG -> VIRTUAL -> $MERRYMEN over two Uniswap v2 pairs,
+ * with the token's buy tax skimmed to the token contract on the way. Four legs,
+ * and only two touch the account: USDG out, $MERRYMEN in.
+ *
+ * Why a distinct kind rather than `capital-out`: the live deposit scanner books
+ * every capital-in/out it sees, and the worker books this purchase itself at
+ * landing. `reserve-out` is the kind the scanner leaves alone and the fleet
+ * tools count — so there is exactly one live booker.
+ */
+describe("the energy reserve purchase", () => {
+  const ME = "0x00000000000000000000000000000000000000a1";
+  const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+  const VIRTUAL = "0xc6911796042b15d7fa4f6cde69e245ddcd3d9c31";
+  const MERRYMEN = "0xa15cd06dd305269a0f48bebeb30aa3588fba7b32";
+  const PAIR_A = "0x00000000000000000000000000000000000000b1"; // USDG/VIRTUAL
+  const PAIR_B = "0x00000000000000000000000000000000000000b2"; // VIRTUAL/MERRYMEN
+  const VAULT = "0x00000000000000000000000000000000000000c0";
+  const TSLA = "0x322f0929c4625ed5bad873c95208d54e1c003b2d";
+
+  const energyLegs = [
+    leg(USDG, ME, PAIR_A, "42000000"),
+    leg(VIRTUAL, PAIR_A, PAIR_B, "90000000000000000000"),
+    leg(MERRYMEN, PAIR_B, MERRYMEN, "2000000000000000000000"), // the buy tax, to the token contract
+    leg(MERRYMEN, PAIR_B, ME, "98000000000000000000000"),
+  ];
+  const classify = (legs: TransferLeg[], extra: { reserveTokens?: string[]; custodyAddresses?: string[] } = {}) =>
+    classifyUsdgMovement({ account: ME, usdg: legs[0]!, txLegs: legs, usdgToken: USDG, ...extra });
+
+  it("with the reserve named, the USDG leg is reserve-out", () => {
+    const v = classify(energyLegs, { reserveTokens: [MERRYMEN] });
+    assert.equal(v.kind, "reserve-out");
+    assert.equal(v.evidence.rule, "reserve-purchase");
+    assert.equal(v.pairedToken, MERRYMEN);
+    assert.equal(v.evidence.direction, "out");
+    assert.equal(v.evidence.txLegCount, 4);
+    assert.match(v.why, /outside the trading book/);
+  });
+
+  it("the reserve list is compared without regard to case", () => {
+    assert.equal(classify(energyLegs, { reserveTokens: [MERRYMEN.toUpperCase().replace("0X", "0x")] }).kind, "reserve-out");
+  });
+
+  it("without the reserve named, the same legs are the trade they always were", () => {
+    const v = classify(energyLegs);
+    assert.equal(v.kind, "trade-out");
+    assert.equal(v.evidence.rule, "paired-token-movement");
+  });
+
+  it("a MIXED batch — the reserve and a position arriving together — stays a trade", () => {
+    // Part of this USDG bought a position. Calling the whole leg reserve-out
+    // would lower contributions for money that is still in the book.
+    const mixed = [...energyLegs, leg(TSLA, PAIR_A, ME, "13000000000000000")];
+    assert.equal(classify(mixed, { reserveTokens: [MERRYMEN] }).kind, "trade-out");
+  });
+
+  it("the reserve landing at a custody vault stays a trade — the energy route pays the account", () => {
+    const toVault = [leg(USDG, ME, PAIR_A, "42000000"), leg(MERRYMEN, PAIR_B, VAULT, "98000000000000000000000")];
+    assert.equal(classify(toVault, { reserveTokens: [MERRYMEN], custodyAddresses: [VAULT] }).kind, "trade-out");
+  });
+
+  it("there is no reserve-in: USDG arriving against the reserve leaving is sale proceeds", () => {
+    const sell = [leg(MERRYMEN, ME, PAIR_B, "98000000000000000000000"), leg(USDG, PAIR_A, ME, "40000000")];
+    const v = classifyUsdgMovement({ account: ME, usdg: sell[1]!, txLegs: sell, usdgToken: USDG, reserveTokens: [MERRYMEN] });
+    assert.equal(v.kind, "trade-in");
+  });
+
+  it("an ordinary trade is untouched by naming the reserve", () => {
+    const swap = [leg(USDG, ME, PAIR_A, "25000000"), leg(TSLA, PAIR_A, ME, "13000000000000000")];
+    assert.deepEqual(classify(swap, { reserveTokens: [MERRYMEN] }), classify(swap));
+  });
+
+  it("a plain withdrawal is still a withdrawal with the reserve named", () => {
+    const out = [leg(USDG, ME, "0x00000000000000000000000000000000000000f1", "5000000")];
+    assert.equal(classify(out, { reserveTokens: [MERRYMEN] }).kind, "capital-out");
+  });
+
+  it("totals: reserve purchases are their own figure and come off net contributions", () => {
+    const funding = leg(USDG, "0x00000000000000000000000000000000000000f1", ME, "100000000");
+    const home = leg(USDG, ME, "0x00000000000000000000000000000000000000f1", "10000000");
+    const t = totalCapital([
+      { amountRaw: funding.amountRaw, classification: classify([funding], { reserveTokens: [MERRYMEN] }) },
+      { amountRaw: home.amountRaw, classification: classify([home], { reserveTokens: [MERRYMEN] }) },
+      { amountRaw: "42000000", classification: classify(energyLegs, { reserveTokens: [MERRYMEN] }) },
+      { amountRaw: "8000000", classification: classify(energyLegs, { reserveTokens: [MERRYMEN] }) },
+    ]);
+    assert.equal(t.grossContributionsRaw, "100000000");
+    assert.equal(t.grossWithdrawalsRaw, "10000000", "withdrawals stay external-only");
+    assert.equal(t.grossReservePurchasesRaw, "50000000");
+    assert.equal(t.reservePurchases, 2);
+    assert.equal(t.netContributionsRaw, "40000000", "in − out − reserve");
+    assert.equal(t.tradeLegs, 0, "a reserve purchase is not counted as a trade leg");
+  });
+
+  it("an account that never bought energy totals zero reserve", () => {
+    const t = totalCapital([]);
+    assert.equal(t.grossReservePurchasesRaw, "0");
+    assert.equal(t.reservePurchases, 0);
   });
 });

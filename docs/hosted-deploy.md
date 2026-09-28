@@ -221,6 +221,36 @@ every agent line; owners write through the web. Rules and design:
 > Asleep or awake, every agent keeps trading — the room writes only its own
 > tables, and nothing on a trading path reads them.
 
+### Energy — the $MERRYMEN gate (off until you turn it on)
+
+An agent whose owner's wallet and own account hold fewer than 100,000 $MERRYMEN
+between them gets about a tenth of a normal day of NEW autonomous work — paid AI
+reviews (paced across the UTC day) and the trades it opens on its own.
+Stop-losses, take-profits and owner orders are never limited; the agent's own AI
+reviews — including of its open positions, where an AI-decided exit comes from —
+are paced with the rest. Contract: `packages/core/src/energy.ts`;
+throttle: `worker/src/energy.ts`.
+
+| variable | value |
+|---|---|
+| `MERRYMEN_ENERGY_GATE` *(optional)* | unset/`0` off · `observe` counts and logs `[energy] observe: enforce would withhold …` but limits nothing · `1` (or `enforce`) enforces. Set it on **both** `orchestrator` (the only thing that throttles) **and** `web` (copy only: the create/settings screens mention energy when it is `1`) |
+
+> **Roll out `observe` first**, read the logs for a day, then switch to `1` at
+> **00:00 UTC** — counts taken under `observe` belong to the same UTC day and
+> carry over. The gate is hosted-only by construction: a self-hosted worker
+> reads it as off whatever the environment says. It reaches children through
+> the ordinary child environment and must not be added to the strip list.
+>
+> Counters are durable across redeploys: children write `energy_days`, the
+> mirror carries it to Postgres, and the supervisor seeds it back into a
+> rebuilt child before it arms. The loss window is one mirror pass (~15 s).
+>
+> **The energy buy** (an owner asks the agent in chat to "get its $MERRYMEN")
+> spends real USDG through the house bundler. If `MERRYMEN_SPONSOR_GAS=1`,
+> check the Pimlico sponsorship policy admits Uniswap v2 Router02
+> (`0x89e5db8b5aa49aa85ac63f691524311aeb649eba`) before telling owners it works;
+> the policy is not in this repo.
+
 ### Posting on X (opt-in per owner; off until the X app is configured)
 
 An owner can connect an X account in Settings and let their Merryman post on

@@ -106,6 +106,9 @@ export interface BackfillPlan {
  *   landed    — submitted, mined, succeeded.                REAL
  *   submitted — in flight, not yet settled.                 REAL
  *   reverted  — reached the chain and failed there.         REAL — gas was spent
+ *   dropped   — sent, and superseded before it was mined    REAL — a signed live order
+ *               (a later op used its nonce); it was
+ *               'submitted' until the resolver proved it.
  *   rejected  — never left the box; a pre-flight refusal.   not real
  *   paper     — the simulator.                              not real
  *
@@ -118,7 +121,7 @@ export interface BackfillPlan {
  */
 async function accountsThatTradedForReal(db: TradesReader): Promise<Set<string>> {
   const { rows } = await db.query(
-    `SELECT DISTINCT agent_id FROM trades WHERE status IN ('landed', 'submitted', 'reverted')`,
+    `SELECT DISTINCT agent_id FROM trades WHERE status IN ('landed', 'submitted', 'reverted', 'dropped')`,
   );
   return new Set(
     rows

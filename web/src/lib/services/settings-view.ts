@@ -7,7 +7,9 @@
  * secret field someone adds; this reads named, non-secret fields only, so a new
  * field is invisible here until someone decides it is safe.
  */
+import { STOCK_TOKENS, isValidCustomToken } from "@merrymen/core";
 import { getSettingsStore } from "@merrymen/settings-store";
+import { withoutEnergyReserve, withoutReserveBasket } from "../energy-reserve";
 import { CHAT_SETTING_KEYS } from "../../../../worker/src/telegram/setting-spec";
 
 export interface SettingsView {
@@ -61,13 +63,18 @@ const b = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
 export function projectSettings(raw: Record<string, unknown> | null | undefined): SettingsView | null {
   if (!raw || typeof raw !== "object") return null;
   const s = raw;
-  const tokens = Array.isArray(s.customTokens) ? s.customTokens : [];
+  // THE RESERVE IS NOT A TOKEN THIS OWNER TRADES — left out here as GET
+  // /api/settings leaves it out, with the basket symbol only it supplied, so
+  // the MCP view never offers MERRYMEN to a basket proposal (energy-reserve.ts).
+  const tokens = withoutEnergyReserve(Array.isArray(s.customTokens) ? s.customTokens : []) ?? [];
+  const selectable = new Set([...STOCK_TOKENS.map((t) => t.symbol), ...tokens.filter(isValidCustomToken).map((t) => t.symbol)]);
+  const basket = withoutReserveBasket(Array.isArray(s.basketSymbols) ? s.basketSymbols : [], s.customTokens, selectable) ?? [];
   const mode = s.assetMode;
   return {
     agentName: typeof s.agentName === "string" ? s.agentName.slice(0, 64) : null,
     strategy: typeof s.strategy === "string" ? s.strategy.slice(0, 64) : null,
     assetMode: mode === "all" || mode === "stocks" || mode === "crypto" ? mode : null,
-    basketSymbols: Array.isArray(s.basketSymbols) ? s.basketSymbols.filter((x): x is string => typeof x === "string").slice(0, 50) : [],
+    basketSymbols: basket.filter((x): x is string => typeof x === "string").slice(0, 50),
     // Consent flags fail closed: only an explicit true counts.
     liveTradingEnabled: s.liveTradingEnabled === true,
     paperTradingEnabled: s.paperTradingEnabled !== false,

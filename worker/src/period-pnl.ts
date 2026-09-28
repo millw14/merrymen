@@ -237,11 +237,17 @@ export type PeriodChange =
  * now: from its last point at or before `since` (else its first after) to its
  * newest. Practice and real money are never compared with each other; a
  * period that used the other book too says so.
+ *
+ * `now` names that book when the caller knows it better than the series does:
+ * a series of MEASURED marks only (held-marks.ts) leaves out a reading taken
+ * mid-hold, and the book the newest reading is in stays the book, held or not.
+ * Absent, the series' own newest point names it.
  */
-export function periodChange(series: readonly AccountPoint[], since: number): PeriodChange {
-  const close = series[series.length - 1];
+export function periodChange(series: readonly AccountPoint[], since: number, now?: BookKey): PeriodChange {
+  const named = now ?? series[series.length - 1]?.book;
+  const book = series.filter((p) => p.book === named);
+  const close = book[book.length - 1];
   if (!close) return { kind: "none" };
-  const book = series.filter((p) => p.book === close.book);
   let open: AccountPoint | undefined;
   for (const p of book) if (p.at <= since) open = p;
   open ??= book.find((p) => p.at >= since);

@@ -175,3 +175,36 @@ describe("a sell into cash spends nothing", () => {
     assert.equal(await getSpentTodayUsdg(TRADER, "live"), 13);
   });
 });
+
+describe("the energy buy is a real spend on the LIVE book, and only there", () => {
+  const ENERGY = "0xenergyaccount0000000000000000000000000e";
+  const USDG_LC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+  const MERRY_LC = "0xa15cd06dd305269a0f48bebeb30aa3588fba7b32";
+  const energyRow = (status: "landed" | "submitted" | "rejected", amount: number) =>
+    addTrade({
+      agent_id: ENERGY,
+      kind: "energy-buy",
+      target: "0x89e5db8b5aa49aa85ac63f691524311aeb649eba",
+      sell_token: USDG_LC,
+      buy_token: MERRY_LC,
+      amount_usdg: amount,
+      status,
+    });
+
+  it("landed and submitted energy buys count toward the live day's spend AND ops — with the sell-exemption asleep", async () => {
+    // getSpentTodayUsdg's sell exemption is keyed on kind swap/curve-trade with
+    // a CASH buy leg; an energy buy's buy leg is the reserve, so it is spend in
+    // full whatever the cash token passed — the cap the policy mirror judged.
+    await energyRow("landed", 10);
+    await energyRow("submitted", 7);
+    await energyRow("rejected", 99);
+    assert.equal(await getSpentTodayUsdg(ENERGY, "live", USDG_LC), 17);
+    assert.equal(await getSpentTodayUsdg(ENERGY, "live"), 17);
+    assert.equal(await getOpsToday(ENERGY, "live"), 2);
+  });
+
+  it("and are invisible to the paper book — a real purchase never spends a practice allowance", async () => {
+    assert.equal(await getSpentTodayUsdg(ENERGY, "paper", USDG_LC), 0);
+    assert.equal(await getOpsToday(ENERGY, "paper"), 0);
+  });
+});

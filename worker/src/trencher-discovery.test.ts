@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { keccak256, type PublicClient } from "viem";
-import { CASH, UNISWAP, GRANT_TRENCHER, type StoredGrant } from "../../packages/core/src/index";
+import { CASH, UNISWAP, GRANT_TRENCHER, MERRYMEN_TOKEN, type StoredGrant } from "../../packages/core/src/index";
 import { discoverTrencherUniverse } from "./trencher-discovery";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 
@@ -43,4 +43,28 @@ test("automatic discovery verifies pool provenance and recovers held tokens with
   assert.equal((await discoverTrencherUniverse(client({decimals:new Error("metadata unavailable")}),grant,[pool])).tokens.length,0);
   process.env.TRENCHER_FACTORY_CODE_HASH=keccak256("0x6001");
   await assert.rejects(discoverTrencherUniverse(client(),grant,[pool]),/bytecode/);
+});
+test("the energy reserve is never a trencher candidate, and held tokens are not narrowed", async (t) => {
+  // $MERRYMEN is held as energy — never watched, bought or sold as a coin. A
+  // Uniswap v3 MERRYMEN pool does not exist today, but discovery must not
+  // depend on that staying true.
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  const merrymen = MERRYMEN_TOKEN.address;
+  const reservePool = { ...pool, tokenAddress: merrymen, name: "MERRYMEN / USDG" } as GeckoPool;
+  const shouted = { ...reservePool, tokenAddress: `0x${merrymen.slice(2).toUpperCase()}` } as GeckoPool;
+  for (const p of [reservePool, shouted]) {
+    const result = await discoverTrencherUniverse(client({ token1: merrymen }), grant, [p]);
+    assert.equal(result.qualified.length, 0, "a qualifying MERRYMEN pool is excluded");
+    assert.equal(result.tokens.length, 0);
+  }
+  // An ordinary pool beside it still qualifies.
+  const both = await discoverTrencherUniverse(client(), grant, [reservePool, pool]);
+  assert.deepEqual(both.qualified.map((q) => q.tokenAddress), [token]);
+  // What the vault already holds is read as it is: `held` is never filtered,
+  // because a held-token read must never be narrowed into an empty book.
+  const held = await discoverTrencherUniverse(client({ tokens: [token] }), grant, [reservePool]);
+  assert.deepEqual(held.held, [token]);
+  assert.deepEqual(held.tokens.map((x) => x.address), [token]);
 });

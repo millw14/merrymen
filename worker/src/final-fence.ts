@@ -28,17 +28,34 @@
  * else, so a difference in EITHER direction is a build nobody authorised. A
  * higher floor is not a safer trade, it is a different one.
  *
- * SCOPE, STATED. This fences the v3 lane — an ERC-20 approve followed by
- * `exactInputSingle` or `exactInput` — which is what every grant this repo can
- * currently produce actually reaches. The v4 adapter and legacy Permit2 lanes
- * are NOT fenced here and must not be passed to it: their calldata is built by
- * different builders with a structurally pinned recipient, and a decoder that
- * silently returned "fine" for a shape it does not understand would be worse
- * than no decoder at all. Unrecognised input is a refusal, never a pass.
+ * SCOPE, STATED. This fences TWO lanes, each with its own function:
+ *
+ *   checkV3SwapCalls — an ERC-20 approve followed by `exactInputSingle` or
+ *   `exactInput`, which is what every trading grant this repo can currently
+ *   produce actually reaches.
+ *
+ *   checkEnergySwapCalls — the energy buy: a USDG approve followed by the
+ *   Uniswap v2 fee-on-transfer swap over the one route the grant sealed. It is
+ *   STRICTER than the v3 fence, and stricter than the wall: the swap's bytes
+ *   must EQUAL a canonical re-encoding, because the wall pins six words and
+ *   admits anything around them (trailing bytes, an unpinned floor) that the
+ *   router would still decode. See that function.
+ *
+ * The v4 adapter and legacy Permit2 lanes are NOT fenced here and must not be
+ * passed to either: their calldata is built by different builders with a
+ * structurally pinned recipient, and a decoder that silently returned "fine"
+ * for a shape it does not understand would be worse than no decoder at all.
+ * Unrecognised input is a refusal, never a pass.
  */
 
-import { decodeFunctionData, erc20Abi, type Hex } from "viem";
-import { UNISWAP_SWAP_ROUTER_ABI } from "../../packages/core/src/index";
+import { decodeFunctionData, encodeFunctionData, erc20Abi, type Hex } from "viem";
+import {
+  ENERGY_SWAP_SELECTOR,
+  UNISWAP_SWAP_ROUTER_ABI,
+  UNISWAP_V2_ENERGY_ABI,
+  energyCallWords,
+  type EnergyRoute,
+} from "../../packages/core/src/index";
 
 export type FenceRule =
   /** The calls are not the shape this trade builds. */
@@ -185,4 +202,143 @@ export function checkV3SwapCalls(
     return no("asset", `the path ends at ${ends.last}, not the token quoted`);
   }
   return { ok: true };
+}
+
+// ── the energy lane ─────────────────────────────────────────────────────────
+
+export interface EnergyFenceExpect {
+  /** The route the grant sealed (grantEnergyRoute) — router and the three-hop path. */
+  route: EnergyRoute;
+  /** The account itself. */
+  recipient: `0x${string}`;
+  /** Raw USDG the swap sells and the approve allows — the same number. */
+  amountIn: bigint;
+  /** The post-tax floor the trade was judged against. Compared by EQUALITY. */
+  minOut: bigint;
+  /** The deadline the build was given. */
+  deadline: bigint;
+}
+
+/**
+ * Does this pair of calls do EXACTLY the energy buy that was approved?
+ *
+ * PROVENANCE, as the v3 fence has it: two calls, no value, an approve on USDG
+ * naming the router for exactly the input.
+ *
+ * MEANING, and here the bar is higher than decoding. The swap's calldata must
+ * be BYTE-EQUAL (case-insensitively) to a canonical re-encoding of the approved
+ * terms. The wall pins only words 2, 3 and 5–8 and leaves the amount, the
+ * floor and the deadline open; it also admits trailing bytes, and it cannot
+ * tell a canonical head from one that relocates the path — only its w2 pin
+ * does. A decoder-based check would pass calldata that decodes to the right
+ * values in a non-canonical layout; equality with the one encoding does not.
+ * On inequality it decodes only to NAME the rule: the floor (price-floor), the
+ * recipient, the path (asset), or anything else (build-integrity).
+ *
+ * AND THE LAYOUT THE WALL PINS, asserted on the canonical bytes through the
+ * same helper the wall's own test uses (core energyCallWords): nine words, the
+ * selector 0x5c11d795, the path offset 0xa0, a path of three, and the three
+ * hops. If the encoder ever produced a layout the wall does not pin, the chain
+ * would refuse it after we paid — so the fence refuses it before we sign.
+ *
+ * Unconditional in the energy arm: there is no other builder and no skip.
+ */
+export function checkEnergySwapCalls(calls: readonly FenceCall[], expect: EnergyFenceExpect): FenceVerdict {
+  if (calls.length !== 2) {
+    return no("build-integrity", `expected an approve and the energy swap, got ${calls.length} call(s)`);
+  }
+  const [approve, swap] = calls as [FenceCall, FenceCall];
+  if (approve.value !== 0n || swap.value !== 0n) {
+    return no("build-integrity", "the energy buy moves no ETH, and one of these legs carries value");
+  }
+  const usdg = expect.route.path[0];
+  const router = expect.route.router;
+
+  // ── leg one: the approval, bounded to this buy ──────────────────────────
+  if (!same(approve.to, usdg)) {
+    return no("asset", `the approval is against ${approve.to}, not USDG`);
+  }
+  let approveArgs: readonly unknown[];
+  try {
+    const d = decodeFunctionData({ abi: erc20Abi, data: approve.data });
+    if (d.functionName !== "approve") return no("approval", `the first leg is \`${d.functionName}\`, not an approval`);
+    approveArgs = d.args as readonly unknown[];
+  } catch {
+    return no("approval", "the first leg does not decode as an ERC-20 call");
+  }
+  const [spender, allowance] = approveArgs as [`0x${string}`, bigint];
+  if (!same(spender, router)) {
+    return no("approval", `the approval names ${spender}, not the energy router`);
+  }
+  if (allowance !== expect.amountIn) {
+    return no("approval", `the approval is for ${allowance}, but the buy spends ${expect.amountIn}`);
+  }
+  const canonicalApprove = encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [router, expect.amountIn] });
+  if (approve.data.toLowerCase() !== canonicalApprove.toLowerCase()) {
+    return no("build-integrity", "the approval decodes right but is not its canonical encoding (trailing or re-laid bytes)");
+  }
+
+  // ── leg two: the swap, byte for byte ────────────────────────────────────
+  if (!same(swap.to, router)) {
+    return no("build-integrity", `the swap is addressed to ${swap.to}, not the energy router`);
+  }
+  const canonical = encodeFunctionData({
+    abi: UNISWAP_V2_ENERGY_ABI,
+    functionName: "swapExactTokensForTokensSupportingFeeOnTransferTokens",
+    args: [expect.amountIn, expect.minOut, [...expect.route.path], expect.recipient, expect.deadline],
+  });
+  if (swap.data.toLowerCase() !== canonical.toLowerCase()) return nameEnergyMismatch(swap.data, expect);
+
+  // ── the layout the wall pins, on the bytes about to be signed ───────────
+  const w = energyCallWords(canonical);
+  const hop = (i: number) => `0x${w!.words[i]!.toString(16).padStart(40, "0")}`;
+  if (
+    !w ||
+    w.selector !== ENERGY_SWAP_SELECTOR ||
+    w.words.length !== 9 ||
+    w.words[2] !== 0xa0n ||
+    w.words[5] !== 3n ||
+    !same(hop(3), expect.recipient) ||
+    !expect.route.path.every((a, i) => same(hop(6 + i), a))
+  ) {
+    return no(
+      "build-integrity",
+      "the canonical encoding no longer lays out the words the wall pins (9 words, path at 0xa0, length 3) — the chain would refuse it",
+    );
+  }
+  return { ok: true };
+}
+
+/** The swap bytes are not the canonical ones: say which part differs, never "fine". */
+function nameEnergyMismatch(data: Hex, expect: EnergyFenceExpect): FenceVerdict {
+  if (data.slice(0, 10).toLowerCase() !== ENERGY_SWAP_SELECTOR) {
+    return no("build-integrity", `the swap leg's selector is ${data.slice(0, 10)}, not the fee-on-transfer swap the wall granted`);
+  }
+  let args: readonly unknown[];
+  try {
+    args = decodeFunctionData({ abi: UNISWAP_V2_ENERGY_ABI, data }).args as readonly unknown[];
+  } catch {
+    return no("build-integrity", "the swap leg does not decode as the energy swap");
+  }
+  const [amountIn, amountOutMin, path, to, deadline] = args as [bigint, bigint, readonly string[], string, bigint];
+  if (amountIn !== expect.amountIn) {
+    return no("build-integrity", `the swap sells ${amountIn}, not ${expect.amountIn}`);
+  }
+  if (amountOutMin !== expect.minOut) {
+    return no(
+      "price-floor",
+      `the floor about to be signed is ${amountOutMin}, but this buy was judged against ${expect.minOut}. ` +
+        "A build carrying a different floor is a different trade.",
+    );
+  }
+  if (!same(to, expect.recipient)) {
+    return no("recipient", `the $MERRYMEN would go to ${to}, not the account`);
+  }
+  if (path.length !== expect.route.path.length || !path.every((a, i) => same(a, expect.route.path[i]!))) {
+    return no("asset", `the path is [${path.join(", ")}], not the sealed energy route`);
+  }
+  if (deadline !== expect.deadline) {
+    return no("build-integrity", `the swap's deadline is ${deadline}, not the ${expect.deadline} it was built with`);
+  }
+  return no("build-integrity", "the swap decodes to the approved terms but is not their canonical encoding (non-canonical encoding)");
 }

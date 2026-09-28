@@ -52,10 +52,14 @@ test("the hash is computed locally, BEFORE anyone is asked to accept the operati
 test("THE DURABLE ROW IS WRITTEN BEFORE THE BROADCAST", () => {
   // The property the whole change exists for. If this inverts again, a lost
   // response is once more an operation with no record.
-  const hookAt = EXECUTOR.indexOf("hooks.onSubmitted(userOpHash)");
+  const hookAt = EXECUTOR.indexOf("hooks.onSubmitted(userOpHash,");
   const sendAt = EXECUTOR.indexOf("client.sendUserOperation(signed");
   assert.ok(hookAt > 0 && sendAt > 0, "both call sites must exist");
   assert.ok(hookAt < sendAt, "onSubmitted must run before the send");
+  // And it carries the nonce the hash commits to — the signed operation's, not
+  // an earlier read — which is what lets a dropped op be proven dropped.
+  assert.match(EXECUTOR, /hooks\.onSubmitted\(userOpHash, \{ nonce: typeof prepared\.nonce === "bigint" \? prepared\.nonce : null \}\)/);
+  assert.match(EXECUTOR, /const signed = \{ \.\.\.prepared, signature \};/, "the signed operation IS the prepared one plus its signature");
 });
 
 test("a throw at the send edge is UNRESOLVED, never a revert", () => {

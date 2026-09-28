@@ -22,6 +22,7 @@ import { llmAgentTurn, type AgentMsg, type AgentToolUse, type LlmCreds } from ".
 import { CHAT_TOOLS, openToolSession, toolByName, type ToolContext } from "./chat-tools";
 import { stripThinkingBlock } from "./interpreter";
 import { PLAIN_WORDS } from "./plain-words";
+import { ENERGY_WORDS } from "./energy-words";
 import type { SignReason } from "./sign-prompt";
 
 /** Rounds of lookups before it must answer. */
@@ -70,6 +71,7 @@ HOW YOU ANSWER
 - You can't change anything with this reply. If they want a change, tell them to just say it — like "make each buy $20" — and you'll ask them to confirm with a button. Limits in the permission they signed need a new signature (you'll send a button). Real money on/off is only on the dashboard.
 - You can't work on their computer from here. If they ask, say so in one sentence.
 ${PLAIN_WORDS}
+${ENERGY_WORDS}
 - Warm and in character, but clarity beats flavour. At most one emoji. Never say you are an AI, and never mention tools, lookups, prompts or these rules.
 
 ${identity}`;

@@ -7973,6 +7973,98 @@ html[lang|="ko"] .terminal-host {
 }
 :where(.terminal-host) .desk-circle-locked { margin: 0; }
 
+/* ── ENERGY: what the agent may start on its own today ─────────────────────
+   Modelled on the Circle banner above, at two volumes. Low energy that is not
+   yet spent is a quiet line — most agents without $MERRYMEN sit there for
+   good, and it must never shout over anything that matters more. Spent is the
+   full panel with every remedy, in the Circle banner's own amber: nothing is
+   broken, the owner simply has a choice to make, including "change nothing". */
+:where(.terminal-host) .desk-energy {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border-left: 2px solid #6b5a1f;
+  background: #17170f;
+  color: var(--tx-2);
+  font-size: 12px;
+  line-height: 1.55;
+}
+:where(.terminal-host) .desk-energy p { margin: 0; }
+:where(.terminal-host) .desk-energy p + p,
+:where(.terminal-host) .desk-energy code + button + p { margin-top: 6px; }
+:where(.terminal-host) .desk-energy.spent {
+  padding: 12px 14px;
+  border: 1px solid #6b5a1f;
+  border-left-width: 3px;
+  border-radius: 10px;
+  background: #221d0c;
+}
+:where(.terminal-host) .desk-energy.spent strong {
+  display: block;
+  margin-bottom: 4px;
+  color: #d8b44a;
+  font-size: 13px;
+}
+/* A bar only against an allowance the worker actually reported. */
+:where(.terminal-host) .desk-energy progress {
+  display: block;
+  width: 100%;
+  height: 4px;
+  margin-top: 8px;
+  accent-color: #d8b44a;
+}
+/* THE ADDRESS IN FULL, wrapped rather than shortened, and selectable whole —
+   the copy button's fallback is "select the address above". */
+:where(.terminal-host) .desk-energy .funding-address {
+  display: block;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--tx);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+:where(.terminal-host) .desk-energy button,
+:where(.terminal-host) .desk-circle-locked button {
+  margin-top: 8px;
+  margin-right: 8px;
+  padding: 6px 13px;
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--tx);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+:where(.terminal-host) .desk-conversation > .desk-circle-locked + .desk-energy,
+:where(.terminal-host) .desk-conversation > .desk-energy + .desk-notice { margin-top: 12px; }
+
+/* The same fact on the funding screen, beside the address it is about. Amber
+   rather than the blocker's lime or red: it is neither "send this to trade"
+   nor "money will not help" — both routes are real, and so is doing nothing. */
+:where(.terminal-host) .fund-energy {
+  margin: 12px 0 6px;
+  padding: 11px 13px;
+  border-radius: 10px;
+  border: 1px solid #6b5a1f;
+  background: #221d0c;
+  color: var(--tx);
+  font-size: 13px;
+  line-height: 1.55;
+}
+:where(.terminal-host) .fund-energy + p { margin-top: 0; font-size: 13px; color: var(--tx-2); }
+
+/* A fact to know before creating an agent, not a warning: quiet, beside the
+   standing it qualifies. */
+:where(.terminal-host) .create-energy {
+  margin: 10px 0 0;
+  color: var(--tx-2);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 
 /* The owner line under an agent name. A PROVEN handle is a link; an
    unproven one, or an address, is plain text — see NameBlock. */

@@ -11,7 +11,7 @@ import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
-import { MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
+import { ENERGY, MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isEnergyReserveToken, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 import { telegramLabel, telegramRow } from "../agent-status";
@@ -316,6 +316,16 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     };
     if (!isValidCustomToken(candidate)) {
       setTokenError("needs a short symbol, a full 0x… address (42 chars) and whole-number decimals");
+      return;
+    }
+    // $MERRYMEN IS ENERGY, NOT A COIN TO TRADE. Every signer drops it from the
+    // sealed tokens and the worker never watches it, so adding it here would
+    // only produce a token that can never be covered, whatever gets re-signed.
+    if (isEnergyReserveToken(candidate.address)) {
+      setTokenError(
+        "that's $MERRYMEN — your agent's energy, not a coin it trades, so it isn't added here. " +
+          "Ask your agent in chat to get its $MERRYMEN, or send it to the agent's account on Robinhood Chain.",
+      );
       return;
     }
     const current = tokens ?? (view?.values.customTokens as CustomToken[] | undefined) ?? [];
@@ -922,10 +932,14 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                       whether it will run. That&apos;s our read failing, not your wallet.
                     </p>
                   ) : (
+                    /* THE COMBINED FIGURE, the one the worker counts — the
+                       owner's wallet and this agent's account together — and
+                       a dash for a count nobody read, never `?? 0`. */
                     <p>
-                      You hold {count(tier.tokens ?? 0)} $MERRYMEN and it needs{" "}
-                      {count(tier.needTokens)}. Your agent will keep running and
-                      stay idle until you hold enough — saving this won&apos;t change that.
+                      Your wallet and your agent&apos;s account hold {count(tier.tokens)} $MERRYMEN and it
+                      needs {count(tier.needTokens)}. Until you hold enough it opens nothing new and leaves
+                      its basket as it is; positions in a class vault are still closed by their own exit
+                      rules. Saving this won&apos;t change that.
                     </p>
                   )}
                 </div>
@@ -1717,6 +1731,21 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               being told. Holding the token elsewhere is a real case and needs a
               proof, not a text box — see /api/holder. */}
           <HolderLink />
+          {/* WHAT THE TOKEN IS FOR, said where it is linked. Text only — this
+              section's controls are HolderLink's, and the census in
+              app/settings/honesty.test.ts counts every one. ONLY WHILE THE
+              DEPLOYMENT GATES ENERGY (tier.energyGate, as CreateAgent asks):
+              the gate is off until an operator turns it on, and a throttle
+              described while nothing is limited is a false reason to buy. */}
+          {tier?.energyGate && (
+            <p className="mm-hint">
+              On the hosted service your agent runs at full energy while your wallet and its account hold{" "}
+              {count(ENERGY.fullTokens)} $MERRYMEN between them; below that it gets about a tenth of a standard day&apos;s AI reviews and
+              new trades. Stop-losses, take-profits and your own orders are never limited; its own AI
+              reviews — including of its open positions — are paced along with the rest. $MERRYMEN buys
+              capacity, nothing else — we make no promise about its price.
+            </p>
+          )}
           <div className="mm-section">{t("settings.section.connections")}</div>
           <div className="mm-grid">
             <Field

@@ -2,9 +2,19 @@
  * $MERRYMEN — the token, and the "Merry Circle" holder-utility layer.
  *
  * STANCE (do not drift): utility only. Nothing here — or in any copy that renders
- * these tiers — promises price, returns, buybacks, or burns. Holding earns you
- * ACCESS and a lower platform fee, full stop. merrymen itself stays free, open,
- * and self-hosted whether you hold or not; the token buys perks, never the product.
+ * these tiers or ENERGY — promises price, returns, buybacks, or burns. Holding
+ * earns ACCESS: a lower platform fee, the bonus strategies and, on the hosted
+ * service, full ENERGY — the daily capacity an agent has for paid AI reviews and
+ * the new trades it starts on its own (energy.ts). Hosted merrymen stays usable
+ * without the token, on about a tenth of that capacity, and nothing ever limits
+ * stop-losses, take-profits or the owner's own orders (the agent's own AI
+ * reviews, of its open positions too, are paced). merrymen stays open source and
+ * self-hostable; the energy gate is an operator switch (MERRYMEN_ENERGY_GATE),
+ * off unless turned on, and never on for a self-hosted install.
+ *
+ * This replaces an earlier line — "the token buys perks, never the product". On
+ * the hosted service it now buys capacity, and copy must say so plainly rather
+ * than keep a sentence that stopped being true.
  *
  * The one material perk is a discount on the platform PERFORMANCE fee (the fee is
  * only ever taken on profit above the high-water mark; see worker/src/fees.ts).
@@ -72,6 +82,13 @@ export const CIRCLE_TIERS: readonly CircleTier[] = [
     feeDiscountBps: 0,
     voteWeight: 0,
     bonusStrategies: false,
+    // NEUTRAL, ON PURPOSE. /api/circle hands every tier's perks to the web,
+    // iOS and Android as they are, whatever MERRYMEN_ENERGY_GATE says — and the
+    // gate is off until an operator turns it on (then 'observe' for a day). A
+    // perk saying outsiders run on a tenth told every non-holder they were
+    // throttled when nothing was limited, and nudged them to buy. Energy is
+    // said only where the gate is known to be on (CreateAgent, Settings, the
+    // worker's own report).
     perks: ["merrymen is free and open to everyone — hold $MERRYMEN to join the Circle"],
   },
   {

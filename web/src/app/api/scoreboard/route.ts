@@ -10,6 +10,7 @@ import { isHostedMode, sameBookAsLatest } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
 import { hostedAgentFor } from "@/lib/agent-for";
+import { readMeasuredMark } from "@/lib/held-marks";
 
 export const dynamic = "force-dynamic";
 
@@ -125,7 +126,26 @@ export async function GET(req: Request) {
           .all(account, ...epochArg)) as { equity_usdg: number; at: number; mode: string | null }[];
         // ONE SERIES, ONE BOOK. Both the practice book and the funded one write
         // to `equity`, and the practice book opens at 1,000 USDG.
+        //
+        // HELD MARKS INCLUDED (held-marks.ts): this is the value the book had,
+        // and a raw series divides no flow out, so a late booking cannot move it.
         equity = sameBookAsLatest(erows).map((r) => ({ equity_usdg: r.equity_usdg, at: fmtEpoch(r.at) }));
+      } catch {
+        /* table not created yet */
+      }
+
+      // WHAT P&L IS MEASURED AT: the newest MEASURED mark of the current book,
+      // never one taken while flow inference was held. That row's cash can
+      // carry a top-up or withdrawal not booked yet, and P&L is equity minus
+      // the BOOKED flows — so for the length of a hold (up to 26 hours for a
+      // dropped op) the owner's own cash read as the agent's profit or loss.
+      // Outside a hold this is the newest row, exactly as before.
+      let latestEquity: number | null = null;
+      let latestAt: number | null = null;
+      try {
+        const m = await readMeasuredMark(db, account, epochArg.length ? epochArg[0]! : null);
+        latestEquity = m?.equity ?? null;
+        latestAt = m?.at ?? null;
       } catch {
         /* table not created yet */
       }
@@ -138,15 +158,19 @@ export async function GET(req: Request) {
       // NULL, not zero, when nothing is on record: this is a PUBLIC scoreboard,
       // and "equity minus nothing" published as P&L is the bankroll dressed up
       // as performance.
+      //
+      // AS OF THE MEASURED MARK: a flow booked after it — an owner transfer
+      // that landed during a hold — is not in its cash, and subtracting it
+      // publishes the transfer as profit.
       let contributed: number | null = null;
       try {
         const row = (await db
           .prepare(
             `SELECT COUNT(*) AS n,
                     COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-               FROM flows WHERE agent_id = ?${epochWhere}`,
+               FROM flows WHERE agent_id = ?${epochWhere}${latestAt === null ? "" : " AND at <= ?"}`,
           )
-          .get(account, ...epochArg)) as { n: number; net: number } | undefined;
+          .get(account, ...epochArg, ...(latestAt === null ? [] : [latestAt]))) as { n: number; net: number } | undefined;
         contributed = !row || row.n === 0 ? null : row.net;
       } catch {
         /* flows arrives with a worker migration */
@@ -168,16 +192,6 @@ export async function GET(req: Request) {
         gasUnpriced = row?.unpriced ?? 0;
       } catch {
         /* gas_usdg arrives with a worker migration */
-      }
-
-      let latestEquity: number | null = null;
-      try {
-        const row = (await db
-          .prepare(`SELECT equity_usdg FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 1`)
-          .get(account, ...epochArg)) as { equity_usdg: number } | undefined;
-        latestEquity = row?.equity_usdg ?? null;
-      } catch {
-        /* table not created yet */
       }
 
       // THE DRAWDOWN, COMPUTED OVER THE WHOLE EPOCH — not over `equity`, which
@@ -203,6 +217,11 @@ export async function GET(req: Request) {
       // COALESCE against a sentinel rather than `IS`: it means the same thing in
       // SQLite and in Postgres, and rows written before the column exists are
       // unattributable, so they group with each other and with nothing else.
+      //
+      // Held marks stay in (held-marks.ts): a drawdown of the RAW series divides
+      // no flow out, so a booking that lands late cannot dip it, and the held
+      // mark is the value the book had. The flow-adjusted drawdown the profile
+      // publishes is the one that must skip them, and does.
       const sameBook =
         ` AND COALESCE(mode, 'unattributed') = COALESCE(` +
         `(SELECT mode FROM equity WHERE agent_id = ?${epochWhere} ORDER BY at DESC, id DESC LIMIT 1), 'unattributed')`;

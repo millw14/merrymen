@@ -425,7 +425,8 @@ const BOOK_PERF = z.object({
   measured_run: z.object({ account: z.string(), epoch: z.number().nullable() }).nullable()
     .describe("The one run (smart account and accounting epoch) the equity figures are measured in. A series never joins a paper reset, an accounting change or a re-signed account to what came before."),
   start: z.object({ at: z.string(), equity_usdg: z.number() }).nullable(),
-  end: z.object({ at: z.string(), equity_usdg: z.number() }).nullable(),
+  end: z.object({ at: z.string(), equity_usdg: z.number() }).nullable()
+    .describe("The newest valuation the figures are measured to. A valuation taken while flow inference was held (an operation in flight, its cash not yet split into capital and result) is never one; the caveats say when newer ones exist."),
   change_usdg: z.number().nullable(),
   net_flows_usdg: z.number().nullable().describe("Deposits minus withdrawals in the window (live only; the paper book has none)"),
   flows_count: z.number().nullable(),

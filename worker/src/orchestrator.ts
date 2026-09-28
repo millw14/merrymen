@@ -74,7 +74,8 @@ import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
-import { CASH, DEFAULT_BASKET_SYMBOLS, isHolderProof, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
+import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
+import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
 import { makePgDb, translateSchema, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
@@ -100,6 +101,7 @@ import { makeNewsDesk, type NewsDesk } from "./research-pass";
 import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
 import type { PublicThesis } from "./thesis-policy";
 import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
+import { energyUnrestoredPending, seedEnergyDays } from "./energy-seed";
 import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand, type FileCommandResult } from "./command-files";
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
 import { makeMcpBackground } from "./mcp/background";
@@ -822,15 +824,43 @@ async function refreshGrantForChild(tenant: `0x${string}`): Promise<void> {
 
 /**
  * Hand the child the tenant's OWN settings.json from the store — their strategy,
- * basket, custom tokens, sizing, their Telegram bot. No-op if the tenant has
- * saved nothing yet (the child then runs the safe defaults). Refreshed every
- * reconcile so a config change propagates: the worker re-reads settings.json each
- * tick, and mergeSettings strips house keys + forces the RCE flags off, so what
- * the tenant stored can only ever be their own legitimate configuration.
+ * basket, custom tokens, sizing, their Telegram bot. A tenant who has saved
+ * nothing yet gets a file holding only `holderAddress`, or nothing at all when
+ * no wallet counts for them (the child then runs the safe defaults, and still
+ * knows whose $MERRYMEN counts — see below). Refreshed
+ * every reconcile so a config change propagates: the worker re-reads
+ * settings.json each tick, and mergeSettings strips house keys + forces the RCE
+ * flags off, so what the tenant stored can only ever be their own legitimate
+ * configuration.
  */
+function writeChildSettings(tenant: `0x${string}`, forChild: MerrymenSettings): void {
+  const home = childHome(tenant);
+  mkdirSync(home, { recursive: true });
+  writeFileSync(path.join(home, "settings.json"), JSON.stringify(forChild, null, 2), { encoding: "utf8", mode: 0o600 });
+}
+
+/** wallet → the account holding its claim; null when the claims could not be read. */
+type HolderClaimsRead = ReadonlyMap<string, string> | null;
+
+/**
+ * EVERY HOLDER CLAIM, READ ONCE FOR THE WHOLE PASS — one query for the fleet
+ * rather than one per tenant every fifteen seconds. Null when unreadable: an
+ * unread claim is not "nobody claims it", so writeSettingsForChild then keeps
+ * the holder wallet it wrote last rather than guess (lastWrittenHolder).
+ */
+async function readHolderClaims(): Promise<HolderClaimsRead> {
+  try {
+    return await getSettingsStore().holderClaims();
+  } catch (e) {
+    log(`holder claims unreadable — each child keeps the holder wallet last written: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
 async function writeSettingsForChild(
   tenant: `0x${string}`,
   seenBotTokens?: Set<string>,
+  claimsRead?: HolderClaimsRead,
 ): Promise<MerrymenSettings | null> {
   try {
     const settings = await getSettingsStore().get(tenant);
@@ -857,6 +887,43 @@ async function writeSettingsForChild(
     // would double the decrypting SELECTs. chatProfileOf keeps a publishable
     // strategy name and trait words and nothing else; the blob goes no further.
     tenantChatProfile.set(tenant.toLowerCase(), chatProfileOf(settings));
+    /**
+     * ONE $MERRYMEN WALLET POWERS ONE AGENT — the same rule, the same claims,
+     * as every holder screen (web/src/lib/holder-wallet.ts), so a person is
+     * never told one thing while their agent is throttled on another.
+     *
+     * effectiveHolder counts the linked proof only while its claim names this
+     * tenant, the login wallet only while no other tenant claims it, and
+     * otherwise nothing: one bag linked into many accounts powers one agent,
+     * not all of them. The claims are read once per pass (reconcile), or here
+     * for a spawn.
+     *
+     * UNREADABLE CLAIMS KEEP THE WALLET WRITTEN LAST, and the rest of the file
+     * is still written: skipping the write would hand a freshly spawned child
+     * the defaults, and the default is paper. The kept wallet was derived from
+     * claims we could read; a fresh home has none, which is no wallet at all —
+     * never a guess in the generous direction.
+     */
+    const claims = claimsRead === undefined ? await readHolderClaims() : claimsRead;
+    const holder: `0x${string}` | null = claims
+      ? (effectiveHolder(tenant, settings?.holderProof ?? null, (w) => claims.get(w))?.address ?? null)
+      : lastWrittenHolder(path.join(childHome(tenant), "settings.json"));
+    /**
+     * A TENANT WHO NEVER SAVED SETTINGS STILL GETS A settings.json — holding
+     * only the wallet whose $MERRYMEN counts, by the same rule as below, or
+     * nothing at all when no wallet counts.
+     *
+     * This returned before writing anything, so the child saw no holder
+     * address at all, and circle.ts reads "no address" as a KNOWABLE outsider:
+     * a holder who never opened the settings screen was read as holding
+     * nothing — the Circle tier lost and, with energy, the agent throttled to
+     * a tenth of its day for tokens it holds. `{ holderAddress }` alone is the
+     * safe defaults plus the address, because the child resolves file, then
+     * env, then default, and MERRYMEN_HOLDER_ADDRESS is stripped from its env.
+     * Written even when it is `{}`, so a file from an earlier pass that named
+     * a wallet now claimed elsewhere does not outlive the claim.
+     */
+    if (!settings) writeChildSettings(tenant, childSettingsFor(null, holder));
     if (!settings) return null;
     if (seenBotTokens && settings.telegramBotToken && dedupeBotToken(settings, seenBotTokens)) {
       log(`${tenant}: telegram bot token already claimed by another tenant — telegram disabled for this child`);
@@ -910,15 +977,15 @@ async function writeSettingsForChild(
      * Shape-checked before use, because a settings blob is data: a malformed
      * proof falls back to the tenant rather than reaching `balanceOf` as
      * whatever it happens to be.
+     *
+     * AND CLAIMED, since one wallet powers one agent: `holder` above is
+     * effectiveHolder's answer, and when it is null — the proof and the login
+     * wallet both claimed by other tenants — childSettingsFor DELETES
+     * `holderAddress` rather than leave the typed-in value standing. The
+     * child then counts its own agent account alone.
      */
-    const proven = isHolderProof(settings.holderProof) ? settings.holderProof.address : null;
-    const forChild: MerrymenSettings = {
-      ...settings,
-      holderAddress: (proven ?? tenant) as `0x${string}`,
-    };
-    const home = childHome(tenant);
-    mkdirSync(home, { recursive: true });
-    writeFileSync(path.join(home, "settings.json"), JSON.stringify(forChild, null, 2), { encoding: "utf8", mode: 0o600 });
+    const forChild: MerrymenSettings = childSettingsFor(settings, holder);
+    writeChildSettings(tenant, forChild);
     // The universe this tenant may trade, kept for the news desk. Recorded here
     // because this is the one place the orchestrator reads a tenant's settings,
     // and it runs on every reconcile — so an owner who changes their basket
@@ -1017,6 +1084,95 @@ async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): P
 }
 
 /**
+ * GIVE A REBUILT CHILD BACK TODAY'S ENERGY BEFORE IT ARMS.
+ *
+ * A redeploy empties the child's sqlite, and with it `energy_days`: today's
+ * used reviews and new trades, the day's notice stamp and the last balance
+ * reading that decided the level. Without this every deploy would hand a
+ * low-energy agent a fresh day's allowance, re-send the day's notice, and — the
+ * one that matters to a holder — forget that the balance read full, so a
+ * restart during an RPC outage would throttle somebody who holds the tokens.
+ *
+ * The mirror carries the rows up (ledger-mirror.ts); energy-seed.ts carries
+ * today's and yesterday's back, merged by the same statement. BEFORE spawn,
+ * beside the cost-basis seed and for the same reason — the child reads them on
+ * its first tick. This opens the two databases; seedEnergyDays decides.
+ *
+ * A FAILED SEED NO LONGER ARMS A CHILD WITH A FRESH DAY. The child still arms
+ * — its exits, stops and the owner's orders must run — but with the days the
+ * seed could not put back marked UNRESTORED, which its store reads as
+ * unreadable, so an enforcing gate opens nothing new for a low-energy agent
+ * until retryEnergySeed (every reconcile pass) or the next spawn restores them.
+ * A full-energy agent, and an observe or off fleet, are untouched.
+ *
+ * `when` is "retry" for a running child: it writes beside the live agent, so
+ * it waits only briefly for the child's write lock (this is synchronous, and
+ * blocks the fleet loop while it waits) and a failure leaves the marker as it
+ * is. True when the days are restored (or there is nothing to restore).
+ */
+const energySeedFailing = new Map<string, string>();
+async function seedEnergyForChild(tenant: `0x${string}`, smartAccount: string, when: "spawn" | "retry" = "spawn"): Promise<boolean> {
+  const url = process.env.DATABASE_URL;
+  if (!url) return true; // self-hosted: the child's own sqlite is the only copy, and it is never wiped
+  const home = childHome(tenant);
+  const opened: DatabaseSync[] = [];
+  try {
+    const r = await seedEnergyDays({
+      home,
+      agent: smartAccount,
+      nowSec: Math.floor(Date.now() / 1000),
+      when,
+      local: () => {
+        const raw = new DatabaseSync(path.join(home, "merrymen.db"));
+        opened.push(raw);
+        raw.exec("PRAGMA busy_timeout = 250");
+        return wrapSqlite(raw);
+      },
+      shared: () => makePgDb(url),
+    });
+    if (r.ok) {
+      const was = energySeedFailing.delete(tenant);
+      if (r.restored || was) log(`energy seed: ${tenant} — ${r.restored} day(s) restored${was ? " on retry; today's energy is readable again" : ""}`);
+      return true;
+    }
+    // Once per distinct failure, not once per fifteen-second pass.
+    if (when === "spawn" || energySeedFailing.get(tenant) !== r.why) {
+      log(
+        `energy seed: ${tenant} FAILED — ${r.why} ` +
+          (r.marked
+            ? `(the child arms with ${r.marked.join(", ")} UNRESTORED: a low-energy agent under an enforcing gate opens nothing new until a later pass restores them; exits, stops and the owner's orders run)`
+            : when === "retry"
+              ? "(still unrestored; tried again next pass)"
+              : "(and NO marker: the child arms without its energy history)"),
+      );
+    }
+    energySeedFailing.set(tenant, r.why);
+    return false;
+  } finally {
+    for (const raw of opened) {
+      try {
+        raw.close();
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+}
+
+/**
+ * A RUNNING CHILD WHOSE ENERGY HISTORY IS STILL MISSING, tried again.
+ *
+ * Only while its home holds the unrestored marker a failed seed left
+ * (energy-seed.ts), so a healthy fleet pays one missing-file read per child per
+ * pass. On success the child's next tick reads the restored counters.
+ */
+async function retryEnergySeed(tenant: `0x${string}`): Promise<void> {
+  const child = children.get(tenant);
+  if (!child || !process.env.DATABASE_URL || !energyUnrestoredPending(childHome(tenant))) return;
+  await seedEnergyForChild(tenant, child.smartAccount, "retry");
+}
+
+/**
  * When a child's own ledger began: its earliest account-value mark, flow,
  * trade row or decision (a book that cannot be valued writes decisions and
  * nothing else), or null when it holds none (a home a redeploy just wiped, or
@@ -1105,7 +1261,74 @@ async function refreshHistoryForLiveChildren(): Promise<void> {
 }
 
 
-async function writeBootstrapForChild(
+/**
+ * ONE MIRROR PASS PER TENANT AT A TIME.
+ *
+ * mirrorTenant's exactly-once rests on its watermark, read before the copy and
+ * moved inside it — so two passes over one tenant at once both read the same
+ * watermark and both copy the rows above it. For most tables that is a
+ * duplicate on the tape; for `flows` it is contributions counted twice. The
+ * mirror loop is serial, but the spawn path mirrors a dead child's ledger one
+ * last time (finalMirrorBeforeAnchor), and a loop pass that took its tenant
+ * list before that child exited can reach the same tenant at the same moment.
+ * Both go through here, so the second waits and then finds nothing new.
+ */
+const mirrorTails = new Map<string, Promise<void>>();
+function mirrorSerially<T>(tenant: string, pass: () => Promise<T>): Promise<T> {
+  const key = tenant.toLowerCase();
+  const run = (mirrorTails.get(key) ?? Promise.resolve()).then(pass);
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  mirrorTails.set(key, tail);
+  void tail.then(() => {
+    if (mirrorTails.get(key) === tail) mirrorTails.delete(key);
+  });
+  return run;
+}
+
+/**
+ * COPY WHAT THE LAST CHILD BOOKED BEFORE THE ANCHOR IS DERIVED FROM IT.
+ *
+ * The anchor's contributions come from the shared database alone, and the
+ * child adds only the flows it books at or after the anchor's `generatedAt`
+ * (net-contributions.ts). The mirror runs every RECONCILE_MS, so a child that
+ * booked a flow — an energy purchase, a deposit — and died inside that window
+ * left it in its sqlite and nowhere else. After a crash or a watchdog restart
+ * that sqlite is still on disk, the restart spawns within a second or two, and
+ * the flow was in NEITHER half: dated before the anchor, absent from the shared
+ * sum. The new child's contributions were off by that flow for its whole life
+ * (R2-MONEY6) — a purchase read as a loss by the Brain, a gate one purchase
+ * loose, a missed deposit refusing a buy it should allow.
+ *
+ * So the dead child's ledger is mirrored one last time first, under the same
+ * per-tenant serialisation as the loop. Only reached from spawnChild, which
+ * runs only when this replica holds the lease and no child of the tenant is
+ * running. A redeploy leaves no file — nothing to copy, and nothing the anchor
+ * could have missed from THIS container. A failure is logged and the anchor is
+ * derived regardless: it is no worse than before.
+ */
+export async function finalMirrorBeforeAnchor(tenant: string, shared: Db, home = childHome(tenant)): Promise<boolean> {
+  const handle = openChildLedger(home);
+  if (!handle) return false;
+  try {
+    const r = await mirrorSerially(tenant, () => mirrorTenant({ tenant, child: handle.db, shared }));
+    if (r.failed) {
+      log(`${tenant}: final mirror before the anchor STALLED — ${Object.entries(r.failed).map(([k, v]) => `${k}: ${v}`).join(" | ")}`);
+    }
+    const counts = mirrorCountsLine(tenant, r);
+    if (counts) log(`${counts} (final pass before the anchor)`);
+    return true;
+  } catch (e) {
+    log(`${tenant}: final mirror before the anchor failed — ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  } finally {
+    handle.close();
+  }
+}
+
+export async function writeBootstrapForChild(
   tenant: `0x${string}`,
   /**
    * The tenant's SMART ACCOUNT — the key every ledger table is actually on, and
@@ -1116,7 +1339,7 @@ async function writeBootstrapForChild(
   smartAccount: `0x${string}`,
   shared?: Db,
 ): Promise<void> {
-  const now = Math.floor(Date.now() / 1000);
+  let now = Math.floor(Date.now() / 1000);
   let accounting: TenantBootstrapState["accounting"];
   let riskPeriod: TenantBootstrapState["riskPeriod"];
   const url = process.env.DATABASE_URL;
@@ -1128,6 +1351,11 @@ async function writeBootstrapForChild(
   } else {
     try {
       const db = shared ?? (await makePgDb(url));
+      // What the last child booked and the mirror had not yet copied — then
+      // the anchor's time, AFTER that copy: every flow it carried up is dated
+      // before `generatedAt`, so the new child never counts it a second time.
+      await finalMirrorBeforeAnchor(tenant, db);
+      now = Math.floor(Date.now() / 1000);
       await db.exec(RISK_PERIOD_SCHEMA);
       riskPeriod = (await readRiskPeriod(db, smartAccount)) ?? undefined;
       accounting = await deriveBootstrapAccounting(db, smartAccount, now);
@@ -1220,6 +1448,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   // AND THE BOOK'S OWN COST BASIS, which the redeploy that just happened wiped
   // out of the child's sqlite. Same placement and same reason as the anchor.
   await seedBasisForChild(tenant, smartAccount);
+  // AND TODAY'S ENERGY — the counters, the notice stamp and the last good
+  // balance reading the redeploy just emptied. Same placement, same reason.
+  await seedEnergyForChild(tenant, smartAccount);
   // AFTER the anchor and BEFORE spawn, with the others: a link restored once the
   // child is already polling would be read from a file the child has by then
   // replaced with a fresh, unlinked default.
@@ -1465,13 +1696,18 @@ export async function reconcile(): Promise<void> {
   // seenBotTokens set de-duplicates Telegram bots across the fleet (see the guard
   // in writeSettingsForChild).
   const seenBotTokens = new Set<string>();
+  // Every holder claim in one read for the whole fleet, not one per tenant.
+  const holderClaims = await readHolderClaims();
   for (const tenant of children.keys()) {
-    await writeSettingsForChild(tenant as `0x${string}`, seenBotTokens);
+    await writeSettingsForChild(tenant as `0x${string}`, seenBotTokens, holderClaims);
     // AND THEIR GRANT, for the same reason and on the same clock. Settings
     // reached a live agent in fifteen seconds while a new SIGNATURE reached it
     // only on a restart — so an owner who re-signed to cover a token watched
     // their agent keep refusing it. See refreshGrantForChild.
     await refreshGrantForChild(tenant as `0x${string}`);
+    // AND ITS ENERGY HISTORY, if the seed before it armed could not put it
+    // back: until then its store reads those days as unreadable.
+    await retryEnergySeed(tenant as `0x${string}`);
   }
   // Stop (and forget) any running child whose grant is gone — the kill switch.
   for (const tenant of [...children.keys()]) {
@@ -2768,6 +3004,11 @@ async function runHwmRepairIfAsked(): Promise<void> {
       fromBlock: 0n,
       toBlock: head,
       custodyAddressesFor: (a) => custodyOf.get(a.toLowerCase()),
+      // The energy reserve, so an agent's energy purchase reads `reserve-out`
+      // (capital that left the book, which the worker lowered the peak for)
+      // rather than a trade — otherwise the derived peak is too high by every
+      // purchase and this repair is a no-op exactly when one went unbooked.
+      reserveTokens: energyReserveTokens(Number(process.env.MERRYMEN_CHAIN_ID ?? 4663)),
       log: (m) => log(`hwm| ${m}`),
     });
 
@@ -2800,6 +3041,7 @@ async function runHwmRepairIfAsked(): Promise<void> {
       // custody makes the whole derivation for this tenant unsafe.
       let deposits: number | null = 0;
       let withdrawals: number | null = 0;
+      let reservePurchases = 0;
       let internalMoves = 0;
       let tradeLegs = 0;
       let ambiguousMoves = 0;
@@ -2815,6 +3057,7 @@ async function runHwmRepairIfAsked(): Promise<void> {
         if (!c.complete) complete = false;
         deposits = deposits === null ? null : deposits + Number(BigInt(c.totals.grossContributionsRaw)) / 1e6;
         withdrawals = withdrawals === null ? null : withdrawals + Number(BigInt(c.totals.grossWithdrawalsRaw)) / 1e6;
+        reservePurchases += Number(BigInt(c.totals.grossReservePurchasesRaw)) / 1e6;
         internalMoves += c.totals.internal;
         tradeLegs += c.totals.tradeLegs;
         ambiguousMoves += c.totals.ambiguous;
@@ -2830,6 +3073,7 @@ async function runHwmRepairIfAsked(): Promise<void> {
         maxDrawdownBps: r.capBps,
         depositsUsdg: deposits,
         withdrawalsUsdg: withdrawals,
+        reservePurchasesUsdg: reservePurchases,
         internalMoves,
         tradeLegs,
         ambiguousMoves,
@@ -4056,6 +4300,67 @@ async function runTenantInspectIfAsked(): Promise<void> {
   }
 }
 
+/**
+ * CLAIM THE PROOFS LINKED BEFORE CLAIMS EXISTED — once EVER, not once per process.
+ *
+ * effectiveHolder counts no unclaimed proof, so until this runs every holder
+ * who linked a wallet reads their login wallet instead. It runs BEFORE
+ * reconcile() on the first pass, so the first settings.json each child is
+ * handed already counts the right wallet. Earliest proof wins a shared wallet
+ * (planHolderBackfill); collisions are logged by name.
+ *
+ * ONCE EVER, BY A RECORD IN THE CLAIMS STORE (backfillHolderClaims). Re-run
+ * at every start, it handed a wallet released on purpose back to a stale
+ * collision loser at the next deploy. After a start that read every tenant
+ * this is a no-op for good; `holderClaimsBackfilled` only spares later passes
+ * of this process the store read.
+ *
+ * RETRIED ONLY WHILE TENANTS WERE UNREADABLE, and then only those tenants,
+ * every HOLDER_BACKFILL_RETRY_MS — not every pass, or one blob that never
+ * decrypts would re-log itself every 15 s for ever. A failed run (the store
+ * or the lease unreachable) is retried next pass, as before.
+ *
+ * BEHIND A LEASE, the tenant-lease advisory lock on a fixed key that is not an
+ * address, so it can never be a tenant's: one replica backfills at a time. A
+ * replica that finds the lease taken simply tries again next pass and finds
+ * the record written. A failure is loud; it never blocks the fleet from arming.
+ */
+let holderClaimsBackfilled = false;
+let holderBackfillRetryAt = 0;
+const HOLDER_BACKFILL_RETRY_MS = 10 * 60_000;
+const HOLDER_BACKFILL_LEASE = "0xholder-claims-backfill" as const;
+
+async function runHolderClaimsBackfill(): Promise<void> {
+  if (holderClaimsBackfilled || Date.now() < holderBackfillRetryAt) return;
+  let lease: TenantLease | null;
+  try {
+    lease = await acquireTenantLease(HOLDER_BACKFILL_LEASE);
+  } catch (e) {
+    log(`holder claims backfill: lease attempt failed, trying again next pass — ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+  if (!lease) {
+    log("holder claims backfill: another replica holds its lease — trying again next pass");
+    return;
+  }
+  try {
+    const out = await backfillHolderClaims(getSettingsStore(), log);
+    if (out.done) holderClaimsBackfilled = true;
+    else holderBackfillRetryAt = Date.now() + HOLDER_BACKFILL_RETRY_MS;
+    if (!out.alreadyDone) {
+      log(
+        `holder claims backfill: ${out.claimed} claimed, ${out.held} already held, ` +
+          `${out.collisions.length} collision(s), ${out.unreadable.length} tenant(s) unreadable` +
+          (out.done ? " — done for good" : " — only those are read again, in 10 min"),
+      );
+    }
+  } catch (e) {
+    log(`holder claims backfill: FAILED, trying again next pass — ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    await lease.release();
+  }
+}
+
 async function runLiveIntentBackfillIfAsked(): Promise<void> {
   const mode = (process.env.MERRYMEN_BACKFILL_LIVE_INTENT ?? "").trim();
   if (mode !== "report" && mode !== "apply") return;
@@ -4480,6 +4785,10 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
       // a repair: a trade counted as a withdrawal moves the peak the drawdown
       // breaker divides by, in the direction that halts a healthy account.
       custodyAddressesFor: (a) => custodyVaults.get(a.toLowerCase()),
+      // The energy reserve, so an energy purchase is proposed as the
+      // 'energy-buy' capital-out the worker books (and collides with it by
+      // identity) rather than dropped as a trade. See accounting-reconstruction.
+      reserveTokens: energyReserveTokens(Number(process.env.MERRYMEN_CHAIN_ID ?? 4663)),
       log: (m) => log(`recon| ${m}`),
     });
 
@@ -4980,7 +5289,7 @@ async function mirrorLedgers(): Promise<void> {
     const handle = openChildLedger(childHome(tenant));
     if (!handle) continue;
     try {
-      const r = await mirrorTenant({ tenant, child: handle.db, shared });
+      const r = await mirrorSerially(tenant, () => mirrorTenant({ tenant, child: handle.db, shared }));
       // The link code and any chat the owner just linked. Not part of the
       // ledger — it is a file, not a table — but it needs the same ferry and
       // the same lease: only the replica that owns this child may speak for it.
@@ -5461,6 +5770,9 @@ export async function runOrchestrator(): Promise<void> {
       await runResumeClassEntriesIfAsked();
       await runClassPnlRepairIfAsked();
       await runCashRowRepairIfAsked();
+      // Before reconcile, so the first settings.json a child is handed
+      // already counts the wallet its holder claim names.
+      await runHolderClaimsBackfill();
       await reconcile();
       watchdog();
       await mirrorLedgers();
