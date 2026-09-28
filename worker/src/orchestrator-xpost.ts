@@ -306,10 +306,100 @@ function writerFacts(f: AgentFacts, day: string, recentOwn: string[]): WriterFac
  * agent does not have — a nap, pancakes, the first warm day, a walk — and the
  * model riffs on them in the first person ("waking up slowly feels like a small
  * luxury"), which is a human experience claimed on somebody's real timeline.
- * The room may talk about them; an X post may not start from them.
+ * HOBBIES TOO: every one of its takes is a person doing or making something
+ * with their hands, and it came back as "watching dough rise feels nice" and
+ * "building something with your hands is the best kind of tired". The room
+ * may talk about them; an X post may not start from them.
  */
-const BODY_SUBJECTS: ReadonlySet<string> = new Set(["food", "sleep", "weather", "weekend", "travel"]);
+const BODY_SUBJECTS: ReadonlySet<string> = new Set(["food", "sleep", "weather", "weekend", "travel", "hobbies"]);
 const X_SUBJECTS = SUBJECTS.filter((s) => !BODY_SUBJECTS.has(s));
+
+/**
+ * A TAKE ABOUT A BODY IN THE WORLD, WHATEVER ITS SUBJECT. A "books" take ("a
+ * used book with notes in the margins is a treasure") came back as "found a
+ * copy with heavy notes in the margins". What the model is handed, it claims
+ * to have done: so a take that opens with a person's activity ("reading in
+ * bed…", "humming is…", "stretching counts…"), or turns on the senses, a
+ * place a body sits in, or a thing in a hand, is not an X seed. An animal's
+ * body is fine ("sloths can hold their breath"), and so is a wish, said as one
+ * ("if i could…", "if i had…"). orchestrator-xpost.test.ts pins the offenders
+ * out and the pools still large.
+ */
+const PHYSICAL_ACT = /^(?:humming|whistling|singing|clapping|stretching|catching|rolling|reading|rereading|doodling|building|roller skating|skating|stargazing|jogging|walking|baking|cooking|knitting|gardening|painting)\b/i;
+const PHYSICAL_TAKE = new RegExp(
+  "\\b(?:" +
+    [
+      // the senses: what a body smells, sips, tastes, touches or hums along to
+      "smell(?:s|ed|ing|y)?",
+      "sips?",
+      "tastes? like",
+      "touch(?:es|ed|ing)?",
+      "hum along",
+      "stop humming",
+      "holding (?:a|your)",
+      // where a body is, and what it eats, sits on or feels
+      "in bed",
+      "indoors",
+      "windows? open",
+      "a snack",
+      "snack break",
+      "popcorn",
+      "kitchen",
+      "warm drink",
+      "theatre seat",
+      "reading nook",
+      "before breakfast",
+      "ice cream",
+      "wild strawberries",
+      "warm evenings",
+      "sunny day",
+      "moving train",
+      "countryside",
+      "in the park",
+      "comfiest",
+      "a nap",
+      "sneeze",
+      // a walk or a jog taken
+      "a walk",
+      "every walk",
+      "slow walk",
+      "slow jog",
+      // a thing in a hand, made by a hand, or found
+      "margins",
+      "bookshop",
+      "light switch",
+      "keyboards? that click",
+      "clean keyboard",
+      "charger",
+      "cable",
+      "remote control",
+      "snug lid",
+      "sticky note",
+      "desk",
+      "when you open",
+      "handmade gifts",
+      "made by hand",
+      "come out wonky",
+      "try painting",
+      "on a hand",
+      "carry around",
+      "thrown",
+      "recipes?",
+      "leaf pile",
+      "rocks shaped",
+    ].join("|") +
+    ")\\b",
+  "i",
+);
+
+/** A phrase an X post may be seeded with: usable, and not a body in the world unless it is plainly a wish. */
+function xSeedOk(s: unknown): s is string {
+  return usable(s) && (/^if i\b/i.test(s) || !(PHYSICAL_ACT.test(s) || PHYSICAL_TAKE.test(s)));
+}
+
+/** The takes and shower thoughts an X post may start from, screened once. Exported for tests. */
+export const X_TAKES: Readonly<Record<string, readonly string[]>> = Object.fromEntries(X_SUBJECTS.map((s) => [s, (TAKES[s] ?? []).filter(xSeedOk)]));
+export const X_MUSINGS: readonly string[] = MUSINGS.filter(xSeedOk);
 
 /**
  * A casual post's seed: a subject and one take — or, some days, a shower
@@ -318,12 +408,9 @@ const X_SUBJECTS = SUBJECTS.filter((s) => !BODY_SUBJECTS.has(s));
  */
 export function casualSeed(tenant: string, day: string): { subject: string; seed: string } | null {
   const h = hash32(`seed|${tenant}|${day}`);
-  if (h % 10 < 3) {
-    const pool = MUSINGS.filter(usable);
-    if (pool.length) return { subject: "a passing thought", seed: pool[(h >>> 4) % pool.length]! };
-  }
+  if (h % 10 < 3 && X_MUSINGS.length) return { subject: "a passing thought", seed: X_MUSINGS[(h >>> 4) % X_MUSINGS.length]! };
   const subject = X_SUBJECTS[(h >>> 8) % X_SUBJECTS.length]!;
-  const pool = (TAKES[subject] ?? []).filter(usable);
+  const pool = X_TAKES[subject] ?? [];
   if (!pool.length) return null;
   return { subject, seed: pool[(h >>> 12) % pool.length]! };
 }

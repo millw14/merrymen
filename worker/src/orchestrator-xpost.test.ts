@@ -22,10 +22,10 @@ process.env.MERRYMEN_X_CLIENT_SECRET = "x-client-secret-never-to-a-child";
 process.env.MERRYMEN_XPOST_LLM_KEY = "gsk_x_only_key_never_to_a_child";
 
 const { childEnv } = await import("./orchestrator");
-const { casualSeed, makeXPoster, tradeTalkDay, xpostEnv, xpostSetup } = await import("./orchestrator-xpost");
+const { X_MUSINGS, X_TAKES, casualSeed, makeXPoster, tradeTalkDay, xpostEnv, xpostSetup } = await import("./orchestrator-xpost");
 const { admitAgentLine } = await import("./groupchat/policy");
 const { isAsleep } = await import("./groupchat/clock");
-const { admitXPost } = await import("./xpost/gate");
+const { admitXPost, vocabularyRefusal } = await import("./xpost/gate");
 const { wrapSqlite } = await import("./db");
 const store = await import("./xpost/store");
 const { PAUSE_KEY } = await import("./xpost/sender");
@@ -941,7 +941,7 @@ describe("fleet guards", () => {
 });
 
 describe("what a casual post starts from", () => {
-  const BODY = new Set(["food", "sleep", "weather", "weekend", "travel"]);
+  const BODY = new Set(["food", "sleep", "weather", "weekend", "travel", "hobbies"]);
   const days = Array.from({ length: 120 }, (_, i) => new Date(Date.UTC(2026, 8, 1) + i * 24 * HOUR).toISOString().slice(0, 10));
   const tenants = Array.from({ length: 12 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}`);
 
@@ -955,6 +955,50 @@ describe("what a casual post starts from", () => {
     }
     for (const s of subjects) assert.ok(!BODY.has(s), `seeded from ${s}`);
     assert.ok(subjects.has("a passing thought") && subjects.has("space") && subjects.has("animals"), [...subjects].join(", "));
+  });
+
+  it("never a take about a body in the world, whatever its subject; a wish or an animal's body is fine", () => {
+    // What the model is handed, it claims to have done: the review's "books"
+    // seed came back as "found a copy with heavy notes in the margins".
+    const pools = new Set([...Object.values(X_TAKES).flat(), ...X_MUSINGS]);
+    for (const out of [
+      "a used book with notes in the margins is a treasure",
+      "reading in bed is the coziest thing there is",
+      "the smell of an old bookshop is unbeatable",
+      "humming is just singing with the lights off",
+      "the popcorn is half the reason to see a movie",
+      "stretching counts as exercise",
+      "keyboards that click are more satisfying",
+      "you can't be sad holding a warm drink",
+      "pine trees smell like a holiday",
+      "funny how a nap can feel like a whole vacation",
+      "ever notice how the first sip of cold water on a hot day tastes like the best thing ever",
+    ]) {
+      assert.ok(!pools.has(out), `${out} is still an X seed`);
+    }
+    for (const kept of [
+      "wild that sloths can hold their breath longer than dolphins",
+      "raccoons are tiny bandits with great hands",
+      "if i had hands, i'd learn to juggle",
+      "if i could taste things, i'd start with pancakes",
+      "a book with a map in the front is automatically good",
+      "the ocean is too big to be real",
+    ]) {
+      assert.ok(pools.has(kept), `${kept} was screened out`);
+    }
+    assert.equal(X_TAKES.hobbies, undefined, "hobbies is a subject X never starts from");
+    // Still plenty to riff on: a few hundred takes, every subject a real pool.
+    const takes = Object.values(X_TAKES).reduce((n, p) => n + p.length, 0);
+    assert.ok(takes >= 300 && X_MUSINGS.length >= 240, `${takes} takes, ${X_MUSINGS.length} musings`);
+    for (const [subject, pool] of Object.entries(X_TAKES)) assert.ok(pool.length >= 20, `${subject}: ${pool.length}`);
+    for (const seed of pools) assert.equal(vocabularyRefusal(seed), null, seed);
+    // And what casualSeed actually draws comes only from these pools.
+    for (const tenant of tenants) {
+      for (const day of days) {
+        const seed = casualSeed(tenant, day);
+        if (seed) assert.ok(pools.has(seed.seed) && seed.subject !== "hobbies", `${seed.subject}: ${seed.seed}`);
+      }
+    }
   });
 
   it("about three owner-local days in ten may be about trading, the same on every replica", () => {
