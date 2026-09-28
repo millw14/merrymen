@@ -82,7 +82,8 @@ final class PreviewTransport: URLProtocol {
     /// one post coming up (due in half an hour — a casual post is due 20 to 45
     /// minutes after it is drafted) and one posted. Like the server, every write must
     /// carry the site's Origin and the signed-in owner, and each body must have
-    /// exactly the contract's keys. The confirmed enable must also be the FIRST
+    /// exactly the contract's keys; enable's `tz` must be the zone this device
+    /// is in. The confirmed enable must also be the FIRST
     /// write since launch: a warning answered "Not now" that sent anything at
     /// all makes the enable that follows it fail.
     private func xPosting(_ path: String) -> (body: String, status: Int) {
@@ -123,7 +124,8 @@ final class PreviewTransport: URLProtocol {
         }
         switch input["action"] as? String {
         case "enable":
-            guard keys == ["action", "xUserId", "owner"] else { return (#"{"error":"Unexpected fields in X posting consent"}"#, 400) }
+            // Consent carries the device's zone, so nothing goes out while the owner sleeps.
+            guard keys == ["action", "xUserId", "owner", "tz"], input["tz"] as? String == TimeZone.current.identifier else { return (#"{"error":"Unexpected fields in X posting consent"}"#, 400) }
             guard earlier == 0 else { return (#"{"error":"Something was sent before this confirmed enable"}"#, 400) }
             guard input["xUserId"] as? String == "2244994945", !d.bool(forKey: "uiTest.xDisconnected") else {
                 return (#"{"error":"The connected X account changed — check which account is connected and try again."}"#, 409)

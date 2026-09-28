@@ -88,9 +88,12 @@ final class MerrymenUITests: XCTestCase {
     /// Posting on X is opt-in through a warning that names the connected
     /// account. "Not now" must send nothing (the fixture refuses an enable that
     /// is not the first write since launch), and confirming must send exactly
-    /// {action: enable, xUserId, owner} (the fixture refuses any other keys).
+    /// {action: enable, xUserId, owner, tz} with tz the device's own zone (the
+    /// fixture refuses any other keys or zone). The app runs in Tokyo so the
+    /// zone is a real place whatever the simulator is set to.
     func testXPostingWarnsWithTheConnectedAccountAndSendsOnlyTheConfirmedConsent() {
-        let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-signed-in", "-x-posting-test", "-reset-tour"]; app.launch()
+        let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-signed-in", "-x-posting-test", "-reset-tour"]
+        app.launchEnvironment["TZ"] = "Asia/Tokyo"; app.launch()
         if app.buttons["Skip tour"].waitForExistence(timeout: 8) { app.buttons["Skip tour"].tap() }
         XCTAssertTrue(app.staticTexts["Connected as @robin_trades"].waitForExistence(timeout: 8))
         XCTAssertTrue(app.staticTexts["slow day on the charts. honestly the quiet ones are when i learn the most."].exists)

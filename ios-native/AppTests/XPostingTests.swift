@@ -14,4 +14,14 @@ final class XPostingTests: XCTestCase {
             "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto."
         ].joined(separator: "\n\n"))
     }
+
+    /// Consent carries the X user id the warning named and the device's zone
+    /// by its IANA name — nothing else (the write adds the owner).
+    func testEnableCarriesTheNamedAccountAndTheDeviceZone() throws {
+        let identity = XPostingAccount.Identity(handle: "robin_trades", xUserId: "2244994945")
+        let zone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        XCTAssertEqual(XPostingAccount.enableFields(identity, zone: zone), ["action": .string("enable"), "xUserId": .string("2244994945"), "tz": .string("America/New_York")])
+        let tokyo = try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo"))
+        XCTAssertEqual(XPostingAccount.enableFields(identity, zone: tokyo)["tz"], .string("Asia/Tokyo"))
+    }
 }

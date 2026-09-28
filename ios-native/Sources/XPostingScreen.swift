@@ -10,7 +10,8 @@ import MerrymenPolicy
 /// names the connected account (`@handle`, as the server read it from X), and
 /// only that warning's own button sends `enable` — carrying the X user id the
 /// warning named, so the server refuses (409) if a different account is
-/// connected by then. "Not now", or dismissing the warning, sends nothing.
+/// connected by then, and the device's time zone, so nothing goes out while
+/// the owner is asleep. "Not now", or dismissing the warning, sends nothing.
 /// Turning it off sends `disable` at once: that direction is always safe.
 ///
 /// UNREAD IS NOT "NOT CONNECTED". The screen shows the connect button only
@@ -175,8 +176,15 @@ struct XPostingScreen: View {
 
     // MARK: writing — every body names the owner who acted; the server refuses another session
 
+    /// CONSENT CARRIES THE DEVICE'S ZONE. The Merryman plans and sends nothing
+    /// while the owner is asleep, but only if it knows where the owner is; the
+    /// room's zone is often unknown (an iOS-only owner who never opened its
+    /// picker, a fleet with the room off). So the zone this phone is in goes
+    /// with the consent, as an IANA name, and the server keeps it as the
+    /// fallback. It validates the name and treats a placeless one (UTC, GMT)
+    /// as unknown, so this sends what the device says and decides nothing.
     private func enable(_ identity: XPostingAccount.Identity) {
-        write(["action": .string("enable"), "xUserId": .string(identity.xUserId)])
+        write(XPostingAccount.enableFields(identity, zone: .current))
     }
 
     private func skip(_ post: XPostingAccount.Post) {
@@ -285,6 +293,12 @@ struct XPostingAccount: Equatable {
         } else { identity = nil }
         upcoming = connected ? v["upcoming"].array.compactMap { Self.post($0, time: "dueAt", link: nil) } : []
         recent = v["recent"].array.compactMap { row in Self.post(row, time: "sentAt", link: row["url"].string.flatMap(URL.init(string:)).flatMap { policy.isXPostLink($0) ? $0 : nil }) }
+    }
+
+    /// The confirmed enable, owner aside (every write adds it): the X user id
+    /// the warning named and the zone the device is in.
+    static func enableFields(_ identity: Identity, zone: TimeZone) -> [String: J] {
+        ["action": .string("enable"), "xUserId": .string(identity.xUserId), "tz": .string(zone.identifier)]
     }
 
     private static func post(_ row: J, time: String, link: URL?) -> Post? {
