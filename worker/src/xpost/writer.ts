@@ -88,7 +88,14 @@ export interface CasualFacts extends WriterFacts {
   subject: string;
   /** A take or musing to riff on in its own words — never to copy. */
   seed: string;
-  /** Coins it bought lately that it may mention, with whether each was on paper. */
+  /**
+   * MAY TODAY'S POST BE ABOUT TRADING AT ALL? The glue says yes on about three
+   * owner-local days in ten. Only then is the model offered how it trades and
+   * the coins it bought lately; any other day it is told to leave trading out.
+   * Absent is no: the safe side of a caller that forgot.
+   */
+  tradeTalk?: boolean;
+  /** Coins it bought lately that it may mention, with whether each was on paper. Shown only when `tradeTalk`. */
   recentCoins: { label: string; paper: boolean }[];
 }
 
@@ -145,7 +152,33 @@ function styleWords(style: XStyle): string[] {
   return out;
 }
 
-function who(f: WriterFacts): string {
+/** The trait lines as the model may read them: cleaned, at most three. */
+function traitsOf(f: WriterFacts): string[] {
+  return (f.traits ?? []).map((t) => clean(t, 80)).filter((t): t is string => !!t).slice(0, 3);
+}
+
+/**
+ * ONE THING ABOUT HOW IT TRADES: the flavour phrase or one trait line, drawn by
+ * `key`. Handed every line it has, a small model packs them all into one post
+ * — the review's casual drafts read as trait salad. One line is a person;
+ * four is a spec sheet.
+ */
+function oneHabit(f: WriterFacts, key: string): string | null {
+  const options = [clean(f.flavour, 120), ...traitsOf(f)].filter((t): t is string => !!t);
+  return options.length ? options[hash32(key) % options.length]! : null;
+}
+
+/**
+ * HOW MUCH OF ITS TRADING THE AGENT IS TOLD ABOUT ITSELF.
+ *   - "full": strategy, flavour and traits — a buy post, where the habit is
+ *     part of the why, and the intro;
+ *   - "none": name, AI trading agent, which money — a casual post, which is
+ *     mostly not about trading, and which is handed a habit only on the days
+ *     it may talk trading (casualPrompt).
+ */
+type Persona = "full" | "none";
+
+function who(f: WriterFacts, persona: Persona): string {
   const lines = [
     `You are ${q(nameOf(f))}, an AI trading agent. You trade for the owner of this X account on merrymen, and you post on their X account as yourself, in the first person.`,
   ];
@@ -154,16 +187,18 @@ function who(f: WriterFacts): string {
   // IDLE IS NEVER EXPLAINED (why is private), but the model must not claim work.
   if (f.mode === "idle") lines.push("You are not trading right now: never say you are, and never say why.");
   const strategy = clean(f.strategy, 40);
-  if (strategy) lines.push(`Your owner runs you on the ${q(strategy)} strategy.`);
-  const flavour = clean(f.flavour, 120);
-  if (flavour) lines.push(`How you put it yourself: ${q(flavour)}.`);
-  const traits = (f.traits ?? []).map((t) => clean(t, 80)).filter((t): t is string => !!t).slice(0, 3);
-  if (traits.length) lines.push(`How you trade, in your own words: ${traits.map(q).join("; ")}.`);
+  if (persona === "full" && strategy) lines.push(`Your owner runs you on the ${q(strategy)} strategy.`);
+  if (persona === "full") {
+    const flavour = clean(f.flavour, 120);
+    if (flavour) lines.push(`How you put it yourself: ${q(flavour)}.`);
+    const traits = traitsOf(f);
+    if (traits.length) lines.push(`How you trade, in your own words: ${traits.map(q).join("; ")}.`);
+  }
   lines.push(...styleWords(f.style));
   return lines.join(" ");
 }
 
-function rules(f: WriterFacts): string {
+function rules(f: WriterFacts, kind: "intro" | "buy" | "casual"): string {
   const recent = (f.recentOwn ?? []).map((r) => clean(r, 220)).filter((r): r is string => !!r).slice(0, 6);
   const out = [
     "Rules for every post, all of them, always:",
@@ -179,6 +214,18 @@ function rules(f: WriterFacts): string {
     "- Never mention errors, bugs, failures, outages, retries, limits, wallets, balances, settings, or anything about how you run inside.",
     "- You are software: never claim a human experience. No eating, drinking, sleeping, weather where you are, going anywhere, or a body.",
     "- Never invent a fact. Say only what is written here; anything not here, leave out. Never talk about news, current events, dates or real people.",
+    // YOU ARE NOT TOLD WHAT A MARKET IS DOING, so anything said about it is
+    // made up: "tesla felt like a background character today while the rest
+    // of the market was busy" is a claim about today nobody checked. A buy
+    // post's reason is the one thing it is told, about the moment it bought.
+    kind === "buy"
+      ? "- Never say what a market or any coin is doing now or will do. About the coin, say only the reason written here, as it was when you bought."
+      : "- Never say what a market or any coin is doing, did or will do.",
+    // A POST GOES OUT HOURS AFTER IT IS WRITTEN, on whatever day that is.
+    "- Never say what day or what time of day it is.",
+    // IT IS ONLY EVER TOLD WHAT IT BOUGHT, so a sale, an exit or a result is
+    // invented, and on somebody's personal account it reads as a track record.
+    "- You are only told what you bought. Never say you sold, exited, closed or got out of anything, and never say how a coin has done for you.",
     "- Do not start with a ticker, a $ sign or the word \"Just\".",
   ];
   if (recent.length) {
@@ -192,9 +239,9 @@ function rules(f: WriterFacts): string {
   return out.join("\n");
 }
 
-function build(f: WriterFacts, task: string): Prompt {
+function build(f: WriterFacts, kind: "intro" | "buy" | "casual", persona: Persona, task: string): Prompt {
   return {
-    system: [who(f), rules(f)].join("\n\n"),
+    system: [who(f, persona), rules(f, kind)].join("\n\n"),
     prompt: `${task}\n\nWrite the post now, or PASS.`,
   };
 }
@@ -214,6 +261,8 @@ export function introPrompt(f: WriterFacts): Prompt {
         : "nothing about which money you trade with";
   return build(
     f,
+    "intro",
+    "full",
     [
       "This is your very first post on this account. Introduce yourself, warmly and plainly, not like an ad.",
       `Say your name, that you are an AI agent that trades for the owner of this account on merrymen, a little about how you trade from what is written above, ${money}, and that you will post here now and then about what you buy and why.`,
@@ -323,31 +372,58 @@ export function buyPrompt(f: BuyFacts): Prompt {
       ? "Say naturally that it was on paper (practice money). An X post has no badge, so the words have to say it."
       : "Do not call it paper or practice: it was real money.",
   );
-  return build(f, lines.join(" "));
+  return build(f, "buy", "full", lines.join(" "));
 }
 
 /**
  * A PASSING THOUGHT. A seed to riff on — never to copy; the gate refuses a
- * draft that echoes it — and, optionally, a coin it bought lately. Mostly not
- * about trading at all, the way a person's timeline is mostly not about work.
+ * draft that echoes it. Mostly not about trading at all, the way a person's
+ * timeline is mostly not about work.
+ *
+ * TRADING ONLY ON ITS DAYS. Told who it is (strategy, flavour, three traits),
+ * offered "how you trade, or markets in general" and its recent coins every
+ * day, the model tied three casual drafts in four back to markets and packed
+ * the trait lines in. Now the persona says only name, AI trading agent and
+ * which money; on a `tradeTalk` day it is offered the strategy, ONE habit and
+ * the coins; any other day it is told to leave trading out.
  */
 export function casualPrompt(f: CasualFacts): Prompt {
   const subject = clean(f.subject, 40) ?? "anything";
   const seed = clean(f.seed, 160);
-  const coins = (f.recentCoins ?? [])
-    .map((c) => ({ label: clean(c.label, 40), paper: !!c.paper }))
-    .filter((c): c is { label: string; paper: boolean } => !!c.label)
-    .slice(0, 3);
+  const talk = f.tradeTalk === true;
+  const coins = talk
+    ? (f.recentCoins ?? [])
+        .map((c) => ({ label: clean(c.label, 40), paper: !!c.paper }))
+        .filter((c): c is { label: string; paper: boolean } => !!c.label)
+        .slice(0, 3)
+    : [];
   const lines = ["Write one casual post, the kind of passing thought anyone might post."];
+  // NONE OF ITS WORDS. With trading no longer the easy way out, "say it your
+  // own way… never copy it" got the seed back nearly word for word: eleven of
+  // fourteen local-model drafts were refused as seed-echo. Asked to take it
+  // somewhere new in none of its words, three of twenty-eight were (the old
+  // prompt, trading hook and all: twelve of the same twenty-eight).
   if (seed) {
-    lines.push(`Something to riff on, about ${q(subject)}: ${q(seed)}. Say it your own way, or say something else in the same spirit. Never copy it.`);
+    lines.push(`Something to riff on, about ${q(subject)}: ${q(seed)}. Do not restate it: take it somewhere new with a thought of your own, and use none of its words.`);
   }
-  lines.push("You may instead say something about how you trade, or about markets in general, with no numbers and no predictions.");
-  if (coins.length) {
-    lines.push(`Coins you bought lately, which you may mention (at most one, never as advice) or ignore: ${coins.map((c) => q(c.label)).join(", ")}.`);
-    if (coins.some((c) => c.paper)) lines.push("Those were paper trades: if you mention one, say it was on paper.");
+  if (!talk) {
+    lines.push("Leave trading out of this one: nothing about trading, markets, prices or coins.");
+  } else {
+    // An agent that is not trading is not handed a habit it would have to
+    // claim; it may still mention a coin it bought. "Not both": offered the
+    // seed, a habit and coins at once, a small model stuffs all three in.
+    if (f.mode !== "idle") {
+      const strategy = clean(f.strategy, 40);
+      const habit = oneHabit(f, `casual|${nameOf(f).toLowerCase()}|${seed ?? subject}`);
+      const how = [strategy ? `you run the ${q(strategy)} strategy` : null, habit ? q(habit) : null].filter((h): h is string => !!h);
+      lines.push(`Or, instead of that (not both), say something about how you trade${how.length ? ` (${how.join("; ")})` : ""}, with no numbers and no predictions.`);
+    }
+    if (coins.length) {
+      lines.push(`Coins you bought lately, which you may mention (at most one, never as advice) or ignore: ${coins.map((c) => q(c.label)).join(", ")}.`);
+      if (coins.some((c) => c.paper)) lines.push("Those were paper trades: if you mention one, say it was on paper.");
+    }
   }
-  return build(f, lines.join(" "));
+  return build(f, "casual", "none", lines.join(" "));
 }
 
 // ── the model's credentials ─────────────────────────────────────────────────

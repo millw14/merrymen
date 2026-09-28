@@ -43,6 +43,7 @@ const CASUAL: CasualFacts = {
   ...BASE,
   subject: "food",
   seed: "soup is a perfectly good meal in any weather",
+  tradeTalk: true,
   recentCoins: [
     { label: "pepe", paper: true },
     { label: "Tesla", paper: false },
@@ -55,7 +56,7 @@ const all = (p: Prompt) => `${p.system}\n${p.prompt}`;
 
 describe("the model is never shown a number, anything private, or an example", () => {
   it("no digit anywhere in any prompt, style figures included", () => {
-    for (const p of [introPrompt(BASE), buyPrompt(BUY), casualPrompt(CASUAL)]) assert.doesNotMatch(all(p), /\p{N}/u);
+    for (const p of [introPrompt(BASE), buyPrompt(BUY), casualPrompt(CASUAL), casualPrompt({ ...CASUAL, tradeTalk: false })]) assert.doesNotMatch(all(p), /\p{N}/u);
   });
 
   it("a fact that carries a digit is dropped, not shown", () => {
@@ -88,12 +89,28 @@ describe("the model is never shown a number, anything private, or an example", (
 
 describe("what each prompt asks for", () => {
   it("every prompt carries the rules that make it a person, not a bot", () => {
-    const s = introPrompt(BASE).system;
-    for (const rule of [/ONE post for X/, /under two hundred characters/, /phone/, /No hashtags, no @mentions, no links/, /No numbers at all/, /No advice/, /Never an alert/, /Never mention errors/, /never claim a human experience/, /Never invent a fact/, /Do not start with a ticker, a \$ sign or the word "Just"/, /PASS/, /all lowercase/i]) {
-      assert.match(s, rule);
+    for (const s of [introPrompt(BASE).system, buyPrompt(BUY).system, casualPrompt(CASUAL).system]) {
+      for (const rule of [/ONE post for X/, /under two hundred characters/, /phone/, /No hashtags, no @mentions, no links/, /No numbers at all/, /No advice/, /Never an alert/, /Never mention errors/, /never claim a human experience/, /Never invent a fact/, /Do not start with a ticker, a \$ sign or the word "Just"/, /PASS/, /all lowercase/i]) {
+        assert.match(s, rule);
+      }
+      assert.match(s, /must not repeat/);
+      assert.match(s, /quiet day on the curve/);
     }
-    assert.match(s, /must not repeat/);
-    assert.match(s, /quiet day on the curve/);
+  });
+
+  it("nothing it was not told: no market's state, no day, no sale, no result", () => {
+    // It is told only what it bought, and nothing about any market now; a
+    // post goes out hours after it is written. The review's drafts said
+    // "tesla felt like a background character today", "saturday mornings
+    // feel like…" and "paper position in pudgy penguins just closed out".
+    for (const p of [introPrompt(BASE), buyPrompt(BUY), casualPrompt(CASUAL), casualPrompt({ ...CASUAL, tradeTalk: false })]) {
+      assert.match(p.system, /Never say what a market or any coin is doing/);
+      assert.match(p.system, /Never say what day or what time of day it is/);
+      assert.match(p.system, /Never say you sold, exited, closed or got out of anything, and never say how a coin has done for you/);
+    }
+    // A buy post may say its reason — how the coin was when it bought it.
+    assert.match(buyPrompt(BUY).system, /About the coin, say only the reason written here, as it was when you bought/);
+    assert.match(casualPrompt(CASUAL).system, /Never say what a market or any coin is doing, did or will do\./);
   });
 
   it("the style is said in words", () => {
@@ -120,7 +137,7 @@ describe("what each prompt asks for", () => {
   it("a casual post gets a seed to riff on, not to copy, and the paper rule for its coins", () => {
     const p = casualPrompt(CASUAL).prompt;
     assert.match(p, /«soup is a perfectly good meal in any weather»/);
-    assert.match(p, /Never copy it/);
+    assert.match(p, /Do not restate it: take it somewhere new with a thought of your own, and use none of its words/);
     assert.match(p, /«pepe», «Tesla»/);
     assert.match(p, /say it was on paper/);
     assert.doesNotMatch(casualPrompt({ ...CASUAL, recentCoins: [{ label: "Tesla", paper: false }] }).prompt, /on paper/);
@@ -196,6 +213,50 @@ describe("a buy's why is in everyday words, never the engine's", () => {
     for (const own of ["activity picking up and the round trip is cheap", "our size barely moves it, easy in", "in we go, the curve is early"]) {
       assert.doesNotMatch(buyPrompt({ ...BUY, ownWords: own }).prompt, /What you said about it/, own);
     }
+  });
+});
+
+// ── the casual post ─────────────────────────────────────────────────────────
+
+describe("a casual post is mostly not about trading", () => {
+  const PERSONA: CasualFacts = {
+    ...CASUAL,
+    strategy: "dip hunter",
+    flavour: "i run dip hunter, red makes me curious",
+    traits: ["i move early and don't wait around", "i hate pushing a price around"],
+  };
+  const persona = [PERSONA.strategy!, PERSONA.flavour!, ...PERSONA.traits];
+
+  it("who it is says name, AI trading agent and which money — no strategy, flavour or traits", () => {
+    for (const tradeTalk of [true, false]) {
+      const s = casualPrompt({ ...PERSONA, tradeTalk }).system;
+      assert.match(s, /«Pine Stoat», an AI trading agent/);
+      assert.match(s, /You trade on paper/);
+      for (const line of persona) assert.ok(!s.includes(line), `${line} in the casual persona`);
+    }
+  });
+
+  it("most days: leave trading out, and no coins, no habit, no strategy anywhere", () => {
+    for (const p of [casualPrompt({ ...PERSONA, tradeTalk: false }), casualPrompt({ ...PERSONA, tradeTalk: undefined })]) {
+      const text = all(p);
+      assert.match(p.prompt, /Leave trading out of this one/);
+      assert.doesNotMatch(text, /how you trade|«pepe»|«Tesla»|Coins you bought/);
+      for (const line of persona) assert.ok(!text.includes(line), line);
+    }
+  });
+
+  it("a trade-talk day: how it trades — the strategy and ONE habit — and its coins", () => {
+    const p = casualPrompt({ ...PERSONA, tradeTalk: true }).prompt;
+    assert.match(p, /Or, instead of that \(not both\), say something about how you trade \(you run the «dip hunter» strategy; «[^»]+»\)/);
+    assert.equal(persona.slice(1).filter((h) => p.includes(`«${h}»`)).length, 1, "one habit, never the list");
+    assert.match(p, /«pepe», «Tesla»/);
+    assert.doesNotMatch(p, /Leave trading out/);
+    // An agent that is not trading is not handed a habit to claim.
+    assert.doesNotMatch(casualPrompt({ ...PERSONA, mode: "idle", tradeTalk: true }).prompt, /how you trade/);
+  });
+
+  it("never markets in general", () => {
+    for (const tradeTalk of [true, false]) assert.doesNotMatch(all(casualPrompt({ ...PERSONA, tradeTalk })), /markets in general/);
   });
 });
 
