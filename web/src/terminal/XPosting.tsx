@@ -180,6 +180,21 @@ async function readAccount(): Promise<Read> {
   }
 }
 
+/**
+ * The zone this browser says it is in, sent with the consent so the Merryman
+ * keeps quiet hours even for an owner the room never met. The route checks it
+ * and drops a placeless one (UTC, Reykjavik) a privacy browser reports for
+ * everybody; null when the browser will not say.
+ */
+function deviceZone(): string | null {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return typeof tz === "string" && tz !== "" ? tz : null;
+  } catch {
+    return null;
+  }
+}
+
 async function send(method: "POST" | "DELETE", url: string, body: Record<string, unknown>): Promise<Sent> {
   let res: Response;
   try {
@@ -397,7 +412,7 @@ export function XPosting({
     if (!asking || busy) return;
     const named = asking;
     setBusy(true);
-    const r = await send("POST", "/api/x/account", { action: "enable", xUserId: named.xUserId, owner });
+    const r = await send("POST", "/api/x/account", { action: "enable", xUserId: named.xUserId, owner, tz: deviceZone() });
     setBusy(false);
     closeWarning();
     if (r.ok && r.data.postingEnabled === true) {

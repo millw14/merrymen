@@ -27,6 +27,8 @@ import { XPosting } from "./XPosting";
 const OWNER = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const HANDLE = "merry_poster";
 const X_ID = "1234567890";
+/** What this process's Intl says, which is what the section sends. */
+const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 let ui: ReturnType<typeof testDom>;
 const originalFetch = globalThis.fetch;
@@ -162,7 +164,8 @@ describe("the switch and the warning", () => {
     await press(theSwitch(), "the switch again");
     await press(buttons("Let it post as @merry_poster")[0], "the warning's confirm");
     assert.deepEqual(writes(), [
-      { method: "POST", url: "/api/x/account", body: { action: "enable", xUserId: X_ID, owner: OWNER } },
+      // The consent carries the browser's zone, for quiet hours when the room has none.
+      { method: "POST", url: "/api/x/account", body: { action: "enable", xUserId: X_ID, owner: OWNER, tz: BROWSER_TZ } },
     ]);
     await until(() => theSwitch()?.getAttribute("aria-checked") === "true", "the confirmed state");
     assert.match(text(), /Posting from @merry_poster — whichever X account is connected\./);

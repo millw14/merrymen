@@ -4,11 +4,14 @@
  *
  *   GET     the connection as Settings draws it (lib/x-connect.ts accountBody):
  *           never a token, only the owner's own drafts and posts.
- *   POST    {action:"enable", xUserId, owner}  — the owner confirmed the warning
- *           that named THIS X account. Stored against that immutable X user id:
- *           if a different account is connected by the time it lands, nothing
- *           changes and the answer is 409, so the owner is shown the new
- *           account before it can post (docs/x-posting.md rule 1).
+ *   POST    {action:"enable", xUserId, owner, tz}  — the owner confirmed the
+ *           warning that named THIS X account. Stored against that immutable X
+ *           user id: if a different account is connected by the time it
+ *           lands, nothing changes and the answer is 409, so the owner is
+ *           shown the new account before it can post (docs/x-posting.md rule
+ *           1). `tz` is the device's IANA zone, kept for quiet hours when the
+ *           room has none (lib/x-connect.ts xpostTz); a missing, unknown or
+ *           placeless one never refuses the consent.
  *           {action:"disable", owner} — always works, cancels every draft.
  *           {action:"skip", id, owner} — the owner's Skip on one draft; only
  *           their own, only while it is still scheduled (a post already
@@ -46,6 +49,7 @@ import {
   xpostDek,
   xpostFetch,
   xpostNow,
+  xpostTz,
 } from "@/lib/x-connect";
 import { revokeToken } from "../../../../../../worker/src/xpost/client";
 import { deleteAccount, getAccount, ownerCancel, postsOf, setPosting } from "../../../../../../worker/src/xpost/store";
@@ -110,7 +114,10 @@ export async function POST(req: Request) {
       }
       // Turning posting ON needs the whole feature; turning it off never does.
       if (!xpostAvailable(isHostedMode())) return refuse(503, X_COPY.unavailable);
-      const on = await withXpostDb(async (db) => (db ? setPosting(db, tenant, { enabled: true, xUserId }, now) : null));
+      // The device's zone, for quiet hours when the room has none; an unusable
+      // or placeless one is null, which keeps the zone stored before.
+      const tz = xpostTz(input.tz);
+      const on = await withXpostDb(async (db) => (db ? setPosting(db, tenant, { enabled: true, xUserId, tz }, now) : null));
       if (on === null) return refuse(503, X_COPY.unavailable);
       if (!on) return refuse(409, X_COPY.accountChanged);
       return json({ ok: true, postingEnabled: true });
