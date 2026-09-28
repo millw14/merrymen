@@ -121,12 +121,12 @@ function behavesAsAClaimsRecord(name: string, make: () => Store) {
       const D = tenantN(98);
       await s.takeHolder(W, A, day + 1 * HOUR);
       assert.equal((await s.takeHolder(W, B, day + 2 * HOUR)).ok, true, "a first claim is not a move: one move is still left today");
-      assert.deepEqual(await s.takeHolder(W, C, day + 23 * HOUR), { ok: false, movableAt: day + DAY });
-      assert.deepEqual(await s.takeHolder(W, D, day + 23 * HOUR + 59 * MINUTE), { ok: false, movableAt: day + DAY });
+      assert.deepEqual(await s.takeHolder(W, C, day + 23 * HOUR), { ok: false, movableAt: day + DAY, held: true });
+      assert.deepEqual(await s.takeHolder(W, D, day + 23 * HOUR + 59 * MINUTE), { ok: false, movableAt: day + DAY, held: true });
       assert.equal((await s.holderClaims()).get(W), B, "a refused move changes nothing");
       const next = await s.takeHolder(W, C, day + DAY);
       assert.equal(next.ok && next.from, B, "a new UTC day, a new move");
-      assert.deepEqual(await s.takeHolder(W, D, day + DAY + HOUR), { ok: false, movableAt: day + 2 * DAY });
+      assert.deepEqual(await s.takeHolder(W, D, day + DAY + HOUR), { ok: false, movableAt: day + 2 * DAY, held: true });
     });
 
     it("THE WALLET'S OWN SIGN-IN ACCOUNT ALWAYS TAKES IT BACK — the same day, and that still spends the day for anybody else", async () => {
@@ -143,7 +143,7 @@ function behavesAsAClaimsRecord(name: string, make: () => Store) {
       const back = await s.takeHolder(W, W, day + HOUR + 2 * MINUTE);
       assert.equal(back.ok && back.from, attacker, "the owner's own sign-in account takes it straight back");
       assert.equal((await s.holderClaims()).get(W), W);
-      assert.deepEqual(await s.takeHolder(W, other, day + 2 * HOUR), { ok: false, movableAt: day + DAY }, "still stamped: nobody else moves it today");
+      assert.deepEqual(await s.takeHolder(W, other, day + 2 * HOUR), { ok: false, movableAt: day + DAY, held: true }, "still stamped: nobody else moves it today");
     });
 
     it("…even when the attacker's first signature claimed it fresh and the second spent the move", async () => {
@@ -164,11 +164,84 @@ function behavesAsAClaimsRecord(name: string, make: () => Store) {
       assert.equal((await s.takeHolder(W, B, day + 2 * HOUR)).ok, true, "the day's move: A → B");
       const back = await s.takeHolder(W, A, day + 3 * HOUR);
       assert.equal(back.ok && back.from, B, "back to A, the account it was moved from");
-      assert.deepEqual(await s.takeHolder(W, C, day + 4 * HOUR), { ok: false, movableAt: day + DAY }, "a third account still waits");
+      assert.deepEqual(await s.takeHolder(W, C, day + 4 * HOUR), { ok: false, movableAt: day + DAY, held: true }, "a third account still waits");
       const again = await s.takeHolder(W, B, day + 5 * HOUR);
       assert.equal(again.ok && again.from, A, "B was the last to lose it, so B may take it back too");
-      assert.deepEqual(await s.takeHolder(W, C, day + 6 * HOUR), { ok: false, movableAt: day + DAY });
+      assert.deepEqual(await s.takeHolder(W, C, day + 6 * HOUR), { ok: false, movableAt: day + DAY, held: true });
       assert.equal((await s.holderClaims()).get(W), B);
+    });
+
+    it("A RELEASE DOES NOT GIVE THE DAY'S MOVE BACK: A → B, B unlinks, and C and D still wait for tomorrow", async () => {
+      // The review's bypass: the move was kept on the claim row and every
+      // unlink deleted the row, so one bag powered A, B, C and D in a day.
+      const s = make();
+      const day = Date.UTC(2026, 8, 28);
+      const [C, D] = [tenantN(80), tenantN(81)];
+      assert.deepEqual(await s.takeHolder(W, A, day + 1 * HOUR), { ok: true, fresh: true });
+      assert.equal((await s.takeHolder(W, B, day + 2 * HOUR)).ok, true, "A → B, the day's move");
+      assert.deepEqual(await s.takeHolder(W, C, day + 3 * HOUR), { ok: false, movableAt: day + DAY, held: true });
+      await s.releaseHolderClaims(B); // B's unlink
+      assert.deepEqual(await s.takeHolder(W, C, day + 4 * HOUR), { ok: false, movableAt: day + DAY, held: false }, "not a fresh claim: still the day's second move");
+      assert.deepEqual(await s.takeHolder(W, D, day + 5 * HOUR), { ok: false, movableAt: day + DAY, held: false });
+      assert.equal((await s.holderClaims()).has(W), false, "a refused claim changes nothing");
+      const tomorrow = await s.takeHolder(W, C, day + DAY + HOUR);
+      assert.deepEqual(tomorrow, { ok: true, fresh: true }, "a new UTC day: C may have it");
+      assert.deepEqual(await s.takeHolder(W, D, day + DAY + 2 * HOUR), { ok: false, movableAt: day + 2 * DAY, held: true }, "and that was the new day's move");
+    });
+
+    it("RELEASE → CLAIM → MOVE, ONE DAY: a claim by an account other than the one that let it go is the day's move", async () => {
+      const s = make();
+      const day = Date.UTC(2026, 8, 28);
+      const C = tenantN(82);
+      await s.takeHolder(W, A, day + 1 * HOUR); // the first claim ever: not a move
+      await s.releaseHolder(W, A);
+      assert.deepEqual(await s.takeHolder(W, B, day + 2 * HOUR), { ok: true, fresh: true });
+      assert.deepEqual(await s.takeHolder(W, C, day + 3 * HOUR), { ok: false, movableAt: day + DAY, held: true }, "B's claim spent the day");
+      assert.equal((await s.holderClaims()).get(W), B);
+    });
+
+    it("…EXEMPT: the account that let it go, the wallet's own sign-in account, and the account it was moved from", async () => {
+      const day = Date.UTC(2026, 8, 28);
+      const C = tenantN(83);
+      // A → B today; B lets it go.
+      const setUp = async () => {
+        const s = make();
+        await s.takeHolder(W, A, day + 1 * HOUR);
+        await s.takeHolder(W, B, day + 2 * HOUR);
+        await s.releaseHolderClaims(B);
+        return s;
+      };
+      let s = await setUp();
+      assert.deepEqual(await s.takeHolder(W, B, day + 3 * HOUR), { ok: true, fresh: true }, "B takes back what it let go");
+      assert.deepEqual(await s.takeHolder(W, C, day + 4 * HOUR), { ok: false, movableAt: day + DAY, held: true }, "…and the day's move is still spent");
+      s = await setUp();
+      assert.deepEqual(await s.takeHolder(W, W, day + 3 * HOUR), { ok: true, fresh: true }, "the wallet's own sign-in account");
+      assert.deepEqual(await s.takeHolder(W, C, day + 4 * HOUR), { ok: false, movableAt: day + DAY, held: true }, "…which is stamped as a move");
+      s = await setUp();
+      assert.deepEqual(await s.takeHolder(W, A, day + 3 * HOUR), { ok: true, fresh: true }, "A, which it was moved from today");
+      assert.deepEqual(await s.takeHolder(W, C, day + 4 * HOUR), { ok: false, movableAt: day + DAY, held: true });
+    });
+
+    it("A FRESH CLAIM UNDONE LEAVES THE WALLET'S RECORD AS IT WAS — no release recorded, no move spent", async () => {
+      const s = make();
+      const day = Date.UTC(2026, 8, 28);
+      const C = tenantN(84);
+      // Never claimed: a claim undone leaves it never claimed.
+      assert.deepEqual(await s.takeHolder(W2, A, day + HOUR), { ok: true, fresh: true });
+      await s.undoTakeHolder(W2, A, null);
+      assert.deepEqual(await s.takeHolder(W2, B, day + 2 * HOUR), { ok: true, fresh: true });
+      assert.equal((await s.takeHolder(W2, C, day + 3 * HOUR)).ok, true, "B's was the first claim ever: C's move is the day's one");
+      // Released by B after today's move: A's claim (a move back) undone
+      // leaves B as the one who let it go, so B may still take it back.
+      await s.takeHolder(W, A, day + HOUR);
+      await s.takeHolder(W, B, day + 2 * HOUR);
+      await s.releaseHolderClaims(B);
+      assert.deepEqual(await s.takeHolder(W, A, day + 3 * HOUR), { ok: true, fresh: true });
+      await s.undoTakeHolder(W, B, null); // not B's to undo: nothing happens
+      assert.equal((await s.holderClaims()).get(W), A);
+      await s.undoTakeHolder(W, A, null);
+      assert.equal((await s.holderClaims()).has(W), false);
+      assert.deepEqual(await s.takeHolder(W, B, day + 4 * HOUR), { ok: true, fresh: true }, "B still the one who let it go");
     });
 
     it("A MOVE UNDONE IS PUT BACK EXACTLY — the claim, and the day's one move", async () => {
@@ -435,6 +508,63 @@ describe("PgSettingsStore specifics", () => {
     );
   });
 
+  it("THE RELEASE RECORD HAS ITS OWN TABLE, created with the store — never a row a previous build would read as a claim", async () => {
+    const log: string[] = [];
+    const s = new PgSettingsStore("postgres://stand-in", async () => sqliteClient({ log }));
+    await s.holderClaims();
+    assert.ok(
+      log.includes("CREATE TABLE IF NOT EXISTS holder_wallet_moves ( wallet TEXT PRIMARY KEY, last_tenant TEXT NOT NULL, moved_at BIGINT, moved_from TEXT )"),
+      log.join("\n"),
+    );
+  });
+
+  it("A RELEASE IS RECORDED BEFORE THE CLAIM GOES: a crash between leaves it held, and the retry finishes", async () => {
+    const real = sqliteClient();
+    const day = Date.UTC(2026, 8, 28);
+    let crash = true;
+    const client: Client = {
+      async query(sql, params) {
+        if (/^\s*DELETE FROM holder_claims/.test(sql) && crash) {
+          crash = false;
+          throw new Error("Connection terminated unexpectedly");
+        }
+        return real.query(sql, params);
+      },
+    };
+    const s = new PgSettingsStore("postgres://stand-in", async () => client);
+    await s.takeHolder(W, A, day + HOUR);
+    await s.takeHolder(W, B, day + 2 * HOUR);
+    await assert.rejects(s.releaseHolderClaims(B));
+    assert.equal((await s.holderClaims()).get(W), B, "still held");
+    assert.deepEqual(await s.takeHolder(W, tenantN(3), day + 3 * HOUR), { ok: false, movableAt: day + DAY, held: true });
+    await s.releaseHolderClaims(B);
+    assert.deepEqual(await s.takeHolder(W, tenantN(3), day + 4 * HOUR), { ok: false, movableAt: day + DAY, held: false }, "released, and the day's move kept");
+  });
+
+  it("A CLAIM ON A FREE WALLET LANDS ONLY ON THE RECORD IT READ — a claim-and-release in between makes it look again", async () => {
+    // Between this call reading "never released" and its INSERT, another
+    // account claimed the wallet by a move and let it go. Unconditional, the
+    // INSERT would have landed as a first claim, skipping the day's move.
+    const real = sqliteClient();
+    const day = Date.UTC(2026, 8, 28);
+    let raced = false;
+    const client: Client = {
+      async query(sql, params) {
+        if (/^\s*INSERT INTO holder_claims \(wallet, tenant, claimed_at, moved_at, moved_from\)/.test(sql) && !raced) {
+          raced = true;
+          await real.query(
+            `INSERT INTO holder_wallet_moves (wallet, last_tenant, moved_at, moved_from) VALUES ($1, $2, $3, $4)`,
+            [W, tenantN(7), day + HOUR, tenantN(6)],
+          );
+        }
+        return real.query(sql, params);
+      },
+    };
+    const s = new PgSettingsStore("postgres://stand-in", async () => client);
+    assert.deepEqual(await s.takeHolder(W, B, day + 2 * HOUR), { ok: false, movableAt: day + DAY, held: false });
+    assert.equal((await s.holderClaims()).has(W), false);
+  });
+
   it("a record it cannot parse throws, never reads as 'never ran'", async () => {
     const client = sqliteClient();
     const s = new PgSettingsStore("postgres://stand-in", async () => client);
@@ -456,7 +586,7 @@ describe("PgSettingsStore specifics", () => {
     assert.ok(log.includes("ALTER TABLE holder_claims ADD COLUMN moved_from TEXT"), log.join("\n"));
     // The other service (or the next start) opens the same database.
     const second = new PgSettingsStore("postgres://stand-in", async () => client);
-    assert.deepEqual(await second.takeHolder(W, tenantN(5), Date.UTC(2026, 8, 28) + HOUR), { ok: false, movableAt: Date.UTC(2026, 8, 29) });
+    assert.deepEqual(await second.takeHolder(W, tenantN(5), Date.UTC(2026, 8, 28) + HOUR), { ok: false, movableAt: Date.UTC(2026, 8, 29), held: true });
   });
 
   it("…the duplicate column is Postgres's 42701 there; any other failure to add it is a failure", async () => {
@@ -510,7 +640,7 @@ describe("PgSettingsStore specifics", () => {
     };
     const s = new PgSettingsStore("postgres://stand-in", async () => client);
     await s.takeHolder(W, A, day + HOUR);
-    assert.deepEqual(await s.takeHolder(W, B, day + 3 * HOUR), { ok: false, movableAt: day + DAY });
+    assert.deepEqual(await s.takeHolder(W, B, day + 3 * HOUR), { ok: false, movableAt: day + DAY, held: true });
     assert.equal((await s.holderClaims()).get(W), tenantN(7));
   });
 
