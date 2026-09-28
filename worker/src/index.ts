@@ -12549,10 +12549,13 @@ async function main() {
         return no(`I don't know ${symbol}. I'm watching: ${known || "nothing yet"}. Add it in /settings and re-sign at /grant if you want me trading it.`);
       }
       const token = resolved.address;
+      // AND ITS NAME AS THE WATCH SET SPELLS IT — the book stores the position
+      // under that, and an order may arrive upper-cased (resolveOrderToken).
+      const named = resolved.symbol;
       // WHERE DOES THIS TOKEN ACTUALLY TRADE? A Pons token has no pool until it
       // graduates, so routing it to the swap router would build an operation
       // against a pool that does not exist. Asked before anything is sized.
-      if (await curveFor(token)) return submitChatCurveTrade(side, symbol, token, usdgAmount, judged, asked);
+      if (await curveFor(token)) return submitChatCurveTrade(side, named, token, usdgAmount, judged, asked);
 
       const router = swapRouterFor(cfg);
       let intent: TradeIntent;
@@ -12563,13 +12566,13 @@ async function main() {
         const raw = usdg(usdgAmount);
         intent = { kind: "swap", target: router, sellToken: CASH.USDG as `0x${string}`, buyToken: token, sellAmountRaw: raw, notionalUsdg: raw };
       } else {
-        const pos = readPositionRaw(active.agentId, symbol, usdg);
-        if (!pos) return no(`you don't hold any ${symbol}.`);
+        const pos = readPositionRaw(active.agentId, named, usdg);
+        if (!pos) return no(`you don't hold any ${named}.`);
         const want = usdg(usdgAmount);
         const partial = want < pos.valueUsdg;
         const sellRaw = partial ? (pos.rawBalance * want) / pos.valueUsdg : pos.rawBalance;
         const notional = partial ? want : pos.valueUsdg;
-        if (sellRaw === 0n) return no(`${symbol} amount rounds to zero shares.`);
+        if (sellRaw === 0n) return no(`${named} amount rounds to zero shares.`);
         // AN OVER-ASK IS CLAMPED, AND THE REPLY HAS TO SAY SO. It used to clamp
         // silently and then quote the amount asked for: "submitted sell 500 USDG
         // NVDA" for a 12 USDG position, a claim the ledger will never support —
@@ -12591,7 +12594,7 @@ async function main() {
       if (outcome?.status === "late") return { ...no(outcome.line), verdict: { kind: "late" } };
       // WHAT THE LEDGER SAYS, NOT WHAT WE HOPED. `sold` is the amount actually
       // sent, which is not always the amount asked for — see the clamp above.
-      return { ...sayTradeOutcome(outcome, side, symbol, usdgAmount, sold ?? usdgAmount), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
+      return { ...sayTradeOutcome(outcome, side, named, usdgAmount, sold ?? usdgAmount), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
     });
   }
 

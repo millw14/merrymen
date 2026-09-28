@@ -78,6 +78,13 @@ describe("WHO CAN REACH THE BUY", () => {
     // (resolveOrderToken is run in energy-buy.test.ts).
     assert.doesNotMatch(trade, /isEnergySymbol\(|watchTokens\.find\(/);
     assert.match(trade, /const token = resolved\.address;/);
+    // AND THE NAME THE WATCH SET GAVE IT from there on: an order upper-cased by
+    // the app or Telegram must still find a mixed-case position to sell.
+    const after = trade.slice(trade.indexOf("const token = resolved.address;"));
+    assert.match(after, /const named = resolved\.symbol;/);
+    assert.match(after, /readPositionRaw\(active\.agentId, named, usdg\)/);
+    assert.match(after, /submitChatCurveTrade\(side, named, token,/);
+    assert.doesNotMatch(after, /readPositionRaw\(active\.agentId, symbol,/);
   });
 
   it("the sentence points to the app chat and never to /settings", async () => {

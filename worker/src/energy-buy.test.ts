@@ -409,7 +409,23 @@ describe("resolveOrderToken — the reserve by address, a lookalike like any coi
   const TSLA = { symbol: "TSLA", address: "0x00000000000000000000000000000000000000a5" };
 
   it("A WATCHED LOOKALIKE CALLED MERRYMEN RESOLVES TO ITS OWN ADDRESS — bought and sold like any token", () => {
-    assert.deepEqual(resolveOrderToken("MERRYMEN", [TSLA, { symbol: "MERRYMEN", address: CLONE }]), { kind: "token", address: CLONE });
+    assert.deepEqual(resolveOrderToken("MERRYMEN", [TSLA, { symbol: "MERRYMEN", address: CLONE }]), { kind: "token", address: CLONE, symbol: "MERRYMEN" });
+  });
+
+  it("A MIXED-CASE LOOKALIKE IS FOUND HOWEVER THE ORDER SPELLS IT — never told 'I never sell it' about a coin its owner holds", () => {
+    // Settings keeps "MerryMen" as typed; the app's sell card and Telegram
+    // upper-case the order's symbol. An exact match missed it, fell through to
+    // the reserve's name, and the owner got ENERGY_NOT_AN_ORDER.
+    const watch = [TSLA, { symbol: "MerryMen", address: CLONE }];
+    for (const s of ["MERRYMEN", "merrymen", "MerryMen", "$MERRYMEN", " MERRYMEN "]) {
+      assert.deepEqual(resolveOrderToken(s, watch), { kind: "token", address: CLONE, symbol: "MerryMen" }, s);
+    }
+    // The name comes back as the watch set spells it — the book's key for the position a sell reads.
+    assert.deepEqual(resolveOrderToken("pepe", [{ symbol: "Pepe", address: CLONE }]), { kind: "token", address: CLONE, symbol: "Pepe" });
+  });
+
+  it("case folding never reaches past the address check: the reserve itself, however spelt, is still refused", () => {
+    assert.deepEqual(resolveOrderToken("merrymen", [{ symbol: "MERRYMEN", address: MERRYMEN_TOKEN.address }]), { kind: "reserve" });
   });
 
   it("NOTHING WATCHED ANSWERS AND THE NAME IS THE RESERVE'S: refused as the reserve, never 'unknown'", () => {
@@ -422,7 +438,7 @@ describe("resolveOrderToken — the reserve by address, a lookalike like any coi
   });
 
   it("an ordinary watched symbol resolves; an unwatched one is unknown", () => {
-    assert.deepEqual(resolveOrderToken("TSLA", [TSLA]), { kind: "token", address: TSLA.address });
+    assert.deepEqual(resolveOrderToken("TSLA", [TSLA]), { kind: "token", address: TSLA.address, symbol: "TSLA" });
     assert.deepEqual(resolveOrderToken("NVDA", [TSLA]), { kind: "unknown" });
   });
 });
