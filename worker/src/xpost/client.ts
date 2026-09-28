@@ -13,7 +13,11 @@
  *   duplicate   403 duplicate content. X did nothing — and never will for this text.
  *   forbidden   403 otherwise: the ACCOUNT may not post (locked, restricted).
  *   credits     402, or a credits-depleted refusal: the APP may not post.
- *   grant       the token endpoint refused the code or refresh token itself.
+ *   grant       the token endpoint refused the code or refresh token itself
+ *               (a 400 invalid_grant, or X's invalid_request for a spent one).
+ *   app         the token endpoint refused the APP — our client id or secret
+ *               (a 401, invalid_client, unauthorized_client). Nothing is wrong
+ *               with the owner's grant, so it is never read as a revocation.
  *   invalid     400-class: our request was wrong. X did nothing.
  *   uncertain   a network error, a timeout, a 5xx, an unreadable 2xx: X MAY
  *               HAVE ACTED. A post answered this way is never sent again
@@ -138,7 +142,7 @@ export function authorizeUrl(app: XApp, p: { state: string; challenge: string; r
 
 // ── results ─────────────────────────────────────────────────────────────────
 
-export type XFailure = "auth" | "rate" | "duplicate" | "forbidden" | "credits" | "grant" | "invalid" | "uncertain";
+export type XFailure = "auth" | "rate" | "duplicate" | "forbidden" | "credits" | "grant" | "app" | "invalid" | "uncertain";
 
 export type XResult<T> =
   | { ok: true; value: T }
@@ -218,10 +222,15 @@ async function tokenCall(app: XApp, form: Record<string, string>, fetchImpl: Fet
   if (res.status >= 500) return fail("uncertain", res.status);
   const body = await jsonOf(res);
   if (res.status >= 400) {
+    const code = typeof body?.error === "string" ? body.error : "";
+    // THE APP, NOT THE OWNER. RFC 6749 answers 401 (invalid_client) when the
+    // client's own Basic auth is refused — a rotated or mistyped secret. Read
+    // as a dead grant, one bad deploy would revoke every owner's connection
+    // over the next few hours, although every grant is still good.
+    if (res.status === 401 || code === "invalid_client" || code === "unauthorized_client") return fail("app", res.status);
     // invalid_grant is the RFC's word; X also answers invalid_request for a
     // refresh token it no longer honours. Either way the grant is gone.
-    const code = typeof body?.error === "string" ? body.error : "";
-    if (code === "invalid_grant" || code === "invalid_request" || res.status === 401) return fail("grant", res.status);
+    if (res.status === 400 && (code === "invalid_grant" || code === "invalid_request")) return fail("grant", res.status);
     return fail("invalid", res.status);
   }
   const access = body?.access_token;
