@@ -40,7 +40,7 @@
  * re-exports this module) and the worker's — Telegram's /pnl, /report and
  * /brag (telegram/reads.ts), the chat's pnl_breakdown (telegram/chat-tools.ts
  * over period-pnl.ts), the account history the orchestrator carries across a
- * redeploy (history-files.ts) and the alert summary (mcp/notify.ts) — all take
+ * redeploy (its loadAccountFromShared) and the alert summary (mcp/notify.ts) — all take
  * it from here.
  *
  * A LEDGER WITHOUT THE COLUMN — one an older worker wrote, a shared Postgres
