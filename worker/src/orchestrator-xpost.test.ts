@@ -898,6 +898,36 @@ describe("fleet guards", () => {
   });
 });
 
+describe("the owner's zone", () => {
+  const TZ = "Asia/Tokyo";
+  // 03:00 in Tokyo on the 29th: inside every agent's night there.
+  const NIGHT = Date.UTC(2026, 8, 28, 18, 0);
+
+  it("with no zone in the room, the one the owner consented from decides their night", async (t) => {
+    const w = await world(t, NIGHT - 5 * MIN);
+    await store.setPosting(w.db, TENANT, { enabled: true, xUserId: "111", tz: TZ }, NIGHT - 5 * MIN);
+    const hello = await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "intro", dedupeKey: `intro:${TENANT}:111:9`, body: INTRO, dueAtMs: NIGHT - MIN, nowMs: NIGHT - 20 * MIN });
+    assert.ok(hello);
+    // The room has no zone for this owner.
+    const p = poster(w, { tz: null });
+    await p.step(w.db, ROSTER, new Map(), NIGHT);
+    assert.equal(w.tweets.length, 0, "not sent at three in the morning, their time");
+    assert.equal(await store.keyStatus(w.db, `intro:${TENANT}:111:9`), "scheduled");
+    await p.step(w.db, ROSTER, new Map(), NIGHT + 9 * HOUR);
+    assert.deepEqual(w.tweets, [INTRO], "sent once they are awake");
+  });
+
+  it("nothing is planned in the consented zone's night either; the room's zone wins when it has one", async (t) => {
+    const w = await world(t, NIGHT - 5 * MIN);
+    await store.setPosting(w.db, TENANT, { enabled: true, xUserId: "111", tz: TZ }, NIGHT - 5 * MIN);
+    await poster(w, { tz: null }).step(w.db, ROSTER, new Map(), NIGHT);
+    assert.deepEqual(await rows(w), [], "no hello drafted in the owner's night");
+    // The room knows them in London, where 19:00 is evening: that zone decides.
+    await poster(w, { tz: "Europe/London" }).step(w.db, ROSTER, new Map(), NIGHT);
+    assert.deepEqual((await rows(w)).map((x) => x.kind), ["intro"]);
+  });
+});
+
 describe("step never throws", () => {
   it("a broken database is one log line, not one every pass", async () => {
     const broken = {

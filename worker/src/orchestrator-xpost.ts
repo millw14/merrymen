@@ -13,7 +13,8 @@
  *
  *   - loadFacts           → the planner's calls and the writer's facts
  *   - styleFor            → the writer's style (lowercase, emoji, "!")
- *   - getMember + clock   → the owner's zone, local day, afternoon and night
+ *   - getMember + clock   → the owner's zone (the room's, else the one the
+ *                           owner consented from), local day, afternoon and night
  *   - admitAgentLine      → the base gate admitXPost runs first
  *   - STRATEGY_SPOKEN, STRATEGY_FLAVOUR, TRAIT_VOICE → the writer's words for how the agent trades
  *   - SUBJECTS/TAKES/MUSINGS → a casual post's seed, to riff on, never copy
@@ -395,14 +396,18 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         const accounts = (await postingAccounts(shared, tenants)).filter((a) => byTenant.has(a.tenant));
         const accountOf = new Map(accounts.map((a) => [a.tenant, a] as const));
 
-        // The owner's zone, once per pass. Unreadable is not "awake": a post
-        // for an owner whose night cannot be known waits for a pass that can.
+        // The owner's zone, once per pass: the room's, or else the one the
+        // owner's device reported when they turned posting on — so an owner
+        // the room never met (iOS only, or the room switched off) still has a
+        // night, a local day and an afternoon. Unreadable is not "awake": a
+        // post for an owner whose night cannot be known waits for a pass that
+        // can.
         const zones = new Map<string, { ok: true; tz: string | null } | { ok: false }>();
-        const zoneOf = async (tenant: string) => {
+        const zoneOf = async (tenant: string, consentTz: string | null) => {
           let z = zones.get(tenant);
           if (!z) {
             try {
-              z = { ok: true, tz: (await memberOf(shared, tenant))?.tz ?? null };
+              z = { ok: true, tz: (await memberOf(shared, tenant))?.tz ?? consentTz ?? null };
             } catch {
               z = { ok: false };
             }
@@ -454,7 +459,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             let asleep = false;
             let dayOf: ((ms: number) => string) | undefined;
             if (account?.posting && account.xUserId === post.xUserId) {
-              const z = await zoneOf(post.tenant);
+              const z = await zoneOf(post.tenant, account.tz);
               asleep = !z.ok || isAsleep(z.tz, post.tenant, t);
               if (z.ok) dayOf = (ms) => localDay(z.tz, ms);
             }
@@ -553,7 +558,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     nowMs: number,
     at: () => number,
     bump: (k: string, n?: number) => void,
-    zoneOf: (tenant: string) => Promise<{ ok: true; tz: string | null } | { ok: false }>,
+    zoneOf: (tenant: string, consentTz: string | null) => Promise<{ ok: true; tz: string | null } | { ok: false }>,
   ): Promise<void> {
     const roster = accounts.map((a) => byTenant.get(a.tenant)!);
     const facts = await factsOf(shared, roster, profiles, Math.floor(nowMs / 1000), { dialect });
@@ -583,7 +588,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       try {
         const f = facts.get(account.tenant);
         if (!f) continue;
-        const z = await zoneOf(account.tenant);
+        const z = await zoneOf(account.tenant, account.tz);
         if (!z.ok) {
           bump("zone-unreadable");
           continue;
