@@ -5,6 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { SETTINGS_DEFAULTS } from "../../../packages/core/src/index";
 import type { LlmCreds } from "../llm";
 import { admitXPost, type BaseGate } from "./gate";
 import {
@@ -18,6 +19,7 @@ import {
   introTemplate,
   xpostCreds,
   xpostModel,
+  xpostModelWarning,
   type BuyFacts,
   type CasualFacts,
   type Prompt,
@@ -213,6 +215,47 @@ describe("the writer spends only its own key", () => {
       const line = describeXpostCreds(env, { ...ROOM, apiKey: "gsk_room_secret" });
       assert.ok(!line.includes("gsk_secret_value") && !line.includes("gsk_room_secret"), line);
     }
+  });
+});
+
+describe("a warning when X's model is trading's model on groq (the room's same-org warning)", () => {
+  const FLEET = SETTINGS_DEFAULTS.groqModel;
+  const house = { GROQ_API_KEY: "gsk_house", MERRYMEN_XPOST_LLM_KEY: "gsk_x" };
+  const groq = (model: string, apiKey = "gsk_x"): LlmCreds => ({ provider: "groq", transport: "openai", baseUrl: "https://api.groq.com/openai/v1", apiKey, model, vision: false });
+
+  it("X's default model is trading's, so a second key in the house org is warned about", () => {
+    assert.equal(XPOST_GROQ_DEFAULT_MODEL, FLEET, "if these ever differ, the default path below stops warning — and needs to");
+    const creds = xpostCreds(house, null);
+    const w = xpostModelWarning(creds, house);
+    assert.ok(w);
+    assert.match(w, /WARNING/);
+    assert.match(w, new RegExp(`model ${FLEET.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")} is the fleet's trading model`));
+    assert.match(w, /MERRYMEN_XPOST_LLM_KEY must come from a SEPARATE Groq organization/);
+    assert.match(w, /MERRYMEN_XPOST_MODEL/);
+    assert.match(w, /MERRYMEN_XPOST_LLM_PER_DAY=0/);
+    assert.ok(!w.includes("gsk_x") && !w.includes("gsk_house"), w);
+    assert.ok(xpostModelWarning(groq(` ${FLEET.toUpperCase()} `), house), "case and padding do not hide it");
+  });
+
+  it("the room's key, borrowed, is named as the room's", () => {
+    const env = { GROQ_API_KEY: "gsk_house" };
+    const w = xpostModelWarning(groq(FLEET, "gsk_room"), env);
+    assert.match(w ?? "", /the room's MERRYMEN_GROUPCHAT_LLM_KEY, which X borrows while MERRYMEN_XPOST_LLM_KEY is unset/);
+  });
+
+  it("follows the fleet's own model when the operator moved it", () => {
+    const env = { ...house, MERRYMEN_GROQ_MODEL: "llama-9-fast" };
+    assert.ok(xpostModelWarning(groq("llama-9-fast"), env));
+    assert.equal(xpostModelWarning(groq(FLEET), env), null);
+  });
+
+  it("silent when it cannot be trading's allowance, or the operator already said so", () => {
+    assert.equal(xpostModelWarning(null, house), null);
+    assert.equal(xpostModelWarning(groq("some-other-model"), house), null);
+    assert.equal(xpostModelWarning(groq(FLEET), { MERRYMEN_XPOST_LLM_KEY: "gsk_x" }), null, "no GROQ_API_KEY: no house org to share");
+    assert.equal(xpostModelWarning(groq(FLEET), { ...house, MERRYMEN_XPOST_SHARE_HOUSE_KEY: "1" }), null, "the boot line already names the fleet key");
+    assert.equal(xpostModelWarning({ ...groq(FLEET), provider: "anthropic", transport: "anthropic", baseUrl: "" }, house), null);
+    assert.equal(xpostModelWarning({ ...groq(FLEET), provider: "openai", baseUrl: "https://llm.example/v1" }, house), null);
   });
 });
 

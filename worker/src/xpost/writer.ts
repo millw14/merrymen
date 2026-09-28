@@ -35,6 +35,7 @@
  * other post needs a model; a casual line or a buy post from a template would
  * be the same few sentences on every account on the fleet.
  */
+import { SETTINGS_DEFAULTS } from "../../../packages/core/src/index";
 import { llmText, type LlmCreds } from "../llm";
 
 export type { LlmCreds };
@@ -383,6 +384,40 @@ export function xpostCreds(env: Env, fallback: LlmCreds | null): LlmCreds | null
 /** The boot line for the writer's model. Never contains a key. */
 export function describeXpostCreds(env: Env, fallback: LlmCreds | null): string {
   return xpostModel(env, fallback).line;
+}
+
+/**
+ * THE SAME GROQ ORG AS TRADING? — the room's groupChatModelWarning
+ * (orchestrator.ts), for the X writer's model.
+ *
+ * Groq rate-limits per organization and per model, not per key. The fleet-key
+ * check above catches only the SAME key string; a second key made in the
+ * house organization is a different string and passes, and with the default
+ * model (qwen/qwen3.8-27b, trading's too) every X draft then spends trading's
+ * per-minute and daily allowance. Nothing can tell from here which org a key
+ * belongs to, so when the model is trading's this says so once at boot, the
+ * way the room does. Null when the creds are not groq, when the operator has
+ * already said X may share a fleet key (the boot line names it), when there
+ * is no GROQ_API_KEY to share an org with, or when the model differs.
+ */
+export function xpostModelWarning(creds: LlmCreds | null, env: Env): string | null {
+  if (!creds || creds.provider !== "groq") return null;
+  if (env.MERRYMEN_XPOST_SHARE_HOUSE_KEY?.trim() === "1") return null;
+  if (!env.GROQ_API_KEY?.trim()) return null;
+  const fleetModel = env.MERRYMEN_GROQ_MODEL?.trim() || SETTINGS_DEFAULTS.groqModel;
+  const model = String(creds.model ?? "").trim();
+  if (model.toLowerCase() !== fleetModel.toLowerCase()) return null;
+  // Whose key it is decides what to change: X's own, or the room's it borrows.
+  const whose = env.MERRYMEN_XPOST_LLM_KEY?.trim()
+    ? "MERRYMEN_XPOST_LLM_KEY must come from a SEPARATE Groq organization"
+    : "the room's MERRYMEN_GROUPCHAT_LLM_KEY, which X borrows while MERRYMEN_XPOST_LLM_KEY is unset, must come from a SEPARATE Groq organization";
+  const line =
+    `xpost: WARNING — the X writer's model ${model} is the fleet's trading model. Groq rate-limits per ` +
+    `organization and per model, not per key, so ${whose}: a second key in the house org spends trading's ` +
+    `per-minute and daily allowance. If it does not, set MERRYMEN_XPOST_LLM_KEY with MERRYMEN_XPOST_MODEL ` +
+    `to a model trading does not use, or MERRYMEN_XPOST_LLM_PER_DAY=0`;
+  const secret = String(creds.apiKey ?? "").trim();
+  return secret ? line.split(secret).join("[key]") : line;
 }
 
 // ── the model call ──────────────────────────────────────────────────────────
