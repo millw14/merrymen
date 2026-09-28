@@ -487,17 +487,192 @@ export function mergeSettings(
   };
 }
 
-/** Read + merge. A missing or corrupt file is just "no overrides". */
-export function resolveConfig(): ResolvedConfig {
-  const SETTINGS_FILE = process.env.MERRYMEN_SETTINGS_FILE ?? homePaths.settings();
-  let file: MerrymenSettings = {};
+/** What one read of settings.json found. */
+export type SettingsFileRead =
+  | { kind: "parsed"; settings: MerrymenSettings }
+  | { kind: "absent" }
+  | { kind: "unusable"; why: string };
+
+/**
+ * WHERE a JSON.parse failed, and nothing else. V8 quotes the input in some of
+ * these messages — `Unexpected token 'x', "{"telegramBotToken":"…" is not
+ * valid JSON` — and settings.json holds plaintext keys, while `why` goes to the
+ * console and the agent's event feed.
+ */
+function whereParseFailed(e: unknown): string {
+  const msg = e instanceof Error ? e.message : "";
+  const at = /\(line (\d+) column (\d+)\)/.exec(msg);
+  if (at) return ` (line ${at[1]}, column ${at[2]})`;
+  if (/Unexpected end of JSON input/.test(msg)) return " (it ends early: empty, or cut short)";
+  return "";
+}
+
+/** Read settings.json and say what is there. Remembers nothing — see settingsSource. */
+export function readSettingsFileAt(file: string): SettingsFileRead {
+  let raw: string;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { kind: "absent" };
+    return { kind: "unusable", why: `settings.json could not be read (${code ?? "unknown error"})` };
+  }
+  let parsed: unknown;
   try {
     // BOM-strip: editors and PowerShell write UTF-8 BOMs that break JSON.parse.
-    file = JSON.parse(readFileSync(SETTINGS_FILE, "utf8").replace(/^﻿/, "")) as MerrymenSettings;
-  } catch {
-    // no settings file yet — env + defaults
+    parsed = JSON.parse(raw.replace(/^\ufeff/, ""));
+  } catch (e) {
+    return { kind: "unusable", why: `settings.json is not valid JSON${whereParseFailed(e)}` };
   }
-  return mergeSettings(file ?? {}, process.env);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { kind: "unusable", why: "settings.json is not a JSON object" };
+  }
+  return { kind: "parsed", settings: parsed as MerrymenSettings };
+}
+
+/** A settings.json this process could not use, and what it runs on instead. */
+export interface SettingsProblem {
+  /** Why, as of the latest read. Never quotes the file (whereParseFailed). */
+  why: string;
+  /** When this run of unusable reads began (ms): one run, one notice. */
+  since: number;
+  /**
+   * TRUE: an earlier read in this process was usable, and those settings stay
+   * in force. FALSE: none has been — what is in force is env + defaults, which
+   * nobody chose, and a worker does not arm on them (settingsArmRefusal).
+   */
+  holding: boolean;
+}
+
+export interface SettingsSource {
+  /** The settings in force: this read's, or the last usable read's when this one is not. */
+  read(): MerrymenSettings;
+  problem(): SettingsProblem | null;
+}
+
+/**
+ * ONE settings.json, remembered across reads.
+ *
+ * A MISSING FILE IS NOT A BROKEN ONE. Missing means "no overrides", as it
+ * always has — an owner who deletes the file is choosing the defaults, and a
+ * fresh install has none yet. A file that is there but cannot be used used to
+ * mean exactly the same thing: `resolveConfig` caught everything and the tick
+ * ran on env + defaults — paper, steady-basket, an empty Telegram allowlist.
+ * Hosted, the orchestrator's atomic write leaves nothing to trip on; self-hosted
+ * a stray comma in a hand edit did it, silently, with the owner believing their
+ * settings were in force. So an unusable read now keeps the last usable one and
+ * says so once; and a process that has never had a usable read says it is
+ * running on nobody's settings, and the worker declines to arm on them.
+ */
+export function settingsSource(
+  file: string,
+  now: () => number = Date.now,
+  warn: (line: string) => void = (line) => console.warn(line),
+): SettingsSource {
+  let lastGood: MerrymenSettings | null = null;
+  let problem: SettingsProblem | null = null;
+  return {
+    read() {
+      const r = readSettingsFileAt(file);
+      if (r.kind !== "unusable") {
+        if (problem) warn("[settings] settings.json is usable again — applied");
+        problem = null;
+        lastGood = r.kind === "parsed" ? r.settings : {};
+        return lastGood;
+      }
+      if (problem) {
+        problem = { ...problem, why: r.why };
+      } else {
+        problem = { why: r.why, since: now(), holding: lastGood !== null };
+        warn(
+          problem.holding
+            ? `[settings] ${r.why} — keeping the settings last read from it`
+            : `[settings] ${r.why} — nothing usable has been read from it since this process started: ` +
+                `running on env + defaults, and a worker will not arm on them`,
+        );
+      }
+      return lastGood ?? {};
+    },
+    problem: () => problem,
+  };
+}
+
+/**
+ * Keyed by path. MERRYMEN_SETTINGS_FILE is read on every call, and one process
+ * can be pointed at more than one file (tests do it constantly) — a last good
+ * parse of one file must never stand in for another.
+ */
+const sources = new Map<string, SettingsSource>();
+function currentSource(): SettingsSource {
+  const file = process.env.MERRYMEN_SETTINGS_FILE ?? homePaths.settings();
+  let source = sources.get(file);
+  if (!source) {
+    source = settingsSource(file);
+    sources.set(file, source);
+  }
+  return source;
+}
+
+/**
+ * Read + merge. A missing file is "no overrides"; a file that is there but
+ * unusable keeps the last usable read (settingsSource), and settingsProblem()
+ * says so.
+ */
+export function resolveConfig(): ResolvedConfig {
+  return mergeSettings(currentSource().read(), process.env);
+}
+
+/** What is wrong with the settings file resolveConfig reads, or null. */
+export function settingsProblem(): SettingsProblem | null {
+  return currentSource().problem();
+}
+
+/**
+ * Why a worker will not arm, in the owner's words — or null when it may.
+ *
+ * Only when NOTHING usable has been read since the process started. With a
+ * last good read in force the agent carries on with it (settingsHoldNotice):
+ * stopping a running agent over a typo would turn an edit into an outage.
+ */
+export function settingsArmRefusal(p: SettingsProblem | null, hosted = isHostedMode()): string | null {
+  if (!p || p.holding) return null;
+  return (
+    `this agent is NOT TRADING: ${p.why}, and nothing usable has been read from it since this worker started. ` +
+    `Rather than trade on settings nobody chose (paper, the default strategy, an empty Telegram allowlist), it will not start. ` +
+    (hosted
+      ? "The file is ours, not yours: it is rewritten from your saved settings within a minute, and the agent starts on the tick after."
+      : "Fix the file, or remove it to run on the defaults on purpose; the agent starts on the first tick after that.")
+  );
+}
+
+/**
+ * What to tell the owner while a last good read is in force — once per run of
+ * unusable reads, and once more when the file is usable again. `told` is the
+ * `since` of the run already announced, or null.
+ */
+export function settingsHoldNotice(
+  p: SettingsProblem | null,
+  told: number | null,
+  hosted = isHostedMode(),
+): { told: number | null; event: { level: "warn" | "ok"; message: string } | null } {
+  if (p?.holding) {
+    if (told === p.since) return { told, event: null };
+    return {
+      told: p.since,
+      event: {
+        level: "warn",
+        message:
+          `${p.why}. This agent keeps running on the settings it last read from it, so nothing changed in the file since then has taken effect. ` +
+          (hosted
+            ? "The file is ours, not yours: it is rewritten from your saved settings within a minute."
+            : "Fix the file; the first tick after it parses applies it."),
+      },
+    };
+  }
+  if (!p && told !== null) {
+    return { told: null, event: { level: "ok", message: "settings.json is usable again — its settings are in force" } };
+  }
+  return { told, event: null };
 }
 
 /**
@@ -507,7 +682,7 @@ export function resolveConfig(): ResolvedConfig {
  * merged object.
  *
  * A FILE THAT IS THERE BUT DOES NOT PARSE IS REFUSED, NOT REPLACED. The merge
- * used to read that file as `{}` (as resolveConfig does) — so the write-back
+ * used to read that file as `{}` (as resolveConfig did) — so the write-back
  * held the patch and nothing else, and every other key (strategy, keys, the
  * holder wallet) was gone. A torn read of a concurrent write did exactly that,
  * and self-hosted so does a hand edit with a stray comma; there it is the only

@@ -5,10 +5,11 @@
  * WHY NOT writeFileSync. It opens with O_TRUNC and then writes, so between the
  * two — and all through a large write — a reader in another process gets an
  * empty or truncated file. For settings.json that is not a cosmetic glitch:
- * `resolveConfig` reads a file that does not parse as "no overrides" and runs
+ * `resolveConfig` read a file that did not parse as "no overrides" and ran
  * that tick on the defaults (paper, the default strategy, an empty allowlist),
  * and the hosted orchestrator rewrote every child's copy every fifteen seconds
- * while the child read it on every tick.
+ * while the child read it on every tick. (It now keeps the last good read —
+ * settingsSource — but that is the fallback, not the fix.)
  *
  * Temp file in the SAME directory, then rename: rename is atomic within a
  * filesystem (POSIX and Windows alike), and a temp file anywhere else could

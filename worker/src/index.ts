@@ -243,6 +243,9 @@ import {
   bundlerChainMismatch,
   connectionKey,
   resolveConfig,
+  settingsArmRefusal,
+  settingsHoldNotice,
+  settingsProblem,
   strategyKey,
   type ResolvedConfig,
 } from "./settings";
@@ -2797,6 +2800,20 @@ async function main() {
   }
   let strategy = makeStrategy(cfg);
 
+  /**
+   * The run of unusable settings.json reads already told to the owner (its
+   * `since`), so it is said once rather than once a tick. settings.ts decides
+   * what is said; this delivers it, to an armed agent's feed only — a run that
+   * begins while nothing is armed is told once something is.
+   */
+  let settingsHeldTold: number | null = null;
+  async function noteSettingsHeld(): Promise<void> {
+    if (!active) return;
+    const { told, event } = settingsHoldNotice(settingsProblem(), settingsHeldTold);
+    settingsHeldTold = told;
+    if (event) await addEvent(active.agentId, event.level, event.message);
+  }
+
   /** Re-read settings.json; apply what changed without a restart. */
   async function refreshConfig(): Promise<void> {
     const next = resolveConfig();
@@ -2831,6 +2848,9 @@ async function main() {
       stratKey = nextStrat;
     }
     cfg = next;
+    // A settings.json that stopped parsing leaves `next` on the last good read;
+    // the owner is told once that their edit has not taken effect.
+    await noteSettingsHeld();
     // Adding a token in /settings is the common way this drifts — say so on the
     // next tick rather than at the next re-arm, which might never come.
     if (active) await noteTokenCoverage(active.agentId);
@@ -6112,6 +6132,27 @@ async function main() {
     // falsy, so it arms on the very next tick exactly as before.
     if (grantExpired(grant, Math.floor(Date.now() / 1000))) {
       await retireGrant(await ensureAgent(grant), grant);
+      return false;
+    }
+
+    // NOT ON SETTINGS NOBODY CHOSE. When nothing usable has been read from
+    // settings.json since this process started, `cfg` is env + defaults —
+    // paper, the default strategy, an empty Telegram allowlist — standing in
+    // for a file the owner believes is in force. Before this, a stray comma in
+    // a hand edit armed the agent on exactly that, and nothing said so. Stay
+    // unarmed and say why, once per reason, like any other arm failure; the
+    // first tick after the file is usable arms as normal. With a last good
+    // read in force this is null and the agent carries on (noteSettingsHeld).
+    const settingsRefusal = settingsArmRefusal(settingsProblem());
+    if (settingsRefusal) {
+      const agentId = await ensureAgent(grant);
+      await setAgentStatus(agentId, "error");
+      if (lastArmFailure !== settingsRefusal) {
+        lastArmFailure = settingsRefusal;
+        console.log(`[worker] NOT ARMING — ${settingsProblem()?.why ?? "settings.json is unusable"}`);
+        await addEvent(agentId, "err", settingsRefusal);
+      }
+      active = null;
       return false;
     }
 
