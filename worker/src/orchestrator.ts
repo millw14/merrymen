@@ -94,6 +94,8 @@ import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { TELEGRAM_STATE_DDL, publishTenantTelegram, readTenantTelegram } from "./telegram-store";
+import { deleteTgGroups, ensureTgGroupsSchema, publishTgGroups, restoreTgGroups } from "./tg-groups-ferry";
+import { storeDek } from "./store-crypto";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
 import { addressesOf, makeBuilderDesk, type BuilderDesk } from "./builder-pass";
@@ -248,6 +250,12 @@ const ROOT = path.join(fileURLToPath(new URL(".", import.meta.url)), "..", "..")
  * DEK), forges any tenant's session (the signing secret), or reaches the shared
  * grant database (the URL). Strip those; forward everything else so the child
  * still has PATH and the OS essentials node needs to run.
+ *
+ * MERRYMEN_TG_GROUPS_LLM_KEY IS FORWARDED ON PURPOSE, unlike the room's and
+ * X's model keys below. Those are stripped because their passes run in this
+ * process; Telegram groups are polled inside the child, so the child is the
+ * only process that can spend that key (docs/tg-groups.md "The model"). It is
+ * a dedicated key so group chatter never draws on trading's house key.
  */
 const CHILD_SECRET_STRIP = [
   "MERRYMEN_STORE_DEK",
@@ -710,6 +718,68 @@ async function promoteChatSettings(tenant: `0x${string}`, chat: ChatSettings | n
     );
   } catch (e) {
     log(`${tenant}: could not promote telegram settings — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * TELEGRAM GROUP MEMORY ACROSS A REDEPLOY (docs/tg-groups.md "Storage and the
+ * ferry"; the mechanics are in tg-groups-ferry.ts).
+ *
+ * The child keeps its groups in `tg-groups.json` in a home the next redeploy
+ * wipes. Up on the mirror's clock behind the lease (mirrorLedgers), down at
+ * spawn before the child starts (spawnChild), gone with the home on the kill
+ * switch (reconcile). Sealed under the store DEK, which never leaves this
+ * process; self-hosted has no DATABASE_URL and the file is the only store.
+ *
+ * `tgGroupsSeen` is the last version of each tenant's file that landed, so an
+ * unchanged file costs one lstat per pass.
+ */
+const tgGroupsSeen = new Map<string, string>();
+let tgGroupsNoDekLogged = false;
+
+/** The store DEK, or null (said once) when this process has none: nothing is ferried in the clear. */
+function tgGroupsDek(): Buffer | null {
+  const dek = storeDek();
+  if (!dek && !tgGroupsNoDekLogged) {
+    tgGroupsNoDekLogged = true;
+    log("tg-groups: MERRYMEN_STORE_DEK is not a 32-byte key — Telegram group memory is not carried across redeploys");
+  }
+  return dek;
+}
+
+/**
+ * PUT THE CHILD'S TELEGRAM GROUPS BACK, before it starts — beside the link
+ * restore and for its reason: a file restored once the child is polling would
+ * land beside a fresh, empty memory the child has already written. Only when
+ * the home has no file (restoreTgGroups decides). Never fatal: a child without
+ * its groups still trades.
+ */
+async function restoreTgGroupsForChild(tenant: `0x${string}`): Promise<void> {
+  const url = process.env.DATABASE_URL;
+  if (!url) return;
+  const dek = tgGroupsDek();
+  if (!dek) return;
+  try {
+    const shared = await makePgDb(url);
+    await ensureTgGroupsSchema(shared, "postgres");
+    const r = await restoreTgGroups({ tenant, home: childHome(tenant), shared, dek, log });
+    if (r === "restored") log(`tg-groups: ${tenant} memory restored`);
+  } catch (e) {
+    log(`tg-groups: ${tenant} memory not restored — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/** THE KILL SWITCH'S HALF: an agent whose grant is gone leaves no group memory behind. Never fatal. */
+async function forgetTgGroups(tenant: string): Promise<void> {
+  tgGroupsSeen.delete(tenant.toLowerCase());
+  const url = process.env.DATABASE_URL;
+  if (!url) return;
+  try {
+    const shared = await makePgDb(url);
+    await ensureTgGroupsSchema(shared, "postgres");
+    await deleteTgGroups(tenant, shared, log);
+  } catch (e) {
+    log(`tg-groups: ${tenant} stored memory not deleted — ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -1455,6 +1525,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   // child is already polling would be read from a file the child has by then
   // replaced with a fresh, unlinked default.
   await writeTelegramForChild(tenant);
+  // AND ITS TELEGRAM GROUPS, in the same place for the same reason. See
+  // restoreTgGroupsForChild.
+  await restoreTgGroupsForChild(tenant);
   void writeHistoryForChild(tenant, smartAccount);
   const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
   const staleSec = staleThresholdSec(tickSeconds);
@@ -1719,6 +1792,9 @@ export async function reconcile(): Promise<void> {
       } catch {
         /* best-effort cleanup */
       }
+      // AND THE SEALED COPY OF ITS TELEGRAM GROUPS, which would otherwise
+      // outlive the home it came from. See forgetTgGroups.
+      await forgetTgGroups(tenant);
     }
   }
   // Release any lease we still hold for a tenant that is no longer wanted — both
@@ -5225,6 +5301,8 @@ async function mirrorLedgers(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url || children.size === 0) return;
   let shared;
+  // Null unless the group-memory schema is in place and the DEK is present.
+  let tgGroupsDekThisPass: Buffer | null = null;
   try {
     shared = await makePgDb(url);
     // The full ledger schema, not just the cursor table. Nothing else applies
@@ -5255,6 +5333,15 @@ async function mirrorLedgers(): Promise<void> {
       await shared.exec(COMMAND_RECEIPT_DDL);
     } catch {
       /* already there */
+    }
+    // Telegram group memory, on the same clock for the same reason. Its own
+    // try: a failure here skips only the group ferry this pass, never the
+    // ledger mirror.
+    try {
+      await ensureTgGroupsSchema(shared, "postgres");
+      tgGroupsDekThisPass = tgGroupsDek();
+    } catch (e) {
+      log(`tg-groups: schema unavailable, not ferried this pass — ${e instanceof Error ? e.message : String(e)}`);
     }
   } catch (e) {
     log(`ledger mirror: shared db unavailable — ${e instanceof Error ? e.message : String(e)}`);
@@ -5344,6 +5431,15 @@ async function mirrorLedgers(): Promise<void> {
       log(`ledger mirror: ${tenant} failed — ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       handle.close();
+    }
+    // THE CHILD'S TELEGRAM GROUPS, beside the telegram link and under the same
+    // lease: only the replica that owns this child may speak for it, and a
+    // stale home left here by a child now running elsewhere must never
+    // overwrite the live copy. Outside the mirror's try, like the wire below:
+    // a stalled ledger is no reason to let group memory fall behind. Read
+    // only; sealed; skipped when the file has not changed.
+    if (tgGroupsDekThisPass) {
+      await publishTgGroups({ tenant, home: childHome(tenant), shared, dek: tgGroupsDekThisPass, seen: tgGroupsSeen, log });
     }
     // ── THE WIRE ────────────────────────────────────────────────────────────
     //
