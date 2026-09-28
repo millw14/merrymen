@@ -10,6 +10,23 @@ import { randomBytes } from "node:crypto";
 import { closeSync, fchmodSync, fsyncSync, openSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
+/** Windows' transient refusal to rename over a file held open elsewhere — retried briefly (see the original). */
+export const RENAME_RETRY_MS = [10, 20, 40, 80, 160, 320, 640];
+const renameBusy = (e, platform) => platform === "win32" && ["EPERM", "EACCES", "EBUSY"].includes(e?.code ?? "");
+
+export function renameRetryingSync(from, to, platform = process.platform, rename = renameSync) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rename(from, to);
+      return;
+    } catch (e) {
+      const wait = RENAME_RETRY_MS[attempt];
+      if (wait === undefined || !renameBusy(e, platform)) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
+    }
+  }
+}
+
 /** A filesystem that does not do fsync on this kind of file — not a failure. */
 const fsyncUnsupported = (e) => ["EINVAL", "ENOTSUP"].includes(e?.code ?? "");
 
@@ -59,7 +76,7 @@ export function writeFileAtomicSync(file, data, mode = 0o600, opts = {}) {
     }
     closeSync(fd);
     fd = null;
-    renameSync(tmp, target);
+    renameRetryingSync(tmp, target);
     if (opts.durable) fsyncDirSync(path.dirname(target));
   } catch (e) {
     if (fd !== null) {

@@ -45,6 +45,11 @@ const STRATEGIES = path.join(HOME, "strategies");
 // a single slot, so replacing or killing a wallet archives the old one here first
 // (with its owner key) instead of stranding whatever's still funded in it.
 const GRANTS_ARCHIVE = path.join(HOME, "grants");
+// The worker's pause marker, and what it holds when a kill set it — the same
+// sentence as KILL_PAUSE_NOTE in worker/src/home.ts (grant-archive-durable.test.ts
+// holds the two equal).
+const PAUSED = path.join(HOME, "paused");
+const KILL_PAUSE_NOTE = "paused by a kill that could not archive the owner key, so it kept the grant";
 const PKG_STRATEGIES = path.join(ROOT, "strategies");
 const WELCOMED = path.join(HOME, ".welcomed");
 
@@ -1103,11 +1108,16 @@ async function kill() {
     // every tick) and keep the grant — the same rule as the Telegram /kill and
     // the dashboard's kill switch.
     if (archive.kind === "failed") {
-      let paused = true;
-      try {
-        writeFileSync(path.join(HOME, "paused"), "paused", "utf8");
-      } catch {
-        paused = false;
+      // pauseForKeptGrant (worker/src/home.ts), which this CLI cannot import:
+      // an existing pause is left as it is, and a new one says a kill set it.
+      let paused = existsSync(PAUSED);
+      if (!paused) {
+        try {
+          writeFileSync(PAUSED, KILL_PAUSE_NOTE, "utf8");
+          paused = true;
+        } catch {
+          paused = existsSync(PAUSED);
+        }
       }
       bad(`grant NOT destroyed — ${archive.why}, and deleting it without a copy would lose your owner key for good.`);
       console.log(
@@ -1119,6 +1129,13 @@ async function kill() {
       return;
     }
     rmSync(GRANT, { force: true });
+    // liftKillPause: a pause an earlier, refused kill left has done its job.
+    // Only that one — a pause the owner asked for stays.
+    try {
+      if (readFileSync(PAUSED, "utf8") === KILL_PAUSE_NOTE) rmSync(PAUSED, { force: true });
+    } catch {
+      /* no marker */
+    }
     const archived = archive.kind === "archived" ? archive.account : null;
     ok("grant destroyed — the band stands down on the next tick (on-chain expiry is the backstop)");
     if (archived) {

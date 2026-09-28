@@ -5,9 +5,19 @@ import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write";
 import { homePaths, merrymenHome } from "./home";
 import { mayArm } from "./kill-request";
 
+/**
+ * The grant file this worker reads, archives and — on a kill — deletes. ONE
+ * answer for all three: the kill used to delete homePaths.grant() while it read
+ * and archived MERRYMEN_GRANT_FILE, so with that set it reported the grant
+ * destroyed and the next tick re-armed from the file it never touched.
+ */
+export function grantFilePath(): string {
+  return process.env.MERRYMEN_GRANT_FILE ?? homePaths.grant();
+}
+
 /** Reads the grant handoff written by web's /api/grants (~/.merrymen/grant.json). */
 export function loadGrantFile(): StoredGrant | null {
-  const file = process.env.MERRYMEN_GRANT_FILE ?? homePaths.grant();
+  const file = grantFilePath();
   try {
     const grant = JSON.parse(readFileSync(file, "utf8")) as StoredGrant;
     if (!grant.serialized || !grant.smartAccount) return null;
@@ -77,7 +87,7 @@ const isAddress = (v: unknown): v is string => typeof v === "string" && /^0x[0-9
  * Never throws: the caller decides what a `failed` archive means.
  */
 export function archiveCurrentGrant(): GrantArchive {
-  const file = process.env.MERRYMEN_GRANT_FILE ?? homePaths.grant();
+  const file = grantFilePath();
   let raw: string;
   try {
     raw = readFileSync(file, "utf8");

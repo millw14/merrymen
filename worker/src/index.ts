@@ -154,7 +154,7 @@ import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus, readHolderStatusResult } from "./circle";
 import { CIRCLE_SHORT_CLASS_GATE, circleNote, circleNoteStep, circleStanding, circleStrategyTick, type CircleNoted } from "./circle-gate";
 import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
-import { archiveCurrentGrant, grantExpired, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
+import { archiveCurrentGrant, grantExpired, grantFilePath, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
 import { killHosted, killRequested } from "./kill-request";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
 import { execModeOf, liveBlockerText, publishedMode, type ExecMode, type RefuseRule } from "./exec-mode";
@@ -170,7 +170,7 @@ import {
   type AnchorVerdict,
   type ContributionTruth,
 } from "./bootstrap-state";
-import { ensureHome, homePaths, merrymenHome } from "./home";
+import { ensureHome, homePaths, liftKillPause, merrymenHome, pauseForKeptGrant } from "./home";
 import { startupSlotMs } from "./stagger";
 import { llmText, resolveLlm } from "./llm";
 import { applyPaperIntent, paperBookPositions, type PaperPosition } from "./paper";
@@ -254,7 +254,7 @@ import { NOT_WATCHED, TRENCHER_DEFAULTS, buysOntoDust, TRENCHER_FAST, priceabili
 import { createPoolPriceReader } from "./venues/pool-prices";
 import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
 import type { Holding, Snapshot, Strategy, Tick } from "./strategies/types";
-import { isPaused, setPaused, startTelegram } from "./telegram/service";
+import { isPaused, startTelegram } from "./telegram/service";
 import { startNotifier } from "./telegram/notifier";
 import { energyToldDayOf, type EnergyToldHere } from "./telegram/energy-alert";
 import { startVirtualsStreamer } from "./virtuals-streamer";
@@ -13343,7 +13343,7 @@ async function main() {
               reason: killRequested(merrymenHome()) ? "already killed — the server is removing the grant" : "no grant",
             };
           }
-          const r = killHosted(merrymenHome(), homePaths.grant(), grant, Math.floor(Date.now() / 1000));
+          const r = killHosted(merrymenHome(), grantFilePath(), grant, Math.floor(Date.now() / 1000));
           void addEvent(
             active?.agentId ?? grant.smartAccount,
             "warn",
@@ -13370,8 +13370,7 @@ async function main() {
         // owner is told why and what to do. The session key's own on-chain
         // expiry and caps bound the agent meanwhile, as they always do.
         if (archive.kind === "failed") {
-          setPaused(true);
-          const paused = isPaused();
+          const paused = pauseForKeptGrant();
           console.log(`[kill] NOT deleting grant.json — the owner key could not be archived: ${archive.why}${paused ? "; trading paused" : "; could not pause either"}`);
           void addEvent(
             active?.agentId ?? grant.smartAccount,
@@ -13381,7 +13380,10 @@ async function main() {
           );
           return { ok: false, reason: archive.why, archiveFailed: { why: archive.why, paused } };
         }
-        rmSync(homePaths.grant(), { force: true });
+        // The file that was read and archived — not homePaths.grant() (grantFilePath).
+        rmSync(grantFilePath(), { force: true });
+        // A pause an earlier, refused kill left in its place has done its job.
+        liftKillPause();
         const archived = archive.kind === "archived" ? archive.account : null;
         if (archived) {
           void addEvent(

@@ -28,7 +28,8 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import * as cliAtomic from "../../cli/atomic-write.mjs";
-import { fsyncDir, fsyncDirSync, writeFileAtomic, writeFileAtomicSync } from "./atomic-write";
+import { fsyncDir, fsyncDirSync, RENAME_RETRY_MS, writeFileAtomic, writeFileAtomicSync } from "./atomic-write";
+import { homePaths, KILL_PAUSE_NOTE, liftKillPause, pauseForKeptGrant } from "./home";
 
 const codeOf = (src: string) =>
   src
@@ -70,7 +71,7 @@ describe("the helper: durable means synced, renamed, and the directory synced", 
       ["writeFileAtomicSync", body(HELPER, "export function writeFileAtomicSync(")],
       ["writeFileAtomic", body(HELPER, "export async function writeFileAtomic(")],
     ] as const) {
-      const rename = fn.search(/\brename(?:Sync)?\(tmp, target\)/);
+      const rename = fn.search(/\brenameRetrying(?:Sync)?\(tmp, target\)/);
       const dirSync = fn.search(/if \(opts\.durable\) (?:await )?fsyncDir(?:Sync)?\(path\.dirname\(target\)\);/);
       assert.ok(rename > 0 && dirSync > rename, `${name}: the directory is synced after the rename that put the entry in it`);
       assert.match(fn, /if \(opts\.durable && !fsyncUnsupported\(e\)\) throw e;/, `${name}: a real fsync failure is an error when durable`);
@@ -79,7 +80,7 @@ describe("the helper: durable means synced, renamed, and the directory synced", 
 
   it("the CLI's copy does the same, and imports nothing from the worker", () => {
     const fn = body(CLI_HELPER, "export function writeFileAtomicSync(");
-    assert.ok(fn.search(/if \(opts\.durable\) fsyncDirSync\(path\.dirname\(target\)\);/) > fn.search(/renameSync\(tmp, target\)/));
+    assert.ok(fn.search(/if \(opts\.durable\) fsyncDirSync\(path\.dirname\(target\)\);/) > fn.search(/renameRetryingSync\(tmp, target\)/));
     assert.match(fn, /if \(opts\.durable && !fsyncUnsupported\(e\)\) throw e;/);
     assert.doesNotMatch(CLI_HELPER, /from "\.\.\/worker/);
   });
@@ -123,6 +124,27 @@ describe("the helper: durable means synced, renamed, and the directory synced", 
       }
     });
   }
+
+  it("WINDOWS: the CLI's copy retries a refused rename exactly as the original does", () => {
+    // The original's retry is run in settings-atomic.test.ts; this holds the
+    // copy to it. Injected platform and rename, so it runs anywhere.
+    let calls = 0;
+    cliAtomic.renameRetryingSync("a", "b", "win32", () => {
+      if (++calls <= 2) throw Object.assign(new Error("busy"), { code: calls === 1 ? "EPERM" : "EBUSY" });
+    });
+    assert.equal(calls, 3);
+    let linux = 0;
+    assert.throws(
+      () => cliAtomic.renameRetryingSync("a", "b", "linux", () => {
+        linux++;
+        throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+      }),
+      /EPERM/,
+    );
+    assert.equal(linux, 1, "elsewhere EPERM is a real answer");
+    assert.deepEqual([...cliAtomic.RENAME_RETRY_MS], [...RENAME_RETRY_MS], "and waits the same");
+    assert.match(body(CLI_HELPER, "export function writeFileAtomicSync("), /\n    renameRetryingSync\(tmp, target\);/);
+  });
 
   it("fsyncDir, all three: a real directory syncs; a missing one is an error, not a silent pass", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "merrymen-durable-"));
@@ -178,25 +200,69 @@ describe("grant.json changes only after the archive — and a kill without one d
     const del = body(ROUTE, "export async function DELETE(");
     const refusal = del.slice(del.indexOf('if (kept.kind === "failed") {'));
     before_(del, "const kept = await archiveCurrentGrant();", "await rm(GRANT_FILE, { force: true });", "archive first");
+    before_(refusal, "const paused = pauseForKeptGrant();", "await rm(GRANT_FILE", "paused before anything else");
     before_(refusal, "return NextResponse.json(", "await rm(GRANT_FILE", "the refusal returns before the delete");
-    assert.match(refusal, /writeFile\(homePaths\.paused\(\), "paused", "utf8"\)/);
     assert.match(refusal, /\{ status: 409 \}/);
+    before_(refusal, "await rm(GRANT_FILE, { force: true });", "liftKillPause();", "a kill that went through lifts the pause a refused one left");
   });
 
-  it("the worker's Telegram /kill: archive, then remove; a failed archive pauses and returns first", () => {
+  it("the worker's Telegram /kill: archive, then remove the SAME file; a failed archive pauses and returns first", () => {
     const kill = INDEX.slice(INDEX.indexOf("const archive = archiveCurrentGrant();"), INDEX.indexOf("return { ok: true, archived };"));
     assert.ok(kill.length > 0, "the self-hosted kill is gone — re-point this test");
     const refusal = kill.slice(kill.indexOf('if (archive.kind === "failed") {'));
-    before_(refusal, "setPaused(true);", "rmSync(homePaths.grant()", "paused before anything else");
-    before_(refusal, "return { ok: false, reason: archive.why, archiveFailed: { why: archive.why, paused } };", "rmSync(homePaths.grant()", "returns before the delete");
+    before_(refusal, "const paused = pauseForKeptGrant();", "rmSync(grantFilePath()", "paused before anything else");
+    before_(refusal, "return { ok: false, reason: archive.why, archiveFailed: { why: archive.why, paused } };", "rmSync(grantFilePath()", "returns before the delete");
+    before_(refusal, "rmSync(grantFilePath(), { force: true });", "liftKillPause();", "a kill that went through lifts the pause a refused one left");
+    // The file loadGrantFile read and archiveCurrentGrant copied — MERRYMEN_GRANT_FILE when set.
+    assert.doesNotMatch(kill, /rmSync\(homePaths\.grant\(\)/);
+    assert.match(GRANT, /export function grantFilePath\(\): string \{\s*return process\.env\.MERRYMEN_GRANT_FILE \?\? homePaths\.grant\(\);/);
+    assert.match(body(GRANT, "export function loadGrantFile("), /const file = grantFilePath\(\);/);
+    assert.match(body(GRANT, "export function archiveCurrentGrant("), /const file = grantFilePath\(\);/);
   });
 
   it("merrymen kill: archive, then remove; a failed archive pauses and returns first", () => {
     const kill = body(CLI, "async function kill(");
     const refusal = kill.slice(kill.indexOf('if (archive.kind === "failed") {'));
     before_(kill, "const archive = archiveCurrentGrant();", "rmSync(GRANT, { force: true });", "archive first");
-    before_(refusal, 'writeFileSync(path.join(HOME, "paused"), "paused", "utf8");', "rmSync(GRANT", "paused first");
+    before_(refusal, "writeFileSync(PAUSED, KILL_PAUSE_NOTE, \"utf8\");", "rmSync(GRANT", "paused first");
     before_(refusal, "return;", "rmSync(GRANT", "returns before the delete");
+    before_(refusal, "rmSync(GRANT, { force: true });", 'if (readFileSync(PAUSED, "utf8") === KILL_PAUSE_NOTE) rmSync(PAUSED, { force: true });', "and lifts only a kill's pause");
+    // Its own copy of the sentence, because it cannot import home.ts. Held equal.
+    const note = /const KILL_PAUSE_NOTE = "([^"]+)";/.exec(CLI)?.[1];
+    assert.equal(note, KILL_PAUSE_NOTE);
+    assert.match(CLI, /const PAUSED = path\.join\(HOME, "paused"\);/);
+  });
+});
+
+describe("the pause a kill leaves in place of a delete", () => {
+  const saved = process.env.MERRYMEN_HOME;
+  let home = "";
+  before(() => {
+    home = mkdtempSync(path.join(os.tmpdir(), "merrymen-kill-pause-"));
+    process.env.MERRYMEN_HOME = home;
+  });
+  after(() => {
+    if (saved === undefined) delete process.env.MERRYMEN_HOME;
+    else process.env.MERRYMEN_HOME = saved;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("pauseForKeptGrant marks itself as a kill's; liftKillPause lifts that and nothing else", () => {
+    rmSync(homePaths.paused(), { force: true });
+    assert.equal(pauseForKeptGrant(), true);
+    assert.equal(readFileSync(homePaths.paused(), "utf8"), KILL_PAUSE_NOTE);
+    liftKillPause();
+    assert.equal(existsSync(homePaths.paused()), false);
+  });
+
+  it("a pause the owner asked for is neither relabelled nor lifted", () => {
+    writeFileSync(homePaths.paused(), "paused"); // what /pause and the dashboard write
+    assert.equal(pauseForKeptGrant(), true, "already paused");
+    assert.equal(readFileSync(homePaths.paused(), "utf8"), "paused");
+    liftKillPause();
+    assert.equal(readFileSync(homePaths.paused(), "utf8"), "paused");
+    rmSync(homePaths.paused(), { force: true });
+    liftKillPause(); // nothing there: no throw
   });
 });
 
@@ -251,9 +317,23 @@ describe("merrymen kill, end to end", () => {
       assert.match(r.stdout, /grant NOT destroyed — the archive could not be written \(EACCES\)/);
       assert.match(r.stdout, /Trading is paused instead/);
       assert.equal(readFileSync(grantFile(), "utf8"), raw, "the only copy of the owner key is still there");
-      assert.ok(existsSync(path.join(home, "paused")), "and the worker's pause marker is set");
+      assert.equal(readFileSync(path.join(home, "paused"), "utf8"), KILL_PAUSE_NOTE, "and the worker's pause marker says a kill set it");
     } finally {
       chmodSync(path.join(home, "grants"), 0o700);
     }
+    // Fixed, and killed again: it goes through, and the stand-in pause is lifted.
+    const again = kill();
+    assert.equal(again.status, 0, again.stdout + again.stderr);
+    assert.equal(existsSync(grantFile()), false);
+    assert.equal(readFileSync(archiveFile(), "utf8"), raw);
+    assert.equal(existsSync(path.join(home, "paused")), false, "the next grant must not arm paused with nothing saying why");
+  });
+
+  it("a pause the owner set survives a kill that went through", () => {
+    writeFileSync(grantFile(), JSON.stringify({ smartAccount: ACCOUNT, serialized: "0xs", demoOwnerPrivateKey: "0xkey-three" }));
+    writeFileSync(path.join(home, "paused"), "paused");
+    const r = kill();
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(readFileSync(path.join(home, "paused"), "utf8"), "paused");
   });
 });

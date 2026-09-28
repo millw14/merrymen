@@ -8,11 +8,11 @@
 
 import { webChainRead } from "@/lib/chain-read";
 import { readGrantBalancesFrom, type GrantBalances } from "@/lib/grant-balances";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { fsyncDir, writeFileAtomic } from "@merrymen/atomic-write";
-import { homePaths, merrymenHome } from "@merrymen/home";
+import { homePaths, liftKillPause, merrymenHome, pauseForKeptGrant } from "@merrymen/home";
 import { createPublicClient } from "viem";
 import {
   accountsMatch,
@@ -498,10 +498,7 @@ export async function DELETE(req: Request) {
     // for good. Trading stops anyway — the pause marker the worker honours on
     // every tick — and the grant stays until it can be kept. Same rule as the
     // worker's Telegram /kill and `merrymen kill`.
-    const paused = await writeFile(homePaths.paused(), "paused", "utf8").then(
-      () => true,
-      () => false,
-    );
+    const paused = pauseForKeptGrant();
     return NextResponse.json(
       {
         error:
@@ -514,6 +511,8 @@ export async function DELETE(req: Request) {
     );
   }
   await rm(GRANT_FILE, { force: true });
+  // A pause an earlier, refused kill left in its place has done its job.
+  liftKillPause();
   return NextResponse.json({ ok: true });
 }
 

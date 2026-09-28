@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, beforeEach, describe, it } from "node:test";
+import { KILL_PAUSE_NOTE } from "@merrymen/home";
 
 /**
  * SELF-HOSTED, THE OUTGOING GRANT IS KEPT — ON DISK, BYTE FOR BYTE — BEFORE
@@ -114,10 +115,24 @@ describe("DELETE /api/grants, self-hosted — the kill switch", () => {
       assert.match(body.error ?? "", /^The grant was NOT deleted: the archive could not be written \(EACCES\)/);
       assert.equal(body.paused, true);
       assert.equal(readFileSync(grantFile(), "utf8"), live, "the only copy of the owner key is still there");
-      assert.ok(existsSync(pausedFile()), "the marker the worker honours every tick");
+      assert.equal(readFileSync(pausedFile(), "utf8"), KILL_PAUSE_NOTE, "the marker the worker honours, saying a kill set it");
     } finally {
       chmodSync(archiveDir(), 0o700);
     }
+    // Fixed, and killed again: it goes through, and the stand-in pause is lifted,
+    // or the next grant would arm paused with nothing saying why.
+    const again = await del();
+    assert.equal(again.status, 200);
+    assert.equal(existsSync(grantFile()), false);
+    assert.equal(readFileSync(archiveOf(A), "utf8"), live);
+    assert.equal(existsSync(pausedFile()), false);
+  });
+
+  it("a pause the owner set survives a kill that went through", async () => {
+    writeFileSync(grantFile(), rawGrant(A, "0xowner-key-A"));
+    writeFileSync(pausedFile(), "paused");
+    assert.equal((await del()).status, 200);
+    assert.equal(readFileSync(pausedFile(), "utf8"), "paused");
   });
 
   it("nothing to archive is not a refusal: no grant, or one naming no account, is simply removed", async () => {
