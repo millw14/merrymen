@@ -409,10 +409,22 @@ describe("one step after another", () => {
     assert.equal((await rows(w))[0]?.status, "scheduled", "the template stood in");
     await p.step(w.db, ROSTER, new Map(), T0 + 11 * MIN);
     const r = await rows(w);
-    assert.deepEqual(r.map((x) => [x.kind, x.status, x.reason]), [["intro", "posted", null], ["buy", "skipped", "pass"]]);
+    assert.deepEqual(r.map((x) => [x.kind, x.status, x.reason]), [["intro", "posted", null], ["buy", "skipped", "no-draft"]]);
     assert.equal(r[1]?.body, "", "nothing refused is kept");
     await p.step(w.db, ROSTER, new Map(), T0 + 13 * MIN);
     assert.equal(w.prompts.length, 2, "the skipped buy is not drafted again");
+  });
+
+  it("a draft the gate refuses is written off with its reason, and never posted", async (t) => {
+    const w = await world(t, T0);
+    const alerting = (prompt: string) => (/very first post/.test(prompt) ? INTRO : "BUY ALERT: picked up pepe on paper, curve early");
+    const p = poster(w, { answer: alerting, calls: [call({ decisionId: "d-pepe", atSec: (T0 + 2 * MIN) / 1000 })] });
+    await p.step(w.db, ROSTER, new Map(), T0 + MIN);
+    await p.step(w.db, ROSTER, new Map(), T0 + 11 * MIN);
+    await p.step(w.db, ROSTER, new Map(), T0 + 2 * HOUR);
+    const r = await rows(w);
+    assert.deepEqual(r.map((x) => [x.kind, x.status, x.reason, x.body === ""]), [["intro", "posted", null, false], ["buy", "skipped", "gate:alert", true]]);
+    assert.deepEqual(w.tweets, [INTRO]);
   });
 
   it("the model's daily allowance is held", async (t) => {

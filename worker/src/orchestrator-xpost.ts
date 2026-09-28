@@ -590,8 +590,11 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
     let reason = "no-model";
     if (creds) {
       if (await takeAllowance(shared, `llm:${utcDay(nowMs)}`, llmPerDay, nowMs)) {
+        // Null is PASS, an empty answer, an error or a timeout alike: the key
+        // is spent either way, so a model outage costs posts, never a loop of
+        // calls on the allowance.
         const raw = await draft(creds, prompt, { call: deps.llm, timeoutMs: deps.draftTimeoutMs });
-        if (raw === null) reason = "pass";
+        if (raw === null) reason = "no-draft";
         else {
           const v = admitXPost(raw, gate, BASE_GATE);
           if (v.ok) body = v.text;
