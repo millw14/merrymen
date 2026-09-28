@@ -276,6 +276,31 @@ describe("backfillHolderClaims — against a real store", () => {
     assert.ok(lines.some((l) => l.includes(t(1)) && /unreadable/.test(l)));
   });
 
+  it("FILE BACKEND: A TENANT WHOSE SETTINGS WILL NOT READ IS PENDING, NOT 'NO PROOF' — and its proof is claimed once it reads", async () => {
+    // The single-service hosted deploy runs on FileSettingsStore. Its get()
+    // used to swallow every error and answer null, so an unreadable blob (a
+    // torn write, the wrong DEK, EMFILE) looked like a tenant with nothing
+    // linked: never pending, the record said done, and that holder's proof
+    // was never claimed.
+    const store = freshStore();
+    const A = t(0xa), P = t(0xb);
+    await store.put(A, { holderProof: { address: W2, at: 1 } });
+    await store.put(P, { holderProof: { address: W, at: 2 } });
+    const file = path.join(process.env.MERRYMEN_HOME!, "tenant-settings", `${P}.json`);
+    const good = readFileSync(file, "utf8");
+    writeFileSync(file, JSON.stringify({ tenant: P, sealed: "{ torn", updatedAt: 1 }));
+    await assert.rejects(store.get(P), "an unreadable blob is an error, not 'no settings'");
+    assert.equal(await store.get(t(0xee)), null, "no blob at all is still simply null");
+    const first = await backfillHolderClaims(store, () => {}, 10_000);
+    assert.deepEqual(first.unreadable, [P]);
+    assert.equal(first.done, false);
+    assert.deepEqual(await store.holderBackfill(), { startedAt: 10_000, pending: [P] });
+    writeFileSync(file, good);
+    const retry = await backfillHolderClaims(store, () => {}, 20_000);
+    assert.equal(retry.done, true);
+    assert.equal((await store.holderClaims()).get(W), P, "claimed once it could be read");
+  });
+
   it("a store whose listing fails throws, so the caller tries again", async () => {
     await assert.rejects(
       backfillHolderClaims({

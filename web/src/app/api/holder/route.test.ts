@@ -455,6 +455,20 @@ describe("PATCH says which wallet the tier reads — and why a linked one is not
     assert.equal((await patch(a.address)).proof, "claimed-elsewhere");
   });
 
+  it("and nothing either when the account's own settings cannot be read — never a crash, never 'nothing linked'", async () => {
+    const a = newWallet();
+    const get = mock.method(store, "get", async () => {
+      throw new Error("unseal failed");
+    });
+    try {
+      const res = await route.PATCH(new Request(`${ORIGIN}/api/holder`, { method: "PATCH", headers: cookie(a.address) }));
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { linked: null, reads: null, proof: null });
+    } finally {
+      get.mock.restore();
+    }
+  });
+
   it("and says nothing (null) when the claims cannot be read, rather than guess", async () => {
     const a = newWallet();
     const claims = mock.method(store, "holderClaims", async () => {

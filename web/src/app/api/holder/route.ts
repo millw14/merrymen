@@ -292,8 +292,15 @@ export async function PATCH(req: Request) {
   const tenant = requireTenant(req);
   if (!tenant) return NextResponse.json({ linked: null, reads: null, proof: null });
   const store = getSettingsStore();
-  const stored = (await store.get(tenant)) ?? {};
-  const proof = isHolderProof(stored.holderProof) ? stored.holderProof : null;
+  let stored: Awaited<ReturnType<typeof store.get>>;
+  try {
+    stored = await store.get(tenant);
+  } catch {
+    // Settings that will not read are not "nothing linked": say nothing.
+    return NextResponse.json({ linked: null, reads: null, proof: null });
+  }
+  const storedProof = stored?.holderProof;
+  const proof = isHolderProof(storedProof) ? storedProof : null;
   let reads: "linked" | "login" | "none" | null = null;
   let standing: "counting" | "claimed-elsewhere" | "unclaimed" | null = null;
   try {

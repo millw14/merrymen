@@ -213,13 +213,24 @@ export class FileSettingsStore implements SettingsStore {
     await mkdir(this.dir, { recursive: true });
     await writeFile(this.file(tenant), JSON.stringify(rec, null, 2), { encoding: "utf8", mode: 0o600 });
   }
+  /**
+   * NULL ONLY WHEN NOTHING IS STORED. A blob that will not read — torn, not
+   * JSON, sealed under another DEK, EMFILE — throws, as PgSettingsStore.get
+   * does. Read as "no settings" it was worse than an error everywhere: the
+   * holder-claims backfill saw no proof and never marked the tenant pending
+   * (so that holder's claim was skipped for good), and every read-modify-write
+   * (`?? {}` then put) replaced the tenant's whole settings with its one field.
+   */
   async get(tenant: `0x${string}`): Promise<MerrymenSettings | null> {
+    let raw: string;
     try {
-      const rec = JSON.parse(await readFile(this.file(tenant), "utf8")) as StoredSettingsRecord;
-      return unseal(rec.sealed);
-    } catch {
-      return null;
+      raw = await readFile(this.file(tenant), "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw e;
     }
+    const rec = JSON.parse(raw) as StoredSettingsRecord;
+    return unseal(rec.sealed);
   }
   async listTenants(): Promise<`0x${string}`[]> {
     try {
