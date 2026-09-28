@@ -25,7 +25,7 @@ import path from "node:path";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-inflight-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { closeStoreForTest, initStore, addTrade, getOpsToday, getSpentTodayUsdg, listOpHashes, listSubmittedOps } =
+const { closeStoreForTest, initStore, addTrade, energyBuysInFlight, getOpsToday, getSpentTodayUsdg, listOpHashes, listSubmittedOps, opsSignedWithNonce } =
   await import("./store");
 const { homePaths } = await import("./home");
 const { DatabaseSync } = await import("node:sqlite");
@@ -246,5 +246,70 @@ describe("an in-flight row is not mistaken for a settled one", () => {
       false,
       "and it stops being re-asked about",
     );
+  });
+});
+
+/**
+ * A 'dropped' ROW: an op the chain can never execute (another op of ours spent
+ * its nonce — inflight-reconcile.ts findDroppedOps). Every reader that counts
+ * spend or in-flight work must see it as what it is: nothing moved.
+ */
+describe("a dropped op is terminal, and nothing counts it", () => {
+  const AGENT2 = "0xagent0000000000000000000000000000000002";
+  const DROPPED = "0xdddd000000000000000000000000000000000000000000000000000000000004";
+  const RIVAL = "0xeeee000000000000000000000000000000000000000000000000000000000005";
+  const NONCE = (0x0102n << 240n) | 9n;
+  const rowsOf = (hash: string) => {
+    const raw = new DatabaseSync(homePaths.db());
+    try {
+      return raw.prepare("SELECT status FROM trades WHERE agent_id = ? AND user_op_hash = ?").all(AGENT2, hash) as { status: string }[];
+    } finally {
+      raw.close();
+    }
+  };
+  const row = (status: "submitted" | "landed" | "dropped", hash: string, extra: Record<string, unknown> = {}) =>
+    addTrade({
+      agent_id: AGENT2,
+      kind: "energy-buy",
+      target: "0xrouter000000000000000000000000000000001",
+      sell_token: "0xusdg",
+      buy_token: "0xmerrymen",
+      amount_usdg: 10,
+      user_op_hash: hash,
+      status,
+      ...extra,
+    } as never);
+
+  it("the pre-broadcast row keeps the nonce it was signed with, through its resolution", async () => {
+    assert.equal(await row("submitted", DROPPED, { user_op_nonce: NONCE.toString() }), true);
+    assert.equal(await row("submitted", RIVAL, { user_op_nonce: NONCE.toString() }), true);
+    assert.equal((await listSubmittedOps(AGENT2)).find((o) => o.userOpHash === DROPPED)!.nonce, NONCE);
+    await row("landed", RIVAL, { tx_hash: "0xrival" });
+    assert.deepEqual(await opsSignedWithNonce(AGENT2, NONCE, DROPPED), [RIVAL], "the landed rival kept its nonce");
+    assert.deepEqual(await opsSignedWithNonce(AGENT2, NONCE, RIVAL), [DROPPED]);
+    assert.deepEqual(await opsSignedWithNonce(AGENT2, NONCE + 1n, DROPPED), []);
+    assert.equal(await getSpentTodayUsdg(AGENT2, "live"), 20, "both charge the live rail while one is in flight");
+    assert.equal(await energyBuysInFlight(AGENT2, 0), true);
+  });
+
+  it("written off, it charges no cap, holds nothing in flight, and cannot be rewritten", async () => {
+    await row("dropped", DROPPED, { reject_rule: "dropped: a later op used its nonce (resolved)" });
+    assert.equal(rowsOf(DROPPED).length, 1, "resolved in place");
+    assert.equal(rowsOf(DROPPED)[0]!.status, "dropped");
+    assert.equal(await getSpentTodayUsdg(AGENT2, "live"), 10, "only the op that executed is spend");
+    assert.equal(await getOpsToday(AGENT2, "live"), 1);
+    assert.equal(await energyBuysInFlight(AGENT2, 0), false, "and the next energy ask is not blocked by it");
+    assert.deepEqual(await listSubmittedOps(AGENT2), []);
+  });
+
+  it("its hash stays OUT of the known set, so the orphan sweep would still count an execution the proof rules out", async () => {
+    const known = await listOpHashes(AGENT2);
+    assert.equal(known.has(DROPPED), false);
+    assert.equal(known.has(RIVAL), true);
+    // And what that sweep would write can never rewrite the dropped row — only
+    // 'submitted' is ever updated — so it lands BESIDE it, counted, visible.
+    await row("landed", DROPPED, { tx_hash: "0xlate" });
+    assert.deepEqual(rowsOf(DROPPED).map((r) => r.status), ["dropped", "landed"]);
+    assert.equal(await getSpentTodayUsdg(AGENT2, "live"), 20);
   });
 });

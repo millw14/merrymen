@@ -66,7 +66,17 @@ export const STRANDED_RESOLVE_WINDOW_SEC = 26 * 3600;
  * op the resolver may still settle: one in the current accounting epoch
  * (the resolver skips any other) created within its lookback.
  *
- * WHY BOUNDED, and not "any submitted row". A userOp the bundler dropped is
+ * A DROPPED OP ENDS ITS HOLD WHEN IT PROVABLY CANNOT LAND. A userOp the bundler
+ * dropped is never found by its hash, and used to hold for the whole window —
+ * 26 hours in which a deposit was not booked. Once another op of ours, signed
+ * with the same nonce, has executed, the EntryPoint can never include it: the
+ * resolver writes it off as 'dropped' (inflight-reconcile.ts findDroppedOps),
+ * it is no longer 'submitted', and the next look no longer holds on it. It
+ * moved nothing, so it queues no settlement. One that nothing has superseded
+ * could still be included by anyone holding it, and keeps holding.
+ *
+ * WHY BOUNDED, and not "any submitted row". A dropped op nothing proves dead —
+ * no later op spent its nonce, or its row predates the recorded nonce — is
  * never found and its row stays 'submitted' for ever, as does a row from an
  * earlier epoch (left for `merrymen verify`). Holding inference on those would
  * switch it off for good — every later deposit booked as profit and charged a

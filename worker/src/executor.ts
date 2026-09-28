@@ -366,8 +366,14 @@ export interface ExecuteHooks {
    * whose row could not be written is an operation nothing can ever reconcile,
    * so not sending it is strictly better than sending it blind. Nothing has been
    * signed to the network at that point and nothing is spent.
+   *
+   * `op.nonce` is the nonce the operation was SIGNED with — the full ERC-4337
+   * uint256 the hash commits to. The row keeps it because a nonce is spent
+   * once: if this op is dropped and the next one, signed with the same nonce,
+   * executes, this one can never land, and only the recorded nonce lets the
+   * resolver prove it (inflight-reconcile.ts findDroppedOps).
    */
-  onSubmitted?(userOpHash: `0x${string}`): Promise<void>;
+  onSubmitted?(userOpHash: `0x${string}`, op: { nonce: bigint | null }): Promise<void>;
 }
 
 export interface AgentExecutor {
@@ -850,7 +856,7 @@ export async function createAgentExecutor(opts: {
 
       // DURABLE BEFORE BROADCAST. From here on, every outcome — accepted,
       // refused, or never answered — has a row to attach itself to.
-      if (hooks?.onSubmitted) await hooks.onSubmitted(userOpHash);
+      if (hooks?.onSubmitted) await hooks.onSubmitted(userOpHash, { nonce: typeof prepared.nonce === "bigint" ? prepared.nonce : null });
 
       let accepted: `0x${string}`;
       try {

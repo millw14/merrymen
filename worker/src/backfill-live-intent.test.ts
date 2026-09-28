@@ -457,6 +457,6 @@ describe("a real order that failed is still a real order", () => {
           `or to 'excluded' here with the reason it does not mean real money moved.`,
       );
     }
-    assert.deepEqual(counted.sort(), ["landed", "reverted", "submitted"]);
+    assert.deepEqual(counted.sort(), ["dropped", "landed", "reverted", "submitted"]);
   });
 });

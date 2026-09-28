@@ -124,7 +124,9 @@ export function isEnergyRow(r: { kind: string; sell_token?: string | null; buy_t
 const ENERGY_WORDS = new Set(["merrymen", "$merrymen", "energy"]);
 
 const FILLED = new Set(["landed", "paper"]);
-const REFUSED = new Set(["rejected", "reverted"]);
+// 'dropped' is here as what the owner asks "refused" for: a trade that did not
+// happen. It was sent and never executed (a later op used its nonce).
+const REFUSED = new Set(["rejected", "reverted", "dropped"]);
 
 /** Read and label recent trades, newest first. Never throws; an unreadable ledger is []. */
 export async function loadTradeViews(db: LabelDb, agentId: string, o: TradeViewOpts = {}): Promise<TradeView[]> {
@@ -136,7 +138,7 @@ export async function loadTradeViews(db: LabelDb, agentId: string, o: TradeViewO
   const where = ["agent_id = ?", "created_at >= ?"];
   const args: SQLInputValue[] = [agentId, o.since ?? 0];
   if (o.filter === "filled") where.push("status IN ('landed','paper')");
-  else if (o.filter === "refused") where.push("status IN ('rejected','reverted')");
+  else if (o.filter === "refused") where.push("status IN ('rejected','reverted','dropped')");
   const tokenAddr = o.token?.trim().toLowerCase();
   if (tokenAddr && /^0x[0-9a-f]{40}$/.test(tokenAddr)) {
     // Leg-less rows stay candidates: a restart copy's coin is only in its receipt.
@@ -279,6 +281,12 @@ function verb(v: TradeView): string {
 export function tradeViewLine(v: TradeView, html: boolean): string {
   const e = html ? esc : (s: string) => s;
   const coin = e(v.label);
+  // DROPPED IS NOT A PURCHASE WAITING TO CONFIRM. Left to the line below it
+  // read "⏳ bought …" for an op that can never execute.
+  if (v.status === "dropped") {
+    const what = v.side ? `${v.side} of ${coin}` : `trade in ${coin}`;
+    return `↩️ dropped: ${what}, ${e(dollars(v.usdg))} — it never reached the chain, and nothing moved · ${when(v.at)}`;
+  }
   if (v.status === "rejected" || v.status === "reverted") {
     const what = v.side ? `${v.side} of ${coin}` : `trade in ${coin}`;
     const why = v.refusal ? ` — ${e(v.refusal)}` : "";

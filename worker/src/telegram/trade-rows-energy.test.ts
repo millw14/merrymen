@@ -152,3 +152,20 @@ describe("the trade ping", () => {
     assert.match(src, /\(t\.status === "landed" \|\| t\.status === "paper"\) && !isEnergyRow\(t\)/);
   });
 });
+
+describe("a DROPPED op on /trades", () => {
+  it("reads as dropped — never '⏳ bought' — and is among what the owner asks 'refused' for", async () => {
+    const db = ledger();
+    db.prepare(
+      `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, status, reject_rule, created_at)
+       VALUES (?, 'energy-buy', ?, ?, ?, 5, 'dropped', 'dropped: a later op used its nonce (resolved)', ?)`,
+    ).run(AGENT, PAIR, USDG, MERRY, Math.floor(Date.now() / 1000));
+    const [v] = await loadTradeViews(db, AGENT);
+    assert.ok(v);
+    const line = tradeViewLine(v!, false);
+    assert.match(line, /^↩️ dropped: buy of energy \(\$MERRYMEN\), \$5\.00 — it never reached the chain, and nothing moved · /);
+    assert.doesNotMatch(line, /bought|⏳/);
+    assert.equal((await loadTradeViews(db, AGENT, { filter: "refused" })).length, 1);
+    assert.equal((await loadTradeViews(db, AGENT, { filter: "filled" })).length, 0);
+  });
+});

@@ -104,7 +104,7 @@ import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
 import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbols } from "./custody";
 import { SponsorRefused } from "./paymaster";
-import { findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { findDroppedOps, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
 import { idleChannelOnStore, modeEmptiedFact } from "./idle-notice";
@@ -512,6 +512,7 @@ import {
   getTransferredTodayUsdg,
   listOpHashes,
   listSubmittedOps,
+  opsSignedWithNonce,
   initStore,
   setPaperBook,
   resetPaperLedger,
@@ -2712,7 +2713,9 @@ async function main() {
                           ? "it landed"
                           : d.status === "rejected"
                             ? `the wall turned it back (${d.reject_rule ?? "policy"})`
-                            : d.status
+                            : d.status === "dropped"
+                              ? "it was sent and dropped before it reached the chain — nothing moved"
+                              : d.status
                               ? d.status
                               : "no trade came of it";
                       const said = d.reason ? ` — you said: ${d.reason}` : "";
@@ -3058,7 +3061,66 @@ async function main() {
                 `it moved nothing, and its spend is released`,
         );
       }
-      const unresolved = mine.length - resolved.length;
+      // AN OP THE CHAIN CAN NEVER EXECUTE IS WRITTEN OFF — ON PROOF, NEVER ON
+      // SILENCE. A userOp the bundler dropped has no event and never will, so
+      // it used to stay 'submitted' for the resolver's whole window: charging
+      // the live rail, blocking the next energy ask, and holding flow
+      // inference for 26 hours (flow-inference.ts opsHoldInference), in which
+      // a deposit was not booked. Once ANOTHER op of ours, signed with the
+      // same nonce, has executed on-chain, the EntryPoint will refuse this one
+      // for ever (inflight-reconcile.ts findDroppedOps says why that is a
+      // proof and "no event found" is not). It moved nothing and burned no
+      // gas: no settlement is queued, nothing is booked, and the row becomes
+      // 'dropped' — counted by no cap, journaled nowhere, and no longer
+      // 'submitted', so the next look no longer holds on it. Only from
+      // 'submitted' (addTrade's guard), so a row settled meanwhile is kept.
+      // BEST-EFFORT, after everything the chain answered for is settled: a
+      // read that fails here leaves the op 'submitted' — still counted, still
+      // holding — and the next pass asks again.
+      const unsettled = mine.filter((m) => m.nonce !== undefined && !resolved.some((r) => r.userOpHash === m.userOpHash));
+      let dropped: Awaited<ReturnType<typeof findDroppedOps>> = [];
+      try {
+        const suspects: { userOpHash: string; nonce: bigint; rivals: string[] }[] = [];
+        for (const m of unsettled) {
+          const rivals = await opsSignedWithNonce(agentId, m.nonce!, m.userOpHash);
+          if (rivals.length > 0) suspects.push({ userOpHash: m.userOpHash, nonce: m.nonce!, rivals });
+        }
+        dropped = await findDroppedOps({
+          chain,
+          smartAccount,
+          stranded: suspects,
+          lookbackBlocks,
+          log: (m) => console.log(`[reconcile] ${m}`),
+        });
+      } catch (e) {
+        console.log(`[reconcile] dropped-op check skipped, will retry: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      for (const d of dropped) {
+        const row = mine.find((m) => m.userOpHash === d.userOpHash)!;
+        const wrote = await addTrade({
+          agent_id: agentId,
+          kind: row.kind as TradeRow["kind"],
+          target: row.target,
+          // The legs stay, as on any settled row: a reader keyed on them must
+          // still find what this op was — and find it not 'submitted'.
+          ...(row.sellToken ? { sell_token: row.sellToken } : {}),
+          ...(row.buyToken ? { buy_token: row.buyToken } : {}),
+          amount_usdg: row.amountUsdg,
+          user_op_hash: d.userOpHash,
+          status: "dropped",
+          reject_rule: "dropped: a later op used its nonce (resolved)",
+        });
+        // A write that did not land leaves it 'submitted' for the next pass.
+        if (!wrote) continue;
+        await addEvent(
+          agentId,
+          "warn",
+          `resolved an op we lost track of: ${d.userOpHash.slice(0, 10)}… was DROPPED before it reached the chain — ` +
+            `our later op ${d.usedBy.slice(0, 10)}… (${d.txHash.slice(0, 10)}…) used the same nonce, so it can never ` +
+            `land. It moved nothing and cost no gas, and its spend is released`,
+        );
+      }
+      const unresolved = mine.length - resolved.length - dropped.length;
       if (unresolved > 0) {
         // NEVER guessed at. An op the chain has no event for inside the
         // lookback might still be pending, or older than the window. Both
@@ -7905,7 +7967,7 @@ async function main() {
        * in-flight window — the unsafe direction, and the thing this is for.
        */
       const submitHooks: ExecuteHooks = {
-        onSubmitted: async (userOpHash) => {
+        onSubmitted: async (userOpHash, op) => {
           const wrote = await addTrade({
             agent_id: agentId,
             kind: intent.kind,
@@ -7913,6 +7975,9 @@ async function main() {
             ...tokenLegs(intent),
             amount_usdg: usdgNum(notional),
             user_op_hash: userOpHash,
+            // The nonce it is signed with: what proves it dropped if the next
+            // op, signed with the same one, executes (resolveStrandedOps).
+            ...(op.nonce !== null ? { user_op_nonce: op.nonce.toString() } : {}),
             status: "submitted",
             decision_id,
             ...sim,
@@ -12715,6 +12780,10 @@ async function main() {
         return no(
           `↩️ the ${side} reached the chain and turned back${outcome.rejectRule ? ` — ${outcome.rejectRule}` : ""}. Nothing moved, but the gas is spent.`,
         );
+      case "dropped":
+        // Only the stranded-op resolver writes this — said truthfully if an
+        // order ever meets it: it was sent, not refused.
+        return no(`↩️ the ${side} was dropped before it reached the chain. Nothing moved and no gas was spent.`);
       default: {
         /**
          * THE SLUG IS NOT AN EXPLANATION, and this line was handing one to

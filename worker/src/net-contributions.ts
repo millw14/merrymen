@@ -21,6 +21,10 @@
  * was written (its flows with `at` at or after the anchor's generatedAt, in the
  * anchor's epoch). A flow already in the anchor was booked by an earlier
  * process, before the parent wrote the file, so it is never counted twice.
+ * And none is in NEITHER half: a flow that earlier process booked after the
+ * mirror's last pass would be dated before the anchor and missing from the
+ * shared sum, so the parent mirrors a dead child's ledger one last time before
+ * deriving the anchor (orchestrator.ts finalMirrorBeforeAnchor).
  * With no anchor figure — self-hosted, where the local ledger IS the durable
  * record, or a hosted anchor that established nothing — or once this child has
  * moved to another epoch than the anchor's, the local epoch sum answers, as
