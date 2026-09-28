@@ -155,7 +155,7 @@ import { readHolderStatus, readHolderStatusResult } from "./circle";
 import { CIRCLE_SHORT_CLASS_GATE, circleNote, circleNoteStep, circleStanding, circleStrategyTick, type CircleNoted } from "./circle-gate";
 import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
-import { killHosted, killRequested } from "./kill-request";
+import { hostedKillFromChat } from "./kill-request";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
 import { execModeOf, liveBlockerText, publishedMode, type ExecMode, type RefuseRule } from "./exec-mode";
 import { limitsFromGrant } from "./limits";
@@ -13302,14 +13302,10 @@ async function main() {
           // restores a missing copy from the tenant store every pass, so
           // deleting it alone was a kill that undid itself in fifteen seconds.
           // killHosted leaves a request the orchestrator carries out against
-          // the store. See kill-request.ts.
-          if (!grant) {
-            return {
-              ok: false,
-              reason: killRequested(merrymenHome()) ? "already killed — the server is removing the grant" : "no grant",
-            };
-          }
-          const r = killHosted(merrymenHome(), homePaths.grant(), grant, Math.floor(Date.now() / 1000));
+          // the store. See kill-request.ts. The hold process makes the same
+          // call (telegram/hold.ts), so a held tenant's owner can revoke too.
+          const r = hostedKillFromChat(merrymenHome(), homePaths.grant(), grant, Math.floor(Date.now() / 1000));
+          if (!r.ok || !grant) return r;
           void addEvent(
             active?.agentId ?? grant.smartAccount,
             "warn",

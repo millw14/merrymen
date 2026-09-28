@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import {
   PRIOR_BOTS_KEPT,
+  bindToken,
   botIdOf,
   ensureLinkCode,
   loadTelegramState,
@@ -302,5 +303,45 @@ describe("switchBot — each bot keeps its own place in its own stream", () => {
     for (let i = 0; i < PRIOR_BOTS_KEPT + 4; i++) st = switchBot({ ...st, offset: 100 + i }, String(500 + i), "0000000000000000", 10 + i);
     assert.equal(st.priorBots.length, PRIOR_BOTS_KEPT);
     assert.equal(st.priorBots[0]!.botId, String(500 + PRIOR_BOTS_KEPT + 2), "newest first");
+  });
+});
+
+/**
+ * bindToken is the state half of service.ts bindBot, and the hold process's
+ * too (telegram/hold.ts): whichever of them polls the bot must leave
+ * telegram.json as the other expects to find it. Each case once, here; the
+ * poll loops' own tests drive them end to end.
+ */
+describe("bindToken — the state a token's bot binds, shared by the child and the hold process", () => {
+  const rng = (n: number) => Uint8Array.from({ length: n }, (_, i) => (i * 7 + 3) % 248);
+  it("adopts a bot when none is on file, and resets nothing", () => {
+    const b = bindToken({ ...base, offset: 90, linkCode: "ABCDEF" }, "111:a", 5);
+    assert.equal(b.change, "adopted");
+    assert.deepEqual([b.state.botId, b.state.tokenTag, b.state.offset, b.state.linkCode], ["111", tokenTagOf("111:a"), 90, "ABCDEF"]);
+  });
+  it("a different bot is switched onto, with a fresh code and the boundary at `at`", () => {
+    const on111 = { ...base, botId: "111", tokenTag: tokenTagOf("111:a"), offset: 90, linkCode: "ABCDEF" };
+    const b = bindToken(on111, "222:b", 5, rng);
+    assert.equal(b.change, "switched");
+    assert.equal(b.state.botId, "222");
+    assert.equal(b.state.offset, 0);
+    assert.equal(b.state.boundAt, 5);
+    assert.ok(b.state.linkCode && b.state.linkCode !== "ABCDEF");
+  });
+  it("the same bot with a new secret keeps its offset and rotates the code; a missing fingerprint is not announced", () => {
+    const on111 = { ...base, botId: "111", tokenTag: tokenTagOf("111:a"), offset: 90, linkCode: "ABCDEF" };
+    const renewed = bindToken(on111, "111:b", 5, rng);
+    assert.equal(renewed.change, "renewed");
+    assert.ok(renewed.change === "renewed" && renewed.told);
+    assert.equal(renewed.state.offset, 90);
+    assert.notEqual(renewed.state.linkCode, "ABCDEF");
+    const untagged = bindToken({ ...on111, tokenTag: null }, "111:a", 5, rng);
+    assert.ok(untagged.change === "renewed" && !untagged.told);
+  });
+  it("the same token changes nothing, and a malformed one is not bound", () => {
+    const on111 = { ...base, botId: "111", tokenTag: tokenTagOf("111:a"), offset: 90, linkCode: "ABCDEF" };
+    assert.equal(bindToken(on111, "111:a", 5).state, on111);
+    assert.equal(bindToken(on111, "111:a", 5).change, "same");
+    assert.equal(bindToken(on111, "not-a-token", 5).change, "invalid");
   });
 });

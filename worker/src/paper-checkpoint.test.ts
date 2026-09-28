@@ -394,3 +394,38 @@ test("a book that survived the restart keeps its place, and its legacy basis is 
     assert.equal(await restorePaperCheckpoint(child!,shared!,'a'), 'local book retained', 'and once normalised, nothing more to say');
   } finally {raws.forEach(r=>r.close());}
 });
+
+/**
+ * R6, 0x516164: THE ROW A DEPLOY REJECTED, THROUGH THE MIRROR AND THE RESTORE.
+ *
+ * The owner's second login held one NVDA position, booked by today's engine:
+ * basis == shares, at a multiplier of 1.000775. A deploy carrying 912502b5
+ * judged that basis against shares × multiplier, refused the checkpoint, and
+ * the restore gate kept the tenant from starting, and its bot from answering
+ * (plan §0, step 3). basisUnits (the "current" arm) already admits it at HEAD;
+ * this pins the exact production row end to end, so a later change to the
+ * units rule cannot hold this owner again without failing here first.
+ */
+test("0x516164, THE ROW A DEPLOY REJECTED: mirrored, then restored into a fresh home, without a throw", async()=>{
+  const SHARES = 0.07197134749978654;
+  const BASIS = '71971347499786536';
+  const raws=[new DatabaseSync(':memory:'),new DatabaseSync(':memory:'),new DatabaseSync(':memory:')];
+  const [child,shared,fresh]=raws.map(wrapSqlite);
+  try {
+    for (const db of [child!,shared!,fresh!]) await db.exec(SCHEMA);
+    for (const db of [child!,shared!]) await db.prepare(`INSERT INTO positions VALUES('a','NVDA',?,?,?,13)`).run(TOKEN, BASIS, NVDA_RAW_MUL);
+    assert.equal(multipliersFrom([{symbol:'NVDA',ui_multiplier:NVDA_RAW_MUL}])('NVDA'), NVDA_NOW, 'premise: the multiplier the row was judged at');
+    // Not vacuous: the rule 912502b5 applied, basis == shares × multiplier, refuses this row.
+    assert.ok(Math.abs(Number(BASIS)/1e18 - SHARES*NVDA_NOW) > 1e-6, 'premise: the old rule would refuse it');
+    await child!.prepare(`INSERT INTO paper_book VALUES('a',987,0,1000,?,10)`).run(JSON.stringify({NVDA:{token:TOKEN,shares:SHARES}}));
+    await child!.prepare(`INSERT INTO cost_basis VALUES('a','paper','NVDA',?,'13000000',10)`).run(BASIS);
+    assert.equal(await mirrorPaperCheckpoints(child!,shared!),1,'the checkpoint is mirrored, not skipped as invalid');
+    const line = await restorePaperCheckpoint(fresh!,shared!,'a');
+    assert.match(line, /^paper cash, holdings and basis restored$/);
+    const book = await fresh!.prepare('SELECT cash_usdg, shares FROM paper_book').get() as {cash_usdg:number;shares:string};
+    assert.equal(book.cash_usdg, 987);
+    assert.equal((JSON.parse(book.shares) as Record<string,{shares:number}>).NVDA!.shares, SHARES);
+    const basis = await fresh!.prepare(`SELECT qty_raw, cost_usdg FROM cost_basis`).get() as {qty_raw:string;cost_usdg:string};
+    assert.deepEqual({...basis}, {qty_raw:BASIS,cost_usdg:'13000000'}, 'the basis comes back as it was booked');
+  } finally {raws.forEach(r=>r.close());}
+});

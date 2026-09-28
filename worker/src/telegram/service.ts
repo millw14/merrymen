@@ -77,8 +77,22 @@ import {
   dashboardBase,
   type StatusContext,
 } from "./reads";
-import { botIdOf, ensureLinkCode, retireLegacyCode, rotateLinkCode, switchBot, tokenTagOf, type StateRef } from "./state";
+import { bindToken, ensureLinkCode, retireLegacyCode, type StateRef } from "./state";
 import { linkReply, tryLink, type LinkFails } from "./link";
+import {
+  BACKOFF_MAX_SEC,
+  CONFLICT_RETELL_SEC,
+  EARLY_LINK_TEXT,
+  IDLE_GAP_MS,
+  POLL_GAP_MS,
+  REARM_AFTER_SEC,
+  STALE_LINK_TEXT,
+  WAKE_SLICE_MS,
+  onboardingText,
+  pollFailure,
+  refusalText,
+  span,
+} from "./poll-rules";
 import {
   ageDays,
   ensureSoul,
@@ -158,27 +172,9 @@ export function isPaused(): boolean {
 
 const HISTORY_TURNS = 6; // user+assistant pairs kept per chat for follow-ups
 
-/**
- * What a chat that is not on the allowlist is told. Its own chat id, which is
- * what the owner would add by hand, and where the code is. Nothing about the
- * agent.
- */
-const refusalText = (chatId: number): string =>
-  `🚫 not authorized — your chat id is ${chatId}. Ask the owner to add you, or send /link &lt;code&gt; with the code shown in Settings → Telegram.`;
-/**
- * A bare /start or /help from a chat not on the allowlist: the first thing
- * anyone who finds the bot sees. What to do if the bot is theirs, and nothing
- * about the agent behind it.
- */
-const onboardingText = (chatId: number): string =>
-  `This is a private Merrymen bot. If it's yours, send the /link code shown in Settings → Telegram. Your chat id is ${chatId}.`;
-/**
- * A /link or /start <code> that waited out an outage (holdStale). Never
- * compared, never counted. Any chat may get it, so it says nothing more than
- * that the bot was offline.
- */
-const STALE_LINK_TEXT =
-  "that code reached me after I'd been offline, so I didn't use it — send the code shown in Settings → Telegram now.";
+// The refusal, the onboarding line and the late-code prompt are in
+// poll-rules.ts, which the hold process shares: a stranger is told the same
+// whichever process is answering.
 
 /**
  * What the backlog rule does with one message that waited out a silence
@@ -227,48 +223,15 @@ function staleSummaryText(n: number, oldest: number, nowSec: number): string {
   const what = n === 1 ? "1 message arrived late" : `${n} messages arrived late`;
   return `I was offline; ${what} (oldest ${utcStamp(oldest, nowSec)}). I didn't act on ${n === 1 ? "it" : "them"} — resend anything you still need.`;
 }
-/**
- * A /link sent to the bot before this agent was switched onto it (holdEarly).
- * Any chat may get this, so it says nothing about the switch itself.
- */
-const EARLY_LINK_TEXT = "that code reached me late, so I didn't use it — send the code shown in Settings → Telegram now.";
 /** Anything else an allowlisted chat sent the bot before this agent was switched onto it (holdEarly). */
 const EARLY_HELD_TEXT =
   "I've just been connected to this bot. Messages sent to it before that reached me late, so I didn't act on them — resend anything you still need.";
 
-/** Between polls when the last one worked. getUpdates itself long-polls, so this can be tight. */
-const POLL_GAP_MS = 500;
-/** How often to look again while Telegram is switched off or has no token. */
-const IDLE_GAP_MS = 8_000;
-/** A failing poll waits 2s, 4s, 8s … up to this, or longer when Telegram names a retry_after. */
-const BACKOFF_MAX_SEC = 60;
-/** After a 401 or 404. The token is revoked or wrong, and retrying sooner cannot fix that. */
-const REFUSED_WAIT_SEC = 300;
-/** After a 409. Another poller holds the bot; hammering it only steals its updates back and forth. */
-const CONFLICT_WAIT_SEC = 10;
-/** A 409 is logged at most this often. Two pollers trade 409s, so each quiet spell would re-log it. */
-const CONFLICT_RETELL_SEC = 3_600;
-/** A long wait is taken in slices this long, so a token fixed on the dashboard is used within one. */
-const WAKE_SLICE_MS = 5_000;
-/**
- * A silence this long re-arms the backlog boundary (pollOnce). About as long
- * as an owner waits for a reply before giving up on it; a blip the backoff
- * retries through (2s, 4s, 8s …) is well inside it, and anything that failed
- * for a 401's five minutes is well past it.
- */
-const REARM_AFTER_SEC = 60;
+// The poll's timings (the gap, the idle wait, the backoff and the re-arm
+// silence) are in poll-rules.ts, shared with the hold process.
 /** Failed pushes of one menu fingerprint before it drops to one try per MENU_RETRY_SEC. */
 const MENU_MAX_ATTEMPTS = 3;
 const MENU_RETRY_SEC = 600;
-
-/** "45s", "4m 10s", "3h 5m", "2d 6h": how long polling was down, for the recovery line. */
-function span(sec: number): string {
-  const s = Math.max(0, Math.round(sec));
-  if (s < 60) return `${s}s`;
-  if (s < 3_600) return `${Math.floor(s / 60)}m ${s % 60}s`;
-  if (s < 86_400) return `${Math.floor(s / 3_600)}h ${Math.floor((s % 3_600) / 60)}m`;
-  return `${Math.floor(s / 86_400)}d ${Math.floor((s % 86_400) / 3_600)}h`;
-}
 
 /** How pushing one menu fingerprint is going. */
 interface MenuTry {
@@ -1573,16 +1536,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         deps.note("ok", "Telegram: the link code was one derived from the bot token, so it was re-minted");
       }
     }
-    const botId = botIdOf(token);
-    if (!botId) return; // not a token Telegram would accept; getUpdates says so
-    const tag = tokenTagOf(token);
-    const st = stateRef.get();
-    if (st.botId === null) {
-      stateRef.set({ ...st, botId, tokenTag: tag });
-      return;
-    }
-    if (st.botId !== botId) {
-      stateRef.set(ensureLinkCode(switchBot(st, botId, tag, now())));
+    // The state change itself is state.ts bindToken, which the hold process
+    // shares; what it means to THIS loop is below.
+    const bound = bindToken(stateRef.get(), token, now());
+    // `invalid` is not a token Telegram would accept; getUpdates says so.
+    if (bound.change === "invalid" || bound.change === "same") return;
+    stateRef.set(bound.state);
+    if (bound.change === "adopted") return;
+    if (bound.change === "switched") {
       linkFails.clear();
       earlyTold.clear();
       armedAt = null;
@@ -1592,14 +1553,12 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       deps.note("ok", me.bot ? `Telegram: bot changed to @${me.bot.username}` : "Telegram: bot changed");
       return;
     }
-    if (st.tokenTag === tag) return;
     // A different fingerprint, or none next to a stored bot (every path above
     // writes the two together): the code on file cannot be shown to have been
     // issued under this token, so it is rotated, and like any rotation it
     // forgives the lockouts that counted guesses at the old one.
-    stateRef.set(rotateLinkCode({ ...st, tokenTag: tag }));
     linkFails.clear();
-    if (st.tokenTag !== null) deps.note("ok", "Telegram: bot token renewed, so the link code was re-minted");
+    if (bound.told) deps.note("ok", "Telegram: bot token renewed, so the link code was re-minted");
   };
 
   /**
@@ -1616,35 +1575,15 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     outage = outage ?? { since: t, streak: 0, told: new Set() };
     outage.streak += 1;
     deafSince ??= t;
-    const reason = r.reason ?? "unknown error";
-    let kind: string;
-    let waitSec: number;
-    let line: string;
-    if (r.errorCode === 409) {
-      kind = "conflict";
-      waitSec = CONFLICT_WAIT_SEC;
-      // Both are a 409, and they need different fixes: stop the other program,
-      // or delete the webhook. The webhook is never deleted from here; it may
-      // be another deployment's.
-      line = /webhook/i.test(reason)
-        ? "Telegram: this bot has a webhook set, so its updates can't be polled (409 Conflict)"
-        : "Telegram: another program is reading this bot's updates (409 Conflict)";
-    } else if (r.errorCode === 401 || r.errorCode === 404) {
-      kind = "refused";
-      waitSec = REFUSED_WAIT_SEC;
-      line = `Telegram: the bot token was refused (${r.errorCode} ${reason}); trying again every 5 minutes, or as soon as the token changes`;
-    } else {
-      kind = "failed";
-      waitSec = Math.min(BACKOFF_MAX_SEC, 2 ** outage.streak);
-      line = `Telegram: getUpdates — ${reason}`;
-    }
+    // How long, and in what words: poll-rules.ts, shared with the hold process.
+    const { kind, waitMs, line } = pollFailure(r, outage.streak);
     const conflictToldRecently = kind === "conflict" && conflictToldAt !== null && t - conflictToldAt < CONFLICT_RETELL_SEC;
     if (!outage.told.has(kind) && !conflictToldRecently) {
       outage.told.add(kind);
       if (kind === "conflict") conflictToldAt = t;
       deps.note("warn", line);
     }
-    return Math.max(r.retryAfter ?? 0, waitSec) * 1000;
+    return waitMs;
   };
 
   /** A poll that worked. An outage that was logged is closed with how long it lasted. */

@@ -1,0 +1,311 @@
+/**
+ * A FAILED PAPER RESTORE HOLDS THE TENANT; IT DOES NOT TAKE ITS BOT DOWN.
+ *
+ * The gate in spawnChild returned before the owner's link was restored and
+ * before anything was spawned, and the trading child was the only process
+ * that polled the owner's bot. So a practice book that would not restore made
+ * the bot silent for as long as the book stayed broken: days, in the incident
+ * this came from. Now the tenant is held: a hold process answers the bot, and
+ * the tenant is kept out of everything that trades, mirrors or ferries.
+ *
+ * Read out of the source, through the TypeScript parser where the shape
+ * matters, in the style of telegram-restore.test.ts and restart-storm.test.ts:
+ * these are one branch and a handful of loops, and the failure they guard
+ * against is silent. restore-hold.integration.test.ts drives the same paths
+ * through the real reconcile(); telegram/hold.integration.test.ts drives the
+ * hold process.
+ */
+import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { DatabaseSync } from "node:sqlite";
+import { describe, it } from "node:test";
+import ts from "typescript";
+import { wrapSqlite } from "./db";
+import {
+  TELEGRAM_HOLD_NOTIFIED_DDL,
+  TELEGRAM_STATE_DDL,
+  clearHoldNotified,
+  holdNotifiedClass,
+  recordHoldNotified,
+} from "./telegram-store";
+import { holdNoticeText, holdText, restoreBlockClass } from "./restore-block";
+
+const SRC = path.dirname(fileURLToPath(import.meta.url));
+const ORCH = readFileSync(path.join(SRC, "orchestrator.ts"), "utf8");
+const AST = ts.createSourceFile("orchestrator.ts", ORCH, ts.ScriptTarget.Latest, true);
+
+const fn = (name: string): ts.FunctionDeclaration => {
+  const f = AST.statements.find((s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === name);
+  assert.ok(f?.body, `${name} must exist`);
+  return f;
+};
+const all = (root: ts.Node, keep: (n: ts.Node) => boolean): ts.Node[] => {
+  const out: ts.Node[] = [];
+  const visit = (n: ts.Node) => {
+    if (keep(n)) out.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+};
+const calls = (root: ts.Node, name: string) =>
+  all(root, (n) => ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === name) as ts.CallExpression[];
+/** Every `for (const … of <expr>)` in `root` whose iterated expression reads `name`. */
+const loopsOver = (root: ts.Node, name: string) =>
+  all(root, (n) => ts.isForOfStatement(n) && new RegExp(`\\b${name}\\b`).test(n.expression.getText())) as ts.ForOfStatement[];
+
+describe("the restore gate holds instead of returning", () => {
+  it("THE FAILING BRANCH HANDS THE TENANT TO spawnHolder BEFORE IT RETURNS", () => {
+    const spawn = fn("spawnChild");
+    const branch = all(spawn, (n) => ts.isIfStatement(n) && n.expression.getText() === "settings?.paperTradingEnabled === true")[0] as
+      | ts.IfStatement
+      | undefined;
+    assert.ok(branch, "the practice-book gate is still there: a book we cannot restore must not restart its cash");
+    const held = calls(branch.thenStatement, "spawnHolder")[0];
+    const ret = all(branch.thenStatement, ts.isReturnStatement)[0];
+    assert.ok(held && ret && held.getEnd() < ret.getStart(), "held first, then no worker");
+    assert.ok(ts.isAwaitExpression(held.parent), "and awaited, inside the spawning claim");
+    // Nothing else in spawnChild returns on a failed restore.
+    const restore = calls(spawn, "tryPaperRestore")[0];
+    assert.ok(restore, "the restore is one call now (tryPaperRestore)");
+  });
+
+  it("spawnHolder PUTS THE OWNER'S LINK BACK BEFORE ANYTHING POLLS THE BOT", () => {
+    const hold = fn("spawnHolder");
+    const link = calls(hold, "writeTelegramForChild")[0];
+    const start = calls(hold, "startHolderProcess")[0];
+    assert.ok(link && start, "it restores the link, and it starts the hold process");
+    assert.ok(link.getEnd() < start.getStart(), "the link first: a link restored after the bot is polled is read from a replaced file");
+    assert.equal(link.arguments.map((a) => a.getText()).join(","), "tenant");
+    // Under the lease spawnChild checked, asked again after the last await.
+    const late = calls(hold, "lateSpawnRefusal")[0];
+    assert.ok(late && link.getEnd() < late.getStart() && late.getEnd() < start.getStart());
+    for (const a of all(hold, ts.isAwaitExpression)) assert.ok(a.getEnd() < late.getStart(), "no await after the late check");
+    // A tenant with no bot is still recorded, so reconcile stops retrying it every pass.
+    const recorded = all(hold, (n) => ts.isCallExpression(n) && n.expression.getText() === "holders.set")[0];
+    const noBot = all(hold, (n) => ts.isIfStatement(n) && n.expression.getText() === "!holderBotReady(settings)")[0];
+    assert.ok(recorded && noBot && recorded.getEnd() < noBot.getStart(), "held before the no-bot return");
+  });
+
+  it("THE HOLD PROCESS RUNS WITH THE CHILD'S ENV, AND ITS OWN ENTRY", () => {
+    const start = fn("startHolderProcess").body!.getText();
+    assert.match(start, /spawn\(\s*process\.execPath,\s*\[`--max-old-space-size=\$\{HOLDER_MAX_OLD_SPACE_MB\}`, "--import", "tsx", HOLD_ENTRY\]/);
+    assert.match(start, /env: childEnv\(tenant\)/, "the same strip: no DATABASE_URL, no store key");
+    assert.match(ORCH, /const HOLD_ENTRY = path\.join\(fileURLToPath\(new URL\("\.", import\.meta\.url\)\), "telegram-hold\.ts"\);/);
+    assert.ok(existsSync(path.join(SRC, "telegram-hold.ts")));
+  });
+
+  it("A HELD TENANT IS NEVER A CHILD: spawnHolder and the retry never touch `children`", () => {
+    for (const name of ["spawnHolder", "startHolderProcess", "watchHolder", "retryHold", "standDownHolder"]) {
+      assert.doesNotMatch(fn(name).body!.getText(), /children\.set\(/, `${name} must not put a held tenant in children`);
+    }
+  });
+});
+
+describe("held tenants reach only the loops they belong in", () => {
+  it("THE FERRIES AND THE WATCHDOG ITERATE `children` ONLY", () => {
+    for (const name of ["ferryCommands", "ferryOrdersNow", "watchdog"]) {
+      assert.doesNotMatch(fn(name).body!.getText(), /\bholders\b/, `${name} must not see a held tenant`);
+    }
+    assert.ok(loopsOver(fn("ferryCommands"), "children").length > 0, "ferryCommands walks children");
+    assert.match(fn("ferryOrdersNow").body!.getText(), /\[\.\.\.children\.entries\(\)\]/, "ferryOrdersNow walks children");
+    assert.ok(loopsOver(fn("watchdog"), "children").length > 0, "the watchdog walks children");
+  });
+
+  it("AND NOTHING ELSE IN THE ORCHESTRATOR SO MUCH AS READS `holders`", () => {
+    // Named by the functions that may, rather than by the passes that may
+    // not: the builder and news desks, the room, the X poster, the fleet
+    // report and whatever pass comes next all walk `children`, and a new one
+    // that reached for `holders` fails here without anybody listing it.
+    const readers = AST.statements
+      .filter((st): st is ts.FunctionDeclaration => ts.isFunctionDeclaration(st) && !!st.body && /\bholders\b/.test(st.body.getText()))
+      .map((f) => f.name!.text)
+      .sort();
+    assert.deepEqual(readers, [
+      "adoptHolderForTest",
+      "isHeldForTest",
+      "mirrorLedgers",
+      "reconcile",
+      "refreshGrantForChild",
+      "retryHold",
+      "runOrchestrator",
+      "scheduleRestart",
+      "spawnChild",
+      "spawnHolder",
+      "standDownHolder",
+      "watchHolder",
+    ]);
+  });
+
+  it("THE MIRROR'S HOLDERS LOOP PUBLISHES TELEGRAM, AND NEVER OPENS OR COPIES A LEDGER", () => {
+    const mirror = fn("mirrorLedgers");
+    const loops = loopsOver(mirror, "holders");
+    assert.equal(loops.length, 1, "one loop over held tenants");
+    const body = loops[0]!.statement.getText();
+    assert.match(body, /await publishChildTelegram\(tenant as `0x\$\{string\}`, shared\);/);
+    assert.match(body, /if \(!lease \|\| !lease\.healthy\(\)\) continue;/, "only under the lease");
+    for (const never of ["mirrorTenant", "openChildLedger", "mirrorSerially", "writePeersFor", "heldEquitySymbols"]) {
+      assert.ok(!body.includes(never), `the holders loop must not call ${never}`);
+    }
+    // And a fleet whose only tenants are held still gets to that loop.
+    assert.match(mirror.body!.getText(), /if \(!url \|\| \(children\.size === 0 && holders\.size === 0\)\) return;/);
+  });
+
+  it("RECONCILE STEPS ROUND A HELD TENANT, RETRIES ITS RESTORE, AND REFRESHES IT FIRST", () => {
+    const rec = fn("reconcile");
+    const skip = all(rec, (n) => ts.isIfStatement(n) && n.expression.getText() === "holders.has(lc)" && ts.isContinueStatement(n.thenStatement))[0];
+    const spawnCall = calls(rec, "spawnChild")[0];
+    assert.ok(skip && spawnCall && skip.getEnd() < spawnCall.getStart(), "the spawn loop skips it");
+    assert.ok(calls(rec, "retryHold").length === 1, "the restore is retried from here");
+    const refresh = loopsOver(rec, "holders").find((l) => /writeSettingsForChild/.test(l.statement.getText()));
+    const childRefresh = loopsOver(rec, "children").find((l) => /writeSettingsForChild/.test(l.statement.getText()));
+    assert.ok(refresh && childRefresh && refresh.getEnd() < childRefresh.getStart(), "held tenants' settings first, so the bot de-dupe sees their tokens");
+    assert.match(refresh.statement.getText(), /writeSettingsForChild\(tenant as `0x\$\{string\}`, seenBotTokens, holderClaims\)/);
+  });
+
+  it("EVERY STAND-DOWN STANDS A HOLD PROCESS DOWN TOO", () => {
+    const rec = fn("reconcile").body!.getText();
+    // The lease loss.
+    assert.match(rec, /if \(children\.has\(tenant\)\) killChild\(tenant\);\s*(\/\/[^\n]*\n\s*)*standDownHolder\(tenant\);/);
+    // The kill switch, with the home.
+    const kill = loopsOver(fn("reconcile"), "holders").find((l) => /standDownHolder/.test(l.statement.getText()));
+    assert.ok(kill && /rmSync\(childHome\(tenant\)/.test(kill.statement.getText()) && /wanted\.has\(tenant\)/.test(kill.statement.getText()));
+    assert.ok(!/finalMirrorBeforeAnchor/.test(kill.statement.getText()), "a held book is never mirrored on the way out");
+    // FLEET_HALT and stop().
+    const run = fn("runOrchestrator").body!.getText();
+    assert.match(run, /for \(const t of \[\.\.\.holders\.keys\(\)\]\) standDownHolder\(t\);/);
+    assert.match(run, /for \(const held of holders\.values\(\)\) held\.proc\?\.kill\("SIGTERM"\);/);
+  });
+
+  it("THE HANDOVER STOPS THE HOLD PROCESS AND WAITS FOR IT BEFORE A WORKER STARTS", () => {
+    const retry = fn("retryHold");
+    const kill = all(retry, (n) => ts.isCallExpression(n) && n.expression.getText() === "proc.kill" && n.arguments[0]?.getText() === '"SIGTERM"')[0];
+    const wait = all(retry, (n) => ts.isAwaitExpression(n) && /Promise\.race/.test(n.getText()))[0];
+    const leave = all(retry, (n) => ts.isCallExpression(n) && n.expression.getText() === "holders.delete")[0];
+    const spawn = calls(retry, "spawnChild")[0];
+    assert.ok(kill && wait && leave && spawn, "stop, wait, leave, spawn");
+    assert.ok(kill.getEnd() < wait.getStart() && wait.getEnd() < leave.getStart() && leave.getEnd() < spawn.getStart());
+    // Nothing between leaving `holders` and spawnChild's own claim can interleave.
+    const spawnAt = ts.isAwaitExpression(spawn.parent) ? spawn.parent.getStart() : spawn.getStart();
+    const between = retry.body!.getText().slice(leave.getEnd() - retry.body!.getStart(), spawnAt - retry.body!.getStart());
+    assert.doesNotMatch(between, /\bawait\b/);
+  });
+});
+
+/**
+ * THE HOLD PROCESS IMPORTS NOTHING THAT TRADES, STORES OR THINKS — at any depth.
+ *
+ * The plan asks that telegram/hold.ts and telegram-hold.ts import none of the
+ * store, the database, the ledger mirror, the model or the paper book. Checked
+ * through every relative import they reach, not only their own, since a
+ * forbidden module one hop away is loaded all the same. Type-only imports are
+ * erased and do not count.
+ */
+describe("the hold process's imports", () => {
+  const FORBIDDEN = ["store.ts", "db.ts", "ledger-mirror.ts", "llm.ts", "paper-checkpoint.ts", "telegram/service.ts", "telegram/interpreter.ts", "telegram/executor.ts"];
+
+  const runtimeImports = (file: string): string[] => {
+    const src = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+    const out: string[] = [];
+    for (const s of src.statements) {
+      if (!ts.isImportDeclaration(s) && !ts.isExportDeclaration(s)) continue;
+      if (ts.isImportDeclaration(s) && s.importClause?.isTypeOnly) continue;
+      if (ts.isExportDeclaration(s) && (s.isTypeOnly || !s.moduleSpecifier)) continue;
+      const spec = (s.moduleSpecifier as ts.StringLiteral).text;
+      if (!spec.startsWith(".")) continue;
+      // An import whose every binding is `type` is erased too.
+      const named = ts.isImportDeclaration(s) ? s.importClause?.namedBindings : undefined;
+      if (ts.isImportDeclaration(s) && !s.importClause?.name && named && ts.isNamedImports(named) && named.elements.every((e) => e.isTypeOnly)) continue;
+      const base = path.resolve(path.dirname(file), spec);
+      const resolved = [base, `${base}.ts`, path.join(base, "index.ts")].find((p) => existsSync(p) && p.endsWith(".ts"));
+      if (resolved) out.push(resolved);
+    }
+    return out;
+  };
+  const reach = (entry: string): Set<string> => {
+    const seen = new Set<string>();
+    const todo = [entry];
+    while (todo.length) {
+      const f = todo.pop()!;
+      if (seen.has(f)) continue;
+      seen.add(f);
+      todo.push(...runtimeImports(f));
+    }
+    return seen;
+  };
+
+  for (const entry of ["telegram/hold.ts", "telegram-hold.ts"]) {
+    it(`${entry} reaches no store, database, ledger, model or paper module`, () => {
+      const reached = [...reach(path.join(SRC, entry))].map((f) => path.relative(SRC, f).split(path.sep).join("/"));
+      for (const bad of FORBIDDEN) assert.ok(!reached.includes(bad), `${entry} reaches ${bad}: ${reached.join(", ")}`);
+      // And directly, by the names the plan gives.
+      const own = readFileSync(path.join(SRC, entry), "utf8");
+      for (const bad of ["../store", "../db", "../ledger-mirror", "../llm", "../paper-checkpoint", "./store", "./db", "./ledger-mirror", "./llm", "./paper-checkpoint"]) {
+        assert.ok(!new RegExp(`from "${bad.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}"`).test(own), `${entry} imports ${bad}`);
+      }
+    });
+  }
+
+  it("the walk does find a forbidden module when there is one (control)", () => {
+    const reached = [...reach(path.join(SRC, "telegram/service.ts"))].map((f) => path.relative(SRC, f).split(path.sep).join("/"));
+    assert.ok(reached.includes("store.ts") && reached.includes("llm.ts"));
+  });
+});
+
+describe("what an owner is told", () => {
+  it("the class is a fixed phrase with no figures, whatever the restore said", () => {
+    const reasons = [
+      "paper fills are newer than the recoverable valuation",
+      "the recoverable valuation does not add up (cash+vault+positions-equity=0.0066)",
+      "paper positions do not value (positions=3)",
+      "invalid paper checkpoint: MU is held with no paper cost basis",
+      "invalid paper checkpoint: NVDA basis 71971347499786536 raw disagrees with 0.07197134749978654 shares at multiplier 1.0007751591646306",
+      "invalid paper checkpoint: cash is -1, not a non-negative number",
+      "connect ECONNREFUSED 10.0.0.7:5432",
+    ];
+    const classes = reasons.map(restoreBlockClass);
+    assert.deepEqual(classes, [
+      "trades newer than the last valuation",
+      "the last valuation doesn't add up",
+      "holdings could not be priced",
+      "a holding has no cost basis",
+      "cost basis and holdings disagree",
+      "the saved book is unreadable",
+      "restore error",
+    ]);
+    for (const c of classes) {
+      assert.ok(!/\d/.test(holdText(c)) && !/\d/.test(holdNoticeText(c)), `no figure in what the owner reads: ${c}`);
+    }
+  });
+});
+
+/**
+ * THE NOTICE IS SENT ONCE PER HOLD, ACROSS REDEPLOYS.
+ *
+ * The dedupe lives in tenant_telegram.hold_notified, keyed on the class, and
+ * is added with the same guarded ALTER the mirror uses. Driven over sqlite
+ * through wrapSqlite; the Postgres side runs the same statements.
+ */
+describe("the durable notice record", () => {
+  it("records a class, reads it back, clears it when the book restores, and survives its ALTER running twice", async () => {
+    const raw = new DatabaseSync(":memory:");
+    const db = wrapSqlite(raw);
+    try {
+      await db.exec(TELEGRAM_STATE_DDL);
+      await db.exec(TELEGRAM_HOLD_NOTIFIED_DDL);
+      await assert.rejects(db.exec(TELEGRAM_HOLD_NOTIFIED_DDL), "the second ALTER throws, which the callers swallow");
+      await db.prepare("INSERT INTO tenant_telegram (tenant, owner_id, updated_at) VALUES (?, ?, 0)").run("0xabc", 4242);
+      assert.equal(await holdNotifiedClass(db, "0xABC"), null);
+      await recordHoldNotified(db, "0xABC", "a holding has no cost basis");
+      assert.equal(await holdNotifiedClass(db, "0xabc"), "a holding has no cost basis", "told: the next pass and the next deploy say nothing");
+      assert.notEqual(await holdNotifiedClass(db, "0xabc"), "trades newer than the last valuation", "a new class is news");
+      await clearHoldNotified(db, "0xabc");
+      assert.equal(await holdNotifiedClass(db, "0xabc"), null, "restored: the next hold is news again");
+      assert.equal(await holdNotifiedClass(db, "0xnobody"), null);
+    } finally {
+      raw.close();
+    }
+  });
+});

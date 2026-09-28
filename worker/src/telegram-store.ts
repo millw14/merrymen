@@ -130,3 +130,40 @@ export async function publishTenantTelegram(
       Math.floor(Date.now() / 1000),
     );
 }
+
+/**
+ * WHICH HOLD THE OWNER HAS ALREADY BEEN TOLD ABOUT: the reason class of the
+ * last "your agent has stopped trading" notice, or null.
+ *
+ * Durable because the memory of it is not: a hold outlives the process that
+ * noticed it, and every redeploy (they come in bursts while something is being
+ * fixed) would otherwise tell the owner the same thing again. Keyed on the
+ * class, so a hold whose cause changes is a new thing to say, and cleared when
+ * the book restores (clearHoldNotified), so the next incident is told too.
+ *
+ * On this table because it is about the owner's chat and nothing else, and
+ * like the rest of it, written only by the orchestrator. Added with an ALTER,
+ * as mirror_state's columns are: CREATE TABLE IF NOT EXISTS adds nothing to a
+ * table every deployment already has. The ALTER throws once the column is
+ * there, which the caller swallows.
+ */
+export const TELEGRAM_HOLD_NOTIFIED_DDL = "ALTER TABLE tenant_telegram ADD COLUMN hold_notified TEXT";
+
+export async function holdNotifiedClass(db: Db, tenant: string): Promise<string | null> {
+  const row = (await db.prepare("SELECT hold_notified FROM tenant_telegram WHERE tenant = ?").get(tenant.toLowerCase())) as
+    | { hold_notified: string | null }
+    | undefined;
+  return row?.hold_notified ?? null;
+}
+
+/** Record that the owner was told about a hold of class `cls`. Needs the tenant's row, which a recipient implies. */
+export async function recordHoldNotified(db: Db, tenant: string, cls: string): Promise<void> {
+  await db.prepare("UPDATE tenant_telegram SET hold_notified = ? WHERE tenant = ?").run(cls, tenant.toLowerCase());
+}
+
+/** The book restored: the next hold, whatever its class, is news again. */
+export async function clearHoldNotified(db: Db, tenant: string): Promise<void> {
+  await db
+    .prepare("UPDATE tenant_telegram SET hold_notified = NULL WHERE tenant = ? AND hold_notified IS NOT NULL")
+    .run(tenant.toLowerCase());
+}

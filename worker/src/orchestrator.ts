@@ -93,7 +93,16 @@ import { custodyAddressesOf } from "./custody";
 import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
-import { TELEGRAM_STATE_DDL, publishTenantTelegram, readTenantTelegram } from "./telegram-store";
+import {
+  TELEGRAM_HOLD_NOTIFIED_DDL,
+  TELEGRAM_STATE_DDL,
+  clearHoldNotified,
+  holdNotifiedClass,
+  publishTenantTelegram,
+  readTenantTelegram,
+  recordHoldNotified,
+} from "./telegram-store";
+import { clearRestoreBlocked, holdNoticeText, readRestoreBlocked, restoreBlockClass, writeRestoreBlocked } from "./restore-block";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
 import { addressesOf, makeBuilderDesk, type BuilderDesk } from "./builder-pass";
@@ -283,7 +292,7 @@ function scheduleRestart(tenant: `0x${string}`, restarts: number, why: string): 
       // reconcile finds the tenant in neither and spawns it too.
       if (restartPending.get(tenant) !== pending) return;
       restartPending.delete(tenant);
-      if (!stopping && !children.has(tenant) && !spawning.has(tenant)) void spawnChild(tenant, restarts);
+      if (!stopping && !children.has(tenant) && !spawning.has(tenant) && !holders.has(tenant)) void spawnChild(tenant, restarts);
     }, delay),
   };
   restartPending.set(tenant, pending);
@@ -293,6 +302,13 @@ function scheduleRestart(tenant: `0x${string}`, restarts: number, why: string): 
 const WORKER_ENTRY = path.join(fileURLToPath(new URL(".", import.meta.url)), "index.ts");
 /** Repo root (…/worker/src → up two), the cwd children need to resolve tsx + deps. */
 const ROOT = path.join(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
+/**
+ * What a HELD tenant runs instead of a worker: the bot, answering, and nothing
+ * else (telegram-hold.ts). See spawnHolder.
+ */
+const HOLD_ENTRY = path.join(fileURLToPath(new URL(".", import.meta.url)), "telegram-hold.ts");
+/** A hold process polls one bot and reads two files; it needs a fraction of a worker's heap. */
+const HOLDER_MAX_OLD_SPACE_MB = 128;
 
 /**
  * Env vars the orchestrator holds that a CHILD must NEVER see. The house keys
@@ -572,6 +588,88 @@ let spawn: (command: string, args: readonly string[], options: SpawnOptions) => 
 /** Test seam: start children with `fn` instead of node's `spawn`. */
 export function setSpawnForTest(fn: typeof spawn): void {
   spawn = fn;
+}
+
+/**
+ * A TENANT WHOSE TRADING IS HELD: its practice book could not be restored, so
+ * no worker runs for it, and a hold process answers its bot instead
+ * (telegram/hold.ts). See spawnHolder.
+ */
+interface Holder {
+  tenant: `0x${string}`;
+  /** The account the book is keyed on, which the restore is retried for. */
+  smartAccount: `0x${string}`;
+  /**
+   * The hold process, or null: no bot to answer (Telegram off, no token), or
+   * the process is being stopped for the handover. A held tenant is recorded
+   * either way, so reconcile stops trying to spawn it every pass.
+   */
+  proc: ChildProcess | null;
+  /** Resolves when `proc` has exited. */
+  exited: Promise<void> | null;
+  /** The restore's own error, and the class of it an owner may be told. */
+  reason: string;
+  cls: string;
+  /** When the restore is tried again, ms, and the wait after the next failure. */
+  nextRetryAt: number;
+  backoffMs: number;
+  /** A retry is running. Two passes must not both hand the tenant over. */
+  retrying: boolean;
+}
+
+/**
+ * HELD TENANTS, AND NOWHERE ELSE: never in `children`.
+ *
+ * `children` is walked by everything that treats a tenant as trading: the
+ * order and command ferries, the ledger mirror, the watchdog, the builder and
+ * news desks, the group chat roster and the X poster. A held tenant must reach
+ * none of them. Mirrored, its empty or unrestored book would overwrite the
+ * paper checkpoint, positions and cost basis the shared ledger still holds; it
+ * must receive no order or command; and it has no tick, so the watchdog would
+ * kill it for a heartbeat it never writes. So it gets its own map, and is
+ * added by name only where it belongs: reconcile's spawn loop (which steps
+ * round it), the restore retry, the settings refresh, the Telegram half of the
+ * mirror, and every stand-down.
+ */
+const holders = new Map<string, Holder>();
+
+/** The first wait before a held tenant's restore is tried again, doubling to HOLD_RETRY_MAX_MS. */
+const HOLD_RETRY_FIRST_MS = 2 * 60_000;
+const HOLD_RETRY_MAX_MS = 30 * 60_000;
+/** A hold process that exits this many times inside HOLDER_CRASH_WINDOW_MS is stood down for GIVE_UP_COOLOFF_MS. */
+const HOLDER_MAX_CRASHES = 3;
+const HOLDER_CRASH_WINDOW_MS = 60_000;
+/** When each tenant's hold process last exited on its own, inside the window. Outlives the entry, like gaveUpUntil. */
+const holderCrashes = new Map<string, number[]>();
+
+/**
+ * Test seam: count a tenant as held without spawning anything, so a test can
+ * drive the real reconcile() over it. `proc` needs `kill`, `once` and `on`,
+ * and may be null, as for a tenant with no bot. The tenant's lease is taken
+ * too, as spawnChild would have found it: a held tenant always has one.
+ */
+export async function adoptHolderForTest(
+  tenant: `0x${string}`,
+  smartAccount: `0x${string}`,
+  proc: Pick<ChildProcess, "kill" | "once" | "on"> | null,
+  reason = "paper fills are newer than the recoverable valuation",
+): Promise<void> {
+  const lc = tenant.toLowerCase() as `0x${string}`;
+  if (!leases.has(lc)) {
+    const lease = await acquireTenantLease(lc);
+    if (lease) leases.set(lc, lease);
+  }
+  const held: Holder = {
+    tenant: lc, smartAccount, proc: null, exited: null, reason, cls: restoreBlockClass(reason),
+    nextRetryAt: Date.now() + HOLD_RETRY_FIRST_MS, backoffMs: HOLD_RETRY_FIRST_MS, retrying: false,
+  };
+  holders.set(lc, held);
+  if (proc) watchHolder(held, proc as ChildProcess);
+}
+
+/** Is this tenant held? For tests, which cannot see the map. */
+export function isHeldForTest(tenant: string): boolean {
+  return holders.has(tenant.toLowerCase());
 }
 
 /**
@@ -965,6 +1063,9 @@ async function refreshGrantForChild(tenant: `0x${string}`): Promise<void> {
   // no longer trades. Same reason the file is rewritten: the wall moved.
   const child = children.get(tenant);
   if (child && grant.smartAccount) child.smartAccount = grant.smartAccount as `0x${string}`;
+  // A held tenant's restore is retried for its account, which a re-sign may move.
+  const held = holders.get(tenant);
+  if (held && grant.smartAccount) held.smartAccount = grant.smartAccount as `0x${string}`;
   log(`${tenant}: grant changed on the store — handed the running child its new wall`);
 }
 
@@ -1578,6 +1679,13 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     log(`${tenant}: already being spawned — not starting a second`);
     return;
   }
+  // A held tenant is handed back to trading by retryHold alone, which takes it
+  // out of `holders` on the line that calls this. Anyone else arriving here
+  // would start a worker beside its hold process, on a book that did not restore.
+  if (holders.has(tenant)) {
+    log(`${tenant}: trading is held — not spawning`);
+    return;
+  }
   spawning.set(tenant, { since: Date.now(), flagged: false });
   try {
     // The advisory lease is a precondition, taken by reconcile() before the FIRST
@@ -1616,23 +1724,22 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // closed, so the agent would run with contributions marked unknown for no
     // reason other than a race.
     await writeBootstrapForChild(tenant, smartAccount);
-    if (process.env.DATABASE_URL) {
-      const raw = new DatabaseSync(path.join(childHome(tenant), "merrymen.db"));
-      try {
-        const local = wrapSqlite(raw);
-        await applyLedgerSchema(local);
-        const shared = await makePgDb(process.env.DATABASE_URL);
-        log(`paper restore: ${tenant} — ${await restorePaperCheckpoint(local, shared, smartAccount)}`);
-        try { await recordPaperRecoveryHealth(shared, smartAccount, false); }
-        catch { log(`paper restore: ${tenant} — restored, but recovery status could not be published`); }
-      } catch (e) {
-        log(`paper restore: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
-        try {
-          await recordPaperRecoveryHealth(await makePgDb(process.env.DATABASE_URL!), smartAccount, true);
-        } catch { log(`paper restore: ${tenant} — recovery status could not be published`); }
-        // A practice book we cannot restore must not silently restart its cash.
-        if (settings?.paperTradingEnabled === true) return;
-      } finally { raw.close(); }
+    const restore = await tryPaperRestore(tenant, smartAccount);
+    if (restore.ok) {
+      if (restore.line) log(`paper restore: ${tenant} — ${restore.line}`);
+      forgetHold(tenant);
+    } else if (settings?.paperTradingEnabled === true) {
+      // A practice book we cannot restore must not silently restart its cash,
+      // so no worker starts. But the owner's bot must not go silent with it,
+      // which is what returning here used to do, for days: HOLD the tenant
+      // instead. Trading stays off, a hold process answers the bot, the
+      // restore is tried again on a backoff, and the owner is told once.
+      await spawnHolder(tenant, smartAccount, restore.reason, settings, lease);
+      return;
+    } else {
+      // Not a practice book (live, or the flag unset): nothing to restart
+      // silently, and the worker starts as it always did.
+      log(`paper restore: ${tenant} FAILED — ${restore.reason}`);
     }
     // AND THE BOOK'S OWN COST BASIS, which the redeploy that just happened wiped
     // out of the child's sqlite. Same placement and same reason as the anchor.
@@ -1713,6 +1820,384 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   } finally {
     spawning.delete(tenant);
   }
+}
+
+/** What a paper restore came to: the line to log (null when there was nothing to restore from), or why it failed. */
+export type PaperRestore = { ok: true; line: string | null } | { ok: false; reason: string };
+
+let paperRestoreForTest: ((tenant: `0x${string}`, smartAccount: `0x${string}`) => Promise<PaperRestore>) | null = null;
+
+/** Test seam: answer every paper restore with `fn`, so a test needs no shared database to hold a tenant. */
+export function setPaperRestoreForTest(fn: ((tenant: `0x${string}`, smartAccount: `0x${string}`) => Promise<PaperRestore>) | null): void {
+  paperRestoreForTest = fn;
+}
+
+/**
+ * PUT THE TENANT'S PRACTICE BOOK BACK INTO ITS HOME, or say why it cannot be.
+ *
+ * Lifted out of spawnChild, where it was inline, because a held tenant's
+ * restore is retried from reconcile (retryHold) against the same home while the
+ * hold process runs in it. The hold process never opens merrymen.db, so this is
+ * the only writer there until a worker starts.
+ *
+ * Never throws. The book, the flag the dashboard reads (recordPaperRecoveryHealth)
+ * and the outcome are all this does; whether a failure holds the tenant is the
+ * caller's decision.
+ */
+async function tryPaperRestore(tenant: `0x${string}`, smartAccount: `0x${string}`): Promise<PaperRestore> {
+  if (paperRestoreForTest) return paperRestoreForTest(tenant, smartAccount);
+  const url = process.env.DATABASE_URL;
+  // No shared database: the child's own sqlite is the only book there is.
+  if (!url) return { ok: true, line: null };
+  let raw: DatabaseSync | null = null;
+  try {
+    raw = new DatabaseSync(path.join(childHome(tenant), "merrymen.db"));
+    const local = wrapSqlite(raw);
+    await applyLedgerSchema(local);
+    const shared = await makePgDb(url);
+    const line = await restorePaperCheckpoint(local, shared, smartAccount);
+    try { await recordPaperRecoveryHealth(shared, smartAccount, false); }
+    catch { log(`paper restore: ${tenant} — restored, but recovery status could not be published`); }
+    return { ok: true, line };
+  } catch (e) {
+    try {
+      await recordPaperRecoveryHealth(await makePgDb(url), smartAccount, true);
+    } catch { log(`paper restore: ${tenant} — recovery status could not be published`); }
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  } finally {
+    raw?.close();
+  }
+}
+
+/** Would these stored settings have a bot for a hold process to answer? */
+function holderBotReady(settings: MerrymenSettings | null): boolean {
+  return settings?.telegramEnabled === true && typeof settings.telegramBotToken === "string" && settings.telegramBotToken.trim() !== "";
+}
+
+/**
+ * HOLD A TENANT WHOSE PRACTICE BOOK COULD NOT BE RESTORED, rather than leave it
+ * dark.
+ *
+ * The gate in spawnChild is kept: a book we cannot restore must not silently
+ * restart its cash, so no worker starts. What changes is everything else. The
+ * worker was the only process that polled the owner's bot, so the gate's
+ * `return` also took the bot down, and in the incident this came from it stayed
+ * down for days: the owner sent /link into the silence, a second login took the
+ * bot, a stale backlog locked the owner out, and nobody told them anything. The
+ * gate also ran every pass, so the only trace was a FAILED line every 17
+ * seconds.
+ *
+ * So instead, under the lease spawnChild already checked:
+ * - `restore-blocked.json` in the home records why and since when, for the hold
+ *   process to say (as a class, never the figures);
+ * - the owner's link is put back, as for a child (writeTelegramForChild);
+ * - the tenant is recorded in `holders`, never `children`, so nothing that
+ *   trades, mirrors or ferries ever sees it, and reconcile stops spawning it;
+ * - when the stored settings have a bot switched on, a hold process answers it
+ *   (telegram-hold.ts) with this tenant's childEnv: no DATABASE_URL, none of the
+ *   orchestrator's secrets, only its own token;
+ * - an [alert] line goes to the log, and the owner a message, once per class.
+ *
+ * NOT the seeds (basis, energy) or the history files: those are for a worker,
+ * and none is starting. The restore is retried from reconcile (retryHold); when
+ * it takes, the hold process is stopped and a worker starts in the same home.
+ */
+async function spawnHolder(
+  tenant: `0x${string}`,
+  smartAccount: `0x${string}`,
+  reason: string,
+  settings: MerrymenSettings | null,
+  lease: TenantLease,
+): Promise<void> {
+  // BEFORE the hold process starts, like a child's: it reads this same
+  // telegram.json, and a link restored after it is polling would be read from
+  // a file it has already replaced with an unlinked default.
+  await writeTelegramForChild(tenant);
+  // THE LAST AWAIT IS ABOVE THIS LINE: asked again for the same reasons as
+  // spawnChild's, and one more. A tenant already held is not held twice.
+  const late = lateSpawnRefusal(tenant, lease) ?? (holders.has(tenant) ? "it is already held" : null);
+  if (late) {
+    log(`${tenant}: ${late} — not holding (it changed while the hold was being prepared)`);
+    return;
+  }
+  const home = childHome(tenant);
+  const cls = restoreBlockClass(reason);
+  // Since the hold began, not since this attempt: a hold process that died and
+  // was put back by the next pass is the same hold.
+  const since = readRestoreBlocked(home)?.since ?? Math.floor(Date.now() / 1000);
+  writeRestoreBlocked(home, { reason, class: cls, since });
+  const held: Holder = {
+    tenant, smartAccount, proc: null, exited: null, reason, cls,
+    nextRetryAt: Date.now() + HOLD_RETRY_FIRST_MS, backoffMs: HOLD_RETRY_FIRST_MS, retrying: false,
+  };
+  holders.set(tenant, held);
+  noteHold(tenant, reason);
+  if (!holderBotReady(settings)) {
+    log(`${tenant}: trading held, with no bot to answer (Telegram off or no token) — the restore is tried again in ${HOLD_RETRY_FIRST_MS / 60_000}m`);
+    return;
+  }
+  startHolderProcess(held);
+}
+
+/** Start the hold process for a held tenant. Its caller has checked the lease and the rest. */
+function startHolderProcess(held: Holder): void {
+  const tenant = held.tenant;
+  const holderProc = spawn(
+    process.execPath,
+    [`--max-old-space-size=${HOLDER_MAX_OLD_SPACE_MB}`, "--import", "tsx", HOLD_ENTRY],
+    { cwd: ROOT, env: childEnv(tenant), stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const tag = `[${tenant.slice(0, 8)} hold]`;
+  const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
+    stream?.on("data", (c: Buffer) =>
+      String(c)
+        .split(/\r?\n/)
+        .filter((l) => l.trim())
+        .forEach((l) => sink.write(`${tag} ${l}\n`)),
+    );
+  pipe(holderProc.stdout, process.stdout);
+  pipe(holderProc.stderr, process.stderr);
+  watchHolder(held, holderProc);
+  log(`${tenant} held (pid ${holderProc.pid}) — trading stays off, the bot answers`);
+}
+
+/**
+ * What a hold process's exit means. The child's rule (spawnChild's exit
+ * handler): only an exit whose entry is still its own is news. A stood-down
+ * hold process, or one being stopped for the handover to trading (its `proc`
+ * already cleared), is said and nothing more.
+ *
+ * One that died on its own is dropped from `holders`, and the next pass
+ * starts over from spawnChild: the restore is tried again, and a failure holds
+ * the tenant again with a fresh process. Three of those inside a minute is a
+ * hold process that cannot stay up, and the tenant is stood down for the
+ * restart policy's cool-off rather than put back every pass.
+ */
+function watchHolder(held: Holder, proc: ChildProcess): void {
+  const tenant = held.tenant;
+  held.proc = proc;
+  held.exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
+  proc.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+    const ours = holders.get(tenant) === held && held.proc === proc;
+    if (ours) holders.delete(tenant);
+    if (stopping) return;
+    if (!ours) {
+      log(`${tenant} stood-down hold process (pid ${proc.pid}) exited with ${code ?? signal}`);
+      return;
+    }
+    const now = Date.now();
+    const recent = [...(holderCrashes.get(tenant) ?? []), now].filter((t) => now - t < HOLDER_CRASH_WINDOW_MS);
+    if (recent.length >= HOLDER_MAX_CRASHES) {
+      holderCrashes.delete(tenant);
+      gaveUpUntil.set(tenant, { until: now + GIVE_UP_COOLOFF_MS, restarts: 0 });
+      log(
+        `${tenant} hold process keeps dying (${recent.length} exits inside ${HOLDER_CRASH_WINDOW_MS / 1000}s, last ${code ?? signal}) — ` +
+          `standing down for ${Math.round(GIVE_UP_COOLOFF_MS / 60_000)}m`,
+      );
+      return;
+    }
+    holderCrashes.set(tenant, recent);
+    log(`${tenant} hold process exited (${code ?? signal}) — the next pass tries the restore again`);
+  });
+}
+
+/**
+ * Stand a held tenant down: forget it, and stop its process, SIGTERM then
+ * SIGKILL, as killChild does. Whoever calls this decides what comes next.
+ */
+function standDownHolder(tenant: string): void {
+  const held = holders.get(tenant);
+  if (!held) return;
+  holders.delete(tenant);
+  const proc = held.proc;
+  if (!proc) return;
+  proc.kill("SIGTERM");
+  setTimeout(() => {
+    try {
+      proc.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }, 3_000);
+}
+
+/**
+ * TRY A HELD TENANT'S RESTORE AGAIN, and hand it back to trading if it takes.
+ *
+ * On reconcile's clock, once its backoff is up: 2 minutes, doubling to 30. The
+ * restore runs against the home's merrymen.db while the hold process keeps
+ * answering the bot; the hold process never opens that file.
+ *
+ * THE HANDOVER, IN ORDER. The hold process is stopped and its exit awaited
+ * BEFORE the worker is spawned, so the two never poll the bot at once (they
+ * would take its updates from each other, 409 against 409). The tenant stays in
+ * `holders` through that wait, so no pass spawns it meanwhile, and leaves it
+ * only on the line that calls spawnChild, which claims `spawning` before it
+ * awaits anything. That spawn restores again and finds the book it just
+ * wrote: "local book retained".
+ */
+async function retryHold(held: Holder): Promise<void> {
+  const tenant = held.tenant;
+  const lease = leases.get(tenant);
+  if (stopping || haltRequested() || !lease || !lease.healthy() || killRequested(childHome(tenant))) return;
+  held.retrying = true;
+  let restore: PaperRestore;
+  try {
+    restore = await tryPaperRestore(tenant, held.smartAccount);
+  } finally {
+    held.retrying = false;
+  }
+  if (holders.get(tenant) !== held) return; // stood down while it ran
+  if (!restore.ok) {
+    held.backoffMs = Math.min(HOLD_RETRY_MAX_MS, held.backoffMs * 2);
+    held.nextRetryAt = Date.now() + held.backoffMs;
+    const cls = restoreBlockClass(restore.reason);
+    if (cls !== held.cls) {
+      const home = childHome(tenant);
+      held.cls = cls;
+      held.reason = restore.reason;
+      writeRestoreBlocked(home, { reason: restore.reason, class: cls, since: readRestoreBlocked(home)?.since ?? Math.floor(Date.now() / 1000) });
+    }
+    noteHold(tenant, restore.reason);
+    return;
+  }
+  const since = readRestoreBlocked(childHome(tenant))?.since;
+  const heldFor = since ? ` after ${Math.max(1, Math.round((Date.now() / 1000 - since) / 60))}m held` : "";
+  log(`paper restore: ${tenant} — ${restore.line ?? "restored"}${heldFor}; handing the bot back to trading`);
+  // Kept out of every other pass until it is handed over.
+  held.retrying = true;
+  const proc = held.proc;
+  const exited = held.exited;
+  // Its exit is a stand-down now, not a crash (watchHolder).
+  held.proc = null;
+  if (proc) {
+    proc.kill("SIGTERM");
+    const hard = setTimeout(() => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }, 3_000);
+    let bound: ReturnType<typeof setTimeout> | undefined;
+    const gone = await Promise.race([
+      (exited ?? Promise.resolve()).then(() => true),
+      new Promise<boolean>((r) => (bound = setTimeout(() => r(false), 10_000))),
+    ]);
+    clearTimeout(hard);
+    clearTimeout(bound);
+    if (!gone) log(`${tenant}: the hold process (pid ${proc.pid}) has not exited 10s after SIGTERM — starting trading anyway`);
+  }
+  if (holders.get(tenant) !== held) return; // stood down while it stopped
+  holders.delete(tenant);
+  forgetHold(tenant);
+  await spawnChild(tenant);
+}
+
+/** The class each held tenant's [alert] last named, so a standing hold is said once, not every pass. */
+const holdAlerted = new Map<string, string>();
+/** The class each held tenant's owner is known to have been told about, in this process. */
+const holdNoticed = new Map<string, string>();
+/** Tenants whose owner notice is being sent. One at a time each. */
+const holdNoticeInFlight = new Set<string>();
+
+/**
+ * SAY A HOLD ONCE: one [alert] line per tenant per reason class, and one
+ * message to the owner.
+ *
+ * The gate's FAILED line used to repeat every pass, about every 17 seconds per
+ * blocked tenant, which buried it; an alert said once per class is one an
+ * operator can grep for and act on. The owner's message is tried on every
+ * failed restore until it lands, and its dedupe is durable
+ * (tenant_telegram.hold_notified), so a redeploy does not repeat it.
+ */
+function noteHold(tenant: `0x${string}`, reason: string): void {
+  const cls = restoreBlockClass(reason);
+  if (holdAlerted.get(tenant) !== cls) {
+    holdAlerted.set(tenant, cls);
+    log(`[alert] paper restore blocked: ${tenant} — ${cls}`);
+    // The figures are the operator's, and only ever here.
+    log(`paper restore: ${tenant} FAILED — ${reason} (trading held; retried from ${HOLD_RETRY_FIRST_MS / 60_000}m, backing off to ${HOLD_RETRY_MAX_MS / 60_000}m)`);
+  }
+  if (holdNoticed.get(tenant) === cls || holdNoticeInFlight.has(tenant)) return;
+  holdNoticeInFlight.add(tenant);
+  void sendHoldNotice(tenant, cls)
+    .then((outcome) => {
+      if (outcome === "sent" || outcome === "told") holdNoticed.set(tenant, cls);
+    })
+    .catch((e) => log(`${tenant}: trading held, but the owner could not be told — ${e instanceof Error ? e.message : String(e)}`))
+    .finally(() => holdNoticeInFlight.delete(tenant));
+}
+
+/**
+ * What became of one attempt to tell an owner their trading is held: `sent`
+ * now, `told` already (this class, durably), or neither this time: `no-owner`
+ * (no linked chat, no bot, or Telegram or alerts switched off) and `failed`.
+ * Only the first two stop the attempts.
+ */
+export type HoldNoticeOutcome = "sent" | "told" | "no-owner" | "failed";
+
+/**
+ * Tell the owner, through their own bot, to the chat that proved the /link
+ * code: the path the kill confirmation takes (confirmKillDone). Unlike that
+ * one, this obeys the alert switches, because nobody asked for it.
+ *
+ * AT LEAST ONCE, NOT AT MOST: the class is recorded after the send. A repeat
+ * after a crash between the two is a nuisance; a notice lost to a failed send
+ * is the silence this exists to end. Only the replica holding the tenant's
+ * lease gets here, so two replicas do not both send.
+ */
+let sendHoldNotice = async (tenant: `0x${string}`, cls: string): Promise<HoldNoticeOutcome> => {
+  const url = process.env.DATABASE_URL;
+  if (!url) return "no-owner";
+  try {
+    const shared = await makePgDb(url);
+    const to = await hostedRecipient(shared)(tenant);
+    if (!to || !to.enabled) return "no-owner";
+    await shared.exec(translateSchema(TELEGRAM_STATE_DDL));
+    try {
+      await shared.exec(TELEGRAM_HOLD_NOTIFIED_DDL);
+    } catch {
+      /* already there */
+    }
+    if ((await holdNotifiedClass(shared, tenant)) === cls) return "told";
+    const sent = await telegramSend()(to.botToken, to.chatId, holdNoticeText(cls));
+    if (!sent.ok) {
+      log(`${tenant}: trading held, but the owner notice did not send — ${sent.reason ?? "unknown"}`);
+      return "failed";
+    }
+    await recordHoldNotified(shared, tenant, cls);
+    log(`${tenant}: owner told that trading is held (${cls})`);
+    return "sent";
+  } catch (e) {
+    log(`${tenant}: trading held, but the owner notice failed — ${e instanceof Error ? e.message : String(e)}`);
+    return "failed";
+  }
+};
+
+/** Test seam: take the owner notice instead of sending it. */
+export function setHoldNoticeForTest(fn: (tenant: `0x${string}`, cls: string) => Promise<HoldNoticeOutcome>): void {
+  sendHoldNotice = fn;
+}
+
+/**
+ * The book restored: whatever this process remembered about a hold is
+ * forgotten, and so is the durable notice, so the next hold is news again.
+ * Called on every restore that works, not only after a hold this process saw:
+ * a redeploy is the commonest way out of one, and it starts with no memory.
+ */
+function forgetHold(tenant: `0x${string}`): void {
+  holdAlerted.delete(tenant);
+  holdNoticed.delete(tenant);
+  holderCrashes.delete(tenant);
+  clearRestoreBlocked(childHome(tenant));
+  const url = process.env.DATABASE_URL;
+  if (!url) return;
+  void makePgDb(url)
+    .then((db) => clearHoldNotified(db, tenant))
+    .catch(() => {
+      /* the column is added on the mirror's clock; a missing one has nothing to clear */
+    });
 }
 
 /** The fleet-wide tick, for a tenant whose own settings do not name one. */
@@ -1867,6 +2352,9 @@ export async function reconcile(): Promise<void> {
     if (!lease.healthy()) {
       log(`${tenant}: lease lost (connection dropped) — standing the child down until it can be re-leased`);
       if (children.has(tenant)) killChild(tenant);
+      // A held tenant's bot is not ours to answer either once the lease is
+      // gone: the replica that takes it will hold it, or start it.
+      standDownHolder(tenant);
       await releaseLease(tenant);
     }
   }
@@ -1883,6 +2371,12 @@ export async function reconcile(): Promise<void> {
     // loop's at rung 0. See `restartPending`.
     flagStuckSpawn(lc);
     if (children.has(lc) || spawning.has(lc) || restartPending.has(lc)) continue;
+    // A HELD TENANT IS NOT A TENANT THAT ISN'T RUNNING EITHER. Its restore
+    // failed and its bot is being answered; spawning it here would only fail
+    // the same restore every pass, which is what it used to do, every 17
+    // seconds. Its restore is retried below, on a backoff, and a crashed hold
+    // process leaves the map, so this loop picks it up again. See spawnHolder.
+    if (holders.has(lc)) continue;
     /**
      * A TENANT THE RESTART POLICY GAVE UP ON IS NOT A TENANT THAT ISN'T RUNNING.
      *
@@ -1919,6 +2413,12 @@ export async function reconcile(): Promise<void> {
     }
     await spawnChild(lc, cool?.restarts ?? 0);
   }
+  // HELD TENANTS WHOSE RESTORE IS DUE AGAIN, and the handover to trading when
+  // it takes. See retryHold.
+  for (const held of [...holders.values()]) {
+    if (!wanted.has(held.tenant) || held.retrying || Date.now() < held.nextRetryAt) continue;
+    await retryHold(held);
+  }
   // Refresh every running child's settings.json so a tenant's config change
   // reaches it (the worker re-reads settings.json each tick). Cheap: one small
   // file per tenant, and unchanged content is a harmless rewrite. The shared
@@ -1927,6 +2427,22 @@ export async function reconcile(): Promise<void> {
   const seenBotTokens = new Set<string>();
   // Every holder claim in one read for the whole fleet, not one per tenant.
   const holderClaims = await readHolderClaims();
+  // HELD TENANTS FIRST, and with the same refresh: a chat the owner removes on
+  // the dashboard, or a token they change, must reach the hold process as it
+  // would a worker, and a held tenant's bot token is as much in use as a
+  // trading one's, so the de-duplication below must see it. First, so that a
+  // tenant held since before another took up the same bot keeps answering it.
+  for (const [tenant, held] of [...holders]) {
+    const stored = await writeSettingsForChild(tenant as `0x${string}`, seenBotTokens, holderClaims);
+    await refreshGrantForChild(tenant as `0x${string}`);
+    // Held with no bot, and now there is one: the owner has just switched
+    // Telegram on. Answer it from this pass, not from the next failed restore.
+    const lease = leases.get(tenant);
+    if (holders.get(tenant) !== held || held.proc || held.retrying || !lease || !holderBotReady(stored)) continue;
+    const late = lateSpawnRefusal(tenant as `0x${string}`, lease);
+    if (late) continue;
+    startHolderProcess(held);
+  }
   for (const tenant of children.keys()) {
     await writeSettingsForChild(tenant as `0x${string}`, seenBotTokens, holderClaims);
     // AND THEIR GRANT, for the same reason and on the same clock. Settings
@@ -1948,6 +2464,22 @@ export async function reconcile(): Promise<void> {
       } catch {
         /* best-effort cleanup */
       }
+    }
+  }
+  // AND ANY HELD TENANT'S, the same way: its hold process stopped and its home
+  // wiped. A Telegram /kill sent to a hold process lands here too, once the
+  // order ferry has carried it to the store. Never mirrored first: a held
+  // book is exactly the one the mirror must not copy (see `holders`).
+  for (const tenant of [...holders.keys()]) {
+    if (wanted.has(tenant)) continue;
+    log(`${tenant} grant removed — standing its hold down`);
+    standDownHolder(tenant);
+    holdAlerted.delete(tenant);
+    holdNoticed.delete(tenant);
+    try {
+      rmSync(childHome(tenant), { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
     }
   }
   /**
@@ -5497,7 +6029,10 @@ const lastRewindLogged = new Map<string, string>();
 
 async function mirrorLedgers(): Promise<void> {
   const url = process.env.DATABASE_URL;
-  if (!url || children.size === 0) return;
+  // Held tenants count: their Telegram is published below, and a fleet whose
+  // only tenants are held would otherwise never show their link codes, or
+  // promote a chat linked through a hold process.
+  if (!url || (children.size === 0 && holders.size === 0)) return;
   let shared;
   try {
     shared = await makePgDb(url);
@@ -5523,6 +6058,13 @@ async function mirrorLedgers(): Promise<void> {
     // creates what it writes, so a fresh deploy heals itself rather than
     // needing DDL run by hand.
     await shared.exec(translateSchema(TELEGRAM_STATE_DDL));
+    // Which hold the owner was told about (sendHoldNotice). The same ALTER
+    // pattern as mirror_state's column above.
+    try {
+      await shared.exec(TELEGRAM_HOLD_NOTIFIED_DDL);
+    } catch {
+      /* already there */
+    }
     // The command receipt, on the same clock and for the same reason: this
     // process writes it (landResults), so this process creates it.
     try {
@@ -5635,6 +6177,19 @@ async function mirrorLedgers(): Promise<void> {
     // `children` is keyed by the grant store's own tenant list, which is
     // 0x-shaped by construction — the same cast writeSettingsForChild takes.
     await writePeersFor(tenant as `0x${string}`, shared);
+  }
+
+  // HELD TENANTS: THEIR TELEGRAM, AND NOTHING ELSE. The link code the hold
+  // process minted or rotated, and any chat linked through it, promoted into
+  // the stored allowlist, as for a child. Never the ledger: no openChildLedger,
+  // no mirrorTenant. A held book is empty or unrestored, and the mirror's
+  // snapshot tables would copy that emptiness over the checkpoint, positions
+  // and cost basis the shared ledger still holds. Under the same lease rule as
+  // the loop above: only the replica holding the tenant speaks for it.
+  for (const tenant of [...holders.keys()]) {
+    const lease = leases.get(tenant.toLowerCase());
+    if (!lease || !lease.healthy()) continue;
+    await publishChildTelegram(tenant as `0x${string}`, shared);
   }
 
   // What the fleet has been thinking about, for the news desk to prioritise.
@@ -5995,6 +6550,7 @@ export async function runOrchestrator(): Promise<void> {
     stopping = true;
     log("stopping — calling the whole fleet home");
     for (const child of children.values()) child.proc.kill("SIGTERM");
+    for (const held of holders.values()) held.proc?.kill("SIGTERM");
     // Release every advisory lease so a restarting replica can take over at once
     // rather than waiting for our dropped connections to time out server-side.
     // Best-effort and unawaited — we exit in a second regardless.
@@ -6025,9 +6581,12 @@ export async function runOrchestrator(): Promise<void> {
   for (;;) {
     if (stopping) return;
     if (haltRequested()) {
-      if (children.size > 0 || leases.size > 0) {
+      if (children.size > 0 || holders.size > 0 || leases.size > 0) {
         log("FLEET_HALT present — standing every child down and releasing leases");
         for (const t of [...children.keys()]) killChild(t);
+        // Held tenants' hold processes too: a halt stands down every process
+        // this replica runs for a tenant, and the leases go below.
+        for (const t of [...holders.keys()]) standDownHolder(t);
         // Release leases too: if only THIS replica is halted, another may take
         // the tenants over; if the whole fleet is halted, releasing is harmless.
         for (const t of [...leases.keys()]) await releaseLease(t);

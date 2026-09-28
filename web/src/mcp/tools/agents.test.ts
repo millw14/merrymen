@@ -139,7 +139,10 @@ test("the screens on each path exist and lead where the text says", () => {
 test("the Telegram commands named are in the bot's command list", () => {
   const help = source("worker/src/telegram/reads.ts");
   const executor = source("worker/src/telegram/executor.ts");
+  // The kill's words live in kill-confirm.ts, shared by the executor and the
+  // process that answers the bot while trading is held.
+  const killWords = source("worker/src/telegram/kill-confirm.ts");
   for (const cmd of ["/kill —", "/pause · /resume"]) assert.ok(help.includes(`"${cmd}`), cmd);
-  assert.ok(executor.includes("/confirm to kill"), "/kill asks for /confirm");
+  assert.ok(killWords.includes("/confirm to kill") && executor.includes("return killPromptText("), "/kill asks for /confirm");
   assert.ok(executor.includes(`case "kill"`) && executor.includes("if (!deps.controlEnabled)"), "kill is refused while control commands are off");
 });

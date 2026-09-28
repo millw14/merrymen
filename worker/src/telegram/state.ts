@@ -349,6 +349,42 @@ export function switchBot(state: TelegramState, botId: string, tokenTag: string,
   };
 }
 
+/**
+ * THE STATE BOUND TO THE BOT `token` BELONGS TO, and what binding it changed.
+ * The pure half of service.ts bindBot, which says why each case is what it is;
+ * shared with the hold process (hold.ts), so that whichever of the two polls
+ * the bot, telegram.json ends up the same.
+ *
+ * - `invalid`: not a token Telegram would accept; nothing changes.
+ * - `adopted`: no bot on file (a file from before botId, or one the
+ *   orchestrator restored). This bot is recorded and nothing is reset.
+ * - `switched`: a different bot. It resumes where this agent last left it
+ *   (switchBot), with a fresh code.
+ * - `renewed`: the same bot with a different secret, or none recorded beside
+ *   it. The offset stands; the code is rotated. `told` is false when there was
+ *   no fingerprint to compare, which is a migration rather than a renewal.
+ * - `same`: nothing changes.
+ */
+export function bindToken(
+  state: TelegramState,
+  token: string,
+  at: number,
+  rng: LinkRng = randomBytes,
+):
+  | { change: "invalid"; state: TelegramState }
+  | { change: "same"; state: TelegramState }
+  | { change: "adopted"; state: TelegramState }
+  | { change: "switched"; state: TelegramState }
+  | { change: "renewed"; state: TelegramState; told: boolean } {
+  const botId = botIdOf(token);
+  if (!botId) return { change: "invalid", state };
+  const tag = tokenTagOf(token);
+  if (state.botId === null) return { change: "adopted", state: { ...state, botId, tokenTag: tag } };
+  if (state.botId !== botId) return { change: "switched", state: ensureLinkCode(switchBot(state, botId, tag, at), rng) };
+  if (state.tokenTag === tag) return { change: "same", state };
+  return { change: "renewed", state: rotateLinkCode({ ...state, tokenTag: tag }, rng), told: state.tokenTag !== null };
+}
+
 /** Where a link code's randomness comes from: `n` random bytes. Injectable so a test can pin a code. */
 export type LinkRng = (n: number) => Uint8Array;
 
