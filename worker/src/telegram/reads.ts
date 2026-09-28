@@ -11,7 +11,8 @@ import { homePaths } from "../home";
 import { esc } from "./api";
 import { gasQualifier } from "../equity";
 import { overlayHistory } from "./history-overlay";
-import { loadTradeViews, renderTradeList, type TradeViewOpts } from "./trade-rows";
+import { loadTradeViews, renderTradeList, when, type TradeViewOpts } from "./trade-rows";
+import { heldSqlSync, isHeld, measuredMarks, readMeasuredMarkSync } from "../held-marks";
 import { rejectRuleLabel, rejectRuleRemedy } from "../thesis-policy";
 // RELATIVE import only — the "@merrymen/core" alias exists solely in dev (see
 // the note in service.ts). isHostedMode decides whether a missing agent id may
@@ -132,18 +133,32 @@ function gasPaid(db: DatabaseSync, agentId: string, epoch: number): { usdg: numb
  * equity is the difference between "the account is worth more than it was" and
  * "the agent made money" — the two were the same number until 2026-08-26, which
  * is how /pnl came to report a 1,000 USDG deposit as a 1,000 USDG profit.
+ *
+ * `window` bounds it to the flows booked after `after` and at or before
+ * `upTo`: what a reading taken at `upTo` has in its cash, less what one taken
+ * at `after` already had (held-marks.ts netFlowsUpTo — a flow counts from the
+ * first reading at or after it). Unbounded, it is the whole record.
  */
-export function netContributions(db: DatabaseSync, agentId: string, sinceUnix?: number): number | null {
+export function netContributions(db: DatabaseSync, agentId: string, window: { after?: number; upTo?: number } = {}): number | null {
   try {
     const epoch = agentEpoch(db, agentId);
-    const sql =
-      `SELECT COUNT(*) AS n,
-              COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-         FROM flows WHERE agent_id = ? AND epoch = ?` + (sinceUnix !== undefined ? " AND at >= ?" : "");
-    const stmt = db.prepare(sql);
-    const row = (
-      sinceUnix !== undefined ? stmt.get(agentId, epoch, sinceUnix) : stmt.get(agentId, epoch)
-    ) as { n: number; net: number } | undefined;
+    const args: number[] = [];
+    let where = "";
+    if (window.after !== undefined) {
+      where += " AND at > ?";
+      args.push(window.after);
+    }
+    if (window.upTo !== undefined) {
+      where += " AND at <= ?";
+      args.push(window.upTo);
+    }
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n,
+                COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
+           FROM flows WHERE agent_id = ? AND epoch = ?${where}`,
+      )
+      .get(agentId, epoch, ...args) as { n: number; net: number } | undefined;
     // No rows is NOT zero. A ledger written before the flows table existed knows
     // nothing about what was put in, and calling that zero republishes the very
     // bug this fixes: equity minus zero is the bankroll, reported as profit.
@@ -154,6 +169,14 @@ export function netContributions(db: DatabaseSync, agentId: string, sinceUnix?: 
     return null;
   }
 }
+
+/**
+ * Why a figure measured against the flows stops short of the newest reading,
+ * or is not given: a reading taken while flow inference was held can carry a
+ * deposit, withdrawal or purchase the flows table has not booked yet
+ * (held-marks.ts), so it is never set against them.
+ */
+const SETTLING = "a deposit, withdrawal or purchase was still settling";
 
 export interface StatusContext {
   /**
@@ -352,9 +375,13 @@ export function readPnl(passedId?: string | null): string {
     const agentId = resolveAgent(db, passedId);
     if (!agentId) return `📈 no agent yet — grant one at ${dashboardBase()}/grant.`;
     const epoch = agentEpoch(db, agentId);
-    const eq = db
-      .prepare("SELECT equity_usdg FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at ASC, id ASC")
-      .all(agentId, epoch) as { equity_usdg: number }[];
+    // The newest reading, held or not: what the account is worth NOW.
+    const now = db
+      .prepare(
+        `SELECT equity_usdg, at, ${heldSqlSync(db).flag()} AS held FROM equity
+          WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 1`,
+      )
+      .get(agentId, epoch) as { equity_usdg: number; at: number; held: unknown } | undefined;
     const fee = db
       .prepare("SELECT COALESCE(SUM(fee_usdg),0) AS f FROM fee_accruals WHERE agent_id = ?")
       .get(agentId) as { f: number } | undefined;
@@ -386,7 +413,7 @@ export function readPnl(passedId?: string | null): string {
       /* pre-migration ledger — no realized column yet */
     }
 
-    if (eq.length < 1) {
+    if (!now) {
       return realizedLine
         ? `📈 <b>P&amp;L</b>\n${realizedLine}\n• equity curve: not enough history yet — check back after a few ticks.`
         : "📈 not enough history yet — check back after a few ticks.";
@@ -395,25 +422,43 @@ export function readPnl(passedId?: string | null): string {
     // last-minus-first over the equity curve, which counts every deposit as a
     // gain and every withdrawal as a loss: on a book that was down 0.52 USDG
     // after a 1,000 USDG deposit, this line read +999.48.
-    const equityNow = eq[eq.length - 1]!.equity_usdg;
-    const contributed = netContributions(db, agentId);
+    const equityNow = now.equity_usdg;
     const lines = [`📈 <b>P&amp;L</b>`];
-    if (contributed === null) {
+    if (netContributions(db, agentId) === null) {
       // Nothing on record about capital, so there is no P&L to state. Saying
       // "equity minus nothing" would be the original bug with extra steps.
       lines.push(`• equity: ${usd(equityNow)}`);
       lines.push(`• change: not measurable — no record of what was put in (ledger predates flow tracking)`);
     } else {
-      const gas = gasPaid(db, agentId, epoch);
-      // NET of gas. Gas leaves in ETH and equity_usdg is cash + vault +
-      // positions, so every figure here used to be gross of a cost that at this
-      // account's trade sizes was most of the total.
-      const delta = equityNow - contributed - gas.usdg;
-      const pct = contributed > 0 ? (delta / contributed) * 100 : 0;
-      lines.push(`• change: ${usd(delta)}${contributed > 0 ? ` (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)` : ""}`);
-      lines.push(`• equity ${usd(equityNow)} · you put in ${usd(contributed)}`);
-      if (gas.usdg > 0 || gas.unpricedTrades > 0) {
-        lines.push(`• ${esc(gasQualifier(gas))}`);
+      // THE RETURN'S PAIR (held-marks.ts): the newest reading NOT taken while
+      // flow inference was held, of the book the newest reading is in, and only
+      // what was booked by then. A top-up landing mid-hold is in the held
+      // reading's cash before it is in the flows, and read against them it was
+      // profit on this line until the hold ended.
+      const measured = readMeasuredMarkSync(db, agentId, epoch);
+      const contributed = measured ? netContributions(db, agentId, { upTo: measured.at }) : null;
+      if (!measured || contributed === null) {
+        lines.push(`• equity: ${usd(equityNow)}`);
+        lines.push(
+          measured
+            ? `• change: not measurable yet — nothing had been put in as of my last settled reading (${when(measured.at)})`
+            : `• change: not measurable yet — every reading of this book so far was taken while ${SETTLING}`,
+        );
+      } else {
+        const gas = gasPaid(db, agentId, epoch);
+        // NET of gas. Gas leaves in ETH and equity_usdg is cash + vault +
+        // positions, so every figure here used to be gross of a cost that at this
+        // account's trade sizes was most of the total.
+        const delta = measured.equity - contributed - gas.usdg;
+        const pct = contributed > 0 ? (delta / contributed) * 100 : 0;
+        lines.push(`• change: ${usd(delta)}${contributed > 0 ? ` (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)` : ""}`);
+        lines.push(`• equity ${usd(measured.equity)} · you put in ${usd(contributed)}`);
+        if (isHeld(now.held)) {
+          lines.push(`• equity now ${usd(equityNow)} — read while ${SETTLING}, so the change is measured at ${when(measured.at)}, before it`);
+        }
+        if (gas.usdg > 0 || gas.unpricedTrades > 0) {
+          lines.push(`• ${esc(gasQualifier(gas))}`);
+        }
       }
     }
     if (realizedLine) lines.push(realizedLine);
@@ -506,25 +551,36 @@ export function readPositionRaw(
 interface EquityPoint {
   equity_usdg: number;
   at: number;
+  mode: string | null;
+  /** Nonzero when taken while flow inference was held (held-marks.ts). */
+  held: unknown;
 }
 
+/**
+ * Every reading of this agent's epoch, oldest first — held ones included,
+ * because what the book is worth now is the newest of them. A figure measured
+ * against the flows takes measuredMarks() of it instead.
+ */
 function equitySeries(db: DatabaseSync, agentId: string, sinceUnix?: number): EquityPoint[] {
   try {
     const epoch = agentEpoch(db, agentId);
+    const cols = `equity_usdg, at, mode, ${heldSqlSync(db).flag()} AS held`;
     const rows =
       sinceUnix !== undefined
         ? db
-            .prepare(
-              "SELECT equity_usdg, at FROM equity WHERE agent_id = ? AND epoch = ? AND at >= ? ORDER BY at ASC, id ASC",
-            )
+            .prepare(`SELECT ${cols} FROM equity WHERE agent_id = ? AND epoch = ? AND at >= ? ORDER BY at ASC, id ASC`)
             .all(agentId, epoch, sinceUnix)
-        : db
-            .prepare("SELECT equity_usdg, at FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at ASC, id ASC")
-            .all(agentId, epoch);
+        : db.prepare(`SELECT ${cols} FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at ASC, id ASC`).all(agentId, epoch);
     return rows as unknown as EquityPoint[];
   } catch {
     return [];
   }
+}
+
+/** The newest reading a figure measured against the flows may end on, or null. */
+function lastMeasured(series: readonly EquityPoint[]): EquityPoint | null {
+  const m = measuredMarks(series);
+  return m.length ? m[m.length - 1]! : null;
 }
 
 function localMidnightUnix(now = new Date()): number {
@@ -563,34 +619,48 @@ export function readReport(ctx: StatusContext, publicSafe = false): string {
     const all = equitySeries(db, agentId);
     const today = equitySeries(db, agentId, midnight);
     if (all.length >= 1) {
+      // What the book is worth now: the newest reading, held or not.
       const eq = all[all.length - 1]!.equity_usdg;
       if (!publicSafe) lines.push(`• equity: <b>${eq.toFixed(2)} USDG</b>`);
     }
-    // Both windows net out capital that crossed the boundary inside them, so a
-    // deposit doesn't read as a day's winnings.
-    if (today.length >= 2) {
-      // Today's flows net out of today's move; a same-day deposit is not a win.
-      const d =
-        today[today.length - 1]!.equity_usdg -
-        today[0]!.equity_usdg -
-        (netContributions(db, agentId, midnight) ?? 0);
-      const base = today[0]!.equity_usdg;
+    // Both figures below measure the book against the money that crossed it, so
+    // both read only MEASURED readings of the book the newest one is in
+    // (held-marks.ts): a reading taken mid-hold can carry a deposit or a
+    // withdrawal not booked yet, and set against the flows it is a day's win or
+    // loss that never happened.
+    const todayMeasured = measuredMarks(today);
+    if (todayMeasured.length >= 2) {
+      // Only money moved BETWEEN the two readings is inside the move: a flow
+      // booked at or before the first is already in its figure, and one booked
+      // after the last is not yet in either. A same-day deposit is not a win.
+      const first = todayMeasured[0]!;
+      const last = todayMeasured[todayMeasured.length - 1]!;
+      const d = last.equity_usdg - first.equity_usdg - (netContributions(db, agentId, { after: first.at, upTo: last.at }) ?? 0);
+      const base = first.equity_usdg;
       const pct = base > 0 ? (d / base) * 100 : 0;
       // The percentage says how it did; the dollar figure says how big the book
       // is. Publicly, only the first is anybody else's business.
       const move = publicSafe ? "" : ` ${usd(d)}`;
       lines.push(`• today: ${trend(d)}${move} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
+    } else if (today.some((p) => isHeld(p.held))) {
+      lines.push(`• today: not measured yet — ${SETTLING} when today's readings were taken`);
     } else {
       lines.push(`• today: not enough ticks yet`);
     }
-    const contributed = netContributions(db, agentId);
-    if (contributed === null) {
+    if (netContributions(db, agentId) === null) {
       lines.push(`• all-time: not measurable — no record of what was put in`);
     } else if (all.length >= 1) {
-      const d = all[all.length - 1]!.equity_usdg - contributed;
-      const pct = contributed > 0 ? (d / contributed) * 100 : 0;
-      const move = publicSafe ? "" : ` ${usd(d)}`;
-      lines.push(`• all-time: ${trend(d)}${move} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
+      // The newest measured reading, over only what was booked by then.
+      const m = lastMeasured(all);
+      const contributed = m ? netContributions(db, agentId, { upTo: m.at }) : null;
+      if (!m || contributed === null) {
+        lines.push(`• all-time: not measured yet — ${SETTLING} when my readings were taken`);
+      } else {
+        const d = m.equity_usdg - contributed;
+        const pct = contributed > 0 ? (d / contributed) * 100 : 0;
+        const move = publicSafe ? "" : ` ${usd(d)}`;
+        lines.push(`• all-time: ${trend(d)}${move} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`);
+      }
     }
     // Positions — biggest and smallest holdings.
     try {
@@ -657,13 +727,20 @@ export function readBrag(ctx: StatusContext): string {
     // The scorecard people SHARE. Getting this one wrong doesn't just mislead
     // the owner, it misleads everyone they show it to — so it nets out capital
     // like every other figure rather than bragging about a deposit.
-    const contributed = netContributions(db, agentId);
-    if (contributed === null) {
+    if (netContributions(db, agentId) === null) {
       return "🏹 nothing to brag about yet — this ledger has no record of what was put in, so there's no honest number to share.";
     }
-    const delta = last.equity_usdg - contributed;
+    // …and it is measured on the newest reading NOT taken mid-hold, over what
+    // was booked by then (held-marks.ts): a top-up still settling is not a win
+    // anybody should be shown.
+    const m = lastMeasured(all);
+    const contributed = m ? netContributions(db, agentId, { upTo: m.at }) : null;
+    if (!m || contributed === null) {
+      return `🏹 nothing to brag about just yet — ${SETTLING}, so there's no honest number to share. Give it a few ticks.`;
+    }
+    const delta = m.equity_usdg - contributed;
     const pct = contributed > 0 ? (delta / contributed) * 100 : 0;
-    const days = Math.max(1, Math.round((last.at - first.at) / 86400));
+    const days = Math.max(1, Math.round((m.at - first.at) / 86400));
     const bar = pct >= 0 ? "🟩".repeat(Math.max(1, Math.min(8, Math.ceil(Math.abs(pct))))) : "🟥".repeat(Math.max(1, Math.min(8, Math.ceil(Math.abs(pct)))));
     let best = "";
     try {
