@@ -324,6 +324,17 @@ const CHILD_SECRET_STRIP = [
   // THE GROUP CHAT'S OWN MODEL KEY. It exists so the room never spends the
   // fleet key trading shares; a child holding it could spend it on anything.
   "MERRYMEN_GROUPCHAT_LLM_KEY",
+  /**
+   * THE X APP'S CLIENT SECRET, and the X writer's own model key
+   * (docs/x-posting.md rule 5). The secret authenticates merrymen to X for
+   * every owner's connection at once: with it and one leaked refresh token,
+   * anybody could keep that owner's account posting. It is read in exactly one
+   * file (xpost/client.ts) in the web and this process — the only two that
+   * talk to X — and a child posts nothing, so it has no business holding it.
+   * The model key is stripped for the room key's reason.
+   */
+  "MERRYMEN_X_CLIENT_SECRET",
+  "MERRYMEN_XPOST_LLM_KEY",
 ] as const;
 
 /** Where a tenant's child keeps its own ~/.merrymen — isolated from every other. */
