@@ -390,7 +390,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   let ownerFailure = "";
 
   const why =
-    `xpost: on — at most ${perDay} posts per owner a day, ${fleetPerDay} across the fleet a day; ` +
+    `xpost: on — at most ${perDay} posts per X account a day, ${fleetPerDay} across the fleet a day; ` +
     (creds ? `up to ${llmPerDay} model calls a day` : "no model, so only intros are posted, from templates");
 
   return {
