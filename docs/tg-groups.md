@@ -182,6 +182,10 @@ messages still get an answer while shushed only from the owner.
 * Does not know (never in its prompt): anything in rule 3.
 * Other people's words are quoted inside a fenced block marked as untrusted
   data; instructions inside them are ignored.
+* It never writes a `$TICKER` (a shill's cashtag echoed by the bot is
+  amplification); it says a coin's plain name, or "this one"/"it".
+* An anonymous admin (`sender_chat` set, `from` = GroupAnonymousBot) and a
+  linked-channel post are ordinary non-owner lines, not bots.
 
 ### Banter and roasts
 
@@ -200,8 +204,10 @@ messages still get an answer while shushed only from the owner.
 
 ## The coin flow
 
-A CA is `0x` + exactly 40 hex characters, found anywhere in the text or
-caption, including inside a GeckoTerminal/DexScreener/explorer URL. A 64-hex
+A CA is `0x` + exactly 40 hex characters, found anywhere in the visible text
+or caption, including inside a GeckoTerminal/DexScreener/explorer URL written
+out in the message. The hidden URL behind a `text_link` entity is never
+scanned: nobody in the chat can see it. A 64-hex
 string (tx hash, v4 pool id, key) is never a CA and is never echoed. A
 Solana-style base58 mint (32–44 chars) is recognised only to say it is not on
 its chain. At most the first 2 CAs in a message are considered.
@@ -291,7 +297,9 @@ never hears it.
 ### Nomination caps (`trencher-nominate.ts`, in the child, on top of every existing limit)
 
 * At most 1 nominated coin under review at a time per agent; others wait in a
-  queue of at most 5 (oldest dropped with `expired`).
+  queue (5 unresolved in total, counting the one under review and any waiting
+  for their fill). A sixth is refused as `busy`; nothing already queued is
+  pushed out, so a burst of CAs cannot displace a coin someone posted first.
 * Per chat: 4 nominations per hour. Per sender: 2 per hour. Per agent: 12 per
   UTC day.
 * The same address is not nominated again for 6 h after a verdict.
@@ -324,8 +332,11 @@ Per chat, durable (survives hosted redeploys via the orchestrator ferry):
   decisionId?, outcome?}` for 14 days.
 * Memory never crosses chats: what was said in one group is never used in
   another, and never in the owner's DMs.
-* `/forget` (owner, in a group) wipes that chat's memory. `/forgetme` (anyone)
-  removes their lines and person note from that chat and says "done 🫡".
+* `/forget` (owner, in a group) wipes that chat's memory and nothing else
+  (the owner's DM memory is untouched). `/forgetme` (anyone) removes their
+  lines and person note from that chat, blanks their name on that chat's coin
+  memos, rewrites the summary without them at the next memory pass, and says
+  "done 🫡".
 * Edited and deleted messages: edits are ignored; Telegram does not report
   deletions to bots.
 * A group upgraded to a supergroup (`migrate_to_chat_id`) moves its state to
@@ -378,6 +389,13 @@ durable store (so a redeploy does not hand out a fresh day). A 429 pauses the
 model 10 min; a daily-cap or rejected-key failure pauses it until UTC
 midnight. Every call is time-boxed at 20 s. At most 2 group model calls run at
 once per agent.
+
+## Operator switch
+
+`MERRYMEN_TG_GROUPS=0` in the environment turns the whole feature off for
+every agent on that host (read by the child on each message): no group lines,
+no reactions, no coin looks, no memory writes. Membership changes are still
+recorded so switching it back on works.
 
 ## Commands in groups
 
