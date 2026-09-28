@@ -387,7 +387,8 @@ export async function profileOf(
   // what make a drawdown mean anything, because without them money the owner
   // took out is indistinguishable from money the agent lost.
   let flows: { at: number; signed: number }[] = [];
-  let contributed: number | null = null;
+  /** Every flow on record this run: whether the book was ever funded. */
+  let onRecord: number | null = null;
   let flowsWithTx = 0;
   let flowsTotal = 0;
   let flowsRead = false;
@@ -408,7 +409,7 @@ export async function profileOf(
       at: Number(r.at),
       signed: (r.direction === "in" ? 1 : -1) * Number(r.amount_usdg),
     }));
-    contributed = rows.length === 0 ? null : flows.reduce((n, x) => n + x.signed, 0);
+    onRecord = rows.length === 0 ? null : flows.reduce((n, x) => n + x.signed, 0);
     flowsTotal = rows.length;
     // WHAT COUNTS AS EVIDENCE IS ONE RULE, AND IT LIVES IN THE WORKER.
     //
@@ -662,8 +663,8 @@ export async function profileOf(
   // those are not in its cash. Pairing them publishes the transfer as profit
   // for as long as the hold lasts. With no measured mark there is no numerator
   // either, and the reason rankPnl gives is decided as before, on every flow.
-  const contributedByLatest = latestAt === null ? contributed : netFlowsUpTo(flows, latestAt);
-  const { pnlBps, unrankedWhy } = rankPnl({ contributed: contributedByLatest, latest, gasUsdg, landed, contributionsKnown });
+  const contributed = latestAt === null ? onRecord : netFlowsUpTo(flows, latestAt);
+  const { pnlBps, unrankedWhy } = rankPnl({ contributed, latest, gasUsdg, landed, contributionsKnown });
 
   return {
     slug: identity.slug,
@@ -691,7 +692,7 @@ export async function profileOf(
     refused,
     tokensTouched,
     gas: { usdg: gasUsdg, unpricedTrades },
-    funded: contributed !== null,
+    funded: onRecord !== null,
     contributionsEvidenced: contributionsKnown === true,
     flowsWithTx,
     flowsTotal,
