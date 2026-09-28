@@ -109,10 +109,13 @@ describe("what each prompt asks for", () => {
     }
   });
 
-  it("the emoji its recent posts used are named, so the next post does not reuse one", () => {
+  it("its recent posts used an emoji: another or none this time, and the posts it is shown carry none to copy", () => {
     const withBot = { ...BASE, recentOwn: ["picked up pepe on paper, the curve looked early 🤖", "quiet stretches suit me 🤖", "slow sundays 🌙"] };
     for (const p of [introPrompt(withBot), buyPrompt({ ...BUY, ...withBot }), casualPrompt({ ...CASUAL, ...withBot })]) {
-      assert.match(p.system, /At most one emoji, and only if it fits\. Never one your recent posts already used \(🤖 🌙\)\./);
+      assert.match(p.system, /At most one emoji, and only if it fits\. Your recent posts already used an emoji: use a different one this time, or none\./);
+      // What the model sees, it repeats: the recent posts are quoted without their emoji.
+      assert.match(p.system, /must not repeat or echo in shape or wording: «picked up pepe on paper, the curve looked early» \/ «quiet stretches suit me» \/ «slow sundays»\./);
+      assert.doesNotMatch(p.system, /🤖|🌙/u);
     }
     assert.doesNotMatch(introPrompt(BASE).system, /already used/, "no emoji used lately, nothing to name");
     const none = introPrompt({ ...withBot, style: { ...BASE.style, emoji: 0 } }).system;
