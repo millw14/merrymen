@@ -184,6 +184,26 @@ describe("the plan", () => {
     assert.equal(p.entries.open, false);
     assert.equal(p.entries.left, 0);
   });
+  it("AND A CLAIM AGAINST A DAY NOBODY COULD READ CLAIMS NOTHING — the hard filter trusts the claim, not the plan", () => {
+    // A rebuilt child whose history the orchestrator could not put back reads
+    // the day as null while its table still takes writes; a claim against the
+    // day's cap would be made on an EMPTY row — a fresh allowance.
+    const p = energyPlan({ mode: "enforce", level: "low", counters: null, reviewsAllowed: 5, entriesAllowed: 2, nowSec: now });
+    assert.equal(claimCap(p, "entries", now), 0);
+    assert.equal(claimCap(p, "reviews", now), 0);
+    const unread = energyPlan({ mode: "enforce", level: "unread", counters: null, reviewsAllowed: 5, entriesAllowed: 2, nowSec: now });
+    assert.equal(claimCap(unread, "entries", now), 0, "unread is throttled too");
+    // Untouched: full energy claims nothing and needs no count; observe counts and never refuses.
+    const full = energyPlan({ mode: "enforce", level: "full", counters: null, reviewsAllowed: 5, entriesAllowed: 2, nowSec: now });
+    assert.equal(full.entries.open, true);
+    assert.equal(claimCap(full, "entries", now), null);
+    const obs = energyPlan({ mode: "observe", level: "low", counters: null, reviewsAllowed: 5, entriesAllowed: 2, nowSec: now });
+    assert.equal(obs.entries.open, true);
+    assert.equal(claimCap(obs, "entries", now), Number.MAX_SAFE_INTEGER);
+    // One readable field is claimed by its own count only.
+    const readable = energyPlan({ mode: "enforce", level: "low", counters: { reviews: 0, entries: 0, toldAt: null }, reviewsAllowed: 5, entriesAllowed: 2, nowSec: now });
+    assert.equal(claimCap(readable, "entries", now), 2);
+  });
   it("enforce, low: open until used, and the reviews by the paced cap", () => {
     const p = energyPlan({ mode: "enforce", level: "low", counters: { reviews: 2, entries: 1, toldAt: null }, reviewsAllowed: 5, entriesAllowed: 2, nowSec: now });
     assert.equal(p.enforce, true);
@@ -349,6 +369,9 @@ describe("telling the owner", () => {
     const unread = at("enforce", null);
     assert.equal(unread.entries.open, false, "new work is still withheld");
     assert.equal(shouldTellOwnerSpent(unread), false);
+    // Nor is a withheld entry on that day: it was withheld by the fail-closed
+    // plan, and the day's notice stamp is as unknown as its count.
+    assert.equal(shouldTellOwner(unread, true), false);
   });
   it("and it agrees with the report's `spent`, which the desk and Telegram already show", () => {
     for (const entries of [0, 1, 2, 3]) {
@@ -418,7 +441,7 @@ describe("the report", () => {
 });
 
 describe("durability: merge and seed", () => {
-  const row = (over: Partial<EnergyDayRow>): EnergyDayRow => ({ day: "2026-09-27", reviews: 0, entries: 0, toldAt: null, readAt: null, readFull: null, ...over });
+  const row = (over: Partial<EnergyDayRow>): EnergyDayRow => ({ day: "2026-09-27", reviews: 0, entries: 0, entriesRefunded: 0, toldAt: null, readAt: null, readFull: null, ...over });
   it("counters take the larger, the first notice stands, the newer read wins — symmetric", () => {
     const a = row({ reviews: 5, entries: 1, toldAt: 100, readAt: 50, readFull: true });
     const b = row({ reviews: 3, entries: 2, toldAt: 200, readAt: 60, readFull: false });
@@ -444,9 +467,29 @@ describe("durability: merge and seed", () => {
       ],
     });
     assert.deepEqual(plan, [
-      { day: "2026-09-26", reviews: 7, entries: 0, toldAt: 5, readAt: null, readFull: null },
-      { day: "2026-09-27", reviews: 4, entries: 2, toldAt: null, readAt: 99, readFull: true },
+      { day: "2026-09-26", reviews: 7, entries: 0, entriesRefunded: 0, toldAt: 5, readAt: null, readFull: null },
+      { day: "2026-09-27", reviews: 4, entries: 2, entriesRefunded: 0, toldAt: null, readAt: 99, readFull: true },
     ]);
+  });
+  it("A REFUND IS ITS OWN RISING COUNT, so the larger of each keeps it — whichever copy is ahead", () => {
+    // The child claimed two and gave one back; shared was mirrored between
+    // the claim and the refund. The old decrement lost the refund here.
+    const child = row({ entries: 2, entriesRefunded: 1 });
+    const stale = row({ entries: 2, entriesRefunded: 0 });
+    for (const m of [mergeEnergyDay(child, stale), mergeEnergyDay(stale, child)]) {
+      assert.equal(m.entries - m.entriesRefunded, 1, "one used, in either order");
+    }
+    // A later claim on the child and an older refund elsewhere still add up.
+    assert.deepEqual(
+      [mergeEnergyDay(row({ entries: 3, entriesRefunded: 1 }), row({ entries: 2, entriesRefunded: 1 }))].map((m) => [m.entries, m.entriesRefunded]),
+      [[3, 1]],
+    );
+  });
+  it("a table from before the refund counter reads as none refunded; an unreadable one drops the row", () => {
+    assert.equal(energyDayRowOf({ day: "2026-09-27", reviews: 0, entries: 2, told_at: null, read_at: null, read_full: null })?.entriesRefunded, 0);
+    assert.equal(energyDayRowOf({ day: "2026-09-27", reviews: 0, entries: 2, entries_refunded: "1", told_at: null, read_at: null, read_full: null })?.entriesRefunded, 1);
+    assert.equal(energyDayRowOf({ day: "2026-09-27", reviews: 0, entries: 2, entries_refunded: -1, told_at: null, read_at: null, read_full: null }), null);
+    assert.equal(energyDayRowOf({ day: "2026-09-27", reviews: 0, entries: 2, entriesRefunded: "x", toldAt: null, readAt: null, readFull: null }), null);
   });
   it("a row with a read time reports its read; without one, read_full means nothing", () => {
     assert.equal(energyDayRowOf({ day: "2026-09-27", reviews: 0, entries: 0, told_at: null, read_at: null, read_full: 1 })?.readFull, null);
@@ -456,7 +499,7 @@ describe("durability: merge and seed", () => {
 
 describe("the seed reads both shapes of a row", () => {
   it("A PARSED ROW KEEPS ITS NOTICE AND ITS READ — the round trip that once dropped them", () => {
-    const parsed: EnergyDayRow = { day: "2026-09-27", reviews: 1, entries: 2, toldAt: 123, readAt: 500, readFull: true };
+    const parsed: EnergyDayRow = { day: "2026-09-27", reviews: 1, entries: 2, entriesRefunded: 1, toldAt: 123, readAt: 500, readFull: true };
     assert.deepEqual(energyDayRowOf(parsed), parsed);
     assert.deepEqual(planEnergySeed({ shared: [parsed], sinceDay: "2026-09-26" }), [parsed]);
   });

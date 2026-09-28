@@ -100,8 +100,7 @@ import { makeNewsDesk, type NewsDesk } from "./research-pass";
 import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
 import type { PublicThesis } from "./thesis-policy";
 import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
-import { ENERGY_DAYS_SCHEMA, mergeEnergyDayRow, readEnergyDaysSince } from "./energy-days";
-import { planEnergySeed, utcDay } from "./energy";
+import { energyUnrestoredPending, seedEnergyDays } from "./energy-seed";
 import { ORDER_IN_FLIGHT_MS, commandWhereabouts, dropCommandResult, drainCommandResults, writeCommand, type FileCommandResult } from "./command-files";
 import { expiredOrderReceipt, type OrderReceipt } from "./order-receipt";
 import { makeMcpBackground } from "./mcp/background";
@@ -1082,40 +1081,83 @@ async function seedBasisForChild(tenant: `0x${string}`, smartAccount: string): P
  * one that matters to a holder — forget that the balance read full, so a
  * restart during an RPC outage would throttle somebody who holds the tokens.
  *
- * The mirror carries the rows up (ledger-mirror.ts); this carries today's and
- * yesterday's back, merged by the same statement: counters only rise, the
- * first notice stamp stands, the newer reading wins. BEFORE spawn, beside the
- * cost-basis seed and for the same reason — the child reads them on its first
- * tick.
+ * The mirror carries the rows up (ledger-mirror.ts); energy-seed.ts carries
+ * today's and yesterday's back, merged by the same statement. BEFORE spawn,
+ * beside the cost-basis seed and for the same reason — the child reads them on
+ * its first tick. This opens the two databases; seedEnergyDays decides.
  *
- * NOT MONEY, AND SAID SO. A failed seed is logged loudly and the child arms
- * anyway: the worst case is one day's allowance issued twice, or a holder on
- * the reduced allowance until the chain answers — never a trade, a fee or a
- * balance written wrong.
+ * A FAILED SEED NO LONGER ARMS A CHILD WITH A FRESH DAY. The child still arms
+ * — its exits, stops and the owner's orders must run — but with the days the
+ * seed could not put back marked UNRESTORED, which its store reads as
+ * unreadable, so an enforcing gate opens nothing new for a low-energy agent
+ * until retryEnergySeed (every reconcile pass) or the next spawn restores them.
+ * A full-energy agent, and an observe or off fleet, are untouched.
+ *
+ * `when` is "retry" for a running child: it writes beside the live agent, so
+ * it waits only briefly for the child's write lock (this is synchronous, and
+ * blocks the fleet loop while it waits) and a failure leaves the marker as it
+ * is. True when the days are restored (or there is nothing to restore).
  */
-async function seedEnergyForChild(tenant: `0x${string}`, smartAccount: string): Promise<void> {
+const energySeedFailing = new Map<string, string>();
+async function seedEnergyForChild(tenant: `0x${string}`, smartAccount: string, when: "spawn" | "retry" = "spawn"): Promise<boolean> {
   const url = process.env.DATABASE_URL;
-  if (!url) return; // self-hosted: the child's own sqlite is the only copy, and it is never wiped
-  const raw = new DatabaseSync(path.join(childHome(tenant), "merrymen.db"));
+  if (!url) return true; // self-hosted: the child's own sqlite is the only copy, and it is never wiped
+  const home = childHome(tenant);
+  const opened: DatabaseSync[] = [];
   try {
-    const local = wrapSqlite(raw);
-    await local.exec(ENERGY_DAYS_SCHEMA);
-    const shared = await makePgDb(url);
-    // The mirror creates this table on its first pass; a spawn can come first.
-    await shared.exec(ENERGY_DAYS_SCHEMA);
-    const sinceDay = utcDay(Math.floor(Date.now() / 1000) - 86_400);
-    const plan = planEnergySeed({
-      shared: await readEnergyDaysSince(shared, smartAccount, sinceDay),
-      child: await readEnergyDaysSince(local, smartAccount, sinceDay),
-      sinceDay,
+    const r = await seedEnergyDays({
+      home,
+      agent: smartAccount,
+      nowSec: Math.floor(Date.now() / 1000),
+      when,
+      local: () => {
+        const raw = new DatabaseSync(path.join(home, "merrymen.db"));
+        opened.push(raw);
+        raw.exec("PRAGMA busy_timeout = 250");
+        return wrapSqlite(raw);
+      },
+      shared: () => makePgDb(url),
     });
-    for (const row of plan) await mergeEnergyDayRow(local, smartAccount, row);
-    if (plan.length) log(`energy seed: ${tenant} — ${plan.length} day(s) restored`);
-  } catch (e) {
-    log(`energy seed: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)} (the child arms without its energy history)`);
+    if (r.ok) {
+      const was = energySeedFailing.delete(tenant);
+      if (r.restored || was) log(`energy seed: ${tenant} — ${r.restored} day(s) restored${was ? " on retry; today's energy is readable again" : ""}`);
+      return true;
+    }
+    // Once per distinct failure, not once per fifteen-second pass.
+    if (when === "spawn" || energySeedFailing.get(tenant) !== r.why) {
+      log(
+        `energy seed: ${tenant} FAILED — ${r.why} ` +
+          (r.marked
+            ? `(the child arms with ${r.marked.join(", ")} UNRESTORED: a low-energy agent under an enforcing gate opens nothing new until a later pass restores them; exits, stops and the owner's orders run)`
+            : when === "retry"
+              ? "(still unrestored; tried again next pass)"
+              : "(and NO marker: the child arms without its energy history)"),
+      );
+    }
+    energySeedFailing.set(tenant, r.why);
+    return false;
   } finally {
-    raw.close();
+    for (const raw of opened) {
+      try {
+        raw.close();
+      } catch {
+        /* already closed */
+      }
+    }
   }
+}
+
+/**
+ * A RUNNING CHILD WHOSE ENERGY HISTORY IS STILL MISSING, tried again.
+ *
+ * Only while its home holds the unrestored marker a failed seed left
+ * (energy-seed.ts), so a healthy fleet pays one missing-file read per child per
+ * pass. On success the child's next tick reads the restored counters.
+ */
+async function retryEnergySeed(tenant: `0x${string}`): Promise<void> {
+  const child = children.get(tenant);
+  if (!child || !process.env.DATABASE_URL || !energyUnrestoredPending(childHome(tenant))) return;
+  await seedEnergyForChild(tenant, child.smartAccount, "retry");
 }
 
 /**
@@ -1651,6 +1693,9 @@ export async function reconcile(): Promise<void> {
     // only on a restart — so an owner who re-signed to cover a token watched
     // their agent keep refusing it. See refreshGrantForChild.
     await refreshGrantForChild(tenant as `0x${string}`);
+    // AND ITS ENERGY HISTORY, if the seed before it armed could not put it
+    // back: until then its store reads those days as unreadable.
+    await retryEnergySeed(tenant as `0x${string}`);
   }
   // Stop (and forget) any running child whose grant is gone — the kill switch.
   for (const tenant of [...children.keys()]) {

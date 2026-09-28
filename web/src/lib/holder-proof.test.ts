@@ -144,6 +144,11 @@ describe("only the verifying route may write a proof", () => {
     const claim = post.indexOf("store.takeHolder(wallet, tenant)");
     const put = post.indexOf("store.put(");
     assert.ok(consume > 0 && recover > consume && claim > recover && put > claim, "nonce, recover, claim, then store");
+    // And the account's OTHER claims go only once the new proof is in: a
+    // failed proof write must never leave the old wallet released while the
+    // stored proof still names it.
+    const release = post.indexOf("store.releaseHolderClaims(tenant, wallet)");
+    assert.ok(release > put, "store, THEN release the old wallet");
     assert.ok(!post.includes("claimHolder("), "a verified signature from the wallet moves a claim; first-claim-wins alone locked its holder out");
     assert.match(post, /status: 429/, "a second move within 24 hours of the last is refused, saying when");
     assert.match(post, /status: 503/, "and an unreadable store refuses rather than letting a second account in");

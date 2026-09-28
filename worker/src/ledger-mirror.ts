@@ -1006,6 +1006,8 @@ export async function mirrorTenant(args: {
       // merge is energy-days.ts's one statement: counters only ever go UP
       // through a copy, the first notice stamp stands, the newer balance read
       // wins — so a rebuilt child's zeros can never lower what shared holds.
+      // A refund travels as its own rising counter (entries_refunded), which
+      // is how a claim mirrored before its trade was refused comes back down.
       //
       // ITS OWN try: energy is not money, and a failure here must not stop
       // the positions and cost basis below from copying. A child from before
@@ -1016,11 +1018,11 @@ export async function mirrorTenant(args: {
           .get();
         if (hasEnergy) {
           const since = utcDay(nowSec - 86_400);
+          // Every column, by name through energyDayRowOf: a child's table
+          // from before the refund counter has no entries_refunded, and its
+          // rows still copy (their `entries` already net of refunds).
           const days = (await child
-            .prepare(
-              `SELECT agent_id, day, reviews, entries, told_at, read_at, read_full
-                 FROM energy_days WHERE day >= ?`,
-            )
+            .prepare(`SELECT * FROM energy_days WHERE day >= ?`)
             .all(since)) as Record<string, unknown>[];
           let n = 0;
           await shared.tx(async (db) => {

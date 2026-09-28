@@ -125,7 +125,7 @@ describe("a redeploy does not hand out a fresh allowance", () => {
 
   it("A SEED NEVER LOWERS WHAT A RUNNING CHILD ALREADY COUNTED", async () => {
     const shared = open(SCHEMA + MIRROR_STATE_DDL);
-    await mergeEnergyDayRow(shared.db, AGENT, { day: TODAY, reviews: 2, entries: 1, toldAt: null, readAt: NOW - 500, readFull: true });
+    await mergeEnergyDayRow(shared.db, AGENT, { day: TODAY, reviews: 2, entries: 1, entriesRefunded: 0, toldAt: null, readAt: NOW - 500, readFull: true });
     const b = open(SCHEMA);
     for (let i = 0; i < 5; i++) await claimEnergyDay(b.db, AGENT, TODAY, "reviews", 29);
     await noteEnergyReadDay(b.db, AGENT, TODAY, false, NOW - 10);
@@ -138,8 +138,8 @@ describe("a redeploy does not hand out a fresh allowance", () => {
 
   it("only today and yesterday travel back", async () => {
     const shared = open(SCHEMA + MIRROR_STATE_DDL);
-    await mergeEnergyDayRow(shared.db, AGENT, { day: utcDay(NOW - 3 * 86_400), reviews: 9, entries: 9, toldAt: null, readAt: null, readFull: null });
-    await mergeEnergyDayRow(shared.db, AGENT, { day: utcDay(NOW - 86_400), reviews: 7, entries: 0, toldAt: null, readAt: NOW - 80_000, readFull: false });
+    await mergeEnergyDayRow(shared.db, AGENT, { day: utcDay(NOW - 3 * 86_400), reviews: 9, entries: 9, entriesRefunded: 0, toldAt: null, readAt: null, readFull: null });
+    await mergeEnergyDayRow(shared.db, AGENT, { day: utcDay(NOW - 86_400), reviews: 7, entries: 0, entriesRefunded: 0, toldAt: null, readAt: NOW - 80_000, readFull: false });
     const b = open(SCHEMA);
     assert.equal(await seed(b.db, shared.db), 1);
     assert.equal((await readEnergyDay(b.db, AGENT, utcDay(NOW - 86_400))).reviews, 7);
@@ -175,12 +175,20 @@ describe("seedEnergyForChild's place in spawnChild", () => {
 
   it("it runs the same plan and the same merge this file just drove", () => {
     const fn = body("seedEnergyForChild");
-    assert.match(fn, /if \(!url\) return;/, "self-hosted: the child's own ledger is never wiped");
-    assert.match(fn, /planEnergySeed\(/);
-    assert.match(fn, /readEnergyDaysSince\(shared, smartAccount, sinceDay\)/);
-    assert.match(fn, /mergeEnergyDayRow\(local, smartAccount, row\)/);
-    assert.match(fn, /utcDay\(Math\.floor\(Date\.now\(\) \/ 1000\) - 86_400\)/, "today and yesterday");
+    assert.match(fn, /if \(!url\) return true;/, "self-hosted: the child's own ledger is never wiped");
+    // The deciding half moved to energy-seed.ts, where energy-seed.test.ts
+    // runs it — including the failure this used to only log.
+    assert.match(fn, /seedEnergyDays\(\{\s*home,\s*agent: smartAccount,\s*nowSec: Math\.floor\(Date\.now\(\) \/ 1000\),/);
+    assert.match(fn, /shared: \(\) => makePgDb\(url\),/);
     assert.match(fn, /FAILED/, "a failed seed is said out loud");
+    const seedSrc = readFileSync(new URL("./energy-seed.ts", import.meta.url), "utf8");
+    const at = seedSrc.indexOf("export async function seedEnergyDays(");
+    const seed = seedSrc.slice(at, seedSrc.indexOf("\n}\n", at));
+    assert.match(seed, /planEnergySeed\(/);
+    assert.match(seed, /readEnergyDaysSince\(shared, i\.agent, sinceDay\)/);
+    assert.match(seed, /mergeEnergyDayRow\(local, i\.agent, row\)/);
+    assert.match(seed, /utcDay\(i\.nowSec - 86_400\)/, "today and yesterday");
+    assert.ok(seed.indexOf("clearEnergyUnrestored(i.home);") > seed.indexOf("mergeEnergyDayRow(local, i.agent, row)"), "the marker goes only after every row is in");
   });
 });
 

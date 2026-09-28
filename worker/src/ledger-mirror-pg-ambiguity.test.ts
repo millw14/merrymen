@@ -176,7 +176,9 @@ const SRC = [
   // THE ENERGY COUNTERS, so the snapshot pass's newest upsert is parsed under
   // the same rule as the class book's: a row is seeded below, which is what
   // makes the statement reach .run() at all (the dormant-parse lesson above).
-  "CREATE TABLE energy_days (agent_id TEXT NOT NULL, day TEXT NOT NULL, reviews INTEGER NOT NULL DEFAULT 0, entries INTEGER NOT NULL DEFAULT 0, told_at INTEGER, read_at INTEGER, read_full INTEGER, PRIMARY KEY (agent_id, day));",
+  // The migrated shape, the refund counter included (store.ts runs
+  // ENERGY_DAYS_ALTERS on the shared ledger every mirror pass).
+  "CREATE TABLE energy_days (agent_id TEXT NOT NULL, day TEXT NOT NULL, reviews INTEGER NOT NULL DEFAULT 0, entries INTEGER NOT NULL DEFAULT 0, told_at INTEGER, read_at INTEGER, read_full INTEGER, entries_refunded INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (agent_id, day));",
 ].join("\n");
 
 const DEST = SRC + MIRROR_STATE_DDL;

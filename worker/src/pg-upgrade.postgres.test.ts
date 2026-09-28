@@ -48,11 +48,15 @@ import {
   ENERGY_DAYS_SCHEMA,
   claimEnergyDay,
   claimEnergyNoticeDay,
+  ensureEnergyDays,
   mergeEnergyDayRow,
   noteEnergyReadDay,
+  readEnergyDay,
   readEnergyDaysSince,
+  refundEnergyDay,
 } from "./energy-days";
 import { planEnergySeed, utcDay } from "./energy";
+import { seedEnergyDays } from "./energy-seed";
 import { RISK_PERIOD_SCHEMA, startRiskPeriod } from "./risk-period";
 import { sealSecret } from "./store-crypto";
 import { repairAccount } from "./accounting-repair";
@@ -226,6 +230,7 @@ test("Postgres: the energy release over production's schema", { skip: !url, time
         ["holder_claims_meta.value", "text"],
         ["energy_days.reviews", "bigint"],
         ["energy_days.read_at", "bigint"],
+        ["energy_days.entries_refunded", "bigint"],
       ]) {
         assert.equal(got.get(c!), type, c);
       }
@@ -417,9 +422,63 @@ test("Postgres: the energy release over production's schema", { skip: !url, time
         { day: yesterday, reviews: 0, entries: 1, told_at: nowSec - 80_000 },
         { day: today, reviews: 3, entries: 0, told_at: null },
       ]);
-      await mergeEnergyDayRow(shared, A1, { day: today, reviews: 0, entries: 0, toldAt: 5, readAt: 1, readFull: false });
+      await mergeEnergyDayRow(shared, A1, { day: today, reviews: 0, entries: 0, entriesRefunded: 0, toldAt: 5, readAt: 1, readFull: false });
       const kept = (await shared.prepare("SELECT reviews, told_at, read_at, read_full FROM energy_days WHERE agent_id = ? AND day = ?").get(A1, today)) as Record<string, unknown>;
       assert.deepEqual(kept, { reviews: 3, told_at: 5, read_at: nowSec - 60, read_full: 1 }, "zeros and an older read change nothing; the first notice stamp lands");
+    });
+
+    await t.test("A REFUND MIRRORED AFTER ITS CLAIM comes back down through the seed — the net, never the stale claim", async () => {
+      // Two new trades claimed while their ops await execution, and mirrored so.
+      assert.equal(await claimEnergyDay(child, A1, today, "entries", 2), true);
+      assert.equal(await claimEnergyDay(child, A1, today, "entries", 2), true);
+      assert.equal((await mirrorTenant({ tenant: T1, child, shared, nowSec })).failed, undefined);
+      // The second is refused at execution and handed back; mirrored again.
+      await refundEnergyDay(child, A1, today);
+      assert.equal((await mirrorTenant({ tenant: T1, child, shared, nowSec })).failed, undefined);
+      assert.deepEqual(
+        await shared.prepare("SELECT entries, entries_refunded FROM energy_days WHERE agent_id = ? AND day = ?").get(A1, today),
+        { entries: 2, entries_refunded: 1 },
+        "shared took the refund — a rising counter the larger-wins merge carries",
+      );
+      // A redeploy: the rebuilt child is seeded by the real seed, off real Postgres.
+      const rebuilt = wrapSqlite(new DatabaseSync(":memory:"));
+      const r = await seedEnergyDays({ home: path.join(home, "rebuilt"), agent: A1, nowSec, when: "spawn", local: () => rebuilt, shared: async () => shared });
+      assert.equal(r.ok, true, r.ok ? "" : r.why);
+      assert.equal((await readEnergyDay(rebuilt, A1, today)).entries, 1, "one used, not the two the first mirror saw");
+      assert.equal(await claimEnergyDay(rebuilt, A1, today, "entries", 2), true, "the handed-back claim is room for one more");
+      assert.equal(await claimEnergyDay(rebuilt, A1, today, "entries", 2), false);
+    });
+
+    await t.test("AN energy_days FROM BEFORE THE REFUND COUNTER gains it, four boots at once, its rows reading as they did", async () => {
+      const old = `${schema}_old`;
+      assert.match(old, /^mm_upgrade_test_[a-f0-9]{16}_old$/);
+      await admin.query(`CREATE SCHEMA ${old}`);
+      try {
+        const u = new URL(target);
+        u.searchParams.set("options", `-c search_path=${old} -c statement_timeout=20000 -c lock_timeout=10000`);
+        const db = await makePgDb(u.toString());
+        await db.exec(
+          "CREATE TABLE energy_days (agent_id TEXT NOT NULL, day TEXT NOT NULL, reviews INTEGER NOT NULL DEFAULT 0, entries INTEGER NOT NULL DEFAULT 0," +
+            " told_at INTEGER, read_at INTEGER, read_full INTEGER, PRIMARY KEY (agent_id, day))",
+        );
+        // Written by the previous code: two claimed, one refunded by decrement.
+        await db.prepare("INSERT INTO energy_days (agent_id, day, reviews, entries) VALUES (?, ?, 2, 1)").run(A1, today);
+        const raced = await Promise.allSettled([ensureEnergyDays(db), ensureEnergyDays(db), ensureEnergyDays(db), ensureEnergyDays(db)]);
+        assert.deepEqual(raced.flatMap((x) => (x.status === "rejected" ? [String(x.reason)] : [])), []);
+        await ensureEnergyDays(db);
+        assert.deepEqual(await readEnergyDay(db, A1, today), { reviews: 2, entries: 1, toldAt: null });
+        const wins = await Promise.all(Array.from({ length: 10 }, () => claimEnergyDay(db, A1, today, "entries", 2)));
+        assert.equal(wins.filter(Boolean).length, 1, "ten racers, one left under the cap");
+        await Promise.all(Array.from({ length: 5 }, () => refundEnergyDay(db, A1, today)));
+        assert.deepEqual(
+          await db.prepare("SELECT entries, entries_refunded FROM energy_days WHERE agent_id = ? AND day = ?").get(A1, today),
+          { entries: 2, entries_refunded: 2 },
+          "five racing refunds stop at zero used",
+        );
+        assert.equal((await readEnergyDay(db, A1, today)).entries, 0);
+      } finally {
+        await admin.query(`DROP SCHEMA ${old} CASCADE`).catch(() => {});
+      }
     });
 
     await t.test("THE STORE'S POSTGRES BACKEND runs every new statement", async () => {
@@ -436,6 +495,14 @@ test("Postgres: the energy release over production's schema", { skip: !url, time
         const day = "2099-01-01";
         const wins = await Promise.all(Array.from({ length: 20 }, () => s.claimEnergy(A3, day, "entries", 3)));
         assert.equal(wins.filter(Boolean).length, 3, "twenty racers, a cap of three");
+        await s.refundEnergy(A3, day, "entries");
+        assert.deepEqual(await s.getEnergyDay(A3, day), { reviews: 0, entries: 2, toldAt: null });
+        const again = await Promise.all(Array.from({ length: 20 }, () => s.claimEnergy(A3, day, "entries", 3)));
+        assert.equal(again.filter(Boolean).length, 1, "a refund is room for exactly one more, however many race");
+        assert.deepEqual(
+          await shared.prepare("SELECT entries, entries_refunded FROM energy_days WHERE agent_id = ? AND day = ?").get(A3, day),
+          { entries: 4, entries_refunded: 1 },
+        );
         await s.refundEnergy(A3, day, "entries");
         assert.deepEqual(await s.getEnergyDay(A3, day), { reviews: 0, entries: 2, toldAt: null });
         assert.deepEqual([await s.claimEnergyNotice(A3, day, nowSec), await s.claimEnergyNotice(A3, day, nowSec + 1)], [true, false]);

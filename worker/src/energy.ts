@@ -279,10 +279,23 @@ export function energyPlan(i: {
  *     day's worth of counts it ran up while it was full.
  *   observe → effectively unlimited: count, never refuse.
  *   enforce → reviews against the PACED cap, entries against the day's.
+ *   enforce with a count nobody could read → 0, which claims nothing.
+ *
+ * WHY THE LAST ONE IS HERE AND NOT ONLY IN THE PLAN. The plan closes a day it
+ * cannot read, but not every claim asks the plan first: the strategy loop's
+ * hard filter and the class entries claim every proposed entry, and the
+ * strategist's window claims its review, trusting the claim's own cap. A day
+ * the store reads as unreadable while its table still takes writes — a
+ * rebuilt child whose history the orchestrator could not put back
+ * (energy-seed.ts) — would otherwise be claimed against an EMPTY row: a fresh
+ * allowance, the exact thing the unreadable reading exists to withhold. A cap
+ * of 0 never writes (claimEnergyDay), so the claim is refused and nothing is
+ * counted. Exits never claim, so this can hold no door shut.
  */
 export function claimCap(plan: EnergyPlan, field: "reviews" | "entries", nowSec: number): number | null {
   if (!plan.throttled) return null;
   if (plan.mode !== "enforce") return Number.MAX_SAFE_INTEGER;
+  if (plan[field].used === null) return 0;
   return enforcedCap(plan, field, nowSec);
 }
 
@@ -375,9 +388,16 @@ export function sellsHeldLeg(intent: TradeIntent, held: ReadonlyMap<string, Held
  * and only if today's notice has not gone yet (the durable claim decides the
  * race; this is the cheap pre-check). shouldTellOwnerSpent is the other
  * moment: the day's new trades used up, withheld or not.
+ *
+ * NOT ON A DAY NOBODY CAN READ. An entry withheld because the count is
+ * unreadable was withheld by the fail-closed plan, not by a spent day, and the
+ * notice says the day is spent — the same guess shouldTellOwnerSpent refuses.
+ * It is also the one day whose notice stamp is unknown: a rebuilt child whose
+ * history could not be put back (energy-seed.ts) would claim told_at on its
+ * empty row and send a notice the owner may already have had today.
  */
 export function shouldTellOwner(plan: EnergyPlan, withheldEntry: boolean): boolean {
-  return plan.enforce && withheldEntry && !plan.told;
+  return plan.enforce && withheldEntry && plan.entries.used !== null && !plan.told;
 }
 
 /**
@@ -488,7 +508,10 @@ export function usdgCentsUp(raw: bigint): number {
 export interface EnergyDayRow {
   day: string;
   reviews: number;
+  /** Entry claims made — gross. The day's use is entries − entriesRefunded. */
   entries: number;
+  /** Entry claims handed back unused. Monotonic like `entries`, so a refund survives every copy. */
+  entriesRefunded: number;
   toldAt: number | null;
   readAt: number | null;
   readFull: boolean | null;
@@ -496,9 +519,10 @@ export interface EnergyDayRow {
 
 /**
  * Two copies of one day, merged the way the mirror and the seed both merge:
- * counters take the larger (a copy never un-spends), the first notice stands,
- * and the newer read wins. Symmetric, so it does not matter which side is
- * "ours".
+ * counters take the larger (a copy never un-spends — nor un-refunds: the
+ * refunds are a counter of their own for exactly this reason), the first
+ * notice stands, and the newer read wins. Symmetric, so it does not matter
+ * which side is "ours".
  */
 export function mergeEnergyDay(a: EnergyDayRow, b: EnergyDayRow): EnergyDayRow {
   const aRead = a.readAt ?? 0;
@@ -508,6 +532,7 @@ export function mergeEnergyDay(a: EnergyDayRow, b: EnergyDayRow): EnergyDayRow {
     day: a.day,
     reviews: Math.max(a.reviews, b.reviews),
     entries: Math.max(a.entries, b.entries),
+    entriesRefunded: Math.max(a.entriesRefunded, b.entriesRefunded),
     toldAt: a.toldAt ?? b.toldAt,
     readAt: newer.readAt,
     readFull: newer.readFull,
@@ -564,10 +589,15 @@ export function energyDayRowOf(raw: unknown): EnergyDayRow | null {
   if (typeof o.day !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(o.day)) return null;
   const reviews = count(o.reviews);
   const entries = count(o.entries);
+  // ABSENT is zero: a table from before the refund counter kept `entries`
+  // already net of its refunds. PRESENT BUT UNREADABLE drops the row, as any
+  // other bad count does — never a guess at how many were handed back.
+  const rawRefunded = col("entries_refunded", "entriesRefunded");
+  const entriesRefunded = rawRefunded === undefined || rawRefunded === null ? 0 : count(rawRefunded);
   const toldAt = stamp(col("told_at", "toldAt"));
   const readAt = stamp(col("read_at", "readAt"));
-  if (reviews === null || entries === null || toldAt === undefined || readAt === undefined) return null;
+  if (reviews === null || entries === null || entriesRefunded === null || toldAt === undefined || readAt === undefined) return null;
   const rf = col("read_full", "readFull");
   const readFull = rf === null || rf === undefined ? null : rf === true || rf === 1 || rf === "1" || rf === 1n;
-  return { day: o.day, reviews, entries, toldAt, readAt, readFull: readAt === null ? null : readFull };
+  return { day: o.day, reviews, entries, entriesRefunded, toldAt, readAt, readFull: readAt === null ? null : readFull };
 }
