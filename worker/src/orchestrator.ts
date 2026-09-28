@@ -44,6 +44,7 @@ import { repairHistoricalFills } from "./history-fill-repair";
 import { makeConductor, type Conductor, type RosterMember } from "./groupchat/conductor";
 import { chatProfileOf, type ChatProfile } from "./groupchat/facts";
 import { describeCreds, groupChatCreds } from "./groupchat/voice";
+import { makeXPoster, xpostSetup, type XPoster, type XPostSetup } from "./orchestrator-xpost";
 // The fleet's default trading model, so the room can say when its own model is
 // the same one (see groupChatModelWarning).
 import { SETTINGS_DEFAULTS as GROUPCHAT_FLEET_DEFAULTS } from "../../packages/core/src/index";
@@ -5281,6 +5282,62 @@ async function runGroupChatPass(): Promise<void> {
   }
 }
 
+// ── POSTING ON X ────────────────────────────────────────────────────────────
+//
+// docs/x-posting.md. The whole of it lives in orchestrator-xpost.ts and
+// worker/src/xpost/; this is the latch, the roster and the log, built exactly
+// like the room's: NOT AWAITED (a slow X or model is a missed post, never a
+// late reconcile or a late watchdog), only for tenants whose lease this
+// replica holds healthily, and silenced by FLEET_HALT because it is started
+// inside the not-halted branch. It writes only xpost_* rows, which nothing on
+// a trading path reads (xpost/boundary.test.ts).
+
+let xPoster: XPoster | null = null;
+let xPostInFlight = false;
+/** Decided once, on the first pass, and said once: the environment does not change under a running process. */
+let xPostBoot: XPostSetup | null = null;
+let xPostLastFailure: { text: string; at: number } | null = null;
+
+function startXPostPass(): void {
+  if (xPostInFlight || stopping) return;
+  if (!xPostBoot) {
+    xPostBoot = xpostSetup();
+    for (const line of xPostBoot.lines) log(line);
+  }
+  if (xPostBoot.off || !xPostBoot.app || !xPostBoot.dek || children.size === 0) return;
+  xPostInFlight = true;
+  void runXPostPass(xPostBoot).finally(() => {
+    xPostInFlight = false;
+  });
+}
+
+async function runXPostPass(boot: XPostSetup): Promise<void> {
+  try {
+    if (!xPoster) {
+      xPoster = makeXPoster({ creds: boot.creds, knobs: boot.knobs, app: boot.app!, dek: boot.dek! });
+      log(xPoster.plan().why);
+    }
+    const shared = await makePgDb(process.env.DATABASE_URL!);
+    // THE SAME ROSTER AS THE ROOM'S: only who this replica speaks for.
+    const roster: RosterMember[] = [];
+    for (const [tenant, child] of children) {
+      const key = tenant.toLowerCase();
+      const held = leases.get(key);
+      if (!held || !held.healthy()) continue;
+      roster.push({ tenant: key, agentId: child.smartAccount.toLowerCase() });
+    }
+    const r = await xPoster.step(shared, roster, tenantChatProfile, Date.now());
+    if (r.log) log(r.log);
+  } catch (e) {
+    const text = e instanceof Error ? e.message : String(e);
+    const now = Date.now();
+    if (!xPostLastFailure || xPostLastFailure.text !== text || now - xPostLastFailure.at > 20 * 60_000) {
+      xPostLastFailure = { text, at: now };
+      log(`xpost: pass failed — ${text}`);
+    }
+  }
+}
+
 /** SIGKILL-and-restart any child whose heartbeat has gone stale past the threshold. */
 export function watchdog(nowSec = Math.floor(Date.now() / 1000)): void {
   if (stopping) return;
@@ -5421,6 +5478,9 @@ export async function runOrchestrator(): Promise<void> {
       // the room can see, and inside this branch, so FLEET_HALT silences it
       // too. Started, never awaited — see startGroupChatPass.
       startGroupChatPass();
+      // POSTING ON X, the same way and for the same reasons: after the mirror,
+      // silenced by FLEET_HALT, never awaited. See startXPostPass.
+      startXPostPass();
       // THE MCP SERVER'S BACKGROUND WORK (backtest jobs, alerts, retention).
       // Started, never awaited, like the room: nothing here is on the trading
       // path, and each pass has its own budget and in-flight guard.
