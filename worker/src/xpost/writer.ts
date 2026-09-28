@@ -472,6 +472,12 @@ export function buyPrompt(f: BuyFacts): Prompt {
   // of seventeen passed buy posts carried five words or more of a gloss.
   lines.push("The reasons above are only the idea: never reuse their wording.");
   lines.push(`${BUY_OPENINGS[hash32(`${seed}|open`) % BUY_OPENINGS.length]!} Do not start with "picked up".`);
+  // HOW AN ALERT READS, SAID WHERE IT BITES. Buried in the rules, "no entry"
+  // did not stop "the entry felt right" or "just grabbed some tsla" (six of
+  // thirty buy drafts in one run, each refused by the gate as an alert). No
+  // verb is offered in their place: offered "went in", the model opened a
+  // third of its buys with it, the way it had with "picked up".
+  lines.push('Never write "just bought", "just grabbed" or "just added", and never the word "entry".');
   lines.push(
     f.paper
       ? "Say naturally that it was on paper (practice money). An X post has no badge, so the words have to say it."

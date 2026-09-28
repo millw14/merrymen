@@ -342,6 +342,7 @@ describe("a buy's why is in everyday words, never the engine's", () => {
       assert.equal(buyPrompt({ ...BUY, glossSeed: `tenant-${i}|decision-${i}` }).prompt, p, "the same decision, the same instruction");
       drawn.add(which[0]!);
       assert.match(p, /Do not start with "picked up"\./);
+      assert.match(p, /Never write "just bought", "just grabbed" or "just added", and never the word "entry"\./);
       assert.match(p, /The reasons above are only the idea: never reuse their wording\./);
     }
     assert.ok(drawn.size >= 3, `${drawn.size} of four openings drawn over thirty buys`);
