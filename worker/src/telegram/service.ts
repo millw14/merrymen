@@ -94,6 +94,8 @@ import {
 import { appendChatTurn, clearChatTurns, lastChatTurnAt, recentChatTurns } from "../store";
 import { describeGap } from "../memory/retrieve";
 import { describeLlmFailure, isLlmProviderFailure } from "../llm-failure";
+import type { TgGroupsStore } from "./tg-groups/store";
+import type { TgCoinsPort } from "./tg-groups/types";
 
 /**
  * Commands that are really questions when they arrive as WORDS: answered by
@@ -133,6 +135,14 @@ export interface TelegramServiceDeps {
   kill: () => KillResult;
   /** Mirror a /name change into the agents table (dashboard display). */
   onNameChange?: (name: string) => void;
+  /**
+   * Telegram groups (docs/tg-groups.md). The durable per-agent store of every
+   * group's memory, and the port through which a coin posted in a group can
+   * reach trading — as an address and nothing else. Both optional: without
+   * them the bot stays silent in groups.
+   */
+  tgGroupsStore?: TgGroupsStore;
+  tgCoins?: TgCoinsPort;
   /** Injectable for tests. */
   now?: () => number;
 }
