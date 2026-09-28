@@ -120,8 +120,10 @@ struct XPostingScreen: View {
                     HStack {
                         Text(verbatim: post.at > .now ? "Goes out \(post.at.formatted(.relative(presentation: .named)))" : "Going out soon").font(.caption).foregroundStyle(.secondary)
                         Spacer()
+                        // Several drafts mean several Skips: VoiceOver hears which post each one skips.
                         Button { skip(post) } label: { if skipping == post.id { ProgressView() } else { Text("Skip") } }
                             .buttonStyle(SecondaryButtonStyle()).disabled(busy)
+                            .accessibilityLabel("Skip post").accessibilityHint(Text(verbatim: post.body))
                     }
                 }
             }

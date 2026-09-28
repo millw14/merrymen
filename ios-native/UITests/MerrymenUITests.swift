@@ -90,7 +90,8 @@ final class MerrymenUITests: XCTestCase {
     /// is not the first write since launch), and confirming must send exactly
     /// {action: enable, xUserId, owner, tz} with tz the device's own zone (the
     /// fixture refuses any other keys or zone). The app runs in Tokyo so the
-    /// zone is a real place whatever the simulator is set to.
+    /// zone is a real place whatever the simulator is set to. The waiting
+    /// post's Skip is named for VoiceOver and skips exactly that post.
     func testXPostingWarnsWithTheConnectedAccountAndSendsOnlyTheConfirmedConsent() {
         let app = XCUIApplication(); app.launchArguments = ["-ui-testing", "-signed-in", "-x-posting-test", "-reset-tour"]
         app.launchEnvironment["TZ"] = "Asia/Tokyo"; app.launch()
@@ -122,6 +123,17 @@ final class MerrymenUITests: XCTestCase {
         XCTAssertEqual(toggle.value as? String, "1")
         XCTAssertFalse(app.alerts["Merrymen"].exists)
         capture(app, "Posting on X on for the confirmed account")
+
+        // Skip says which post it skips (label "Skip post", the post as its
+        // hint), never a bare "Skip" repeated once per draft.
+        let skip = app.buttons["Skip post"]
+        XCTAssertTrue(skip.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Skip"].exists)
+        for _ in 0..<6 { if skip.isHittable { break }; app.swipeUp() }
+        skip.tap()
+        XCTAssertTrue(app.staticTexts["Nothing waiting to go out."].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.staticTexts["slow day on the charts. honestly the quiet ones are when i learn the most."].exists)
+        XCTAssertFalse(app.alerts["Merrymen"].exists)
     }
     /// A SwiftUI Toggle's element spans its label; only the switch itself flips it.
     private func flip(_ toggle: XCUIElement) {
