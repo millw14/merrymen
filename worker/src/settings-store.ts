@@ -844,16 +844,19 @@ export interface PgClientLike {
  *
  * Web and the orchestrator both open this store, and after the deploy that
  * adds a table both create it at once. Postgres's IF NOT EXISTS is not atomic
- * against that: the loser can fail on the catalog's own unique index (23505)
- * or see the table appear mid-statement (42P07). Either means the table now
- * exists, which is all this wanted.
+ * against that: the loser can fail on the catalog's own unique index (23505),
+ * see the table appear mid-statement (42P07), or find the table's row type
+ * already made (42710 duplicate_object: `type "holder_claims_meta" already
+ * exists`, from a real Postgres 17 in one of eighteen racing boots over the
+ * previous release's schema). Each means the table now exists, which is all
+ * this wanted.
  */
 async function createIfAbsent(c: PgClientLike, ddl: string): Promise<void> {
   try {
     await c.query(ddl);
   } catch (e) {
     const code = (e as { code?: unknown }).code;
-    if (code === "23505" || code === "42P07") return;
+    if (code === "23505" || code === "42P07" || code === "42710") return;
     throw e;
   }
 }
@@ -903,65 +906,87 @@ export class PgSettingsStore implements SettingsStore {
   ) {
     requireDek();
   }
+  /**
+   * The one connection, with every table made — once, and only once it WORKED.
+   *
+   * A failed start is forgotten, so the next call starts afresh: cached, one
+   * refused connection or one lost CREATE race during a deploy failed every
+   * later call on the store for the life of the process — in the web, every
+   * settings read, holder link and tier. Concurrent first callers still share
+   * one attempt.
+   */
   private async client(): Promise<PgClientLike> {
     if (!this.ready) {
-      this.ready = (async () => {
+      const started = (this.ready = (async () => {
         const c = await this.connect(this.url);
-        await createIfAbsent(
-          c,
-          `CREATE TABLE IF NOT EXISTS tenant_settings (
-             tenant TEXT PRIMARY KEY,
-             sealed TEXT NOT NULL,
-             updated_at BIGINT NOT NULL
-           )`,
-        );
-        // ONE ROW PER WALLET, so the primary key IS the one-wallet-one-agent
-        // rule: a second account's INSERT conflicts and changes nothing.
-        // Plain columns, like `grants`: it holds no secret, and it must be
-        // queryable by wallet, which a sealed blob is not.
-        await createIfAbsent(
-          c,
-          `CREATE TABLE IF NOT EXISTS holder_claims (
-             wallet TEXT PRIMARY KEY,
-             tenant TEXT NOT NULL,
-             claimed_at BIGINT NOT NULL
-           )`,
-        );
-        // When the claim last MOVED between accounts (takeHolder): a wallet
-        // moves at most once in any 24 hours. Added, not created, so a table
-        // made before moves existed gains it; NULL = never moved.
-        await addColumnIfAbsent(c, `ALTER TABLE holder_claims ADD COLUMN moved_at BIGINT`);
-        // …and which account that move took it from: a move BACK there
-        // within the 24 hours is allowed (moveBarredUntil). NULL = never moved.
-        await addColumnIfAbsent(c, `ALTER TABLE holder_claims ADD COLUMN moved_from TEXT`);
-        // HOW EACH WALLET'S CLAIM WAS LAST LET GO (HolderRelease): a release
-        // deletes the claim row, and the last move must outlive it. Its own
-        // table, so a service still running the previous build — which reads
-        // every holder_claims row as a live claim — never mistakes one of
-        // these for a claim. Written only by a release, never deleted.
-        await createIfAbsent(
-          c,
-          `CREATE TABLE IF NOT EXISTS holder_wallet_moves (
-             wallet TEXT PRIMARY KEY,
-             last_tenant TEXT NOT NULL,
-             moved_at BIGINT,
-             moved_from TEXT
-           )`,
-        );
-        // One row per fact about the claims themselves — today only whether
-        // the one-time backfill has finished (HolderBackfillState).
-        await createIfAbsent(
-          c,
-          `CREATE TABLE IF NOT EXISTS holder_claims_meta (
-             key TEXT PRIMARY KEY,
-             value TEXT NOT NULL,
-             updated_at BIGINT NOT NULL
-           )`,
-        );
+        try {
+          await this.makeTables(c);
+        } catch (e) {
+          // CLOSED, so a start that keeps failing (a permission, a lost
+          // race every time) cannot pile up one open connection per call.
+          void Promise.resolve((c as { end?: () => unknown }).end?.()).catch(() => {});
+          throw e;
+        }
         return c;
-      })();
+      })());
+      started.catch(() => {
+        if (this.ready === started) this.ready = null;
+      });
     }
     return this.ready;
+  }
+  private async makeTables(c: PgClientLike): Promise<void> {
+    await createIfAbsent(
+      c,
+      `CREATE TABLE IF NOT EXISTS tenant_settings (
+         tenant TEXT PRIMARY KEY,
+         sealed TEXT NOT NULL,
+         updated_at BIGINT NOT NULL
+       )`,
+    );
+    // ONE ROW PER WALLET, so the primary key IS the one-wallet-one-agent
+    // rule: a second account's INSERT conflicts and changes nothing.
+    // Plain columns, like `grants`: it holds no secret, and it must be
+    // queryable by wallet, which a sealed blob is not.
+    await createIfAbsent(
+      c,
+      `CREATE TABLE IF NOT EXISTS holder_claims (
+         wallet TEXT PRIMARY KEY,
+         tenant TEXT NOT NULL,
+         claimed_at BIGINT NOT NULL
+       )`,
+    );
+    // When the claim last MOVED between accounts (takeHolder): a wallet
+    // moves at most once in any 24 hours. Added, not created, so a table
+    // made before moves existed gains it; NULL = never moved.
+    await addColumnIfAbsent(c, `ALTER TABLE holder_claims ADD COLUMN moved_at BIGINT`);
+    // …and which account that move took it from: a move BACK there
+    // within the 24 hours is allowed (moveBarredUntil). NULL = never moved.
+    await addColumnIfAbsent(c, `ALTER TABLE holder_claims ADD COLUMN moved_from TEXT`);
+    // HOW EACH WALLET'S CLAIM WAS LAST LET GO (HolderRelease): a release
+    // deletes the claim row, and the last move must outlive it. Its own
+    // table, so a service still running the previous build — which reads
+    // every holder_claims row as a live claim — never mistakes one of
+    // these for a claim. Written only by a release, never deleted.
+    await createIfAbsent(
+      c,
+      `CREATE TABLE IF NOT EXISTS holder_wallet_moves (
+         wallet TEXT PRIMARY KEY,
+         last_tenant TEXT NOT NULL,
+         moved_at BIGINT,
+         moved_from TEXT
+       )`,
+    );
+    // One row per fact about the claims themselves — today only whether
+    // the one-time backfill has finished (HolderBackfillState).
+    await createIfAbsent(
+      c,
+      `CREATE TABLE IF NOT EXISTS holder_claims_meta (
+         key TEXT PRIMARY KEY,
+         value TEXT NOT NULL,
+         updated_at BIGINT NOT NULL
+       )`,
+    );
   }
   async put(tenant: `0x${string}`, settings: MerrymenSettings): Promise<void> {
     const c = await this.client();

@@ -987,7 +987,7 @@ function initSqlite(): Db {
  * initSqlite and initPostgres already swallow it.
  */
 export async function applyLedgerSchema(db: Db): Promise<void> {
-  await db.exec(SQLITE_SCHEMA);
+  await execSchemaBatch(db);
   for (const ddl of SQLITE_ALTERS) {
     try {
       await db.exec(ddl);
@@ -996,12 +996,43 @@ export async function applyLedgerSchema(db: Db): Promise<void> {
     }
   }
 }
+
+/**
+ * THE SCHEMA BATCH, SAFE AGAINST A SECOND PROCESS RUNNING IT AT THE SAME TIME.
+ *
+ * Postgres's CREATE TABLE IF NOT EXISTS is not atomic against a concurrent
+ * one: the loser fails on the catalog's unique index (23505), sees the table
+ * appear mid-statement (42P07), or finds its row type already made (42710,
+ * duplicate_object — seen on Postgres 17). And SQLITE_SCHEMA is one
+ * multi-statement batch, which Postgres runs as ONE implicit transaction — so
+ * the loser's whole batch rolled back and the caller threw before a single
+ * ALTER ran. Measured on the deploy that adds a table (`energy_days`), with
+ * three processes booting over the previous release's schema: two losers
+ * every time. The mirror then skipped its pass, and startHistoryRepair — once
+ * per process — never ran.
+ *
+ * Each of those means the other process created it, so the batch is run again
+ * and finds everything there. Anything else is thrown, and a batch that keeps
+ * losing gives up after three runs rather than spinning.
+ */
+async function execSchemaBatch(db: Db): Promise<void> {
+  for (let run = 1; ; run++) {
+    try {
+      await db.exec(SQLITE_SCHEMA);
+      return;
+    } catch (e) {
+      const code = (e as { code?: unknown }).code;
+      if (run >= 3 || (code !== "23505" && code !== "42P07" && code !== "42710")) throw e;
+    }
+  }
+}
+
 /** Open the shared Postgres ledger (hosted, multi-tenant): connect, then run the
  *  same schema + migrations through the async driver, which translates each to the
  *  Postgres dialect. Selected by DATABASE_URL, mirroring the grant store. */
 async function initPostgres(url: string): Promise<Db> {
   const d = await makePgDb(url);
-  await d.exec(SQLITE_SCHEMA);
+  await execSchemaBatch(d);
   for (const ddl of SQLITE_ALTERS) {
     try {
       await d.exec(ddl);
