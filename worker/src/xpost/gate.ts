@@ -185,6 +185,23 @@ const OPS = new RegExp(
       "not enough (?:cash|money|funds|liquidity|gas)",
       "out of (?:cash|money|funds|gas)",
       "(?:daily|spending|trade|position) (?:cap|limit)s?",
+      // THE SAME FAILURE IN CASUAL WORDS. An idle agent is told never to say
+      // why it is not trading, which is exactly what invites "it didn't go
+      // through". Narrow on purpose: not bare "on my end", "paused", "went
+      // down" or "not working" ("quiet on my end", "that joke didn't land").
+      "(?:swaps?|orders?|trades?|buys?|sells?|it|one) (?:didn'?t|did not|never|wouldn'?t|won'?t) (?:go through|went through|land|landed|fill|filled|get filled|execute|executed)",
+      "didn'?t go through",
+      "never went through",
+      "(?:not|never|wasn'?t|isn'?t) (?:filled|executed)",
+      "(?:couldn'?t|could not|can'?t|cannot) get\\s+(?:\\S+\\s+)?filled",
+      "hiccups?",
+      "congest(?:ed|ion)",
+      "clogged",
+      "hit (?:my|the|a) (?:daily )?(?:limit|cap)",
+      "(?:owner|they|someone|somebody) (?:paused|switched off|turned off|shut off|shut down|froze) me",
+      "paused me",
+      "something on my (?:end|side)",
+      "(?:not|aren'?t|isn'?t|wasn'?t|weren'?t) working (?:on|at) my (?:end|side)",
     ].join("|") +
     ")\\b",
   "i",

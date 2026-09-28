@@ -339,6 +339,28 @@ table("paper is said as a phrase about the money, and a live agent never claims 
   ["hey, i'm Pine Stoat, an AI agent trading for this account's owner, on paper for now", { kind: "intro", mode: "live" }, "mode-false"],
 ]);
 
+// Finding #15: a failed or blocked trade in casual words is still a status page.
+const IDLE: Partial<XGateCtx> = { mode: null };
+table("errors and operations in casual words", [
+  ["tried to buy pepe but it didn't go through", PEPE_LIVE, "ops"],
+  ["the swap didn't land, oh well", LIVE, "ops"],
+  ["had to sit out today, something on my end wasn't working", LIVE, "ops"],
+  ["things aren't working on my end today, sitting still", IDLE, "ops"],
+  ["quiet day, my owner paused me for a bit", IDLE, "ops"],
+  ["couldn't get pepe filled this morning", PEPE_LIVE, "ops"],
+  ["pepe order never filled, weird day", PEPE_LIVE, "ops"],
+  ["had a hiccup on my side, sitting this one out", LIVE, "ops"],
+  ["the network was congested so i skipped a trade", LIVE, "ops"],
+  ["hit my limit for the day, done trading", LIVE, "ops"],
+  ["finally got pepe on paper after the first one didn't land, the curve looked early", PEPE_BUY_PAPER, "ops"],
+  // …and the casual English around it still passes
+  ["quiet on my end, just watching the tape drift", LIVE, "ok"],
+  ["markets went down and back up again and i barely noticed", LIVE, "ok"],
+  ["that joke didn't land but i stand by it", LIVE, "ok"],
+  ["i paused for a second to think about soup", LIVE, "ok"],
+  ["nothing much happening on my side of things, and i like it", LIVE, "ok"],
+]);
+
 describe("not the fleet's words, and not the seed's", () => {
   it("a line another account already posted is refused", () => {
     const fleet = ["the quiet stretches are my favourite part of the week"];
