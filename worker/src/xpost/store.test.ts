@@ -13,6 +13,7 @@ import {
   cancelPost,
   cancelScheduled,
   claimPost,
+  claimSpan,
   deferPost,
   deleteAccount,
   duePosts,
@@ -34,6 +35,7 @@ import {
   readMeta,
   readTokens,
   recentBodies,
+  releaseSpan,
   reschedulePost,
   returnAllowance,
   schedulePost,
@@ -485,6 +487,10 @@ test("every statement the store sends translates to Postgres with matching, bind
   await recentBodies(db, { tenant: null, sinceMs: 0.5, limit: 5.5 });
   await returnAllowance(db, "k", 14.7);
   await takeAllowance(db, "k", 3.5, 14.5);
+  const span = await claimSpan(db, "gap:111", 20.5, 10.5);
+  await claimSpan(db, "gap:111", 21.5, 10.5);
+  if (span.ok) await releaseSpan(db, "gap:111", 20.5, span.prev, 22.5);
+  await releaseSpan(db, "gap:111", 20.5, 7.5, 22.5);
   await readMeta(db, "k");
   await writeMeta(db, "k", "v", 15.5);
   await setPosting(db, OWNER_A, { enabled: false }, 16.5);
@@ -528,4 +534,32 @@ test("the zone the owner consented from is kept, and a consent without one keeps
   assert.equal((await getAccount(db, OWNER_A))?.tz, "Europe/Paris", "no zone this time is not a new zone");
   await setPosting(db, OWNER_A, { enabled: true, xUserId: "111", tz: "Asia/Tokyo" }, 5);
   assert.equal((await getAccount(db, OWNER_A))?.tz, "Asia/Tokyo");
+});
+
+test("a span of an X account's clock is claimed by exactly one of two racing claimants, and given back only if still ours", async (t) => {
+  const { db } = await open(t);
+  const GAP = 3 * 60 * 60_000;
+  // Two replicas claim the same instant: one wins, the other learns when the span began.
+  const [a, b] = await Promise.all([claimSpan(db, "gap:111", 1_000_000, GAP), claimSpan(db, "gap:111", 1_000_000, GAP)]);
+  assert.deepEqual([a.ok, b.ok].sort(), [false, true]);
+  const lost = a.ok ? b : a;
+  assert.deepEqual(lost, { ok: false, lastAtMs: 1_000_000 });
+  // Inside the span: refused. At its end: the next claim wins, and remembers the one before it.
+  assert.equal((await claimSpan(db, "gap:111", 1_000_000 + GAP - 1, GAP)).ok, false);
+  const next = await claimSpan(db, "gap:111", 1_000_000 + GAP, GAP);
+  assert.deepEqual(next, { ok: true, prev: 1_000_000 });
+  // Another X account's clock is its own.
+  assert.equal((await claimSpan(db, "gap:222", 1_000_000 + 1, GAP)).ok, true);
+  // Given back: the previous span is restored, so a post that never went out does not hold the account.
+  await releaseSpan(db, "gap:111", 1_000_000 + GAP, 1_000_000, 1_000_000 + GAP + 5);
+  assert.equal((await readMeta(db, "gap:111"))?.n, 1_000_000);
+  // A release that is no longer ours changes nothing: a later claim by another replica stands.
+  await claimSpan(db, "gap:111", 1_000_000 + 2 * GAP, GAP);
+  await releaseSpan(db, "gap:111", 1_000_000 + GAP, 1_000_000, 1_000_000 + 2 * GAP + 5);
+  assert.equal((await readMeta(db, "gap:111"))?.n, 1_000_000 + 2 * GAP);
+  // The first claim on a clock, given back, leaves no row.
+  const first = await claimSpan(db, "fold:111:pepe", 5, GAP);
+  assert.deepEqual(first, { ok: true, prev: null });
+  await releaseSpan(db, "fold:111:pepe", 5, null, 6);
+  assert.equal(await readMeta(db, "fold:111:pepe"), null);
 });

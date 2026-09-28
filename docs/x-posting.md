@@ -200,7 +200,13 @@ for the connected user id. It plans at most once a minute and sends every pass.
 
 Cadence limits — all per X ACCOUNT, across every owner posting on it (one X
 account connected by two owners keeps one cadence, though each owner's agent
-still says its own hello):
+still says its own hello). The planner spaces posts by reading the account's
+history, but a read is not a lock, so right before each send the account's
+gap, its day's count and a buy's coin fold are also RESERVED ATOMICALLY in
+`xpost_meta` (`gap:<xUserId>`, `xday:<xUserId>:<localDay>`,
+`fold:<xUserId>:<coin>`) and handed back when X surely made nothing. Two
+orchestrator replicas holding two owners of one X account can therefore both
+plan a post, but only one can send inside the gap:
 - at most `MERRYMEN_XPOST_PER_DAY` posts per local day (default 3), of which at
   most two are buy posts, whatever that knob allows;
 - at least three hours between two posts, by pushing the later one's due time

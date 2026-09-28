@@ -46,10 +46,11 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp } from "./xpost/client";
 import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { GAP_MS, coinOf, hash32, planPosts, sendDecision, type PlanClock, type PlanIntent } from "./xpost/planner";
+import { BUY_COIN_FOLD_MS, GAP_MS, coinOf, hash32, planPosts, sendDecision, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, sendOne, type SendOutcome } from "./xpost/sender";
 import {
   cancelPost,
+  claimSpan,
   deferPost,
   duePosts,
   ensureXpostSchema,
@@ -62,6 +63,7 @@ import {
   postsOfXUser,
   readMeta,
   recentBodies,
+  releaseSpan,
   returnAllowance,
   schedulePost,
   skipScheduled,
@@ -663,8 +665,49 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               }
             }
             if (sends >= MAX_SENDS_PER_PASS || t - nowMs > SEND_BUDGET_MS) break send;
+            // THE X ACCOUNT'S CADENCE, RESERVED ATOMICALLY, ACROSS REPLICAS.
+            // Everything above is a read, and a read then a send is not a lock:
+            // two orchestrators holding two owners who connected the same X
+            // account could both read "nothing in three hours" and both post.
+            // So the gap, the account's day cap and a buy's coin fold are each
+            // taken as a conditional write that only one claimant can win
+            // (xpost/store claimSpan, takeAllowance), in that order, right
+            // before X is called — and every one is handed back when X surely
+            // made nothing, exactly like the fleet's unit below.
+            const release: (() => Promise<void>)[] = [];
+            const giveBack = async () => {
+              for (const r of release.reverse()) await r();
+            };
+            if (post.kind !== "intro") {
+              const gapKey = `gap:${post.xUserId}`;
+              const gap = await claimSpan(shared, gapKey, t, GAP_MS);
+              if (!gap.ok) {
+                if (await deferPost(shared, post.id, gap.lastAtMs + GAP_MS, t)) bump("deferred");
+                continue;
+              }
+              release.push(() => releaseSpan(shared, gapKey, t, gap.prev, at()));
+            }
+            // The day is the owner's own, as the planner counts it; the hello counts too.
+            const accountDayKey = `xday:${post.xUserId}:${dayOf ? dayOf(t) : utcDay(t)}`;
+            if (!(await takeAllowance(shared, accountDayKey, perDay, t))) {
+              await giveBack();
+              bump("account-day-cap");
+              continue;
+            }
+            release.push(() => returnAllowance(shared, accountDayKey, at()));
+            if (post.kind === "buy" && post.coin) {
+              const foldKey = `fold:${post.xUserId}:${post.coin}`;
+              const fold = await claimSpan(shared, foldKey, t, BUY_COIN_FOLD_MS);
+              if (!fold.ok) {
+                await giveBack();
+                if (await skipScheduled(shared, post.id, "folded", t)) bump("folded");
+                continue;
+              }
+              release.push(() => releaseSpan(shared, foldKey, t, fold.prev, at()));
+            }
             const dayKey = `posts:${utcDay(t)}`;
             if (!(await takeAllowance(shared, dayKey, fleetPerDay, t))) {
+              await giveBack();
               ceiling = true;
               if (capNoted !== utcDay(t)) {
                 capNoted = utcDay(t);
@@ -678,9 +721,12 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             // The app's credentials refused is the one line an operator must act
             // on, so it says what happened rather than an outcome code.
             bump(out === "posted" ? "sent" : out === "app" ? "x-refused-client-credentials" : out);
-            // What may exist on X keeps its unit of the ceiling, not only what surely does.
-            if (!MAY_BE_ON_X.has(out)) await returnAllowance(shared, dayKey, at());
-            else if (post.kind !== "intro") lastOut.set(post.xUserId, t);
+            // What may exist on X keeps its units — the fleet's, and the
+            // account's gap, day and fold — not only what surely does.
+            if (!MAY_BE_ON_X.has(out)) {
+              await returnAllowance(shared, dayKey, at());
+              await giveBack();
+            } else if (post.kind !== "intro") lastOut.set(post.xUserId, t);
             // The sender wrote the pause; this pass honours it at once, and the
             // event just said is the pause's line, so later passes stay quiet.
             if (out === "credits" || out === "app") {

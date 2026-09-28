@@ -939,6 +939,55 @@ export async function returnAllowance(db: Db, key: string, nowMs: number): Promi
   await db.prepare(`UPDATE xpost_meta SET n = n - 1, updated_at_ms = ? WHERE k = ? AND n > 0`).run(int(nowMs), key);
 }
 
+/**
+ * A SPAN OF ONE X ACCOUNT'S CLOCK, CLAIMED ATOMICALLY — the three-hour gap
+ * between two posts, the three-day fold on one coin.
+ *
+ * The planner spaces an account's posts from its history, and the send loop
+ * checks that history again — but a read followed by a send is not a lock.
+ * Two orchestrator replicas holding two owners who connected the same X
+ * account can both read "nothing went out in three hours" and both post. So
+ * the last send is also a row, `xpost_meta.n` under `key`, and taking the next
+ * span is one conditional upsert: it succeeds only while the span last taken
+ * is at least `spanMs` old, which Postgres decides under the row's lock and
+ * sqlite under its write lock. Exactly one of two racing claims wins.
+ *
+ * Returns what to put back if the send then never happened (`prev`, the span
+ * before ours, or null when there was none), or — when the claim lost — when
+ * the span last taken began, so the post can wait until it has passed.
+ */
+export async function claimSpan(
+  db: Db,
+  key: string,
+  atMs: number,
+  spanMs: number,
+): Promise<{ ok: true; prev: number | null } | { ok: false; lastAtMs: number }> {
+  // Read only for the release: the conditional upsert below is the decision.
+  const before = await readMeta(db, key);
+  const row = (await db
+    .prepare(
+      `INSERT INTO xpost_meta (k, n, v, updated_at_ms) VALUES (?, ?, NULL, ?)
+       ON CONFLICT (k) DO UPDATE SET n = excluded.n, updated_at_ms = excluded.updated_at_ms
+       WHERE xpost_meta.n <= ?
+       RETURNING n`,
+    )
+    .get(key, int(atMs), int(atMs), int(atMs - spanMs))) as { n: unknown } | undefined;
+  if (row) return { ok: true, prev: before ? before.n : null };
+  return { ok: false, lastAtMs: (await readMeta(db, key))?.n ?? atMs };
+}
+
+/**
+ * Give a span back when the post it was taken for never reached X — only if it
+ * is still ours, so a later claim by another replica is never undone.
+ */
+export async function releaseSpan(db: Db, key: string, claimedAtMs: number, prev: number | null, nowMs: number): Promise<void> {
+  if (prev === null) {
+    await db.prepare(`DELETE FROM xpost_meta WHERE k = ? AND n = ?`).run(key, int(claimedAtMs));
+  } else {
+    await db.prepare(`UPDATE xpost_meta SET n = ?, updated_at_ms = ? WHERE k = ? AND n = ?`).run(int(prev), int(nowMs), key, int(claimedAtMs));
+  }
+}
+
 export async function readMeta(db: Db, key: string): Promise<{ n: number; v: string | null } | null> {
   const row = (await db.prepare(`SELECT n, v FROM xpost_meta WHERE k = ?`).get(key)) as { n: unknown; v: unknown } | undefined;
   return row ? { n: num(row.n), v: strOrNull(row.v) } : null;

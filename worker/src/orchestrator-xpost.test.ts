@@ -335,6 +335,7 @@ function poster(
     answer?: (prompt: string) => string;
     llmPerDay?: number;
     fleetPerDay?: number;
+    perDay?: number;
     fetch?: FetchLike;
     member?: XPosterDeps["member"];
     facts?: XPosterDeps["facts"];
@@ -347,7 +348,7 @@ function poster(
     ((prompt: string) => (/very first post/.test(prompt) ? INTRO : /What happened: you bought/.test(prompt) ? BUY : "slow afternoons make me weirdly calm, nothing to prove"));
   return makeXPoster({
     creds: over.creds === undefined ? CREDS : over.creds,
-    knobs: { ...xpostEnv({}), llmPerDay: over.llmPerDay, fleetPerDay: over.fleetPerDay },
+    knobs: { ...xpostEnv({}), llmPerDay: over.llmPerDay, fleetPerDay: over.fleetPerDay, perDay: over.perDay },
     app: APP,
     dek: w.dek,
     deps: {
@@ -761,6 +762,63 @@ describe("fleet guards", () => {
     await poster(v).step(v.db, ROSTER, new Map(), T0);
     assert.deepEqual(v.tweets, [INTRO], "the hello goes; the casual post waits for the gap");
     assert.equal((await rows(v)).find((x) => x.dedupeKey === "casual:too-soon")?.dueAtMs, T0 - HOUR + GAP_MS);
+  });
+
+  it("two replicas holding two owners of one X account, stepping at the same instant, post once: the gap is claimed atomically", async (t) => {
+    const w = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(w);
+    await otherOwner(w, "111");
+    await dueCasual(w, "casual:replica-a");
+    await dueCasual(w, "casual:replica-b", { tenant: OTHER, xUserId: "111" });
+    // Each replica holds one owner's lease; both read the same, empty history.
+    const onlyA = [{ tenant: TENANT, agentId: AGENT }];
+    const onlyB = [{ tenant: OTHER, agentId: AGENT }];
+    await Promise.all([poster(w).step(w.db, onlyA, new Map(), T0), poster(w).step(w.db, onlyB, new Map(), T0)]);
+    assert.equal(w.tweets.length, 1, "one post on the shared X account, not one per replica");
+    const statuses = [await store.keyStatus(w.db, "casual:replica-a"), await store.keyStatus(w.db, "casual:replica-b")].sort();
+    assert.deepEqual(statuses, ["posted", "scheduled"]);
+    const held = [...(await store.postsOf(w.db, TENANT, 0, 10)), ...(await store.postsOf(w.db, OTHER, 0, 10))].find((x) => x.status === "scheduled")!;
+    assert.equal(held.dueAtMs, T0 + GAP_MS, "the loser waits out the gap the winner claimed");
+  });
+
+  it("the X account's day cap and coin fold hold at send time across replicas, whatever each one planned", async (t) => {
+    // The day cap: one post a day, two owners on one account, four hours apart (past the gap).
+    const w = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(w);
+    await otherOwner(w, "111");
+    await dueCasual(w, "casual:morning");
+    await dueCasual(w, "casual:later", { tenant: OTHER, xUserId: "111", dueAtMs: T0 + 4 * HOUR - MIN });
+    await poster(w, { perDay: 1 }).step(w.db, [{ tenant: TENANT, agentId: AGENT }], new Map(), T0);
+    const log = (await poster(w, { perDay: 1 }).step(w.db, [{ tenant: OTHER, agentId: AGENT }], new Map(), T0 + 4 * HOUR)).log;
+    assert.equal(w.tweets.length, 1, "the account's one post today");
+    assert.match(log ?? "", /account-day-cap 1/);
+    assert.equal(await store.keyStatus(w.db, "casual:later"), "scheduled", "held, and left to go stale on its own clock");
+
+    // The coin fold: both owners bought Pepe; the second post of it on the same X account is skipped.
+    const v = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(v);
+    await otherOwner(v, "111");
+    const buy = (tenant: string, key: string, dueAtMs: number) =>
+      store.schedulePost(v.db, { tenant, xUserId: "111", kind: "buy", dedupeKey: key, body: BUY, coin: "pepe", decisionId: key, dueAtMs, nowMs: dueAtMs - 20 * MIN });
+    await buy(TENANT, "buy:pepe-a", T0 - MIN);
+    await buy(OTHER, "buy:pepe-b", T0 + 4 * HOUR - MIN);
+    await poster(v).step(v.db, [{ tenant: TENANT, agentId: AGENT }], new Map(), T0);
+    const second = (await poster(v).step(v.db, [{ tenant: OTHER, agentId: AGENT }], new Map(), T0 + 4 * HOUR)).log;
+    assert.equal(v.tweets.length, 1);
+    assert.match(second ?? "", /folded 1/);
+    assert.equal(await store.keyStatus(v.db, "buy:pepe-b"), "skipped");
+  });
+
+  it("a send X surely refused gives the account's gap, day and fold back", async (t) => {
+    const w = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(w);
+    await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "buy", dedupeKey: "buy:refused", body: BUY, coin: "pepe", decisionId: "refused", dueAtMs: T0 - MIN, nowMs: T0 - 20 * MIN });
+    const limited: FetchLike = async () => ({ status: 429, headers: { get: () => null }, text: async () => "{}" });
+    await poster(w, { fetch: limited }).step(w.db, ROSTER, new Map(), T0);
+    assert.equal(await store.keyStatus(w.db, "buy:refused"), "scheduled", "a 429 waits for X's reset");
+    assert.equal(await store.readMeta(w.db, "gap:111"), null, "no gap was used");
+    assert.equal(await store.readMeta(w.db, "fold:111:pepe"), null, "no fold was used");
+    assert.equal((await store.readMeta(w.db, "xday:111:2026-09-28"))?.n, 0, "no day was used");
   });
 
   it("fifty-odd older posts waiting for sleeping owners do not hide an awake owner's due post", async (t) => {
