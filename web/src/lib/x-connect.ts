@@ -28,7 +28,6 @@
  * lease; a web process doing either would race it, and X refresh tokens are
  * single use.
  */
-import { isHostedMode } from "@merrymen/core";
 import { withReadDb } from "@/lib/ledger";
 import { normaliseXHandle } from "@/lib/x-handle";
 import { readBounded } from "../../../worker/src/bounded-read";
@@ -92,9 +91,14 @@ function hasDatabase(): boolean {
  * to seal it under, and an X app whose callback can be built. Every one of
  * these missing is "unavailable", never "broken": the Settings section says so
  * in one line and offers nothing that would fail on the first press.
+ *
+ * `hosted` is the caller's isHostedMode(), handed in rather than read here:
+ * that check belongs in route handlers (lib/client-env.test.ts), because it
+ * reads process.env and is always false in a browser bundle. Every caller is
+ * a route under app/api/x/, which has already answered 404 when it is false.
  */
-export function xpostAvailable(): boolean {
-  if (!isHostedMode() || !hasDatabase() || xpostDek() === null) return false;
+export function xpostAvailable(hosted: boolean): boolean {
+  if (!hosted || !hasDatabase() || xpostDek() === null) return false;
   const app = xpostApp();
   return app !== null && app.redirectUri !== null;
 }

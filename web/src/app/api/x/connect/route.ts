@@ -99,7 +99,7 @@ async function start(tenant: `0x${string}`, input: Record<string, unknown>): Pro
   if (client !== "web" && client !== "ios") return refuse(400, "Say where the connection finishes: web or ios.");
   const app = xpostApp();
   const dek = xpostDek();
-  if (!xpostAvailable() || !app || !app.redirectUri || !dek) return refuse(503, X_COPY.unavailable);
+  if (!xpostAvailable(isHostedMode()) || !app || !app.redirectUri || !dek) return refuse(503, X_COPY.unavailable);
   const redirectUri = app.redirectUri;
   const now = xpostNow();
   const state = newState(client);
@@ -122,7 +122,7 @@ async function start(tenant: `0x${string}`, input: Record<string, unknown>): Pro
 async function finish(tenant: `0x${string}`, input: Record<string, unknown>): Promise<Response> {
   const app = xpostApp();
   const dek = xpostDek();
-  if (!xpostAvailable() || !app || !dek) return refuse(503, X_COPY.unavailable);
+  if (!xpostAvailable(isHostedMode()) || !app || !dek) return refuse(503, X_COPY.unavailable);
   const code = input.code;
   const state = input.state;
   // A malformed code or state is, to the owner, the same as a spent one: start again.

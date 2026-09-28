@@ -64,7 +64,7 @@ export async function GET(req: Request) {
   if (!isHostedMode()) return refuse(404, "not found");
   const tenant = tenantOf(req);
   if (!tenant) return refuse(401, X_COPY.signedOut);
-  const available = xpostAvailable();
+  const available = xpostAvailable(isHostedMode());
   try {
     const body = await withXpostDb(async (db) => {
       if (!db) return accountBody(false, null, []);
@@ -107,7 +107,7 @@ export async function POST(req: Request) {
         return refuse(400, "Say which X account the warning named.");
       }
       // Turning posting ON needs the whole feature; turning it off never does.
-      if (!xpostAvailable()) return refuse(503, X_COPY.unavailable);
+      if (!xpostAvailable(isHostedMode())) return refuse(503, X_COPY.unavailable);
       const on = await withXpostDb(async (db) => (db ? setPosting(db, tenant, { enabled: true, xUserId }, now) : null));
       if (on === null) return refuse(503, X_COPY.unavailable);
       if (!on) return refuse(409, X_COPY.accountChanged);
