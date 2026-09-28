@@ -418,6 +418,11 @@ const PNL = new RegExp(
       "exited",
       "cashed out",
       "took (?:profits?|a loss|losses|a hit)",
+      // A size or a count in words the room's quantity list lets through ("a
+      // couple", "a ton"): only beside a buy or a trade, so "a couple of quiet
+      // days" and "a ton of ideas" stay ordinary.
+      "(?:bought|buying|grabbed|grabbing|picked up|picking up|added|adding|loaded up on|scooped up) (?:a ton|tons|a bunch|a load|loads|a heap|heaps|a lot|a big chunk|a chunk)",
+      "(?:a couple|a few|a handful|a bunch|a string|a run|lots)(?: of)? (?:good |great |nice |solid |bad |winning |losing |big |small )?(?:trades|buys|wins|losses|flips|calls)",
       "roi",
       "pnl",
       "p\\s*&\\s*l",

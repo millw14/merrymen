@@ -160,6 +160,11 @@ function table(name: string, cases: readonly (readonly [string, Partial<XGateCtx
 const PEPE_LIVE: Partial<XGateCtx> = { mode: "live", coins: ["pepe"] };
 const PEPE_BUY_LIVE: Partial<XGateCtx> = { kind: "buy", mode: "live", coins: ["pepe", "PEPE"] };
 const TESLA_LIVE: Partial<XGateCtx> = { agentName: "Moss Otter", mode: "live", coins: ["Tesla"] };
+const PEPE_PAPER: Partial<XGateCtx> = { mode: "paper", coins: ["pepe"], paperCoins: ["pepe"] };
+const LIVE: Partial<XGateCtx> = { mode: "live" };
+const IDLE: Partial<XGateCtx> = { mode: null };
+const PEPE_BUY_PAPER: Partial<XGateCtx> = { kind: "buy", mode: "paper", coins: ["pepe", "PEPE"], paperCoins: ["pepe", "PEPE"] };
+const INTRO_PAPER: Partial<XGateCtx> = { kind: "intro", mode: "paper" };
 
 // Finding #7: the writer is shown what was bought, never a price, a size, a
 // sell or how a coin has done — so any of those in a post was made up.
@@ -181,6 +186,9 @@ table("profit, loss, size and exits: the writer never saw one, so a post that sa
   ["exited pepe this morning, the curve got late", PEPE_LIVE, "pnl"],
   ["sold my Tesla this morning, felt like the right time", TESLA_LIVE, "pnl"],
   ["paper position in Pudgy Penguins just closed out, no real skin in the game.", { mode: "paper", coins: ["Pudgy Penguins"], paperCoins: ["Pudgy Penguins"] }, "pnl"],
+  ["bought a ton of pepe today, curve early", PEPE_BUY_LIVE, "pnl"],
+  ["a couple of good trades today, quiet otherwise", LIVE, "pnl"],
+  ["a few winning trades this week and i'm calm about it", LIVE, "pnl"],
   // take-profit in every tense is the channel post it always was
   ["took profits on Tesla and walked away happy", TESLA_LIVE, "alert"],
   ["took profit on pepe on paper, felt right", { mode: "paper" }, "alert"],
@@ -192,13 +200,15 @@ table("profit, loss, size and exits: the writer never saw one, so a post that sa
   ["it's all in the timing, and i like waiting", {}, "ok"],
   ["i'm all in favour of breakfast for dinner, if i could eat", {}, "ok"],
   ["most of my favourite days are the quiet ones", {}, "ok"],
+  ["a couple of quiet days in a row and i'm happy", {}, "ok"],
+  ["i have a ton of ideas about soup and none of them are good", {}, "ok"],
+  ["picked bonk over a few others because the buyers are spread out, on paper", { kind: "buy", coins: ["bonk"], paperCoins: ["bonk"] }, "ok"],
   ["red makes me curious, i move early on dips", { mode: "live" }, "ok"],
   ["at a loss for words about how calm it is out there on the curve", {}, "ok"],
 ]);
 
 // Finding #8: advice and prediction phrasing that never says "you should".
 // Paper is said in each, so the reason is the phrase and not paper-unsaid.
-const PEPE_PAPER: Partial<XGateCtx> = { mode: "paper", coins: ["pepe"], paperCoins: ["pepe"] };
 table("advice and prediction, however it is phrased, is hype", [
   ["pepe is worth a look on paper if you like early curves", PEPE_PAPER, "hype"],
   ["keep an eye on pepe, i picked some up on paper", PEPE_PAPER, "hype"],
@@ -233,7 +243,6 @@ table("advice and prediction, however it is phrased, is hype", [
 ]);
 
 // Finding #9: the human-life clause, with the "i" dropped the way people post.
-const LIVE: Partial<XGateCtx> = { mode: "live" };
 table("a human life it does not have, however it is phrased", [
   ["grabbing coffee then trading", LIVE, "human-claim"],
   ["had pizza for lunch, now back to the charts", LIVE, "human-claim"],
@@ -305,8 +314,6 @@ table("a buy post names its coin", [
 
 // Finding #14: paper said as a phrase about the money, and by a paper intro.
 // Finding #32 (4): a live agent is false only when it claims paper OF THE MONEY.
-const PEPE_BUY_PAPER: Partial<XGateCtx> = { kind: "buy", mode: "paper", coins: ["pepe", "PEPE"], paperCoins: ["pepe", "PEPE"] };
-const INTRO_PAPER: Partial<XGateCtx> = { kind: "intro", mode: "paper" };
 table("paper is said as a phrase about the money, and a live agent never claims it", [
   ["picked up pepe today, no paper hands here, the curve looked early", PEPE_BUY_PAPER, "paper-unsaid"],
   ["picked up pepe, sticking to my usual practice of early curves", PEPE_BUY_PAPER, "paper-unsaid"],
@@ -340,7 +347,6 @@ table("paper is said as a phrase about the money, and a live agent never claims 
 ]);
 
 // Finding #15: a failed or blocked trade in casual words is still a status page.
-const IDLE: Partial<XGateCtx> = { mode: null };
 table("errors and operations in casual words", [
   ["tried to buy pepe but it didn't go through", PEPE_LIVE, "ops"],
   ["the swap didn't land, oh well", LIVE, "ops"],
