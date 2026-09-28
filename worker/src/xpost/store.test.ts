@@ -27,6 +27,7 @@ import {
   ownerCancel,
   postingAccounts,
   postsOf,
+  postsOfXUser,
   prunePending,
   putPending,
   readMeta,
@@ -318,6 +319,18 @@ test("the orchestrator cancels a scheduled post whose account moved on, and noth
   assert.equal(await cancelPost(db, claimed, "account-gone", 5), false, "a claimed post is the sender's to finish");
 });
 
+test("one X account's posts, from every owner posting on it, newest first", async (t) => {
+  const { db } = await open(t);
+  await schedulePost(db, post({ dedupeKey: "a-old", nowMs: 5 }));
+  await schedulePost(db, post({ dedupeKey: "a", nowMs: 10 }));
+  await schedulePost(db, post({ dedupeKey: "b", tenant: OWNER_B, nowMs: 20 }));
+  await schedulePost(db, post({ dedupeKey: "a-other-account", xUserId: "222", nowMs: 30 }));
+  assert.deepEqual((await postsOfXUser(db, "111", 10)).map((p) => [p.dedupeKey, p.tenant]), [
+    ["b", OWNER_B],
+    ["a", OWNER_A.toLowerCase()],
+  ]);
+});
+
 test("every intro one owner wrote for one X account, any status and any age, oldest first", async (t) => {
   const { db } = await open(t);
   const base = `intro:${OWNER_A.toLowerCase()}:111`;
@@ -411,6 +424,7 @@ test("every statement the store sends translates to Postgres with matching, bind
   await failInterrupted(db, 13.5, 13.5);
   await postsOf(db, OWNER_A, 0.5, 20.5);
   await introPostsOf(db, OWNER_A, "111");
+  await postsOfXUser(db, "111", 0.5, 20.5);
   await recentBodies(db, { tenant: OWNER_A, sinceMs: 0.5, limit: 5.5 });
   await recentBodies(db, { tenant: null, sinceMs: 0.5, limit: 5.5 });
   await countPostedSince(db, 0.5);

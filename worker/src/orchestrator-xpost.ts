@@ -56,7 +56,7 @@ import {
   getAccount,
   introPostsOf,
   postingAccounts,
-  postsOf,
+  postsOfXUser,
   readMeta,
   recentBodies,
   schedulePost,
@@ -85,7 +85,7 @@ const MAX_DRAFTS_PER_PASS = 10;
 const OWN_MEMORY_MS = 60 * DAY;
 const FLEET_MEMORY_MS = 14 * DAY;
 const FLEET_MEMORY_MAX = 1000;
-/** The planner weighs caps, gaps and the three-day coin fold over this much of an account's history. */
+/** The planner weighs caps, gaps and the three-day coin fold over this much of an X account's history. */
 const PLAN_HISTORY_MS = 4 * DAY;
 /** Template intros tried with fresh dice before the intro is skipped. */
 const TEMPLATE_TRIES = 8;
@@ -493,7 +493,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           bump("zone-unreadable");
           continue;
         }
-        const posts = await postsOf(shared, account.tenant, nowMs - PLAN_HISTORY_MS, 200);
+        // The X ACCOUNT's history, from every owner posting on it: one timeline, one cadence.
+        const posts = await postsOfXUser(shared, account.xUserId, nowMs - PLAN_HISTORY_MS, 200);
         const intros = await introPostsOf(shared, account.tenant, account.xUserId);
         const intents = planPosts({
           tenant: account.tenant,

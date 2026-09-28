@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS xpost_posts (
 );
 CREATE INDEX IF NOT EXISTS xpost_posts_tenant ON xpost_posts (tenant, created_at_ms);
 CREATE INDEX IF NOT EXISTS xpost_posts_due ON xpost_posts (status, due_at_ms);
+CREATE INDEX IF NOT EXISTS xpost_posts_x_user ON xpost_posts (x_user_id, created_at_ms);
 CREATE TABLE IF NOT EXISTS xpost_meta (
   k TEXT PRIMARY KEY,
   n INTEGER NOT NULL DEFAULT 0,
@@ -800,6 +801,24 @@ export async function postsOf(db: Db, tenant: string, sinceMs: number, limit = 1
         LIMIT ?`,
     )
     .all(tenantKey(tenant), int(sinceMs), int(Math.max(1, Math.min(500, limit))))) as PostRow[];
+  return rows.map(postOf);
+}
+
+/**
+ * ONE X ACCOUNT'S POSTS since `sinceMs`, newest first — from every owner that
+ * posts on it. What the cadence weighs: one X account connected to two owners
+ * (one person with two wallets) is still one timeline, with one day's cap, one
+ * three-hour gap and one coin fold, not two.
+ */
+export async function postsOfXUser(db: Db, xUserId: string, sinceMs: number, limit = 100): Promise<XPost[]> {
+  const rows = (await db
+    .prepare(
+      `SELECT ${POST_COLUMNS} FROM xpost_posts
+        WHERE x_user_id = ? AND created_at_ms >= ?
+        ORDER BY created_at_ms DESC, id DESC
+        LIMIT ?`,
+    )
+    .all(String(xUserId), int(sinceMs), int(Math.max(1, Math.min(500, limit))))) as PostRow[];
   return rows.map(postOf);
 }
 

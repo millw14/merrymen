@@ -29,11 +29,13 @@ const { admitXPost } = await import("./xpost/gate");
 const { wrapSqlite } = await import("./db");
 const store = await import("./xpost/store");
 const { PAUSE_KEY } = await import("./xpost/sender");
+const { GAP_MS } = await import("./xpost/planner");
 
 import type { AgentFacts, CallFact } from "./groupchat/facts";
 import type { Db } from "./db";
 import type { LlmCreds } from "./llm";
 import type { FetchLike, XApp } from "./xpost/client";
+import type { XPosterDeps } from "./orchestrator-xpost";
 import type { XGateCtx } from "./xpost/gate";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -299,33 +301,45 @@ function call(over: Partial<CallFact>): CallFact {
   return { side: "buy", symbol: "PEPE", name: "Pepe", token: null, paper: true, decisionId: "d", atSec: 0, bands: ["curve early"], ownWords: null, ...over };
 }
 
-function factsOf(calls: CallFact[], mode: AgentFacts["mode"] = "paper") {
+function factsOf(calls: CallFact[], mode: AgentFacts["mode"] = "paper", others: Record<string, CallFact[]> = {}) {
   return async (_db: Db, _roster: unknown, _profiles: unknown, nowSec: number) =>
-    new Map<string, AgentFacts>([
-      [
-        TENANT,
-        { tenant: TENANT, agentId: AGENT, slug: null, name: "Pine Stoat", mode, ageDays: 3, strategy: "steady-basket", traits: [], calls: calls.filter((c) => c.atSec <= nowSec) },
-      ],
-    ]);
+    new Map<string, AgentFacts>(
+      [[TENANT, calls] as const, ...Object.entries(others)].map(([tenant, cs], i) => [
+        tenant,
+        { tenant, agentId: AGENT, slug: null, name: i === 0 ? "Pine Stoat" : "Moss Otter", mode, ageDays: 3, strategy: "steady-basket", traits: [], calls: cs.filter((c) => c.atSec <= nowSec) },
+      ]),
+    );
 }
 
 function poster(
   w: World,
-  over: { calls?: CallFact[]; tz?: string | null; creds?: LlmCreds | null; answer?: (prompt: string) => string; llmPerDay?: number; fetch?: FetchLike } = {},
+  over: {
+    calls?: CallFact[];
+    /** Other owners' calls, by tenant. */
+    others?: Record<string, CallFact[]>;
+    tz?: string | null;
+    creds?: LlmCreds | null;
+    answer?: (prompt: string) => string;
+    llmPerDay?: number;
+    fleetPerDay?: number;
+    fetch?: FetchLike;
+    member?: XPosterDeps["member"];
+    facts?: XPosterDeps["facts"];
+  } = {},
 ) {
   const answer =
     over.answer ??
     ((prompt: string) => (/very first post/.test(prompt) ? INTRO : /What happened: you bought/.test(prompt) ? BUY : "slow afternoons make me weirdly calm, nothing to prove"));
   return makeXPoster({
     creds: over.creds === undefined ? CREDS : over.creds,
-    knobs: { ...xpostEnv({}), llmPerDay: over.llmPerDay },
+    knobs: { ...xpostEnv({}), llmPerDay: over.llmPerDay, fleetPerDay: over.fleetPerDay },
     app: APP,
     dek: w.dek,
     deps: {
       fetch: over.fetch ?? w.fetch,
       dialect: "sqlite",
-      facts: factsOf(over.calls ?? []) as never,
-      member: async () => ({ tz: over.tz ?? null }),
+      facts: over.facts ?? (factsOf(over.calls ?? [], "paper", over.others) as never),
+      member: over.member ?? (async () => ({ tz: over.tz ?? null })),
       llm: async (_creds, { prompt }) => {
         w.prompts.push(prompt);
         return answer(prompt);
@@ -554,6 +568,38 @@ describe("fleet guards", () => {
       nowMs: T0 - 30 * MIN,
     }))!;
   }
+
+  /** A post that already went out on X, as the sender records it. */
+  async function wentOut(w: World, key: string, over: { tenant?: string; xUserId?: string; kind?: "casual" | "buy"; coin?: string | null; atMs: number }) {
+    const id = await store.schedulePost(w.db, {
+      tenant: over.tenant ?? TENANT,
+      xUserId: over.xUserId ?? "111",
+      kind: over.kind ?? "casual",
+      dedupeKey: key,
+      body: `an earlier post, ${key}`,
+      coin: over.coin ?? null,
+      dueAtMs: over.atMs,
+      nowMs: over.atMs - 30 * MIN,
+    });
+    assert.equal(await store.claimPost(w.db, id!, over.atMs), true);
+    await store.markPosted(w.db, id!, String(1840000000000000000n + BigInt(id!)), over.atMs);
+  }
+
+  it("one X account connected by two owners keeps one cadence: one gap, one coin fold", async (t) => {
+    const w = await world(t, T0 - 2 * HOUR);
+    await introDealtWith(w);
+    await otherOwner(w, "111");
+    // The first owner's agent posted on @shared an hour ago, and about Pepe yesterday.
+    await wentOut(w, "casual:first", { atMs: T0 - HOUR });
+    await wentOut(w, "buy:first-pepe", { kind: "buy", coin: "pepe", atMs: T0 - 20 * HOUR });
+    const fresh = (T0 - MIN) / 1000;
+    const p = poster(w, { others: { [OTHER]: [call({ decisionId: "d-bonk", symbol: "BONK", name: "Bonk", atSec: fresh }), call({ decisionId: "d-pepe", atSec: fresh })] } });
+    await p.step(w.db, BOTH, new Map(), T0);
+    const bonk = (await store.postsOf(w.db, OTHER, 0, 10)).find((x) => x.dedupeKey === "buy:d-bonk");
+    assert.ok(bonk, "the second owner's buy is planned");
+    assert.ok(bonk.dueAtMs >= T0 - HOUR + GAP_MS, "three hours after the other owner's post on the same X account");
+    assert.equal(await store.keyStatus(w.db, "buy:d-pepe"), null, "the coin the X account posted about yesterday is folded");
+  });
 
   it("a credits pause holds every due post, and is said once", async (t) => {
     const w = await world(t, T0 - 2 * HOUR);
