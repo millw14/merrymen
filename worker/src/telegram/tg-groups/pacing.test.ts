@@ -9,7 +9,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { CHATTINESS, REACTION_FOR, REACTIONS, SendPacer, decide, typingDelayMs, type PaceInput } from "./pacing";
+import {
+  CHATTINESS,
+  REACTION_FOR,
+  REACTIONS,
+  SendPacer,
+  decide,
+  typingDelayMs,
+  type PaceDecision,
+  type PaceInput,
+  type ReactionKey,
+} from "./pacing";
 import type { TgLine, TgPerson, TgRoom } from "./types";
 
 const MIN = 60_000;
@@ -135,9 +145,12 @@ describe("constants", () => {
   });
 
   it("REACTION_FOR covers every mood and draws only from REACTIONS", () => {
-    for (const mood of ["funny", "agree", "hype", "sad", "thinking", "look", "respect", "bored", "clown", "love", "gm", "gn", "shush"]) {
+    const moods: ReactionKey[] = ["funny", "agree", "hype", "sad", "thinking", "look", "respect", "bored", "clown", "love", "gm", "gn", "shush"];
+    // The type says every key has a list; this says there are no others.
+    assert.deepEqual(Object.keys(REACTION_FOR).sort(), [...moods].sort());
+    for (const mood of moods) {
       const list = REACTION_FOR[mood];
-      assert.ok(list && list.length > 0, mood);
+      assert.ok(list.length > 0, mood);
       for (const e of list) assert.ok(REACTIONS.includes(e), `${mood}: ${e}`);
     }
   });
@@ -148,6 +161,36 @@ describe("constants", () => {
 describe("decide: who and where", () => {
   it("skips a bot's line, even addressed and even in distress", () => {
     assert.deepEqual(decide(input({ fromIsBot: true, addressed: "mention", signals: { distress: true } })), { act: "skip", why: "bot" });
+  });
+
+  it("reads a line with fromIsBot false as a human's, whatever else it carries (an anonymous admin, a channel post)", () => {
+    // GroupAnonymousBot's placeholder user id: the `from` of an anonymous
+    // admin's line. It has is_bot true, but the line also has a sender_chat,
+    // so the caller passes fromIsBot = is_bot && no sender_chat = false.
+    const ANON_ADMIN = 1087968824;
+    const said = (text: string) => mk(ANON_ADMIN, text, 0);
+    const cases: Array<[label: string, over: NonNullable<Parameters<typeof input>[0]>, rolls: number[], want: PaceDecision]> = [
+      ["mentioned", { addressed: "mention" }, [], { act: "answer", mood: "normal" }],
+      ["replied to", { addressed: "reply", signals: { insult: "insult" } }, [], { act: "roast", owner: false }],
+      ["teasing by name", { addressed: "name", signals: { insult: "tease" } }, [], { act: "roast", owner: false }],
+      ["hateful", { addressed: "mention", signals: { insult: "hateful" } }, [], { act: "react", emoji: "🤡" }],
+      ["in distress", { signals: { distress: true } }, [], { act: "kind" }],
+      ["shushing it", { addressed: "mention", signals: { shush: true } }, [], { act: "shush" }],
+      ["asking if it is a bot", { addressed: "name", signals: { botQuestion: true } }, [], { act: "answer", mood: "bot-question" }],
+      ["asking for its wallet", { addressed: "mention", signals: { privateAsk: true } }, [], { act: "answer", mood: "private-ask" }],
+      ["steering it", { addressed: "reply", signals: { injection: true } }, [], { act: "answer", mood: "injection" }],
+      ["saying gm to it", { addressed: "mention", signals: { greeting: "gm" } }, [], { act: "greet", word: "gm" }],
+      ["saying gm to the room", { signals: { greeting: "gm" } }, [0.1], { act: "greet", word: "gm" }],
+      ["talking trades", { signals: { tradeTalk: true } }, [0.09], { act: "ambient", topic: "trade" }],
+      ["posting a CA", { line: said(`look at ${CA}`) }, [], { act: "skip", why: "coin-flow" }],
+      ["insulting someone else", { signals: { insult: "insult" } }, [], { act: "skip", why: "not-ours" }],
+    ];
+    for (const [label, over, rolls, want] of cases) {
+      const base = { line: said("hello there"), isOwner: false, ...over };
+      assert.deepEqual(run(input({ ...base, fromIsBot: false }), ...rolls), want, label);
+      // The same line with fromIsBot true is a bot's, and nothing else is read.
+      assert.deepEqual(run(input({ ...base, fromIsBot: true })), { act: "skip", why: "bot" }, `${label}, from a bot`);
+    }
   });
 
   it("skips its own line", () => {

@@ -77,7 +77,7 @@ const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
  * an address. The lookahead refuses a 41st hex character and the lookbehind a
  * hex character before the 0x, so no slice of a longer run can match.
  */
-const CA_RUN = /(?<![0-9a-f])0x([0-9a-f]{40})(?![0-9a-f])/gi;
+const CA_RUN = /(?<![0-9a-f])0x[0-9a-f]{40}(?![0-9a-f])/gi;
 /** At most this many CAs per message are considered (the contract's "first 2"). */
 const MAX_CAS = 2;
 
@@ -95,7 +95,9 @@ export function extractCas(text: string): string[] {
   const t = text.normalize("NFKC").replace(/%[0-9a-f]{2}/gi, " ");
   const out: string[] = [];
   for (const m of t.matchAll(CA_RUN)) {
-    const ca = `0x${m[1].toLowerCase()}`;
+    // The whole match is the address: the lookarounds take no characters, and
+    // lowercasing turns a "0X" prefix into "0x" along with the hex.
+    const ca = m[0].toLowerCase();
     if (!out.includes(ca)) out.push(ca);
     if (out.length >= MAX_CAS) break;
   }
@@ -131,14 +133,15 @@ export function hasForeignMint(text: string): boolean {
 }
 
 /** "$PEPE": 2–10 letters/digits starting with a letter, not glued to a word or a longer run. */
-const CASHTAG = /(?<![\p{L}\p{N}_$])\$([a-z][a-z0-9]{1,9})(?![\p{L}\p{N}_])/giu;
+const CASHTAG = /(?<![\p{L}\p{N}_$])\$[a-z][a-z0-9]{1,9}(?![\p{L}\p{N}_])/giu;
 
 /** Cashtags in a line, uppercased, unique, in order. "$5" and "$100k" are money, not tickers. */
 export function extractCashtags(text: string): string[] {
   if (typeof text !== "string" || !text) return [];
   const out: string[] = [];
   for (const m of text.normalize("NFKC").matchAll(CASHTAG)) {
-    const tag = m[1].toUpperCase();
+    // The match is "$" and the tag; the lookarounds take no characters.
+    const tag = m[0].slice(1).toUpperCase();
     if (!out.includes(tag)) out.push(tag);
   }
   return out;
@@ -253,16 +256,18 @@ function nameMatcher(name: string): NameMatcher {
   const words = wordsOf(key);
   const hits: RegExp[] = [];
   let label: RegExp | null = null;
-  if (words.length > 0) {
+  const first = words[0];
+  const lastWord = words[words.length - 1];
+  // Both are there exactly when the name has a word; wordsOf never yields an
+  // empty word, so charAt below reads the same code unit indexing would.
+  if (first !== undefined && lastWord !== undefined) {
     const full = words.map(escapeRe).join(SEP);
-    const first = words[0];
-    const lastWord = words[words.length - 1];
     // A one-character CJK name would match inside every other word, so the
     // unspaced-script leniency needs at least two letters.
     const lenient = letterCount(key) >= 2;
-    const fullRe = bounded(full, first[0], lastWord[lastWord.length - 1], lenient);
+    const fullRe = bounded(full, first.charAt(0), lastWord.charAt(lastWord.length - 1), lenient);
     // "<name>'s owner" / "<name>'s human" (and the first word's) name the owner, not the agent.
-    const firstRe = words.length > 1 ? `|${bounded(escapeRe(first), first[0], first[first.length - 1], lenient)}` : "";
+    const firstRe = words.length > 1 ? `|${bounded(escapeRe(first), first.charAt(0), first.charAt(first.length - 1), lenient)}` : "";
     label = new RegExp(`(?:${fullRe}${firstRe})(?:'s|s')?\\s*(?:owner|human)s?${POST}`, "gu");
     if (words.length === 1) {
       if (COMMON_WORD_NAMES.has(first)) hits.push(...vocatives(first));
@@ -270,7 +275,7 @@ function nameMatcher(name: string): NameMatcher {
     } else {
       hits.push(new RegExp(fullRe, "u"));
       if (letterCount(first) >= 4 && !COMMON_WORD_NAMES.has(first)) {
-        hits.push(new RegExp(bounded(escapeRe(first), first[0], first[first.length - 1], lenient), "u"));
+        hits.push(new RegExp(bounded(escapeRe(first), first.charAt(0), first.charAt(first.length - 1), lenient), "u"));
       } else if (letterCount(first) >= 2) {
         hits.push(...vocatives(first));
       }
@@ -427,7 +432,8 @@ export function greetingOf(text: string): "gm" | "gn" | null {
   if (words.length === 0 || words.length > MAX_GREETING_WORDS) return null;
   const direct = greetingWord(words);
   if (direct) return direct;
-  return GREET_LEAD.has(words[0]) ? greetingWord(words.slice(1)) : null;
+  const [lead, ...rest] = words;
+  return lead !== undefined && GREET_LEAD.has(lead) ? greetingWord(rest) : null;
 }
 
 // ─── Insults ───────────────────────────────────────────────────────────────
@@ -674,12 +680,13 @@ function bareInsult(t: string): boolean {
   const words = wordsOf(t.replace(/@\w+/g, " ")).filter((w) => !BARE_FILLER.has(w));
   const rest = t.replace(/@\w+/g, " ").replace(/[\p{L}\p{N}'\s]+/gu, "");
   const emojiOnly = INSULT_EMOJI.test(rest);
-  if (words.length === 0) return emojiOnly;
+  const head = words[0];
+  if (head === undefined) return emojiOnly;
   // One leading word is allowed for the vocative ("pine clown", "@bot trash"),
   // but not a word about the speaker or a thing: "i'm so stupid lol" is not
   // aimed at anyone, and "that's trash" is about the coin.
-  const vocative = words.length > 1 && !BARE_INSULTS.has(words[0]) && !NOT_VOCATIVE.has(words[0]);
-  if (words.length > 1 && !vocative && !BARE_INSULTS.has(words[0])) return false;
+  const vocative = words.length > 1 && !BARE_INSULTS.has(head) && !NOT_VOCATIVE.has(head);
+  if (words.length > 1 && !vocative && !BARE_INSULTS.has(head)) return false;
   const body = vocative ? words.slice(1) : words;
   if (body.length > 2) return false;
   return body.every((w) => BARE_INSULTS.has(w));
@@ -925,11 +932,12 @@ export function isQuestionToRoom(text: string): boolean {
   t = t.replace(/[\s\p{Extended_Pictographic}\u{FE0F}\u{200D}\u{1F3FB}-\u{1F3FF}]+$/u, "");
   if (/(?<![\p{L}\p{N}_])@[a-z0-9_]{3,}/u.test(t)) return false;
   const words = wordsOf(t);
-  if (words.length === 0) return false;
+  const head = words[0];
+  if (head === undefined) return false;
   const endsQ = /\?+$/.test(t);
   if (!endsQ && (!ROOM_OPENER.test(t) || NOT_A_QUESTION.test(t))) return false;
   if (SECOND_PERSON.test(t) && !ROOM_MARKER.test(t)) return false;
-  if (words.length < 2 && !ONE_WORD_QUESTIONS.has(words[0])) return false;
+  if (words.length < 2 && !ONE_WORD_QUESTIONS.has(head)) return false;
   return true;
 }
 

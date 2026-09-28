@@ -49,13 +49,23 @@ export const REACTIONS: readonly string[] = [
   "😎", "🥱", "🙈", "🤷", "❤", "😴", "👏", "🎉", "🙏", "🤯", "😱",
 ];
 
+/** The kinds of line REACTION_FOR has reactions for. */
+export type ReactionKey = ReactionMood | "gm" | "gn" | "shush";
+
+/** At least one emoji, so a pick from the list always has something to pick. */
+type Emojis = readonly [string, ...string[]];
+
 /**
  * Which reactions suit which kind of line. Every emoji is from REACTIONS.
  * The mood keys are detect.ts `ReactionMood`s, plus "gm" / "gn" for a
  * greeting it does not answer in words and "shush" for the 🤐-like answer to
  * being told to be quiet (🤐 itself is not a reaction Telegram allows).
+ *
+ * Keyed by ReactionKey rather than any string, so every mood detect.ts can
+ * return is known to have a list: a mood added there without a list here is a
+ * type error, not a reaction that silently never happens.
  */
-export const REACTION_FOR: Record<string, readonly string[]> = {
+export const REACTION_FOR: Record<ReactionKey, Emojis> = {
   funny: ["🤣", "😁", "😭"],
   agree: ["👍", "💯", "🤝"],
   hype: ["🔥", "🎉", "🤯", "😎"],
@@ -76,6 +86,14 @@ export interface PaceInput {
   line: TgLine;
   addressed: "mention" | "reply" | "name" | null;
   isOwner: boolean;
+  /**
+   * The line is from another bot, and so is skipped before anything else.
+   * Callers MUST pass `msg.fromIsBot === true && msg.senderChatId === undefined`,
+   * never `msg.fromIsBot` alone: an anonymous admin posts as GroupAnonymousBot
+   * (is_bot true) with a sender_chat, and a linked-channel post carries one
+   * too. Those are people speaking through a chat, and the contract makes them
+   * ordinary non-owner lines, not bots.
+   */
   fromIsBot: boolean;
   chattiness: Chattiness;
   nowMs: number;
@@ -157,10 +175,12 @@ function roll(rand: () => number): number {
 }
 
 /** One emoji from a list, by the dice. */
-function pick(list: readonly string[], rand: () => number): string {
+function pick(list: Emojis, rand: () => number): string {
   const r = rand();
   const x = Number.isFinite(r) ? Math.min(1, Math.max(0, r)) : 0;
-  return list[Math.min(list.length - 1, Math.floor(x * list.length))];
+  // x is in [0, 1] and the list is never empty, so the index is always in
+  // [0, length - 1]; the fallback to the first emoji only satisfies the type.
+  return list[Math.min(list.length - 1, Math.floor(x * list.length))] ?? list[0];
 }
 
 const skip = (why: string): PaceDecision => ({ act: "skip", why });
@@ -228,7 +248,8 @@ function answeredSince(earlier: readonly TgLine[], line: TgLine): boolean {
 /**
  * What to do with one incoming line. In order:
  *
- * 1. A bot's line, its own line, or a chat that is not approved → skip.
+ * 1. A bot's line (not an anonymous admin or a channel post: see
+ *    PaceInput.fromIsBot), its own line, or a chat that is not approved → skip.
  * 2. Distress → the kind line, always (addressed or not, shushed or not),
  *    once per person per hour; after that, silence.
  * 3. A shush, addressed or right after its own line → "ok ok 🤐" (a second
@@ -402,9 +423,13 @@ export class SendPacer {
     const t = this.now();
     let wait = this.pause - t;
     const list = this.recent(chatId, t);
-    if (list.length > 0) {
-      wait = Math.max(wait, list[list.length - 1] + SEND_GAP_MS - t);
-      if (list.length >= SENDS_PER_MINUTE) wait = Math.max(wait, list[list.length - SENDS_PER_MINUTE] + SEND_WINDOW_MS - t);
+    const newest = list[list.length - 1];
+    if (newest !== undefined) wait = Math.max(wait, newest + SEND_GAP_MS - t);
+    // A full window: the next send waits for the oldest of the last
+    // SENDS_PER_MINUTE sends to leave it.
+    if (list.length >= SENDS_PER_MINUTE) {
+      const oldest = list[list.length - SENDS_PER_MINUTE];
+      if (oldest !== undefined) wait = Math.max(wait, oldest + SEND_WINDOW_MS - t);
     }
     return Math.max(0, Math.ceil(wait));
   }

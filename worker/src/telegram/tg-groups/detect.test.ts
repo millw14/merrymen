@@ -327,8 +327,13 @@ const HATEFUL_B64 = [
 const b64 = (s: string): string => Buffer.from(s, "base64").toString("utf8");
 const HATEFUL_WORDS = HATEFUL_B64.map(b64);
 /** Entries whose collapsed spelling is an everyday word, so they need the typed double letter. */
-const [DOUBLE_1, DOUBLE_2, DOUBLE_3, DOUBLE_4] = ["bmlnZ2Vy", "dHJvb24=", "Y29vbg==", "aGVlYg=="].map(b64);
-const [F_WORD, K_WORD, R_WORD] = ["ZmFnZ290", "a2lrZQ==", "cmV0YXJk"].map(b64);
+const DOUBLE_1 = b64("bmlnZ2Vy");
+const DOUBLE_2 = b64("dHJvb24=");
+const DOUBLE_3 = b64("Y29vbg==");
+const DOUBLE_4 = b64("aGVlYg==");
+const F_WORD = b64("ZmFnZ290");
+const K_WORD = b64("a2lrZQ==");
+const R_WORD = b64("cmV0YXJk");
 
 const leet = (w: string) => w.replace(/i/g, "1").replace(/e/g, "3").replace(/a/g, "@").replace(/o/g, "0").replace(/s/g, "$").replace(/t/g, "7");
 const stretch = (w: string) => w.replace(/[aeiou]/g, (c) => c.repeat(4));
