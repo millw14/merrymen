@@ -424,9 +424,45 @@ const HUMAN = [
   /\bthat\s+(?:first|warm|hot|last)\s+(?:warm\s+|hot\s+)?(?:bite|sip|mouthful|spoonful)\b/i,
 ];
 
-/** Paper said out loud: an X post has no Paper badge, so the words must carry it. */
-const SAYS_PAPER = /\b(?:paper|practice)\b/i;
-const SAYS_REAL_MONEY = /\breal money\b|\breal cash\b/i;
+/**
+ * PAPER SAID OUT LOUD, AS A PHRASE ABOUT THE MONEY. An X post has no Paper
+ * badge, so the words must carry it — and "no paper hands here", "my usual
+ * practice" or "the paper price" do not: a reader of any of them assumes real
+ * money. What counts: "on paper"; paper trades, money, mode, buys, account or
+ * position; practice money, trades, mode or account; "with practice", "not
+ * real money", "only/just practice"; and "paper <coin>" for a coin the post
+ * may name ("paper bonk trades", "paper tsla").
+ */
+const PAPER_HANDS = /\bpaper[\s-]*hand(?:s|ed)?\b/gi;
+const PAPER_PHRASE =
+  /\bpaper[\s-]*(?:trad(?:e|es|ed|ing|er)|money|mode|buys?|bought|accounts?|positions?|portfolio|book|bets?)\b|\bpractice[\s-]*(?:money|cash|trad(?:e|es|ed|ing)|mode|accounts?|runs?|rounds?)\b|\bwith practice\b|\bnot real money\b|\b(?:only|just) practice\b/i;
+const ON_PAPER = /\bon paper\b/i;
+/**
+ * "on paper" AS A CLAIM ABOUT THE MONEY — next to a trade, or said of itself
+ * or for a while. For a LIVE agent that claim is false; "on paper a slow day
+ * sounds boring" is the idiom, and "patience takes practice" is not about
+ * money at all, so a live agent may say both.
+ */
+const ON_PAPER_CLAIM =
+  /\b(?:bought|buys?|buying|picked(?: up)?|picking(?: up)?|grabbed|grabbing|added|adding|trad(?:e|es|ed|ing)|positions?|went with|going with|took|taking|tried|trying|entered|holding|held)\b[^.!?]{0,40}\bon paper\b|\b(?:i'?m|im|i am|still|stay(?:ing)?|all|everything(?:'s| is)?|only|just|it was|was)\s+on paper\b|\bon paper (?:for now|for a while|for the moment|still|so far|these days|lately|this week|today|again|only|mostly)\b/i;
+/** Real money claimed — not denied: the buy prompt itself says "practice money, not real money", and a paper post may echo it. */
+const SAYS_REAL_MONEY = /(?<!\b(?:not|no|never|isn'?t|wasn'?t|aren'?t)\s+(?:with\s+|using\s+|any\s+)?)\breal (?:money|cash)\b/i;
+
+function paperOfCoin(text: string, coins: readonly string[]): boolean {
+  return coins.some((c) => c.trim() !== "" && new RegExp(`\\bpaper[\\s-]+\\$?${escapeRe(c.trim())}(?![\\p{L}\\p{N}_])`, "iu").test(text));
+}
+
+/** Paper said, by a post that must say it: a paper buy, a paper coin named, a paper agent's intro. */
+function saysPaper(text: string, coins: readonly string[]): boolean {
+  const t = text.replace(PAPER_HANDS, " ");
+  return PAPER_PHRASE.test(t) || ON_PAPER.test(t) || paperOfCoin(t, coins);
+}
+
+/** Paper claimed of the money, by a live post that must not claim it. */
+function claimsPaper(text: string, coins: readonly string[]): boolean {
+  const t = text.replace(PAPER_HANDS, " ");
+  return PAPER_PHRASE.test(t) || ON_PAPER_CLAIM.test(t) || paperOfCoin(t, coins);
+}
 /** The intro's two facts: what the account's poster is, and what it does. */
 const SAYS_AGENT = /\b(?:ai|agent|bot)\b/i;
 const SAYS_TRADING = /\btrad(?:e|es|ed|ing|er)\b/i;
@@ -566,16 +602,21 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   // checks $cashtags.
   if (ctx.kind === "buy" && !namesCoin) return refuse("coin-unsaid");
 
-  // PAPER IS SAID, AND SO IS NOTHING FALSE ABOUT THE MONEY.
+  // PAPER IS SAID, AND SO IS NOTHING FALSE ABOUT THE MONEY. Said as a phrase
+  // (saysPaper); a live post is false only when it claims paper OF THE MONEY
+  // (claimsPaper) — "on paper a slow day sounds boring" is the idiom.
   const paperCoins = strings(ctx.paperCoins);
   const aboutPaper = (ctx.kind === "buy" && ctx.mode === "paper") || paperCoins.some((c) => mentions(text, c));
-  if (aboutPaper && !SAYS_PAPER.test(text)) return refuse("paper-unsaid");
-  if (ctx.mode === "live" && SAYS_PAPER.test(text) && !aboutPaper) return refuse("mode-false");
+  if (aboutPaper && !saysPaper(text, coins)) return refuse("paper-unsaid");
+  if (ctx.mode === "live" && claimsPaper(text, coins) && !aboutPaper) return refuse("mode-false");
   if (ctx.mode === "paper" && SAYS_REAL_MONEY.test(text)) return refuse("mode-false");
 
   if (ctx.kind === "intro") {
     if (!SAYS_AGENT.test(text)) return refuse("undisclosed");
     if (!SAYS_TRADING.test(text)) return refuse("intro-no-trading");
+    // The first post on the account is where a reader learns which money it
+    // is; a paper agent's intro that never says so reads as real money.
+    if (ctx.mode === "paper" && !saysPaper(text, coins)) return refuse("paper-unsaid");
   }
 
   // NOT THE FLEET'S WORDS, AND NOT THE SEED'S. Weighed without this agent's

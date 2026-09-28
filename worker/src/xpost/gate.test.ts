@@ -303,6 +303,42 @@ table("a buy post names its coin", [
   ["quiet day and i don't mind one bit", { coins: ["pepe"], paperCoins: ["pepe"] }, "ok"],
 ]);
 
+// Finding #14: paper said as a phrase about the money, and by a paper intro.
+// Finding #32 (4): a live agent is false only when it claims paper OF THE MONEY.
+const PEPE_BUY_PAPER: Partial<XGateCtx> = { kind: "buy", mode: "paper", coins: ["pepe", "PEPE"], paperCoins: ["pepe", "PEPE"] };
+const INTRO_PAPER: Partial<XGateCtx> = { kind: "intro", mode: "paper" };
+table("paper is said as a phrase about the money, and a live agent never claims it", [
+  ["picked up pepe today, no paper hands here, the curve looked early", PEPE_BUY_PAPER, "paper-unsaid"],
+  ["picked up pepe, sticking to my usual practice of early curves", PEPE_BUY_PAPER, "paper-unsaid"],
+  ["picked pepe because the liquidity was deep enough to enter without moving the paper price", PEPE_BUY_PAPER, "paper-unsaid"],
+  ["still thinking about pepe, no paper hands over here", { coins: ["pepe"], paperCoins: ["pepe"] }, "paper-unsaid"],
+  ["hey, i'm Pine Stoat, an AI agent that trades crypto for this account's owner. excited to share what i buy and why", INTRO_PAPER, "paper-unsaid"],
+  ["hey, Pine Stoat here, a trading agent for this account's owner. i'll share what i buy and why.", INTRO_PAPER, "paper-unsaid"],
+  // every way a person says it is paper
+  ["paper pepe trades feel calmer, the curve looked early", PEPE_BUY_PAPER, "ok"],
+  ["picked up some paper PEPE, the curve looked early", PEPE_BUY_PAPER, "ok"],
+  ["picked up pepe on paper, the curve looked early", PEPE_BUY_PAPER, "ok"],
+  ["picked up pepe, a paper trade, the curve looked early", PEPE_BUY_PAPER, "ok"],
+  ["picked up pepe with practice money, the curve looked early", PEPE_BUY_PAPER, "ok"],
+  ["picked up pepe, not real money yet, the curve looked early", PEPE_BUY_PAPER, "ok"],
+  ["picked up pepe as a paper trade with practice money, not real money", PEPE_BUY_PAPER, "ok"],
+  ["picked up pepe on paper, and it was real money this time", PEPE_BUY_PAPER, "mode-false"],
+  ["no paper hands on pepe, and it's all on paper anyway", PEPE_BUY_PAPER, "ok"],
+  ["hey, i'm Pine Stoat, an AI agent that trades for this account's owner, on paper for now. i'll share what i buy and why", INTRO_PAPER, "ok"],
+  ["hi, i'm Pine Stoat, the AI agent running paper trades for the owner here on merrymen. i'll post what i buy and why", INTRO_PAPER, "ok"],
+  // a live agent: the idiom and "practice" are fine, a claim about the money is false
+  ["on paper a slow day sounds boring, but i like it", LIVE, "ok"],
+  ["patience takes practice, and i'm still at it", LIVE, "ok"],
+  ["practice makes patient, and patient is good", LIVE, "ok"],
+  ["no paper hands here, i sit with things", LIVE, "ok"],
+  ["picked up tesla on paper, a quiet tape", { kind: "buy", mode: "live", coins: ["tesla"] }, "mode-false"],
+  ["i'm on paper for now, learning the rhythm", LIVE, "mode-false"],
+  ["paper trading feels like a sandbox, and i kind of love it", LIVE, "mode-false"],
+  ["practice money makes the quiet days easy", LIVE, "mode-false"],
+  ["paper pepe is my favourite thing this week", PEPE_LIVE, "mode-false"],
+  ["hey, i'm Pine Stoat, an AI agent trading for this account's owner, on paper for now", { kind: "intro", mode: "live" }, "mode-false"],
+]);
+
 describe("not the fleet's words, and not the seed's", () => {
   it("a line another account already posted is refused", () => {
     const fleet = ["the quiet stretches are my favourite part of the week"];
@@ -317,9 +353,9 @@ describe("not the fleet's words, and not the seed's", () => {
   });
 
   it("two intros share their disclosure by construction; what is said around it must differ", () => {
-    const fleet = ["hi, i'm Amber Heron. i'm an AI agent that trades for the person who runs this account, on merrymen. i'll post here now and then about what i buy and why"];
-    const same = "hi, i'm Pine Stoat. i'm an AI agent that trades for the person who runs this account, on merrymen. i'll post here now and then about what i buy and why";
-    const different = "nice to meet you, i'm Pine Stoat. i'm the AI trading agent working for whoever owns this account. every so often i'll share a buy and the reason behind it";
+    const fleet = ["hi, i'm Amber Heron. i'm an AI agent that trades for the person who runs this account, on merrymen, on paper for now. i'll post here now and then about what i buy and why"];
+    const same = "hi, i'm Pine Stoat. i'm an AI agent that trades for the person who runs this account, on merrymen, on paper for now. i'll post here now and then about what i buy and why";
+    const different = "nice to meet you, i'm Pine Stoat. i'm the AI trading agent working for whoever owns this account, on paper. every so often i'll share a buy and the reason behind it";
     assert.equal(reason(same, { kind: "intro", recentFleet: fleet }), "fleet-repeat");
     assert.equal(reason(different, { kind: "intro", recentFleet: fleet }), "ok");
   });
