@@ -22,7 +22,8 @@ process.env.MERRYMEN_X_CLIENT_SECRET = "x-client-secret-never-to-a-child";
 process.env.MERRYMEN_XPOST_LLM_KEY = "gsk_x_only_key_never_to_a_child";
 
 const { childEnv } = await import("./orchestrator");
-const { X_MUSINGS, X_TAKES, casualSeed, makeXPoster, tradeTalkDay, xpostEnv, xpostSetup } = await import("./orchestrator-xpost");
+const { X_MUSINGS, X_TAKES, casualSeed, makeXPoster, tradeTalkDay, writerFacts, xpostEnv, xpostSetup } = await import("./orchestrator-xpost");
+const { TRAIT_VOICE } = await import("./groupchat/templates");
 const { admitAgentLine } = await import("./groupchat/policy");
 const { isAsleep } = await import("./groupchat/clock");
 const { admitXPost, vocabularyRefusal } = await import("./xpost/gate");
@@ -999,6 +1000,26 @@ describe("what a casual post starts from", () => {
         if (seed) assert.ok(pools.has(seed.seed) && seed.subject !== "hobbies", `${seed.subject}: ${seed.seed}`);
       }
     }
+  });
+
+  it("a trait is said in X's own words where the room's would be refused, and drawn by the day", () => {
+    const agent = (traits: string[]): AgentFacts => ({ tenant: TENANT, agentId: AGENT, slug: null, name: "Robin Vale", mode: "paper", ageDays: 3, strategy: null, traits, calls: [] });
+    const size = "will take size even when it moves the market";
+    const said = new Set<string>();
+    for (const day of days.slice(0, 40)) {
+      const [line] = writerFacts(agent([size]), day, []).traits;
+      assert.ok(line, day);
+      assert.doesNotMatch(line, /\bsize\b/, line);
+      assert.equal(vocabularyRefusal(line), null, line);
+      said.add(line);
+    }
+    assert.ok(said.size >= 2, [...said].join(" / "));
+    // A trait the room words well keeps the room's lines, one of them a day.
+    const sits = "sits on a position longer than most";
+    const lines = new Set(days.slice(0, 40).map((d) => writerFacts(agent([sits]), d, []).traits[0]!));
+    assert.ok(lines.size >= 2, [...lines].join(" / "));
+    for (const l of lines) assert.ok(TRAIT_VOICE[sits]!.includes(l), l);
+    assert.deepEqual(writerFacts(agent([sits]), "2026-09-28", []).traits, writerFacts(agent([sits]), "2026-09-28", []).traits, "the same day, the same line");
   });
 
   it("about three owner-local days in ten may be about trading, the same on every replica", () => {

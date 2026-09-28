@@ -287,17 +287,40 @@ function xStyleOf(f: AgentFacts): XStyle {
 }
 
 /**
+ * X'S OWN WORDS FOR A TRAIT, where the room's would be refused on X. The
+ * room's first line for a big-size setting is "i'll take size even when it
+ * moves things"; handed that, the model posted "taking size when the market
+ * moves", and the gate now refuses a size said in words. These are screened
+ * like every other phrase (`usable`), so a line the gate would refuse is
+ * never handed over, whichever map it came from.
+ */
+const X_TRAIT_VOICE: Readonly<Record<string, readonly string[]>> = {
+  "will take size even when it moves the market": ["i don't mind making a splash", "i don't mind moving the price a little when i buy"],
+};
+
+/**
  * The writer's facts about this agent — words only. The strategy is named only
  * when it is on the publication list (chatProfileOf already nulled the rest);
  * the flavour is said only by an agent that trades (templates.ts); every
  * phrase is screened so the model is never handed a word its post would be
  * dropped for.
+ *
+ * ONE LINE PER TRAIT, DRAWN BY THE DAY. The room's lines for a trait say the
+ * same thing different ways; always the first one put the same sentence in
+ * front of the model on every post, and it came back word for word. The
+ * flavour is drawn the same way. Exported for tests.
  */
-function writerFacts(f: AgentFacts, day: string, recentOwn: string[]): WriterFacts {
+export function writerFacts(f: AgentFacts, day: string, recentOwn: string[]): WriterFacts {
   const strategy = f.strategy ? (STRATEGY_SPOKEN[f.strategy] ?? null) : null;
   const flavours = strategy && f.mode !== "idle" ? (STRATEGY_FLAVOUR[f.strategy!] ?? []).filter(usable) : [];
   const flavour = flavours.length ? flavours[hash32(`flavour|${f.tenant}|${day}`) % flavours.length]! : null;
-  const traits = f.traits.map((t) => TRAIT_VOICE[t]?.[0]).filter(usable).slice(0, 3);
+  const traits = f.traits
+    .map((t) => {
+      const lines = (X_TRAIT_VOICE[t] ?? TRAIT_VOICE[t] ?? []).filter(usable);
+      return lines.length ? lines[hash32(`trait|${f.tenant}|${t}|${day}`) % lines.length]! : null;
+    })
+    .filter((t): t is string => t !== null)
+    .slice(0, 3);
   return { agentName: f.name, strategy, flavour, traits, mode: f.mode, style: xStyleOf(f), recentOwn: recentOwn.slice(0, 6) };
 }
 
