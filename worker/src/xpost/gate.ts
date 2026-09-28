@@ -205,7 +205,8 @@ const ALERT = new RegExp(
       "entries",
       "entered at",
       "targets?",
-      "take[\\s-]*profits?",
+      // Every tense: "took profits" is the same channel post as "take profit".
+      "t(?:ake|akes|aking|ook)[\\s-]*profits?",
       "stop[\\s-]*loss(?:es)?",
       "tp",
       "sl",
@@ -290,6 +291,48 @@ const HYPE = new RegExp(
   "i",
 );
 
+/**
+ * PROFIT, LOSS, SIZE AND EXITS. The writer is shown what the agent BOUGHT —
+ * never a price, a size, a sell, or how a coin has done since — so a post that
+ * claims a gain, a loss, a stake or a sale made it up, on a real person's
+ * account. The base gate refuses the figures; this is the same claim in
+ * words ("half my bag", "took a loss", "sold my Tesla"). Bare "red" is not
+ * here: a dip hunter's "red makes me curious" is a taste, not a result.
+ */
+const PNL = new RegExp(
+  "\\b(?:" +
+    [
+      "profit(?:s|able)?",
+      "loss(?:es)?",
+      "gains",
+      "(?:a|nice|small|big|quick|solid|good|little|decent|tidy|modest|healthy) gain",
+      "in the (?:green|red)",
+      "(?:green|red) (?:day|days|week|weeks|month)",
+      "(?:up|down) (?:big|bad|huge|a lot|nicely)",
+      "made (?:some |good |real |a little |a bit of |decent )?money",
+      // Not "all in all" or "it's all in the timing": going all in is a stake.
+      "(?:went|go|goes|going|gone|i'?m|im|i am|we'?re) all[\\s-]in(?![\\s-]+(?:favou?r|all|a|the|my|your|good)\\b)",
+      "all[\\s-]in on",
+      "most of my (?:cash|money|bag|bags|stack|portfolio|book|budget)",
+      "(?:half|whole|all) (?:of )?my (?:bag|bags|stack|cash|money|portfolio|book)",
+      "my (?:whole |entire )?(?:bag|bags|stack|portfolio)",
+      "sold",
+      "selling",
+      "closed (?:it |them )?out",
+      "exited",
+      "cashed out",
+      "took (?:profits?|a loss|losses|a hit)",
+      "roi",
+      "pnl",
+      "p\\s*&\\s*l",
+    ].join("|") +
+    ")\\b",
+  "i",
+);
+/** The idioms that share a word with it, taken out first: "i'm sold on soup", "the selling point", "a loss for words". */
+const PNL_IDIOM =
+  /\b(?:i'?m|im|i am|totally|completely|fully|pretty|not|never|already|was|wasn'?t)\s+(?:quite\s+|really\s+|so\s+|still\s+)?sold on\b|\bselling points?\b|\b(?:a\s+)?loss for words\b/gi;
+
 /** No reach outside the post, whatever the base gate let through: no @, no #, no link. */
 const HANDLE = /[@#＠＃﹫﹟]\s*[\p{L}\p{N}_]/u;
 const LINK = /https?:|www\.|\b[a-z0-9-]+\.(?:com|net|org|io|xyz|gg|ly|fun|app|me|co|ai|so|to|tv|dev|finance|exchange)\b/i;
@@ -337,15 +380,17 @@ function words(text: string): number {
 
 /**
  * The X clauses on vocabulary alone: ops words, alert shapes, hype and advice,
- * a claimed human life. The gate runs these on every draft; the glue also runs
- * them on a seed or a flavour phrase BEFORE a model is shown it, so a model is
- * never handed a word its own post would be dropped for.
+ * a profit, loss, size or sale, a claimed human life. The gate runs these on
+ * every draft; the glue also runs them on a seed or a flavour phrase BEFORE a
+ * model is shown it, so a model is never handed a word its own post would be
+ * dropped for.
  */
 export function vocabularyRefusal(text: string): string | null {
   const t = String(text ?? "");
   if (OPS.test(t)) return "ops";
   if (ALERT.test(t) || ALERT_CAPS.test(t) || ALERT_EMOJI.test(t)) return "alert";
   if (HYPE.test(t)) return "hype";
+  if (PNL.test(t.replace(PNL_IDIOM, " "))) return "pnl";
   if (HUMAN.some((re) => re.test(t))) return "human-claim";
   return null;
 }
@@ -401,7 +446,7 @@ function strings(list: unknown): string[] {
  * `ok` carries the exact text to store and post.
  *
  * Reason codes (stable, operator-only): empty · pass · too-short · too-long ·
- * handle · link · markup · emoji · exclaim · caps · ops · alert · hype ·
+ * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
  * human-claim · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
  * fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
  * quantity, repeat, unvouched-ticker, address, secret…).

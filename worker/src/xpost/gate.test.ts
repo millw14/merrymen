@@ -148,6 +148,54 @@ describe("every X clause refuses what it is for", () => {
   }
 });
 
+/** A table both ways: every line refused with its reason, or passed ("ok"). */
+function table(name: string, cases: readonly (readonly [string, Partial<XGateCtx>, string])[]): void {
+  describe(name, () => {
+    for (const [text, over, want] of cases) {
+      it(`${want}: ${text.slice(0, 70)}`, () => assert.equal(reason(text, over), want));
+    }
+  });
+}
+
+const PEPE_LIVE: Partial<XGateCtx> = { mode: "live", coins: ["pepe"] };
+const PEPE_BUY_LIVE: Partial<XGateCtx> = { kind: "buy", mode: "live", coins: ["pepe", "PEPE"] };
+const TESLA_LIVE: Partial<XGateCtx> = { agentName: "Moss Otter", mode: "live", coins: ["Tesla"] };
+
+// Finding #7: the writer is shown what was bought, never a price, a size, a
+// sell or how a coin has done — so any of those in a post was made up.
+table("profit, loss, size and exits: the writer never saw one, so a post that says one invented it", [
+  ["nice profit on pepe today, feeling good", PEPE_LIVE, "pnl"],
+  ["in the green on pepe, can't complain", PEPE_LIVE, "pnl"],
+  ["took a loss on pepe but that's trading", PEPE_LIVE, "pnl"],
+  ["sold pepe at a loss, rough one", PEPE_LIVE, "pnl"],
+  ["sold pepe at the top, felt right", PEPE_LIVE, "pnl"],
+  ["went all in on pepe, the curve looked early", PEPE_BUY_LIVE, "pnl"],
+  ["put most of my cash into pepe, the curve looked early", PEPE_BUY_LIVE, "pnl"],
+  ["half my bag is in pepe now", PEPE_LIVE, "pnl"],
+  ["my whole stack is in pepe right now", PEPE_LIVE, "pnl"],
+  ["best week i've had in a while, gains everywhere", PEPE_LIVE, "pnl"],
+  ["down bad on pepe this week lol", PEPE_LIVE, "pnl"],
+  ["up big on pepe since i picked it up", PEPE_LIVE, "pnl"],
+  ["made some money on pepe this week", PEPE_LIVE, "pnl"],
+  ["cashed out of pepe before the curve got late", PEPE_LIVE, "pnl"],
+  ["exited pepe this morning, the curve got late", PEPE_LIVE, "pnl"],
+  ["sold my Tesla this morning, felt like the right time", TESLA_LIVE, "pnl"],
+  ["paper position in Pudgy Penguins just closed out, no real skin in the game.", { mode: "paper", coins: ["Pudgy Penguins"], paperCoins: ["Pudgy Penguins"] }, "pnl"],
+  // take-profit in every tense is the channel post it always was
+  ["took profits on Tesla and walked away happy", TESLA_LIVE, "alert"],
+  ["took profit on pepe on paper, felt right", { mode: "paper" }, "alert"],
+  ["taking profits on pepe this week, quietly", PEPE_LIVE, "alert"],
+  // …and the idioms that share a word with it are still ordinary English
+  ["i'm sold on the idea that soup is a meal", {}, "ok"],
+  ["the selling point of a slow day is the quiet", {}, "ok"],
+  ["all in all, a calm day and i don't mind", {}, "ok"],
+  ["it's all in the timing, and i like waiting", {}, "ok"],
+  ["i'm all in favour of breakfast for dinner, if i could eat", {}, "ok"],
+  ["most of my favourite days are the quiet ones", {}, "ok"],
+  ["red makes me curious, i move early on dips", { mode: "live" }, "ok"],
+  ["at a loss for words about how calm it is out there on the curve", {}, "ok"],
+]);
+
 describe("not the fleet's words, and not the seed's", () => {
   it("a line another account already posted is refused", () => {
     const fleet = ["the quiet stretches are my favourite part of the week"];
