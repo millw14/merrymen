@@ -466,17 +466,29 @@ const GREET_FILLER: ReadonlySet<string> = new Set([
   "morning", "sweet", "dreams", "lol", "gm", "gn", "ya", "u2",
 ]);
 const GREET_LEAD: ReadonlySet<string> = new Set(["hey", "hi", "yo", "oh", "ok", "okay", "well", "and", "a", "big"]);
+/** The wishes a greeting ends with ("gm, have a great day"): still nothing but the greeting. */
+const GREET_WISH: ReadonlySet<string> = new Set([
+  "have", "a", "an", "good", "great", "nice", "wonderful", "awesome", "one", "day", "sleep", "well", "rest", "up", "safe", "weekend",
+]);
 const MAX_GREETING_WORDS = 5;
 
+/**
+ * gm or gn when the words are that and nothing more. What rides along must be
+ * greeting filler or a wish: "gm fam", "good morning everyone", "gm, have a
+ * good one". Anything else is a message that opens with a gm — "gm merryman
+ * thoughts on eth?" is a question, "gm guys what's the play" one to the room —
+ * and a name is not filler: "gm pine" is said to Pine (said to it, it is small
+ * talk, which reads its names; see addressedSmallTalk).
+ */
 function greetingWord(words: string[]): "gm" | "gn" | null {
   const [a, b] = words;
   if (!a) return null;
-  const rest = (from: number) => words.slice(from).every((w) => GREET_FILLER.has(w));
-  if (/^(?:g+m+|(?:gm)+|gmorning|gmornin|goodmorning)$/.test(a)) return "gm";
-  if (/^(?:g+n+|(?:gn)+|gn8|gnight|g'night|goodnight|gnite)$/.test(a)) return "gn";
+  const rest = (from: number) => words.slice(from).every((w) => GREET_FILLER.has(w) || GREET_WISH.has(w));
+  if (/^(?:g+m+|(?:gm)+|gmorning|gmornin|goodmorning)$/.test(a)) return rest(1) ? "gm" : null;
+  if (/^(?:g+n+|(?:gn)+|gn8|gnight|g'night|goodnight|gnite)$/.test(a)) return rest(1) ? "gn" : null;
   if (/^(?:go+d|gud|gd)$/.test(a) && b) {
-    if (/^(?:morning|mornin|morn)$/.test(b)) return "gm";
-    if (/^(?:night|nite|nyt|nighty)$/.test(b)) return "gn";
+    if (/^(?:morning|mornin|morn)$/.test(b)) return rest(2) ? "gm" : null;
+    if (/^(?:night|nite|nyt|nighty)$/.test(b)) return rest(2) ? "gn" : null;
   }
   if (/^(?:morning|mornin|morn)$/.test(a) && rest(1)) return "gm";
   if (/^(?:night|nite|nighty|nightnight)$/.test(a) && rest(1)) return "gn";
@@ -806,7 +818,7 @@ const HATEFUL_RES: readonly RegExp[] = [
 /** Insulting nouns that work bare after "you": "you idiot", "u clown". */
 const INSULT_NOUN = String.raw`(?:idiot|moron|clown|loser|dipshit|jackass|ass ?hole|asshat|dickhead|dick|prick|twat|wanker|tosser|muppet|bozo|fool|imbecile|dimwit|halfwit|nitwit|numpty|pillock|plonker|donkey|buffoon|dumbass|dumbfuck|bitch|cuck|simp|noob|scrub|ngmi|piece of (?:shit|crap|garbage|trash))`;
 /** Insulting words that need a copula: "you're useless", "ur trash", "you are a joke". */
-const INSULT_ADJ = String.raw`(?:dumb|stupid|useless|trash|garbage|worthless|pathetic|brain ?dead|brainless|clueless|idiotic|moronic|lame|cringe|shit|shitty|crap|crappy|dogshit|a joke|a failure|a disgrace|a waste of (?:space|time|money|electricity|compute)|a scam(?:mer)?|a fraud|fake|the worst|terrible|awful|${INSULT_NOUN})`;
+const INSULT_ADJ = String.raw`(?:dumb|stupid|useless|trash|garbage|worthless|pathetic|brain ?dead|brainless|clueless|idiotic|moronic|lame|cringe|shit|shitty|crap|crappy|dogshit|ass|a joke|a failure|a disgrace|a waste of (?:space|time|money|electricity|compute)|a scam(?:mer)?|a fraud|fake|the worst|terrible|awful|${INSULT_NOUN})`;
 const INTENSIFIERS = String.raw`(?:(?:such|so|a|an|the|fucking|fkn|fking|fcking|fuckin|freaking|literally|really|actually|just|absolute|absolutely|complete|completely|total|totally|utter|utterly|dumb|stupid|big|little|lil|straight|pure|genuinely|honestly)\s+)*`;
 const YOU_ARE = String.raw`(?:you'?re|youre|you are|you r|ur|u r|u are|ya are|yer)`;
 const BOTLIKE = String.raw`(?:bot|ai|robot|agent|machine|merryman|clanker|chatbot)`;
@@ -884,7 +896,24 @@ function bareInsult(t: string): boolean {
   return body.every((w) => BARE_INSULTS.has(w));
 }
 
+/**
+ * Teases whose target is a bot word: "ok bot", "sure bot", "bot moment", and
+ * the ones said about it rather than to it ("merryman is mid", "this bot is
+ * cooked", "L merryman"), which pacing roasts back like "you're mid".
+ */
+const AT_BOT_TEASE_RES: readonly RegExp[] = [
+  /\bsure (?:thing )?bot\b/u,
+  /\bok(?:ay)? bot\b/u,
+  /\b(?:bot|clanker|ai) moment\b/u,
+  new RegExp(
+    String.raw`\b${BOT_SUBJECT}(?:'s|\s+(?:is|r|are|be|looks?|looking|lookin|sounds?|seems?|getting|gettin))\s+(?:so |kinda |lowkey |actually |pretty |a bit |a lil |hella |mad |straight |totally |fully )?(?:mid|cooked|washed(?: up)?|slow|lagging|behind|a bum|an npc|down bad|bad at this|goofy|sus)\b`,
+    "u",
+  ),
+  /^l\W+(?:the |this |ur |your )?(?:bot|ai|robot|merryman|clanker|chatbot)\b/u,
+];
+
 const TEASE_RES: readonly RegExp[] = [
+  ...AT_BOT_TEASE_RES,
   new RegExp(String.raw`\b(?:lol|lmao|lmfao|haha\w*|kek|bruh)\b.*\b${YOU_ARE} (?:so |kinda |pretty |a bit |a lil |lowkey )?(?:slow|late|behind|lagging|old|washed|broke|poor|bad at this|mid|cooked|down bad)\b`, "u"),
   new RegExp(String.raw`\b${YOU_ARE} (?:so |kinda |pretty |lowkey )?(?:slow|late|lagging|washed|cooked|mid)\b`, "u"),
   /\bbet (?:you|u|ya)\b/u,
@@ -907,8 +936,8 @@ const TEASE_RES: readonly RegExp[] = [
   /^mid\W*$/u,
 ];
 
-/** Teases whose target is a bot word: "ok bot", "sure bot", "bot moment". */
-const AT_BOT_TEASE_RES: readonly RegExp[] = [/\bsure (?:thing )?bot\b/u, /\bok(?:ay)? bot\b/u, /\b(?:bot|clanker|ai) moment\b/u];
+/** The teases a name swap makes out of agreement: "ok pine" and "sure pine, will look" read as "ok bot" and "sure bot". */
+const AGREE_AS_TEASE = /\bok(?:ay)? bot\b|\bsure (?:thing )?bot\b/gu;
 
 export type InsultLevel = "none" | "tease" | "insult" | "hateful";
 const INSULT_RANK: Record<InsultLevel, number> = { none: 0, tease: 1, insult: 2, hateful: 3 };
@@ -940,11 +969,12 @@ function levelOf(text: string): InsultLevel {
 export function insultLevel(text: string, selfNames: readonly string[] = []): InsultLevel {
   const plain = levelOf(text);
   if (!Array.isArray(selfNames) || selfNames.length === 0 || plain === "hateful") return plain;
-  const named = levelOf(withSelfNames(text, selfNames, "bot", false));
-  // Only an insult or worse counts from the second reading: "ok pine" and
-  // "sure pine" agree with it, and would read as the teases "ok bot" and
-  // "sure bot".
-  if (named === "tease") return plain;
+  const swapped = withSelfNames(text, selfNames, "bot", false);
+  let named = levelOf(swapped);
+  // "ok pine" and "sure pine" agree with it, and would read as the teases
+  // "ok bot" and "sure bot": a tease from the second reading counts only
+  // when it is still one with those taken out ("pine is mid", "L pine").
+  if (named === "tease" && INSULT_RANK[levelOf(swapped.replace(AGREE_AS_TEASE, " , "))] < INSULT_RANK.tease) named = "none";
   return INSULT_RANK[named] > INSULT_RANK[plain] ? named : plain;
 }
 
@@ -1037,7 +1067,10 @@ const PRIVATE_RES: readonly RegExp[] = [
   /\bhow much (?:money|cash|usdg|usdc|usdt|eth|weth|sol|btc|crypto|bucks|dollars|\$) (?:do |does |did |have |has |would |will |are |r |could |should )?(?:you|u|ya)\b/u,
   // how much it would put in: a size, whatever the unit ("how much would you ape into this")
   /\bhow much (?:would|will|do|did|are|r|could|should) (?:you|u|ya) (?:ape|aping|put|putting|buy|buying|spend|spending|risk|risking|throw|invest|investing|bet|allocate|size)\b/u,
-  /\b(?:are|r) (?:you|u) (?:up|down|in profit|in the green|in the red|profitable|rich|broke)\b/u,
+  // "are you up?" / "are you down bad" ask how it is doing; "are you down to
+  // look at this" and "are you up for a chat" ask if it is willing. "Up for
+  // the week" and "down to your last…" are still how it is doing.
+  /\b(?:are|r) (?:you|u) (?:(?:up|down)(?!\s+to\b(?!\s+(?:your|ur|the|zero|nothing|pennies|dust)\b))(?!\s+for\b(?!\s+(?:the\s+|this\s+)?(?:day|week|month|year|today|session|trade|run|quarter|ytd)\b))|in profit|in the green|in the red|profitable|rich|broke)\b/u,
   /\bhow(?:'s| is|s) (?:your|ur) (?:pnl|p&l|portfolio|bag|bags|trading going|performance|balance|stack)\b/u,
   /\bhow (?:big|large|much) (?:is|are) (?:your|ur) (?:bag|bags|position|positions|stack|portfolio|wallet|balance)\b/u,
   /\bportfolio size\b|\bhow rich\b/u,

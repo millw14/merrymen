@@ -259,8 +259,9 @@ function answeredSince(earlier: readonly TgLine[], line: TgLine): boolean {
  *    PaceInput.fromIsBot), its own line, or a chat that is not approved → skip.
  * 2. Distress → the kind line, always (addressed or not, shushed or not),
  *    once per person per hour; after that, silence.
- * 3. A shush, addressed or right after its own line → "ok ok 🤐" (a second
- *    shush while already quiet only counts from the owner, who sets 2 h).
+ * 3. A shush, addressed or right after its own line (and not a reply to
+ *    somebody else's message) → "ok ok 🤐" (a second shush while already
+ *    quiet only counts from the owner, who sets 2 h).
  * 4. A shushed chat → skip, unless the owner addressed it.
  * 5. Flood (3 answers to this person within 2 min) → skip.
  * 6. Addressed → 🤡 for hateful; the injection / bot-question / private-ask
@@ -295,7 +296,11 @@ export function decide(i: PaceInput): PaceDecision {
 
   if (s.distress) return kindRecently(earlier, line, now) ? skip("kind-recent") : { act: "kind" };
 
-  const afterOwn = rightAfterOwn(room, earlier, now);
+  // A line threaded to somebody else's message is said to them, however soon
+  // after its own line it comes: "shut up bob lol" replying to Bob is not a
+  // shush, and a question threaded to Bob is not asked of it. A reply to its
+  // own line is already `addressed`.
+  const afterOwn = line.replyTo === undefined && rightAfterOwn(room, earlier, now);
   const shushed = typeof room.shushedUntilMs === "number" && room.shushedUntilMs > now;
   if (s.shush && (addressed || afterOwn)) return shushed && !isOwner ? skip("shushed") : { act: "shush" };
   if (shushed && !(isOwner && addressed)) return skip("shushed");

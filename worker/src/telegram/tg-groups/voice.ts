@@ -36,7 +36,7 @@
 import { REPEAT_LIMIT, similarity } from "../../social-post";
 import { fnv1a } from "../../memory/tokens";
 import { asksHowItIs, isQuestionShaped, type SmallTalk } from "./detect";
-import { admitTgLine, tidyTgLine, type TgGateCtx, type TgLineKind } from "./gate";
+import { admitTgLine, tidyTgLine, type TgGateCtx, type TgLineKind, type TgVerdict } from "./gate";
 import { promptSafe, renderMemory } from "./memory";
 import { callText, type TgModel, type TgModelGate } from "./model";
 import type { CoinKind, CoinVerdict, TgLine, TgRoom } from "./types";
@@ -137,9 +137,15 @@ function templateOnly(intent: TgIntent): boolean {
   return TEMPLATE_ONLY.has(intent.kind) || (intent.kind === "answer" && intent.mood === "bot-question");
 }
 
-/** Which of gate.ts's line kinds judges an intent's line. */
+/**
+ * Which of gate.ts's line kinds judges an intent's line. Joining in on a coin
+ * or on trading talk is a line about a coin: no figure at all, no "hop in"
+ * (`say` also holds it to banter's clauses, see admitFor).
+ */
 export function gateKindFor(intent: TgIntent): TgLineKind {
   switch (intent.kind) {
+    case "ambient":
+      return intent.topic === "coin" || intent.topic === "trade" ? "coin" : "banter";
     case "coin-bought":
       return "buy";
     case "coin-passed":
@@ -331,22 +337,23 @@ const POOLS: Readonly<Record<string, readonly string[]>> = {
     "hard to say tbh",
   ],
   // …and to a line that asked nothing ("@pine you're cool", "merryman lol"):
-  // a question-shaped reply to a statement reads as a bot.
+  // a question-shaped reply to a statement reads as a bot. Nothing that
+  // agrees ("true true", "fair point", "lol same"): the statement it cannot
+  // read may be "merryman is cooked", and a person does not agree with that.
   "answer:ack": [
     "👀",
     "haha",
     "lol",
-    "lol fair",
-    "fair point",
+    "heh",
     "that's a good one",
     "say more 👀",
     "yo",
     "what's up",
-    "true true",
     "ha, noted",
-    "real",
     "i hear you",
-    "lol same",
+    "oh word",
+    "interesting",
+    "hah ok",
   ],
   "answer:bot-question": [
     "yeah, i'm an AI agent, i trade for {owner}",
@@ -907,16 +914,32 @@ function tooLike(line: string, recent: readonly string[]): boolean {
   });
 }
 
-/** The gate context for an intent's line. */
+/**
+ * The gate context for an intent's line. The coin's name may be said, never
+ * as a cashtag: only the people's names are `cashtagNames`, so a coin a
+ * shill named "PEPE" never unlocks "$PEPE".
+ */
 function gateCtxFor(intent: TgIntent, ctx: SpeakCtx): TgGateCtx {
-  const names = [ctx.ownerName, ctx.senderName, ctx.coinName, intent.kind === "welcome" ? intent.name : null].filter(
-    (n): n is string => typeof n === "string" && n.trim() !== "",
-  );
+  const sayable = (n: unknown): n is string => typeof n === "string" && n.trim() !== "";
+  const people = [ctx.ownerName, ctx.senderName, intent.kind === "welcome" ? intent.name : null].filter(sayable);
+  const names = [...people, ctx.coinName].filter(sayable);
   // A buy line is judged by the fill it is about (a paper fill stays paper
   // after a switch to live); every other line by the mode it trades in now,
   // so nothing it says can claim the other kind of money.
   const paper = intent.kind === "coin-bought" ? intent.paper === true : ctx.mode === "paper";
-  return { agentName: String(ctx.agentName ?? ""), kind: gateKindFor(intent), paper, recentOwn: recentOwn(ctx.room, 8), names };
+  return { agentName: String(ctx.agentName ?? ""), kind: gateKindFor(intent), paper, recentOwn: recentOwn(ctx.room, 8), names, cashtagNames: people };
+}
+
+/**
+ * JUDGE AN INTENT'S LINE. An ambient line on a coin or on trading talk answers
+ * to a coin line's clauses (gateKindFor) and to banter's as well — never
+ * looks, bodies or family — since nobody asked it for either.
+ */
+function admitFor(text: string, intent: TgIntent, gctx: TgGateCtx): TgVerdict {
+  const v = admitTgLine(text, gctx);
+  if (!v.ok || intent.kind !== "ambient" || gctx.kind === "banter") return v;
+  const banter = admitTgLine(text, { ...gctx, kind: "banter" });
+  return banter.ok ? v : banter;
 }
 
 /** The pool in the dice's order (Fisher–Yates). */
@@ -947,7 +970,7 @@ export function templateLine(intent: TgIntent, ctx: SpeakCtx): string | null {
     const tries = [...fresh, ...order.filter((l) => !fresh.includes(l))];
     for (const line of tries) {
       for (const candidate of [styleLine(line, intent, style, rand), line]) {
-        const v = admitTgLine(candidate, gctx);
+        const v = admitFor(candidate, intent, gctx);
         if (v.ok) return v.text;
       }
     }
@@ -1167,7 +1190,7 @@ export async function say(intent: TgIntent, ctx: SpeakCtx, model: TgModel | null
     if (!p) return fallback();
     const raw = await gate.run(ctx.room.chatId, () => callText(model, p.system, p.prompt, LINE_TOKENS));
     if (typeof raw === "string") {
-      const v = admitTgLine(tidyTgLine(raw, ctx.agentName), gateCtxFor(intent, ctx));
+      const v = admitFor(tidyTgLine(raw, ctx.agentName), intent, gateCtxFor(intent, ctx));
       if (v.ok) return v.text;
     }
     return fallback();

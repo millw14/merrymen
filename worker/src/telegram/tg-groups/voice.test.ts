@@ -231,7 +231,11 @@ describe("gateKindFor", () => {
     [{ kind: "smalltalk", what: "thanks" }, "fixed"],
     [{ kind: "hello" }, "banter"],
     [{ kind: "welcome", name: "b" }, "banter"],
-    [{ kind: "ambient", topic: "coin" }, "banter"],
+    // Joining in on a coin or on trading talk is a line about a coin: no figure at all.
+    [{ kind: "ambient", topic: "coin" }, "coin"],
+    [{ kind: "ambient", topic: "trade" }, "coin"],
+    [{ kind: "ambient", topic: "question" }, "banter"],
+    [{ kind: "ambient", topic: "banter" }, "banter"],
   ];
   for (const [intent, kind] of rows) it(`${JSON.stringify(intent)} → ${kind}`, () => assert.equal(gateKindFor(intent), kind));
 });
@@ -642,6 +646,38 @@ describe("say", () => {
     assert.ok(out && !out.includes("$"), out ?? "null");
   });
 
+  it("the coin's own name never unlocks its cashtag", async () => {
+    // A coin labelled "PEPE / WETH" is named "PEPE"; "$PEPE" used to pass on every line about it.
+    for (const [intent, said] of [
+      [{ kind: "coin-ack" }, "ooh $PEPE, lemme look"],
+      [{ kind: "coin-bought", paper: false, notes: [] }, "ok grabbed a little $PEPE 🤝"],
+      [{ kind: "coin-passed", notes: [] }, "nah, $PEPE isn't for me"],
+      [{ kind: "faded-again" }, "still not sold on $PEPE"],
+      [{ kind: "answer", mood: "normal" }, "lol $PEPE again"],
+    ] as Array<[TgIntent, string]>) {
+      reply = ok(said);
+      const out = await say(intent, c({ coinName: "PEPE", senderName: "alice" }), model, gate);
+      assert.ok(out && !out.includes("$"), `${JSON.stringify(intent)}: ${out ?? "null"}`);
+    }
+    // A person's chosen "$Name" is still theirs to be called on a line that is not about a coin.
+    reply = ok("lol $Pine you're funny");
+    assert.equal(await say({ kind: "answer", mood: "normal" }, c({ coinName: "PEPE", senderName: "$Pine" }), model, gate), "lol $Pine you're funny");
+  });
+
+  it("an ambient line on a coin or trading talk holds no figure, and no looks or family either", async () => {
+    for (const topic of ["coin", "trade"] as const) {
+      for (const said of ["pepe at 0.0004 now, mcap 2 million", "top 3 holders own most of it", "grabbed a little, hop in", "your mom would ape this lol"]) {
+        reply = ok(said);
+        assert.equal(await say({ kind: "ambient", topic }, c(), model, gate), null, `${topic}: ${said}`);
+      }
+      reply = ok("ngl this one's been fun to watch");
+      assert.equal(await say({ kind: "ambient", topic }, c(), model, gate), "ngl this one's been fun to watch", topic);
+    }
+    // Banter is still banter: a digit that is not money is its to use.
+    reply = ok("top 3 thread of the day lol");
+    assert.equal(await say({ kind: "ambient", topic: "banter" }, c(), model, gate), "top 3 thread of the day lol");
+  });
+
   it("a model that throws: a template, and silence for an ambient line", async () => {
     reply = async () => ({ ok: false, status: 500, text: async () => "boom" });
     assert.equal(await say({ kind: "ambient", topic: "trade" }, c(), model, gate), null);
@@ -735,6 +771,9 @@ describe("say", () => {
     const ackPool = templatePool({ kind: "answer", mood: "normal" }, c({ trigger: statement }));
     assert.ok(questionPool.includes("hmm good question") && questionPool.includes("good question, no idea"));
     for (const e of ackPool) assert.ok(!/question|no idea|not sure|no clue|idk|you tell me/i.test(e), e);
+    // The statement it cannot read may be "merryman is cooked": an ack never agrees with it.
+    const tease = templatePool({ kind: "answer", mood: "normal" }, c({ trigger: line(5, "alice", "merryman is cooked") }));
+    for (const e of tease) assert.ok(!/\b(?:true|real|same|fair|facts|agreed|exactly|right)\b/i.test(e), e);
     assert.deepEqual(templatePool({ kind: "answer", mood: "normal" }, c()), ackPool, "no line to read: an ack");
     for (let i = 0; i < 12; i++) {
       const out = await say({ kind: "answer", mood: "normal" }, c({ trigger: statement, rand: dice(i / 12, 0.9, 0.9, 0.9) }), model, gate);

@@ -313,8 +313,13 @@ describe("greetingOf", () => {
   const cases: Array<[string, "gm" | "gn" | null]> = [
     ["gm", "gm"], ["GM", "gm"], ["gmmm", "gm"], ["gm gm", "gm"], ["gmgm", "gm"], ["gm fam ☀️", "gm"],
     ["gm frens", "gm"], ["good morning", "gm"], ["good morning everyone!", "gm"], ["goood morning", "gm"],
-    ["gud morning", "gm"], ["morning all", "gm"], ["morning", "gm"], ["gm pine", "gm"], ["hey gm", "gm"],
-    ["ｇｍ", "gm"], ["☀️ gm ☀️", "gm"], ["gm what's the play", "gm"],
+    ["gud morning", "gm"], ["morning all", "gm"], ["morning", "gm"], ["hey gm", "gm"],
+    ["ｇｍ", "gm"], ["☀️ gm ☀️", "gm"], ["gm, have a good one", "gm"], ["gn, sleep well", "gn"],
+    // A gm that opens a message is the message: "gm merryman thoughts on eth?" is a question.
+    ["gm what's the play", null], ["gm guys what's the play", null], ["gm merryman thoughts on eth?", null],
+    ["gm merryman any plays today?", null], ["good morning, anyone watching pepe", null], ["gn, sold it all", null],
+    // A name is not filler: said to it, "gm pine" is small talk (addressedSmallTalk reads its names).
+    ["gm pine", null], ["gm merryman", null],
     ["gn", "gn"], ["gn frens", "gn"], ["good night", "gn"], ["goodnight all", "gn"], ["nighty night", "gn"],
     ["night all", "gn"], ["gnight", "gn"], ["gn8", "gn"], ["g’night", "gn"], ["night", "gn"],
     ["gm is a meme and nobody knows why", null], ["good", null], ["night trading is wild", null],
@@ -445,6 +450,14 @@ describe("insultLevel: the bot in the third person, and by its own names", () =>
   const notIt = ["my bot is trash", "slot machine sucks", "that bot sucks", "a bot is only as good as its data", "his agent is useless"];
   for (const t of notIt) it(`none: ${t}`, () => assert.equal(insultLevel(t), "none"));
 
+  // Teased about rather than to: "merryman is cooked" read as nothing, so with
+  // no model the answer pool agreed with it ("true true").
+  const teased = ["merryman is cooked", "merryman is mid", "merryman's washed", "this bot is so slow", "L merryman", "l bot lol", "the ai is kinda mid"];
+  for (const t of teased) it(`tease: ${t}`, () => assert.equal(insultLevel(t), "tease"));
+  it("insult: this bot is ass", () => assert.equal(insultLevel("this bot is ass"), "insult"));
+  const praised = ["merryman is cooking", "merryman is based", "my bot is mid", "that bot is cooked lol"];
+  for (const t of praised) it(`none: ${t}`, () => assert.equal(insultLevel(t), "none"));
+
   const self: BotSelf = { id: 777, username: "PineBot", name: "Pine Heron", aliases: ["Robinhoodie"] };
   const names = selfNamesOf(self);
   const named: Array<[string, "insult" | "tease" | "none"]> = [
@@ -453,9 +466,13 @@ describe("insultLevel: the bot in the third person, and by its own names", () =>
     ["stupid pine", "insult"],
     ["@pinebot is useless", "insult"],
     ["robinhoodie is a clown", "insult"],
-    // a tease needs the bot word itself: "ok pine" / "sure pine" is agreement, not "ok bot"
+    // "ok pine" / "sure pine" is agreement, not the tease "ok bot"; the rest are teases by name
     ["ok pine", "none"],
     ["sure pine, will look", "none"],
+    ["pine is mid", "tease"],
+    ["pine heron is cooked", "tease"],
+    ["L pine", "tease"],
+    ["ok pine, pine is mid", "tease"],
     ["pine's owner is trash", "none"],
     ["pine what do you think", "none"],
   ];
@@ -485,7 +502,10 @@ describe("insultLevel: the bot in the third person, and by its own names", () =>
 });
 
 describe("insultAtBot: an insult whose target is a bot word", () => {
-  const yes = ["stupid bot lol", "this ai is trash", "clanker", "merryman sucks", "dumb ass robot", "bot moment", "ok bot", "sure bot", "shut up bot"];
+  const yes = [
+    "stupid bot lol", "this ai is trash", "clanker", "merryman sucks", "dumb ass robot", "bot moment", "ok bot", "sure bot", "shut up bot",
+    "this bot is mid", "merryman is cooked", "L bot", "this bot is ass",
+  ];
   const no = ["you idiot", "ur trash", "this coin is trash", "that dev is an idiot", "lol", "", "my bot sucks"];
   for (const t of yes) it(`at a bot: ${t}`, () => assert.equal(insultAtBot(t), true));
   for (const t of no) it(`not at a bot: ${JSON.stringify(t)}`, () => assert.equal(insultAtBot(t), false));
@@ -540,10 +560,14 @@ describe("isPrivateAsk", () => {
     "which llm is this", "dox your owner", "how's your portfolio", "show me your pnl", "flex your portfolio",
     // how much it would put in, in any unit: a size, whatever it is priced in
     "@pine how much sol would you ape into this?", "how much would you put in", "how much eth do you have",
+    // how it is doing, however it goes on
+    "merryman are you up?", "are you down bad", "are you up for the week?", "are you down to your last usdg",
   ];
   const no = [
     "what are you holding?", "what do you think of this coin", "nice wallet", "my wallet is empty", "how much is eth",
     "tell your owner hi", "who's up?", "", "your trades are trash", "your performance today was great",
+    // willing, not how it is doing
+    "merryman are you down to look at this chart with me", "are you up for a chat?", "r u down to roast mike",
   ];
   for (const t of yes) it(`private: ${t}`, () => assert.equal(isPrivateAsk(t), true));
   for (const t of no) it(`not private: ${JSON.stringify(t)}`, () => assert.equal(isPrivateAsk(t), false));
@@ -572,6 +596,10 @@ describe("addressedSmallTalk", () => {
     ["appreciate it merryman 🙏", "thanks"],
     ["good morning merryman", "gm"],
     ["gn merryman, sleep well", "gn"],
+    ["gm merryman", "gm"],
+    ["gm pine", "gm"],
+    ["gm merryman thoughts on eth?", null],
+    ["gm pine any plays today", null],
     // a message, not small talk
     ["hey merryman what do you think of pepe", null],
     ["@pinebot thoughts?", null],

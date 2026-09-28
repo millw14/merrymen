@@ -285,6 +285,20 @@ describe("decide: shush", () => {
     assert.deepEqual(decide(input({ room: after, signals: { shush: true } })), { act: "skip", why: "not-ours" });
   });
 
+  it("does not take a shush replying to somebody else's message, even right after its own line", () => {
+    // Bob brags, it says something, Ann replies to BOB: "shut up bob lol".
+    // That muted the whole chat for 30 minutes and answered "ok ok 🤐".
+    const brag = mk(BOB, "called the bottom again", 3 * MIN);
+    const r = room({ lines: [...liveLines(), brag, own("lol nice", 2 * MIN)] });
+    const line = mk(ALICE, "shut up bob lol", 0, { replyTo: brag.messageId });
+    assert.deepEqual(decide(input({ room: r, line, signals: { shush: true } })), { act: "skip", why: "not-ours" });
+    // …and a question threaded to somebody else is not asked of it either.
+    const q = mk(ALICE, "are you a bot bob?", 0, { replyTo: brag.messageId });
+    assert.equal(decide(input({ room: r, line: q, signals: { botQuestion: true } })).act, "skip");
+    // Unthreaded, the same shush right after its line is at it.
+    assert.deepEqual(decide(input({ room: r, line: mk(ALICE, "shut up lol", 0), signals: { shush: true } })), { act: "shush" });
+  });
+
   it("while already shushed, only the owner's shush counts again", () => {
     const r = room({ lines: liveLines(), shushedUntilMs: NOW + 20 * MIN });
     assert.deepEqual(decide(input({ room: r, addressed: "mention", signals: { shush: true } })), { act: "skip", why: "shushed" });

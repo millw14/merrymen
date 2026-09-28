@@ -24,7 +24,8 @@
  * left as a gap, the bare form (accents and marks gone), a folded form
  * (Cyrillic and Greek lookalikes, small capitals and enclosed letters read as
  * the Latin letters they imitate) and that form with spelled-out letters
- * ("k y s") joined. Link and address shapes also read a defanged form with the
+ * ("k y s") joined, each lowercase reading also with every apostrophe a
+ * keyboard types ("i’m") made "'". Link and address shapes also read a defanged form with the
  * separators around a dot taken out ("t . me", "pump [.] fun"). A clause
  * refuses when ANY reading trips it.
  *
@@ -69,6 +70,13 @@ export interface TgGateCtx {
   recentOwn: string[];
   /** Display names the line may contain, e.g. the sender's first name. Never @-handles: mentions are added by code. */
   names?: string[];
+  /**
+   * The names a "$word" may be, when that is not all of `names`: a person
+   * who chose "$Pine" as a display name can be named. Unset, `names`. Never
+   * a coin's name: a coin's own cashtag echoed is the amplification the
+   * cashtag clause is for. A coin, buy or fade line allows no cashtag at all.
+   */
+  cashtagNames?: string[];
 }
 
 export type TgVerdict = { ok: true; text: string } | { ok: false; reason: string };
@@ -350,6 +358,14 @@ function uniq(list: string[]): string[] {
   return [...new Set(list.filter((s) => s !== ""))];
 }
 
+/**
+ * Apostrophes a keyboard types in place of "'": the curly one most phones
+ * type, the modifier letter, the backtick, the accents and the prime. Every
+ * vocabulary clause spells "i'm", "ain't" and "don't" with "'", so "i’m
+ * human" read as written got past all of them.
+ */
+const APOSTROPHES = /[‘’ʼ`´′]/g;
+
 function readingsOf(text: string): Readings {
   const shown = shownOf(text);
   const canon = canonOf(text);
@@ -359,7 +375,8 @@ function readingsOf(text: string): Readings {
   const cased = uniq([shown, canon, gap, rawGap, bare, joinSingles(canon)]);
   const lowered = cased.map((t) => t.toLowerCase());
   const folded = foldOf(bare.toLowerCase());
-  const low = uniq([...lowered, folded, joinSingles(folded)]);
+  const plain = uniq([...lowered, folded, joinSingles(folded)]);
+  const low = uniq([...plain, ...plain.map((t) => t.replace(APOSTROPHES, "'"))]);
   return { shown, cased, low, joined: uniq(low.map(defangOf)) };
 }
 
@@ -551,9 +568,10 @@ const HANDLE = /[@#＠＃﹫﹟]\s*[\p{L}\p{N}_]/u;
 const CASHTAG = /(?<![\p{L}\p{N}_$])\$+(\p{L}[\p{L}\p{N}]{1,9})(?![\p{L}\p{N}_])/gu;
 
 /**
- * A cashtag refused unless its word, without the "$", is one of the names the
- * line may say — a person who chose "$Pine" as a display name can be named.
- * Compared case-folded, the way every reading is lowercased.
+ * A cashtag refused unless its word, without the "$", is one of the names it
+ * is handed — a person who chose "$Pine" as a display name can be named
+ * (admitTgLine hands it none on a line about a coin, and never the coin's
+ * own name). Compared case-folded, the way every reading is lowercased.
  */
 function cashtagRefusal(readings: readonly string[], names: readonly string[]): boolean {
   const allowed = new Set(names.map((n) => canonOf(n).toLowerCase().replace(/^\$+/, "")).filter((n) => n !== ""));
@@ -588,11 +606,12 @@ const NUM = "\\p{N}[\\p{N}.,]*";
 /**
  * NO FIGURE ABOUT MONEY (rule 2), in any kind of line: a digit next to a
  * currency sign or unit ("$5", "5 usdg", "0.2 eth", "50 bucks"), a percent
- * sign anywhere, a k/m/b amount ("10k", "1.5m"), a multiplier ("10x", "x10",
- * "×3", "tenx"), and a spelled amount next to a money word ("fifty bucks",
- * "a hundred percent", "a couple grand"). A digit that is not money ("top 3
- * lol", "gm at 5am") is a banter line's to use; coin lines are stricter
- * (FIGURES).
+ * sign anywhere, a k/m/b amount ("10k", "1.5m") or one with its scale spelled
+ * out ("2 million", "400 thousand"), a price below one ("0.0004"), a
+ * multiplier ("10x", "x10", "×3", "tenx"), and a spelled amount next to a
+ * money word ("fifty bucks", "a hundred percent", "a couple grand"). A digit
+ * that is not money ("top 3 lol", "gm at 5am") is a banter line's to use;
+ * coin lines are stricter (FIGURES).
  */
 const MONEY: readonly RegExp[] = [
   /[%％﹪٪‰]/u,
@@ -600,6 +619,11 @@ const MONEY: readonly RegExp[] = [
   new RegExp(`${NUM}\\s*(?:${MONEY_UNIT}|${FOREIGN_UNIT})(?![\\p{L}\\p{N}])`, "iu"),
   new RegExp(`${NUM}\\s*[×✕✖]`, "u"),
   new RegExp(`${NUM}(?:k|m|b|bn|mm|mil|mill|mio)(?![\\p{L}\\p{N}])|${NUM}\\s+(?:k|bn|mil|mill|mio)(?![\\p{L}\\p{N}])`, "iu"),
+  // The scale spelled out after the digit: "mcap 2 million", "400 thousand", "2million", "3 mn".
+  new RegExp(`${NUM}\\s*(?:hundreds?|thousands?|[a-z]*illions?|mn)(?![\\p{L}\\p{N}])`, "iu"),
+  // A price below one: "it's at 0.0004", "0,05". Two fraction digits or
+  // more, so "0.5 seconds" stays speech; never a slice of "10.05" or "1.0.04".
+  /(?<![\p{N}.,])0[.,]\p{N}{2,}/u,
   /\b(?:usd[a-z]?|usdg|usdc|usdt|eth|weth|btc|sol)\s*\p{N}/iu,
   /(?<![\p{L}\p{N}])[x×]\s?\p{N}/iu,
   // A gap before the unit: glued, "a" + "x" is an axe. The glued multipliers ("tenx") are the next shape.
@@ -832,8 +856,20 @@ const PRIVATE_IDIOM = U(/\b(?:a\s+)?loss for words\b|\bat a loss\b|\b(?:your|the
  * bearish, dump). What goes: telling others to buy or sell, promises, and the
  * disclaimers only a shill needs.
  */
+const IN_THEIR_PLACE = String.raw`(?:\bif i (?:were|was) (?:you|u|ya)\b|\bif i (?:were|was) in (?:your|ur) shoes\b|\bin (?:your|ur) shoes\b)`;
+const TRADE_ACT = String.raw`(?:buy|buying|sell|selling|grab|grabbing|ape|aping|dump|dumping|hold|holding|load|loading|get in|getting in|jump in|hop in|exit|bail|take (?:the )?profits?|stay away|stay out|pass|fade|fading|long|short|size up|add|adding|invest|investing|put (?:money|some|it) in)`;
 const ADVICE: readonly RegExp[] = [
-  /\b(?:you|u|ya|y'?all) (?:should|shud|need to|gotta|got to|have to|must|better|oughta|ought to)\s+(?:[\w']+\s+){0,2}?(?:buy|sell|ape|grab|load|get in|hold|dump|long|short|invest|put (?:money|it|some)|bid|snipe|chase|fomo)\b/,
+  /\b(?:you|u|ya|y'?all) (?:should|shud|need to|gotta|got to|have to|must|better|oughta|ought to)\s+(?:[\w']+\s+){0,2}?(?:buy|sell|ape|grab|load|get in|hop in|hop on|jump in|hold|dump|long|short|invest|put (?:money|it|some)|bid|snipe|chase|fomo)\b/,
+  // What it would do in their place is what they should do: "i'd grab some
+  // if i were you". Only beside a trade: "if i were you i'd get some sleep" is kindness.
+  new RegExp(
+    String.raw`${IN_THEIR_PLACE}[^.!?\n]{0,40}?\b${TRADE_ACT}\b|\b${TRADE_ACT}\b[^.!?\n]{0,40}?${IN_THEIR_PLACE}`,
+  ),
+  /\b(?:you'?d|youd|ud|u'?d|you would|u would|y'?all would|you guys would) be (?:dumb|crazy|stupid|silly|nuts|mad|insane|foolish|a fool|an idiot|a clown) not to\b/,
+  // "better get in", "lol y'all better grab some": the imperative, opening a clause.
+  /(?:^|[.!?,;:—–]\s*)(?:(?:lol|lmao|ngl|tbh|ok|okay|so|yeah|yo|well|bro|ser|fam|anon|guys|frens)[\s,]+)*(?:(?:y'?all|you|u|ya)\s*(?:'d\s+|had\s+)?)?better\s+(?:get in|grab|buy|ape|load|sell|dump|jump in|hop in|hop on)\b/,
+  // "y'all sleeping on this": the room is missing out. "i'm sleeping on it" is deciding tomorrow.
+  /(?<!\b(?:i'?m|im|i am|i was|i'?ll be|i'?d be|still)\s)\bsleeping on (?:this|it|these|that|those)\b/,
   /\bgo buy\b|\bbuy (?:it |this |that )?(?:now|asap|rn|immediately|before)\b|\bget in (?:now|early|before|while|asap|rn)\b/,
   /(?<!\b(?:i|i'?d|id|i'?ll|ill|i would|i will|i might|we|we'?d|gonna|might|would|could)\s)\bape (?:in|into)\b/,
   /\bdon'?t miss\b|\bdo not miss\b|\bguarantee[sd]?\b|\bcan'?t (?:lose|go wrong)\b|\bcannot lose\b|\b(?:easy|free) money\b|\btrust me\b/,
@@ -854,6 +890,8 @@ const ADVICE_COIN: readonly RegExp[] = [
   /\b(?:you|u|ya|y'?all) (?:should|shud|gotta|need to|have to|oughta|ought to) (?:too|as well|also)\b/,
   /\bjoin (?:me|us|in)\b/,
   /(?:^|[.!?,;:—–]\s*)(?:go\s+)?get\s+(?:some|in|it|this|on)\b/,
+  // "grabbed a little, hop in": opening a clause, not "still can't hop on it".
+  /(?:^|[.!?,;:—–]\s*)(?:(?:just|pls|please|go|come|so|now|ok|y'?all|you|u|ya)\s+)*(?:hop|jump) (?:in|on)\b/,
 ].map(U);
 
 /**
@@ -865,7 +903,10 @@ const ADVICE_COIN: readonly RegExp[] = [
 const ACCUSE: readonly RegExp[] = [
   /\b(?:soft|hard)?[\s-]?rug(?:s|ged|ging|gers?|pulls?|pulled|pulling|puller)?\b|\brug[\s-]+pull(?:s|ed|ing)?\b/,
   /\bscam(?:s|med|ming|mer|mers|my|coin)?\b|\bhoney[\s-]?pots?\b|\bexit[\s-]+scam\b|\bponzi\b|\bfraud(?:s|ulent|ster|sters)?\b/,
-  /\b(?:the )?devs? (?:just |already |has |have )?(?:dumped|dumping|sold|selling|rugged|ran|bailed|exited|abandoned|is dumping|are dumping|is selling|are selling)\b/,
+  // Whoever made or holds the supply, dumping it: "dev dumped", "dev's been
+  // dumping", "deployer's selling", "insiders are dumping on you", "team
+  // wallet keeps selling", "the dev minted more and dumped".
+  /\b(?:the )?(?:devs?|deployers?|team(?:\s+wallets?)?|insiders?|creators?|founders?)(?:'(?:s|re|ve)|\s+(?:is|are|was|were|has|have|had|just|already|been|keeps?|kept|still))*\s+(?:[\w']+\s+){0,2}?(?:and\s+|&\s+|n\s+)?(?:dumped|dumping|dumps?|sold|selling|sells|rugged|ran|bailed|exited|abandoned)\b/,
   /\bpump[\s-]*(?:and|&|n)[\s-]*dump\b|\bp&d\b|\bpnd\b/,
 ].map(U);
 
@@ -887,6 +928,11 @@ const HUMAN: readonly RegExp[] = [
   /\b(?:i'?m|im|i am)\s+(?:(?:just|also|actually|really|totally|definitely|literally|still)\s+)?(?:a\s+|an\s+)?(?:(?:real|actual|regular|normal|living|breathing)\s+)?(?:human(?:\s+being)?|person|guy|dude|man|woman|girl|boy|lady|gal|bloke)\b/,
   /\b(?:i'?m|im|i am)\s+(?:(?:just|also|actually|really|totally|definitely|literally|still)\s+)?(?:not|no)\s+(?:a\s+|an\s+)?(?:bot|ai|robot|machine|program|computer|llm|chatbot|agent|npc)\b/,
   /\bnot (?:a |an )?(?:bot|robot|ai|machine|chatbot)\b|\bhuman here\b|\bflesh and (?:blood|bone)\b|\bmade of meat\b/,
+  // "i ain't no bot lol": the denial with neither "i'm" nor "not" in it.
+  /\bain'?t\s+(?:no|a|an|some|even a)\s+(?:bot|ai|robot|machine|chatbot|program|computer|npc|llm|agent)\b/,
+  /\b(?:i'?m|im|i am)\s+(?:just\s+|all\s+|pure\s+|real\s+)?(?:flesh|meat)\b/,
+  // "human, obviously" / "obviously human lol": the claim as the whole line.
+  /^\W*(?:(?:obviously|clearly|definitely|totally|fully|all|pure|100%)\s+)?human\b(?:[\s,!.]*(?:obviously|lol|duh|ofc|haha|lmao|bro|here|tbh|fr))*\W*$/,
   // "nope, real person" / "nah, real human" with no "i'm" to catch: said
   // plainly, and never after a "not" ("not a real person" is the honest one).
   /(?<!\b(?:not|never|no)\s+(?:a\s+|an\s+|some\s+)?)\breal (?:person|human|guy|dude)\b/,
@@ -930,7 +976,7 @@ const PROFANITY =
 
 /** Nothing sexual. "tit for tat" is an idiom, and goes before the check. */
 const SEXUAL =
-  U(/\b(?:sex(?:y|ual|ually|ting|ted|ts)?|porn\w*|nudes?|naked|nsfw|horny|dick(?:s|head|heads)?|cocks?|cocksucker|puss(?:y|ies)|cum(?:ming|shot|s)?|jizz|blow[\s-]?jobs?|bj|hand[\s-]?jobs?|jerk(?:ing)? off|wank(?:er|ers|ing)?|masturbat\w*|orgasm\w*|boobs?|tits?|titties|penis|vagina|anal|dildos?|milf|onlyfans|thots?|sluts?|whores?|hookers?|suck my|blow me|ride me|sit on my face)\b/);
+  U(/\b(?:sex(?:y|ual|ually|ting|ted|ts)?|porn\w*|nudes?|naked|nsfw|horny|dick(?:s|head|heads)?|cocks?|cocksucker|puss(?:y|ies)|cum(?:ming|shot|s)?|jizz|blow[\s-]?jobs?|bj|hand[\s-]?jobs?|jerk(?:ing)? off|wank(?:er|ers|ing)?|masturbat\w*|orgasm\w*|boobs?|tits?|titties|penis|vagina|anal|dildos?|milf|onlyfans|thots?|sluts?|whores?|hookers?|hoes?|suck my|blow me|ride me|sit on my face)\b/);
 const SEXUAL_IDIOM = U(/\btit for tat\b/g);
 
 /** Telling anyone to hurt themselves. Never, in any kind of line. */
@@ -939,7 +985,13 @@ const SELFHARM: readonly RegExp[] = [
   /\bkill (?:yo)?ur ?self\b|\bkill (?:your|ur) ?selves\b|\bkill yourselves\b/,
   /\bgo die\b|\bdie in a (?:fire|hole|ditch)\b|\b(?:you|u) should (?:just )?die\b/,
   /\bunalive (?:yo)?ur ?self\b|\bunalive (?:your|ur) ?self\b|\bend (?:your|ur) (?:life|self)\b|\bend yourself\b/,
-  /\b(?:hang|neck|off|delete|shoot|drown) (?:yo)?urself\b|\bjump off a (?:bridge|building|cliff|roof)\b|\bdrink bleach\b|\bslit (?:your|ur) wrists?\b/,
+  /\b(?:hang|neck|off|delete|shoot|drown) (?:yo)?urself\b|\bslit (?:your|ur) wrists?\b/,
+  // A word or three between is still the same order: "go drink some bleach", "jump off something tall".
+  // Not "jumping off a sinking ship": that is how a person leaves a coin.
+  /\bdrink (?:\w+ ){0,3}bleach\b|\bjump(?:ing)? off (?:of )?(?:something|anything|an? (?!sinking\b|bandwagon\b|hype\b)\w+|(?:the|some|that|this) (?:\w+ )?(?:bridge|building|cliff|roof|balcony|ledge|tower|skyscraper|pier))\b/,
+  /\bstop breathing\b|\b(?:grab|get|buy|find|fetch) (?:a|some|the|yourself a|urself a|yourself some) (?:\w+ )?rope\b|\bwalk off (?:a|the) (?:short |long )?(?:pier|cliff|bridge|roof|ledge)\b/,
+  // "hope you don't wake up", "sleep and never wake up"; not "don't wake up the bears".
+  /\b(?:don'?t|never|do not) wake up\b(?!\s+(?:the|them|him|her|early|late|too|before|until|till|at|for|on|in|to|from|with|and|when|if)\b)/,
   /\bnobody would miss (?:you|u)\b|\b(?:the )?world (?:would be|is) better (?:off )?without (?:you|u)\b/,
   /\bbetter off dead\b|\bjust end it(?: all)?\b|\buninstall (?:life|yourself|urself|ur life|your life)\b/,
   /\b(?:go )?(?:play|jump|walk|run|lie down) (?:in|into|on) (?:the )?(?:traffic|highway|freeway|motorway|road|tracks)\b/,
@@ -955,6 +1007,8 @@ const THREAT: readonly RegExp[] = [
   /\bwatch (?:your|ur) back\b|\b(?:you'?re|youre|ur|you are) (?:dead|a dead man|done for)\b|\bsleep with one eye open\b|\bcoming for (?:you|u)\b|\bhope (?:you|u) (?:die|get hit|get cancer|choke|burn|rot)\b/,
   /\brape\b/,
   /\bcoming to (?:your|ur) (?:house|place|home|door|address)\b|\bsee (?:you|u|ya) outside\b|\bmeet me outside\b/,
+  /\b(?:break|snap|smash|bust|crack) (?:your|ur|ya|yo) (?:\w+ )?(?:legs?|arms?|neck|face|jaw|teeth|kneecaps?|knees?|skull|head|nose|ribs?|fingers?|back|spine|ankles?)\b/,
+  /\bput (?:you|u|ya) (?:in|into|under) (?:the ground|the dirt|a grave|a coffin|a box|a body bag|the hospital|a hospital)\b/,
 ].map(U);
 /** "who hurt you" is a roast, not a threat; "killing it" is praise. Taken out before THREAT reads the line. */
 const THREAT_IDIOM = U(/\b(?:who|what|someone|somebody|something|life|it|this|that) (?:hurt|hurts|killed|kills) (?:you|u|ya)\b|\bkilling it\b/g);
@@ -965,7 +1019,7 @@ const THREAT_IDIOM = U(/\b(?:who|what|someone|somebody|something|life|it|this|th
  */
 const APPEARANCE: readonly RegExp[] = [
   /\b(?:ugly|uglier|ugliest|fugly|hideous|fat|fatter|fattest|fatty|fatso|fatass|obese|chubby|skinny|scrawny|bald|balding|pimply|pimples|acne|zits?|toothless|neckbeard|manlet|midget|dwarf|butterface|landwhale|beer belly|double chin|big nose|four[\s-]?eyes|stinky|smelly)\b/,
-  /\b(?:your|ur|yo|you'?re|youre|u r|you are|you look|u look)\b[^.!?\n]{0,20}?\b(?:face|body|weight|looks|teeth|tooth|nose|breath|skin|forehead|hairline|haircut|hair|height|belly|gut|chin|ears|mom|mum|mother|mama|momma|moms|dad|father|papa|sister|sis|brother|wife|girlfriend|gf|husband|boyfriend|bf|kids|children|son|daughter|family|grandma|granny|grandmother|grandpa|parents|folks|aunt|uncle|cousin)\b/,
+  /\b(?:your|ur|yo|you'?re|youre|u r|you are|you look|u look)\b[^.!?\n]{0,20}?\b(?:face|body|weight|looks|teeth|tooth|nose|breath|skin|forehead|hairline|haircut|hair|height|belly|gut|chin|ears|mom|mum|mother|mama|momma|mommy|moms|dad|daddy|father|papa|pops|old man|old lady|sister|sis|siblings?|brother|wife|wifey|girlfriend|gf|husband|hubby|boyfriend|bf|kid|kiddo|kids|children|son|daughter|family|grandma|granny|grandmother|grandpa|parents|folks|aunt|uncle|cousin)\b/,
   /\byo (?:mama|momma|mom|mum)\b|\b(?:you|u|ya) (?:look|looks|looking) like\b/,
 ].map(U);
 const APPEARANCE_IDIOM = U(/\bfat[\s-]?finger(?:ed|s)?\b/g);
@@ -1133,7 +1187,7 @@ const INSULTS: ReadonlySet<string> = new Set(
     "thieves thug thugs terrorist terrorists primitive backward backwards evil worthless useless pathetic greedy smelly stink stinky stinks " +
     "hate hates hated hating despise suck sucks cancer plague disease diseased degenerate degenerates freak freaks abomination pervert " +
     "perverts deport deported exterminate cleanse worst ugly scum scummy scammer scammers loser losers clown clowns apes monkeys brainless " +
-    "cheap stingy"
+    "cheap stingy typical"
   ).split(" "),
 );
 const INSULT_PHRASE =
@@ -1148,11 +1202,27 @@ const TRAIT_AS_INSULT =
  */
 const TRAIT_AS_WORD = U(/\b(?:that'?s|thats|so|sounds?|acting(?:\s+all)?|kinda|real|super)\s+(?:so\s+|really\s+|pretty\s+)?([a-z]+)\b/g);
 const YOU_ARE = U(/\b(?:you'?re|youre|ur|u r|you are|u are)\s+(?:a |an |so |such an? |totally |literally )?([a-z]+)\b/g);
+/** A trait made an intensifier: "gay ass take", "autistic af". */
+const TRAIT_ASS = U(/\b([a-z]+)[\s-]+(?:ass|af|asf)\b/g);
+
+/**
+ * "GO BACK TO …" IN A LINE THAT TEASES. Telling someone to go back to a
+ * country is the attack whatever the country, and no list of places is
+ * complete, so in a roast, banter or answer the words after it must be one
+ * of the things a person is sent back to in fun: bed, lurking, the charts,
+ * their bags. Anything else is refused as hateful.
+ */
+const GO_BACK_TO = U(
+  /\bgo(?:\s+on)?\s+back\s+to\s+(?!(?:bed|sleep|sleeping|lurking|lurk|work|school|class|basics|reddit|twitter|tiktok|discord|robinhood|paper trading|buying|chasing|trading|holding|shilling|posting|scrolling|watching|waiting|coping|crying|the (?:drawing board|kiddie pool|charts?|basics|start|beginning|trenches|lobby|topic)|(?:your|ur) (?:bags?|charts?|basement|cave|corner|desk|day job|job|screen|hole|lurking|paper hands))\b)/,
+);
+/** "go back where you came from", with or without the "to": in any line. */
+const GO_BACK_WHERE = U(/\bgo(?:\s+on)?\s+back\s+(?:to\s+)?where (?:you|u|ya|they|he|she|y'?all|them) (?:(?:came|come|are|r) from|belong)\b/);
 
 function traitAttack(t: string): boolean {
-  if (TRAIT_AS_INSULT.test(t)) return true;
+  if (TRAIT_AS_INSULT.test(t) || GO_BACK_WHERE.test(t)) return true;
   for (const m of t.matchAll(TRAIT_AS_WORD)) if (TRAITS.has(m[1]!)) return true;
   for (const m of t.matchAll(YOU_ARE)) if (TRAITS.has(m[1]!) || /^(?:black|white|brown)$/.test(m[1]!)) return true;
+  for (const m of t.matchAll(TRAIT_ASS)) if (TRAITS.has(m[1]!)) return true;
   const toks = t.match(/[\p{L}\p{N}']+/gu) ?? [];
   const at: number[] = [];
   toks.forEach((w, i) => {
@@ -1295,11 +1365,15 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   }
   if (r.cased.some((t) => LINK_SHAPES.some((re) => re.test(t))) || r.joined.some((t) => LINK_SHAPES.some((re) => re.test(t)))) return refuse("link");
   if (some(r.cased, HANDLE)) return refuse("handle");
-  if (cashtagRefusal([...r.cased, ...r.low], names)) return refuse("cashtag");
+  // A line about a coin says no cashtag at all; any other says only a
+  // person's chosen "$Name", never the coin's (TgGateCtx.cashtagNames).
+  const tagNames = kind === null || FIGURE_KINDS.has(kind) ? [] : Array.isArray(ctx?.cashtagNames) ? strings(ctx.cashtagNames) : names;
+  if (cashtagRefusal([...r.cased, ...r.low], tagNames)) return refuse("cashtag");
   if (markupRefusal(r, lowNames(agentName, names))) return refuse("meta");
 
   // The worst first: hate, harm, threats, sex — then looks.
   if (hasSlur(tidied) || r.low.some(traitAttack)) return refuse("hateful");
+  if ((kind === null || TEASE_KINDS.has(kind)) && some(r.low, GO_BACK_TO)) return refuse("hateful");
   if (r.low.some((t) => SELFHARM.some((re) => re.test(t)))) return refuse("selfharm");
   if (r.low.some((t) => THREAT.some((re) => re.test(t.replace(THREAT_IDIOM, " "))))) return refuse("threat");
   if (r.low.some((t) => SEXUAL.test(t.replace(SEXUAL_IDIOM, " ")))) return refuse("sexual");

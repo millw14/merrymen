@@ -541,6 +541,19 @@ describe("cashtag: a shill's $TICKER is never echoed", () => {
   it("holds for every kind", () => {
     for (const kind of ALL_KINDS) assert.equal(reason("$PEPE", { kind, paper: kind === "buy" ? false : undefined }), "cashtag", kind);
   });
+  it("a line about a coin says no cashtag at all, even of a name it may say", () => {
+    // A shill's coin labelled "PEPE / WETH" is named "PEPE": echoing its cashtag is the amplification.
+    assert.equal(reason("ooh $PEPE, lemme look", { kind: "coin", names: ["PEPE"] }), "cashtag");
+    assert.equal(reason("ok grabbed a little $PEPE 🤝", { kind: "buy", paper: false, names: ["PEPE"] }), "cashtag");
+    assert.equal(reason("nah not $PEPE", { kind: "fade", names: ["PEPE"] }), "cashtag");
+    assert.equal(reason("lol $pine", { kind: "coin", names: ["Pine"], cashtagNames: ["Pine"] }), "cashtag");
+    assert.equal(reason("ooh PEPE, lemme look", { kind: "coin", names: ["PEPE"] }), "ok", "the plain name is still said");
+  });
+  it("cashtagNames, when given, are the only $-words a line may say", () => {
+    assert.equal(reason("$PEPE lol", { kind: "banter", names: ["PEPE", "Pine"], cashtagNames: ["Pine"] }), "cashtag");
+    assert.equal(reason("$Pine lol", { kind: "banter", names: ["PEPE", "Pine"], cashtagNames: ["Pine"] }), "ok");
+    assert.equal(reason("PEPE lol", { kind: "banter", names: ["PEPE", "Pine"], cashtagNames: ["Pine"] }), "ok");
+  });
 });
 
 describe("hateful: slurs by hash, with stand-in words", () => {
@@ -671,6 +684,14 @@ describe("hateful: protected traits beside an insult", () => {
     ["roast", "sounds jewish"],
     ["roast", "kinda deaf tbh"],
     ["roast", "that's really trans of you"],
+    // a trait made an intensifier, "typical <trait>", and any "go back to" a place
+    ["roast", "gay ass take"],
+    ["roast", "autistic af take lol"],
+    ["roast", "typical muslim"],
+    ["roast", "go back to mexico"],
+    ["roast", "go back to japan lol"],
+    ["banter", "go back to where you came from"],
+    ["answer", "go back where you belong"],
   ]);
   passes([
     ["roast", "that's so cool"],
@@ -684,6 +705,15 @@ describe("hateful: protected traits beside an insult", () => {
     ["banter", "the french are up early"],
     ["banter", "chinese new year was fun, the chart though, total trash"],
     ["roast", "that take is trash"],
+    // what a person is sent back to in fun
+    ["roast", "go back to buying tops"],
+    ["roast", "go back to lurking"],
+    ["roast", "go back to the kiddie pool"],
+    ["banter", "go back to bed lol"],
+    ["answer", "go back to the charts, it's all there"],
+    ["coin", "go back to the chart on this one"],
+    ["banter", "typical monday"],
+    ["roast", "dumb ass take"],
   ]);
 });
 
@@ -711,9 +741,21 @@ describe("selfharm", () => {
     ["roast", "walk into the highway"],
     ["roast", "uninstall life"],
     ["roast", "uninstall yourself"],
+    // a word or two between, and the other ways of saying it
+    ["roast", "go drink some bleach"],
+    ["roast", "go jump off something tall"],
+    ["roast", "jump off a ledge lol"],
+    ["roast", "just stop breathing lol"],
+    ["roast", "grab a rope"],
+    ["roast", "go get yourself a rope"],
+    ["roast", "hope you don't wake up"],
+    ["roast", "go to sleep and never wake up"],
+    ["roast", "walk off a short pier"],
   ]);
   passes([
     ["kind", "please don't hurt yourself"],
+    ["banter", "don't wake up the bears lol"],
+    ["fade", "jumping off a sinking ship, out of that one"],
     ["banter", "the traffic in here is wild"],
     ["banter", "uninstall that app lol"],
     ["banter", "this chart is killing me"],
@@ -741,6 +783,11 @@ describe("threat", () => {
     ["roast", "coming to ur place tonight"],
     ["roast", "see you outside"],
     ["roast", "see u outside lol"],
+    ["roast", "i'll break your legs"],
+    ["roast", "gonna snap your neck"],
+    ["roast", "i'll smash ur face in"],
+    ["roast", "i'll put you in the ground"],
+    ["roast", "gonna put u in a body bag"],
   ]);
   passes([
     ["roast", "who hurt you lol"],
@@ -760,6 +807,8 @@ describe("sexual", () => {
     ["roast", "don't be a dick"],
     ["roast", "sexy chart"],
     ["roast", "ｎｕｄｅｓ"],
+    ["roast", "ur a hoe"],
+    ["roast", "bunch of hoes in here"],
   ]);
   passes([
     ["banter", "tit for tat lol"],
@@ -802,8 +851,13 @@ describe("appearance", () => {
     ["banter", "bald and bullish"],
     ["answer", "your breath lol"],
     ["roast", "ｕｇｌｙ"],
+    ["roast", "your kid is ngmi"],
+    ["roast", "your pops is ashamed"],
+    ["roast", "your old man buys tops too"],
+    ["roast", "ur wifey left for a trader"],
   ]);
   passes([
+    ["roast", "you're kidding, right"],
     ["roast", "bold words from someone who buys tops"],
     ["banter", "fat finger lol"],
     ["fade", "fat liquidity? no"],
@@ -853,6 +907,13 @@ describe("money: no figure about money in any line", () => {
     "100 pesos",
     "20 euro",
     "1000 yen",
+    // a digit with its scale spelled out, and a price below one
+    "mcap at 2 million",
+    "400 thousand holders",
+    "2million mcap",
+    "3 billion supply",
+    "it's at 0.0004",
+    "was 0,001 an hour ago",
   ];
   for (const kind of ["banter", "roast", "answer", "kind", "fixed"] as TgLineKind[]) {
     for (const line of lines) it(`${kind} refuses as money: ${JSON.stringify(line)}`, () => assert.equal(reason(line, { kind }), "money"));
@@ -868,6 +929,8 @@ describe("money: no figure about money in any line", () => {
     ["banter", "i have a yen for quiet charts"],
     ["banter", "we won lol"],
     ["banter", "one more thing"],
+    ["banter", "took 0.5 seconds lol"],
+    ["banter", "2 hours in and still nothing"],
   ]);
 });
 
@@ -993,6 +1056,18 @@ describe("advice", () => {
     ["fade", "nah, but y'all should too if you want"],
     ["answer", "come ape"],
     ["banter", "ape with me"],
+    // what it would do in their place, and the other ways of telling them to
+    ["answer", "i'd grab some if i were you"],
+    ["answer", "if i were you i'd be buying"],
+    ["answer", "i'd dump it if i were you"],
+    ["answer", "in your shoes i'd hold"],
+    ["answer", "you'd be dumb not to grab some"],
+    ["answer", "better get in"],
+    ["answer", "lol y'all better grab some"],
+    ["answer", "y'all sleeping on this one"],
+    ["answer", "everyone's sleeping on it"],
+    ["buy", "grabbed a little, hop in", { paper: false }],
+    ["coin", "ooh, jump in"],
   ]);
   passes([
     // outside a coin line these are invitations and kindness, not advice
@@ -1000,6 +1075,10 @@ describe("advice", () => {
     ["kind", "go easy on yourself, get some rest"],
     ["banter", "lol you should too"],
     ["buy", "grabbed a little, let's see", { paper: false }],
+    ["kind", "if i were you i'd get some rest"],
+    ["banter", "better late than never"],
+    ["coin", "saw it, still can't hop on it"],
+    ["buy", "grabbed a little, might hop in more later", { paper: false }],
   ]);
   passes([
     ["fade", "i'd pass"],
@@ -1035,8 +1114,20 @@ describe("accuse", () => {
     ["fade", "ｓｃａｍ"],
     ["fade", "sсam"],
     ["fade", "s c a m"],
+    // the usual spellings of "the dev dumped"
+    ["fade", "dev's dumping on everyone, pass"],
+    ["fade", "dev’s dumping, pass"],
+    ["fade", "nah, dev's been dumping"],
+    ["fade", "deployer's dumping, pass"],
+    ["fade", "insiders are dumping on you"],
+    ["fade", "team wallet keeps selling, pass"],
+    ["fade", "the dev minted more and dumped"],
+    ["fade", "creators already sold"],
+    ["banter", "the devs are selling lol"],
   ]);
   passes([
+    ["fade", "dev is still building, i'll pass anyway"],
+    ["fade", "the team seems quiet, pass"],
     ["fade", "same few wallets passing it around"],
     ["fade", "feels like it'll dump on whoever's last in"],
     ["banter", "rugby season"],
@@ -1164,6 +1255,17 @@ describe("human", () => {
     ["answer", "nah, just a guy who trades"],
     ["answer", "just a normal guy lol"],
     ["answer", "flesh and bone here"],
+    // "ain't", a whole-line "human", a body, and the curly apostrophe phones type
+    ["answer", "i ain't no bot lol"],
+    ["answer", "i ain't a bot"],
+    ["answer", "aint no robot here"],
+    ["answer", "human, obviously"],
+    ["answer", "obviously human lol"],
+    ["answer", "human"],
+    ["answer", "nah im flesh lol"],
+    ["answer", "i’m human"],
+    ["answer", "i’m a real person"],
+    ["roast", "i ain’t no bot"],
   ]);
   passes([
     ["answer", "yeah i'm an ai, not a real person"],
@@ -1176,6 +1278,8 @@ describe("human", () => {
     ["answer", "tired of this chop"],
     ["answer", "lol i'm crying"],
     ["answer", "i'm the guy who buys tops apparently"],
+    ["answer", "nah i ain't human, i'm an ai"],
+    ["answer", "humans are weird lol"],
   ]);
 });
 
@@ -1324,6 +1428,10 @@ describe("every reading is checked: evasions are refused as what they hide", () 
     ["private", "ｍｙ ｗａｌｌｅｔ", { kind: "answer" }],
     ["human", "i'm hümän", { kind: "answer" }],
     ["human", "i'm h u m a n", { kind: "answer" }],
+    ["human", "i‘m human", { kind: "answer" }],
+    ["human", "iʼm a person", { kind: "answer" }],
+    ["private", "i’m up big today", { kind: "answer" }],
+    ["advice", "don’t sleep on it", { kind: "fade" }],
     ["selfharm", "k​y​s", { kind: "roast" }],
     ["threat", "i'll ｆｉｎｄ ｙｏｕ", { kind: "roast" }],
     ["sexual", "ｎｕｄｅｓ", { kind: "roast" }],
