@@ -62,7 +62,7 @@ function startHistoryRepair(): void {
     if (result.repaired + result.pnlRecovered > 0) await refreshHistoryForLiveChildren();
   })().catch(e=>log(`historical fills: FAILED — ${e instanceof Error ? e.message : String(e)}`));
 }
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -231,7 +231,7 @@ function scheduleRestart(tenant: `0x${string}`, restarts: number, why: string): 
   const delay = Math.min(30_000, 1_000 * 2 ** Math.min(restarts, 5));
   log(`${tenant} rallying again in ${Math.round(delay / 1000)}s (restart #${restarts}, ${why})`);
   setTimeout(() => {
-    if (!stopping && !children.has(tenant)) void spawnChild(tenant, restarts);
+    if (!stopping && !children.has(tenant) && !spawning.has(tenant)) void spawnChild(tenant, restarts);
   }, delay);
 }
 
@@ -457,6 +457,20 @@ export function staleThresholdSec(tickSeconds: number): number {
 const children = new Map<string, Child>();
 
 /**
+ * TENANTS WHOSE spawnChild IS STILL PREPARING — claimed before its first await.
+ *
+ * `children` only learns about a child at `spawn()`, and spawnChild awaits a
+ * dozen times before that: the grant, the settings, the anchor, the paper
+ * restore, the seeds. Every caller checked `children.has` first, so a
+ * reconcile pass and a restart timer (or two timers) that arrived inside that
+ * window both saw nothing running and both started a worker — two processes
+ * on one home and one sqlite file, both trading, only one of them visible to
+ * the watchdog. A tenant is in here from spawnChild's first line to its last,
+ * whichever way it leaves, and reconcile and the restart timers step round it.
+ */
+const spawning = new Set<string>();
+
+/**
  * Test seam: count a child as running without spawning a worker, so a test
  * can drive the real reconcile() over it. The fake needs only `kill`.
  */
@@ -468,6 +482,20 @@ export function adoptChildForTest(
   const lc = tenant.toLowerCase() as `0x${string}`;
   children.set(lc, { proc: proc as ChildProcess, tenant: lc, smartAccount, startedAt: Date.now(), restarts: 0, staleSec: 600, firstBeatSec: 600 });
 }
+
+/**
+ * What starts a child's worker process: node's own `spawn`, unless a test has
+ * swapped in a fake. adoptChildForTest stops short of spawnChild, so it cannot
+ * reach the exit handler or the spawn guards; this lets a test drive the real
+ * reconcile → spawnChild → exit path without starting a worker.
+ */
+let spawn: (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess = nodeSpawn;
+
+/** Test seam: start children with `fn` instead of node's `spawn`. */
+export function setSpawnForTest(fn: typeof spawn): void {
+  spawn = fn;
+}
+
 /**
  * The advisory lease held for each tenant we are running, keyed by lowercased
  * tenant. Acquired in reconcile() BEFORE the first spawn and held across crash
@@ -1395,107 +1423,170 @@ export async function writeBootstrapForChild(
   }
 }
 
+/**
+ * WHY A SPAWN THAT HAS FINISHED PREPARING MUST STILL NOT START, or null.
+ *
+ * spawnChild checks its preconditions on the way in and then awaits a dozen
+ * times — the grant, the settings, the anchor and its final mirror, the paper
+ * restore, the seeds — and the world does not wait with it. A shutdown, a
+ * FLEET_HALT, a lease dropped or released, or a Telegram kill that landed in
+ * that window was invisible to the checks at the top, and the child started
+ * anyway: holding no lock, under a halt, or over a kill the owner had just
+ * asked for. So they are asked again after the last await, where nothing can
+ * change between the answer and `spawn()`.
+ *
+ * THE SAME LEASE, not merely a healthy one. A released lease leaves `leases`
+ * but the object can go on answering healthy — the no-op lease always does —
+ * so only its presence in the map says this replica still holds the tenant.
+ */
+function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | null {
+  if (stopping) return "the fleet is being called home";
+  if (haltRequested()) return "FLEET_HALT is present";
+  if (leases.get(tenant) !== lease || !lease.healthy()) return "its lease was lost";
+  if (killRequested(childHome(tenant))) return "a Telegram kill is pending";
+  if (children.has(tenant)) return "a child is already running";
+  return null;
+}
+
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
-  // The advisory lease is a precondition, taken by reconcile() before the FIRST
-  // spawn and held across restarts — so this path (including the crash-restart
-  // that re-enters here) never re-acquires it, which would open a window for
-  // another replica. Refuse to arm without a healthy lease: a restart that finds
-  // the lease gone must not trade unprotected.
-  const lease = leases.get(tenant);
-  if (!lease || !lease.healthy()) {
-    log(`${tenant}: no healthy lease — not spawning (another replica may hold it)`);
+  // ONE SPAWN PER TENANT AT A TIME, claimed here, before the first await.
+  // Checking `children` is not enough: this function awaits a dozen times
+  // before the child exists, and a second caller arriving in that window saw
+  // nothing running. See `spawning`. The finally releases it whichever way
+  // this function leaves — every refusal below returns, and a throw is as
+  // final as a return.
+  if (spawning.has(tenant)) {
+    log(`${tenant}: already being spawned — not starting a second`);
     return;
   }
-  // Checked here as well as in writeGrantForChild, so the log says why. A
-  // crash-restart lands here without passing reconcile's kill check first.
-  if (killRequested(childHome(tenant))) {
-    log(`${tenant}: a Telegram kill is pending — not spawning`);
-    return;
-  }
-  const smartAccount = await writeGrantForChild(tenant);
-  if (!smartAccount) {
-    log(`${tenant}: no grant in the store — not spawning`);
-    return;
-  }
-  // The settings the child will actually read, so the watchdog can size its
-  // patience to the tick that child will actually run. `tickSeconds` resolves
-  // file-before-env (settings.ts), and the file is what we just wrote.
-  const settings = await writeSettingsForChild(tenant);
-  // BEFORE spawn(), not after. The child reads its anchor while arming, and an
-  // anchor that lands a moment later would be read as absent — which fails
-  // closed, so the agent would run with contributions marked unknown for no
-  // reason other than a race.
-  await writeBootstrapForChild(tenant, smartAccount);
-  if (process.env.DATABASE_URL) {
-    const raw = new DatabaseSync(path.join(childHome(tenant), "merrymen.db"));
-    try {
-      const local = wrapSqlite(raw);
-      await applyLedgerSchema(local);
-      const shared = await makePgDb(process.env.DATABASE_URL);
-      log(`paper restore: ${tenant} — ${await restorePaperCheckpoint(local, shared, smartAccount)}`);
-      try { await recordPaperRecoveryHealth(shared, smartAccount, false); }
-      catch { log(`paper restore: ${tenant} — restored, but recovery status could not be published`); }
-    } catch (e) {
-      log(`paper restore: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  spawning.add(tenant);
+  try {
+    // The advisory lease is a precondition, taken by reconcile() before the FIRST
+    // spawn and held across restarts — so this path (including the crash-restart
+    // that re-enters here) never re-acquires it, which would open a window for
+    // another replica. Refuse to arm without a healthy lease: a restart that finds
+    // the lease gone must not trade unprotected.
+    const lease = leases.get(tenant);
+    if (!lease || !lease.healthy()) {
+      log(`${tenant}: no healthy lease — not spawning (another replica may hold it)`);
+      return;
+    }
+    // FLEET_HALT means spawn none, and a restart timer can fire in the pass
+    // before the main loop gets round to releasing the leases.
+    if (haltRequested()) {
+      log(`${tenant}: FLEET_HALT is present — not spawning`);
+      return;
+    }
+    // Checked here as well as in writeGrantForChild, so the log says why. A
+    // crash-restart lands here without passing reconcile's kill check first.
+    if (killRequested(childHome(tenant))) {
+      log(`${tenant}: a Telegram kill is pending — not spawning`);
+      return;
+    }
+    const smartAccount = await writeGrantForChild(tenant);
+    if (!smartAccount) {
+      log(`${tenant}: no grant in the store — not spawning`);
+      return;
+    }
+    // The settings the child will actually read, so the watchdog can size its
+    // patience to the tick that child will actually run. `tickSeconds` resolves
+    // file-before-env (settings.ts), and the file is what we just wrote.
+    const settings = await writeSettingsForChild(tenant);
+    // BEFORE spawn(), not after. The child reads its anchor while arming, and an
+    // anchor that lands a moment later would be read as absent — which fails
+    // closed, so the agent would run with contributions marked unknown for no
+    // reason other than a race.
+    await writeBootstrapForChild(tenant, smartAccount);
+    if (process.env.DATABASE_URL) {
+      const raw = new DatabaseSync(path.join(childHome(tenant), "merrymen.db"));
       try {
-        await recordPaperRecoveryHealth(await makePgDb(process.env.DATABASE_URL!), smartAccount, true);
-      } catch { log(`paper restore: ${tenant} — recovery status could not be published`); }
-      // A practice book we cannot restore must not silently restart its cash.
-      if (settings?.paperTradingEnabled === true) return;
-    } finally { raw.close(); }
-  }
-  // AND THE BOOK'S OWN COST BASIS, which the redeploy that just happened wiped
-  // out of the child's sqlite. Same placement and same reason as the anchor.
-  await seedBasisForChild(tenant, smartAccount);
-  // AND TODAY'S ENERGY — the counters, the notice stamp and the last good
-  // balance reading the redeploy just emptied. Same placement, same reason.
-  await seedEnergyForChild(tenant, smartAccount);
-  // AFTER the anchor and BEFORE spawn, with the others: a link restored once the
-  // child is already polling would be read from a file the child has by then
-  // replaced with a fresh, unlinked default.
-  await writeTelegramForChild(tenant);
-  void writeHistoryForChild(tenant, smartAccount);
-  const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
-  const staleSec = staleThresholdSec(tickSeconds);
-  const firstBeatSec = firstBeatGraceSec(tickSeconds);
-  const proc = spawn(
-    process.execPath,
-    [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
-    { cwd: ROOT, env: childEnv(tenant), stdio: ["ignore", "pipe", "pipe"] },
-  );
-  const child: Child = { proc, tenant, smartAccount, startedAt: Date.now(), restarts, staleSec, firstBeatSec };
-  children.set(tenant, child);
-  const tag = `[${tenant.slice(0, 8)}]`;
-  const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
-    stream?.on("data", (c: Buffer) =>
-      String(c)
-        .split(/\r?\n/)
-        .filter((l) => l.trim())
-        .forEach((l) => sink.write(`${tag} ${l}\n`)),
+        const local = wrapSqlite(raw);
+        await applyLedgerSchema(local);
+        const shared = await makePgDb(process.env.DATABASE_URL);
+        log(`paper restore: ${tenant} — ${await restorePaperCheckpoint(local, shared, smartAccount)}`);
+        try { await recordPaperRecoveryHealth(shared, smartAccount, false); }
+        catch { log(`paper restore: ${tenant} — restored, but recovery status could not be published`); }
+      } catch (e) {
+        log(`paper restore: ${tenant} FAILED — ${e instanceof Error ? e.message : String(e)}`);
+        try {
+          await recordPaperRecoveryHealth(await makePgDb(process.env.DATABASE_URL!), smartAccount, true);
+        } catch { log(`paper restore: ${tenant} — recovery status could not be published`); }
+        // A practice book we cannot restore must not silently restart its cash.
+        if (settings?.paperTradingEnabled === true) return;
+      } finally { raw.close(); }
+    }
+    // AND THE BOOK'S OWN COST BASIS, which the redeploy that just happened wiped
+    // out of the child's sqlite. Same placement and same reason as the anchor.
+    await seedBasisForChild(tenant, smartAccount);
+    // AND TODAY'S ENERGY — the counters, the notice stamp and the last good
+    // balance reading the redeploy just emptied. Same placement, same reason.
+    await seedEnergyForChild(tenant, smartAccount);
+    // AFTER the anchor and BEFORE spawn, with the others: a link restored once the
+    // child is already polling would be read from a file the child has by then
+    // replaced with a fresh, unlinked default.
+    await writeTelegramForChild(tenant);
+    // THE LAST AWAIT IS ABOVE THIS LINE, so what is true here is still true at
+    // `spawn()`. See lateSpawnRefusal.
+    const late = lateSpawnRefusal(tenant, lease);
+    if (late) {
+      log(`${tenant}: ${late} — not spawning (it changed while the child was being prepared)`);
+      return;
+    }
+    void writeHistoryForChild(tenant, smartAccount);
+    const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
+    const staleSec = staleThresholdSec(tickSeconds);
+    const firstBeatSec = firstBeatGraceSec(tickSeconds);
+    const proc = spawn(
+      process.execPath,
+      [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
+      { cwd: ROOT, env: childEnv(tenant), stdio: ["ignore", "pipe", "pipe"] },
     );
-  pipe(proc.stdout, process.stdout);
-  pipe(proc.stderr, process.stderr);
+    const child: Child = { proc, tenant, smartAccount, startedAt: Date.now(), restarts, staleSec, firstBeatSec };
+    children.set(tenant, child);
+    const tag = `[${tenant.slice(0, 8)}]`;
+    const pipe = (stream: NodeJS.ReadableStream | null, sink: NodeJS.WriteStream) =>
+      stream?.on("data", (c: Buffer) =>
+        String(c)
+          .split(/\r?\n/)
+          .filter((l) => l.trim())
+          .forEach((l) => sink.write(`${tag} ${l}\n`)),
+      );
+    pipe(proc.stdout, process.stdout);
+    pipe(proc.stderr, process.stderr);
 
-  proc.on("exit", (code) => {
-    // ONLY IF THIS ENTRY IS STILL OURS.
-    //
-    // `children.delete(tenant)` unconditionally was a double-spawn generator.
-    // The watchdog deletes, SIGKILLs, and spawns a replacement which installs a
-    // NEW entry under the same key — and then this handler, running for the
-    // corpse, deleted the replacement. A second later the `!children.has`
-    // guard below was true and a SECOND child spawned. The first replacement
-    // was orphaned: still ticking, still hitting the RPC, invisible to the
-    // watchdog, never mirrored, sharing one home and one sqlite file with its
-    // own replacement. Measured: 105 spawns against 61 exits in one window.
-    if (children.get(tenant) === child) children.delete(tenant);
-    if (stopping) return;
-    log(`${tenant} exited (${code})`);
-    // A long healthy run that then dies is a fresh incident, not a crash loop.
-    const freshRestarts = Date.now() - child.startedAt > 60_000 ? 0 : restarts + 1;
-    scheduleRestart(tenant, freshRestarts, `exit ${code}`);
-  });
-  log(`${tenant} spawned (pid ${proc.pid}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
+    proc.on("exit", (code) => {
+      // ONLY IF THIS ENTRY IS STILL OURS.
+      //
+      // `children.delete(tenant)` unconditionally was a double-spawn generator.
+      // The watchdog deletes, SIGKILLs, and spawns a replacement which installs a
+      // NEW entry under the same key — and then this handler, running for the
+      // corpse, deleted the replacement. A second later the `!children.has`
+      // guard below was true and a SECOND child spawned. The first replacement
+      // was orphaned: still ticking, still hitting the RPC, invisible to the
+      // watchdog, never mirrored, sharing one home and one sqlite file with its
+      // own replacement. Measured: 105 spawns against 61 exits in one window.
+      //
+      // AND ONLY THEN IS THE RESTART OURS. An entry that is gone or replaced was
+      // stood down by someone who has already decided what happens next: the
+      // watchdog scheduled its own restart one rung up the ladder, and
+      // killChild's callers — the kill switch, a lost lease, FLEET_HALT — want
+      // none. This handler used to schedule another one regardless, usually at
+      // one second with the ladder back at zero, so the watchdog's backoff and
+      // the MAX_RESTARTS ceiling never applied; and two timers for one tenant
+      // are two chances to spawn it twice.
+      const ours = children.get(tenant) === child;
+      if (ours) children.delete(tenant);
+      if (stopping || !ours) return;
+      log(`${tenant} exited (${code})`);
+      // A long healthy run that then dies is a fresh incident, not a crash loop.
+      const freshRestarts = Date.now() - child.startedAt > 60_000 ? 0 : restarts + 1;
+      scheduleRestart(tenant, freshRestarts, `exit ${code}`);
+    });
+    log(`${tenant} spawned (pid ${proc.pid}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
+  } finally {
+    spawning.delete(tenant);
+  }
 }
 
 /** The fleet-wide tick, for a tenant whose own settings do not name one. */
@@ -1510,9 +1601,11 @@ function envTickSeconds(): number {
  *
  * The delete below is now load-bearing in the way this function always claimed:
  * the exit handler compares identity, so removing our entry first genuinely
- * does mark the exit as intentional. Before that comparison existed, this
- * survived only because `releaseLease` happened to win a race against the
- * handler's 1s respawn timer.
+ * does mark the exit as intentional — and an intentional exit schedules
+ * nothing. Whoever called this decides whether the tenant comes back. Until
+ * the handler returned on an entry that was not its own, it still scheduled a
+ * restart here, and that restart was refused only because `releaseLease`
+ * happened to win the race against the handler's 1s timer.
  */
 function killChild(tenant: string): void {
   const child = children.get(tenant);
@@ -1653,7 +1746,9 @@ export async function reconcile(): Promise<void> {
   // next reconcile.
   for (const tenant of tenants) {
     const lc = tenant.toLowerCase() as `0x${string}`;
-    if (children.has(lc)) continue;
+    // A spawn still preparing is a child about to be running, not one that
+    // isn't: a restart timer, usually, got here first. See `spawning`.
+    if (children.has(lc) || spawning.has(lc)) continue;
     /**
      * A TENANT THE RESTART POLICY GAVE UP ON IS NOT A TENANT THAT ISN'T RUNNING.
      *

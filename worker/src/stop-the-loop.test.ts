@@ -78,10 +78,10 @@ describe("A2 — the exit handler only cleans up its own child", () => {
     // ticking, still hitting the RPC, invisible to the watchdog.
     // Measured: 105 spawns against 61 exits in one window.
     const src = strip(at("./orchestrator.ts"));
-    assert.match(src, /if \(children\.get\(tenant\) === child\) children\.delete\(tenant\);/);
+    assert.match(src, /const ours = children\.get\(tenant\) === child;\s*if \(ours\) children\.delete\(tenant\);/);
     // And the unconditional form must be gone from the exit path.
     const exitAt = src.indexOf('proc.on("exit"');
-    const guardAt = src.indexOf("if (children.get(tenant) === child)", exitAt);
+    const guardAt = src.indexOf("const ours = children.get(tenant) === child;", exitAt);
     assert.ok(exitAt > 0 && guardAt > exitAt, "the guard must be inside the exit handler");
     // THE RESPAWN MOVED, THE PROPERTY DID NOT. Both restart paths now go
     // through `scheduleRestart` — the watchdog used to spawn on the line after
@@ -91,10 +91,31 @@ describe("A2 — the exit handler only cleans up its own child", () => {
     // again fails loudly instead of silently finding nothing.
     const policy = src.slice(src.indexOf("function scheduleRestart("), src.indexOf("async function spawnChild("));
     assert.match(policy, /!stopping && !children\.has\(tenant\)/, "no respawn over a live child");
+    assert.match(policy, /!spawning\.has\(tenant\)/, "nor over one still being prepared");
     assert.ok(
       !/proc\.on\("exit"[\s\S]{0,600}spawnChild\(/.test(src),
       "the exit handler must not spawn directly — it goes through the one policy",
     );
+  });
+
+  it("AND ONLY ITS OWN CHILD'S EXIT SCHEDULES A RESTART", () => {
+    // Deleting only its own entry stopped the corpse evicting its
+    // replacement, but the handler still went on to schedule a restart of its
+    // own. After a watchdog kill that was a second timer beside the
+    // watchdog's — usually at one second with the ladder back at zero, so the
+    // backoff and MAX_RESTARTS never applied — and after the kill switch, a
+    // lost lease or FLEET_HALT it was a restart nobody wanted, refused only
+    // because the lease happened to be gone by the time it fired. An entry
+    // that is gone or replaced was stood down by someone who has already
+    // decided what happens next; double-spawn.integration.test.ts drives it.
+    const src = strip(at("./orchestrator.ts"));
+    const exitAt = src.indexOf('proc.on("exit"');
+    const handler = src.slice(exitAt, src.indexOf("});", exitAt));
+    assert.match(handler, /if \(stopping \|\| !ours\) return;/);
+    const standAside = handler.indexOf("if (stopping || !ours) return;");
+    const restart = handler.indexOf("scheduleRestart(");
+    assert.ok(standAside > 0 && restart > standAside, "it returns before scheduleRestart when the entry is not its own");
+    assert.ok(handler.indexOf("exited (") > standAside, "and says nothing about an exit it does not own");
   });
 
   it("the watchdog logs the threshold it actually applied", () => {

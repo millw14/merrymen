@@ -30,6 +30,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
+import ts from "typescript";
 
 const orch = () => readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
 
@@ -44,10 +45,25 @@ describe("there is exactly one restart policy", () => {
       !/kill\("SIGKILL"\);[\s\S]{0,200}void spawnChild\(/.test(src),
       "the watchdog must not restart on the same line as the kill",
     );
+    // AND IT IS THE ONLY RESTART. The entry goes before the kill, so the
+    // corpse's exit handler finds it is not its own and stands aside rather
+    // than scheduling a second, one-second, restart-count-zero restart that
+    // always won — which is what kept this ladder from ever climbing.
+    const deleted = watchdog.indexOf("children.delete(tenant);");
+    assert.ok(deleted > 0 && deleted < watchdog.indexOf('child.proc.kill("SIGKILL")'), "the entry goes before the kill");
   });
 
-  it("and so does an exit", () => {
-    assert.match(orch(), /scheduleRestart\(tenant, freshRestarts, `exit \$\{code\}`\)/);
+  it("and so does an exit — of a child that is still its own", () => {
+    const src = orch();
+    assert.match(src, /scheduleRestart\(tenant, freshRestarts, `exit \$\{code\}`\)/);
+    // An exit whose entry is gone or replaced was stood down by somebody who
+    // already decided (stop-the-loop.test.ts, A2).
+    const exitAt = src.indexOf('proc.on("exit"');
+    const handler = src.slice(exitAt, src.indexOf("});", exitAt));
+    assert.ok(
+      handler.indexOf("if (stopping || !ours) return;") < handler.indexOf("scheduleRestart(tenant, freshRestarts"),
+      "only its own child's exit reaches the policy",
+    );
   });
 
   it("and the policy itself both waits and gives up", () => {
@@ -87,5 +103,105 @@ describe("reconcile cannot undo the ceiling", () => {
     // time reconcile looks, which is exactly how it saw a clean slate.
     const src = orch();
     assert.match(src, /const gaveUpUntil = new Map<string, \{ until: number; restarts: number \}>\(\);/);
+  });
+});
+
+/**
+ * ONE SPAWN PER TENANT AT A TIME.
+ *
+ * spawnChild awaits a dozen times between "nothing is running" and `spawn()`,
+ * and every caller checked only `children`, which learns about a child at
+ * `spawn()`. So a reconcile pass and a restart timer arriving inside that
+ * window both started a worker: two processes on one home and one sqlite
+ * file, both trading. Pinned through the TypeScript parser, so a comment or a
+ * string holding the words cannot satisfy it; double-spawn.integration.test.ts
+ * drives the same paths through the real reconcile().
+ */
+describe("a tenant being spawned is not a tenant that isn't running", () => {
+  const AST = ts.createSourceFile("orchestrator.ts", orch(), ts.ScriptTarget.Latest, true);
+  const fn = (name: string) => {
+    const f = AST.statements.find((s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === name);
+    assert.ok(f?.body, `${name} must exist`);
+    return f;
+  };
+  const all = (root: ts.Node, keep: (n: ts.Node) => boolean): ts.Node[] => {
+    const out: ts.Node[] = [];
+    const visit = (n: ts.Node) => {
+      if (keep(n)) out.push(n);
+      ts.forEachChild(n, visit);
+    };
+    visit(root);
+    return out;
+  };
+  const calls = (root: ts.Node, name: string) =>
+    all(root, (n) => ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === name);
+  const within = (n: ts.Node, outer: ts.Node) => n.getStart() >= outer.getStart() && n.getEnd() <= outer.getEnd();
+
+  it("SPAWNCHILD REFUSES A SECOND ENTRY, AND CLAIMS THE TENANT BEFORE ITS FIRST AWAIT", () => {
+    const spawn = fn("spawnChild");
+    const stmts = [...spawn.body!.statements];
+    const refuse = stmts.findIndex(
+      (s) => ts.isIfStatement(s) && s.expression.getText() === "spawning.has(tenant)" && all(s.thenStatement, ts.isReturnStatement).length > 0,
+    );
+    const claim = stmts.findIndex((s) => s.getText() === "spawning.add(tenant);");
+    assert.ok(refuse >= 0, "a tenant already in `spawning` is refused");
+    assert.ok(claim > refuse, "and the claim follows the refusal");
+    const firstAwait = all(spawn, ts.isAwaitExpression)[0];
+    assert.ok(firstAwait && stmts[claim]!.getEnd() < firstAwait.getStart(), "synchronously — before anything can interleave");
+  });
+
+  it("AND RELEASES IT HOWEVER IT LEAVES", () => {
+    // A leaked claim is a tenant reconcile never spawns again. Every return
+    // and every await after the claim sits inside one try whose finally
+    // releases it, and that try is the rest of the function.
+    const spawn = fn("spawnChild");
+    const stmts = [...spawn.body!.statements];
+    const claim = stmts.findIndex((s) => s.getText() === "spawning.add(tenant);");
+    const guarded = stmts[claim + 1];
+    assert.ok(guarded && ts.isTryStatement(guarded), "the statement after the claim is a try");
+    assert.equal(claim + 2, stmts.length, "and nothing follows it");
+    assert.ok(guarded.finallyBlock && /spawning\.delete\(tenant\)/.test(guarded.finallyBlock.getText()), "its finally releases the claim");
+    const after = (n: ts.Node) => n.getStart() > stmts[claim]!.getEnd();
+    for (const r of all(spawn, ts.isReturnStatement).filter(after)) {
+      // The exit handler's own returns are inside the try as well; they leave
+      // the handler, not spawnChild, and are covered by the same check.
+      assert.ok(within(r, guarded.tryBlock), `return at ${r.getStart()} is inside the try`);
+    }
+    for (const a of all(spawn, ts.isAwaitExpression)) assert.ok(within(a, guarded.tryBlock), "every await is inside the try");
+  });
+
+  it("RECONCILE AND THE RESTART TIMER STEP ROUND A SPAWN IN PROGRESS", () => {
+    const rec = fn("reconcile");
+    const skip = all(
+      rec,
+      (n) => ts.isIfStatement(n) && n.expression.getText() === "children.has(lc) || spawning.has(lc)" && ts.isContinueStatement(n.thenStatement),
+    )[0];
+    assert.ok(skip, "reconcile skips a tenant that is running or being spawned");
+    const spawnCall = calls(rec, "spawnChild")[0];
+    const leaseCall = calls(rec, "acquireTenantLease")[0];
+    assert.ok(spawnCall && leaseCall && skip.getEnd() < leaseCall.getStart(), "before it takes a lease or spawns");
+
+    const policy = fn("scheduleRestart");
+    const timerSpawn = calls(policy, "spawnChild")[0];
+    assert.ok(timerSpawn, "the timer spawns through spawnChild");
+    let guard: ts.IfStatement | undefined;
+    for (let p: ts.Node | undefined = timerSpawn.parent; p && p !== policy; p = p.parent) if (ts.isIfStatement(p)) guard = p;
+    assert.ok(guard && /!spawning\.has\(tenant\)/.test(guard.expression.getText()), "and only when no spawn is in progress");
+  });
+
+  it("THE PRECONDITIONS ARE ASKED AGAIN AFTER THE LAST AWAIT, BEFORE spawn()", () => {
+    // Checked on the way in, then a dozen awaits: a shutdown, a FLEET_HALT, a
+    // lease dropped or released, or a Telegram kill landing in between was
+    // invisible, and the child started anyway.
+    const spawn = fn("spawnChild");
+    const late = calls(spawn, "lateSpawnRefusal")[0];
+    const started = calls(spawn, "spawn")[0];
+    assert.ok(late && started, "spawnChild asks again, and spawns");
+    for (const a of all(spawn, ts.isAwaitExpression)) assert.ok(a.getEnd() < late.getStart(), "after every await");
+    assert.ok(late.getEnd() < started.getStart(), "and before the worker starts");
+    const refusal = fn("lateSpawnRefusal").body!.getText();
+    for (const asked of ["stopping", "haltRequested()", "leases.get(tenant) !== lease", "lease.healthy()", "killRequested(childHome(tenant))"]) {
+      assert.ok(refusal.includes(asked), `it asks ${asked}`);
+    }
   });
 });
