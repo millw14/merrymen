@@ -15,6 +15,8 @@ import { readDeskPositions } from "@/lib/desk-positions";
 import { readOwnerTape, readRunEpoch } from "@/lib/desk-trades";
 import { hostedAgentFor } from "@/lib/agent-for";
 import { identityOf as identityFrom, type FeedIdentity, type IdentitySources } from "@/lib/feed-identity";
+import { readMeasuredMark } from "@/lib/held-marks";
+import type { FeedMeasured } from "@/lib/feed-pnl";
 
 /**
  * Where identity is read from on this deploy — see lib/feed-identity.ts for
@@ -141,6 +143,16 @@ export interface FeedResponse {
    */
   netContributionsUsdg: number | null;
   /**
+   * WHAT A RETURN IS MEASURED AT (lib/feed-pnl.ts): the newest mark of the
+   * `equity` book NOT taken while flow inference was held, and the net
+   * contributions booked at or before it. `equity` keeps held marks — they are
+   * the book's value — but one can carry a top-up or withdrawal the flows
+   * table has not booked yet, and a return over it calls the owner's own cash
+   * profit or loss for as long as the hold lasts. Null when that book has no
+   * measured mark yet.
+   */
+  measured: FeedMeasured | null;
+  /**
    * Gas paid in USDG, and how many landed trades' gas could NOT be priced.
    * P&L is equity − contributions − gas; the count is what says whether that is
    * the full gas cost or only the priceable part.
@@ -172,6 +184,7 @@ async function emptyFeed(tenant: `0x${string}` | null = null): Promise<FeedRespo
     // an unconfigured name here is a fallback and says so.
     agent: await identityOf(null, tenant),
     netContributionsUsdg: null,
+    measured: null,
     gasUsdg: 0,
     gasUnpricedTrades: 0,
     landed: 0,
@@ -216,6 +229,7 @@ export async function GET(req: Request) {
     // The ledger's name, or null until it is read — see resolveAgentName.
     let name: string | null = null;
     let netContributionsUsdg: number | null = null;
+    let measured: FeedMeasured | null = null;
     let gasUsdg = 0;
     let gasUnpricedTrades = 0;
     // WHOSE numbers these are. Re-granting mints a new smart account and leaves
@@ -374,6 +388,24 @@ export async function GET(req: Request) {
       /* flows arrives with a worker migration — null, never zero */
     }
     try {
+      // The return's pair: the newest measured mark and what was booked by it.
+      // Read on its own, not off the tail of `equity`: a dropped op holds for
+      // 26 hours, and 900 rows is not always that far back.
+      const m = await readMeasuredMark(db, scope, epoch);
+      if (m) {
+        const row = (await db
+          .prepare(
+            `SELECT COUNT(*) AS n,
+                    COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
+               FROM flows WHERE agent_id = ?${epochWhere} AND at <= ?`,
+          )
+          .get(scope, ...epochArg, m.at)) as { n: number; net: number } | undefined;
+        measured = { equityUsdg: m.equity, at: fmtEpoch(m.at), netContributionsUsdg: !row || row.n === 0 ? null : row.net };
+      }
+    } catch {
+      /* no equity or flows table yet: nothing measured, and the page says so */
+    }
+    try {
       const row = (await db
         .prepare(
           `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
@@ -415,6 +447,7 @@ export async function GET(req: Request) {
       financials,
       agent: await identityOf(name, tenant),
       netContributionsUsdg,
+      measured,
       gasUsdg,
       gasUnpricedTrades,
       landed,
