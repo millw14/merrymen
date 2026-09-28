@@ -255,6 +255,33 @@ describe("enable — the warning's confirm", () => {
     assert.equal((await post(OWNER_A, { action: "enable", xUserId: X_USER.id, owner: OWNER_A })).status, 409);
   });
 
+  it("keeps the zone the consent came from, canonical, for quiet hours when the room has none", async () => {
+    await connect(OWNER_A);
+    const ok = await post(OWNER_A, { action: "enable", xUserId: X_USER.id, owner: OWNER_A, tz: "america/new_york" });
+    assert.deepEqual(await read(ok), { ok: true, postingEnabled: true });
+    assert.equal((await getAccount(w.db, OWNER_A))?.tz, "America/New_York");
+  });
+
+  it("a zone that says nothing about where the owner is never refuses the consent, and never replaces a real one", async () => {
+    await connect(OWNER_A);
+    await post(OWNER_A, { action: "enable", xUserId: X_USER.id, owner: OWNER_A, tz: "Asia/Tokyo" });
+    // Privacy browsers report UTC or Reykjavik for everybody; the rest is not a zone at all.
+    for (const tz of ["UTC", "Etc/UTC", "Etc/GMT+5", "GMT", "Atlantic/Reykjavik", "Iceland", "Mars/Olympus", "+05:30", 42, "", null, undefined, "x".repeat(300)]) {
+      await post(OWNER_A, { action: "disable", owner: OWNER_A });
+      const res = await post(OWNER_A, { action: "enable", xUserId: X_USER.id, owner: OWNER_A, tz });
+      assert.deepEqual(await read(res), { ok: true, postingEnabled: true }, String(tz));
+      const account = await getAccount(w.db, OWNER_A);
+      assert.equal(account?.posting, true, String(tz));
+      assert.equal(account?.tz, "Asia/Tokyo", `${String(tz)} replaced the stored zone`);
+    }
+  });
+
+  it("a consent with no zone at all stores none", async () => {
+    await connect(OWNER_A);
+    await post(OWNER_A, { action: "enable", xUserId: X_USER.id, owner: OWNER_A, tz: "UTC" });
+    assert.equal((await getAccount(w.db, OWNER_A))?.tz, null);
+  });
+
   it("refuses an id that is not one, and is unavailable without the X app", async () => {
     await connect(OWNER_A);
     assert.equal((await post(OWNER_A, { action: "enable", xUserId: 1234567890, owner: OWNER_A })).status, 400);
@@ -344,6 +371,18 @@ describe("DELETE — disconnect", () => {
     assert.deepEqual(await read(await del(OWNER_A, { owner: OWNER_A })), { ok: true });
     assert.equal(await getAccount(w.db, OWNER_A), null);
     assert.equal(w.x.calls.length, 0);
+  });
+
+  it("STILL FORGETS THE CONNECTION AND CANCELS THE DRAFTS ON A WEB WITHOUT THE DEK — only the revoke is skipped", async () => {
+    // The orchestrator holds the DEK and is posting; this web process does not.
+    await connect(OWNER_A);
+    await post(OWNER_A, { action: "enable", xUserId: X_USER.id, owner: OWNER_A });
+    const waiting = await draft(OWNER_A);
+    delete process.env.MERRYMEN_STORE_DEK;
+    assert.deepEqual(await read(await del(OWNER_A, { owner: OWNER_A })), { ok: true });
+    assert.equal(await getAccount(w.db, OWNER_A), null);
+    assert.equal(statusOf(waiting), "cancelled");
+    assert.equal(w.x.calls.length, 0, "a token nobody here can open is not sent anywhere");
   });
 
   it("leaves another owner's connection alone", async () => {

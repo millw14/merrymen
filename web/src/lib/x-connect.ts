@@ -32,6 +32,7 @@ import { withReadDb } from "@/lib/ledger";
 import { normaliseXHandle } from "@/lib/x-handle";
 import { readBounded } from "../../../worker/src/bounded-read";
 import type { Db } from "../../../worker/src/db";
+import { canonicalTz } from "../../../worker/src/groupchat/clock";
 import { storeDek } from "../../../worker/src/store-crypto";
 import { xAppFromEnv, type FetchLike, type XApp } from "../../../worker/src/xpost/client";
 import { ensureXpostSchema, type XAccount, type XPost, type XPostKind } from "../../../worker/src/xpost/store";
@@ -172,6 +173,56 @@ export async function readXBody(
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return { ok: false, status: 400 };
   return { ok: true, value: parsed as Record<string, unknown> };
+}
+
+// ── the zone a consent carries ──────────────────────────────────────────────
+
+/**
+ * What a device reports when it will not say where it is: UTC under each of
+ * its names, the Etc/* zones, and Iceland's zone under both of its names (Tor
+ * Browser since 13.5, Mullvad Browser and Firefox's resistFingerprinting spoof
+ * Atlantic/Reykjavik). The same list as the room's browser capture
+ * (app/api/groupchat/me/route.ts), which a route file cannot export.
+ */
+const PLACELESS = new Set([
+  "utc",
+  "etc/utc",
+  "etc/gmt",
+  "gmt",
+  "universal",
+  "zulu",
+  "uct",
+  "greenwich",
+  "gmt0",
+  "gmt+0",
+  "gmt-0",
+  "atlantic/reykjavik",
+  "iceland",
+]);
+
+function placeless(zone: string): boolean {
+  const z = zone.trim().toLowerCase();
+  return PLACELESS.has(z) || z.startsWith("etc/");
+}
+
+/**
+ * THE ZONE AN OWNER TURNED POSTING ON FROM, as the store may keep it: a
+ * canonical IANA name, or null. The Merryman's quiet hours fall back to it
+ * when the room has no zone for this owner (store.ts XAccount.tz); without
+ * one, the owner is never asleep and their account can post at 4am.
+ *
+ * NULL, NOT A REFUSAL, for anything unusable — missing, not a zone, or
+ * placeless. The owner confirmed a warning; a zone the device got wrong is
+ * no reason to refuse that, and null keeps whatever zone was stored before.
+ * A placeless zone is dropped because storing it would put the owner to
+ * sleep through the UTC night, which is somebody's afternoon. Matched on the
+ * spelling sent AND the one Intl resolves it to, since engines differ on
+ * which alias they hand back.
+ */
+export function xpostTz(raw: unknown): string | null {
+  const tz = canonicalTz(raw);
+  if (tz === null || placeless(tz) || placeless(String(raw))) return null;
+  return tz;
 }
 
 // ── what an owner reads back ────────────────────────────────────────────────

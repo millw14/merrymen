@@ -4,17 +4,21 @@
  *
  *   GET     the connection as Settings draws it (lib/x-connect.ts accountBody):
  *           never a token, only the owner's own drafts and posts.
- *   POST    {action:"enable", xUserId, owner}  — the owner confirmed the warning
- *           that named THIS X account. Stored against that immutable X user id:
- *           if a different account is connected by the time it lands, nothing
- *           changes and the answer is 409, so the owner is shown the new
- *           account before it can post (docs/x-posting.md rule 1).
+ *   POST    {action:"enable", xUserId, owner, tz}  — the owner confirmed the
+ *           warning that named THIS X account. Stored against that immutable X
+ *           user id: if a different account is connected by the time it
+ *           lands, nothing changes and the answer is 409, so the owner is
+ *           shown the new account before it can post (docs/x-posting.md rule
+ *           1). `tz` is the device's IANA zone, kept for quiet hours when the
+ *           room has none (lib/x-connect.ts xpostTz); a missing, unknown or
+ *           placeless one never refuses the consent.
  *           {action:"disable", owner} — always works, cancels every draft.
  *           {action:"skip", id, owner} — the owner's Skip on one draft; only
  *           their own, only while it is still scheduled (a post already
  *           claimed for sending cannot be half-skipped).
  *   DELETE  {owner} — forget the connection: the row goes, every draft is
- *           cancelled, and the tokens are revoked at X, best effort.
+ *           cancelled, and X is asked to revoke the tokens, best effort (not
+ *           at all when this process has no X app or no DEK to open them).
  *
  * THE SWITCH IS HERE AND NOWHERE ELSE. Chat, Telegram and MCP have no path to
  * `enable`; it needs a browser session (or the iOS app's) and a body naming
@@ -28,6 +32,7 @@
  *
  * Hosted only (404 otherwise), signed-in only (401), private and never cached.
  */
+import { randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
@@ -44,6 +49,7 @@ import {
   xpostDek,
   xpostFetch,
   xpostNow,
+  xpostTz,
 } from "@/lib/x-connect";
 import { revokeToken } from "../../../../../../worker/src/xpost/client";
 import { deleteAccount, getAccount, ownerCancel, postsOf, setPosting } from "../../../../../../worker/src/xpost/store";
@@ -108,7 +114,10 @@ export async function POST(req: Request) {
       }
       // Turning posting ON needs the whole feature; turning it off never does.
       if (!xpostAvailable(isHostedMode())) return refuse(503, X_COPY.unavailable);
-      const on = await withXpostDb(async (db) => (db ? setPosting(db, tenant, { enabled: true, xUserId }, now) : null));
+      // The device's zone, for quiet hours when the room has none; an unusable
+      // or placeless one is null, which keeps the zone stored before.
+      const tz = xpostTz(input.tz);
+      const on = await withXpostDb(async (db) => (db ? setPosting(db, tenant, { enabled: true, xUserId, tz }, now) : null));
       if (on === null) return refuse(503, X_COPY.unavailable);
       if (!on) return refuse(409, X_COPY.accountChanged);
       return json({ ok: true, postingEnabled: true });
@@ -145,13 +154,18 @@ export async function DELETE(req: Request) {
   const refused = ownerRefusal(read.value, tenant);
   if (refused) return refused;
 
-  // The DEK opens the tokens so they can be revoked. Nothing was ever sealed
-  // without one, so a deploy with none has nothing here to forget.
+  // THE DEK ONLY OPENS THE TOKENS SO THEY CAN BE REVOKED; forgetting the
+  // connection never needs it. A web process without one can still sit in
+  // front of an orchestrator that has it and is posting, and "Disconnect"
+  // must stop that. Without the DEK the store is handed a throwaway key that
+  // opens nothing (store.ts openOrNull answers null for every token), so the
+  // row goes and the drafts are cancelled, and only the revoke is skipped.
   const dek = xpostDek();
-  if (!dek) return refuse(503, X_COPY.unavailable);
   let tokens: Awaited<ReturnType<typeof deleteAccount>>;
   try {
-    const gone = await withXpostDb(async (db) => (db ? { tokens: await deleteAccount(db, dek, tenant, xpostNow()) } : null));
+    const gone = await withXpostDb(async (db) =>
+      db ? { tokens: await deleteAccount(db, dek ?? randomBytes(32), tenant, xpostNow()) } : null,
+    );
     if (!gone) return refuse(503, X_COPY.unavailable);
     tokens = gone.tokens;
   } catch {
@@ -163,7 +177,7 @@ export async function DELETE(req: Request) {
   // not depend on X: the connection is forgotten here either way, and a
   // revoke X refused only leaves a token nobody holds to expire on its own.
   const app = xpostApp();
-  if (tokens && app) {
+  if (tokens && app && dek) {
     const xFetch = xpostFetch();
     await Promise.all([
       tokens.refreshToken ? revokeToken(app, tokens.refreshToken, "refresh_token", { fetch: xFetch }) : null,

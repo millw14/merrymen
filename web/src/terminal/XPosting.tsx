@@ -31,9 +31,29 @@
  * same mistake once told Telegram owners they had never saved their token
  * (see "AN UNREAD BRIDGE IS NOT A MISSING TOKEN" in screens/Settings.tsx).
  *
+ * "UNAVAILABLE" ONLY STOPS WHAT NEEDS THIS SERVER'S X APP. `available` is
+ * the web's own configuration; the orchestrator posts on its own, so an
+ * owner connected on a web that lost (say) its public origin may still have a
+ * Merryman posting. Unavailable hides Connect and Reconnect and refuses
+ * turning posting ON; the off switch, Coming up with its Skip, Posted and
+ * Disconnect stay, because every one of them works without the X app.
+ *
  * IT NEVER SEES A TOKEN. GET /api/x/account has no field that could hold one
  * (lib/x-connect.ts accountBody). Handles render only through xHandleTag, and
  * a "View on X" link only when it is exactly an x.com status URL.
+ *
+ * ── "COMING UP" IS A PROMISE, SO IT IS KEPT CURRENT ──────────────────────
+ *
+ * The warning tells the owner every post waits under Coming up for at least
+ * ten minutes (the planner's MIN_LEAD_MS) and can be skipped there. That is
+ * only true of a list that shows what the server has: nothing tells an owner
+ * a draft was written, and the orchestrator drafts on its own, at most once a
+ * minute. So while the section is open and posting is on, it re-reads quietly
+ * every POLL_MS (a hidden tab skips its turn and re-reads when it is shown
+ * again), and once more AFTER_ENABLE_MS after the owner turns posting on —
+ * by then the next plan pass has drafted the hello, which is due ten minutes
+ * after the consent. A list read once and left open would show "Nothing
+ * waiting" while the hello was queued, and a Skip on a post that already went.
  *
  * Hosted only: renders nothing anywhere else. Literal English, like the rest
  * of the Settings screen, which is not in the translated set.
@@ -55,7 +75,9 @@ const COPY = {
     "You'll approve it on X. Your Merryman will post from whichever X account you approve there, so check which account you're signed into on X first.",
   toggle: "Let my Merryman post on X",
   revoked: "X stopped accepting this connection. Reconnect to keep posting.",
-  unavailable: "Posting on X isn't available on this server yet.",
+  /** lib/x-connect.ts X_COPY.unavailable, word for word (the routes and iOS say it too). */
+  unavailable: "Posting on X isn't available right now.",
+  cannotTurnOn: "Turning posting on isn't available right now.",
   comingUp: "Coming up",
   nothingWaiting: "Nothing waiting to go out.",
   posted: "Posted",
@@ -77,17 +99,38 @@ const warningLead = (handle: string) =>
   `Your Merryman will post from whichever X account is connected — right now that's ${handle}.`;
 const WARNING_BODY = [
   "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
-  "Posts go out on their own, a few a day at most. You'll see each one here before it goes out and can skip it. Turn this off or disconnect X at any time.",
+  "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
   "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto.",
 ] as const;
 const warningYes = (handle: string) => `Let it post as ${handle}`;
 
 const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post", casual: "Casual post", buy: "Buy post" };
 
+/**
+ * What a Skip button is called to assistive tech: which post it skips, by its
+ * own words. Its kind and time are not enough — two drafts can share both —
+ * and "Skip, button" said once per draft leaves a screen-reader user choosing
+ * blind.
+ */
+function skipLabel(p: XUpcomingPost): string {
+  const words = p.body.replace(/\s+/g, " ").trim();
+  const excerpt = words.length <= 60 ? words : `${words.slice(0, 60).replace(/\s+\S*$/, "")}…`;
+  return `Skip ${(KIND_LABEL[p.kind] ?? "Post").toLowerCase()}: ${excerpt}`;
+}
+
 /** Where X's authorize page lives. A start that answers anything else is not followed. */
 const AUTHORIZE = "https://x.com/i/oauth2/authorize?";
 /** The only link "View on X" may be. */
 const STATUS_URL = /^https:\/\/x\.com\/[A-Za-z0-9_]{1,15}\/status\/\d{1,25}$/;
+
+/**
+ * How often an open section re-reads while posting is on. Well inside the
+ * ten minutes every post waits, so a draft shows within a minute of being
+ * written, and a post that went out stops offering a Skip.
+ */
+const POLL_MS = 45_000;
+/** The one extra re-read after posting is turned on: past the orchestrator's next plan pass (once a minute), so the hello is on screen. */
+const AFTER_ENABLE_MS = 70_000;
 
 // ── talking to the routes ───────────────────────────────────────────────────
 
@@ -100,6 +143,7 @@ type Read =
 type Sent = { ok: true; data: Record<string, unknown> } | { ok: false; status: number; message: string };
 
 const UNREACHABLE = "Couldn't reach merrymen just now. Try again in a moment.";
+const REFRESH_FAILED = "Couldn't refresh this just now.";
 
 /** A 200 is only an answer if it is the shape the route promises; anything else is unread. */
 function accountOf(data: unknown): XAccountBody | null {
@@ -136,6 +180,21 @@ async function readAccount(): Promise<Read> {
   }
 }
 
+/**
+ * The zone this browser says it is in, sent with the consent so the Merryman
+ * keeps quiet hours even for an owner the room never met. The route checks it
+ * and drops a placeless one (UTC, Reykjavik) a privacy browser reports for
+ * everybody; null when the browser will not say.
+ */
+function deviceZone(): string | null {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return typeof tz === "string" && tz !== "" ? tz : null;
+  } catch {
+    return null;
+  }
+}
+
 async function send(method: "POST" | "DELETE", url: string, body: Record<string, unknown>): Promise<Sent> {
   let res: Response;
   try {
@@ -163,12 +222,15 @@ export function XPosting({
   owner,
   hosted,
   navigate = (url: string) => window.location.assign(url),
+  timing = { pollMs: POLL_MS, afterEnableMs: AFTER_ENABLE_MS },
 }: {
   /** The signed-in owner, as the Settings answer named it (SettingsView.owner). Sent with every change. */
   owner: string | null;
   hosted: boolean | null;
   /** Where "Connect X account" sends the browser. A seam for tests; the default leaves for X. */
   navigate?: (url: string) => void;
+  /** The re-read clocks. A seam for tests; the defaults are POLL_MS and AFTER_ENABLE_MS. */
+  timing?: { pollMs: number; afterEnableMs: number };
 }) {
   const [read, setRead] = useState<Read>({ kind: "checking" });
   const [busy, setBusy] = useState(false);
@@ -176,22 +238,29 @@ export function XPosting({
   /** The account the open warning names, captured when the switch was pressed. */
   const [asking, setAsking] = useState<{ xUserId: string; handle: string } | null>(null);
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
+  /** Whether the Settings group this sits in is open (true when it sits in none). */
+  const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
+  /** The warning's lead sentence, where focus goes when the warning opens. */
+  const lead = useRef<HTMLParagraphElement>(null);
+  const afterEnable = useRef<ReturnType<typeof setTimeout> | null>(null);
   const on = hosted === true;
+  const { pollMs, afterEnableMs } = timing;
 
   /**
    * Read the connection. `quiet` keeps what is on screen while it reads (after
    * a change the screen already shows what the server confirmed), and a quiet
-   * failure says so rather than blanking it.
+   * failure says so rather than blanking it — until a later read works.
    */
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setRead({ kind: "checking" });
     const next = await readAccount();
     if (quiet && next.kind === "failed") {
-      setNote({ text: "Couldn't refresh this just now.", alert: false });
+      setNote({ text: REFRESH_FAILED, alert: false });
       return;
     }
+    if (quiet) setNote((n) => (n?.text === REFRESH_FAILED ? null : n));
     setRead(next);
   }, []);
 
@@ -203,19 +272,60 @@ export function XPosting({
   // section, and re-reading whenever it is opened keeps "Coming up" current.
   useEffect(() => {
     const details = root.current?.closest("details");
-    if (!details) return;
+    if (!details) {
+      setOpen(on);
+      return;
+    }
     if (window.location.hash === "#x-posting") {
       details.open = true;
       details.scrollIntoView?.({ block: "start" });
     }
+    setOpen(details.open);
     const reread = () => {
+      setOpen(details.open);
       if (details.open) void load(true);
     };
     details.addEventListener("toggle", reread);
     return () => details.removeEventListener("toggle", reread);
   }, [load, on]);
 
+  // KEEPING "COMING UP" TRUE: re-read while the owner can see the list and
+  // something may be drafted into it. Not while a change of theirs is in
+  // flight — that change re-reads when it lands.
+  const polling =
+    on && open && !busy && read.kind === "ready" && read.account.connected && read.account.postingEnabled;
+  useEffect(() => {
+    if (!polling) return;
+    const tick = () => {
+      if (document.visibilityState !== "hidden") void load(true);
+    };
+    const shown = () => {
+      if (document.visibilityState === "visible") void load(true);
+    };
+    const timer = setInterval(tick, pollMs);
+    document.addEventListener("visibilitychange", shown);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", shown);
+    };
+  }, [polling, pollMs, load]);
+
+  useEffect(
+    () => () => {
+      if (afterEnable.current) clearTimeout(afterEnable.current);
+    },
+    [],
+  );
+
   // The warning is a native modal: focus is held in it and Escape closes it.
+  //
+  // FOCUS GOES TO THE SENTENCE, NOT THE BUTTON. Left to itself, showModal
+  // focuses the first button in the dialog — "Let it post as @h" — so an
+  // Enter held a moment too long on the switch (key repeat), or pressed
+  // twice, would consent without the warning being read, and a screen reader
+  // would announce the button and skip the one sentence this flow exists to
+  // say. The lead is focused instead (tabIndex -1: reachable by script, not
+  // by Tab), and it is the dialog's description.
   useEffect(() => {
     const node = dialog.current;
     if (!node) return;
@@ -224,6 +334,7 @@ export function XPosting({
     } else {
       node.setAttribute("open", "");
     }
+    lead.current?.focus();
   }, [asking]);
 
   if (!on) return null;
@@ -268,6 +379,12 @@ export function XPosting({
     if (busy || !account.connected || account.status !== "ok" || !handle || !account.xUserId) return;
     setNote(null);
     if (next) {
+      // Turning ON needs this server's X app (the route would refuse it too);
+      // turning OFF never does, and must never be the switch that is missing.
+      if (!account.available) {
+        setNote({ text: COPY.cannotTurnOn, alert: true });
+        return;
+      }
       // NOTHING IS SENT HERE. The warning names the account; its button writes.
       setAsking({ xUserId: account.xUserId, handle });
       return;
@@ -295,12 +412,16 @@ export function XPosting({
     if (!asking || busy) return;
     const named = asking;
     setBusy(true);
-    const r = await send("POST", "/api/x/account", { action: "enable", xUserId: named.xUserId, owner });
+    const r = await send("POST", "/api/x/account", { action: "enable", xUserId: named.xUserId, owner, tz: deviceZone() });
     setBusy(false);
     closeWarning();
     if (r.ok && r.data.postingEnabled === true) {
       patch({ postingEnabled: true });
       void load(true);
+      // The hello is drafted on the orchestrator's next plan pass, after this
+      // read: read once more when it will be there, open section or not.
+      if (afterEnable.current) clearTimeout(afterEnable.current);
+      afterEnable.current = setTimeout(() => void load(true), afterEnableMs);
       return;
     }
     setNote({ text: r.ok ? "merrymen didn't confirm that, so posting is still off." : r.message, alert: true });
@@ -364,20 +485,17 @@ export function XPosting({
     </div>
   );
 
-  // ── not here at all ──
-  if (!account.available) {
-    return (
-      <div className="xpost" ref={root}>
-        <p className="mm-hint">{COPY.unavailable}</p>
-        {account.connected && connectedRow}
-        {disconnectConfirm}
-        {noteLine}
-      </div>
-    );
-  }
-
   // ── nothing connected ──
   if (!account.connected) {
+    // Nothing to stop, and nothing can be started here: one line.
+    if (!account.available) {
+      return (
+        <div className="xpost" ref={root}>
+          <p className="mm-hint">{COPY.unavailable}</p>
+          {noteLine}
+        </div>
+      );
+    }
     return (
       <div className="xpost" ref={root}>
         <p className="mm-hint" style={{ marginTop: 0 }}>{COPY.blurb}</p>
@@ -409,7 +527,7 @@ export function XPosting({
         {connectedRow}
         {disconnectConfirm}
         <p className="mm-danger" role="status">{COPY.revoked}</p>
-        {connectButton(COPY.reconnect)}
+        {account.available ? connectButton(COPY.reconnect) : <p className="mm-hint">{COPY.unavailable}</p>}
         {noteLine}
       </div>
     );
@@ -444,7 +562,9 @@ export function XPosting({
                     <span>
                       {KIND_LABEL[p.kind] ?? "Post"} · {p.dueAt <= Date.now() ? "going out soon" : `goes out around ${shortDateTime(p.dueAt)}`}
                     </span>
-                    <button type="button" className="mm-btn" disabled={busy} onClick={() => void skip(p.id)}>{COPY.skip}</button>
+                    <button type="button" className="mm-btn" disabled={busy} aria-label={skipLabel(p)} onClick={() => void skip(p.id)}>
+                      {COPY.skip}
+                    </button>
                   </div>
                 </li>
               ))}
@@ -477,6 +597,7 @@ export function XPosting({
           ref={dialog}
           className="portfolio-dialog xpost-dialog"
           aria-labelledby="xpost-warning-title"
+          aria-describedby="xpost-warning-lead"
           onCancel={(event) => {
             event.preventDefault();
             closeWarning();
@@ -486,7 +607,9 @@ export function XPosting({
             <h2 id="xpost-warning-title">{warningTitle(asking.handle)}</h2>
           </div>
           <div className="portfolio-body">
-            <p><strong>{warningLead(asking.handle)}</strong></p>
+            <p id="xpost-warning-lead" ref={lead} tabIndex={-1}>
+              <strong>{warningLead(asking.handle)}</strong>
+            </p>
             {WARNING_BODY.map((line) => <p key={line}>{line}</p>)}
             <div className="resign-actions">
               <button type="button" className="mm-btn primary" disabled={busy} onClick={() => void confirmWarning()}>

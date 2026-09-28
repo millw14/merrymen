@@ -27,7 +27,7 @@ import {
   xWorld,
 } from "@/lib/x-test-kit";
 import { X_AUTHORIZE_URL, X_ME_URL, X_REVOKE_URL, X_TOKEN_URL } from "../../../../../../worker/src/xpost/client";
-import { getAccount, readTokens } from "../../../../../../worker/src/xpost/store";
+import { getAccount, markRevoked, readTokens, setPosting } from "../../../../../../worker/src/xpost/store";
 import { POST } from "./route";
 
 let w: Awaited<ReturnType<typeof xWorld>>;
@@ -165,7 +165,7 @@ describe("finish", () => {
     const res = await post(OWNER_A, { action: "finish", code: "the-code-from-x", state });
     const body = await read(res);
     assert.equal(res.status, 200, JSON.stringify(body));
-    assert.deepEqual(body, { ok: true, username: X_USER.username });
+    assert.deepEqual(body, { ok: true, username: X_USER.username, postingEnabled: false });
 
     assert.deepEqual(w.x.calls.map((c) => c.url), [X_TOKEN_URL, X_ME_URL]);
     const form = new URLSearchParams(w.x.calls[0]!.body);
@@ -303,6 +303,28 @@ describe("finish", () => {
     const now = await getAccount(w.db, OWNER_A);
     assert.equal(now?.username, "someone_else");
     assert.equal(now?.posting, false);
+  });
+
+  it("A RECONNECT OF THE SAME ACCOUNT AFTER X REVOKED IT SAYS POSTING IS ON AGAIN: the consent it had was kept", async () => {
+    let s = await started(OWNER_A);
+    assert.equal((await post(OWNER_A, { action: "finish", code: "the-code-from-x", state: s.state })).status, 200);
+    await setPosting(w.db, OWNER_A, { enabled: true, xUserId: X_USER.id }, w.clock.now);
+    await markRevoked(w.db, OWNER_A, 1, w.clock.now);
+    assert.equal((await getAccount(w.db, OWNER_A))?.posting, false, "revoked: nothing posts");
+
+    s = await started(OWNER_A);
+    const res = await post(OWNER_A, { action: "finish", code: "the-code-from-x", state: s.state });
+    assert.deepEqual(await read(res), { ok: true, username: X_USER.username, postingEnabled: true });
+    assert.equal((await getAccount(w.db, OWNER_A))?.posting, true, "and it is what the store says");
+  });
+
+  it("a reconnect of an account whose owner had posting off says it is off", async () => {
+    let s = await started(OWNER_A);
+    await post(OWNER_A, { action: "finish", code: "the-code-from-x", state: s.state });
+    await markRevoked(w.db, OWNER_A, 1, w.clock.now);
+    s = await started(OWNER_A);
+    const body = await read(await post(OWNER_A, { action: "finish", code: "the-code-from-x", state: s.state }));
+    assert.equal(body.postingEnabled, false);
   });
 
   it("NEVER LOGS OR ANSWERS A CODE, A STATE OR A TOKEN, whatever happens", async () => {

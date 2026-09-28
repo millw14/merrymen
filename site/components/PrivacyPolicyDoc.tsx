@@ -51,12 +51,20 @@ import type { ReactNode } from "react";
  *
  * Posting on X (docs/x-posting.md): what is stored is worker/src/xpost/store.ts
  * — the connection and its sealed tokens (deleteAccount removes them; the web's
- * DELETE /api/x/account revokes them at X), the owner's consent bound to one X
- * user id, the pending connect (15 minutes, PENDING_TTL_MS in
- * web/src/app/api/x/connect/route.ts) and every post, which nothing deletes. A
+ * DELETE /api/x/account then ASKS X to revoke them, best effort, and not at all
+ * when that process has no X app or no DEK), the owner's consent bound to one X
+ * user id with the zone the device reported (xpost_accounts.tz; placeless zones
+ * are dropped by web/src/lib/x-connect.ts xpostTz), the pending connect (it
+ * works for 15 minutes, PENDING_TTL_MS in web/src/app/api/x/connect/route.ts,
+ * and is deleted when it is used or by prunePending, which runs only when
+ * someone starts a connect) and every post, which nothing deletes. Each post
+ * waits at least ten minutes under Coming up (the planner's MIN_LEAD_MS). A
  * browser never receives a token (web/src/lib/x-connect.ts accountBody). What
- * the post writer is given, and the gate that refuses a post with a number in
- * it, are worker/src/xpost/ — keep the Groq row in step with them.
+ * the post writer is given (worker/src/xpost/writer.ts WriterFacts and its
+ * kin), and the gate that refuses a post with a number in it, are
+ * worker/src/xpost/ — keep the Groq row in step with them. The writer's
+ * provider is MERRYMEN_XPOST_LLM_PROVIDER (Groq by default): a provider other
+ * than Groq must be named in section 5 before it is deployed.
  *
  * The date is fixed, not `new Date()`: a policy's date says when its words
  * last changed, and a build-time date claimed a new policy on every deploy.
@@ -240,15 +248,21 @@ export function PrivacyPolicyDoc() {
             not turn posting on.
           </li>
           <li>
+            The time zone your browser or phone reported when you turned posting on, so your agent
+            does not post during your night. A zone that says nothing about where you are, such as
+            UTC, is not kept.
+          </li>
+          <li>
             Each post your agent writes for X: its text, what kind of post it is (a hello, a casual
             post, or a coin it bought), when it is due and when it went out, X&apos;s id for it once
             posted, and whether it was skipped, cancelled or failed.
           </li>
-          <li>While you are connecting, for up to 15 minutes, a one-time value that ties the approval on X to your account.</li>
+          <li>While you are connecting, a one-time value that ties the approval on X to your account. It works for 15 minutes.</li>
         </ul>
         <p>
           <em>Why:</em> to post only when you allowed it, only from the account you chose, and to
-          show you each post before it goes out.
+          list each post under Coming up in Settings for at least ten minutes before it goes out, so
+          you can skip it.
         </p>
 
         <h3>AI assistant connections (MCP)</h3>
@@ -363,9 +377,9 @@ export function PrivacyPolicyDoc() {
             ["Your trading permission (the encrypted session key)", "Until you discard it on Wallet & permissions or stop your agent with Telegram /kill; the hosted worker's decrypted working copy is deleted then too. On chain, it stops working at the expiry date you signed."],
             ["Telegram bot token and ids", "Until you remove them from your settings or ask us to delete them."],
             ["Telegram chat with your agent", "The latest 40 messages in each chat."],
-            ["An X account connected for posting (its id, handle and encrypted tokens)", "Until you disconnect it in Settings. Disconnecting also revokes the tokens at X and cancels every post that has not gone out."],
+            ["An X account connected for posting (its id, handle, encrypted tokens, and the time zone you turned posting on from)", "Until you disconnect it in Settings. Disconnecting deletes them here, cancels every post that has not gone out, and asks X to revoke the tokens. You can also remove Merrymen's access at any time in your X account's settings, under connected apps."],
             ["Your agent's X posts, and the drafts it wrote for X", "Kept with your account history. Posts already on X stay there until you delete them on X."],
-            ["An X connection started and not finished", "It stops working after 15 minutes and is deleted after that."],
+            ["An X connection started and not finished", "It stops working after 15 minutes. It is deleted when it is used, or otherwise the next time anyone starts connecting an X account."],
             ["What your agent notes about you in Telegram, and its journal", "Up to 60 facts at a time (older ones move to an archive file beside them) and about 40,000 characters of journal, in your agent's working files on the hosted worker. Deleted with those files when you discard the trading permission or stop your agent with /kill; a redeploy of the hosted worker also clears them."],
             ["Conversations through an AI assistant", "1 year."],
             ["Research notes", "Shown to your agent for 7 days, then deleted 30 days later."],
@@ -398,7 +412,7 @@ export function PrivacyPolicyDoc() {
           head={["Provider, and what for", "What it receives"]}
           rows={[
             [provider("Privy", "Sign-in with X or email, and the wallet behind it"), "Your X account or email address and sign-in details."],
-            [provider("Groq", "Merrymen's language model: it writes your agent's replies, and makes decisions for strategies that use one"), "Your messages to your agent and recent conversation, research notes, what your agent has noted about you, and your agent's state: its name, settings, balances, positions, recent trades and decisions. Chat in the Merrymen app, conversations through an AI assistant or a partner app, and the group chat room always use Merrymen's Groq account. If you connect an X account for posting, the posts your agent writes for X also come from a Merrymen model account, never one whose key you added: it is given your agent's name and how it trades, whether it trades on paper, and for a post about a coin it bought, that coin and your agent's reasons, but never your balances, amounts or prices. If you add your own API key for a model provider in Settings, that provider receives what your agent's Telegram chat and messages and its trading decisions send, instead of Groq."],
+            [provider("Groq", "Merrymen's language model: it writes your agent's replies, and makes decisions for strategies that use one"), "Your messages to your agent and recent conversation, research notes, what your agent has noted about you, and your agent's state: its name, settings, balances, positions, recent trades and decisions. Chat in the Merrymen app, conversations through an AI assistant or a partner app, and the group chat room always use Merrymen's Groq account. If you connect an X account for posting, the posts your agent writes for X come from the model provider Merrymen uses for posts (Groq by default), on a Merrymen account, never one whose key you added: it is given your agent's name and how it trades, whether it trades on paper, its own recent X posts, on some days the coins it bought lately, and for a post about a coin it bought, that coin and your agent's reasons, but never your balances, amounts or prices. If you add your own API key for a model provider in Settings, that provider receives what your agent's Telegram chat and messages and its trading decisions send, instead of Groq."],
             [provider("CoinGecko, GeckoTerminal, Blockscout, Robinhood's stock-token API, Yahoo Finance, HEY Research and other public market-data sources", "Prices, charts, liquidity and token research, fetched by our servers"), "Token addresses and symbols, and pool and chain queries. Not who you are or what you wrote."],
             [provider("Financial Modeling Prep and Robinhood's image server (cdn.robinhood.com)", "Company and token logos, which your browser loads directly when the Merrymen app shows them"), "Your IP address and the logo requested, as any site you load an image from sees. A few token logos come instead from the image address Blockscout lists for that token, which your browser loads the same way."],
             [provider("Robinhood Chain's public RPC (rpc.mainnet.chain.robinhood.com) and Blockscout, from your browser", "Chain reads the Merrymen app makes in your browser (creating your agent's account, the wallet screen, withdrawing), and this website's dashboard and watch pages"), "Your IP address and the account addresses and transactions being looked up, including an address you paste into this website."],
@@ -479,8 +493,10 @@ export function PrivacyPolicyDoc() {
           </li>
           <li>
             <strong>Stop your agent posting on X</strong> in Settings, under Posting on X: turn
-            posting off, skip any post before it goes out, or disconnect the X account, which also
-            revokes our access at X. Posts already on X stay there until you delete them on X.
+            posting off, skip a post while it waits under Coming up (each waits there at least ten
+            minutes), or disconnect the X account, which also asks X to revoke our access. You can
+            also remove Merrymen&apos;s access in your X account&apos;s settings, under connected apps.
+            Posts already on X stay there until you delete them on X.
           </li>
           <li>
             <strong>Remove</strong> your Telegram bot in Merrymen&apos;s settings. Watchlist tokens
