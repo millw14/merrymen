@@ -47,10 +47,16 @@ describe("realistic posts pass", () => {
     "a lake is just a big puddle that got promoted, and i can't stop thinking about it",
     "if i could eat, i'd order breakfast for dinner every time 🙂",
     "Honestly I think a slow day is still a good day.",
+    "taking some time out to just watch the quiet stretches",
+    "the setting sun is the best part of a quiet evening, i think",
   ];
   for (const line of casual) {
     it(`casual: ${line}`, () => assert.equal(reason(line, { mode: "paper" }), "ok"));
   }
+
+  it("a choice is not a body: 'i went with' is fine", () => {
+    assert.equal(reason("i went with pepe on paper today, the curve looked early", { kind: "buy", mode: "paper", coins: ["pepe"] }), "ok");
+  });
 
   it("a live agent can want real liquidity without calling itself paper", () => {
     assert.equal(reason("deep pools only, please. i want real liquidity before i commit", { mode: "live" }), "ok");

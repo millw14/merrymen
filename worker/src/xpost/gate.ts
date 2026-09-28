@@ -139,7 +139,7 @@ const OPS = new RegExp(
       "slippage",
       "gas\\s+(?:fees?|costs?|prices?)",
       "gwei",
-      "timed?\\s*out",
+      "timed\\s+out",
       "timeouts?",
       "retr(?:y|ies|ied|ying)",
       "halt(?:s|ed|ing)?",
@@ -174,7 +174,7 @@ const OPS = new RegExp(
       "servers?",
       "database",
       "debug(?:ging|ged)?",
-      "settings?",
+      "settings",
       "config(?:uration)?",
       "permissions?",
       "session keys?",
@@ -303,7 +303,8 @@ const MARKUP = /[<>{}[\]`]|\*\*|__/;
  * is the backstop, and it is narrow on purpose: "i could eat" is a wish.
  */
 const HUMAN = [
-  /\bi\s+(?:just\s+|finally\s+|already\s+)?(?:ate|slept|drank|walked|went|drove|cooked|showered|woke up|napped|ran to)\b/i,
+  // Not "went" or "walked": "i went with pepe" and "i walked away" are choices, not a body.
+  /\bi\s+(?:just\s+|finally\s+|already\s+)?(?:ate|slept|drank|drove|cooked|showered|woke up|napped)\b/i,
   /\b(?:i'?m|im|i am)\s+(?:just\s+|finally\s+)?(?:eating|sleeping|drinking|walking|driving|cooking|napping|heading (?:out|home|to))\b/i,
   /\bmy\s+(?:coffee|breakfast|lunch|dinner|commute|morning run|walk|kids|wife|husband|girlfriend|boyfriend|apartment|house|car)\b/i,
   /\b(?:raining|snowing|sunny|freezing|so hot|so cold)\s+(?:here|outside)\b|\boutside my window\b/i,
