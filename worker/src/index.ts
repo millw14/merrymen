@@ -2808,7 +2808,12 @@ async function main() {
    */
   let settingsHeldTold: number | null = null;
   async function noteSettingsHeld(): Promise<void> {
-    if (!active) return;
+    if (!active) {
+      // Fixed while nothing was armed: that run is over, and there is nobody
+      // to tell. Forget it, or the next arm announces a fix from long before.
+      if (!settingsProblem()) settingsHeldTold = null;
+      return;
+    }
     const { told, event } = settingsHoldNotice(settingsProblem(), settingsHeldTold);
     settingsHeldTold = told;
     if (event) await addEvent(active.agentId, event.level, event.message);

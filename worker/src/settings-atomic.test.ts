@@ -32,7 +32,7 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { writeFile } from "node:fs/promises";
 import { Worker } from "node:worker_threads";
-import { writeFileAtomic, writeFileAtomicSync } from "./atomic-write";
+import { RENAME_RETRY_MS, renameRetrying, renameRetryingSync, writeFileAtomic, writeFileAtomicSync } from "./atomic-write";
 import { patchSettingsFile } from "./settings";
 
 const codeOf = (src: string) =>
@@ -137,6 +137,51 @@ for (const { name, write } of WRITERS) describe(name, () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * WINDOWS refuses a rename over a file another process holds open (antivirus,
+ * indexer, editor) with EPERM/EACCES/EBUSY, where the truncating write this
+ * replaced went through. Platform and rename are injected, so this runs anywhere.
+ */
+describe("the rename is retried, briefly, on Windows' transient refusals", () => {
+  const failing = (codes: string[]) => {
+    let calls = 0;
+    return {
+      fn: () => {
+        const code = codes[Math.min(calls++, codes.length - 1)];
+        if (code) throw Object.assign(new Error(code), { code });
+      },
+      calls: () => calls,
+    };
+  };
+
+  it("busy twice, then through — sync and async", async () => {
+    const a = failing(["EPERM", "EBUSY", ""]);
+    renameRetryingSync("a", "b", "win32", a.fn);
+    assert.equal(a.calls(), 3);
+    const b = failing(["EACCES", "EPERM", ""]);
+    await renameRetrying("a", "b", "win32", async () => b.fn());
+    assert.equal(b.calls(), 3);
+  });
+
+  it("only on Windows, only for those codes, and not for ever", async () => {
+    const linux = failing(["EPERM"]);
+    assert.throws(() => renameRetryingSync("a", "b", "linux", linux.fn), /EPERM/);
+    assert.equal(linux.calls(), 1, "elsewhere EPERM is a real answer");
+    const missing = failing(["ENOENT"]);
+    assert.throws(() => renameRetryingSync("a", "b", "win32", missing.fn), /ENOENT/);
+    assert.equal(missing.calls(), 1);
+    const stuck = failing(["EBUSY"]);
+    await assert.rejects(renameRetrying("a", "b", "win32", async () => stuck.fn()), /EBUSY/);
+    assert.equal(stuck.calls(), RENAME_RETRY_MS.length + 1, "gives up after the last wait");
+  });
+
+  it("both writers go through it", () => {
+    const helper = readFileSync(new URL("./atomic-write.ts", import.meta.url), "utf8");
+    assert.match(helper, /\n    renameRetryingSync\(tmp, target\);/);
+    assert.match(helper, /\n    await renameRetrying\(tmp, target\);/);
   });
 });
 

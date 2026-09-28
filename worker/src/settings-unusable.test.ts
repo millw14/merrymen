@@ -103,6 +103,27 @@ describe("readSettingsFileAt tells missing from broken", () => {
     const r = readSettingsFileAt(file);
     assert.equal(r.kind === "unusable" ? r.why : "", "settings.json is not valid JSON (line 3, column 1)");
   });
+
+  it("counts line and column itself — and agrees with V8 where V8 says (CI's Node may not)", () => {
+    for (const broken of ['{"strategy":"dip-hunter",}', '{\n  "a": 1,\n  "b": 2\n  "c": 3\n}', '{\r\n  "a": [1, 2,,]\r\n}', '{"a":1}}']) {
+      const file = freshFile();
+      writeFileSync(file, broken);
+      const r = readSettingsFileAt(file);
+      const why = r.kind === "unusable" ? r.why : "";
+      let v8 = "";
+      try {
+        JSON.parse(broken);
+      } catch (e) {
+        v8 = (e as Error).message;
+      }
+      // A position is all it takes; without one (V8's quoting "Unexpected
+      // token" form) it says no more than that the file is not JSON.
+      if (/\bat position \d+/.test(v8)) assert.match(why, /^settings\.json is not valid JSON \(line \d+, column \d+\)$/, why);
+      else assert.equal(why, "settings.json is not valid JSON");
+      const says = /\(line (\d+) column (\d+)\)/.exec(v8);
+      if (says) assert.ok(why.endsWith(`(line ${says[1]}, column ${says[2]})`), `${why} vs V8's ${v8}`);
+    }
+  });
 });
 
 describe("settingsSource keeps the last usable read", () => {
@@ -260,6 +281,7 @@ describe("the worker acts on it", () => {
     assert.match(refresh, /await noteSettingsHeld\(\);/);
     const note = INDEX.slice(INDEX.indexOf("async function noteSettingsHeld("), INDEX.indexOf("\n  }\n", INDEX.indexOf("async function noteSettingsHeld(")));
     assert.match(note, /settingsHoldNotice\(settingsProblem\(\), settingsHeldTold\)/);
+    assert.match(note, /if \(!active\) \{\s*if \(!settingsProblem\(\)\) settingsHeldTold = null;\s*return;/, "a run fixed while unarmed is forgotten, not announced on the next arm");
     assert.match(note, /if \(event\) await addEvent\(active\.agentId, event\.level, event\.message\);/);
   });
 });

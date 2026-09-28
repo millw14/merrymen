@@ -39,6 +39,55 @@ function tempPathFor(target: string): string {
 }
 
 /**
+ * WINDOWS REFUSES A RENAME OVER A FILE ANOTHER PROCESS HOLDS OPEN without
+ * FILE_SHARE_DELETE — an antivirus scan, an indexer, an editor — for as long as
+ * it holds it, with EPERM, EACCES or EBUSY. The truncating write this replaced
+ * did not care; the rename does, so it is retried for a moment first, as
+ * graceful-fs does. Anywhere else those codes are real answers and are not.
+ */
+export const RENAME_RETRY_MS = [10, 20, 40, 80, 160, 320, 640] as const;
+const renameBusy = (e: unknown, platform: NodeJS.Platform) =>
+  platform === "win32" && ["EPERM", "EACCES", "EBUSY"].includes((e as NodeJS.ErrnoException)?.code ?? "");
+
+/** renameSync, retried briefly on Windows' transient refusals. Blocks this thread for at most ~1.3s. */
+export function renameRetryingSync(
+  from: string,
+  to: string,
+  platform: NodeJS.Platform = process.platform,
+  rename: (from: string, to: string) => void = renameSync,
+): void {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rename(from, to);
+      return;
+    } catch (e) {
+      const wait = RENAME_RETRY_MS[attempt];
+      if (wait === undefined || !renameBusy(e, platform)) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);
+    }
+  }
+}
+
+/** renameRetryingSync for a request handler. */
+export async function renameRetrying(
+  from: string,
+  to: string,
+  platform: NodeJS.Platform = process.platform,
+  doRename: (from: string, to: string) => Promise<void> = rename,
+): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await doRename(from, to);
+      return;
+    } catch (e) {
+      const wait = RENAME_RETRY_MS[attempt];
+      if (wait === undefined || !renameBusy(e, platform)) throw e;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
+}
+
+/**
  * Write `data` to `file` atomically, with exactly `mode` (default 0600 — every
  * file a home holds is owner-only, and settings.json carries plaintext keys).
  * Throws on failure, having removed its temp file; `file` is then untouched.
@@ -77,7 +126,7 @@ export function writeFileAtomicSync(file: string, data: string, mode = 0o600): v
     }
     closeSync(fd);
     fd = null;
-    renameSync(tmp, target);
+    renameRetryingSync(tmp, target);
   } catch (e) {
     if (fd !== null) {
       try {
@@ -130,7 +179,7 @@ export async function writeFileAtomic(file: string, data: string, mode = 0o600):
     }
     await fh.close();
     fh = null;
-    await rename(tmp, target);
+    await renameRetrying(tmp, target);
   } catch (e) {
     if (fh !== null) {
       try {

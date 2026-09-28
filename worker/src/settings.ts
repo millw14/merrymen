@@ -498,11 +498,19 @@ export type SettingsFileRead =
  * these messages — `Unexpected token 'x', "{"telegramBotToken":"…" is not
  * valid JSON` — and settings.json holds plaintext keys, while `why` goes to the
  * console and the agent's event feed.
+ *
+ * Line and column are counted here from V8's "at position N" and the text that
+ * was parsed, not read off the "(line N column M)" V8 appends on some Node
+ * versions: CI runs 22, and the wording is V8's to change.
  */
-function whereParseFailed(e: unknown): string {
+function whereParseFailed(e: unknown, text: string): string {
   const msg = e instanceof Error ? e.message : "";
-  const at = /\(line (\d+) column (\d+)\)/.exec(msg);
-  if (at) return ` (line ${at[1]}, column ${at[2]})`;
+  const at = /\bat position (\d+)\b/.exec(msg);
+  if (at) {
+    const pos = Math.min(Number(at[1]), text.length);
+    const before = text.slice(0, pos);
+    return ` (line ${before.split("\n").length}, column ${pos - before.lastIndexOf("\n")})`;
+  }
   if (/Unexpected end of JSON input/.test(msg)) return " (it ends early: empty, or cut short)";
   return "";
 }
@@ -518,11 +526,12 @@ export function readSettingsFileAt(file: string): SettingsFileRead {
     return { kind: "unusable", why: `settings.json could not be read (${code ?? "unknown error"})` };
   }
   let parsed: unknown;
+  // BOM-strip: editors and PowerShell write UTF-8 BOMs that break JSON.parse.
+  const text = raw.replace(/^\ufeff/, "");
   try {
-    // BOM-strip: editors and PowerShell write UTF-8 BOMs that break JSON.parse.
-    parsed = JSON.parse(raw.replace(/^\ufeff/, ""));
+    parsed = JSON.parse(text);
   } catch (e) {
-    return { kind: "unusable", why: `settings.json is not valid JSON${whereParseFailed(e)}` };
+    return { kind: "unusable", why: `settings.json is not valid JSON${whereParseFailed(e, text)}` };
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return { kind: "unusable", why: "settings.json is not a JSON object" };
