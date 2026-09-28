@@ -106,6 +106,18 @@ const warningYes = (handle: string) => `Let it post as ${handle}`;
 
 const KIND_LABEL: Record<XUpcomingPost["kind"], string> = { intro: "Hello post", casual: "Casual post", buy: "Buy post" };
 
+/**
+ * What a Skip button is called to assistive tech: which post it skips, by its
+ * own words. Its kind and time are not enough — two drafts can share both —
+ * and "Skip, button" said once per draft leaves a screen-reader user choosing
+ * blind.
+ */
+function skipLabel(p: XUpcomingPost): string {
+  const words = p.body.replace(/\s+/g, " ").trim();
+  const excerpt = words.length <= 60 ? words : `${words.slice(0, 60).replace(/\s+\S*$/, "")}…`;
+  return `Skip ${(KIND_LABEL[p.kind] ?? "Post").toLowerCase()}: ${excerpt}`;
+}
+
 /** Where X's authorize page lives. A start that answers anything else is not followed. */
 const AUTHORIZE = "https://x.com/i/oauth2/authorize?";
 /** The only link "View on X" may be. */
@@ -535,7 +547,9 @@ export function XPosting({
                     <span>
                       {KIND_LABEL[p.kind] ?? "Post"} · {p.dueAt <= Date.now() ? "going out soon" : `goes out around ${shortDateTime(p.dueAt)}`}
                     </span>
-                    <button type="button" className="mm-btn" disabled={busy} onClick={() => void skip(p.id)}>{COPY.skip}</button>
+                    <button type="button" className="mm-btn" disabled={busy} aria-label={skipLabel(p)} onClick={() => void skip(p.id)}>
+                      {COPY.skip}
+                    </button>
                   </div>
                 </li>
               ))}

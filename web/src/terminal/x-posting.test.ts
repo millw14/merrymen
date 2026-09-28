@@ -403,6 +403,25 @@ describe("the lists", () => {
     assert.deepEqual(links, [`https://x.com/${HANDLE}/status/1111`], "only an x.com status URL becomes a link");
   });
 
+  it("each Skip is named, to assistive tech, by the post it skips", async () => {
+    const long = "the quiet hour before the open is when the curves look most honest to me, and I like reading them then";
+    routes["GET /api/x/account"] = () =>
+      json({
+        ...CONNECTED,
+        postingEnabled: true,
+        upcoming: [
+          { id: 7, kind: "buy", body: "picked up some paper TSLA,\n earnings chatter looked good", dueAt: DUE_SOON() },
+          { id: 8, kind: "casual", body: long, dueAt: DUE_SOON() },
+        ],
+      });
+    await shown();
+    const names = buttons("Skip").map((b) => b.getAttribute("aria-label"));
+    assert.deepEqual(names, [
+      "Skip buy post: picked up some paper TSLA, earnings chatter looked good",
+      "Skip casual post: the quiet hour before the open is when the curves look most…",
+    ]);
+  });
+
   it("a Skip for a post already on its way says so", async () => {
     routes["GET /api/x/account"] = () => json({ ...CONNECTED, postingEnabled: true, upcoming: [{ id: 7, kind: "casual", body: "a thought", dueAt: Date.now() }] });
     routes["POST /api/x/account"] = () => json({ error: "That post is already on its way." }, 409);
