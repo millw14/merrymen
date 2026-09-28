@@ -38,6 +38,21 @@ function tempPathFor(target: string): string {
   return path.join(path.dirname(target), `${path.basename(target)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
 }
 
+export interface AtomicWriteOptions {
+  /**
+   * DURABLE, not just atomic: the file must survive a power loss once this
+   * returns, or this must throw. A failed fsync is then an error (unless the
+   * filesystem simply does not do fsync), and the directory is synced after the
+   * rename — a renamed entry is not on disk until its directory is.
+   *
+   * For a file whose loss cannot be undone: the grant archive, the only copy
+   * of an owner key once grant.json is replaced or removed. Everything else
+   * here is rewritten from its source on the next pass, and is not worth a
+   * second fsync per write.
+   */
+  durable?: boolean;
+}
+
 /**
  * WINDOWS REFUSES A RENAME OVER A FILE ANOTHER PROCESS HOLDS OPEN without
  * FILE_SHARE_DELETE — an antivirus scan, an indexer, an editor — for as long as
@@ -87,12 +102,45 @@ export async function renameRetrying(
   }
 }
 
+/** A filesystem that does not do fsync on this kind of file — not a failure. */
+const fsyncUnsupported = (e: unknown) => ["EINVAL", "ENOTSUP"].includes((e as NodeJS.ErrnoException)?.code ?? "");
+
+/**
+ * Put a directory's entries on disk: a new or renamed file inside it survives
+ * a power loss only once the directory itself is synced. Skipped on Windows,
+ * which cannot open a directory for this and journals its metadata anyway.
+ */
+export function fsyncDirSync(dir: string): void {
+  if (process.platform === "win32") return;
+  const fd = openSync(dir, "r");
+  try {
+    fsyncSync(fd);
+  } catch (e) {
+    if (!fsyncUnsupported(e)) throw e;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** fsyncDirSync for a request handler. */
+export async function fsyncDir(dir: string): Promise<void> {
+  if (process.platform === "win32") return;
+  const fh = await open(dir, "r");
+  try {
+    await fh.sync();
+  } catch (e) {
+    if (!fsyncUnsupported(e)) throw e;
+  } finally {
+    await fh.close();
+  }
+}
+
 /**
  * Write `data` to `file` atomically, with exactly `mode` (default 0600 — every
  * file a home holds is owner-only, and settings.json carries plaintext keys).
  * Throws on failure, having removed its temp file; `file` is then untouched.
  */
-export function writeFileAtomicSync(file: string, data: string, mode = 0o600): void {
+export function writeFileAtomicSync(file: string, data: string, mode = 0o600, opts: AtomicWriteOptions = {}): void {
   // THROUGH A SYMLINK, NOT OVER IT. writeFileSync followed a link to the file
   // it names; rename would replace the link itself with a regular file, and a
   // self-hosted owner who keeps settings.json elsewhere would lose the link.
@@ -121,12 +169,15 @@ export function writeFileAtomicSync(file: string, data: string, mode = 0o600): v
       // Durability, not atomicity: rename alone keeps a reader off half a
       // file. This keeps a crash straight after from leaving an empty one.
       fsyncSync(fd);
-    } catch {
-      /* a filesystem that cannot fsync still gets the atomic replace */
+    } catch (e) {
+      // A filesystem that cannot fsync still gets the atomic replace — unless
+      // the caller needs the bytes on disk, and this was a real failure.
+      if (opts.durable && !fsyncUnsupported(e)) throw e;
     }
     closeSync(fd);
     fd = null;
     renameRetryingSync(tmp, target);
+    if (opts.durable) fsyncDirSync(path.dirname(target));
   } catch (e) {
     if (fd !== null) {
       try {
@@ -152,7 +203,7 @@ export function writeFileAtomicSync(file: string, data: string, mode = 0o600): v
  * and rename, without holding the event loop through the fsync. Same contract —
  * throws on failure, having removed its temp file; `file` is then untouched.
  */
-export async function writeFileAtomic(file: string, data: string, mode = 0o600): Promise<void> {
+export async function writeFileAtomic(file: string, data: string, mode = 0o600, opts: AtomicWriteOptions = {}): Promise<void> {
   // Through a symlink, not over it — see writeFileAtomicSync.
   let target = file;
   try {
@@ -174,12 +225,13 @@ export async function writeFileAtomic(file: string, data: string, mode = 0o600):
     await fh.writeFile(data, "utf8");
     try {
       await fh.sync();
-    } catch {
-      /* a filesystem that cannot fsync still gets the atomic replace */
+    } catch (e) {
+      if (opts.durable && !fsyncUnsupported(e)) throw e;
     }
     await fh.close();
     fh = null;
     await renameRetrying(tmp, target);
+    if (opts.durable) await fsyncDir(path.dirname(target));
   } catch (e) {
     if (fh !== null) {
       try {

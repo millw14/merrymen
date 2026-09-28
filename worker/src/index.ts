@@ -254,7 +254,7 @@ import { NOT_WATCHED, TRENCHER_DEFAULTS, buysOntoDust, TRENCHER_FAST, priceabili
 import { createPoolPriceReader } from "./venues/pool-prices";
 import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
 import type { Holding, Snapshot, Strategy, Tick } from "./strategies/types";
-import { isPaused, startTelegram } from "./telegram/service";
+import { isPaused, setPaused, startTelegram } from "./telegram/service";
 import { startNotifier } from "./telegram/notifier";
 import { energyToldDayOf, type EnergyToldHere } from "./telegram/energy-alert";
 import { startVirtualsStreamer } from "./virtuals-streamer";
@@ -13361,8 +13361,28 @@ async function main() {
         // copy strands the funds permanently, and this path is reachable from a
         // Telegram message. The CLI and the web API have archived for months;
         // the worker was the one destructive route that did not.
-        const archived = archiveCurrentGrant();
+        const archive = archiveCurrentGrant();
+        // AND NOT WITHOUT ONE. A `failed` archive used to come back as the same
+        // null as "nothing to keep", and the grant was deleted anyway: on a full
+        // or read-only disk, that was the only copy of the owner key, gone for
+        // good. Trading still stops — the pause marker, which every tick and
+        // every chat trade honours — but the key stays where it is, and the
+        // owner is told why and what to do. The session key's own on-chain
+        // expiry and caps bound the agent meanwhile, as they always do.
+        if (archive.kind === "failed") {
+          setPaused(true);
+          const paused = isPaused();
+          console.log(`[kill] NOT deleting grant.json — the owner key could not be archived: ${archive.why}${paused ? "; trading paused" : "; could not pause either"}`);
+          void addEvent(
+            active?.agentId ?? grant.smartAccount,
+            "err",
+            `kill switch — the grant was NOT destroyed: ${archive.why}, and deleting grant.json without a copy would ` +
+              `lose the owner key for good. ${paused ? "Trading is paused instead." : "Trading could not be paused either."}`,
+          );
+          return { ok: false, reason: archive.why, archiveFailed: { why: archive.why, paused } };
+        }
         rmSync(homePaths.grant(), { force: true });
+        const archived = archive.kind === "archived" ? archive.account : null;
         if (archived) {
           void addEvent(
             active?.agentId ?? archived,
