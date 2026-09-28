@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { TrenchBrainReview, TrenchTapeReader, fetchTrenchTape, highVolumePools, trenchBrainPersona, trenchBrainSignals, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { TrenchBrainReview, TrenchTapeReader, fetchTrenchTape, highVolumePools, trenchBrainPersona, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { chooseFocus } from "./brain-focus";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
 import { makeTrencher, TRENCHER_FAST, type Candidate, type OpenPosition } from "./strategies/trencher";
@@ -232,4 +233,161 @@ test("Brain can sell early without waiting for a mechanical threshold", async ()
   assert.equal(orders[0]!.notionalUsdg, 2_000_000n);
   assert.equal(orders[0]!.sellAmountRaw, 200n*10n**18n);
   assert.equal(takeTick(await strategy.tick(snap)).intents.length, 0, "cannot repeat the same sell approval");
+});
+
+// ─── Nominated coins (Telegram groups, docs/tg-groups.md) ─────────────────
+
+const NOMINATED = "0x00000000000000000000000000000000000000aa" as const;
+
+test("a nominated coin that is ELIGIBLE goes ahead of the rotation; one that is not gets nothing", async () => {
+  let now = 1000;
+  const review = new TrenchBrainReview(() => now);
+  review.reset("live");
+  const busy = { token: TOKEN, volume24hUsd: 900_000 };
+  const quiet = { token: NOMINATED, volume24hUsd: 150_000 };
+  // No hint: busiest first, as before.
+  assert.equal(review.candidate([busy, quiet])?.token, TOKEN);
+  // The hint, spelled in any case, moves the eligible nominated coin first.
+  assert.equal(review.candidate([busy, quiet], new Set([NOMINATED.toUpperCase().replace("0X", "0x")]))?.token, NOMINATED);
+  // Not eligible (filtered out by the caller: not verified, fails shouldEnter,
+  // paused, held) → the hint cannot put it on the queue.
+  assert.equal(review.candidate([busy], new Set([NOMINATED]))?.token, TOKEN);
+  assert.equal(review.candidate([], new Set([NOMINATED])), undefined);
+  // An empty hint is no hint.
+  assert.equal(review.candidate([busy, quiet], new Set())?.token, TOKEN);
+});
+
+test("a nominated coin cannot take every review slot: it is re-preferred only after PRIORITY_RETRY_MS", async () => {
+  let now = 1000;
+  const review = new TrenchBrainReview(() => now);
+  review.reset("live");
+  const eligible = [{ token: TOKEN, volume24hUsd: 900_000 }, { token: NOMINATED, volume24hUsd: 150_000 }];
+  const priority = new Set([NOMINATED]);
+  assert.equal(review.candidate(eligible, priority)?.token, NOMINATED);
+  // The review of it produced no decision (Brain down): the nomination stays.
+  review.launch("live", input, NOMINATED, async () => ({ ran: true, result: { ok: false, kind: "unavailable", detail: "down" } }) as unknown as ShadowOutcome, () => {});
+  await setImmediate();
+  now += TRENCH_REVIEW_INTERVAL_MS;
+  assert.equal(review.candidate(eligible, priority)?.token, TOKEN, "the next slot goes to the rotation");
+  now = 1000 + PRIORITY_RETRY_MS;
+  assert.equal(review.candidate(eligible, priority)?.token, NOMINATED, "and the one after may ask again");
+  assert.equal(PRIORITY_RETRY_MS, 2 * TRENCH_REVIEW_INTERVAL_MS, "at most every other slot");
+});
+
+test("the hint picks the ENTRY candidate only: an overdue held position still wins the focus", () => {
+  // chooseFocus is untouched: the nominated candidate is just the universe it
+  // is offered, and a holding past its review gap takes the slot regardless.
+  const review = new TrenchBrainReview(() => 1_000_000);
+  review.reset("live");
+  const cand = review.candidate([{ token: NOMINATED }], new Set([NOMINATED]));
+  assert.equal(cand?.token, NOMINATED);
+  const focus = chooseFocus({
+    agentId: AGENT,
+    positions: [{ symbol: "HELD", token: TOKEN, valueUsdg: 5_000_000, price8: 1_000_000n, priceStale: false, priceSource: "pool" }],
+    universe: [{ symbol: "NOM", address: NOMINATED }],
+    prices: new Map([["HELD", { price8: 1_000_000n, stale: false, source: "pool" }], ["NOM", { price8: 1_000_000n, stale: false, source: "pool" }]]) as never,
+    paused: new Set(),
+    alternate: { lastReviewedAtMs: new Map(), nowMs: 1_000_000, maxGapMs: HELD_REVIEW_MAX_GAP_MS },
+  });
+  assert.equal(focus?.symbol, "HELD", "never reviewed counts as overdue, and overdue wins");
+});
+
+test("reset says whether the context changed; a dropped order names its decision", async () => {
+  let now = 1000;
+  const review = new TrenchBrainReview(() => now);
+  assert.equal(review.reset("paper"), true);
+  assert.equal(review.reset("paper"), false);
+  const drops: [string, string | undefined][] = [];
+  review.onDrop = (why, id) => drops.push([why, id]);
+  review.launch("paper", input, TOKEN, async () => answer(), () => {});
+  await setImmediate();
+  now += 60_001;
+  assert.equal(review.take("MEME", TOKEN, 1_000_000n, 5), null);
+  assert.equal(drops.length, 1);
+  assert.match(drops[0]![0], /past the 60s/);
+  assert.equal(drops[0]![1], "decision-1");
+  assert.equal(review.reset("live"), true);
+});
+
+test("a nominated coin's own page rides the tape: read with it, screened like it, dropped when it resolves", async () => {
+  let now = 1000;
+  const tokenReads: string[] = [];
+  let feedReads = 0;
+  const nominatedPool = pool({ tokenAddress: NOMINATED, poolAddress: NOMINATED, dex: "uniswap-v3-robinhood" });
+  const quietPool = pool({ tokenAddress: ROUTER, poolAddress: ROUTER, volume24hUsd: 1 });
+  const reader = new TrenchTapeReader(
+    async () => { feedReads++; return { failed: false, pools: [] }; },
+    () => now,
+    async (address) => {
+      tokenReads.push(address);
+      // A page may carry pools where the coin is the QUOTE; only its own count.
+      if (address === NOMINATED) return { failed: false, pools: [nominatedPool, pool({ tokenAddress: USDG, poolAddress: USDG })], observedAt: now };
+      return { failed: false, pools: [quietPool], observedAt: now };
+    },
+  );
+  assert.equal((await reader.refresh()).pools.length, 0, "nothing nominated: nothing extra read");
+  assert.deepEqual(tokenReads, []);
+
+  reader.setNominated([NOMINATED.toUpperCase().replace("0X", "0x"), ROUTER, "not-an-address", NOMINATED]);
+  const failures = await reader.refreshNominated();
+  assert.deepEqual(failures, []);
+  assert.deepEqual(tokenReads.sort(), [NOMINATED, ROUTER.toLowerCase()].sort());
+  assert.equal(feedReads, 6, "a nomination's own refresh does not re-read the six feed pages");
+  const snap = reader.snapshot();
+  assert.deepEqual(snap.pools.map(p => p.tokenAddress), [NOMINATED], "the quiet nominated coin fails highVolumePools like any tape row");
+
+  // Refreshed WITH the tape.
+  tokenReads.length = 0;
+  now += 60_000;
+  await reader.refresh();
+  assert.equal(tokenReads.length, 2);
+
+  // Same 120s freshness: an unrefreshed page expires.
+  now += 120_001;
+  assert.equal(reader.snapshot().pools.length, 0);
+
+  // Resolved → the page goes now, not at its freshness limit.
+  now += 1;
+  await reader.refreshNominated();
+  assert.equal(reader.snapshot().pools.length, 1);
+  reader.setNominated([]);
+  assert.equal(reader.snapshot().pools.length, 0);
+  tokenReads.length = 0;
+  await reader.refresh();
+  assert.deepEqual(tokenReads, []);
+});
+
+test("a nominated page failure is reported, never erases the tape, and a resolved read cannot come back", async () => {
+  const now = 1000;
+  let release!: () => void;
+  const gate = new Promise<void>(r => { release = r; });
+  const reader = new TrenchTapeReader(
+    async () => ({ failed: false, pools: [pool()] }),
+    () => now,
+    async (address) => {
+      if (address === ROUTER.toLowerCase()) return { failed: true, pools: [], failure: "http-429" };
+      await gate;
+      return { failed: false, pools: [pool({ tokenAddress: NOMINATED, poolAddress: NOMINATED })], observedAt: now };
+    },
+  );
+  reader.setNominated([ROUTER]);
+  const r = await reader.refresh();
+  assert.deepEqual(r.failures, ["nominated=http-429"], "the kind of page, never the coin's address");
+  assert.equal(r.pools.length, 1, "the feed pages are untouched by a failed token page");
+
+  reader.setNominated([NOMINATED]);
+  const inFlight = reader.refreshNominated();
+  reader.setNominated([]); // resolved while the read was in flight
+  release();
+  await inFlight;
+  assert.ok(!reader.snapshot().pools.some(p => p.tokenAddress === NOMINATED));
+});
+
+test("at most NOMINATED_PAGES_MAX nominated pages are ever read", async () => {
+  const reads: string[] = [];
+  const reader = new TrenchTapeReader(async () => ({ failed: false, pools: [] }), () => 1000,
+    async (address) => { reads.push(address); return { failed: false, pools: [], observedAt: 1000 }; });
+  reader.setNominated(Array.from({ length: NOMINATED_PAGES_MAX + 3 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}`));
+  await reader.refreshNominated();
+  assert.equal(reads.length, NOMINATED_PAGES_MAX);
 });

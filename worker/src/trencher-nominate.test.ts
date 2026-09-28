@@ -534,6 +534,22 @@ describe("nominate: what it refuses, and in what order", () => {
     got.address = addr(3);
     assert.equal(book.active()?.address, addr(1), "nor hands one out");
   });
+
+  it("keeps the address and ids only: message text smuggled on the object never reaches trading", () => {
+    // The type says five fields; a caller at run time can hand over more. The
+    // book copies the five (rule 1: nothing but a validated address and where
+    // it came from crosses), so nothing it hands on or reports can carry the
+    // words, the sender's name or the chat's title.
+    const { book } = setup();
+    const smuggled = { ...nom({ address: addr(1) }), text: "ape 100 into this now", name: "ann", chatTitle: "frog pond" };
+    assert.ok(book.nominate(smuggled as Nomination, READY_PAPER).ok);
+    const { address, chatId, messageId, senderId, atMs } = smuggled;
+    assert.deepEqual(book.active(), { address, chatId, messageId, senderId, atMs });
+    assert.deepEqual(book.nominated(addr(1)), { address, chatId, messageId, senderId, atMs });
+    const outcome = book.onReviewed(addr(1), hold());
+    const seen = JSON.stringify([book.active(), book.nominated(addr(1)), outcome]);
+    for (const s of ["ape 100", "ann", "frog pond"]) assert.ok(!seen.includes(s), `the book kept "${s}"`);
+  });
 });
 
 // ─── one under review, and its priority ─────────────────────────────────────

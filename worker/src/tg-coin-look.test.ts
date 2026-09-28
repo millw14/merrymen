@@ -1,0 +1,538 @@
+/**
+ * A COIN POSTED IN A TELEGRAM GROUP, SEEN FROM THE TRADING SIDE
+ * (docs/tg-groups.md). What is pinned here:
+ *
+ *   - the quick look: every kind, cheapest reads first, `unknown` whenever a
+ *     read fails (never `wallet`, never `no-pool`), a 30-minute cache that the
+ *     free checks still run in front of, and a per-process allowance;
+ *   - the port: safe at any time, never throws, outcomes reach every
+ *     subscriber;
+ *   - the tick's seams: a nominated coin's buy still needs a fresh Brain BUY
+ *     and then the group-entry claim, and a refused claim blocks that entry
+ *     and nothing else;
+ *   - the wiring in index.ts, read as source the way energy-wiring.test.ts
+ *     reads it, because the order of those seams is the safety property.
+ */
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { describe, it } from "node:test";
+import { setImmediate } from "node:timers/promises";
+import { encodeAbiParameters, type PublicClient } from "viem";
+import { CASH, MERRYMEN_TOKEN, STOCK_TOKENS } from "../../packages/core/src/index";
+import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
+import { makeTrencher, TRENCHER_FAST, type Candidate } from "./strategies/trencher";
+import { takeTick, type Snapshot } from "./strategies/types";
+import type { CoinOutcome, TrencherReadiness } from "./telegram/tg-groups/types";
+import {
+  COIN_LOOK,
+  chainTokenProbe,
+  claimGroupEntry,
+  createCoinLook,
+  createTgCoinsPort,
+  groupExitOf,
+  reviewedDecisionOf,
+  type CoinLookReaders,
+} from "./tg-coin-look";
+import { TrenchBrainReview } from "./trencher-brain";
+import { NOMINATE, NominationBook, type NominationCounters } from "./trencher-nominate";
+import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
+
+const NOW = Date.parse("2026-09-28T12:00:00Z");
+const NOW_SEC = Math.floor(NOW / 1000);
+const COIN = "0x00000000000000000000000000000000000c0111";
+const ACCOUNT = "0x000000000000000000000000000000000000acc1";
+const VAULT = "0x000000000000000000000000000000000000fa17";
+
+const gp = (over: Partial<GeckoPool> = {}): GeckoPool => ({
+  poolId: "0x0000000000000000000000000000000000000011",
+  poolAddress: "0x0000000000000000000000000000000000000011",
+  tokenAddress: COIN,
+  name: "FROGGY / WETH 1%",
+  dex: "uniswap-v3-robinhood",
+  priceUsd: 0.01,
+  reserveUsd: 200_000,
+  fdvUsd: 1_000_000,
+  volume24hUsd: 500_000,
+  change24hPct: 5,
+  change1hPct: 1,
+  buys24h: 100,
+  sells24h: 80,
+  buyers24h: 50,
+  buckets: { ...emptyGeckoBuckets(), m5: { changePct: 2, volumeUsd: 1000, buys: 10, sells: 8, buyers: 9, sellers: 8 } },
+  createdAt: NOW_SEC - 3600,
+  ...over,
+});
+const V4_ID = `0x${"4".repeat(64)}`;
+
+function readers(over: Partial<CoinLookReaders> = {}, clock = { t: NOW }) {
+  const calls = { pools: 0, code: 0, probe: 0, curve: 0 };
+  const r: CoinLookReaders = {
+    own: () => [ACCOUNT, VAULT],
+    held: () => null,
+    tokenPools: async () => { calls.pools++; return [gp()]; },
+    getCode: async () => { calls.code++; return "0x6000"; },
+    probe: async () => { calls.probe++; return { pons: false, erc20: true }; },
+    curveFor: async () => { calls.curve++; return null; },
+    now: () => clock.t,
+    ...over,
+  };
+  return { r, calls, clock };
+}
+const look1 = async (over: Partial<CoinLookReaders>, address = COIN) => createCoinLook(readers(over).r)(address);
+
+describe("the quick look: every kind, cheapest first", () => {
+  it("answers its own money, cash, energy, stocks and holdings with no read at all", async () => {
+    const { r, calls } = readers({ held: (a) => (a === COIN ? { name: "FROGGY" } : null) });
+    const look = createCoinLook(r);
+    assert.deepEqual(await look(ACCOUNT.toUpperCase().replace("0X", "0x")), { kind: "own" });
+    assert.deepEqual(await look(VAULT), { kind: "own" });
+    assert.deepEqual(await look(CASH.USDG), { kind: "cash", name: "USDG" });
+    assert.deepEqual(await look(CASH.WETH), { kind: "cash", name: "WETH" });
+    assert.deepEqual(await look(MERRYMEN_TOKEN.address), { kind: "energy" });
+    const stock = STOCK_TOKENS[0]!;
+    assert.deepEqual(await look(stock.address), { kind: "stock", name: stock.symbol }, "a stock goes by its ticker");
+    assert.deepEqual(await look(COIN), { kind: "held", name: "FROGGY" });
+    assert.deepEqual(calls, { pools: 0, code: 0, probe: 0, curve: 0 });
+  });
+
+  it("a v3 pool that clears the tape screen and shouldEnter(TRENCHER_FAST) is a candidate, named by its pool label", async () => {
+    assert.deepEqual(await look1({ tokenPools: async () => [gp()] }), { kind: "candidate", name: "FROGGY" });
+  });
+
+  it("names which bound refused: quiet, thin, small, new", async () => {
+    assert.equal((await look1({ tokenPools: async () => [gp({ volume24hUsd: 50_000 })] })).kind, "too-quiet");
+    assert.equal((await look1({ tokenPools: async () => [gp({ sells24h: 0 })] })).kind, "too-quiet", "one-sided flow is quiet");
+    assert.equal((await look1({ tokenPools: async () => [gp({ reserveUsd: TRENCHER_FAST.minLiquidityUsd - 1 })] })).kind, "too-thin");
+    assert.equal((await look1({ tokenPools: async () => [gp({ fdvUsd: TRENCHER_FAST.minFdvUsd - 1 })] })).kind, "too-thin");
+    assert.equal((await look1({ tokenPools: async () => [gp({ createdAt: NOW_SEC - 60 })] })).kind, "too-new");
+    // The busiest v3 pool is the one judged, whatever else trades.
+    assert.equal((await look1({ tokenPools: async () => [gp({ volume24hUsd: 50_000, poolAddress: "0x0000000000000000000000000000000000000022" }), gp()] })).kind, "candidate");
+  });
+
+  it("a figure the index left out is a look that could not be made", async () => {
+    for (const over of [{ fdvUsd: null }, { reserveUsd: null }, { createdAt: null }, { createdAt: NOW_SEC + 3600 }]) {
+      assert.equal((await look1({ tokenPools: async () => [gp(over)] })).kind, "unknown", JSON.stringify(over));
+    }
+  });
+
+  it("venues trencher v1 cannot buy: the curve, v4-only, and no v3 pool at all", async () => {
+    assert.equal((await look1({ tokenPools: async () => [gp({ dex: "pons-v2", poolAddress: null, poolId: V4_ID })] })).kind, "curve");
+    const v4 = await look1({ tokenPools: async () => [gp({ dex: "uniswap-v4-robinhood", poolAddress: null, poolId: V4_ID }), gp({ dex: "pons-v2-dex", poolAddress: null, poolId: V4_ID })] });
+    assert.deepEqual(v4, { kind: "v4-only", name: "FROGGY" });
+    assert.equal((await look1({ tokenPools: async () => [gp({ dex: "uniswap-v2-robinhood" })] })).kind, "no-pool");
+    // A "v3" row with no pool contract is a v4-style id and does not count as v3.
+    assert.equal((await look1({ tokenPools: async () => [gp({ poolAddress: null, poolId: V4_ID })] })).kind, "v4-only");
+  });
+
+  it("no pool known: one getCode read decides wallet, and one probe decides curve, token or not a token", async () => {
+    const none = async () => [] as GeckoPool[];
+    const { r, calls } = readers({ tokenPools: none, getCode: async () => undefined });
+    assert.deepEqual(await createCoinLook(r)(COIN), { kind: "wallet" });
+    assert.equal(calls.code, 0, "the injected getCode was replaced");
+    assert.equal((await look1({ tokenPools: none, getCode: async () => "0x" })).kind, "wallet");
+    assert.equal((await look1({ tokenPools: none, probe: async () => ({ pons: true, erc20: true }) })).kind, "curve");
+    assert.equal((await look1({ tokenPools: none, probe: async () => ({ pons: false, erc20: true }) })).kind, "no-pool");
+    assert.equal((await look1({ tokenPools: none, probe: async () => ({ pons: false, erc20: false }) })).kind, "not-token");
+    // Pools where the coin is only the QUOTE side are not its pools.
+    assert.equal((await look1({ tokenPools: async () => [gp({ tokenAddress: "0x00000000000000000000000000000000000d0222" })], getCode: async () => undefined })).kind, "wallet");
+  });
+
+  it("local curve provenance answers before any chain read", async () => {
+    const h = readers({ tokenPools: async () => [], curveFor: async () => ({ curve: "0x1" }) });
+    assert.deepEqual(await createCoinLook(h.r)(COIN), { kind: "curve" });
+    assert.equal(h.calls.code + h.calls.probe, 0);
+    // A ledger that cannot be read is not a verdict: the chain is asked.
+    assert.equal((await look1({ tokenPools: async () => [], curveFor: async () => { throw new Error("db"); } })).kind, "no-pool");
+  });
+
+  it("UNREADABLE IS NOT ABSENT: every failed read is unknown, never wallet or no-pool", async () => {
+    assert.equal((await look1({ tokenPools: async () => null })).kind, "unknown");
+    assert.equal((await look1({ tokenPools: async () => { throw new Error("gecko"); } })).kind, "unknown");
+    assert.equal((await look1({ tokenPools: async () => [], getCode: async () => { throw new Error("rpc"); } })).kind, "unknown", "a failed getCode is not a wallet");
+    assert.equal((await look1({ tokenPools: async () => [], probe: async () => null })).kind, "unknown", "a failed probe is not no-pool");
+    assert.equal((await look1({ tokenPools: async () => [], probe: async () => { throw new Error("rpc"); } })).kind, "unknown");
+    assert.equal((await look1({ own: () => { throw new Error("no grant"); } })).kind, "unknown", "never throws");
+    const noPools = readers({ tokenPools: async () => null });
+    await createCoinLook(noPools.r)(COIN);
+    assert.equal(noPools.calls.code, 0, "a failed index read does not fall through to the chain");
+  });
+
+  it("anything that is not an address is unknown, and nothing is read for it", async () => {
+    const { r, calls } = readers();
+    const look = createCoinLook(r);
+    for (const bad of ["", "0x1234", `0x${"a".repeat(64)}`, `0x${"0".repeat(40)}`, `0x${"g".repeat(40)}`, undefined as unknown as string]) {
+      assert.deepEqual(await look(bad), { kind: "unknown" });
+    }
+    assert.equal(calls.pools, 0);
+  });
+
+  it("a name is never address-shaped and never borrows a trusted ticker", async () => {
+    for (const name of ["0xdeadbeef / WETH", `T${COIN.slice(-11).toUpperCase()} / WETH`, "TSLA / WETH", "usdg / WETH", "$$$ / WETH"]) {
+      const l = await look1({ tokenPools: async () => [gp({ name })] });
+      assert.equal(l.kind, "candidate");
+      assert.equal(l.name, undefined, name);
+    }
+    assert.deepEqual(await look1({ held: () => ({ name: "NVDA" }) }), { kind: "held" });
+  });
+});
+
+describe("the quick look: cache and allowance", () => {
+  it("reuses a definite answer for 30 minutes, then reads again", async () => {
+    const h = readers();
+    const look = createCoinLook(h.r);
+    assert.equal((await look(COIN)).kind, "candidate");
+    assert.equal((await look(COIN.toUpperCase().replace("0X", "0x"))).kind, "candidate");
+    assert.equal(h.calls.pools, 1);
+    h.clock.t += COIN_LOOK.cacheMs;
+    await look(COIN);
+    assert.equal(h.calls.pools, 2);
+  });
+
+  it("does not cache unknown, so the next look can succeed", async () => {
+    let fail = true;
+    const h = readers({ tokenPools: async () => (fail ? null : [gp()]) });
+    const look = createCoinLook(h.r);
+    assert.equal((await look(COIN)).kind, "unknown");
+    fail = false;
+    assert.equal((await look(COIN)).kind, "candidate");
+  });
+
+  it("the free checks run in front of the cache: a coin bought since is held, not a stale candidate", async () => {
+    let held = false;
+    const h = readers({ held: () => (held ? { name: "FROGGY" } : null) });
+    const look = createCoinLook(h.r);
+    assert.equal((await look(COIN)).kind, "candidate");
+    held = true;
+    assert.deepEqual(await look(COIN), { kind: "held", name: "FROGGY" });
+  });
+
+  it(`at most ${COIN_LOOK.maxUncached} uncached looks per ${COIN_LOOK.windowMs / 60_000} minutes; beyond is unknown with no read`, async () => {
+    let reads = 0;
+    const clock = { t: NOW };
+    const h = readers({ tokenPools: async (a) => { reads++; return [gp({ tokenAddress: a as `0x${string}` })]; } }, clock);
+    const look = createCoinLook(h.r);
+    const addr = (i: number) => `0x${(0xc0de00 + i).toString(16).padStart(40, "0")}`;
+    for (let i = 0; i < COIN_LOOK.maxUncached; i++) assert.equal((await look(addr(i))).kind, "candidate");
+    assert.equal(reads, COIN_LOOK.maxUncached);
+    assert.deepEqual(await look(addr(99)), { kind: "unknown" });
+    assert.equal(reads, COIN_LOOK.maxUncached, "the refused look read nothing");
+    assert.equal((await look(addr(0))).kind, "candidate", "a cached answer costs nothing and is still given");
+    clock.t += COIN_LOOK.windowMs;
+    assert.equal((await look(addr(99))).kind, "candidate", "the window rolls");
+  });
+
+  it("two looks at the same coin at once are one read and one use of the allowance", async () => {
+    let reads = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const h = readers({ tokenPools: async () => { reads++; await gate; return [gp()]; } });
+    const look = createCoinLook(h.r);
+    const both = Promise.all([look(COIN), look(COIN)]);
+    release();
+    assert.deepEqual((await both).map((l) => l.kind), ["candidate", "candidate"]);
+    assert.equal(reads, 1);
+  });
+});
+
+describe("the chain probe: one multicall, and a failed batch is not an answer", () => {
+  const METADATA = [
+    { type: "address" }, { type: "string" }, { type: "string" },
+    { type: "tuple", components: [{ type: "string" }, { type: "string" }, { type: "string" }, { type: "string" }, { type: "string" }] },
+  ] as const;
+  const meta = encodeAbiParameters(METADATA, [ACCOUNT, "ipfs://logo", "a frog", ["", "", "", "", ""]]);
+  const decimals = `0x${(18).toString(16).padStart(64, "0")}` as `0x${string}`;
+  const client = (answer: () => unknown) => ({ readContract: async () => answer() }) as unknown as PublicClient;
+
+  it("reads Pons-ness and ERC-20-ness from one aggregate3", async () => {
+    let calls = 0;
+    const probe = chainTokenProbe({ readContract: async () => { calls++; return [{ success: true, returnData: meta }, { success: true, returnData: decimals }]; } } as unknown as PublicClient);
+    assert.deepEqual(await probe(COIN), { pons: true, erc20: true });
+    assert.equal(calls, 1);
+    assert.deepEqual(await chainTokenProbe(client(() => [{ success: false, returnData: "0x" }, { success: true, returnData: decimals }]))(COIN), { pons: false, erc20: true });
+    // An address with no code answers every sub-call with nothing.
+    assert.deepEqual(await chainTokenProbe(client(() => [{ success: true, returnData: "0x" }, { success: true, returnData: "0x" }]))(COIN), { pons: false, erc20: false });
+    // decimals() that is not a uint8 is not an ERC-20 answer.
+    assert.deepEqual(await chainTokenProbe(client(() => [{ success: false, returnData: "0x" }, { success: true, returnData: `0x${"f".repeat(64)}` }]))(COIN), { pons: false, erc20: false });
+  });
+
+  it("a batch that failed is null — unknown to the look, never 'not a token'", async () => {
+    assert.equal(await chainTokenProbe(client(() => { throw new Error("rpc"); }))(COIN), null);
+  });
+});
+
+// ─── The port ───────────────────────────────────────────────────────────────
+
+const READY: TrencherReadiness = { kind: "ready-paper", ownerReason: "ready" };
+const nomination = (over = {}) => ({ address: COIN, chatId: -100, messageId: 7, senderId: 42, atMs: NOW, ...over });
+
+function memCounters(entriesUsed = 0): NominationCounters & { entries: () => number } {
+  const day = new Date(NOW).toISOString().slice(0, 10);
+  const s = { n: 0, entries: entriesUsed };
+  return {
+    entries: () => s.entries,
+    takeNomination: (d, limit) => (d === day && s.n < limit ? (s.n++, true) : false),
+    takeGroupEntry: (d, limit) => (d === day && s.entries < limit ? (s.entries++, true) : false),
+    refundGroupEntry: (d) => { if (d === day && s.entries > 0) s.entries--; },
+  };
+}
+
+describe("the port is safe to call at any time", () => {
+  it("nominates through the book with the live readiness, and registers the tape page only on success", () => {
+    const seen: string[] = [];
+    const kinds: string[] = [];
+    const port = createTgCoinsPort({
+      readiness: () => READY,
+      look: async () => ({ kind: "candidate" }),
+      book: { nominate: (_n, kind) => { kinds.push(kind); return { ok: true }; } },
+      onNominated: (a) => seen.push(a),
+      heldNames: () => ["FROGGY", ""],
+      paper: () => true,
+    });
+    assert.deepEqual(port.nominate(nomination({ address: COIN.toUpperCase().replace("0X", "0x") })), { ok: true });
+    assert.deepEqual(kinds, ["ready-paper"]);
+    assert.deepEqual(seen, [COIN], "lowercased");
+    assert.deepEqual(port.heldNames(), ["FROGGY"]);
+    assert.equal(port.mode(), "paper");
+
+    const refused = createTgCoinsPort({
+      readiness: () => READY, look: async () => ({ kind: "unknown" }),
+      book: { nominate: () => ({ ok: false, reason: "busy" }) },
+      onNominated: () => { throw new Error("must not be called"); },
+      heldNames: () => [], paper: () => false,
+    });
+    assert.deepEqual(refused.nominate(nomination()), { ok: false, reason: "busy" });
+    assert.equal(refused.mode(), "live");
+  });
+
+  it("with a real book: not ready is refused, and a burst is capped", () => {
+    let readiness: TrencherReadiness = { kind: "slow", ownerReason: "fast off" };
+    const book = new NominationBook(memCounters(), () => NOW);
+    const port = createTgCoinsPort({ readiness: () => readiness, look: async () => ({ kind: "candidate" }), book, heldNames: () => [], paper: () => true });
+    assert.deepEqual(port.nominate(nomination()), { ok: false, reason: "not-ready" });
+    readiness = READY;
+    assert.deepEqual(port.nominate(nomination()), { ok: true });
+    assert.deepEqual(port.nominate(nomination({ messageId: 8 })), { ok: false, reason: "recent" }, "the same coin is one nomination");
+  });
+
+  it("every failure answers the way that does nothing", async () => {
+    const boom = () => { throw new Error("boom"); };
+    const port = createTgCoinsPort({
+      readiness: boom, look: boom as never, book: { nominate: boom }, onNominated: boom,
+      heldNames: boom, paper: boom,
+    });
+    assert.equal(port.readiness().kind, "off");
+    assert.ok(!/\d/.test(port.readiness().ownerReason));
+    assert.deepEqual(await port.look(COIN), { kind: "unknown" });
+    assert.deepEqual(port.nominate(nomination()), { ok: false, reason: "invalid" });
+    assert.deepEqual(port.heldNames(), []);
+    assert.equal(port.mode(), "paper", "an unreadable mode never claims real money");
+    const rejecting = createTgCoinsPort({ readiness: () => READY, look: () => Promise.reject(new Error("x")), book: { nominate: () => ({ ok: true }) }, onNominated: boom, heldNames: () => [], paper: () => false });
+    assert.deepEqual(await rejecting.look(COIN), { kind: "unknown" });
+    assert.deepEqual(rejecting.nominate(nomination()), { ok: true }, "a failing tape hook does not undo the nomination");
+  });
+
+  it("outcomes reach every subscriber, a throwing one is skipped, and unsubscribe works", () => {
+    const lines: string[] = [];
+    const port = createTgCoinsPort({ readiness: () => READY, look: async () => ({ kind: "candidate" }), book: { nominate: () => ({ ok: true }) }, heldNames: () => [], paper: () => true, log: (l) => lines.push(l) });
+    const a: CoinOutcome[] = [];
+    const b: CoinOutcome[] = [];
+    port.onOutcome(() => { throw new Error("bad handler"); });
+    const offA = port.onOutcome((o) => a.push(o));
+    port.onOutcome((o) => b.push(o));
+    const expired: CoinOutcome = { kind: "expired", address: COIN, chatId: -100, messageId: 7 };
+    port.emit(expired);
+    port.emit([expired, { kind: "skipped", address: COIN, chatId: -100, messageId: 8 }]);
+    port.emit(null);
+    port.emit(undefined);
+    assert.equal(a.length, 3);
+    assert.equal(b.length, 3);
+    offA();
+    port.emit(expired);
+    assert.equal(a.length, 3);
+    assert.equal(b.length, 4);
+    assert.ok(lines.every((l) => !l.includes(COIN) && !l.includes("-100")), "the log line is the kind only");
+    assert.deepEqual(lines.slice(0, 1), ["[tg-groups] coin outcome: expired"]);
+  });
+});
+
+// ─── The tick's seams ─────────────────────────────────────────────────────
+
+describe("what a review of a nominated coin reports", () => {
+  const decision = (over = {}) => ({
+    action: "buy" as const, decision_id: "d-1", thesis: "flow is real", bull_case: "new buyers", bear_case: "thin",
+    risks: ["reversal"], hold_kind: null, gate_verdict: "proceed" as const, ...over,
+  });
+  it("passes the Brain's own decision through", () => {
+    assert.deepEqual(reviewedDecisionOf(decision()), {
+      action: "buy", decisionId: "d-1", holdKind: null, thesis: "flow is real", bullCase: "new buyers", bearCase: "thin", risks: ["reversal"],
+    });
+  });
+  it("a BUY the portfolio gate refused is a gate-forced hold — skipped, never a take, never a pending buy", () => {
+    for (const gate_verdict of ["refuse", "downgrade-to-hold"] as const) {
+      const r = reviewedDecisionOf(decision({ gate_verdict }));
+      assert.equal(r.action, "hold");
+      assert.equal(r.holdKind, "GATE_FORCED_HOLD");
+      const book = new NominationBook(memCounters(), () => NOW);
+      book.nominate(nomination(), "ready-paper");
+      assert.equal(book.onReviewed(COIN, r)?.kind, "skipped");
+    }
+  });
+});
+
+describe("a nominated coin's buy", () => {
+  const OTHER = "0x00000000000000000000000000000000000d0222" as const;
+  const USDG = "0x0000000000000000000000000000000000000022" as const;
+  const ROUTER = "0x0000000000000000000000000000000000000033" as const;
+  const AGENT = "0x0000000000000000000000000000000000000044";
+  const cand = (token: `0x${string}`, symbol: string): Candidate => ({
+    symbol, token, decimals: 18, price8: 1_000_000n, priceable: true, liquidityUsd: 100_000, fdvUsd: 1_000_000, ageSec: 3600, volume24hUsd: 500_000,
+  });
+  const inputFor = (symbol: string) => ({ agentId: AGENT, market: { instrumentId: `merrymen:${symbol.toLowerCase()}`, symbol, priceUsd: "0.01" } }) as ShadowInputs;
+  const buy = (symbol: string, id: string) => ({ ran: true, result: { ok: true, decision: {
+    decision_id: id, agent_id: AGENT, instrument_id: `merrymen:${symbol.toLowerCase()}`, symbol, action: "buy", suggested_delta_usdg: 5e6, gate_verdict: "proceed",
+  } } }) as ShadowOutcome;
+  const snap = { cashUsdg: 1000_000_000n, vaultUsdg: 0n, holdings: new Map(), prices: new Map(), pausedTokens: new Set(), staleFeeds: new Set(), sequencerUp: true, spendHeadroomUsdg: 100_000_000n, perTradeCapUsdg: 10_000_000n } as unknown as Snapshot;
+
+  it("still needs the fresh Brain BUY, then the group-entry claim; a refused claim blocks only that entry", async () => {
+    let now = NOW;
+    const counters = memCounters();
+    const book = new NominationBook(counters, () => now);
+    assert.deepEqual(book.nominate(nomination(), "ready-paper"), { ok: true });
+    const review = new TrenchBrainReview(() => now);
+    review.reset("paper");
+    const reviewed = new Map<string, string>();
+    const candidates = [cand(OTHER, "TOTHER"), cand(COIN, "TNOM")];
+    const strategy = makeTrencher({
+      cfg: TRENCHER_FAST, brainRequired: true, brainOrder: (s, t, p) => review.take(s, t, p, 5),
+      swapRouter: ROUTER, usdgToken: USDG, candidates: () => candidates, open: () => [], liquidityOf: () => 100_000,
+    });
+
+    // 1. A nomination is not a buy: no Brain BUY, no intent — for it or anyone.
+    assert.equal(takeTick(await strategy.tick(snap)).intents.length, 0);
+
+    // 2. It is looked at first...
+    assert.equal(review.candidate(candidates, book.priority())?.token, COIN);
+    // ...and the Brain's answer is the only thing that can make an order.
+    review.launch("paper", inputFor("TNOM"), COIN, async () => {
+      const o = buy("TNOM", "decision-nom");
+      if (o.ran && o.result.ok) {
+        const d = reviewedDecisionOf(o.result.decision);
+        if (book.nominated(COIN)) reviewed.set(d.decisionId, COIN);
+        assert.equal(book.onReviewed(COIN, d), null, "a BUY says nothing until a fill");
+      }
+      return o;
+    }, () => {});
+    await setImmediate();
+    const intents = takeTick(await strategy.tick(snap)).intents;
+    assert.equal(intents.length, 1);
+    const entry = intents[0]!;
+    assert.ok(entry.kind === "swap");
+    assert.equal(entry.buyToken, COIN);
+    assert.equal(entry.decisionId, "decision-nom", "provenance is the Brain's decision, nothing minted");
+    assert.equal(entry.sellAmountRaw, 5_000_000n, "sized by the entry path, never by the chat");
+
+    // 3. The group-entry claim, on top of everything else.
+    const claimed = claimGroupEntry(book, entry, (id) => reviewed.get(id));
+    assert.deepEqual(claimed, { group: true, address: COIN, ok: true });
+    assert.equal(counters.entries(), 1);
+    // No fill → the claim goes back (the loop's tgSettleGroupEntry).
+    book.refundEntry(COIN);
+    assert.equal(counters.entries(), 0);
+
+    // 4. At the day's cap, THIS entry is refused...
+    const full = memCounters(NOMINATE.groupEntriesPerDay);
+    const capped = new NominationBook(full, () => now);
+    capped.nominate(nomination(), "ready-paper");
+    assert.deepEqual(claimGroupEntry(capped, entry, (id) => reviewed.get(id)), { group: true, address: COIN, ok: false, why: "cap" });
+    assert.equal(full.entries(), NOMINATE.groupEntriesPerDay, "a refusal takes nothing");
+    // ...and an entry into a coin nobody nominated is not this cap's business.
+    const tape = { kind: "swap" as const, buyToken: OTHER, decisionId: "decision-other" };
+    assert.deepEqual(claimGroupEntry(capped, tape, (id) => reviewed.get(id)), { group: false });
+    const exit = { kind: "swap", sellToken: COIN, buyToken: USDG };
+    assert.deepEqual(claimGroupEntry(capped, exit, () => undefined), { group: false }, "an exit is never an entry");
+
+    // 5. A decision from a nominated review whose nomination has since
+    //    resolved cannot slip past the cap uncounted.
+    now += NOMINATE.ttlMs;
+    assert.equal(book.expire().length, 1);
+    assert.deepEqual(claimGroupEntry(book, entry, (id) => reviewed.get(id)), { group: true, address: COIN, ok: false, why: "resolved" });
+  });
+
+  it("a claim that cannot be answered refuses the entry", () => {
+    const book = { nominated: () => nomination(), claimEntry: () => { throw new Error("disk"); } };
+    assert.deepEqual(claimGroupEntry(book as never, { kind: "swap", buyToken: COIN }, () => undefined), { group: true, address: COIN, ok: false, why: "cap" });
+  });
+});
+
+describe("which sale is an exit worth one line", () => {
+  const sale = (over = {}) => ({ kind: "swap", sellToken: COIN, buyToken: CASH.USDG, sellAmountRaw: 500n, ...over });
+  it("a mechanical trencher exit always sells the whole position", () => {
+    for (const cause of ["stop", "take", "aged", "drain", "unpriceable"]) {
+      const e = groupExitOf(sale({ sellAmountRaw: 1n }), { code: "trench-exit", cause }, 500n);
+      assert.equal(e?.address, COIN);
+      assert.equal(e!.notes.length, 1);
+      assert.ok(!/\d|%|\$|up|profit|loss/i.test(e!.notes[0]!), `${cause}: ${e!.notes[0]}`);
+    }
+  });
+  it("a Brain sale counts only when it empties the position; a trim is silence", () => {
+    assert.ok(groupExitOf(sale(), null, 500n));
+    assert.ok(groupExitOf(sale({ sellAmountRaw: 600n }), null, 500n));
+    assert.equal(groupExitOf(sale({ sellAmountRaw: 200n }), null, 500n), null);
+    assert.equal(groupExitOf(sale(), null, null), null, "an unknown holding is not an empty one");
+  });
+  it("buys and cash legs are never exits", () => {
+    assert.equal(groupExitOf({ kind: "swap", sellToken: CASH.USDG, buyToken: COIN, sellAmountRaw: 5n }, { code: "trench-exit", cause: "stop" }, 5n), null);
+    assert.equal(groupExitOf({ kind: "transfer" }, { code: "trench-exit" }, 5n), null);
+  });
+});
+
+// ─── The wiring, read as source ───────────────────────────────────────────
+
+describe("index.ts wires the seams in the order that makes them safe", () => {
+  const CODE = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  const loopAt = CODE.indexOf("for (const [proposedAt, intent] of proposed.entries()) {");
+  const LOOP = CODE.slice(loopAt, CODE.indexOf("\n    }\n", loopAt));
+
+  it("the group-entry claim comes before the energy claim and before any decision row", () => {
+    const group = LOOP.indexOf("const groupEntry = entry ? tgClaimGroupEntry(intent) : null;");
+    const skip = LOOP.indexOf("if (groupEntry?.group && !groupEntry.ok) continue;");
+    const energy = LOOP.indexOf("const energyClaim = entry ? await claimEntry() : null;");
+    const decided = LOOP.indexOf("await ensureDecision(");
+    assert.ok(loopAt > 0 && group > 0 && skip > group && energy > skip && decided > energy);
+  });
+
+  it("the group claim goes back wherever the energy claim does", () => {
+    assert.match(LOOP, /tgSettleGroupEntry\(groupEntry, intent\.decisionId, null\);\n\s+await withholdEntry\(agentId\);\n\s+continue;/);
+    assert.match(LOOP, /await refundEntry\(energyClaim\);\n\s+tgSettleGroupEntry\(groupEntry, intent\.decisionId, null\);\n\s+continue;/);
+    assert.match(LOOP, /if \(!tradeConsumesSnapshot\(facts\?\.status\)\) await refundEntry\(energyClaim\);\n\s+tgSettleGroupEntry\(groupEntry, intent\.decisionId, facts\?\.status\);/);
+    assert.match(CODE, /if \(!g \|\| !g\.group \|\| !g\.ok \|\| tradeConsumesSnapshot\(status\)\) return;/, "refunded only when no trade came of it");
+  });
+
+  it("the nomination only reorders the review, and the Brain's input is any tape coin's", () => {
+    assert.match(CODE, /trenchBrain\.candidate\(trenchEligible\.filter\([^\n]*\), tgBook\.priority\(\)\);/);
+    const inputsAt = CODE.indexOf("const inputs: ShadowInputs = {");
+    const launchAt = CODE.indexOf("trenchBrain.launch(trenchContext, inputs");
+    assert.ok(inputsAt > 0 && launchAt > inputsAt);
+    assert.doesNotMatch(CODE.slice(inputsAt, launchAt), /\btg[A-Z]\w*/, "nothing from Telegram groups reaches the Brain's input");
+  });
+
+  it("every trencher review is reported after it is persisted, and cannot break the review", () => {
+    const at = CODE.indexOf("return runShadow(brainConfig, inputs,");
+    assert.match(CODE.slice(at, at + 1600), /admit: claimReview,\n\s+\}\)\.then\(outcome => \{ tgNoteReview\(focus\.token, outcome\); return outcome; \}\); \},/);
+    const body = CODE.slice(CODE.indexOf("function tgNoteReview("), CODE.indexOf("function tgNoteHeld("));
+    assert.match(body, /try \{[\s\S]*\} catch/);
+  });
+
+  it("fills, drops, TTLs and context changes all reach the book", () => {
+    assert.match(CODE, /if \(wrote && decision_id\) void maybePost\(decision_id, row\.status\);\n[\s\S]{0,400}if \(wrote\) tgNoteTradeRow\(intent, decision_id, row\.status\);/);
+    assert.match(CODE, /if \(decisionId\) tgDeliver\(tgBook\.onFill\(decisionId, "dropped", paperActive\(\)\)\);/);
+    assert.match(CODE, /if \(trenchBrain\.reset\(trenchContext\)\) tgDeliver\(tgBook\.reset\(\)\);\n\s+tgDeliver\(tgBook\.expire\(\)\);/);
+    assert.match(CODE, /discoverTrencherUniverse\(mainnetClient\(\),current\.grant,freshTrenchTape\(\),\{nominated:new Set\(tgNominated\)\}\)/);
+  });
+
+  it("the child hands the service its one store and the port", () => {
+    assert.match(CODE, /const tgGroupsStore = TgGroupsStore\.open\(merrymenHome\(\)\);\n\s+const tgBook = new NominationBook\(tgGroupsStore\);/);
+    const tg = CODE.slice(CODE.indexOf("startTelegram({"));
+    assert.match(tg.slice(0, 4000), /\n\s+tgGroupsStore,\n\s+tgCoins,\n/);
+  });
+});
