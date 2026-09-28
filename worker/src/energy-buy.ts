@@ -20,11 +20,16 @@
  * have — and a tax nobody could read is never a floor. Each unknown refuses, by
  * name, before anything is sized.
  *
- * THE SIZING IS EXACT V2 ARITHMETIC, not a hedge. What must ARRIVE is the
- * shortfall plus a 50 bps rounding margin; grossNeededFor inverts the token's
- * buy tax and the owner's slippage tolerance exactly (ceiling at each step);
- * the router's own getAmountsIn prices that gross output across both pools,
- * fees included; the result is rounded UP to the cent. Only then is it capped:
+ * THE SIZING IS EXACT V2 ARITHMETIC AT THE EXPECTED RATE, not a hedge. What
+ * must ARRIVE is the shortfall plus a 50 bps margin; grossNeededFor inverts the
+ * token's buy tax exactly (ceiling at each step); the router's own getAmountsIn
+ * prices that gross output across both pools, fees included; the result is
+ * rounded UP to the cent. The owner's slippage tolerance is NOT in the size —
+ * it is the router's floor on what arrives (the executor's minOut), nothing
+ * else. Sizing for the worst case bought 1.5% over the shortfall at the default
+ * tolerance and ~11.7% at the maximum on every ask; a buy the market moves
+ * against now arrives a little short, and the next ask tops it up from the
+ * chain, which is already safe. Only then is it capped:
  * by the owner's own maximum for this ask, the key's per-trade cap (the USDG
  * approve the wall seals), what is left of today's budget, and the cash in the
  * account — each rounded DOWN to the cent. Every cap binds at once, so the
@@ -37,14 +42,19 @@
  * percentage is printed: the tax is its owner's to change.
  */
 
-import { ENERGY, ENERGY_FULL_RAW, MERRYMEN_TOKEN, wholeTokens } from "../../packages/core/src/index";
+import { ENERGY, ENERGY_FULL_RAW, MERRYMEN_TOKEN, isEnergyReserveToken, wholeTokens } from "../../packages/core/src/index";
 import { energyPreTradeGate, type EnergyGateRule } from "./energy-accounting";
 import { count } from "./energy-copy";
 import type { LedgerFacts } from "./order-receipt";
 import { rejectRuleLabel, rejectRuleRemedy } from "./thesis-policy";
 import { grossNeededFor } from "./venues/uniswap-v2";
 
-/** The rounding margin on what must arrive, bps. Tax and slippage are handled exactly; this is rounding only. */
+/**
+ * The margin on what must arrive, bps — the ONLY margin over the shortfall.
+ * The tax is inverted exactly; slippage is never sized in (it is the router's
+ * floor, see the header), so this is what absorbs rounding and a small move
+ * between the quote and the fill: the card's "small margin for price movement".
+ */
 export const ENERGY_BUFFER_BPS = 50;
 /** One cent of USDG, raw 6dp. */
 const CENT = 10_000n;
@@ -79,12 +89,14 @@ export interface EnergyCaps {
   maxOpsPerDay: number;
 }
 
-/** How the route prices right now. `amountInFor` is the router's getAmountsIn over the energy path. */
+/**
+ * How the route prices right now. `amountInFor` is the router's getAmountsIn
+ * over the energy path. NO SLIPPAGE: the owner's tolerance is the executor's
+ * floor on what arrives (energyMinOut at the re-quote), never part of the size.
+ */
 export interface EnergyPricing {
   /** $MERRYMEN's buy tax, bps, read now; null = unreadable. */
   taxBps: number | null;
-  /** The owner's slippage tolerance, bps. */
-  slippageBps: number;
   amountInFor(grossOut: bigint): Promise<bigint | null>;
 }
 
@@ -142,15 +154,17 @@ const floorCent = (v: bigint) => (v <= 0n ? 0n : v - (v % CENT));
 
 /**
  * THE ONE SIZING RULE: how much $MERRYMEN to price for a shortfall. What must
- * arrive is the shortfall plus its rounding margin; grossNeededFor inverts the
- * token's buy tax and the owner's slippage tolerance on top. The planner sizes
- * the buy with it and index.ts's "about $X" estimate prices the same figure,
- * so the number an owner is shown is the number they will be asked for — the
- * estimate once left the margin and the slippage out and under-asked.
+ * arrive is the shortfall plus its margin (ENERGY_BUFFER_BPS); grossNeededFor
+ * inverts the token's buy tax on top, at the EXPECTED rate — zero slippage,
+ * because the owner's tolerance is the router's floor (energyMinOut), never
+ * part of the size. It takes no slippage argument, so no caller can size with
+ * one. The planner sizes the buy with it and index.ts's "about $X" estimate
+ * prices the same figure, so the number an owner is shown is the number they
+ * will be asked for.
  */
-export function energyGrossFor(shortRaw: bigint, taxBps: number, slippageBps: number): bigint {
+export function energyGrossFor(shortRaw: bigint, taxBps: number): bigint {
   const wantNet = (shortRaw * BigInt(10_000 + ENERGY_BUFFER_BPS) + 9_999n) / 10_000n;
-  return grossNeededFor(wantNet, taxBps, slippageBps);
+  return grossNeededFor(wantNet, taxBps, 0);
 }
 
 /** A route quote → the USDG one buy asks: rounded UP to the cent, and never under the smallest buy. */
@@ -177,10 +191,42 @@ export function isEnergySymbol(symbol: string | null | undefined): boolean {
 }
 
 /**
- * submitChatTrade's answer to ANY order for $MERRYMEN — the Brain's, a Telegram
- * message's, or anything else that reaches the ordinary order path. It points
- * to the one way in (the app chat's get-energy, which asks first) and the way
- * round it; it never says "add it in /settings", which would not help.
+ * WHICH TOKEN AN ORDINARY ORDER MEANS — the watch set first, the reserve only
+ * when nothing there answers to the name.
+ *
+ * submitChatTrade used to refuse any symbol reading MERRYMEN before it looked
+ * at the watch set, so a coin the owner holds or watches at ANOTHER address
+ * under that name (a lookalike added in Settings, one a snipe resolved, one
+ * the Trencher found — none of them the reserve, all kept in the watch set on
+ * purpose) could be neither bought nor sold by its owner, and every surface
+ * answered with sentences ("I never sell it") that were false for that coin.
+ * An order is resolved by ADDRESS:
+ *
+ *   'token'   — a watched token answers to the symbol and is not the reserve:
+ *               traded like any other, buys and sells alike;
+ *   'reserve' — the watched token IS a reserve address (the registry keeps it
+ *               out, so this is defence in depth), or nothing watched answers
+ *               and the symbol names the reserve: ENERGY_NOT_AN_ORDER;
+ *   'unknown' — nothing watched answers, and it is not the reserve's name.
+ *
+ * The one way the reserve itself is bought is get-energy's marked order,
+ * which never comes here (order-gate.ts orderRoute).
+ */
+export function resolveOrderToken(
+  symbol: string,
+  watch: readonly { symbol: string; address: string }[],
+): { kind: "token"; address: `0x${string}` } | { kind: "reserve" } | { kind: "unknown" } {
+  const hit = watch.find((t) => t.symbol === symbol);
+  if (hit) return isEnergyReserveToken(hit.address) ? { kind: "reserve" } : { kind: "token", address: hit.address as `0x${string}` };
+  return isEnergySymbol(symbol) ? { kind: "reserve" } : { kind: "unknown" };
+}
+
+/**
+ * submitChatTrade's answer to an order for THE RESERVE — the Brain's, a
+ * Telegram message's, a plain app buy or sell, anything that reaches the
+ * ordinary order path and resolves to it (resolveOrderToken). It points to the
+ * one way in (the app chat's get-energy, which asks first) and the way round
+ * it; it never says "add it in /settings", which would not help.
  */
 export const ENERGY_NOT_AN_ORDER =
   "$MERRYMEN is my energy, not something I trade — I never sell it, and I buy it only when you ask me to " +
@@ -311,7 +357,7 @@ export async function planEnergyBuy(
   }
 
   // 6. THE PRICE OF THE SHORTFALL, then every cap at once.
-  const gross = energyGrossFor(shortRaw, taxBps, pricing.slippageBps);
+  const gross = energyGrossFor(shortRaw, taxBps);
   const quoted = await pricing.amountInFor(gross);
   if (quoted === null || quoted <= 0n) {
     return refuse(

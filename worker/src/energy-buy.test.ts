@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ENERGY, ENERGY_FULL_RAW } from "../../packages/core/src/index";
+import { ENERGY, ENERGY_FULL_RAW, MERRYMEN_TOKEN } from "../../packages/core/src/index";
 import {
   ENERGY_BUFFER_BPS,
   energyAskFor,
   energyGrossFor,
   planEnergyBuy,
+  resolveOrderToken,
   sayEnergyOutcome,
   sayEnergyPlan,
   type EnergyBook,
@@ -40,7 +41,6 @@ const caps = (over: Partial<EnergyCaps> = {}): EnergyCaps => ({
 });
 const pricing = (over: Partial<EnergyPricing> = {}): EnergyPricing => ({
   taxBps: 100,
-  slippageBps: 100,
   amountInFor: async (g) => linear(g),
   ...over,
 });
@@ -63,10 +63,14 @@ const refusal = (p: EnergyPlan) => {
   assert.equal(p.kind, "refuse");
   return p as Extract<EnergyPlan, { kind: "refuse" }>;
 };
-/** What the uncapped shortfall would cost, computed independently of the planner. */
-const needFor = (short: bigint, tax = 100, slip = 100) => {
+/**
+ * What the uncapped shortfall would cost, computed independently of the
+ * planner: the shortfall plus the margin, grossed up for the tax alone, at the
+ * expected rate — the owner's slippage tolerance is never in the size.
+ */
+const needFor = (short: bigint, tax = 100) => {
   const want = (short * BigInt(10_000 + ENERGY_BUFFER_BPS) + 9_999n) / 10_000n;
-  const raw = linear(grossNeededFor(want, tax, slip));
+  const raw = linear(grossNeededFor(want, tax, 0));
   return raw % 10_000n === 0n ? raw : raw + (10_000n - (raw % 10_000n));
 };
 const NO_PRICE_WORDS = /price|returns?\b|profit|moon|pump|investment|worth|\d+(\.\d+)?\s*%/i;
@@ -198,7 +202,7 @@ describe("planEnergyBuy — the size", () => {
         opsRemaining: 1 + Math.floor(rnd() * 5),
       });
       const r = reads({ holder: big(100_000) * TOKEN, account: big(20_000) * TOKEN, cashUsdg: big(50_000_000) });
-      const p = await plan(r, c, pricing({ taxBps: Math.floor(rnd() * 201), slippageBps: Math.floor(rnd() * 300) }));
+      const p = await plan(r, c, pricing({ taxBps: Math.floor(rnd() * 201) }));
       if (p.kind !== "buy") continue;
       bought += 1;
       const dailyLeft = c.dailyRaw > c.spentTodayRaw ? c.dailyRaw - c.spentTodayRaw : 0n;
@@ -214,19 +218,23 @@ describe("planEnergyBuy — the size", () => {
   it("THE ESTIMATE AND THE ASK ARE ONE RULE — energyGrossFor/energyAskFor size exactly what the planner buys", async () => {
     // index.ts's "about $X" estimate prices energyAskFor(amountIn(energyGrossFor(...))).
     // Uncapped, that must be the planner's own amount, to the cent — it once
-    // priced the bare shortfall at zero slippage and under-stated the ask.
+    // priced the bare shortfall and under-stated the ask.
     const big = caps({ ownerMaxRaw: 900n * USDG, perTradeRaw: 900n * USDG, dailyRaw: 900n * USDG });
-    for (const [held, tax, slip] of [
-      [20_000n, 100, 100],
-      [12_345n, 0, 0],
-      [99_000n, 200, 1_000],
-      [99_995n, 100, 100], // a few tokens short: the smallest buy
+    for (const [held, tax] of [
+      [20_000n, 100],
+      [12_345n, 0],
+      [99_000n, 200],
+      [99_995n, 100], // a few tokens short: the smallest buy
     ] as const) {
       const short = ENERGY_FULL_RAW - held * TOKEN;
-      const p = buyOf(await plan(reads({ holder: held * TOKEN, cashUsdg: 900n * USDG }), big, pricing({ taxBps: tax, slippageBps: slip })));
-      const estimate = energyAskFor(linear(energyGrossFor(short, tax, slip)));
-      assert.equal(estimate, p.amountInRaw, `held ${held}, tax ${tax}, slippage ${slip}`);
-      assert.equal(p.needInRaw, needFor(short, tax, slip), "and the independent arithmetic agrees");
+      const p = buyOf(await plan(reads({ holder: held * TOKEN, cashUsdg: 900n * USDG }), big, pricing({ taxBps: tax })));
+      const estimate = energyAskFor(linear(energyGrossFor(short, tax)));
+      assert.equal(estimate, p.amountInRaw, `held ${held}, tax ${tax}`);
+      assert.equal(p.needInRaw, needFor(short, tax), "and the independent arithmetic agrees");
+      // A card sized at the estimate covers the shortfall in one ask.
+      const atEstimate = buyOf(await plan(reads({ holder: held * TOKEN, cashUsdg: 900n * USDG }), caps({ ...big, ownerMaxRaw: estimate }), pricing({ taxBps: tax })));
+      assert.equal(atEstimate.coversShortfall, true, `held ${held}: the estimate is enough`);
+      assert.equal(atEstimate.asksLeft, 0);
     }
   });
 
@@ -237,12 +245,28 @@ describe("planEnergyBuy — the size", () => {
     assert.equal(energyAskFor(37_120_000n), 37_120_000n);
   });
 
-  it("the margin and the owner's slippage are IN the size: more slippage, more asked", () => {
+  it("THE SIZE IS THE EXPECTED-RATE COST: the margin and the tax are in it, the owner's slippage is NOT", () => {
     const short = 87_655n * TOKEN;
     const bare = grossNeededFor(short, 100, 0);
-    const sized = energyGrossFor(short, 100, 100);
-    assert.ok(sized > bare, "the old estimate's figure is below what is actually bought");
-    assert.ok(energyGrossFor(short, 100, 1_000) > sized);
+    const sized = energyGrossFor(short, 100);
+    assert.ok(sized > bare, "the margin is in the size");
+    // Exactly the shortfall plus 50 bps, grossed up for the tax alone.
+    assert.equal(sized, grossNeededFor((short * 10_050n + 9_999n) / 10_000n, 100, 0));
+    // What arrives at the quoted rate is the shortfall plus the margin — not
+    // plus the slippage setting too, which bought ~11.7% over at the maximum.
+    const afterTax = (sized * 9_900n) / 10_000n;
+    assert.ok(afterTax >= short && afterTax - short <= (short * 51n) / 10_000n, "over by the margin, and only the margin");
+  });
+
+  it("THE OWNER'S SLIPPAGE TOLERANCE DOES NOT CHANGE THE SIZE — it is the router's floor, nothing else", async () => {
+    // The plan has no slippage input at all; what the executor floors at is
+    // energyMinOut(re-quote, tax, cfg.slippageBps) — pinned in energy-buy-wiring.
+    const big = caps({ ownerMaxRaw: 900n * USDG, perTradeRaw: 900n * USDG, dailyRaw: 900n * USDG });
+    const p = buyOf(await plan(reads({ holder: 20_000n * TOKEN, cashUsdg: 900n * USDG }), big));
+    const short = ENERGY_FULL_RAW - 20_000n * TOKEN;
+    const worstCase = energyAskFor(linear(grossNeededFor((short * 10_050n + 9_999n) / 10_000n, 100, 1_000)));
+    assert.ok(p.amountInRaw < worstCase, "no longer sized for the worst case");
+    assert.equal(p.amountInRaw, needFor(short));
   });
 
   it("DETERMINISTIC: the same reads give the same plan", async () => {
@@ -267,6 +291,15 @@ describe("planEnergyBuy — the accounting gate, on the size to be spent", () =>
     assert.equal(p.rule, "would-trip-breaker");
     assert.match(p.line, /the limit is not loosened/);
     buyOf(await plan(reads(), caps(), pricing(), { ...b, maxDrawdownBps: 500 }));
+  });
+  it("A SPEND THAT WOULD LEAVE NOTHING CONTRIBUTED REFUSES — on the size actually to be spent", async () => {
+    // The worked default spends 10 (the per-trade cap binds). With 10 on
+    // record that leaves nothing; with 10.01 it leaves a cent and is planned.
+    const p = refusal(await plan(reads(), caps(), pricing(), book({ netContributionsUsdg: 10n * USDG })));
+    assert.equal(p.rule, "would-exhaust-contributions");
+    assert.match(p.line, /^I did not buy: spending 10\.00 USDG on energy would use up all 10\.00 USDG of capital on record for me/);
+    assert.match(p.line, /send USDG to me first and ask again/);
+    assert.equal(buyOf(await plan(reads(), caps(), pricing(), book({ netContributionsUsdg: 10n * USDG + 10_000n }))).amountInRaw, 10n * USDG);
   });
   it("a paper book is never bought on — a skip is a refusal here", async () => {
     assert.equal(refusal(await plan(reads(), caps(), pricing(), book({ paper: true, netContributionsUsdg: null }))).rule, "no-contribution-record");
@@ -359,5 +392,37 @@ describe("the fixed sentences — each names what to do instead", async () => {
     for (const l of [m.ENERGY_NOT_AN_ORDER, m.ENERGY_NO_SELL, m.ENERGY_NOT_MAINNET, m.ENERGY_RESIGN, m.energyNeedsLiveLine("x")]) {
       assert.doesNotMatch(l, NO_PRICE_WORDS, l);
     }
+  });
+});
+
+/**
+ * AN ORDINARY ORDER IS RESOLVED BY ADDRESS — the watch set first.
+ *
+ * submitChatTrade refused any symbol reading MERRYMEN before it looked at the
+ * watch set, so a watched coin at another address under that name could be
+ * neither bought nor sold by its owner, and every surface told them "I never
+ * sell it" about a coin they held. resolveOrderToken is the decision it now
+ * makes first; index.ts's use of it is pinned in energy-buy-wiring.test.ts.
+ */
+describe("resolveOrderToken — the reserve by address, a lookalike like any coin", () => {
+  const CLONE = "0x00000000000000000000000000000000000c1011";
+  const TSLA = { symbol: "TSLA", address: "0x00000000000000000000000000000000000000a5" };
+
+  it("A WATCHED LOOKALIKE CALLED MERRYMEN RESOLVES TO ITS OWN ADDRESS — bought and sold like any token", () => {
+    assert.deepEqual(resolveOrderToken("MERRYMEN", [TSLA, { symbol: "MERRYMEN", address: CLONE }]), { kind: "token", address: CLONE });
+  });
+
+  it("NOTHING WATCHED ANSWERS AND THE NAME IS THE RESERVE'S: refused as the reserve, never 'unknown'", () => {
+    for (const s of ["MERRYMEN", "$MERRYMEN", "merrymen"]) assert.deepEqual(resolveOrderToken(s, [TSLA]), { kind: "reserve" }, s);
+  });
+
+  it("a watched entry AT the reserve address is refused whatever it is called (defence in depth)", () => {
+    assert.deepEqual(resolveOrderToken("MM", [{ symbol: "MM", address: MERRYMEN_TOKEN.address }]), { kind: "reserve" });
+    assert.deepEqual(resolveOrderToken("MERRYMEN", [{ symbol: "MERRYMEN", address: MERRYMEN_TOKEN.address.toUpperCase().replace("0X", "0x") }]), { kind: "reserve" });
+  });
+
+  it("an ordinary watched symbol resolves; an unwatched one is unknown", () => {
+    assert.deepEqual(resolveOrderToken("TSLA", [TSLA]), { kind: "token", address: TSLA.address });
+    assert.deepEqual(resolveOrderToken("NVDA", [TSLA]), { kind: "unknown" });
   });
 });

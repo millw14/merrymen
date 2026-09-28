@@ -68,6 +68,15 @@ class OrdersWireTest {
     assertEquals(JsonPrimitive(5.0), body["usdgAmount"])
   }
 
+  @Test fun theEnergyMarkerTravelsOnlyWhenTheCardFixesIt() = runBlocking {
+    server.answer("""{"id":"${"b".repeat(32)}","queued":true}""")
+    api.postOrder("buy", "MERRYMEN", 20.0, owner = "0xabc", purpose = "energy")
+    assertEquals(JsonPrimitive("energy"), sentBody()["purpose"])
+    server.answer("""{"id":"${"c".repeat(32)}","queued":true}""")
+    api.postOrder("buy", "MERRYMEN", 20.0, owner = "0xabc")
+    assertFalse("an ordinary order sends no marker", sentBody().containsKey("purpose"))
+  }
+
   @Test fun noOwnerSendsNoOwnerKey() = runBlocking {
     server.answer("""{"id":"x","queued":true}""")
     api.postOrder("sell", "NVDA", 1.0, owner = null)

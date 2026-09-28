@@ -431,6 +431,12 @@ export interface ResolvedOp {
   /** |USDG leg|, 6dp. 0 when unattributable, and only meaningful on success. */
   notionalUsdg6: bigint;
   attributed: boolean;
+  /**
+   * The block the op's UserOperationEvent is in, when the log carried one —
+   * where an energy purchase LANDED, which the buy's balance-read pin needs
+   * (index.ts lastEnergyLandedBlock). Absent when the log did not say.
+   */
+  blockNumber?: bigint;
 }
 
 /**
@@ -491,6 +497,7 @@ export async function resolveSubmittedOps(opts: {
 
     let decoded: { success: boolean } | null = null;
     let txHash = "";
+    let blockNumber: bigint | undefined;
     for (const raw of logs.logs) {
       try {
         const d = decodeEventLog({
@@ -501,6 +508,12 @@ export async function resolveSubmittedOps(opts: {
         if (String(d.args.userOpHash).toLowerCase() !== hash) continue;
         decoded = { success: Boolean(d.args.success) };
         txHash = String(raw.transactionHash).toLowerCase();
+        try {
+          const b = raw.blockNumber === undefined ? undefined : BigInt(raw.blockNumber);
+          if (b !== undefined && b > 0n) blockNumber = b;
+        } catch {
+          // an unreadable block number is just an absent one
+        }
         break;
       } catch {
         // not a UserOperationEvent we can read — keep looking
@@ -520,7 +533,7 @@ export async function resolveSubmittedOps(opts: {
         }
       }
     }
-    out.push({ userOpHash: hash, txHash, success: decoded.success, notionalUsdg6, attributed });
+    out.push({ userOpHash: hash, txHash, success: decoded.success, notionalUsdg6, attributed, ...(blockNumber !== undefined ? { blockNumber } : {}) });
   }
   return out;
 }

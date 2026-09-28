@@ -211,14 +211,22 @@ val COMMANDS: Map<String, CommandSpec> = listOf(
       "I have to sell the whole position — I'll tell you which happened. I'll place it; my key's " +
       "limits still decide."
   },
-  // THE ENERGY BUY. Side AND symbol are fixed, so a card can only ever buy
-  // $MERRYMEN; the model supplies nothing but the most the owner will spend,
-  // which the card states and the worker treats as a ceiling (it sizes the buy
-  // to cover the shortfall, with a margin). Mirrors web/src/lib/chat-commands.ts
+  // THE ENERGY BUY. Side, symbol AND purpose are fixed, so a card can only
+  // ever buy $MERRYMEN; the model supplies nothing but the most the owner will
+  // spend, which the card states and the worker treats as a ceiling (it sizes
+  // the buy to cover the shortfall, with a margin). `purpose: "energy"` is what
+  // routes it to the agent's energy buy — the worker never routes on the
+  // symbol, so a `buy` card naming MERRYMEN stays an ordinary order — and the
+  // ORDER branch in Act.kt sends it. Mirrors web/src/lib/chat-commands.ts
   // get-energy word for word.
   CommandSpec(
-    "get-energy", Via.ORDER, listOf("side", "symbol", "usdgAmount"),
-    fixed = mapOf("side" to JsonPrimitive("buy"), "symbol" to JsonPrimitive("MERRYMEN")), weighty = true,
+    "get-energy", Via.ORDER, listOf("side", "symbol", "usdgAmount", "purpose"),
+    fixed = mapOf(
+      "side" to JsonPrimitive("buy"),
+      "symbol" to JsonPrimitive("MERRYMEN"),
+      "purpose" to JsonPrimitive("energy"),
+    ),
+    weighty = true,
   ) {
     "Spend up to ${money(it, "usdgAmount")} of my real USDG on the \$MERRYMEN I'm short of 100,000 — " +
       "through Uniswap on Robinhood Chain (USDG → VIRTUAL → \$MERRYMEN). I size it to cover what's missing, with a " +

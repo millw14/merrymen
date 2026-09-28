@@ -223,7 +223,7 @@ export interface EnergyStatus {
   /** Today's new-trade allowance is used up. */
   spent: boolean;
   buy: EnergyBuy;
-  /** USDG the energy buy would ask now, sized exactly as it buys (margin, slippage, fees and tax included); null = unknown. */
+  /** USDG the energy buy would ask now, sized exactly as it buys (margin, fees and tax included; slippage is the router's floor, never the size); null = unknown. */
   estimateUsdg: number | null;
   /** Unix seconds of this report. */
   at: number;

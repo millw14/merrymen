@@ -47,12 +47,21 @@ public enum TradeInput {
               let value = Double(text.replacingOccurrences(of: ",", with: ".")), value.isFinite, value > 0 else { return nil }
         return value
     }
-    public static func body(side: String, symbol: String, amount: String, owner: String) -> JSONValue? {
+    /// `purpose` is get-energy's fixed "energy" marker (web/src/lib/chat-commands.ts),
+    /// the one thing the worker routes the agent's energy buy on — never the
+    /// symbol. Any other value is refused rather than sent, and a marked order
+    /// is a buy: the card fixes the side, so a sell under it is not that card.
+    public static func body(side: String, symbol: String, amount: String, owner: String, purpose: String? = nil) -> JSONValue? {
         let ticker = symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard ["buy", "sell"].contains(side), let value = self.amount(amount), value >= 0.01,
               value <= 1_000_000_000,
               ticker.range(of: "^[A-Z0-9._-]{1,16}$", options: .regularExpression) != nil,
               owner.range(of: "^0x[0-9a-fA-F]{40}$", options: .regularExpression) != nil else { return nil }
-        return .object(["side": .string(side), "symbol": .string(ticker), "usdgAmount": .number(value), "owner": .string(owner)])
+        var fields: [String: JSONValue] = ["side": .string(side), "symbol": .string(ticker), "usdgAmount": .number(value), "owner": .string(owner)]
+        if let purpose {
+            guard purpose == "energy", side == "buy" else { return nil }
+            fields["purpose"] = .string(purpose)
+        }
+        return .object(fields)
     }
 }

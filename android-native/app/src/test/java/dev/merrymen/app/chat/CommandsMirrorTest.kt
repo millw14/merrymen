@@ -80,10 +80,17 @@ class CommandsMirrorTest {
       COMMANDS.getValue("set-strategy").say(mapOf("strategy" to "dip-hunter")),
     )
     assertEquals(
-      "the energy card can only ever buy \$MERRYMEN",
-      mapOf("side" to JsonPrimitive("buy"), "symbol" to JsonPrimitive("MERRYMEN")).toString(),
+      "the energy card can only ever buy \$MERRYMEN, and it carries the marker the worker routes on",
+      mapOf(
+        "side" to JsonPrimitive("buy"),
+        "symbol" to JsonPrimitive("MERRYMEN"),
+        "purpose" to JsonPrimitive("energy"),
+      ).toString(),
       COMMANDS.getValue("get-energy").fixed.toString(),
     )
+    assertEquals(listOf("side", "symbol", "usdgAmount", "purpose"), COMMANDS.getValue("get-energy").writes)
+    // No other card carries the marker: a buy of MERRYMEN is an ordinary order.
+    assertEquals(listOf("get-energy"), COMMANDS.values.filter { "purpose" in it.fixed }.map { it.id })
     assertEquals("Refuse a fill worse than 0.5% off the quote.", COMMANDS.getValue("set-slippage").say(mapOf("slippageBps" to "50")))
     assertEquals("Refuse a fill worse than 1% off the quote.", COMMANDS.getValue("set-slippage").say(mapOf("slippageBps" to "100")))
     assertEquals("Trade this basket from now on: TSLA, NVDA. Anything not on that list I stop buying.",

@@ -19,6 +19,14 @@ final class PolicyTests: XCTestCase {
         XCTAssertNil(TradeInput.body(side: "buy", symbol: String(repeating: "A", count: 17), amount: "5", owner: owner))
         XCTAssertNil(TradeInput.body(side: "buy", symbol: "NVDA", amount: "5", owner: "someone else"))
     }
+    func testTheEnergyMarkerTravelsOnlyAsGetEnergySetsIt() {
+        // The worker routes the agent's energy buy on this marker and never on
+        // the symbol, so an ordinary order must never carry it.
+        XCTAssertNil(TradeInput.body(side: "buy", symbol: "MERRYMEN", amount: "20", owner: owner)?["purpose"].string)
+        XCTAssertEqual(TradeInput.body(side: "buy", symbol: "MERRYMEN", amount: "20", owner: owner, purpose: "energy")?["purpose"].string, "energy")
+        XCTAssertNil(TradeInput.body(side: "sell", symbol: "MERRYMEN", amount: "20", owner: owner, purpose: "energy"), "a marked order is a buy")
+        XCTAssertNil(TradeInput.body(side: "buy", symbol: "MERRYMEN", amount: "20", owner: owner, purpose: "Energy"), "exactly the marker or nothing")
+    }
     func testNullBalancesAndBooleanValuesAreNotCoerced() throws {
         let input = Data(#"{"balance":null,"zero":0,"read":false,"raw":"123456789012345678901234567890","defaults":{"live":false},"values":{"live":true}}"#.utf8)
         let v = try JSONDecoder().decode(JSONValue.self, from: input)

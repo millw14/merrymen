@@ -1,5 +1,5 @@
 {
-  "ios-native/Resources/FeedEngine.js": "b38e5becada04431c89ff824468319b79767186f2d13f576149a0b56ce5c7e4b",
+  "ios-native/Resources/FeedEngine.js": "7639e9d8b06b2c40b4cfb9c67d5381e529553609923e7ea7e21b92f59faad4f8",
   "ios-native/Resources/WalletCryptography.js": "2acd222eb726c067fefe9b18aa9af7e98c138e2f1c518c951650dfd0393ee02c",
   "ios-native/Resources/WalletEngine.js": "c75bd360a5a21d5b29d3c76c36c48a89ea232cf5330215d4f36669de1e72bbd0",
   "ios-native/Resources/WalletRuntime.js": "ab934c4b8ff5fb422e2276dc30cc0eaf7696a4a31dd9c2606533d6aca95dfdd3",
@@ -17,7 +17,7 @@
   "packages/core/src/chain.ts": "bc694a333bf42b699c8942253f2a0e51f47e5738ffb92544dd31cd3458444d32",
   "packages/core/src/classvault.ts": "b133838e2938053660b0cf1a174eb2a0b97f0d5a3861e260f169b7865c047275",
   "packages/core/src/derivation.ts": "b94208a589979c79c0c8ca12c8b0a91de4c26d97418edfaf4b2b61736fb4c070",
-  "packages/core/src/energy.ts": "e07499aa4041146227543141e19f91f76dce26f64cbd2b5b244ca02e29e80480",
+  "packages/core/src/energy.ts": "e53e56501933341a247d285dac9440d9fea660d7a6cda30bdea2578d565e8d73",
   "packages/core/src/equity-book.ts": "9806da2a6611326883ecccdd4285e84672d1e5ed711bfe7ba6306d0d15452d25",
   "packages/core/src/explain.ts": "c46dedaa7f17acc8e5112a1a32c2ff3d68576299a945bff74b2f71a990486012",
   "packages/core/src/first-enable-gas.ts": "b3bcac344a2c6af9b670f7e8ca83d9ee9df467cdc1dace250d72dec3e6b133a3",
@@ -46,7 +46,7 @@
   "packages/core/src/wall.ts": "c7a4f5725aa551106596e8b7a0e6cd083701c52894693594c665573c0b29a558",
   "web/src/app/connect/approve/[id]/approve-view.ts": "0d44edd3e5b8788fa5d841c273a5d025be8c8be4ae1d4deddd321b5b5a658162",
   "web/src/lib/can-start.ts": "1e7029dd3b967b6d3e036f63654e202eb8993f57aa6c7d0a9a506c53cf5f56d7",
-  "web/src/lib/chat-commands.ts": "9ac61802b19c19cc46083c41c3a64878f0c2e136bdb1cdff2ef880886789aaf8",
+  "web/src/lib/chat-commands.ts": "e799c6e41fd254cd53ef29a52207ad61ada525921aa4cd007f6e3eb324c997c8",
   "web/src/lib/format.ts": "0741971882577d0f1d2f78ab4679dfca477b155cde43601a2b35bea577c2cd8d",
   "web/src/lib/hold-time.ts": "93a59edaad878247c8096e6c2e18657cdf30ea7cad4fb721616eba9481cf5d6c",
   "web/src/lib/locale.ts": "2ee80b3c1e180dac18abcb4a852d012a13aecdaf48e61669041fba896d78462d",
@@ -71,6 +71,6 @@
   "worker/src/class-recovery.ts": "87e2a987769677dfa28ea1fa5d64e540076625c99ad2291af00df7a9f5646818",
   "worker/src/gas.ts": "26151ec23d111c235d09ddd48ca25325f7b8f5ef18b7ca9546edc24ab291b24c",
   "worker/src/recover.ts": "c55bf8c3d134e226836c6bc3cc33d3a727878b643fd0475ed01da690fec8443e",
-  "worker/src/thesis-policy.ts": "a610048cc672874a3a83033783c33f137842207899283f2410245973c842462a",
+  "worker/src/thesis-policy.ts": "e993a62802c5d8e366f21d6aba0f559fff9b0544ba0c866962ca2c13b3ffce4b",
   "worker/src/venues/class-log.ts": "d14520eeba5174d8077d8e17df16d98c66b95ef11d04b413d69983ecf60dc2ab"
 }

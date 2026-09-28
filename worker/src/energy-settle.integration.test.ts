@@ -33,7 +33,7 @@ const { homePaths } = await import("./home");
 const { DatabaseSync } = await import("node:sqlite");
 const { CASH, ENERGY_ROUTE_V1, MERRYMEN_TOKEN, VIRTUAL_TOKEN } = await import("../../packages/core/src/index");
 const { TRANSFER_TOPIC } = await import("./deposit-log");
-const { bookEnergyPurchase, isEnergyRow, settleEnergyLanding } = await import("./energy-settle");
+const { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyRow, settleEnergyLanding } = await import("./energy-settle");
 type Deps = import("./energy-settle").EnergySettleDeps;
 type ReceiptLog = import("./fills").ReceiptLog;
 
@@ -239,6 +239,23 @@ describe("the executor's landing: bookEnergyPurchase", () => {
     assert.equal(events.at(-1)!.level, "err");
   });
 
+  it("A LANDED PURCHASE THAT LEAVES NOTHING CONTRIBUTED IS STILL BOOKED — the money moved — and the owner is warned", async () => {
+    // The pre-trade gate refuses this (would-exhaust-contributions); a
+    // purchase that got through anyway (the figure moved between the plan
+    // and the landing) is booked as it must be, and said.
+    exec("DELETE FROM flows");
+    await store.addFlow({ agentId: ACCOUNT, direction: "in", amountUsdg: 10, source: "chain-log", txHash: `0x${"d9".repeat(32)}`, blockNumber: 8_000_000, logIndex: 1, mode: "live", chainId: 4663 });
+    assert.equal(await bookEnergyPurchase(deps(), { txHash: txHash(), logs: energyLogs(10_000_000n) }), "booked");
+    assert.equal(energyFlows(), 1);
+    assert.equal(events.at(-1)!.level, "warn");
+    assert.match(events.at(-1)!.line, /used up all of the capital on record for this agent — until more USDG is sent to it/);
+  });
+
+  it("an ordinary purchase is not warned about", async () => {
+    assert.equal(await bookEnergyPurchase(deps(), { txHash: txHash(), logs: energyLogs(10_000_000n) }), "booked");
+    assert.equal(events.at(-1)!.level, "ok");
+  });
+
   it("no contribution record: refused, nothing moved, and the owner is told", async () => {
     exec("DELETE FROM flows");
     assert.equal(await bookEnergyPurchase(deps(), { txHash: txHash(), logs: energyLogs(10_000_000n) }), "refused");
@@ -340,5 +357,98 @@ describe("the stranded-op resolver: settleEnergyLanding before the row is settle
   it("rows that are not 'submitted' — landed, rejected, paper — are never on the resolver's list at all", async () => {
     for (const status of ["landed", "rejected", "paper", "reverted"]) await submitted({ status });
     assert.equal((await store.listSubmittedOps(ACCOUNT)).length, 0);
+  });
+});
+
+/**
+ * THE BALANCE-READ PIN SURVIVES A RESTART.
+ *
+ * The next ask reads both $MERRYMEN halves and the cash no earlier than the
+ * last purchase's landing block, so a node still behind it cannot hand the
+ * planner a pre-purchase balance to size a second chunk on. The pin lived in
+ * memory only; the in-flight guard it was said to stand in for matches only
+ * 'submitted' rows. It is seeded at arm from the ledger now.
+ */
+describe("the energy pin, seeded at arm from the ledger", () => {
+  /** A purchase the executor landed: booked from its receipt, then written landed. */
+  async function landed(tx: `0x${string}`, book = true): Promise<void> {
+    if (book) assert.equal(await bookEnergyPurchase(deps(), { txHash: tx, logs: energyLogs(10_000_000n), blockNumber: 9_000_001n }), "booked");
+    await store.addTrade({
+      agent_id: ACCOUNT,
+      kind: "energy-buy",
+      target: ENERGY_ROUTE_V1.router,
+      sell_token: USDG,
+      buy_token: MERRY,
+      amount_usdg: 10,
+      user_op_hash: `0x${tx.slice(2, 66).split("").reverse().join("")}`,
+      tx_hash: tx,
+      status: "landed",
+    } as never);
+  }
+  const noReceipt = async (): Promise<bigint | null> => {
+    throw new Error("the ledger knew the block — no receipt should be read");
+  };
+  const seed = (receiptBlock: (h: `0x${string}`) => Promise<bigint | null> = noReceipt, timeoutMs?: number) =>
+    energyLandedBlockAtArm({ newest: () => store.newestLandedEnergyBuy(ACCOUNT), receiptBlock }, timeoutMs);
+
+  it("A LANDED, BOOKED PURCHASE SEEDS THE PIN FROM ITS FLOW ROW — no chain read", async () => {
+    await landed(txHash());
+    assert.equal(await seed(), 9_000_001n);
+  });
+
+  it("a landed purchase whose booking did not happen reads its ONE receipt for the block", async () => {
+    const tx = txHash();
+    await landed(tx, false);
+    assert.deepEqual(await store.newestLandedEnergyBuy(ACCOUNT), { txHash: tx, blockNumber: null });
+    const asked: string[] = [];
+    assert.equal(await seed(async (h) => (asked.push(h), 9_000_777n)), 9_000_777n);
+    assert.deepEqual(asked, [tx]);
+  });
+
+  it("the NEWEST landed purchase is the one — by kind or by legs", async () => {
+    await landed(txHash());
+    exec("UPDATE trades SET created_at = created_at - 100");
+    exec("UPDATE flows SET at = at - 100");
+    const newer = txHash();
+    await store.addTrade({
+      agent_id: ACCOUNT,
+      kind: "swap",
+      target: ACCOUNT,
+      sell_token: USDG,
+      buy_token: MERRY,
+      amount_usdg: 5,
+      user_op_hash: `0x${"ab".repeat(32)}`,
+      tx_hash: newer,
+      status: "landed",
+    } as never);
+    assert.equal((await store.newestLandedEnergyBuy(ACCOUNT))?.txHash, newer);
+    assert.equal(await seed(async () => 9_100_000n), 9_100_000n);
+  });
+
+  it("NOTHING LANDED IS NO PIN: a submitted purchase, an ordinary buy, an empty ledger", async () => {
+    assert.equal(await seed(), null);
+    await submitted();
+    await store.addTrade({
+      agent_id: ACCOUNT,
+      kind: "swap",
+      target: ACCOUNT,
+      sell_token: USDG,
+      buy_token: "0x000000000000000000000000000000000000aa01",
+      amount_usdg: 5,
+      user_op_hash: `0x${"cd".repeat(32)}`,
+      tx_hash: `0x${"ce".repeat(32)}`,
+      status: "landed",
+    } as never);
+    assert.equal(await store.newestLandedEnergyBuy(ACCOUNT), null);
+    assert.equal(await seed(), null);
+  });
+
+  it("FAIL-SOFT, AND BOUNDED: a slow receipt, a failing receipt and a ledger that throws are each no pin", async () => {
+    await landed(txHash(), false);
+    const started = Date.now();
+    assert.equal(await seed(() => new Promise(() => {}), 25), null, "a receipt that never answers");
+    assert.ok(Date.now() - started < 2_000, "and the arm is not held on it");
+    assert.equal(await seed(async () => Promise.reject(new Error("rpc down"))), null);
+    assert.equal(await energyLandedBlockAtArm({ newest: async () => Promise.reject(new Error("db down")), receiptBlock: noReceipt }), null);
   });
 });

@@ -65,14 +65,19 @@ function energyArm(): string {
 }
 
 describe("WHO CAN REACH THE BUY", () => {
-  it("submitChatTrade refuses $MERRYMEN FIRST — before the book, the watch set, or anything else", () => {
+  it("submitChatTrade resolves BY ADDRESS against the watch set, and refuses the reserve before the book or anything else", () => {
     const trade = body("submitChatTrade");
-    const refuse = trade.indexOf("if (isEnergySymbol(symbol)) return no(ENERGY_NOT_AN_ORDER);");
-    assert.ok(refuse > 0, "the refusal exists");
-    for (const later of ["if (!active)", "tickBook.judge(side)", "watchTokens.find(", "curveFor(", "ensureDecision("]) {
+    const resolve = trade.indexOf("const resolved = resolveOrderToken(symbol, watchTokens);");
+    const refuse = trade.indexOf('if (resolved.kind === "reserve") return no(ENERGY_NOT_AN_ORDER);');
+    assert.ok(resolve > 0 && refuse > resolve, "resolved first, then the reserve refused");
+    for (const later of ["if (!active)", "tickBook.judge(side)", "curveFor(", "ensureDecision("]) {
       const at = trade.indexOf(later);
-      assert.ok(at > refuse, `${later} must come after the $MERRYMEN refusal`);
+      assert.ok(at > refuse, `${later} must come after the reserve refusal`);
     }
+    // NEVER BY NAME: a watched lookalike called MERRYMEN is an ordinary token
+    // (resolveOrderToken is run in energy-buy.test.ts).
+    assert.doesNotMatch(trade, /isEnergySymbol\(|watchTokens\.find\(/);
+    assert.match(trade, /const token = resolved\.address;/);
   });
 
   it("the sentence points to the app chat and never to /settings", async () => {
@@ -87,7 +92,14 @@ describe("WHO CAN REACH THE BUY", () => {
   it("submitEnergyBuy is called from runOrderCommand's submit closure and NOWHERE else", () => {
     assert.equal(count(CODE, "submitEnergyBuy("), 2, "one definition, one call");
     const order = body("runOrderCommand");
-    assert.match(order, /if \(symbol === MERRYMEN_TOKEN\.symbol\) \{\s*return submitEnergyBuy\(side, size,/);
+    // ROUTED ON THE MARKER placeOrder decided (order-gate.ts orderRoute, run in
+    // order-gate.test.ts), never on the symbol: a buy card, a snipe or an MCP
+    // proposal naming MERRYMEN reaches submitChatTrade like any order.
+    assert.match(order, /\(side, symbol, size, route\) => \{/);
+    assert.match(order, /if \(route === "energy"\) \{\s*if \(!isEnergySymbol\(symbol\)\) \{[\s\S]*?\}\s*return submitEnergyBuy\(side, size, asked\);/);
+    assert.doesNotMatch(order, /symbol === MERRYMEN_TOKEN\.symbol|isEnergyReserveToken/, "no symbol decides the route");
+    assert.match(order, /return submitChatTrade\(side, symbol, size, asked\);/, "every unmarked order is an ordinary one");
+    assert.match(order, /\.\.\.orderAsked\(cmd\.args, side, symbol, size\),/, "filed under the order's own source and reason");
     // Routed BEFORE the ordinary submitter, inside placeOrder's submit closure
     // — so its reads, pause, shape and ceiling gates run first.
     assert.ok(order.indexOf("submitEnergyBuy(") < order.indexOf("return submitChatTrade("));
@@ -98,6 +110,10 @@ describe("WHO CAN REACH THE BUY", () => {
     }
     const tg = CODE.slice(CODE.indexOf("startTelegram({"), CODE.indexOf("notifierHandle = startNotifier({"));
     assert.doesNotMatch(tg, /submitEnergyBuy|energyBuyLocked/);
+  });
+
+  it("its decision is filed under the ORDER's source and reason, never a literal", () => {
+    assert.match(body("energyBuyLocked"), /await ensureDecision\(intent, asked\.source, `\$\{asked\.reason\}, /);
   });
 
   it("an energy intent is BUILT in exactly one place — the locked body of submitEnergyBuy", () => {
@@ -225,8 +241,26 @@ describe("THE EXECUTOR", () => {
 
   it("the landing block is remembered only AFTER the send came back", () => {
     const arm = energyArm();
-    assert.ok(arm.indexOf("lastEnergyLandedBlock = exec.blockNumber;") > arm.indexOf("exec = await send(calls);"));
-    assert.equal(count(CODE, "lastEnergyLandedBlock = "), 1, "no other writer");
+    assert.ok(arm.indexOf("noteEnergyLanded(exec.blockNumber);") > arm.indexOf("exec = await send(calls);"));
+  });
+
+  it("THE PIN HAS ONE WRITER, which only moves it forward — fed by the executor, the resolver and the arm's ledger seed", () => {
+    // It lived in memory, written by the executor alone: a restart, or a
+    // landing only the stranded resolver saw, left the next ask's balance
+    // reads unpinned (the in-flight guard matches only 'submitted' rows).
+    assert.equal(count(CODE, "lastEnergyLandedBlock = "), 1, "one assignment");
+    const note = CODE.slice(CODE.indexOf("const noteEnergyLanded = "), CODE.indexOf("const noteEnergyLanded = ") + 400);
+    assert.match(note, /if \(block === null \|\| block === undefined \|\| block <= 0n\) return;\s*if \(lastEnergyLandedBlock === null \|\| block > lastEnergyLandedBlock\) lastEnergyLandedBlock = block;/);
+    assert.equal(count(CODE, "noteEnergyLanded("), 3, "three callers: the executor, the resolver, the arm");
+    // The resolver pins a purchase it settled as landed — after its booking decided.
+    const r = arrow("resolveStrandedOps");
+    const settle = r.indexOf("await settleEnergyLanding(");
+    assert.ok(r.indexOf("noteEnergyLanded(r.blockNumber);") > settle);
+    // The arm seeds it from the ledger AFTER the stranded resolver ran, and before the budget.
+    const reconcile = CODE.indexOf("if (executor) await reconcileInFlightAtArm(agentId, client, grant.smartAccount as `0x${string}`);");
+    const seeded = CODE.indexOf("await energyLandedBlockAtArm({", reconcile);
+    assert.ok(reconcile > 0 && seeded > reconcile && seeded < CODE.indexOf("await refreshBudget(agentId);", reconcile));
+    assert.match(CODE.slice(seeded, seeded + 300), /newest: \(\) => newestLandedEnergyBuy\(agentId\),/);
   });
 
   it("tokenLegs names the energy legs, so the pre-broadcast 'submitted' row carries them", () => {
@@ -298,6 +332,25 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     assert.match(r.slice(add, add + 600), /\.\.\.\(energyRow \? \{ sell_token: row\.sellToken, buy_token: row\.buyToken \} : \{\}\),/);
   });
 
+  it("(5b) NOTHING IS INFERRED WHILE AN OP IS IN FLIGHT, and the resolver's settlement explains the interval (flow-inference.integration.test.ts runs this shape)", () => {
+    // A stranded purchase was booked twice: inferred as a withdrawal by the
+    // next tick, then booked as energy by the resolver.
+    const f = arrow("reconcileFlows");
+    assert.match(f, /opsHoldInference\(await listSubmittedOps\(agentId\), \{\s*epoch: await getAgentEpoch\(agentId\),/);
+    assert.match(f, /const verdict = steadyStateInference\(\{ lastCashUsdg, cashUsdg, ledgerWrites, ledgerWritesAtSnapshot, opsInFlight \}\);/);
+    const hold = f.indexOf('if (verdict.action === "hold") {');
+    const baseline = f.lastIndexOf("lastCashUsdg = cashUsdg;");
+    assert.ok(hold > 0 && baseline > hold);
+    assert.match(f.slice(hold, baseline), /return;\s*\}\s*if \(verdict\.action === "infer"\) await record\(verdict\.deltaUsdg, "no trade explains this"\);/);
+    assert.doesNotMatch(f, /ledgerWrites === ledgerWritesAtSnapshot\) \{\s*await record\(/, "the old unconditional inference is gone");
+    // The downtime inference across a restart obeys the same rule.
+    assert.match(f, /\} else if \(ledgerWrites === 0\) \{[\s\S]*?const prior = await lastKnownCashUsdg\(agentId\);/);
+    // The resolver moves the count for every op it settles, before the row is written.
+    const r = arrow("resolveStrandedOps");
+    const bump = r.indexOf("ledgerWrites += 1;");
+    assert.ok(bump > r.indexOf("await settleEnergyLanding(") && bump < r.indexOf("await addTrade({"));
+  });
+
   it("(6) the orphan sweep NEVER books", () => {
     const arm = arrow("reconcileInFlightAtArm");
     const orphans = arm.slice(arm.indexOf("const orphans = await findOrphanOps({"));
@@ -338,7 +391,24 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
 
   it("net contributions reach the gates as a 6dp bigint, rounded the one way", () => {
     assert.match(SETTLE, /const usdg6 = \(v: number\) => BigInt\(Math\.round\(v \* 1e6\)\);/);
-    assert.match(body("energyBuyLocked"), /netContributionsUsdg: net === null \? null : usdg\(net\),/);
+    assert.match(body("energyBuyLocked"), /netContributionsUsdg: net,/);
+  });
+
+  it("DURABLE FIRST: the planner, the booking gate and the Brain snapshot all read durableNetContributions, never the child's local sum", () => {
+    // A redeployed hosted child's flows table is empty: the local sum refused
+    // every energy buy as "no record", and the anchor alone never saw a
+    // purchase booked after arm (net-contributions.integration.test.ts).
+    assert.match(body("energyBuyLocked"), /durableNetContributions\(agentId\)\.catch\(\(\) => undefined\),/);
+    const deps = CODE.slice(CODE.indexOf("const energySettleDeps = "), CODE.indexOf("const energySettleDeps = ") + 900);
+    assert.match(deps, /netContributionsUsdg: async \(\) => \{\s*const net = await durableNetContributions\(agentId\);\s*return net === null \? null : Number\(net\) \/ 1e6;/);
+    assert.match(CODE, /const netContrib = await durableNetContributions\(agentId\);/);
+    assert.match(CODE, /netContributionsUsdg: netContrib === null \? null : Number\(netContrib\),/);
+    assert.doesNotMatch(CODE, /getNetContributionsUsdg\(/, "no consumer in the child reads the local sum alone");
+    assert.doesNotMatch(CODE, /\? Number\(anchorNetContributionsUsdg\)/, "nor the arm-time anchor alone");
+    const helper = body("durableNetContributions");
+    assert.match(helper, /getNetContributionsSince\(agentId, anchorWrittenAtSec \?\? 0\)/);
+    assert.match(helper, /anchorNetUsdg6: anchorNetContributionsUsdg,\s*anchorEpoch,/);
+    assert.match(CODE, /anchorWrittenAtSec = verdict\.kind === "valid" \? verdict\.state\.generatedAt : null;/);
   });
 });
 

@@ -161,6 +161,7 @@ export type EnergyGateRule =
   | "book-untotalled"
   | "no-contribution-record"
   | "peak-below-spend"
+  | "would-exhaust-contributions"
   | "would-trip-breaker";
 
 export type EnergyGateVerdict =
@@ -230,6 +231,18 @@ function recordAndPeaks(a: {
  * from getAgentFinancials().hwmUsdg, net contributions from
  * getNetContributionsUsdg, and the grant's maxDrawdownBps.
  *
+ * WOULD EXHAUST CONTRIBUTIONS. The purchase is booked as capital leaving the
+ * book, so net contributions fall by the spend — and nothing else in these
+ * gates compared the two. An agent funded with 20 USDG that made 30 passed
+ * every check three asks running while its record went 20 → 10 → 0 → −10: at
+ * zero or below, core computePnl answers 'no-capital-contributed' (the Brain
+ * then holds on every decision), the leaderboard calls a profitable agent
+ * 'no-deposit', and just above zero its published return is the P&L over a
+ * sliver. So a spend that would leave nothing (or less) contributed is
+ * refused before any USDG moves, and the owner is told the USDG-then-buy way
+ * round it. Pre-trade only: once money has moved the booking still books it
+ * (energy-settle.ts warns when a landed purchase does this).
+ *
  * WOULD TRIP THE BREAKER. The purchase is not an exit, and after it both the
  * peak and equity are lower by the spend, so the drawdown becomes
  * (P − E)/(P − s) — larger than (P − E)/P. Judged with policy.ts's own
@@ -256,6 +269,18 @@ export function energyPreTradeGate(a: {
   }
   const early = recordAndPeaks(a);
   if (early) return early;
+  // recordAndPeaks answered for a null record (refuse live, skip paper), so it
+  // is a number here whenever this line is reached on the live rail.
+  if (a.netContributionsUsdg !== null && a.netContributionsUsdg - a.spendUsdg <= 0n) {
+    return {
+      action: "refuse",
+      rule: "would-exhaust-contributions",
+      why:
+        `spending ${fmt(a.spendUsdg)} USDG on energy would use up all ${fmt(a.netContributionsUsdg)} USDG of capital on ` +
+        `record for me, and with nothing contributed on record I can't size trades or report how I'm doing — send USDG ` +
+        `to me first and ask again, or send $MERRYMEN to my account directly`,
+    };
+  }
   const P = a.breakerPeakUsdg;
   if ((P - a.equityUsdg) * 10_000n >= BigInt(a.maxDrawdownBps) * (P - a.spendUsdg)) {
     const after = P - a.equityUsdg <= 0n ? 0n : ((P - a.equityUsdg) * 10_000n) / (P - a.spendUsdg);
