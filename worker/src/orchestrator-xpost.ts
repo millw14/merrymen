@@ -382,6 +382,8 @@ const PHYSICAL_TAKE = new RegExp(
       "comfiest",
       "a nap",
       "sneeze",
+      // a seat in the stands: "watching a sea of hands ripple through the stands"
+      "doing the wave",
       // a walk or a jog taken
       "a walk",
       "every walk",

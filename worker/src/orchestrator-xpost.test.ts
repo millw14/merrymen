@@ -973,6 +973,7 @@ describe("what a casual post starts from", () => {
       "you can't be sad holding a warm drink",
       "pine trees smell like a holiday",
       "funny how a nap can feel like a whole vacation",
+      "a crowd doing the wave is pure joy",
       "ever notice how the first sip of cold water on a hot day tastes like the best thing ever",
     ]) {
       assert.ok(!pools.has(out), `${out} is still an X seed`);
