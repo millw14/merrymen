@@ -45,7 +45,12 @@
  * signature, or held by an account its owner can no longer sign in to, would
  * otherwise lock the wallet's real holder out for good. At most one move per
  * wallet per UTC day, so a bag cannot be passed round a string of agents; a
- * second answers 429 with when it can move.
+ * second answers 429 with when it can move. An unlink does not give the day's
+ * move back: the next account to claim the wallet that day is making the move
+ * (settings-store HolderRelease). Two moves are never refused, so a phished
+ * move cannot lock the owner out until midnight: back to the wallet's own
+ * sign-in account, and back to the account it was last moved from
+ * (settings-store moveBarredUntil).
  */
 import { NextResponse } from "next/server";
 import { recoverMessageAddress } from "viem";
@@ -184,13 +189,18 @@ export async function POST(req: Request) {
     );
   }
   if (!claim.ok) {
-    // Never who: that account is somebody's login.
+    // Never who: that account is somebody's login. `held` only says whether
+    // it powers one right now — an account that let it go earlier today does
+    // not give the day's move back.
     const retryAfter = Math.max(1, Math.ceil((claim.movableAt - Date.now()) / 1000));
     return NextResponse.json(
       {
         error:
-          "This wallet powers another merrymen account, and it already moved once today — a wallet can move between " +
-          `accounts once per day (UTC). Sign again from ${utcStamp(claim.movableAt)} to move it here.`,
+          (claim.held
+            ? "This wallet powers another merrymen account, and it already moved once today"
+            : "Another merrymen account used this wallet earlier today, and it already moved once today") +
+          " — a wallet can move between accounts once per day (UTC). " +
+          `Sign again from ${utcStamp(claim.movableAt)} to ${claim.held ? "move it here" : "link it here"}.`,
         ownerFacing: true,
         movableAt: claim.movableAt,
       },
@@ -212,11 +222,13 @@ export async function POST(req: Request) {
     });
   } catch {
     // Undo what THIS call took, so a failed link does not hold the wallet
-    // hostage: a fresh claim is released, and a move is put back exactly as
-    // it was (the other account's claim, and its day's move allowance). One
+    // hostage: a fresh claim is removed and a move is put back, each exactly
+    // as it was — the other account's claim, the wallet's release record,
+    // the day's move allowance. Never a release: that would record this
+    // account as the last holder and spend a move that never happened. One
     // this account already held stays: it may back a stored proof.
     if (claim.from) await store.undoTakeHolder(wallet, tenant, claim.was).catch(() => {});
-    else if (claim.fresh) await store.releaseHolder(wallet, tenant).catch(() => {});
+    else if (claim.fresh) await store.undoTakeHolder(wallet, tenant, null).catch(() => {});
     return NextResponse.json(
       { error: "couldn't save that link just now — nothing changed, please try again", ownerFacing: true },
       { status: 503 },
@@ -292,8 +304,15 @@ export async function PATCH(req: Request) {
   const tenant = requireTenant(req);
   if (!tenant) return NextResponse.json({ linked: null, reads: null, proof: null });
   const store = getSettingsStore();
-  const stored = (await store.get(tenant)) ?? {};
-  const proof = isHolderProof(stored.holderProof) ? stored.holderProof : null;
+  let stored: Awaited<ReturnType<typeof store.get>>;
+  try {
+    stored = await store.get(tenant);
+  } catch {
+    // Settings that will not read are not "nothing linked": say nothing.
+    return NextResponse.json({ linked: null, reads: null, proof: null });
+  }
+  const storedProof = stored?.holderProof;
+  const proof = isHolderProof(storedProof) ? storedProof : null;
   let reads: "linked" | "login" | "none" | null = null;
   let standing: "counting" | "claimed-elsewhere" | "unclaimed" | null = null;
   try {

@@ -79,7 +79,8 @@ export function LinkedWallet({
         <p>
           <span className="mono">{address}</span> is linked but not counting here: it powers another merrymen
           account right now, and a wallet powers one at a time. Link it again with a fresh signature from it to
-          move it here — a wallet can move once a day — or link a different wallet.
+          move it here — a wallet can move once a day, and can always come back to the account it last left — or
+          link a different wallet.
         </p>
       ) : (
         <p>
@@ -94,6 +95,28 @@ export function LinkedWallet({
   );
 }
 
+/**
+ * WHAT AN UNLINK LEAVES THE TIER READING — said from the PATCH that follows
+ * it, never assumed.
+ *
+ * It used to say "Your tier reads the wallet you sign in with again" every
+ * time. When another account holds the claim on that login wallet (it was
+ * linked or moved there), the tier reads NO wallet — and the hint above said
+ * so in the same breath. `none` says what is true and what brings it back:
+ * the login wallet's own signature from this account, which the once-a-day
+ * limit never refuses. Unknown (the read failed) claims nothing.
+ */
+export function unlinkedNote(reads: Reads): string {
+  if (reads === "login") return "Unlinked. Your tier reads the wallet you sign in with again.";
+  if (reads === "none") {
+    return (
+      "Unlinked. The wallet you sign in with powers another merrymen account right now, so your tier reads no " +
+      "wallet here. To bring it back, link it below with a signature from it."
+    );
+  }
+  return "Unlinked.";
+}
+
 export function HolderLink() {
   const [linked, setLinked] = useState<Linked | null>(null);
   const [reads, setReads] = useState<Reads>(null);
@@ -105,15 +128,18 @@ export function HolderLink() {
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
 
-  const refresh = useCallback(async () => {
+  /** Re-read the link; answers which wallet the tier reads now (null when that is unknown). */
+  const refresh = useCallback(async (): Promise<Reads> => {
     try {
       const r = await fetch("/api/holder", { method: "PATCH", cache: "no-store" });
       const j = (await r.json()) as { linked?: Linked | null; reads?: Reads; proof?: ProofStanding };
       setLinked(j.linked ?? null);
       setReads(j.reads ?? null);
       setStanding(j.proof ?? null);
+      return j.reads ?? null;
     } catch {
       /* an unreadable link is shown as none — never as an error on a settings page */
+      return null;
     }
   }, []);
   useEffect(() => {
@@ -214,8 +240,7 @@ export function HolderLink() {
       // A refused unlink must not read as done: the wallet would still be
       // held by this account, and unavailable to the one it was meant for.
       if (!r.ok) throw new Error(j.error ?? "could not unlink that wallet");
-      setNote("Unlinked. Your tier reads the wallet you sign in with again.");
-      await refresh();
+      setNote(unlinkedNote(await refresh()));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -245,7 +270,8 @@ export function HolderLink() {
             : "By default your tier reads the wallet you sign in with. "}
           If your $MERRYMEN is somewhere else, name that wallet and prove it with a signature from it.
           A wallet powers one merrymen account at a time: signing for it here moves it from any other
-          account, at most once a day. Your agent&apos;s own account counts too. The wallet stays
+          account. It can move once a day, and can always come back to the account it last left or to the
+          account that signs in with it. Your agent&apos;s own account counts too. The wallet stays
           read-only — it is never a spend key and never joins your agent&apos;s permission.
         </p>
       )}

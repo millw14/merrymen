@@ -195,7 +195,64 @@ describe("POST /api/holder claims the wallet before it stores the proof", () => 
     assert.doesNotMatch(third.body.error ?? "", /price|return|profit/i);
     assert.equal(await proofOf(c.address), null, "no proof — a refused move is not a holding");
     assert.equal((await store.holderClaims()).get(lc(w.address)), lc(b.address), "the claim did not move");
-    assert.equal((await link(a.address, w)).status, 429, "not even back to where it came from");
+    const back = await link(a.address, w);
+    assert.equal(back.status, 200, "back to the account it was moved from is allowed the same day");
+    assert.equal(back.body.moved, true);
+    assert.equal((await link(c.address, w)).status, 429, "and a third account still waits for tomorrow");
+  });
+
+  it("A PHISHED MOVE NEVER LOCKS THE OWNER OUT: the wallet's own sign-in account takes it back the same day", async () => {
+    // One phished signature moved the claim off the owner's own login account
+    // and spent the day's move; the owner's fresh signature from that very
+    // account met 429 until 00:00 UTC while the attacker's agent ran on the bag.
+    const whale = newWallet();
+    const attacker = newWallet();
+    const other = newWallet();
+    assert.equal((await link(whale.address, whale)).status, 200);
+    assert.equal((await link(attacker.address, whale)).body.moved, true, "the phished move");
+    const back = await link(whale.address, whale);
+    assert.equal(back.status, 200, JSON.stringify(back.body));
+    assert.equal(back.body.moved, true);
+    assert.deepEqual(await patch(whale.address), { linked: await proofOf(whale.address), reads: "linked", proof: "counting" });
+    assert.equal((await link(other.address, whale)).status, 429, "taking it back still spends the day for anybody else");
+  });
+
+  it("AN UNLINK DOES NOT GIVE THE DAY'S MOVE BACK: after a → b, b unlinks, and c and d are still 429 — naming nobody", async () => {
+    // The review's bypass: every unlink deleted the claim row and its move,
+    // so one bag could power a, b, c and d in one UTC day.
+    const [a, b, c, d] = [newWallet(), newWallet(), newWallet(), newWallet()];
+    const w = newWallet();
+    assert.equal((await link(a.address, w)).status, 200);
+    assert.equal((await link(b.address, w)).body.moved, true, "the day's move");
+    assert.equal((await unlink(b.address)).status, 200);
+    for (const who of [c, d]) {
+      const res = await link(who.address, w);
+      assert.equal(res.status, 429, JSON.stringify(res.body));
+      assert.match(res.body.error ?? "", /Another merrymen account used this wallet earlier today/);
+      assert.match(res.body.error ?? "", /once per day \(UTC\)/);
+      assert.doesNotMatch(res.body.error ?? "", /powers another/, "nobody holds it now, and the copy does not say so");
+      for (const x of [a, b]) assert.ok(!JSON.stringify(res.body).toLowerCase().includes(lc(x.address)), "no account is named");
+      assert.equal(await proofOf(who.address), null);
+    }
+    assert.equal((await store.holderClaims()).has(lc(w.address)), false);
+    assert.equal((await link(a.address, w)).status, 200, "a, which it was moved from today, may still have it back");
+  });
+
+  it("A FAILED LINK OF A RELEASED WALLET SPENDS NO MOVE — undone, not released", async () => {
+    const [a, b, c] = [newWallet(), newWallet(), newWallet()];
+    const w = newWallet();
+    assert.equal((await link(a.address, w)).status, 200);
+    assert.equal((await unlink(a.address)).status, 200);
+    const put = mock.method(store, "put", async () => {
+      throw new Error("disk full");
+    });
+    try {
+      assert.equal((await link(b.address, w)).status, 503);
+    } finally {
+      put.mock.restore();
+    }
+    assert.equal((await store.holderClaims()).has(lc(w.address)), false);
+    assert.equal((await link(c.address, w)).status, 200, "b's link never happened, so neither did its move");
   });
 
   it("CONCURRENT LINKS OF ONE WALLET FROM THREE ACCOUNTS → ONE CLAIM, AT MOST ONE MOVE; exactly one account counts it", async () => {
@@ -453,6 +510,20 @@ describe("PATCH says which wallet the tier reads — and why a linked one is not
     await store.put(lc(a.address), { holderProof: { address: lc(w.address), at: 1 } });
     await store.claimHolder(lc(w.address), lc(b.address));
     assert.equal((await patch(a.address)).proof, "claimed-elsewhere");
+  });
+
+  it("and nothing either when the account's own settings cannot be read — never a crash, never 'nothing linked'", async () => {
+    const a = newWallet();
+    const get = mock.method(store, "get", async () => {
+      throw new Error("unseal failed");
+    });
+    try {
+      const res = await route.PATCH(new Request(`${ORIGIN}/api/holder`, { method: "PATCH", headers: cookie(a.address) }));
+      assert.equal(res.status, 200);
+      assert.deepEqual(await res.json(), { linked: null, reads: null, proof: null });
+    } finally {
+      get.mock.restore();
+    }
   });
 
   it("and says nothing (null) when the claims cannot be read, rather than guess", async () => {

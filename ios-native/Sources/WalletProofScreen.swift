@@ -129,7 +129,20 @@ struct WalletProofScreen: View {
     }
     private func remove() async {
         guard !busy else { return }; busy = true; defer { busy = false }
-        do { _ = try await store.perform("/api/holder", method: "DELETE", body: .object([:]), expectedOwner: store.owner); linked = nil; challenge = nil; note = "Holder wallet unlinked. Your sign-in wallet is used for your tier." }
+        do {
+            _ = try await store.perform("/api/holder", method: "DELETE", body: .object([:]), expectedOwner: store.owner); linked = nil; challenge = nil
+            // Said from the read that follows, as the web does: when another account holds the sign-in wallet, the tier reads no wallet.
+            let reads = (try? await store.perform("/api/holder", method: "PATCH", body: .object([:]), expectedOwner: store.owner))?["reads"].string
+            note = Self.unlinkedNote(reads)
+        }
         catch { self.error = error.localizedDescription }
+    }
+    /// Mirrors unlinkedNote in web/src/terminal/HolderLink.tsx.
+    static func unlinkedNote(_ reads: String?) -> String {
+        switch reads {
+        case "login": return "Holder wallet unlinked. Your sign-in wallet is used for your tier."
+        case "none": return "Holder wallet unlinked. Your sign-in wallet powers another merrymen account right now, so your tier reads no wallet here. To bring it back, link it with a signature from it."
+        default: return "Holder wallet unlinked."
+        }
     }
 }
