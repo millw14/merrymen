@@ -1207,7 +1207,74 @@ async function refreshHistoryForLiveChildren(): Promise<void> {
 }
 
 
-async function writeBootstrapForChild(
+/**
+ * ONE MIRROR PASS PER TENANT AT A TIME.
+ *
+ * mirrorTenant's exactly-once rests on its watermark, read before the copy and
+ * moved inside it — so two passes over one tenant at once both read the same
+ * watermark and both copy the rows above it. For most tables that is a
+ * duplicate on the tape; for `flows` it is contributions counted twice. The
+ * mirror loop is serial, but the spawn path mirrors a dead child's ledger one
+ * last time (finalMirrorBeforeAnchor), and a loop pass that took its tenant
+ * list before that child exited can reach the same tenant at the same moment.
+ * Both go through here, so the second waits and then finds nothing new.
+ */
+const mirrorTails = new Map<string, Promise<void>>();
+function mirrorSerially<T>(tenant: string, pass: () => Promise<T>): Promise<T> {
+  const key = tenant.toLowerCase();
+  const run = (mirrorTails.get(key) ?? Promise.resolve()).then(pass);
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  mirrorTails.set(key, tail);
+  void tail.then(() => {
+    if (mirrorTails.get(key) === tail) mirrorTails.delete(key);
+  });
+  return run;
+}
+
+/**
+ * COPY WHAT THE LAST CHILD BOOKED BEFORE THE ANCHOR IS DERIVED FROM IT.
+ *
+ * The anchor's contributions come from the shared database alone, and the
+ * child adds only the flows it books at or after the anchor's `generatedAt`
+ * (net-contributions.ts). The mirror runs every RECONCILE_MS, so a child that
+ * booked a flow — an energy purchase, a deposit — and died inside that window
+ * left it in its sqlite and nowhere else. After a crash or a watchdog restart
+ * that sqlite is still on disk, the restart spawns within a second or two, and
+ * the flow was in NEITHER half: dated before the anchor, absent from the shared
+ * sum. The new child's contributions were off by that flow for its whole life
+ * (R2-MONEY6) — a purchase read as a loss by the Brain, a gate one purchase
+ * loose, a missed deposit refusing a buy it should allow.
+ *
+ * So the dead child's ledger is mirrored one last time first, under the same
+ * per-tenant serialisation as the loop. Only reached from spawnChild, which
+ * runs only when this replica holds the lease and no child of the tenant is
+ * running. A redeploy leaves no file — nothing to copy, and nothing the anchor
+ * could have missed from THIS container. A failure is logged and the anchor is
+ * derived regardless: it is no worse than before.
+ */
+export async function finalMirrorBeforeAnchor(tenant: string, shared: Db, home = childHome(tenant)): Promise<boolean> {
+  const handle = openChildLedger(home);
+  if (!handle) return false;
+  try {
+    const r = await mirrorSerially(tenant, () => mirrorTenant({ tenant, child: handle.db, shared }));
+    if (r.failed) {
+      log(`${tenant}: final mirror before the anchor STALLED — ${Object.entries(r.failed).map(([k, v]) => `${k}: ${v}`).join(" | ")}`);
+    }
+    const counts = mirrorCountsLine(tenant, r);
+    if (counts) log(`${counts} (final pass before the anchor)`);
+    return true;
+  } catch (e) {
+    log(`${tenant}: final mirror before the anchor failed — ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  } finally {
+    handle.close();
+  }
+}
+
+export async function writeBootstrapForChild(
   tenant: `0x${string}`,
   /**
    * The tenant's SMART ACCOUNT — the key every ledger table is actually on, and
@@ -1218,7 +1285,7 @@ async function writeBootstrapForChild(
   smartAccount: `0x${string}`,
   shared?: Db,
 ): Promise<void> {
-  const now = Math.floor(Date.now() / 1000);
+  let now = Math.floor(Date.now() / 1000);
   let accounting: TenantBootstrapState["accounting"];
   let riskPeriod: TenantBootstrapState["riskPeriod"];
   const url = process.env.DATABASE_URL;
@@ -1230,6 +1297,11 @@ async function writeBootstrapForChild(
   } else {
     try {
       const db = shared ?? (await makePgDb(url));
+      // What the last child booked and the mirror had not yet copied — then
+      // the anchor's time, AFTER that copy: every flow it carried up is dated
+      // before `generatedAt`, so the new child never counts it a second time.
+      await finalMirrorBeforeAnchor(tenant, db);
+      now = Math.floor(Date.now() / 1000);
       await db.exec(RISK_PERIOD_SCHEMA);
       riskPeriod = (await readRiskPeriod(db, smartAccount)) ?? undefined;
       accounting = await deriveBootstrapAccounting(db, smartAccount, now);
@@ -5160,7 +5232,7 @@ async function mirrorLedgers(): Promise<void> {
     const handle = openChildLedger(childHome(tenant));
     if (!handle) continue;
     try {
-      const r = await mirrorTenant({ tenant, child: handle.db, shared });
+      const r = await mirrorSerially(tenant, () => mirrorTenant({ tenant, child: handle.db, shared }));
       // The link code and any chat the owner just linked. Not part of the
       // ledger — it is a file, not a table — but it needs the same ferry and
       // the same lease: only the replica that owns this child may speak for it.
