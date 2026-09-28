@@ -195,7 +195,26 @@ describe("POST /api/holder claims the wallet before it stores the proof", () => 
     assert.doesNotMatch(third.body.error ?? "", /price|return|profit/i);
     assert.equal(await proofOf(c.address), null, "no proof — a refused move is not a holding");
     assert.equal((await store.holderClaims()).get(lc(w.address)), lc(b.address), "the claim did not move");
-    assert.equal((await link(a.address, w)).status, 429, "not even back to where it came from");
+    const back = await link(a.address, w);
+    assert.equal(back.status, 200, "back to the account it was moved from is allowed the same day");
+    assert.equal(back.body.moved, true);
+    assert.equal((await link(c.address, w)).status, 429, "and a third account still waits for tomorrow");
+  });
+
+  it("A PHISHED MOVE NEVER LOCKS THE OWNER OUT: the wallet's own sign-in account takes it back the same day", async () => {
+    // One phished signature moved the claim off the owner's own login account
+    // and spent the day's move; the owner's fresh signature from that very
+    // account met 429 until 00:00 UTC while the attacker's agent ran on the bag.
+    const whale = newWallet();
+    const attacker = newWallet();
+    const other = newWallet();
+    assert.equal((await link(whale.address, whale)).status, 200);
+    assert.equal((await link(attacker.address, whale)).body.moved, true, "the phished move");
+    const back = await link(whale.address, whale);
+    assert.equal(back.status, 200, JSON.stringify(back.body));
+    assert.equal(back.body.moved, true);
+    assert.deepEqual(await patch(whale.address), { linked: await proofOf(whale.address), reads: "linked", proof: "counting" });
+    assert.equal((await link(other.address, whale)).status, 429, "taking it back still spends the day for anybody else");
   });
 
   it("CONCURRENT LINKS OF ONE WALLET FROM THREE ACCOUNTS → ONE CLAIM, AT MOST ONE MOVE; exactly one account counts it", async () => {

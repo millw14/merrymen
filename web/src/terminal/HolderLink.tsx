@@ -79,7 +79,8 @@ export function LinkedWallet({
         <p>
           <span className="mono">{address}</span> is linked but not counting here: it powers another merrymen
           account right now, and a wallet powers one at a time. Link it again with a fresh signature from it to
-          move it here — a wallet can move once a day — or link a different wallet.
+          move it here — a wallet can move once a day, and can always come back to the account it last left — or
+          link a different wallet.
         </p>
       ) : (
         <p>
@@ -245,7 +246,8 @@ export function HolderLink() {
             : "By default your tier reads the wallet you sign in with. "}
           If your $MERRYMEN is somewhere else, name that wallet and prove it with a signature from it.
           A wallet powers one merrymen account at a time: signing for it here moves it from any other
-          account, at most once a day. Your agent&apos;s own account counts too. The wallet stays
+          account. It can move once a day, and can always come back to the account it last left or to the
+          account that signs in with it. Your agent&apos;s own account counts too. The wallet stays
           read-only — it is never a spend key and never joins your agent&apos;s permission.
         </p>
       )}

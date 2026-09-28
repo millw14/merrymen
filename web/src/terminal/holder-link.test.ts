@@ -45,6 +45,7 @@ describe("LinkedWallet — the linked wallet, and whether it counts", () => {
     assert.match(t, /powers another merrymen account right now/);
     assert.match(t, /move it here/);
     assert.match(t, /once a day/);
+    assert.match(t, /can always come back to the account it last left/, "a phished move is not a lock-out until midnight");
     assert.match(t, /link it again/);
     assert.doesNotMatch(t, /Unlink it there/, "the wallet's own signature is the remedy now");
   });

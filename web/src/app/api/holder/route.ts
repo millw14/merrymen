@@ -45,7 +45,10 @@
  * signature, or held by an account its owner can no longer sign in to, would
  * otherwise lock the wallet's real holder out for good. At most one move per
  * wallet per UTC day, so a bag cannot be passed round a string of agents; a
- * second answers 429 with when it can move.
+ * second answers 429 with when it can move. Two moves are never refused, so a
+ * phished move cannot lock the owner out until midnight: back to the wallet's
+ * own sign-in account, and back to the account it was last moved from
+ * (settings-store moveBarredUntil).
  */
 import { NextResponse } from "next/server";
 import { recoverMessageAddress } from "viem";

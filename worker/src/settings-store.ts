@@ -40,6 +40,8 @@ export interface HolderClaimRecord {
   claimedAt: number;
   /** Epoch ms of the last move onto this row, or null when it never moved. */
   movedAt: number | null;
+  /** The account that last move took it from, or null when it never moved. */
+  movedFrom: `0x${string}` | null;
 }
 
 /** The outcome of a fresh signature from the wallet itself (takeHolder). */
@@ -54,6 +56,40 @@ export type HolderTake =
 /** A wallet's claim moves at most once per UTC day (takeHolder). */
 const DAY_MS = 86_400_000;
 const utcDayStart = (ms: number) => Math.floor(ms / DAY_MS) * DAY_MS;
+
+/**
+ * WHEN `tenant` MAY MOVE `wallet`'s CLAIM OFF `was`: null for now, else the
+ * epoch ms of the next UTC day. One rule for both backends.
+ *
+ * ONE MOVE PER WALLET PER UTC DAY, so a bag cannot be passed round a string
+ * of agents — but the limit alone let ONE phished signature lock the real
+ * owner out until midnight: the attacker's move spent the day, and the
+ * owner's own fresh signature then met 429 even from the wallet's own
+ * sign-in account. Two moves are therefore always allowed, and neither
+ * widens who can hold the wallet in a day:
+ *
+ *   THE WALLET'S OWN SIGN-IN ACCOUNT (tenant === wallet). The session is
+ *   that wallet's login and the signature is that wallet's key — the one
+ *   party a move limit must never lock out.
+ *
+ *   BACK TO THE ACCOUNT IT WAS LAST MOVED FROM. The holders stay the pair
+ *   the day's move already made, {from, to}; every such move still needs a
+ *   fresh signature over a five-minute nonce.
+ *
+ * Both still stamp the move (movedAt = now, movedFrom = the holder it left),
+ * so neither frees a move for anybody else that day.
+ */
+function moveBarredUntil(
+  wallet: `0x${string}`,
+  tenant: `0x${string}`,
+  was: Pick<HolderClaimRecord, "movedAt" | "movedFrom">,
+  now: number,
+): number | null {
+  const dayStart = utcDayStart(now);
+  if (was.movedAt === null || was.movedAt < dayStart) return null;
+  if (tenant === wallet || tenant === was.movedFrom) return null;
+  return dayStart + DAY_MS;
+}
 
 /**
  * WHERE THE ONE-TIME HOLDER-CLAIMS BACKFILL STANDS (holder-claims.ts
@@ -110,9 +146,11 @@ export interface SettingsStore {
    * nowhere (effectiveHolder follows the claim).
    *
    * AT MOST ONE MOVE PER WALLET PER UTC DAY, recorded on the claim itself, so
-   * one bag cannot be passed round a string of agents in a day. Within it the
-   * answer is `{ ok: false, movableAt }`. Unclaimed or already ours, it is
-   * claimHolder. Throws when the store cannot be read.
+   * one bag cannot be passed round a string of agents in a day — except back
+   * to the wallet's own sign-in account or to the account it was last moved
+   * from (moveBarredUntil). Within it the answer is `{ ok: false, movableAt }`.
+   * Unclaimed or already ours, it is claimHolder. Throws when the store cannot
+   * be read.
    */
   takeHolder(wallet: string, tenant: string, now?: number): Promise<HolderTake>;
   /**
@@ -289,6 +327,7 @@ export class FileSettingsStore implements SettingsStore {
       tenant: claimKey("tenant", String(rec.tenant)),
       claimedAt: Number(rec.claimedAt) || 0,
       movedAt: typeof rec.movedAt === "number" && Number.isFinite(rec.movedAt) ? rec.movedAt : null,
+      movedFrom: rec.movedFrom === undefined ? null : claimKey("tenant", String(rec.movedFrom)),
     };
   }
   /** The account holding `wallet`, or null when none. Throws on a claim it cannot read. */
@@ -297,7 +336,13 @@ export class FileSettingsStore implements SettingsStore {
   }
   /** Replace `w`'s claim whole: a private temp file renamed over it. Only under the wallet's lock. */
   private async replaceClaim(w: `0x${string}`, rec: HolderClaimRecord): Promise<void> {
-    const stored: StoredClaim = { wallet: w, tenant: rec.tenant, claimedAt: rec.claimedAt, ...(rec.movedAt === null ? {} : { movedAt: rec.movedAt }) };
+    const stored: StoredClaim = {
+      wallet: w,
+      tenant: rec.tenant,
+      claimedAt: rec.claimedAt,
+      ...(rec.movedAt === null ? {} : { movedAt: rec.movedAt }),
+      ...(rec.movedFrom === null ? {} : { movedFrom: rec.movedFrom }),
+    };
     const tmp = path.join(this.claimsDir, `.${w}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
     await writeFile(tmp, JSON.stringify(stored), { encoding: "utf8", mode: 0o600 });
     try {
@@ -375,7 +420,6 @@ export class FileSettingsStore implements SettingsStore {
   async takeHolder(wallet: string, tenant: string, now: number = Date.now()): Promise<HolderTake> {
     const w = claimKey("wallet", wallet);
     const t = claimKey("tenant", tenant);
-    const dayStart = utcDayStart(now);
     for (let attempt = 0; attempt < 3; attempt++) {
       const first = await this.claimHolder(w, t, now);
       if (first.ok) return { ok: true, fresh: first.fresh };
@@ -383,8 +427,9 @@ export class FileSettingsStore implements SettingsStore {
         const was = await this.readClaim(w);
         if (!was) return null; // released meanwhile: claim it afresh
         if (was.tenant === t) return { ok: true, fresh: false };
-        if (was.movedAt !== null && was.movedAt >= dayStart) return { ok: false, movableAt: dayStart + DAY_MS };
-        await this.replaceClaim(w, { tenant: t, claimedAt: now, movedAt: now });
+        const barred = moveBarredUntil(w, t, was, now);
+        if (barred !== null) return { ok: false, movableAt: barred };
+        await this.replaceClaim(w, { tenant: t, claimedAt: now, movedAt: now, movedFrom: was.tenant });
         return { ok: true, fresh: true, from: was.tenant, was };
       });
       if (out) return out;
@@ -394,7 +439,12 @@ export class FileSettingsStore implements SettingsStore {
   async undoTakeHolder(wallet: string, tenant: string, was: HolderClaimRecord): Promise<void> {
     const w = claimKey("wallet", wallet);
     const t = claimKey("tenant", tenant);
-    const back: HolderClaimRecord = { tenant: claimKey("tenant", was.tenant), claimedAt: was.claimedAt, movedAt: was.movedAt };
+    const back: HolderClaimRecord = {
+      tenant: claimKey("tenant", was.tenant),
+      claimedAt: was.claimedAt,
+      movedAt: was.movedAt,
+      movedFrom: was.movedFrom === null ? null : claimKey("tenant", was.movedFrom),
+    };
     await this.withClaimLock(w, async () => {
       if ((await this.claimHolderOf(w)) === t) await this.replaceClaim(w, back);
     });
@@ -491,6 +541,8 @@ interface StoredClaim {
   claimedAt: number;
   /** Epoch ms of the last move onto this claim (takeHolder); absent when it never moved. */
   movedAt?: number;
+  /** The account that move took it from; absent when it never moved. */
+  movedFrom?: string;
 }
 
 /** No lock is held for longer than a few file operations; one this old was orphaned by a crash. */
@@ -638,6 +690,9 @@ export class PgSettingsStore implements SettingsStore {
         // moves at most once per UTC day. Added, not created, so a table
         // made before moves existed gains it; NULL = never moved.
         await addColumnIfAbsent(c, `ALTER TABLE holder_claims ADD COLUMN moved_at BIGINT`);
+        // …and which account that move took it from: a same-day move BACK
+        // there is allowed (moveBarredUntil). NULL = never moved.
+        await addColumnIfAbsent(c, `ALTER TABLE holder_claims ADD COLUMN moved_from TEXT`);
         // One row per fact about the claims themselves — today only whether
         // the one-time backfill has finished (HolderBackfillState).
         await createIfAbsent(
@@ -702,16 +757,16 @@ export class PgSettingsStore implements SettingsStore {
     throw new Error("holder claim: the wallet's claim kept changing — try again");
   }
   /**
-   * CLAIM, OR MOVE IN ONE CONDITIONAL UPDATE. The UPDATE names the holder it
-   * read and the once-a-day condition, so it changes the row only if nothing
-   * moved or released it since: two moves racing for one wallet cannot both
-   * win, and a move can never land on a claim it did not see. Changed under
-   * it, it looks again.
+   * CLAIM, OR MOVE IN ONE CONDITIONAL UPDATE. The UPDATE names the holder and
+   * the last move it read, so it changes the row only if nothing moved or
+   * released it since: two moves racing for one wallet cannot both win (the
+   * first stamps moved_at, and the second's row no longer matches), and a move
+   * can never land on a claim it did not see. Whether the move is allowed at
+   * all is moveBarredUntil, on what was read. Changed under it, it looks again.
    */
   async takeHolder(wallet: string, tenant: string, now: number = Date.now()): Promise<HolderTake> {
     const w = claimKey("wallet", wallet);
     const t = claimKey("tenant", tenant);
-    const dayStart = utcDayStart(now);
     const c = await this.client();
     for (let attempt = 0; attempt < 3; attempt++) {
       const ins = await c.query(
@@ -720,19 +775,24 @@ export class PgSettingsStore implements SettingsStore {
         [w, t, now],
       );
       if (ins.rows[0]) return { ok: true, fresh: true };
-      const { rows } = await c.query(`SELECT tenant, claimed_at, moved_at FROM holder_claims WHERE wallet = $1`, [w]);
+      const { rows } = await c.query(
+        `SELECT tenant, claimed_at, moved_at, moved_from FROM holder_claims WHERE wallet = $1`,
+        [w],
+      );
       if (!rows[0]) continue; // released meanwhile: claim it afresh
       const was: HolderClaimRecord = {
         tenant: claimKey("tenant", String(rows[0].tenant)),
         claimedAt: Number(rows[0].claimed_at),
         movedAt: rows[0].moved_at === null || rows[0].moved_at === undefined ? null : Number(rows[0].moved_at),
+        movedFrom: rows[0].moved_from === null || rows[0].moved_from === undefined ? null : claimKey("tenant", String(rows[0].moved_from)),
       };
       if (was.tenant === t) return { ok: true, fresh: false };
-      if (was.movedAt !== null && was.movedAt >= dayStart) return { ok: false, movableAt: dayStart + DAY_MS };
+      const barred = moveBarredUntil(w, t, was, now);
+      if (barred !== null) return { ok: false, movableAt: barred };
       const moved = await c.query(
-        `UPDATE holder_claims SET tenant = $2, claimed_at = $3, moved_at = $3
-         WHERE wallet = $1 AND tenant = $4 AND (moved_at IS NULL OR moved_at < $5) RETURNING tenant`,
-        [w, t, now, was.tenant, dayStart],
+        `UPDATE holder_claims SET tenant = $2, claimed_at = $3, moved_at = $3, moved_from = $4
+         WHERE wallet = $1 AND tenant = $4 AND COALESCE(moved_at, -1) = $5 RETURNING tenant`,
+        [w, t, now, was.tenant, was.movedAt ?? -1],
       );
       if (moved.rows[0]) return { ok: true, fresh: true, from: was.tenant, was };
     }
@@ -742,8 +802,15 @@ export class PgSettingsStore implements SettingsStore {
   async undoTakeHolder(wallet: string, tenant: string, was: HolderClaimRecord): Promise<void> {
     const c = await this.client();
     await c.query(
-      `UPDATE holder_claims SET tenant = $3, claimed_at = $4, moved_at = $5 WHERE wallet = $1 AND tenant = $2`,
-      [claimKey("wallet", wallet), claimKey("tenant", tenant), claimKey("tenant", was.tenant), was.claimedAt, was.movedAt],
+      `UPDATE holder_claims SET tenant = $3, claimed_at = $4, moved_at = $5, moved_from = $6 WHERE wallet = $1 AND tenant = $2`,
+      [
+        claimKey("wallet", wallet),
+        claimKey("tenant", tenant),
+        claimKey("tenant", was.tenant),
+        was.claimedAt,
+        was.movedAt,
+        was.movedFrom === null ? null : claimKey("tenant", was.movedFrom),
+      ],
     );
   }
   /** One conditional DELETE: only the holder's own release removes the row. */
