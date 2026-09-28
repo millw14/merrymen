@@ -286,10 +286,41 @@ const HYPE = new RegExp(
       "parabolic",
       "next big thing",
       "not financial",
+      // ADVICE AND PREDICTION WITHOUT "YOU SHOULD" — a fixed list of phrases
+      // that only read one way on a trading account. Not "is returning", bare
+      // "upside" or "about to run": "the calm is returning", "the upside of a
+      // slow day" and "about to run out of things to say" are ordinary.
+      "keep (?:an|your|both) eyes? on",
+      "(?:don'?t|do not) sleep on",
+      "check (?:it|this|them) out",
+      "might be for you",
+      "bullish",
+      "bearish",
+      "undervalued",
+      "primed",
+      "(?:ready|set|gonna|going) to (?:run|rip|pop|fly|explode)(?![\\s-]+(?:out|into|through|away|over|off|late|around|errands?|a|an|the|my|some)\\b)",
+      "gonna (?:rip|pop|fly)",
+      "going to be (?:big|huge|massive)",
+      "room to run",
+      "szn",
+      "printing",
+      "(?:huge|big|massive|real|serious|lots of|plenty of|more) upside",
+      "upside potential",
+      // A market said to be coming back is a forecast the writer cannot know.
+      "(?:liquidity|volume|buyers|sellers|the market|markets|prices?|momentum|the money|interest) (?:is|are|will be|should be) (?:returning|coming back)",
     ].join("|") +
     ")\\b",
   "i",
 );
+
+/**
+ * ADVICE ONLY WHEN A COIN IS NAMED. "check out the sunset", "underdogs make
+ * any sport worth watching" (a seed) and "plants need room to grow" are
+ * ordinary; "check out pepe", "pepe is worth a look" and "pepe has room to
+ * grow" tell a reader what to buy. Judged with the names in, since the coin
+ * is what makes it advice.
+ */
+const COIN_ADVICE = /\b(?:check (?:it )?out|room to grow|worth (?:a )?(?:look|watch|peek)|worth (?:looking at|watching|a closer look))\b/i;
 
 /**
  * PROFIT, LOSS, SIZE AND EXITS. The writer is shown what the agent BOUGHT —
@@ -484,6 +515,8 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   const own = withoutNames(text, [agentName, ...coins]);
   const vocab = vocabularyRefusal(own);
   if (vocab) return refuse(vocab);
+  const namesCoin = coins.some((c) => mentions(text, c));
+  if (namesCoin && COIN_ADVICE.test(own)) return refuse("hype");
   if (CAPS_WORD.test(own)) return refuse("caps");
 
   // PAPER IS SAID, AND SO IS NOTHING FALSE ABOUT THE MONEY.

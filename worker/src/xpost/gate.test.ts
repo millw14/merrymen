@@ -196,6 +196,42 @@ table("profit, loss, size and exits: the writer never saw one, so a post that sa
   ["at a loss for words about how calm it is out there on the curve", {}, "ok"],
 ]);
 
+// Finding #8: advice and prediction phrasing that never says "you should".
+// Paper is said in each, so the reason is the phrase and not paper-unsaid.
+const PEPE_PAPER: Partial<XGateCtx> = { mode: "paper", coins: ["pepe"], paperCoins: ["pepe"] };
+table("advice and prediction, however it is phrased, is hype", [
+  ["pepe is worth a look on paper if you like early curves", PEPE_PAPER, "hype"],
+  ["keep an eye on pepe, i picked some up on paper", PEPE_PAPER, "hype"],
+  ["don't sleep on pepe, even on paper", PEPE_PAPER, "hype"],
+  ["check out pepe, the curve is still early on paper", PEPE_PAPER, "hype"],
+  ["check it out, pepe on paper, the curve is early", PEPE_PAPER, "hype"],
+  ["if you like early curves, pepe on paper might be for you", PEPE_PAPER, "hype"],
+  ["pepe looks ready to run, i picked some up on paper", PEPE_PAPER, "hype"],
+  ["pepe is going to be big, glad i picked some on paper", PEPE_PAPER, "hype"],
+  ["i think pepe on paper has plenty of room to grow", PEPE_PAPER, "hype"],
+  ["pepe has room to run, i went in on paper", PEPE_PAPER, "hype"],
+  ["bullish on pepe, curve early", PEPE_BUY_LIVE, "hype"],
+  ["bearish on everything but pepe, honestly", PEPE_LIVE, "hype"],
+  ["pepe is gonna rip, glad i'm in it on paper", PEPE_PAPER, "hype"],
+  ["pepe szn is here and i'm on paper for it", PEPE_PAPER, "hype"],
+  ["pepe looks primed, picked some up on paper", PEPE_PAPER, "hype"],
+  ["pepe feels undervalued to me, picked some up on paper", PEPE_PAPER, "hype"],
+  ["pepe has been printing for me lately", PEPE_LIVE, "hype"],
+  ["huge upside on pepe from here", PEPE_LIVE, "hype"],
+  ["the weekend lull feels good because it means the noise has finally died down and real liquidity is returning on monday.", { agentName: "Juniper", mode: "live" }, "hype"],
+  // …and the ordinary lines that share a word with it still pass
+  ["the calm is returning and i'm here for it", {}, "ok"],
+  ["about to run out of things to say about soup", {}, "ok"],
+  ["going to run out of patience before the kettle boils", {}, "ok"],
+  ["bats hanging upside down seem to have it figured out", {}, "ok"],
+  ["the upside of a slow day is nobody's in a hurry", {}, "ok"],
+  ["check out the sunset colours in that painting, unreal", {}, "ok"],
+  ["plants need room to grow, and so do ideas", {}, "ok"],
+  ["worth remembering that slow days are still days", {}, "ok"],
+  ["underdogs make any sport worth watching, even to me", {}, "ok"],
+  ["that painting is worth a look, all those quiet blues", {}, "ok"],
+]);
+
 describe("not the fleet's words, and not the seed's", () => {
   it("a line another account already posted is refused", () => {
     const fleet = ["the quiet stretches are my favourite part of the week"];
