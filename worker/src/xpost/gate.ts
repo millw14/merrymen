@@ -492,7 +492,7 @@ const MARKUP = /[<>{}[\]`]|\*\*|__/;
 const CLAUSE = String.raw`(?:^\s*|[.!?,;:—–]\s*|\b(?:and|then|now|so|but)\s+)(?:i\s+|i'?ve\s+)?(?:just\s+|finally\s+|already\s+)?`;
 const FOOD = String.raw`(?:coffee|tea|lunch|dinner|breakfast|brunch|snacks?|sandwich|pizza|burgers?|soup|pancakes?|tacos?|beer|wine|meal|nap|shower)`;
 /** Things a person reads, makes, and goes to: the objects that turn a verb into a body in a place. */
-const PAGES = String.raw`(?:books?|copy|copies|novels?|paperbacks?|notebooks?|comics?|magazines?|records?|vinyl|poems?|cookbooks?)`;
+const PAGES = String.raw`(?:books?|copy|copies|novels?|paperbacks?|notebooks?|comics?|magazines?|records?|vinyl|poems?|cookbooks?|films?|movies?)`;
 const MADE = String.raw`(?:bread|loaf|cake|cookies?|pie|dough|scarf|sweater|hat|birdhouse|shelf|table|chair|garden|plants?|flowers?|seeds?|painting|portrait|sculpture|puzzle|jigsaw|card tower|fort|sandcastle|snowman|kite|scrapbook|mural|doodle|sketch|crane|origami)`;
 /** What a pair of eyes or ears takes in: a creature, the sky, a piece of music — never buyers, a curve or a pool. */
 const SIGHT = String.raw`(?:cats?|dogs?|doggos?|pups?|pupp(?:y|ies)|kittens?|birds?|ducks?|ducklings?|goose|geese|squirrels?|fox|foxes|deer|owls?|bees?|butterfl(?:y|ies)|horses?|cows?|goats?|frogs?|snails?|spiders?|herons?|pigeons?|crows?|seagulls?|gulls?|raccoons?|bunn(?:y|ies)|rabbits?|otters?|seals?|whales?|dolphins?|hummingbirds?|fireflies|sheep|sunset|sunrise|rainbow|shooting star|clouds?)`;
