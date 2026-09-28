@@ -280,6 +280,39 @@ table("a human life it does not have, however it is phrased", [
   ["hate pushing a price around, but love watching how things just happen", LIVE, "ok"],
 ]);
 
+// The physical world, done in the first person: the review's "books" seed came
+// back as a copy it found. Only a verb WITH a physical thing (or an activity
+// with the "i" said) is a claim; a choice, a wish and an opinion are not.
+table("something it found, read, made, touched or went to is a life it does not have", [
+  ["found a copy with heavy notes in the margins and decided to skip the blank pages this time", { agentName: "Tamsin Vole", mode: "paper" }, "human-claim"],
+  ["read a great book on a slow afternoon, highly recommend the quiet", LIVE, "human-claim"],
+  ["just finished a novel with a map in the front", LIVE, "human-claim"],
+  ["baked a loaf of bread and it came out wonky", LIVE, "human-claim"],
+  ["built a tiny birdhouse for the neighbours", LIVE, "human-claim"],
+  ["i painted a little sketch of the sea", LIVE, "human-claim"],
+  ["went to the park and watched the ducks in a line", LIVE, "human-claim"],
+  ["walked through the forest for a bit, felt calm after", LIVE, "human-claim"],
+  ["touched grass today, would recommend", LIVE, "human-claim"],
+  ["picked some flowers on the hill, they looked brave", LIVE, "human-claim"],
+  ["i'm reading a book about octopuses and it's wild", LIVE, "human-claim"],
+  ["i'm watching a documentary about bees, they dance", LIVE, "human-claim"],
+  ["i'm humming along to nothing in particular", LIVE, "human-claim"],
+  ["went hiking and forgot about the curve for a while", LIVE, "human-claim"],
+  // …and the choices, wishes and opinions that share a verb with it pass
+  ["found it while it was still early, and i liked that", LIVE, "ok"],
+  ["read the room and kept things small and quiet", LIVE, "ok"],
+  ["made up my mind on pepe fast, the pool was deep", PEPE_BUY_LIVE, "ok"],
+  ["built a position in pepe slowly, the buyers were spread out", PEPE_BUY_LIVE, "ok"],
+  ["walked away from a busy curve and felt fine about it", LIVE, "ok"],
+  ["ran into the same thought again: slow days are good days", LIVE, "ok"],
+  ["if i could bake, i'd make a cake shaped like a cloud", LIVE, "ok"],
+  ["a book with a map in the front is automatically good", LIVE, "ok"],
+  ["libraries are the best buildings ever made", LIVE, "ok"],
+  ["a garden after rain must smell amazing, i'm told", LIVE, "ok"],
+  ["i'm watching the tape drift and i like it", LIVE, "ok"],
+  ["picked bonk over a few others, the buyers were spread out", { kind: "buy", mode: "live", coins: ["bonk"] }, "ok"],
+]);
+
 // Finding #10: a buy post names the coin it bought — the label, the ticker or
 // the clean name the glue vouched (coinNames), as a whole word.
 const buyOf = (agentName: string, mode: "paper" | "live", coins: string[]): Partial<XGateCtx> => ({

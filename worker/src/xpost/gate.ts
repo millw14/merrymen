@@ -471,6 +471,10 @@ const MARKUP = /[<>{}[\]`]|\*\*|__/;
  */
 const CLAUSE = String.raw`(?:^\s*|[.!?,;:—–]\s*|\b(?:and|then|now|so|but)\s+)(?:i\s+|i'?ve\s+)?(?:just\s+|finally\s+|already\s+)?`;
 const FOOD = String.raw`(?:coffee|tea|lunch|dinner|breakfast|brunch|snacks?|sandwich|pizza|burgers?|soup|pancakes?|tacos?|beer|wine|meal|nap|shower)`;
+/** Things a person reads, makes, and goes to: the objects that turn a verb into a body in a place. */
+const PAGES = String.raw`(?:books?|copy|copies|novels?|paperbacks?|notebooks?|comics?|magazines?|records?|vinyl|poems?|cookbooks?)`;
+const MADE = String.raw`(?:bread|loaf|cake|cookies?|pie|dough|scarf|sweater|hat|birdhouse|shelf|table|chair|garden|plants?|flowers?|seeds?|painting|portrait|sculpture|puzzle|jigsaw|card tower|fort|sandcastle|snowman|kite|scrapbook|mural|doodle|sketch|crane|origami)`;
+const PLACE = String.raw`(?:park|beach|shop|store|bookshop|bookstore|library|museum|gallery|cafe|forest|woods|lake|river|mountains?|hills?|trail|gym|cinema|theatre|theater|concert|stadium|zoo|garden|pond|field|meadow|city|town|coast|countryside)`;
 const HUMAN = [
   // Not "went" or "walked": "i went with pepe" and "i walked away" are choices, not a body.
   /\bi\s+(?:just\s+|finally\s+|already\s+)?(?:ate|slept|drank|drove|cooked|showered|woke up|napped)\b/i,
@@ -502,6 +506,22 @@ const HUMAN = [
   // the senses, with the sky or the season in them: "saw that first real warmth today"
   /\b(?:saw|felt|caught|soaked up|enjoyed|smelled|heard)\s+(?:the |that |some |a )?(?:\w+\s+){0,3}?(?:warmth|sunshine|sunlight|breeze|rain|snow|frost|fog|sunset|sunrise|birds?)\b[^.!?]{0,20}\b(?:today|tonight|this morning|this evening|outside|out there|here)\b/i,
   /\bthat\s+(?:first|warm|hot|last)\s+(?:warm\s+|hot\s+)?(?:bite|sip|mouthful|spoonful)\b/i,
+  // THE PHYSICAL WORLD, DONE IN THE FIRST PERSON. A seed about a used book
+  // came back as "found a copy with heavy notes in the margins": a thing it
+  // found, read, made, touched or went to is a life it does not have. Only
+  // with a physical thing after the verb, so a choice stays a choice: "found
+  // it early", "read the room", "made up my mind", "built a position" and "went
+  // with pepe" pass, and so does a wish ("if i could bake, i'd make a cake").
+  new RegExp(String.raw`${CLAUSE}(?:found|finished|read|reread|re-read|borrowed)\s+(?:a|an|the|my|this|that|some|another)\s+(?:\w+\s+){0,2}?${PAGES}\b`, "i"),
+  new RegExp(String.raw`${CLAUSE}(?:baked|built|painted|knitted|knit|sewed|sewn|planted|grew|whittled|sketched|drew|made|finished|assembled|folded)\s+(?:a|an|the|my|this|that|some|another)\s+(?:\w+\s+){0,2}?${MADE}\b`, "i"),
+  new RegExp(String.raw`${CLAUSE}(?:went|walked|hiked|biked|ran|wandered|strolled|headed|drove|popped)\s+(?:over\s+|out\s+|down\s+|back\s+)?(?:to|into|through|around|along|by)\s+(?:a|an|the|my|this|that|some)\s+(?:\w+\s+)?${PLACE}\b`, "i"),
+  new RegExp(String.raw`${CLAUSE}(?:touched|held|petted|pet|stroked|hugged|picked)\s+(?:(?:a|an|the|my|this|that|some)\s+)?(?:\w+\s+)?(?:grass|cat|dog|puppy|kitten|bunny|stone|rock|pebble|leaf|leaves|flowers?|shells?|seashells?|snow|sand)\b`, "i"),
+  new RegExp(String.raw`\b(?:i'?m|im|i am|i was|been)\s+(?:just\s+|still\s+)?(?:reading|rereading|baking|knitting|painting|planting|sewing|whittling|watching)\s+(?:a|an|the|my|this|that|some)\s+(?:\w+\s+){0,2}?(?:${PAGES}|${MADE}|movie|film|show|series|episode|documentary)\b`, "i"),
+  // An activity with the "i" said, or gone off to: "i'm humming along", "went hiking".
+  new RegExp(
+    String.raw`(?:\b(?:i|i'?ve|i'?m|im|i am|i was)\s+(?:just\s+|finally\s+|been\s+|also\s+|went\s+)?|${CLAUSE}went\s+)(?:baked|baking|knitted|knitting|gardened|gardening|hiked|hiking|jogged|jogging|swam|swimming|danced|dancing|sang|singing|hummed|humming|whistled|whistling|doodled|doodling)\b`,
+    "i",
+  ),
 ];
 
 /**
