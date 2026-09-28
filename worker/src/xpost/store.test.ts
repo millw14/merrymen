@@ -13,6 +13,7 @@ import {
   cancelPost,
   cancelScheduled,
   claimPost,
+  deferPost,
   deleteAccount,
   duePosts,
   ensureXpostSchema,
@@ -20,6 +21,7 @@ import {
   getAccount,
   introPostsOf,
   keyStatus,
+  lastOutAt,
   markFailed,
   markPosted,
   markRevoked,
@@ -329,6 +331,38 @@ test("one X account's posts, from every owner posting on it, newest first", asyn
   ]);
 });
 
+test("when an X account last posted, from any owner, what went out or may have; never a hello", async (t) => {
+  const { db } = await open(t);
+  assert.equal(await lastOutAt(db, "111", 0), null);
+  const out = async (key: string, over: Partial<NewPost>, end: (id: number) => Promise<unknown>) => {
+    const id = (await schedulePost(db, post({ dedupeKey: key, ...over })))!;
+    await claimPost(db, id, over.nowMs ?? 500);
+    await end(id);
+  };
+  await out("hello", { kind: "intro", nowMs: 100 }, (id) => markPosted(db, id, "1", 9_000));
+  assert.equal(await lastOutAt(db, "111", 0), null, "a hello is exempt");
+  await out("a", { nowMs: 100 }, (id) => markPosted(db, id, "2", 1_000));
+  await out("b", { tenant: OWNER_B, nowMs: 200 }, (id) => markPosted(db, id, "3", 2_000));
+  assert.equal(await lastOutAt(db, "111", 0), 2_000, "the other owner's post on the same X account");
+  await out("maybe", { nowMs: 300 }, (id) => markFailed(db, id, "uncertain", 3_000));
+  assert.equal(await lastOutAt(db, "111", 0), 3_000, "an uncertain post may be on the timeline");
+  await out("refused", { nowMs: 400 }, (id) => markFailed(db, id, "forbidden", 4_000));
+  await schedulePost(db, post({ dedupeKey: "waiting", nowMs: 400, dueAtMs: 5_000 }));
+  assert.equal(await lastOutAt(db, "111", 0), 3_000, "X refused it, and a draft is not out");
+  assert.equal(await lastOutAt(db, "222", 0), null);
+  assert.equal(await lastOutAt(db, "111", 250), 3_000, "only posts drafted since");
+});
+
+test("a scheduled post can be moved later; a claimed one cannot", async (t) => {
+  const { db } = await open(t);
+  const id = (await schedulePost(db, post()))!;
+  assert.equal(await deferPost(db, id, 9_000, 600), true);
+  assert.deepEqual(await duePosts(db, [OWNER_A], 8_999), []);
+  assert.equal((await duePosts(db, [OWNER_A], 9_000))[0]?.id, id);
+  await claimPost(db, id, 9_001);
+  assert.equal(await deferPost(db, id, 20_000, 9_002), false);
+});
+
 test("every intro one owner wrote for one X account, any status and any age, oldest first", async (t) => {
   const { db } = await open(t);
   const base = `intro:${OWNER_A.toLowerCase()}:111`;
@@ -429,6 +463,8 @@ test("every statement the store sends translates to Postgres with matching, bind
   await postsOf(db, OWNER_A, 0.5, 20.5);
   await introPostsOf(db, OWNER_A, "111");
   await postsOfXUser(db, "111", 0.5, 20.5);
+  await lastOutAt(db, "111", 0.5);
+  await deferPost(db, id, 21.5, 21.5);
   await recentBodies(db, { tenant: OWNER_A, sinceMs: 0.5, limit: 5.5 });
   await recentBodies(db, { tenant: null, sinceMs: 0.5, limit: 5.5 });
   await returnAllowance(db, "k", 14.7);

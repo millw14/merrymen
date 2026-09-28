@@ -705,6 +705,48 @@ describe("fleet guards", () => {
     }
   });
 
+  it("two posts of one X account held until they are due together go out three hours apart, not in one pass", async (t) => {
+    const w = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(w);
+    // A casual post and a buy, spaced when drafted, both held (a pause, the ceiling) until now.
+    await dueCasual(w, "casual:held", { dueAtMs: T0 - 2 * HOUR });
+    await store.schedulePost(w.db, { tenant: TENANT, xUserId: "111", kind: "buy", dedupeKey: "buy:held", body: BUY, coin: "pepe", decisionId: "held", dueAtMs: T0 - MIN, nowMs: T0 - 30 * MIN });
+    const p = poster(w);
+    const log = (await p.step(w.db, ROSTER, new Map(), T0)).log;
+    assert.equal(w.tweets.length, 1, "one of them");
+    assert.match(log ?? "", /deferred 1/);
+    const buy = (await rows(w)).find((x) => x.dedupeKey === "buy:held")!;
+    assert.equal(buy.status, "scheduled");
+    assert.equal(buy.dueAtMs, T0 + GAP_MS, "moved to three hours after the one that went out");
+    await p.step(w.db, ROSTER, new Map(), T0 + GAP_MS - MIN);
+    assert.equal(w.tweets.length, 1);
+    await p.step(w.db, ROSTER, new Map(), T0 + GAP_MS);
+    assert.deepEqual(w.tweets, ["slow afternoons make me weirdly calm, casual:held", BUY]);
+  });
+
+  it("the send-time gap is the X account's: a second owner on it, or a post already out, defers the next; a hello is exempt", async (t) => {
+    const w = await world(t, T0 - 3 * HOUR);
+    await introDealtWith(w);
+    await otherOwner(w, "111");
+    await dueCasual(w, "casual:first", { dueAtMs: T0 - 2 * MIN });
+    await dueCasual(w, "casual:second-owner", { tenant: OTHER, xUserId: "111" });
+    const p = poster(w);
+    await p.step(w.db, BOTH, new Map(), T0);
+    assert.deepEqual(w.tweets, ["slow afternoons make me weirdly calm, casual:first"]);
+    const second = (await store.postsOf(w.db, OTHER, 0, 10)).find((x) => x.dedupeKey === "casual:second-owner")!;
+    assert.equal(second.status, "scheduled");
+    assert.equal(second.dueAtMs, T0 + GAP_MS);
+
+    const v = await world(t, T0 - 3 * HOUR);
+    await wentOut(v, "casual:an-hour-ago", { atMs: T0 - HOUR });
+    // A hello due now is never held back by the gap.
+    await store.schedulePost(v.db, { tenant: TENANT, xUserId: "111", kind: "intro", dedupeKey: `intro:${TENANT}:111`, body: INTRO, dueAtMs: T0 - MIN, nowMs: T0 - 11 * MIN });
+    await dueCasual(v, "casual:too-soon");
+    await poster(v).step(v.db, ROSTER, new Map(), T0);
+    assert.deepEqual(v.tweets, [INTRO], "the hello goes; the casual post waits for the gap");
+    assert.equal((await rows(v)).find((x) => x.dedupeKey === "casual:too-soon")?.dueAtMs, T0 - HOUR + GAP_MS);
+  });
+
   it("a credits pause holds every due post, and is said once", async (t) => {
     const w = await world(t, T0 - 2 * HOUR);
     await introDealtWith(w);

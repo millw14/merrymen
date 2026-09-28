@@ -45,15 +45,17 @@ import { STRATEGY_FLAVOUR, STRATEGY_SPOKEN, TRAIT_VOICE } from "./groupchat/temp
 import { MUSINGS, SUBJECTS, TAKES } from "./groupchat/topics";
 import { xAppFromEnv, type FetchLike, type XApp } from "./xpost/client";
 import { admitXPost, vocabularyRefusal, type BaseGate, type XGateCtx } from "./xpost/gate";
-import { coinOf, hash32, planPosts, sendDecision, type PlanClock, type PlanIntent } from "./xpost/planner";
+import { GAP_MS, coinOf, hash32, planPosts, sendDecision, type PlanClock, type PlanIntent } from "./xpost/planner";
 import { APP_PAUSE_KEY, APP_PAUSE_MS, CREDITS_PAUSE_MS, PAUSE_KEY, sendOne, type SendOutcome } from "./xpost/sender";
 import {
   cancelPost,
+  deferPost,
   duePosts,
   ensureXpostSchema,
   failInterrupted,
   getAccount,
   introPostsOf,
+  lastOutAt,
   postingAccounts,
   postsOfXUser,
   readMeta,
@@ -87,6 +89,8 @@ const FLEET_MEMORY_MS = 14 * DAY;
 const FLEET_MEMORY_MAX = 1000;
 /** The planner weighs caps, gaps and the three-day coin fold over this much of an X account's history. */
 const PLAN_HISTORY_MS = 4 * DAY;
+/** The send side's gap looks at posts drafted this recently: anything that went out in the last three hours was. */
+const GAP_HISTORY_MS = 2 * DAY;
 /** Template intros tried with fresh dice before the intro is skipped. */
 const TEMPLATE_TRIES = 8;
 /** Send outcomes after which the post may exist on X: they keep their unit of the fleet's ceiling. */
@@ -401,6 +405,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
         // after the call) keeps its unit, while a send X certainly refused gives
         // its unit back. Read here only to skip planning while it is reached.
         let ceiling = ((await readMeta(shared, `posts:${utcDay(nowMs)}`))?.n ?? 0) >= fleetPerDay;
+        // When each X account last posted (not a hello), once per pass and
+        // moved on by this pass's own sends.
+        const lastOut = new Map<string, number | null>();
+        const lastOutOf = async (xUserId: string) => {
+          if (!lastOut.has(xUserId)) lastOut.set(xUserId, await lastOutAt(shared, xUserId, nowMs - GAP_HISTORY_MS));
+          return lastOut.get(xUserId) ?? null;
+        };
         let sends = 0;
         for (const post of await duePosts(shared, tenants, nowMs, MAX_DUE)) {
           const account: XAccount | null = accountOf.get(post.tenant) ?? (await getAccount(shared, post.tenant));
@@ -431,6 +442,20 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             }
             continue;
           }
+          // THE GAP, AGAIN, AT SEND TIME — per X ACCOUNT. The planner spaced
+          // posts three hours apart when it drafted them, but a hold (a pause,
+          // the ceiling, a 429's reset) or a second owner on the same X
+          // account can bring two due together. The later one is moved to
+          // three hours after the last that went out, never sent inside the
+          // gap; a buy still goes stale on its own clock, a casual post past
+          // its day. The hello is exempt, both ways.
+          if (post.kind !== "intro") {
+            const last = await lastOutOf(post.xUserId);
+            if (last !== null && nowMs - last < GAP_MS) {
+              if (await deferPost(shared, post.id, last + GAP_MS, nowMs)) bump("deferred");
+              continue;
+            }
+          }
           if (sends >= MAX_SENDS_PER_PASS) break;
           const dayKey = `posts:${utcDay(nowMs)}`;
           if (!(await takeAllowance(shared, dayKey, fleetPerDay, nowMs))) {
@@ -449,6 +474,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           bump(out === "posted" ? "sent" : out === "app" ? "x-refused-client-credentials" : out);
           // What may exist on X keeps its unit of the ceiling, not only what surely does.
           if (!MAY_BE_ON_X.has(out)) await returnAllowance(shared, dayKey, nowMs);
+          else if (post.kind !== "intro") lastOut.set(post.xUserId, nowMs);
           // The sender wrote the pause; this pass honours it at once, and the
           // event just said is the pause's line, so later passes stay quiet.
           if (out === "credits" || out === "app") {

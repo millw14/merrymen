@@ -734,6 +734,17 @@ export async function cancelPost(db: Db, id: number, reason: string, nowMs: numb
 }
 
 /**
+ * NOT YET: a scheduled post moved later (the three-hour gap, found at send
+ * time). Conditional on still being scheduled, like every change to one.
+ */
+export async function deferPost(db: Db, id: number, dueAtMs: number, nowMs: number): Promise<boolean> {
+  const r = await db
+    .prepare(`UPDATE xpost_posts SET due_at_ms = ?, updated_at_ms = ? WHERE id = ? AND status = 'scheduled'`)
+    .run(int(dueAtMs), int(nowMs), int(id));
+  return r.changes === 1;
+}
+
+/**
  * THE OWNER'S SKIP. Only their own post, and only while it is still
  * scheduled: a post already claimed for sending cannot be half-skipped.
  */
@@ -803,6 +814,24 @@ export async function postsOf(db: Db, tenant: string, sinceMs: number, limit = 1
     )
     .all(tenantKey(tenant), int(sinceMs), int(Math.max(1, Math.min(500, limit))))) as PostRow[];
   return rows.map(postOf);
+}
+
+/**
+ * WHEN ONE X ACCOUNT LAST POSTED something other than a hello — from any owner
+ * posting on it — or null. What went out (its sent time), and what may have
+ * (an uncertain answer, a crashed claim, our own fault after the call: the
+ * time it ended). Only posts drafted since `sinceMs` are looked at. The send
+ * side's three-hour gap is kept against this.
+ */
+export async function lastOutAt(db: Db, xUserId: string, sinceMs: number): Promise<number | null> {
+  const row = (await db
+    .prepare(
+      `SELECT MAX(CASE WHEN status = 'posted' THEN sent_at_ms ELSE updated_at_ms END) AS at FROM xpost_posts
+        WHERE x_user_id = ? AND created_at_ms >= ? AND kind <> 'intro'
+          AND (status = 'posted' OR (status = 'failed' AND reason IN ('uncertain', 'interrupted', 'fault')))`,
+    )
+    .get(String(xUserId), int(sinceMs))) as { at: unknown } | undefined;
+  return row && row.at !== null && row.at !== undefined ? num(row.at) : null;
 }
 
 /**
