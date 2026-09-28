@@ -114,7 +114,7 @@ const UPLOAD_TIMEOUT_MS = 60_000;
  * AbortSignal.timeout runs on, so a test could not show the bound holds. The
  * reason is the same TimeoutError AbortSignal.timeout would give.
  */
-function deadline(ms: number): { signal: AbortSignal; disarm: () => void } {
+export function deadline(ms: number): { signal: AbortSignal; disarm: () => void } {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(new DOMException(`timed out after ${ms}ms`, "TimeoutError")), ms);
   (t as { unref?: () => void }).unref?.();
@@ -129,7 +129,7 @@ function deadline(ms: number): { signal: AbortSignal; disarm: () => void } {
  * one that ignores the signal, so the deadline belongs to call() and not to
  * whichever fetch happened to be passed in.
  */
-function orAbort<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+export function orAbort<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason);
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(signal.reason);

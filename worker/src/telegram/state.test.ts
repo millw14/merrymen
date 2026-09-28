@@ -3,11 +3,24 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { botIdOf, ensureLinkCode, loadTelegramState, rotateLinkCode, saveTelegramState, type TelegramState } from "./state";
+import {
+  PRIOR_BOTS_KEPT,
+  botIdOf,
+  ensureLinkCode,
+  loadTelegramState,
+  rotateLinkCode,
+  saveTelegramState,
+  switchBot,
+  tokenTagOf,
+  type TelegramState,
+} from "./state";
 
 const base: TelegramState = {
   offset: 0,
   botId: null,
+  priorBots: [],
+  tokenTag: null,
+  boundAt: null,
   chatSettings: null,
   linkCode: "",
   linkedChats: [],
@@ -118,5 +131,83 @@ describe("telegram.json carries the bot id", () => {
         assert.equal(loadTelegramState().botId, null, JSON.stringify(botId));
       }
     });
+  });
+
+  it("round-trips the other bots' offsets, the token fingerprint and when the bot was bound", () => {
+    inHome(() => {
+      const tag = tokenTagOf("111:a");
+      saveTelegramState({ ...base, botId: "111", priorBots: [{ botId: "222", offset: 77 }], tokenTag: tag, boundAt: 1_790_000_000 });
+      const back = loadTelegramState();
+      assert.deepEqual(back.priorBots, [{ botId: "222", offset: 77 }]);
+      assert.equal(back.tokenTag, tag);
+      assert.equal(back.boundAt, 1_790_000_000);
+    });
+  });
+
+  it("a file from before these fields existed loads with none of them", () => {
+    inHome((file) => {
+      writeFileSync(file, JSON.stringify({ offset: 4242, botId: "111" }));
+      const st = loadTelegramState();
+      assert.deepEqual(st.priorBots, []);
+      assert.equal(st.tokenTag, null);
+      assert.equal(st.boundAt, null);
+    });
+  });
+
+  it("a malformed entry is dropped: no token under a bot id, no zero offset, and at most PRIOR_BOTS_KEPT", () => {
+    inHome((file) => {
+      const many = Array.from({ length: PRIOR_BOTS_KEPT + 3 }, (_, i) => ({ botId: String(300 + i), offset: 10 + i }));
+      writeFileSync(
+        file,
+        JSON.stringify({
+          priorBots: [{ botId: "111:secret", offset: 5 }, { botId: "222", offset: 0 }, { botId: "333" }, null, "444", ...many],
+          tokenTag: "111:secret",
+        }),
+      );
+      const st = loadTelegramState();
+      assert.deepEqual(st.priorBots, many.slice(0, PRIOR_BOTS_KEPT));
+      assert.equal(st.tokenTag, null, "only a 16-hex fingerprint is taken");
+    });
+  });
+});
+
+describe("tokenTagOf — tells a new secret apart without keeping the token", () => {
+  it("is 16 hex characters, stable for a token, different for a new secret on the same bot", () => {
+    const a = tokenTagOf("111:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    assert.match(a, /^[0-9a-f]{16}$/);
+    assert.equal(tokenTagOf("111:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), a);
+    assert.notEqual(tokenTagOf("111:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"), a);
+    assert.ok(!a.includes("AAAA") && !a.includes("111"), "and carries nothing of the token");
+  });
+});
+
+describe("switchBot — each bot keeps its own place in its own stream", () => {
+  const on111: TelegramState = { ...base, botId: "111", offset: 11, linkCode: "ABCDEF", tokenTag: tokenTagOf("111:a") };
+
+  it("a bot never polled starts from its first update; the one left is remembered", () => {
+    const st = switchBot(on111, "222", tokenTagOf("222:b"), 1_000);
+    assert.equal(st.botId, "222");
+    assert.equal(st.offset, 0);
+    assert.deepEqual(st.priorBots, [{ botId: "111", offset: 11 }]);
+    assert.equal(st.tokenTag, tokenTagOf("222:b"));
+    assert.equal(st.boundAt, 1_000);
+    assert.equal(st.linkCode, "", "for the caller to re-mint");
+  });
+
+  it("A → B → A resumes A where it was left, so Telegram does not hand its last batch over again", () => {
+    const onB = { ...switchBot(on111, "222", tokenTagOf("222:b"), 1_000), offset: 40 };
+    const backOnA = switchBot(onB, "111", tokenTagOf("111:a"), 2_000);
+    assert.equal(backOnA.offset, 11);
+    assert.deepEqual(backOnA.priorBots, [{ botId: "222", offset: 40 }], "A is current again, so it is not listed twice");
+    assert.equal(backOnA.boundAt, 2_000);
+  });
+
+  it("a bot that never got past 0 (a mistyped token) takes no slot, and the list stays bounded", () => {
+    let st = switchBot(on111, "900", tokenTagOf("900:x"), 1);
+    st = switchBot(st, "901", tokenTagOf("901:x"), 2);
+    assert.deepEqual(st.priorBots, [{ botId: "111", offset: 11 }], "900 never polled, so nothing to remember");
+    for (let i = 0; i < PRIOR_BOTS_KEPT + 4; i++) st = switchBot({ ...st, offset: 100 + i }, String(500 + i), "0000000000000000", 10 + i);
+    assert.equal(st.priorBots.length, PRIOR_BOTS_KEPT);
+    assert.equal(st.priorBots[0]!.botId, String(500 + PRIOR_BOTS_KEPT + 2), "newest first");
   });
 });

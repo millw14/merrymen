@@ -28,7 +28,7 @@ process.env.MERRYMEN_HOME = HOME; // the soul files and a /link's settings patch
 after(() => rmSync(HOME, { recursive: true, force: true }));
 
 const { startTelegram } = await import("./service");
-const { ensureLinkCode } = await import("./state");
+const { ensureLinkCode, tokenTagOf } = await import("./state");
 
 const T0 = Date.parse("2026-09-28T12:00:00Z");
 const CONFLICT_LINE = "Telegram: another program is reading this bot's updates (409 Conflict)";
@@ -44,7 +44,8 @@ type Reply = { status?: number; body: unknown } | "throw" | "hang";
 
 function blankState(over: Partial<TelegramState> = {}): TelegramState {
   return {
-    offset: 0, botId: null, chatSettings: null, linkCode: "", linkRound: 0, ownerId: null, linkedAt: null,
+    offset: 0, botId: null, priorBots: [], tokenTag: null, boundAt: null, chatSettings: null, linkCode: "",
+    linkRound: 0, ownerId: null, linkedAt: null,
     linkedChats: [], messageCount: 0, lastNotifiedTradeId: -1, lastTradeDigestAt: 0, lastRemedyRule: null,
     firedAlerts: {}, signWatch: null, lastDigestDate: "", lastJournalDate: "", priceAlerts: [], reminders: [],
     watchers: [], nextId: 1, ...over,
@@ -56,9 +57,9 @@ const refused = (status: number, description: string, parameters?: Record<string
   status,
   body: { ok: false, error_code: status, description, ...(parameters ? { parameters } : {}) },
 });
-const text = (updateId: number, chatId: number, t: string) => ({
+const text = (updateId: number, chatId: number, t: string, date = Math.floor(Date.now() / 1000)) => ({
   update_id: updateId,
-  message: { text: t, date: Math.floor(Date.now() / 1000), chat: { id: chatId }, from: { id: chatId } },
+  message: { text: t, date, chat: { id: chatId }, from: { id: chatId } },
 });
 
 /** Whatever the script does not answer: every method succeeds, and getUpdates is empty. */
@@ -75,8 +76,11 @@ const settle = async () => {
 
 interface Harness {
   calls: Call[];
-  notes: { level: string; message: string }[];
-  cfg: { telegramBotToken: string; telegramAllowlist: number[] };
+  notes: { level: string; message: string; at: number }[];
+  cfg: { telegramEnabled: boolean; telegramBotToken: string; telegramAllowlist: number[]; telegramControlEnabled: boolean };
+  /** While true, every read of the config throws, as an unreadable settings file would. */
+  cfgBroken: boolean;
+  trades: string[];
   state: () => TelegramState;
   polls: () => Call[];
   sent: () => string[];
@@ -94,16 +98,18 @@ async function withService(
     allowlist?: number[];
     state?: Partial<TelegramState>;
     script?: (c: Call, h: Harness) => Reply | undefined;
+    /** Lets /buy and /sell run, recording each one; without it any trade fails the test. */
+    trading?: boolean;
   },
   body: (h: Harness) => Promise<void>,
 ): Promise<void> {
   const calls: Call[] = [];
-  const notes: { level: string; message: string }[] = [];
+  const notes: { level: string; message: string; at: number }[] = [];
   const cfg = {
     telegramEnabled: true,
     telegramBotToken: opts.token,
     telegramAllowlist: opts.allowlist ?? [],
-    telegramControlEnabled: false,
+    telegramControlEnabled: opts.trading ?? false,
     telegramTransferEnabled: false,
     telegramPcControlEnabled: false,
     telegramAgentEnabled: false,
@@ -116,6 +122,8 @@ async function withService(
     calls,
     notes,
     cfg,
+    cfgBroken: false,
+    trades: [],
     state: () => state,
     polls: () => calls.filter((c) => c.method === "getUpdates"),
     sent: () => calls.filter((c) => c.method === "sendMessage").map((c) => String(c.body.text)),
@@ -145,15 +153,25 @@ async function withService(
     return { ok: status < 400, status, json: async () => r.body };
   }) as typeof fetch;
   const svc = startTelegram({
-    getCfg: () => cfg as never,
+    // A fresh object on every read, as resolveConfig() gives the real service:
+    // a change made during a batch is not visible through the config read
+    // before it.
+    getCfg: () => {
+      if (h.cfgBroken) throw new Error("settings unreadable");
+      return { ...cfg, telegramAllowlist: [...cfg.telegramAllowlist] } as never;
+    },
     stateRef: { get: () => state, set: (s) => { state = s; } },
-    note: (level, message) => notes.push({ level, message }),
+    note: (level, message) => notes.push({ level, message, at: Date.now() }),
     buildStatusContext: () => ({}) as never,
     setStrategy: () => ({ ok: true }),
     grantPerTradeUsdg: () => undefined,
     grantHasTransfer: () => false,
     readDepth: async () => "",
-    submitTrade: async () => { throw new Error("no trade may run in this test"); },
+    submitTrade: async (side, symbol, usdg) => {
+      if (!opts.trading) throw new Error("no trade may run in this test");
+      h.trades.push(`${side} ${symbol} ${usdg}`);
+      return `${side} ${symbol} done`;
+    },
     submitTransfer: async () => { throw new Error("no transfer may run in this test"); },
     kill: () => ({ ok: false, reason: "not in this test" }) as never,
   });
@@ -167,7 +185,7 @@ async function withService(
   }
 }
 
-const gaps = (calls: Call[]) => calls.slice(1).map((c, i) => c.at - calls[i]!.at);
+const gaps = (xs: { at: number }[]) => xs.slice(1).map((x, i) => x.at - xs[i]!.at);
 const warns = (h: Harness, re: RegExp) => h.notes.filter((n) => n.level === "warn" && re.test(n.message));
 
 describe("bounded I/O: nothing Telegram does can hold the loop", () => {
@@ -397,7 +415,7 @@ describe("the offset and the link code belong to one bot", () => {
 
   it("the SAME bot with a new secret keeps its offset, but the code is re-minted", async () => {
     const code = ensureLinkCode(blankState(), "111:a").linkCode;
-    await withService({ token: "111:a", state: { offset: 500, botId: "111", linkCode: code } }, async (h) => {
+    await withService({ token: "111:a", state: { offset: 500, botId: "111", tokenTag: tokenTagOf("111:a"), linkCode: code } }, async (h) => {
       assert.equal(h.polls()[0]!.body.offset, 500);
       assert.equal(h.state().linkCode, code, "nothing changes while the token does not");
       h.cfg.telegramBotToken = "111:b";
@@ -425,5 +443,228 @@ describe("the offset and the link code belong to one bot", () => {
       assert.equal(h.state().botId, null);
       assert.equal(h.polls()[0]!.body.offset, 12);
     });
+  });
+});
+
+/**
+ * Telegram as it really behaves: an update is forgotten only when a later
+ * getUpdates for THAT bot asks past it, so a batch handled just before the
+ * token changed is still there to be handed over again.
+ */
+function realisticTelegram(pending: Record<string, ReturnType<typeof text>[]>) {
+  const confirmed: Record<string, number> = {};
+  return (c: Call): Reply | undefined => {
+    if (c.method !== "getUpdates") return undefined;
+    const bot = c.token.split(":")[0]!;
+    confirmed[bot] = Math.max(confirmed[bot] ?? 0, Number(c.body.offset ?? 0));
+    return ok((pending[bot] ?? []).filter((u) => u.update_id >= confirmed[bot]!));
+  };
+}
+
+const EARLY_LINK = /that code reached me late, so I didn't use it/;
+const EARLY_HELD = /just been connected to this bot/;
+const sentTo = (h: Harness, chat: number) =>
+  h.calls.filter((c) => c.method === "sendMessage" && c.body.chat_id === chat).map((c) => String(c.body.text));
+
+describe("a change of bot never runs a command twice, or one that was not sent to this agent", () => {
+  it("A → B → A resumes A where it was left: its last batch is not handed over again, and its /buy runs once", async () => {
+    const pending = { "111": [text(10, 555, "/buy NVDA 5")] };
+    await withService(
+      { token: "111:a", allowlist: [555], trading: true, state: { botId: "111", tokenTag: tokenTagOf("111:a") }, script: realisticTelegram(pending) },
+      async (h) => {
+        assert.deepEqual(h.trades, ["buy NVDA 5"], "premise: the first poll bought");
+        // The token changes before the next poll of A asks past update 10, so
+        // Telegram still holds it: a mistyped paste, or another bot's token.
+        h.cfg.telegramBotToken = "222:b";
+        await h.advance(1_000);
+        assert.equal(h.polls().at(-1)!.token, "222:b");
+        h.cfg.telegramBotToken = "111:a";
+        await h.advance(1_000);
+        const back = h.polls().filter((c) => c.token === "111:a");
+        assert.equal(back[1]!.body.offset, 11, "A resumes past what it already handled");
+        assert.deepEqual(h.trades, ["buy NVDA 5"], "the /buy did not run a second time");
+        assert.equal(sentTo(h, 555).filter((t) => EARLY_HELD.test(t)).length, 0, "and was not even handed over again");
+      },
+    );
+  });
+
+  it("a new bot's backlog is answered once per chat and acted on never: no trade, no /kill, no /link compared or counted", async () => {
+    const stale = Math.floor(T0 / 1000) - 3_600; // sent an hour before the switch
+    let n = 0;
+    await withService(
+      {
+        token: "222:b",
+        allowlist: [555],
+        trading: true,
+        state: { botId: "111", offset: 900, tokenTag: tokenTagOf("111:a"), linkCode: "ABCDEF" },
+        script: (c, h) => {
+          if (c.method !== "getUpdates") return undefined;
+          n += 1;
+          if (n === 1) {
+            return ok([
+              // The incident: the owner's /link attempts at a code this bot's
+              // dashboard never showed, waiting out a silence.
+              ...[1, 2, 3, 4, 5, 6].map((i) => text(i, 999, `/link WRONG${i}`, stale)),
+              // Commands the same owner sent while the bot served another agent.
+              text(7, 555, "/buy NVDA 5", stale),
+              text(8, 555, "/kill", stale),
+              text(9, 555, "/reminders", stale),
+              ...[10, 11, 12].map((i) => text(i, 777, "hey", stale)),
+              {
+                update_id: 13,
+                callback_query: {
+                  id: "cb1",
+                  data: "c:y:abcdef",
+                  from: { id: 555 },
+                  message: { message_id: 4, chat: { id: 555 }, date: stale },
+                },
+              } as never,
+            ]);
+          }
+          if (n === 2) return ok([text(14, 999, `/link ${h.state().linkCode}`)]);
+          return undefined;
+        },
+      },
+      async (h) => {
+        await h.advance(1_000);
+        assert.deepEqual(h.trades, [], "no trade from the backlog");
+        assert.deepEqual(sentTo(h, 555), [sentTo(h, 555)[0]], "one answer to the owner, and nothing ran");
+        assert.match(sentTo(h, 555)[0]!, EARLY_HELD);
+        assert.deepEqual(sentTo(h, 777).length, 1, "one refusal to a stranger, not three");
+        assert.match(sentTo(h, 777)[0]!, /not authorized/);
+        const to999 = sentTo(h, 999);
+        assert.match(to999[0]!, EARLY_LINK, "one resend prompt for six stale codes");
+        assert.match(to999[1]!, /you're linked/, "and no lockout: the live code links");
+        assert.equal(to999.length, 2);
+        const pressed = h.calls.find((c) => c.method === "answerCallbackQuery");
+        assert.equal(pressed?.body.text, "That button has expired.");
+        assert.equal(h.polls()[1]!.body.offset, 14, "the backlog is consumed, not replayed");
+      },
+    );
+  });
+
+  it("the same bot, restarted with a new secret: a code derived from the replaced token no longer links", async () => {
+    const leaked = "111:LEAKED";
+    const derived = ensureLinkCode(blankState({ linkRound: 2 }), leaked).linkCode;
+    let n = 0;
+    await withService(
+      {
+        token: "111:FRESH",
+        allowlist: [555],
+        // What the process left on disk while it still ran on the leaked token.
+        state: { botId: "111", tokenTag: tokenTagOf(leaked), offset: 500, linkRound: 2, linkCode: derived, ownerId: 555, linkedChats: [555] },
+        script: (c) => (c.method === "getUpdates" && ++n === 1 ? ok([text(500, 666, `/link ${derived}`)]) : undefined),
+      },
+      async (h) => {
+        assert.equal(h.polls()[0]!.body.offset, 500, "the same bot's stream");
+        assert.notEqual(h.state().linkCode, derived);
+        assert.equal(h.state().tokenTag, tokenTagOf("111:FRESH"));
+        assert.deepEqual(h.state().linkedChats, [555], "the stranger was not linked");
+        assert.match(sentTo(h, 666)[0]!, /bad or expired code/);
+        assert.ok(h.notes.some((x) => /bot token renewed/.test(x.message)));
+        assert.ok(!h.notes.some((x) => x.message.includes(h.state().linkCode) || x.message.includes("FRESH")));
+      },
+    );
+  });
+
+  it("the code on disk is never empty while the new bot's name is being looked up", async () => {
+    await withService(
+      {
+        token: "222:x",
+        state: { botId: "111", offset: 40, tokenTag: tokenTagOf("111:a"), linkCode: "ABCDEF" },
+        script: (c) => (c.method === "getMe" ? "hang" : undefined),
+      },
+      async (h) => {
+        assert.equal(h.polls().length, 0, "premise: getMe is still out");
+        assert.equal(h.state().botId, "222");
+        assert.match(h.state().linkCode, /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/, "minted in the same write");
+        assert.notEqual(h.state().linkCode, "ABCDEF");
+        await h.advance(15_250);
+        assert.equal(h.polls().length, 1, "and the poll goes ahead once getMe gives up");
+        assert.ok(h.notes.some((x) => x.message === "Telegram: bot changed"));
+      },
+    );
+  });
+});
+
+describe("the menu, the 409s, the crashes and the off switch", () => {
+  it("a chat linked in this batch gets its full menu on this poll, not after the next long poll", async () => {
+    let n = 0;
+    await withService(
+      {
+        token: "111:a",
+        script: (c, h) => {
+          if (c.method === "getUpdates" && ++n === 1) return ok([text(1, 555, `/link ${h.state().linkCode}`)]);
+          // What resolveConfig reads back once the link has patched settings.json.
+          if (c.method === "sendMessage" && /you're linked/.test(String(c.body.text))) h.cfg.telegramAllowlist.push(555);
+          return undefined;
+        },
+      },
+      async (h) => {
+        await h.advance(1_000);
+        const full = h.calls.findIndex(
+          (c) => c.method === "setMyCommands" && (c.body.scope as { chat_id?: number } | undefined)?.chat_id === 555,
+        );
+        const second = h.calls.indexOf(h.polls()[1]!);
+        assert.ok(full > 0, "the owner's full menu was pushed");
+        assert.ok(full < second, "before the next poll went out");
+      },
+    );
+  });
+
+  it("a 409 from a webhook says so, instead of blaming another program", async () => {
+    let n = 0;
+    await withService(
+      {
+        token: "111:a",
+        script: (c) =>
+          c.method === "getUpdates" && ++n === 1
+            ? refused(409, "Conflict: can't use getUpdates method while webhook is active; use deleteWebhook to delete the webhook first")
+            : undefined,
+      },
+      async (h) => {
+        await h.advance(10_500);
+        assert.deepEqual(
+          h.notes.filter((x) => x.level === "warn").map((x) => x.message),
+          ["Telegram: this bot has a webhook set, so its updates can't be polled (409 Conflict)"],
+        );
+        assert.equal(gaps(h.polls())[0], 10_000);
+      },
+    );
+  });
+
+  it("a poll that throws, such as an unreadable config, backs off 2s, 4s, 8s … and recovers to a tight loop", async () => {
+    await withService({ token: "111:a" }, async (h) => {
+      h.cfgBroken = true;
+      await h.advance(31_000);
+      const crashes = h.notes.filter((x) => /poll loop — settings unreadable/.test(x.message));
+      assert.deepEqual(gaps(crashes), [2_000, 4_000, 8_000, 16_000]);
+      const before = h.polls().length;
+      h.cfgBroken = false;
+      await h.advance(6_000);
+      const after = h.polls().slice(before);
+      assert.ok(after.length >= 2, "polling again");
+      assert.equal(gaps(after)[0], 500, "and the crash count starts over");
+    });
+  });
+
+  it("time spent switched off is not counted into an outage", async () => {
+    let n = 0;
+    await withService(
+      { token: "111:a", script: (c) => (c.method === "getUpdates" && ++n <= 2 ? "throw" : undefined) },
+      async (h) => {
+        assert.equal(warns(h, /getUpdates — request failed/).length, 1, "premise: an outage began");
+        h.cfg.telegramEnabled = false;
+        await h.advance(60_000);
+        assert.equal(h.polls().length, 1, "nothing polled while off");
+        h.cfg.telegramEnabled = true;
+        await h.advance(12_000);
+        assert.deepEqual(
+          h.notes.filter((x) => /receiving updates again/.test(x.message)).map((x) => x.message),
+          ["Telegram: receiving updates again after 2s"],
+          "the outage is the one after switching on, not the minute it was off",
+        );
+      },
+    );
   });
 });

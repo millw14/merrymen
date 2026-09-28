@@ -1,7 +1,7 @@
 /**
  * Telegram runtime state, persisted at ~/.merrymen/telegram.json:
- *   - the getUpdates offset (so a restart doesn't replay old messages), and the
- *     bot it belongs to
+ *   - the getUpdates offset (so a restart doesn't replay old messages), the bot
+ *     it belongs to, and where any other bot this agent polled got to
  *   - the link code (shown in the dashboard; consumed by /link) and its round —
  *     the round increments on every successful link so the code ROTATES and a
  *     used code can't link a second chat
@@ -14,6 +14,7 @@
  * is worker-managed runtime bookkeeping.
  */
 
+import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { ensureHome, homePaths } from "../home";
 
@@ -58,6 +59,41 @@ export interface TelegramState {
    * must not link a chat on the new one.
    */
   botId: string | null;
+  /**
+   * WHERE EVERY OTHER BOT THIS AGENT POLLED GOT TO, newest first, at most
+   * PRIOR_BOTS_KEPT of them. Only bots with a non-zero offset are kept, since
+   * 0 is what a bot never seen starts at anyway.
+   *
+   * Telegram forgets an update only when the NEXT getUpdates for that bot asks
+   * past it. So the last batch handled on a bot is still waiting on Telegram's
+   * side when the token changes, and it stays there for up to a day. Resetting
+   * to 0 on a return to that bot hands the batch over again, and a /buy in it
+   * runs twice. A bot this agent has polled before resumes at its own offset;
+   * only a bot never seen starts at its first update.
+   */
+  priorBots: { botId: string; offset: number }[];
+  /**
+   * A one-way fingerprint of the token the link code was minted under
+   * (tokenTagOf), never the token. Null in a file written before this existed,
+   * or restored by the orchestrator.
+   *
+   * The code is derived from the token, so a new secret for the same bot must
+   * re-mint it, or whoever held the replaced token can derive the live code.
+   * Held in memory only, that was missed whenever the token changed while the
+   * process was down: the restarted child adopted the stored code, still
+   * derived from the old token.
+   */
+  tokenTag: string | null;
+  /**
+   * When the loop was last switched onto `botId` from a different bot, unix
+   * seconds; null when it never was (a first run, or a file from before this
+   * existed).
+   *
+   * Anything that bot was sent before then was sent while this agent was not
+   * listening to it: perhaps while it served another agent. service.ts answers
+   * those messages but acts on none of them (holdEarly).
+   */
+  boundAt: number | null;
   linkCode: string;
   /** Increments on each successful /link so the code rotates. */
   linkRound: number;
@@ -136,9 +172,19 @@ export interface TelegramState {
   nextId: number;
 }
 
+/**
+ * How many other bots' offsets are remembered. A returning bot only matters
+ * inside the day Telegram keeps its updates, and eight different bots in a
+ * day is not something an owner does, even fumbling a paste.
+ */
+export const PRIOR_BOTS_KEPT = 8;
+
 const DEFAULT: TelegramState = {
   offset: 0,
   botId: null,
+  priorBots: [],
+  tokenTag: null,
+  boundAt: null,
   chatSettings: null,
   linkCode: "",
   linkRound: 0,
@@ -168,6 +214,24 @@ export function loadTelegramState(): TelegramState {
       // Only a numeric id is accepted, so a hand-edited or corrupt file can
       // never carry a token back in under this name.
       botId: typeof s.botId === "string" && /^\d+$/.test(s.botId) ? s.botId : null,
+      // The same rule for the ids kept here. A malformed entry is dropped rather
+      // than trusted: the worst it costs is one bot starting from its first
+      // update, which is what it did before this list existed.
+      priorBots: Array.isArray(s.priorBots)
+        ? (s.priorBots as unknown[])
+            .filter(
+              (b): b is { botId: string; offset: number } =>
+                !!b && typeof b === "object" &&
+                typeof (b as { botId?: unknown }).botId === "string" &&
+                /^\d+$/.test((b as { botId: string }).botId) &&
+                typeof (b as { offset?: unknown }).offset === "number" &&
+                (b as { offset: number }).offset > 0,
+            )
+            .map((b) => ({ botId: b.botId, offset: b.offset }))
+            .slice(0, PRIOR_BOTS_KEPT)
+        : [],
+      tokenTag: typeof s.tokenTag === "string" && /^[0-9a-f]{16}$/.test(s.tokenTag) ? s.tokenTag : null,
+      boundAt: typeof s.boundAt === "number" ? s.boundAt : null,
       // A malformed record is dropped rather than carried: a half-read patch
       // would be promoted to the tenant store as if the owner had asked for it.
       chatSettings:
@@ -247,6 +311,38 @@ export function saveTelegramState(state: TelegramState): void {
 export function botIdOf(token: string): string | null {
   const m = /^(\d+):./.exec(token);
   return m ? m[1]! : null;
+}
+
+/**
+ * A fingerprint of the token: the first 16 hex characters of its SHA-256.
+ *
+ * Enough to tell that the secret changed, and nothing an attacker can use: the
+ * secret behind it is far too long to guess, and the token itself sits in
+ * plain text in settings.json in the same home anyway.
+ */
+export function tokenTagOf(token: string): string {
+  return createHash("sha256").update(token).digest("hex").slice(0, 16);
+}
+
+/**
+ * Move the state onto a DIFFERENT bot. Where the bot being left got to is
+ * remembered, and the new one resumes where this agent last left it, or at
+ * its first update if it never polled it (priorBots says why that matters).
+ * The link code is cleared for the caller to re-mint, and `boundAt` marks
+ * everything the new bot was sent before `at` as not meant for this agent.
+ */
+export function switchBot(state: TelegramState, botId: string, tokenTag: string, at: number): TelegramState {
+  const leaving = state.botId !== null && state.offset > 0 ? [{ botId: state.botId, offset: state.offset }] : [];
+  const others = state.priorBots.filter((b) => b.botId !== botId && b.botId !== state.botId);
+  return {
+    ...state,
+    botId,
+    tokenTag,
+    offset: state.priorBots.find((b) => b.botId === botId)?.offset ?? 0,
+    priorBots: [...leaving, ...others].slice(0, PRIOR_BOTS_KEPT),
+    boundAt: at,
+    linkCode: "",
+  };
 }
 
 /**

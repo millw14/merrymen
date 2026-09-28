@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, it, mock } from "node:test";
-import { BOT_COMMANDS, answerCallbackQuery, editMessageText, esc, getMe, getUpdates, sendMessage, setMyCommands, publicBotCommands, type FetchLike } from "./api";
+import { BOT_COMMANDS, answerCallbackQuery, editMessageText, esc, getMe, getUpdates, sendDocument, sendMessage, setMyCommands, publicBotCommands, type FetchLike } from "./api";
 import { parseSlash } from "./interpreter";
 
 /** Fake fetch capturing the last call, returning a canned envelope. */
@@ -586,6 +588,28 @@ describe("every request is bounded", () => {
       assert.deepEqual(r.value, { ok: false, reason: "request timed out after 15s" });
     } finally {
       mock.timers.reset();
+    }
+  });
+
+  it("an upload gets 60 seconds, since it carries the file itself", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "merrymen-upload-"));
+    const file = path.join(dir, "report.txt");
+    writeFileSync(file, "hello");
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const { f, seen } = deaf();
+      const r = settled(sendDocument({ token: "1:a", fetchFn: f }, 5, file));
+      await flush();
+      mock.timers.tick(59_999);
+      await flush();
+      assert.equal(r.done, false, "still inside the window");
+      mock.timers.tick(1);
+      await flush();
+      assert.deepEqual(r.value, { ok: false, reason: "upload timed out after 60s" });
+      assert.equal(seen[0]!.signal!.aborted, true);
+    } finally {
+      mock.timers.reset();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
