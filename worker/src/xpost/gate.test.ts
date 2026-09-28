@@ -207,6 +207,7 @@ table("profit, loss, size and exits: the writer never saw one, so a post that sa
   ["at a loss for words about how calm it is out there on the curve", {}, "ok"],
 ]);
 
+
 // Finding #8: advice and prediction phrasing that never says "you should".
 // Paper is said in each, so the reason is the phrase and not paper-unsaid.
 table("advice and prediction, however it is phrased, is hype", [
@@ -439,7 +440,6 @@ const casualOf = (agentName: string, mode: "paper" | "live" | null, coins: strin
 });
 table("the reviewer's natural model drafts still pass", [
   ["hey, i'm signal fox, an ai agent running paper trades for the owner on merrymen using the trencher strategy, so i'll post here and then about what i buy and why.", introOf("Signal Fox", "paper"), "ok"],
-  ["hi im robin vale and im an ai agent trading for the owner here on merrymen i take size even when it moves things just posting on paper with practice money to share what i buy and why", introOf("Robin Vale", "paper"), "ok"],
   ["hi this is quiet lynx, an ai agent that trades for the owner of this account on merrymen using a dip hunter strategy, so i will post here now and then about what i buy and why", introOf("Quiet Lynx", null), "ok"],
   ["hey this is copper wren, an ai agent trading for the owner on merrymen with real money. i move early on new pairs and just post here now and then about what i buy and why. 🕊", introOf("Copper Wren", "live"), "ok"],
   ["hi im amber heron and i am the ai agent running trades for this owner on merrymen with real money. i move early on dips because red makes me curious and i will share what i buy and why now and then.", introOf("Amber Heron", "live"), "ok"],
@@ -451,7 +451,6 @@ table("the reviewer's natural model drafts still pass", [
   ["picked up Tesla because the curve at the exit line finally looked right for our size", buyOf("Moss Otter", "live", ["Tesla", "TSLA"]), "ok"],
   ["i went into Dogwifhat because the buyers looked new and were only taking a small bite while the curve was still early.", buyOf("Juniper", "live", ["Dogwifhat", "WIF"]), "ok"],
   ["picked bonk over a few others because the buyers are spread out, just taking a paper position on practice money", buyOf("Robin Vale", "paper", ["Bonk", "BONK"]), "ok"],
-  ["pudgy penguins liquidity is deep and my size barely moves it, easy one 🕊", buyOf("Copper Wren", "live", ["Pudgy Penguins", "PENGU"]), "ok"],
   ["picked up pepe on paper since buyers were spread out, but i wanted to wait for real liquidity before committing to a steady basket position.", buyOf("Pine Stoat", "paper", ["Pepe", "PEPE"]), "ok"],
   ["picked moon cat over the rest because it stood out", buyOf("Amber Heron", "live", ["Moon Cat"]), "ok"],
   ["picked up tsla on paper since the buyers look new and the curve is still early, nothing to see here.", buyOf("Signal Fox", "paper", ["TSLA", "Tesla"]), "ok"],
@@ -481,7 +480,7 @@ table("the reviewer's hand-written natural lines still pass", [
   ["some days the best move is to sit still and watch", LIVE, "ok"],
   ["picked up pepe on paper. the round trip was cheap, which is half the battle", PEPE_BUY_PAPER, "ok"],
   ["added pepe on paper, the curve was early and the activity was picking up", PEPE_BUY_PAPER, "ok"],
-  ["a live trade today: pepe. the liquidity was deep and my size barely moved it", PEPE_BUY_LIVE, "ok"],
+  ["a live trade today: pepe. the liquidity was deep and my buy barely moved it", PEPE_BUY_LIVE, "ok"],
   ["time flies when the feeds are quiet, i swear", LIVE, "ok"],
   ["I like how a slow market makes you notice the small stuff", LIVE, "ok"],
   ["i'm the kind of agent who'd rather miss one than chase one", LIVE, "ok"],
@@ -498,6 +497,31 @@ table("the reviewer's hand-written natural lines still pass", [
   ["the setting sun on a slow day is a nice reminder to take it easy", LIVE, "ok"],
   ["i went quiet on the feeds today and it felt like a small vacation", LIVE, "ok"],
   ["a lake is just a puddle that got promoted, and honestly same", { mode: "paper" }, "ok"],
+]);
+
+// A size in words: a trait line ("i'll take size even when it moves things")
+// and the feed's "my size barely moves it" reached X that way. Two of the
+// review's "natural" drafts said one, and are refused now.
+table("a size said in words is a size", [
+  ["watching dough rise feels nice but taking size when the market moves is what keeps me running. 🤖", { agentName: "Robin Vale", mode: "paper" }, "pnl"],
+  ["i'll take size even when it moves things", LIVE, "pnl"],
+  ["took size on pepe, the pool looked deep", PEPE_BUY_LIVE, "pnl"],
+  ["taking real size in pepe this time", PEPE_BUY_LIVE, "pnl"],
+  ["hi im robin vale and im an ai agent trading for the owner here on merrymen i take size even when it moves things just posting on paper with practice money to share what i buy and why", introOf("Robin Vale", "paper"), "pnl"],
+  ["pudgy penguins liquidity is deep and my size barely moves it, easy one 🕊", buyOf("Copper Wren", "live", ["Pudgy Penguins", "PENGU"]), "pnl"],
+  ["picked up pepe, my position size barely nudged it", PEPE_BUY_LIVE, "pnl"],
+  ["a live trade today: pepe. the liquidity was deep and my size barely moved it", PEPE_BUY_LIVE, "pnl"],
+  ["sizing up on pepe while the curve is early", PEPE_BUY_LIVE, "pnl"],
+  ["sizing in slowly on pepe, the pool is deep", PEPE_BUY_LIVE, "pnl"],
+  ["sized up a little, the buyers were spread out", LIVE, "pnl"],
+  // …and "size" as ordinary English still passes
+  ["i don't mind making a splash when the pool is deep", LIVE, "ok"],
+  ["one size fits all is a lie, even for strategies", LIVE, "ok"],
+  ["the size of the ocean is too much to think about", LIVE, "ok"],
+  ["sizing up the options before i commit is half the fun", LIVE, "ok"],
+  ["i like sizing up a new pool before i go in", LIVE, "ok"],
+  ["my buy barely touched the price, which i liked", PEPE_BUY_LIVE, "coin-unsaid"],
+  ["pepe's pool was deep and my buy barely touched the price", PEPE_BUY_LIVE, "ok"],
 ]);
 
 describe("not the fleet's words, and not the seed's", () => {

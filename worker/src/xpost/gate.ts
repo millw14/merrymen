@@ -392,10 +392,11 @@ const COIN_ADVICE =
 /**
  * PROFIT, LOSS, SIZE AND EXITS. The writer is shown what the agent BOUGHT —
  * never a price, a size, a sell, or how a coin has done since — so a post that
- * claims a gain, a loss, a stake or a sale made it up, on a real person's
- * account. The base gate refuses the figures; this is the same claim in
- * words ("half my bag", "took a loss", "sold my Tesla"). Bare "red" is not
- * here: a dip hunter's "red makes me curious" is a taste, not a result.
+ * claims a gain, a loss, a stake, a size or a sale made it up, on a real
+ * person's account. The base gate refuses the figures; this is the same claim
+ * in words ("half my bag", "took a loss", "sold my Tesla", "i take size").
+ * Bare "red" is not here: a dip hunter's "red makes me curious" is a taste,
+ * not a result.
  */
 const PNL = new RegExp(
   "\\b(?:" +
@@ -425,6 +426,17 @@ const PNL = new RegExp(
       // days" and "a ton of ideas" stay ordinary.
       "(?:bought|buying|grabbed|grabbing|picked up|picking up|added|adding|loaded up on|scooped up) (?:a ton|tons|a bunch|a load|loads|a heap|heaps|a lot|a big chunk|a chunk)",
       "(?:a couple|a few|a handful|a bunch|a string|a run|lots)(?: of)? (?:good |great |nice |solid |bad |winning |losing |big |small )?(?:trades|buys|wins|losses|flips|calls)",
+      // A SIZE SAID IN WORDS. The writer is never told one, yet a trait line
+      // ("i'll take size even when it moves things") put "taking size when
+      // the market moves" on a personal account, and a feed post's "my size
+      // barely moves it" says how big the agent goes next to a pool. Only
+      // beside taking, a position or "my": "one size fits all" and "the size
+      // of the ocean" are ordinary, and so is sizing SOMETHING up ("sizing up
+      // the options") — but not sizing up, or in, on its own.
+      "t(?:ake|akes|aking|ook|aken)\\s+(?:on\\s+)?(?:some\\s+|more\\s+|real\\s+|big\\s+|serious\\s+|decent\\s+)?size",
+      "my (?:position |trade |buy )?size",
+      "position siz(?:e|es|ed|ing)",
+      "siz(?:e|es|ed|ing) (?:up|in)(?![\\s-]+(?:(?:the|an|this|that|these|those|things|everyone|everybody|each|people|someone|somebody|who|what|how|whether|options|my options)\\b|a\\b(?!\\s+(?:little|bit|touch|lot|tad)\\b)))",
       "roi",
       "pnl",
       "p\\s*&\\s*l",
