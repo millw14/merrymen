@@ -716,3 +716,38 @@ describe("vocabularyRefusal is what the glue screens seeds with", () => {
     assert.equal(vocabularyRefusal("soup is a perfectly good meal in any weather"), null);
   });
 });
+
+// ── what a price did, and a small size, both of which it was never told ────
+
+const MOON_CAT_LIVE: Partial<XGateCtx> = { kind: "buy", mode: "live", coins: ["Moon Cat"] };
+const PENGU_LIVE: Partial<XGateCtx> = { kind: "buy", mode: "live", coins: ["pudgy penguins"] };
+
+table("an invented price move is refused; ordinary words that share one are not", [
+  // The final live-model run's two inventions, verbatim.
+  ["pudgy penguins looked like a solid floor after the last drop, so i pulled the trigger on that one", PENGU_LIVE, "market"],
+  ["it felt like a quiet moment when i saw moon cat, i liked it more than the others so i took a small bite while the price was still low", MOON_CAT_LIVE, "pnl"],
+  ["moon cat looked good to me while the price was still quiet", MOON_CAT_LIVE, "market"],
+  ["the price looked cheap on moon cat so in it went", MOON_CAT_LIVE, "market"],
+  ["moon cat bounced off support and i liked what i saw", MOON_CAT_LIVE, "market"],
+  ["moon cat is sitting right at resistance, fun to watch", MOON_CAT_LIVE, "market"],
+  ["moon cat finally found a bottom, so i went in with real money", MOON_CAT_LIVE, "market"],
+  ["the charts look clean on moon cat, real money in", MOON_CAT_LIVE, "market"],
+  ["the market is bleeding and moon cat still caught my eye", MOON_CAT_LIVE, "market"],
+  // Still ordinary.
+  ["dip hunter, always looking for a dip", LIVE, "ok"],
+  ["the path of least resistance is usually the long way round", LIVE, "ok"],
+  ["a dog chasing its tail until it hits the floor is peak comedy", LIVE, "ok"],
+  ["the market felt quiet and i kind of liked it", LIVE, "ok"],
+  ["some songs only make sense after the drop in the chorus", LIVE, "market"],
+]);
+
+table("a small size is a size; small things are not", [
+  ["started with tesla because the pool behind it felt deep enough to hold a small paper position", { kind: "buy", mode: "paper", coins: ["tesla"], paperCoins: ["tesla"] }, "pnl"],
+  ["the steady basket approach works well with moon cat, so i added a small piece to the mix", { mode: "live", coins: ["Moon Cat"] }, "pnl"],
+  ["i went into Dogwifhat because the buyers looked new and were only taking a small bite", { kind: "buy", mode: "live", coins: ["Dogwifhat"] }, "ok"],
+  ["moon cat caught my eye, so i took a tiny bite with real money", MOON_CAT_LIVE, "pnl"],
+  // Still ordinary.
+  ["a small piece of art can change a whole room", LIVE, "ok"],
+  ["small steps still count as moving", LIVE, "ok"],
+  ["a little bite of something sweet never hurt anyone's afternoon", LIVE, "ok"],
+]);

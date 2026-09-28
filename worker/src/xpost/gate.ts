@@ -442,6 +442,13 @@ const PNL = new RegExp(
       // …or got to one: "enough in the pool to get a comfortable size"
       "(?:get|got|getting|build|built|building|put on|grab|grabbed) (?:a |some )?(?:\\w+ )?size",
       "position siz(?:e|es|ed|ing)",
+      // A SMALL SIZE IS STILL A SIZE. "so i took a small bite while the price
+      // was still low" and "a small paper position" say how much it put in.
+      // Only when the agent itself takes, adds or holds it ("the buyers were
+      // only taking a small bite" is about other people, and a band), or as a
+      // position: "a small piece of art" and "small steps" are ordinary.
+      "(?:i|i'?ve|i'?m|i'?d|i'?ll|ive|im)\\s+(?:just\\s+|only\\s+|also\\s+)?(?:took|take|taking|added|add|adding|grabbed|grab|grabbing|holding|hold|opened|open|built|started|went in with) (?:a |my |some )?(?:small|smaller|tiny|little|modest) (?:bite|bites|piece|position|bag|slice|stake|nibble)",
+      "(?:small|smaller|tiny|little|modest) (?:paper |real |live |starter )?positions?",
       "siz(?:e|es|ed|ing) (?:up|in)(?![\\s-]+(?:(?:the|an|this|that|these|those|things|everyone|everybody|each|people|someone|somebody|who|what|how|whether|options|my options)\\b|a\\b(?!\\s+(?:little|bit|touch|lot|tad)\\b)))",
       "roi",
       "pnl",
@@ -450,6 +457,35 @@ const PNL = new RegExp(
     ")\\b",
   "i",
 );
+/**
+ * WHAT A PRICE DID, WHICH IT WAS NEVER TOLD. The writer sees what the agent
+ * bought and the closed-vocabulary words for why — never a chart, a level or
+ * a move since. A small model still invents one to sound like a trader: "a
+ * solid floor after the last drop", "while the price was still low". On a
+ * personal account that is a technical-analysis call nobody made. Narrow on
+ * purpose: "dip" stays (a dip hunter says "always looking for a dip"), and so
+ * do "the path of least resistance", "hit the floor" in a joke about a dog,
+ * and "the market felt quiet".
+ */
+const MARKET = new RegExp(
+  "\\b(?:" +
+    [
+      "(?:the |its |a )?price (?:was|is|looked|looks|felt|feels|seemed|seems) (?:still |so |pretty |really )?(?:low|high|cheap|right|attractive|good|solid)",
+      "while (?:the |its )?price (?:was|is) (?:still )?(?:low|cheap|down|quiet)",
+      "(?:solid|price|a firm|a clear|double) (?:floor|bottom)",
+      "(?:found|finding|finds|made|making|put in|putting in) (?:a |the |its )?(?:floor|bottom)",
+      "(?:floor|bottom) (?:is |was )?(?:in|forming|holding|held)",
+      "bottomed(?: out)?",
+      "(?:above|below|near|at|off|broke|breaking|held|holding|reclaimed|reclaiming|bounced off|bouncing off) (?:the |a |its )?(?:support|resistance)(?: level| line| zone)?",
+      "(?:support|resistance) (?:level|line|zone)s?",
+      "after (?:the |that |this |a |its )?(?:last |recent |big |sharp |little )?(?:drop|dump|pump|rally|run[\\s-]?up|sell[\\s-]?off|pullback|pull[\\s-]back|correction|spike)",
+      "(?:chart|charts|candle|candles) (?:look|looks|looked|is|are|was|were) (?:good|great|clean|bullish|bearish|strong|weak)",
+      "the market (?:is|was|looks|looked) (?:up|down|pumping|dumping|bleeding|ripping|recovering|turning)",
+    ].join("|") +
+    ")\\b",
+  "i",
+);
+
 /** The idioms that share a word with it, taken out first: "i'm sold on soup", "the selling point", "a loss for words". */
 const PNL_IDIOM =
   /\b(?:i'?m|im|i am|totally|completely|fully|pretty|not|never|already|was|wasn'?t)\s+(?:quite\s+|really\s+|so\s+|still\s+)?sold on\b|\bselling points?\b|\b(?:a\s+)?loss for words\b/gi;
@@ -660,6 +696,7 @@ export function vocabularyRefusal(text: string): string | null {
   if (HYPE.test(t)) return "hype";
   if (PNL.test(t.replace(PNL_IDIOM, " "))) return "pnl";
   if (HUMAN.some((re) => re.test(t))) return "human-claim";
+  if (MARKET.test(t)) return "market";
   return null;
 }
 
@@ -762,7 +799,7 @@ function strings(list: unknown): string[] {
  *
  * Reason codes (stable, operator-only): empty · pass · meta · too-short · too-long ·
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
- * human-claim · points-back · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
+ * market · human-claim · points-back · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
  * fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
  * quantity, repeat, unvouched-ticker, address, secret…).
  */
