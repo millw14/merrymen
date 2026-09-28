@@ -29,6 +29,11 @@
  * A crash anywhere after the claim leaves the row `sending`; the next pass
  * fails it as `interrupted` (store.ts failInterrupted). Also never resent.
  *
+ * Every "back to scheduled" goes through store.ts reschedulePost, which puts
+ * a post back only while its account still posts for that X user: one the
+ * owner switched off (or disconnected, or X revoked) while it was in flight
+ * is cancelled instead, and the outcome says so.
+ *
  * THE TOKEN IS REFRESHED BEFORE IT IS USED, AND STORED BEFORE IT IS USED. With
  * under two minutes left it is traded for a new pair, and the new pair is
  * written with compare-and-swap on `version` BEFORE the post is sent: X
@@ -86,6 +91,7 @@ export type SendOutcome =
   | "invalid"
   | "uncertain"
   | "gone" // the account, or the X user the post was written for, is not there any more
+  | "cancelled" // X did nothing, and the account stopped posting while it was in flight
   | "fault"; // our own failure (the database, a DEK that cannot open the tokens)
 
 export interface SendDeps {
@@ -211,8 +217,7 @@ export async function sendOne(db: Db, dek: Buffer, app: XApp, post: XPost, deps:
     }
     switch (answer.failure) {
       case "rate":
-        await reschedulePost(db, post.id, answer.resetAtMs ?? now + 15 * 60_000, now);
-        return "rate";
+        return (await reschedulePost(db, post.id, answer.resetAtMs ?? now + 15 * 60_000, now)) ? "rate" : "cancelled";
       case "credits":
         await reschedulePost(db, post.id, now + CREDITS_PAUSE_MS, now);
         await writeMeta(db, PAUSE_KEY, String(now + CREDITS_PAUSE_MS), now);
@@ -263,8 +268,7 @@ async function settleUnsent(db: Db, post: XPost, outcome: Unsent, now: number): 
     await pauseUntil(db, APP_PAUSE_KEY, now + APP_PAUSE_MS, now);
     return "app";
   }
-  await reschedulePost(db, post.id, now + RETRY_AFTER_MS, now);
-  return "retry";
+  return (await reschedulePost(db, post.id, now + RETRY_AFTER_MS, now)) ? "retry" : "cancelled";
 }
 
 /** Pause the fleet until `untilMs` under `key` — never shortening a pause already longer. */

@@ -301,6 +301,26 @@ test("a 429 goes back to scheduled at X's reset", async (t) => {
   assert.equal(r.dueAtMs, reset * 1000);
 });
 
+test("a post whose owner switched off (and on again) while X answered 429 is cancelled, not put back", async (t) => {
+  const { db, post } = await setup(t);
+  const offThenOn: Reply = async () => {
+    await setPosting(db, OWNER, { enabled: false }, NOW + 1);
+    await setPosting(db, OWNER, { enabled: true, xUserId: "111" }, NOW + 2);
+    return { status: 429, body: {} };
+  };
+  assert.equal(await sendOne(db, DEK, APP, post, { fetch: scripted([offThenOn]), nowMs: NOW }), "cancelled");
+  const r = await row(db);
+  assert.equal(r.status, "cancelled");
+  assert.equal(r.reason, "account-off");
+  const offDuringRefresh = await setup(t, EXPIRING);
+  const off: Reply = async () => {
+    await setPosting(offDuringRefresh.db, OWNER, { enabled: false }, NOW + 1);
+    return { status: 503, body: "" };
+  };
+  assert.equal(await sendOne(offDuringRefresh.db, DEK, APP, offDuringRefresh.post, { fetch: scripted([off]), nowMs: NOW }), "cancelled");
+  assert.equal((await row(offDuringRefresh.db)).status, "cancelled");
+});
+
 test("out of credits: the post waits an hour and the whole fleet pauses", async (t) => {
   const { db, post } = await setup(t);
   assert.equal(await sendOne(db, DEK, APP, post, { fetch: scripted([{ status: 402, body: { title: "CreditsDepleted" } }]), nowMs: NOW }), "credits");

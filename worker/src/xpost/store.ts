@@ -676,13 +676,38 @@ export async function markFailed(db: Db, id: number, reason: string, nowMs: numb
 }
 
 /**
- * X REFUSED BEFORE CREATING ANYTHING (a 429, or a 401 a refresh then fixed):
- * back to scheduled, due again at `dueAtMs`. Never for an ambiguous answer.
+ * X REFUSED BEFORE CREATING ANYTHING (a 429, credits, a refresh that did not
+ * land): back to scheduled, due again at `dueAtMs`. Never for an ambiguous
+ * answer.
+ *
+ * ONLY WHILE THE ACCOUNT STILL POSTS FOR THAT X USER, under a consent given
+ * before the post was drafted. Switching off, disconnecting and a revoke
+ * cancel only `scheduled` rows; a post in flight at that moment is `sending`
+ * and was left alone. Put back to `scheduled` regardless, it would sit as a
+ * live draft while posting is off — and go out if the owner switched on again
+ * before it came due, which the owner's "off" was meant to prevent. Such a
+ * post is cancelled ("account-off") instead. True when it was put back.
  */
-export async function reschedulePost(db: Db, id: number, dueAtMs: number, nowMs: number): Promise<void> {
-  await db
-    .prepare(`UPDATE xpost_posts SET status = 'scheduled', due_at_ms = ?, updated_at_ms = ? WHERE id = ? AND status = 'sending'`)
-    .run(int(dueAtMs), int(nowMs), int(id));
+export async function reschedulePost(db: Db, id: number, dueAtMs: number, nowMs: number): Promise<boolean> {
+  return db.tx(async (tx) => {
+    const back = await tx
+      .prepare(
+        `UPDATE xpost_posts SET status = 'scheduled', due_at_ms = ?, updated_at_ms = ?
+          WHERE id = ? AND status = 'sending'
+            AND EXISTS (
+              SELECT 1 FROM xpost_accounts a
+               WHERE a.tenant = xpost_posts.tenant AND a.x_user_id = xpost_posts.x_user_id
+                 AND a.posting_enabled = 1 AND a.status = 'ok' AND a.consent_x_user_id = a.x_user_id
+                 AND a.consent_at_ms <= xpost_posts.created_at_ms
+            )`,
+      )
+      .run(int(dueAtMs), int(nowMs), int(id));
+    if (back.changes === 1) return true;
+    await tx
+      .prepare(`UPDATE xpost_posts SET status = 'cancelled', reason = 'account-off', updated_at_ms = ? WHERE id = ? AND status = 'sending'`)
+      .run(int(nowMs), int(id));
+    return false;
+  });
 }
 
 /** A scheduled post that will not go out (stale, the owner's night ran past it…). */

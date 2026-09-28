@@ -242,14 +242,43 @@ test("a post is claimed by exactly one sender and never sent twice", async (t) =
 
 test("a rate-limited post goes back to scheduled; a failure is final", async (t) => {
   const { db } = await open(t);
+  await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "robin_trades", tokens: TOKENS, nowMs: 1 });
+  await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 400);
   const id = (await schedulePost(db, post()))!;
   await claimPost(db, id, 1_001);
-  await reschedulePost(db, id, 9_000, 1_002);
+  assert.equal(await reschedulePost(db, id, 9_000, 1_002), true);
   assert.deepEqual((await duePosts(db, [OWNER_A], 9_000)).map((p) => p.id), [id]);
   await claimPost(db, id, 9_001);
   await markFailed(db, id, "uncertain", 9_002);
   assert.equal(await claimPost(db, id, 9_003), false, "failed is final");
   assert.equal((await postsOf(db, OWNER_A, 0))[0]?.reason, "uncertain");
+});
+
+test("a post in flight when its account stopped posting is cancelled, never put back to scheduled", async (t) => {
+  const cases: [string, (db: Db) => Promise<unknown>][] = [
+    ["switched off", (db) => setPosting(db, OWNER_A, { enabled: false }, 1_010)],
+    ["switched off and on again before the reschedule", async (db) => {
+      await setPosting(db, OWNER_A, { enabled: false }, 1_010);
+      await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 1_011);
+    }],
+    ["disconnected", (db) => deleteAccount(db, DEK, OWNER_A, 1_010)],
+    ["revoked", async (db) => markRevoked(db, OWNER_A, (await getAccount(db, OWNER_A))!.version, 1_010)],
+    ["another X account connected", (db) => upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "222", username: "someone_else", tokens: TOKENS, nowMs: 1_010 })],
+  ];
+  for (const [label, change] of cases) {
+    const { db } = await open(t);
+    await upsertAccount(db, DEK, { tenant: OWNER_A, xUserId: "111", username: "robin_trades", tokens: TOKENS, nowMs: 1 });
+    await setPosting(db, OWNER_A, { enabled: true, xUserId: "111" }, 400);
+    const id = (await schedulePost(db, post()))!;
+    assert.equal(await claimPost(db, id, 1_001), true);
+    await change(db);
+    assert.equal(await keyStatus(db, post().dedupeKey), "sending", `${label}: the web cancels only scheduled rows`);
+    assert.equal(await reschedulePost(db, id, 9_000, 1_020), false, label);
+    const [p] = await postsOf(db, OWNER_A, 0);
+    assert.equal(p?.status, "cancelled", label);
+    assert.equal(p?.reason, "account-off", label);
+    assert.deepEqual(await duePosts(db, [OWNER_A], 9_000), [], `${label}: nothing to send later`);
+  }
 });
 
 test("a claim that outlived its process fails as interrupted, never resent", async (t) => {
