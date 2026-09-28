@@ -68,7 +68,7 @@ import {
   takeAllowance,
   type XAccount,
 } from "./xpost/store";
-import { buyPrompt, casualPrompt, draft, introPrompt, introTemplate, xpostModel, type WriterFacts, type XStyle } from "./xpost/writer";
+import { buyPrompt, casualPrompt, draft, introPrompt, introTemplate, xpostModel, xpostModelWarning, type WriterFacts, type XStyle } from "./xpost/writer";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -199,7 +199,10 @@ export interface XPostSetup {
  * IS POSTING ON FOR THIS PROCESS? Off when the operator switched it off, when
  * there is no X app (client id and secret), no shared database, or no DEK to
  * open the sealed tokens with. The writer's model is the X key, or the room's
- * own dedicated key when X has none (groupChatCreds already refuses a fleet key).
+ * own key when X has none — and either is refused when it IS a fleet key, the
+ * room's included when the room itself was allowed to share one, unless
+ * MERRYMEN_XPOST_SHARE_HOUSE_KEY=1 (xpostModel). A key that is its own but
+ * runs trading's Groq model gets the room's same-organization WARNING too.
  */
 export function xpostSetup(env: Record<string, string | undefined> = process.env, dek: Buffer | null = storeDek()): XPostSetup {
   const knobs = xpostEnv(env);
@@ -210,7 +213,8 @@ export function xpostSetup(env: Record<string, string | undefined> = process.env
   if (!env.DATABASE_URL?.trim()) return off("xpost: off — no DATABASE_URL, so there is nowhere to keep the connections and posts");
   if (!dek) return off("xpost: off — MERRYMEN_STORE_DEK is not a 32-byte key, so the X tokens cannot be opened");
   const model = xpostModel(env, groupChatCreds(env));
-  return { off: null, lines: [...knobs.notes, model.line], app, dek, knobs, creds: model.creds };
+  const warning = xpostModelWarning(model.creds, env);
+  return { off: null, lines: [...knobs.notes, model.line, ...(warning ? [warning] : [])], app, dek, knobs, creds: model.creds };
 }
 
 // ── the poster ──────────────────────────────────────────────────────────────
@@ -733,6 +737,10 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       gate.mode = call.paper ? "paper" : "live";
       gate.coins = coinNames(intent.coin, call);
       gate.paperCoins = call.paper ? gate.coins : [];
+      // ITS OWN FEED WORDS ARE A SEED, NOT A DRAFT. The feed already printed
+      // them under this trade; an X post that only repeats them is the feed's
+      // line cross-posted, not something said on X.
+      gate.seeds = call.ownWords ? [call.ownWords] : [];
       coin = intent.coinKey;
       decisionId = call.decisionId;
       // The gloss dice are the account's and the decision's, so two accounts

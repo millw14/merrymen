@@ -80,6 +80,10 @@ const PENDING_TTL_MS = 15 * 60_000;
  * narrower — X does not document its alphabet, and a code refused here is an
  * owner told their link expired when it had not. It only ever travels
  * form-encoded (URLSearchParams), so no character in it can split a field.
+ * The iOS app accepts exactly the same set before it finishes a connect
+ * (NavigationPolicy.isXCode in ios-native/Policy): keep the two equal, or one
+ * client tells an owner "that answer wasn't for this connection" for a code
+ * the other takes.
  */
 const CODE = /^[\x21-\x7e]{8,1024}$/;
 

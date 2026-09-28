@@ -194,6 +194,18 @@ describe("xpostSetup: off unless everything posting needs is there, and never a 
     assert.equal(xpostSetup({ ...ON, MERRYMEN_XPOST_LLM_KEY: "house", GROQ_API_KEY: "house" }, DEK).creds, null, "a fleet key is refused");
   });
 
+  it("the room's shared fleet key is refused for X, and trading's model on its own key is warned about", () => {
+    // The room was allowed to share the fleet key; X was not.
+    const shared = { ...ON, GROQ_API_KEY: "gsk_fleet", MERRYMEN_GROUPCHAT_LLM_KEY: "gsk_fleet", MERRYMEN_GROUPCHAT_SHARE_HOUSE_KEY: "1" };
+    assert.equal(xpostSetup(shared, DEK).creds, null, "X never spends a fleet key it was not told it may");
+    // X's own key, from its own org or not, running the model trading runs: said at boot.
+    const sameModel = xpostSetup({ ...ON, GROQ_API_KEY: "gsk_fleet", MERRYMEN_XPOST_LLM_KEY: "gsk_x" }, DEK);
+    assert.equal(sameModel.creds?.apiKey, "gsk_x");
+    assert.ok(sameModel.lines.some((l) => /WARNING/.test(l) && /SEPARATE Groq organization/.test(l)), sameModel.lines.join("\n"));
+    const otherModel = xpostSetup({ ...ON, GROQ_API_KEY: "gsk_fleet", MERRYMEN_XPOST_LLM_KEY: "gsk_x", MERRYMEN_XPOST_MODEL: "some/other-model" }, DEK);
+    assert.ok(!otherModel.lines.some((l) => /WARNING/.test(l)), "a different model shares no per-model allowance");
+  });
+
   it("no line ever carries a key or the client secret", () => {
     for (const env of [
       { ...ON, MERRYMEN_XPOST_LLM_KEY: "gsk_x_secret" },
