@@ -154,6 +154,28 @@ function resolved(file: string, spec: string): string | null {
   return rel(path.resolve(path.dirname(file), spec)).replace(/\.(?:ts|tsx|js|mjs|cjs)$/, "");
 }
 
+/**
+ * THE TABLES A PIECE OF SQL WRITES OR CREATES, HOWEVER IT IS CASED. Upper case
+ * is how this codebase spells SQL, but `update tenant_settings set …` runs
+ * just the same in lower case, so case is not what is trusted. An UPDATE in
+ * any case counts when a SET follows its table — prose never has one, and
+ * neither does the seed-phrase wordlist's "update upgrade" the room carries —
+ * and an upper-case UPDATE counts on its own, as before. `DO UPDATE SET` is an
+ * upsert's tail, not a statement of its own.
+ */
+function sqlTargets(sql: string): { writes: string[]; creates: string[] } {
+  const writes: string[] = [];
+  for (const re of [
+    /\b(?:INSERT\s+(?:OR\s+[A-Z]+\s+)?INTO|DELETE\s+FROM)\s+([A-Za-z_][A-Za-z0-9_]*)/gi,
+    /(?<!\bDO\s+)\bUPDATE\s+(?:OR\s+[A-Z]+\s+)?([A-Za-z_][A-Za-z0-9_]*)\s+SET\b/gi,
+    /(?<!DO\s)\bUPDATE\s+(?:OR\s+[A-Z]+\s+)?([A-Za-z_][A-Za-z0-9_]*)/g,
+  ]) {
+    for (const m of sql.matchAll(re)) writes.push(m[1]!);
+  }
+  const creates = [...sql.matchAll(/\bCREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)/gi)].map((m) => m[1]!);
+  return { writes: [...new Set(writes)], creates: [...new Set(creates)] };
+}
+
 const lexed = new Map<string, ReturnType<typeof lex>>();
 function lexFile(f: string): ReturnType<typeof lex> {
   let l = lexed.get(f);
@@ -180,6 +202,19 @@ describe("xpost reaches nothing that trades", () => {
     assert.ok(strings.some((s) => s.includes("xpost_posts")));
     const sample = "import x fr" + 'om "../policy";\nconst y = await imp' + 'ort("./store");\n';
     assert.deepEqual(specifiers(lex(sample).code), ["../policy", "./store"]);
+  });
+
+  it("the SQL detector reads a write in any case, and not prose", () => {
+    assert.deepEqual(sqlTargets("UPDATE xpost_posts SET status = ?").writes, ["xpost_posts"]);
+    assert.deepEqual(sqlTargets("UPDATE xpost_posts").writes, ["xpost_posts"], "upper case needs no SET, as before");
+    assert.deepEqual(sqlTargets("update tenant_settings set x = 1").writes, ["tenant_settings"]);
+    assert.deepEqual(sqlTargets("insert or replace into peers (a) values (?)").writes, ["peers"]);
+    assert.deepEqual(sqlTargets("delete from posts where id = ?").writes, ["posts"]);
+    assert.deepEqual(sqlTargets("create table if not exists settings (a)").creates, ["settings"]);
+    assert.deepEqual(sqlTargets("INSERT INTO xpost_posts (a) VALUES (?) ON CONFLICT (a) DO UPDATE SET a = excluded.a").writes, ["xpost_posts"]);
+    assert.deepEqual(sqlTargets("do update set a = excluded.a").writes, []);
+    assert.deepEqual(sqlTargets("unusual unveil update upgrade uphold").writes, [], "a wordlist is not a statement");
+    assert.deepEqual(sqlTargets("could not update the post, will retry").writes, [], "a log line is not a statement");
   });
 
   it("found the production files", () => {
@@ -228,13 +263,9 @@ describe("xpost reaches nothing that trades", () => {
     const name = path.basename(f);
     it(`${name} writes only xpost_* tables, and no file at all`, () => {
       const { code, strings } = lexFile(f);
-      const sql = strings.join("\n");
-      for (const m of sql.matchAll(/\b(?:INSERT\s+(?:OR\s+[A-Z]+\s+)?INTO|(?<!DO\s)UPDATE|DELETE\s+FROM)\s+([A-Za-z_][A-Za-z0-9_]*)/g)) {
-        assert.match(m[1]!, /^xpost_/, `${name} writes ${m[1]} — xpost writes only xpost_* tables`);
-      }
-      for (const m of sql.matchAll(/\bCREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)/g)) {
-        assert.match(m[1]!, /^xpost_/, `${name} creates ${m[1]}`);
-      }
+      const { writes, creates } = sqlTargets(strings.join("\n"));
+      for (const table of writes) assert.match(table, /^xpost_/, `${name} writes ${table} — xpost writes only xpost_* tables`);
+      for (const table of creates) assert.match(table, /^xpost_/, `${name} creates ${table}`);
       assert.doesNotMatch(code, /\b(?:writeFile|writeFileSync|appendFile|appendFileSync|renameSync|createWriteStream|mkdirSync|rmSync|unlinkSync)\b/, `${name} touches a file`);
     });
   }
@@ -264,6 +295,55 @@ describe("nothing that trades knows X exists", () => {
       .filter((f) => /\bxpost_[a-z]/.test(lexFile(f).code))
       .map(rel);
     assert.deepEqual(readers, [], "X state must never be read on a trading path");
+  });
+
+  /**
+   * THE WEB'S SIDE OF TRADING, the same paths the room's boundary test holds
+   * (webTradingFiles there): the agent chat that can propose orders, the
+   * orders route, and the MCP server and its routes, which put tools that
+   * act in an assistant's hands. The web DOES import xpost — the X connect
+   * and account routes, through lib/x-connect.ts — so "the worker never
+   * imports it" is not enough on its own; none of these may reach it.
+   */
+  function webTradingFiles(): string[] {
+    const lib = path.join(REPO, "web", "src", "lib");
+    const api = path.join(REPO, "web", "src", "app", "api");
+    const ts = (f: string) => /\.tsx?$/.test(f);
+    const libFiles = readdirSync(lib)
+      .filter((f) => ts(f) && (f === "agent-chat.ts" || f.startsWith("chat-")))
+      .map((f) => path.join(lib, f));
+    const routes = ["chat", "orders", "mcp"].flatMap((d) => walk(path.join(api, d), ts));
+    return [...libFiles, ...routes, ...walk(path.join(REPO, "web", "src", "mcp"), ts)];
+  }
+
+  it("the web walk reaches the agent chat, the orders route and MCP", () => {
+    const files = webTradingFiles().map(rel);
+    for (const must of ["web/src/lib/agent-chat.ts", "web/src/lib/chat-commands.ts", "web/src/mcp/server.ts"]) {
+      assert.ok(files.includes(must), `${must} was not found — the walk is looking in the wrong place`);
+    }
+    for (const dir of ["web/src/app/api/chat/", "web/src/app/api/orders/", "web/src/app/api/mcp/", "web/src/mcp/tools/"]) {
+      assert.ok(files.some((f) => f.startsWith(dir)), `nothing under ${dir} was found`);
+    }
+  });
+
+  it("the web's agent chat, orders and MCP never import xpost/ or the X connect glue, nor name an xpost_* table", () => {
+    const guilty = webTradingFiles()
+      .filter((f) => {
+        const { code } = lexFile(f);
+        if (/\bxpost_[a-z]/.test(code)) return true;
+        return specifiers(code).some((s) => /(?:^|\/)x-connect(?:\.tsx?)?$/.test(s) || resolved(f, s)?.startsWith("worker/src/xpost/"));
+      })
+      .map(rel);
+    assert.deepEqual(guilty, [], "a web path that can act for an owner knows X posting exists");
+  });
+
+  it("the web check would catch the edge it is for", () => {
+    // Run on a fake agent-chat.ts, so a regex that no longer matches is a failure, not silence.
+    const f = path.join(REPO, "web", "src", "lib", "agent-chat.ts");
+    const imp = "import { getAccount } fr" + 'om "../../../worker/src/xpost/store";\n';
+    assert.ok(specifiers(lex(imp).code).some((s) => resolved(f, s)?.startsWith("worker/src/xpost/")));
+    const glue = "import { xConnect } fr" + 'om "./x-connect";\n';
+    assert.ok(specifiers(lex(glue).code).some((s) => /(?:^|\/)x-connect(?:\.tsx?)?$/.test(s)));
   });
 });
 

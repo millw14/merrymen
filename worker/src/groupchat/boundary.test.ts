@@ -203,6 +203,28 @@ function lexFile(f: string): ReturnType<typeof lex> {
   return l;
 }
 
+/**
+ * THE TABLES A PIECE OF SQL WRITES, HOWEVER IT IS CASED. Upper case is how
+ * this codebase spells SQL, but `update tenant_settings set …` runs just the
+ * same in lower case, so case is not what is trusted. An INSERT INTO or a
+ * DELETE FROM counts in any case; an UPDATE counts in any case when a SET
+ * follows its table — prose ("update the …") never has one, and neither does
+ * policy.ts's seed-phrase wordlist, which says "update upgrade" — and in upper
+ * case on its own, as before. `DO UPDATE SET` is an upsert's tail, not a
+ * statement of its own.
+ */
+function sqlWrites(sql: string): string[] {
+  const out = new Set<string>();
+  for (const re of [
+    /\b(?:INSERT\s+(?:OR\s+[A-Z]+\s+)?INTO|DELETE\s+FROM)\s+([A-Za-z_][A-Za-z0-9_]*)/gi,
+    /(?<!\bDO\s+)\bUPDATE\s+(?:OR\s+[A-Z]+\s+)?([A-Za-z_][A-Za-z0-9_]*)\s+SET\b/gi,
+    /(?<!DO\s)\bUPDATE\s+(?:OR\s+[A-Z]+\s+)?([A-Za-z_][A-Za-z0-9_]*)/g,
+  ]) {
+    for (const m of sql.matchAll(re)) out.add(m[1]!);
+  }
+  return [...out];
+}
+
 // ── (a) the room reaches nothing that trades ────────────────────────────────
 
 /**
@@ -250,6 +272,16 @@ describe("the room reaches nothing that trades", () => {
     const sample = "import x fr" + 'om "../policy";\nconst y = await imp' + 'ort("./store");\n';
     assert.deepEqual(specifiers(lex(sample).code), ["../policy", "./store"]);
     assert.equal(pythonCode('"""groupchat doc"""\nx = 1  # groupchat\ny = "#groupchat"\n').includes("groupchat doc"), false);
+  });
+
+  it("the SQL detector reads a write in any case, and not prose", () => {
+    assert.deepEqual(sqlWrites("UPDATE groupchat_messages SET body = ?"), ["groupchat_messages"]);
+    assert.deepEqual(sqlWrites("update tenant_settings set x = 1"), ["tenant_settings"]);
+    assert.deepEqual(sqlWrites("insert or ignore into posts (a) values (?)"), ["posts"]);
+    assert.deepEqual(sqlWrites("delete from decisions where id = ?"), ["decisions"]);
+    assert.deepEqual(sqlWrites("INSERT INTO groupchat_messages (a) VALUES (?) ON CONFLICT (a) DO UPDATE SET a = excluded.a"), ["groupchat_messages"]);
+    assert.deepEqual(sqlWrites("unusual unveil update upgrade uphold upon"), [], "the wordlist is not a statement");
+    assert.deepEqual(sqlWrites("could not update the room, will retry"), [], "a log line is not a statement");
   });
 
   it("found the room's files", () => {
@@ -337,12 +369,9 @@ describe("the room reaches nothing that trades", () => {
     const name = path.basename(f);
     it(`${name} writes only the room's own tables, and no file at all`, () => {
       const { code, strings } = lexFile(f);
-      // Upper-case keywords only, which is how this codebase spells SQL, so
-      // prose in a log string ("update the …") is not read as a statement.
-      // `DO UPDATE SET` is an upsert's tail, not a statement of its own.
-      const sql = strings.join("\n");
-      for (const m of sql.matchAll(/\b(?:INSERT\s+(?:OR\s+[A-Z]+\s+)?INTO|(?<!DO\s)UPDATE|DELETE\s+FROM)\s+([A-Za-z_][A-Za-z0-9_]*)/g)) {
-        assert.match(m[1]!, /^groupchat_/, `${name} writes ${m[1]} — the room writes only groupchat_* tables`);
+      // In any case (sqlWrites): a lower-case statement runs just the same.
+      for (const table of sqlWrites(strings.join("\n"))) {
+        assert.match(table, /^groupchat_/, `${name} writes ${table} — the room writes only groupchat_* tables`);
       }
       // THE FILES A CHILD READS (peers.json, research.json, its settings) are
       // how anything reaches a trading decision; the room writes none.
