@@ -47,6 +47,13 @@ describe("proposeSettingChange — a question, never a change", () => {
     assert.match((p as { text: string }).text, /dashboard/);
   });
 
+  it("posting on X is dashboard-only: the warning naming the X account is shown there, never in a chat", () => {
+    for (const [setting, value] of [["xPosting", "on"], ["post on X", "yes"], ["twitter", "on"], ["tweets", "off"], ["posting on x", ""]] as const) {
+      const p = proposeSettingChange(setting, value, ctx);
+      assert.deepEqual(p, { kind: "reply", text: "Posting on X is only switched on in Settings on the dashboard.", button: "dashboard" }, setting);
+    }
+  });
+
   it("an out-of-range value is refused with the reason, and nothing is parked", () => {
     const p = proposeSettingChange("strategistStopLossBps", "250%", ctx);
     assert.equal(p.kind, "reply");
@@ -89,6 +96,9 @@ describe("resolveSettingName — /set takes words, not keys", () => {
     assert.equal(resolveSettingName("notifications"), "telegram", "all notifications is dashboard-only");
     assert.equal(resolveSettingName("trade messages"), "telegramNotifyEveryMin", "fewer trade pings is batching");
     assert.equal(resolveSettingName("liveTrading"), "liveTrading");
+    assert.equal(resolveSettingName("Post on X"), "xPosting");
+    assert.equal(resolveSettingName("x-posting"), "xPosting");
+    assert.equal(resolveSettingName("Twitter"), "xPosting");
     assert.equal(resolveSettingName("colour of the sky"), null);
   });
 
