@@ -432,6 +432,15 @@ export interface ResolvedOp {
   notionalUsdg6: bigint;
   attributed: boolean;
   /**
+   * THE ACCOUNT'S OWN USDG MOVEMENT in this op, signed (a buy or a transfer
+   * home is negative), read off the same receipt as the notional. 0n when the
+   * receipt was read and moved no USDG (stock↔stock), and on a revert — which
+   * moved nothing. NULL WHEN THE RECEIPT COULD NOT BE READ: `attributed: false`
+   * cannot say which of those two it was, and flow inference must never guess
+   * a landed op's movement at zero (flow-inference.ts, rule 2).
+   */
+  usdgDelta6: bigint | null;
+  /**
    * The block the op's UserOperationEvent is in, when the log carried one —
    * where an energy purchase LANDED, which the buy's balance-read pin needs
    * (index.ts lastEnergyLandedBlock). Absent when the log did not say.
@@ -523,17 +532,21 @@ export async function resolveSubmittedOps(opts: {
 
     let notionalUsdg6 = 0n;
     let attributed = false;
+    let usdgDelta6: bigint | null = 0n;
     if (decoded.success) {
       const receiptLogs = await opts.chain.getReceiptLogs(txHash as Hex).catch(() => null);
       if (receiptLogs) {
         const usdgDelta = netTokenDeltas(receiptLogs, opts.smartAccount).get(opts.usdgToken.toLowerCase()) ?? 0n;
+        usdgDelta6 = usdgDelta;
         if (usdgDelta !== 0n) {
           notionalUsdg6 = usdgDelta < 0n ? -usdgDelta : usdgDelta;
           attributed = true;
         }
+      } else {
+        usdgDelta6 = null;
       }
     }
-    out.push({ userOpHash: hash, txHash, success: decoded.success, notionalUsdg6, attributed, ...(blockNumber !== undefined ? { blockNumber } : {}) });
+    out.push({ userOpHash: hash, txHash, success: decoded.success, notionalUsdg6, attributed, usdgDelta6, ...(blockNumber !== undefined ? { blockNumber } : {}) });
   }
   return out;
 }

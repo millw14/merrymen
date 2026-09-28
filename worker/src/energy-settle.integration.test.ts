@@ -33,7 +33,7 @@ const { homePaths } = await import("./home");
 const { DatabaseSync } = await import("node:sqlite");
 const { CASH, ENERGY_ROUTE_V1, MERRYMEN_TOKEN, VIRTUAL_TOKEN } = await import("../../packages/core/src/index");
 const { TRANSFER_TOPIC } = await import("./deposit-log");
-const { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyRow, settleEnergyLanding } = await import("./energy-settle");
+const { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyRow, settleEnergyLanding, settleTransferLanding } = await import("./energy-settle");
 type Deps = import("./energy-settle").EnergySettleDeps;
 type ReceiptLog = import("./fills").ReceiptLog;
 
@@ -450,5 +450,84 @@ describe("the energy pin, seeded at arm from the ledger", () => {
     assert.ok(Date.now() - started < 2_000, "and the arm is not held on it");
     assert.equal(await seed(async () => Promise.reject(new Error("rpc down"))), null);
     assert.equal(await energyLandedBlockAtArm({ newest: async () => Promise.reject(new Error("db down")), receiptBlock: noReceipt }), null);
+  });
+});
+
+/**
+ * A STRANDED TRANSFER HOME (R2-MONEY1). The executor books a transfer when it
+ * hears the receipt; one whose receipt wait timed out was booked by nobody, and
+ * the peak kept the money that went home. The resolver now books it from the
+ * receipt, through bookCapitalFlow — once, both peaks with it.
+ */
+describe("the resolver's transfer home: settleTransferLanding", () => {
+  const OWNER = "0x00000000000000000000000000000000000000ff";
+  const home = (usdg6: bigint): ReceiptLog[] => [transfer(USDG, ACCOUNT, OWNER, usdg6, 7)];
+  const transferFlows = () =>
+    Number(one<{ n: number }>("SELECT COUNT(*) AS n FROM flows WHERE agent_id = ? AND source = 'transfer-intent'", ACCOUNT).n);
+  const withTx = (receipts: Map<string, readonly ReceiptLog[] | null>) =>
+    deps({ flowBookedForTx: (h) => store.hasFlowForTx(ACCOUNT, h) }, receipts);
+
+  it("books ONE 'transfer-intent' flow out with both peaks — and again is nothing", async () => {
+    const tx = txHash();
+    const d = withTx(new Map([[tx, home(10_000_000n)]]));
+    assert.deepEqual(await settleTransferLanding(d, tx), { proceed: true, settled: "booked" });
+    assert.equal(transferFlows(), 1);
+    assert.equal(await peak(), 90);
+    assert.equal(riskWithdrawn(), 10, "the breaker's peak followed the money home");
+    assert.equal(await store.getNetContributionsUsdg(ACCOUNT), 90);
+    assert.match(events.at(-1)!.line, /withdrawn 10 USDG \(a transfer home the worker had lost track of/);
+    assert.deepEqual(await settleTransferLanding(d, tx), { proceed: true, settled: "already" });
+    assert.equal(transferFlows(), 1);
+    assert.equal(await peak(), 90, "idempotent");
+  });
+
+  it("THE EXECUTOR'S OWN BOOKING (tx hash, no log index) is seen: never a second booking of the same transfer", async () => {
+    const tx = txHash();
+    // processIntentLocked's transfer branch: addFlow + adjustAgentHwm, then its landed-row write failed.
+    assert.equal(await store.addFlow({ agentId: ACCOUNT, direction: "out", amountUsdg: 10, source: "transfer-intent", txHash: tx, mode: "live" }), true);
+    await store.adjustAgentHwm(ACCOUNT, -10);
+    assert.deepEqual(await settleTransferLanding(withTx(new Map([[tx, home(10_000_000n)]])), tx), { proceed: true, settled: "already" });
+    assert.equal(transferFlows(), 1);
+    assert.equal(await peak(), 90, "lowered once");
+  });
+
+  it("the DEPOSIT SCAN'S booking of the same log is seen too (the identity index)", async () => {
+    const tx = txHash();
+    assert.equal(
+      await store.addFlow({ agentId: ACCOUNT, direction: "out", amountUsdg: 10, source: "chain-log", txHash: tx, blockNumber: 9_000_001, logIndex: 7, mode: "live", chainId: 4663 }),
+      true,
+    );
+    await store.adjustAgentHwm(ACCOUNT, -10);
+    // Even without the tx lookup, bookCapitalFlow's identity catches it.
+    assert.deepEqual(await settleTransferLanding(deps({}, new Map([[tx, home(10_000_000n)]])), tx), { proceed: true, settled: "already" });
+    assert.equal(transferFlows(), 0);
+    assert.equal(await peak(), 90);
+  });
+
+  it("A RECEIPT OR A LEDGER THAT CANNOT BE READ leaves the op 'submitted' for the next pass — nothing moved", async () => {
+    const tx = txHash();
+    assert.equal((await settleTransferLanding(withTx(new Map([[tx, null]])), tx)).proceed, false);
+    assert.equal((await settleTransferLanding(withTx(new Map([[tx, []]])), tx)).proceed, false, "no Transfer logs handed over");
+    assert.equal(
+      (await settleTransferLanding(deps({ flowBookedForTx: async () => null }, new Map([[tx, home(10_000_000n)]])), tx)).proceed,
+      false,
+      "the ledger could not say whether it was booked",
+    );
+    assert.equal(
+      (await settleTransferLanding(deps({ flowBookedForTx: async () => false, book: async () => Promise.reject(new Error("db down")) }, new Map([[tx, home(10_000_000n)]])), tx)).proceed,
+      false,
+      "a ledger that throws",
+    );
+    assert.equal(transferFlows(), 0);
+    assert.equal(await peak(), 100);
+  });
+
+  it("A RECEIPT THAT IS NOT A TRANSFER HOME is not booked as one — its cash is left to inference, and the owner is told", async () => {
+    const tx = txHash();
+    const swap = [transfer(USDG, ACCOUNT, PAIR_A, 10_000_000n, 3), transfer(VIRTUAL_TOKEN, PAIR_A, ACCOUNT, 10n ** 18n, 4)];
+    assert.deepEqual(await settleTransferLanding(withTx(new Map([[tx, swap]])), tx), { proceed: true, settled: "not-a-transfer" });
+    assert.equal(transferFlows(), 0);
+    assert.equal(await peak(), 100);
+    assert.equal(events.at(-1)!.level, "err");
   });
 });

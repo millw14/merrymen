@@ -225,6 +225,17 @@ export function tickPlan(kind: TickKind): TickPlan {
  *   incomplete  — a book that could not be totalled has no equity to write: a
  *                 gap is honest, a partial total is not. tick() skips the peaks
  *                 for it before it gets here; this holds that too.
+ *   held        — flow inference HELD this tick (flow-inference.ts): an op the
+ *                 resolver may still settle is in flight, so the cash in this
+ *                 equity is not yet split into capital and performance. A
+ *                 deposit made during the hold is in the equity and not yet in
+ *                 the peak, so a fee accrued now is a fee on principal, and a
+ *                 peak observed now counts the deposit twice once it is booked.
+ *                 Treated as an untotalled book: no peak, no fee, and no equity
+ *                 row either — the newest row's cash is the durable baseline a
+ *                 restart infers from (store.ts lastKnownCashUsdg), and a held
+ *                 reading written there would carry the stranded op's movement
+ *                 into the one figure that must not contain it.
  *
  * The reads stay unconditional. A command tick still needs the peak its order
  * is judged against — it is asked with `null`, which reads without observing
@@ -241,8 +252,9 @@ export interface TickRatchets {
   equityRow(write: () => Promise<unknown>): Promise<void>;
 }
 
-export function tickRatchets(plan: TickPlan, book: { incomplete: boolean; curveMarked: number }): TickRatchets {
-  const peaks = plan.ratchets && !book.incomplete && book.curveMarked === 0;
+export function tickRatchets(plan: TickPlan, book: { incomplete: boolean; curveMarked: number; held?: boolean }): TickRatchets {
+  const held = book.held === true;
+  const peaks = plan.ratchets && !book.incomplete && book.curveMarked === 0 && !held;
   return {
     async paperPeak(b, equityUsdg, write) {
       if (peaks && equityUsdg > b.hwmUsdg) {
@@ -258,7 +270,7 @@ export function tickRatchets(plan: TickPlan, book: { incomplete: boolean; curveM
       return accrual.newHwmUsdg;
     },
     async equityRow(write) {
-      if (plan.ratchets && !book.incomplete) await write();
+      if (plan.ratchets && !book.incomplete && !held) await write();
     },
   };
 }

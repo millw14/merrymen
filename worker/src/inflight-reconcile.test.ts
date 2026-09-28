@@ -183,6 +183,38 @@ describe("resolveSubmittedOps", () => {
     assert.equal(res[0]!.attributed, true);
   });
 
+  it("CARRIES THE ACCOUNT'S OWN SIGNED USDG MOVEMENT — and null, never 0, when the receipt could not be read", async () => {
+    // Flow inference folds this into its cash baseline (flow-inference.ts rule
+    // 2). A buy is negative, a sell positive, a stock-for-stock op 0, a revert
+    // 0 — and an unreadable receipt NULL: `attributed: false` alone cannot tell
+    // "moved no USDG" from "could not read", and reading the second as the
+    // first would book the op's whole movement as a deposit or a withdrawal.
+    const [buy, sell, none, unread, reverted] = [h(0x71), h(0x72), h(0x73), h(0x74), h(0x75)];
+    const [t1, t2, t3, t4, t5] = [h(0x81), h(0x82), h(0x83), h(0x84), h(0x85)];
+    const res = await resolveSubmittedOps({
+      chain: chainFor(
+        [opLog(buy, true, t1), opLog(sell, true, t2), opLog(none, true, t3), opLog(unread, true, t4), opLog(reverted, false, t5)],
+        {
+          [t1]: [transfer(USDG, ACCOUNT, ROUTER, 25_000_000n), transfer(STOCK, ROUTER, ACCOUNT, 10n ** 18n)],
+          [t2]: [transfer(STOCK, ACCOUNT, ROUTER, 10n ** 18n), transfer(USDG, ROUTER, ACCOUNT, 7_500_000n)],
+          [t3]: [transfer(STOCK, ACCOUNT, ROUTER, 10n ** 18n)],
+        },
+      ),
+      smartAccount: ACCOUNT,
+      usdgToken: USDG,
+      hashes: [buy, sell, none, unread, reverted],
+      lookbackBlocks: 1000n,
+    });
+    const by = new Map(res.map((r) => [r.userOpHash, r]));
+    assert.equal(by.get(buy)!.usdgDelta6, -25_000_000n);
+    assert.equal(by.get(sell)!.usdgDelta6, 7_500_000n);
+    assert.equal(by.get(none)!.usdgDelta6, 0n, "read, and no USDG moved");
+    assert.equal(by.get(none)!.attributed, false);
+    assert.equal(by.get(unread)!.usdgDelta6, null, "NOT READ — which attributed:false alone cannot say");
+    assert.equal(by.get(unread)!.attributed, false);
+    assert.equal(by.get(reverted)!.usdgDelta6, 0n, "a revert moved nothing");
+  });
+
   it("carries the block the op landed in, when its log says — the energy buy's balance pin needs it", async () => {
     const [op, tx] = [h(0x53), h(0x63)];
     const res = await resolveSubmittedOps({

@@ -1142,6 +1142,27 @@ describe("what a tick may write down", () => {
     assert.deepEqual(w.calls, ["risk peak observe=null", "equity row"]);
   });
 
+  it("A HELD FLOW LOOK WRITES NOTHING DOWN on a regular tick — no fee, no peak, no observation, no equity row (flow-inference.ts)", async () => {
+    // An op the resolver may still settle is in flight, so the cash in this
+    // equity is not split into capital and performance yet: a deposit made in
+    // the hold would be charged a fee, and observed into the breaker's peak
+    // before it is booked — then raised again when it is.
+    const r = tickRatchets(tickPlan("regular"), { ...BOOK, held: true });
+    const w = writers();
+    assert.equal(await r.paperPeak({ hwmUsdg: 100 }, 120, w.paper), 100);
+    await r.riskPeak(120, w.risk);
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), PEAK, "the in-memory mark the breaker divides by does not move");
+    await r.equityRow(w.equity);
+    assert.deepEqual(w.calls, ["risk peak observe=null"], "the peak is still READ — without observing");
+    // And `held: false` is the ordinary regular tick.
+    const plain = tickRatchets(tickPlan("regular"), { ...BOOK, held: false });
+    const w2 = writers();
+    await plain.riskPeak(120, w2.risk);
+    await plain.accrue(ACCRUAL, PEAK, w2.fee);
+    await plain.equityRow(w2.equity);
+    assert.deepEqual(w2.calls, ["risk peak observe=120", "fee + live mark", "equity row"]);
+  });
+
   it("A BOOK THAT COULD NOT BE TOTALLED WRITES NO EQUITY ROW — a gap is honest, a partial total is not", async () => {
     const r = tickRatchets(tickPlan("regular"), { incomplete: true, curveMarked: 0 });
     const w = writers();
