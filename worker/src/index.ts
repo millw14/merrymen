@@ -225,7 +225,7 @@ import {
   sayEnergyPlan,
   usdgText,
 } from "./energy-buy";
-import { lookAtCash, opsHoldInference, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC, type Settlement } from "./flow-inference";
+import { attributeSettlements, lookAtCash, opsHoldInference, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC, wroteSince, type Settlement } from "./flow-inference";
 import { durableNetContributionsUsdg6 } from "./net-contributions";
 import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, type EnergySettleDeps } from "./energy-settle";
 import { bookCapitalFlow, energyBuysInFlight, newestLandedEnergyBuy } from "./store";
@@ -502,7 +502,8 @@ import {
   accountingHistoryAuditable,
   hasEpochOneHistory,
   lastKnownEquityUsdg,
-  lastKnownCashUsdg,
+  lastKnownCashReading,
+  landedOpsBetween,
   openNextEpoch,
   poolKeysFor,
   getOpsToday,
@@ -3521,57 +3522,99 @@ async function main() {
       // THE DECISION IS PURE AND LIVES IN bootstrap-state.ts. Only the recording
       // is here, so the rule that decides whether money is a contribution can be
       // tested directly rather than inferred from the shape of this block.
-      const plan = planFirstObservation({
-        licence: accounting.openingBalanceLicence,
-        equityUsdg,
-        cashUsdg,
-        anchorCashUsdg,
-        materialDriftUsdg: MATERIAL_DRIFT_USDG,
-        why: accounting.why,
-      });
-      if (plan.action === "legacy-local") {
-        // SELF-HOSTED KEEPS THE ORIGINAL BEHAVIOUR, unchanged, because the
-        // premise it rests on is true here: the ledger is on a real disk that
-        // outlives the process, so an empty one is a new agent and a persisted
-        // cash reading really is where the account was left. The hosted arms
-        // below exist because that premise is false in a container, not because
-        // the reasoning was ever wrong on its own terms.
-        if (equityUsdg > 0n && highWaterMarkUsdg === 0n) {
-          await record(equityUsdg, "opening balance");
-        } else if (ledgerWrites === 0 && settlementsQueued.size === 0) {
-          // ONLY WHEN NOTHING THIS PROCESS SETTLED EXPLAINS IT — the steady
-          // state's own rule, applied across the restart. The arm's stranded
-          // resolver runs before this first look and may have just settled an
-          // op that moved this very cash (for an energy purchase, booking it as
-          // capital out already); inferring its cash leg as well would book it
-          // twice. It queued a settlement when it did.
-          const prior = await lastKnownCashUsdg(agentId);
-          if (prior !== null) {
-            await record(cashUsdg - usdg(prior), "changed while the worker was stopped");
-          }
-        }
-      } else if (plan.action === "book-opening-balance") {
-        // THE ONLY PATH THAT BOOKS A CONTRIBUTION HERE, and it runs only when
-        // the orchestrator READ durable state and found none.
-        if (plan.amountUsdg > 0n) await record(plan.amountUsdg, "opening balance");
-      } else if (plan.action === "resume-with-drift") {
-        doubtContributions(`cash moved across the downtime window and nothing could price it`);
-        await addEvent(
-          agentId,
-          "warn",
-          `cash moved ${plan.driftUsdg > 0n ? "+" : ""}${fmt(plan.driftUsdg)} USDG while the worker was stopped and ` +
-            `no chain scan covered the window — this is NOT booked as a contribution, because a balance change ` +
-            `across downtime cannot distinguish a deposit from a withdrawal from a trade that landed. ` +
-            `Contributions and P&L are marked unknown until a deposit scan can price it.`,
-        );
-      } else if (plan.action === "stand-down") {
-        // NO USABLE ANCHOR. The one thing that must not happen here is the old
-        // inference, so nothing is booked and the book says so.
-        doubtContributions(plan.why);
+      //
+      // THE SAME HOLD AS THE STEADY STATE (flow-inference.ts). An op the last
+      // process sent and never heard back about may have moved this cash while
+      // it was down; judged now, a stranded purchase was booked as money
+      // "changed while the worker was stopped" and then AGAIN as energy by the
+      // resolver, and a stranded swap's cash leg as a withdrawal. So nothing is
+      // judged, on any licence, while one is in flight: the baseline stays open
+      // (`lastCashUsdg` null) and this look is simply asked again next tick —
+      // against the same durable reading, because a held tick writes no equity
+      // row, and with every settlement the resolver has queued since.
+      if (opsInFlight) {
+        console.log(`[flows] first look — an op is still in flight, so nothing is judged until it settles`);
+        return "held";
       }
-      // `resume-clean` is the remaining arm and it does nothing on purpose: a
-      // funded account came back with the cash the anchor said it had.
-      takeSettlements();
+      // THE DURABLE READS COME BEFORE THE QUEUE IS TAKEN: a read that throws
+      // aborts the pass with every settlement still queued for the retry.
+      const hostedLook = accounting.openingBalanceLicence !== "self-hosted-local";
+      const prior = hostedLook ? null : await lastKnownCashReading(agentId);
+      const earlierLanded = prior === null ? [] : await landedOpsBetween(agentId, prior.at, processStartedSec + 1);
+      const settled = takeSettlements();
+      // A FIRST LOOK THAT THROWS (a flow row that did not land) is asked again
+      // next tick, from the same durable reading — so it must find the same
+      // settlements queued, or the retry would book their movement as drift.
+      try {
+        // THE SAME SHIFT, for the hosted resume: what the arm's resolver settled
+        // explains its own movement across the downtime, so it is not drift.
+        const anchorShift = attributeSettlements(settled, anchorObservedAtSec);
+        const plan = planFirstObservation({
+          licence: accounting.openingBalanceLicence,
+          equityUsdg,
+          cashUsdg,
+          anchorCashUsdg: anchorCashUsdg === null ? null : anchorCashUsdg + anchorShift.shiftUsdg6,
+          materialDriftUsdg: MATERIAL_DRIFT_USDG,
+          why: accounting.why,
+        });
+        if (plan.action === "resume-clean" || plan.action === "resume-with-drift") {
+          await doubtUnreadSettlements(agentId, anchorShift.unread);
+        }
+        if (plan.action === "legacy-local") {
+          // SELF-HOSTED KEEPS THE ORIGINAL BEHAVIOUR, unchanged, because the
+          // premise it rests on is true here: the ledger is on a real disk that
+          // outlives the process, so an empty one is a new agent and a persisted
+          // cash reading really is where the account was left. The hosted arms
+          // below exist because that premise is false in a container, not because
+          // the reasoning was ever wrong on its own terms.
+          if (equityUsdg > 0n && highWaterMarkUsdg === 0n) {
+            await record(equityUsdg, "opening balance");
+          } else if (prior !== null) {
+            // THE STEADY STATE'S OWN LOOK, across the restart, against the last
+            // durable reading: every op the resolver settled since that reading
+            // explains exactly its own movement (it used to bump ledgerWrites and
+            // silently drop the WHOLE downtime delta, a deposit included — even
+            // for a revert); a fill this process recorded, or one an EARLIER
+            // process recorded or settled after that reading, explains the
+            // interval as a write does in the steady state; and only the
+            // residual is booked.
+            const l = lookAtCash({
+              baselineUsdg: usdg(prior.cashUsdg),
+              since: prior.at,
+              unattributed: false,
+              settled,
+              cashUsdg,
+              opsInFlight: false,
+              writesInInterval: ledgerWrites > 0 || wroteSince(earlierLanded, settlementsQueued),
+            });
+            await doubtUnreadSettlements(agentId, l.unread);
+            if (l.verdict.action === "infer") await record(l.verdict.deltaUsdg, "changed while the worker was stopped");
+          }
+        } else if (plan.action === "book-opening-balance") {
+          // THE ONLY PATH THAT BOOKS A CONTRIBUTION HERE, and it runs only when
+          // the orchestrator READ durable state and found none.
+          if (plan.amountUsdg > 0n) await record(plan.amountUsdg, "opening balance");
+        } else if (plan.action === "resume-with-drift") {
+          doubtContributions(`cash moved across the downtime window and nothing could price it`);
+          await addEvent(
+            agentId,
+            "warn",
+            `cash moved ${plan.driftUsdg > 0n ? "+" : ""}${fmt(plan.driftUsdg)} USDG while the worker was stopped and ` +
+              `no chain scan covered the window — this is NOT booked as a contribution, because a balance change ` +
+              `across downtime cannot distinguish a deposit from a withdrawal from a trade that landed. ` +
+              `Contributions and P&L are marked unknown until a deposit scan can price it.`,
+          );
+        } else if (plan.action === "stand-down") {
+          // NO USABLE ANCHOR. The one thing that must not happen here is the old
+          // inference, so nothing is booked and the book says so.
+          doubtContributions(plan.why);
+        }
+        // `resume-clean` is the remaining arm and it does nothing on purpose: a
+        // funded account came back with the cash the anchor said it had.
+      } catch (e) {
+        settlementQueue = [...settled, ...settlementQueue];
+        throw e;
+      }
     } else {
       // ONE LOOK, ONE RULE (flow-inference.ts lookAtCash): hold while an op the
       // resolver may still settle is in flight; fold every settlement's own
@@ -3787,6 +3830,14 @@ async function main() {
   let truth: ContributionTruth = INITIAL_CONTRIBUTION_TRUTH;
   /** Cash at the anchor's newest durable observation. The downtime baseline. */
   let anchorCashUsdg: bigint | null = null;
+  /**
+   * When that observation was made — the hosted resume's `since` (flow-
+   * inference.ts): an op created at or after it is not in `anchorCashUsdg`.
+   * The anchor's time is its NEWEST durable row, flow or equity, so it can
+   * only fall after the cash reading: an op in between counts as already in
+   * it, and its settlement shows as drift — which doubts, never books.
+   */
+  let anchorObservedAtSec: number | null = null;
   /** The peak the anchor says was already reached, restored into the local store. */
   let anchorHwmUsdg: bigint | null = null;
   /** Σ withdrawals the shared row already counts. Null means the anchor read none. */
@@ -3815,6 +3866,7 @@ async function main() {
     anchorHwmUsdg = l.highWaterMarkUsdg;
     anchorHwmWithdrawnUsdg = l.highWaterWithdrawnUsdg;
     anchorCashUsdg = l.lastObservedCashUsdg;
+    anchorObservedAtSec = verdict.kind === "valid" ? verdict.accounting.observedAt : null;
     anchorEpoch = l.accountingEpoch;
     // THE DURABLE CONTRIBUTION FIGURE, kept for anything that has to describe
     // this book to something outside the process.
@@ -4044,6 +4096,12 @@ async function main() {
       : null;
   let ledgerWrites = 0;
   let ledgerWritesAtSnapshot = 0;
+  /**
+   * When this process started. A trade row created before it was written by an
+   * EARLIER process — the first look's durable stand-in for `ledgerWrites`,
+   * which starts at 0 (store.ts landedOpsBetween).
+   */
+  const processStartedSec = Math.floor(Date.now() / 1000);
   /** The last row recordTrade wrote — see the comment there for why this exists. */
   let lastTradeOutcome = null as LedgerFacts | null;
   // Merry Circle — the holder's $MERRYMEN tier, refreshed each tick; drives the

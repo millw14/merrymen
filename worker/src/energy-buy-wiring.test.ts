@@ -368,6 +368,29 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     assert.match(retry, /catch \(e\) \{[\s\S]*return "held";/);
   });
 
+  it("(5c) THE FIRST LOOK AFTER A RESTART holds the same way and takes the same settlements (flow-inference.integration.test.ts runs this shape)", () => {
+    // Self-hosted, a stranded purchase was booked as money "changed while the
+    // worker was stopped" AND by the resolver; any settled op (even a revert)
+    // silently dropped the whole downtime delta; hosted, it read as drift.
+    const f = arrow("reconcileFlows");
+    const first = f.slice(f.indexOf("} else if (lastCashUsdg === null) {"), f.lastIndexOf("const l = lookAtCash({"));
+    const hold = first.indexOf("if (opsInFlight) {");
+    assert.ok(hold > 0 && hold < first.indexOf("planFirstObservation({"));
+    assert.match(first.slice(hold, hold + 200), /return "held";/);
+    // Durable reads BEFORE the queue is taken, and the queue put back if the look throws.
+    const take = first.indexOf("const settled = takeSettlements();");
+    assert.ok(first.indexOf("await lastKnownCashReading(agentId)") < take && first.indexOf("await landedOpsBetween(agentId, prior.at, processStartedSec + 1)") < take);
+    assert.match(first, /catch \(e\) \{\s*settlementQueue = \[\.\.\.settled, \.\.\.settlementQueue\];\s*throw e;/);
+    // Hosted: the anchor is shifted by what settled after it.
+    assert.match(first, /const anchorShift = attributeSettlements\(settled, anchorObservedAtSec\);/);
+    assert.match(first, /anchorCashUsdg: anchorCashUsdg === null \? null : anchorCashUsdg \+ anchorShift\.shiftUsdg6,/);
+    // Self-hosted: the steady look against the durable reading; the old bare delta is gone.
+    assert.match(first, /baselineUsdg: usdg\(prior\.cashUsdg\),\s*since: prior\.at,\s*unattributed: false,\s*settled,\s*cashUsdg,\s*opsInFlight: false,\s*writesInInterval: ledgerWrites > 0 \|\| wroteSince\(earlierLanded, settlementsQueued\),/);
+    assert.match(first, /if \(l\.verdict\.action === "infer"\) await record\(l\.verdict\.deltaUsdg, "changed while the worker was stopped"\);/);
+    assert.doesNotMatch(first, /record\(cashUsdg - usdg\(prior\)/);
+    assert.doesNotMatch(first, /ledgerWrites === 0/);
+  });
+
   it("(6) the orphan sweep NEVER books", () => {
     const arm = arrow("reconcileInFlightAtArm");
     const orphans = arm.slice(arm.indexOf("const orphans = await findOrphanOps({"));

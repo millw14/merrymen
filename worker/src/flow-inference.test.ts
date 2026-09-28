@@ -11,6 +11,7 @@ import {
   opsHoldInference,
   settlementDelta,
   STRANDED_RESOLVE_WINDOW_SEC,
+  wroteSince,
   type Settlement,
 } from "./flow-inference";
 
@@ -94,5 +95,15 @@ describe("lookAtCash — one look, one rule", () => {
   it("nothing in flight, nothing written, nothing settled: the change is capital", () => {
     assert.deepEqual(lookAtCash({ ...base, cashUsdg: 80n * U }).verdict, { action: "infer", deltaUsdg: -20n * U });
     assert.deepEqual(lookAtCash(base).verdict, { action: "infer", deltaUsdg: 0n });
+  });
+});
+
+describe("wroteSince — the first look's durable write rule", () => {
+  it("a landed row this process's resolver settled is NOT a write (its settlement explains it); any other landed row is", () => {
+    const mine = new Set(["0xa"]);
+    assert.equal(wroteSince([], mine), false);
+    assert.equal(wroteSince(["0xa"], mine), false, "settled here: explained by its own movement");
+    assert.equal(wroteSince(["0xa", "0xb"], mine), true, "a fill, or a settlement, by the earlier process");
+    assert.equal(wroteSince([null], mine), true, "a row with no op hash still counts");
   });
 });

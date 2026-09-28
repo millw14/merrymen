@@ -2382,17 +2382,59 @@ export async function getGasPaidWei(agentId: string): Promise<bigint> {
  * from "cash was zero": a brand-new agent has nothing to compare against.
  */
 export async function lastKnownCashUsdg(agentId: string): Promise<number | null> {
+  const r = await lastKnownCashReading(agentId);
+  return r === null ? null : r.cashUsdg;
+}
+
+/**
+ * The same reading, AND WHEN IT WAS WRITTEN — the restart's cash baseline and
+ * its `since` (flow-inference.ts): an op submitted at or after `at` is not in
+ * `cashUsdg`, so its settlement shifts that baseline; one submitted before is.
+ *
+ * A tick whose flow look HELD writes no equity row (command-wake.ts
+ * tickRatchets `held`), so this is always a reading taken with no op in flight
+ * — never one that already carries a stranded op's movement.
+ */
+export async function lastKnownCashReading(agentId: string): Promise<{ cashUsdg: number; at: number } | null> {
   try {
     const epoch = await epochOf(agentId);
     const row = await getDb()
       .prepare(
-        "SELECT cash_usdg FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 1",
+        "SELECT cash_usdg, at FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 1",
       )
-      .get(agentId, epoch) as { cash_usdg: number } | undefined;
-    return row ? row.cash_usdg : null;
+      .get(agentId, epoch) as { cash_usdg: number; at: number } | undefined;
+    return row ? { cashUsdg: Number(row.cash_usdg), at: Number(row.at) } : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * THE LEDGER WRITES AN EARLIER PROCESS MADE after a cash reading: the op hashes
+ * (lowercased; null for a row without one) of this epoch's LANDED rows
+ * created in [fromSec, beforeSec).
+ *
+ * The durable half of `ledgerWrites` for the first look after a restart. That
+ * counter is process memory and starts at 0, so a fill the last process
+ * recorded after its final equity row — or a stranded op its resolver settled
+ * before it stopped — was invisible, and its cash leg was booked as money
+ * "changed while the worker was stopped". The caller drops the hashes its own
+ * resolver settled (those explain exactly their own movement) and treats any
+ * other as a write in the interval.
+ *
+ * THROWS WHEN THE QUESTION COULD NOT BE ASKED, like listSubmittedOps: an
+ * unreadable ledger is not an empty one, and the caller's pass must abort and
+ * retry rather than infer on it.
+ */
+export async function landedOpsBetween(agentId: string, fromSec: number, beforeSec: number): Promise<(string | null)[]> {
+  const epoch = await epochOf(agentId);
+  const rows = (await getDb()
+    .prepare(
+      `SELECT user_op_hash FROM trades
+        WHERE agent_id = ? AND epoch = ? AND status = 'landed' AND created_at >= ? AND created_at < ?`,
+    )
+    .all(agentId, epoch, fromSec, beforeSec)) as { user_op_hash: string | null }[];
+  return rows.map((r) => (r.user_op_hash ? r.user_op_hash.toLowerCase() : null));
 }
 
 /**

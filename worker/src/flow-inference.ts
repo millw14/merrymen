@@ -194,3 +194,16 @@ export function lookAtCash(a: {
         : { action: "infer", deltaUsdg: a.cashUsdg - baselineUsdg };
   return { baselineUsdg, unread, unattributed, verdict };
 }
+
+/**
+ * DID AN EARLIER PROCESS WRITE TO THE LEDGER AFTER THE RESTART'S READING? The
+ * first look's durable stand-in for the write rule: `earlierLanded` are the
+ * landed rows created after the last durable cash reading and before this
+ * process started (store.ts landedOpsBetween). A row this process's own
+ * resolver settled is NOT a write — its settlement explains exactly its own
+ * movement — and any other is: a fill recorded, or a stranded op settled, by a
+ * process that stopped before its next reading. A row with no op hash counts.
+ */
+export function wroteSince(earlierLanded: readonly (string | null)[], settledHere: ReadonlySet<string>): boolean {
+  return earlierLanded.some((h) => h === null || !settledHere.has(h));
+}

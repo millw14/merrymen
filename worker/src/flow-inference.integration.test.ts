@@ -37,7 +37,8 @@ const { DatabaseSync } = await import("node:sqlite");
 const { CASH, ENERGY_ROUTE_V1, MERRYMEN_TOKEN, VIRTUAL_TOKEN } = await import("../../packages/core/src/index");
 const { TRANSFER_TOPIC } = await import("./deposit-log");
 const { isEnergyRow, settleEnergyLanding } = await import("./energy-settle");
-const { lookAtCash, opsHoldInference, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC } = await import("./flow-inference");
+const { attributeSettlements, lookAtCash, opsHoldInference, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC, wroteSince } = await import("./flow-inference");
+const { planFirstObservation } = await import("./bootstrap-state");
 const { addressTopic, resolveSubmittedOps } = await import("./inflight-reconcile");
 const { tickPlan, tickRatchets } = await import("./command-wake");
 const { accrueAboveHwm } = await import("./fees");
@@ -183,9 +184,13 @@ function deps(): Deps {
 
 // ── the process ───────────────────────────────────────────────────────────
 
-/** main()'s own state: lastCashUsdg, baselineSince, baselineUnattributed, the ledger-write counters, the queue. */
+/**
+ * main()'s own state: lastCashUsdg, baselineSince, baselineUnattributed, the
+ * ledger-write counters, the settlement queue — and, for a restart, when the
+ * process started and (hosted) what its anchor said.
+ */
 const proc = {
-  lastCash: 100n * U as bigint,
+  lastCash: 100n * U as bigint | null,
   since: 0 as number | null,
   unattributed: false,
   writes: 0,
@@ -194,7 +199,13 @@ const proc = {
   queued: new Set<string>(),
   doubted: false,
   fees: [] as bigint[],
+  startedSec: 0,
+  anchor: null as { cashUsdg: bigint; observedAt: number } | null,
 };
+/** The process stops and a new one starts: everything in memory is gone; the ledger stays. */
+function restart(at = nowSec(), anchor: { cashUsdg: bigint; observedAt: number } | null = null): void {
+  Object.assign(proc, { lastCash: null, since: null, unattributed: false, writes: 0, snapshot: 0, queue: [], queued: new Set(), doubted: false, fees: [], startedSec: at, anchor });
+}
 const take = () => {
   const out = proc.queue;
   proc.queue = [];
@@ -216,12 +227,13 @@ async function record(deltaUsdg: bigint): Promise<void> {
  * the live mark (accrueAboveHwm against the persisted peak) and the equity row.
  * `equity` defaults to cash: a book of only USDG.
  */
-async function tick(cash: bigint, equity = cash): Promise<"hold" | "explained" | "infer"> {
+async function tick(cash: bigint, equity = cash): Promise<"hold" | "explained" | "infer" | "resume-clean" | "resume-with-drift"> {
   const listedAt = nowSec();
   const opsInFlight = opsHoldInference(await store.listSubmittedOps(ACCOUNT), {
     epoch: await store.getAgentEpoch(ACCOUNT),
     nowSec: listedAt,
   });
+  if (proc.lastCash === null) return firstLook(cash, equity, listedAt, opsInFlight);
   const l = lookAtCash({
     baselineUsdg: proc.lastCash,
     since: proc.since,
@@ -243,7 +255,54 @@ async function tick(cash: bigint, equity = cash): Promise<"hold" | "explained" |
     proc.snapshot = proc.writes;
     held = opsInFlight;
   }
-  // THE RATCHET — the live branch of tick(), after reconcileFlowsOrRetry.
+  await ratchet(cash, equity, held);
+  return l.verdict.action;
+}
+
+/**
+ * index.ts reconcileFlows' FIRST OBSERVATION with the scan off: the hold, the
+ * durable reads, then the self-hosted look against the last durable reading
+ * (legacy-local) or the hosted resume's drift against its anchor.
+ */
+async function firstLook(cash: bigint, equity: bigint, listedAt: number, opsInFlight: boolean): Promise<"hold" | "explained" | "infer" | "resume-clean" | "resume-with-drift"> {
+  if (opsInFlight) {
+    await ratchet(cash, equity, true);
+    return "hold";
+  }
+  const prior = proc.anchor ? null : await store.lastKnownCashReading(ACCOUNT);
+  const earlierLanded = prior === null ? [] : await store.landedOpsBetween(ACCOUNT, prior.at, proc.startedSec + 1);
+  const settled = take();
+  let out: "explained" | "infer" | "resume-clean" | "resume-with-drift" = "explained";
+  if (proc.anchor) {
+    const shift = attributeSettlements(settled, proc.anchor.observedAt);
+    if (shift.unread.length > 0) proc.doubted = true;
+    const plan = planFirstObservation({ licence: "resume", equityUsdg: equity, cashUsdg: cash, anchorCashUsdg: proc.anchor.cashUsdg + shift.shiftUsdg6, materialDriftUsdg: 10_000n });
+    if (plan.action === "resume-with-drift") proc.doubted = true;
+    out = plan.action as "resume-clean" | "resume-with-drift";
+  } else if (prior !== null) {
+    const l = lookAtCash({
+      baselineUsdg: BigInt(Math.round(prior.cashUsdg * 1e6)),
+      since: prior.at,
+      unattributed: false,
+      settled,
+      cashUsdg: cash,
+      opsInFlight: false,
+      writesInInterval: proc.writes > 0 || wroteSince(earlierLanded, proc.queued),
+    });
+    if (l.unread.length > 0) proc.doubted = true;
+    if (l.verdict.action === "infer") await record(l.verdict.deltaUsdg);
+    out = l.verdict.action as "explained" | "infer";
+  }
+  proc.lastCash = cash;
+  proc.since = listedAt;
+  proc.unattributed = false;
+  proc.snapshot = proc.writes;
+  await ratchet(cash, equity, false);
+  return out;
+}
+
+/** THE RATCHET — the live branch of tick(), after reconcileFlowsOrRetry. */
+async function ratchet(cash: bigint, equity: bigint, held: boolean): Promise<void> {
   const ratchet = tickRatchets(tickPlan("regular"), { incomplete: false, curveMarked: 0, held });
   const mark = BigInt(Math.round((await peak()) * 1e6));
   const accrual = accrueAboveHwm(equity, mark, proc.doubted ? 0 : FEE_BPS);
@@ -254,7 +313,6 @@ async function tick(cash: bigint, equity = cash): Promise<"hold" | "explained" |
   await ratchet.equityRow(() =>
     store.addEquity(ACCOUNT, { mode: "live", ethWei: 0n, cashUsdg: Number(cash) / 1e6, vaultUsdg: 0, positionsUsdg: Number(equity - cash) / 1e6, equityUsdg: Number(equity) / 1e6 }),
   );
-  return l.verdict.action;
 }
 
 /** index.ts resolveStrandedOps: every current-epoch 'submitted' op the chain can answer for. */
@@ -346,7 +404,7 @@ async function freshAgent(): Promise<void> {
   chainState.events.clear();
   chainState.receipts.clear();
   // The baseline was read a minute ago, before any op below was submitted.
-  Object.assign(proc, { lastCash: 100n * U, since: nowSec() - 60, unattributed: false, writes: 0, snapshot: 0, queue: [], queued: new Set(), doubted: false, fees: [] });
+  Object.assign(proc, { lastCash: 100n * U, since: nowSec() - 60, unattributed: false, writes: 0, snapshot: 0, queue: [], queued: new Set(), doubted: false, fees: [], startedSec: 0, anchor: null });
 }
 
 before(async () => {
@@ -545,5 +603,115 @@ describe("what a settlement explains is ITS OWN cash — nothing else in the hel
     assert.equal(proc.queue.length, 1);
     assert.equal(await tick(90n * U, 100n * U), "infer");
     assert.equal(flowsBy("inferred"), 0, "no +10 phantom deposit from a double shift");
+  });
+});
+
+/**
+ * ACROSS A RESTART. The last process wrote its final equity row (cash 100) at
+ * T0, then sent an op at T0+10 and stopped before it heard back; the new one
+ * starts at T0+20. Times are set explicitly so `since` is really exercised.
+ */
+describe("the first look after a restart follows the same rule", () => {
+  const T0 = nowSec() - 3_600;
+  /** The previous process's last reading, and the op it sent after it. */
+  async function lastProcessSent(over: Record<string, unknown> = {}): Promise<string> {
+    exec("DELETE FROM equity");
+    await store.addEquity(ACCOUNT, { mode: "live", ethWei: 0n, cashUsdg: 100, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 100 });
+    exec("UPDATE equity SET at = ?", T0);
+    const op = await stranded(over);
+    exec("UPDATE trades SET created_at = ? WHERE user_op_hash = ?", T0 + 10, op);
+    return op;
+  }
+
+  it("SELF-HOSTED RESTART WITH AN UNRESOLVED OP: nothing is judged while it is in flight, and it is booked ONCE when it settles", async () => {
+    const op = await lastProcessSent();
+    const tx = lands(op, null); // it landed (cash 90); the receipt will not come back yet
+    restart(T0 + 20);
+    await resolvePass(); // the arm's resolver cannot settle it
+    assert.equal(await tick(90n * U), "hold", "the first look holds — no 'changed while the worker was stopped'");
+    assert.equal(flowsBy("inferred"), 0);
+    assert.equal(proc.lastCash, null, "the baseline stays open");
+    assert.equal(await tick(90n * U), "hold");
+    assert.equal(equityRows(), 1, "and the held ticks wrote no reading over the last process's");
+
+    chainState.receipts.set(tx, energyLogs(10n * U));
+    await resolvePass();
+    assert.equal(await tick(90n * U), "infer");
+    assert.equal(flowsBy("energy-buy"), 1, "booked once, by the resolver");
+    assert.equal(flowsBy("inferred"), 0, "and never as downtime movement");
+    assert.equal(await peak(), 90, "one peak move");
+    assert.equal(await riskPeak(), 90);
+    assert.equal(await store.getNetContributionsUsdg(ACCOUNT), 90);
+  });
+
+  it("ARM-SETTLED OP + DOWNTIME DEPOSIT: the op explains its own −10, and the owner's +50 is booked (it used to be dropped with the whole delta)", async () => {
+    const op = await lastProcessSent();
+    lands(op, energyLogs(10n * U));
+    restart(T0 + 20);
+    await resolvePass(); // the arm's resolver settles it
+    assert.equal(flowsBy("energy-buy"), 1);
+    // Cash: 100 − 10 (the purchase) + 50 (deposited while the worker was down).
+    assert.equal(await tick(140n * U), "infer");
+    assert.equal(inferredIn(), 50, "exactly the deposit");
+    assert.equal(flowsBy("inferred", "out"), 0);
+    assert.equal(await store.getNetContributionsUsdg(ACCOUNT), 140);
+    assert.equal(await peak(), 140);
+    assert.deepEqual(proc.fees, [], "no fee on the owner's own deposit");
+  });
+
+  it("A REVERTED ARM-SETTLED OP + DOWNTIME DEPOSIT: the revert moved nothing and masks nothing — the deposit is booked", async () => {
+    const op = await lastProcessSent({ ...swapRow });
+    lands(op, [], false);
+    restart(T0 + 20);
+    await resolvePass();
+    assert.equal(await tick(150n * U), "infer");
+    assert.equal(inferredIn(), 50);
+  });
+
+  it("A STRANDED OP THE LAST PROCESS'S RESOLVER SETTLED BEFORE IT STOPPED is an earlier write: explained, never booked a second time", async () => {
+    const op = await lastProcessSent();
+    lands(op, energyLogs(10n * U));
+    await resolvePass(); // the OLD process's resolver books it and settles the row…
+    assert.equal(flowsBy("energy-buy"), 1);
+    restart(T0 + 20); // …and it stops before its next look
+    assert.equal(await tick(90n * U), "explained");
+    assert.equal(flowsBy("inferred"), 0, "its −10 is not downtime movement");
+    assert.equal(await peak(), 90, "one peak move");
+  });
+
+  it("A FILL THE LAST PROCESS RECORDED AFTER ITS FINAL READING is an earlier write too — its cash leg is not a withdrawal", async () => {
+    const h = await lastProcessSent({ ...swapRow });
+    exec("UPDATE trades SET status = 'landed' WHERE user_op_hash = ?", h); // recordTrade(landed), then the process stopped
+    restart(T0 + 20);
+    assert.equal(await tick(90n * U, 100n * U), "explained");
+    assert.equal(flowsBy("inferred"), 0);
+    assert.equal(await peak(), 100);
+  });
+
+  it("A DOWNTIME WITHDRAWAL WITH NOTHING ELSE IN THE INTERVAL is still booked — the self-hosted look is unchanged there", async () => {
+    await lastProcessSent({ ...swapRow, status: "reverted" });
+    restart(T0 + 20);
+    assert.equal(await tick(70n * U), "infer");
+    assert.equal(flowsBy("inferred", "out"), 1);
+    assert.equal(await peak(), 70);
+  });
+
+  it("HOSTED RESUME: an arm-settled purchase explains its own drift (resume-clean, nothing doubted); an unresolved one holds the look", async () => {
+    const op = await lastProcessSent();
+    lands(op, energyLogs(10n * U));
+    restart(T0 + 20, { cashUsdg: 100n * U, observedAt: T0 });
+    await resolvePass();
+    assert.equal(await tick(90n * U), "resume-clean", "a −10 drift the settlement explains is no drift");
+    assert.equal(proc.doubted, false, "contributions stay known");
+    assert.equal(flowsBy("inferred"), 0);
+
+    // And with the op still unresolved at arm, nothing is judged at all.
+    await freshAgent();
+    const op2 = await lastProcessSent();
+    lands(op2, null);
+    restart(T0 + 20, { cashUsdg: 100n * U, observedAt: T0 });
+    await resolvePass();
+    assert.equal(await tick(90n * U), "hold");
+    assert.equal(proc.doubted, false, "not doubted on a stranded op's movement");
   });
 });
