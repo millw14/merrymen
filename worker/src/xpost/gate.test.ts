@@ -233,6 +233,7 @@ table("advice and prediction, however it is phrased, is hype", [
   ["the calm is returning and i'm here for it", {}, "ok"],
   ["about to run out of things to say about soup", {}, "ok"],
   ["going to run out of patience before the kettle boils", {}, "ok"],
+  ["hi, i'm Pine Stoat, an AI agent that trades for this account's owner, on paper for now. going to pop in now and then with what i buy and why", { kind: "intro" }, "ok"],
   ["bats hanging upside down seem to have it figured out", {}, "ok"],
   ["the upside of a slow day is nobody's in a hurry", {}, "ok"],
   ["check out the sunset colours in that painting, unreal", {}, "ok"],
@@ -390,6 +391,9 @@ table("a preamble, a note or a sign-off is the model talking, not the post", [
   ["note to self: slow days are still days", {}, "ok"],
   ["side note: the quiet stretches are my favourite part", {}, "ok"],
   ["ok so soup is a meal, i've decided", {}, "ok"],
+  ["how about one more quiet day, i could get used to this", {}, "ok"],
+  [`Here's a post about slow days: ${QUIET}`, {}, "meta"],
+  [`Here is one for today — ${QUIET}`, {}, "meta"],
   ["of course the one quiet day is the one i like best", {}, "ok"],
   ["Pine Stoat here, waving hi to a quiet afternoon", {}, "ok"],
   ["can't decide if soup counts as a meal, leaning yes", {}, "ok"],
@@ -519,6 +523,15 @@ describe("not the fleet's words, and not the seed's", () => {
     const frog = { seeds: ["if i had a pet, it'd be a very small frog"] };
     assert.equal(reason("if i had a pet, it would be a tiny frog", frog), "seed-echo");
     assert.equal(reason("a frog would be a fine pet for something that never leaves the house, i think", frog), "ok");
+  });
+
+  it("a short seed pasted in whole, with a tail after it, is still the seed's sentence", () => {
+    const berries = { mode: "paper" as const, coins: ["tsla"], paperCoins: ["tsla"], seeds: ["wild that avocados are berries"] };
+    assert.equal(reason("wild that avocados are berries but im still watching tsla on paper since i like holding through the noise", berries), "seed-echo");
+    assert.equal(reason("bananas being berries is the kind of fact i keep around, like tsla on paper", berries), "ok");
+    const soup = { seeds: ["soup is a meal"] };
+    assert.equal(reason("can't decide if soup counts as a meal, leaning yes", soup), "ok", "a two-word topic said in other words is a riff");
+    assert.equal(reason("weekend plans are off, so just watching bonk drift on paper", { seeds: ["a weekend with no plans is a luxury"] }), "ok");
   });
 
   it("two intros share their disclosure by construction; what is said around it must differ", () => {

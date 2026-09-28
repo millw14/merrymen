@@ -138,8 +138,9 @@ const PASS = /^[^\p{L}\p{N}]*pass(?![\p{L}\p{N}_])/iu;
  * did not wrap the whole answer. Apostrophes stay: "can't" is a contraction.
  * "here's the thing:", "note to self:" and "side note:" are how people post.
  */
+// A preamble ends in a colon or a dash: "how about one more quiet day" is a post.
 const META_PREAMBLE =
-  /^(?:(?:sure|okay|ok|alright|absolutely|certainly|of course)[\s,!.:-]*)?(?:here'?s|here is|how about)\s+(?:a |an |one |my |the |your |another )?(?:[\w'-]+\s+){0,2}?(?:post|tweet|draft|version|attempt|option|one)\b/i;
+  /^(?:(?:sure|okay|ok|alright|absolutely|certainly|of course)[\s,!.:-]*)?(?:here'?s|here is|how about)\s+(?:a |an |one |my |the |your |another )?(?:[\w'-]+\s+){0,2}?(?:post|tweet|draft|version|attempt|option|one)\b[^.!?\n:—–-]{0,40}[:—–-]/i;
 const META_ACK = /^(?:(?:sure|okay|ok|alright|absolutely|of course|got it)\s*[!:]|(?:certainly|understood|as requested)\b)/i;
 const META_NOTE = /\(\s*note\b|(?<!\b(?:side|quick|self)\s)\bnote\s*:|\blet me know\b|\banother version\b|\bas requested\b|\bhope (?:this|that) (?:works|helps)\b/i;
 
@@ -361,7 +362,8 @@ const HYPE = new RegExp(
       "bearish",
       "undervalued",
       "primed",
-      "(?:ready|set|gonna|going) to (?:run|rip|pop|fly|explode)(?![\\s-]+(?:out|into|through|away|over|off|late|around|errands?|a|an|the|my|some)\\b)",
+      // Not when it runs OUT, or pops IN: "going to pop in now and then" is an intro.
+      "(?:ready|set|gonna|going) to (?:run|rip|pop|fly|explode)(?![\\s-]+(?:out|in|into|by|up|back|through|away|over|off|late|around|round|errands?|a|an|the|my|some)\\b)",
       "gonna (?:rip|pop|fly)",
       "going to be (?:big|huge|massive)",
       "room to run",
@@ -615,24 +617,37 @@ function contentWords(text: string): Set<string> {
 /** A seed with fewer content words than this is a topic, not a sentence (see seedEcho). */
 const SEED_SENTENCE_WORDS = 4;
 
+/** A text's content words in the order it says them (contentWords, as a sequence). */
+function contentRun(text: string): string {
+  return text
+    .toLowerCase()
+    .split(/[^a-z]+/)
+    .filter((w) => w.length > 2 && similarity(w, w) > 0)
+    .join(" ");
+}
+
 /**
- * HOW MUCH OF A DRAFT IS ITS SEED. A seed that is a sentence is weighed like
- * any echo: shared content words over the shorter side's. A SHORT seed — "the
+ * DOES A DRAFT ECHO ITS SEED? A seed that is a sentence is weighed like any
+ * echo: shared content words over the shorter side's. A SHORT seed — "the
  * snooze button is a trap" is three content words — is a topic, and a riff
  * keeps a topic's nouns: "i know the pause button is just a trap that keeps
  * me from moving forward" shares two of three, which the shorter-side measure
- * calls a copy. So a short seed is weighed over the LONGER side's words: a
- * riff brings words of its own, a copy ("if i had a pet, it would be a tiny
- * frog") brings next to none.
+ * calls a copy. So a short seed is weighed over the LONGER side's words (a
+ * riff brings words of its own, a near-copy — "if i had a pet, it would be a
+ * tiny frog" — brings next to none), and it is also an echo when the draft
+ * says the seed's words in a row: the seed pasted in with a tail after it
+ * ("wild that avocados are berries but im still watching tsla…") is still the
+ * seed's sentence, not the agent's.
  */
-function seedEcho(text: string, seed: string): number {
+function echoesSeed(text: string, seed: string): boolean {
   const s = contentWords(seed);
-  if (s.size >= SEED_SENTENCE_WORDS) return similarity(text, seed);
+  if (s.size >= SEED_SENTENCE_WORDS) return similarity(text, seed) >= REPEAT_LIMIT;
   const t = contentWords(text);
-  if (s.size === 0 || t.size === 0) return 0;
+  if (s.size === 0 || t.size === 0) return false;
+  if (s.size >= 2 && ` ${contentRun(text)} `.includes(` ${contentRun(seed)} `)) return true;
   let shared = 0;
   for (const w of s) if (t.has(w)) shared++;
-  return shared / Math.max(s.size, t.size);
+  return shared / Math.max(s.size, t.size) >= REPEAT_LIMIT;
 }
 
 function strings(list: unknown): string[] {
@@ -721,7 +736,7 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   // must differ.
   const weigh = (s: string) => (ctx.kind === "intro" ? s.replace(INTRO_DISCLOSURE, " ") : s);
   if (fleet.some((prev) => similarity(weigh(mine), weigh(prev)) >= REPEAT_LIMIT)) return refuse("fleet-repeat");
-  if (strings(ctx.seeds).some((seed) => seedEcho(text, seed) >= REPEAT_LIMIT)) return refuse("seed-echo");
+  if (strings(ctx.seeds).some((seed) => echoesSeed(text, seed))) return refuse("seed-echo");
 
   return { ok: true, text };
 }
