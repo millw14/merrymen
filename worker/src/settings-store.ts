@@ -730,6 +730,30 @@ const RECORD_RELEASE = `INSERT INTO holder_wallet_moves (wallet, last_tenant, mo
   SELECT wallet, tenant, moved_at, moved_from FROM holder_claims`;
 const ON_RELEASE_CONFLICT = `ON CONFLICT (wallet) DO UPDATE SET last_tenant = EXCLUDED.last_tenant,
   moved_at = EXCLUDED.moved_at, moved_from = EXCLUDED.moved_from`;
+/**
+ * …AND THEN DELETE ONLY A CLAIM ITS WALLET'S RECORD NOW DESCRIBES EXACTLY
+ * (appended to the caller's DELETE … WHERE on holder_claims).
+ *
+ * The record and the delete are two statements, and the store shares one
+ * pg.Client across requests, so another request's statements run between
+ * them — and under READ COMMITTED each statement reads afresh. Unconditional,
+ * the DELETE on the account took whatever that account held BY THEN: a move
+ * onto it that landed between the two (a DELETE and a POST /api/holder fired
+ * together) was deleted with no record, the wallet read as never claimed, and
+ * its next claim was a first-ever one with the day's move unspent — one bag
+ * passed on through as many accounts as the race was won.
+ *
+ * So a claim goes only while holder, last move and whom it came from are
+ * still what its record says, and every deleted claim is one its record
+ * carries. One that arrived in between is simply not deleted: as if it had
+ * landed just after this release, which is an order the two requests could
+ * have run in anyway. Portable (sqlite runs it too) and with no BEGIN, which
+ * a client shared across requests cannot hold open. Postgres re-checks the
+ * row's own columns against a concurrent change before deleting it.
+ */
+const RECORDED_AS_IS = `AND EXISTS (SELECT 1 FROM holder_wallet_moves m WHERE m.wallet = holder_claims.wallet
+  AND m.last_tenant = holder_claims.tenant AND COALESCE(m.moved_at, -1) = COALESCE(holder_claims.moved_at, -1)
+  AND COALESCE(m.moved_from, '') = COALESCE(holder_claims.moved_from, ''))`;
 
 /** A nullable BIGINT epoch-ms column. */
 function pgMs(v: unknown): number | null {
@@ -1015,28 +1039,33 @@ export class PgSettingsStore implements SettingsStore {
     );
   }
   /**
-   * RECORD, THEN DELETE — both conditional on the holder. Recorded first, so
-   * a crash between leaves the claim held and its record saying the same;
-   * never a claim gone with no record of the day's move.
+   * RECORD, THEN DELETE WHAT WAS RECORDED — both conditional on the holder.
+   * Recorded first, so a crash between leaves the claim held and its record
+   * saying the same; never a claim gone with no record of the day's move. And
+   * the DELETE takes only a claim its record still describes (RECORDED_AS_IS),
+   * so a move that lands between the two survives rather than vanishing.
    */
   async releaseHolder(wallet: string, tenant: string): Promise<void> {
     const w = claimKey("wallet", wallet);
     const t = claimKey("tenant", tenant);
     const c = await this.client();
     await c.query(`${RECORD_RELEASE} WHERE wallet = $1 AND tenant = $2 ${ON_RELEASE_CONFLICT}`, [w, t]);
-    await c.query(`DELETE FROM holder_claims WHERE wallet = $1 AND tenant = $2`, [w, t]);
+    await c.query(`DELETE FROM holder_claims WHERE wallet = $1 AND tenant = $2 ${RECORDED_AS_IS}`, [w, t]);
   }
-  /** One DELETE on the account, so it clears strays whatever put them there — each recorded first. */
+  /**
+   * One DELETE on the account, so it clears strays whatever put them there —
+   * each recorded first, and deleted only as recorded (releaseHolder).
+   */
   async releaseHolderClaims(tenant: string, keep?: string): Promise<void> {
     const t = claimKey("tenant", tenant);
     const c = await this.client();
     if (keep === undefined) {
       await c.query(`${RECORD_RELEASE} WHERE tenant = $1 ${ON_RELEASE_CONFLICT}`, [t]);
-      await c.query(`DELETE FROM holder_claims WHERE tenant = $1`, [t]);
+      await c.query(`DELETE FROM holder_claims WHERE tenant = $1 ${RECORDED_AS_IS}`, [t]);
     } else {
       const k = claimKey("wallet", keep);
       await c.query(`${RECORD_RELEASE} WHERE tenant = $1 AND wallet <> $2 ${ON_RELEASE_CONFLICT}`, [t, k]);
-      await c.query(`DELETE FROM holder_claims WHERE tenant = $1 AND wallet <> $2`, [t, k]);
+      await c.query(`DELETE FROM holder_claims WHERE tenant = $1 AND wallet <> $2 ${RECORDED_AS_IS}`, [t, k]);
     }
   }
   async holderClaims(wallets?: readonly string[]): Promise<Map<string, `0x${string}`>> {

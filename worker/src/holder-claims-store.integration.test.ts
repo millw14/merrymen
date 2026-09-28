@@ -553,6 +553,134 @@ describe("PgSettingsStore specifics", () => {
     assert.deepEqual(await s.takeHolder(W, tenantN(3), day + 4 * HOUR), { ok: false, movableAt: day + DAY, held: false }, "released, and the day's move kept");
   });
 
+  /**
+   * sqlite standing in for Postgres, with a one-shot `run` just before the
+   * first statement `before` matches — how one pg.Client's queue serves two
+   * requests' statements alternately. Never re-entered: the hook is cleared
+   * before it runs, so its own statements pass straight through.
+   */
+  function hookedClient(): { client: Client; db: Client; hook: (before: RegExp, run: () => Promise<void>) => void } {
+    const db = sqliteClient();
+    let pending: { before: RegExp; run: () => Promise<void> } | null = null;
+    return {
+      db,
+      hook: (before, run) => {
+        pending = { before, run };
+      },
+      client: {
+        async query(sql, params) {
+          const h = pending;
+          if (h && h.before.test(sql.replace(/\s+/g, " ").trim())) {
+            pending = null;
+            await h.run();
+          }
+          return db.query(sql, params);
+        },
+      },
+    };
+  }
+
+  it("A MOVE THAT LANDS BETWEEN A RELEASE'S RECORD AND ITS DELETE SURVIVES — the day's move is never erased unrecorded", async () => {
+    // The review's sybil bypass (R3-CLAIMS1): account B fires DELETE and POST
+    // /api/holder together; one pg.Client alternates their statements, so the
+    // release recorded nothing (B held nothing yet), the move A → B landed,
+    // and the release's DELETE on the account then took the claim that had
+    // just moved there. No claim, no record: C's claim was a first-ever one,
+    // C → D a second free move the same day, and again for E and F.
+    const { client, db, hook } = hookedClient();
+    const s = new PgSettingsStore("postgres://stand-in", async () => client);
+    const day = Date.UTC(2026, 8, 28);
+    const [C, D] = [tenantN(40), tenantN(41)];
+    assert.deepEqual(await s.takeHolder(W, A, day - 5 * HOUR), { ok: true, fresh: true }, "A has held W since yesterday");
+    let moved: Awaited<ReturnType<Store["takeHolder"]>> | null = null;
+    hook(/^DELETE FROM holder_claims WHERE tenant = \$1/, async () => {
+      moved = await s.takeHolder(W, B, day + 2 * HOUR);
+    });
+    await s.releaseHolderClaims(B);
+    assert.equal(moved && (moved as { from?: string }).from, A, "set-up: A → B landed between the release's two statements");
+    const held = (await s.holderClaims()).get(W);
+    const { rows: record } = await db.query(`SELECT last_tenant, moved_at FROM holder_wallet_moves WHERE wallet = $1`, [W]);
+    assert.ok(held === B || record.length === 1, `the move is still somewhere: claim ${held}, record ${JSON.stringify(record)}`);
+    assert.equal(held, B, "the claim that arrived after the release looked survives it");
+    assert.deepEqual(await s.takeHolder(W, C, day + 3 * HOUR), { ok: false, movableAt: day + DAY, held: true }, "C's is the day's second move");
+    assert.deepEqual(await s.takeHolder(W, D, day + 4 * HOUR), { ok: false, movableAt: day + DAY, held: true });
+    // And B's own unlink, run again now that B holds it, records the move.
+    await s.releaseHolderClaims(B);
+    assert.equal((await s.holderClaims()).has(W), false);
+    assert.deepEqual(await s.takeHolder(W, C, day + 5 * HOUR), { ok: false, movableAt: day + DAY, held: false }, "released, and the move kept");
+  });
+
+  it("…the same through a link's release of the account's OTHER claims (keep), and a single wallet's release", async () => {
+    const day = Date.UTC(2026, 8, 28);
+    const V = "0x000000000000000000000000000000000000f00d";
+    const C = tenantN(42);
+    {
+      // B links V in one tab (take V, then release B's others but V) while
+      // linking W in another.
+      const { client, hook } = hookedClient();
+      const s = new PgSettingsStore("postgres://stand-in", async () => client);
+      await s.takeHolder(W, A, day - 5 * HOUR);
+      await s.takeHolder(V, B, day + 1 * HOUR);
+      hook(/^DELETE FROM holder_claims WHERE tenant = \$1 AND wallet <> \$2/, async () => {
+        await s.takeHolder(W, B, day + 2 * HOUR);
+      });
+      await s.releaseHolderClaims(B, V);
+      assert.equal((await s.holderClaims()).get(W), B, "keep: the move survives");
+      assert.equal((await s.takeHolder(W, C, day + 3 * HOUR)).ok, false, "keep: C still waits");
+    }
+    {
+      // A single wallet's release (releaseHolder) raced by A → B → A: the
+      // release recorded A's never-moved claim, and the claim now there is a
+      // different one — stamped with today's move — that must not go with it.
+      const { client, hook } = hookedClient();
+      const s = new PgSettingsStore("postgres://stand-in", async () => client);
+      await s.takeHolder(W, A, day - 5 * HOUR);
+      hook(/^DELETE FROM holder_claims WHERE wallet = \$1 AND tenant = \$2/, async () => {
+        assert.equal((await s.takeHolder(W, B, day + 2 * HOUR)).ok, true);
+        assert.equal((await s.takeHolder(W, A, day + 3 * HOUR)).ok, true, "back to A, the account it was moved from");
+      });
+      await s.releaseHolder(W, A);
+      assert.equal((await s.holderClaims()).get(W), A, "the claim that moved back in meanwhile survives");
+      assert.equal((await s.takeHolder(W, C, day + 4 * HOUR)).ok, false, "and still carries the day's move");
+    }
+  });
+
+  it("…and with no script at all: DELETE and POST from one account, fired together through one FIFO client", async () => {
+    // How a single pg.Client serves concurrent requests in one web process:
+    // strictly one statement at a time, in the order they were issued, each a
+    // network round trip. The review's log: SELECT sealed, SELECT claim,
+    // INSERT INTO holder_wallet_moves, UPDATE holder_claims, DELETE FROM
+    // holder_claims — ending with no claim and no record.
+    const db = sqliteClient();
+    let chain: Promise<unknown> = Promise.resolve();
+    const fifo: Client = {
+      query(sql, params) {
+        const run = async () => {
+          await new Promise((r) => setTimeout(r, 1));
+          return db.query(sql, params);
+        };
+        const p = chain.then(run, run);
+        chain = p.catch(() => {});
+        return p;
+      },
+    };
+    const s = new PgSettingsStore("postgres://stand-in", async () => fifo);
+    const day = Date.UTC(2026, 8, 28);
+    const C = tenantN(43);
+    await s.takeHolder(W, A, day - 5 * HOUR);
+    const del = (async () => {
+      await s.get(B as `0x${string}`); // the DELETE route reads settings first
+      await s.releaseHolderClaims(B);
+    })();
+    const post = s.takeHolder(W, B, day + 2 * HOUR);
+    const [, moved] = await Promise.all([del, post]);
+    assert.equal((moved as { from?: string }).from, A, "set-up: the move A → B landed");
+    const held = (await s.holderClaims()).get(W);
+    const { rows: record } = await db.query(`SELECT last_tenant FROM holder_wallet_moves WHERE wallet = $1`, [W]);
+    assert.ok(held === B || record.length === 1, `the move is still somewhere: claim ${held}, record ${JSON.stringify(record)}`);
+    assert.equal((await s.takeHolder(W, C, day + 3 * HOUR)).ok, false, "the day's bound holds: C waits");
+  });
+
   it("A CLAIM ON A FREE WALLET LANDS ONLY ON THE RECORD IT READ — a claim-and-release in between makes it look again", async () => {
     // Between this call reading "never released" and its INSERT, another
     // account claimed the wallet by a move and let it go. Unconditional, the
@@ -694,20 +822,25 @@ describe("PgSettingsStore specifics", () => {
     await assert.rejects(s.releaseHolder(W, A));
   });
 
-  it("release is one conditional DELETE on wallet AND account", async () => {
+  /** Only a claim its wallet's release record now describes exactly — holder, last move, whom it came from. */
+  const AS_RECORDED =
+    " AND EXISTS (SELECT 1 FROM holder_wallet_moves m WHERE m.wallet = holder_claims.wallet AND m.last_tenant = holder_claims.tenant" +
+    " AND COALESCE(m.moved_at, -1) = COALESCE(holder_claims.moved_at, -1) AND COALESCE(m.moved_from, '') = COALESCE(holder_claims.moved_from, ''))";
+
+  it("release is one conditional DELETE on wallet AND account — and only as recorded", async () => {
     const log: string[] = [];
     const s = new PgSettingsStore("postgres://stand-in", async () => sqliteClient({ log }));
     await s.releaseHolder(W, A);
-    assert.ok(log.includes("DELETE FROM holder_claims WHERE wallet = $1 AND tenant = $2"), log.join("\n"));
+    assert.ok(log.includes(`DELETE FROM holder_claims WHERE wallet = $1 AND tenant = $2${AS_RECORDED}`), log.join("\n"));
   });
 
-  it("an account's claims go in ONE DELETE on the account", async () => {
+  it("an account's claims go in ONE DELETE on the account — each only as recorded", async () => {
     const log: string[] = [];
     const s = new PgSettingsStore("postgres://stand-in", async () => sqliteClient({ log }));
     await s.releaseHolderClaims(A, W);
     await s.releaseHolderClaims(A);
-    assert.ok(log.includes("DELETE FROM holder_claims WHERE tenant = $1 AND wallet <> $2"), log.join("\n"));
-    assert.ok(log.includes("DELETE FROM holder_claims WHERE tenant = $1"), log.join("\n"));
+    assert.ok(log.includes(`DELETE FROM holder_claims WHERE tenant = $1 AND wallet <> $2${AS_RECORDED}`), log.join("\n"));
+    assert.ok(log.includes(`DELETE FROM holder_claims WHERE tenant = $1${AS_RECORDED}`), log.join("\n"));
   });
 });
 
