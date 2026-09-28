@@ -14,7 +14,7 @@
  * words from here, so a copy change is made once. No price or returns
  * language, ever (core token.ts STANCE).
  */
-import { isEnergyReserveToken, shortAddress } from "@merrymen/core";
+import { MERRYMEN_TOKEN, isEnergyReserveToken, shortAddress } from "@merrymen/core";
 
 /** For an assistant or a checklist: what it is, how it is bought, and that no signature is involved. */
 export const ENERGY_RESERVE_WHY =
@@ -47,6 +47,45 @@ export function withoutEnergyReserve<T>(list: T[] | undefined): T[] | undefined 
   return list.filter((t) => {
     const address = (t as { address?: unknown } | null)?.address;
     return !(typeof address === "string" && isEnergyReserveToken(address));
+  });
+}
+
+/**
+ * THE BASKET AS A CLIENT READS AND SAVES IT: a symbol only a reserve entry
+ * ever supplied goes with that entry.
+ *
+ * withoutEnergyReserve leaves the reserve out of the custom tokens a client is
+ * served, but an owner who listed $MERRYMEN before energy also has MERRYMEN
+ * in `basketSymbols` — Settings' add-token and the Proposals approve both put
+ * the symbol in the basket too. Serving the basket unchanged made every client
+ * that saves both fields (web Settings, Proposals, iOS, Android) send a basket
+ * naming a coin its own token list no longer carried, and the PUT refused it
+ * ("basketSymbols: unknown symbols MERRYMEN"). After a tokens-only save had
+ * dropped the stored entry, EVERY later basket save was refused, about a coin
+ * the owner could no longer see or deselect.
+ *
+ * So a basket symbol is dropped when nothing selectable supplies it (not in
+ * `selectable`: the registry's stocks plus the custom tokens that stay) AND
+ * it is the reserve's — the symbol of a reserve entry in `tokens`, or the
+ * reserve's own name once no entry supplies it at all. Anything else passes
+ * untouched, including a lookalike at another address that merely calls itself
+ * MERRYMEN (it is in `selectable`), and a symbol validation should still refuse.
+ */
+export function withoutReserveBasket<T>(
+  basket: T[] | undefined,
+  tokens: unknown,
+  selectable: ReadonlySet<string>,
+): T[] | undefined {
+  if (!Array.isArray(basket)) return basket;
+  const reserveSymbols = new Set<string>();
+  for (const t of Array.isArray(tokens) ? tokens : []) {
+    const { symbol, address } = (t ?? {}) as { symbol?: unknown; address?: unknown };
+    if (typeof symbol === "string" && typeof address === "string" && isEnergyReserveToken(address)) reserveSymbols.add(symbol);
+  }
+  const reserveName = MERRYMEN_TOKEN.symbol.toUpperCase();
+  return basket.filter((s) => {
+    if (typeof s !== "string" || selectable.has(s)) return true;
+    return !(reserveSymbols.has(s) || s.trim().replace(/^\$/, "").toUpperCase() === reserveName);
   });
 }
 
