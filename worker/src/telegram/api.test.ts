@@ -1203,7 +1203,7 @@ describe("getMe — group flags", () => {
   it("exposes can_join_groups and can_read_all_group_messages", async () => {
     const f = fakeFetch(200, OK({ id: 42, is_bot: true, first_name: "Pine", username: "pine_bot", can_join_groups: true, can_read_all_group_messages: false, supports_inline_queries: false }));
     const { bot } = await getMe({ token: "t", fetchFn: f });
-    assert.deepEqual(bot, { id: 42, username: "pine_bot", canJoinGroups: true, canReadAllGroupMessages: false });
+    assert.deepEqual(bot, { id: 42, username: "pine_bot", firstName: "Pine", canJoinGroups: true, canReadAllGroupMessages: false });
   });
 
   it("privacy off reads as true", async () => {

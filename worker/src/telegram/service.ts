@@ -39,6 +39,8 @@ import {
   setMyCommands,
   publicBotCommands,
   type InlineKeyboard,
+  type SendExtra,
+  type SendResult,
   type TgBotInfo,
   type TgCallback,
   type TgMessage,
@@ -97,7 +99,7 @@ import { describeGap } from "../memory/retrieve";
 import { describeLlmFailure, isLlmProviderFailure } from "../llm-failure";
 import type { TgGroupsStore } from "./tg-groups/store";
 import type { TgCoinsPort } from "./tg-groups/types";
-import { createTgGroups, type TgGroups, type TgGroupsDeps } from "./tg-groups/handler";
+import { createTgGroups, type TgCommandNotice, type TgGroups, type TgGroupsDeps } from "./tg-groups/handler";
 
 /**
  * Commands that are really questions when they arrive as WORDS: answered by
@@ -346,7 +348,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         port: () => deps.tgCoins ?? null,
         self: () => {
           const bot = selfFor(groupCfg());
-          return bot ? { id: bot.id, username: bot.username, name: getName() } : null;
+          // The bot's display name (getMe's first_name) is what members see on
+          // its lines, so it is a name they call it by too ("pine bot, thoughts?").
+          return bot
+            ? { id: bot.id, username: bot.username, name: getName(), ...(bot.firstName ? { aliases: [bot.firstName] } : {}) }
+            : null;
         },
         privacyOff: () => {
           const bot = selfFor(groupCfg());
@@ -785,23 +791,35 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     return cmdDeps;
   };
 
-  const handle = async (msg: TgMessage, cfg: ResolvedConfig): Promise<void> => {
+  /**
+   * `onSent`, when given, hears whether each message this call sends reached the
+   * chat. Only a command forwarded from a group passes it: the room is told
+   * "sent it to your DMs" only when something actually arrived there (a person
+   * who never opened a DM with the bot cannot be written to first). A DM is
+   * answered exactly as before either way.
+   */
+  const handle = async (msg: TgMessage, cfg: ResolvedConfig, onSent?: (ok: boolean) => void): Promise<void> => {
     const token = cfg.telegramBotToken!;
+    const say = async (text: string, extra?: SendExtra): Promise<SendResult> => {
+      const r = await sendMessage({ token }, msg.chatId, text, extra);
+      onSent?.(r.ok);
+      return r;
+    };
     const allowed = cfg.telegramAllowlist.includes(msg.chatId) || cfg.telegramAllowlist.includes(msg.fromId);
 
     // Voice note → text: only for allowlisted chats with the "voice" capability.
     // Transcribed text then flows through the SAME path as a typed message.
     if (msg.voiceFileId && !msg.text) {
       if (!allowed) {
-        await sendMessage({ token }, msg.chatId, "🚫 not authorized.");
+        await say("🚫 not authorized.");
         return;
       }
       if (!cfg.telegramPcControlEnabled || !cfg.telegramCapabilities.includes("voice")) {
-        await sendMessage({ token }, msg.chatId, "🎙️ voice is off — enable “remote control” + the voice capability in the dashboard.");
+        await say("🎙️ voice is off — enable “remote control” + the voice capability in the dashboard.");
         return;
       }
       if (!cfg.telegramTranscribeKey) {
-        await sendMessage({ token }, msg.chatId, "🎙️ add a transcription key (OpenAI-compatible) in the dashboard to talk to me by voice.");
+        await say("🎙️ add a transcription key (OpenAI-compatible) in the dashboard to talk to me by voice.");
         return;
       }
       const { url } = await getFileUrl({ token }, msg.voiceFileId);
@@ -809,18 +827,18 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         ? await transcribeVoice(url, { key: cfg.telegramTranscribeKey, base: cfg.telegramTranscribeBase })
         : { text: null as string | null, reason: "couldn't fetch the voice file" };
       if (!t.text) {
-        await sendMessage({ token }, msg.chatId, `🎙️ couldn't transcribe that: ${esc(t.reason ?? "unknown")}`);
+        await say(`🎙️ couldn't transcribe that: ${esc(t.reason ?? "unknown")}`);
         return;
       }
       msg = { ...msg, text: t.text };
-      await sendMessage({ token }, msg.chatId, `🎙️ <i>heard:</i> ${esc(t.text)}`);
+      await say(`🎙️ <i>heard:</i> ${esc(t.text)}`);
     }
 
     const slash = parseSlash(msg.text);
 
     // /link is the only command an unlisted chat may use — and it's rate-limited.
     if (!allowed && !(slash?.kind === "link")) {
-      await sendMessage({ token }, msg.chatId, "🚫 not authorized. Ask the owner to add you, or /link &lt;code&gt; if you have the code from the dashboard.");
+      await say("🚫 not authorized. Ask the owner to add you, or /link &lt;code&gt; if you have the code from the dashboard.");
       return;
     }
 
@@ -829,13 +847,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // Every gate is checked here, so both entry points are equally locked down.
     const startAgent = async (task: string): Promise<void> => {
       if (!task.trim()) {
-        await sendMessage({ token }, msg.chatId, "what would you like me to do? Describe the task, e.g. “clone github.com/x/y, install, build, and tell me what breaks”.");
+        await say("what would you like me to do? Describe the task, e.g. “clone github.com/x/y, install, build, and tell me what breaks”.");
         return;
       }
       if (!cfg.telegramPcControlEnabled || !cfg.telegramAgentEnabled) {
-        await sendMessage(
-          { token },
-          msg.chatId,
+        await say(
           isHostedMode()
             ? "I can't work on your computer — I live on the merrymen servers. Ask me anything about your trades, coins or settings and I'll look it up."
             : "I can only work on your computer when PC control and agent mode are switched on in Settings. Ask me anything about your trades, coins or settings and I'll look it up.",
@@ -844,11 +860,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       }
       const llm = resolveLlm(cfg);
       if (!llm) {
-        await sendMessage({ token }, msg.chatId, "🤖 agent mode needs an AI provider — pick one in the dashboard (Settings → AI provider).");
+        await say("🤖 agent mode needs an AI provider — pick one in the dashboard (Settings → AI provider).");
         return;
       }
       if (agentRuns.has(msg.chatId)) {
-        await sendMessage({ token }, msg.chatId, "⏳ I'm already on a task here — say “stop” (or /agent stop) first, or wait for it to finish.");
+        await say("⏳ I'm already on a task here — say “stop” (or /agent stop) first, or wait for it to finish.");
         return;
       }
       const st = stateRef.get();
@@ -874,7 +890,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       ].filter((s): s is string => typeof s === "string" && s.length >= 8);
       const stopFlag = { stopped: false };
       agentRuns.set(msg.chatId, stopFlag);
-      await sendMessage({ token }, msg.chatId, "🏹 on it — I'll message progress here. Say “stop” to halt me.");
+      await say("🏹 on it — I'll message progress here. Say “stop” to halt me.");
       void runAgentTask(task, {
         creds: llm,
         cfg: {
@@ -910,7 +926,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       // Same sender-level rule as other state-changing commands: in a group,
       // only individually-allowlisted users may drive the PC.
       if (msg.chatId !== msg.fromId && !cfg.telegramAllowlist.includes(msg.fromId)) {
-        await sendMessage({ token }, msg.chatId, "🚫 in a group, only individually-allowlisted users can run /agent.");
+        await say("🚫 in a group, only individually-allowlisted users can run /agent.");
         return;
       }
       const arg = (agentMatch[1] ?? "").trim();
@@ -918,14 +934,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const running = agentRuns.get(msg.chatId);
         if (running) {
           running.stopped = true;
-          await sendMessage({ token }, msg.chatId, "🛑 stopping after the current step…");
+          await say("🛑 stopping after the current step…");
         } else {
-          await sendMessage({ token }, msg.chatId, "nothing running.");
+          await say("nothing running.");
         }
         return;
       }
       if (!arg) {
-        await sendMessage({ token }, msg.chatId, "what's the task? e.g. <code>/agent clone github.com/x/y, install deps, build, and tell me what breaks</code> — or just say it in plain English. <code>/agent stop</code> halts.");
+        await say("what's the task? e.g. <code>/agent clone github.com/x/y, install deps, build, and tell me what breaks</code> — or just say it in plain English. <code>/agent stop</code> halts.");
         return;
       }
       await startAgent(arg);
@@ -936,7 +952,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     if (agentRuns.has(msg.chatId) && /^\s*(stop|halt|cancel|abort)\b/i.test(msg.text ?? "")) {
       if (msg.chatId === msg.fromId || cfg.telegramAllowlist.includes(msg.fromId)) {
         agentRuns.get(msg.chatId)!.stopped = true;
-        await sendMessage({ token }, msg.chatId, "🛑 stopping after the current step…");
+        await say("🛑 stopping after the current step…");
         return;
       }
     }
@@ -1145,9 +1161,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       cmd.kind === "confirm" ||
       cmd.kind === "agent";
     if (stateChanging && msg.chatId !== msg.fromId && !cfg.telegramAllowlist.includes(msg.fromId)) {
-      await sendMessage(
-        { token },
-        msg.chatId,
+      await say(
         "🚫 in a group, only individually-allowlisted users can run that. The owner can add your Telegram user id in the dashboard.",
       );
       return;
@@ -1199,9 +1213,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     } else if (!parkedNow) {
       pendingMeta.delete(pendingKey);
     }
-    const sent = await sendMessage(
-      { token },
-      msg.chatId,
+    const sent = await say(
       strippedReply ||
         "that came back as reasoning with no answer in it — say it again, or use a slash command like /status.",
       keyboard ? { keyboard } : {},
@@ -1219,17 +1231,21 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * may reach it and where the answer goes:
    *
    *   - "/cmd@OtherBot" is another bot's, and is ignored (parseSlash strips
-   *     any @name without checking it is ours).
+   *     any @name without checking it is ours), and so is a bare command
+   *     parseSlash does not know ("/ban @spammer" is a moderation bot's).
    *   - Someone who may not run commands gets one casual line per hour at
    *     most, never "🚫 not authorized" — with privacy mode off that was one
    *     refusal per message.
    *   - /link never works in a group: codes are for DMs (see below).
    *   - Every command's answer — a private read (rule 3) or an order's
    *     receipt (rule 2) — goes to the asker's own DM, with a "sent it to
-   *     your DMs" in the room; the room never sees a report or a figure.
-   *   - /name, /remember and /soul need the SENDER on the allowlist, like
-   *     every state-changing command (today any member of a linked group
-   *     could run them, and /remember writes owner facts).
+   *     your DMs" in the room once it arrived there (else "dm me /start
+   *     first"); the room never sees a report or a figure.
+   *   - A command reaches the DM only from a SENDER on the allowlist, as a
+   *     DM would need; that covers /name, /remember and /soul (today any
+   *     member of a linked group could run them, and /remember writes owner
+   *     facts).
+   *   - The owner's /groups is answered in their DM, like the DM command.
    *   - /forget wipes that group's memory only, and only for the owner: the
    *     owner's DM memory is not the room's to erase. /forgetme is anyone's.
    */
@@ -1237,11 +1253,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     const text = msg.text.trim();
     const head = text.slice(1).split(/\s+/)[0] ?? "";
     const addressedTo = /@(\w+)$/.exec(head)?.[1];
-    if (addressedTo) {
-      // Unknown username (getMe not answered yet): not provably ours, so not ours.
-      const me = selfFor(cfg)?.username;
-      if (!me || addressedTo.toLowerCase() !== me.toLowerCase()) return;
-    }
+    // Unknown username (getMe not answered yet): not provably ours, so not ours.
+    const me = selfFor(cfg)?.username;
+    const ours = !addressedTo || (!!me && addressedTo.toLowerCase() === me.toLowerCase());
     const name = head.replace(/@\w+$/, "").toLowerCase();
     // A person speaking through a chat (an anonymous admin, a channel) cannot
     // be told apart from any other: nobody in particular to answer or forget.
@@ -1253,16 +1267,10 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // NOT AWAITED. The group line takes typing time, the flood pacer and maybe
     // a 429 pause; the poll loop must not wait on any of it (rule 7). Neither
     // call ever rejects.
-    const notice = (what: "dm-sent" | "private-refused" | "owner-only" | "link-here"): void => {
+    const notice = (what: TgCommandNotice): void => {
       if (tgGroups) void tgGroups.commandNotice(msg.chatId, msg.messageId, msg.fromId, what, thread);
     };
 
-    if (name === "forgetme") {
-      // The wipe itself happens before forgetMe first awaits; only the
-      // "done 🫡" is left to the group queue.
-      if (!via && tgGroups) void tgGroups.forgetMe(msg.chatId, msg.fromId, msg.messageId);
-      return;
-    }
     const slash = parseSlash(text);
     if (slash?.kind === "link") {
       // LINK CODES ARE FOR DMs ONLY. In a group there is nothing to link: the
@@ -1272,18 +1280,50 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       // every member the chat-level private reads (/pnl, /positions …). And
       // when it is the live code, everyone in the room has just seen a bearer
       // credential, so it is replaced and the owner told why.
+      //
+      // CHECKED BEFORE WHOSE COMMAND IT IS. "/link@SomeBot CODE" shows the room
+      // the code just the same — whether it names another bot, an old username
+      // of this one, or this one before getMe has answered — and a code left
+      // live would let any member DM "/link CODE" later and be allowlisted. For
+      // the same reason the code counts anywhere in the words, not only alone.
+      // Only the "no code needed" line waits for the command to be ours.
       const token = cfg.telegramBotToken;
       if (token && slash.code) {
         const state = ensureLinkCode(stateRef.get(), token);
-        if (slash.code.toUpperCase() === state.linkCode.toUpperCase()) {
+        const live = state.linkCode.toUpperCase();
+        if (slash.code.split(/\s+/).some((w) => w.toUpperCase() === live)) {
           stateRef.set(rotateLinkCode(state, token));
           deps.note("warn", "Telegram: a link code was typed in a group; it was replaced");
           if (tgGroups) void tgGroups.codeLeaked(msg.chatId);
         }
       }
-      notice("link-here");
+      if (ours) notice("link-here");
       return;
     }
+    if (!ours) return;
+
+    if (name === "forgetme") {
+      // The wipe itself happens before forgetMe first awaits; only the
+      // "done 🫡" is left to the group queue.
+      if (!via && tgGroups) void tgGroups.forgetMe(msg.chatId, msg.fromId, msg.messageId);
+      return;
+    }
+    // THE OWNER'S /groups is answered in their DM, as when they type it there;
+    // the room hears nothing (the listing names every group the bot is in).
+    if (name === "groups") {
+      if (isOwner) await tgGroups?.groupsCommand(msg.fromId);
+      else notice("owner-only");
+      return;
+    }
+    // A BARE COMMAND WE DO NOT KNOW IS ANOTHER BOT'S. Crypto groups run
+    // moderation and scanner bots whose commands ("/ban @spammer", "/price")
+    // carry no @name; forwarded, each one DMed the asker "unknown command" and
+    // told the room "sent it to your DMs". Only parseSlash's own "unknown
+    // command" marks a name it does not know: its usage lines ("usage: /buy …")
+    // are for our commands and still go through, and /agent is matched by
+    // `handle` itself rather than parseSlash.
+    if (slash?.kind === "unknown" && name !== "agent" && /^unknown command\b/.test(slash.text)) return;
+
     if (!isOwner && !senderListed) {
       notice(slash && PRIVATE_READS.has(slash.kind) ? "private-refused" : "owner-only");
       return;
@@ -1293,8 +1333,15 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       else notice("owner-only");
       return;
     }
-    if (!senderListed && (slash?.kind === "name" || slash?.kind === "remember")) {
-      notice("owner-only");
+    // FORWARDED ONLY WHEN THE DM WOULD ANSWER IT. `handle` lets a DM in by the
+    // sender's own id on the allowlist. An owner who linked from a group
+    // before groups had their own rules has only that group there, so their DM
+    // would be "🚫 not authorized" while the room heard "sent it to your DMs";
+    // they are asked to DM the bot instead, which is where linking now
+    // happens. /name and /remember need the sender listed too (they shape the
+    // soul), and this is where they get it.
+    if (!senderListed) {
+      notice("dm-first");
       return;
     }
     // EVERY OTHER ANSWER GOES TO THE ASKER'S DM, reads and orders alike. The
@@ -1302,9 +1349,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // applies (confirm buttons included), and the answer lands in their DM.
     // A private read in the room would publish the owner's book (rule 3), and
     // an order's receipt — "bought 10 USDG of …" — is exactly the figure a
-    // group must never see (rule 2).
-    await handle({ updateId: msg.updateId, chatId: msg.fromId, fromId: msg.fromId, fromUsername: msg.fromUsername, text: msg.text }, cfg);
-    notice("dm-sent");
+    // group must never see (rule 2). The room hears "sent it to your DMs" only
+    // when the DM arrived: a bot cannot write first to someone who never
+    // opened a DM with it.
+    let delivered = false;
+    await handle({ updateId: msg.updateId, chatId: msg.fromId, fromId: msg.fromId, fromUsername: msg.fromUsername, text: msg.text }, cfg, (ok) => {
+      if (ok) delivered = true;
+    });
+    notice(delivered ? "dm-sent" : "dm-first");
   };
 
   /**

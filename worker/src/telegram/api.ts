@@ -198,6 +198,12 @@ export type InlineKeyboard = InlineButton[][];
 export interface TgBotInfo {
   id: number;
   username: string;
+  /**
+   * getMe's first_name: the display name members see on the bot's lines
+   * ("Pine Bot"), which is often what they call it rather than its username or
+   * soul name. Absent when Telegram left it out or it was not a string.
+   */
+  firstName?: string;
   /** getMe's can_join_groups: false when BotFather's "Allow Groups" is off. */
   canJoinGroups?: boolean;
   /**
@@ -317,7 +323,7 @@ async function call(opts: TelegramOpts, method: string, params?: Record<string, 
 export async function getMe(opts: TelegramOpts): Promise<{ bot: TgBotInfo | null; reason?: string }> {
   const { result, reason } = await call(opts, "getMe");
   if (!result || typeof result !== "object") return { bot: null, reason: reason ?? `invalid token ${short(opts.token)}` };
-  const r = result as { id?: unknown; username?: unknown; can_join_groups?: unknown; can_read_all_group_messages?: unknown };
+  const r = result as { id?: unknown; username?: unknown; first_name?: unknown; can_join_groups?: unknown; can_read_all_group_messages?: unknown };
   if (typeof r.id !== "number" || typeof r.username !== "string") {
     return { bot: null, reason: "getMe: missing id/username" };
   }
@@ -325,6 +331,7 @@ export async function getMe(opts: TelegramOpts): Promise<{ bot: TgBotInfo | null
     bot: {
       id: r.id,
       username: r.username,
+      ...(typeof r.first_name === "string" && r.first_name.trim() ? { firstName: r.first_name.trim() } : {}),
       ...(typeof r.can_join_groups === "boolean" ? { canJoinGroups: r.can_join_groups } : {}),
       ...(typeof r.can_read_all_group_messages === "boolean" ? { canReadAllGroupMessages: r.can_read_all_group_messages } : {}),
     },
