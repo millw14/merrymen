@@ -8,14 +8,15 @@
  * THE MODEL IS NEVER SHOWN A NUMBER, OR ANYTHING PRIVATE. Every prompt here is
  * built from plain words the caller already cleaned: the agent's name, its
  * strategy as spoken and one flavour phrase, trait lines, paper or live, a
- * typing style, its own recent X posts, and for a buy the coin's label, the
- * closed-vocabulary evidence bands and the agent's own earlier (already gated)
- * words. No reason text (a model's reason may quote the owner's cash), no
- * size, price, balance, error, owner fact, time zone or X handle ever reaches
- * a builder — the inputs have no field for them — and `clean` drops any given
- * fact that still carries a digit. Even the length rule is spelled out in
- * words. A model that was never shown a figure has none to repeat, and the
- * gate drops the post if it invents one anyway.
+ * typing style, its own recent X posts, and for a buy the coin's label, fixed
+ * everyday glosses of the closed-vocabulary evidence bands (BUY_GLOSS) and the
+ * agent's own earlier (already gated) words. No reason text (a model's reason
+ * may quote the owner's cash), no size, price, balance, error, owner fact,
+ * time zone or X handle ever reaches a builder — the inputs have no field for
+ * them — and `clean` drops any given fact that still carries a digit. Even
+ * the length rule is spelled out in words. A model that was never shown a
+ * figure has none to repeat, and the gate drops the post if it invents one
+ * anyway.
  *
  * NO EXAMPLE POST. An example becomes a template: every agent's posts would
  * share its skeleton, and X reads a fleet of near-identical posts as spam.
@@ -37,6 +38,7 @@
  */
 import { SETTINGS_DEFAULTS } from "../../../packages/core/src/index";
 import { llmText, type LlmCreds } from "../llm";
+import { hash32 } from "./planner";
 
 export type { LlmCreds };
 
@@ -69,10 +71,16 @@ export interface BuyFacts extends WriterFacts {
   /** The coin as the post may name it: a clean display name or an all-letters ticker. */
   coin: string;
   paper: boolean;
-  /** Closed-vocabulary evidence words ("curve early"). */
+  /** Closed-vocabulary evidence words ("curve early"). Never shown as they are: see BUY_GLOSS. */
   bands: string[];
   /** The agent's own feed post about this trade, already gated, or null. */
   ownWords: string | null;
+  /**
+   * Which glosses this buy gets, and which two reasons. The glue passes
+   * `${tenant}|${decisionId}`, so two accounts buying on the same bands are
+   * handed different words. Default: the agent's name and the coin.
+   */
+  glossSeed?: string;
 }
 
 export interface CasualFacts extends WriterFacts {
@@ -214,21 +222,101 @@ export function introPrompt(f: WriterFacts): Prompt {
 }
 
 /**
- * A COIN IT BOUGHT, AND WHY. The why is the closed-vocabulary bands and its own
- * earlier words, never the decision's reason. A paper fill is said to be paper
+ * THE BANDS IN EVERYDAY WORDS — two or three fixed glosses for every buy band
+ * class-evidence.ts can produce (writer.test.ts derives the set from
+ * everyBand() and holds every one to a gloss).
+ *
+ * WHY NOT THE BANDS THEMSELVES: handed «our size nudges it», «round trip
+ * cheap», «liquidity adequate», a small model copies them word for word. The
+ * posts read like a log ("committed where the liquidity was adequate", "our
+ * size"), and with about twenty bands every account's buy posts share most of
+ * their content words, which is what the gate's fleet-echo clause refuses.
+ *
+ * FIXED STRINGS, NOT A MODEL'S PARAPHRASE, so the closed-vocabulary guarantee
+ * still holds: every gloss is written here, has no digit, passes the gate's
+ * vocabulary clauses, and says "i" and "my" — never "our" or "we", because it
+ * was this agent's own buy. A band with no gloss here (an exit band, a band
+ * added tomorrow) is not shown at all rather than shown raw.
+ */
+export const BUY_GLOSS: ReadonlyMap<string, readonly string[]> = new Map<string, readonly string[]>([
+  // depth
+  ["liquidity thin", ["the pool behind it was still small, and i was fine with that", "not much was sitting in the pool yet, and i went in anyway"]],
+  ["liquidity adequate", ["there was enough in the pool for me to get in comfortably", "the pool behind it was big enough for me", "it had enough behind it for me to feel ok going in"]],
+  ["liquidity deep", ["the pool behind it had plenty of room for me", "i liked how deep the pool behind it was"]],
+  // round-trip cost
+  ["round trip cheap", ["it was cheap for me to get in and back out", "being wrong on it would not cost me much"]],
+  ["round trip fair", ["getting in and back out cost me a little, which felt fair", "being wrong on it would cost me something, but not a lot"]],
+  ["round trip expensive", ["getting in and back out was not cheap for me, and i went anyway", "being wrong on this one would cost me, and i still liked it"]],
+  // how far along the curve is
+  ["curve early", ["i liked that it was still early days for it", "i got in while it was still early", "it had barely started when i found it"]],
+  ["curve building", ["i came in as it started to build, nowhere near done", "i caught it just as it was getting going"]],
+  ["curve well along", ["it was already a good way along when i came in", "i came in after it had already built up"]],
+  ["curve at the exit line", ["i came in when it was already close to the end of its curve", "i came in late, near the end of its curve"]],
+  // activity
+  ["activity steady", ["i liked the steady pace of people trading it", "i saw a steady stream of trades in it"]],
+  ["activity picking up", ["i noticed trading in it picking up", "i saw more people start trading it", "it was getting busier when i looked"]],
+  ["activity heavy", ["i liked how busy it was, lots of people trading it", "i saw a lot of trading going on in it"]],
+  // breadth
+  ["the same few hands", ["i went in with only the same small group trading it", "hardly anyone was trading it yet when i went in"]],
+  ["buyers mostly new", ["i liked that most of the people buying it were new to it", "i kept seeing new people show up to buy it"]],
+  ["buyers spread out", ["i liked that the buying was spread across lots of different people", "no single buyer was running the show, which i liked"]],
+  ["a handful of hands", ["i got in while only a small crowd was trading it", "not many people were in it yet when i went in"]],
+  // price impact of its own buy
+  ["our size barely moves it", ["i could buy without moving the price", "my buy barely touched the price"]],
+  ["our size nudges it", ["my buy nudged the price a little", "i moved the price a touch getting in"]],
+  ["our size moves it", ["my buy moved the price, and i was fine with that", "i pushed the price some getting in"]],
+  // it was chosen from a field
+  ["picked over others", ["i liked it more than the others i looked at", "it stood out from the others i was watching"]],
+]);
+
+/** Every band the glossary knows, raw — what must never reach the model as it is. */
+const RAW_BAND = new RegExp(`(?:${[...BUY_GLOSS.keys()].map((b) => b.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "i");
+const OUR_WE = /\b(?:our|ours|we|we're|we've|we'll|us)\b/i;
+
+/**
+ * AT MOST TWO REASONS, IN EVERYDAY WORDS. Which two, and which gloss of each,
+ * is drawn from `seed` — so the same bands on two accounts (or two buys) come
+ * out in different words, and the model is not handed a list it will recite.
+ */
+function reasonsFor(bands: readonly unknown[], seed: string): string[] {
+  const known: string[] = [];
+  for (const b of bands ?? []) {
+    const band = typeof b === "string" ? b.trim().toLowerCase() : "";
+    if (BUY_GLOSS.has(band) && !known.includes(band)) known.push(band);
+  }
+  const order = (b: string) => hash32(`${seed}|pick|${b}`);
+  return known
+    .sort((a, b) => order(a) - order(b))
+    .slice(0, 2)
+    .map((band) => {
+      const glosses = BUY_GLOSS.get(band)!;
+      return glosses[hash32(`${seed}|${band}`) % glosses.length]!;
+    });
+}
+
+/**
+ * A COIN IT BOUGHT, AND WHY. The why is two glossed bands and its own earlier
+ * words, never the decision's reason. A paper fill is said to be paper
  * (docs/x-posting.md rule 3): an X post has no Paper badge.
+ *
+ * ITS OWN WORDS ONLY WHEN THEY ARE WORDS. The feed post was written from the
+ * raw bands, so it often carries them ("activity picking up and the round
+ * trip is cheap, in we go") — and the model copied it whole onto X. A feed
+ * post that says a band as it is, or "we"/"our", is left out.
  */
 export function buyPrompt(f: BuyFacts): Prompt {
   const coin = clean(f.coin, 40) ?? "this coin";
-  const bands = (f.bands ?? []).map((b) => clean(b, 40)).filter((b): b is string => !!b).slice(0, 5);
+  const seed = typeof f.glossSeed === "string" && f.glossSeed.trim() !== "" ? f.glossSeed : `${nameOf(f).toLowerCase()}|${coin.toLowerCase()}`;
+  const reasons = reasonsFor(f.bands ?? [], seed);
   const own = clean(f.ownWords, 200);
+  const ownOk = own !== null && !RAW_BAND.test(own) && !OUR_WE.test(own);
   const lines = [
     `What happened: you bought ${q(coin)}, ${f.paper ? "a paper trade with practice money, not real money" : "a live trade with real money"}.`,
   ];
-  if (bands.length) lines.push(`Words that describe why: ${bands.map(q).join(", ")}.`);
-  if (own) lines.push(`What you said about it at the time: ${q(own)}.`);
+  if (reasons.length) lines.push(`Why, roughly: ${reasons.map(q).join("; ")}.`);
+  if (ownOk) lines.push(`What you said about it at the time: ${q(own)}.`);
   lines.push(
-    `Write a casual post about picking it up and why, in your own words. Pick the ONE thing that made up your mind; do not list everything. Call the coin ${q(coin)}.`,
+    `Write a casual post about picking it up and why. Pick the ONE thing that made up your mind; do not list everything. Say it in your own everyday words, never the exact words above, and never say "our" or "we": it was your own buy. Call the coin ${q(coin)}.`,
   );
   lines.push(
     f.paper

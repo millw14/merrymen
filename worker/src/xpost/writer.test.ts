@@ -6,9 +6,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { SETTINGS_DEFAULTS } from "../../../packages/core/src/index";
+import { everyBand } from "../class-evidence";
 import type { LlmCreds } from "../llm";
-import { admitXPost, type BaseGate } from "./gate";
+import { admitXPost, vocabularyRefusal, type BaseGate } from "./gate";
 import {
+  BUY_GLOSS,
   XPOST_ANTHROPIC_DEFAULT_MODEL,
   XPOST_GROQ_DEFAULT_MODEL,
   buyPrompt,
@@ -46,6 +48,8 @@ const CASUAL: CasualFacts = {
     { label: "Tesla", paper: false },
   ],
 };
+/** Every band a BUY can carry: everyBand() without the exit-only ones (how long it was held, why it sold). */
+const BUY_BANDS = [...everyBand()].filter((b) => !/^(?:held|sold)\b/.test(b));
 
 const all = (p: Prompt) => `${p.system}\n${p.prompt}`;
 
@@ -57,7 +61,7 @@ describe("the model is never shown a number, anything private, or an example", (
   it("a fact that carries a digit is dropped, not shown", () => {
     const p = all(buyPrompt({ ...BUY, bands: ["curve early", "top 10 holders"], ownWords: "bought 50 dollars worth", traits: ["i hold for 6h"] }));
     assert.doesNotMatch(p, /\p{N}/u);
-    assert.match(p, /curve early/);
+    assert.ok(BUY_GLOSS.get("curve early")!.some((g) => p.includes(`«${g}»`)), "the band it knows is shown, glossed");
     assert.doesNotMatch(p, /top|holders|dollars/);
   });
 
@@ -109,7 +113,7 @@ describe("what each prompt asks for", () => {
   it("a paper buy says paper; a live one never does", () => {
     assert.match(buyPrompt(BUY).prompt, /Say naturally that it was on paper/);
     assert.match(buyPrompt({ ...BUY, paper: false }).prompt, /Do not call it paper/);
-    assert.match(buyPrompt(BUY).prompt, /«curve early», «buyers mostly new»/);
+    assert.match(buyPrompt(BUY).prompt, /Why, roughly: «[^»]+»; «[^»]+»\./);
     assert.match(buyPrompt(BUY).prompt, /ONE thing/);
   });
 
@@ -120,6 +124,78 @@ describe("what each prompt asks for", () => {
     assert.match(p, /«pepe», «Tesla»/);
     assert.match(p, /say it was on paper/);
     assert.doesNotMatch(casualPrompt({ ...CASUAL, recentCoins: [{ label: "Tesla", paper: false }] }).prompt, /on paper/);
+  });
+});
+
+// ── the buy post's why ──────────────────────────────────────────────────────
+
+describe("a buy's why is in everyday words, never the engine's", () => {
+  it("every band a buy can carry has two or three fixed glosses", () => {
+    assert.ok(BUY_BANDS.length >= 20, `${BUY_BANDS.length} buy bands — everyBand() is not what this test thinks`);
+    for (const band of BUY_BANDS) {
+      const glosses = BUY_GLOSS.get(band);
+      assert.ok(glosses, `no gloss for ${JSON.stringify(band)}`);
+      assert.ok(glosses.length >= 2 && glosses.length <= 3, band);
+      assert.equal(new Set(glosses).size, glosses.length, band);
+    }
+    for (const band of BUY_GLOSS.keys()) assert.ok(BUY_BANDS.includes(band), `${band} is not a buy band any more`);
+  });
+
+  it("every gloss is plain, first person singular, and something its own post may say", () => {
+    for (const [band, glosses] of BUY_GLOSS) {
+      for (const g of glosses) {
+        assert.doesNotMatch(g, /\p{N}/u, g);
+        assert.equal(vocabularyRefusal(g), null, `${band}: ${g}`);
+        assert.doesNotMatch(g, /\b(?:our|ours|we|us)\b/i, g);
+        assert.match(g, /\b(?:i|my|me)\b/, `${g} is not in the first person`);
+        assert.equal(g, g.toLowerCase(), "the model styles it; the gloss does not shout");
+        for (const raw of BUY_BANDS) assert.ok(!g.includes(raw), `${g} carries the band ${raw}`);
+      }
+    }
+  });
+
+  it("no band ever reaches the prompt as it is, whatever the buy carries", () => {
+    for (let i = 0; i < 40; i++) {
+      const p = all(
+        buyPrompt({
+          ...BUY,
+          bands: [...everyBand()],
+          ownWords: "activity picking up and the round trip is cheap, in we go",
+          glossSeed: `t${i}|d${i}`,
+        }),
+      ).toLowerCase();
+      for (const raw of everyBand()) assert.ok(!p.includes(raw.toLowerCase()), `seed ${i}: ${raw}`);
+    }
+  });
+
+  it("at most two reasons, drawn by the seed, so two buys on the same bands read differently", () => {
+    const facts = { ...BUY, bands: BUY_BANDS };
+    const reasons = (seed: string) => /Why, roughly: ((?:«[^»]*»(?:; )?)+)\./.exec(buyPrompt({ ...facts, glossSeed: seed }).prompt)?.[1] ?? "";
+    const seen = new Set<string>();
+    for (let i = 0; i < 30; i++) {
+      const r = reasons(`tenant-${i}|decision-${i}`);
+      assert.equal((r.match(/«/g) ?? []).length, 2, r);
+      assert.equal(reasons(`tenant-${i}|decision-${i}`), r, "the same seed, the same words");
+      seen.add(r);
+    }
+    assert.ok(seen.size >= 20, `${seen.size} distinct pairs of reasons from thirty buys`);
+    // No seed given: the agent's name and the coin decide, still at most two.
+    assert.equal((reasons("").match(/«/g) ?? []).length, 2);
+    // A band it has no gloss for (an exit band) is left out, not shown raw.
+    assert.doesNotMatch(buyPrompt({ ...BUY, bands: ["held briefly"] }).prompt, /Why, roughly/);
+  });
+
+  it("tells the model to use everyday words, not the ones it is shown, and never our or we", () => {
+    assert.match(buyPrompt(BUY).prompt, /Say it in your own everyday words, never the exact words above, and never say "our" or "we"/);
+  });
+
+  it("its own feed words are shown only when they carry no band and no we", () => {
+    // The feed post was written from the raw bands; copied onto X it is the
+    // engine talking ("activity picking up and the round trip is cheap, in we go").
+    assert.match(buyPrompt(BUY).prompt, /What you said about it at the time: «liked how early the curve was»/);
+    for (const own of ["activity picking up and the round trip is cheap", "our size barely moves it, easy in", "in we go, the curve is early"]) {
+      assert.doesNotMatch(buyPrompt({ ...BUY, ownWords: own }).prompt, /What you said about it/, own);
+    }
   });
 });
 
