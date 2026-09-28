@@ -1,0 +1,1815 @@
+/**
+ * Telegram groups — the handler: what the poll service hands a group update
+ * to, and the one place a group line is sent from. The contract is
+ * docs/tg-groups.md, all of it; this file is where its pieces meet.
+ *
+ * WHAT LIVES WHERE. Whether to speak is pacing.ts (pure); what a line says is
+ * voice.ts (templates, one gated model call, the line gate); coins go through
+ * coins.ts, which reaches trading only through `TgCoinsPort`; memory is the
+ * store plus memory.ts. This file decides nothing those modules decide. It
+ * reads the update, keeps the books (who added it, what was said, who got an
+ * answer), and sends — typing, a person's pace, Telegram's flood limits.
+ *
+ * NEVER ON THE POLL LOOP'S TIME. Every `on*` method returns at once: the work
+ * goes onto a per-chat serial queue, so a slow model, a slow coin look or a
+ * Telegram 429 in one group never delays the owner's DMs, their buttons or
+ * /kill (rule 7). Only bookkeeping that must be in order with the next update
+ * (room status, the line itself) happens before returning.
+ *
+ * NEVER THROWS, AND NEVER SAYS WHY. Every method catches everything. A failure
+ * of any kind is at most one log line naming the stage and the error's class —
+ * never message text, a name, a title or an address — and in the group it is
+ * silence (rule 5).
+ *
+ * WHAT IS NOT HERE ON PURPOSE. No trading module is imported (types.ts): a
+ * coin crosses as a nomination through the port and nothing else. No group
+ * text is written anywhere but the tg-groups store: not chat_turns, not the
+ * event feed (`note` carries counts and kinds only), not the soul, not peers or
+ * research files. The persona is built from voice.ts's fixed, group-safe
+ * context and never from the DM prompt builders (rule 3).
+ *
+ * NAMING: never write the web room's name (group + chat, joined or separated)
+ * in code here. See types.ts.
+ */
+import { isHostedMode } from "../../../../packages/core/src/index";
+import type { ResolvedConfig } from "../../settings";
+import {
+  answerCallbackQuery,
+  editMessageText,
+  esc,
+  leaveChat,
+  sendChatAction,
+  sendMessage,
+  setMessageReaction,
+  type InlineKeyboard,
+  type TelegramOpts,
+  type TgCallback,
+  type TgMemberUpdate,
+  type TgMessage,
+  type TgServiceMessage,
+} from "../api";
+import type { StateRef } from "../state";
+import { CoinFlow, type CoinIntent, type CoinSpeakOpts } from "./coins";
+import {
+  addressedHow,
+  extractCas,
+  extractCashtags,
+  greetingOf,
+  hasForeignMint,
+  insultLevel,
+  isBotQuestion,
+  isDistress,
+  isInjection,
+  isPrivateAsk,
+  isQuestionToRoom,
+  isShush,
+  isTradeTalk,
+  type BotSelf,
+} from "./detect";
+import { admitTgLine } from "./gate";
+import { applyMemoryPass, memoryPass, needsMemoryPass } from "./memory";
+import {
+  describeTgGroupsModel,
+  resolveTgGroupsModel,
+  TgModelGate,
+  tgGroupsDedicatedKeyProblem,
+  tgGroupsPerDay,
+  type TgModel,
+} from "./model";
+import { CHATTINESS, REACTION_FOR, SendPacer, decide, typingDelayMs, type PaceDecision, type PaceInput } from "./pacing";
+import { utcDay, type TgGroupsStore } from "./store";
+import type { Chattiness, TgCoinsPort, TgLine, TgPerson, TgRoom } from "./types";
+import { mentionFor, say, type SpeakCtx, type TgIntent } from "./voice";
+
+// ─── The numbers ───────────────────────────────────────────────────────────
+
+const SEC = 1_000;
+const MIN = 60 * SEC;
+const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
+
+/** A line that waited longer than this to go out is dropped (coin outcomes excepted). */
+const STALE_MS = 90 * SEC;
+/** Addressed lines closer together than this are one burst: only the last is answered. */
+const BURST_MS = 15 * SEC;
+/** A question to the room waits this long, so pacing can see whether anyone answered it. */
+const QUESTION_WAIT_MS = MIN;
+/** An ambient line is dropped when this many newer human lines arrived while it was being written. */
+const NEWER_LINES_DROP = 3;
+/** Welcomes: the odds per join, and the most per chat per UTC day. */
+const WELCOME_ODDS = 0.25;
+const WELCOMES_PER_DAY = 3;
+/** Shush: how long it stays quiet, and how often the answer is a 🙈 rather than words. */
+const SHUSH_MS = 30 * MIN;
+const OWNER_SHUSH_MS = 2 * HOUR;
+const SHUSH_REACT_ODDS = 0.25;
+/** "still not sold on that one tbh": the odds per line that names a faded coin, and how often per coin. */
+const FADED_ODDS = 0.15;
+const FADED_EVERY_MS = 6 * HOUR;
+/** Casual refusals ("that's between me and {owner}", "only my owner can do that"): once per person per hour. */
+const REFUSE_EVERY_MS = HOUR;
+/** A stranger's group the owner never answered about is left after this. */
+const PENDING_LEAVE_MS = DAY;
+/** A failed Stay/Leave DM is tried again at most this often. */
+const ASK_RETRY_MS = HOUR;
+/** The background pass: pending rooms, the quiet-hours memory pass. */
+const SWEEP_MS = 5 * MIN;
+/** How long a resolved model is trusted before settings are read again. */
+const MODEL_RECHECK_MS = MIN;
+/**
+ * The flood and roast windows pacing.ts reads. Mirrored, not imported: pacing
+ * keeps them private because it only ever READS the windows; this file is the
+ * one that opens and extends them after a line lands.
+ */
+const FLOOD_WINDOW_MS = 2 * MIN;
+const ROAST_WINDOW_MS = 30 * MIN;
+/** At most this many lines waiting per chat. Past it, new chatter is remembered but not answered. */
+const MAX_QUEUED = 40;
+/** In-memory books (reply targets, topics, stamps) are bounded like the store is. */
+const LRU_MAX = 2_000;
+
+/** Callback data this file owns. Short on purpose: Telegram caps it at 64 bytes. */
+const CB_PREFIX = "tgg:";
+const CB_RE = /^tgg:(stay|leave|forget):(-?\d{1,20})$/;
+
+/** Intents that report on a coin already decided: never stale, never blocked by "one reply per message". */
+const FOLLOW_UPS: ReadonlySet<TgIntent["kind"]> = new Set<TgIntent["kind"]>(["coin-bought", "coin-passed", "coin-skipped", "coin-exited"]);
+
+/**
+ * "Only my owner can do that 🙃" — a slash command from someone who may not
+ * run it. Code-written like voice.ts's fixed pools and gated the same way.
+ */
+const OWNER_ONLY_LINES: readonly string[] = [
+  "only my owner can do that 🙃",
+  "that one's for my owner 🙃",
+  "owner only, sorry 🙃",
+  "nah, only my owner gets to run that 🙃",
+  "sorry, that's my owner's button 🙃",
+];
+
+// ─── The handler's surface ─────────────────────────────────────────────────
+
+export interface TgGroupsDeps {
+  /** The bot's token, read fresh (the dashboard can change it); null while there is none. */
+  opts: () => TelegramOpts | null;
+  store: TgGroupsStore;
+  getCfg: () => ResolvedConfig;
+  stateRef: StateRef;
+  port: () => TgCoinsPort | null;
+  /** getMe's id and username, plus the soul name; null until getMe answered. */
+  self: () => BotSelf | null;
+  /** getMe's can_read_all_group_messages: false means privacy mode is on; null unknown. */
+  privacyOff: () => boolean | null;
+  /** The event feed. Counts and kinds only: it reaches the owner's DM prompt and the fleet's tables. */
+  note: (level: "ok" | "warn", msg: string) => void;
+  dashboardBase: () => string;
+  /** What the agent's typing style is seeded from (styleFor). */
+  agentKey: () => string;
+  /** Milliseconds. Should be the store's clock. */
+  now?: () => number;
+  rand?: () => number;
+  env?: Record<string, string | undefined>;
+  hosted?: boolean;
+  /** Waits (typing, a person's pace, a flood pause). Injectable so tests need not wait. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Operator log (console by default). The same rule as `note`: no content. */
+  log?: (s: string) => void;
+}
+
+/** What a group notice after a slash command is for (the service's group rules). */
+export type TgCommandNotice = "dm-sent" | "private-refused" | "owner-only";
+
+export interface TgGroups {
+  /** A group line anyone typed (never a slash command: those are the service's). */
+  onMessage(msg: TgMessage): void;
+  /** The bot's own membership changed (my_chat_member). */
+  onMember(u: TgMemberUpdate): void;
+  /** A join, a leave or a supergroup migration. */
+  onService(s: TgServiceMessage): void;
+  /** True when the press was one of this file's (`tgg:`), answered or refused. */
+  onCallback(cb: TgCallback): Promise<boolean>;
+  /** The owner's /groups, in their DM `chatId`. */
+  groupsCommand(chatId: number): Promise<void>;
+  /** The owner's /forget in a group: that chat's memory and nothing else. */
+  forgetChat(chatId: number, messageId?: number): void;
+  /** Anyone's /forgetme: their lines and note in that chat. */
+  forgetMe(chatId: number, userId: number, messageId?: number): Promise<void>;
+  /** The casual group line after a slash command (see TgCommandNotice). Rate-limited here. */
+  commandNotice(chatId: number, messageId: number | undefined, fromId: number, what: TgCommandNotice, threadId?: number): Promise<void>;
+  isApproved(chatId: number): boolean;
+  /** One background pass now (it also runs every few minutes). */
+  sweep(): Promise<void>;
+  /** Resolves once every queued and detached piece of work has settled. For tests and shutdown. */
+  drain(): Promise<void>;
+  stop(): void;
+}
+
+// ─── Small pieces ──────────────────────────────────────────────────────────
+
+/** A Map that forgets its oldest entry past `max`: the in-memory books never grow without bound. */
+class Lru<K, V> {
+  private readonly m = new Map<K, V>();
+  constructor(private readonly max: number) {}
+  get(k: K): V | undefined {
+    return this.m.get(k);
+  }
+  has(k: K): boolean {
+    return this.m.has(k);
+  }
+  set(k: K, v: V): void {
+    this.m.delete(k);
+    this.m.set(k, v);
+    if (this.m.size > this.max) {
+      const first = this.m.keys().next();
+      if (!first.done) this.m.delete(first.value);
+    }
+  }
+  delete(k: K): void {
+    this.m.delete(k);
+  }
+  deleteWhere(pred: (k: K) => boolean): void {
+    for (const k of [...this.m.keys()]) if (pred(k)) this.m.delete(k);
+  }
+}
+
+const errName = (e: unknown): string => (e instanceof Error ? e.name : typeof e);
+const isUserId = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
+const isMsgId = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
+const msgKey = (chatId: number, messageId: number): string => `${chatId}:${messageId}`;
+
+/** A display name as the mention shows it: one line, no controls, ≤ 40 chars. Escaped when used. */
+function mentionName(v: unknown): string {
+  if (typeof v !== "string") return "";
+  // eslint-disable-next-line no-control-regex
+  return [...v.replace(/[\u0000-\u001f\u007f\u2028\u2029\p{Cf}]+/gu, " ").replace(/\s+/g, " ").trim()].slice(0, 40).join("").trim();
+}
+
+/** The chat types this file handles. A message with no type is a group when its id is negative (the repo's old test). */
+function isTgGroup(chatType: string | undefined, chatId: number): boolean {
+  if (chatType === "group" || chatType === "supergroup") return true;
+  return chatType === undefined && chatId < 0;
+}
+
+/** In the chat, as Telegram counts it: a restricted member is in unless is_member says otherwise. */
+function isIn(status: string, isMember: boolean | undefined): boolean {
+  if (status === "member" || status === "administrator" || status === "creator") return true;
+  return status === "restricted" && isMember !== false;
+}
+
+/** A sender who is a person speaking through a chat (an anonymous admin, a linked channel), not a bot. */
+const viaChat = (m: TgMessage): boolean => m.senderChatId !== undefined;
+/**
+ * The loop guard. is_bot alone is not it: an anonymous admin posts as
+ * GroupAnonymousBot (is_bot true) with a sender_chat, and the contract makes
+ * that an ordinary line (pacing.ts PaceInput.fromIsBot).
+ */
+const fromBot = (m: TgMessage): boolean => m.fromIsBot === true && m.senderChatId === undefined;
+
+/** First name, else username (without the @: a handle the model saw is one it may echo). */
+function displayName(m: { fromFirstName?: string; fromUsername?: string }): string {
+  const first = typeof m.fromFirstName === "string" ? m.fromFirstName.trim() : "";
+  if (first) return first;
+  const user = typeof m.fromUsername === "string" ? m.fromUsername.replace(/^@+/, "").trim() : "";
+  return user || "someone";
+}
+
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** A window counter extended by one: the same window while it is open, a fresh one after. */
+function bump(w: { count: number; sinceMs: number } | undefined, now: number, windowMs: number): { count: number; sinceMs: number } {
+  return w && Number.isFinite(w.count) && now - w.sinceMs < windowMs ? { count: w.count + 1, sinceMs: w.sinceMs } : { count: 1, sinceMs: now };
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, Math.max(0, ms));
+    // A wait must never be what keeps the process alive: the poll loop is.
+    t.unref?.();
+  });
+}
+
+/** What a remembered line and its answer carry through the queue. */
+interface LineJob {
+  msg: TgMessage;
+  line: TgLine;
+  addressed: "mention" | "reply" | "name" | null;
+  isOwner: boolean;
+  via: boolean;
+  /** When the line reached this process (or, deferred, when it came back up). Staleness counts from here. */
+  bornAtMs: number;
+  threadId?: number;
+  /** The question-to-the-room second look (see QUESTION_WAIT_MS). */
+  deferred?: boolean;
+}
+
+/** One outgoing group line, composed and waiting to be sent. */
+interface Outgoing {
+  chatId: number;
+  intent: TgIntent;
+  /** Plain text from voice.say. Escaped here; the mention is built by code. */
+  text: string;
+  replyTo?: number;
+  threadId?: number;
+  mention?: { id: number; name: string };
+  bornAtMs: number;
+  /** A coin outcome: never dropped as stale. */
+  followUp: boolean;
+  /** The owner called it: it may answer while the chat is shushed. */
+  ownerAddressed: boolean;
+  /** Re-checked right before the send: a newer burst line, a chat that moved on. */
+  stillWanted?: () => boolean;
+}
+
+interface SpeakOpts {
+  replyTo?: number;
+  threadId?: number;
+  mention?: { id: number; name: string };
+  trigger?: TgLine;
+  senderName?: string;
+  coinName?: string;
+  bornAtMs?: number;
+  ownerAddressed?: boolean;
+  stillWanted?: () => boolean;
+  /** An ambient line waits like someone who has been reading (pacing.ts typingDelayMs). */
+  ambient?: boolean;
+}
+
+// ─── The handler ───────────────────────────────────────────────────────────
+
+/**
+ * THE TELEGRAM GROUPS HANDLER for one agent. Created once by the poll service
+ * when it has a store; every method is safe to call at any time.
+ */
+export function createTgGroups(d: TgGroupsDeps): TgGroups {
+  const store = d.store;
+  const clock = typeof d.now === "function" ? d.now : Date.now;
+  const rand = typeof d.rand === "function" ? d.rand : Math.random;
+  const sleep = typeof d.sleep === "function" ? d.sleep : defaultSleep;
+  const env = (): Record<string, string | undefined> => d.env ?? process.env;
+  const hosted = typeof d.hosted === "boolean" ? d.hosted : safeHosted();
+  const pacer = new SendPacer(clock);
+  let stopped = false;
+
+  const log = (s: string): void => {
+    try {
+      (d.log ?? ((x: string) => console.log(x)))(s);
+    } catch {
+      /* a logger that throws has nothing more to say */
+    }
+  };
+  const fail = (stage: string, e: unknown): void => log(`[tg-groups] ${stage} failed (${errName(e)})`);
+  const note = (level: "ok" | "warn", msg: string): void => {
+    try {
+      d.note(level, msg);
+    } catch {
+      /* the feed is best-effort */
+    }
+  };
+
+  const gate = new TgModelGate(store, { perDay: tgGroupsPerDay(env(), hosted), now: clock, log });
+
+  // In-memory books. None of them decides whether money moves (the store's
+  // claims do); losing them to a restart costs at most one extra casual line.
+  /** Messages that already got their one immediate reply ("never two replies to one message"). */
+  const repliedTo = new Lru<string, true>(LRU_MAX);
+  /** When each recent message reached this process, for the staleness of a coin line about it. */
+  const received = new Lru<string, number>(LRU_MAX);
+  /** The forum topic of each recent message, so an outcome minutes later lands in the same topic. */
+  const threads = new Lru<string, number>(LRU_MAX);
+  /** The newest addressed line per chat: a burst answers only its last line. */
+  const lastAddressed = new Map<number, { messageId: number; atMs: number }>();
+  /** Casual refusals, per person per chat. */
+  const refusedAt = new Lru<string, number>(LRU_MAX);
+  /** "still not sold on that one", per chat and coin. */
+  const fadedAt = new Lru<string, number>(LRU_MAX);
+  /** A Stay/Leave DM that failed to go out, per chat. */
+  const askFailedAt = new Map<number, number>();
+  /** Blocked rooms already left again this process (a message proved it was back). */
+  const releft = new Set<number>();
+  /** /groups listings, so a press on one re-renders it instead of printing an outcome. */
+  const listings = new Lru<number, true>(64);
+  /** Memory passes in flight, per chat. */
+  const passing = new Set<number>();
+
+  // ─── Work tracking ───────────────────────────────────────────────────────
+
+  const inflight = new Set<Promise<unknown>>();
+  const track = <T>(p: Promise<T>): Promise<T> => {
+    inflight.add(p);
+    void p.then(
+      () => inflight.delete(p),
+      () => inflight.delete(p),
+    );
+    return p;
+  };
+
+  const queues = new Map<number, { tail: Promise<void>; size: number }>();
+  /**
+   * Run `job` after every earlier job of this chat. Serial per chat, so the
+   * room is read and written in order; parallel across chats. Returns the
+   * job's settling (it never rejects), or null when the chat's queue is full.
+   */
+  const enqueue = (chatId: number, job: () => Promise<void>, opts: { force?: boolean } = {}): Promise<void> | null => {
+    const q = queues.get(chatId) ?? { tail: Promise.resolve(), size: 0 };
+    if (!opts.force && q.size >= MAX_QUEUED) return null;
+    q.size += 1;
+    const next = q.tail
+      .then(async () => {
+        if (!stopped) await job();
+      })
+      .catch((e) => fail("line", e))
+      .finally(() => {
+        q.size -= 1;
+        if (q.size <= 0 && queues.get(chatId) === q) queues.delete(chatId);
+      });
+    q.tail = next;
+    queues.set(chatId, q);
+    track(next);
+    return next;
+  };
+
+  const locks = new Map<number, Promise<void>>();
+  /** One send at a time per chat: typing, the wait, the send. */
+  const withLock = async <T>(chatId: number, fn: () => Promise<T>): Promise<T> => {
+    const prev = locks.get(chatId) ?? Promise.resolve();
+    let release: () => void = () => {};
+    const mine = new Promise<void>((r) => {
+      release = r;
+    });
+    const chained = prev.then(() => mine);
+    locks.set(chatId, chained);
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (locks.get(chatId) === chained) locks.delete(chatId);
+    }
+  };
+
+  // ─── Reading the world ───────────────────────────────────────────────────
+
+  const cfgNow = (): ResolvedConfig | null => {
+    try {
+      return d.getCfg();
+    } catch (e) {
+      fail("settings", e);
+      return null;
+    }
+  };
+  /** MERRYMEN_TG_GROUPS=0: the operator's off switch, read on every update. */
+  const switchOn = (): boolean => {
+    try {
+      return env().MERRYMEN_TG_GROUPS?.trim() !== "0";
+    } catch {
+      return false;
+    }
+  };
+  const featureOn = (cfg: ResolvedConfig | null): boolean => !stopped && switchOn() && cfg?.telegramGroupsEnabled === true;
+  const ownerId = (): number | null => {
+    try {
+      const id = d.stateRef.get().ownerId;
+      return isUserId(id) ? id : null;
+    } catch {
+      return null;
+    }
+  };
+  const selfNow = (): BotSelf | null => {
+    try {
+      const s = d.self();
+      return s && typeof s.id === "number" ? s : null;
+    } catch {
+      return null;
+    }
+  };
+  const optsNow = (): TelegramOpts | null => {
+    try {
+      const o = d.opts();
+      return o && typeof o.token === "string" && o.token ? o : null;
+    } catch {
+      return null;
+    }
+  };
+  const portNow = (): TgCoinsPort | null => {
+    try {
+      return d.port() ?? null;
+    } catch {
+      return null;
+    }
+  };
+  /** May it say anything in this chat right now? Approved, switched on, and not stopped. */
+  const canTalk = (chatId: number, cfg: ResolvedConfig | null = cfgNow()): boolean =>
+    featureOn(cfg) && store.room(chatId)?.status === "approved";
+  const shushedNow = (room: TgRoom | undefined, now: number): boolean => typeof room?.shushedUntilMs === "number" && room.shushedUntilMs > now;
+  const chattiness = (cfg: ResolvedConfig | null): Chattiness => {
+    const c = cfg?.telegramGroupsChattiness;
+    return c === "quiet" || c === "normal" || c === "chatty" ? c : "normal";
+  };
+  const roll = (): number => {
+    try {
+      const r = rand();
+      return Number.isFinite(r) ? Math.min(1, Math.max(0, r)) : 1;
+    } catch {
+      return 1;
+    }
+  };
+
+  let modelCache: { at: number; m: TgModel | null; line: string } | null = null;
+  /**
+   * WHO WRITES GROUP LINES, re-read at most once a minute so a key the owner
+   * saves applies without a restart. The boot line names source, provider and
+   * model only, and is logged again only when that changes.
+   */
+  const modelNow = (): TgModel | null => {
+    const t = clock();
+    if (modelCache && t - modelCache.at >= 0 && t - modelCache.at < MODEL_RECHECK_MS) return modelCache.m;
+    let m: TgModel | null = null;
+    const cfg = cfgNow();
+    try {
+      m = cfg ? resolveTgGroupsModel(cfg, env(), hosted) : null;
+    } catch (e) {
+      fail("model", e);
+      m = null;
+    }
+    const line = describeTgGroupsModel(m);
+    if (!modelCache || modelCache.line !== line) {
+      log(`[tg-groups] ${line}`);
+      try {
+        const problem = tgGroupsDedicatedKeyProblem(env());
+        if (problem) log(`[tg-groups] telegram groups: ${problem}`);
+      } catch {
+        /* names variables only; nothing to lose */
+      }
+    }
+    modelCache = { at: t, m, line };
+    return m;
+  };
+
+  // ─── Sending ─────────────────────────────────────────────────────────────
+
+  const pauseFor = (sec: number): void => {
+    const until = clock() + Math.max(1, Math.ceil(sec)) * SEC;
+    const before = pacer.pausedUntil();
+    pacer.pauseAll(until);
+    if (until > before && before <= clock()) note("warn", `Telegram groups: Telegram asked to slow down; group lines paused for ${Math.ceil(sec)}s`);
+  };
+
+  /** Until the pacer allows a send to this chat. Bounded: a pause longer than the staleness window drops the line anyway. */
+  const waitTurn = async (chatId: number): Promise<void> => {
+    for (let i = 0; i < 8; i++) {
+      const w = pacer.waitMs(chatId);
+      if (w <= 0) return;
+      await sleep(w);
+    }
+  };
+
+  /** Still worth sending? Re-read at every step, because every step can take seconds. */
+  const stillOk = (o: Outgoing, chatId: number): boolean => {
+    if (stopped) return false;
+    const cfg = cfgNow();
+    if (!canTalk(chatId, cfg)) return false;
+    const now = clock();
+    if (!o.followUp && now - o.bornAtMs > STALE_MS) return false;
+    // Quiet means quiet: only the answer to being told so, and the owner calling it, go out.
+    if (o.intent.kind !== "shushed" && !o.ownerAddressed && shushedNow(store.room(chatId), now)) return false;
+    try {
+      if (o.stillWanted && !o.stillWanted()) return false;
+    } catch {
+      return false;
+    }
+    return true;
+  };
+
+  const htmlOf = (o: Outgoing): string => {
+    const body = esc(o.text);
+    const m = o.mention;
+    if (!m || !isUserId(m.id)) return body;
+    const name = mentionName(m.name);
+    return name ? `<a href="tg://user?id=${m.id}">${esc(name)}</a> ${body}` : body;
+  };
+
+  /**
+   * SEND ONE LINE. Typing first, a person's delay, the flood pacer, then the
+   * send. A 429 pauses every group send for Telegram's retry_after and the
+   * line is tried again if it is still fresh; a group that became a
+   * supergroup moves its state and gets the line once, at the new id, without
+   * the reply (message ids do not carry over).
+   */
+  const deliver = async (o: Outgoing): Promise<{ chatId: number; messageId?: number } | null> =>
+    withLock(o.chatId, async () => {
+      let chatId = o.chatId;
+      let replyTo = o.replyTo;
+      let threadId = o.threadId;
+      let migrated = false;
+      const opts = optsNow();
+      if (!opts || !stillOk(o, chatId)) return null;
+      try {
+        await sendChatAction(opts, chatId, "typing", threadId);
+      } catch (e) {
+        fail("typing", e);
+      }
+      await sleep(typingDelayMs(o.text, false, rand));
+      for (let attempt = 0; attempt < 4; attempt++) {
+        await waitTurn(chatId);
+        if (!stillOk(o, chatId)) return null;
+        const r = await sendMessage(opts, chatId, htmlOf(o), {
+          ...(isMsgId(replyTo) ? { replyToMessageId: replyTo } : {}),
+          ...(isMsgId(threadId) ? { messageThreadId: threadId } : {}),
+          disablePreview: true,
+        });
+        if (r.ok) {
+          pacer.noteSent(chatId);
+          return r.messageId !== undefined ? { chatId, messageId: r.messageId } : { chatId };
+        }
+        if (typeof r.retryAfterSec === "number") {
+          pauseFor(r.retryAfterSec);
+          continue;
+        }
+        if (typeof r.migrateToChatId === "number" && !migrated) {
+          migrated = true;
+          store.migrate(chatId, r.migrateToChatId);
+          chatId = r.migrateToChatId;
+          replyTo = undefined;
+          threadId = undefined;
+          continue;
+        }
+        log(`[tg-groups] send failed (${r.reason ? "refused" : "no answer"})`);
+        return null;
+      }
+      return null;
+    });
+
+  /** One emoji on a message, through the same pacer and pause as a line. */
+  const reactTo = async (chatId: number, messageId: number, emoji: string, o: { ownerAddressed?: boolean } = {}): Promise<boolean> => {
+    if (!isMsgId(messageId)) return false;
+    return withLock(chatId, async () => {
+      const opts = optsNow();
+      if (!opts || stopped || !canTalk(chatId)) return false;
+      if (emoji !== REACTION_FOR.shush[0] && !o.ownerAddressed && shushedNow(store.room(chatId), clock())) return false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await waitTurn(chatId);
+        if (!canTalk(chatId)) return false;
+        const r = await setMessageReaction(opts, chatId, messageId, emoji);
+        if (r.ok) {
+          pacer.noteSent(chatId);
+          return true;
+        }
+        if (typeof r.retryAfterSec === "number") {
+          pauseFor(r.retryAfterSec);
+          continue;
+        }
+        return false;
+      }
+      return false;
+    });
+  };
+
+  /** The fixed, group-safe context voice.ts writes from. Never anything private (rule 3). */
+  const speakCtx = (chatId: number, o: SpeakOpts): SpeakCtx | null => {
+    const room = store.room(chatId);
+    if (!room) return null;
+    const port = portNow();
+    let mode: "paper" | "live" = "paper";
+    let heldNames: string[] = [];
+    try {
+      if (port && port.mode() === "live") mode = "live";
+    } catch (e) {
+      fail("mode", e);
+    }
+    try {
+      const h = port?.heldNames();
+      if (Array.isArray(h)) heldNames = h.filter((n): n is string => typeof n === "string");
+    } catch (e) {
+      fail("held names", e);
+    }
+    let agentKey = "";
+    try {
+      agentKey = String(d.agentKey() ?? "");
+    } catch {
+      agentKey = "";
+    }
+    return {
+      agentName: selfNow()?.name ?? "",
+      agentKey,
+      ownerName: room.ownerName ?? null,
+      mode,
+      heldNames,
+      room,
+      ...(o.trigger ? { trigger: o.trigger } : {}),
+      ...(o.senderName ? { senderName: o.senderName } : {}),
+      ...(o.coinName ? { coinName: o.coinName } : {}),
+      nowMs: clock(),
+      rand,
+    };
+  };
+
+  /** Its own line, remembered so the next prompt sees it and the repeat clause can refuse an echo. */
+  const recordOwn = (chatId: number, messageId: number | undefined, text: string, replyTo: number | undefined): void => {
+    const now = clock();
+    const me = selfNow();
+    if (isMsgId(messageId)) {
+      store.addLine(chatId, {
+        messageId,
+        fromId: me?.id ?? 0,
+        name: me?.name ?? "",
+        text,
+        atMs: now,
+        ...(isMsgId(replyTo) ? { replyTo } : {}),
+        own: true,
+      });
+    }
+    store.update(chatId, (r) => {
+      r.lastOwnAtMs = now;
+    });
+  };
+
+  /**
+   * COMPOSE AND SEND ONE LINE for an intent. The words come from voice.say
+   * (null is silence); the tag is added by code when voice.mentionFor says
+   * so. Returns where it landed, or null.
+   */
+  const speak = async (chatId: number, intent: TgIntent, o: SpeakOpts = {}): Promise<{ chatId: number; messageId?: number } | null> => {
+    if (!canTalk(chatId)) return null;
+    const born = typeof o.bornAtMs === "number" ? o.bornAtMs : clock();
+    const followUp = FOLLOW_UPS.has(intent.kind);
+    const ctx = speakCtx(chatId, o);
+    if (!ctx) return null;
+    const m = modelNow();
+    const text = await say(intent, ctx, m, m ? gate : null);
+    if (!text) return null;
+    if (o.ambient) {
+      // Someone joining in has been reading for a while (5–40 s on top of typing).
+      const reading = typingDelayMs(text, true, rand) - typingDelayMs(text, false, rand);
+      await sleep(reading);
+    }
+    const who = mentionFor(intent);
+    const mention = who !== null && o.mention && isUserId(o.mention.id) && mentionName(o.mention.name) ? o.mention : undefined;
+    const sent = await deliver({
+      chatId,
+      intent,
+      text,
+      ...(o.replyTo !== undefined ? { replyTo: o.replyTo } : {}),
+      ...(o.threadId !== undefined ? { threadId: o.threadId } : {}),
+      ...(mention ? { mention } : {}),
+      bornAtMs: born,
+      followUp,
+      ownerAddressed: o.ownerAddressed === true,
+      ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}),
+    });
+    if (!sent) return null;
+    // A migrated chat has no message the old reply id means.
+    recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? o.replyTo : undefined);
+    log(`[tg-groups] said ${intent.kind}`);
+    return sent;
+  };
+
+  /** "Never two replies to one message": reserve the message's one immediate reply, or refuse. */
+  const reserveReply = (chatId: number, messageId: number | undefined): boolean => {
+    if (!isMsgId(messageId)) return true;
+    const k = msgKey(chatId, messageId);
+    if (repliedTo.has(k)) return false;
+    repliedTo.set(k, true);
+    return true;
+  };
+  const releaseReply = (chatId: number, messageId: number | undefined): void => {
+    if (isMsgId(messageId)) repliedTo.delete(msgKey(chatId, messageId));
+  };
+
+  const dmOwner = async (html: string, keyboard?: InlineKeyboard): Promise<boolean> => {
+    const owner = ownerId();
+    const opts = optsNow();
+    if (owner === null || !opts || stopped) return false;
+    try {
+      const r = await sendMessage(opts, owner, html, keyboard && keyboard.length > 0 ? { keyboard } : {});
+      return r.ok;
+    } catch (e) {
+      fail("owner dm", e);
+      return false;
+    }
+  };
+
+  // ─── The coin flow ───────────────────────────────────────────────────────
+
+  const coinSpeak = async (chatId: number, intent: CoinIntent, o: CoinSpeakOpts): Promise<boolean> => {
+    const t: TgIntent = intent;
+    const followUp = FOLLOW_UPS.has(t.kind);
+    const replyTo = o.replyTo;
+    // An outcome replies to the post again by design (the ack came first); an
+    // immediate line takes the message's one reply, and a second is dropped.
+    if (!followUp && !reserveReply(chatId, replyTo)) return false;
+    const born = followUp ? clock() : (isMsgId(replyTo) ? received.get(msgKey(chatId, replyTo)) : undefined) ?? clock();
+    const threadId = isMsgId(replyTo) ? threads.get(msgKey(chatId, replyTo)) : undefined;
+    const sent = await speak(chatId, t, {
+      ...(replyTo !== undefined ? { replyTo } : {}),
+      ...(threadId !== undefined ? { threadId } : {}),
+      ...(o.mention ? { mention: o.mention } : {}),
+      ...(o.trigger ? { trigger: o.trigger } : {}),
+      ...(o.mention?.name || o.trigger?.name ? { senderName: o.mention?.name || o.trigger?.name } : {}),
+      ...(o.coinName ? { coinName: o.coinName } : {}),
+      bornAtMs: born,
+    });
+    if (!sent && !followUp) releaseReply(chatId, replyTo);
+    return sent !== null;
+  };
+
+  const flow = new CoinFlow({
+    store,
+    port: portNow,
+    coinsEnabled: () => {
+      const cfg = cfgNow();
+      return featureOn(cfg) && cfg?.telegramGroupCoinsEnabled === true;
+    },
+    ownerId,
+    speak: (chatId, intent, o) => track(coinSpeak(chatId, intent, o)),
+    react: (chatId, messageId, emoji) => track(reactTo(chatId, messageId, emoji)),
+    dmOwner: (text, button) => dmOwner(esc(text), button ? [[{ text: button.text, url: button.url }]] : undefined),
+    dashboardUrl: () => d.dashboardBase(),
+    now: clock,
+    log,
+  });
+  flow.start();
+
+  // ─── Rooms and membership ────────────────────────────────────────────────
+
+  /** A room the bot is in, first seen or seen again: created, and approved when the owner linked it. */
+  const knownRoom = (chatId: number, init: { title?: string; kind?: string; isForum?: boolean }, cfg: ResolvedConfig | null): TgRoom | undefined => {
+    const kind = init.kind === "group" || init.kind === "supergroup" ? init.kind : "";
+    const room = store.ensureRoom(chatId, {
+      title: typeof init.title === "string" ? init.title : "",
+      kind,
+      ...(typeof init.isForum === "boolean" ? { isForum: init.isForum } : {}),
+    });
+    if (room.status === "pending" || room.status === "left") {
+      // A negative id on the allowlist is a group the owner ran /link in
+      // before this feature: approved on first sight.
+      if (cfg?.telegramAllowlist?.includes(chatId)) {
+        store.setStatus(chatId, "approved");
+        note("ok", "Telegram groups: a group the owner linked earlier is approved");
+      } else if (room.status === "left") {
+        // A line from a room it had left means it is back, added while this
+        // process missed the update: not approved until the owner says so.
+        store.setStatus(chatId, "pending");
+      }
+    }
+    return store.room(chatId);
+  };
+
+  const sayHello = async (chatId: number): Promise<void> => {
+    const room = store.room(chatId);
+    if (!room || room.helloSaid || !canTalk(chatId)) return;
+    const sent = await speak(chatId, { kind: "hello" }, { bornAtMs: clock() });
+    if (sent) {
+      store.update(sent.chatId, (r) => {
+        r.helloSaid = true;
+      });
+    }
+  };
+
+  const privacyText = (title: string): string =>
+    [
+      `Heads up about ${title}: Telegram's privacy mode is on for me, so there I only hear commands and replies to my own messages. I can't follow the chat or see coins people post.`,
+      "To fix it: open @BotFather → /setprivacy → pick your bot → Disable. Then remove me from the group and add me back (or make me an admin there).",
+    ].join("\n");
+
+  const titleOf = (room: TgRoom | undefined): string => (room?.title ? `«${esc(room.title)}»` : "your group");
+
+  /** The privacy-mode steps, once per group, when getMe says privacy mode is on. */
+  const privacyHint = async (chatId: number): Promise<void> => {
+    let off: boolean | null = null;
+    try {
+      off = d.privacyOff();
+    } catch {
+      off = null;
+    }
+    if (off !== false) return;
+    const room = store.room(chatId);
+    if (!room || room.privacyHintSent || !featureOn(cfgNow()) || ownerId() === null) return;
+    // Reserved before the send, so two adds in one batch cannot both DM.
+    store.update(chatId, (r) => {
+      r.privacyHintSent = true;
+    });
+    const ok = await dmOwner(privacyText(titleOf(room)));
+    if (!ok) {
+      store.update(chatId, (r) => {
+        delete r.privacyHintSent;
+      });
+    }
+  };
+
+  const approve = (chatId: number, byId: number | undefined, why: string): void => {
+    const was = store.room(chatId)?.status;
+    store.setStatus(chatId, "approved", byId);
+    if (was !== "approved") note("ok", `Telegram groups: ${why} — talking there`);
+    enqueue(
+      chatId,
+      async () => {
+        await sayHello(chatId);
+        await privacyHint(chatId);
+      },
+      { force: true },
+    );
+  };
+
+  /** The one DM asking the owner about a stranger's group, with Stay / Leave. */
+  const askOwner = async (chatId: number): Promise<void> => {
+    const room = store.room(chatId);
+    if (!room || room.status !== "pending" || !featureOn(cfgNow()) || ownerId() === null) return;
+    const now = clock();
+    if (room.askedOwnerAtMs !== undefined && now - room.askedOwnerAtMs < PENDING_LEAVE_MS) return;
+    const failed = askFailedAt.get(chatId);
+    if (failed !== undefined && now - failed < ASK_RETRY_MS) return;
+    const prev = room.askedOwnerAtMs;
+    store.update(
+      chatId,
+      (r) => {
+        r.askedOwnerAtMs = now;
+      },
+      { flush: true },
+    );
+    const ok = await dmOwner(`someone added me to ${titleOf(room)}. want me to hang out there?`, [
+      [
+        { text: "Stay", callbackData: `${CB_PREFIX}stay:${chatId}` },
+        { text: "Leave", callbackData: `${CB_PREFIX}leave:${chatId}` },
+      ],
+    ]);
+    if (ok) {
+      askFailedAt.delete(chatId);
+      note("ok", "Telegram groups: someone else added me to a group — asked the owner");
+      return;
+    }
+    // Not asked means the 24 h clock has not started: leaving a group over a
+    // question nobody received would be the agent deciding for the owner.
+    askFailedAt.set(chatId, now);
+    store.update(chatId, (r) => {
+      if (r.askedOwnerAtMs !== now) return;
+      if (prev === undefined) delete r.askedOwnerAtMs;
+      else r.askedOwnerAtMs = prev;
+    });
+  };
+
+  const leaveRoom = async (chatId: number, why: string): Promise<void> => {
+    const opts = optsNow();
+    if (opts) {
+      try {
+        await leaveChat(opts, chatId);
+      } catch (e) {
+        fail("leave", e);
+      }
+    }
+    // Blocked whatever Telegram said: the owner's no stands, and a stranger's
+    // re-add is undone again (onMember).
+    store.setStatus(chatId, "blocked");
+    note("ok", `Telegram groups: left a group (${why})`);
+  };
+
+  /**
+   * The in-memory books about one chat's conversation. The refusal stamps
+   * stay: they are a rate limit, not memory, and forgetting would reset them.
+   */
+  const forgetInMemory = (chatId: number): void => {
+    const prefix = `${chatId}:`;
+    repliedTo.deleteWhere((k) => k.startsWith(prefix));
+    fadedAt.deleteWhere((k) => k.startsWith(prefix));
+    lastAddressed.delete(chatId);
+  };
+
+  // ─── The memory pass ─────────────────────────────────────────────────────
+
+  /** Rewrite a chat's summary and notes, off the hot path, when memory.ts says one is due. */
+  const maybeMemoryPass = (chatId: number): void => {
+    try {
+      if (passing.has(chatId) || !canTalk(chatId)) return;
+      const room = store.room(chatId);
+      if (!room || !needsMemoryPass(room, clock())) return;
+      const m = modelNow();
+      if (!m) return;
+      passing.add(chatId);
+      const agentName = selfNow()?.name ?? "";
+      track(
+        (async () => {
+          try {
+            const r = await memoryPass(room, agentName, m, gate);
+            if (r && store.room(chatId)) applyMemoryPass(store, chatId, r, clock());
+          } catch (e) {
+            fail("memory pass", e);
+          } finally {
+            passing.delete(chatId);
+          }
+        })(),
+      );
+    } catch (e) {
+      fail("memory pass", e);
+    }
+  };
+
+  // ─── What a line means ───────────────────────────────────────────────────
+
+  /** A coin it holds or has a memo for, said as a whole word: pacing's "a coin it has a take on". */
+  const knownCoinIn = (text: string, room: TgRoom): boolean => {
+    const names = new Set<string>();
+    try {
+      for (const n of portNow()?.heldNames() ?? []) if (typeof n === "string") names.add(n);
+    } catch {
+      /* no held names is no boost */
+    }
+    for (const c of room.coins) if (c.name) names.add(c.name);
+    const hay = text.normalize("NFKC");
+    for (const raw of names) {
+      const n = raw.normalize("NFKC").trim();
+      if ([...n].length < 3 || !/\p{L}/u.test(n)) continue;
+      if (new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRe(n)}(?![\\p{L}\\p{N}_])`, "iu").test(hay)) return true;
+    }
+    return false;
+  };
+
+  const signalsOf = (text: string, room: TgRoom): PaceInput["signals"] => ({
+    shush: isShush(text),
+    greeting: greetingOf(text),
+    insult: insultLevel(text),
+    distress: isDistress(text),
+    botQuestion: isBotQuestion(text),
+    privateAsk: isPrivateAsk(text),
+    injection: isInjection(text),
+    tradeTalk: isTradeTalk(text),
+    questionToRoom: isQuestionToRoom(text),
+    knownCoin: knownCoinIn(text, room),
+  });
+
+  /** A newer addressed line arrived within the burst: this one is not the one to answer. */
+  const burstPassed = (chatId: number, j: LineJob): boolean => {
+    const last = lastAddressed.get(chatId);
+    return !!last && last.messageId !== j.line.messageId && last.atMs >= j.bornAtMs && last.atMs - j.bornAtMs <= BURST_MS;
+  };
+
+  /** Human lines after this one: an ambient line written for a chat that moved on is dropped. */
+  const newerHumanLines = (chatId: number, messageId: number): number =>
+    (store.room(chatId)?.lines ?? []).filter((l) => !l.own && l.messageId > messageId).length;
+
+  const countAmbient = (chatId: number, n: number, stamp: boolean): void => {
+    const now = clock();
+    const day = utcDay(now);
+    store.update(chatId, (r) => {
+      const cur = r.ambient && r.ambient.day === day && Number.isFinite(r.ambient.n) ? r.ambient.n : 0;
+      r.ambient = { day, n: cur + n };
+      if (stamp) r.lastAmbientAtMs = now;
+    });
+  };
+
+  const personOf = (chatId: number, id: number): TgPerson | undefined => store.person(chatId, id);
+
+  /** After an answer to someone who called it: the flood window (and, for a roast, the roast window). */
+  const noteAnswered = (chatId: number, j: LineJob, roast: boolean): void => {
+    const now = clock();
+    const p = personOf(chatId, j.line.fromId);
+    store.upsertPerson(chatId, {
+      id: j.line.fromId,
+      name: j.line.name,
+      ...(j.addressed !== null ? { answers: bump(p?.answers, now, FLOOD_WINDOW_MS) } : {}),
+      ...(roast ? { roasts: bump(p?.roasts, now, ROAST_WINDOW_MS) } : {}),
+    });
+  };
+
+  /**
+   * "Still not sold on that one tbh": a line naming a coin it faded in this
+   * chat, at low odds, once per coin per few hours, and within the day's
+   * ambient budget. Only when pacing chose no words of its own.
+   */
+  const maybeFadedAgain = async (j: LineJob, cfg: ResolvedConfig | null): Promise<boolean> => {
+    const chatId = j.msg.chatId;
+    const memo = flow.fadedCoinIn(chatId, j.line.text);
+    if (!memo) return false;
+    const now = clock();
+    const room = store.room(chatId);
+    if (!room || shushedNow(room, now)) return false;
+    const k = `${chatId}:${memo.address}`;
+    const last = fadedAt.get(k);
+    if (last !== undefined && now - last < FADED_EVERY_MS) return false;
+    const cap = CHATTINESS[chattiness(cfg)].perDay;
+    const used = room.ambient && room.ambient.day === utcDay(now) ? room.ambient.n : 0;
+    if (used + 1 > cap) return false;
+    if (roll() >= FADED_ODDS) return false;
+    if (!reserveReply(chatId, j.line.messageId)) return false;
+    fadedAt.set(k, now);
+    const sent = await speak(chatId, { kind: "faded-again" }, {
+      replyTo: j.line.messageId,
+      ...(j.threadId !== undefined ? { threadId: j.threadId } : {}),
+      trigger: j.line,
+      senderName: j.line.name,
+      ...(memo.name ? { coinName: memo.name } : {}),
+      bornAtMs: j.bornAtMs,
+    });
+    if (!sent) {
+      releaseReply(chatId, j.line.messageId);
+      fadedAt.delete(k);
+      return false;
+    }
+    countAmbient(sent.chatId, 1, true);
+    return true;
+  };
+
+  /** Act on pacing's decision. Books are kept only after a line or reaction actually landed. */
+  const act = async (dec: PaceDecision, j: LineJob): Promise<void> => {
+    const chatId = j.msg.chatId;
+    const messageId = j.line.messageId;
+    const reply: SpeakOpts = {
+      replyTo: messageId,
+      ...(j.threadId !== undefined ? { threadId: j.threadId } : {}),
+      trigger: j.line,
+      senderName: j.line.name,
+      bornAtMs: j.bornAtMs,
+      ownerAddressed: j.isOwner && j.addressed !== null,
+      ...(j.addressed !== null ? { stillWanted: () => !burstPassed(chatId, j) } : {}),
+    };
+    switch (dec.act) {
+      case "skip":
+        return;
+      case "react": {
+        if (!reserveReply(chatId, messageId)) return;
+        const ok = await reactTo(chatId, messageId, dec.emoji, { ownerAddressed: reply.ownerAddressed === true });
+        if (!ok) {
+          releaseReply(chatId, messageId);
+          return;
+        }
+        // An unprompted reaction is half an ambient line; a 🤡 or 🥱 in answer is not ambient.
+        if (j.addressed === null) countAmbient(chatId, 0.5, false);
+        return;
+      }
+      case "shush": {
+        const now = clock();
+        // Quiet from now, whether or not the "ok ok" lands: going quiet is the
+        // safe direction, and a failed send must not leave it chatty.
+        store.update(chatId, (r) => {
+          const until = now + (j.isOwner ? OWNER_SHUSH_MS : SHUSH_MS);
+          r.shushedUntilMs = Math.max(r.shushedUntilMs ?? 0, until);
+        });
+        if (!reserveReply(chatId, messageId)) return;
+        if (roll() < SHUSH_REACT_ODDS) {
+          if (!(await reactTo(chatId, messageId, REACTION_FOR.shush[0]))) releaseReply(chatId, messageId);
+          return;
+        }
+        const sent = await speak(chatId, { kind: "shushed" }, { ...reply, stillWanted: () => true });
+        if (!sent && !(await reactTo(chatId, messageId, REACTION_FOR.shush[0]))) releaseReply(chatId, messageId);
+        return;
+      }
+      default:
+        break;
+    }
+
+    let intent: TgIntent;
+    let ambient = false;
+    let replyOpts: SpeakOpts = reply;
+    switch (dec.act) {
+      case "answer":
+        intent = { kind: "answer", mood: dec.mood };
+        break;
+      case "roast":
+        intent = { kind: "roast", owner: dec.owner };
+        break;
+      case "kind":
+        intent = { kind: "kind" };
+        break;
+      case "greet":
+        intent = { kind: "greet", word: dec.word };
+        break;
+      case "ambient": {
+        intent = { kind: "ambient", topic: dec.topic };
+        ambient = true;
+        // Joining in is not a reply, except to answer a question left hanging
+        // (a deferred line is always one, whatever topic pacing named).
+        const base: SpeakOpts = {
+          ...(j.threadId !== undefined ? { threadId: j.threadId } : {}),
+          trigger: j.line,
+          senderName: j.line.name,
+          bornAtMs: j.bornAtMs,
+          ambient: true,
+          stillWanted: () => newerHumanLines(chatId, messageId) < NEWER_LINES_DROP,
+        };
+        replyOpts = dec.topic === "question" || j.deferred === true ? { ...base, replyTo: messageId } : base;
+        break;
+      }
+      default:
+        return;
+    }
+
+    if (!reserveReply(chatId, messageId)) return;
+    const sent = await speak(chatId, intent, replyOpts);
+    if (!sent) {
+      releaseReply(chatId, messageId);
+      return;
+    }
+    const at = sent.chatId;
+    switch (dec.act) {
+      case "answer":
+      case "kind":
+        noteAnswered(at, j, false);
+        return;
+      case "roast":
+        noteAnswered(at, j, true);
+        return;
+      case "greet": {
+        store.upsertPerson(at, {
+          id: j.line.fromId,
+          name: j.line.name,
+          greetedDay: utcDay(clock()),
+          ...(j.addressed !== null ? { answers: bump(personOf(at, j.line.fromId)?.answers, clock(), FLOOD_WINDOW_MS) } : {}),
+        });
+        // A greeting in words unasked is an ambient line (pacing.ts), so a gm thread cannot blow the day's cap.
+        if (j.addressed === null) countAmbient(at, 1, true);
+        return;
+      }
+      case "ambient":
+        if (ambient) countAmbient(at, 1, true);
+        return;
+      default:
+        return;
+    }
+  };
+
+  /** ONE LINE, off the poll loop: the coin flow first, then pacing, then the words. */
+  const processLine = async (j: LineJob): Promise<void> => {
+    const chatId = j.msg.chatId;
+    let cfg = cfgNow();
+    if (!canTalk(chatId, cfg)) return;
+    const text = j.line.text;
+
+    if (!j.deferred) {
+      const cas = extractCas(text);
+      const foreignMint = hasForeignMint(text);
+      const cashtags = extractCashtags(text);
+      if (cas.length > 0 || foreignMint || cashtags.length > 0) {
+        const r = await flow.onPost(chatId, j.line, {
+          senderId: j.line.fromId,
+          // Nobody to tag behind an anonymous admin or a channel: the tag would name the chat's placeholder.
+          senderName: j.via ? "" : j.line.name,
+          ...(typeof j.msg.dateSec === "number" ? { dateSec: j.msg.dateSec } : {}),
+          cas,
+          foreignMint,
+          cashtags,
+          addressed: j.addressed !== null,
+        });
+        // The coin flow owns the message: nothing else is said about it.
+        if (r === "handled") return;
+      }
+    }
+
+    const now = clock();
+    if (now - j.bornAtMs > STALE_MS) return;
+    cfg = cfgNow();
+    const room = store.room(chatId);
+    if (!room || !canTalk(chatId, cfg)) return;
+    const signals = signalsOf(text, room);
+
+    // A QUESTION TO THE ROOM is looked at again in a minute: pacing can only
+    // see "nobody answered it" once a minute has passed, and answering it at
+    // once would be the lurker who beats everyone to it. Never a line that
+    // reads as distress ("anyone else want to die after this?"): the kind
+    // line does not wait. Nor a shush or an insult, which pacing settles now.
+    const plainQuestion = !signals.distress && !signals.shush && signals.insult === "none";
+    if (!j.deferred && j.addressed === null && plainQuestion && signals.questionToRoom && j.line.replyTo === undefined && extractCas(text).length === 0) {
+      track(
+        (async () => {
+          await sleep(QUESTION_WAIT_MS);
+          if (stopped) return;
+          enqueue(chatId, () => processLine({ ...j, deferred: true, bornAtMs: clock() }));
+        })(),
+      );
+      return;
+    }
+
+    if (j.addressed !== null && burstPassed(chatId, j)) return;
+
+    const m = modelNow();
+    const dec = decide({
+      room,
+      line: j.line,
+      addressed: j.addressed,
+      isOwner: j.isOwner,
+      fromIsBot: fromBot(j.msg),
+      chattiness: chattiness(cfg),
+      nowMs: now,
+      rand,
+      hasModel: m !== null && gate.available(chatId),
+      signals,
+    });
+    if ((dec.act === "skip" || dec.act === "react") && j.addressed === null && (await maybeFadedAgain(j, cfg))) return;
+    await act(dec, j);
+  };
+
+  // ─── The owner's /groups and its buttons ─────────────────────────────────
+
+  const STATUS_WORDS: Record<TgRoom["status"], string> = {
+    approved: "talking there",
+    pending: "waiting for your ok",
+    left: "not in it any more",
+    blocked: "you told me to leave",
+  };
+  const STATUS_ORDER: Record<TgRoom["status"], number> = { pending: 0, approved: 1, left: 2, blocked: 3 };
+
+  const listing = (): { html: string; keyboard: InlineKeyboard } => {
+    const rooms = store
+      .rooms()
+      .slice()
+      .sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || b.statusAtMs - a.statusAtMs || a.chatId - b.chatId);
+    const cfg = cfgNow();
+    const lines: string[] = [];
+    if (rooms.length === 0) {
+      lines.push("I'm not in any Telegram groups yet. Add me to one and I'll say hi.");
+    } else {
+      lines.push("<b>Your Telegram groups</b>");
+      rooms.forEach((r, i) => lines.push(`${i + 1}. ${r.title ? `«${esc(r.title)}»` : "a group"} — ${STATUS_WORDS[r.status]}`));
+    }
+    if (!switchOn()) lines.push("", "Telegram groups are switched off on this server, so I stay quiet in all of them.");
+    else if (cfg?.telegramGroupsEnabled !== true) lines.push("", "Telegram groups are switched off in Settings → Telegram, so I stay quiet in all of them.");
+    let off: boolean | null = null;
+    try {
+      off = d.privacyOff();
+    } catch {
+      off = null;
+    }
+    if (off === false) {
+      lines.push(
+        "",
+        "Privacy mode is on for me, so in groups I only hear commands and replies to me. To let me follow along: @BotFather → /setprivacy → your bot → Disable, then remove me from each group and add me back.",
+      );
+    }
+    const keyboard: InlineKeyboard = [];
+    rooms.forEach((r, i) => {
+      const n = i + 1;
+      const row: InlineKeyboard[number] = [];
+      if (r.status === "pending") row.push({ text: `${n} · Stay`, callbackData: `${CB_PREFIX}stay:${r.chatId}` });
+      if (r.status === "pending" || r.status === "approved") row.push({ text: `${n} · Leave`, callbackData: `${CB_PREFIX}leave:${r.chatId}` });
+      row.push({ text: `${n} · Forget`, callbackData: `${CB_PREFIX}forget:${r.chatId}` });
+      keyboard.push(row);
+    });
+    return { html: lines.join("\n"), keyboard };
+  };
+
+  const forgetChat = (chatId: number, messageId?: number): void => {
+    try {
+      if (!store.room(chatId)) return;
+      store.forgetChat(chatId);
+      forgetInMemory(chatId);
+      note("ok", "Telegram groups: the owner wiped one group's memory");
+      enqueue(
+        chatId,
+        async () => {
+          if (!canTalk(chatId)) return;
+          await speak(chatId, { kind: "forgot" }, { ...(isMsgId(messageId) ? { replyTo: messageId } : {}), ownerAddressed: true });
+        },
+        { force: true },
+      );
+    } catch (e) {
+      fail("forget", e);
+    }
+  };
+
+  // ─── The surface ─────────────────────────────────────────────────────────
+
+  const sweep = async (): Promise<void> => {
+    try {
+      if (stopped || !switchOn()) return;
+      const now = clock();
+      for (const room of store.rooms()) {
+        try {
+          if (room.status === "pending") {
+            if (room.askedOwnerAtMs !== undefined && now - room.askedOwnerAtMs >= PENDING_LEAVE_MS) {
+              await leaveRoom(room.chatId, "the owner didn't answer within a day");
+              continue;
+            }
+            await askOwner(room.chatId);
+          } else if (room.status === "approved") {
+            // The "three quiet hours" pass: nothing else is happening in that chat to trigger it.
+            maybeMemoryPass(room.chatId);
+          }
+        } catch (e) {
+          fail("sweep", e);
+        }
+      }
+    } catch (e) {
+      fail("sweep", e);
+    }
+  };
+
+  const sweepTimer = setInterval(() => void track(sweep()), SWEEP_MS);
+  sweepTimer.unref?.();
+  // The boot line: which model writes group lines (names only).
+  try {
+    modelNow();
+  } catch {
+    /* logged inside */
+  }
+
+  return {
+    onMessage(msg: TgMessage): void {
+      try {
+        if (stopped || !msg || typeof msg !== "object") return;
+        const chatId = msg.chatId;
+        if (typeof chatId !== "number" || !isTgGroup(msg.chatType, chatId)) return;
+        const cfg = cfgNow();
+        const room = knownRoom(chatId, { title: msg.chatTitle, kind: msg.chatType, isForum: msg.isForum }, cfg);
+        if (!room) return;
+        if (room.status === "blocked") {
+          // The owner said leave; a line proves it is back. Leave again, once per process.
+          if (!releft.has(chatId) && featureOn(cfg)) {
+            releft.add(chatId);
+            track(leaveRoom(chatId, "the owner said leave"));
+          }
+          return;
+        }
+        // Everything below is a group line or a memory write: the operator's
+        // switch, the owner's setting and the room's status each stop it.
+        if (!featureOn(cfg) || room.status !== "approved") return;
+        const messageId = msg.messageId;
+        if (!isMsgId(messageId)) return;
+        const text = typeof msg.text === "string" ? msg.text : "";
+        // Voice notes are ignored in groups; stickers and bare media never get here.
+        if (!text.trim()) return;
+        if (fromBot(msg)) return;
+        const me = selfNow();
+        if (me && msg.fromId === me.id) return;
+        if (text.trim().startsWith("/")) return;
+
+        const now = clock();
+        const via = viaChat(msg);
+        const owner = ownerId();
+        const isOwner = !via && owner !== null && msg.fromId === owner;
+        const name = displayName(msg);
+        const atMs = typeof msg.dateSec === "number" && Number.isFinite(msg.dateSec) ? Math.min(now, msg.dateSec * 1000) : now;
+        const line: TgLine = {
+          messageId,
+          fromId: msg.fromId,
+          name,
+          text,
+          atMs,
+          ...(msg.replyTo && isMsgId(msg.replyTo.messageId) ? { replyTo: msg.replyTo.messageId } : {}),
+        };
+        // A redelivered update (a replayed batch) is already remembered, and was already answered.
+        if (!store.addLine(chatId, line)) return;
+        store.upsertPerson(chatId, { id: msg.fromId, name, lastSeenMs: now });
+        if (isOwner && typeof msg.fromFirstName === "string" && msg.fromFirstName.trim() && room.ownerName !== mentionName(msg.fromFirstName)) {
+          const first = msg.fromFirstName;
+          store.update(chatId, (r) => {
+            r.ownerName = first;
+          });
+        }
+        const key = msgKey(chatId, messageId);
+        received.set(key, now);
+        const threadId = (msg.isTopicMessage === true || room.isForum === true) && isMsgId(msg.messageThreadId) ? msg.messageThreadId : undefined;
+        if (threadId !== undefined) threads.set(key, threadId);
+        const addressed = me ? addressedHow(msg, me) : null;
+        if (addressed !== null) lastAddressed.set(chatId, { messageId, atMs: now });
+        maybeMemoryPass(chatId);
+
+        const job: LineJob = { msg, line, addressed, isOwner, via, bornAtMs: now, ...(threadId !== undefined ? { threadId } : {}) };
+        // A line with a coin in it is always queued: its claim and nomination
+        // must not be lost to a busy chat. Chatter past the cap is remembered only.
+        const coin = extractCas(text).length > 0;
+        enqueue(chatId, () => processLine(job), { force: coin || addressed !== null });
+      } catch (e) {
+        fail("message", e);
+      }
+    },
+
+    onMember(u: TgMemberUpdate): void {
+      try {
+        if (stopped || !u || typeof u !== "object" || typeof u.chatId !== "number") return;
+        if (u.chatType !== "group" && u.chatType !== "supergroup") return;
+        const chatId = u.chatId;
+        const nowIn = isIn(u.newStatus, u.newIsMember);
+        const cfg = cfgNow();
+        const existing = store.room(chatId);
+        if (!nowIn) {
+          if (!existing) return;
+          // Removed or kicked. A blocked room stays blocked: that is our own
+          // leave arriving back, and the owner's no still stands.
+          if (existing.status !== "blocked" && existing.status !== "left") {
+            store.setStatus(chatId, "left");
+            note("ok", "Telegram groups: removed from a group (memory kept for 30 days)");
+          }
+          store.update(chatId, (r) => {
+            delete r.helloSaid;
+          });
+          forgetInMemory(chatId);
+          return;
+        }
+        const wasOut = !isIn(u.oldStatus, undefined);
+        const room = store.ensureRoom(chatId, {
+          title: typeof u.chatTitle === "string" ? u.chatTitle : "",
+          kind: u.chatType,
+          ...(typeof u.isForum === "boolean" ? { isForum: u.isForum } : {}),
+        });
+        const added = wasOut || !existing || existing.status === "left";
+        if (added && Number.isSafeInteger(u.fromId)) {
+          // Who added it, whatever the status becomes: setStatus records this
+          // only on a change, and a room created just now is already pending.
+          const at = clock();
+          store.update(chatId, (r) => {
+            r.addedById = u.fromId;
+            r.addedAtMs = at;
+          });
+        }
+        const owner = ownerId();
+        const byOwner = owner !== null && u.fromId === owner;
+        if (byOwner) {
+          if (room.status !== "approved" || added) approve(chatId, u.fromId, "added to a group by the owner");
+          return;
+        }
+        if (!added) return; // a promotion or a restriction by someone else changes nothing
+        if (room.status === "blocked") {
+          // The owner said leave; a stranger adding it back is undone quietly,
+          // without asking the owner the same question again.
+          if (switchOn()) track(leaveRoom(chatId, "the owner said leave"));
+          return;
+        }
+        if (cfg?.telegramAllowlist?.includes(chatId)) {
+          approve(chatId, u.fromId, "added to a group the owner linked");
+          return;
+        }
+        store.setStatus(chatId, "pending", u.fromId);
+        track(askOwner(chatId));
+      } catch (e) {
+        fail("member", e);
+      }
+    },
+
+    onService(s: TgServiceMessage): void {
+      try {
+        if (stopped || !s || typeof s !== "object" || typeof s.chatId !== "number") return;
+        if (s.chatType !== "group" && s.chatType !== "supergroup") return;
+        const chatId = s.chatId;
+        // A group that became a supergroup: its state moves to the new id.
+        // Both notices arrive (one in each chat); the second finds nothing to move.
+        if (typeof s.migrateToChatId === "number") {
+          store.migrate(chatId, s.migrateToChatId);
+          forgetInMemory(chatId);
+          return;
+        }
+        if (typeof s.migrateFromChatId === "number") {
+          if (store.room(s.migrateFromChatId)) store.migrate(s.migrateFromChatId, chatId);
+          forgetInMemory(s.migrateFromChatId);
+          return;
+        }
+        const me = selfNow();
+        if (s.leftChatMember && me && s.leftChatMember.id === me.id) {
+          const room = store.room(chatId);
+          if (room && room.status !== "blocked" && room.status !== "left") {
+            store.setStatus(chatId, "left");
+            note("ok", "Telegram groups: removed from a group (memory kept for 30 days)");
+          }
+          return;
+        }
+        const joined = (s.newChatMembers ?? []).filter((m) => m && !m.isBot && (!me || m.id !== me.id));
+        if (joined.length === 0) return;
+        const cfg = cfgNow();
+        if (!canTalk(chatId, cfg)) return;
+        const room = store.room(chatId);
+        const now = clock();
+        if (!room || shushedNow(room, now)) return;
+        const day = utcDay(now);
+        const n = room.welcomes && room.welcomes.day === day ? room.welcomes.n : 0;
+        if (n >= WELCOMES_PER_DAY) return;
+        if (roll() >= WELCOME_ODDS) return;
+        const first = joined[0];
+        const name = first ? displayName({ fromFirstName: first.firstName, ...(first.username ? { fromUsername: first.username } : {}) }) : "";
+        enqueue(chatId, async () => {
+          const sent = await speak(chatId, { kind: "welcome", name }, { ...(isMsgId(s.messageId) ? { replyTo: s.messageId } : {}), senderName: name, bornAtMs: now });
+          if (!sent) return;
+          const today = utcDay(clock());
+          store.update(sent.chatId, (r) => {
+            const cur = r.welcomes && r.welcomes.day === today ? r.welcomes.n : 0;
+            r.welcomes = { day: today, n: cur + 1 };
+          });
+        });
+      } catch (e) {
+        fail("service", e);
+      }
+    },
+
+    async onCallback(cb: TgCallback): Promise<boolean> {
+      try {
+        if (!cb || typeof cb.data !== "string" || !cb.data.startsWith(CB_PREFIX)) return false;
+        const opts = optsNow();
+        if (!opts) return true;
+        const answer = async (text: string): Promise<void> => {
+          try {
+            await answerCallbackQuery(opts, cb.id, text);
+          } catch (e) {
+            fail("callback answer", e);
+          }
+        };
+        const m = CB_RE.exec(cb.data);
+        if (!m) {
+          await answer("That button has expired.");
+          return true;
+        }
+        // THE OWNER, IN THEIR OWN DM. A press from anyone else — or from the
+        // owner on a copy forwarded into some other chat — decides nothing.
+        const owner = ownerId();
+        if (owner === null || cb.fromId !== owner || cb.chatId !== owner) {
+          await answer("Only my owner can do that.");
+          return true;
+        }
+        const what = m[1];
+        const chatId = Number(m[2]);
+        const room = Number.isSafeInteger(chatId) ? store.room(chatId) : undefined;
+        if (!room) {
+          await answer("I don't know that group any more.");
+          if (listings.has(cb.messageId)) {
+            const l = listing();
+            await editMessageText(opts, cb.chatId, cb.messageId, l.html, l.keyboard);
+          }
+          return true;
+        }
+        const title = titleOf(room);
+        let outcome = "";
+        if (what === "stay") {
+          if (room.status === "pending") {
+            approve(chatId, undefined, "the owner said stay");
+            outcome = `✅ Staying in ${title}.`;
+            await answer("Staying");
+          } else if (room.status === "approved") {
+            outcome = `✅ Already hanging out in ${title}.`;
+            await answer("Already there");
+          } else {
+            outcome = `I'm not in ${title} any more — add me back and I'll be there.`;
+            await answer("Not in that group");
+          }
+        } else if (what === "leave") {
+          if (room.status === "approved" || room.status === "pending") {
+            await leaveRoom(chatId, "the owner said leave");
+            forgetInMemory(chatId);
+            outcome = `👋 Left ${title}.`;
+          } else {
+            // Not in it; blocked all the same, so a stranger's re-add is undone.
+            store.setStatus(chatId, "blocked");
+            outcome = `👋 I'll stay out of ${title}.`;
+          }
+          await answer("Done");
+        } else {
+          store.forgetChat(chatId);
+          forgetInMemory(chatId);
+          note("ok", "Telegram groups: the owner wiped one group's memory");
+          outcome = `🧹 Forgot everything from ${title}.`;
+          await answer("Forgotten");
+        }
+        try {
+          if (listings.has(cb.messageId)) {
+            const l = listing();
+            await editMessageText(opts, cb.chatId, cb.messageId, l.html, l.keyboard);
+          } else {
+            await editMessageText(opts, cb.chatId, cb.messageId, outcome);
+          }
+        } catch (e) {
+          fail("callback edit", e);
+        }
+        return true;
+      } catch (e) {
+        fail("callback", e);
+        return true;
+      }
+    },
+
+    async groupsCommand(chatId: number): Promise<void> {
+      try {
+        const opts = optsNow();
+        if (!opts) return;
+        const l = listing();
+        const r = await sendMessage(opts, chatId, l.html, l.keyboard.length > 0 ? { keyboard: l.keyboard } : {});
+        if (r.ok && isMsgId(r.messageId)) listings.set(r.messageId, true);
+      } catch (e) {
+        fail("groups", e);
+      }
+    },
+
+    forgetChat,
+
+    async forgetMe(chatId: number, userId: number, messageId?: number): Promise<void> {
+      try {
+        const room = store.room(chatId);
+        if (!room || !Number.isSafeInteger(userId)) return;
+        const person = store.person(chatId, userId);
+        const names = [person?.name, ...room.lines.filter((l) => l.fromId === userId).map((l) => l.name)].filter(
+          (n): n is string => typeof n === "string" && [...n.trim()].length >= 2,
+        );
+        // Honoured whatever the switches say: a request to be forgotten is not a line.
+        store.forgetPerson(chatId, userId);
+        // Their coin posts keep the coin and its verdict (an outcome may still
+        // be on its way to that memo), but no longer say who posted it: the
+        // name goes, and so does the user id, which names them just as well.
+        // An outcome for such a memo is then said without a tag (coins.ts).
+        for (const c of room.coins) if (c.byId === userId) store.updateCoin(chatId, c.address, { byName: "", byId: 0 });
+        store.update(
+          chatId,
+          (r) => {
+            // A summary that names them is dropped whole; the next memory pass
+            // rebuilds it from the lines that are left, which no longer hold theirs.
+            const s = r.summary.normalize("NFKC").toLowerCase();
+            if (names.some((n) => new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRe(n.normalize("NFKC").toLowerCase().trim())}(?![\\p{L}\\p{N}_])`, "u").test(s))) {
+              r.summary = "";
+            }
+            if (userId === ownerId()) delete r.ownerName;
+          },
+          { flush: true },
+        );
+        if (!canTalk(chatId)) return;
+        await enqueue(
+          chatId,
+          async () => {
+            await speak(chatId, { kind: "forgot-me" }, { ...(isMsgId(messageId) ? { replyTo: messageId } : {}), bornAtMs: clock() });
+          },
+          { force: true },
+        );
+      } catch (e) {
+        fail("forget me", e);
+      }
+    },
+
+    async commandNotice(chatId: number, messageId: number | undefined, fromId: number, what: TgCommandNotice, threadId?: number): Promise<void> {
+      try {
+        if (!canTalk(chatId)) return;
+        const now = clock();
+        if (what !== "dm-sent") {
+          const k = `${what}:${chatId}:${fromId}`;
+          const last = refusedAt.get(k);
+          if (last !== undefined && now - last < REFUSE_EVERY_MS) return;
+          refusedAt.set(k, now);
+        }
+        const reply: SpeakOpts = {
+          ...(isMsgId(messageId) ? { replyTo: messageId } : {}),
+          ...(isMsgId(threadId) ? { threadId } : {}),
+          bornAtMs: now,
+          ownerAddressed: what === "dm-sent",
+        };
+        await enqueue(
+          chatId,
+          async () => {
+            if (what === "owner-only") {
+              // Its own small fixed pool, gated like every template.
+              const room = store.room(chatId);
+              const recentOwn = (room?.lines ?? []).filter((l) => l.own).slice(-8).map((l) => l.text);
+              const start = Math.floor(roll() * OWNER_ONLY_LINES.length);
+              let text: string | null = null;
+              for (let i = 0; i < OWNER_ONLY_LINES.length && text === null; i++) {
+                const cand = OWNER_ONLY_LINES[(start + i) % OWNER_ONLY_LINES.length] ?? "";
+                const v = admitTgLine(cand, { agentName: selfNow()?.name ?? "", kind: "fixed", recentOwn, names: [] });
+                if (v.ok) text = v.text;
+              }
+              if (!text) return;
+              const sent = await deliver({
+                chatId,
+                intent: { kind: "private-read-refuse" },
+                text,
+                ...(reply.replyTo !== undefined ? { replyTo: reply.replyTo } : {}),
+                ...(reply.threadId !== undefined ? { threadId: reply.threadId } : {}),
+                bornAtMs: now,
+                followUp: false,
+                ownerAddressed: false,
+              });
+              if (sent) recordOwn(sent.chatId, sent.messageId, text, sent.chatId === chatId ? reply.replyTo : undefined);
+              return;
+            }
+            await speak(chatId, { kind: what === "dm-sent" ? "private-read-dm" : "private-read-refuse" }, reply);
+          },
+          { force: true },
+        );
+      } catch (e) {
+        fail("notice", e);
+      }
+    },
+
+    isApproved(chatId: number): boolean {
+      try {
+        return store.room(chatId)?.status === "approved";
+      } catch {
+        return false;
+      }
+    },
+
+    sweep,
+
+    async drain(): Promise<void> {
+      for (let i = 0; i < 1_000 && inflight.size > 0; i++) {
+        await Promise.allSettled([...inflight]);
+      }
+    },
+
+    stop(): void {
+      try {
+        stopped = true;
+        clearInterval(sweepTimer);
+        flow.stop();
+      } catch (e) {
+        fail("stop", e);
+      }
+    },
+  };
+}
+
+function safeHosted(): boolean {
+  try {
+    return isHostedMode();
+  } catch {
+    // Unknown reads as hosted: the side where the house key is never spent.
+    return true;
+  }
+}

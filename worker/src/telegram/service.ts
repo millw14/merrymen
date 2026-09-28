@@ -39,6 +39,7 @@ import {
   setMyCommands,
   publicBotCommands,
   type InlineKeyboard,
+  type TgBotInfo,
   type TgCallback,
   type TgMessage,
 } from "./api";
@@ -96,6 +97,7 @@ import { describeGap } from "../memory/retrieve";
 import { describeLlmFailure, isLlmProviderFailure } from "../llm-failure";
 import type { TgGroupsStore } from "./tg-groups/store";
 import type { TgCoinsPort } from "./tg-groups/types";
+import { createTgGroups, type TgGroups, type TgGroupsDeps } from "./tg-groups/handler";
 
 /**
  * Commands that are really questions when they arrive as WORDS: answered by
@@ -145,6 +147,8 @@ export interface TelegramServiceDeps {
   tgCoins?: TgCoinsPort;
   /** Injectable for tests. */
   now?: () => number;
+  /** Injectable for tests: the group handler's clock, dice, waits, environment and log. */
+  tgGroupsTest?: Partial<Pick<TgGroupsDeps, "now" | "rand" | "sleep" | "env" | "log">>;
 }
 
 /** Toggle the pause marker the tick loop honors. */
@@ -165,6 +169,39 @@ export function isPaused(): boolean {
 const LINK_MAX_FAILS = 5;
 const LINK_LOCKOUT_SEC = 600;
 const HISTORY_TURNS = 6; // user+assistant pairs kept per chat for follow-ups
+/** How often the cached getMe (id, username, privacy flag) is read again. */
+const SELF_REFRESH_MS = 30 * 60 * 1000;
+
+/**
+ * Commands that read the owner's private state (docs/tg-groups.md rule 3).
+ * Asked in a group by the owner or an allowlisted sender, they are answered in
+ * THAT PERSON'S DM, never in the room. The contract's list, plus the other
+ * reads that print settings, alerts, reminders or the remote-control state —
+ * rule 3 keeps all of those out of a group too.
+ */
+const PRIVATE_READS: ReadonlySet<string> = new Set([
+  "status",
+  "positions",
+  "pnl",
+  "trades",
+  "wallet",
+  "why",
+  "report",
+  "soul",
+  "depth",
+  "brag",
+  "settings",
+  "alerts",
+  "reminders",
+  "watchers",
+  "pc",
+]);
+
+/** A group or supergroup; with no chat type (an older parse), a negative id — the repo's long-standing group test. */
+function isGroupMessage(m: { chatType?: string; chatId: number }): boolean {
+  if (m.chatType === "group" || m.chatType === "supergroup") return true;
+  return m.chatType === undefined && m.chatId < 0;
+}
 
 /** Escape a name so it can sit inside a RegExp. */
 function escapeRe(v: string): string {
@@ -249,6 +286,86 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    */
   // One detached /agent task per chat; /agent stop flips the flag mid-run.
   const agentRuns = new Map<number, { stopped: boolean }>();
+
+  /**
+   * WHO THE BOT IS, from getMe: its id (a reply to one of its messages is a
+   * reply to this id), its username (whether "/cmd@name" and "@name" mean it)
+   * and whether privacy mode is off. Read at start, again when the token
+   * changes, and every half hour — the owner can flip privacy mode in
+   * BotFather at any time. Bound to the token it was read with, so a new
+   * token never borrows the old bot's identity.
+   */
+  let botSelf: { token: string; bot: TgBotInfo; at: number } | null = null;
+  let selfReading: Promise<void> | null = null;
+  const refreshSelf = (token: string): Promise<void> => {
+    if (selfReading) return selfReading;
+    selfReading = getMe({ token })
+      .then((r) => {
+        if (r.bot) botSelf = { token, bot: r.bot, at: Date.now() };
+      })
+      .catch(() => {
+        /* the next poll tries again */
+      })
+      .finally(() => {
+        selfReading = null;
+      });
+    return selfReading;
+  };
+  const selfFor = (cfg: ResolvedConfig): TgBotInfo | null =>
+    botSelf && cfg.telegramBotToken && botSelf.token === cfg.telegramBotToken ? botSelf.bot : null;
+
+  /**
+   * The settings as the group handler reads them: fresh, but at most once a
+   * second. It reads them several times per group line, and every read here
+   * is a settings file parse; a busy group would otherwise mean dozens a
+   * second. A second is short enough that a /link or a dashboard switch
+   * still applies at once.
+   */
+  let groupCfgMemo: { at: number; cfg: ResolvedConfig } | null = null;
+  const groupCfg = (): ResolvedConfig => {
+    const t = Date.now();
+    if (!groupCfgMemo || t - groupCfgMemo.at >= 1000 || t < groupCfgMemo.at) groupCfgMemo = { at: t, cfg: deps.getCfg() };
+    return groupCfgMemo.cfg;
+  };
+
+  /**
+   * TELEGRAM GROUPS (docs/tg-groups.md), created once, and only when the child
+   * handed over the durable store. Without it the bot is silent in groups:
+   * slash commands keep their rules (handleGroupCommand), and nothing else is
+   * answered.
+   */
+  const tgGroups: TgGroups | null = deps.tgGroupsStore
+    ? createTgGroups({
+        opts: () => {
+          const token = groupCfg().telegramBotToken;
+          return token ? { token } : null;
+        },
+        store: deps.tgGroupsStore,
+        getCfg: groupCfg,
+        stateRef,
+        port: () => deps.tgCoins ?? null,
+        self: () => {
+          const bot = selfFor(groupCfg());
+          return bot ? { id: bot.id, username: bot.username, name: getName() } : null;
+        },
+        privacyOff: () => {
+          const bot = selfFor(groupCfg());
+          return typeof bot?.canReadAllGroupMessages === "boolean" ? bot.canReadAllGroupMessages : null;
+        },
+        note: deps.note,
+        dashboardBase,
+        // The agent's own id seeds its typing style; before it is armed, the
+        // bot's id (one bot per agent) keeps the style stable meanwhile.
+        agentKey: () => {
+          const id = deps.buildStatusContext().agentId;
+          if (id) return id;
+          const bot = botSelf?.bot;
+          return bot ? `bot:${bot.id}` : getName();
+        },
+        hosted: isHostedMode(),
+        ...(deps.tgGroupsTest ?? {}),
+      })
+    : null;
 
   /**
    * The in-memory map is now a CACHE over the sqlite log, not the source of
@@ -1096,6 +1213,83 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   };
 
   /**
+   * A SLASH COMMAND TYPED IN A GROUP (docs/tg-groups.md "Commands in groups").
+   *
+   * It still goes through `handle` and its sender rules; what changes is who
+   * may reach it and where the answer goes:
+   *
+   *   - "/cmd@OtherBot" is another bot's, and is ignored (parseSlash strips
+   *     any @name without checking it is ours).
+   *   - Someone who may not run commands gets one casual line per hour at
+   *     most, never "🚫 not authorized" — with privacy mode off that was one
+   *     refusal per message. /link keeps today's behaviour.
+   *   - A private read (rule 3) is answered in the asker's own DM, with a
+   *     "sent it to your DMs" in the room; the room never sees the report.
+   *   - /name, /remember and /soul need the SENDER on the allowlist, like
+   *     every state-changing command (today any member of a linked group
+   *     could run them, and /remember writes owner facts).
+   *   - /forget wipes that group's memory only, and only for the owner: the
+   *     owner's DM memory is not the room's to erase. /forgetme is anyone's.
+   */
+  const handleGroupCommand = async (msg: TgMessage, cfg: ResolvedConfig): Promise<void> => {
+    const text = msg.text.trim();
+    const head = text.slice(1).split(/\s+/)[0] ?? "";
+    const addressedTo = /@(\w+)$/.exec(head)?.[1];
+    if (addressedTo) {
+      // Unknown username (getMe not answered yet): not provably ours, so not ours.
+      const me = selfFor(cfg)?.username;
+      if (!me || addressedTo.toLowerCase() !== me.toLowerCase()) return;
+    }
+    const name = head.replace(/@\w+$/, "").toLowerCase();
+    // A person speaking through a chat (an anonymous admin, a channel) cannot
+    // be told apart from any other: nobody in particular to answer or forget.
+    const via = msg.senderChatId !== undefined;
+    const ownerId = stateRef.get().ownerId;
+    const isOwner = !via && ownerId !== null && msg.fromId === ownerId;
+    const senderListed = !via && cfg.telegramAllowlist.includes(msg.fromId);
+    const thread = msg.isTopicMessage === true && typeof msg.messageThreadId === "number" ? msg.messageThreadId : undefined;
+    // NOT AWAITED. The group line takes typing time, the flood pacer and maybe
+    // a 429 pause; the poll loop must not wait on any of it (rule 7). Neither
+    // call ever rejects.
+    const notice = (what: "dm-sent" | "private-refused" | "owner-only"): void => {
+      if (tgGroups) void tgGroups.commandNotice(msg.chatId, msg.messageId, msg.fromId, what, thread);
+    };
+
+    if (name === "forgetme") {
+      // The wipe itself happens before forgetMe first awaits; only the
+      // "done 🫡" is left to the group queue.
+      if (!via && tgGroups) void tgGroups.forgetMe(msg.chatId, msg.fromId, msg.messageId);
+      return;
+    }
+    const slash = parseSlash(text);
+    if (slash?.kind === "link") {
+      await handle(msg, cfg);
+      return;
+    }
+    if (!isOwner && !senderListed) {
+      notice(slash && PRIVATE_READS.has(slash.kind) ? "private-refused" : "owner-only");
+      return;
+    }
+    if (slash && PRIVATE_READS.has(slash.kind)) {
+      // The same command, as if they had sent it to the bot directly: every
+      // DM rule applies, and the answer lands in their DM.
+      await handle({ updateId: msg.updateId, chatId: msg.fromId, fromId: msg.fromId, fromUsername: msg.fromUsername, text: msg.text }, cfg);
+      notice("dm-sent");
+      return;
+    }
+    if (slash?.kind === "forget") {
+      if (isOwner) tgGroups?.forgetChat(msg.chatId, msg.messageId);
+      else notice("owner-only");
+      return;
+    }
+    if (!senderListed && (slash?.kind === "name" || slash?.kind === "remember")) {
+      notice("owner-only");
+      return;
+    }
+    await handle(msg, cfg);
+  };
+
+  /**
    * A BUTTON PRESS — the answer to one parked question, from the person it was
    * asked of.
    *
@@ -1187,7 +1381,13 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       }
     }
 
-    const { messages, callbacks, nextOffset, reason } = await getUpdates({ token: cfg.telegramBotToken }, stateRef.get().offset);
+    // Who the bot is, before a group line is read against it: first poll,
+    // a new token, or half an hour since the last look (in the background).
+    const selfToken = cfg.telegramBotToken;
+    if (!botSelf || botSelf.token !== selfToken) await refreshSelf(selfToken);
+    else if (Date.now() - botSelf.at > SELF_REFRESH_MS) void refreshSelf(selfToken);
+
+    const { messages, callbacks, members, service, nextOffset, reason } = await getUpdates({ token: cfg.telegramBotToken }, stateRef.get().offset);
     if (reason) {
       if (!warnedUnreachable) {
         deps.note("warn", `Telegram: getUpdates — ${reason}`);
@@ -1196,11 +1396,60 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       return;
     }
     warnedUnreachable = false;
+    /**
+     * WHERE A MESSAGE GOES. A DM goes to `handle` exactly as it always has
+     * (the owner's /groups aside). A group message never does, unless it is a
+     * slash command: ordinary group lines — the owner's included — go to the
+     * group persona, which knows nothing private. Before this, the owner's
+     * words in a group ran the full DM pipeline, private state and all, and
+     * the answer was posted to the room.
+     *
+     * The group handler's methods return at once and do their work on their
+     * own queue, so a busy group never holds up the owner's DMs or buttons.
+     */
+    const route = (m: TgMessage): Promise<void> => {
+      if (isGroupMessage(m)) {
+        // Voice notes are not transcribed in groups: nobody asked the owner's
+        // transcription key to listen to a room.
+        if (m.voiceFileId && !m.text) return Promise.resolve();
+        // The loop guard: another bot's line. An anonymous admin (a bot account
+        // posting for a person, with sender_chat set) is a person.
+        if (m.fromIsBot === true && m.senderChatId === undefined) return Promise.resolve();
+        if (m.text.trim().startsWith("/")) return handleGroupCommand(m, cfg);
+        tgGroups?.onMessage(m);
+        return Promise.resolve();
+      }
+      if (
+        tgGroups &&
+        m.chatId === m.fromId &&
+        m.fromId === stateRef.get().ownerId &&
+        /^\/groups(?:@\w+)?\s*$/i.test(m.text.trim())
+      ) {
+        return tgGroups.groupsCommand(m.chatId);
+      }
+      return handle(m, cfg);
+    };
     // In the order they happened: a press and a typed message in the same
-    // batch must not overtake each other.
+    // batch must not overtake each other, and a group's "you were added"
+    // must come before the first line said in it.
     const updates = [
-      ...messages.map((m) => ({ at: m.updateId, run: () => handle(m, cfg) })),
-      ...callbacks.map((c) => ({ at: c.updateId, run: () => handleCallback(c, cfg) })),
+      ...messages.map((m) => ({ at: m.updateId, run: () => route(m) })),
+      ...callbacks.map((c) => ({
+        at: c.updateId,
+        run: async () => {
+          if (tgGroups && c.data.startsWith("tgg:")) {
+            await tgGroups.onCallback(c);
+            return;
+          }
+          await handleCallback(c, cfg);
+        },
+      })),
+      ...members
+        .filter((u) => u.chatType === "group" || u.chatType === "supergroup")
+        .map((u) => ({ at: u.updateId, run: async () => tgGroups?.onMember(u) })),
+      ...service
+        .filter((s) => s.chatType === "group" || s.chatType === "supergroup")
+        .map((s) => ({ at: s.updateId, run: async () => tgGroups?.onService(s) })),
     ].sort((a, b) => a.at - b.at);
     for (const u of updates) {
       try {
@@ -1227,11 +1476,20 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   // Announce the bot identity once at startup (best-effort).
   const cfg0 = deps.getCfg();
   if (cfg0.telegramEnabled && cfg0.telegramBotToken) {
-    void getMe({ token: cfg0.telegramBotToken }).then((r) => {
-      if (r.bot) deps.note("ok", `Telegram: connected as @${r.bot.username}`);
-      else deps.note("warn", `Telegram: token check failed — ${r.reason}`);
+    const token0 = cfg0.telegramBotToken;
+    void getMe({ token: token0 }).then((r) => {
+      if (r.bot) {
+        // The same answer seeds the cached identity, so the first poll need not ask again.
+        if (!botSelf) botSelf = { token: token0, bot: r.bot, at: Date.now() };
+        deps.note("ok", `Telegram: connected as @${r.bot.username}`);
+      } else deps.note("warn", `Telegram: token check failed — ${r.reason}`);
     });
   }
   loop();
-  return { stop: () => { stopped = true; } };
+  return {
+    stop: () => {
+      stopped = true;
+      tgGroups?.stop();
+    },
+  };
 }
