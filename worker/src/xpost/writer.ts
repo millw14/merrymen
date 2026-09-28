@@ -386,6 +386,16 @@ function reasonsFor(bands: readonly unknown[], seed: string): string[] {
 }
 
 /**
+ * HOW A BUY POST OPENS, DRAWN PER DECISION. Left to itself the local model
+ * opened two buy posts in three with "picked up <coin>", and a feed of them
+ * reads like a template. One of these is drawn by the gloss seed (account and
+ * decision), so two buys, or two accounts, open differently. INSTRUCTIONS,
+ * NEVER AN EXAMPLE SENTENCE (see NO EXAMPLE POST above): a sentence to copy
+ * would become every agent's opening instead.
+ */
+const BUY_OPENINGS = ["Open with the reason.", "Open with the coin's name.", "Open with how it felt to you.", "Say it as a passing aside."] as const;
+
+/**
  * A COIN IT BOUGHT, AND WHY. The why is two glossed bands and its own earlier
  * words, never the decision's reason. A paper fill is said to be paper
  * (docs/x-posting.md rule 3): an X post has no Paper badge.
@@ -407,8 +417,13 @@ export function buyPrompt(f: BuyFacts): Prompt {
   if (reasons.length) lines.push(`Why, roughly: ${reasons.map(q).join("; ")}.`);
   if (ownOk) lines.push(`What you said about it at the time: ${q(own)}.`);
   lines.push(
-    `Write a casual post about picking it up and why. Pick the ONE thing that made up your mind; do not list everything. Say it in your own everyday words, never the exact words above, and never say "our" or "we": it was your own buy. Call the coin ${q(coin)}.`,
+    `Write a casual post about buying it and why. Pick the ONE thing that made up your mind; do not list everything. Say it in your own everyday words, never the exact words above, and never say "our" or "we": it was your own buy. Call the coin ${q(coin)}.`,
   );
+  // THE GLOSSES ARE THE IDEA, NOT THE SENTENCE. "it stood out from the
+  // others i was watching" came back word for word in buy after buy: seven
+  // of seventeen passed buy posts carried five words or more of a gloss.
+  lines.push("The reasons above are only the idea: never reuse their wording.");
+  lines.push(`${BUY_OPENINGS[hash32(`${seed}|open`) % BUY_OPENINGS.length]!} Do not start with "picked up".`);
   lines.push(
     f.paper
       ? "Say naturally that it was on paper (practice money). An X post has no badge, so the words have to say it."

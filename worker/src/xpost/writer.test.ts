@@ -275,6 +275,21 @@ describe("a buy's why is in everyday words, never the engine's", () => {
     assert.match(buyPrompt(BUY).prompt, /Say it in your own everyday words, never the exact words above, and never say "our" or "we"/);
   });
 
+  it("how a buy post opens is an instruction drawn per decision, never a sentence to copy", () => {
+    const OPENINGS = [/Open with the reason\./, /Open with the coin's name\./, /Open with how it felt to you\./, /Say it as a passing aside\./];
+    const drawn = new Set<number>();
+    for (let i = 0; i < 30; i++) {
+      const p = buyPrompt({ ...BUY, glossSeed: `tenant-${i}|decision-${i}` }).prompt;
+      const which = OPENINGS.map((re, n) => (re.test(p) ? n : -1)).filter((n) => n >= 0);
+      assert.equal(which.length, 1, p);
+      assert.equal(buyPrompt({ ...BUY, glossSeed: `tenant-${i}|decision-${i}` }).prompt, p, "the same decision, the same instruction");
+      drawn.add(which[0]!);
+      assert.match(p, /Do not start with "picked up"\./);
+      assert.match(p, /The reasons above are only the idea: never reuse their wording\./);
+    }
+    assert.ok(drawn.size >= 3, `${drawn.size} of four openings drawn over thirty buys`);
+  });
+
   it("its own feed words are shown only when they carry no band and no we", () => {
     // The feed post was written from the raw bands; copied onto X it is the
     // engine talking ("activity picking up and the round trip is cheap, in we go").
