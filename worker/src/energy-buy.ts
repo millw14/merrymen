@@ -215,9 +215,22 @@ export function isEnergySymbol(symbol: string | null | undefined): boolean {
 export function resolveOrderToken(
   symbol: string,
   watch: readonly { symbol: string; address: string }[],
-): { kind: "token"; address: `0x${string}` } | { kind: "reserve" } | { kind: "unknown" } {
-  const hit = watch.find((t) => t.symbol === symbol);
-  if (hit) return isEnergyReserveToken(hit.address) ? { kind: "reserve" } : { kind: "token", address: hit.address as `0x${string}` };
+): { kind: "token"; address: `0x${string}`; symbol: string } | { kind: "reserve" } | { kind: "unknown" } {
+  // THE NAME AS THE WATCH SET SPELLS IT, whatever case it was asked in. The
+  // app's sell card and Telegram upper-case the symbol before it gets here,
+  // and Settings keeps an owner-typed symbol as typed — so a watched
+  // lookalike called "MerryMen" missed an exact match, fell through to the
+  // reserve's name, and its owner was told "I never sell it" about a coin
+  // they held. Folding case is safe: watchTokensFor keeps one token per
+  // case-folded symbol. `symbol` comes back as the watch set spells it, which
+  // is how the book stores the position the sell reads.
+  const want = symbol.trim().replace(/^\$/, "").toUpperCase();
+  const hit = watch.find((t) => t.symbol.toUpperCase() === want);
+  if (hit) {
+    return isEnergyReserveToken(hit.address)
+      ? { kind: "reserve" }
+      : { kind: "token", address: hit.address as `0x${string}`, symbol: hit.symbol };
+  }
   return isEnergySymbol(symbol) ? { kind: "reserve" } : { kind: "unknown" };
 }
 

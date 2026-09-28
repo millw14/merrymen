@@ -70,13 +70,17 @@ describe("the tick charges nobody for our outage", () => {
     assert.match(src, /const effFeeBps = effectivePerfFeeBps\(cfg\.perfFeeBps, holderTier\);/);
   });
 
-  it("AND THE IDLE NOTICE NAMES WHICH NO IT IS", () => {
+  it("AND THE IDLE NOTICE NAMES WHICH NO IT IS", async () => {
     // Telling a holder to go and hold $MERRYMEN because our read failed is
-    // advice they cannot act on — they already did it.
+    // advice they cannot act on — they already did it. The note is written in
+    // circle-gate.ts (circleNote) and chosen by whether the read answered.
     const src = read("./index.ts");
-    assert.match(src, /holderReadOk\s*\?/);
-    assert.match(src, /could not read your \$MERRYMEN balance this tick/);
-    assert.match(src, /our read failing, not your wallet/);
+    assert.match(src, /circleNoteStep\(circleNoted, \{ short: circleShort, readOk: holderReadOk \}\)/);
+    const { circleNote } = await import("./circle-gate");
+    const unread = circleNote("unread", { strategyName: "even-keel", accountCounts: true });
+    assert.match(unread, /could not read your \$MERRYMEN balance this tick/);
+    assert.match(unread, /our read failing, not your wallet/);
+    assert.doesNotMatch(unread, /hold 100,000/);
   });
 });
 

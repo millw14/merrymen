@@ -292,14 +292,20 @@ describe("planEnergyBuy — the accounting gate, on the size to be spent", () =>
     assert.match(p.line, /the limit is not loosened/);
     buyOf(await plan(reads(), caps(), pricing(), { ...b, maxDrawdownBps: 500 }));
   });
-  it("A SPEND THAT WOULD LEAVE NOTHING CONTRIBUTED REFUSES — on the size actually to be spent", async () => {
+  it("A SPEND THAT WOULD LEAVE NOTHING, OR A SLIVER, CONTRIBUTED REFUSES — on the size actually to be spent", async () => {
     // The worked default spends 10 (the per-trade cap binds). With 10 on
-    // record that leaves nothing; with 10.01 it leaves a cent and is planned.
+    // record that leaves nothing; with 10.01 it leaves a cent — a sliver, also
+    // refused. The floor is a tenth of the record, never under 1 USDG, so
+    // 11.12 (leaving 1.12 over a floor of 1.112) is the first that is planned.
     const p = refusal(await plan(reads(), caps(), pricing(), book({ netContributionsUsdg: 10n * USDG })));
     assert.equal(p.rule, "would-exhaust-contributions");
     assert.match(p.line, /^I did not buy: spending 10\.00 USDG on energy would use up all 10\.00 USDG of capital on record for me/);
     assert.match(p.line, /send USDG to me first and ask again/);
-    assert.equal(buyOf(await plan(reads(), caps(), pricing(), book({ netContributionsUsdg: 10n * USDG + 10_000n }))).amountInRaw, 10n * USDG);
+    const sliver = refusal(await plan(reads(), caps(), pricing(), book({ netContributionsUsdg: 10n * USDG + 10_000n })));
+    assert.equal(sliver.rule, "would-exhaust-contributions");
+    assert.match(sliver.line, /would leave only 0\.01 of the 10\.01 USDG of capital on record for me/);
+    assert.equal(refusal(await plan(reads(), caps(), pricing(), book({ netContributionsUsdg: 11_110_000n }))).rule, "would-exhaust-contributions");
+    assert.equal(buyOf(await plan(reads(), caps(), pricing(), book({ netContributionsUsdg: 11_120_000n }))).amountInRaw, 10n * USDG);
   });
   it("a paper book is never bought on — a skip is a refusal here", async () => {
     assert.equal(refusal(await plan(reads(), caps(), pricing(), book({ paper: true, netContributionsUsdg: null }))).rule, "no-contribution-record");
@@ -409,7 +415,23 @@ describe("resolveOrderToken — the reserve by address, a lookalike like any coi
   const TSLA = { symbol: "TSLA", address: "0x00000000000000000000000000000000000000a5" };
 
   it("A WATCHED LOOKALIKE CALLED MERRYMEN RESOLVES TO ITS OWN ADDRESS — bought and sold like any token", () => {
-    assert.deepEqual(resolveOrderToken("MERRYMEN", [TSLA, { symbol: "MERRYMEN", address: CLONE }]), { kind: "token", address: CLONE });
+    assert.deepEqual(resolveOrderToken("MERRYMEN", [TSLA, { symbol: "MERRYMEN", address: CLONE }]), { kind: "token", address: CLONE, symbol: "MERRYMEN" });
+  });
+
+  it("A MIXED-CASE LOOKALIKE IS FOUND HOWEVER THE ORDER SPELLS IT — never told 'I never sell it' about a coin its owner holds", () => {
+    // Settings keeps "MerryMen" as typed; the app's sell card and Telegram
+    // upper-case the order's symbol. An exact match missed it, fell through to
+    // the reserve's name, and the owner got ENERGY_NOT_AN_ORDER.
+    const watch = [TSLA, { symbol: "MerryMen", address: CLONE }];
+    for (const s of ["MERRYMEN", "merrymen", "MerryMen", "$MERRYMEN", " MERRYMEN "]) {
+      assert.deepEqual(resolveOrderToken(s, watch), { kind: "token", address: CLONE, symbol: "MerryMen" }, s);
+    }
+    // The name comes back as the watch set spells it — the book's key for the position a sell reads.
+    assert.deepEqual(resolveOrderToken("pepe", [{ symbol: "Pepe", address: CLONE }]), { kind: "token", address: CLONE, symbol: "Pepe" });
+  });
+
+  it("case folding never reaches past the address check: the reserve itself, however spelt, is still refused", () => {
+    assert.deepEqual(resolveOrderToken("merrymen", [{ symbol: "MERRYMEN", address: MERRYMEN_TOKEN.address }]), { kind: "reserve" });
   });
 
   it("NOTHING WATCHED ANSWERS AND THE NAME IS THE RESERVE'S: refused as the reserve, never 'unknown'", () => {
@@ -422,7 +444,7 @@ describe("resolveOrderToken — the reserve by address, a lookalike like any coi
   });
 
   it("an ordinary watched symbol resolves; an unwatched one is unknown", () => {
-    assert.deepEqual(resolveOrderToken("TSLA", [TSLA]), { kind: "token", address: TSLA.address });
+    assert.deepEqual(resolveOrderToken("TSLA", [TSLA]), { kind: "token", address: TSLA.address, symbol: "TSLA" });
     assert.deepEqual(resolveOrderToken("NVDA", [TSLA]), { kind: "unknown" });
   });
 });

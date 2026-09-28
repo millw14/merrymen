@@ -223,6 +223,18 @@ function recordAndPeaks(a: {
 }
 
 /**
+ * THE LEAST CAPITAL AN ENERGY PURCHASE MAY LEAVE ON RECORD: a tenth of what is
+ * on record before it, and never under 1 USDG. Everything that divides by
+ * contributions (core computePnl's sizing, the board's published return) is
+ * meaningless over a sliver, so a purchase that would leave less is refused.
+ * Raw 6dp USDG in and out.
+ */
+export function contributionFloorUsdg(netContributionsUsdg: bigint): bigint {
+  const tenth = netContributionsUsdg / 10n;
+  return tenth > 1_000_000n ? tenth : 1_000_000n;
+}
+
+/**
  * May the agent spend `spendUsdg` of its book on energy RIGHT NOW? Called by
  * the buy planner before anything is built. All amounts raw 6dp USDG.
  *
@@ -238,10 +250,14 @@ function recordAndPeaks(a: {
  * zero or below, core computePnl answers 'no-capital-contributed' (the Brain
  * then holds on every decision), the leaderboard calls a profitable agent
  * 'no-deposit', and just above zero its published return is the P&L over a
- * sliver. So a spend that would leave nothing (or less) contributed is
- * refused before any USDG moves, and the owner is told the USDG-then-buy way
- * round it. Pre-trade only: once money has moved the booking still books it
- * (energy-settle.ts warns when a landed purchase does this).
+ * sliver. So a spend that would leave too little contributed — under
+ * contributionFloorUsdg, a tenth of what is on record and never under 1 USDG
+ * — is refused before any USDG moves, and the owner is told the
+ * USDG-then-buy way round it. Stopping only at zero was not enough: funded
+ * 20, grown to 50, a 19 USDG ask left 1 USDG on record and the board then
+ * published (50 − 19 − 1)/1 as the agent's return. Pre-trade only: once
+ * money has moved the booking still books it (energy-settle.ts warns when a
+ * landed purchase leaves nothing).
  *
  * WOULD TRIP THE BREAKER. The purchase is not an exit, and after it both the
  * peak and equity are lower by the spend, so the drawdown becomes
@@ -271,15 +287,24 @@ export function energyPreTradeGate(a: {
   if (early) return early;
   // recordAndPeaks answered for a null record (refuse live, skip paper), so it
   // is a number here whenever this line is reached on the live rail.
-  if (a.netContributionsUsdg !== null && a.netContributionsUsdg - a.spendUsdg <= 0n) {
-    return {
-      action: "refuse",
-      rule: "would-exhaust-contributions",
-      why:
-        `spending ${fmt(a.spendUsdg)} USDG on energy would use up all ${fmt(a.netContributionsUsdg)} USDG of capital on ` +
-        `record for me, and with nothing contributed on record I can't size trades or report how I'm doing — send USDG ` +
-        `to me first and ask again, or send $MERRYMEN to my account directly`,
-    };
+  if (a.netContributionsUsdg !== null) {
+    const net = a.netContributionsUsdg;
+    const left = net - a.spendUsdg;
+    const floor = contributionFloorUsdg(net);
+    if (left < floor) {
+      return {
+        action: "refuse",
+        rule: "would-exhaust-contributions",
+        why:
+          (left <= 0n
+            ? `spending ${fmt(a.spendUsdg)} USDG on energy would use up all ${fmt(net)} USDG of capital on record ` +
+              `for me, and with nothing contributed on record I can't size trades or report how I'm doing`
+            : `spending ${fmt(a.spendUsdg)} USDG on energy would leave only ${fmt(left)} of the ${fmt(net)} USDG of ` +
+              `capital on record for me — I keep at least ${fmt(floor)} (a tenth, and never under 1 USDG) so I can ` +
+              `size trades and report how I'm doing`) +
+          ` — send USDG to me first and ask again, or send $MERRYMEN to my account directly`,
+      };
+    }
   }
   const P = a.breakerPeakUsdg;
   if ((P - a.equityUsdg) * 10_000n >= BigInt(a.maxDrawdownBps) * (P - a.spendUsdg)) {

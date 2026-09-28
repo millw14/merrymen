@@ -112,7 +112,8 @@ describe("the receipt says what the ledger says", () => {
     // trimmed — asked and actual are now both passed and the direction derived.
     const submit = CODE.slice(CODE.indexOf("async function submitChatTrade"), CODE.indexOf("async function submitChatTransfer"));
     assert.match(submit, /if \(!partial\) sold = Number\(pos\.valueUsdg\) \/ 1e6;/);
-    assert.match(submit, /sayTradeOutcome\(outcome, side, symbol, usdgAmount, sold \?\? usdgAmount\)/);
+    // `named` is the symbol as the watch set spells it (energy-buy.ts resolveOrderToken).
+    assert.match(submit, /sayTradeOutcome\(outcome, side, named, usdgAmount, sold \?\? usdgAmount\)/);
     const curve = CODE.slice(CODE.indexOf("async function submitChatCurveTrade"), CODE.indexOf("function sayTradeOutcome"));
     assert.match(curve, /sayTradeOutcome\(outcome, side, symbol, usdgAmount, actual\)/);
     assert.match(CODE, /less than the \$\{asked\.toFixed\(2\)\} you asked for/);

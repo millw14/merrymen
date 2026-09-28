@@ -438,8 +438,8 @@ fun SettingsForm(
       if (current in circleLocked) {
         LockedPanel(
           strong = "This is a Merry Circle strategy.",
-          body = "It only runs while you hold enough \$MERRYMEN — picking it now means the " +
-            "agent stays idle until you do.",
+          body = "It only runs while you hold enough \$MERRYMEN. Until you do it opens nothing new and " +
+            "leaves its basket as it is; positions in a class vault are still closed by their own exit rules.",
         )
       }
     }

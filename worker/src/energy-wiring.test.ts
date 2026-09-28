@@ -209,7 +209,10 @@ describe("deciding and telling", () => {
 
   it("THE CIRCLE LINES NAME THE COMBINED BALANCE, and keep their pinned halves", () => {
     assert.match(CODE, /Merry Circle — no \$MERRYMEN between your wallet and my account; standard platform fee applies/);
-    assert.match(CODE, /hold \$\{countTokens\(ENERGY\.fullTokens\)\} \$MERRYMEN between your wallet and my account \(Merry Man tier\) to run it; idle until then/);
+    // The Circle note is written in circle-gate.ts now (run in circle-gate.test.ts).
+    const gate = readFileSync(new URL("./circle-gate.ts", import.meta.url), "utf8");
+    assert.match(gate, /hold \$\{count\(ENERGY\.fullTokens\)\} \$MERRYMEN \$\{where\} /);
+    assert.match(gate, /"between your wallet and my account"/);
     assert.match(CODE, /isCircleStrategy\(strategy\.name\) && !holderTier\.bonusStrategies/, "the Circle gate itself is unchanged");
   });
 });

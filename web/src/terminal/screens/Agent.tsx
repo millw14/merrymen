@@ -825,7 +825,7 @@ export function Agent({
                     tier?.needTokens ?? null,
                   )} $MERRYMEN between them — right now ${
                     tier?.tokens == null ? "I couldn't read how many" : count(tier.tokens)
-                  }. It still closes what it holds. Switch to Steady basket or Strategist, which run for everyone, or top up: ${
+                  }. Until then it leaves its basket as it is; positions in a class vault are still closed by their own exit rules. Switch to Steady basket or Strategist, which run for everyone, or top up: ${
                     remedies.sendToAgent
                       ? `send $MERRYMEN on Robinhood Chain to my account${
                           remedies.usdg === "ready" ? ", or send USDG there and ask me to get my $MERRYMEN" : ""

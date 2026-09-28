@@ -840,9 +840,9 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   "energy-in-flight": "an earlier energy buy was still settling",
   "energy-too-small": "the most it could spend was below the smallest energy buy",
   // The accounting gate's own refusal (energy-accounting.ts): the purchase is
-  // capital leaving the book, and this one would have left nothing contributed.
-  // Said as capital, never as performance.
-  "would-exhaust-contributions": "spending that much on energy would have used up all the capital put into it",
+  // capital leaving the book, and this one would have left nothing, or too
+  // little, contributed. Said as capital, never as performance.
+  "would-exhaust-contributions": "spending that much on energy would have used up all, or nearly all, the capital put into it",
 });
 
 /**

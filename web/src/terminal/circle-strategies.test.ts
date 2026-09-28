@@ -66,7 +66,7 @@ describe("the picker marks what the worker gates", () => {
     // agent that will not trade.
     const src = read("./screens/CreateAgent.tsx");
     assert.match(src, /Runs only while you hold \$MERRYMEN/);
-    assert.match(src, /stays idle until you do/);
+    assert.match(src, /opens nothing new until you do/);
   });
 
   it("and the gate itself is still where the test thinks it is", () => {
@@ -269,19 +269,50 @@ describe("whose tokens each screen counts", () => {
 });
 
 /**
- * A SHORT CIRCLE AGENT STILL CLOSES WHAT IT HOLDS (worker/src/circle-gate.ts).
+ * WHAT A SHORT CIRCLE AGENT DOES, IN ONE SENTENCE ON EVERY SURFACE
+ * (worker/src/circle-gate.ts).
  *
- * The worker's Circle gate used to end the tick, and the banner said the
- * strategy "isn't running" — true then, and it meant the agent's own sells and
- * its class exits never ran. The gate is now a brake on NEW work only, so the
- * banner says exactly that: nothing new opens, and what it holds is still
- * closed by its own rules.
+ * Below the tier the worker does not tick the Circle strategy at all — a
+ * rebalancer allowed only its trims sold the book down to cash — and the class
+ * route's exits still run. The surfaces used to disagree: the web banner said
+ * "It still closes what it holds" (false for both strategies: dip-hunter never
+ * sells and even-keel is no longer asked), while Settings, iOS and Android said
+ * the agent "stays idle" (false while a class position is being closed). Every
+ * one of them now says the worker note's own sentence.
  */
-describe("the Circle banner says what a short Circle agent still does", () => {
-  it("IT OPENS NOTHING NEW, AND STILL CLOSES WHAT IT HOLDS", () => {
+const SENTENCE = /leaves\s+its\s+basket\s+as\s+it\s+is;\s+positions\s+in\s+a\s+class\s+vault\s+are\s+still\s+closed\s+by\s+their\s+own\s+exit\s+rules/;
+/** Source text with JSX/Kotlin string joins flattened, so a wrapped sentence still reads as one. */
+const flat = (src: string) => src.replace(/"\s*\+\s*"/g, "").replace(/\s+/g, " ");
+
+describe("every surface says what a short Circle agent still does", () => {
+  it("THE WEB BANNER: it opens nothing new, leaves its basket as it is, and says nothing about closing what it holds", () => {
     const agent = read("./screens/Agent.tsx");
     assert.match(agent, /is a Merry Circle strategy — it opens nothing new right now\./);
-    assert.match(agent, /It still closes what it holds\./);
-    assert.doesNotMatch(agent, /it isn&apos;t running/, "exits now run below the tier");
+    assert.match(flat(agent), SENTENCE);
+    assert.doesNotMatch(agent, /still closes what it holds/, "the strategy's own sells do not run below the tier");
+    assert.doesNotMatch(agent, /it isn&apos;t running/, "class exits run below the tier");
+  });
+
+  it("SETTINGS AND CREATE, WEB: the same sentence, never 'stay idle'", () => {
+    for (const f of ["./screens/Settings.tsx", "./screens/CreateAgent.tsx"]) {
+      const src = flat(read(f));
+      assert.match(src, SENTENCE, f);
+      assert.doesNotMatch(src, /stays? idle until you hold enough/, f);
+    }
+  });
+
+  it("iOS AND ANDROID: the same sentence in the native strings", () => {
+    const ios = flat(read("../../../ios-native/Sources/GrantScreen.swift"));
+    assert.match(ios, /this strategy opens nothing new and leaves its basket as it is/);
+    assert.match(ios, SENTENCE);
+    assert.doesNotMatch(ios, /stays idle until your wallet/);
+    const android = flat(read("../../../android-native/app/src/main/java/dev/merrymen/app/ui/screens/SettingsEditor.kt"));
+    assert.match(android, /Until you do it opens nothing new and leaves its basket as it is/);
+    assert.match(android, SENTENCE);
+    assert.doesNotMatch(android, /agent stays idle until you do/);
+  });
+
+  it("THE WORKER'S OWN NOTE says it too — the surfaces repeat it, they do not invent it", () => {
+    assert.match(flat(read("../../../worker/src/circle-gate.ts")), SENTENCE);
   });
 });

@@ -291,14 +291,17 @@ describe("a grant from a signer that predates energy", () => {
     assert.deepEqual(verdict(await preEnergyGrant([EXTRA])), { ok: true });
   });
 
-  it("with $MERRYMEN sealed as a custom token: refused by name, with the two ways out", async () => {
+  it("with $MERRYMEN sealed as a custom token: refused by name, with the way out that works", async () => {
     const legacy = await preEnergyGrant([{ symbol: "MERRYMEN", address: MERRY, decimals: 18 }, EXTRA]);
     assert.ok(legacy.grantTokens?.includes(MERRY.toLowerCase()), "premise: the old signer listed the reserve");
     const v = refusedWith(legacy, "invalid_wall");
     const why = v.ok ? "" : v.why;
     assert.match(why, /\$MERRYMEN/);
-    assert.match(why, /Update the app/);
-    assert.match(why, /remove \$MERRYMEN from your custom tokens, and sign again/);
+    assert.match(why, /This page or app version is out of date/);
+    assert.match(why, /Reload the page \(or update the app\) and sign again$/);
+    // No screen shows the reserve as a custom token any more (GET /api/settings
+    // leaves it out), so that remedy sent the owner to a list with nothing to remove.
+    assert.doesNotMatch(why, /custom tokens/i);
     assert.doesNotMatch(why, /does not implement/, "the generic refusal is what left owners stuck");
     assert.doesNotMatch(why, /\.$/, "POST /api/grants appends its own sentence");
     assert.doesNotMatch(why, /price|returns?\b|profit|invest/i);

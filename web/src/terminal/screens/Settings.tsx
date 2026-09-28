@@ -936,8 +936,9 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                        a dash for a count nobody read, never `?? 0`. */
                     <p>
                       Your wallet and your agent&apos;s account hold {count(tier.tokens)} $MERRYMEN and it
-                      needs {count(tier.needTokens)}. Your agent will keep running and
-                      stay idle until you hold enough — saving this won&apos;t change that.
+                      needs {count(tier.needTokens)}. Until you hold enough it opens nothing new and leaves
+                      its basket as it is; positions in a class vault are still closed by their own exit
+                      rules. Saving this won&apos;t change that.
                     </p>
                   )}
                 </div>

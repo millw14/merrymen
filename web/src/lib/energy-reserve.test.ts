@@ -74,6 +74,27 @@ describe("/api/proposals", () => {
   });
 });
 
+describe("the MCP settings view (projectSettings)", () => {
+  const CATE = { symbol: "CATE", address: "0x0000000000000000000000000000000000ca7e00", decimals: 18 };
+  const NAMESAKE = { symbol: "MERRYMEN", address: "0x0000000000000000000000000000000000003333", decimals: 18 };
+
+  it("SERVES NEITHER THE RESERVE NOR THE BASKET SYMBOL ONLY IT SUPPLIED — as GET /api/settings, so no basket proposal is fed MERRYMEN", () => {
+    const v = settings({ customTokens: [{ ...OWNER_LISTED, address: MERRY_MIXED }, CATE], basketSymbols: ["NVDA", "MERRYMEN", "CATE"] })!;
+    assert.deepEqual(v.customTokens, [{ symbol: "CATE", address: CATE.address }]);
+    assert.deepEqual(v.basketSymbols, ["NVDA", "CATE"]);
+  });
+
+  it("a basket that outlived its reserve entry drops the reserve's name too", () => {
+    assert.deepEqual(settings({ customTokens: [CATE], basketSymbols: ["MERRYMEN", "CATE"] })!.basketSymbols, ["CATE"]);
+  });
+
+  it("a lookalike at another address that calls itself MERRYMEN is an ordinary token, and stays", () => {
+    const v = settings({ customTokens: [OWNER_LISTED, NAMESAKE], basketSymbols: ["MERRYMEN", "NVDA"] })!;
+    assert.deepEqual(v.customTokens, [{ symbol: "MERRYMEN", address: NAMESAKE.address }]);
+    assert.deepEqual(v.basketSymbols, ["MERRYMEN", "NVDA"]);
+  });
+});
+
 describe("MCP propose_trade / approval: addressableSymbol", () => {
   it("refuses the reserve with the energy sentence, whether or not the owner listed it", () => {
     for (const s of [settings({}), settings({ customTokens: [OWNER_LISTED] })]) {
@@ -89,8 +110,12 @@ describe("MCP propose_trade / approval: addressableSymbol", () => {
 });
 
 describe("check_token_eligibility: the watch set and the verdict", () => {
-  it("watchSetFor drops an owner-listed $MERRYMEN, as the worker does, with the energy reason", () => {
-    const w = watchSetFor(settings({ customTokens: [OWNER_LISTED] }), 4663);
+  it("watchSetFor never watches an owner-listed $MERRYMEN — the view leaves it out, and a view that carries it drops it with the energy reason", () => {
+    assert.ok(!watchSetFor(settings({ customTokens: [OWNER_LISTED] }), 4663).tokens.some((t) => t.address === MERRY), "never watched");
+    // Defence in depth: a view that still carries the entry (projectSettings
+    // leaves it out now) is dropped as the worker drops it, with the reason.
+    const carried = { ...settings({})!, customTokens: [{ symbol: "MERRYMEN", address: MERRY }] };
+    const w = watchSetFor(carried, 4663);
     assert.ok(!w.tokens.some((t) => t.address === MERRY), "never watched");
     const d = w.dropped.find((t) => t.address === MERRY)!;
     assert.equal(d.why, ENERGY_RESERVE_WHY);

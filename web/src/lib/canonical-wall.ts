@@ -259,15 +259,22 @@ function verify(grant: Record<string, unknown>): void {
   // lets the key SELL the owner's energy. The rebuild below would refuse that
   // too — as "does not implement the advertised limits", which tells the owner
   // nothing they can act on while their grant runs out. So it is refused FIRST,
-  // by name, with the two ways out. Refused rather than accepted: the energy
+  // by name, with the way out. Refused rather than accepted: the energy
   // permission's safety case is that nothing in the wall can spend the reserve.
+  //
+  // THE WAY OUT IS A FRESH CLIENT, AND ONLY THAT. GET /api/settings no longer
+  // serves the reserve as a custom token (energy-reserve.ts), so any client
+  // that reads it now seals a wall without it; what still reaches here is a tab
+  // loaded before the deploy or an app build from before energy. "Remove it
+  // from your custom tokens" sent that owner to a list no screen shows any
+  // more — reloading (or updating) is what works.
   // No trailing period: POST /api/grants appends its own sentence.
   if ((tokens as string[] | undefined)?.some((a) => isEnergyReserveToken(a))) {
     refuse(
       400,
       "invalid_wall",
-      "This app version seals $MERRYMEN as a token your agent trades, but $MERRYMEN is now its energy, which the " +
-        "agent's key may only buy. Update the app, or remove $MERRYMEN from your custom tokens, and sign again",
+      "This page or app version is out of date: it seals $MERRYMEN as a token your agent trades, but $MERRYMEN is " +
+        "now its energy, which the agent's key may only buy. Reload the page (or update the app) and sign again",
     );
   }
 

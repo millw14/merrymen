@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { energyBookingGate, energyFlowFromReceipt, energyPreTradeGate } from "./energy-accounting";
+import { contributionFloorUsdg, energyBookingGate, energyFlowFromReceipt, energyPreTradeGate } from "./energy-accounting";
 import { TRANSFER_TOPIC } from "./deposit-log";
 import type { ReceiptLog } from "./fills";
 import { rejectRuleLabel, rejectRuleRemedy } from "./thesis-policy";
@@ -216,8 +216,44 @@ describe("energyPreTradeGate", () => {
     assert.equal(second.action === "refuse" && second.rule, "would-exhaust-contributions", "10 → 0 is refused");
     const third = ask(0, 30);
     assert.equal(third.action === "refuse" && third.rule, "would-exhaust-contributions");
-    // The boundary is "nothing left": one micro-USDG remaining is still capital on record.
-    assert.equal(energyPreTradeGate(book({ netContributionsUsdg: u(10) + 1n, spendUsdg: u(10) })).action, "book");
+    // And "something left" is not enough: a micro-USDG left is a sliver (below).
+    assert.equal(energyPreTradeGate(book({ netContributionsUsdg: u(10) + 1n, spendUsdg: u(10) })).action, "refuse");
+  });
+
+  it("A SLIVER IS REFUSED TOO — funded 20, grown to 50, a 19 USDG ask would leave 1 on record", () => {
+    // Stopping only at zero let this through, and the board then published
+    // (50 − 19 − 1)/1 as the agent's return. The floor is a tenth of what is
+    // on record before the purchase, never under 1 USDG: 2 USDG here.
+    const sliver = energyPreTradeGate(
+      book({ netContributionsUsdg: u(20), equityUsdg: u(50), lifetimePeakUsdg: u(50), breakerPeakUsdg: u(50), spendUsdg: u(19) }),
+    );
+    assert.equal(sliver.action === "refuse" && sliver.rule, "would-exhaust-contributions");
+    const why = sliver.action === "refuse" ? sliver.why : "";
+    assert.match(why, /would leave only 1\.00 of the 20\.00 USDG of capital on record for me — I keep at least 2\.00/);
+    assert.match(why, /send USDG to me first and ask again, or send \$MERRYMEN to my account directly$/);
+    assert.doesNotMatch(why, /price|returns?\b|profit|investment|moon|\d+\s*%/i);
+    // 18 leaves exactly the floor, and is booked.
+    const at = energyPreTradeGate(
+      book({ netContributionsUsdg: u(20), equityUsdg: u(50), lifetimePeakUsdg: u(50), breakerPeakUsdg: u(50), spendUsdg: u(18) }),
+    );
+    assert.equal(at.action, "book");
+    assert.equal(
+      energyPreTradeGate(book({ netContributionsUsdg: u(20), equityUsdg: u(50), lifetimePeakUsdg: u(50), breakerPeakUsdg: u(50), spendUsdg: u(18) + 1n })).action,
+      "refuse",
+      "one micro-USDG under the floor",
+    );
+  });
+
+  it("the floor is a tenth of what is on record, and never under 1 USDG", () => {
+    assert.equal(contributionFloorUsdg(u(100)), u(10));
+    assert.equal(contributionFloorUsdg(u(20)), u(2));
+    assert.equal(contributionFloorUsdg(u(10)), u(1));
+    assert.equal(contributionFloorUsdg(u(5)), u(1), "small books keep a whole USDG");
+    assert.equal(contributionFloorUsdg(0n), u(1));
+    assert.equal(contributionFloorUsdg(-u(3)), u(1));
+    // A small book: 5 on record, 4 spent leaves 1 — exactly the floor.
+    assert.equal(energyPreTradeGate(book({ netContributionsUsdg: u(5), spendUsdg: u(4) })).action, "book");
+    assert.equal(energyPreTradeGate(book({ netContributionsUsdg: u(5), spendUsdg: u(4) + 1n })).action, "refuse");
   });
 
   it("its sentence says what to do — USDG first, then ask again — in capital words only", () => {

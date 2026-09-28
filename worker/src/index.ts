@@ -152,7 +152,7 @@ import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus, readHolderStatusResult } from "./circle";
-import { CIRCLE_SHORT_CLASS_GATE, circleExitsOnly } from "./circle-gate";
+import { CIRCLE_SHORT_CLASS_GATE, circleNote, circleNoteStep, circleStrategyTick, type CircleNoted } from "./circle-gate";
 import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
 import { killHosted, killRequested } from "./kill-request";
@@ -203,7 +203,7 @@ import {
   type LastGood,
 } from "./energy";
 import type { EnergyStatus } from "../../packages/core/src/index";
-import { count as countTokens, energyNotice } from "./energy-copy";
+import { energyNotice } from "./energy-copy";
 import { energyAmountInFor, energyMinOut, quoteEnergyOut, readEnergyTaxBps } from "./venues/uniswap-v2";
 // ── THE ENERGY BUY: the owner's own confirmed order for the agent's $MERRYMEN.
 // The planner and its sentences are energy-buy.ts; the two calls are
@@ -4128,7 +4128,8 @@ async function main() {
   // performance-fee discount. Starts as the outsider (no discount) until read.
   let holderTier: CircleTier = CIRCLE_TIERS[0]!;
   let lastTierId = holderTier.id;
-  let circleBlockedNoted = false; // so the "hold to unlock" note isn't spammed each tick
+  /** Which Circle note went out last, so it is said once per change of reason, not each tick (circle-gate.ts). */
+  let circleNoted: CircleNoted = null;
   /** So the bricked-breaker note is said once per change, not once per tick, for ever. */
   let breakerBrickNoted = false;
   /** Did the last $MERRYMEN read actually answer? A failed read must not be reported as a wallet. */
@@ -11976,35 +11977,30 @@ async function main() {
     }
     breakerBrickNoted = false;
 
-    // Merry Circle strategies run in full only for holders (Merry Man+). A
-    // non-holder may select one; it starts nothing new, with a one-time note,
-    // until they hold $MERRYMEN.
+    // Merry Circle strategies run only for holders (Merry Man+). A non-holder
+    // may select one; it opens nothing new and leaves its basket as it is,
+    // with a one-time note, until they hold $MERRYMEN.
     //
-    // A BRAKE ON NEW WORK, NEVER A RETURN. This used to end the tick here, ahead
-    // of the strategy's own sells and ahead of the class route's exits, so an
-    // owner who fell below the tier with positions open had an agent that could
-    // not close anything — while every energy surface says exits are never
-    // limited. Below the tier the strategy still ticks and only its exits go on
-    // (circle-gate.ts), the class route proposes no entries, and the class
-    // exits run exactly as they do for everyone. Nothing below may `return`
-    // before them (circle-gate.test.ts).
+    // NEVER A RETURN. This used to end the tick here, ahead of the class
+    // route's exits too, so a class position with a deadline was never closed
+    // while its owner was short. Below the tier the Circle strategy is not
+    // ticked at all (circle-gate.ts — a rebalancer allowed only its trims sells
+    // the book down to cash), the class route proposes no entries, and the
+    // class exits run exactly as they do for everyone. Nothing below may
+    // `return` before them (circle-gate.test.ts).
     const circleShort = isCircleStrategy(strategy.name) && !holderTier.bonusStrategies;
-    if (circleShort) {
-      if (!circleBlockedNoted) {
-        circleBlockedNoted = true;
-        await addEvent(
-          agentId,
-          "warn",
-          // AND WHICH KIND OF NO IT IS. Telling a holder to go and hold
-          // $MERRYMEN because our own read failed is advice they cannot act
-          // on — they already did the thing being asked of them.
-          holderReadOk
-            ? `${strategy.name} is a Merry Circle strategy — hold ${countTokens(ENERGY.fullTokens)} $MERRYMEN between your wallet and my account (Merry Man tier) to run it; idle until then, apart from exits, which always run`
-            : `${strategy.name} is a Merry Circle strategy and we could not read your $MERRYMEN balance this tick, so it is idle apart from exits, which always run. That is our read failing, not your wallet — it should clear on its own.`,
-        );
-      }
-    } else {
-      circleBlockedNoted = false;
+    // ONCE PER CHANGE OF REASON (circle-gate.ts circleNoteStep): a first
+    // read that failed and a later one that shows a real shortfall are two
+    // different notes. AND WHICH KIND OF NO IT IS: telling a holder to go and
+    // hold $MERRYMEN because our own read failed is advice they cannot act on.
+    const circleStep = circleNoteStep(circleNoted, { short: circleShort, readOk: holderReadOk });
+    circleNoted = circleStep.noted;
+    if (circleStep.say) {
+      await addEvent(
+        agentId,
+        "warn",
+        circleNote(circleStep.say, { strategyName: strategy.name, accountCounts: grant.chainId === MERRYMEN_TOKEN.chainId }),
+      );
     }
 
     // A strategy may hand back a reason for each intent. It travels to the
@@ -12043,13 +12039,11 @@ async function main() {
 
     // A submitted Brain order invalidates this tick's pre-trade holdings.
     // Do not run another discretionary strategy against the old book.
-    // Below the Circle tier the strategy still ticks — its exits are the
-    // point — and only what the breaker's own exit test calls an exit survives.
-    const ticked: Tick = brainOrderAccepted ? { intents: [], why: [] } : takeTick(await strategy.tick(snap));
-    const exitLimits = active.limits;
-    const { intents: proposed, why: proposedWhy, idle } = circleShort
-      ? circleExitsOnly(ticked, (intent) => isExitIntent(intent, exitLimits))
-      : ticked;
+    // Below the Circle tier the strategy is not asked at all — not for its
+    // trims either: half a rebalance is a liquidation (circle-gate.ts).
+    const { intents: proposed, why: proposedWhy, idle }: Tick = brainOrderAccepted
+      ? { intents: [], why: [] }
+      : await circleStrategyTick(circleShort, async () => takeTick(await strategy.tick(snap)));
 
     // ── AND WHY IT PROPOSED NOTHING ─────────────────────────────────────
     //
@@ -12741,10 +12735,13 @@ async function main() {
         return no(`I don't know ${symbol}. I'm watching: ${known || "nothing yet"}. Add it in /settings and re-sign at /grant if you want me trading it.`);
       }
       const token = resolved.address;
+      // AND ITS NAME AS THE WATCH SET SPELLS IT — the book stores the position
+      // under that, and an order may arrive upper-cased (resolveOrderToken).
+      const named = resolved.symbol;
       // WHERE DOES THIS TOKEN ACTUALLY TRADE? A Pons token has no pool until it
       // graduates, so routing it to the swap router would build an operation
       // against a pool that does not exist. Asked before anything is sized.
-      if (await curveFor(token)) return submitChatCurveTrade(side, symbol, token, usdgAmount, judged, asked);
+      if (await curveFor(token)) return submitChatCurveTrade(side, named, token, usdgAmount, judged, asked);
 
       const router = swapRouterFor(cfg);
       let intent: TradeIntent;
@@ -12755,13 +12752,13 @@ async function main() {
         const raw = usdg(usdgAmount);
         intent = { kind: "swap", target: router, sellToken: CASH.USDG as `0x${string}`, buyToken: token, sellAmountRaw: raw, notionalUsdg: raw };
       } else {
-        const pos = readPositionRaw(active.agentId, symbol, usdg);
-        if (!pos) return no(`you don't hold any ${symbol}.`);
+        const pos = readPositionRaw(active.agentId, named, usdg);
+        if (!pos) return no(`you don't hold any ${named}.`);
         const want = usdg(usdgAmount);
         const partial = want < pos.valueUsdg;
         const sellRaw = partial ? (pos.rawBalance * want) / pos.valueUsdg : pos.rawBalance;
         const notional = partial ? want : pos.valueUsdg;
-        if (sellRaw === 0n) return no(`${symbol} amount rounds to zero shares.`);
+        if (sellRaw === 0n) return no(`${named} amount rounds to zero shares.`);
         // AN OVER-ASK IS CLAMPED, AND THE REPLY HAS TO SAY SO. It used to clamp
         // silently and then quote the amount asked for: "submitted sell 500 USDG
         // NVDA" for a 12 USDG position, a claim the ledger will never support —
@@ -12783,7 +12780,7 @@ async function main() {
       if (outcome?.status === "late") return { ...no(outcome.line), verdict: { kind: "late" } };
       // WHAT THE LEDGER SAYS, NOT WHAT WE HOPED. `sold` is the amount actually
       // sent, which is not always the amount asked for — see the clamp above.
-      return { ...sayTradeOutcome(outcome, side, symbol, usdgAmount, sold ?? usdgAmount), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
+      return { ...sayTradeOutcome(outcome, side, named, usdgAmount, sold ?? usdgAmount), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
     });
   }
 
