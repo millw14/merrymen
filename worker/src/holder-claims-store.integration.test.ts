@@ -483,6 +483,92 @@ describe("FileSettingsStore specifics", () => {
     );
   });
 
+  it("A HOLDER'S RELEASE THAT MEETS A BREAKER MID-BREAK STILL REMOVES ITS LOCK — nothing is left that nobody holds", async () => {
+    // The review's orphan (R3-CLAIMS3). A crash left a stale lock; P2 and P1
+    // both judge it stale. P1 breaks it, takes a fresh lock, moves the claim
+    // and releases — but P2's delayed move-aside of the dead lock moves P1's
+    // live one aside first. P1's own release found nothing, took that for
+    // "released" and returned; P2 then saw the lock was not the one it
+    // judged and linked it back: a lock with a fresh mtime that nobody held,
+    // and every claim, move or release of the wallet 'busy' (a 503) for 30 s.
+    process.env.MERRYMEN_HOME = path.join(HOME, "file-orphan");
+    const s = new FileSettingsStore();
+    const dir = path.join(HOME, "file-orphan", "holder-claims");
+    const C = tenantN(85);
+    await s.takeHolder(W, A, 1);
+    const lock = path.join(dir, `.${W}.lock`);
+    writeFileSync(lock, "dead");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lock, old, old);
+    const realRename = fsp.rename;
+    let renames = 0;
+    let p2Rename: (() => Promise<void>) | null = null;
+    mock.method(fsp, "rename", async (from: string, to: string) => {
+      if (from !== lock) return realRename(from, to);
+      renames += 1;
+      if (renames === 1) {
+        // P2 judged "dead" stale and is about to move it aside — slowly.
+        return new Promise<void>((resolve, reject) => {
+          p2Rename = async () => realRename(from, to).then(resolve, reject);
+        });
+      }
+      if (renames === 3 && p2Rename) {
+        // P1 is releasing its own lock: P2's move-aside lands first.
+        const go = p2Rename;
+        p2Rename = null;
+        await go();
+      }
+      return realRename(from, to);
+    });
+    syncBuiltinESMExports();
+    try {
+      const p2 = s.takeHolder(W, B, 2).then(
+        (r) => ({ r }),
+        (e: Error) => ({ e: e.message }),
+      );
+      await new Promise((r) => setTimeout(r, 20));
+      const p1 = await s.takeHolder(W, C, 3);
+      assert.equal(p1.ok && p1.from, A, "P1 moved A → C and returned");
+      assert.equal(renames >= 3, true, "set-up: P2's move-aside raced P1's release");
+      assert.deepEqual(await p2, { r: { ok: false, movableAt: 3 + DAY, held: true } }, "P2 got in and was answered, never 'busy'");
+    } finally {
+      mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+    assert.deepEqual(readdirSync(dir), [`${W}.json`], "no lock left behind, and nothing moved aside");
+    const t0 = Date.now();
+    await s.releaseHolder(W, C);
+    assert.ok(Date.now() - t0 < 1_000, "the next caller is not kept waiting on an orphan");
+    assert.equal((await s.holderClaims()).has(W), false);
+  });
+
+  it("…a release waits out a break in progress: linked back, it is removed; deleted by the breaker, it is simply gone", async () => {
+    // No mocks: a 'breaker' moves the holder's live lock aside just before
+    // the holder releases, and finishes 30 ms later — by linking it back
+    // (it was not the lock it judged) or by deleting it (it was: the holder
+    // outlived CLAIM_LOCK_STALE_MS).
+    for (const ending of ["link-back", "delete"] as const) {
+      process.env.MERRYMEN_HOME = path.join(HOME, `file-break-${ending}`);
+      const s = new FileSettingsStore();
+      const dir = path.join(HOME, `file-break-${ending}`, "holder-claims");
+      await s.takeHolder(W, A, 1);
+      const lock = path.join(dir, `.${W}.lock`);
+      const aside = `${lock}.4242.0123456789ab.gone`;
+      let finished: Promise<void> | null = null;
+      await lockOf(s).withClaimLock(W as `0x${string}`, async () => {
+        await fsp.rename(lock, aside);
+        finished = new Promise<void>((r) => setTimeout(r, 30)).then(async () => {
+          if (ending === "link-back") await fsp.link(aside, lock);
+          await fsp.unlink(aside);
+        });
+      });
+      await finished;
+      assert.deepEqual(readdirSync(dir), [`${W}.json`], `${ending}: no lock left that nobody holds`);
+      const moved = await s.takeHolder(W, B, 2);
+      assert.equal(moved.ok && moved.from, A, `${ending}: the next caller gets straight in`);
+    }
+  });
+
   it("…but a live one is waited on, and a release waits for the move holding it", async () => {
     process.env.MERRYMEN_HOME = path.join(HOME, "file-live-lock");
     const s = new FileSettingsStore();

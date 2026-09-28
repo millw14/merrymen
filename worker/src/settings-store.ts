@@ -496,7 +496,9 @@ export class FileSettingsStore implements SettingsStore {
    * moves where the limit allows one. A lock is now only ever taken away by
    * takeAwayLock, which moves it aside atomically and deletes it only if it
    * is the very lock that was judged; the holder's own release goes the same
-   * way with its own token, so it cannot delete a lock another process holds.
+   * way with its own token (releaseOwnLock), so it cannot delete a lock
+   * another process holds — nor leave its own behind for a breaker to put
+   * back after it has gone.
    */
   private async withClaimLock<T>(w: `0x${string}`, fn: () => Promise<T>): Promise<T> {
     await mkdir(this.claimsDir, { recursive: true });
@@ -521,7 +523,7 @@ export class FileSettingsStore implements SettingsStore {
     try {
       return await fn();
     } finally {
-      await takeAwayLock(lock, token).catch(() => {});
+      await releaseOwnLock(lock, token).catch(() => {});
     }
   }
   async claimHolder(wallet: string, tenant: string, now: number = Date.now()): Promise<HolderClaim> {
@@ -704,6 +706,9 @@ async function readLock(lock: string): Promise<{ token: string; ageMs: number } 
   }
 }
 
+/** Where takeAwayLock moves `lock` while it reads it: `<lock>.<pid>.<random>.gone`, beside it. */
+const asidePrefix = (lock: string) => `${path.basename(lock)}.`;
+
 /**
  * REMOVE `lock` ONLY IF IT IS STILL THE ONE HOLDING `token`.
  *
@@ -714,18 +719,73 @@ async function readLock(lock: string): Promise<{ token: string; ageMs: number } 
  * straight back under the lock's name, never deleted. link(2) refuses if a
  * third process has taken the name meanwhile, which is the one case left: it
  * needs three contenders inside a few microseconds, after a crash.
+ *
+ * "absent" when nothing was at the name: gone for good, OR moved aside by
+ * another process's takeAwayLock that will link it back (releaseOwnLock).
  */
-async function takeAwayLock(lock: string, token: string): Promise<void> {
+async function takeAwayLock(lock: string, token: string): Promise<"removed" | "absent" | "not-it"> {
   const aside = `${lock}.${process.pid}.${randomBytes(6).toString("hex")}.gone`;
   try {
     await rename(lock, aside);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // already gone
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return "absent";
     throw e;
   }
   const moved = await readFile(aside, "utf8").catch(() => null);
   if (moved !== token) await link(aside, lock).catch(() => {});
   await unlink(aside).catch(() => {});
+  return moved === token ? "removed" : "not-it";
+}
+
+/** How long a holder's release waits for a breaker to finish with its lock: breaks are microseconds of file I/O. */
+const OWN_RELEASE_WAIT_MS = 2_000;
+
+/**
+ * THE HOLDER'S OWN RELEASE: takeAwayLock with its own token — and a missing
+ * lock is not taken at its word.
+ *
+ * A contender breaking a stale lock can move THIS holder's live lock aside
+ * instead, when the dead one it judged was replaced between its look and
+ * its rename. It then sees the token is not the one it judged and links the
+ * lock back — the right thing while the holder is inside. But if the
+ * holder's release came in between, it found no lock, called that released
+ * and returned; the link-back then left a lock with a fresh mtime that
+ * nobody held, and every claim, move and release of the wallet waited it
+ * out and failed 'busy' for CLAIM_LOCK_STALE_MS.
+ *
+ * So after "absent" the holder looks for its own token among the moved-aside
+ * locks FIRST, and waits while one is there — a break in progress, which
+ * ends with a link-back (then it is at the name, and taken away again) or a
+ * delete (a break of this holder's own lock, judged stale: gone). Only with
+ * none aside does it look at the name: a link-back that finished before the
+ * look at the asides is at the name by then, so the two looks in that order
+ * cannot both miss it. Bounded, in case a breaker died mid-break: its aside
+ * then never comes back under the lock's name.
+ */
+async function releaseOwnLock(lock: string, token: string): Promise<void> {
+  const until = Date.now() + OWN_RELEASE_WAIT_MS;
+  for (;;) {
+    if ((await takeAwayLock(lock, token)) !== "absent") return;
+    if (Date.now() > until) return;
+    if (await heldAside(lock, token)) {
+      await new Promise((r) => setTimeout(r, 2)); // a break in progress: let it finish
+      continue;
+    }
+    // None aside: gone for good, or somebody else's now — unless it was
+    // linked back before the look above, and then it is at the name: again.
+    if ((await readLock(lock))?.token !== token) return;
+  }
+}
+
+/** Whether some process has `lock` moved aside (takeAwayLock) while it still holds `token`. */
+async function heldAside(lock: string, token: string): Promise<boolean> {
+  const dir = path.dirname(lock);
+  const prefix = asidePrefix(lock);
+  for (const f of await readdir(dir)) {
+    if (!f.startsWith(prefix) || !f.endsWith(".gone")) continue;
+    if ((await readFile(path.join(dir, f), "utf8").catch(() => null)) === token) return true;
+  }
+  return false;
 }
 
 // ── postgres backend ─────────────────────────────────────────────────────────
