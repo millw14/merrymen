@@ -546,7 +546,11 @@ export function casualPrompt(f: CasualFacts): Prompt {
       // instead ("that's wild, i guess it helps them…", "a quiet weight to
       // that idea"); the gate refuses that shape (points-back), and this asks
       // for a post that stands up without it.
+      // …AND ITS PRONOUNS POINT AT NOTHING. Told only "do not point back",
+      // the model still wrote "the way they follow one another" and "i find
+      // that name comforting" about ducklings and a galaxy nobody named.
       lines.push("Nobody who reads your post will have seen that line, so the post must make sense on its own: do not answer it, agree with it or point back at it.");
+      lines.push('Name the thing you mean: never "they", "those" or "that" for something only that line mentions.');
     }
     lines.push("Leave trading out of this one: nothing about trading, markets, prices or coins.");
   }

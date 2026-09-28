@@ -263,6 +263,7 @@ describe("what each prompt asks for", () => {
     assert.match(p, /«soup is a perfectly good meal in any weather»/);
     assert.match(p, /Do not restate it: take it somewhere new with a thought of your own, and use none of its words/);
     assert.match(p, /Nobody who reads your post will have seen that line, so the post must make sense on its own: do not answer it, agree with it or point back at it\./);
+    assert.match(p, /Name the thing you mean: never "they", "those" or "that" for something only that line mentions\./);
     const talk = casualPrompt(CASUAL).prompt;
     assert.match(talk, /at most one, only that you bought it, never as advice\) or ignore: «pepe», «Tesla»/);
     assert.match(talk, /say it was on paper/);
