@@ -79,9 +79,11 @@ final class PreviewTransport: URLProtocol {
     }
     /// Posting on X as the web routes answer it (docs/x-posting.md): one
     /// connected account, @robin_trades (X user id 2244994945), posting off,
-    /// one post coming up and one posted. Like the server, every write must
+    /// one post coming up (due in half an hour — a casual post is due 20 to 45
+    /// minutes after it is drafted) and one posted. Like the server, every write must
     /// carry the site's Origin and the signed-in owner, and each body must have
-    /// exactly the contract's keys. The confirmed enable must also be the FIRST
+    /// exactly the contract's keys; enable's `tz` must be the zone this device
+    /// is in. The confirmed enable must also be the FIRST
     /// write since launch: a warning answered "Not now" that sent anything at
     /// all makes the enable that follows it fail.
     private func xPosting(_ path: String) -> (body: String, status: Int) {
@@ -92,7 +94,7 @@ final class PreviewTransport: URLProtocol {
             guard path == "/api/x/account" else { return (#"{"error":"No UI-test fixture for this request"}"#, 404) }
             let connected = !d.bool(forKey: "uiTest.xDisconnected")
             let upcoming: [[String: Any]] = connected && !d.bool(forKey: "uiTest.xSkipped")
-                ? [["id": 41, "kind": "casual", "body": "slow day on the charts. honestly the quiet ones are when i learn the most.", "dueAt": Int((Date().timeIntervalSince1970 + 2 * 3600) * 1000)]] : []
+                ? [["id": 41, "kind": "casual", "body": "slow day on the charts. honestly the quiet ones are when i learn the most.", "dueAt": Int((Date().timeIntervalSince1970 + 30 * 60) * 1000)]] : []
             let value: [String: Any] = [
                 "available": true, "connected": connected,
                 "username": connected ? "robin_trades" as Any : NSNull(), "xUserId": connected ? "2244994945" as Any : NSNull(),
@@ -111,7 +113,9 @@ final class PreviewTransport: URLProtocol {
             case "start" where keys == ["action", "client", "owner"] && input["client"] as? String == "ios":
                 return ("{\"url\":\"https://x.com/i/oauth2/authorize?response_type=code&client_id=ui-test&redirect_uri=https%3A%2F%2Fapp.merrymen.dev%2Fconnect%2Fx&scope=tweet.read%20tweet.write%20users.read%20offline.access&state=\(state)&code_challenge=ui-test&code_challenge_method=S256\"}", 200)
             case "finish" where keys == ["action", "code", "state", "owner"] && input["state"] as? String == state:
-                d.set(false, forKey: "uiTest.xDisconnected"); return (#"{"ok":true,"username":"robin_trades"}"#, 200)
+                // Like the server: a reconnect of the same account answers whether posting is on again.
+                d.set(false, forKey: "uiTest.xDisconnected")
+                return ("{\"ok\":true,\"username\":\"robin_trades\",\"postingEnabled\":\(d.bool(forKey: "uiTest.xPostingEnabled"))}", 200)
             default: return (#"{"error":"Unexpected fields in X connect"}"#, 400)
             }
         }
@@ -122,7 +126,8 @@ final class PreviewTransport: URLProtocol {
         }
         switch input["action"] as? String {
         case "enable":
-            guard keys == ["action", "xUserId", "owner"] else { return (#"{"error":"Unexpected fields in X posting consent"}"#, 400) }
+            // Consent carries the device's zone, so nothing goes out while the owner sleeps.
+            guard keys == ["action", "xUserId", "owner", "tz"], input["tz"] as? String == TimeZone.current.identifier else { return (#"{"error":"Unexpected fields in X posting consent"}"#, 400) }
             guard earlier == 0 else { return (#"{"error":"Something was sent before this confirmed enable"}"#, 400) }
             guard input["xUserId"] as? String == "2244994945", !d.bool(forKey: "uiTest.xDisconnected") else {
                 return (#"{"error":"The connected X account changed — check which account is connected and try again."}"#, 409)

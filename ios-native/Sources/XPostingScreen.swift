@@ -10,7 +10,8 @@ import MerrymenPolicy
 /// names the connected account (`@handle`, as the server read it from X), and
 /// only that warning's own button sends `enable` — carrying the X user id the
 /// warning named, so the server refuses (409) if a different account is
-/// connected by then. "Not now", or dismissing the warning, sends nothing.
+/// connected by then, and the device's time zone, so nothing goes out while
+/// the owner is asleep. "Not now", or dismissing the warning, sends nothing.
 /// Turning it off sends `disable` at once: that direction is always safe.
 ///
 /// UNREAD IS NOT "NOT CONNECTED". The screen shows the connect button only
@@ -24,8 +25,10 @@ import MerrymenPolicy
 /// than whichever one Safari happened to hold. The server's URL must be X's
 /// own authorize page (NavigationPolicy.isXAuthorize) with an iOS state; the
 /// sheet's `merrymen://x-connect` answer is accepted only with that same state
-/// (xConnectAnswer). Closing the sheet or saying no on X is a choice, not a
-/// failure. If the owner changed while X was open, nothing is finished.
+/// (xConnectAnswer). Closing the sheet or saying no on X (`access_denied`) is
+/// a choice, not a failure, and closes quietly; any other error X answers
+/// with is X failing, and the owner is told so. If the owner changed while X
+/// was open, nothing is finished.
 ///
 /// WHAT THIS SCREEN DOES NOT DO: it never posts, drafts or edits a post, and
 /// it never shows a post it has not read from the server. Drafts are shown
@@ -117,8 +120,10 @@ struct XPostingScreen: View {
                     HStack {
                         Text(verbatim: post.at > .now ? "Goes out \(post.at.formatted(.relative(presentation: .named)))" : "Going out soon").font(.caption).foregroundStyle(.secondary)
                         Spacer()
+                        // Several drafts mean several Skips: VoiceOver hears which post each one skips.
                         Button { skip(post) } label: { if skipping == post.id { ProgressView() } else { Text("Skip") } }
                             .buttonStyle(SecondaryButtonStyle()).disabled(busy)
+                            .accessibilityLabel("Skip post").accessibilityHint(Text(verbatim: post.body))
                     }
                 }
             }
@@ -173,8 +178,15 @@ struct XPostingScreen: View {
 
     // MARK: writing — every body names the owner who acted; the server refuses another session
 
+    /// CONSENT CARRIES THE DEVICE'S ZONE. The Merryman plans and sends nothing
+    /// while the owner is asleep, but only if it knows where the owner is; the
+    /// room's zone is often unknown (an iOS-only owner who never opened its
+    /// picker, a fleet with the room off). So the zone this phone is in goes
+    /// with the consent, as an IANA name, and the server keeps it as the
+    /// fallback. It validates the name and treats a placeless one (UTC, GMT)
+    /// as unknown, so this sends what the device says and decides nothing.
     private func enable(_ identity: XPostingAccount.Identity) {
-        write(["action": .string("enable"), "xUserId": .string(identity.xUserId)])
+        write(XPostingAccount.enableFields(identity, zone: .current))
     }
 
     private func skip(_ post: XPostingAccount.Post) {
@@ -222,8 +234,12 @@ struct XPostingScreen: View {
                 }
                 switch policy.xConnectAnswer(callback, state: state) {
                 case .declined: return // Saying no on X is a choice too; nothing is sent.
+                case .failed: // X's own error, not the owner's choice: say so rather than close in silence.
+                    throw APIError(status: 0, message: "X couldn't finish connecting, so nothing was connected. Try again in a moment.")
                 case .approved(let code):
-                    _ = try await store.perform("/api/x/connect", body: .object(["action": .string("finish"), "code": .string(code), "state": .string(state), "owner": .string(owner)]), expectedOwner: owner)
+                    let finished = try await store.perform("/api/x/connect", body: .object(["action": .string("finish"), "code": .string(code), "state": .string(state), "owner": .string(owner)]), expectedOwner: owner)
+                    // A reconnect of the same account keeps the owner's earlier consent: say so, it posts again now.
+                    if let notice = XPostingAccount.postingBackOn(finished) { store.notice = notice }
                 case nil:
                     throw APIError(status: 0, message: "That answer from X wasn't for this connection, so nothing was connected. Try again.")
                 }
@@ -283,6 +299,25 @@ struct XPostingAccount: Equatable {
         recent = v["recent"].array.compactMap { row in Self.post(row, time: "sentAt", link: row["url"].string.flatMap(URL.init(string:)).flatMap { policy.isXPostLink($0) ? $0 : nil }) }
     }
 
+    /// RECONNECTING CAN TURN POSTING BACK ON, AND THE OWNER IS TOLD. When X
+    /// stops accepting a connection and the owner reconnects the SAME X
+    /// account, the server keeps the consent they gave for it, so the
+    /// Merryman posts again from the next pass — with no new warning. The
+    /// finish answer says so (`postingEnabled`), and this is the sentence the
+    /// owner sees then; nil when posting is off, or the answer does not say
+    /// `true` in so many words. A handle that is not an X handle is not shown.
+    static func postingBackOn(_ finished: J) -> String? {
+        guard finished["postingEnabled"].bool == true else { return nil }
+        let handle = finished["username"].string.flatMap { $0.wholeMatch(of: #/[A-Za-z0-9_]{1,15}/#) != nil ? "@\($0)" : nil }
+        return "Posting is back on — your Merryman posts from \(handle ?? "the X account you just connected") again. You can see what's coming up, skip it, or turn posting off here."
+    }
+
+    /// The confirmed enable, owner aside (every write adds it): the X user id
+    /// the warning named and the zone the device is in.
+    static func enableFields(_ identity: Identity, zone: TimeZone) -> [String: J] {
+        ["action": .string("enable"), "xUserId": .string(identity.xUserId), "tz": .string(zone.identifier)]
+    }
+
     private static func post(_ row: J, time: String, link: URL?) -> Post? {
         guard let id = row["id"].number, id.rounded() == id, id > 0, id < 9_007_199_254_740_992,
               let body = row["body"].string, !body.isEmpty, let ms = row[time].number, ms > 0 else { return nil }
@@ -291,11 +326,17 @@ struct XPostingAccount: Equatable {
 
     /// The warning the owner confirms, in the words the web uses. It names the
     /// account because that account is what the Merryman will post from.
+    ///
+    /// THE REVIEW WINDOW IT PROMISES IS THE PLANNER'S FLOOR. Every post is
+    /// drafted at least ten minutes before it is due (worker/src/xpost/
+    /// planner.ts), and this screen re-reads every minute while it is open —
+    /// so "at least ten minutes" is a promise the code keeps, where "you'll see
+    /// each one" was not: nothing tells the owner to look.
     static func warning(_ handle: String) -> String {
         [
             "Your Merryman will post from whichever X account is connected — right now that's @\(handle).",
             "It writes its own posts: a hello first, then the odd casual thought and now and then a coin it bought and why. It never posts trade alerts, error messages, prices or amounts.",
-            "Posts go out on their own, a few a day at most. You'll see each one here before it goes out and can skip it. Turn this off or disconnect X at any time.",
+            "Posts go out on their own, a few a day at most. Each one waits under Coming up for at least ten minutes first, and you can skip it there. Turn this off or disconnect X at any time.",
             "X may label accounts that post automatically, and may ask an account to verify itself the first time it posts about crypto."
         ].joined(separator: "\n\n")
     }

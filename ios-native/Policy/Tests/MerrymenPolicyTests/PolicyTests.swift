@@ -74,23 +74,57 @@ final class PolicyTests: XCTestCase {
     func testXConnectCallbackIsOnlyTheAnswerToThisConnectAndNeverADeepLink() {
         let policy = NavigationPolicy()
         XCTAssertEqual(policy.xConnectAnswer(URL(string: "merrymen://x-connect?code=VGNibzFW_SWR-EZm01bjN1N3.dicWl:NUG1&state=\(xState)")!, state: xState), .approved(code: "VGNibzFW_SWR-EZm01bjN1N3.dicWl:NUG1"))
-        XCTAssertEqual(policy.xConnectAnswer(URL(string: "merrymen://x-connect/?state=\(xState)&code=abc")!, state: xState), .approved(code: "abc"))
+        XCTAssertEqual(policy.xConnectAnswer(URL(string: "merrymen://x-connect/?state=\(xState)&code=abcdefgh")!, state: xState), .approved(code: "abcdefgh"))
         XCTAssertEqual(policy.xConnectAnswer(URL(string: "merrymen://x-connect?error=access_denied&state=\(xState)")!, state: xState), .declined)
-        for raw in ["merrymen://x-connect?code=abc&state=i.\(String(repeating: "Z", count: 32))", "merrymen://x-connect?code=abc",
-                    "merrymen://x-connect?error=access_denied", "merrymen://x-connect?code=abc&code=def&state=\(xState)",
-                    "merrymen://x-connect?code=abc&state=\(xState)&state=\(xState)", "merrymen://x-connect?state=\(xState)",
-                    "merrymen://x-connect?code=&state=\(xState)", "merrymen://x-connect?code=a%20b&state=\(xState)",
-                    "merrymen://x-connect?code=a%0Ab&state=\(xState)", "merrymen://app/x-connect?code=abc&state=\(xState)",
-                    "merrymen://x-connect/evil?code=abc&state=\(xState)", "merrymen://evil@x-connect?code=abc&state=\(xState)",
-                    "merrymen://x-connect:1?code=abc&state=\(xState)", "merrymen://x-connect?code=abc&state=\(xState)#frag",
-                    "https://app.merrymen.dev/connect/x?code=abc&state=\(xState)", "walletconnect://x-connect?code=abc&state=\(xState)"] {
+        for raw in ["merrymen://x-connect?code=abcdefgh&state=i.\(String(repeating: "Z", count: 32))", "merrymen://x-connect?code=abcdefgh",
+                    "merrymen://x-connect?error=access_denied", "merrymen://x-connect?error=server_error",
+                    "merrymen://x-connect?error=server_error&state=i.\(String(repeating: "Z", count: 32))",
+                    "merrymen://x-connect?code=abcdefgh&code=abcdefgi&state=\(xState)",
+                    "merrymen://x-connect?error=access_denied&error=server_error&state=\(xState)",
+                    "merrymen://x-connect?code=abcdefgh&state=\(xState)&state=\(xState)", "merrymen://x-connect?state=\(xState)",
+                    "merrymen://x-connect?code=&state=\(xState)", "merrymen://x-connect?code=abcd%20efgh&state=\(xState)",
+                    "merrymen://x-connect?code=abcd%0Aefgh&state=\(xState)", "merrymen://app/x-connect?code=abcdefgh&state=\(xState)",
+                    "merrymen://x-connect/evil?code=abcdefgh&state=\(xState)", "merrymen://evil@x-connect?code=abcdefgh&state=\(xState)",
+                    "merrymen://x-connect:1?code=abcdefgh&state=\(xState)", "merrymen://x-connect?code=abcdefgh&state=\(xState)#frag",
+                    "https://app.merrymen.dev/connect/x?code=abcdefgh&state=\(xState)", "walletconnect://x-connect?code=abcdefgh&state=\(xState)"] {
             XCTAssertNil(URL(string: raw).flatMap { policy.xConnectAnswer($0, state: xState) }, raw)
         }
-        XCTAssertNil(policy.xConnectAnswer(URL(string: "merrymen://x-connect?code=abc&state=")!, state: ""))
+        XCTAssertNil(policy.xConnectAnswer(URL(string: "merrymen://x-connect?code=abcdefgh&state=")!, state: ""))
         // The callback never routes anywhere through the deep-link path.
         for raw in ["merrymen://x-connect?code=abc&state=\(xState)", "merrymen://app/connect/x?code=abc&state=\(xState)",
                     "https://app.merrymen.dev/connect/x?code=abc&state=\(xState)", "merrymen://app/x-connect?code=abc&state=\(xState)"] {
             XCTAssertNil(policy.deepLink(URL(string: raw)!), raw)
+        }
+    }
+
+    /// Only `access_denied` is the owner saying no. Any other error X sends
+    /// back for this connect is a failure the screen reports, never a silent
+    /// close; an error for another connect is still nothing at all.
+    func testXConnectErrorOtherThanAccessDeniedIsAFailureNotADecline() {
+        let policy = NavigationPolicy()
+        for error in ["server_error", "invalid_scope", "temporarily_unavailable", "unauthorized_client", "invalid_request", "access_denied_", "ACCESS_DENIED", ""] {
+            XCTAssertEqual(policy.xConnectAnswer(URL(string: "merrymen://x-connect?error=\(error)&state=\(xState)")!, state: xState), .failed, error)
+        }
+        // The web page hands the error on beside the code only if X sent both; the error still decides.
+        XCTAssertEqual(policy.xConnectAnswer(URL(string: "merrymen://x-connect?code=abcdefgh&error=server_error&state=\(xState)")!, state: xState), .failed)
+        XCTAssertEqual(policy.xConnectAnswer(URL(string: "merrymen://x-connect?code=abcdefgh&error=access_denied&state=\(xState)")!, state: xState), .declined)
+        XCTAssertNil(policy.xConnectAnswer(URL(string: "merrymen://x-connect?error=server_error&state=i.\(String(repeating: "Z", count: 32))")!, state: xState))
+    }
+
+    /// The same code rule as the web's finish route: printable ASCII, no
+    /// spaces, 8 to 1024 characters after percent-decoding.
+    func testXConnectAcceptsEveryCodeTheFinishRouteAccepts() {
+        let policy = NavigationPolicy()
+        let state = xState
+        let answer = { (code: String) in policy.xConnectAnswer(URL(string: "merrymen://x-connect?code=\(code)&state=\(state)")!, state: state) }
+        XCTAssertEqual(answer("ab!cd*ef"), .approved(code: "ab!cd*ef"))
+        XCTAssertEqual(answer("ab%21cd%2Aef"), .approved(code: "ab!cd*ef"))
+        XCTAssertEqual(answer("%21%22%27%3C%3E%5C%60%7B%7D%7C%5E~"), .approved(code: "!\"'<>\\`{}|^~"))
+        XCTAssertEqual(answer("ab%26cd%3Def"), .approved(code: "ab&cd=ef"))
+        XCTAssertEqual(answer("abcdefgh"), .approved(code: "abcdefgh"))
+        XCTAssertEqual(answer(String(repeating: "A", count: 1024)), .approved(code: String(repeating: "A", count: 1024)))
+        for code in ["abcdefg", "a!*", String(repeating: "A", count: 1025), "abcdefg%7F", "abcdefg%C3%A9", "abcdefgh%CC%81", "abcdefg%09", "abcdefg%00"] {
+            XCTAssertNil(answer(code), code)
         }
     }
 
