@@ -264,16 +264,17 @@ describe("a warning when X's model is trading's model on groq (the room's same-o
 describe("a draft is the model's answer, or null — never a throw", () => {
   const P: Prompt = { system: "sys", prompt: "go" };
 
-  it("hands the prompt over and returns the answer as written", async () => {
+  it("hands the prompt over and returns the text it judged: trimmed, its wrapping quotes off, nothing inside touched", async () => {
     const seen: unknown[] = [];
     const out = await draft(ROOM, P, {
       call: async (creds, opts) => {
         seen.push([creds.model, opts]);
-        return '"quiet day on the curve"';
+        return '  "quiet day on the curve"\n';
       },
     });
-    assert.equal(out, '"quiet day on the curve"');
+    assert.equal(out, "quiet day on the curve");
     assert.deepEqual(seen, [["room-model", { system: "sys", prompt: "go", maxTokens: 400 }]]);
+    assert.equal(await draft(ROOM, P, { call: async () => "“first line\n\nsecond line”" }), "first line\n\nsecond line", "line breaks are the gate's to judge");
   });
 
   it("PASS, empty, an error and a timeout are all null", async () => {

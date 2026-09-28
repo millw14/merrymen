@@ -426,8 +426,13 @@ const PASS_LINE = /^[^\p{L}\p{N}]*pass(?![\p{L}\p{N}_])/iu;
 
 /**
  * One draft from the model, or null. Null on a timeout, a thrown error, an
- * empty answer or PASS — a failure costs a post, never a throw. The answer is
- * returned as the model wrote it: tidying and judging are the gate's.
+ * empty answer or PASS — a failure costs a post, never a throw.
+ *
+ * THE TEXT THAT WAS JUDGED IS THE TEXT RETURNED: trimmed, with the quotes the
+ * model wrapped round it taken off — the same string the PASS and empty checks
+ * just read, rather than the raw answer beside it. Nothing inside is touched
+ * (line breaks stay), so the gate's own tidying and judging still see what the
+ * model wrote.
  *
  * THE TIMEOUT DOES NOT CANCEL THE CALL. llmText takes no signal; the race only
  * stops the pass from waiting, and the losing promise is caught so it cannot
@@ -455,7 +460,7 @@ export async function draft(
     if (out === null) return null;
     const text = out.trim().replace(/^["'“”‘’`]+|["'“”‘’`]+$/g, "").trim();
     if (text === "" || PASS_LINE.test(text)) return null;
-    return out;
+    return text;
   } catch {
     return null;
   } finally {
