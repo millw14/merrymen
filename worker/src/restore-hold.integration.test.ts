@@ -13,7 +13,9 @@
  * entry, and the clock in the test's hands where the backoff matters. The
  * restore and the owner notice need Postgres, so they are seams here
  * (setPaperRestoreForTest, setHoldNoticeForTest); the notice's durable dedupe
- * is driven over sqlite in restore-hold.test.ts.
+ * is driven over sqlite in restore-hold.test.ts. The last block swaps the
+ * restore seam for the real restore over a sqlite ledger, and gives the
+ * practice reset the same ledger (setHeldResetDbForTest).
  *
  * MERRYMEN_HOME is per process (node --test forks per file), so this never
  * leaks into another test file.
@@ -25,7 +27,9 @@ import os from "node:os";
 import path from "node:path";
 import { after, beforeEach, describe, it, mock } from "node:test";
 import type { ChildProcess } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import type { StoredGrant } from "../../packages/core/src/index";
+import { wrapSqlite, type Db } from "./db";
 
 const FLEET = mkdtempSync(path.join(os.tmpdir(), "merrymen-restore-hold-"));
 process.env.MERRYMEN_HOME = FLEET;
@@ -42,7 +46,11 @@ const {
   setHoldNoticeForTest,
   adoptHolderForTest,
   isHeldForTest,
+  setHeldResetDbForTest,
 } = await import("./orchestrator");
+const { applyLedgerSchema } = await import("./store");
+const { PAPER_CHECKPOINT_SCHEMA, restorePaperCheckpoint } = await import("./paper-checkpoint");
+const { HELD_RESET_DONE } = await import("./held-reset");
 const { getGrantStore } = await import("./grant-store");
 const { getSettingsStore } = await import("./settings-store");
 const { readRestoreBlocked } = await import("./restore-block");
@@ -120,10 +128,26 @@ setSpawnForTest((_cmd, args, opts) => {
 
 /** The restore, as the test wants it to come out. */
 let restoreSays: { ok: true; line: string } | { ok: false; reason: string } = { ok: false, reason: NEWER };
+/**
+ * Or, when set, the REAL restore, against this shared ledger and an empty
+ * home, which is what a held tenant's home is: a restore that fails writes
+ * nothing, and neither does one that finds nothing to restore.
+ */
+let ledger: Db | null = null;
 let restores = 0;
-setPaperRestoreForTest(async () => {
+setPaperRestoreForTest(async (_tenant, account) => {
   restores += 1;
-  return restoreSays;
+  if (!ledger) return restoreSays;
+  const raw = new DatabaseSync(":memory:");
+  try {
+    const home = wrapSqlite(raw);
+    await applyLedgerSchema(home);
+    return { ok: true, line: await restorePaperCheckpoint(home, ledger, account) };
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  } finally {
+    raw.close();
+  }
 });
 const notices: string[] = [];
 setHoldNoticeForTest(async (_tenant, cls) => {
@@ -172,6 +196,8 @@ beforeEach(async () => {
   rmSync(childHome(OTHER), { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   await getSettingsStore().put(TENANT, paperWithBot as never);
   restoreSays = { ok: false, reason: NEWER };
+  ledger = null;
+  setHeldResetDbForTest(null);
   restores = 0;
   spawned.length = 0;
   events.length = 0;
@@ -480,5 +506,144 @@ describe("a held tenant is stood down like any other", () => {
     assert.equal(spawned.length, 0, "no process started to poll a revoked tenant's bot, only to be killed in a wiped home");
     assert.ok(!isHeldForTest(TENANT));
     assert.equal(existsSync(childHome(TENANT)), false);
+  });
+});
+
+/**
+ * A PRACTICE RESET ITS OWNER ASKS FOR WHILE THE BOOK IS HELD (plan §3.4).
+ *
+ * Here the restore is the real one, over a sqlite ledger holding 0x542978's
+ * condition (a paper fill newer than the last valuation), and so are the
+ * claim and the reset (held-reset.ts, through setHeldResetDbForTest). Only the
+ * processes are fakes.
+ */
+describe("a practice reset its owner asks for while held", () => {
+  let shared: { raw: DatabaseSync; db: Db } | null = null;
+  after(() => shared?.raw.close());
+  async function useLedger(): Promise<Db> {
+    shared?.raw.close();
+    const raw = new DatabaseSync(":memory:");
+    const db = wrapSqlite(raw);
+    await applyLedgerSchema(db);
+    await db.exec(PAPER_CHECKPOINT_SCHEMA);
+    await db.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, epoch, mode)
+      VALUES (?, '0xowner', '0xsession', 4663, '{}', 1, 2, 1, 'paper')`).run(ACCOUNT);
+    await db.prepare(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, at)
+      VALUES (?, '0', 900, 0, 110, 1010, 1, 'paper', 10)`).run(ACCOUNT);
+    await db.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, status, epoch, created_at)
+      VALUES (?, 'swap', 'NVDA', 100, 'paper', 1, 11)`).run(ACCOUNT);
+    shared = { raw, db };
+    ledger = db;
+    setHeldResetDbForTest(db);
+    return db;
+  }
+  const ask = (db: Db, id: string, at: number) =>
+    db.prepare("INSERT INTO agent_commands (id, agent_id, kind, created_at) VALUES (?, ?, 'paper-reset', ?)").run(id, ACCOUNT, at);
+  const commandRow = async (db: Db, id: string) =>
+    ({ ...((await db.prepare("SELECT claimed_at, done_at, result FROM agent_commands WHERE id = ?").get(id)) as object) }) as {
+      claimed_at: number | null;
+      done_at: number | null;
+      result: string | null;
+    };
+  const epochOf = async (db: Db) => Number(((await db.prepare("SELECT epoch FROM agents").get()) as { epoch: number }).epoch);
+  const startedOver = () => said.filter((l) => l.includes("practice book started over at its owner's request"));
+
+  it("HELD, THEN THE OWNER PRESSES RESTART: THE NEXT PASS STARTS THE BOOK OVER, STOPS THE HOLD PROCESS, AND STARTS ONE WORKER", async () => {
+    const db = await useLedger();
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      await reconcile();
+      assert.ok(isHeldForTest(TENANT), `premise: the real restore refuses this book:\n${said.join("\n")}`);
+      assert.equal(readRestoreBlocked(childHome(TENANT))?.class, NEWER_CLASS);
+      mock.timers.tick(15_000);
+      await reconcile();
+      assert.equal(restores, 1, "premise: nothing asked, so the two-minute backoff stands");
+
+      // The owner presses Restart the practice book, well inside the backoff.
+      await ask(db, "r1", Date.now());
+      mock.timers.tick(15_000);
+      await reconcile();
+      await settle();
+      assert.deepEqual(events, ["hold-spawn", "hold-exit", "worker-spawn"], `the hold process was gone before the worker started:\n${said.join("\n")}`);
+      // Failed, started over, restored to nothing; then the spawn restores once more.
+      assert.equal(restores, 4);
+      assert.ok(!isHeldForTest(TENANT));
+      assert.equal(readRestoreBlocked(childHome(TENANT)), null);
+      assert.equal(await epochOf(db), 2, "the book opens a new epoch");
+      const r = await commandRow(db, "r1");
+      assert.ok(r.claimed_at && r.done_at, "claimed and answered, so no ferry hands it to the worker");
+      assert.equal(r.result, HELD_RESET_DONE);
+      assert.equal(startedOver().length, 1, said.join("\n"));
+      for (let i = 0; i < 3; i++) {
+        mock.timers.tick(15_000);
+        await reconcile();
+      }
+      assert.equal(workers().length, 1, "exactly one worker");
+      assert.equal(await epochOf(db), 2, "and started over exactly once");
+    });
+  });
+
+  it("A RESET ALREADY WAITING AT SPAWN IS HONOURED THERE: NO HOLD, NO NOTICE, ONE WORKER", async () => {
+    // The web's Start over: the reset is queued and the grant discarded, and
+    // this spawn is the one the owner's new signature brings.
+    const db = await useLedger();
+    await ask(db, "r1", Date.now() - 60 * 60_000);
+    await store.put(TENANT, grant());
+    await reconcile();
+    await settle();
+    assert.equal(workers().length, 1, said.join("\n"));
+    assert.equal(holds().length, 0, "never held");
+    assert.deepEqual(notices, [], "and the owner is not told their book is broken");
+    assert.ok(!isHeldForTest(TENANT));
+    assert.equal(restores, 2, "refused, then nothing to restore");
+    assert.equal(await epochOf(db), 2);
+    assert.equal((await commandRow(db, "r1")).result, HELD_RESET_DONE);
+  });
+
+  it("A LIVE OWNER'S RESET IS NOT HONOURED, AND ONE PRESS BRINGS ONE RETRY FORWARD, NOT ONE EVERY PASS", async () => {
+    const db = await useLedger();
+    await getSettingsStore().put(TENANT, { ...paperWithBot, liveTradingEnabled: true } as never);
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      await reconcile();
+      assert.ok(isHeldForTest(TENANT));
+      await ask(db, "r1", Date.now());
+      mock.timers.tick(15_000);
+      await reconcile();
+      assert.equal(restores, 2, "the press brought a retry forward");
+      for (let i = 0; i < 4; i++) {
+        mock.timers.tick(15_000);
+        await reconcile();
+      }
+      assert.equal(restores, 2, "once, not on every pass while the row waits");
+      assert.ok(isHeldForTest(TENANT), "still held");
+      assert.equal(workers().length, 0);
+      assert.equal(await epochOf(db), 1, "the book is not touched");
+      assert.deepEqual(await commandRow(db, "r1"), { claimed_at: null, done_at: null, result: null });
+      assert.equal(said.filter((l) => l.includes("not honoured while held — live trading is switched on")).length, 1, said.join("\n"));
+    });
+  });
+
+  it("A RESET OLDER THAN SEVEN DAYS IS NOT ACTED ON, AND DOES NOT BRING RETRIES FORWARD", async () => {
+    const db = await useLedger();
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      // The owner's Sep 21 press, still unclaimed a week and more later.
+      await ask(db, "r1", Date.now() - 8 * 24 * 60 * 60_000);
+      await reconcile();
+      assert.ok(isHeldForTest(TENANT), "held, not reset");
+      for (let i = 0; i < 4; i++) {
+        mock.timers.tick(15_000);
+        await reconcile();
+      }
+      assert.equal(restores, 1, "nothing brought forward");
+      mock.timers.tick(2 * 60_000);
+      await reconcile();
+      assert.equal(restores, 2, "the backoff's own retry");
+      assert.ok(isHeldForTest(TENANT));
+      assert.equal(await epochOf(db), 1);
+      assert.deepEqual(await commandRow(db, "r1"), { claimed_at: null, done_at: null, result: null });
+      assert.equal(said.filter((l) => /not honoured while held — .*seven days/.test(l)).length, 1, "said once, not on every retry");
+    });
   });
 });

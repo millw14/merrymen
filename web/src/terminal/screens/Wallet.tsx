@@ -1033,13 +1033,26 @@ export default function GrantPage() {
       if (!okToKeepHistory) return;
     }
     clearGrant();
-    // Also destroy the worker-side handoff — otherwise the "discarded" grant
+    // Ask for the paper book to be restarted. Best-effort and unconditional:
+    // only the worker knows which rail it is on (or, while its book is held,
+    // the orchestrator, which asks the ledger), and each refuses a live agent
+    // outright, so nothing real can be cleared.
+    //
+    // THEN destroy the worker-side handoff — otherwise the "discarded" grant
     // stays armed and the worker keeps trading on it (kill-switch semantics).
-    void fetch("/api/grants", { method: "DELETE" }).catch(() => {});
-    // Ask the child to restart the paper book. Best-effort and
-    // unconditional: only the worker knows which rail it is on, and it refuses
-    // this outright when the agent is live, so nothing real can be cleared.
-    void fetch("/api/paper-reset", { method: "POST" }).catch(() => {});
+    //
+    // IN THAT ORDER, AND THE DELETE WAITS FOR THE RESET'S ANSWER. The reset
+    // route finds the agent through the live grant (agent-for.ts), so a DELETE
+    // that lands first leaves it nobody to queue for. Fired side by side, it
+    // lost that race and answered 401, which the catch swallowed: production,
+    // 2026-09-21T16:24:24Z, an owner whose practice book would not restore
+    // pressed this to start over, and nothing was queued. Chained rather than awaited, so the screen
+    // clears at once; bounded, so a reset that hangs cannot keep a discarded
+    // grant armed for longer than ten seconds.
+    void fetch("/api/paper-reset", { method: "POST", signal: AbortSignal.timeout(10_000) })
+      .catch(() => {})
+      .then(() => fetch("/api/grants", { method: "DELETE" }))
+      .catch(() => {});
     localStorage.removeItem(BACKUP_KEY);
     setGrant(null);
     setBackedUp(false);

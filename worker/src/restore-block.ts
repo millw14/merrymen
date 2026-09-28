@@ -98,36 +98,46 @@ export function clearRestoreBlocked(home: string): void {
 }
 
 /**
+ * The way out an owner is offered: starting practice over. Honoured while held
+ * (held-reset.ts), so it is true to say. On the web the only way to ask for it
+ * is Start over, which discards the signed key too, hence "sign again".
+ */
+const START_OVER =
+  "You can wait for a fix, or start practice over: restart the practice book in the app " +
+  "(on the web, Wallet → Start over, then sign again).";
+
+/**
  * What the bot says to its owner while trading is held. The plan's wording,
  * with the class and nothing else from the reason.
  *
- * LESS ONE SENTENCE OF THE PLAN'S: it sent the owner to Practice reset, and
- * nothing may yet. A paper-reset is an agent_commands row, and while the
- * tenant is held nothing delivers it (the ferries walk trading children
- * only), nothing expires it (only orders are closed when stale), and the web's
- * "Start over" deletes the grant as well. So the row waits for the first
- * worker after the hold, which is usually there because a retry has just
- * restored the book: the reset the owner pressed because we said the book was
- * lost would wipe the book we had just got back. The instruction returns with
- * plan §3.4, which honours a reset while held, under a 7-day bound and with
- * fresh consent. Until then the owner is told the truth: nothing to do.
+ * THE PRACTICE RESET IS OFFERED AGAIN. It was held back while nothing could
+ * act on one: a paper-reset is an agent_commands row, the ferries hand rows to
+ * trading children only, and a held tenant has none, so the row waited for
+ * the first worker after the hold. Plan §3.4 honours it while held: the
+ * orchestrator claims the newest reset of the last seven days, under the
+ * lease, for a book the ledger and the stored settings both say is practice,
+ * and starts the book over in the shared ledger (held-reset.ts). The press
+ * brings the next restore attempt forward, so it is acted on within a pass or
+ * so rather than at the end of the backoff. If that attempt restores the book
+ * after all, the worker it hands to is ferried the same reset and starts over
+ * as it was asked to: the owner asked for a new book, and gets one either way.
  */
 export function holdText(cls: string): string {
   return (
     `I'm not trading right now: your practice book couldn't be restored after a server update (${cls}). ` +
-    "Nothing was traded or lost, you don't need to do anything, and the team has been alerted. /link still works."
+    `Nothing was traded or lost, and the team has been alerted. ${START_OVER} /link still works.`
   );
 }
 
 /**
  * The one message the orchestrator sends the owner, unasked, when a hold
  * begins (or its class changes to one they have not heard). Plain text: the
- * sender escapes it. Without Practice reset, for holdText's reason.
+ * sender escapes it. The same way out as holdText.
  */
 export function holdNoticeText(cls: string): string {
   return (
     `⏸️ Your agent has stopped trading: your practice book couldn't be restored after a server update (${cls}). ` +
-    "Nothing was traded or lost, you don't need to do anything, and the team has been alerted. " +
+    `Nothing was traded or lost, and the team has been alerted. ${START_OVER} ` +
     "I'll keep answering here in the meantime."
   );
 }

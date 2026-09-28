@@ -274,6 +274,57 @@ describe("the hold process's imports", () => {
   });
 });
 
+/**
+ * A PRACTICE RESET HONOURED WHILE HELD (plan §3.4), where the integration test
+ * cannot look: it runs with no DATABASE_URL, so the anchor file never carries
+ * an epoch, and the lease there is the no-op one that is always healthy.
+ */
+describe("a held tenant's practice reset", () => {
+  it("spawnChild HONOURS IT ONLY FOR A PRACTICE BOOK THAT HAS JUST FAILED TO RESTORE, AND WRITES THE ANCHOR AGAIN BEFORE RESTORING", () => {
+    const spawn = fn("spawnChild");
+    const honour = calls(spawn, "honourHeldPaperReset");
+    assert.equal(honour.length, 1);
+    const gate = all(spawn, (n) => ts.isIfStatement(n) && calls(n.expression, "honourHeldPaperReset").length === 1)[0] as ts.IfStatement;
+    assert.ok(gate, "the reset is the last term of an if");
+    const cond = gate.expression.getText();
+    assert.ok(cond.startsWith("!restore.ok && settings?.paperTradingEnabled === true && "), `after a failed restore, for the book the gate holds: ${cond}`);
+    assert.equal(honour[0]!.arguments.map((a) => a.getText()).join(","), "tenant,smartAccount,lease", "under the lease spawnChild checked");
+    // The anchor was read before the reset closed its epoch; the worker files
+    // every row under the anchor's. So it is written again, then restored.
+    const anchor = calls(gate.thenStatement, "writeBootstrapForChild")[0];
+    const again = calls(gate.thenStatement, "tryPaperRestore")[0];
+    assert.ok(anchor && again && anchor.getEnd() < again.getStart(), "the anchor again, then the restore again");
+    // And the gate's own branch comes after, so a reset that did not happen still holds.
+    const hold = all(spawn, (n) => ts.isIfStatement(n) && n.expression.getText() === "settings?.paperTradingEnabled === true")[0]!;
+    assert.ok(gate.getEnd() < hold.getStart());
+  });
+
+  it("retryHold HONOURS IT ONLY AFTER ITS OWN RESTORE FAILED, INSIDE THE RETRY'S CLAIM, AND HANDS BACK ONLY THROUGH handHoldBack", () => {
+    const retry = fn("retryHold");
+    const guard = all(retry, (n) => ts.isIfStatement(n) && calls(n.expression, "honourHeldPaperReset").length === 1)[0] as ts.IfStatement;
+    assert.ok(guard);
+    assert.ok(guard.expression.getText().startsWith("!restore.ok && holders.get(tenant) === held && "), guard.expression.getText());
+    assert.equal(calls(guard.thenStatement, "tryPaperRestore").length, 1, "restored again");
+    const tryStmt = all(retry, ts.isTryStatement)[0] as ts.TryStatement;
+    assert.ok(tryStmt.tryBlock.getStart() < guard.getStart() && guard.getEnd() < tryStmt.tryBlock.getEnd(), "while `retrying` is set");
+    assert.equal(calls(retry, "handHoldBack").length, 1);
+  });
+
+  it("THE WRITE IS REFUSED WHEN ANYTHING THAT STOPS A SPAWN WOULD STOP IT, AND THE CLAIM IS deliverCommand's", () => {
+    const honour = fn("honourHeldPaperReset").body!.getText();
+    assert.match(honour, /mayWrite: \(\) => \(lease \? lateSpawnRefusal\(tenant, lease\) : "it holds no lease"\)/);
+    const held = readFileSync(path.join(SRC, "held-reset.ts"), "utf8");
+    const deliver = fn("deliverCommand").body!.getText();
+    const claim = 'UPDATE agent_commands SET claimed_at = ? WHERE id = ? AND claimed_at IS NULL';
+    assert.ok(deliver.includes(claim) && held.includes(claim), "the same claim, so one of the two wins");
+    // Inside the one transaction, with the reset and the answer.
+    const tx = held.slice(held.indexOf("shared.tx(async (db) => {"));
+    for (const step of [claim, "resetBlockedPaperBookIn(db, account, decision.epoch)", 'SET done_at = ?, result = ? WHERE id = ?']) {
+      assert.ok(tx.includes(step), `inside the transaction: ${step}`);
+    }
+  });
+});
+
 describe("what an owner is told", () => {
   it("the class is a fixed phrase with no figures, whatever the restore said", () => {
     const reasons = [

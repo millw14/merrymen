@@ -102,6 +102,7 @@ import {
 } from "./telegram-store";
 import { clearRestoreBlocked, isNamedBlock, readRestoreBlocked, restoreBlockClass, writeRestoreBlocked } from "./restore-block";
 import { notifyHoldOnce, type HoldNoticeOutcome } from "./hold-notice";
+import { applyHeldReset, resetsAsked, type HeldResetOutcome } from "./held-reset";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
 import { addressesOf, makeBuilderDesk, type BuilderDesk } from "./builder-pass";
@@ -649,6 +650,12 @@ interface Holder {
   quickMs: number;
   /** A retry is running. Two passes must not both hand the tenant over. */
   retrying: boolean;
+  /**
+   * The newest practice reset its owner queued that has already brought a
+   * retry forward, so one press is one early retry and not one every pass
+   * (reconcile; held-reset.ts).
+   */
+  resetSeen: string | null;
 }
 
 /**
@@ -697,7 +704,7 @@ export async function adoptHolderForTest(
   }
   const held: Holder = {
     tenant: lc, smartAccount, proc: null, exited: null, reason, cls: restoreBlockClass(reason),
-    nextRetryAt: 0, backoffMs: HOLD_RETRY_FIRST_MS, quickMs: HOLD_RETRY_QUICK_MS, retrying: false,
+    nextRetryAt: 0, backoffMs: HOLD_RETRY_FIRST_MS, quickMs: HOLD_RETRY_QUICK_MS, retrying: false, resetSeen: null,
   };
   scheduleHoldRetry(held, held.cls);
   holders.set(lc, held);
@@ -1761,7 +1768,20 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // closed, so the agent would run with contributions marked unknown for no
     // reason other than a race.
     await writeBootstrapForChild(tenant, smartAccount);
-    const restore = await tryPaperRestore(tenant, smartAccount);
+    let restore = await tryPaperRestore(tenant, smartAccount);
+    // A PRACTICE RESET ITS OWNER ASKED FOR, honoured here because no worker can
+    // honour it: this is the book the gate below would hold. Most often the
+    // owner pressed Start over on the web, which also discards the grant, so
+    // this spawn is the one their re-signed grant brought. See
+    // honourHeldPaperReset.
+    if (!restore.ok && settings?.paperTradingEnabled === true && (await honourHeldPaperReset(tenant, smartAccount, lease))) {
+      // The anchor above was read in the epoch the reset has just closed, and
+      // the worker files every row under the anchor's epoch. Written again, or
+      // its whole run would land in the old epoch, beside the fills that broke
+      // the book, where nothing that reads the new one would ever see it.
+      await writeBootstrapForChild(tenant, smartAccount);
+      restore = await tryPaperRestore(tenant, smartAccount);
+    }
     if (restore.ok) {
       if (restore.line) log(`paper restore: ${tenant} — ${restore.line}`);
       forgetHold(tenant);
@@ -1906,6 +1926,98 @@ async function tryPaperRestore(tenant: `0x${string}`, smartAccount: `0x${string}
   }
 }
 
+let heldResetDbForTest: Db | null = null;
+
+/**
+ * Test seam: the shared ledger a held tenant's practice reset is read from and
+ * written to, in place of DATABASE_URL's, so a test can drive the real claim
+ * and reset (held-reset.ts) through the real reconcile() over sqlite.
+ */
+export function setHeldResetDbForTest(db: Db | null): void {
+  heldResetDbForTest = db;
+}
+
+/** The shared ledger for held resets, or null when there is none (self-hosted: nothing is ever held). */
+async function heldResetDb(): Promise<Db | null> {
+  if (heldResetDbForTest) return heldResetDbForTest;
+  const url = process.env.DATABASE_URL;
+  return url ? makePgDb(url) : null;
+}
+
+/**
+ * What each tenant's last unhonoured reset said, so a refusal, or a ledger that
+ * will not answer, is logged once and not on every retry of a hold.
+ */
+const heldResetSaid = new Map<string, string>();
+const sayResetOnce = (tenant: string, line: string): void => {
+  if (heldResetSaid.get(tenant) === line) return;
+  heldResetSaid.set(tenant, line);
+  log(line);
+};
+
+/**
+ * HONOUR A PRACTICE RESET FOR A BOOK THAT WILL NOT RESTORE. True when the book
+ * was started over, and the caller then restores again, which finds nothing to
+ * restore and lets a worker seed a fresh book.
+ *
+ * Called only where a restore has just failed for a tenant the gate holds:
+ * spawnChild's paper branch and retryHold. Under the lease the caller holds,
+ * asked again (with the rest of what would stop a spawn) after every read and
+ * immediately before the one transaction that claims the owner's command and
+ * resets the book. The conditions, the claim and the reset are held-reset.ts
+ * and paper-checkpoint.ts resetBlockedPaperBook; this is the wiring and the log.
+ *
+ * Never throws: a reset that could not be read or written is logged, and the
+ * next retry asks again. Nothing it failed to do was half done.
+ */
+async function honourHeldPaperReset(
+  tenant: `0x${string}`,
+  smartAccount: `0x${string}`,
+  lease: TenantLease | undefined,
+): Promise<boolean> {
+  let out: HeldResetOutcome;
+  try {
+    const db = await heldResetDb();
+    if (!db) return false;
+    out = await applyHeldReset(db, smartAccount, {
+      now: Date.now(),
+      readSettings: () => getSettingsStore().get(tenant),
+      // settings.ts enforceLiveIntent, as the tenant's worker would read it.
+      consentEnforced: (process.env.MERRYMEN_LIVE_INTENT_STAND_DOWN ?? "").trim() !== "1",
+      mayWrite: () => (lease ? lateSpawnRefusal(tenant, lease) : "it holds no lease"),
+    });
+  } catch (e) {
+    sayResetOnce(tenant, `${tenant}: a practice reset could not be checked for or honoured — ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+  if (out.applied) {
+    heldResetSaid.delete(tenant);
+    log(
+      `${tenant}: practice book started over at its owner's request (command ${out.id.slice(0, 8)}) — ` +
+        `epoch ${out.from} closed and kept, epoch ${out.epoch} opens with no positions, no capital flow booked`,
+    );
+    return true;
+  }
+  // Nothing waiting is the ordinary case, and says nothing.
+  if (out.id !== null) sayResetOnce(tenant, `${tenant}: practice reset ${out.id.slice(0, 8)} not honoured while held — ${out.why}`);
+  return false;
+}
+
+/**
+ * The held accounts, of those given, whose owner has queued a practice reset
+ * nobody has claimed yet, with the newest row's id. Empty when there is no
+ * shared ledger or it will not answer: the retries then keep their own clock.
+ */
+async function heldResetsAsked(accounts: readonly string[]): Promise<Map<string, string>> {
+  if (accounts.length === 0) return new Map();
+  try {
+    const db = await heldResetDb();
+    return db ? await resetsAsked(db, accounts, Date.now()) : new Map();
+  } catch {
+    return new Map();
+  }
+}
+
 /**
  * Would these stored settings have a bot for a hold process to answer? The
  * hold process's own rule (botWillPoll), and so also the rule for whether a
@@ -1974,7 +2086,7 @@ async function spawnHolder(
   writeRestoreBlocked(home, { reason: why, class: cls, since: prev?.since ?? Math.floor(Date.now() / 1000) });
   const held: Holder = {
     tenant, smartAccount, proc: null, exited: null, reason: why, cls,
-    nextRetryAt: 0, backoffMs: HOLD_RETRY_FIRST_MS, quickMs: HOLD_RETRY_QUICK_MS, retrying: false,
+    nextRetryAt: 0, backoffMs: HOLD_RETRY_FIRST_MS, quickMs: HOLD_RETRY_QUICK_MS, retrying: false, resetSeen: null,
   };
   // Paced by what this restore said, not by the cause the hold keeps.
   scheduleHoldRetry(held, restoreBlockClass(reason));
@@ -2115,6 +2227,14 @@ async function retryHold(held: Holder): Promise<void> {
   let restore: PaperRestore;
   try {
     restore = await tryPaperRestore(tenant, held.smartAccount);
+    // A PRACTICE RESET ITS OWNER ASKED FOR, now that the book has failed to
+    // restore once more. When it is honoured the restore is asked again and
+    // finds nothing to restore, so the tenant is handed back below exactly as
+    // a restore that took is: the hold process stopped and awaited, then one
+    // worker, whose spawn writes its anchor in the new epoch.
+    if (!restore.ok && holders.get(tenant) === held && (await honourHeldPaperReset(tenant, held.smartAccount, leases.get(tenant)))) {
+      restore = await tryPaperRestore(tenant, held.smartAccount);
+    }
   } finally {
     held.retrying = false;
   }
@@ -2288,6 +2408,7 @@ export function setHoldNoticeForTest(fn: (tenant: `0x${string}`, cls: string) =>
 function forgetHold(tenant: `0x${string}`): void {
   holdAlerted.delete(tenant);
   holdNoticed.delete(tenant);
+  heldResetSaid.delete(tenant);
   holderCrashes.delete(tenant);
   clearRestoreBlocked(childHome(tenant));
   const url = process.env.DATABASE_URL;
@@ -2514,8 +2635,19 @@ export async function reconcile(): Promise<void> {
   }
   // HELD TENANTS WHOSE RESTORE IS DUE AGAIN, and the handover to trading when
   // it takes. See retryHold.
+  //
+  // AND ANY WHOSE OWNER HAS JUST ASKED FOR A PRACTICE RESET, whatever its
+  // backoff says. The hold's own reply tells the owner to press it, and a
+  // book that has been broken for days waits thirty minutes between retries:
+  // the press would sit that long before retryHold honoured it. Each queued
+  // row brings one retry forward, once (`resetSeen`), so a reset that is
+  // refused does not put the restore back on every pass.
+  const asked = await heldResetsAsked([...holders.values()].filter((h) => wanted.has(h.tenant)).map((h) => h.smartAccount));
   for (const held of [...holders.values()]) {
-    if (!wanted.has(held.tenant) || held.retrying || Date.now() < held.nextRetryAt) continue;
+    const ask = asked.get(held.smartAccount);
+    const early = ask !== undefined && ask !== held.resetSeen;
+    if (!wanted.has(held.tenant) || held.retrying || (!early && Date.now() < held.nextRetryAt)) continue;
+    if (early) held.resetSeen = ask;
     await retryHold(held);
   }
   // Refresh every running child's settings.json so a tenant's config change
