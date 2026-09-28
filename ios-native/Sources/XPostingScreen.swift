@@ -24,8 +24,10 @@ import MerrymenPolicy
 /// than whichever one Safari happened to hold. The server's URL must be X's
 /// own authorize page (NavigationPolicy.isXAuthorize) with an iOS state; the
 /// sheet's `merrymen://x-connect` answer is accepted only with that same state
-/// (xConnectAnswer). Closing the sheet or saying no on X is a choice, not a
-/// failure. If the owner changed while X was open, nothing is finished.
+/// (xConnectAnswer). Closing the sheet or saying no on X (`access_denied`) is
+/// a choice, not a failure, and closes quietly; any other error X answers
+/// with is X failing, and the owner is told so. If the owner changed while X
+/// was open, nothing is finished.
 ///
 /// WHAT THIS SCREEN DOES NOT DO: it never posts, drafts or edits a post, and
 /// it never shows a post it has not read from the server. Drafts are shown
@@ -222,6 +224,8 @@ struct XPostingScreen: View {
                 }
                 switch policy.xConnectAnswer(callback, state: state) {
                 case .declined: return // Saying no on X is a choice too; nothing is sent.
+                case .failed: // X's own error, not the owner's choice: say so rather than close in silence.
+                    throw APIError(status: 0, message: "X couldn't finish connecting, so nothing was connected. Try again in a moment.")
                 case .approved(let code):
                     _ = try await store.perform("/api/x/connect", body: .object(["action": .string("finish"), "code": .string(code), "state": .string(state), "owner": .string(owner)]), expectedOwner: owner)
                 case nil:

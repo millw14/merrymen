@@ -99,16 +99,26 @@ public struct NavigationPolicy {
     public enum XConnectAnswer: Equatable, Sendable {
         /// The owner approved on X: finish the connect with this code.
         case approved(code: String)
-        /// The owner said no on X (or X did not finish). A choice, not a failure; nothing is sent.
+        /// The owner said no on X (`error=access_denied`). A choice, not a
+        /// failure; nothing is sent and nothing needs saying.
         case declined
+        /// X answered this connect with any other error (a server error, a
+        /// scope the app lacks, X unavailable). Nothing is sent, but the owner
+        /// is told it failed — it was not their choice.
+        case failed
     }
 
     /// The sheet's callback, read only as the answer to the connect whose
     /// authorize URL carried `state`: `merrymen://x-connect?code=…&state=…`,
     /// or `?error=…&state=…`. Every other shape — another host or path, a
     /// state that is not this connect's, a parameter given twice, userinfo, a
-    /// fragment, a code with characters no OAuth code has — is nil, and the
-    /// app sends nothing.
+    /// fragment, a code no OAuth code could be — is nil, and the app sends
+    /// nothing.
+    ///
+    /// ONLY `access_denied` IS THE OWNER SAYING NO. RFC 6749 §4.1.2.1 lets X
+    /// come back with server_error, temporarily_unavailable, invalid_scope and
+    /// the rest once the redirect is valid; those are failures the owner must
+    /// see, not a silent close that sends them round the connect again.
     public func xConnectAnswer(_ callback: URL, state: String) -> XConnectAnswer? {
         guard let c = URLComponents(url: callback, resolvingAgainstBaseURL: false),
               c.scheme?.lowercased() == "merrymen", c.percentEncodedHost?.lowercased() == "x-connect",
@@ -117,10 +127,20 @@ public struct NavigationPolicy {
         let items = c.queryItems ?? []
         guard Set(items.map(\.name)).count == items.count, !state.isEmpty,
               items.first(where: { $0.name == "state" })?.value == state else { return nil }
-        if items.contains(where: { $0.name == "error" }) { return .declined }
-        guard let code = items.first(where: { $0.name == "code" })?.value,
-              code.wholeMatch(of: #/[A-Za-z0-9._~+\/=:-]{1,2048}/#) != nil else { return nil }
+        if let error = items.first(where: { $0.name == "error" }) { return error.value == "access_denied" ? .declined : .failed }
+        guard let code = items.first(where: { $0.name == "code" })?.value, Self.isXCode(code) else { return nil }
         return .approved(code: code)
+    }
+
+    /// AN AUTHORIZATION CODE AS THE SERVER ACCEPTS IT: printable ASCII with no
+    /// spaces (U+0021…U+007E), 8 to 1024 of them, read after percent-decoding.
+    /// The same rule as the finish route's CODE
+    /// (web/src/app/api/x/connect/route.ts); keep the two equal. Not narrower —
+    /// X does not document its alphabet, and a code refused here is an owner
+    /// told X's answer was not for them when it was. Checked scalar by scalar,
+    /// so no grapheme rule can let a combining mark ride along.
+    static func isXCode(_ code: String) -> Bool {
+        (8...1024).contains(code.unicodeScalars.count) && code.unicodeScalars.allSatisfy { (0x21...0x7e).contains($0.value) }
     }
 
     /// A link to one post on X, to open in the browser: exactly
