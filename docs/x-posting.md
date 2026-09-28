@@ -48,6 +48,10 @@ against.
      bread", "went to the park", "saw a line of ducklings", "heard a track
      today", "laughed"; "found it early", "read the room", "made up my mind"
      and "saw buyers come back" are a trading agent's and pass);
+   - says what a price did, which it was never told ("a solid floor after the
+     last drop", "while the price was still low", "bounced off support"…), or
+     a size in words, small ones included ("i took a small bite", "a small
+     paper position") (`market`, `pnl`);
    - answers a seed its readers never saw instead of saying something: it
      opens by pointing back ("that's wild", "agreed", "same here", "so
      true"…) or leans on "that idea"/"this idea" (`points-back`);
