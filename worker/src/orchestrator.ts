@@ -209,6 +209,50 @@ const GIVE_UP_COOLOFF_MS = 5 * 60_000;
 const gaveUpUntil = new Map<string, { until: number; restarts: number }>();
 
 /**
+ * TENANTS WITH A RESTART ALREADY SCHEDULED, and the timer that will make it.
+ *
+ * `reconcile()` spawns anything wanted that is not running, and a tenant whose
+ * restart timer has not fired yet is not running — so the next pass spawned it
+ * at restarts=0 and the timer, finding a child, stood aside. Any rung whose
+ * delay outlasted the gap to that pass was unreachable: 16s and 30s lose to a
+ * fifteen-second pass, so the ladder reset at about #4 or #5 and MAX_RESTARTS
+ * (#9) was never hit, on the exit path or the watchdog's. A child that never
+ * beat was SIGKILLed and cold-armed every couple of minutes for ever — the
+ * loop `gaveUpUntil` exists to stop. The timer owns the restart it was
+ * scheduled for, and reconcile steps round it.
+ */
+const restartPending = new Map<string, { restarts: number; timer: ReturnType<typeof setTimeout> }>();
+
+/** Drop a tenant's scheduled restart, for a stand-down that wants none. */
+function cancelRestart(tenant: string): void {
+  const pending = restartPending.get(tenant);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  restartPending.delete(tenant);
+}
+
+/**
+ * How long a child must have stayed alive for its death to be a fresh
+ * incident rather than the next rung of a crash loop.
+ */
+const HEALTHY_RUN_MS = 60_000;
+
+/**
+ * THE RUNG A CHILD'S RESTART GOES ON, decided by how long it stayed alive.
+ *
+ * A child that ran for a minute and then went down is a fresh incident, rung
+ * 0: it says nothing about the one before it. One that went down inside that
+ * minute is the same incident still going, one rung above the child it
+ * replaced. The exit handler measures "alive" up to the exit. The watchdog
+ * measures it up to the last heartbeat, because a wedged child is still a
+ * running process and its age says nothing — it only ever kills a child older
+ * than WATCHDOG_GRACE_SEC, which is already past this minute.
+ */
+function nextRung(child: Child, aliveUntilMs: number): number {
+  return aliveUntilMs - child.startedAt > HEALTHY_RUN_MS ? 0 : child.restarts + 1;
+}
+
+/**
  * ONE RESTART POLICY, because there were two and only one of them had a brake.
  *
  * The exit handler backed off and capped. The watchdog — the path a
@@ -230,9 +274,19 @@ function scheduleRestart(tenant: `0x${string}`, restarts: number, why: string): 
   }
   const delay = Math.min(30_000, 1_000 * 2 ** Math.min(restarts, 5));
   log(`${tenant} rallying again in ${Math.round(delay / 1000)}s (restart #${restarts}, ${why})`);
-  setTimeout(() => {
-    if (!stopping && !children.has(tenant) && !spawning.has(tenant)) void spawnChild(tenant, restarts);
-  }, delay);
+  const pending = {
+    restarts,
+    timer: setTimeout(() => {
+      // Only the restart still scheduled: one a stand-down cancelled, or a
+      // later one replaced, does nothing. Released just before spawnChild,
+      // which claims `spawning` synchronously, so there is no moment at which
+      // reconcile finds the tenant in neither and spawns it too.
+      if (restartPending.get(tenant) !== pending) return;
+      restartPending.delete(tenant);
+      if (!stopping && !children.has(tenant) && !spawning.has(tenant)) void spawnChild(tenant, restarts);
+    }, delay),
+  };
+  restartPending.set(tenant, pending);
 }
 
 /** The worker entrypoint each child runs — the same main() the CLI supervises. */
@@ -467,8 +521,32 @@ const children = new Map<string, Child>();
  * on one home and one sqlite file, both trading, only one of them visible to
  * the watchdog. A tenant is in here from spawnChild's first line to its last,
  * whichever way it leaves, and reconcile and the restart timers step round it.
+ *
+ * WITH THE TIME IT WAS CLAIMED, because stepping round it is silent. A spawn
+ * whose preparation never settles — a Postgres lock wait or a half-open socket
+ * under the final mirror, the restore or the seeds, none of which carry a
+ * timeout — holds its tenant here for good, and that tenant and its Telegram
+ * bot go dark with nothing in the log. See flagStuckSpawn.
  */
-const spawning = new Set<string>();
+const spawning = new Map<string, { since: number; flagged: boolean }>();
+
+/** How long a spawn may stay preparing before reconcile says so. */
+const SPAWN_STUCK_MS = 5 * 60_000;
+
+/**
+ * SAY ONCE THAT A TENANT IS DARK BECAUSE ITS SPAWN NEVER FINISHED.
+ *
+ * Only said, never undone: releasing the claim would let the next pass start
+ * a second worker beside a spawn that may yet finish, which is the double
+ * spawn `spawning` exists to prevent. A redeploy clears it; the alert is what
+ * tells an operator one is needed.
+ */
+function flagStuckSpawn(tenant: string): void {
+  const prep = spawning.get(tenant);
+  if (!prep || prep.flagged || Date.now() - prep.since < SPAWN_STUCK_MS) return;
+  prep.flagged = true;
+  log(`[alert] spawn for ${tenant} still preparing since ${new Date(prep.since).toISOString()} — nothing else will start this tenant until it settles`);
+}
 
 /**
  * Test seam: count a child as running without spawning a worker, so a test
@@ -1460,7 +1538,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     log(`${tenant}: already being spawned — not starting a second`);
     return;
   }
-  spawning.add(tenant);
+  spawning.set(tenant, { since: Date.now(), flagged: false });
   try {
     // The advisory lease is a precondition, taken by reconcile() before the FIRST
     // spawn and held across restarts — so this path (including the crash-restart
@@ -1555,7 +1633,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     pipe(proc.stdout, process.stdout);
     pipe(proc.stderr, process.stderr);
 
-    proc.on("exit", (code) => {
+    proc.on("exit", (code, signal) => {
       // ONLY IF THIS ENTRY IS STILL OURS.
       //
       // `children.delete(tenant)` unconditionally was a double-spawn generator.
@@ -1569,7 +1647,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       //
       // AND ONLY THEN IS THE RESTART OURS. An entry that is gone or replaced was
       // stood down by someone who has already decided what happens next: the
-      // watchdog scheduled its own restart one rung up the ladder, and
+      // watchdog scheduled its own restart on the rung it judged, and
       // killChild's callers — the kill switch, a lost lease, FLEET_HALT — want
       // none. This handler used to schedule another one regardless, usually at
       // one second with the ladder back at zero, so the watchdog's backoff and
@@ -1577,10 +1655,18 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       // are two chances to spawn it twice.
       const ours = children.get(tenant) === child;
       if (ours) children.delete(tenant);
-      if (stopping || !ours) return;
+      if (stopping) return;
+      if (!ours) {
+        // SAID, AND NOTHING MORE. This line is the only record that a child
+        // somebody stood down really went: one that ignored SIGTERM and kept
+        // the home or its sqlite file open shows up as a stand-down with no
+        // exit after it, and the signal says whether SIGKILL was needed.
+        log(`${tenant} stood-down child (pid ${proc.pid}) exited with ${code ?? signal} — no restart from its exit`);
+        return;
+      }
       log(`${tenant} exited (${code})`);
       // A long healthy run that then dies is a fresh incident, not a crash loop.
-      const freshRestarts = Date.now() - child.startedAt > 60_000 ? 0 : restarts + 1;
+      const freshRestarts = nextRung(child, Date.now());
       scheduleRestart(tenant, freshRestarts, `exit ${code}`);
     });
     log(`${tenant} spawned (pid ${proc.pid}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
@@ -1668,19 +1754,24 @@ async function honourKill(tenant: `0x${string}`, nowSec: number): Promise<KillOu
   return k;
 }
 
-/**
- * Every child home holding a pending request, whether or not its child is
- * running. Read from the disk rather than the children map, so a kill left
- * by a child that has since crashed is not missed.
- */
-function pendingKillTenants(): `0x${string}`[] {
+/** Every tenant with a home on this container's disk, whether or not its child is running. */
+function childHomeTenants(): `0x${string}`[] {
   let names: string[];
   try {
     names = readdirSync(path.join(merrymenHome(), "children"));
   } catch {
     return [];
   }
-  return names.filter((n): n is `0x${string}` => /^0x[0-9a-f]{40}$/.test(n) && killRequested(childHome(n)));
+  return names.filter((n): n is `0x${string}` => /^0x[0-9a-f]{40}$/.test(n));
+}
+
+/**
+ * Every child home holding a pending request, whether or not its child is
+ * running. Read from the disk rather than the children map, so a kill left
+ * by a child that has since crashed is not missed.
+ */
+function pendingKillTenants(): `0x${string}`[] {
+  return childHomeTenants().filter((n) => killRequested(childHome(n)));
 }
 
 /**
@@ -1747,8 +1838,11 @@ export async function reconcile(): Promise<void> {
   for (const tenant of tenants) {
     const lc = tenant.toLowerCase() as `0x${string}`;
     // A spawn still preparing is a child about to be running, not one that
-    // isn't: a restart timer, usually, got here first. See `spawning`.
-    if (children.has(lc) || spawning.has(lc)) continue;
+    // isn't: a restart timer, usually, got here first. See `spawning`. And a
+    // restart already scheduled is the timer's to make, on its rung, not this
+    // loop's at rung 0. See `restartPending`.
+    flagStuckSpawn(lc);
+    if (children.has(lc) || spawning.has(lc) || restartPending.has(lc)) continue;
     /**
      * A TENANT THE RESTART POLICY GAVE UP ON IS NOT A TENANT THAT ISN'T RUNNING.
      *
@@ -1814,6 +1908,51 @@ export async function reconcile(): Promise<void> {
       } catch {
         /* best-effort cleanup */
       }
+    }
+  }
+  /**
+   * AND EVERY OTHER HOME OF A TENANT NO LONGER WANTED, running or not.
+   *
+   * The loop above reaches only a child in `children`, and a tenant can be
+   * stood down with a home but no entry. A kill or a DELETE /api/grants that
+   * lands while spawnChild is preparing is refused at the last moment
+   * (lateSpawnRefusal) — after grant.json, settings.json with the bot token,
+   * the anchor and the restored book have been written. A child that crashed
+   * and was waiting on its restart timer, or was stood down by the restart
+   * policy, is not in `children` either. Those homes kept the revoked session
+   * key and the kill request until the container was replaced, and a grant
+   * signed later armed on top of them rather than on a fresh home —
+   * kill-request.ts promises that "the reconcile that follows wipes the whole
+   * home". A spawn still preparing is left alone: it is about to find the
+   * grant or the lease gone and refuse, and the next pass wipes what it wrote.
+   *
+   * ITS LEDGER GOES UP FIRST, when this replica still holds the tenant. No
+   * child is running on it, so its sqlite is still — but a child that crashed
+   * after the last mirror pass left rows in it that are nowhere else, and the
+   * spawn that would have carried them up (finalMirrorBeforeAnchor) is not
+   * coming. Without the lease it is not ours to write: another replica may
+   * have run the tenant since. A failed copy is logged and the home is wiped
+   * regardless, as the spawn path derives its anchor regardless.
+   */
+  for (const tenant of childHomeTenants()) {
+    if (wanted.has(tenant) || children.has(tenant) || spawning.has(tenant)) continue;
+    // Before the await, so no restart timer can start a spawn in this home
+    // while its ledger is being read.
+    cancelRestart(tenant);
+    const url = process.env.DATABASE_URL;
+    if (url && leases.get(tenant)?.healthy()) {
+      try {
+        await finalMirrorBeforeAnchor(tenant, await makePgDb(url));
+      } catch (e) {
+        log(`${tenant}: last mirror before wiping its home failed — ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    if (children.has(tenant) || spawning.has(tenant)) continue;
+    log(`${tenant} grant removed — wiping the home it left with no child running`);
+    try {
+      rmSync(childHome(tenant), { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
     }
   }
   // Release any lease we still hold for a tenant that is no longer wanted — both
@@ -5760,7 +5899,18 @@ export function watchdog(nowSec = Math.floor(Date.now() / 1000)): void {
           ? `${tenant} heartbeat stale (never beat in ${Math.round(ageSec)}s > ${firstGrace}s) — SIGKILL + restart`
           : `${tenant} heartbeat stale (${nowSec - beat}s > ${child.staleSec}s) — SIGKILL + restart`,
       );
-      const restarts = child.restarts;
+      // A FRESH INCIDENT OR THE NEXT RUNG, by the same rule as an exit, with
+      // "alive" read up to the last beat of THIS child. A beat older than its
+      // start is the file its predecessor left, and counts as none.
+      //
+      // Decided here now, and it never used to be. The corpse's exit handler
+      // scheduled a restart of its own at rung 0 and one second, which always
+      // beat this one, so the count this line passed never took effect. With
+      // that gone, `child.restarts + 1` alone would carry a rung from one
+      // incident into the next: a child that wedged once a week would restart
+      // a little slower each time, and nine weeks on be stood down as "keeps
+      // dying right after start".
+      const rung = nextRung(child, beat === null ? child.startedAt : beat * 1000);
       children.delete(tenant);
       try {
         child.proc.kill("SIGKILL");
@@ -5773,7 +5923,7 @@ export function watchdog(nowSec = Math.floor(Date.now() / 1000)): void {
       // failure a rate limit actually produces was the one that got the
       // un-braked restart, and every restart is another cold arm against the
       // endpoint that caused it.
-      scheduleRestart(tenant as `0x${string}`, restarts + 1, "heartbeat stale");
+      scheduleRestart(tenant as `0x${string}`, rung, "heartbeat stale");
     }
   }
 }

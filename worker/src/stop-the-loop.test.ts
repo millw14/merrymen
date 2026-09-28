@@ -108,14 +108,24 @@ describe("A2 — the exit handler only cleans up its own child", () => {
     // because the lease happened to be gone by the time it fired. An entry
     // that is gone or replaced was stood down by someone who has already
     // decided what happens next; double-spawn.integration.test.ts drives it.
+    //
+    // IT STILL SAYS THE CHILD WENT, in words of its own. That line is the only
+    // record that a stood-down child really exited, and with what signal — a
+    // child that ignored SIGTERM and kept the home open shows up as a
+    // stand-down with no exit after it — so it must not read as the ordinary
+    // "exited (" that precedes a restart.
     const src = strip(at("./orchestrator.ts"));
     const exitAt = src.indexOf('proc.on("exit"');
     const handler = src.slice(exitAt, src.indexOf("});", exitAt));
-    assert.match(handler, /if \(stopping \|\| !ours\) return;/);
-    const standAside = handler.indexOf("if (stopping || !ours) return;");
+    const standAside = handler.indexOf("if (!ours) {");
+    assert.ok(standAside > 0, "the handler has a branch for an entry that is not its own");
+    const branch = handler.slice(standAside, handler.indexOf("return;", standAside) + "return;".length);
+    assert.match(branch, /stood-down child \(pid \$\{proc\.pid\}\) exited with \$\{code \?\? signal\}/, "it says the stood-down child went");
+    assert.ok(!/scheduleRestart\(|spawnChild\(/.test(branch), "and schedules nothing");
+    assert.ok(!branch.includes("exited ("), "in words that cannot be taken for the exit that restarts");
     const restart = handler.indexOf("scheduleRestart(");
-    assert.ok(standAside > 0 && restart > standAside, "it returns before scheduleRestart when the entry is not its own");
-    assert.ok(handler.indexOf("exited (") > standAside, "and says nothing about an exit it does not own");
+    assert.ok(restart > standAside + branch.length, "it returns before scheduleRestart when the entry is not its own");
+    assert.ok(handler.indexOf("exited (") > standAside + branch.length, "and the ordinary exit line is only for its own child");
   });
 
   it("the watchdog logs the threshold it actually applied", () => {
