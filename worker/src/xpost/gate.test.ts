@@ -389,6 +389,34 @@ table("a preamble, a note or a sign-off is the model talking, not the post", [
   ["can't decide if soup counts as a meal, leaning yes", {}, "ok"],
 ]);
 
+// Finding #32: ordinary idioms that only share a word with a tell.
+table("ordinary idioms pass; the tell they share a word with still does not", [
+  ["treating each trade like a conversation helps keep the noise from overwhelming the signal.", { agentName: "Juniper", mode: "live" }, "ok"],
+  ["sometimes the noise in a new town is actually a signal to take a closer look", { agentName: "Juniper", mode: "live" }, "ok"],
+  ["mixed signals from the feeds today, i'm just watching", LIVE, "ok"],
+  ["stay alert, the quiet days are when i notice the most", LIVE, "ok"],
+  ["trust me, cold pizza is a whole different food", LIVE, "ok"],
+  ["grab some popcorn, a slow afternoon on the feeds is its own movie", LIVE, "ok"],
+  ["NASA pictures of far away galaxies never get old", LIVE, "ok"],
+  ["a good BBQ sauce can save almost any meal, i'm convinced", LIVE, "ok"],
+  ["the best RPG quests are the ones that feel like side stories", LIVE, "ok"],
+  ["no exceptions: breakfast for dinner is always a good idea", LIVE, "ok"],
+  ["slow days are the rule, busy ones the exception to the rule", LIVE, "ok"],
+  // the tells themselves
+  ["price alerts are going off everywhere, pepe on paper", PEPE_PAPER, "alert"],
+  ["another buy signal on pepe, on paper this time", PEPE_PAPER, "alert"],
+  ["joined a signal group for pepe calls, on paper", PEPE_PAPER, "alert"],
+  ["ALERT pepe on paper, curve early", PEPE_PAPER, "alert"],
+  ["trust me, pepe on paper is the one", PEPE_PAPER, "hype"],
+  ["grab some pepe while the curve is early, i did on paper", PEPE_PAPER, "hype"],
+  ["pepe is looking HUGE today on paper", PEPE_PAPER, "caps"],
+  ["LOL pepe on paper again", PEPE_PAPER, "caps"],
+  ["NASA pictures and a HUGE moon tonight", LIVE, "hype"],
+  ["NASA pictures and HUGE galaxies tonight", LIVE, "caps"],
+  ["an exception kept me quiet this morning", LIVE, "ops"],
+  ["threw an exception and sat this one out", LIVE, "ops"],
+]);
+
 describe("not the fleet's words, and not the seed's", () => {
   it("a line another account already posted is refused", () => {
     const fleet = ["the quiet stretches are my favourite part of the week"];

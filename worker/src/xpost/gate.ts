@@ -14,12 +14,15 @@
  *      directory never reaches the room's modules (xpost/boundary.test.ts):
  *      the room is not on the X path, and the X path is not in the room.
  *   2. THE X CLAUSES below, which are what makes a post read like a person
- *      posting from a phone rather than a bot: no error or operations words,
- *      no alert or call-to-action shape, no hype or advice, no ALL-CAPS, no
- *      claim of a human life, the paper said out loud, the intro saying it is
- *      an AI that trades, and nothing another account on the fleet already
- *      said (X: never "identical or substantially similar content across
- *      multiple accounts").
+ *      posting from a phone rather than a bot: no model talk around the post,
+ *      no error or operations words, no alert or call-to-action shape, no
+ *      hype, advice or forecast from a fixed list of phrases, no profit,
+ *      loss, size or sale, no ALL-CAPS, no claim of a human life, a buy post
+ *      naming its coin, the paper said out loud, the intro saying it is an
+ *      AI that trades, and nothing another account on the fleet already said
+ *      (X: never "identical or substantially similar content across multiple
+ *      accounts"). A word list cannot catch every paraphrase: the writer's
+ *      prompt is told the same rules, and this is the backstop.
  *
  * DROP, NEVER REPAIR. A draft that fails any clause is refused whole, with a
  * short stable reason code for the operator log — never shown to anyone, never
@@ -34,12 +37,17 @@
  * a blank line, a sign-off — is not wrapping, and the draft is refused.
  *
  * WHAT THE VOCABULARY LISTS DELIBERATELY DO NOT DO: refuse ordinary casual
- * English. "can't", "honestly", "curve looked early", "on paper", "picked up",
- * "real liquidity" all pass (gate.test.ts pins realistic lines both ways). A
- * word that is BOTH ordinary and a tell ("balance", "moon", "stuck") is on the
- * list because the tell is what a reader sees first on a trading account; the
- * glue keeps such words out of the seeds a model is handed (vocabularyRefusal)
- * so the gate rarely has to drop a draft for one.
+ * English. "can't", "honestly", "curve looked early", "picked up", "real
+ * liquidity", "stay alert", "the noise and the signal", "trust me, cold pizza…",
+ * "NASA pictures", "no exceptions" all pass, and so does "on paper" — for a
+ * live agent too, unless it is said of the money (gate.test.ts pins realistic
+ * lines both ways). Advice words that are ordinary until a coin is named
+ * ("trust me", "grab some", "check out", "worth a look") refuse only beside
+ * one. A word that is BOTH ordinary and a tell ("balance", "moon", "gem",
+ * "stuck", "crash", "bug", "breakout") is on the list because the tell is
+ * what a reader sees first on a trading account; the glue keeps such words
+ * out of the seeds a model is handed (vocabularyRefusal) so the gate rarely
+ * has to drop a draft for one.
  *
  * Pure: no I/O, no clock, no model.
  */
@@ -236,6 +244,10 @@ const OPS = new RegExp(
   "i",
 );
 
+/** "no exceptions", "with the exception of", "the exception, not the rule": a rule of thumb, not a stack trace. */
+const OPS_IDIOM =
+  /\bno exceptions?\b|\bwith the exception of\b|\b(?:an|the) exception to (?:the|every|any) rule\b|\bthe exception,? not the rule\b|\bmake an exception\b|\bexception that proves\b/gi;
+
 /**
  * THE SHAPE OF AN ALERT. A buy post is a person saying what they picked up and
  * why; "BUY ALERT 🚨 entered at …, target …" is a signal channel, and a signal
@@ -245,8 +257,11 @@ const OPS = new RegExp(
 const ALERT = new RegExp(
   "\\b(?:" +
     [
-      "alerts?",
-      "signals?",
+      // Only in a trading compound: "stay alert" and "the noise and the signal"
+      // are ordinary. An all-caps ALERT is ALERT_CAPS's.
+      "(?:buy|sell|price|trade|trading|whale|pump) alerts?",
+      "(?:buy|sell|trade|trading|entry|long|short|price) signals?",
+      "signal (?:group|channel|call)s?",
       "entry",
       "entries",
       "entered at",
@@ -311,7 +326,6 @@ const HYPE = new RegExp(
       "you need to",
       "you must",
       "go buy",
-      "grab (?:some|it|this|one)",
       "get in (?:now|early|before)",
       "load(?:ing)? up",
       "don'?t miss",
@@ -323,7 +337,6 @@ const HYPE = new RegExp(
       "can'?t lose",
       "cannot lose",
       "sure thing",
-      "trust me",
       "wen",
       "lambos?",
       "get(?:ting)? rich",
@@ -365,12 +378,14 @@ const HYPE = new RegExp(
 
 /**
  * ADVICE ONLY WHEN A COIN IS NAMED. "check out the sunset", "underdogs make
- * any sport worth watching" (a seed) and "plants need room to grow" are
- * ordinary; "check out pepe", "pepe is worth a look" and "pepe has room to
- * grow" tell a reader what to buy. Judged with the names in, since the coin
- * is what makes it advice.
+ * any sport worth watching" (a seed), "plants need room to grow", "trust me,
+ * cold pizza is a different food" and "grab some popcorn" are ordinary;
+ * "check out pepe", "pepe is worth a look", "pepe has room to grow", "trust
+ * me on pepe" and "grab some pepe" tell a reader what to buy. Judged with the
+ * names in, since the coin is what makes it advice.
  */
-const COIN_ADVICE = /\b(?:check (?:it )?out|room to grow|worth (?:a )?(?:look|watch|peek)|worth (?:looking at|watching|a closer look))\b/i;
+const COIN_ADVICE =
+  /\b(?:check (?:it )?out|room to grow|worth (?:a )?(?:look|watch|peek)|worth (?:looking at|watching|a closer look)|trust me|grab (?:some|it|this|one))\b/i;
 
 /**
  * PROFIT, LOSS, SIZE AND EXITS. The writer is shown what the agent BOUGHT —
@@ -525,7 +540,17 @@ const INTRO_DISCLOSURE =
 
 const PICTOGRAPH = /\p{Extended_Pictographic}/gu;
 /** Three capitals or more as a word. A $cashtag is the base gate's business (vouched or refused). */
-const CAPS_WORD = /(?<![\p{L}\p{N}_$])[A-Z]{3,}(?![\p{L}\p{N}_])/u;
+const CAPS_WORDS = /(?<![\p{L}\p{N}_$])[A-Z]{3,}(?![\p{L}\p{N}_])/gu;
+/**
+ * Acronyms a person writes in capitals whatever their mood: the seeds' space,
+ * food, games and sport ("NASA pictures", "a good BBQ sauce", "RPG quests").
+ * A short, explicit list — never "any short word": "HUGE" and "LOL" shout.
+ */
+const ACRONYMS = new Set(["NASA", "BBQ", "RPG", "NBA", "NFL", "NHL", "MLB", "DIY", "USA", "FAQ", "GPS", "UFO", "DVD", "NYC", "DNA"]);
+
+function shouts(text: string): boolean {
+  return [...text.matchAll(CAPS_WORDS)].some((m) => !ACRONYMS.has(m[0]));
+}
 
 function words(text: string): number {
   return (text.match(/\p{L}[\p{L}\p{M}'’-]*/gu) ?? []).length;
@@ -540,7 +565,7 @@ function words(text: string): number {
  */
 export function vocabularyRefusal(text: string): string | null {
   const t = String(text ?? "");
-  if (OPS.test(t)) return "ops";
+  if (OPS.test(t.replace(OPS_IDIOM, " "))) return "ops";
   if (ALERT.test(t) || ALERT_CAPS.test(t) || ALERT_EMOJI.test(t)) return "alert";
   if (HYPE.test(t)) return "hype";
   if (PNL.test(t.replace(PNL_IDIOM, " "))) return "pnl";
@@ -640,7 +665,7 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   if (vocab) return refuse(vocab);
   const namesCoin = coins.some((c) => mentions(text, c));
   if (namesCoin && COIN_ADVICE.test(own)) return refuse("hype");
-  if (CAPS_WORD.test(own)) return refuse("caps");
+  if (shouts(own)) return refuse("caps");
 
   // A BUY POST NAMES ITS COIN: its label, its ticker or its clean name, as a
   // whole word. Without one, "picked over others on the curve at the exit
