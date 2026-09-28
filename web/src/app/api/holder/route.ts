@@ -44,13 +44,15 @@
  * 409 nobody could get past: a claim made with a phished or borrowed
  * signature, or held by an account its owner can no longer sign in to, would
  * otherwise lock the wallet's real holder out for good. At most one move per
- * wallet per UTC day, so a bag cannot be passed round a string of agents; a
- * second answers 429 with when it can move. An unlink does not give the day's
- * move back: the next account to claim the wallet that day is making the move
+ * wallet in any 24 hours, counted from the last move rather than by calendar
+ * day, so a bag cannot be passed round a string of agents; a second answers
+ * 429 with when it can move. An unlink does not give the move back: the next
+ * account to claim the wallet within those 24 hours is making a second move
  * (settings-store HolderRelease). Two moves are never refused, so a phished
- * move cannot lock the owner out until midnight: back to the wallet's own
- * sign-in account, and back to the account it was last moved from
- * (settings-store moveBarredUntil).
+ * move cannot lock the owner out for a day: back to the wallet's own sign-in
+ * account, and back to the account it was last moved from (settings-store
+ * moveBarredUntil) — and, the window being rolling, no second phished
+ * signature just past midnight can take that way back away.
  */
 import { NextResponse } from "next/server";
 import { recoverMessageAddress } from "viem";
@@ -190,16 +192,16 @@ export async function POST(req: Request) {
   }
   if (!claim.ok) {
     // Never who: that account is somebody's login. `held` only says whether
-    // it powers one right now — an account that let it go earlier today does
-    // not give the day's move back.
+    // it powers one right now — an account that let it go since the last
+    // move does not give that move back.
     const retryAfter = Math.max(1, Math.ceil((claim.movableAt - Date.now()) / 1000));
     return NextResponse.json(
       {
         error:
           (claim.held
-            ? "This wallet powers another merrymen account, and it already moved once today"
-            : "Another merrymen account used this wallet earlier today, and it already moved once today") +
-          " — a wallet can move between accounts once per day (UTC). " +
+            ? "This wallet powers another merrymen account, and it already moved in the last 24 hours"
+            : "Another merrymen account used this wallet recently, and it already moved in the last 24 hours") +
+          " — a wallet can move between accounts once every 24 hours. " +
           `Sign again from ${utcStamp(claim.movableAt)} to ${claim.held ? "move it here" : "link it here"}.`,
         ownerFacing: true,
         movableAt: claim.movableAt,
@@ -224,7 +226,7 @@ export async function POST(req: Request) {
     // Undo what THIS call took, so a failed link does not hold the wallet
     // hostage: a fresh claim is removed and a move is put back, each exactly
     // as it was — the other account's claim, the wallet's release record,
-    // the day's move allowance. Never a release: that would record this
+    // its move allowance. Never a release: that would record this
     // account as the last holder and spend a move that never happened. One
     // this account already held stays: it may back a stored proof.
     if (claim.from) await store.undoTakeHolder(wallet, tenant, claim.was).catch(() => {});
@@ -238,9 +240,13 @@ export async function POST(req: Request) {
   return NextResponse.json({ ok: true, holder: wallet, ...(claim.from ? { moved: true } : {}) });
 }
 
-/** "00:00 UTC on 29 Sep 2026" — when a wallet can move again. */
+/**
+ * "14:38 UTC on 29 Sep 2026" — when a wallet can move again: 24 hours after
+ * its last move, rounded UP to the minute, so signing at the stated minute
+ * is never still a few seconds too early.
+ */
 function utcStamp(ms: number): string {
-  const d = new Date(ms);
+  const d = new Date(Math.ceil(ms / 60_000) * 60_000);
   const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getUTCMonth()];
   const hh = String(d.getUTCHours()).padStart(2, "0");
   const mm = String(d.getUTCMinutes()).padStart(2, "0");
@@ -286,7 +292,7 @@ export async function DELETE(req: Request) {
  *
  *   counting           its claim names this account.
  *   claimed-elsewhere  another account holds its claim. Signing again moves
- *                      it here (once a day).
+ *                      it here (once in any 24 hours).
  *   unclaimed          nobody holds it — linked before claims existed and not
  *                      yet backfilled, or an unlink / re-link that failed
  *                      half-way. Signing again claims it; there is no other

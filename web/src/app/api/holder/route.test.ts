@@ -6,7 +6,7 @@
  * CLAIMS the wallet before it stores the proof, an unreadable store refuses
  * rather than letting a second account in, and unlinking frees the wallet.
  * The wallet's own fresh signature MOVES a claim another account holds, at
- * most once per wallet per UTC day (429 after that, saying when).
+ * most once per wallet in any 24 hours (429 after that, saying when).
  *
  * Hosted, as it only exists there: the real GET → sign → POST round trip with
  * real viem signatures. The nonce store and the settings store are the two
@@ -173,22 +173,33 @@ describe("POST /api/holder claims the wallet before it stores the proof", () => 
     assert.deepEqual(await patch(attacker.address), { linked: await proofOf(attacker.address), reads: "login", proof: "claimed-elsewhere" });
   });
 
-  it("ONE MOVE PER WALLET PER UTC DAY: the next is 429, says when, names nobody, and stores nothing", async () => {
+  it("ONE MOVE PER WALLET IN ANY 24 HOURS: the next is 429, says when, names nobody, and stores nothing", async () => {
     const a = newWallet();
     const b = newWallet();
     const c = newWallet();
     const w = newWallet();
     assert.equal((await link(a.address, w)).status, 200);
-    assert.equal((await link(b.address, w)).status, 200, "the day's one move");
+    const movedFrom = Date.now();
+    assert.equal((await link(b.address, w)).status, 200, "the one move");
+    const movedBy = Date.now();
     const third = await link(c.address, w);
     assert.equal(third.status, 429, JSON.stringify(third.body));
-    const tomorrow = Math.floor(Date.now() / 86_400_000 + 1) * 86_400_000;
-    assert.equal(third.body.movableAt, tomorrow);
-    assert.match(third.body.error ?? "", /already moved once today/);
-    assert.match(third.body.error ?? "", /once per day \(UTC\)/);
-    assert.match(third.body.error ?? "", /from 00:00 UTC on \d{1,2} [A-Z][a-z]{2} \d{4}/);
+    // 24 hours from the move itself — not the next UTC midnight.
+    const at = third.body.movableAt ?? 0;
+    assert.ok(at >= movedFrom + 86_400_000 && at <= movedBy + 86_400_000, `movableAt ${at}`);
+    assert.match(third.body.error ?? "", /already moved in the last 24 hours/);
+    assert.match(third.body.error ?? "", /once every 24 hours/);
+    assert.doesNotMatch(third.body.error ?? "", /today|UTC day|per day/, "no calendar day in it any more");
+    const shown = /from (\d{2}):(\d{2}) UTC on (\d{1,2}) ([A-Z][a-z]{2}) (\d{4})/.exec(third.body.error ?? "");
+    assert.ok(shown, third.body.error);
+    const up = new Date(Math.ceil(at / 60_000) * 60_000);
+    assert.deepEqual(
+      [Number(shown[1]), Number(shown[2]), Number(shown[3]), Number(shown[5])],
+      [up.getUTCHours(), up.getUTCMinutes(), up.getUTCDate(), up.getUTCFullYear()],
+      "the minute it names is never before movableAt",
+    );
     assert.equal(third.body.ownerFacing, true);
-    assert.ok(Number(third.retryAfter) > 0 && Number(third.retryAfter) <= 86_400);
+    assert.ok(Number(third.retryAfter) > 86_000 && Number(third.retryAfter) <= 86_400, `retry-after ${third.retryAfter}`);
     for (const who of [a, b]) {
       assert.ok(!JSON.stringify(third.body).toLowerCase().includes(lc(who.address)), "no account is named");
     }
@@ -198,13 +209,13 @@ describe("POST /api/holder claims the wallet before it stores the proof", () => 
     const back = await link(a.address, w);
     assert.equal(back.status, 200, "back to the account it was moved from is allowed the same day");
     assert.equal(back.body.moved, true);
-    assert.equal((await link(c.address, w)).status, 429, "and a third account still waits for tomorrow");
+    assert.equal((await link(c.address, w)).status, 429, "and a third account still waits out the 24 hours");
   });
 
-  it("A PHISHED MOVE NEVER LOCKS THE OWNER OUT: the wallet's own sign-in account takes it back the same day", async () => {
+  it("A PHISHED MOVE NEVER LOCKS THE OWNER OUT: the wallet's own sign-in account takes it back at once", async () => {
     // One phished signature moved the claim off the owner's own login account
-    // and spent the day's move; the owner's fresh signature from that very
-    // account met 429 until 00:00 UTC while the attacker's agent ran on the bag.
+    // and spent the move; the owner's fresh signature from that very account
+    // met 429 until 00:00 UTC while the attacker's agent ran on the bag.
     const whale = newWallet();
     const attacker = newWallet();
     const other = newWallet();
@@ -214,28 +225,28 @@ describe("POST /api/holder claims the wallet before it stores the proof", () => 
     assert.equal(back.status, 200, JSON.stringify(back.body));
     assert.equal(back.body.moved, true);
     assert.deepEqual(await patch(whale.address), { linked: await proofOf(whale.address), reads: "linked", proof: "counting" });
-    assert.equal((await link(other.address, whale)).status, 429, "taking it back still spends the day for anybody else");
+    assert.equal((await link(other.address, whale)).status, 429, "taking it back still spends the 24 hours for anybody else");
   });
 
-  it("AN UNLINK DOES NOT GIVE THE DAY'S MOVE BACK: after a → b, b unlinks, and c and d are still 429 — naming nobody", async () => {
+  it("AN UNLINK DOES NOT GIVE THE MOVE BACK: after a → b, b unlinks, and c and d are still 429 — naming nobody", async () => {
     // The review's bypass: every unlink deleted the claim row and its move,
-    // so one bag could power a, b, c and d in one UTC day.
+    // so one bag could power a, b, c and d in one day.
     const [a, b, c, d] = [newWallet(), newWallet(), newWallet(), newWallet()];
     const w = newWallet();
     assert.equal((await link(a.address, w)).status, 200);
-    assert.equal((await link(b.address, w)).body.moved, true, "the day's move");
+    assert.equal((await link(b.address, w)).body.moved, true, "the move");
     assert.equal((await unlink(b.address)).status, 200);
     for (const who of [c, d]) {
       const res = await link(who.address, w);
       assert.equal(res.status, 429, JSON.stringify(res.body));
-      assert.match(res.body.error ?? "", /Another merrymen account used this wallet earlier today/);
-      assert.match(res.body.error ?? "", /once per day \(UTC\)/);
+      assert.match(res.body.error ?? "", /Another merrymen account used this wallet recently/);
+      assert.match(res.body.error ?? "", /once every 24 hours/);
       assert.doesNotMatch(res.body.error ?? "", /powers another/, "nobody holds it now, and the copy does not say so");
       for (const x of [a, b]) assert.ok(!JSON.stringify(res.body).toLowerCase().includes(lc(x.address)), "no account is named");
       assert.equal(await proofOf(who.address), null);
     }
     assert.equal((await store.holderClaims()).has(lc(w.address)), false);
-    assert.equal((await link(a.address, w)).status, 200, "a, which it was moved from today, may still have it back");
+    assert.equal((await link(a.address, w)).status, 200, "a, which it was just moved from, may still have it back");
   });
 
   it("A FAILED LINK OF A RELEASED WALLET SPENDS NO MOVE — undone, not released", async () => {
@@ -268,7 +279,7 @@ describe("POST /api/holder claims the wallet before it stores the proof", () => 
     assert.deepEqual(counting, [holder]);
   });
 
-  it("A MOVE WHOSE PROOF FAILS TO SAVE IS PUT BACK — the other account keeps it, and the day's move is not spent", async () => {
+  it("A MOVE WHOSE PROOF FAILS TO SAVE IS PUT BACK — the other account keeps it, and its move is not spent", async () => {
     const a = newWallet();
     const b = newWallet();
     const c = newWallet();
@@ -284,7 +295,7 @@ describe("POST /api/holder claims the wallet before it stores the proof", () => 
     }
     assert.equal((await store.holderClaims()).get(lc(w.address)), lc(a.address), "nothing changed");
     assert.deepEqual(await patch(a.address), { linked: await proofOf(a.address), reads: "linked", proof: "counting" });
-    assert.equal((await link(c.address, w)).status, 200, "the day's move is still there to use");
+    assert.equal((await link(c.address, w)).status, 200, "the move is still there to use");
   });
 
   it("re-linking your own wallet is not a conflict", async () => {

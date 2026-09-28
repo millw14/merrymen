@@ -56,9 +56,10 @@ export type HolderTake =
   /** MOVED here from `from` by this call. `was` is the claim it replaced: never shown to the caller. */
   | { ok: true; fresh: true; from: `0x${string}`; was: HolderClaimRecord }
   /**
-   * It already moved once this UTC day; it can move from `movableAt` (epoch
-   * ms). `held`: another account holds it now — false when that account has
-   * since let it go (the day's move is kept past a release).
+   * It already moved in the last 24 hours; it can move from `movableAt`
+   * (epoch ms: that move + 24 h). `held`: another account holds it now —
+   * false when that account has since let it go (the move is kept past a
+   * release).
    */
   | { ok: false; movableAt: number; held: boolean };
 
@@ -68,7 +69,7 @@ export type HolderTake =
  * The once-a-day move used to live on the claim row alone, and every unlink
  * deleted that row: release, and the next account's claim was a fresh one
  * with the day's move unspent. Someone with a handful of accounts could pass
- * one bag through any number of agents in a UTC day (unlink, link elsewhere,
+ * one bag through any number of agents in a day (unlink, link elsewhere,
  * move, unlink…), and the limit bound only the phished owner who did not
  * cooperate. So a release first records who held the claim and its last move,
  * and a claim on a wallet nobody holds is judged against it (claimOnReleased).
@@ -82,31 +83,41 @@ export interface HolderRelease {
   movedFrom: `0x${string}` | null;
 }
 
-/** A wallet's claim moves at most once per UTC day (takeHolder). */
-const DAY_MS = 86_400_000;
-const utcDayStart = (ms: number) => Math.floor(ms / DAY_MS) * DAY_MS;
+/** A wallet's claim moves at most once in any 24 hours (takeHolder). */
+const MOVE_WINDOW_MS = 86_400_000;
 
 /**
  * WHEN `tenant` MAY MOVE `wallet`'s CLAIM OFF `was`: null for now, else the
- * epoch ms of the next UTC day. One rule for both backends.
+ * epoch ms 24 hours after its last move. One rule for both backends.
  *
- * ONE MOVE PER WALLET PER UTC DAY, so a bag cannot be passed round a string
- * of agents — but the limit alone let ONE phished signature lock the real
- * owner out until midnight: the attacker's move spent the day, and the
- * owner's own fresh signature then met 429 even from the wallet's own
- * sign-in account. Two moves are therefore always allowed, and neither
- * widens who can hold the wallet in a day:
+ * ONE MOVE PER WALLET IN ANY 24 HOURS, so a bag cannot be passed round a
+ * string of agents — but the limit alone let ONE phished signature lock the
+ * real owner out for a day: the attacker's move spent it, and the owner's
+ * own fresh signature then met 429 even from the wallet's own sign-in
+ * account. Two moves are therefore always allowed, and neither widens who
+ * can hold the wallet in the window:
  *
  *   THE WALLET'S OWN SIGN-IN ACCOUNT (tenant === wallet). The session is
  *   that wallet's login and the signature is that wallet's key — the one
  *   party a move limit must never lock out.
  *
  *   BACK TO THE ACCOUNT IT WAS LAST MOVED FROM. The holders stay the pair
- *   the day's move already made, {from, to}; every such move still needs a
- *   fresh signature over a five-minute nonce.
+ *   the window's move already made, {from, to}; every such move still needs
+ *   a fresh signature over a five-minute nonce.
  *
  * Both still stamp the move (movedAt = now, movedFrom = the holder it left),
- * so neither frees a move for anybody else that day.
+ * so neither frees a move for anybody else within the next 24 hours.
+ *
+ * ROLLING FROM THE MOVE, NOT THE UTC CALENDAR DAY. Counted by calendar day,
+ * the first move after midnight was free whatever happened at 23:59 — and
+ * it re-stamped movedFrom. Two phished signatures submitted either side of
+ * midnight moved the owner's wallet O → A1 → A2, the second rewrote
+ * movedFrom to A1, and the owner's own signature met 429 for a whole day
+ * (the take-back above no longer named O). Rolling, a second move by
+ * anybody but the pair needs 24 hours from the first, so the owner's
+ * take-back stays open; and any two unexempt moves are now at least a day
+ * apart, never seconds either side of midnight — as tight as a calendar day
+ * everywhere, and tighter across one.
  */
 function moveBarredUntil(
   wallet: `0x${string}`,
@@ -114,10 +125,9 @@ function moveBarredUntil(
   was: Pick<HolderClaimRecord, "movedAt" | "movedFrom">,
   now: number,
 ): number | null {
-  const dayStart = utcDayStart(now);
-  if (was.movedAt === null || was.movedAt < dayStart) return null;
+  if (was.movedAt === null || now - was.movedAt >= MOVE_WINDOW_MS) return null;
   if (tenant === wallet || tenant === was.movedFrom) return null;
-  return dayStart + DAY_MS;
+  return was.movedAt + MOVE_WINDOW_MS;
 }
 
 /**
@@ -126,8 +136,8 @@ function moveBarredUntil(
  *
  *   Never held since releases were recorded (`last` null) — the first claim
  *   ever: not a move, nothing stamped.
- *   The account that let it go takes it again — not a move, and the day's
- *   move it carried is carried on, still spent.
+ *   The account that let it go takes it again — not a move, and the last
+ *   move it carried is carried on, its 24 hours still running.
  *   Any other account — a MOVE, exactly as if it had been taken off the
  *   holder directly: moveBarredUntil decides it (the wallet's own sign-in
  *   account and the account it was last moved from are never refused), and
@@ -207,8 +217,8 @@ export interface SettingsStore {
    * one conditional statement — and the old account's proof then counts
    * nowhere (effectiveHolder follows the claim).
    *
-   * AT MOST ONE MOVE PER WALLET PER UTC DAY, recorded on the claim and kept
-   * past a release (HolderRelease), so one bag cannot be passed round a
+   * AT MOST ONE MOVE PER WALLET IN ANY 24 HOURS, recorded on the claim and
+   * kept past a release (HolderRelease), so one bag cannot be passed round a
    * string of agents in a day — except back to the wallet's own sign-in
    * account or to the account it was last moved from (moveBarredUntil).
    * Within it the answer is `{ ok: false, movableAt, held }`. A wallet nobody
@@ -372,7 +382,7 @@ export class FileSettingsStore implements SettingsStore {
    * too. A move (takeHolder) and a conditional release are each
    * read-then-write; without the lock a release that read "ours" could delete
    * the claim a move had just put there, and two moves in one instant could
-   * both pass the once-a-day check. And a claim on a free wallet is judged
+   * both pass the move limit. And a claim on a free wallet is judged
    * against the wallet's release record, which a release writes: unlocked, a
    * claim could read the record, a claim-and-release land in between, and the
    * claim then be made against a record that no longer says who let it go.
@@ -483,10 +493,12 @@ export class FileSettingsStore implements SettingsStore {
    * Breaking a stale lock was stat-then-unlink: two contenders could both
    * judge the same dead lock stale, the first break it and take a fresh one,
    * and the second then unlink THAT fresh one — two holders at once, and two
-   * moves past one day's check. A lock is now only ever taken away by
+   * moves where the limit allows one. A lock is now only ever taken away by
    * takeAwayLock, which moves it aside atomically and deletes it only if it
    * is the very lock that was judged; the holder's own release goes the same
-   * way with its own token, so it cannot delete a lock another process holds.
+   * way with its own token (releaseOwnLock), so it cannot delete a lock
+   * another process holds — nor leave its own behind for a breaker to put
+   * back after it has gone.
    */
   private async withClaimLock<T>(w: `0x${string}`, fn: () => Promise<T>): Promise<T> {
     await mkdir(this.claimsDir, { recursive: true });
@@ -511,7 +523,7 @@ export class FileSettingsStore implements SettingsStore {
     try {
       return await fn();
     } finally {
-      await takeAwayLock(lock, token).catch(() => {});
+      await releaseOwnLock(lock, token).catch(() => {});
     }
   }
   async claimHolder(wallet: string, tenant: string, now: number = Date.now()): Promise<HolderClaim> {
@@ -694,6 +706,9 @@ async function readLock(lock: string): Promise<{ token: string; ageMs: number } 
   }
 }
 
+/** Where takeAwayLock moves `lock` while it reads it: `<lock>.<pid>.<random>.gone`, beside it. */
+const asidePrefix = (lock: string) => `${path.basename(lock)}.`;
+
 /**
  * REMOVE `lock` ONLY IF IT IS STILL THE ONE HOLDING `token`.
  *
@@ -704,18 +719,73 @@ async function readLock(lock: string): Promise<{ token: string; ageMs: number } 
  * straight back under the lock's name, never deleted. link(2) refuses if a
  * third process has taken the name meanwhile, which is the one case left: it
  * needs three contenders inside a few microseconds, after a crash.
+ *
+ * "absent" when nothing was at the name: gone for good, OR moved aside by
+ * another process's takeAwayLock that will link it back (releaseOwnLock).
  */
-async function takeAwayLock(lock: string, token: string): Promise<void> {
+async function takeAwayLock(lock: string, token: string): Promise<"removed" | "absent" | "not-it"> {
   const aside = `${lock}.${process.pid}.${randomBytes(6).toString("hex")}.gone`;
   try {
     await rename(lock, aside);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // already gone
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return "absent";
     throw e;
   }
   const moved = await readFile(aside, "utf8").catch(() => null);
   if (moved !== token) await link(aside, lock).catch(() => {});
   await unlink(aside).catch(() => {});
+  return moved === token ? "removed" : "not-it";
+}
+
+/** How long a holder's release waits for a breaker to finish with its lock: breaks are microseconds of file I/O. */
+const OWN_RELEASE_WAIT_MS = 2_000;
+
+/**
+ * THE HOLDER'S OWN RELEASE: takeAwayLock with its own token — and a missing
+ * lock is not taken at its word.
+ *
+ * A contender breaking a stale lock can move THIS holder's live lock aside
+ * instead, when the dead one it judged was replaced between its look and
+ * its rename. It then sees the token is not the one it judged and links the
+ * lock back — the right thing while the holder is inside. But if the
+ * holder's release came in between, it found no lock, called that released
+ * and returned; the link-back then left a lock with a fresh mtime that
+ * nobody held, and every claim, move and release of the wallet waited it
+ * out and failed 'busy' for CLAIM_LOCK_STALE_MS.
+ *
+ * So after "absent" the holder looks for its own token among the moved-aside
+ * locks FIRST, and waits while one is there — a break in progress, which
+ * ends with a link-back (then it is at the name, and taken away again) or a
+ * delete (a break of this holder's own lock, judged stale: gone). Only with
+ * none aside does it look at the name: a link-back that finished before the
+ * look at the asides is at the name by then, so the two looks in that order
+ * cannot both miss it. Bounded, in case a breaker died mid-break: its aside
+ * then never comes back under the lock's name.
+ */
+async function releaseOwnLock(lock: string, token: string): Promise<void> {
+  const until = Date.now() + OWN_RELEASE_WAIT_MS;
+  for (;;) {
+    if ((await takeAwayLock(lock, token)) !== "absent") return;
+    if (Date.now() > until) return;
+    if (await heldAside(lock, token)) {
+      await new Promise((r) => setTimeout(r, 2)); // a break in progress: let it finish
+      continue;
+    }
+    // None aside: gone for good, or somebody else's now — unless it was
+    // linked back before the look above, and then it is at the name: again.
+    if ((await readLock(lock))?.token !== token) return;
+  }
+}
+
+/** Whether some process has `lock` moved aside (takeAwayLock) while it still holds `token`. */
+async function heldAside(lock: string, token: string): Promise<boolean> {
+  const dir = path.dirname(lock);
+  const prefix = asidePrefix(lock);
+  for (const f of await readdir(dir)) {
+    if (!f.startsWith(prefix) || !f.endsWith(".gone")) continue;
+    if ((await readFile(path.join(dir, f), "utf8").catch(() => null)) === token) return true;
+  }
+  return false;
 }
 
 // ── postgres backend ─────────────────────────────────────────────────────────
@@ -730,6 +800,30 @@ const RECORD_RELEASE = `INSERT INTO holder_wallet_moves (wallet, last_tenant, mo
   SELECT wallet, tenant, moved_at, moved_from FROM holder_claims`;
 const ON_RELEASE_CONFLICT = `ON CONFLICT (wallet) DO UPDATE SET last_tenant = EXCLUDED.last_tenant,
   moved_at = EXCLUDED.moved_at, moved_from = EXCLUDED.moved_from`;
+/**
+ * …AND THEN DELETE ONLY A CLAIM ITS WALLET'S RECORD NOW DESCRIBES EXACTLY
+ * (appended to the caller's DELETE … WHERE on holder_claims).
+ *
+ * The record and the delete are two statements, and the store shares one
+ * pg.Client across requests, so another request's statements run between
+ * them — and under READ COMMITTED each statement reads afresh. Unconditional,
+ * the DELETE on the account took whatever that account held BY THEN: a move
+ * onto it that landed between the two (a DELETE and a POST /api/holder fired
+ * together) was deleted with no record, the wallet read as never claimed, and
+ * its next claim was a first-ever one with its last move forgotten — one bag
+ * passed on through as many accounts as the race was won.
+ *
+ * So a claim goes only while holder, last move and whom it came from are
+ * still what its record says, and every deleted claim is one its record
+ * carries. One that arrived in between is simply not deleted: as if it had
+ * landed just after this release, which is an order the two requests could
+ * have run in anyway. Portable (sqlite runs it too) and with no BEGIN, which
+ * a client shared across requests cannot hold open. Postgres re-checks the
+ * row's own columns against a concurrent change before deleting it.
+ */
+const RECORDED_AS_IS = `AND EXISTS (SELECT 1 FROM holder_wallet_moves m WHERE m.wallet = holder_claims.wallet
+  AND m.last_tenant = holder_claims.tenant AND COALESCE(m.moved_at, -1) = COALESCE(holder_claims.moved_at, -1)
+  AND COALESCE(m.moved_from, '') = COALESCE(holder_claims.moved_from, ''))`;
 
 /** A nullable BIGINT epoch-ms column. */
 function pgMs(v: unknown): number | null {
@@ -834,14 +928,14 @@ export class PgSettingsStore implements SettingsStore {
            )`,
         );
         // When the claim last MOVED between accounts (takeHolder): a wallet
-        // moves at most once per UTC day. Added, not created, so a table
+        // moves at most once in any 24 hours. Added, not created, so a table
         // made before moves existed gains it; NULL = never moved.
         await addColumnIfAbsent(c, `ALTER TABLE holder_claims ADD COLUMN moved_at BIGINT`);
-        // …and which account that move took it from: a same-day move BACK
-        // there is allowed (moveBarredUntil). NULL = never moved.
+        // …and which account that move took it from: a move BACK there
+        // within the 24 hours is allowed (moveBarredUntil). NULL = never moved.
         await addColumnIfAbsent(c, `ALTER TABLE holder_claims ADD COLUMN moved_from TEXT`);
         // HOW EACH WALLET'S CLAIM WAS LAST LET GO (HolderRelease): a release
-        // deletes the claim row, and the day's move must outlive it. Its own
+        // deletes the claim row, and the last move must outlive it. Its own
         // table, so a service still running the previous build — which reads
         // every holder_claims row as a live claim — never mistakes one of
         // these for a claim. Written only by a release, never deleted.
@@ -1015,28 +1109,33 @@ export class PgSettingsStore implements SettingsStore {
     );
   }
   /**
-   * RECORD, THEN DELETE — both conditional on the holder. Recorded first, so
-   * a crash between leaves the claim held and its record saying the same;
-   * never a claim gone with no record of the day's move.
+   * RECORD, THEN DELETE WHAT WAS RECORDED — both conditional on the holder.
+   * Recorded first, so a crash between leaves the claim held and its record
+   * saying the same; never a claim gone with no record of its last move. And
+   * the DELETE takes only a claim its record still describes (RECORDED_AS_IS),
+   * so a move that lands between the two survives rather than vanishing.
    */
   async releaseHolder(wallet: string, tenant: string): Promise<void> {
     const w = claimKey("wallet", wallet);
     const t = claimKey("tenant", tenant);
     const c = await this.client();
     await c.query(`${RECORD_RELEASE} WHERE wallet = $1 AND tenant = $2 ${ON_RELEASE_CONFLICT}`, [w, t]);
-    await c.query(`DELETE FROM holder_claims WHERE wallet = $1 AND tenant = $2`, [w, t]);
+    await c.query(`DELETE FROM holder_claims WHERE wallet = $1 AND tenant = $2 ${RECORDED_AS_IS}`, [w, t]);
   }
-  /** One DELETE on the account, so it clears strays whatever put them there — each recorded first. */
+  /**
+   * One DELETE on the account, so it clears strays whatever put them there —
+   * each recorded first, and deleted only as recorded (releaseHolder).
+   */
   async releaseHolderClaims(tenant: string, keep?: string): Promise<void> {
     const t = claimKey("tenant", tenant);
     const c = await this.client();
     if (keep === undefined) {
       await c.query(`${RECORD_RELEASE} WHERE tenant = $1 ${ON_RELEASE_CONFLICT}`, [t]);
-      await c.query(`DELETE FROM holder_claims WHERE tenant = $1`, [t]);
+      await c.query(`DELETE FROM holder_claims WHERE tenant = $1 ${RECORDED_AS_IS}`, [t]);
     } else {
       const k = claimKey("wallet", keep);
       await c.query(`${RECORD_RELEASE} WHERE tenant = $1 AND wallet <> $2 ${ON_RELEASE_CONFLICT}`, [t, k]);
-      await c.query(`DELETE FROM holder_claims WHERE tenant = $1 AND wallet <> $2`, [t, k]);
+      await c.query(`DELETE FROM holder_claims WHERE tenant = $1 AND wallet <> $2 ${RECORDED_AS_IS}`, [t, k]);
     }
   }
   async holderClaims(wallets?: readonly string[]): Promise<Map<string, `0x${string}`>> {
