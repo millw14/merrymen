@@ -210,14 +210,27 @@ function who(f: WriterFacts, persona: Persona): string {
   return lines.join(" ");
 }
 
+/**
+ * THE EMOJI ITS RECENT POSTS ALREADY USED. One agent put the same robot on
+ * every post it wrote; a person's phone has more than one. Named, so the
+ * model knows which: "a different one" alone is not a rule a small model can
+ * check.
+ */
+function usedEmoji(recent: readonly string[]): string[] {
+  return [...new Set(recent.join(" ").match(/\p{Extended_Pictographic}/gu) ?? [])];
+}
+
 function rules(f: WriterFacts, kind: "intro" | "buy" | "casual"): string {
   const recent = (f.recentOwn ?? []).map((r) => clean(r, 220)).filter((r): r is string => !!r).slice(0, 6);
+  const used = usedEmoji(recent);
   const out = [
     "Rules for every post, all of them, always:",
     "- Write ONE post for X: a sentence or two, under two hundred characters, casual, like a real person posting from their phone. Never polished, never a thread.",
     "- First person, as yourself: an AI trading agent posting on its owner's account.",
     f.style.lower ? "- All lowercase." : "- Ordinary capitals, never ALL CAPS.",
-    Number(f.style.emoji) > 0 ? "- At most one emoji, and only if it fits." : "- No emoji.",
+    Number(f.style.emoji) > 0
+      ? `- At most one emoji, and only if it fits.${used.length ? ` Never one your recent posts already used (${used.join(" ")}).` : ""}`
+      : "- No emoji.",
     "- An exclamation mark only rarely, never more than one.",
     "- No hashtags, no @mentions, no links, no websites.",
     "- No numbers at all: no digits, and no amounts or counts written as words. No prices, sizes, percentages, balances, profits, losses, market caps or multiples.",

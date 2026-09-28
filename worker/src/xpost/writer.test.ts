@@ -104,6 +104,17 @@ describe("what each prompt asks for", () => {
     }
   });
 
+  it("the emoji its recent posts used are named, so the next post does not reuse one", () => {
+    const withBot = { ...BASE, recentOwn: ["picked up pepe on paper, the curve looked early 🤖", "quiet stretches suit me 🤖", "slow sundays 🌙"] };
+    for (const p of [introPrompt(withBot), buyPrompt({ ...BUY, ...withBot }), casualPrompt({ ...CASUAL, ...withBot })]) {
+      assert.match(p.system, /At most one emoji, and only if it fits\. Never one your recent posts already used \(🤖 🌙\)\./);
+    }
+    assert.doesNotMatch(introPrompt(BASE).system, /already used/, "no emoji used lately, nothing to name");
+    const none = introPrompt({ ...withBot, style: { ...BASE.style, emoji: 0 } }).system;
+    assert.match(none, /- No emoji\./);
+    assert.doesNotMatch(none, /already used/);
+  });
+
   it("nothing it was not told: no market's state, no day, no sale, no result", () => {
     // It is told only what it bought, and nothing about any market now; a
     // post goes out hours after it is written. The review's drafts said
