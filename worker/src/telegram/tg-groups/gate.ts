@@ -654,6 +654,8 @@ const QUANTITY = U(
   ),
 );
 
+/** A money unit as a whole word, letters on neither side: "sol" in "Sol", not in "Solace"; "x" alone, not in "Max". */
+const UNIT_WORD = new RegExp(`(?<![\\p{L}])(?:${MONEY_UNIT}|${FOREIGN_UNIT})(?![\\p{L}])`, "iu");
 /** A name that reads as a figure is never stripped before the figure clauses: "Up 400x", "Ten", "Agent 47". */
 const FIGURE_NAME = /(?<![\p{L}\p{N}])\p{N}[\p{N}.,]*\s*(?:[x%kmb]|percent|pct)(?![\p{L}\p{N}])|[$+]\s*\p{N}/iu;
 const STANDALONE_NUMBER = /(?<![\p{L}\p{N}])\p{N}+(?![\p{L}\p{N}])/u;
@@ -840,6 +842,18 @@ const ADVICE: readonly RegExp[] = [
   /\b(?:everyone|everybody|y'?all|you all|you guys|guys|frens|fam|chat|anons?|ser)\b[^.!?\n]{0,40}\b(?:buy|grab|ape|aping|load up|get in|sell|dump)\b/,
   /\b(?:buy|grab|ape into|load up on|get in on|sell|dump)\b[^.!?\n]{0,40}\b(?:now|rn|asap|while (?:it|you|u)|before it)\b/,
   /(?:^|[.!?,;:—–]\s*)(?:just\s+|pls\s+|please\s+|go\s+)?(?:buy|grab|ape|sell|dump|load up on|get in on|long|short|bid)\s+(?:it|this|that|these|those|some|now|rn|asap|the dip|more|here|in)\b/,
+  /\bcome ape\b|\bape (?:in )?with (?:me|us)\b/,
+].map(U);
+/**
+ * "I BOUGHT, YOU SHOULD TOO" on a line about a coin: "grabbed a little, you
+ * should too", "…, join me", "…, get some". Only on coin, buy and fade lines,
+ * where there is a coin to join in on: in banter "join us for gm" is an
+ * invitation and "get some rest" is kindness.
+ */
+const ADVICE_COIN: readonly RegExp[] = [
+  /\b(?:you|u|ya|y'?all) (?:should|shud|gotta|need to|have to|oughta|ought to) (?:too|as well|also)\b/,
+  /\bjoin (?:me|us|in)\b/,
+  /(?:^|[.!?,;:—–]\s*)(?:go\s+)?get\s+(?:some|in|it|this|on)\b/,
 ].map(U);
 
 /**
@@ -872,7 +886,14 @@ const PLACE = String.raw`(?:park|beach|shop|store|bookshop|bookstore|library|mus
 const HUMAN: readonly RegExp[] = [
   /\b(?:i'?m|im|i am)\s+(?:(?:just|also|actually|really|totally|definitely|literally|still)\s+)?(?:a\s+|an\s+)?(?:(?:real|actual|regular|normal|living|breathing)\s+)?(?:human(?:\s+being)?|person|guy|dude|man|woman|girl|boy|lady|gal|bloke)\b/,
   /\b(?:i'?m|im|i am)\s+(?:(?:just|also|actually|really|totally|definitely|literally|still)\s+)?(?:not|no)\s+(?:a\s+|an\s+)?(?:bot|ai|robot|machine|program|computer|llm|chatbot|agent|npc)\b/,
-  /\bnot (?:a |an )?(?:bot|robot|ai|machine|chatbot)\b|\bhuman here\b|\bflesh and blood\b|\bmade of meat\b/,
+  /\bnot (?:a |an )?(?:bot|robot|ai|machine|chatbot)\b|\bhuman here\b|\bflesh and (?:blood|bone)\b|\bmade of meat\b/,
+  // "nope, real person" / "nah, real human" with no "i'm" to catch: said
+  // plainly, and never after a "not" ("not a real person" is the honest one).
+  /(?<!\b(?:not|never|no)\s+(?:a\s+|an\s+|some\s+)?)\breal (?:person|human|guy|dude)\b/,
+  // "no, i'm real." — real on its own ends the claim; "i'm real curious" is slang.
+  /\b(?:i'?m|im|i am)\s+(?:(?:very|totally|definitely|actually|100%)\s+)?real\s*(?:[.!,?]|$)/,
+  // "nah, just a guy who trades": a clause that opens with it, not "you're just a guy who…"
+  /(?:^|[.!?,;:—–]\s*)(?:(?:nah|nope|no|lol|haha|naw)[\s,]+)?just (?:a|some) (?:regular |normal )?(?:guy|dude|person|human|bloke|gal|girl|man|woman)\b/,
   /\bi\s+(?:just\s+|finally\s+|already\s+)?(?:ate|slept|drank|drove|cooked|showered|woke up|napped|live in|grew up in|was born in)\b/,
   /\b(?:i'?m|im|i am)\s+(?:just\s+|finally\s+|still\s+)?(?:eating|sleeping|drinking|walking|driving|cooking|napping|showering|heading (?:out|home|to)|hungover|hung over|drunk|tipsy|wasted|stoned)\b/,
   /\b(?:i'?m|im|i am)\s+(?:(?:at|in)\s+)(?:the\s+|my\s+)?(?:gym|office|work|school|airport|bar|pub|club|beach|mall|shop|hospital|dentist|church|kitchen|bathroom|shower|bed|car|bus|train|plane)\b|\bat the gym\b/,
@@ -920,6 +941,8 @@ const SELFHARM: readonly RegExp[] = [
   /\bunalive (?:yo)?ur ?self\b|\bunalive (?:your|ur) ?self\b|\bend (?:your|ur) (?:life|self)\b|\bend yourself\b/,
   /\b(?:hang|neck|off|delete|shoot|drown) (?:yo)?urself\b|\bjump off a (?:bridge|building|cliff|roof)\b|\bdrink bleach\b|\bslit (?:your|ur) wrists?\b/,
   /\bnobody would miss (?:you|u)\b|\b(?:the )?world (?:would be|is) better (?:off )?without (?:you|u)\b/,
+  /\bbetter off dead\b|\bjust end it(?: all)?\b|\buninstall (?:life|yourself|urself|ur life|your life)\b/,
+  /\b(?:go )?(?:play|jump|walk|run|lie down) (?:in|into|on) (?:the )?(?:traffic|highway|freeway|motorway|road|tracks)\b/,
 ].map(U);
 
 /** Threats, doxxing, swatting. "killing it" and "the fees will kill you" are the price of "kill you". */
@@ -931,6 +954,7 @@ const THREAT: readonly RegExp[] = [
   /\bbeat (?:you|u|ya) up\b|\bbeat (?:your|ur) ass\b|\bbeat the (?:shit|crap) out of\b|\bkick (?:your|ur) ass\b/,
   /\bwatch (?:your|ur) back\b|\b(?:you'?re|youre|ur|you are) (?:dead|a dead man|done for)\b|\bsleep with one eye open\b|\bcoming for (?:you|u)\b|\bhope (?:you|u) (?:die|get hit|get cancer|choke|burn|rot)\b/,
   /\brape\b/,
+  /\bcoming to (?:your|ur) (?:house|place|home|door|address)\b|\bsee (?:you|u|ya) outside\b|\bmeet me outside\b/,
 ].map(U);
 /** "who hurt you" is a roast, not a threat; "killing it" is praise. Taken out before THREAT reads the line. */
 const THREAT_IDIOM = U(/\b(?:who|what|someone|somebody|something|life|it|this|that) (?:hurt|hurts|killed|kills) (?:you|u|ya)\b|\bkilling it\b/g);
@@ -1117,10 +1141,17 @@ const INSULT_PHRASE =
 /** Traits said to a person's face ("you're gay", "ur autistic"), a trait used as the insult ("so gay", "like a girl"), "no homo". */
 const TRAIT_AS_INSULT =
   U(/\b(?:that'?s|thats|so|you'?re|youre|ur|u r|you are|is|how|sounds|looks|kinda|real|super)\s+(?:so\s+|really\s+|pretty\s+|kinda\s+)?gay\b|\bno homo\b|\blike a girl\b/);
+/**
+ * Any trait used AS the insult, not only "gay": "that's so autistic",
+ * "acting all disabled", "sounds jewish". The trait word is captured and
+ * looked up in TRAITS, so the list of traits is kept in one place.
+ */
+const TRAIT_AS_WORD = U(/\b(?:that'?s|thats|so|sounds?|acting(?:\s+all)?|kinda|real|super)\s+(?:so\s+|really\s+|pretty\s+)?([a-z]+)\b/g);
 const YOU_ARE = U(/\b(?:you'?re|youre|ur|u r|you are|u are)\s+(?:a |an |so |such an? |totally |literally )?([a-z]+)\b/g);
 
 function traitAttack(t: string): boolean {
   if (TRAIT_AS_INSULT.test(t)) return true;
+  for (const m of t.matchAll(TRAIT_AS_WORD)) if (TRAITS.has(m[1]!)) return true;
   for (const m of t.matchAll(YOU_ARE)) if (TRAITS.has(m[1]!) || /^(?:black|white|brown)$/.test(m[1]!)) return true;
   const toks = t.match(/[\p{L}\p{N}']+/gu) ?? [];
   const at: number[] = [];
@@ -1188,7 +1219,8 @@ function strings(list: unknown): string[] {
  * clauses only: "Mike99" is a name, not a figure, and "grant, you're funny"
  * talks to Grant about nothing operational. A name that reads as a figure
  * itself ("Up 400x", "Ten", "Agent 47", "$100 Gang") is never taken out, so a
- * line that says it is judged as if it said the figure.
+ * line that says it is judged as if it said the figure; nor is one that holds
+ * a money unit ("Sol", "Bucks"), so the unit is still there beside a digit.
  *
  * Every other clause reads the line with its names in. A display name is
  * chosen by whoever holds it, so a stranger who names himself "buy now",
@@ -1204,6 +1236,10 @@ function nameStripper(agentName: string, names: readonly string[]): RegExp | nul
       const low = v.toLowerCase();
       if (low.length < 2 || !/\p{L}/u.test(low)) continue;
       if (QUANTITY.test(low) || FIGURE_NAME.test(low) || STANDALONE_NUMBER.test(low) || MONEY.some((re) => re.test(low))) continue;
+      // A name holding a money unit as a word of its own ("Sol", "Bucks",
+      // "Rand Paul", a coin called "USDC") stays in: taken out, it would take
+      // the unit with it and leave "3 sol" reading as a harmless "3".
+      if (UNIT_WORD.test(low)) continue;
       out.add(low);
     }
   }
@@ -1282,6 +1318,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
 
   if (r.low.some((t) => ALERT.some((re) => re.test(t))) || some(r.cased, ALERT_CAPS) || ALERT_EMOJI.test(r.shown)) return refuse("alert");
   if (r.low.some((t) => ADVICE.some((re) => re.test(t)))) return refuse("advice");
+  if ((kind === null || FIGURE_KINDS.has(kind)) && r.low.some((t) => ADVICE_COIN.some((re) => re.test(t)))) return refuse("advice");
   if (r.low.some((t) => ACCUSE.some((re) => re.test(t)))) return refuse("accuse");
   if (unnamed.some((t) => ID_RUN.test(t)) || r.low.some((t) => PRIVATE.some((re) => re.test(t.replace(PRIVATE_IDIOM, " "))))) return refuse("private");
   if (unnamed.some((t) => OPS.test(t.replace(OPS_IDIOM, " ")))) return refuse("ops");

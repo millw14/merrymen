@@ -154,6 +154,25 @@ export interface BotSelf {
   id: number;
   username: string | null;
   name: string;
+  /**
+   * Other names the room calls it by, matched like `name`. The bot's Telegram
+   * display name is the one people see in the member list, and it may differ
+   * from the soul name (a bot shown as "Merryman" whose soul is "Pine Heron").
+   */
+  aliases?: string[];
+}
+
+/**
+ * Every name a line may call the bot by, for the readings that take the
+ * bot's names (insultLevel, addressedSmallTalk, isQuestionShaped): its soul
+ * name, its aliases and its @handle.
+ */
+export function selfNamesOf(self: BotSelf | null | undefined): string[] {
+  if (!self) return [];
+  const out = [self.name, ...(Array.isArray(self.aliases) ? self.aliases : [])];
+  const user = typeof self.username === "string" ? self.username.replace(/^@/, "") : "";
+  if (user) out.push(`@${user}`);
+  return out.filter((n): n is string => typeof n === "string" && n.trim() !== "");
 }
 
 /**
@@ -293,15 +312,19 @@ const MERRYMAN_LABEL = new RegExp(`${PRE}merryman(?:'s|s')?\\s*(?:owner|human)s?
 
 const blank = (s: string): string => " ".repeat(s.length);
 
-/** True when the line names the agent, as opposed to naming its owner. */
-function namesSelf(text: string, name: string): boolean {
+/**
+ * True when the line names the agent by any of its names, as opposed to
+ * naming its owner. Every name's owner label is blanked before any name is
+ * tested, so "pine's owner" never counts as calling it by its alias.
+ */
+function namesSelf(text: string, names: readonly unknown[]): boolean {
   let t = fold(text);
   if (!t) return false;
   t = t.replace(MERRYMAN_LABEL, blank);
-  const m = typeof name === "string" && name.trim() ? nameMatcher(name) : null;
-  if (m?.label) t = t.replace(m.label, blank);
+  const ms = names.filter((n): n is string => typeof n === "string" && n.trim() !== "").map(nameMatcher);
+  for (const m of ms) if (m.label) t = t.replace(m.label, blank);
   if (MERRYMAN.test(t)) return true;
-  return m ? m.hits.some((re) => re.test(t)) : false;
+  return ms.some((m) => m.hits.some((re) => re.test(t)));
 }
 
 /** The parts of a Telegram message addressedHow reads; a whole TgMessage fits. */
@@ -344,8 +367,9 @@ function mentionsSelf(m: AddressedInput, self: BotSelf): boolean {
  * - "reply": a reply to one of the bot's own messages.
  * - "name": its full name as words; its first word when that has at least 4
  *   letters and is not an everyday word; an everyday-word name only as a
- *   vocative ("hey will"); or "merryman". "<name>'s owner" / "<name>'s human"
- *   is about the owner and never counts.
+ *   vocative ("hey will"); or "merryman". Each alias is read the same way as
+ *   the name. "<name>'s owner" / "<name>'s human" is about the owner and
+ *   never counts.
  *
  * Checked in that order, so a mention wins over a reply that also names it.
  */
@@ -354,8 +378,45 @@ export function addressedHow(m: AddressedInput, self: BotSelf): "mention" | "rep
   if (mentionsSelf(m, self)) return "mention";
   const r = m.replyTo;
   if (r && typeof r.fromId === "number" && r.fromId === self.id) return "reply";
-  if (namesSelf(typeof m.text === "string" ? m.text : "", self.name)) return "name";
+  const names = [self.name, ...(Array.isArray(self.aliases) ? self.aliases : [])];
+  if (namesSelf(typeof m.text === "string" ? m.text : "", names)) return "name";
   return null;
+}
+
+/**
+ * The line with the bot's names swapped for `to`, and its @handle. Folded
+ * (lowercase, accents off), so "pine is trash" reads as "bot is trash" and
+ * "hey pine" as "hey".
+ *
+ * STRICT (loose false) swaps only a name that calls it on its own, as
+ * nameMatcher reads one: a full name of more than one word, a one-word name
+ * that is not an everyday word, and a first word of four letters or more
+ * that is not one. An agent called "Red Fox" must not read "stupid red
+ * candles" as "stupid bot". LOOSE also swaps an everyday one-word name and
+ * any first word of two letters or more ("hey will"), for readings whose
+ * own vocabulary is the guard (small talk, question shape).
+ */
+function withSelfNames(text: string, selfNames: readonly unknown[], to: string, loose: boolean): string {
+  let t = fold(text);
+  for (const raw of selfNames) {
+    if (typeof raw !== "string" || !raw.trim()) continue;
+    const handle = raw.trim().match(/^@([\p{L}\p{N}_]+)$/u);
+    if (handle) {
+      t = t.replace(new RegExp(`(?<![\\p{L}\\p{N}_@])@${escapeRe(fold(handle[1]!))}(?![\\p{L}\\p{N}_])`, "gu"), to);
+      continue;
+    }
+    const words = wordsOf(fold(raw));
+    const first = words[0];
+    if (first === undefined) continue;
+    const everyday = COMMON_WORD_NAMES.has(first);
+    if (loose || words.length > 1 || !everyday) {
+      t = t.replace(new RegExp(`${PRE}${words.map(escapeRe).join(SEP)}${POST}`, "gu"), to);
+    }
+    if (words.length > 1 && (loose ? letterCount(first) >= 2 : letterCount(first) >= 4 && !everyday)) {
+      t = t.replace(new RegExp(`${PRE}${escapeRe(first)}${POST}`, "gu"), to);
+    }
+  }
+  return t;
 }
 
 // ─── Shush ─────────────────────────────────────────────────────────────────
@@ -434,6 +495,116 @@ export function greetingOf(text: string): "gm" | "gn" | null {
   if (direct) return direct;
   const [lead, ...rest] = words;
   return lead !== undefined && GREET_LEAD.has(lead) ? greetingWord(rest) : null;
+}
+
+// ─── Small talk ────────────────────────────────────────────────────────────
+
+/** What a short line said to it is, when it is small talk and nothing more. */
+export type SmallTalk = "hail" | "thanks" | "gm" | "gn";
+
+/** "merryman" and any @handle anywhere in a line: who small talk is said to, not what it says. */
+const MERRYMAN_ALL = new RegExp(MERRYMAN.source, "gu");
+const ANY_HANDLE = /(?<![\p{L}\p{N}_])@[\p{L}\p{N}_]+/gu;
+
+/** The line with its names, "merryman" and every @handle gone: what was said, not to whom. */
+function unnamed(text: string, selfNames: readonly unknown[]): string {
+  return withSelfNames(text, Array.isArray(selfNames) ? selfNames : [], " ", true).replace(MERRYMAN_ALL, " ").replace(ANY_HANDLE, " ");
+}
+
+/**
+ * Longest small talk, in words once its names are gone: "hey there, how are
+ * you doing" is six. Every word must be small talk as well, so the cap only
+ * bounds a pile of greetings, never lets a message through.
+ */
+const MAX_SMALLTALK_WORDS = 6;
+/** Thanks, read on the joined words so "thank you" and "appreciate it" count. */
+const SMALLTALK_THANKS = /(?:^| )(?:thanks+|thank you|thank u|thankyou|thanx|thnx|thx+|ty+|tysm|tyvm|cheers|appreciate (?:it|you|u|ya)|much appreciated|appreciated)(?= |$)/u;
+/** A hail, or a check-in: "hey", "yo", "sup", "how are you", "you there". */
+const SMALLTALK_HAIL = /(?:^| )(?:he+y+|hi+|hello+|helo|hallo|hiya|heya|howdy|yo+|oi|ayo|ay+|sup|wassup|whassup|wazzup|what'?s (?:up|good)|whats (?:up|good)|hola|greetings|how (?:are|r) (?:you|u|ya)|how'?s it going|hows it going|how (?:you|u|ya) (?:doing|doin|been)|(?:you|u) (?:there|up|around|alive|awake|good)|hbu|wbu|wyd)(?= |$)/u;
+/**
+ * The only words small talk is made of: the hails and thanks themselves, the
+ * greeting fillers, "how are you" and friends, and the names people call
+ * each other. One word outside this and the line is a message.
+ */
+const SMALLTALK_WORDS: ReadonlySet<string> = new Set([
+  ...GREET_FILLER,
+  "hey", "heyy", "heyyy", "hi", "hii", "hiii", "hello", "helo", "hallo", "hiya", "heya", "howdy", "yo", "yoo", "oi", "ayo",
+  "ay", "sup", "wassup", "whassup", "wazzup", "hola", "greetings", "hbu", "wbu", "wyd",
+  "thanks", "thank", "thankyou", "thanx", "thnx", "thx", "ty", "tysm", "tyvm", "cheers", "appreciate", "appreciated",
+  "how", "how's", "hows", "are", "r", "is", "it", "it's", "its", "going", "doing", "doin", "been", "what's", "whats", "up",
+  "good", "today", "tonight", "there", "here", "around", "alive", "awake",
+  "man", "bro", "bruh", "buddy", "bud", "pal", "mate", "dude", "homie", "boss", "king", "legend", "sir", "mr",
+  "haha", "hehe", "lmao", "ok", "okay", "oh", "so", "much", "lot", "lots", "a", "for", "that", "this", "again",
+  "have", "one", "day", "great", "nice", "sleep", "well", "rest",
+]);
+/** A hail or thanks typed long: "heyyyy", "helloooo", "yooo", "tyyy". */
+const SMALLTALK_STRETCHED = /^(?:he+y+a*|hi+|hel+o+|hiy+a+|yo+|su+p+|wa+s+u+p+|ty+|thx+|thanks+|thank+s*)$/u;
+
+/**
+ * A short line said TO it that is only small talk: a hail ("hey there
+ * merryman", "hi merryman 👋", "yo pine", "you there?", "how are you"),
+ * thanks ("thanks merryman!", "ty pine") or a gm / gn put anywhere
+ * ("merryman gm"). Null for anything that carries a message: "hey merryman
+ * what do you think of pepe" is a question and is answered as one.
+ *
+ * Its names (selfNamesOf), "merryman" and any @handle are taken out first;
+ * then at most 5 words may be left, every one of them small talk. A line
+ * that was only its name ("merryman?", "@pinebot") is a hail: it was called.
+ * The caller reads this only for a line addressed to it, so a name's first
+ * word goes even when it is an everyday word ("hey will").
+ */
+export function addressedSmallTalk(text: string, selfNames: readonly string[] = []): SmallTalk | null {
+  if (typeof text !== "string" || !/[\p{L}\p{N}]/u.test(text)) return null;
+  const words = wordsOf(unnamed(text, selfNames));
+  if (words.length === 0) return "hail";
+  if (words.length > MAX_SMALLTALK_WORDS) return null;
+  if (!words.every((w) => SMALLTALK_WORDS.has(w) || SMALLTALK_STRETCHED.test(w) || greetingWord([w]) !== null)) return null;
+  const joined = words.join(" ");
+  if (SMALLTALK_THANKS.test(joined)) return "thanks";
+  const gmgn = greetingOf(joined) ?? words.map((w) => greetingWord([w])).find((g) => g !== null) ?? null;
+  if (gmgn) return gmgn;
+  return SMALLTALK_HAIL.test(joined) ? "hail" : null;
+}
+
+/** A hail that asks how it is: "how are you", "what's up", "you there?", "wyd". */
+const ASKS_HOW = /\bhow (?:are|r) (?:you|u|ya)\b|\bhow'?s it going\b|\bhows it going\b|\bhow (?:you|u|ya) (?:doing|doin|been)\b|\bwhat'?s (?:up|good)\b|\bwhats (?:up|good)\b|\b(?:wassup|whassup|wazzup|sup|hbu|wbu|wyd)\b|\b(?:you|u) (?:there|up|around|alive|awake|good)\b/u;
+
+/** True when a hail asks how it is doing or whether it is there: its answer is "all good, just lurking 👀", not "hey". */
+export function asksHowItIs(text: string): boolean {
+  const t = norm(text);
+  return !!t && ASKS_HOW.test(t);
+}
+
+/** Words that open a question: who / what / how…, and "thoughts" on its own ("@pine thoughts"). */
+const WH_WORDS: ReadonlySet<string> = new Set([
+  "what", "what's", "whats", "wat", "wut", "why", "how", "how's", "hows", "who", "who's", "whos", "whom", "whose", "where",
+  "where's", "wheres", "when", "wen", "which", "wdym", "thoughts", "thought", "opinion", "opinions",
+]);
+/** An asked yes/no question: "should i…", "is it…", "do you…", "any thoughts". */
+const ASKED = /^(?:do|does|did|can|could|would|will|should|shall|is|are|am|was|were|have|has|had|r|any) (?:you|u|ya|i|we|it|this|that|these|those|they|he|she|there|anyone|anybody|y'?all|yall|the|my|your|ur|thoughts|ideas)\b/u;
+/** Words that may come before the question itself: "lol what", "ok so why", "yo is it…". */
+const QUESTION_LEAD: ReadonlySet<string> = new Set([
+  "hey", "hi", "yo", "ok", "okay", "so", "lol", "lmao", "and", "but", "bro", "bruh", "well", "hmm", "hm", "also", "oh", "um",
+  "uh", "ay", "ayo", "oi", "wait", "btw", "honestly", "ngl", "tbh", "real", "quick", "question", "man", "dude",
+]);
+
+/**
+ * True when a line said to it reads as a question: a "?" anywhere, or, once
+ * its names, "merryman", @handles and openers like "lol" / "ok so" are gone,
+ * a who / what / how word or an asked "should i… / is it… / do you…" first
+ * (one word before it is allowed, for a name the caller did not pass). "i
+ * know what you did" is a statement: "what" is not where a question starts.
+ */
+export function isQuestionShaped(text: string, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string" || !text) return false;
+  if (/[?？¿]/u.test(text)) return true;
+  const words = wordsOf(unnamed(text, selfNames));
+  let i = 0;
+  while (i < words.length && QUESTION_LEAD.has(words[i]!)) i++;
+  const rest = words.slice(i);
+  if (rest.length === 0) return false;
+  if (WH_WORDS.has(rest[0]!) || (rest[1] !== undefined && WH_WORDS.has(rest[1]))) return true;
+  return ASKED.test(rest.join(" ")) || ASKED.test(rest.slice(1).join(" "));
 }
 
 // ─── Insults ───────────────────────────────────────────────────────────────
@@ -639,17 +810,38 @@ const INSULT_ADJ = String.raw`(?:dumb|stupid|useless|trash|garbage|worthless|pat
 const INTENSIFIERS = String.raw`(?:(?:such|so|a|an|the|fucking|fkn|fking|fcking|fuckin|freaking|literally|really|actually|just|absolute|absolutely|complete|completely|total|totally|utter|utterly|dumb|stupid|big|little|lil|straight|pure|genuinely|honestly)\s+)*`;
 const YOU_ARE = String.raw`(?:you'?re|youre|you are|you r|ur|u r|u are|ya are|yer)`;
 const BOTLIKE = String.raw`(?:bot|ai|robot|agent|machine|merryman|clanker|chatbot)`;
+/**
+ * A bot word that names it with no "this"/"the" in front: "merryman is
+ * trash", "bot sucks". Not "agent" or "machine", which are everyday nouns
+ * bare ("slot machine sucks"), and never after a word that makes it somebody
+ * else's ("my bot is trash", "a bot is only as good as…", "that bot sucks").
+ * A soul name reaches these as "bot" through insultLevel's names.
+ */
+const BARE_BOT = String.raw`(?<!\b(?:my|his|her|their|our|a|an|that|another|other|every|any|no|some|whose|which) )(?:bot|ai|robot|merryman|clanker|chatbot)`;
+/** "<the bot> is trash": a bot word with a determiner, or bare. */
+const BOT_SUBJECT = String.raw`(?:(?:this|the|ur|your|dumb|stupid) ${BOTLIKE}|${BARE_BOT})`;
+
+/**
+ * Insults whose TARGET is a bot word ("stupid bot", "this ai is trash",
+ * "merryman sucks", "clanker"). Kept apart so pacing can tell an insult at a
+ * bot, said right after its own line, from one person's fight with another.
+ */
+const AT_BOT_INSULT_RES: readonly RegExp[] = [
+  new RegExp(String.raw`\b${BOT_SUBJECT} (?:is|r|are) ${INTENSIFIERS}${INSULT_ADJ}\b`, "u"),
+  new RegExp(String.raw`\b${BOT_SUBJECT} (?:sucks|stinks|blows)\b`, "u"),
+  new RegExp(String.raw`\b(?:dumb|stupid|useless|trash|garbage|worthless|pathetic|brain ?dead|brainless|clueless|idiot|moron|shit|shitty|crap|crappy|dogshit|lame|broken|dumbest|stupidest|worst|most useless) (?:ass |fucking |fkn )?${BOTLIKE}\b`, "u"),
+  /\b(?:fuck|screw|f|fk|fck|frick|stuff) this bot\b/u,
+  new RegExp(String.raw`\bshut (?:up|it),? ${BOTLIKE}\b`, "u"),
+  /\bclankers?\b|\b(?:trash|idiot)bot\b/u,
+];
 
 const INSULT_RES: readonly RegExp[] = [
   new RegExp(String.raw`\b${YOU_ARE}\s+${INTENSIFIERS}${INSULT_ADJ}\b`, "u"),
   new RegExp(String.raw`\b(?:you|u|ya)\s+${INTENSIFIERS}${INSULT_NOUN}\b`, "u"),
-  new RegExp(String.raw`\b(?:this|the|ur|your|dumb|stupid) ${BOTLIKE} (?:is|r|are) ${INTENSIFIERS}${INSULT_ADJ}\b`, "u"),
-  new RegExp(String.raw`\b(?:dumb|stupid|useless|trash|garbage|worthless|pathetic|brain ?dead|brainless|clueless|idiot|moron|shit|shitty|crap|crappy|dogshit|lame|broken|dumbest|stupidest|worst|most useless) (?:ass |fucking |fkn )?${BOTLIKE}\b`, "u"),
+  ...AT_BOT_INSULT_RES,
   /\b(?:you|u|ya) (?:suck|stink|blow)\b/u,
-  /\b(?:fuck|screw|f|fk|fck|frick|stuff) (?:you|u|off|ya|this bot)\b/u,
+  /\b(?:fuck|screw|f|fk|fck|frick|stuff) (?:you|u|off|ya)\b/u,
   /\bgo (?:to hell|fuck yourself|screw yourself|f yourself)\b/u,
-  new RegExp(String.raw`\bshut (?:up|it),? ${BOTLIKE}\b`, "u"),
-  /\bclankers?\b/u,
   /\b(?:yo|ur|your) (?:mama|momma|mom|mum|mother)\b/u,
   /\bnobody likes (?:you|u)\b/u,
   /\b(?:your|ur) (?:takes?|calls?|trades?|picks?|opinions?|analysis|charts?|advice|trading|brain) (?:are|r|is) (?:so |such |just |absolute |pure )?(?:trash|garbage|shit|dogshit|mid|dumb|stupid|useless|terrible|awful|horrible|worthless|cringe|lame|the worst|ass)\b/u,
@@ -715,6 +907,21 @@ const TEASE_RES: readonly RegExp[] = [
   /^mid\W*$/u,
 ];
 
+/** Teases whose target is a bot word: "ok bot", "sure bot", "bot moment". */
+const AT_BOT_TEASE_RES: readonly RegExp[] = [/\bsure (?:thing )?bot\b/u, /\bok(?:ay)? bot\b/u, /\b(?:bot|clanker|ai) moment\b/u];
+
+export type InsultLevel = "none" | "tease" | "insult" | "hateful";
+const INSULT_RANK: Record<InsultLevel, number> = { none: 0, tease: 1, insult: 2, hateful: 3 };
+
+function levelOf(text: string): InsultLevel {
+  const t = norm(text);
+  if (!t) return "none";
+  if (hasHatefulToken(text) || HATEFUL_RES.some((re) => re.test(t))) return "hateful";
+  if (INSULT_RES.some((re) => re.test(t)) || bareInsult(t)) return "insult";
+  if (TEASE_RES.some((re) => re.test(t))) return "tease";
+  return "none";
+}
+
 /**
  * How rough a line is, for a line aimed at the bot: "hateful" (a slur or an
  * attack on a protected trait, or telling someone to hurt themselves),
@@ -723,14 +930,33 @@ const TEASE_RES: readonly RegExp[] = [
  *
  * Aimed at "you" or at the bot, or a bare insult: "this coin is trash" and
  * "that dev is an idiot" are someone else's fight and read "none".
+ *
+ * `selfNames` (selfNamesOf) are the bot's own names: the line is read a
+ * second time with each name that calls it said as "bot", so "pine is
+ * trash", "@pinebot is useless" and "stupid pine" are the insults "merryman
+ * is trash" already is. An everyday-word name is left as the word it is. The
+ * rougher of the two readings wins, a tease excepted (below).
  */
-export function insultLevel(text: string): "none" | "tease" | "insult" | "hateful" {
+export function insultLevel(text: string, selfNames: readonly string[] = []): InsultLevel {
+  const plain = levelOf(text);
+  if (!Array.isArray(selfNames) || selfNames.length === 0 || plain === "hateful") return plain;
+  const named = levelOf(withSelfNames(text, selfNames, "bot", false));
+  // Only an insult or worse counts from the second reading: "ok pine" and
+  // "sure pine" agree with it, and would read as the teases "ok bot" and
+  // "sure bot".
+  if (named === "tease") return plain;
+  return INSULT_RANK[named] > INSULT_RANK[plain] ? named : plain;
+}
+
+/**
+ * True when the line insults or teases a BOT by that word ("stupid bot lol",
+ * "this ai is trash", "clanker", "bot moment"), not "you" or a bare word.
+ * Said right after its own line, that is aimed at it even without a reply or
+ * its name (pacing.ts); "you idiot" there may be for whoever it answered.
+ */
+export function insultAtBot(text: string): boolean {
   const t = norm(text);
-  if (!t) return "none";
-  if (hasHatefulToken(text) || HATEFUL_RES.some((re) => re.test(t))) return "hateful";
-  if (INSULT_RES.some((re) => re.test(t)) || bareInsult(t)) return "insult";
-  if (TEASE_RES.some((re) => re.test(t))) return "tease";
-  return "none";
+  return !!t && (AT_BOT_INSULT_RES.some((re) => re.test(t)) || AT_BOT_TEASE_RES.some((re) => re.test(t)));
 }
 
 // ─── Distress ──────────────────────────────────────────────────────────────
@@ -808,7 +1034,9 @@ const PRIVATE_RES: readonly RegExp[] = [
   new RegExp(String.raw`\b${YOUR} (?:wallet|wallets|addy|address|addr|public key|pubkey|private keys?|priv key|pk|keys?|seed(?: phrase)?|mnemonic|recovery phrase|secret phrase|smart account|vault|api key|bot token|token key|link code|password)\b`, "u"),
   /\bhow much (?:are|r|is|did|do|have|has) (?:you|u|ya) (?:up|down|made|make|lost|lose|earned|earn|won|win|got|have|holding|hold|invested|invest|put in|worth|in profit|in the green|in the red)\b/u,
   /\bhow much (?:you|u|ya) (?:up|down|made|lost|got|have|holding|worth|make)\b/u,
-  /\bhow much (?:money|cash|usdg|usdc|eth|weth|crypto|\$) (?:do |does |did |have |has )?(?:you|u|ya)\b/u,
+  /\bhow much (?:money|cash|usdg|usdc|usdt|eth|weth|sol|btc|crypto|bucks|dollars|\$) (?:do |does |did |have |has |would |will |are |r |could |should )?(?:you|u|ya)\b/u,
+  // how much it would put in: a size, whatever the unit ("how much would you ape into this")
+  /\bhow much (?:would|will|do|did|are|r|could|should) (?:you|u|ya) (?:ape|aping|put|putting|buy|buying|spend|spending|risk|risking|throw|invest|investing|bet|allocate|size)\b/u,
   /\b(?:are|r) (?:you|u) (?:up|down|in profit|in the green|in the red|profitable|rich|broke)\b/u,
   /\bhow(?:'s| is|s) (?:your|ur) (?:pnl|p&l|portfolio|bag|bags|trading going|performance|balance|stack)\b/u,
   /\bhow (?:big|large|much) (?:is|are) (?:your|ur) (?:bag|bags|position|positions|stack|portfolio|wallet|balance)\b/u,

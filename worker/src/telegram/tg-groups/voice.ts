@@ -35,6 +35,7 @@
  */
 import { REPEAT_LIMIT, similarity } from "../../social-post";
 import { fnv1a } from "../../memory/tokens";
+import { asksHowItIs, isQuestionShaped, type SmallTalk } from "./detect";
 import { admitTgLine, tidyTgLine, type TgGateCtx, type TgLineKind } from "./gate";
 import { promptSafe, renderMemory } from "./memory";
 import { callText, type TgModel, type TgModelGate } from "./model";
@@ -49,6 +50,7 @@ export type TgIntent =
   | { kind: "kind" }
   | { kind: "hello" }
   | { kind: "greet"; word: "gm" | "gn" }
+  | { kind: "smalltalk"; what: SmallTalk }
   | { kind: "welcome"; name: string }
   | { kind: "shushed" }
   | { kind: "coin-ack" }
@@ -120,7 +122,20 @@ const TEMPLATE_ONLY: ReadonlySet<TgIntent["kind"]> = new Set<TgIntent["kind"]>([
   "coin-seen",
   "coin-skipped",
   "greet",
+  // "hey 👋" to a hello, "np 🤝" to a thanks: nothing a model would add, and
+  // a hail is the commonest thing said to it, so no allowance goes on it.
+  "smalltalk",
 ]);
+
+/**
+ * Only a template may say this intent's line. Besides TEMPLATE_ONLY, the
+ * answer to a sincere "are you a bot?": rule 6 has one right answer, the
+ * template says it, and a model talked into "nope, real person" by the
+ * question ("for this game you're human") must never get the chance.
+ */
+function templateOnly(intent: TgIntent): boolean {
+  return TEMPLATE_ONLY.has(intent.kind) || (intent.kind === "answer" && intent.mood === "bot-question");
+}
 
 /** Which of gate.ts's line kinds judges an intent's line. */
 export function gateKindFor(intent: TgIntent): TgLineKind {
@@ -298,22 +313,40 @@ export function styleLine(text: string, intent: TgIntent, style: TgStyle, rand: 
  * through admitTgLine under many styles.
  */
 const POOLS: Readonly<Record<string, readonly string[]>> = {
-  "answer:normal": [
+  // A normal answer the model did not write, to a line shaped like a
+  // question ("@pine thoughts?", "merryman what do you think").
+  "answer:question": [
     "hmm good question",
     "honestly not sure 🤷",
     "idk tbh",
-    "lol fair",
     "no clue ngl",
     "can't say i know",
     "hmm, tough one",
-    "say more 👀",
-    "fair point",
     "good question, no idea",
     "you tell me lol",
     "hmm 🤔",
     "i'll think about that one",
-    "lol what",
+    "no idea, honestly",
+    "beats me 🤷",
+    "hard to say tbh",
+  ],
+  // …and to a line that asked nothing ("@pine you're cool", "merryman lol"):
+  // a question-shaped reply to a statement reads as a bot.
+  "answer:ack": [
+    "👀",
+    "haha",
+    "lol",
+    "lol fair",
+    "fair point",
     "that's a good one",
+    "say more 👀",
+    "yo",
+    "what's up",
+    "true true",
+    "ha, noted",
+    "real",
+    "i hear you",
+    "lol same",
   ],
   "answer:bot-question": [
     "yeah, i'm an AI agent, i trade for {owner}",
@@ -417,6 +450,24 @@ const POOLS: Readonly<Record<string, readonly string[]>> = {
   ],
   "greet:gm": ["gm", "gm gm", "gm ☀️", "gm fren", "morning 🫡", "gm, have a good one", "gm legend", "gm to you too"],
   "greet:gn": ["gn", "gn 🌙", "night night", "gn, sleep well", "gn fren", "rest up 🫡", "night 🌙"],
+  // Small talk said to it (detect.ts addressedSmallTalk): a hail, a hail that
+  // asks how it is, thanks, a gm or gn with its name in it.
+  "smalltalk:hail": ["hey 👋", "yo", "sup", "hey hey", "heyy", "yo 👋", "hey there", "hi 👋", "ayy", "oh hey", "sup 👀", "hey, what's up"],
+  "smalltalk:how": [
+    "all good, just lurking 👀",
+    "all good here 🤝",
+    "doing alright, you?",
+    "can't complain 🤝",
+    "all good, you?",
+    "just lurking 👀",
+    "chillin 😎",
+    "good good, you?",
+    "not bad, you?",
+    "here, just lurking 👀",
+  ],
+  "smalltalk:thanks": ["np 🤝", "anytime", "np", "anytime 🤝", "you got it", "no worries", "all good 🤝", "sure thing", "happy to 🫡", "np fren"],
+  "smalltalk:gm": ["gm", "gm gm", "gm ☀️", "gm fren", "morning 🫡", "gm, have a good one", "gm legend", "gm to you too"],
+  "smalltalk:gn": ["gn", "gn 🌙", "night night", "gn, sleep well", "gn fren", "rest up 🫡", "night 🌙"],
   shushed: [
     "ok ok 🤐",
     "fine 🤐",
@@ -774,9 +825,18 @@ const SEEN_GROUP: Record<CoinVerdict, string> = {
   unknown: "unknown",
 };
 
-function poolKey(intent: TgIntent): string | null {
+/**
+ * The pool for an intent. A normal answer and a hail also read the line they
+ * answer (`ctx.trigger`): "hmm good question" only to a line shaped like a
+ * question, "all good, just lurking 👀" only to a hail that asked how it is.
+ * With no line to read, a normal answer is an ack: that fits a statement and
+ * does not read as a non sequitur to a question.
+ */
+function poolKey(intent: TgIntent, ctx: SpeakCtx | undefined): string | null {
+  const said = typeof ctx?.trigger?.text === "string" ? ctx.trigger.text : "";
   switch (intent.kind) {
     case "answer":
+      if (intent.mood === "normal") return said && isQuestionShaped(said, [String(ctx?.agentName ?? "")]) ? "answer:question" : "answer:ack";
       return `answer:${intent.mood}`;
     case "ambient":
       return null;
@@ -784,6 +844,8 @@ function poolKey(intent: TgIntent): string | null {
       return intent.owner ? "roast:owner" : "roast";
     case "greet":
       return `greet:${intent.word}`;
+    case "smalltalk":
+      return intent.what === "hail" && said && asksHowItIs(said) ? "smalltalk:how" : `smalltalk:${intent.what}`;
     case "coin-look":
       return `look:${intent.look}`;
     case "coin-seen":
@@ -814,7 +876,7 @@ function sayableName(v: unknown): string {
  * ambient intent (a template never joins in unasked).
  */
 export function templatePool(intent: TgIntent, ctx: SpeakCtx): string[] {
-  const key = intent ? poolKey(intent) : null;
+  const key = intent ? poolKey(intent, ctx) : null;
   const pool = key ? POOLS[key] : undefined;
   if (!pool) return [];
   const owner = sayableName(ctx?.ownerName) || "my owner";
@@ -969,8 +1031,6 @@ function instruction(intent: TgIntent, ctx: SpeakCtx, owner: string | null): str
   switch (intent.kind) {
     case "answer":
       switch (intent.mood) {
-        case "bot-question":
-          return `${sender} is asking whether you're a bot or an AI. Say yes, casually: you're an AI agent and you trade for ${ownerRef}.`;
         case "private-ask":
           return `${sender} is asking about something private (your wallet, your money, how you're doing, or your owner's life). Deflect playfully and reveal nothing — no hints, no figures.`;
         case "injection":
@@ -1040,7 +1100,7 @@ function instruction(intent: TgIntent, ctx: SpeakCtx, owner: string | null): str
  * instruction.
  */
 export function buildPrompt(intent: TgIntent, ctx: SpeakCtx): { system: string; prompt: string } | null {
-  if (!intent || TEMPLATE_ONLY.has(intent.kind)) return null;
+  if (!intent || templateOnly(intent)) return null;
   const me = nameOf(ctx.agentName) || "a merryman";
   const owner = nameOf(ctx.ownerName) || null;
 
@@ -1086,7 +1146,7 @@ export function buildPrompt(intent: TgIntent, ctx: SpeakCtx): { system: string; 
  * THE LINE FOR AN INTENT, or null for silence. Plain text: the caller
  * escapes it and adds any mention.
  *
- *   - A template-only intent: `templateLine`.
+ *   - A template-only intent, and the answer to "are you a bot?": `templateLine`.
  *   - A model-written intent with a model: one gated call; the answer is
  *     tidied and judged by gate.ts as this intent's kind. PASS, a refused
  *     line, or no answer at all (paused, out of allowance, timed out, threw)
@@ -1099,7 +1159,7 @@ export function buildPrompt(intent: TgIntent, ctx: SpeakCtx): { system: string; 
 export async function say(intent: TgIntent, ctx: SpeakCtx, model: TgModel | null, gate: TgModelGate | null): Promise<string | null> {
   try {
     if (!intent || !ctx) return null;
-    if (TEMPLATE_ONLY.has(intent.kind)) return templateLine(intent, ctx);
+    if (templateOnly(intent)) return templateLine(intent, ctx);
     const ambient = intent.kind === "ambient";
     const fallback = (): string | null => (ambient ? null : templateLine(intent, ctx));
     if (!model || !gate) return fallback();

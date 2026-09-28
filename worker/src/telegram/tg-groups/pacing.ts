@@ -21,7 +21,7 @@
  * left to it.
  */
 
-import { extractCas, isDistress, lineMood, type ReactionMood } from "./detect";
+import { extractCas, insultAtBot, isDistress, lineMood, type ReactionMood, type SmallTalk } from "./detect";
 import type { Chattiness, TgLine, TgPerson, TgRoom } from "./types";
 
 const MIN = 60_000;
@@ -110,6 +110,12 @@ export interface PaceInput {
     tradeTalk: boolean;
     questionToRoom: boolean;
     knownCoin: boolean;
+    /**
+     * detect.ts addressedSmallTalk for an addressed line (a hail, thanks, a gm
+     * or gn and nothing more), read with the bot's names; null or absent
+     * otherwise. Answered with small talk, not as a question.
+     */
+    smallTalk?: SmallTalk | null;
   };
 }
 
@@ -120,6 +126,7 @@ export type PaceDecision =
   | { act: "kind" }
   | { act: "shush" }
   | { act: "greet"; word: "gm" | "gn" }
+  | { act: "smalltalk"; what: SmallTalk }
   | { act: "react"; emoji: string }
   | { act: "ambient"; topic: "coin" | "trade" | "question" | "banter" };
 
@@ -259,9 +266,12 @@ function answeredSince(earlier: readonly TgLine[], line: TgLine): boolean {
  * 6. Addressed → 🤡 for hateful; the injection / bot-question / private-ask
  *    moods; a roast for an insult or tease (affectionate for the owner; past
  *    2 per person per 30 min a 🥱 or silence, the owner a normal answer); a
- *    greeting back; else a normal answer.
- * 7. Not addressed → other people's fights, steering attempts and CA lines
- *    are not its business; a gm/gn may get a greeting (35%, once per person
+ *    greeting back; small talk back for a hail, thanks or gm/gn said to it;
+ *    else a normal answer.
+ * 7. Not addressed → an insult or tease at a bot ("stupid bot lol") right
+ *    after its own line is at it: a roast under the same cap, silence past
+ *    it. Other people's fights, steering attempts and CA lines are not its
+ *    business; a gm/gn may get a greeting (35%, once per person
  *    per UTC day) or a reaction; otherwise an ambient roll when the chat is
  *    live, the cooldown has passed, today's cap has room, it is not a
  *    two-person exchange and a model is there; else maybe a reaction.
@@ -305,17 +315,33 @@ function whenAddressed(i: PaceInput, person: TgPerson | undefined): PaceDecision
   if (s.botQuestion) return answer("bot-question");
   if (s.privateAsk) return answer("private-ask");
   if (s.insult === "insult" || s.insult === "tease") {
-    if (!inWindow(person?.roasts, now, ROAST_WINDOW_MS, ROAST_CAP)) return { act: "roast", owner: isOwner };
+    if (!roastCapped(person, now)) return { act: "roast", owner: isOwner };
     // The owner is never left on read; anyone else is past the cap.
     if (isOwner) return answer("normal");
     return roll(i.rand) < YAWN_ODDS ? react("🥱") : skip("roast-cap");
   }
   if (s.greeting) return { act: "greet", word: s.greeting };
+  // "hey there merryman", "thanks merryman!": small talk gets small talk,
+  // never a "good question" to a line that asked nothing.
+  if (s.smallTalk) return { act: "smalltalk", what: s.smallTalk };
   return answer("normal");
+}
+
+/** This person already had ROAST_CAP roast exchanges inside the window. */
+function roastCapped(person: TgPerson | undefined, now: number): boolean {
+  return inWindow(person?.roasts, now, ROAST_WINDOW_MS, ROAST_CAP);
 }
 
 function whenNotAddressed(i: PaceInput, person: TgPerson | undefined, earlier: readonly TgLine[], afterOwn: boolean): PaceDecision {
   const { room, line, signals: s, nowMs: now, rand } = i;
+  // "stupid bot lol" right after its own line, not threaded to it, is still
+  // at it: roast back like an addressed insult, under the same per-person
+  // cap. Past the cap it just stays out; nobody called it, so no 🥱 either.
+  // Only an insult that names a bot: "you idiot" there may be for whoever
+  // it just answered.
+  if (afterOwn && (s.insult === "insult" || s.insult === "tease") && insultAtBot(line.text)) {
+    return roastCapped(person, now) ? skip("roast-cap") : { act: "roast", owner: i.isOwner };
+  }
   // Insults between other people, and steering or private asks not aimed at
   // it, are nobody's invitation. A shush aimed at someone else likewise.
   if (s.insult === "hateful" || s.insult === "insult") return skip("not-ours");

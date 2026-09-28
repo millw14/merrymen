@@ -18,20 +18,25 @@ import { fileURLToPath } from "node:url";
 
 import {
   addressedHow,
+  addressedSmallTalk,
+  asksHowItIs,
   extractCas,
   extractCashtags,
   greetingOf,
   hasForeignMint,
   hatefulKey,
+  insultAtBot,
   insultLevel,
   isBotQuestion,
   isDistress,
   isInjection,
   isPrivateAsk,
+  isQuestionShaped,
   isQuestionToRoom,
   isShush,
   isTradeTalk,
   lineMood,
+  selfNamesOf,
   type BotSelf,
 } from "./detect";
 
@@ -262,6 +267,16 @@ describe("addressedHow", () => {
     it(`name: ${label}`, () => assert.equal(addressedHow({ text }, { ...self, name }), want));
   }
 
+  it("answers to an alias like its name: the display name the room sees may not be its soul name", () => {
+    const shown: BotSelf = { ...self, aliases: ["Robinhoodie", "Sir Loxley"] };
+    assert.equal(addressedHow({ text: "robinhoodie what's up" }, shown), "name");
+    assert.equal(addressedHow({ text: "sir loxley, thoughts?" }, shown), "name");
+    assert.equal(addressedHow({ text: "pine what's up" }, shown), "name", "the soul name still counts");
+    assert.equal(addressedHow({ text: "robinhoodie's owner said hi" }, shown), null, "an alias's owner label is the owner");
+    assert.equal(addressedHow({ text: "robinhoodie what's up" }, self), null, "no alias, no call");
+    assert.equal(addressedHow({ text: "robinhoodie" }, { ...self, aliases: [7 as never, "", "  "] }), null, "junk aliases are ignored");
+  });
+
   it("is not addressed by an empty line or an empty name", () => {
     assert.equal(addressedHow({ text: "" }, self), null);
     assert.equal(addressedHow({ text: "pine" }, { ...self, name: "" }), null);
@@ -417,6 +432,65 @@ describe("insultLevel: insult, tease, none", () => {
   for (const t of none) it(`none: ${JSON.stringify(t)}`, () => assert.equal(insultLevel(t), "none"));
 });
 
+describe("insultLevel: the bot in the third person, and by its own names", () => {
+  // Said about it rather than to it: "merryman is trash" was read as nothing,
+  // so it got a normal answer (or "fair point") instead of a roast.
+  const third = [
+    "merryman is trash", "merryman sucks", "merryman is an idiot", "merryman is a clown", "merryman is the worst",
+    "bot is useless", "ai sucks", "robot is so dumb", "the agent is useless", "lol merryman stinks",
+  ];
+  for (const t of third) it(`insult: ${t}`, () => assert.equal(insultLevel(t), "insult"));
+
+  // A bot word that is somebody else's, or an everyday noun, is not the bot.
+  const notIt = ["my bot is trash", "slot machine sucks", "that bot sucks", "a bot is only as good as its data", "his agent is useless"];
+  for (const t of notIt) it(`none: ${t}`, () => assert.equal(insultLevel(t), "none"));
+
+  const self: BotSelf = { id: 777, username: "PineBot", name: "Pine Heron", aliases: ["Robinhoodie"] };
+  const names = selfNamesOf(self);
+  const named: Array<[string, "insult" | "tease" | "none"]> = [
+    ["pine is trash", "insult"],
+    ["pine heron sucks", "insult"],
+    ["stupid pine", "insult"],
+    ["@pinebot is useless", "insult"],
+    ["robinhoodie is a clown", "insult"],
+    // a tease needs the bot word itself: "ok pine" / "sure pine" is agreement, not "ok bot"
+    ["ok pine", "none"],
+    ["sure pine, will look", "none"],
+    ["pine's owner is trash", "none"],
+    ["pine what do you think", "none"],
+  ];
+  for (const [t, want] of named) {
+    it(`with its names, ${want}: ${t}`, () => assert.equal(insultLevel(t, names), want));
+  }
+  it("an everyday-word name stays a word: \"Red Fox\" is not roasted over \"stupid red candles\"", () => {
+    const fox = selfNamesOf({ id: 1, username: "foxbot", name: "Red Fox", aliases: ["Robin"] });
+    assert.equal(insultLevel("stupid red candles everywhere", fox), "none");
+    assert.equal(insultLevel("stupid robin hood chain", fox), "none");
+    assert.equal(insultLevel("red fox is trash", fox), "insult", "the full name still calls it");
+    assert.equal(insultLevel("@foxbot sucks", fox), "insult");
+  });
+
+  it("without its names a soul name is just a word", () => {
+    for (const t of ["pine is trash", "stupid pine", "@pinebot is useless"]) assert.equal(insultLevel(t), "none", t);
+  });
+  it("its names never soften a line: hateful stays hateful, an insult to you stays one", () => {
+    assert.equal(insultLevel("pine go back to your country", names), "hateful");
+    assert.equal(insultLevel("pine you idiot", names), "insult");
+  });
+  it("selfNamesOf gives the name, the aliases and the @handle", () => {
+    assert.deepEqual(names, ["Pine Heron", "Robinhoodie", "@PineBot"]);
+    assert.deepEqual(selfNamesOf({ id: 1, username: null, name: "" }), []);
+    assert.deepEqual(selfNamesOf(null), []);
+  });
+});
+
+describe("insultAtBot: an insult whose target is a bot word", () => {
+  const yes = ["stupid bot lol", "this ai is trash", "clanker", "merryman sucks", "dumb ass robot", "bot moment", "ok bot", "sure bot", "shut up bot"];
+  const no = ["you idiot", "ur trash", "this coin is trash", "that dev is an idiot", "lol", "", "my bot sucks"];
+  for (const t of yes) it(`at a bot: ${t}`, () => assert.equal(insultAtBot(t), true));
+  for (const t of no) it(`not at a bot: ${JSON.stringify(t)}`, () => assert.equal(insultAtBot(t), false));
+});
+
 describe("hatefulKey", () => {
   it("is two base-36 hashes", () => assert.match(hatefulKey("hello"), /^[0-9a-z]+\.[0-9a-z]+$/));
   it("normalises leetspeak, case, accents and repeated letters the way a typed token is", () => {
@@ -464,6 +538,8 @@ describe("isPrivateAsk", () => {
     "what's your pnl", "your p&l?", "how big is your bag", "portfolio size?", "who's your owner", "who owns you",
     "where does your owner live", "what's your owner's name", "your owner's wallet?", "what model are you",
     "which llm is this", "dox your owner", "how's your portfolio", "show me your pnl", "flex your portfolio",
+    // how much it would put in, in any unit: a size, whatever it is priced in
+    "@pine how much sol would you ape into this?", "how much would you put in", "how much eth do you have",
   ];
   const no = [
     "what are you holding?", "what do you think of this coin", "nice wallet", "my wallet is empty", "how much is eth",
@@ -471,6 +547,67 @@ describe("isPrivateAsk", () => {
   ];
   for (const t of yes) it(`private: ${t}`, () => assert.equal(isPrivateAsk(t), true));
   for (const t of no) it(`not private: ${JSON.stringify(t)}`, () => assert.equal(isPrivateAsk(t), false));
+});
+
+describe("addressedSmallTalk", () => {
+  const self: BotSelf = { id: 777, username: "PineBot", name: "Pine Heron", aliases: ["Merryman", "Will Scarlet"] };
+  const names = selfNamesOf(self);
+  const cases: Array<[string, ReturnType<typeof addressedSmallTalk>]> = [
+    // what was answered "good question, no idea" before
+    ["Hey there Merryman…", "hail"],
+    ["hi merryman 👋", "hail"],
+    ["thanks merryman!", "thanks"],
+    ["merryman gm", "gm"],
+    ["@pinebot hi", "hail"],
+    ["@PineBot hey", "hail"],
+    ["@pinebot helloooo", "hail"],
+    ["yo pine", "hail"],
+    ["hey will", "hail"],
+    ["pine heron, you there?", "hail"],
+    ["hey there, how are you doing merryman", "hail"],
+    ["@pinebot", "hail"],
+    ["merryman?", "hail"],
+    ["ty pine", "thanks"],
+    ["thank you so much pine", "thanks"],
+    ["appreciate it merryman 🙏", "thanks"],
+    ["good morning merryman", "gm"],
+    ["gn merryman, sleep well", "gn"],
+    // a message, not small talk
+    ["hey merryman what do you think of pepe", null],
+    ["@pinebot thoughts?", null],
+    ["thanks, bought it", null],
+    ["merryman lol", null],
+    ["@pinebot answer me", null],
+    ["hey pine are you a bot", null],
+    ["hi merryman hi merryman hi hi hi hi hi", null],
+    ["", null],
+    ["👋", null],
+  ];
+  for (const [t, want] of cases) it(`${JSON.stringify(t)} → ${want}`, () => assert.equal(addressedSmallTalk(t, names), want));
+
+  it("without its names, a name is a word that makes the line a message", () => {
+    assert.equal(addressedSmallTalk("yo pine"), null);
+    assert.equal(addressedSmallTalk("hi merryman 👋"), "hail", "merryman is always a name for it");
+    assert.equal(addressedSmallTalk(5 as never), null);
+  });
+});
+
+describe("asksHowItIs", () => {
+  const yes = ["hey merryman how are you", "@pinebot you there?", "sup pine", "what's up merryman", "how's it going", "wyd"];
+  const no = ["hi merryman 👋", "hey there", "thanks", "gm", ""];
+  for (const t of yes) it(`asks: ${t}`, () => assert.equal(asksHowItIs(t), true));
+  for (const t of no) it(`does not ask: ${JSON.stringify(t)}`, () => assert.equal(asksHowItIs(t), false));
+});
+
+describe("isQuestionShaped", () => {
+  const names = ["Pine Heron", "@PineBot"];
+  const yes = [
+    "@pinebot thoughts?", "merryman what do you think", "pine heron why is it dumping", "lol what", "ok so why",
+    "should i buy this", "is it any good", "@pinebot thoughts", "robin what do you think", "do you like frogs",
+  ];
+  const no = ["i know what you did", "@pinebot you're cool", "pine is cooking today", "merryman lol", "@pinebot one", "", "hey"];
+  for (const t of yes) it(`question: ${t}`, () => assert.equal(isQuestionShaped(t, names), true));
+  for (const t of no) it(`not a question: ${JSON.stringify(t)}`, () => assert.equal(isQuestionShaped(t, names), false));
 });
 
 describe("isInjection", () => {

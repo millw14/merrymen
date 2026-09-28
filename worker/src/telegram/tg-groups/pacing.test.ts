@@ -422,6 +422,34 @@ describe("decide: addressed", () => {
     const r = room({ lines: liveLines(), people: [person(ALICE, { greetedDay: TODAY })] });
     assert.deepEqual(decide(input({ room: r, addressed: "name", signals: { greeting: "gn" } })), { act: "greet", word: "gn" });
   });
+
+  it("answers small talk with small talk, not a normal answer (\"hi merryman 👋\" is not a question)", () => {
+    for (const what of ["hail", "thanks", "gm", "gn"] as const) {
+      assert.deepEqual(decide(input({ addressed: "mention", signals: { smallTalk: what } })), { act: "smalltalk", what });
+    }
+    // Without a model too: it is a template either way.
+    assert.deepEqual(decide(input({ addressed: "name", hasModel: false, signals: { smallTalk: "hail" } })), { act: "smalltalk", what: "hail" });
+    // No small-talk reading (a caller that does not pass one): the normal answer, as before.
+    assert.deepEqual(decide(input({ addressed: "mention", signals: { smallTalk: null } })), { act: "answer", mood: "normal" });
+  });
+
+  it("small talk comes after everything that says more: hateful, honesty, privacy, a roast, a greeting", () => {
+    const talk = (signals: Partial<Signals>) => decide(input({ addressed: "mention", signals: { smallTalk: "hail", ...signals } }));
+    assert.deepEqual(talk({ insult: "hateful" }), { act: "react", emoji: "🤡" });
+    assert.deepEqual(talk({ botQuestion: true }), { act: "answer", mood: "bot-question" });
+    assert.deepEqual(talk({ privateAsk: true }), { act: "answer", mood: "private-ask" });
+    assert.deepEqual(talk({ injection: true }), { act: "answer", mood: "injection" });
+    assert.deepEqual(talk({ insult: "insult" }), { act: "roast", owner: false });
+    assert.deepEqual(talk({ greeting: "gm" }), { act: "greet", word: "gm" });
+  });
+
+  it("small talk still keeps the flood and shush rules, and is never said unaddressed", () => {
+    const flooded = room({ lines: liveLines(), people: [person(ALICE, { answers: { count: 3, sinceMs: NOW - MIN } })] });
+    assert.deepEqual(decide(input({ room: flooded, addressed: "mention", signals: { smallTalk: "thanks" } })), { act: "skip", why: "flood" });
+    const shushed = room({ lines: liveLines(), shushedUntilMs: NOW + MIN });
+    assert.deepEqual(decide(input({ room: shushed, addressed: "mention", signals: { smallTalk: "hail" } })), { act: "skip", why: "shushed" });
+    assert.deepEqual(run(input({ signals: { smallTalk: "hail" } }), 0.9), { act: "skip", why: "roll" });
+  });
 });
 
 // ─── decide: not addressed ─────────────────────────────────────────────────
@@ -453,6 +481,36 @@ describe("decide: other people's business", () => {
 
   it("lets a tease between others through to the ordinary rules", () => {
     assert.deepEqual(run(input({ signals: { insult: "tease" } }), 0.01), { act: "ambient", topic: "banter" });
+  });
+});
+
+describe("decide: an insult at a bot right after its own line", () => {
+  // It said "nah i'll pass"; Bob answers "stupid bot lol" without replying to
+  // it. That is at it, and used to be skipped as somebody else's fight.
+  const afterOwn = () => room({ lines: [...liveLines(), own("nah i'll pass", MIN)] });
+
+  it("roasts back, without rolling, affectionately for the owner", () => {
+    const line = mk(BOB, "stupid bot lol", 0);
+    assert.deepEqual(decide(input({ room: afterOwn(), line, signals: { insult: "insult" } })), { act: "roast", owner: false });
+    const ownerLine = mk(OWNER, "ok bot", 0);
+    assert.deepEqual(decide(input({ room: afterOwn(), line: ownerLine, isOwner: true, signals: { insult: "tease" } })), { act: "roast", owner: true });
+  });
+
+  it("is held to the roast cap: past it, silence without a 🥱 roll", () => {
+    const r = room({ lines: [...liveLines(), own("nah i'll pass", MIN)], people: [person(BOB, { roasts: { count: 2, sinceMs: NOW - 10 * MIN } })] });
+    assert.deepEqual(decide(input({ room: r, line: mk(BOB, "this ai is trash", 0), signals: { insult: "insult" } })), { act: "skip", why: "roast-cap" });
+  });
+
+  it("needs a bot word: \"you idiot\" after its line may be for whoever it answered", () => {
+    assert.deepEqual(decide(input({ room: afterOwn(), line: mk(BOB, "you idiot", 0), signals: { insult: "insult" } })), { act: "skip", why: "not-ours" });
+  });
+
+  it("needs its line to be the newest and recent; a hateful one is never mirrored", () => {
+    const old = room({ lines: [...liveLines(), own("nah i'll pass", 10 * MIN)] });
+    assert.deepEqual(decide(input({ room: old, line: mk(BOB, "stupid bot lol", 0), signals: { insult: "insult" } })), { act: "skip", why: "not-ours" });
+    const talkedOver = room({ lines: [own("nah i'll pass", 2 * MIN), mk(CAROL, "lol", MIN)] });
+    assert.deepEqual(decide(input({ room: talkedOver, line: mk(BOB, "stupid bot lol", 0), signals: { insult: "insult" } })), { act: "skip", why: "not-ours" });
+    assert.deepEqual(decide(input({ room: afterOwn(), line: mk(BOB, "stupid bot lol", 0), signals: { insult: "hateful" } })), { act: "skip", why: "not-ours" });
   });
 });
 

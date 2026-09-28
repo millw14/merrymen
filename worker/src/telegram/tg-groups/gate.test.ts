@@ -665,8 +665,18 @@ describe("hateful: protected traits beside an insult", () => {
     ["banter", "ｃｈｉｎｅｓｅ devs are trash"],
     ["banter", "chinese​ devs are trash"],
     ["banter", "christian you're so dumb", { names: ["Christian"] }],
+    // any trait used as the insult, not only one
+    ["roast", "that's so autistic"],
+    ["roast", "acting all disabled lol"],
+    ["roast", "sounds jewish"],
+    ["roast", "kinda deaf tbh"],
+    ["roast", "that's really trans of you"],
   ]);
   passes([
+    ["roast", "that's so cool"],
+    ["banter", "sounds good"],
+    ["banter", "real talk"],
+    ["banter", "kinda wild ngl"],
     ["banter", "gm to the aussies"],
     ["banter", "chinese new year vibes"],
     ["banter", "black candles everywhere, rough chart"],
@@ -693,9 +703,19 @@ describe("selfharm", () => {
     ["roast", "nobody would miss you"],
     ["banter", "ｋｙｓ"],
     ["banter", "kіll yourself"],
+    ["roast", "you're better off dead"],
+    ["roast", "just end it"],
+    ["roast", "just end it all lol"],
+    ["roast", "go play in traffic"],
+    ["roast", "go play in the traffic"],
+    ["roast", "walk into the highway"],
+    ["roast", "uninstall life"],
+    ["roast", "uninstall yourself"],
   ]);
   passes([
     ["kind", "please don't hurt yourself"],
+    ["banter", "the traffic in here is wild"],
+    ["banter", "uninstall that app lol"],
     ["banter", "this chart is killing me"],
     ["banter", "keys to the city"],
   ]);
@@ -717,6 +737,10 @@ describe("threat", () => {
     ["roast", "you're dead"],
     ["roast", "hope you die"],
     ["roast", "i have your address"],
+    ["roast", "i'm coming to your house"],
+    ["roast", "coming to ur place tonight"],
+    ["roast", "see you outside"],
+    ["roast", "see u outside lol"],
   ]);
   passes([
     ["roast", "who hurt you lol"],
@@ -959,6 +983,23 @@ describe("advice", () => {
     ["fade", "grab some now"],
     ["fade", "sell it"],
     ["banter", "last chance lol"],
+    // "i bought, you should too"
+    ["buy", "grabbed a little on paper, you should too", { paper: true }],
+    ["buy", "grabbed a little, you should too 🤝", { paper: false }],
+    ["buy", "grabbed a little, get some", { paper: false }],
+    ["buy", "ok grabbed a little, join me", { paper: false }],
+    ["buy", "grabbed some, u gotta too", { paper: false }],
+    ["coin", "ooh, get in"],
+    ["fade", "nah, but y'all should too if you want"],
+    ["answer", "come ape"],
+    ["banter", "ape with me"],
+  ]);
+  passes([
+    // outside a coin line these are invitations and kindness, not advice
+    ["banter", "join us for gm"],
+    ["kind", "go easy on yourself, get some rest"],
+    ["banter", "lol you should too"],
+    ["buy", "grabbed a little, let's see", { paper: false }],
   ]);
   passes([
     ["fade", "i'd pass"],
@@ -1115,8 +1156,19 @@ describe("human", () => {
     ["answer", "i'm 30 years old"],
     ["answer", "ｉ'ｍ ｈｕｍａｎ"],
     ["answer", "i'm hυman"],
+    // short denials with no "i'm" to hang on
+    ["answer", "nope, real person"],
+    ["answer", "nah, real human"],
+    ["answer", "no, i'm real"],
+    ["answer", "i'm real."],
+    ["answer", "nah, just a guy who trades"],
+    ["answer", "just a normal guy lol"],
+    ["answer", "flesh and bone here"],
   ]);
   passes([
+    ["answer", "yeah i'm an ai, not a real person"],
+    ["answer", "i'm real curious about this one"],
+    ["roast", "you're just a guy who buys tops"],
     ["answer", "yeah, i'm an AI agent, i trade for mike"],
     ["answer", "yeah i'm a bot lol"],
     ["answer", "yeah i'm an ai, not a person lol"],
@@ -1217,6 +1269,18 @@ describe("names may be said, never @-tagged, and never loosen the clauses that m
     assert.equal(reason("ape in", { kind: "fade", names: ["ape in"] }), "advice");
     withHate("gloomwisp", () => assert.equal(reason("gloomwisp lol", { names: ["gloomwisp"] }), "hateful"));
   });
+  it("a name that holds a money unit keeps the unit in: 'Sol' or 'Bucks' never hides '3 sol'", () => {
+    assert.equal(reason("prob like 2 sol lol", { kind: "answer", names: ["Sol"] }), "money");
+    assert.equal(reason("sol, a couple bucks tops", { kind: "answer", names: ["Sol", "Bucks"] }), "money");
+    assert.equal(reason("like 3 usdc", { kind: "banter", names: ["USDC"] }), "money");
+    assert.equal(reason("20 rand lol", { kind: "banter", names: ["Rand Paul"] }), "money");
+    assert.equal(reason("prob like 2 sol lol", { kind: "answer", agentName: "Sol", names: [] }), "money");
+    // …and the name alone is still sayable, and a unit inside a longer word is no unit.
+    assert.equal(reason("sol lol", { kind: "answer", names: ["Sol"] }), "ok");
+    assert.equal(reason("solace99 lol", { kind: "coin", names: ["Solace99"] }), "ok");
+    assert.equal(reason("max99 lol", { kind: "coin", names: ["Max99"] }), "ok");
+  });
+
   it("names that are not strings, or too short to be names, are ignored", () => {
     assert.equal(reason("lol", { names: [7 as never, null as never, "", "a"] }), "ok");
     assert.equal(reason("a 3 hmm", { kind: "coin", names: ["a"] }), "figures");
