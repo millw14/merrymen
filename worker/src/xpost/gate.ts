@@ -30,6 +30,8 @@
  * HYGIENE IS NOT REPAIR. `tidyXPost` only undoes a model's wrapping: the
  * quotes it put round its answer, a "Name:" label, doubled spaces and line
  * breaks. The text the gates judge is the text that is stored and posted.
+ * The model talking ABOUT its answer — "Here's a casual post:", a note after
+ * a blank line, a sign-off — is not wrapping, and the draft is refused.
  *
  * WHAT THE VOCABULARY LISTS DELIBERATELY DO NOT DO: refuse ordinary casual
  * English. "can't", "honestly", "curve looked early", "on paper", "picked up",
@@ -117,6 +119,33 @@ export function tidyXPost(raw: unknown, agentName: string): string {
 
 /** The model's "nothing to say", however it decorated it. */
 const PASS = /^[^\p{L}\p{N}]*pass(?![\p{L}\p{N}_])/iu;
+
+/**
+ * THE MODEL TALKING ABOUT ITS ANSWER, not the answer: "Here's a casual
+ * post:", "Sure, here's one:", "Okay!", "(Note: kept it under the limit)",
+ * "let me know if you want another version", a "- Pine Stoat" sign-off.
+ * Refused, not repaired — cutting a preamble off is guessing where the post
+ * starts. A BLANK LINE in the raw answer is a note after the post (tidying
+ * would fold it in), and a DOUBLE QUOTE left after tidying is a quote that
+ * did not wrap the whole answer. Apostrophes stay: "can't" is a contraction.
+ * "here's the thing:", "note to self:" and "side note:" are how people post.
+ */
+const META_PREAMBLE =
+  /^(?:(?:sure|okay|ok|alright|absolutely|certainly|of course)[\s,!.:-]*)?(?:here'?s|here is|how about)\s+(?:a |an |one |my |the |your |another )?(?:[\w'-]+\s+){0,2}?(?:post|tweet|draft|version|attempt|option|one)\b/i;
+const META_ACK = /^(?:(?:sure|okay|ok|alright|absolutely|of course|got it)\s*[!:]|(?:certainly|understood|as requested)\b)/i;
+const META_NOTE = /\(\s*note\b|(?<!\b(?:side|quick|self)\s)\bnote\s*:|\blet me know\b|\banother version\b|\bas requested\b|\bhope (?:this|that) (?:works|helps)\b/i;
+
+function metaRefusal(raw: unknown, tidied: string, agentName: string): boolean {
+  if (typeof raw === "string" && /\n[ \t\r]*\n/.test(raw.trim())) return true;
+  if (META_PREAMBLE.test(tidied) || META_ACK.test(tidied) || META_NOTE.test(tidied)) return true;
+  if (/["“”]/.test(tidied)) return true;
+  if (agentName) {
+    const name = escapeRe(agentName);
+    if (new RegExp(`^${name}\\s+here\\s*:`, "i").test(tidied)) return true;
+    if (new RegExp(`[-—–~]\\s*${name}\\s*[.!]?\\s*\\p{Extended_Pictographic}?\\s*$`, "iu").test(tidied)) return true;
+  }
+  return false;
+}
 
 /**
  * ERRORS AND OPERATIONS. An owner's X account must never read like a status
@@ -569,7 +598,7 @@ function strings(list: unknown): string[] {
  * MAY THIS BE POSTED ON X? Tidy, then the base gate, then every X clause.
  * `ok` carries the exact text to store and post.
  *
- * Reason codes (stable, operator-only): empty · pass · too-short · too-long ·
+ * Reason codes (stable, operator-only): empty · pass · meta · too-short · too-long ·
  * handle · link · markup · emoji · exclaim · caps · ops · alert · hype · pnl ·
  * human-claim · coin-unsaid · paper-unsaid · mode-false · undisclosed · intro-no-trading ·
  * fleet-repeat · seed-echo — plus whatever the base gate says (has-digits,
@@ -580,6 +609,7 @@ export function admitXPost(raw: unknown, ctx: XGateCtx, baseGate: BaseGate): XVe
   const tidied = tidyXPost(raw, agentName);
   if (tidied === "") return refuse("empty");
   if (PASS.test(tidied)) return refuse("pass");
+  if (metaRefusal(raw, tidied, agentName)) return refuse("meta");
 
   const coins = strings(ctx.coins);
   const base = baseGate(tidied, {

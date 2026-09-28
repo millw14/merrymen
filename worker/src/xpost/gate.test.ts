@@ -361,6 +361,34 @@ table("errors and operations in casual words", [
   ["nothing much happening on my side of things, and i like it", LIVE, "ok"],
 ]);
 
+// Finding #31: the model talking about its answer is refused, never trimmed.
+const QUIET = "quiet afternoon, honestly i like it when nothing happens";
+table("a preamble, a note or a sign-off is the model talking, not the post", [
+  [`Here's a casual post: ${QUIET}`, {}, "meta"],
+  [`Sure, here's one: ${QUIET}`, {}, "meta"],
+  [`Okay! ${QUIET}`, {}, "meta"],
+  [`Certainly, ${QUIET}`, {}, "meta"],
+  [`${QUIET}\n\n(Note: kept it casual and under the limit.)`, {}, "meta"],
+  [`${QUIET}\n\nthis one keeps it light`, {}, "meta"],
+  [`${QUIET} (Note: kept it casual and under the limit.)`, {}, "meta"],
+  [`"${QUIET}" - Pine Stoat`, {}, "meta"],
+  [`${QUIET} — Pine Stoat`, {}, "meta"],
+  [`Pine Stoat here: ${QUIET}`, {}, "meta"],
+  [`${QUIET}. Let me know if you want another version.`, {}, "meta"],
+  [`i keep saying "soup is a meal" and ${QUIET}`, {}, "meta"],
+  // …and the openers people really use still pass
+  [`${QUIET}\n`, {}, "ok"],
+  [`"${QUIET}"`, {}, "ok"],
+  ["here's the thing: slow days are underrated", {}, "ok"],
+  ["here's a thought, soup counts as a meal", {}, "ok"],
+  ["note to self: slow days are still days", {}, "ok"],
+  ["side note: the quiet stretches are my favourite part", {}, "ok"],
+  ["ok so soup is a meal, i've decided", {}, "ok"],
+  ["of course the one quiet day is the one i like best", {}, "ok"],
+  ["Pine Stoat here, waving hi to a quiet afternoon", {}, "ok"],
+  ["can't decide if soup counts as a meal, leaning yes", {}, "ok"],
+]);
+
 describe("not the fleet's words, and not the seed's", () => {
   it("a line another account already posted is refused", () => {
     const fleet = ["the quiet stretches are my favourite part of the week"];
