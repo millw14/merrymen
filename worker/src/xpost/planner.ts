@@ -323,11 +323,15 @@ export function planPosts(input: PlanInput): PlanIntent[] {
     used.add(dedupeKey);
   }
 
-  // ONE CASUAL POST, at the account's own slot in the owner's afternoon, most days.
+  // ONE CASUAL POST, at the account's own slot in the owner's afternoon, most
+  // days. "One" is counted on the owner's local day as the zone reads NOW, not
+  // only by key: the key carries the day under whatever zone was known when it
+  // was written, so learning or changing the zone could otherwise give one
+  // local day two casual posts under two keys.
   const today = dayOf(now);
   const cKey = casualKey(tenant, today);
   const minutes = clock.localMinutes(tz, now);
-  if (!used.has(cKey) && minutes !== null) {
+  if (!used.has(cKey) && onDay(today, "casual") === 0 && minutes !== null) {
     const [start, end] = tz ? CASUAL_WINDOW_LOCAL : CASUAL_WINDOW_UTC;
     const h = hash32(`casual|${key(tenant)}|${today}`);
     const quiet = h % 10 < CASUAL_QUIET_DAYS_IN_TEN;

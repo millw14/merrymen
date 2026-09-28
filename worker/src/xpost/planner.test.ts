@@ -427,6 +427,24 @@ describe("one casual post at the account's own afternoon slot, most days", () =>
     assert.deepEqual(planPosts(input({ tenant, nowMs: now, perDay: 10, posts: far })), []);
   });
 
+  it("one casual post per owner-local day under the zone known now, whatever day its key was written under", () => {
+    const tenant = `0x${"0".repeat(39)}1`;
+    const tz = "Test/Plus2";
+    let day = DAY0;
+    let slot = firstPlanned(tenant, tz, day);
+    while (slot === null) {
+      day += 24 * HOUR;
+      slot = firstPlanned(tenant, tz, day);
+    }
+    const now = day + slot * MIN - 2 * HOUR; // the slot, local
+    assert.equal(kinds(planPosts(input({ tenant, tz, nowMs: now }))).includes("casual"), true);
+    // Posted this morning (local) while the zone was unknown: its key is
+    // yesterday's UTC day, so the key alone would allow a second one today.
+    const utcKeyed = post({ kind: "casual", status: "posted", dedupeKey: casualKey(tenant, "2000-01-01"), sentAtMs: day - 2 * HOUR + 30 * MIN });
+    assert.equal(clock.localDay(tz, utcKeyed.sentAtMs!), clock.localDay(tz, now), "the same local day");
+    assert.deepEqual(planPosts(input({ tenant, tz, nowMs: now, posts: [utcKeyed] })), []);
+  });
+
   it("a zone the clock cannot read gets no casual post rather than a guessed afternoon", () => {
     for (let m = 0; m < 24 * 60; m += 15) {
       assert.deepEqual(planPosts(input({ tz: "Not/AZone", nowMs: DAY0 + m * MIN })), []);
