@@ -64,6 +64,14 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (statusTimer.current) clearTimeout(statusTimer.current); }, []);
   const [errors, setErrors] = useState<string[]>([]);
+  /**
+   * THE BOT IS CLAIMED BY ANOTHER AGENT: what the server said, while the owner
+   * decides whether to move it here. Null when there is nothing to decide.
+   * The draft is kept as it was, so "Move it here" re-sends the same save.
+   */
+  const [botClaimed, setBotClaimed] = useState<string | null>(null);
+  /** The last save moved the bot here: nobody is linked to it here yet, so say so until the next save. */
+  const [botMoved, setBotMoved] = useState(false);
   // Telegram: booleans/allowlist can't ride the string `draft`, so track separately.
   /**
    * Is this the hosted service?
@@ -357,9 +365,12 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     setTokens(current.filter((t) => t.address.toLowerCase() !== address.toLowerCase()));
   }
 
-  async function save() {
+  /** `moveBot`: the owner answered "Move it here" to a bot another agent holds. */
+  async function save(opts: { moveBot?: boolean } = {}) {
     setStatus("saving…");
     setErrors([]);
+    setBotClaimed(null);
+    setBotMoved(false);
     // An unreadable field would be sent as typed and rejected, or — worse, if
     // it were ever blanked first — sent as "" and read as "clear to default".
     const unreadable = Object.entries(numError);
@@ -392,6 +403,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     if (appList !== null) body.telegramAppAllowlist = appList;
     if (agentEnabled !== null) body.telegramAgentEnabled = agentEnabled;
     if (agentAutoShell !== null) body.telegramAgentAutoShell = agentAutoShell;
+    if (opts.moveBot) body.moveBot = true;
     // Secrets: only send when the user typed something or hit clear ("").
     try {
       const res = await fetch("/api/settings", {
@@ -403,13 +415,22 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
         // a form read signed out, which no session is.
         body: JSON.stringify(view && view.owner !== null ? { ...body, owner: view.owner } : body),
       });
-      const json = (await res.json()) as { ok?: boolean; errors?: string[] };
+      const json = (await res.json()) as { ok?: boolean; errors?: string[]; error?: string; botMoved?: boolean };
+      // ANOTHER AGENT HOLDS THIS BOT. Not an error in the form: a question for
+      // the owner, asked beside the button they pressed. Nothing was saved.
+      if (res.status === 409 && json.error === "bot_claimed") {
+        setBotClaimed(json.errors?.[0] ?? "This bot is already connected to another Merrymen agent.");
+        setStatus(null);
+        return;
+      }
       if (!res.ok) {
         setErrors(json.errors ?? ["save failed"]);
         setStatus(null);
         return;
       }
       setStatus("Changes saved");
+      // A moved bot answers here now, but nobody is linked to it here yet.
+      setBotMoved(json.botMoved === true);
       onSaved?.();
       setDraft({});
       setSymbols(null);
@@ -1934,6 +1955,23 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           <button className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…"}>
             {status ?? "Save changes"}
           </button>
+          {botClaimed && (
+            <div className="mm-note" role="alert">
+              <p style={{ marginTop: 0 }}>{botClaimed}</p>
+              <button className="mm-btn danger sm" onClick={() => void save({ moveBot: true })} disabled={status === "saving…"}>
+                Move it here
+              </button>{" "}
+              <button className="mm-btn sm" onClick={() => setBotClaimed(null)}>
+                Keep it there
+              </button>
+            </div>
+          )}
+          {botMoved && (
+            <p className="mm-note" role="status">
+              The bot answers this agent now, and has stopped answering the other one. Link your chat to it here: send it
+              /link with the code shown under Telegram once it appears.
+            </p>
+          )}
           {errors.length > 0 && (
             <div className="mm-danger mono">
               {errors.map((e, i) => (

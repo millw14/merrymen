@@ -409,7 +409,7 @@ describe("the orchestrator wiring", () => {
     const read = rec.indexOf("const holderClaims = await readHolderClaims();");
     const loop = rec.indexOf("for (const tenant of children.keys())", read);
     assert.ok(read > 0 && loop > read);
-    assert.match(rec, /writeSettingsForChild\(tenant as `0x\$\{string\}`, seenBotTokens, holderClaims\)/);
+    assert.match(rec, /writeSettingsForChild\(tenant as `0x\$\{string\}`, seenBots, holderClaims, botClaims\)/);
   });
 
   it("UNREADABLE CLAIMS KEEP THE WALLET WRITTEN LAST — and the rest of settings.json is still written", () => {

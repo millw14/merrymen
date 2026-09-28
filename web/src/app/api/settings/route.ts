@@ -32,6 +32,7 @@ import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { agentNameSave } from "@/lib/settings-agent-name";
 import { withoutEnergyReserve, withoutReserveBasket } from "@/lib/energy-reserve";
+import { botClaimForSave } from "@/lib/telegram-claims";
 
 export const dynamic = "force-dynamic";
 
@@ -335,6 +336,10 @@ export async function PUT(req: Request) {
   // never stored and never reported as an unknown key.
   const claimedOwner = (body as { owner?: unknown } | null)?.owner;
   if (body && typeof body === "object") delete (body as Record<string, unknown>).owner;
+  // "MOVE IT HERE", the owner's answer to a 409 bot_claimed (lib/telegram-claims.ts).
+  // Not a setting either, and taken off the same way. Only `true` moves.
+  const moveBot = (body as { moveBot?: unknown } | null)?.moveBot === true;
+  if (body && typeof body === "object") delete (body as Record<string, unknown>).moveBot;
 
   let tenant: `0x${string}` | null = null;
   if (isHostedMode()) {
@@ -770,11 +775,33 @@ export async function PUT(req: Request) {
 
   if (errors.length > 0) return NextResponse.json({ errors }, { status: 400 });
 
+  /**
+   * ONE BOT, ONE TENANT. A save carrying the Telegram token claims its bot
+   * first, so a bot another account holds is refused here, in words the owner
+   * can act on, rather than saved and then quietly never polled: the
+   * orchestrator hands a token only to the account its bot's claim names. The
+   * 409 names no account, and "Move it here" sends the same save back with
+   * `moveBot`, which getMe must confirm. Before the write, so a refusal writes
+   * nothing; undone if the write fails, so a claim never outlives a token that
+   * was not stored. See lib/telegram-claims.ts.
+   */
+  const botClaim = await botClaimForSave({ tenant, touched: touched.has("telegramBotToken"), next, moveBot });
+  if (botClaim && !botClaim.ok) return NextResponse.json(botClaim.body, { status: botClaim.status });
+
   if (tenant) {
     // Hosted: the tenant's own settings go to the per-tenant store (sealed at
     // rest), and the orchestrator hands the child worker a settings.json from it
     // within a reconcile tick.
-    await getSettingsStore().put(tenant, next);
+    try {
+      await getSettingsStore().put(tenant, next);
+    } catch (e) {
+      await botClaim?.undo().catch((u) => console.warn(`[settings] telegram bot claim not undone: ${u instanceof Error ? u.message : String(u)}`));
+      throw e;
+    }
+    // The bot this account left, if it left one: free for whoever takes it
+    // next. After the write, and not fatal: the save has landed, and a claim
+    // left behind is one the next owner's move resolves.
+    await botClaim?.settle().catch((e) => console.warn(`[settings] telegram bot claim not released: ${e instanceof Error ? e.message : String(e)}`));
   } else {
     await mkdir(DATA_DIR, { recursive: true });
     // settings.json holds plaintext API keys (bundler/Groq/Anthropic/Telegram/…) —
@@ -785,6 +812,9 @@ export async function PUT(req: Request) {
   return NextResponse.json({
     ok: true,
     appliesWithin: "one worker tick",
+    // The bot now answers here and nowhere else; its owner links it again
+    // with this agent's code.
+    ...(botClaim?.ok && botClaim.moved ? { botMoved: true } : {}),
     // Present only when something was dropped, so a caller can tell the
     // difference between 'saved' and 'saved, minus the field you cared about'.
     ...(ignored.length > 0 ? { ignored } : {}),

@@ -74,8 +74,11 @@ import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
-import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, SETTINGS_DEFAULTS, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
+import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
 import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
+import { botWillPoll, claimBot, claimGate, ensureBotClaims, readBotClaims, unclaimedBot } from "./telegram-claims";
+import { getMe as telegramGetMe } from "./telegram/api";
+import { tokenTagOf } from "./telegram/state";
 import { makePgDb, translateSchema, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
@@ -360,9 +363,10 @@ const CHILD_SECRET_STRIP = [
    * from any chat would bind to whichever child answered first: control of
    * one stranger's agent handed to another.
    *
-   * AND THE EXISTING GUARD WOULD NOT CATCH IT. `dedupeBotToken` compares the
-   * tokens in tenants' SETTINGS, so tokens arriving by env are invisible to
-   * it — the one collision it is built to prevent is the one it cannot see.
+   * AND THE EXISTING GUARD WOULD NOT CATCH IT. The bot claims (claimGate) are
+   * judged on the tokens in tenants' SETTINGS, so tokens arriving by env are
+   * invisible to them — the one collision they are built to prevent is the
+   * one they cannot see.
    *
    * Latent today: the variable is set nowhere in this repo and is absent from
    * the deployed environment. Stripped anyway, because the cost is one line
@@ -421,51 +425,11 @@ export function fleetHaltFile(): string {
 }
 
 /**
- * WILL THE PROCESS THESE SETTINGS ARE WRITTEN FOR POLL THE BOT? The child and
- * the hold process each resolve it as settings.ts does: the file's own
- * `telegramEnabled`, else MERRYMEN_TELEGRAM_ENABLED from the env they inherit
- * from this one (childEnv does not strip it), else the default, which is off;
- * and neither polls without a token.
+ * WILL THE PROCESS THESE SETTINGS ARE WRITTEN FOR POLL THE BOT? Lives beside
+ * the bot claims now (telegram-claims.ts), because only a tenant that will poll
+ * claims a bot; re-exported for the callers and tests that knew it here.
  */
-export function botWillPoll(settings: MerrymenSettings | null): boolean {
-  const token = settings?.telegramBotToken;
-  if (!settings || typeof token !== "string" || token.trim() === "") return false;
-  if (typeof settings.telegramEnabled === "boolean") return settings.telegramEnabled;
-  const env = process.env.MERRYMEN_TELEGRAM_ENABLED;
-  if (env !== undefined) return env === "1" || env.toLowerCase() === "true";
-  return SETTINGS_DEFAULTS.telegramEnabled;
-}
-
-/**
- * TELEGRAM BOT COLLISION GUARD. A Telegram bot accepts exactly ONE long-poll
- * getUpdates loop per token — two children polling the same token would steal
- * each other's updates, and one tenant's bot could surface another's replies.
- * Each hosted tenant brings their OWN bot; if two ever share a token, only the
- * first (by the caller's iteration order) keeps it and the rest get Telegram
- * stripped rather than clobbering. Mutates `settings` and returns true when it
- * stripped a duplicate.
- *
- * ONLY A TENANT THAT WILL POLL CLAIMS. A token saved with Telegram switched off
- * is a token nobody reads updates for, and it used to claim the bot all the
- * same: whichever tenant came first in the pass kept it, so a login with the
- * bot switched off could strip the bot from the one login that had it on, and
- * nobody polled it at all. That is the silence this branch exists to end, and
- * the settings refresh walks held tenants first, many of them with no bot on.
- * A tenant that does not poll keeps its token in its file, as the first tenant
- * of a pass always did, and claims nothing; the pass its owner switches
- * Telegram on, it is judged like any other, in the same write that hands its
- * process the switch.
- */
-export function dedupeBotToken(settings: MerrymenSettings, seen: Set<string>): boolean {
-  const token = settings.telegramBotToken;
-  if (!token || !botWillPoll(settings)) return false;
-  if (seen.has(token)) {
-    delete settings.telegramBotToken;
-    return true;
-  }
-  seen.add(token);
-  return false;
-}
+export { botWillPoll };
 
 /**
  * A child's env: the orchestrator's env, minus the child-secret keys, plus this
@@ -1157,13 +1121,152 @@ async function readHolderClaims(): Promise<HolderClaimsRead> {
   }
 }
 
+/** bot id → the account holding its claim; null when there are none to read. */
+type BotClaimsRead = Map<string, string> | null;
+
+/** Test seam: the database the bot claims are kept in, in place of DATABASE_URL's. */
+let botClaimsDbForTest: Db | null = null;
+export function setBotClaimsDbForTest(db: Db | null): void {
+  botClaimsDbForTest = db;
+}
+
+/** The shared database holding the bot claims, with the table made; null with no shared database. */
+async function botClaimsDb(): Promise<Db | null> {
+  const url = process.env.DATABASE_URL;
+  const db = botClaimsDbForTest ?? (url ? await makePgDb(url) : null);
+  if (db) await ensureBotClaims(db);
+  return db;
+}
+
+/**
+ * EVERY BOT CLAIM, READ ONCE FOR THE WHOLE PASS, as the holder claims are
+ * (readHolderClaims). Null when there is no shared database or it will not
+ * answer, and claimGate then de-duplicates among the pass's own tenants only,
+ * which is what the pass did before claims existed.
+ */
+async function readBotClaimsForPass(): Promise<BotClaimsRead> {
+  try {
+    const db = await botClaimsDb();
+    return db ? await readBotClaims(db) : null;
+  } catch (e) {
+    log(`telegram bot claims unreadable — this pass keeps one poller per bot among its own tenants only: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+/**
+ * getMe: the id of the bot `token` belongs to, as Telegram says it, or null
+ * (refused, revoked, unreachable). Bounded, and never throws (telegram/api.ts).
+ */
+async function botIdFromTelegram(token: string): Promise<string | null> {
+  const { bot } = await telegramGetMe({ token });
+  return bot ? String(bot.id) : null;
+}
+let confirmBotId = botIdFromTelegram;
+/** Test seam: what getMe answers, in place of Telegram; null puts Telegram back. */
+export function setBotConfirmForTest(fn: ((token: string) => Promise<string | null>) | null): void {
+  confirmBotId = fn ?? botIdFromTelegram;
+}
+
+/** How long a token Telegram would not confirm is left before it is asked about again. */
+const BOT_CONFIRM_RETRY_MS = 10 * 60_000;
+/** Per tenant, the token (by fingerprint) Telegram last would not confirm, and until when it is not asked again. */
+const botUnconfirmed = new Map<string, { tag: string; until: number }>();
+
+/**
+ * CLAIM A BOT NOBODY HAS CLAIMED YET FOR THIS TENANT — first one wins, and only
+ * once Telegram confirms the token is that bot's (claimBot says why) — and say
+ * who holds it now: this tenant, or one that got there first. Null when no
+ * claim was made; the tenant is then judged without one this pass.
+ *
+ * A token Telegram will not confirm is not asked about again for ten minutes:
+ * it is revoked, mistyped, or not a token at all, and every pass would
+ * otherwise spend a bot API call (and up to fifteen seconds) on it. Its
+ * process could not poll with it either, so going without a claim costs
+ * nobody an answer.
+ */
+async function backfillBotClaim(bot: string, tenant: `0x${string}`, token: string): Promise<string | null> {
+  const lc = tenant.toLowerCase();
+  const tag = tokenTagOf(token);
+  const refused = botUnconfirmed.get(lc);
+  if (refused && refused.tag === tag && Date.now() < refused.until) return null;
+  try {
+    const db = await botClaimsDb();
+    if (!db) return null;
+    const claim = await claimBot(db, bot, tenant, await confirmBotId(token), Date.now());
+    if (!claim) {
+      if (refused?.tag !== tag) log(`${tenant}: telegram bot ${bot} did not answer for its token (revoked or mistyped?) — not claimed; asked again in ${BOT_CONFIRM_RETRY_MS / 60_000} min`);
+      botUnconfirmed.set(lc, { tag, until: Date.now() + BOT_CONFIRM_RETRY_MS });
+      return null;
+    }
+    botUnconfirmed.delete(lc);
+    return claim.holder;
+  } catch (e) {
+    log(`${tenant}: telegram bot claim could not be recorded, tried again next pass: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
+/** The bot each tenant was last refused, so the refusal is logged once, not every pass. */
+const botRefusedLogged = new Map<string, string>();
+
+/**
+ * THE SETTINGS THIS TENANT'S PROCESS MAY HAVE, AS FAR AS ITS BOT GOES — the
+ * stored ones, or a copy without `telegramBotToken` when another tenant holds
+ * the bot's claim or already polls it this pass (claimGate, which says why
+ * each case is what it is).
+ *
+ * Asked on every path that writes a settings.json: a spawn (spawnChild, and
+ * through it a hold's spawnHolder and handHoldBack) and the refresh of held
+ * and trading tenants in reconcile. A spawn has no pass, so it reads the
+ * claims for itself, and only when there is a bot to judge: most tenants have
+ * none. A bot nobody has claimed yet — any token saved before claims existed,
+ * or while Telegram could not confirm it to the web — is claimed here for the
+ * first tenant that polls it with a token Telegram confirms, and the pass map
+ * learns the answer, so the rest of the pass is judged against the same claim.
+ *
+ * THE TOKEN IS STRIPPED FROM THE CHILD'S FILE, NOT FROM THE STORE. The owner's
+ * saved settings are theirs; the web tells them the bot is claimed (409
+ * bot_claimed) and offers to move it, and a move is what gives it back.
+ */
+async function gateBot(
+  tenant: `0x${string}`,
+  settings: MerrymenSettings,
+  seen: Map<string, string> | undefined,
+  claimsRead: BotClaimsRead | undefined,
+): Promise<MerrymenSettings> {
+  const claims = claimsRead !== undefined ? claimsRead : botWillPoll(settings) ? await readBotClaimsForPass() : null;
+  // A bot no claim names yet is claimed BEFORE it is judged, so the pass's own
+  // record never decides a bot a confirmed claim could have: see claimGate.
+  const unclaimed = unclaimedBot(settings, claims);
+  if (unclaimed && claims) {
+    const holder = await backfillBotClaim(unclaimed, tenant, settings.telegramBotToken!);
+    if (holder) claims.set(unclaimed, holder);
+  }
+  const gate = claimGate(settings, tenant, claims, seen);
+  const lc = tenant.toLowerCase();
+  const verdict = gate.verdict;
+  if (verdict.kind === "strip") {
+    if (botRefusedLogged.get(lc) !== verdict.bot) {
+      botRefusedLogged.set(lc, verdict.bot);
+      const why = verdict.by === "claim" ? "the bot's claim names another account" : "another tenant polls it this pass";
+      log(`${tenant}: telegram bot token already claimed by another tenant — telegram disabled for this child (bot ${verdict.bot}: ${why})`);
+    }
+  } else {
+    botRefusedLogged.delete(lc);
+  }
+  if (verdict.kind === "keep") seen?.set(verdict.bot, lc);
+  return gate.settings;
+}
+
 async function writeSettingsForChild(
   tenant: `0x${string}`,
-  seenBotTokens?: Set<string>,
+  seenBots?: Map<string, string>,
   claimsRead?: HolderClaimsRead,
+  botClaimsRead?: BotClaimsRead,
 ): Promise<MerrymenSettings | null> {
   try {
-    const settings = await getSettingsStore().get(tenant);
+    let settings = await getSettingsStore().get(tenant);
     // THE UNIVERSE IS RECORDED EVEN WHEN NOTHING WAS SAVED, and that is the fix.
     //
     // This used to be set below, AFTER the early return — so a tenant who never
@@ -1225,9 +1328,10 @@ async function writeSettingsForChild(
      */
     if (!settings) writeChildSettings(tenant, childSettingsFor(null, holder));
     if (!settings) return null;
-    if (seenBotTokens && settings.telegramBotToken && dedupeBotToken(settings, seenBotTokens)) {
-      log(`${tenant}: telegram bot token already claimed by another tenant — telegram disabled for this child`);
-    }
+    // ONE BOT, ONE TENANT, before the file is written: on a spawn as on a
+    // refresh, so a second login's child never starts with a bot it would
+    // lose a pass later, having polled it in between. See gateBot.
+    settings = await gateBot(tenant, settings, seenBots, botClaimsRead);
     /**
      * WHOSE $MERRYMEN BALANCE DECIDES THE CIRCLE TIER — settled here, by the
      * only process that knows the answer.
@@ -2054,7 +2158,7 @@ async function heldResetsAsked(accounts: readonly string[]): Promise<Map<string,
 /**
  * Would these stored settings have a bot for a hold process to answer? The
  * hold process's own rule (botWillPoll), and so also the rule for whether a
- * held tenant's token counts as taken in the bot de-duplication.
+ * held tenant claims its bot (claimGate).
  */
 function holderBotReady(settings: MerrymenSettings | null): boolean {
   return botWillPoll(settings);
@@ -2728,18 +2832,22 @@ export async function reconcile(): Promise<void> {
   }
   // Refresh every running child's settings.json so a tenant's config change
   // reaches it (the worker re-reads settings.json each tick). Cheap: one small
-  // file per tenant, and unchanged content is a harmless rewrite. The shared
-  // seenBotTokens set de-duplicates Telegram bots across the fleet (see the guard
-  // in writeSettingsForChild).
-  const seenBotTokens = new Set<string>();
+  // file per tenant, and unchanged content is a harmless rewrite. Each bot goes
+  // to the tenant its claim names, and the pass's own seenBots map (bot id →
+  // the tenant polling it) keeps it to one poller whatever the claims say (see
+  // gateBot in writeSettingsForChild).
+  const seenBots = new Map<string, string>();
   // Every holder claim in one read for the whole fleet, not one per tenant.
   const holderClaims = await readHolderClaims();
+  // And every bot claim, the same way.
+  const botClaims = await readBotClaimsForPass();
   // HELD TENANTS FIRST, and with the same refresh: a chat the owner removes on
   // the dashboard, or a token they change, must reach the hold process as it
   // would a worker, and a held tenant's bot token is as much in use as a
-  // trading one's, so the de-duplication below must see it. First, so that a
-  // tenant held since before another took up the same bot keeps answering it.
-  // (A held tenant with Telegram off claims nothing: see dedupeBotToken.)
+  // trading one's, so the claims must be asked about it. First, so that a bot
+  // nobody has claimed yet, shared by a held tenant and one that took it up
+  // since, is claimed for the tenant that was answering it.
+  // (A held tenant with Telegram off claims nothing: see claimGate.)
   const released: Holder[] = [];
   for (const [tenant, held] of [...holders]) {
     // NOT WANTED ANY MORE, and stood down below, this pass: its settings are
@@ -2747,7 +2855,7 @@ export async function reconcile(): Promise<void> {
     // hold process is started only to be killed a few lines later in a home
     // that is about to be wiped.
     if (!wanted.has(tenant)) continue;
-    const stored = await writeSettingsForChild(tenant as `0x${string}`, seenBotTokens, holderClaims);
+    const stored = await writeSettingsForChild(tenant as `0x${string}`, seenBots, holderClaims, botClaims);
     await refreshGrantForChild(tenant as `0x${string}`);
     if (holders.get(tenant) !== held || held.retrying) continue;
     /**
@@ -2778,7 +2886,7 @@ export async function reconcile(): Promise<void> {
     startHolderProcess(held);
   }
   for (const tenant of children.keys()) {
-    await writeSettingsForChild(tenant as `0x${string}`, seenBotTokens, holderClaims);
+    await writeSettingsForChild(tenant as `0x${string}`, seenBots, holderClaims, botClaims);
     // AND THEIR GRANT, for the same reason and on the same clock. Settings
     // reached a live agent in fifteen seconds while a new SIGNATURE reached it
     // only on a restart — so an owner who re-signed to cover a token watched
@@ -2789,9 +2897,11 @@ export async function reconcile(): Promise<void> {
     await retryEnergySeed(tenant as `0x${string}`);
   }
   // HELD TENANTS THE GATE NO LONGER HOLDS, handed back to trading. After the
-  // children's refresh and not inside the holders' loop: the worker each one
-  // becomes must not meet the children's loop this pass, where the bot token
-  // its own hold just claimed would be read as taken, and stripped from it.
+  // children's refresh and not inside the holders' loop, so the worker each
+  // one becomes is judged for its bot once, at its own spawn (gateBot), against
+  // the claim its hold made. (This once also kept its own hold's entry in the
+  // pass's de-duplication from reading its token as taken; seenBots names the
+  // tenant polling each bot now, so a tenant is never stripped by itself.)
   for (const held of released) {
     if (holders.get(held.tenant) !== held || held.retrying || !holdMayLeave(held.tenant)) continue;
     log(`${held.tenant}: practice mode is off, so trading is no longer held — handing the bot back to trading`);

@@ -163,7 +163,7 @@ describe("held tenants reach only the loops they belong in", () => {
     const refresh = loopsOver(rec, "holders").find((l) => /writeSettingsForChild/.test(l.statement.getText()));
     const childRefresh = loopsOver(rec, "children").find((l) => /writeSettingsForChild/.test(l.statement.getText()));
     assert.ok(refresh && childRefresh && refresh.getEnd() < childRefresh.getStart(), "held tenants' settings first, so the bot de-dupe sees their tokens");
-    assert.match(refresh.statement.getText(), /writeSettingsForChild\(tenant as `0x\$\{string\}`, seenBotTokens, holderClaims\)/);
+    assert.match(refresh.statement.getText(), /writeSettingsForChild\(tenant as `0x\$\{string\}`, seenBots, holderClaims, botClaims\)/);
   });
 
   it("EVERY STAND-DOWN STANDS A HOLD PROCESS DOWN TOO", () => {
