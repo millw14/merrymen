@@ -464,6 +464,31 @@ function recentCoins(f: AgentFacts): { label: string; paper: boolean }[] {
   return out.map(({ label, paper }) => ({ label, paper }));
 }
 
+/**
+ * WHAT A CASUAL POST IS HANDED — decided here, never left to the model.
+ * Offered a seed and "or, instead, how you trade" together, the local model
+ * mashed the two on twelve of fourteen trade-talk days. So a trade-talk day
+ * is how it trades and the coins it bought lately, and no seed; any other day
+ * is the seed, and no coin. An agent that is not trading, or has nothing to
+ * say about how it trades (no strategy, no habit, no coin), never has a
+ * trade-talk day. `habitSeed` draws which habit that day is handed, so the
+ * same line does not come back every trade-talk day. Exported for tests.
+ */
+export function casualInputs(
+  f: AgentFacts,
+  day: string,
+): { subject: string; seed: string; tradeTalk: boolean; recentCoins: { label: string; paper: boolean }[]; habitSeed: string } {
+  const habitSeed = `${f.tenant}|${day}`;
+  const coins = recentCoins(f);
+  const own = writerFacts(f, day, []);
+  const something = own.strategy !== null || own.flavour !== null || own.traits.length > 0 || coins.length > 0;
+  if (f.mode !== "idle" && something && tradeTalkDay(f.tenant, day)) {
+    return { subject: "how it trades", seed: "", tradeTalk: true, recentCoins: coins, habitSeed };
+  }
+  const seed = casualSeed(f.tenant, day);
+  return { subject: seed?.subject ?? "anything", seed: seed?.seed ?? "", tradeTalk: false, recentCoins: [], habitSeed };
+}
+
 /** Every way the post may name its coin: the label, and the clean ticker and name beside it. */
 function coinNames(label: string, c: { symbol: string | null; name: string | null }): string[] {
   const out = [label];
@@ -857,14 +882,13 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       // buying one coin the same hour do not say it the same way.
       prompt = buyPrompt({ ...facts, coin: intent.coin, paper: call.paper, bands: call.bands, ownWords: call.ownWords, glossSeed: `${account.tenant}|${call.decisionId}` });
     } else {
-      const seed = casualSeed(f.tenant, intent.day);
-      const tradeTalk = tradeTalkDay(f.tenant, intent.day);
-      // No coin is offered, or vouched to the gate, on a day that is not about trading.
-      const coins = tradeTalk ? recentCoins(f) : [];
-      gate.coins = coins.map((c) => c.label);
-      gate.paperCoins = coins.filter((c) => c.paper).map((c) => c.label);
-      gate.seeds = seed ? [seed.seed] : [];
-      prompt = casualPrompt({ ...facts, subject: seed?.subject ?? "anything", seed: seed?.seed ?? "", tradeTalk, recentCoins: coins });
+      // A trade-talk day is handed no seed, any other day no coin: neither is
+      // offered, or vouched to the gate, on the day it is not about.
+      const casual = casualInputs(f, intent.day);
+      gate.coins = casual.recentCoins.map((c) => c.label);
+      gate.paperCoins = casual.recentCoins.filter((c) => c.paper).map((c) => c.label);
+      gate.seeds = casual.seed ? [casual.seed] : [];
+      prompt = casualPrompt({ ...facts, ...casual });
     }
 
     let body: string | null = null;

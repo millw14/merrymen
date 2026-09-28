@@ -184,12 +184,14 @@ describe("what each prompt asks for", () => {
     assert.match(buyPrompt(BUY).prompt, /ONE thing/);
   });
 
-  it("a casual post gets a seed to riff on, not to copy, and the paper rule for its coins", () => {
-    const p = casualPrompt(CASUAL).prompt;
+  it("a casual post gets a seed to riff on, not to copy, that its readers never saw; a trade-talk day gets the paper rule for its coins", () => {
+    const p = casualPrompt({ ...CASUAL, tradeTalk: false }).prompt;
     assert.match(p, /«soup is a perfectly good meal in any weather»/);
     assert.match(p, /Do not restate it: take it somewhere new with a thought of your own, and use none of its words/);
-    assert.match(p, /«pepe», «Tesla»/);
-    assert.match(p, /say it was on paper/);
+    assert.match(p, /Nobody who reads your post will have seen that line, so the post must make sense on its own: do not answer it, agree with it or point back at it\./);
+    const talk = casualPrompt(CASUAL).prompt;
+    assert.match(talk, /«pepe», «Tesla»/);
+    assert.match(talk, /say it was on paper/);
     assert.doesNotMatch(casualPrompt({ ...CASUAL, recentCoins: [{ label: "Tesla", paper: false }] }).prompt, /on paper/);
   });
 });
@@ -295,14 +297,34 @@ describe("a casual post is mostly not about trading", () => {
     }
   });
 
-  it("a trade-talk day: how it trades — the strategy and ONE habit — and its coins", () => {
+  it("a trade-talk day: how it trades — the strategy and ONE habit — and its coins, and never the seed", () => {
     const p = casualPrompt({ ...PERSONA, tradeTalk: true }).prompt;
-    assert.match(p, /Or, instead of that \(not both\), say something about how you trade \(you run the «dip hunter» strategy; «[^»]+»\)/);
+    assert.match(p, /Today it is about how you trade \(you run the «dip hunter» strategy; «[^»]+»\): say it your own way, with no numbers and no predictions\./);
     assert.equal(persona.slice(1).filter((h) => p.includes(`«${h}»`)).length, 1, "one habit, never the list");
     assert.match(p, /«pepe», «Tesla»/);
     assert.doesNotMatch(p, /Leave trading out/);
-    // An agent that is not trading is not handed a habit to claim.
-    assert.doesNotMatch(casualPrompt({ ...PERSONA, mode: "idle", tradeTalk: true }).prompt, /how you trade/);
+    // One or the other: offered both, the model mashed the seed into its trading.
+    assert.doesNotMatch(p, /soup|riff|instead of that/);
+    // An agent that is not trading is not handed a habit to claim; it may still mention a coin.
+    const idle = casualPrompt({ ...PERSONA, mode: "idle", tradeTalk: true }).prompt;
+    assert.doesNotMatch(idle, /how you trade/);
+    assert.match(idle, /a coin you bought lately[\s\S]*«pepe», «Tesla»/);
+    // Nothing to say about trading at all: an ordinary day, seed and all.
+    const nothing = casualPrompt({ ...PERSONA, mode: "idle", tradeTalk: true, recentCoins: [] }).prompt;
+    assert.match(nothing, /«soup is a perfectly good meal in any weather»/);
+    assert.match(nothing, /Leave trading out/);
+  });
+
+  it("which habit a trade-talk day is handed is drawn by the day, so the same line does not come back every time", () => {
+    const shown = (habitSeed: string) => persona.slice(1).filter((h) => casualPrompt({ ...PERSONA, tradeTalk: true, habitSeed }).prompt.includes(`«${h}»`));
+    const seen = new Set<string>();
+    for (let d = 1; d <= 20; d++) {
+      const one = shown(`0xtenant|2026-09-${String(d).padStart(2, "0")}`);
+      assert.equal(one.length, 1);
+      assert.deepEqual(shown(`0xtenant|2026-09-${String(d).padStart(2, "0")}`), one, "the same day, the same habit");
+      seen.add(one[0]!);
+    }
+    assert.ok(seen.size >= 2, [...seen].join(" / "));
   });
 
   it("never markets in general", () => {

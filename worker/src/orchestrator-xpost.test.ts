@@ -22,7 +22,7 @@ process.env.MERRYMEN_X_CLIENT_SECRET = "x-client-secret-never-to-a-child";
 process.env.MERRYMEN_XPOST_LLM_KEY = "gsk_x_only_key_never_to_a_child";
 
 const { childEnv } = await import("./orchestrator");
-const { X_MUSINGS, X_TAKES, casualSeed, makeXPoster, tradeTalkDay, writerFacts, xpostEnv, xpostSetup } = await import("./orchestrator-xpost");
+const { X_MUSINGS, X_TAKES, casualInputs, casualSeed, makeXPoster, tradeTalkDay, writerFacts, xpostEnv, xpostSetup } = await import("./orchestrator-xpost");
 const { TRAIT_VOICE } = await import("./groupchat/templates");
 const { admitAgentLine } = await import("./groupchat/policy");
 const { isAsleep } = await import("./groupchat/clock");
@@ -1051,6 +1051,40 @@ describe("what a casual post starts from", () => {
       seen[talk ? "trade" : "other"]++;
     }
     assert.ok(seen.trade > 0 && seen.other > 0, JSON.stringify(seen));
+  });
+
+  it("a trade-talk day is how it trades and its coins, and no seed; any other day the seed, and no coin — decided here", () => {
+    const agent = (mode: AgentFacts["mode"], over: Partial<AgentFacts> = {}): AgentFacts => ({
+      tenant: TENANT,
+      agentId: AGENT,
+      slug: null,
+      name: "Pine Stoat",
+      mode,
+      ageDays: 3,
+      strategy: "steady-basket",
+      traits: ["sits on a position longer than most"],
+      calls: [call({ decisionId: "d-1" })],
+      ...over,
+    });
+    let talk = 0;
+    for (const day of days) {
+      const c = casualInputs(agent("paper"), day);
+      assert.equal(c.habitSeed, `${TENANT}|${day}`);
+      if (tradeTalkDay(TENANT, day)) {
+        talk++;
+        assert.equal(c.tradeTalk, true, day);
+        assert.equal(c.seed, "", "a trade-talk day is handed no seed");
+        assert.deepEqual(c.recentCoins, [{ label: "Pepe", paper: true }]);
+      } else {
+        assert.equal(c.tradeTalk, false, day);
+        assert.equal(c.seed, casualSeed(TENANT, day)?.seed ?? "");
+        assert.deepEqual(c.recentCoins, [], "no coin on a day that is not about trading");
+      }
+      // An agent that is not trading never has one; nor one with nothing to say about it.
+      assert.equal(casualInputs(agent("idle"), day).tradeTalk, false);
+      assert.equal(casualInputs(agent("live", { strategy: null, traits: [], calls: [] }), day).tradeTalk, false);
+    }
+    assert.ok(talk > 0);
   });
 
   it("a buy post's gloss dice are the account's and the decision's", () => {

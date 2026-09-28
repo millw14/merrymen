@@ -86,17 +86,24 @@ export interface BuyFacts extends WriterFacts {
 export interface CasualFacts extends WriterFacts {
   /** What the seed is about ("food", "space", "a passing thought"). */
   subject: string;
-  /** A take or musing to riff on in its own words — never to copy. */
+  /** A take or musing to riff on in its own words — never to copy. Never shown on a `tradeTalk` day. */
   seed: string;
   /**
-   * MAY TODAY'S POST BE ABOUT TRADING AT ALL? The glue says yes on about three
-   * owner-local days in ten. Only then is the model offered how it trades and
-   * the coins it bought lately; any other day it is told to leave trading out.
-   * Absent is no: the safe side of a caller that forgot.
+   * IS TODAY'S POST ABOUT HOW IT TRADES? The glue says yes on about three
+   * owner-local days in ten, for an agent that trades and has something to
+   * say about it. Then the model is handed how it trades and the coins it
+   * bought lately, and no seed; any other day, the seed and nothing about
+   * trading. Absent is no: the safe side of a caller that forgot.
    */
   tradeTalk?: boolean;
   /** Coins it bought lately that it may mention, with whether each was on paper. Shown only when `tradeTalk`. */
   recentCoins: { label: string; paper: boolean }[];
+  /**
+   * Which habit a trade-talk day is handed. The glue passes
+   * `${tenant}|${localDay}`, so the same line does not come back every
+   * trade-talk day. Default: the agent's name.
+   */
+  habitSeed?: string;
 }
 
 export interface Prompt {
@@ -405,42 +412,55 @@ export function buyPrompt(f: BuyFacts): Prompt {
  * the trait lines in. Now the persona says only name, AI trading agent and
  * which money; on a `tradeTalk` day it is offered the strategy, ONE habit and
  * the coins; any other day it is told to leave trading out.
+ *
+ * ONE OR THE OTHER, DECIDED HERE, NOT BY THE MODEL. Offered the seed AND "or,
+ * instead of that (not both), how you trade", the local model took both on
+ * twelve of fourteen trade-talk days: "the planning montage in heist movies
+ * feels like my entire trading approach", the ocean as "a market so deep the
+ * bottom is lost". So a trade-talk day is handed no seed at all, and any
+ * other day nothing about trading. A trade-talk day with nothing to say about
+ * trading (no strategy, no habit, no coin) is an ordinary day.
  */
 export function casualPrompt(f: CasualFacts): Prompt {
   const subject = clean(f.subject, 40) ?? "anything";
   const seed = clean(f.seed, 160);
-  const talk = f.tradeTalk === true;
-  const coins = talk
-    ? (f.recentCoins ?? [])
-        .map((c) => ({ label: clean(c.label, 40), paper: !!c.paper }))
-        .filter((c): c is { label: string; paper: boolean } => !!c.label)
-        .slice(0, 3)
-    : [];
+  const coins = (f.recentCoins ?? [])
+    .map((c) => ({ label: clean(c.label, 40), paper: !!c.paper }))
+    .filter((c): c is { label: string; paper: boolean } => !!c.label)
+    .slice(0, 3);
+  // An agent that is not trading is not handed a habit it would have to
+  // claim; it may still mention a coin it bought.
+  const strategy = f.mode !== "idle" ? clean(f.strategy, 40) : null;
+  const habitKey = typeof f.habitSeed === "string" && f.habitSeed.trim() !== "" ? f.habitSeed : nameOf(f).toLowerCase();
+  const habit = f.mode !== "idle" ? oneHabit(f, `casual|${habitKey}`) : null;
+  const how = [strategy ? `you run the ${q(strategy)} strategy` : null, habit ? q(habit) : null].filter((h): h is string => !!h);
+  const talk = f.tradeTalk === true && (how.length > 0 || coins.length > 0);
   const lines = ["Write one casual post, the kind of passing thought anyone might post."];
-  // NONE OF ITS WORDS. With trading no longer the easy way out, "say it your
-  // own way… never copy it" got the seed back nearly word for word: eleven of
-  // fourteen local-model drafts were refused as seed-echo. Asked to take it
-  // somewhere new in none of its words, three of twenty-eight were (the old
-  // prompt, trading hook and all: twelve of the same twenty-eight).
-  if (seed) {
-    lines.push(`Something to riff on, about ${q(subject)}: ${q(seed)}. Do not restate it: take it somewhere new with a thought of your own, and use none of its words.`);
-  }
-  if (!talk) {
-    lines.push("Leave trading out of this one: nothing about trading, markets, prices or coins.");
-  } else {
-    // An agent that is not trading is not handed a habit it would have to
-    // claim; it may still mention a coin it bought. "Not both": offered the
-    // seed, a habit and coins at once, a small model stuffs all three in.
-    if (f.mode !== "idle") {
-      const strategy = clean(f.strategy, 40);
-      const habit = oneHabit(f, `casual|${nameOf(f).toLowerCase()}|${seed ?? subject}`);
-      const how = [strategy ? `you run the ${q(strategy)} strategy` : null, habit ? q(habit) : null].filter((h): h is string => !!h);
-      lines.push(`Or, instead of that (not both), say something about how you trade${how.length ? ` (${how.join("; ")})` : ""}, with no numbers and no predictions.`);
-    }
+  if (talk) {
+    lines.push(
+      how.length
+        ? `Today it is about how you trade (${how.join("; ")}): say it your own way, with no numbers and no predictions.`
+        : "Today it is about a coin you bought lately, said your own way, with no numbers and no predictions.",
+    );
     if (coins.length) {
       lines.push(`Coins you bought lately, which you may mention (at most one, never as advice) or ignore: ${coins.map((c) => q(c.label)).join(", ")}.`);
       if (coins.some((c) => c.paper)) lines.push("Those were paper trades: if you mention one, say it was on paper.");
     }
+  } else {
+    // NONE OF ITS WORDS. With trading no longer the easy way out, "say it your
+    // own way… never copy it" got the seed back nearly word for word: eleven of
+    // fourteen local-model drafts were refused as seed-echo. Asked to take it
+    // somewhere new in none of its words, three of twenty-eight were (the old
+    // prompt, trading hook and all: twelve of the same twenty-eight).
+    if (seed) {
+      lines.push(`Something to riff on, about ${q(subject)}: ${q(seed)}. Do not restate it: take it somewhere new with a thought of your own, and use none of its words.`);
+      // ITS READERS NEVER SAW THE SEED. A small model sometimes answered it
+      // instead ("that's wild, i guess it helps them…", "a quiet weight to
+      // that idea"); the gate refuses that shape (points-back), and this asks
+      // for a post that stands up without it.
+      lines.push("Nobody who reads your post will have seen that line, so the post must make sense on its own: do not answer it, agree with it or point back at it.");
+    }
+    lines.push("Leave trading out of this one: nothing about trading, markets, prices or coins.");
   }
   return build(f, "casual", "none", lines.join(" "));
 }
