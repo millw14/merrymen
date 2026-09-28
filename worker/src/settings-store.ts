@@ -19,7 +19,7 @@
  * NODE-ONLY (node:crypto, node:fs, pg). Imported by the web API and the worker,
  * never the browser bundle.
  */
-import { link, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, open, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { merrymenHome } from "./home";
@@ -302,25 +302,32 @@ export class FileSettingsStore implements SettingsStore {
    * CLAIM_LOCK_STALE_MS was left by a process that died holding it and is
    * broken; a live one is waited on, briefly, then refused (the route answers
    * 503 and the owner tries again) rather than waited on for ever.
+   *
+   * EVERY LOCK CARRIES A TOKEN, AND NOTHING REMOVES A LOCK IT DID NOT NAME.
+   * Breaking a stale lock was stat-then-unlink: two contenders could both
+   * judge the same dead lock stale, the first break it and take a fresh one,
+   * and the second then unlink THAT fresh one — two holders at once, and two
+   * moves past one day's check. A lock is now only ever taken away by
+   * takeAwayLock, which moves it aside atomically and deletes it only if it
+   * is the very lock that was judged; the holder's own release goes the same
+   * way with its own token, so it cannot delete a lock another process holds.
    */
   private async withClaimLock<T>(w: `0x${string}`, fn: () => Promise<T>): Promise<T> {
     await mkdir(this.claimsDir, { recursive: true });
     const lock = path.join(this.claimsDir, `.${w}.lock`);
+    const token = `${process.pid}.${randomBytes(8).toString("hex")}`;
     for (let attempt = 0; ; attempt++) {
       if (attempt >= 200) throw new Error("holder claim: the wallet's claim is busy — try again");
       try {
-        await writeFile(lock, String(process.pid), { flag: "wx", mode: 0o600 });
+        await writeFile(lock, token, { flag: "wx", mode: 0o600 });
         break;
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
       }
-      const age = await stat(lock).then(
-        (st) => Date.now() - st.mtimeMs,
-        () => -1, // released since: take it now
-      );
-      if (age < 0) continue;
-      if (age > CLAIM_LOCK_STALE_MS) {
-        await unlink(lock).catch(() => {});
+      const seen = await readLock(lock);
+      if (!seen) continue; // released since: take it now
+      if (seen.ageMs > CLAIM_LOCK_STALE_MS) {
+        await takeAwayLock(lock, seen.token);
         continue;
       }
       await new Promise((r) => setTimeout(r, 5 + Math.floor(Math.random() * 20)));
@@ -328,7 +335,7 @@ export class FileSettingsStore implements SettingsStore {
     try {
       return await fn();
     } finally {
-      await unlink(lock).catch(() => {});
+      await takeAwayLock(lock, token).catch(() => {});
     }
   }
   async claimHolder(wallet: string, tenant: string, now: number = Date.now()): Promise<HolderClaim> {
@@ -477,6 +484,50 @@ interface StoredClaim {
 
 /** No lock is held for longer than a few file operations; one this old was orphaned by a crash. */
 const CLAIM_LOCK_STALE_MS = 30_000;
+
+/**
+ * A lock's token and age, read through ONE open file, so the age judged and
+ * the token later compared belong to the same lock. Null when there is none.
+ */
+async function readLock(lock: string): Promise<{ token: string; ageMs: number } | null> {
+  let fh: Awaited<ReturnType<typeof open>>;
+  try {
+    fh = await open(lock, "r");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
+  }
+  try {
+    const st = await fh.stat();
+    return { token: await fh.readFile("utf8"), ageMs: Date.now() - st.mtimeMs };
+  } finally {
+    await fh.close().catch(() => {});
+  }
+}
+
+/**
+ * REMOVE `lock` ONLY IF IT IS STILL THE ONE HOLDING `token`.
+ *
+ * rename(2) is atomic, so of any number of processes taking the same lock
+ * away exactly one gets it, under a name nobody else uses. What was moved is
+ * then read: the lock that was meant is deleted; anything else — a live lock
+ * that replaced the judged one between the look and the rename — is linked
+ * straight back under the lock's name, never deleted. link(2) refuses if a
+ * third process has taken the name meanwhile, which is the one case left: it
+ * needs three contenders inside a few microseconds, after a crash.
+ */
+async function takeAwayLock(lock: string, token: string): Promise<void> {
+  const aside = `${lock}.${process.pid}.${randomBytes(6).toString("hex")}.gone`;
+  try {
+    await rename(lock, aside);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // already gone
+    throw e;
+  }
+  const moved = await readFile(aside, "utf8").catch(() => null);
+  if (moved !== token) await link(aside, lock).catch(() => {});
+  await unlink(aside).catch(() => {});
+}
 
 // ── postgres backend ─────────────────────────────────────────────────────────
 

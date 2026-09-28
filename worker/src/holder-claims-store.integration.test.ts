@@ -18,8 +18,10 @@
  * the same statement's snapshot — is scripted explicitly below.
  */
 import assert from "node:assert/strict";
-import { after, describe, it } from "node:test";
-import { mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { after, describe, it, mock } from "node:test";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import fsp from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
@@ -31,6 +33,9 @@ process.env.MERRYMEN_STORE_DEK = Buffer.alloc(32, 7).toString("base64");
 const { FileSettingsStore, PgSettingsStore } = await import("./settings-store");
 type Store = InstanceType<typeof FileSettingsStore> | InstanceType<typeof PgSettingsStore>;
 type Client = { query(sql: string, params?: unknown[]): Promise<{ rows: Record<string, unknown>[] }> };
+/** The file store's wallet lock, private in the type only — driven directly where a race needs it. */
+type Locker = { withClaimLock<T>(w: `0x${string}`, fn: () => Promise<T>): Promise<T> };
+const lockOf = (s: InstanceType<typeof FileSettingsStore>) => s as unknown as Locker;
 
 after(() => {
   try {
@@ -253,6 +258,74 @@ describe("FileSettingsStore specifics", () => {
     utimesSync(lock, old, old);
     const moved = await s.takeHolder(W, B, 2);
     assert.equal(moved.ok && moved.from, A);
+  });
+
+  it("A STALE LOCK IS BROKEN BY ONE CONTENDER ONLY — a live lock that took its place in between is never removed", async () => {
+    // Two contenders judge the same dead lock stale. The other one gets there
+    // first: it breaks the dead lock and takes a fresh one. What this store
+    // then removes — by whatever means — must not be that fresh lock, or both
+    // are inside at once (two moves past one day's check).
+    process.env.MERRYMEN_HOME = path.join(HOME, "file-stale-race");
+    const s = new FileSettingsStore();
+    await s.takeHolder(W, A, 1);
+    const lock = path.join(HOME, "file-stale-race", "holder-claims", `.${W}.lock`);
+    writeFileSync(lock, "4242");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lock, old, old);
+    let raced = false;
+    const otherContenderWins = () => {
+      if (raced) return;
+      raced = true;
+      rmSync(lock);
+      writeFileSync(lock, "the other contender");
+    };
+    const realUnlink = fsp.unlink;
+    const realRename = fsp.rename;
+    mock.method(fsp, "unlink", async (p: string) => {
+      if (p === lock) otherContenderWins();
+      return realUnlink(p);
+    });
+    mock.method(fsp, "rename", async (from: string, to: string) => {
+      if (from === lock) otherContenderWins();
+      return realRename(from, to);
+    });
+    syncBuiltinESMExports();
+    try {
+      let otherReleased = false;
+      let enteredWhileOtherHeld: boolean | null = null;
+      const inside = lockOf(s).withClaimLock(W as `0x${string}`, async () => {
+        enteredWhileOtherHeld = !otherReleased;
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      assert.equal(raced, true, "set-up: the race happened");
+      assert.equal(readFileSync(lock, "utf8"), "the other contender", "the live lock is still there, still the other's");
+      otherReleased = true;
+      rmSync(lock);
+      await inside;
+      assert.equal(enteredWhileOtherHeld, false, "never inside while the other contender held the lock");
+    } finally {
+      mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+  });
+
+  it("…and a holder's own release removes only its own lock", async () => {
+    // A holder that outlived CLAIM_LOCK_STALE_MS has had its lock broken and
+    // taken by another process: its finally must not delete that one.
+    process.env.MERRYMEN_HOME = path.join(HOME, "file-own-release");
+    const s = new FileSettingsStore();
+    await s.takeHolder(W, A, 1);
+    const lock = path.join(HOME, "file-own-release", "holder-claims", `.${W}.lock`);
+    await lockOf(s).withClaimLock(W as `0x${string}`, async () => {
+      rmSync(lock);
+      writeFileSync(lock, "another holder");
+    });
+    assert.equal(readFileSync(lock, "utf8"), "another holder");
+    assert.deepEqual(
+      readdirSync(path.join(HOME, "file-own-release", "holder-claims")).sort(),
+      [`.${W}.lock`, `${W}.json`],
+      "nothing moved aside is left behind",
+    );
   });
 
   it("…but a live one is waited on, and a release waits for the move holding it", async () => {
