@@ -26,7 +26,7 @@ const SRC = [
   "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, level TEXT, message TEXT, created_at INTEGER);",
   "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, decision_id TEXT UNIQUE, body TEXT, created_at INTEGER);",
   "CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, kind TEXT, target TEXT, sell_token TEXT, buy_token TEXT, amount_usdg REAL, user_op_hash TEXT, tx_hash TEXT, status TEXT, reject_rule TEXT, decision_id TEXT, fill_side TEXT, fill_qty_raw TEXT, fill_price_usd REAL, realized_pnl_usdg REAL, basis_source TEXT, gas_wei TEXT, sponsored_gas_wei TEXT, gas_usdg REAL, gas_units TEXT, fill_cash_usdg REAL, fill_symbol TEXT, epoch INTEGER DEFAULT 1, created_at INTEGER);",
-  "CREATE TABLE equity (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, eth_wei TEXT, cash_usdg REAL, vault_usdg REAL, positions_usdg REAL, equity_usdg REAL, epoch INTEGER DEFAULT 1, mode TEXT, at INTEGER);",
+  "CREATE TABLE equity (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, eth_wei TEXT, cash_usdg REAL, vault_usdg REAL, positions_usdg REAL, equity_usdg REAL, epoch INTEGER DEFAULT 1, mode TEXT, flows_held INTEGER, cash_read_at INTEGER, at INTEGER);",
   "CREATE TABLE flows (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, direction TEXT, amount_usdg REAL, tx_hash TEXT, block_number INTEGER, log_index INTEGER, source TEXT, epoch INTEGER DEFAULT 1, chain_id INTEGER, at INTEGER);",
   "CREATE TABLE fee_accruals (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, profit_usdg REAL, fee_usdg REAL, hwm_before_usdg REAL, hwm_after_usdg REAL, epoch INTEGER DEFAULT 1, at INTEGER);",
   // `hold_kind` is on here because a migrated database has it, and this fixture
@@ -722,6 +722,26 @@ describe("the ledger mirror", () => {
     await mirrorTenant({ tenant: "0xten", child: seedChild(), shared });
     const e = (await shared.prepare("SELECT mode FROM equity").get()) as { mode: string | null };
     assert.equal(e.mode, "live");
+  });
+
+  it("AND WHETHER THE FLOWS WERE HELD, and WHEN THE CASH WAS READ — the hosted anchor's baseline and its `since`", async () => {
+    // A mark taken while flow inference was held (store.ts `flows_held`) is a
+    // true valuation but never a cash baseline, and bootstrap-source.ts reads
+    // the baseline from THIS side. Dropped by the column list, every held mark
+    // would land here unflagged and the anchor would take its cash.
+    const child = seedChild();
+    await child.prepare(
+      "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, cash_read_at, at)" +
+        " VALUES ('0xagent','1000',80.0,0.0,70.0,150.0,2,'live',1,128,130)",
+    ).run();
+    const shared = mem(DEST);
+    await mirrorTenant({ tenant: "0xten", child, shared });
+    const rows = (await shared.prepare("SELECT flows_held, cash_read_at, at FROM equity ORDER BY at").all()) as {
+      flows_held: number | null;
+      cash_read_at: number | null;
+      at: number;
+    }[];
+    assert.deepEqual(rows.map((r) => [r.at, r.flows_held, r.cash_read_at]), [[120, null, null], [130, 1, 128]]);
   });
 });
 

@@ -453,6 +453,26 @@ const SQLITE_ALTERS: string[] = [
     // behaviour they had for a NULL series and split on it once it is known,
     // which is what makes this migration cost nothing on the way in.
     "ALTER TABLE equity ADD COLUMN mode TEXT",
+    // A MARK TAKEN WHILE FLOW INFERENCE WAS HELD (command-wake.ts tickRatchets
+    // `held`): an op the resolver may still settle was in flight, so this row's
+    // cash may carry that op's movement, or a deposit not yet booked. It is a
+    // true valuation — the curve and freshness read it like any other — but it
+    // is NOT a cash baseline, and the two readers that take one from the newest
+    // row (lastKnownCashReading, bootstrap-source.ts) skip it. Those rows used
+    // not to be written at all, which left a dropped op's 26-hour hold as a gap
+    // in the curve and a day-old anchor. 1 held, 0 not; NULL predates the
+    // question, and every reader treats NULL as not held — which is what every
+    // such row was, because a held tick wrote nothing.
+    "ALTER TABLE equity ADD COLUMN flows_held INTEGER",
+    // WHEN THIS ROW'S CASH WAS READ, unix seconds — the tick's balance read,
+    // which comes before its flow look's ledger read, where `at` is the INSERT
+    // at the end of the tick. A restart's `since` must be the read: a chat trade
+    // can join the intent chain mid-tick, so an op created between the read and
+    // the INSERT is not in `cash_usdg`, yet `at` called it "already in the
+    // reading" — its settlement was dropped and its movement booked a second
+    // time as money "changed while the worker was stopped". NULL on every row
+    // written before this; readers fall back to `at`, exactly as before.
+    "ALTER TABLE equity ADD COLUMN cash_read_at INTEGER",
     "ALTER TABLE flows ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE fee_accruals ADD COLUMN epoch INTEGER NOT NULL DEFAULT 1",
     // The epoch this agent is currently writing into.
@@ -2392,7 +2412,8 @@ export async function getGasPaidWei(agentId: string): Promise<bigint> {
 }
 
 /**
- * Cash as of the most recent equity row for this agent's current epoch.
+ * Cash as of the most recent equity row for this agent's current epoch that was
+ * not taken while flow inference was held (see lastKnownCashReading).
  *
  * The worker's in-memory `lastCashUsdg` resets to null on every restart, so
  * without this a top-up made while the worker was stopped is invisible to flow
@@ -2408,23 +2429,40 @@ export async function lastKnownCashUsdg(agentId: string): Promise<number | null>
 }
 
 /**
- * The same reading, AND WHEN IT WAS WRITTEN — the restart's cash baseline and
+ * The same reading, AND WHEN ITS CASH WAS READ — the restart's cash baseline and
  * its `since` (flow-inference.ts): an op submitted at or after `at` is not in
- * `cashUsdg`, so its settlement shifts that baseline; one submitted before is.
+ * `cashUsdg`, so its settlement shifts that baseline, and a landed row created
+ * at or after it is a write in the downtime interval (landedOpsBetween).
  *
- * A tick whose flow look HELD writes no equity row (command-wake.ts
- * tickRatchets `held`), so this is always a reading taken with no op in flight
- * — never one that already carries a stranded op's movement.
+ * `at` IS THE READ, NOT THE WRITE (`cash_read_at`, falling back to the row's
+ * INSERT time for rows that predate it). The row is inserted at the END of a
+ * tick, after its flow look listed the ledger, and a chat trade can submit an
+ * op in between: stamped by the insert, such an op read as already in this
+ * cash, so after a restart its settlement was skipped, it was no write either,
+ * and its movement was inferred a second time — contributions short by it and
+ * a performance fee charged on the owner's own money. An op whose movement IS
+ * in the cash landed before the read, so it was either in flight at the list
+ * (that tick held, and its row is skipped below) or already recorded.
+ *
+ * NEVER A HELD READING. A tick whose flow look held writes its row flagged
+ * `flows_held` (command-wake.ts tickRatchets `held`), and it is skipped here:
+ * its cash may already carry a stranded op's movement, which the op's
+ * settlement would then shift a second time. So this is always a reading taken
+ * with no op in flight.
  */
 export async function lastKnownCashReading(agentId: string): Promise<{ cashUsdg: number; at: number } | null> {
   try {
     const epoch = await epochOf(agentId);
     const row = await getDb()
       .prepare(
-        "SELECT cash_usdg, at FROM equity WHERE agent_id = ? AND epoch = ? ORDER BY at DESC, id DESC LIMIT 1",
+        // Ordered by the INSERT (`at`, id) as always — the alias is `read_at`
+        // so ORDER BY cannot resolve to it on either engine.
+        `SELECT cash_usdg, COALESCE(cash_read_at, at) AS read_at FROM equity
+          WHERE agent_id = ? AND epoch = ? AND COALESCE(flows_held, 0) = 0
+          ORDER BY at DESC, id DESC LIMIT 1`,
       )
-      .get(agentId, epoch) as { cash_usdg: number; at: number } | undefined;
-    return row ? { cashUsdg: Number(row.cash_usdg), at: Number(row.at) } : null;
+      .get(agentId, epoch) as { cash_usdg: number; read_at: number } | undefined;
+    return row ? { cashUsdg: Number(row.cash_usdg), at: Number(row.read_at) } : null;
   } catch {
     return null;
   }
@@ -2441,7 +2479,9 @@ export async function lastKnownCashReading(agentId: string): Promise<{ cashUsdg:
  * before it stopped — was invisible, and its cash leg was booked as money
  * "changed while the worker was stopped". The caller drops the hashes its own
  * resolver settled (those explain exactly their own movement) and treats any
- * other as a write in the interval.
+ * other as a write in the interval. `fromSec` is when the reading's cash was
+ * READ (lastKnownCashReading), so a fill recorded mid-tick — after the read,
+ * before that tick's row was inserted — is inside the interval too.
  *
  * THROWS WHEN THE QUESTION COULD NOT BE ASKED, like listSubmittedOps: an
  * unreadable ledger is not an empty one, and the caller's pass must abort and
@@ -3176,6 +3216,19 @@ export async function addEquity(
      * lines earlier.
      */
     mode: "paper" | "live";
+    /**
+     * TAKEN WHILE FLOW INFERENCE WAS HELD (command-wake.ts tickRatchets
+     * `held`). A true valuation, but not a cash baseline: see the `flows_held`
+     * column. Written 1 or 0, and journalled only when true, so every other
+     * mark's evidence reads exactly as it did.
+     */
+    flowsHeld?: boolean;
+    /**
+     * WHEN THE CASH WAS READ, unix seconds — the tick's balance read. What a
+     * restart takes as this reading's `since` (lastKnownCashReading); the row's
+     * own `at` is the insert, which a mid-tick op can precede.
+     */
+    cashReadAt?: number;
   },
 ): Promise<void> {
   try {
@@ -3189,6 +3242,8 @@ export async function addEquity(
         cashUsdg: b.cashUsdg,
         equityUsdg: b.equityUsdg,
         ethWei: b.ethWei.toString(),
+        // Only when held: undefined is dropped by canonicalJson's stringify.
+        flowsHeld: b.flowsHeld === true ? true : undefined,
         marks: (b.marks ?? []).map((m) => ({
           priceUsd: m.priceUsd,
           source: m.source,
@@ -3209,9 +3264,20 @@ export async function addEquity(
       async (db: Db) => {
         await db
           .prepare(
-            "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, cash_read_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           )
-          .run(agentId, b.ethWei.toString(), b.cashUsdg, b.vaultUsdg, b.positionsUsdg, b.equityUsdg, epoch, b.mode);
+          .run(
+            agentId,
+            b.ethWei.toString(),
+            b.cashUsdg,
+            b.vaultUsdg,
+            b.positionsUsdg,
+            b.equityUsdg,
+            epoch,
+            b.mode,
+            b.flowsHeld === true ? 1 : 0,
+            b.cashReadAt ?? null,
+          );
       },
     );
   } catch (e) {

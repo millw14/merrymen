@@ -225,7 +225,7 @@ import {
   sayEnergyPlan,
   usdgText,
 } from "./energy-buy";
-import { attributeSettlements, lookAtCash, opsHoldInference, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC, wroteSince, type Settlement } from "./flow-inference";
+import { attributeSettlements, expectedCashUsdg, heldBreakerObservationUsdg, lookAtCash, opsHoldInference, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC, wroteSince, type Settlement } from "./flow-inference";
 import { durableNetContributionsUsdg6 } from "./net-contributions";
 import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, settleTransferLanding, type EnergySettleDeps } from "./energy-settle";
 import { bookCapitalFlow, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
@@ -3549,8 +3549,9 @@ async function main() {
       // resolver, and a stranded swap's cash leg as a withdrawal. So nothing is
       // judged, on any licence, while one is in flight: the baseline stays open
       // (`lastCashUsdg` null) and this look is simply asked again next tick —
-      // against the same durable reading, because a held tick writes no equity
-      // row, and with every settlement the resolver has queued since.
+      // against the same durable reading, because a held tick's equity row is
+      // flagged and lastKnownCashReading skips it, and with every settlement
+      // the resolver has queued since.
       if (opsInFlight) {
         console.log(`[flows] first look — an op is still in flight, so nothing is judged until it settles`);
         return "held";
@@ -3656,9 +3657,10 @@ async function main() {
       await doubtUnreadSettlements(agentId, l.unread);
       if (l.verdict.action === "hold") {
         // THE BASELINE IS KEPT, and so is the write snapshot: the interval
-        // stays open until the op settles. The caller ratchets nothing on this
-        // tick (tickRatchets `held`) — a deposit made in it is in equity and
-        // not yet in the peak.
+        // stays open until the op settles. The caller accrues no fee and moves
+        // no lifetime peak on this tick (tickRatchets `held`) — a deposit made
+        // in it is in equity and not yet in the peak — while the breaker keeps
+        // observing a figure that deposit cannot reach (heldCashBaseline).
         console.log(`[flows] an op is still in flight — not inferring a flow from this cash change; baseline kept`);
         return "held";
       }
@@ -3670,6 +3672,25 @@ async function main() {
     baselineUnattributed = false;
     ledgerWritesAtSnapshot = ledgerWrites;
     return opsInFlight ? "held" : "settled";
+  };
+
+  /**
+   * THE CASH A HELD TICK EXPECTS, for the breaker's held observation
+   * (flow-inference.ts heldBreakerObservationUsdg): the baseline the held look
+   * kept, with every settlement still queued folded in by the look's own
+   * `since` rule. A first look still holding has no baseline in memory yet, so
+   * it takes the one that look will judge against — the anchor's cash hosted,
+   * the last durable (never held) reading self-hosted. Null when there is none:
+   * then every dollar of cash is treated as possibly unbooked, which only ever
+   * lowers the observation. Reads the queue without taking it.
+   */
+  const heldCashBaseline = async (agentId: string): Promise<bigint | null> => {
+    if (lastCashUsdg !== null) return expectedCashUsdg({ cashUsdg: lastCashUsdg, since: baselineSince }, settlementQueue);
+    if (accounting.openingBalanceLicence !== "self-hosted-local") {
+      return expectedCashUsdg(anchorCashUsdg === null ? null : { cashUsdg: anchorCashUsdg, since: anchorObservedAtSec }, settlementQueue);
+    }
+    const prior = await lastKnownCashReading(agentId);
+    return expectedCashUsdg(prior === null ? null : { cashUsdg: usdg(prior.cashUsdg), since: prior.at }, settlementQueue);
   };
 
   /** The resolver's queue, emptied by the look that folds it (flow-inference.ts rule 2). */
@@ -3735,7 +3756,27 @@ async function main() {
   };
   let highWaterMarkUsdg = 0n;
   let riskHighWaterMarkUsdg: bigint | null = null;
-  const drawdownPeak = () => paperActive() ? highWaterMarkUsdg : (riskHighWaterMarkUsdg ?? highWaterMarkUsdg);
+  /**
+   * WHAT HELD LOOKS SAW ABOVE THE LIFETIME MARK — the breaker's, not the fee's.
+   *
+   * With no risk period standing, the live breaker judges against
+   * `highWaterMarkUsdg`, which is also the mark the performance fee ratchets.
+   * A held flow look may not raise that mark (a deposit made in the hold is in
+   * the equity and not yet in the peak), and a dropped userOp holds for 26
+   * hours — so a book that ran 100 → 150 → 110 in the hold was judged at 110
+   * against 100 and the breaker never tripped. The held tick's observation
+   * (flow-inference.ts heldBreakerObservationUsdg, which no unbooked cash can
+   * reach) lifts the BREAKER'S peak instead: `highWaterMarkUsdg + this`.
+   * Relative to the mark, so a capital flow re-read into the mark moves the
+   * breaker's peak with it; absorbed once the mark itself rises past it
+   * (command-wake.ts tickRatchets.breakerLift). Process memory, like the mark
+   * it sits on between persists: a restart forgets it — a risk period, whose
+   * peak observes the same figure in the ledger, does not.
+   */
+  let heldBreakerLiftUsdg = 0n;
+  /** The live breaker's peak when no risk period stands: the lifetime mark plus what held looks saw above it. */
+  const lifetimeBreakerPeak = () => highWaterMarkUsdg + heldBreakerLiftUsdg;
+  const drawdownPeak = () => paperActive() ? highWaterMarkUsdg : (riskHighWaterMarkUsdg ?? lifetimeBreakerPeak());
   /**
    * AN ENERGY PURCHASE MOVED THE PERSISTED PEAKS, and the in-memory ones have
    * not caught up — on purpose.
@@ -3853,9 +3894,11 @@ async function main() {
   /**
    * When that observation was made — the hosted resume's `since` (flow-
    * inference.ts): an op created at or after it is not in `anchorCashUsdg`.
-   * The anchor's time is its NEWEST durable row, flow or equity, so it can
-   * only fall after the cash reading: an op in between counts as already in
-   * it, and its settlement shows as drift — which doubts, never books.
+   * The anchor's time is its NEWEST durable row, flow or equity — the equity
+   * row's by when its cash was READ (`cash_read_at`), not when it was written —
+   * so it can only fall at or after the cash reading: an op in between counts
+   * as already in it, and its settlement shows as drift — which doubts, never
+   * books.
    */
   let anchorObservedAtSec: number | null = null;
   /** The peak the anchor says was already reached, restored into the local store. */
@@ -6605,6 +6648,9 @@ async function main() {
     // HWM is persistent — a restart must not forget the peak, or the breaker
     // re-arms low and the fee ledger double-charges old profit.
     highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+    // A lift is relative to the mark it was observed above; a fresh arm starts
+    // from the persisted mark alone.
+    heldBreakerLiftUsdg = 0n;
     await setAgentStatus(agentId, "armed");
     await addEvent(
       agentId,
@@ -7435,7 +7481,7 @@ async function main() {
     const state: AgentState = {
       spentTodayUsdg: spentToday(),
       opsToday: opsTodayCount(),
-      highWaterMarkUsdg: paperActive() ? highWaterMarkUsdg : usdg((await getRiskPeriodPeak(agentId)) ?? usdgNum(highWaterMarkUsdg)),
+      highWaterMarkUsdg: paperActive() ? highWaterMarkUsdg : usdg((await getRiskPeriodPeak(agentId)) ?? usdgNum(lifetimeBreakerPeak())),
       equityUsdg,
       equityKnown,
       nowSec: Math.floor(Date.now() / 1000),
@@ -10043,6 +10089,14 @@ async function main() {
       symbols: [],
       tokens: [],
     };
+    // WHEN THIS TICK'S CASH WAS READ — taken before the book read below, so it
+    // is at or before the balance it stamps and before the flow look's ledger
+    // read. The equity row carries it as `cash_read_at`, and a restart takes it
+    // (not the row's INSERT time) as its reading's `since`: an op a chat trade
+    // submitted mid-tick, after this read but before the row was written, is
+    // not in this cash, and its settlement must shift the baseline rather than
+    // be skipped as "already in the reading" (store.ts lastKnownCashReading).
+    const cashReadAtSec = Math.floor(Date.now() / 1000);
     if (paper) {
       // The book IS the paper ledger, marked to market at the live oracle px.
       const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
@@ -10791,6 +10845,9 @@ async function main() {
       // curve mark: an owner's order is not a sample of the cadence the peak is
       // measured on. See command-wake.ts tickRatchets.
       highWaterMarkUsdg = usdg(await ratchet.paperPeak(bookRow, usdgNum(equityUsdg), (b) => setPaperBook(agentId, b)));
+      // The mark is the paper book's now; a live lift observed above the live
+      // mark means nothing on top of it. Paper never holds a flow look.
+      heldBreakerLiftUsdg = 0n;
     } else {
       // Capital first, performance second. Any deposit or withdrawal since the
       // last look moves the high-water mark with it, so what follows can only
@@ -10817,12 +10874,30 @@ async function main() {
             }
           : undefined,
       );
-      // A HELD LOOK RATCHETS NOTHING. While an op the resolver may still settle
-      // is in flight, this equity's cash is not yet split into capital and
-      // performance: a deposit made in the hold is in it and not in the peak.
-      // The fee, both peaks and the equity row wait for the look that closes
-      // the interval (command-wake.ts tickRatchets `held`).
-      if (flows === "held") ratchet = tickRatchets(plan, { incomplete: bookIncomplete, curveMarked: curveMarked.length, held: true });
+      // A HELD LOOK ACCRUES NO FEE AND MOVES NO LIFETIME PEAK. While an op the
+      // resolver may still settle is in flight, this equity's cash is not yet
+      // split into capital and performance: a deposit made in the hold is in it
+      // and not in the peak. The fee and the lifetime mark wait for the look
+      // that closes the interval (command-wake.ts tickRatchets `held`).
+      //
+      // THE BREAKER DOES NOT WAIT. A dropped userOp holds for 26 hours, and a
+      // drawdown limit switched off for a day is not a limit. Its peaks observe
+      // this equity less any cash above what the account is expected to hold —
+      // a figure no unbooked deposit can reach (heldCashBaseline) — and the row
+      // is written, flagged, so neither the restart baseline nor the hosted
+      // anchor ever takes its cash.
+      if (flows === "held") {
+        ratchet = tickRatchets(plan, {
+          incomplete: bookIncomplete,
+          curveMarked: curveMarked.length,
+          held: true,
+          breakerObservationUsdg: heldBreakerObservationUsdg({
+            equityUsdg,
+            cashUsdg: balances.cashUsdg,
+            expectedCashUsdg: await heldCashBaseline(agentId),
+          }),
+        });
+      }
       // A PERFORMANCE FEE NEEDS TO KNOW WHAT WAS CONTRIBUTED.
       //
       // "Profit" here means equity above the peak, and the peak only means
@@ -10837,7 +10912,10 @@ async function main() {
       // is also what the drawdown breaker measures against: freezing it would
       // make the breaker LESS likely to halt a falling book, which is the wrong
       // direction to fail in. Refusing the money movement and keeping the safety
-      // signal is the split that matters.
+      // signal is the split that matters. (A HELD look keeps the same split by
+      // another route: the lifetime mark cannot take a figure that may hold an
+      // unbooked deposit, so the breaker's peak takes one that cannot — the
+      // held observation above, through breakerLift and riskPeak below.)
       // PUBLISH THE QUALITY, not just act on it.
       //
       // This flag gated the fee and nothing else, and it lived in a process-local
@@ -10860,7 +10938,8 @@ async function main() {
       // needs the peak its order is judged against, but an order arriving must
       // not move that reference point at the very moment it judges the order
       // — null asks without observing (risk-period.ts markRiskPeriod), and
-      // tickRatchets passes null on a command tick or under a curve mark.
+      // tickRatchets passes null on a command tick or under a curve mark. On a
+      // held tick it passes the held observation, never the raw equity.
       const riskPeak = await ratchet.riskPeak(usdgNum(equityUsdg), (observe) => getRiskPeriodPeak(agentId, observe));
       riskHighWaterMarkUsdg = riskPeak === null ? null : usdg(riskPeak);
       const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
@@ -10925,6 +11004,7 @@ async function main() {
       // accrueAboveHwm returns the mark unchanged when there is no profit.
       // tickRatchets.accrue returns the mark this tick may carry, and runs the
       // write below only when it may and there is a profit to charge.
+      const markBeforeAccrual = highWaterMarkUsdg;
       highWaterMarkUsdg = await ratchet.accrue(accrual, highWaterMarkUsdg, async () => {
         const feeOk = await addFeeAccrual(agentId, {
           profitUsdg: usdgNum(accrual.profitUsdg),
@@ -10955,6 +11035,10 @@ async function main() {
           );
         }
       });
+      // THE BREAKER'S LIFT, after the mark has moved (or, held, not): what a
+      // held observation saw above the mark, less whatever the mark has since
+      // caught up with. See heldBreakerLiftUsdg.
+      heldBreakerLiftUsdg = ratchet.breakerLift(heldBreakerLiftUsdg, markBeforeAccrual, highWaterMarkUsdg);
     }
     console.log(
       `[account] ${grant.smartAccount} · eth ${formatUnits(balances.ethWei, 18)} · ` +
@@ -10966,9 +11050,15 @@ async function main() {
     // a real drop on the equity curve and in P&L. A gap is honest; a wrong
     // number is not. And none on a command tick: the curve is the regular
     // cadence's record, and an order's extra sample is not a point on it.
-    // Both decided in tickRatchets.equityRow.
-    await ratchet.equityRow(() =>
+    // A held flow look's row IS written, flagged — a true valuation that is no
+    // cash baseline (store.ts `flows_held`). All decided in tickRatchets.equityRow.
+    await ratchet.equityRow(({ flowsHeld }) =>
       addEquity(agentId, {
+        // TAKEN WHILE FLOW INFERENCE WAS HELD: the restart baseline and the
+        // hosted anchor skip it, the curve does not.
+        flowsHeld,
+        // WHEN ITS CASH WAS READ, which is what a restart's `since` must be.
+        cashReadAt: cashReadAtSec,
         // WHICH BOOK THIS MARK IS OF. `balances` is the paper ledger above and
         // the chain below, and until now the row said nothing about which — so
         // an agent that practised at 1,000 USDG and then went live wrote one

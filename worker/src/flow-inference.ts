@@ -29,9 +29,11 @@
  *
  *   1. While an op the resolver may still settle is in flight, the look HOLDS:
  *      the baseline stays, the write snapshot stays, and the tick accrues no fee
- *      and ratchets no peak (command-wake.ts tickRatchets `held`). The hold is
- *      asked BEFORE the ledger-write rule, so a trade landing beside a stranded
- *      op cannot close the interval over it.
+ *      and ratchets no lifetime peak (command-wake.ts tickRatchets `held`). The
+ *      drawdown breaker's peak keeps observing, with a figure no unbooked cash
+ *      can reach (heldBreakerObservationUsdg). The hold is asked BEFORE the
+ *      ledger-write rule, so a trade landing beside a stranded op cannot close
+ *      the interval over it.
  *   2. When the resolver settles an op as LANDED it queues that op's own USDG
  *      movement, read off its receipt (`Settlement`). The next look folds it
  *      into the baseline, so the residual — cash − (baseline + Σ settled) — is
@@ -44,10 +46,12 @@
  *
  * WHICH SETTLEMENTS A BASELINE MAY TAKE — `since`. A settlement shifts a
  * baseline only when the op was created at or after the moment that baseline's
- * cash was established (the look's ledger read, or the restart's durable
- * reading). An op created before it was either settled and in that cash
- * already, or was not holding when the baseline advanced over it — shifting by
- * it again would book its movement a second time with the opposite sign.
+ * cash was established (the look's ledger read, or when the restart's durable
+ * reading's cash was READ — store.ts `cash_read_at`, never the row's later
+ * insert, which a mid-tick op can precede). An op created before it was either
+ * settled and in that cash already, or was not holding when the baseline
+ * advanced over it — shifting by it again would book its movement a second
+ * time with the opposite sign.
  */
 
 /**
@@ -193,6 +197,52 @@ export function lookAtCash(a: {
         ? { action: "explained", why: "unread-settlement" }
         : { action: "infer", deltaUsdg: a.cashUsdg - baselineUsdg };
   return { baselineUsdg, unread, unattributed, verdict };
+}
+
+/**
+ * THE CASH A HELD LOOK EXPECTS: a baseline's cash with every queued
+ * settlement's own movement folded in, by the same `since` rule a look uses
+ * (attributeSettlements) — what the account would hold now if nothing unbooked
+ * had crossed its boundary. Null when there is no baseline at all. A settlement
+ * nobody could read shifts nothing here: guessing at it is what rule 2 forbids,
+ * and the caller only ever uses this figure to take cash OUT of an observation.
+ */
+export function expectedCashUsdg(
+  baseline: { cashUsdg: bigint; since: number | null } | null,
+  queued: readonly Settlement[],
+): bigint | null {
+  if (baseline === null) return null;
+  return baseline.cashUsdg + attributeSettlements(queued, baseline.since).shiftUsdg6;
+}
+
+/**
+ * WHAT A HELD LOOK MAY STILL SHOW THE DRAWDOWN BREAKER.
+ *
+ * A held tick accrues no fee and moves no lifetime peak, because a deposit made
+ * during the hold is in this equity and not yet in the peak (rule 1). But the
+ * breaker's peak froze with them, and a dropped userOp holds for the resolver's
+ * whole window — 26 hours — so a book that ran 100 → 150 → 110 under a hold
+ * was judged at 110 against 100: no drawdown, where a 5% limit sees 26.7%, and
+ * every non-exit buy went out for a day. A risk limit may not switch off
+ * because the accounting is waiting.
+ *
+ * So the breaker keeps observing, with a figure that CANNOT contain an unbooked
+ * deposit: equity less any cash above what the account is expected to hold
+ * (`expectedCashUsdg`). A deposit or a sell during the hold raises cash above
+ * that and is taken straight back out; a buy, a purchase or a withdrawal only
+ * lowers cash and changes nothing here. Every error is downward — a peak not
+ * raised — which is the direction the breaker's reference already errs in when
+ * it is frozen, never a deposit counted into a peak twice once it is booked.
+ * With no baseline at all, every dollar of cash is treated as possibly unbooked.
+ */
+export function heldBreakerObservationUsdg(a: {
+  equityUsdg: bigint;
+  cashUsdg: bigint;
+  expectedCashUsdg: bigint | null;
+}): bigint {
+  const unexplained = a.cashUsdg - (a.expectedCashUsdg ?? 0n);
+  const observed = a.equityUsdg - (unexplained > 0n ? unexplained : 0n);
+  return observed > 0n ? observed : 0n;
 }
 
 /**
