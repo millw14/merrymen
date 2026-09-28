@@ -26,7 +26,7 @@
  * So below the tier the Circle strategy is not asked at all — no rebalancing
  * in either direction, its basket left exactly as it is, which is what the gate
  * always did to the strategy — and the class route proposes no entries. The owner hears it once,
- * from the Circle note in main(), and every surface says the same
+ * from circleNote below (once per change of reason), and every surface says the same
  * sentence: it opens nothing new and leaves its basket as it is; positions in
  * the class vault are still closed by their own exit rules.
  *
@@ -37,6 +37,8 @@
  * Pure, and in its own file: main() cannot be booted by a test, and a flag
  * inline in it can be reverted with every test still green.
  */
+import { ENERGY } from "../../packages/core/src/index";
+import { count } from "./energy-copy";
 import type { Tick } from "./strategies/types";
 
 /**
@@ -57,3 +59,67 @@ export async function circleStrategyTick(circleShort: boolean, run: () => Promis
 export const CIRCLE_SHORT_CLASS_GATE: { entries(propose: () => Promise<Tick>): Promise<Tick> } = Object.freeze({
   entries: async (): Promise<Tick> => ({ intents: [], why: [] }),
 });
+
+// ── the Circle note ────────────────────────────────────────────────────────
+
+/**
+ * Which Circle note the owner was last given: none, "our read failed", or
+ * "you are short". Kept by main() across ticks.
+ */
+export type CircleNoted = "unread" | "short" | null;
+
+/**
+ * ONCE PER CHANGE OF REASON, NOT ONCE PER SHORTFALL.
+ *
+ * The latch used to be a boolean keyed on `circleShort` alone. A child whose
+ * FIRST $MERRYMEN read failed (holderTier starts at the outsider until a read
+ * answers) sent "that is our read failing — it should clear on its own", set
+ * the latch, and when the next read answered and showed the owner really was
+ * short, said nothing: on iOS and Android that first sentence was the owner's
+ * only word, and it never cleared. So the latch remembers WHICH sentence went
+ * out, and unread → short is said again.
+ *
+ * Not the other way round: an owner already told they are short is not then
+ * told a read failed. The tier kept is the last one read (the index.ts rule),
+ * so "short" still stands, and a flapping RPC must not turn into a stream of
+ * notes. Reaching the tier clears the latch, so a later shortfall is news.
+ */
+export function circleNoteStep(
+  noted: CircleNoted,
+  now: { short: boolean; readOk: boolean },
+): { noted: CircleNoted; say: Exclude<CircleNoted, null> | null } {
+  if (!now.short) return { noted: null, say: null };
+  if (now.readOk) return noted === "short" ? { noted, say: null } : { noted: "short", say: "short" };
+  return noted === null ? { noted: "unread", say: "unread" } : { noted, say: null };
+}
+
+/**
+ * THE SENTENCE — what a short Circle agent does, said the way every surface
+ * says it (web Agent.tsx banner, Settings, CreateAgent, iOS GrantScreen,
+ * Android SettingsEditor): it opens nothing new and leaves its basket as it
+ * is; positions in a class vault are still closed by their own exit rules.
+ * Never "exits always run" — the strategy's own trims do not.
+ *
+ * WHERE THE TOKENS COUNT. The agent's account counts toward the tier only on
+ * Robinhood Chain (index.ts energyAccount); on a grant anywhere else, "between
+ * your wallet and my account" names an account whose $MERRYMEN would not
+ * count, so that owner is told the one place that does — energy-copy.ts says
+ * it the same way.
+ */
+export function circleNote(
+  say: Exclude<CircleNoted, null>,
+  f: { strategyName: string; accountCounts: boolean },
+): string {
+  const idle = "it opens nothing new and leaves its basket as it is; positions in a class vault are still closed by their own exit rules";
+  if (say === "unread") {
+    return (
+      `${f.strategyName} is a Merry Circle strategy and we could not read your $MERRYMEN balance this tick, so until ` +
+      `we can, ${idle}. That is our read failing, not your wallet — it should clear on its own.`
+    );
+  }
+  const where = f.accountCounts ? "between your wallet and my account" : "in your own wallet on Robinhood Chain";
+  return (
+    `${f.strategyName} is a Merry Circle strategy — hold ${count(ENERGY.fullTokens)} $MERRYMEN ${where} ` +
+    `(Merry Man tier) to run it; idle until then: ${idle}.`
+  );
+}

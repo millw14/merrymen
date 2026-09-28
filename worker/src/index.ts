@@ -152,7 +152,7 @@ import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus, readHolderStatusResult } from "./circle";
-import { CIRCLE_SHORT_CLASS_GATE, circleStrategyTick } from "./circle-gate";
+import { CIRCLE_SHORT_CLASS_GATE, circleNote, circleNoteStep, circleStrategyTick, type CircleNoted } from "./circle-gate";
 import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
 import { killHosted, killRequested } from "./kill-request";
@@ -203,7 +203,7 @@ import {
   type LastGood,
 } from "./energy";
 import type { EnergyStatus } from "../../packages/core/src/index";
-import { count as countTokens, energyNotice } from "./energy-copy";
+import { energyNotice } from "./energy-copy";
 import { energyAmountInFor, energyMinOut, quoteEnergyOut, readEnergyTaxBps } from "./venues/uniswap-v2";
 // ── THE ENERGY BUY: the owner's own confirmed order for the agent's $MERRYMEN.
 // The planner and its sentences are energy-buy.ts; the two calls are
@@ -3948,7 +3948,8 @@ async function main() {
   // performance-fee discount. Starts as the outsider (no discount) until read.
   let holderTier: CircleTier = CIRCLE_TIERS[0]!;
   let lastTierId = holderTier.id;
-  let circleBlockedNoted = false; // so the "hold to unlock" note isn't spammed each tick
+  /** Which Circle note went out last, so it is said once per change of reason, not each tick (circle-gate.ts). */
+  let circleNoted: CircleNoted = null;
   /** So the bricked-breaker note is said once per change, not once per tick, for ever. */
   let breakerBrickNoted = false;
   /** Did the last $MERRYMEN read actually answer? A failed read must not be reported as a wallet. */
@@ -11802,22 +11803,18 @@ async function main() {
     // class exits run exactly as they do for everyone. Nothing below may
     // `return` before them (circle-gate.test.ts).
     const circleShort = isCircleStrategy(strategy.name) && !holderTier.bonusStrategies;
-    if (circleShort) {
-      if (!circleBlockedNoted) {
-        circleBlockedNoted = true;
-        await addEvent(
-          agentId,
-          "warn",
-          // AND WHICH KIND OF NO IT IS. Telling a holder to go and hold
-          // $MERRYMEN because our own read failed is advice they cannot act
-          // on — they already did the thing being asked of them.
-          holderReadOk
-            ? `${strategy.name} is a Merry Circle strategy — hold ${countTokens(ENERGY.fullTokens)} $MERRYMEN between your wallet and my account (Merry Man tier) to run it; idle until then, apart from exits, which always run`
-            : `${strategy.name} is a Merry Circle strategy and we could not read your $MERRYMEN balance this tick, so it is idle apart from exits, which always run. That is our read failing, not your wallet — it should clear on its own.`,
-        );
-      }
-    } else {
-      circleBlockedNoted = false;
+    // ONCE PER CHANGE OF REASON (circle-gate.ts circleNoteStep): a first
+    // read that failed and a later one that shows a real shortfall are two
+    // different notes. AND WHICH KIND OF NO IT IS: telling a holder to go and
+    // hold $MERRYMEN because our own read failed is advice they cannot act on.
+    const circleStep = circleNoteStep(circleNoted, { short: circleShort, readOk: holderReadOk });
+    circleNoted = circleStep.noted;
+    if (circleStep.say) {
+      await addEvent(
+        agentId,
+        "warn",
+        circleNote(circleStep.say, { strategyName: strategy.name, accountCounts: grant.chainId === MERRYMEN_TOKEN.chainId }),
+      );
     }
 
     // A strategy may hand back a reason for each intent. It travels to the

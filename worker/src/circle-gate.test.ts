@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
-import { CIRCLE_SHORT_CLASS_GATE, circleStrategyTick } from "./circle-gate";
+import { CIRCLE_SHORT_CLASS_GATE, circleNote, circleNoteStep, circleStrategyTick, type CircleNoted } from "./circle-gate";
 import { evenKeelTick, type EvenKeelConfig } from "./strategies/even-keel";
 import type { Holding, Snapshot, Tick } from "./strategies/types";
 
@@ -154,6 +154,73 @@ describe("a Circle strategy below the tier", () => {
   });
 });
 
+/**
+ * THE CIRCLE NOTE, ONCE PER CHANGE OF REASON.
+ *
+ * The latch was keyed on "short" alone, so a first read that failed sent "our
+ * read is failing — it should clear on its own" and the real shortfall the next
+ * read found was never said. And on a grant off Robinhood Chain it told the
+ * owner to hold $MERRYMEN "between your wallet and my account", an account
+ * whose $MERRYMEN does not count there.
+ */
+describe("the Circle note", () => {
+  /** Run a sequence of ticks through the latch; the notes that went out. */
+  const said = (ticks: { short: boolean; readOk: boolean }[]) => {
+    let noted: CircleNoted = null;
+    const out: string[] = [];
+    for (const t of ticks) {
+      const step = circleNoteStep(noted, t);
+      noted = step.noted;
+      if (step.say) out.push(step.say);
+    }
+    return out;
+  };
+  const UNREAD = { short: true, readOk: false };
+  const SHORT = { short: true, readOk: true };
+  const FULL = { short: false, readOk: true };
+
+  it("A FIRST READ THAT FAILED, THEN A REAL SHORTFALL: both are said", () => {
+    assert.deepEqual(said([UNREAD, SHORT]), ["unread", "short"]);
+    assert.deepEqual(said([UNREAD, UNREAD, SHORT, SHORT]), ["unread", "short"]);
+  });
+
+  it("each reason once, however many ticks it lasts", () => {
+    assert.deepEqual(said([SHORT, SHORT, SHORT]), ["short"]);
+    assert.deepEqual(said([UNREAD, UNREAD, UNREAD]), ["unread"]);
+  });
+
+  it("an owner already told they are short is not then told a read failed — the last read stands, and a flapping RPC is not a stream of notes", () => {
+    assert.deepEqual(said([SHORT, UNREAD, SHORT, UNREAD, SHORT]), ["short"]);
+  });
+
+  it("reaching the tier clears it, so a later shortfall is news again", () => {
+    assert.deepEqual(said([SHORT, FULL, SHORT]), ["short", "short"]);
+    assert.deepEqual(said([FULL, FULL]), []);
+  });
+
+  const text = (say: "unread" | "short", accountCounts: boolean) => circleNote(say, { strategyName: "even-keel", accountCounts });
+
+  it("ON ROBINHOOD CHAIN it names the combined balance, and keeps its pinned half", () => {
+    assert.match(text("short", true), /^even-keel is a Merry Circle strategy — hold 100,000 \$MERRYMEN between your wallet and my account \(Merry Man tier\) to run it; idle until then/);
+  });
+
+  it("OFF ROBINHOOD CHAIN it names the one place that counts, and never the account", () => {
+    const t = text("short", false);
+    assert.match(t, /hold 100,000 \$MERRYMEN in your own wallet on Robinhood Chain \(Merry Man tier\) to run it/);
+    assert.doesNotMatch(t, /my account/);
+  });
+
+  it("EVERY NOTE SAYS WHAT A SHORT CIRCLE AGENT DOES — the surfaces' one sentence, never 'exits always run'", () => {
+    for (const t of [text("short", true), text("short", false), text("unread", true), text("unread", false)]) {
+      assert.match(t, /it opens nothing new and leaves its basket as it is; positions in a class vault are still closed by their own exit rules/);
+      assert.doesNotMatch(t, /always run|still closes what it holds/);
+      assert.doesNotMatch(t, /price|returns?\b|profit|invest/i);
+    }
+    assert.match(text("unread", true), /That is our read failing, not your wallet — it should clear on its own\.$/);
+    assert.doesNotMatch(text("unread", true), /hold 100,000/, "no advice to hold what nobody could read");
+  });
+});
+
 const codeOf = (src: string) =>
   src
     .replace(/\/\*[\s\S]*?\*\//g, " ")
@@ -189,9 +256,12 @@ describe("the tick's wiring below the tier", () => {
     assert.match(CODE, /const entries: Tick = await classGate\.entries\(async \(\) => await proposeClassEntries\(\)\);/);
   });
 
-  it("the owner is still told once per change", () => {
+  it("the owner is told once per change of reason, in the words for this grant's chain", () => {
     const block = CODE.slice(gate, tick);
-    assert.match(block, /if \(circleShort\) \{\s*if \(!circleBlockedNoted\) \{\s*circleBlockedNoted = true;/);
-    assert.match(block, /\} else \{\s*circleBlockedNoted = false;\s*\}/);
+    assert.match(block, /const circleStep = circleNoteStep\(circleNoted, \{ short: circleShort, readOk: holderReadOk \}\);\s*circleNoted = circleStep\.noted;\s*if \(circleStep\.say\) \{/);
+    assert.match(block, /circleNote\(circleStep\.say, \{ strategyName: strategy\.name, accountCounts: grant\.chainId === MERRYMEN_TOKEN\.chainId \}\)/);
+    // The same test that decides whether the account is read at all.
+    assert.match(CODE, /const energyAccount = grant\.chainId === MERRYMEN_TOKEN\.chainId \?/);
+    assert.doesNotMatch(CODE, /circleBlockedNoted/, "the boolean latch that stuck on 'our read failed' is gone");
   });
 });
