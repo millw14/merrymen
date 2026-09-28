@@ -16,7 +16,7 @@ const API_BASE = "https://api.telegram.org";
 /** Minimal fetch surface — supports the POST+JSON that sendMessage needs. */
 export type FetchLike = (
   url: string,
-  init?: { method?: string; headers?: Record<string, string>; body?: string },
+  init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal },
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
 export interface TelegramOpts {
@@ -36,6 +36,13 @@ export interface TgMessage {
   text: string;
   /** Telegram file_id of an attached voice/audio note, if any (for transcription). */
   voiceFileId?: string;
+  /**
+   * When Telegram received it, unix seconds; 0 when the update carried no date.
+   * Telegram holds undelivered updates for up to a day, so after an outage a
+   * batch can be hours old, and this is the only way to tell a live message
+   * from one that waited out the silence.
+   */
+  date: number;
 }
 
 /**
@@ -60,6 +67,13 @@ export interface TgCallback {
   messageId: number;
   /** Our own callback_data, at most 64 bytes. */
   data: string;
+  /**
+   * The date of the message the button sits on, unix seconds; 0 when absent.
+   * A press carries no time of its own, so this is a lower bound: the press
+   * came after the question was asked. Telegram itself sends 0 for a message
+   * it can no longer show, which is why absent and 0 mean the same here.
+   */
+  date: number;
 }
 
 /**
@@ -83,43 +97,135 @@ function short(token: string): string {
 }
 
 /**
+ * How long one bot method may take before it is abandoned. getUpdates is
+ * allowed its long-poll window on top of POLL_SLACK_SEC instead.
+ */
+const CALL_TIMEOUT_MS = 15_000;
+/** Past a long poll's own `timeout`, how long before it counts as hung. */
+const POLL_SLACK_SEC = 10;
+/** An upload carries the file itself, so it gets longer than a JSON call. */
+const UPLOAD_TIMEOUT_MS = 60_000;
+
+/**
+ * A signal that aborts after `ms`, and a way to disarm it once the call is done.
+ *
+ * On setTimeout rather than AbortSignal.timeout because node:test's mock
+ * timers drive setTimeout and cannot reach the internal timer
+ * AbortSignal.timeout runs on, so a test could not show the bound holds. The
+ * reason is the same TimeoutError AbortSignal.timeout would give.
+ */
+function deadline(ms: number): { signal: AbortSignal; disarm: () => void } {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(new DOMException(`timed out after ${ms}ms`, "TimeoutError")), ms);
+  (t as { unref?: () => void }).unref?.();
+  return { signal: ac.signal, disarm: () => clearTimeout(t) };
+}
+
+/**
+ * `p`, or a rejection the moment `signal` aborts, whichever comes first.
+ *
+ * The signal is also handed to fetch, and a real fetch honours it for the
+ * request and the body. This makes the bound hold for ANY FetchLike, including
+ * one that ignores the signal, so the deadline belongs to call() and not to
+ * whichever fetch happened to be passed in.
+ */
+function orAbort<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    p.then(
+      (v) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(e);
+      },
+    );
+  });
+}
+
+/**
+ * What a bot method came back with. `errorCode` and `retryAfter` are what the
+ * poll loop backs off on: Telegram's own `error_code` (the HTTP status when the
+ * body has none), and `parameters.retry_after` in seconds on a 429.
+ */
+interface CallResult {
+  result: unknown;
+  reason?: string;
+  errorCode?: number;
+  retryAfter?: number;
+}
+
+/**
  * Call a bot method. Returns the parsed `result` on `{ ok: true }`, else a
  * reason. GET when no body, POST+JSON when a body is given.
+ *
+ * EVERY CALL HAS A DEADLINE. The poll loop is strictly serial, one update after
+ * the next, so a single request that never answered, a half-open socket after
+ * a network blip, stalled every message behind it for as long as the process
+ * lived, and nothing ever said so.
  */
 async function call(
   opts: TelegramOpts,
   method: string,
   params?: Record<string, unknown>,
-): Promise<{ result: unknown; reason?: string }> {
+  timeoutMs = CALL_TIMEOUT_MS,
+): Promise<CallResult> {
   const base = opts.apiBase ?? API_BASE;
   const fetchFn = opts.fetchFn ?? (fetch as unknown as FetchLike);
   const url = `${base}/bot${opts.token}/${method}`;
+  const { signal, disarm } = deadline(timeoutMs);
+  const timedOut = { result: null, reason: `request timed out after ${Math.round(timeoutMs / 1000)}s` };
 
-  let res: Awaited<ReturnType<FetchLike>>;
   try {
-    res = params
-      ? await fetchFn(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(params) })
-      : await fetchFn(url);
-  } catch (e) {
-    return { result: null, reason: `request failed: ${e instanceof Error ? e.message : String(e)}` };
+    let res: Awaited<ReturnType<FetchLike>>;
+    try {
+      res = await orAbort(
+        params
+          ? fetchFn(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(params), signal })
+          : fetchFn(url, { signal }),
+        signal,
+      );
+    } catch (e) {
+      if (signal.aborted) return timedOut;
+      return { result: null, reason: `request failed: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    // READ THE BODY ON AN ERROR TOO. Telegram answers a refused request with
+    // HTTP 400 AND a JSON description ("Bad Request: can't parse entities…",
+    // "…button URL … is invalid"). Returning "HTTP 400" before reading it meant
+    // every fallback keyed on that description — the plain-text retry when the
+    // markup is refused, the retry without a link button — never ran: the reply
+    // was simply lost.
+    let body: unknown = null;
+    try {
+      body = await orAbort(res.json(), signal);
+    } catch {
+      if (signal.aborted) return timedOut;
+      body = null;
+    }
+    const env = (body && typeof body === "object" ? body : {}) as {
+      ok?: unknown;
+      result?: unknown;
+      description?: unknown;
+      error_code?: unknown;
+      parameters?: { retry_after?: unknown };
+    };
+    if (res.ok && env.ok === true) return { result: env.result };
+    // Kept, not dropped with the rest of the envelope: a 429 that is retried
+    // before its retry_after is refused again, and a 401 or 409 is not a
+    // network blip and must not be retried like one.
+    const errorCode = typeof env.error_code === "number" ? env.error_code : !res.ok ? res.status : undefined;
+    const ra = env.parameters && typeof env.parameters === "object" ? env.parameters.retry_after : undefined;
+    const why = { errorCode, ...(typeof ra === "number" && ra > 0 ? { retryAfter: ra } : {}) };
+    if (typeof env.description === "string") return { result: null, reason: env.description, ...why };
+    if (!res.ok) return { result: null, reason: `HTTP ${res.status}`, ...why };
+    return { result: null, reason: body ? "bot API returned ok:false" : "response is not JSON", ...why };
+  } finally {
+    disarm();
   }
-  // READ THE BODY ON AN ERROR TOO. Telegram answers a refused request with
-  // HTTP 400 AND a JSON description ("Bad Request: can't parse entities…",
-  // "…button URL … is invalid"). Returning "HTTP 400" before reading it meant
-  // every fallback keyed on that description — the plain-text retry when the
-  // markup is refused, the retry without a link button — never ran: the reply
-  // was simply lost.
-  let body: unknown = null;
-  try {
-    body = await res.json();
-  } catch {
-    body = null;
-  }
-  const env = (body && typeof body === "object" ? body : {}) as { ok?: unknown; result?: unknown; description?: unknown };
-  if (res.ok && env.ok === true) return { result: env.result };
-  if (typeof env.description === "string") return { result: null, reason: env.description };
-  if (!res.ok) return { result: null, reason: `HTTP ${res.status}` };
-  return { result: null, reason: body ? "bot API returned ok:false" : "response is not JSON" };
 }
 
 /** Validate a token and return the bot's identity (for the dashboard "test connection"). */
@@ -133,21 +239,51 @@ export async function getMe(opts: TelegramOpts): Promise<{ bot: TgBotInfo | null
   return { bot: { id: r.id, username: r.username } };
 }
 
-/** Long-poll for new messages. `offset` is the last handled updateId + 1. */
+/**
+ * Long-poll for new messages. `offset` is the last handled updateId + 1.
+ *
+ * Bounded at `timeoutSec` plus POLL_SLACK_SEC: Telegram holds the request for
+ * up to `timeoutSec` and then answers, so anything much past that is a request
+ * that will never come back. On failure `errorCode` and `retryAfter` say how
+ * long the caller should leave it (service.ts).
+ */
 export async function getUpdates(
   opts: TelegramOpts,
   offset: number,
   timeoutSec = 25,
-): Promise<{ messages: TgMessage[]; callbacks: TgCallback[]; nextOffset: number; reason?: string }> {
-  const { result, reason } = await call(opts, "getUpdates", {
-    offset,
-    timeout: timeoutSec,
-    // callback_query is how an inline button press arrives. Without it here
-    // Telegram never delivers the press at all — the button spins and nothing
-    // on this side can tell it was tapped.
-    allowed_updates: ["message", "callback_query"],
-  });
-  if (!Array.isArray(result)) return { messages: [], callbacks: [], nextOffset: offset, reason };
+): Promise<{
+  messages: TgMessage[];
+  callbacks: TgCallback[];
+  nextOffset: number;
+  reason?: string;
+  errorCode?: number;
+  retryAfter?: number;
+}> {
+  const { result, reason, errorCode, retryAfter } = await call(
+    opts,
+    "getUpdates",
+    {
+      offset,
+      timeout: timeoutSec,
+      // callback_query is how an inline button press arrives. Without it here
+      // Telegram never delivers the press at all — the button spins and nothing
+      // on this side can tell it was tapped.
+      allowed_updates: ["message", "callback_query"],
+    },
+    (timeoutSec + POLL_SLACK_SEC) * 1000,
+  );
+  if (!Array.isArray(result)) {
+    return {
+      messages: [],
+      callbacks: [],
+      nextOffset: offset,
+      // A reason always, even for a 200 whose result is not a list: the loop
+      // treats "no reason" as a clean poll.
+      reason: reason ?? "getUpdates returned no update list",
+      ...(errorCode !== undefined ? { errorCode } : {}),
+      ...(retryAfter !== undefined ? { retryAfter } : {}),
+    };
+  }
 
   const messages: TgMessage[] = [];
   const callbacks: TgCallback[] = [];
@@ -167,6 +303,7 @@ export async function getUpdates(
           from?: { id?: unknown; username?: unknown };
           text?: unknown;
           caption?: unknown;
+          date?: unknown;
           voice?: { file_id?: unknown };
           audio?: { file_id?: unknown };
         }
@@ -190,6 +327,7 @@ export async function getUpdates(
       fromUsername: typeof m.from?.username === "string" ? m.from.username : undefined,
       text,
       voiceFileId,
+      date: typeof m.date === "number" ? m.date : 0,
     });
   }
   return { messages, callbacks, nextOffset };
@@ -202,7 +340,7 @@ function parseCallback(updateId: unknown, raw: unknown): TgCallback | null {
     id?: unknown;
     data?: unknown;
     from?: { id?: unknown; username?: unknown };
-    message?: { message_id?: unknown; chat?: { id?: unknown } };
+    message?: { message_id?: unknown; chat?: { id?: unknown }; date?: unknown };
   };
   if (typeof q.id !== "string" || typeof q.data !== "string") return null;
   const fromId = q.from?.id;
@@ -219,6 +357,7 @@ function parseCallback(updateId: unknown, raw: unknown): TgCallback | null {
     fromUsername: typeof q.from?.username === "string" ? q.from.username : undefined,
     messageId,
     data: q.data,
+    date: typeof q.message?.date === "number" ? q.message.date : 0,
   };
 }
 
@@ -508,6 +647,9 @@ async function sendFile(
 ): Promise<{ ok: boolean; reason?: string }> {
   const base = opts.apiBase ?? API_BASE;
   const fetchFn = (opts.fetchFn ?? (fetch as unknown)) as typeof fetch;
+  // Bounded like call(): an upload that never finishes would hold the serial
+  // poll loop just as a hung sendMessage would.
+  const { signal, disarm } = deadline(UPLOAD_TIMEOUT_MS);
   try {
     const { readFileSync } = await import("node:fs");
     const path = await import("node:path");
@@ -519,12 +661,16 @@ async function sendFile(
       form.append("parse_mode", "HTML");
     }
     form.append(field, new Blob([bytes]), path.basename(filePath));
-    const res = await fetchFn(`${base}/bot${opts.token}/${method}`, { method: "POST", body: form });
-    const body = (await res.json().catch(() => null)) as { ok?: boolean; description?: string } | null;
+    const res = await orAbort(fetchFn(`${base}/bot${opts.token}/${method}`, { method: "POST", body: form, signal }), signal);
+    const body = (await orAbort(res.json(), signal).catch(() => null)) as { ok?: boolean; description?: string } | null;
     if (body?.ok) return { ok: true };
+    if (signal.aborted) return { ok: false, reason: `upload timed out after ${UPLOAD_TIMEOUT_MS / 1000}s` };
     return { ok: false, reason: body?.description ?? `HTTP ${res.status}` };
   } catch (e) {
+    if (signal.aborted) return { ok: false, reason: `upload timed out after ${UPLOAD_TIMEOUT_MS / 1000}s` };
     return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  } finally {
+    disarm();
   }
 }
 

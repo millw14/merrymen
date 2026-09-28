@@ -1,6 +1,7 @@
 /**
  * Telegram runtime state, persisted at ~/.merrymen/telegram.json:
- *   - the getUpdates offset (so a restart doesn't replay old messages)
+ *   - the getUpdates offset (so a restart doesn't replay old messages), and the
+ *     bot it belongs to
  *   - the link code (shown in the dashboard; consumed by /link) and its round —
  *     the round increments on every successful link so the code ROTATES and a
  *     used code can't link a second chat
@@ -45,6 +46,18 @@ export interface Watcher {
 
 export interface TelegramState {
   offset: number;
+  /**
+   * WHICH BOT `offset` AND `linkCode` BELONG TO: the numeric id before the ':'
+   * in its token, never the token itself. Null in a file written before this
+   * existed, or restored by the orchestrator, which writes only the link.
+   *
+   * An update id counts up per bot, so an offset carried over to a different
+   * bot is meaningless: it is far past anything the new bot has sent, and
+   * getUpdates returned nothing, for good. The code is the other half. It
+   * belongs to the bot it was shown for, and a code minted for the old bot
+   * must not link a chat on the new one.
+   */
+  botId: string | null;
   linkCode: string;
   /** Increments on each successful /link so the code rotates. */
   linkRound: number;
@@ -125,6 +138,7 @@ export interface TelegramState {
 
 const DEFAULT: TelegramState = {
   offset: 0,
+  botId: null,
   chatSettings: null,
   linkCode: "",
   linkRound: 0,
@@ -151,6 +165,9 @@ export function loadTelegramState(): TelegramState {
     const s = JSON.parse(raw) as Partial<TelegramState>;
     return {
       offset: typeof s.offset === "number" ? s.offset : 0,
+      // Only a numeric id is accepted, so a hand-edited or corrupt file can
+      // never carry a token back in under this name.
+      botId: typeof s.botId === "string" && /^\d+$/.test(s.botId) ? s.botId : null,
       // A malformed record is dropped rather than carried: a half-read patch
       // would be promoted to the tenant store as if the owner had asked for it.
       chatSettings:
@@ -218,6 +235,18 @@ export function saveTelegramState(state: TelegramState): void {
   } catch {
     // best-effort; worst case we replay a few messages after a restart
   }
+}
+
+/**
+ * The bot a token belongs to: the numeric id Telegram puts before the ':'.
+ *
+ * Null for anything that is not `<digits>:<secret>`. What this returns is
+ * written to disk and compared in the clear, so a malformed token must give
+ * nothing rather than fall back to the whole string, which is the secret.
+ */
+export function botIdOf(token: string): string | null {
+  const m = /^(\d+):./.exec(token);
+  return m ? m[1]! : null;
 }
 
 /**

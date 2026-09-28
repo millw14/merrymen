@@ -74,7 +74,7 @@ import {
   dashboardBase,
   type StatusContext,
 } from "./reads";
-import { ensureLinkCode, rotateLinkCode, type StateRef } from "./state";
+import { botIdOf, ensureLinkCode, rotateLinkCode, type StateRef } from "./state";
 import {
   ageDays,
   ensureSoul,
@@ -156,6 +156,48 @@ const LINK_MAX_FAILS = 5;
 const LINK_LOCKOUT_SEC = 600;
 const HISTORY_TURNS = 6; // user+assistant pairs kept per chat for follow-ups
 
+/** Between polls when the last one worked. getUpdates itself long-polls, so this can be tight. */
+const POLL_GAP_MS = 500;
+/** How often to look again while Telegram is switched off or has no token. */
+const IDLE_GAP_MS = 8_000;
+/** A failing poll waits 2s, 4s, 8s … up to this, or longer when Telegram names a retry_after. */
+const BACKOFF_MAX_SEC = 60;
+/** After a 401 or 404. The token is revoked or wrong, and retrying sooner cannot fix that. */
+const REFUSED_WAIT_SEC = 300;
+/** After a 409. Another poller holds the bot; hammering it only steals its updates back and forth. */
+const CONFLICT_WAIT_SEC = 10;
+/** A 409 is logged at most this often. Two pollers trade 409s, so each quiet spell would re-log it. */
+const CONFLICT_RETELL_SEC = 3_600;
+/** A long wait is taken in slices this long, so a token fixed on the dashboard is used within one. */
+const WAKE_SLICE_MS = 5_000;
+/** Failed pushes of one menu fingerprint before it drops to one try per MENU_RETRY_SEC. */
+const MENU_MAX_ATTEMPTS = 3;
+const MENU_RETRY_SEC = 600;
+
+/** "45s", "4m 10s", "3h 5m", "2d 6h": how long polling was down, for the recovery line. */
+function span(sec: number): string {
+  const s = Math.max(0, Math.round(sec));
+  if (s < 60) return `${s}s`;
+  if (s < 3_600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  if (s < 86_400) return `${Math.floor(s / 3_600)}h ${Math.floor((s % 3_600) / 60)}m`;
+  return `${Math.floor(s / 86_400)}d ${Math.floor((s % 86_400) / 3_600)}h`;
+}
+
+/** How pushing one menu fingerprint is going. */
+interface MenuTry {
+  key: string;
+  /** Failed pushes of this fingerprint so far. */
+  attempts: number;
+  /** Unix seconds before which it is not tried again. */
+  nextAt: number;
+  /** Its failure has been logged. */
+  warned: boolean;
+  /** Chats Telegram says it has no chat with. Retrying cannot change that. */
+  gone: Set<number>;
+}
+
+const freshMenuTry = (key = ""): MenuTry => ({ key, attempts: 0, nextAt: 0, warned: false, gone: new Set() });
+
 /** Escape a name so it can sit inside a RegExp. */
 function escapeRe(v: string): string {
   return v.replace(/[.*+?^${}()|[\]\\]/g, (m) => `\\${m}`);
@@ -177,10 +219,21 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   /** Fingerprint (token + allowlist) whose "/" command menus are live — avoids
    * re-setting every poll and re-pushes when /link grows the allowlist. */
   let commandsRegisteredKey = "";
-  /** One warn per config fingerprint until a clean menu push (no per-poll spam). */
-  let menuWarned = false;
+  /** How pushing the fingerprint that is NOT yet live is going. */
+  let menuTry = freshMenuTry();
   const stateRef = deps.stateRef;
-  let warnedUnreachable = false;
+  /**
+   * The polling outage in progress, if any: when it began, how many polls in a
+   * row have failed (the backoff exponent), and which kinds of failure have
+   * been logged. Only a logged outage gets a recovery line.
+   */
+  let outage: { since: number; streak: number; told: Set<string> } | null = null;
+  /** When a 409 was last logged, unix seconds. */
+  let conflictToldAt: number | null = null;
+  /** Polls in a row that threw, as opposed to failing cleanly. */
+  let crashStreak = 0;
+  /** The token the loop last polled with. In memory only: telegram.json never holds a token. */
+  let boundToken: string | null = null;
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   ensureSoul(now()); // the merryman is born (IDENTITY/OWNER/JOURNAL.md) on first run
 
@@ -1143,49 +1196,26 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     await pushHistory(cb.chatId, "assistant", stripThinkingBlock(result.replace(/<[^>]+>/g, "")));
   };
 
-  const pollOnce = async (): Promise<void> => {
+  /**
+   * One poll. Returns how long to wait before the next, in ms. The bot
+   * binding, the backoff and the menu push it calls are defined just below.
+   */
+  const pollOnce = async (): Promise<number> => {
     const cfg = deps.getCfg();
-    if (!cfg.telegramEnabled || !cfg.telegramBotToken) return; // idle until enabled
-    stateRef.set(ensureLinkCode(stateRef.get(), cfg.telegramBotToken));
-
-    // Push the "/" command menus whenever the token or allowlist changed
-    // (enable-after-start, /link growing the allowlist). Two scopes: a trimmed
-    // safe menu for every private chat — strangers get signposts, not an
-    // advertisement of the remote-control surface — and the FULL menu for each
-    // allowlisted chat, so owners keep discoverability (/run, /type, /agent…).
-    // The fingerprint is stored only after a clean pass, so one transient
-    // network failure at startup retries on the next poll instead of silently
-    // dropping the menu until a restart. Best-effort — never breaks the poll.
-    if (cfg.telegramBotToken) {
-      const key = `${cfg.telegramBotToken}:${[...cfg.telegramAllowlist].sort((a, b) => a - b).join(",")}`;
-      if (key !== commandsRegisteredKey) {
-        const token = cfg.telegramBotToken;
-        let firstFail: string | null = null;
-        const pub = await setMyCommands({ token }, publicBotCommands, { type: "all_private_chats" });
-        if (!pub.ok) firstFail = firstFail ?? pub.reason ?? "public menu failed";
-        for (const chatId of cfg.telegramAllowlist) {
-          const r = await setMyCommands({ token }, undefined, { type: "chat", chat_id: chatId });
-          if (!r.ok) firstFail = firstFail ?? `chat ${chatId} — ${r.reason ?? "full menu failed"}`;
-        }
-        if (!firstFail) {
-          commandsRegisteredKey = key;
-          menuWarned = false;
-        } else if (!menuWarned) {
-          menuWarned = true; // retried on every poll until it lands — but logged once
-          deps.note("warn", `Telegram: command menu — ${firstFail}`);
-        }
-      }
+    if (!cfg.telegramEnabled || !cfg.telegramBotToken) {
+      // Switched off is not an outage, and time spent off must not be counted
+      // into one when it is switched back on.
+      outage = null;
+      return IDLE_GAP_MS; // idle until enabled
     }
+    const token = cfg.telegramBotToken;
+    await bindBot(token);
+    stateRef.set(ensureLinkCode(stateRef.get(), token));
 
-    const { messages, callbacks, nextOffset, reason } = await getUpdates({ token: cfg.telegramBotToken }, stateRef.get().offset);
-    if (reason) {
-      if (!warnedUnreachable) {
-        deps.note("warn", `Telegram: getUpdates — ${reason}`);
-        warnedUnreachable = true;
-      }
-      return;
-    }
-    warnedUnreachable = false;
+    const polled = await getUpdates({ token }, stateRef.get().offset);
+    if (polled.reason) return pollFailed(polled);
+    pollWorked();
+    const { messages, callbacks, nextOffset } = polled;
     // In the order they happened: a press and a typed message in the same
     // batch must not overtake each other.
     const updates = [
@@ -1202,16 +1232,199 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     if (nextOffset !== stateRef.get().offset) {
       stateRef.set({ ...stateRef.get(), offset: nextOffset });
     }
+    await pushMenus(cfg, token);
+    return POLL_GAP_MS;
+  };
+
+  /**
+   * TIE THE OFFSET AND THE LINK CODE TO THE BOT THEY BELONG TO, before either
+   * is used.
+   *
+   * Both used to outlive a change of bot. Update ids count up per bot, so the
+   * old bot's offset, far past anything a new bot has sent, made getUpdates
+   * return nothing for good: the new bot never heard a message. And the code
+   * minted for the old bot stayed on the dashboard and kept working.
+   *
+   * - A DIFFERENT bot starts from its first update, with a fresh code and no
+   *   link lockouts: those counted guesses at a code that no longer exists.
+   * - The SAME bot with a new secret keeps its offset, since its updates are
+   *   the same stream. The code is re-minted all the same, because it was
+   *   derived from the token, and whoever held the replaced token could derive
+   *   it.
+   * - NO stored bot, a file from before this existed or one the orchestrator
+   *   restored, adopts the current bot and resets nothing. A reset there would
+   *   replay the backlog and void a code the dashboard may be showing.
+   *
+   * Logged without the token or the code; the dashboard shows the new code.
+   */
+  const bindBot = async (token: string): Promise<void> => {
+    const was = boundToken;
+    boundToken = token;
+    const renewed = was !== null && was !== token;
+    // A new token is a new question, so it starts the backoff from the bottom.
+    if (renewed && outage) outage.streak = 0;
+    const botId = botIdOf(token);
+    if (!botId) return; // not a token Telegram would accept; getUpdates says so
+    const st = stateRef.get();
+    if (st.botId === null) {
+      stateRef.set({ ...st, botId });
+      return;
+    }
+    if (st.botId !== botId) {
+      stateRef.set({ ...st, botId, offset: 0, linkCode: "" });
+      linkFails.clear();
+      commandsRegisteredKey = "";
+      menuTry = freshMenuTry();
+      const me = await getMe({ token });
+      deps.note("ok", me.bot ? `Telegram: bot changed to @${me.bot.username}` : "Telegram: bot changed");
+      return;
+    }
+    if (renewed) {
+      stateRef.set({ ...st, linkCode: "" });
+      deps.note("ok", "Telegram: bot token renewed, so the link code was re-minted");
+    }
+  };
+
+  /**
+   * A poll that failed: log it once per kind per outage, and say how long to
+   * leave it.
+   *
+   * The loop used to retry every 500ms whatever the answer. A revoked token
+   * was asked again twice a second for days, a 429 was retried inside its own
+   * retry_after, and a second poller on the same bot turned into two processes
+   * taking the bot's updates from each other as fast as they could.
+   */
+  const pollFailed = (r: { reason?: string; errorCode?: number; retryAfter?: number }): number => {
+    const t = now();
+    outage = outage ?? { since: t, streak: 0, told: new Set() };
+    outage.streak += 1;
+    const reason = r.reason ?? "unknown error";
+    let kind: string;
+    let waitSec: number;
+    let line: string;
+    if (r.errorCode === 409) {
+      kind = "conflict";
+      waitSec = CONFLICT_WAIT_SEC;
+      // Both are a 409, and they need different fixes: stop the other program,
+      // or delete the webhook. The webhook is never deleted from here; it may
+      // be another deployment's.
+      line = /webhook/i.test(reason)
+        ? "Telegram: this bot has a webhook set, so its updates can't be polled (409 Conflict)"
+        : "Telegram: another program is reading this bot's updates (409 Conflict)";
+    } else if (r.errorCode === 401 || r.errorCode === 404) {
+      kind = "refused";
+      waitSec = REFUSED_WAIT_SEC;
+      line = `Telegram: the bot token was refused (${r.errorCode} ${reason}); trying again every 5 minutes, or as soon as the token changes`;
+    } else {
+      kind = "failed";
+      waitSec = Math.min(BACKOFF_MAX_SEC, 2 ** outage.streak);
+      line = `Telegram: getUpdates — ${reason}`;
+    }
+    const conflictToldRecently = kind === "conflict" && conflictToldAt !== null && t - conflictToldAt < CONFLICT_RETELL_SEC;
+    if (!outage.told.has(kind) && !conflictToldRecently) {
+      outage.told.add(kind);
+      if (kind === "conflict") conflictToldAt = t;
+      deps.note("warn", line);
+    }
+    return Math.max(r.retryAfter ?? 0, waitSec) * 1000;
+  };
+
+  /** A poll that worked. An outage that was logged is closed with how long it lasted. */
+  const pollWorked = (): void => {
+    if (outage && outage.told.size > 0) {
+      deps.note("ok", `Telegram: receiving updates again after ${span(now() - outage.since)}`);
+    }
+    outage = null;
+  };
+
+  /**
+   * Push the "/" command menus whenever the token or allowlist changed
+   * (enable-after-start, /link growing the allowlist). Two scopes: a trimmed
+   * safe menu for every private chat — strangers get signposts, not an
+   * advertisement of the remote-control surface — and the FULL menu for each
+   * allowlisted chat, so owners keep discoverability (/run, /type, /agent…).
+   * The fingerprint is stored only after a clean pass, so one transient
+   * network failure retries on the next poll instead of silently dropping the
+   * menu until a restart. Best-effort — never breaks the poll.
+   *
+   * AFTER THE BATCH, AND BOUNDED. It ran before getUpdates on every poll, so a
+   * menu that could not be pushed (a revoked token, an allowlisted chat the bot
+   * has never spoken to) cost one to N requests before each poll, twice a
+   * second, and stood in front of every message waiting to be read. Now a
+   * fingerprint is tried at most MENU_MAX_ATTEMPTS times in a row, then once
+   * every MENU_RETRY_SEC. "chat not found" is not retried for that chat at
+   * all: the bot has no chat with it until that person writes to the bot, and
+   * asking again does not change that. The next change of fingerprint, or a
+   * restart, tries it again.
+   */
+  const pushMenus = async (cfg: ResolvedConfig, token: string): Promise<void> => {
+    const key = `${token}:${[...cfg.telegramAllowlist].sort((a, b) => a - b).join(",")}`;
+    if (key === commandsRegisteredKey) return;
+    if (menuTry.key !== key) menuTry = freshMenuTry(key);
+    if (now() < menuTry.nextAt) return;
+    let firstFail: string | null = null;
+    const pub = await setMyCommands({ token }, publicBotCommands, { type: "all_private_chats" });
+    if (!pub.ok) firstFail = pub.reason ?? "public menu failed";
+    for (const chatId of cfg.telegramAllowlist) {
+      if (menuTry.gone.has(chatId)) continue;
+      const r = await setMyCommands({ token }, undefined, { type: "chat", chat_id: chatId });
+      if (r.ok) continue;
+      if (/chat not found/i.test(r.reason ?? "")) {
+        menuTry.gone.add(chatId);
+        continue;
+      }
+      firstFail = firstFail ?? `chat ${chatId} — ${r.reason ?? "full menu failed"}`;
+    }
+    if (!firstFail) {
+      commandsRegisteredKey = key;
+      return;
+    }
+    menuTry.attempts += 1;
+    if (menuTry.attempts >= MENU_MAX_ATTEMPTS) menuTry.nextAt = now() + MENU_RETRY_SEC;
+    if (!menuTry.warned) {
+      menuTry.warned = true; // retried as above — but logged once per fingerprint
+      deps.note("warn", `Telegram: command menu — ${firstFail}`);
+    }
+  };
+
+  const currentToken = (): string | undefined => {
+    try {
+      return deps.getCfg().telegramBotToken;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
+   * Wait `ms`, then poll. Taken in slices so that a wait never outlasts the
+   * token it was for: after a 401 the owner pastes a new token on the
+   * dashboard, and the next poll should use it within seconds, not at the end
+   * of the five minutes the old token earned.
+   */
+  const waitThenPoll = (ms: number, token: string | undefined): void => {
+    const slice = Math.min(ms, WAKE_SLICE_MS);
+    setTimeout(() => {
+      if (stopped) return;
+      const left = ms - slice;
+      if (left > 0 && currentToken() === token) waitThenPoll(left, token);
+      else loop();
+    }, slice);
   };
 
   const loop = () => {
     if (stopped) return;
-    const cfg = deps.getCfg();
-    // Enabled: getUpdates long-polls ~25s, so loop tight. Disabled: re-check slowly.
-    const gap = cfg.telegramEnabled && cfg.telegramBotToken ? 500 : 8000;
+    const token = currentToken();
     pollOnce()
-      .catch((e) => deps.note("warn", `Telegram: poll loop — ${e instanceof Error ? e.message : String(e)}`))
-      .finally(() => setTimeout(loop, gap));
+      .then((ms) => {
+        crashStreak = 0;
+        return ms;
+      })
+      .catch((e) => {
+        deps.note("warn", `Telegram: poll loop — ${e instanceof Error ? e.message : String(e)}`);
+        crashStreak += 1;
+        return Math.min(BACKOFF_MAX_SEC, 2 ** crashStreak) * 1000;
+      })
+      .then((ms) => waitThenPoll(ms, token));
   };
 
   // Announce the bot identity once at startup (best-effort).

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import { BOT_COMMANDS, answerCallbackQuery, editMessageText, esc, getMe, getUpdates, sendMessage, setMyCommands, publicBotCommands, type FetchLike } from "./api";
 import { parseSlash } from "./interpreter";
 
@@ -114,7 +114,7 @@ describe("getUpdates", () => {
     assert.equal(messages.length, 1);
     assert.equal(messages[0]!.text, "hi");
     assert.deepEqual(callbacks, [
-      { updateId: 40, id: "cbq-1", chatId: 555, fromId: 555, fromUsername: "alice", messageId: 77, data: "mm:ok:ab12" },
+      { updateId: 40, id: "cbq-1", chatId: 555, fromId: 555, fromUsername: "alice", messageId: 77, data: "mm:ok:ab12", date: 0 },
     ]);
     assert.equal(nextOffset, 42);
   });
@@ -480,5 +480,178 @@ describe("a refused request keeps Telegram's reason", () => {
     const f: FetchLike = async () => ({ ok: false, status: 502, json: async () => { throw new Error("html"); } });
     const { reason } = await getMe({ token: "t", fetchFn: f });
     assert.match(reason!, /HTTP 502/);
+  });
+});
+
+describe("every update carries when it was sent", () => {
+  it("a message has Telegram's date, and 0 when it came without one", async () => {
+    const f = fakeFetch(
+      200,
+      OK([
+        { update_id: 1, message: { text: "/status", date: 1_790_000_000, chat: { id: 5 }, from: { id: 5 } } },
+        { update_id: 2, message: { text: "hi", chat: { id: 5 }, from: { id: 5 } } },
+      ]),
+    );
+    const { messages } = await getUpdates({ token: "t", fetchFn: f }, 1);
+    assert.deepEqual(
+      messages.map((m) => m.date),
+      [1_790_000_000, 0],
+    );
+  });
+
+  it("a press has the date of the message its button sits on, and 0 when Telegram gives none", async () => {
+    const press = (id: number, date?: number) => ({
+      update_id: id,
+      callback_query: {
+        id: `cb${id}`,
+        data: "mm:ok:1",
+        from: { id: 5 },
+        message: { message_id: 9, chat: { id: 5 }, ...(date === undefined ? {} : { date }) },
+      },
+    });
+    const f = fakeFetch(200, OK([press(1, 1_790_000_100), press(2), press(3, 0)]));
+    const { callbacks } = await getUpdates({ token: "t", fetchFn: f }, 1);
+    assert.deepEqual(
+      callbacks.map((c) => c.date),
+      [1_790_000_100, 0, 0],
+    );
+  });
+});
+
+describe("every request is bounded", () => {
+  /** A fetch that records what it was handed and never answers — not even to its signal. */
+  const deaf = () => {
+    const seen: { signal?: AbortSignal }[] = [];
+    const f: FetchLike = (_url, init) => {
+      seen.push({ signal: init?.signal });
+      return new Promise(() => {});
+    };
+    return { f, seen };
+  };
+  const settled = <T>(p: Promise<T>) => {
+    const box: { done: boolean; value?: T } = { done: false };
+    void p.then((v) => {
+      box.done = true;
+      box.value = v;
+    });
+    return box;
+  };
+  const flush = async () => {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  };
+
+  it("hands fetch an AbortSignal, on GET and POST alike", async () => {
+    const seen: (AbortSignal | undefined)[] = [];
+    const f: FetchLike = async (_url, init) => {
+      seen.push(init?.signal);
+      return { ok: true, status: 200, json: async () => OK({ id: 1, username: "b", message_id: 1 }) };
+    };
+    await getMe({ token: "1:a", fetchFn: f });
+    await getUpdates({ token: "1:a", fetchFn: f }, 0);
+    await sendMessage({ token: "1:a", fetchFn: f }, 5, "hi");
+    assert.equal(seen.length, 3);
+    for (const s of seen) assert.ok(s instanceof AbortSignal, "every call carries a signal");
+    assert.ok(seen.every((s) => !s!.aborted), "and a call that answered in time is not aborted");
+  });
+
+  it("a getUpdates that never answers comes back with a reason at its long-poll window plus 10s — 35s by default", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const { f, seen } = deaf();
+      const r = settled(getUpdates({ token: "1:a", fetchFn: f }, 7));
+      mock.timers.tick(34_999);
+      await flush();
+      assert.equal(r.done, false, "still inside the window");
+      mock.timers.tick(1);
+      await flush();
+      assert.equal(r.done, true, "abandoned at 35s, though the fetch ignored its signal");
+      assert.match(r.value!.reason!, /timed out after 35s/);
+      assert.equal(r.value!.nextOffset, 7, "and the offset is kept, so nothing is skipped");
+      assert.equal(seen[0]!.signal!.aborted, true, "the request itself was told to stop");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("any other method gets 15 seconds", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const { f } = deaf();
+      const r = settled(sendMessage({ token: "1:a", fetchFn: f }, 5, "hi"));
+      mock.timers.tick(14_999);
+      await flush();
+      assert.equal(r.done, false);
+      mock.timers.tick(1);
+      await flush();
+      assert.deepEqual(r.value, { ok: false, reason: "request timed out after 15s" });
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("a body that never finishes arriving is bounded too", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const f: FetchLike = async () => ({ ok: true, status: 200, json: () => new Promise(() => {}) });
+      const r = settled(getMe({ token: "1:a", fetchFn: f }));
+      mock.timers.tick(15_000);
+      await flush();
+      assert.equal(r.done, true);
+      assert.match(r.value!.reason!, /timed out after 15s/);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+});
+
+describe("a refusal keeps what the poll loop backs off on", () => {
+  it("a 429 carries its retry_after and code", async () => {
+    const f = fakeFetch(429, {
+      ok: false,
+      error_code: 429,
+      description: "Too Many Requests: retry after 7",
+      parameters: { retry_after: 7 },
+    });
+    const r = await getUpdates({ token: "t", fetchFn: f }, 3);
+    assert.equal(r.retryAfter, 7);
+    assert.equal(r.errorCode, 429);
+    assert.match(r.reason!, /Too Many Requests/);
+    assert.equal(r.nextOffset, 3);
+  });
+
+  it("a revoked token is a 401, a second poller a 409", async () => {
+    const revoked = await getUpdates({ token: "t", fetchFn: fakeFetch(401, { ok: false, error_code: 401, description: "Unauthorized" }) }, 0);
+    assert.equal(revoked.errorCode, 401);
+    assert.equal(revoked.retryAfter, undefined);
+    const conflict = await getUpdates(
+      {
+        token: "t",
+        fetchFn: fakeFetch(409, {
+          ok: false,
+          error_code: 409,
+          description: "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running",
+        }),
+      },
+      0,
+    );
+    assert.equal(conflict.errorCode, 409);
+  });
+
+  it("the HTTP status stands in when the body has no error_code", async () => {
+    const r = await getUpdates({ token: "t", fetchFn: fakeFetch(502, null) }, 0);
+    assert.equal(r.errorCode, 502);
+    assert.equal(r.reason, "HTTP 502");
+  });
+
+  it("a network failure has a reason and no code", async () => {
+    const r = await getUpdates({ token: "t", fetchFn: async () => { throw new TypeError("fetch failed"); } }, 0);
+    assert.match(r.reason!, /fetch failed/);
+    assert.equal(r.errorCode, undefined);
+  });
+
+  it("an answer that is not a list of updates is a failure, never a clean empty poll", async () => {
+    const r = await getUpdates({ token: "t", fetchFn: fakeFetch(200, OK({ not: "a list" })) }, 4);
+    assert.ok(r.reason);
+    assert.equal(r.nextOffset, 4);
   });
 });
