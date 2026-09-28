@@ -126,7 +126,7 @@ beforeEach(() => {
   for (const f of ["settings.json", "telegram.json", "grant.json", "restore-blocked.json"]) rmSync(path.join(HOME, f), { force: true });
   for (const f of readdirSync(HOME)) if (f.startsWith("kill-request-")) rmSync(path.join(HOME, f), { force: true });
   writeSettings();
-  writeRestoreBlocked(HOME, { reason: REASON, class: CLASS, since: Math.floor(T0 / 1000) - 3_600 });
+  writeRestoreBlocked(HOME, { reason: REASON, class: CLASS, since: Math.floor(T0 / 1000) - 3_600, resettable: true });
   writeFileSync(
     path.join(HOME, "grant.json"),
     JSON.stringify({ smartAccount: "0x00000000000000000000000000000000000000c7", serialized: "eyJ-held-grant", grantedAt: 1 }),
@@ -147,6 +147,23 @@ describe("an allowlisted owner is told trading is held", () => {
         }
         assert.ok(!/\d/.test(s), `no digit at all reaches the owner: ${s}`);
       }
+    });
+  });
+
+  it("an owner the practice reset would be refused for is not told to press it, and is told again once it would not be", async () => {
+    await withHold(async (h) => {
+      // The orchestrator writes `resettable` from the owner's settings
+      // (live switched on beside practice, here), and the hold reads it per reply.
+      writeRestoreBlocked(HOME, { reason: REASON, class: CLASS, since: Math.floor(T0 / 1000) - 3_600, resettable: false });
+      h.queue.push(text(1, OWNER, "hey"));
+      await h.advance(1_000);
+      const [refused] = h.sentTo(OWNER);
+      assert.doesNotMatch(refused!, /Start over|start practice over/);
+      assert.match(refused!, /You don't need to do anything\. \/link still works\.$/);
+      writeRestoreBlocked(HOME, { reason: REASON, class: CLASS, since: Math.floor(T0 / 1000) - 3_600, resettable: true });
+      h.queue.push(text(2, OWNER, "hey"));
+      await h.advance(1_000);
+      assert.match(h.sentTo(OWNER)[1]!, HOLD);
     });
   });
 

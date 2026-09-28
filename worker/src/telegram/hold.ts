@@ -92,9 +92,12 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
   const note = deps.note ?? ((level, message) => console.log(`[telegram${level === "warn" ? " warn" : ""}] ${message}`));
   const blocker = deps.blocker ?? (() => readRestoreBlocked(merrymenHome()));
   const kill = deps.kill ?? (() => hostedKillFromChat(merrymenHome(), homePaths.grant(), loadGrantFile(), now()));
-  // The hold's own record unreadable: the class that names no cause.
-  const cls = (): string => blocker()?.class ?? UNCLASSIFIED_BLOCK;
-  const holdReply = (): string => esc(holdText(cls()));
+  // The hold's own record unreadable: the class that names no cause, and no
+  // practice reset offered, since nothing then says it would be honoured.
+  const holdReply = (): string => {
+    const block = blocker();
+    return esc(holdText(block?.class ?? UNCLASSIFIED_BLOCK, block?.resettable === true));
+  };
 
   // The same loop state as the child's (service.ts startTelegram says what
   // each is for): the outage and its backoff, the bot this loop last bound,

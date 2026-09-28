@@ -378,8 +378,12 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
   return `paper cash, holdings and basis restored${saidNormalized(normalized)}`;
 }
 
-/** What a reset of a blocked book came to: the epoch it opened, or why nothing was changed. */
-export type BlockedBookReset = { ok: true; epoch: number } | { ok: false; why: string };
+/**
+ * What a reset of a blocked book came to: the epoch it opened, or why nothing
+ * was changed. `moved` marks the one refusal that asking again can undo: the
+ * epoch changed under the decision, and the next decision reads the new one.
+ */
+export type BlockedBookReset = { ok: true; epoch: number } | { ok: false; why: string; moved?: true };
 
 /**
  * START A PRACTICE BOOK OVER WHEN NO WORKER CAN, from the shared ledger alone.
@@ -448,7 +452,7 @@ export async function resetBlockedPaperBookIn(db: Db, account: string, observedE
   if (!Number.isSafeInteger(observedEpoch) || observedEpoch < 1) return { ok: false, why: `no usable epoch (${String(observedEpoch)})` };
   const agent = await db.prepare(`SELECT epoch, mode FROM agents WHERE LOWER(smart_account)=LOWER(?)`).get(account) as { epoch: number; mode: string | null } | undefined;
   if (!agent) return { ok: false, why: "the account has no agent row" };
-  if (Number(agent.epoch) !== observedEpoch) return { ok: false, why: `the epoch moved (${observedEpoch} → ${Number(agent.epoch)})` };
+  if (Number(agent.epoch) !== observedEpoch) return { ok: false, why: `the epoch moved (${observedEpoch} → ${Number(agent.epoch)})`, moved: true };
   if (agent.mode === "live") return { ok: false, why: "the agent last reported the live rail" };
   const mark = await db.prepare(`SELECT mode FROM equity WHERE LOWER(agent_id)=LOWER(?) ORDER BY at DESC, id DESC LIMIT 1`).get(account) as { mode: string | null } | undefined;
   if (mark?.mode !== "paper") return { ok: false, why: mark ? `the newest valuation is not a paper one (${String(mark.mode)})` : "there is no valuation to show the book is a paper one" };
@@ -461,7 +465,7 @@ export async function resetBlockedPaperBookIn(db: Db, account: string, observedE
   const filed = Number(top?.top ?? 0);
   const epoch = Math.max(observedEpoch, Number.isFinite(filed) ? filed : 0) + 1;
   const moved = await db.prepare(`UPDATE agents SET epoch=? WHERE LOWER(smart_account)=LOWER(?) AND epoch=?`).run(epoch, account, observedEpoch);
-  if (Number(moved.changes) === 0) return { ok: false, why: "the epoch moved" };
+  if (Number(moved.changes) === 0) return { ok: false, why: "the epoch moved", moved: true };
   await db.prepare(`DELETE FROM positions WHERE LOWER(agent_id)=LOWER(?)`).run(account);
   await db.prepare(`DELETE FROM cost_basis WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).run(account);
   await db.prepare(`DELETE FROM position_floors WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).run(account);

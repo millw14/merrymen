@@ -1,16 +1,19 @@
 /**
- * START OVER ASKS FOR THE PRACTICE RESET, AND HEARS BACK, BEFORE IT DISCARDS THE GRANT.
+ * START OVER SENDS ONE REQUEST, AT ONCE, THAT OUTLIVES THE TAB.
  *
- * /api/paper-reset finds the agent to queue the reset for through the live
- * grant (agent-for.ts hostedAgentFor), and Start over also sends DELETE
- * /api/grants. The two were fired side by side, so the DELETE could land first
- * and leave the reset nobody to queue for: a 401 the catch swallowed. That is
- * what happened in production at 2026-09-21T16:24:24Z, to an owner whose
- * practice book was held and who pressed Start over to get out of it.
+ * Start over is the kill switch for a discarded grant (DELETE /api/grants) and
+ * the ask for a practice reset, and the reset finds its agent through that
+ * grant. Fired side by side, the DELETE won and the reset answered 401
+ * (production, 2026-09-21T16:24:24Z). Chained, so the DELETE went only once
+ * the reset had answered, the kill waited on a round trip, and a tab closed
+ * inside it never sent the DELETE at all: the page had already forgotten the
+ * grant, the server still ran it. So the page now sends one request, the
+ * server does the ordering (/api/grants/discard and lib/start-over.ts, driven in
+ * app/api/grants/discard/discard.test.ts), and this pins the page's half.
  *
  * Read through the TypeScript parser rather than by regex, so the pin is about
- * the call structure (the DELETE runs in a `.then` of the chain the POST
- * starts) and not about line order, which a promise does not respect.
+ * the call structure (the request is a statement of discard() itself, not the
+ * body of a callback that runs later) and not about line order.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -29,8 +32,8 @@ const all = (root: ts.Node, keep: (n: ts.Node) => boolean): ts.Node[] => {
   visit(root);
   return out;
 };
-/** Every `fetch("<url>", …)` under `root`. */
-const fetches = (root: ts.Node, url: string) =>
+/** Every `fetch("<url>…", …)` under `root` whose URL starts with `prefix`. */
+const fetches = (root: ts.Node, prefix: string) =>
   all(
     root,
     (n) =>
@@ -39,39 +42,35 @@ const fetches = (root: ts.Node, url: string) =>
       n.expression.text === "fetch" &&
       !!n.arguments[0] &&
       ts.isStringLiteral(n.arguments[0]) &&
-      n.arguments[0].text === url,
+      n.arguments[0].text.startsWith(prefix),
   ) as ts.CallExpression[];
 
 const discard = all(AST, (n) => ts.isFunctionDeclaration(n) && n.name?.text === "discard")[0] as ts.FunctionDeclaration | undefined;
 
 describe("Start over", () => {
-  it("SENDS THE RESET FIRST, AND THE DELETE ONLY ONCE THE RESET HAS ANSWERED", () => {
+  it("SENDS ONE REQUEST THAT DOES BOTH, AND NEITHER HALF ON ITS OWN", () => {
     assert.ok(discard?.body, "discard() is where Start over lives");
-    const [post] = fetches(discard, "/api/paper-reset");
-    const [del] = fetches(discard, "/api/grants");
-    assert.ok(post && del, "it asks for both");
-    assert.equal(fetches(discard, "/api/grants").length, 1, "one DELETE, and only in the chain");
-    assert.match(del.arguments[1]!.getText(), /method: "DELETE"/);
-
-    // The DELETE is the body of an arrow passed to `.then(...)`, and that
-    // `.then` is called on a chain whose root is the reset's fetch.
-    const arrow = del.parent;
-    assert.ok(ts.isArrowFunction(arrow), "the DELETE is started by a callback, not beside the reset");
-    const then = arrow.parent;
-    assert.ok(ts.isCallExpression(then) && ts.isPropertyAccessExpression(then.expression) && then.expression.name.text === "then");
-    let root: ts.Expression = then.expression.expression;
-    while (ts.isCallExpression(root) && ts.isPropertyAccessExpression(root.expression)) root = root.expression.expression;
-    assert.equal(root, post, "and the chain it waits on is the reset's");
+    const sent = fetches(discard, "/api/grants/discard");
+    assert.equal(sent.length, 1, "one request, which removes the grant and queues the reset from it");
+    const urls = (prefix: string) => fetches(discard, prefix).map((f) => (f.arguments[0] as ts.StringLiteral).text);
+    assert.deepEqual(urls("/api/grants").filter((u) => u !== "/api/grants/discard"), [], "no separate DELETE to order against");
+    assert.deepEqual(urls("/api/paper-reset"), [], "and no separate reset");
+    const init = sent[0]!.arguments[1]!.getText();
+    assert.match(init, /method: "POST"/);
+    assert.match(init, /keepalive: true/, "a tab closed straight after the press still delivers the kill");
   });
 
-  it("A RESET THAT FAILS OR HANGS STILL DISCARDS THE GRANT", () => {
-    const [post] = fetches(discard!, "/api/paper-reset");
-    // Bounded, so the kill-switch half is never held up for long…
-    assert.match(post!.arguments[1]!.getText(), /signal: AbortSignal\.timeout\([\d_]+\)/);
-    // …and a rejection is caught BEFORE the `.then`, so the DELETE still runs.
-    const caught = post!.parent;
-    assert.ok(ts.isPropertyAccessExpression(caught) && caught.name.text === "catch", "the reset's own failure is caught first");
-    const next = caught.parent.parent;
-    assert.ok(ts.isPropertyAccessExpression(next) && next.name.text === "then", "and only then does the DELETE go");
+  it("SENT NOW, NOT FROM A CALLBACK, AND WITH NOTHING BEFORE IT THAT COULD THROW IT AWAY", () => {
+    const [del] = fetches(discard!, "/api/grants/discard");
+    // The nearest function around the request is discard() itself: it is not
+    // the body of a `.then`, a timer or any other callback that runs later, or
+    // not at all once the page has gone.
+    let fn: ts.Node = del!.parent;
+    while (!ts.isFunctionLike(fn)) fn = fn.parent;
+    assert.equal(fn, discard, "started by discard(), not by something discard() schedules");
+    // AbortSignal.timeout does not exist on every browser this page meets, and
+    // a synchronous throw there would skip the kill and the rest of the reset
+    // of this screen.
+    assert.doesNotMatch(discard!.body!.getText(), /AbortSignal\.timeout/);
   });
 });

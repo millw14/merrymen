@@ -100,9 +100,9 @@ import {
   publishTenantTelegram,
   readTenantTelegram,
 } from "./telegram-store";
-import { clearRestoreBlocked, isNamedBlock, readRestoreBlocked, restoreBlockClass, writeRestoreBlocked } from "./restore-block";
+import { UNCLASSIFIED_BLOCK, clearRestoreBlocked, isNamedBlock, readRestoreBlocked, restoreBlockClass, writeRestoreBlocked } from "./restore-block";
 import { notifyHoldOnce, type HoldNoticeOutcome } from "./hold-notice";
-import { applyHeldReset, resetsAsked, type HeldResetOutcome } from "./held-reset";
+import { applyHeldReset, resetsAsked, settingsRefuseHeldReset, type HeldResetOutcome } from "./held-reset";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
 import { addressesOf, makeBuilderDesk, type BuilderDesk } from "./builder-pass";
@@ -651,11 +651,19 @@ interface Holder {
   /** A retry is running. Two passes must not both hand the tenant over. */
   retrying: boolean;
   /**
-   * The newest practice reset its owner queued that has already brought a
-   * retry forward, so one press is one early retry and not one every pass
-   * (reconcile; held-reset.ts).
+   * The newest practice reset its owner queued that a restore attempt has
+   * already looked at, so one press is one early retry and not one every pass
+   * (reconcile; held-reset.ts). Seeded by the spawn that held the tenant when
+   * it looked at one, so the same pass does not look again.
    */
   resetSeen: string | null;
+  /**
+   * Whether the owner is offered the practice reset (restore-block.ts
+   * holdText): their stored settings would let it be honoured. Recorded in
+   * restore-blocked.json for the hold process, and kept in step with the
+   * settings on reconcile's clock.
+   */
+  resettable: boolean;
 }
 
 /**
@@ -705,6 +713,7 @@ export async function adoptHolderForTest(
   const held: Holder = {
     tenant: lc, smartAccount, proc: null, exited: null, reason, cls: restoreBlockClass(reason),
     nextRetryAt: 0, backoffMs: HOLD_RETRY_FIRST_MS, quickMs: HOLD_RETRY_QUICK_MS, retrying: false, resetSeen: null,
+    resettable: false,
   };
   scheduleHoldRetry(held, held.cls);
   holders.set(lc, held);
@@ -1773,8 +1782,11 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // honour it: this is the book the gate below would hold. Most often the
     // owner pressed Start over on the web, which also discards the grant, so
     // this spawn is the one their re-signed grant brought. See
-    // honourHeldPaperReset.
-    if (!restore.ok && settings?.paperTradingEnabled === true && (await honourHeldPaperReset(tenant, smartAccount, lease))) {
+    // honourHeldPaperReset. What it looked at goes to spawnHolder when the
+    // book is held after all, so the hold does not look again this pass.
+    const honour =
+      !restore.ok && settings?.paperTradingEnabled === true ? await honourHeldPaperReset(tenant, smartAccount, lease) : null;
+    if (honour?.applied) {
       // The anchor above was read in the epoch the reset has just closed, and
       // the worker files every row under the anchor's epoch. Written again, or
       // its whole run would land in the old epoch, beside the fills that broke
@@ -1791,7 +1803,7 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
       // which is what returning here used to do, for days: HOLD the tenant
       // instead. Trading stays off, a hold process answers the bot, the
       // restore is tried again on a backoff, and the owner is told once.
-      await spawnHolder(tenant, smartAccount, restore.reason, settings, lease);
+      await spawnHolder(tenant, smartAccount, restore.reason, settings, lease, honour);
       return;
     } else {
       // Not a practice book (live, or the flag unset): nothing to restart
@@ -1956,9 +1968,31 @@ const sayResetOnce = (tenant: string, line: string): void => {
 };
 
 /**
- * HONOUR A PRACTICE RESET FOR A BOOK THAT WILL NOT RESTORE. True when the book
- * was started over, and the caller then restores again, which finds nothing to
- * restore and lets a worker seed a fresh book.
+ * Is the owner's live-trading consent enforced on this deployment? settings.ts
+ * enforceLiveIntent, as the tenant's worker would read it. With it stood down,
+ * a setting that does not switch live trading on proves nothing (held-reset.ts).
+ */
+const liveConsentEnforced = (): boolean => (process.env.MERRYMEN_LIVE_INTENT_STAND_DOWN ?? "").trim() !== "1";
+
+/** What honouring a held tenant's practice reset came to, for the hold's own bookkeeping. */
+interface HeldHonour {
+  /** The book was started over: the caller restores again. */
+  applied: boolean;
+  /** The queued reset it looked at, or null when none was waiting (or none could be read). */
+  looked: string | null;
+  /**
+   * The answer was no only because something could not be read or written
+   * just then (held-reset.ts HeldResetOutcome): the hold's next attempt comes
+   * at the pace of a failure that names no cause, a pass or so, not at the end
+   * of its backoff.
+   */
+  transient: boolean;
+}
+
+/**
+ * HONOUR A PRACTICE RESET FOR A BOOK THAT WILL NOT RESTORE. `applied` when the
+ * book was started over, and the caller then restores again, which finds
+ * nothing to restore and lets a worker seed a fresh book.
  *
  * Called only where a restore has just failed for a tenant the gate holds:
  * spawnChild's paper branch and retryHold. Under the lease the caller holds,
@@ -1974,21 +2008,20 @@ async function honourHeldPaperReset(
   tenant: `0x${string}`,
   smartAccount: `0x${string}`,
   lease: TenantLease | undefined,
-): Promise<boolean> {
+): Promise<HeldHonour> {
   let out: HeldResetOutcome;
   try {
     const db = await heldResetDb();
-    if (!db) return false;
+    if (!db) return { applied: false, looked: null, transient: false };
     out = await applyHeldReset(db, smartAccount, {
       now: Date.now(),
       readSettings: () => getSettingsStore().get(tenant),
-      // settings.ts enforceLiveIntent, as the tenant's worker would read it.
-      consentEnforced: (process.env.MERRYMEN_LIVE_INTENT_STAND_DOWN ?? "").trim() !== "1",
+      consentEnforced: liveConsentEnforced(),
       mayWrite: () => (lease ? lateSpawnRefusal(tenant, lease) : "it holds no lease"),
     });
   } catch (e) {
     sayResetOnce(tenant, `${tenant}: a practice reset could not be checked for or honoured — ${e instanceof Error ? e.message : String(e)}`);
-    return false;
+    return { applied: false, looked: null, transient: true };
   }
   if (out.applied) {
     heldResetSaid.delete(tenant);
@@ -1996,11 +2029,11 @@ async function honourHeldPaperReset(
       `${tenant}: practice book started over at its owner's request (command ${out.id.slice(0, 8)}) — ` +
         `epoch ${out.from} closed and kept, epoch ${out.epoch} opens with no positions, no capital flow booked`,
     );
-    return true;
+    return { applied: true, looked: out.id, transient: false };
   }
   // Nothing waiting is the ordinary case, and says nothing.
   if (out.id !== null) sayResetOnce(tenant, `${tenant}: practice reset ${out.id.slice(0, 8)} not honoured while held — ${out.why}`);
-  return false;
+  return { applied: false, looked: out.id, transient: out.transient };
 }
 
 /**
@@ -2057,6 +2090,12 @@ function holderBotReady(settings: MerrymenSettings | null): boolean {
  * it takes, or the gate would no longer hold the tenant (practice switched
  * off), the hold process is stopped and a worker starts in the same home
  * (handHoldBack).
+ *
+ * `honour` is what spawnChild's own look at a practice reset came to, just
+ * now, for this same failed restore. The reset it looked at counts as seen, so
+ * reconcile's early retry later in this pass does not run the restore and the
+ * reset again for it; and if the answer could not be had just then, the first
+ * retry comes at the quick pace rather than after the backoff.
  */
 async function spawnHolder(
   tenant: `0x${string}`,
@@ -2064,6 +2103,7 @@ async function spawnHolder(
   reason: string,
   settings: MerrymenSettings | null,
   lease: TenantLease,
+  honour: HeldHonour | null,
 ): Promise<void> {
   // BEFORE the hold process starts, like a child's: it reads this same
   // telegram.json, and a link restored after it is polling would be read from
@@ -2083,20 +2123,37 @@ async function spawnHolder(
   const prev = readRestoreBlocked(home);
   const why = !isNamedBlock(restoreBlockClass(reason)) && prev && isNamedBlock(prev.class) ? prev.reason : reason;
   const cls = restoreBlockClass(why);
-  writeRestoreBlocked(home, { reason: why, class: cls, since: prev?.since ?? Math.floor(Date.now() / 1000) });
+  const resettable = settingsRefuseHeldReset(settings, liveConsentEnforced()) === null;
+  writeRestoreBlocked(home, { reason: why, class: cls, since: prev?.since ?? Math.floor(Date.now() / 1000), resettable });
   const held: Holder = {
     tenant, smartAccount, proc: null, exited: null, reason: why, cls,
-    nextRetryAt: 0, backoffMs: HOLD_RETRY_FIRST_MS, quickMs: HOLD_RETRY_QUICK_MS, retrying: false, resetSeen: null,
+    nextRetryAt: 0, backoffMs: HOLD_RETRY_FIRST_MS, quickMs: HOLD_RETRY_QUICK_MS, retrying: false,
+    resetSeen: honour?.looked ?? null, resettable,
   };
-  // Paced by what this restore said, not by the cause the hold keeps.
-  scheduleHoldRetry(held, restoreBlockClass(reason));
+  // Paced by what this restore said, not by the cause the hold keeps; and a
+  // reset that could not be decided is asked about again soon.
+  scheduleHoldRetry(held, honour?.transient ? UNCLASSIFIED_BLOCK : restoreBlockClass(reason));
   holders.set(tenant, held);
-  noteHold(tenant, reason, cls);
+  noteHold(tenant, reason, cls, resettable);
   if (!holderBotReady(settings)) {
     log(`${tenant}: trading held, with no bot to answer (Telegram off or no token) — the restore is tried again in ${Math.round((held.nextRetryAt - Date.now()) / 1000)}s`);
     return;
   }
   startHolderProcess(held);
+}
+
+/**
+ * Keep a held tenant's offer of the practice reset in step with its owner's
+ * stored settings: in the Holder, and in restore-blocked.json, which the hold
+ * process reads for every reply. Only on a change.
+ */
+function keepResetOffer(held: Holder, settings: MerrymenSettings): void {
+  const resettable = settingsRefuseHeldReset(settings, liveConsentEnforced()) === null;
+  if (resettable === held.resettable) return;
+  held.resettable = resettable;
+  const home = childHome(held.tenant);
+  const block = readRestoreBlocked(home);
+  if (block) writeRestoreBlocked(home, { ...block, resettable });
 }
 
 /** Start the hold process for a held tenant. Its caller has checked the lease and the rest. */
@@ -2219,12 +2276,17 @@ function holdMayLeave(tenant: `0x${string}`): boolean {
  * On reconcile's clock, once its wait is up (scheduleHoldRetry). The restore
  * runs against the home's merrymen.db while the hold process keeps answering
  * the bot; the hold process never opens that file.
+ *
+ * False when it did not try at all (holdMayLeave said no: a lease blip, a
+ * pending kill, FLEET_HALT), so reconcile does not count an owner's press as
+ * looked at by an attempt that never happened.
  */
-async function retryHold(held: Holder): Promise<void> {
+async function retryHold(held: Holder): Promise<boolean> {
   const tenant = held.tenant;
-  if (!holdMayLeave(tenant)) return;
+  if (!holdMayLeave(tenant)) return false;
   held.retrying = true;
   let restore: PaperRestore;
+  let unsure = false;
   try {
     restore = await tryPaperRestore(tenant, held.smartAccount);
     // A PRACTICE RESET ITS OWNER ASKED FOR, now that the book has failed to
@@ -2232,16 +2294,22 @@ async function retryHold(held: Holder): Promise<void> {
     // finds nothing to restore, so the tenant is handed back below exactly as
     // a restore that took is: the hold process stopped and awaited, then one
     // worker, whose spawn writes its anchor in the new epoch.
-    if (!restore.ok && holders.get(tenant) === held && (await honourHeldPaperReset(tenant, held.smartAccount, leases.get(tenant)))) {
-      restore = await tryPaperRestore(tenant, held.smartAccount);
+    if (!restore.ok && holders.get(tenant) === held) {
+      const honour = await honourHeldPaperReset(tenant, held.smartAccount, leases.get(tenant));
+      unsure = honour.transient;
+      if (honour.applied) restore = await tryPaperRestore(tenant, held.smartAccount);
     }
   } finally {
     held.retrying = false;
   }
-  if (holders.get(tenant) !== held) return; // stood down while it ran
+  if (holders.get(tenant) !== held) return true; // stood down while it ran
   if (!restore.ok) {
     const cls = restoreBlockClass(restore.reason);
-    scheduleHoldRetry(held, cls);
+    // A reset that could not be decided just then (its settings unreadable,
+    // the lease blinking, the ledger failing) is asked about again at the pace
+    // of a failure that names no cause, not at the end of a backoff that may
+    // be half an hour: the owner pressed it and is waiting.
+    scheduleHoldRetry(held, unsure ? UNCLASSIFIED_BLOCK : cls);
     // A new NAMED cause is what the hold process says from now on. A failure
     // that names none keeps the one the hold has: an owner told "trades newer
     // than the last valuation" is not then told "restore error" because the
@@ -2250,15 +2318,21 @@ async function retryHold(held: Holder): Promise<void> {
       const home = childHome(tenant);
       held.cls = cls;
       held.reason = restore.reason;
-      writeRestoreBlocked(home, { reason: restore.reason, class: cls, since: readRestoreBlocked(home)?.since ?? Math.floor(Date.now() / 1000) });
+      writeRestoreBlocked(home, {
+        reason: restore.reason,
+        class: cls,
+        since: readRestoreBlocked(home)?.since ?? Math.floor(Date.now() / 1000),
+        resettable: held.resettable,
+      });
     }
-    noteHold(tenant, restore.reason, held.cls);
-    return;
+    noteHold(tenant, restore.reason, held.cls, held.resettable);
+    return true;
   }
   const since = readRestoreBlocked(childHome(tenant))?.since;
   const heldFor = since ? ` after ${Math.max(1, Math.round((Date.now() / 1000 - since) / 60))}m held` : "";
   log(`paper restore: ${tenant} — ${restore.line ?? "restored"}${heldFor}; handing the bot back to trading`);
   await handHoldBack(held);
+  return true;
 }
 
 /**
@@ -2331,7 +2405,7 @@ const holdNoticeInFlight = new Set<string>();
  * restore until it lands, and its dedupe is durable (notifyHoldOnce), so a
  * redeploy does not repeat it.
  */
-function noteHold(tenant: `0x${string}`, reason: string, tell: string): void {
+function noteHold(tenant: `0x${string}`, reason: string, tell: string, resettable: boolean): void {
   const cls = restoreBlockClass(reason);
   const alerted = holdAlerted.get(tenant) ?? new Set<string>();
   holdAlerted.set(tenant, alerted);
@@ -2346,7 +2420,7 @@ function noteHold(tenant: `0x${string}`, reason: string, tell: string): void {
   }
   if (!isNamedBlock(tell) || holdNoticed.get(tenant)?.has(tell) || holdNoticeInFlight.has(tenant)) return;
   holdNoticeInFlight.add(tenant);
-  void sendHoldNotice(tenant, tell)
+  void sendHoldNotice(tenant, tell, resettable)
     .then((outcome) => {
       if (outcome !== "sent" && outcome !== "told") return;
       const told = holdNoticed.get(tenant) ?? new Set<string>();
@@ -2363,7 +2437,7 @@ function noteHold(tenant: `0x${string}`, reason: string, tell: string): void {
  * the replica holding the tenant's lease gets here, so two replicas do not
  * both send.
  */
-let sendHoldNotice = async (tenant: `0x${string}`, cls: string): Promise<HoldNoticeOutcome> => {
+let sendHoldNotice = async (tenant: `0x${string}`, cls: string, resettable: boolean): Promise<HoldNoticeOutcome> => {
   const url = process.env.DATABASE_URL;
   if (!url) return "no-owner";
   try {
@@ -2387,6 +2461,7 @@ let sendHoldNotice = async (tenant: `0x${string}`, cls: string): Promise<HoldNot
       },
       tenant,
       cls,
+      resettable,
     );
   } catch (e) {
     log(`${tenant}: trading held, but the owner notice failed — ${e instanceof Error ? e.message : String(e)}`);
@@ -2395,7 +2470,7 @@ let sendHoldNotice = async (tenant: `0x${string}`, cls: string): Promise<HoldNot
 };
 
 /** Test seam: take the owner notice instead of sending it. */
-export function setHoldNoticeForTest(fn: (tenant: `0x${string}`, cls: string) => Promise<HoldNoticeOutcome>): void {
+export function setHoldNoticeForTest(fn: (tenant: `0x${string}`, cls: string, resettable: boolean) => Promise<HoldNoticeOutcome>): void {
   sendHoldNotice = fn;
 }
 
@@ -2641,14 +2716,15 @@ export async function reconcile(): Promise<void> {
   // book that has been broken for days waits thirty minutes between retries:
   // the press would sit that long before retryHold honoured it. Each queued
   // row brings one retry forward, once (`resetSeen`), so a reset that is
-  // refused does not put the restore back on every pass.
+  // refused does not put the restore back on every pass. Counted only once
+  // the retry has really run: one that holdMayLeave turned away looked at
+  // nothing, and the press is still owed its early look on the next pass.
   const asked = await heldResetsAsked([...holders.values()].filter((h) => wanted.has(h.tenant)).map((h) => h.smartAccount));
   for (const held of [...holders.values()]) {
     const ask = asked.get(held.smartAccount);
     const early = ask !== undefined && ask !== held.resetSeen;
     if (!wanted.has(held.tenant) || held.retrying || (!early && Date.now() < held.nextRetryAt)) continue;
-    if (early) held.resetSeen = ask;
-    await retryHold(held);
+    if ((await retryHold(held)) && early) held.resetSeen = ask;
   }
   // Refresh every running child's settings.json so a tenant's config change
   // reaches it (the worker re-reads settings.json each tick). Cheap: one small
@@ -2688,6 +2764,11 @@ export async function reconcile(): Promise<void> {
       released.push(held);
       continue;
     }
+    // AND WHETHER THE PRACTICE RESET IS OFFERED, which the same settings
+    // decide: an owner who switches live trading off beside practice is told
+    // of the way out from their next message, and one who switches it on is
+    // no longer sent towards a reset that would be refused. See keepResetOffer.
+    if (stored) keepResetOffer(held, stored);
     // Held with no bot, and now there is one: the owner has just switched
     // Telegram on. Answer it from this pass, not from the next failed restore.
     const lease = leases.get(tenant);

@@ -44,14 +44,23 @@ export interface HoldNoticeDeps {
   log: (line: string) => void;
 }
 
-export async function notifyHoldOnce(deps: HoldNoticeDeps, tenant: `0x${string}`, cls: string): Promise<HoldNoticeOutcome> {
+/**
+ * `resettable`: whether the notice offers the practice reset (holdNoticeText).
+ * It is not part of what counts as told: once per class, whichever it said.
+ */
+export async function notifyHoldOnce(
+  deps: HoldNoticeDeps,
+  tenant: `0x${string}`,
+  cls: string,
+  resettable: boolean,
+): Promise<HoldNoticeOutcome> {
   try {
     const to = await deps.recipient(tenant);
     if (!to || !to.enabled) return "no-owner";
     const allowed = await deps.allowlist(tenant);
     if (!allowed.some((id) => Number(id) === Number(to.chatId))) return "no-owner";
     if ((await holdNotifiedClasses(deps.db, tenant)).includes(cls)) return "told";
-    const sent = await deps.send(to.botToken, to.chatId, holdNoticeText(cls));
+    const sent = await deps.send(to.botToken, to.chatId, holdNoticeText(cls, resettable));
     if (!sent.ok) {
       deps.log(`${tenant}: trading held, but the owner notice did not send — ${sent.reason ?? "unknown"}`);
       return "failed";

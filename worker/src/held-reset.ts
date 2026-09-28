@@ -15,8 +15,11 @@
  *   (practice on), and only under the tenant's lease (orchestrator.ts);
  * - only the NEWEST unclaimed paper-reset row for the account, and only one
  *   queued in the last seven days. Consent is to a reset now, not whenever the
- *   book next breaks: an older row is left alone, and the owner is asked to
- *   press it again;
+ *   book next breaks: an older row is not acted on, and the owner is asked to
+ *   press it again. It is CLOSED, not left: a row this has judged to be no
+ *   longer consent must not be run by the worker a later restore hands the
+ *   tenant to (the ferry delivers whatever is unclaimed), which would start
+ *   over a book that had just been got back, on a request already turned down;
  * - only a PRACTICE book: the owner's stored settings must not switch live
  *   trading on, and the ledger must say paper (the newest valuation is a paper
  *   one, and the agent did not last report the live rail). The ledger half is
@@ -37,7 +40,10 @@
  * the hold would be ferried one and would start the new book over again.
  *
  * NO CAPITAL FLOW IS BOOKED, and nothing is deleted that is history: see
- * resetBlockedPaperBook for what moves.
+ * resetBlockedPaperBook for what moves. What IS added is the line the worker's
+ * own reset writes to the agent's event feed (index.ts runPaperReset), in the
+ * same transaction, so the dashboard's activity says the book was started over
+ * whichever process did it.
  */
 import type { Db } from "./db";
 import { PAPER_CHECKPOINT_SCHEMA, resetBlockedPaperBookIn } from "./paper-checkpoint";
@@ -71,7 +77,33 @@ export interface HeldResetEvidence {
   latestMarkMode: string | null;
 }
 
-export type HeldResetDecision = { reset: true; id: string; epoch: number } | { reset: false; why: string };
+/**
+ * `stale`: the newest ask is past the seven days, and is closed rather than
+ * left (applyHeldReset). `transient`: nothing about the book or the owner's
+ * wish said no, only a read that failed, so asking again soon may say yes.
+ */
+export type HeldResetDecision =
+  | { reset: true; id: string; epoch: number }
+  | { reset: false; why: string; stale?: true; transient?: true };
+
+/**
+ * THE HALF OF THE DECISION THE OWNER'S SETTINGS DECIDE: why they rule a held
+ * reset out, or null when they allow one. Its own function because the
+ * orchestrator asks it before it offers the reset at all (the hold's replies
+ * and notice, restore-block.ts): an owner whose reset would always be refused
+ * here is not told to press it, and so not sent to discard a signed grant on
+ * the web for nothing.
+ */
+export function settingsRefuseHeldReset(
+  settings: HeldResetEvidence["settings"],
+  consentEnforced: boolean,
+): string | null {
+  if (settings === "unreadable") return "the owner's settings could not be read";
+  if (settings?.paperTradingEnabled !== true) return "practice mode is not on";
+  if (settings.liveTradingEnabled === true) return "live trading is switched on";
+  if (!consentEnforced) return "live-trading consent is stood down on this deployment";
+  return null;
+}
 
 /**
  * MAY THIS HELD TENANT'S BOOK BE STARTED OVER NOW? Pure.
@@ -85,12 +117,10 @@ export function decideHeldReset(e: HeldResetEvidence): HeldResetDecision {
   if (e.ask.claimed_at !== null && e.ask.claimed_at !== undefined) return { reset: false, why: "the reset was already claimed" };
   const age = e.now - Number(e.ask.created_at);
   if (!Number.isFinite(age) || age > HELD_RESET_MAX_AGE_MS) {
-    return { reset: false, why: "the reset was asked for more than seven days ago; the owner must ask again" };
+    return { reset: false, why: "the reset was asked for more than seven days ago; the owner must ask again", stale: true };
   }
-  if (e.settings === "unreadable") return { reset: false, why: "the owner's settings could not be read" };
-  if (e.settings?.paperTradingEnabled !== true) return { reset: false, why: "practice mode is not on" };
-  if (e.settings.liveTradingEnabled === true) return { reset: false, why: "live trading is switched on" };
-  if (!e.consentEnforced) return { reset: false, why: "live-trading consent is stood down on this deployment" };
+  const settingsSay = settingsRefuseHeldReset(e.settings, e.consentEnforced);
+  if (settingsSay) return e.settings === "unreadable" ? { reset: false, why: settingsSay, transient: true } : { reset: false, why: settingsSay };
   if (!e.agent) return { reset: false, why: "the account has no agent row" };
   if (e.agent.mode === "live") return { reset: false, why: "the agent last reported the live rail" };
   if (e.latestMarkMode !== "paper") {
@@ -145,10 +175,16 @@ export async function resetsAsked(shared: Db, accounts: readonly string[], now: 
   return out;
 }
 
-/** What honouring a held tenant's reset came to. `id` is the row it was about, when there was one. */
+/**
+ * What honouring a held tenant's reset came to. `id` is the row it was about,
+ * when there was one. `transient` when the answer was no only because
+ * something could not be read or written just then (the settings, the lease,
+ * the epoch moving under the decision): the orchestrator then asks again soon
+ * rather than at the end of the hold's backoff.
+ */
 export type HeldResetOutcome =
   | { applied: true; id: string; from: number; epoch: number }
-  | { applied: false; id: string | null; why: string };
+  | { applied: false; id: string | null; why: string; transient: boolean };
 
 /** What the owner's command row is answered with. No figure: the worker's starting stake is not known here. */
 export const HELD_RESET_DONE =
@@ -156,18 +192,41 @@ export const HELD_RESET_DONE =
   "It restarts at the practice starting cash when the agent comes back.";
 /** What an older reset closed by this one is answered with. */
 export const HELD_RESET_SUPERSEDED = "practice book started over by a later request";
+/** What a reset closed for its age is answered with. */
+export const HELD_RESET_EXPIRED =
+  "not done: this practice reset was asked for more than seven days ago, and a practice book is only started over " +
+  "on a recent request. Ask again if you still want it.";
+/**
+ * The line the agent's event feed gets, as runPaperReset's does, less the
+ * figure: the starting stake is the worker's to know.
+ */
+export const heldResetEvent = (closed: number): string =>
+  `paper book restarted — positions cleared, and earlier paper trades closed into epoch ${closed} ` +
+  "(kept, but no longer counted). Cash goes back to the practice starting stake when the agent comes back.";
 
 /** Thrown inside the transaction to roll it back, claim and all, with the reason. */
-class NotApplied extends Error {}
+class NotApplied extends Error {
+  constructor(
+    why: string,
+    readonly transient = false,
+  ) {
+    super(why);
+  }
+}
 
 /**
  * HONOUR THE NEWEST PRACTICE RESET FOR A HELD ACCOUNT, if every condition holds.
  *
  * `readSettings` is the owner's stored settings (null when none are stored; a
- * throw is unreadable). `mayWrite` is asked after every read and before the
- * transaction, and names why the write must not happen (the lease is gone), or
+ * throw is unreadable). `mayWrite` is asked after every read and before any
+ * write, and names why the write must not happen (the lease is gone), or
  * returns null. Reads that fail throw; the caller logs them and the next
  * attempt asks again.
+ *
+ * A newest ask past the seven days is not honoured, and is closed, with every
+ * older one, under the same `mayWrite` and with HELD_RESET_EXPIRED for an
+ * answer. Only rows past the bound: one queued a moment ago, after the read
+ * above, is left for the next attempt to honour.
  */
 export async function applyHeldReset(
   shared: Db,
@@ -181,7 +240,7 @@ export async function applyHeldReset(
 ): Promise<HeldResetOutcome> {
   const ask = await newestResetAsk(shared, account);
   // The common case, and it costs one indexed read: nothing was asked.
-  if (!ask) return { applied: false, id: null, why: "no practice reset is waiting" };
+  if (!ask) return { applied: false, id: null, why: "no practice reset is waiting", transient: false };
   let settings: HeldResetEvidence["settings"];
   try {
     settings = await opts.readSettings();
@@ -202,9 +261,24 @@ export async function applyHeldReset(
     agent: agentRow ? { epoch: Number(agentRow.epoch), mode: agentRow.mode ?? null } : null,
     latestMarkMode: mark ? (mark.mode ?? null) : null,
   });
-  if (!decision.reset) return { applied: false, id: ask.id, why: decision.why };
+  if (!decision.reset && !decision.stale) {
+    return { applied: false, id: ask.id, why: decision.why, transient: decision.transient === true };
+  }
   const refused = opts.mayWrite();
-  if (refused) return { applied: false, id: ask.id, why: refused };
+  if (refused) return { applied: false, id: ask.id, why: refused, transient: true };
+  if (!decision.reset) {
+    const closed = await shared
+      .prepare(
+        `UPDATE agent_commands SET claimed_at = ?, done_at = ?, result = ?
+          WHERE agent_id = ? AND kind = 'paper-reset' AND claimed_at IS NULL AND created_at < ?`,
+      )
+      .run(opts.now, opts.now, HELD_RESET_EXPIRED, account, opts.now - HELD_RESET_MAX_AGE_MS);
+    const why =
+      Number(closed.changes) > 0
+        ? "the reset was asked for more than seven days ago, so it was closed unrun; the owner must ask again"
+        : decision.why;
+    return { applied: false, id: ask.id, why, transient: false };
+  }
   await shared.exec(PAPER_CHECKPOINT_SCHEMA);
   try {
     const epoch = await shared.tx(async (db) => {
@@ -214,7 +288,7 @@ export async function applyHeldReset(
         .run(opts.now, decision.id);
       if (Number(claim.changes) === 0) throw new NotApplied("another pass or replica claimed the reset");
       const reset = await resetBlockedPaperBookIn(db, account, decision.epoch);
-      if (!reset.ok) throw new NotApplied(reset.why);
+      if (!reset.ok) throw new NotApplied(reset.why, reset.moved === true);
       await db.prepare("UPDATE agent_commands SET done_at = ?, result = ? WHERE id = ?").run(opts.now, HELD_RESET_DONE, decision.id);
       await db
         .prepare(
@@ -222,11 +296,12 @@ export async function applyHeldReset(
             WHERE agent_id = ? AND kind = 'paper-reset' AND claimed_at IS NULL AND id <> ? AND created_at <= ?`,
         )
         .run(opts.now, opts.now, HELD_RESET_SUPERSEDED, account, decision.id, ask.created_at);
+      await db.prepare("INSERT INTO events (agent_id, level, message) VALUES (?, 'ok', ?)").run(account, heldResetEvent(decision.epoch));
       return reset.epoch;
     });
     return { applied: true, id: decision.id, from: decision.epoch, epoch };
   } catch (e) {
-    if (e instanceof NotApplied) return { applied: false, id: decision.id, why: e.message };
+    if (e instanceof NotApplied) return { applied: false, id: decision.id, why: e.message, transient: e.transient };
     throw e;
   }
 }

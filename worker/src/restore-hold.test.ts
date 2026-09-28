@@ -284,30 +284,55 @@ describe("a held tenant's practice reset", () => {
     const spawn = fn("spawnChild");
     const honour = calls(spawn, "honourHeldPaperReset");
     assert.equal(honour.length, 1);
-    const gate = all(spawn, (n) => ts.isIfStatement(n) && calls(n.expression, "honourHeldPaperReset").length === 1)[0] as ts.IfStatement;
-    assert.ok(gate, "the reset is the last term of an if");
-    const cond = gate.expression.getText();
-    assert.ok(cond.startsWith("!restore.ok && settings?.paperTradingEnabled === true && "), `after a failed restore, for the book the gate holds: ${cond}`);
+    // Asked only on the true side of `<failed, practice> ? … : null`.
+    const asked = all(spawn, (n) => ts.isConditionalExpression(n) && calls(n.whenTrue, "honourHeldPaperReset").length === 1)[0] as
+      | ts.ConditionalExpression
+      | undefined;
+    assert.ok(asked, "the reset is looked at only on one side of a condition");
+    assert.equal(asked.condition.getText(), "!restore.ok && settings?.paperTradingEnabled === true", "after a failed restore, for the book the gate holds");
     assert.equal(honour[0]!.arguments.map((a) => a.getText()).join(","), "tenant,smartAccount,lease", "under the lease spawnChild checked");
     // The anchor was read before the reset closed its epoch; the worker files
     // every row under the anchor's. So it is written again, then restored.
+    const gate = all(spawn, (n) => ts.isIfStatement(n) && n.expression.getText() === "honour?.applied")[0] as ts.IfStatement | undefined;
+    assert.ok(gate && asked.getEnd() < gate.getStart(), "only when it was applied");
     const anchor = calls(gate.thenStatement, "writeBootstrapForChild")[0];
     const again = calls(gate.thenStatement, "tryPaperRestore")[0];
     assert.ok(anchor && again && anchor.getEnd() < again.getStart(), "the anchor again, then the restore again");
-    // And the gate's own branch comes after, so a reset that did not happen still holds.
-    const hold = all(spawn, (n) => ts.isIfStatement(n) && n.expression.getText() === "settings?.paperTradingEnabled === true")[0]!;
+    // And the gate's own branch comes after, so a reset that did not happen
+    // still holds, and hands spawnHolder what was looked at.
+    const hold = all(spawn, (n) => ts.isIfStatement(n) && n.expression.getText() === "settings?.paperTradingEnabled === true")[0] as ts.IfStatement;
     assert.ok(gate.getEnd() < hold.getStart());
+    const holder = calls(hold.thenStatement, "spawnHolder")[0]!;
+    assert.equal(holder.arguments.at(-1)!.getText(), "honour", "so the hold does not look at the same reset again this pass");
   });
 
   it("retryHold HONOURS IT ONLY AFTER ITS OWN RESTORE FAILED, INSIDE THE RETRY'S CLAIM, AND HANDS BACK ONLY THROUGH handHoldBack", () => {
     const retry = fn("retryHold");
-    const guard = all(retry, (n) => ts.isIfStatement(n) && calls(n.expression, "honourHeldPaperReset").length === 1)[0] as ts.IfStatement;
+    const guard = all(retry, (n) => ts.isIfStatement(n) && calls(n.thenStatement, "honourHeldPaperReset").length === 1)[0] as ts.IfStatement;
     assert.ok(guard);
-    assert.ok(guard.expression.getText().startsWith("!restore.ok && holders.get(tenant) === held && "), guard.expression.getText());
-    assert.equal(calls(guard.thenStatement, "tryPaperRestore").length, 1, "restored again");
+    assert.equal(guard.expression.getText(), "!restore.ok && holders.get(tenant) === held");
+    const applied = all(guard.thenStatement, (n) => ts.isIfStatement(n) && n.expression.getText() === "honour.applied")[0] as ts.IfStatement;
+    assert.ok(applied, "restored again only when the book was started over");
+    assert.equal(calls(applied.thenStatement, "tryPaperRestore").length, 1, "restored again");
     const tryStmt = all(retry, ts.isTryStatement)[0] as ts.TryStatement;
     assert.ok(tryStmt.tryBlock.getStart() < guard.getStart() && guard.getEnd() < tryStmt.tryBlock.getEnd(), "while `retrying` is set");
     assert.equal(calls(retry, "handHoldBack").length, 1);
+  });
+
+  it("A RESET THAT COULD NOT BE DECIDED IS ASKED ABOUT AGAIN AT THE QUICK PACE, AND ONLY A RETRY THAT RAN USES UP A PRESS", () => {
+    const retry = fn("retryHold");
+    const pace = calls(retry, "scheduleHoldRetry")[0]!;
+    assert.equal(pace.arguments[1]!.getText(), "unsure ? UNCLASSIFIED_BLOCK : cls", "an unsure honour does not wait out the backoff");
+    // The first thing it does is decline when holdMayLeave says no, and it
+    // says so: `return false`, before anything is tried.
+    const first = retry.body!.statements.find((st) => ts.isIfStatement(st)) as ts.IfStatement;
+    assert.equal(first.expression.getText(), "!holdMayLeave(tenant)");
+    assert.equal(first.thenStatement.getText(), "return false;");
+    const hold = fn("spawnHolder").body!.getText();
+    assert.match(hold, /resetSeen: honour\?\.looked \?\? null/, "a hold starts having seen what its spawn looked at");
+    assert.match(hold, /scheduleHoldRetry\(held, honour\?\.transient \? UNCLASSIFIED_BLOCK : restoreBlockClass\(reason\)\)/);
+    const rec = fn("reconcile").body!.getText();
+    assert.match(rec, /if \(\(await retryHold\(held\)\) && early\) held\.resetSeen = ask;/, "marked seen only once the retry ran");
   });
 
   it("THE WRITE IS REFUSED WHEN ANYTHING THAT STOPS A SPAWN WOULD STOP IT, AND THE CLAIM IS deliverCommand's", () => {
@@ -347,7 +372,9 @@ describe("what an owner is told", () => {
       "restore error",
     ]);
     for (const c of classes) {
-      assert.ok(!/\d/.test(holdText(c)) && !/\d/.test(holdNoticeText(c)), `no figure in what the owner reads: ${c}`);
+      for (const resettable of [true, false]) {
+        assert.ok(!/\d/.test(holdText(c, resettable)) && !/\d/.test(holdNoticeText(c, resettable)), `no figure in what the owner reads: ${c}`);
+      }
     }
   });
 });

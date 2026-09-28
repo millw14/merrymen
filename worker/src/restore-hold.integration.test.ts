@@ -22,7 +22,7 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, beforeEach, describe, it, mock } from "node:test";
@@ -41,6 +41,7 @@ process.env.MERRYMEN_TICK_SECONDS = "60";
 const {
   reconcile,
   childHome,
+  fleetHaltFile,
   setSpawnForTest,
   setPaperRestoreForTest,
   setHoldNoticeForTest,
@@ -50,7 +51,7 @@ const {
 } = await import("./orchestrator");
 const { applyLedgerSchema } = await import("./store");
 const { PAPER_CHECKPOINT_SCHEMA, restorePaperCheckpoint } = await import("./paper-checkpoint");
-const { HELD_RESET_DONE } = await import("./held-reset");
+const { HELD_RESET_DONE, HELD_RESET_EXPIRED } = await import("./held-reset");
 const { getGrantStore } = await import("./grant-store");
 const { getSettingsStore } = await import("./settings-store");
 const { readRestoreBlocked } = await import("./restore-block");
@@ -150,8 +151,11 @@ setPaperRestoreForTest(async (_tenant, account) => {
   }
 });
 const notices: string[] = [];
-setHoldNoticeForTest(async (_tenant, cls) => {
+/** Whether each notice offered the practice reset, beside `notices`. */
+const offered: boolean[] = [];
+setHoldNoticeForTest(async (_tenant, cls, resettable) => {
   notices.push(cls);
+  offered.push(resettable);
   return "sent";
 });
 
@@ -202,7 +206,9 @@ beforeEach(async () => {
   spawned.length = 0;
   events.length = 0;
   notices.length = 0;
+  offered.length = 0;
   said.length = 0;
+  rmSync(fleetHaltFile(), { force: true });
 });
 
 describe("a paper book that will not restore holds the tenant", () => {
@@ -624,7 +630,7 @@ describe("a practice reset its owner asks for while held", () => {
     });
   });
 
-  it("A RESET OLDER THAN SEVEN DAYS IS NOT ACTED ON, AND DOES NOT BRING RETRIES FORWARD", async () => {
+  it("A RESET OLDER THAN SEVEN DAYS IS NOT ACTED ON, AND IS CLOSED THERE, SO NOTHING RUNS IT LATER", async () => {
     const db = await useLedger();
     await store.put(TENANT, grant());
     await withClock(async () => {
@@ -632,6 +638,10 @@ describe("a practice reset its owner asks for while held", () => {
       await ask(db, "r1", Date.now() - 8 * 24 * 60 * 60_000);
       await reconcile();
       assert.ok(isHeldForTest(TENANT), "held, not reset");
+      assert.equal(await epochOf(db), 1);
+      const r = await commandRow(db, "r1");
+      assert.ok(r.claimed_at && r.done_at, "closed, so no worker a later restore hands the tenant to is ferried it");
+      assert.equal(r.result, HELD_RESET_EXPIRED);
       for (let i = 0; i < 4; i++) {
         mock.timers.tick(15_000);
         await reconcile();
@@ -641,9 +651,64 @@ describe("a practice reset its owner asks for while held", () => {
       await reconcile();
       assert.equal(restores, 2, "the backoff's own retry");
       assert.ok(isHeldForTest(TENANT));
+      assert.equal(said.filter((l) => /not honoured while held — .*seven days.*closed unrun/.test(l)).length, 1, said.join("\n"));
+    });
+  });
+
+  it("A LIVE OWNER'S RESET WAITING AT SPAWN IS LOOKED AT THERE, AND NOT AGAIN LATER IN THE SAME PASS", async () => {
+    const db = await useLedger();
+    await getSettingsStore().put(TENANT, { ...paperWithBot, liveTradingEnabled: true } as never);
+    await ask(db, "r1", Date.now() - 60 * 60_000);
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      await reconcile();
+      assert.ok(isHeldForTest(TENANT));
+      assert.equal(restores, 1, "the spawn's restore, and no early retry for a reset the spawn had just refused");
+      for (let i = 0; i < 4; i++) {
+        mock.timers.tick(15_000);
+        await reconcile();
+      }
+      assert.equal(restores, 1, "nor on any pass after it");
+      assert.equal(said.filter((l) => l.includes("not honoured while held — live trading is switched on")).length, 1, said.join("\n"));
+    });
+  });
+
+  it("A PRESS WHILE THE HOLD MAY NOT LEAVE (FLEET_HALT) IS STILL OWED ITS EARLY LOOK WHEN IT MAY", async () => {
+    const db = await useLedger();
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      await reconcile();
+      assert.ok(isHeldForTest(TENANT));
+      writeFileSync(fleetHaltFile(), "");
+      await ask(db, "r1", Date.now());
+      mock.timers.tick(15_000);
+      await reconcile();
+      assert.equal(restores, 1, "nothing tried while the fleet is halted");
       assert.equal(await epochOf(db), 1);
-      assert.deepEqual(await commandRow(db, "r1"), { claimed_at: null, done_at: null, result: null });
-      assert.equal(said.filter((l) => /not honoured while held — .*seven days/.test(l)).length, 1, "said once, not on every retry");
+      rmSync(fleetHaltFile(), { force: true });
+      mock.timers.tick(15_000);
+      await reconcile();
+      await settle();
+      assert.equal(await epochOf(db), 2, `started over on the first pass it could be, not at the end of the backoff:\n${said.join("\n")}`);
+      assert.equal((await commandRow(db, "r1")).result, HELD_RESET_DONE);
+      assert.equal(workers().length, 1);
+    });
+  });
+
+  it("THE RESET IS OFFERED ONLY WHERE IT WOULD BE HONOURED, AND THE OFFER FOLLOWS THE SETTINGS", async () => {
+    await useLedger();
+    await getSettingsStore().put(TENANT, { ...paperWithBot, liveTradingEnabled: true } as never);
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      await reconcile();
+      assert.ok(isHeldForTest(TENANT));
+      assert.equal(readRestoreBlocked(childHome(TENANT))?.resettable, false, "live switched on beside practice: it would be refused");
+      assert.deepEqual(offered, [false], "and the notice does not send them round the loop either");
+      await getSettingsStore().put(TENANT, paperWithBot as never);
+      mock.timers.tick(15_000);
+      await reconcile();
+      assert.equal(readRestoreBlocked(childHome(TENANT))?.resettable, true, "switched off: the hold process offers it from the next reply");
+      assert.equal(readRestoreBlocked(childHome(TENANT))?.class, NEWER_CLASS, "and the rest of the record is as it was");
     });
   });
 });
