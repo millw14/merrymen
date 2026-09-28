@@ -89,6 +89,8 @@ const FLEET_MEMORY_MAX = 1000;
 const PLAN_HISTORY_MS = 4 * DAY;
 /** Template intros tried with fresh dice before the intro is skipped. */
 const TEMPLATE_TRIES = 8;
+/** Log counters that describe a standing condition rather than something that happened. */
+const CONDITIONS: ReadonlySet<string> = new Set(["no-model-budget", "zone-unreadable", "owner-failed"]);
 
 // ── the knobs ───────────────────────────────────────────────────────────────
 
@@ -338,6 +340,9 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
   /** Said once per UTC day, and once per pause: a ceiling reached is news, not a line every fifteen seconds. */
   let capNoted = "";
   let pauseNoted = "";
+  /** The last standing condition said, and when: a condition that has not changed is said again only every twenty minutes. */
+  let lastCondition: { text: string; at: number } | null = null;
+  let ownerFailure = "";
 
   const why =
     `xpost: on — at most ${perDay} posts per owner a day, ${fleetPerDay} across the fleet a day; ` +
@@ -350,7 +355,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
       running = true;
       const counts = new Map<string, number>();
       const bump = (k: string, n = 1) => counts.set(k, (counts.get(k) ?? 0) + n);
-      const quiet = new Set(["waiting"]);
+      ownerFailure = "";
       try {
         await ensureXpostSchema(shared, dialect);
         const interrupted = await failInterrupted(shared, nowMs - INTERRUPTED_AFTER_MS, nowMs);
@@ -417,7 +422,8 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
               capNoted = utcDay(nowMs);
               bump("fleet-ceiling-reached");
             }
-            break;
+            // Not a break: a later post may still be one to cancel or skip.
+            continue;
           }
           if (sends >= MAX_SENDS_PER_PASS) break;
           sends++;
@@ -434,9 +440,7 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
           await planPass(shared, accounts, byTenant, profiles, nowMs, bump, zoneOf);
         }
 
-        const noisy = [...counts.keys()].some((k) => !quiet.has(k));
-        if (!noisy) return { log: null };
-        return { log: `xpost: ${[...counts].map(([k, n]) => `${k} ${n}`).join(", ")}` };
+        return { log: summary(counts, nowMs) };
       } catch (e) {
         const text = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 200);
         if (!lastFail || lastFail.text !== text || nowMs - lastFail.at > 20 * MIN) {
@@ -499,10 +503,37 @@ export function makeXPoster(o: { creds: LlmCreds | null; knobs: XPostEnv; app: X
             recentFleet.unshift(r.body);
           }
         }
-      } catch {
+      } catch (e) {
         bump("owner-failed");
+        if (!ownerFailure) ownerFailure = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 160);
       }
     }
+  }
+
+  /**
+   * ONE LINE A PASS, COUNTS ONLY — never a post's text, never a token. Events
+   * (a post sent, drafted, cancelled, failed) are always said. A standing
+   * condition (the model's allowance spent, an owner whose plan keeps
+   * failing) is said when it changes, or every twenty minutes while it
+   * lasts, not every minute. A post waiting for its owner to wake is not news.
+   */
+  function summary(counts: Map<string, number>, nowMs: number): string | null {
+    const events: string[] = [];
+    const conditions: string[] = [];
+    for (const [k, n] of counts) {
+      if (k === "waiting") continue;
+      const part = k === "owner-failed" && ownerFailure ? `${k} ${n} (${ownerFailure})` : `${k} ${n}`;
+      (CONDITIONS.has(k) ? conditions : events).push(part);
+    }
+    const text = conditions.join(", ");
+    if (events.length > 0) {
+      if (text) lastCondition = { text, at: nowMs };
+      return `xpost: ${[...events, ...conditions].join(", ")}`;
+    }
+    if (conditions.length === 0) return null;
+    if (lastCondition && lastCondition.text === text && nowMs - lastCondition.at <= 20 * MIN) return null;
+    lastCondition = { text, at: nowMs };
+    return `xpost: ${text}`;
   }
 
   /**

@@ -419,10 +419,14 @@ describe("one step after another", () => {
     const w = await world(t, T0);
     const p = poster(w, { llmPerDay: 1, calls: [call({ decisionId: "d-pepe", atSec: (T0 + 2 * MIN) / 1000 })] });
     await p.step(w.db, ROSTER, new Map(), T0 + MIN);
-    await p.step(w.db, ROSTER, new Map(), T0 + 11 * MIN);
-    await p.step(w.db, ROSTER, new Map(), T0 + 13 * MIN);
+    const sent = await p.step(w.db, ROSTER, new Map(), T0 + 11 * MIN);
+    assert.equal(sent.log, "xpost: sent 1, no-model-budget 1");
+    // A standing condition is said when it changes, then every twenty minutes — not every minute.
+    assert.equal((await p.step(w.db, ROSTER, new Map(), T0 + 13 * MIN)).log, null);
     assert.equal(w.prompts.length, 1, "the intro took the day's one call");
     assert.deepEqual((await rows(w)).map((x) => x.kind), ["intro"], "the buy waits for an allowance rather than being written off");
+    assert.equal((await p.step(w.db, ROSTER, new Map(), T0 + 20 * MIN)).log, null);
+    assert.equal((await p.step(w.db, ROSTER, new Map(), T0 + 32 * MIN)).log, "xpost: no-model-budget 1");
   });
 
   it("a draft for an X account that is no longer connected is cancelled, never sent", async (t) => {
