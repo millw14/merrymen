@@ -97,6 +97,9 @@ import { TELEGRAM_STATE_DDL, publishTenantTelegram, readTenantTelegram } from ".
 import {
   deleteTgGroups,
   ensureTgGroupsSchema,
+  forgetStoredTgGroups,
+  forgetTgGroupsHome,
+  forgetTgGroupsInHomes,
   forgetUnwantedTgGroups,
   publishTgGroups,
   restoreTgGroups,
@@ -741,11 +744,17 @@ async function promoteChatSettings(tenant: `0x${string}`, chat: ChatSettings | n
  *
  * The child keeps its groups in `tg-groups.json` in a home the next redeploy
  * wipes. Up on the mirror's clock behind the lease (mirrorLedgers), down at
- * spawn before the child starts (spawnChild), gone with the grant: on the
- * kill switch (reconcile), the moment a /kill removes the grant (honourKill),
- * and for every tenant the grant store no longer lists (sweepTgGroups). Sealed
- * under the store DEK, which never leaves this process; self-hosted has no
- * DATABASE_URL and the file is the only store.
+ * spawn before the child starts (spawnChild), gone with the grant, from the
+ * row and from a home no child runs in: on the kill switch (reconcile), the
+ * moment a /kill removes the grant (honourKill), and for every tenant the
+ * grant store no longer lists (sweepTgGroups). Sealed under the store DEK,
+ * which never leaves this process; self-hosted has no DATABASE_URL and the
+ * file is the only store.
+ *
+ * Forget requests go up even when the file does not: while a child is held
+ * (below) or its file could not be published, the mirror applies the
+ * requests its home holds to the stored row (forgetStoredTgGroups), so a
+ * /forgetme is never undone by the next restore.
  *
  * `tgGroupsSeen` is the last version of each tenant's file that landed, so an
  * unchanged file costs one lstat per pass.
@@ -753,8 +762,8 @@ async function promoteChatSettings(tenant: `0x${string}`, chat: ChatSettings | n
  * `tgGroupsHeld` is every tenant whose child runs with its groups held off,
  * because its spawn could not put the stored memory back (tgGroupsHeldOff).
  * Nothing is published for them, so the stored row outlives the empty memory
- * the child started with. Cleared by a spawn that restores it, or with the
- * grant.
+ * the child started with; only their forget requests reach it. Cleared by a
+ * spawn that restores it, or with the grant.
  */
 const tgGroupsSeen = new Map<string, string>();
 const tgGroupsHeld = new Set<string>();
@@ -814,10 +823,24 @@ async function restoreTgGroupsForChild(tenant: `0x${string}`): Promise<void> {
   }
 }
 
-/** THE KILL SWITCH'S HALF: an agent whose grant is gone leaves no group memory behind. Never fatal. */
+/**
+ * THE KILL SWITCH'S HALF: an agent whose grant is gone leaves no group memory
+ * behind, in shared Postgres or in its home here. Never fatal.
+ *
+ * THE HOME TOO, when no child of it runs here. Only reconcile's kill branch
+ * removes a home, and only a running child's. A grant found gone during a
+ * restart back-off, a crash-loop stand-down, a fleet halt or after a lost
+ * lease (honourKill, spawnChild finding no grant) left tg-groups.json there,
+ * and a re-grant by the same wallet found it "present" and published it
+ * straight back. A running child is the file's writer and goes with its home
+ * when the kill branch stands it down. Checked and removed synchronously,
+ * before anything is awaited, so no spawn can start in between.
+ */
 async function forgetTgGroups(tenant: string): Promise<void> {
-  tgGroupsSeen.delete(tenant.toLowerCase());
-  tgGroupsHeld.delete(tenant.toLowerCase());
+  const lc = tenant.toLowerCase();
+  tgGroupsSeen.delete(lc);
+  tgGroupsHeld.delete(lc);
+  if (!children.has(lc)) forgetTgGroupsHome(childHome(tenant), log);
   const url = process.env.DATABASE_URL;
   if (!url) return;
   try {
@@ -840,11 +863,23 @@ async function forgetTgGroups(tenant: string): Promise<void> {
  * read, the stored memory of every tenant it no longer lists is deleted
  * (forgetUnwantedTgGroups: bounded per pass, tried again on the next).
  * `listedAtMs` is when that listing was requested. Never fatal.
+ *
+ * AND FROM THE HOMES. The row sweep visits only tenants that still have a
+ * row, and a home outlives its row, so the same pass removes the group files
+ * from the home of every tenant that is neither wanted nor running here
+ * (forgetTgGroupsInHomes, bounded per pass). Without a database too: the
+ * file is the memory either way.
  */
 async function sweepTgGroups(wanted: ReadonlySet<string>, listedAtMs: number): Promise<void> {
   // A tenant that comes back publishes afresh and is not held by a spawn of its old grant.
   for (const t of [...tgGroupsSeen.keys()]) if (!wanted.has(t)) tgGroupsSeen.delete(t);
   for (const t of [...tgGroupsHeld]) if (!wanted.has(t)) tgGroupsHeld.delete(t);
+  forgetTgGroupsInHomes({
+    childrenDir: path.join(merrymenHome(), "children"),
+    keep: (t) => wanted.has(t) || children.has(t),
+    before: listedAtMs,
+    log,
+  });
   const url = process.env.DATABASE_URL;
   if (!url) return;
   try {
@@ -5533,8 +5568,19 @@ async function mirrorLedgers(): Promise<void> {
     // only; sealed; skipped when the file has not changed. Never for a child
     // whose groups are held off: its file is not its memory, and the stored
     // row is what its next spawn will restore (tgGroupsHeld).
+    //
+    // FORGET REQUESTS REACH THE ROW EITHER WAY. A publish applies them to what
+    // it seals. When nothing is published (held, or a file that is absent,
+    // refused or failed), the requests in the home are applied to the stored
+    // row itself, under the same lease, so a /forgetme made while the child's
+    // groups are held off is not undone by the restore that ends the hold.
     if (tgGroupsDekThisPass && !tgGroupsHeld.has(tenant.toLowerCase())) {
-      await publishTgGroups({ tenant, home: childHome(tenant), shared, dek: tgGroupsDekThisPass, seen: tgGroupsSeen, log });
+      const published = await publishTgGroups({ tenant, home: childHome(tenant), shared, dek: tgGroupsDekThisPass, seen: tgGroupsSeen, log });
+      if (published !== "published" && published !== "unchanged") {
+        await forgetStoredTgGroups({ tenant, home: childHome(tenant), shared, dek: tgGroupsDekThisPass, seen: tgGroupsSeen, log });
+      }
+    } else if (tgGroupsDekThisPass) {
+      await forgetStoredTgGroups({ tenant, home: childHome(tenant), shared, dek: tgGroupsDekThisPass, seen: tgGroupsSeen, log });
     }
     // ── THE WIRE ────────────────────────────────────────────────────────────
     //

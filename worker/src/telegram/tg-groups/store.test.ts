@@ -13,6 +13,7 @@
  */
 import assert from "node:assert/strict";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -26,13 +27,18 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import {
+  TG_FORGET_LIMITS,
   TG_GROUPS_FILE,
+  TG_GROUPS_FORGET_FILE,
   TG_LIMITS,
   TgGroupsStore,
+  applyForgets,
   emptyTgGroupsState,
+  parseTgForgets,
   parseTgGroupsState,
   utcDay,
   utcHour,
+  type TgForgetOp,
 } from "./store";
 import type { TgCoinMemo, TgGroupsState, TgLine, TgRoom } from "./types";
 
@@ -971,6 +977,210 @@ describe("forgetChat and forgetPerson", () => {
   });
 });
 
+// ─── Forget requests, in their own file ──────────────────────────────────
+
+describe("forget requests: recordForget, parseTgForgets and applyForgets", () => {
+  const ALICE = 7;
+  const BO = 8;
+  const forgetPath = () => path.join(home, TG_GROUPS_FORGET_FILE);
+  const onFile = (): TgForgetOp[] => parseTgForgets(readFileSync(forgetPath(), "utf8"));
+
+  /** A room that remembers Alice and Bo: lines, notes, coin posts, and a summary naming Alice. */
+  function remembered(s: TgGroupsStore): void {
+    approvedRoom(s);
+    s.addLine(CHAT, line(1, { fromId: ALICE, name: "alice", text: "wen lambo" }));
+    s.addLine(CHAT, line(2, { fromId: BO, name: "bo", text: "never" }));
+    s.upsertPerson(CHAT, { id: ALICE, name: "alice", note: "shills frogs" });
+    s.upsertPerson(CHAT, { id: BO, name: "bo", note: "the skeptic" });
+    s.rememberCoin(CHAT, memo(addr(1), { byId: ALICE, byName: "alice" }));
+    s.rememberCoin(CHAT, memo(addr(2), { byId: BO, byName: "bo" }));
+    s.update(CHAT, (r) => {
+      r.summary = "Alice keeps posting frogs";
+      r.lastSummaryAtMs = clock;
+    });
+  }
+
+  it("on disk before it returns, one record per line, whether or not the store knows the chat", () => {
+    const s = open();
+    assert.equal(s.recordForget({ chatId: CHAT, userId: ALICE, atMs: T0 }), true);
+    assert.deepEqual(onFile(), [{ chatId: CHAT, userId: ALICE, atMs: T0 }], "written before returning, no flush needed");
+    assert.equal(statSync(forgetPath()).mode & 0o777, 0o600);
+    assert.equal(s.room(OTHER), undefined);
+    assert.equal(s.recordForget({ chatId: OTHER, userId: "*", atMs: T0 + 1 }), true, "a held child's empty store records it too");
+    assert.deepEqual(onFile(), [
+      { chatId: CHAT, userId: ALICE, atMs: T0 },
+      { chatId: OTHER, userId: "*", atMs: T0 + 1 },
+    ]);
+    assert.equal(existsSync(filePath()), false, "the memory file is not written by a request");
+  });
+
+  it("a record torn by a crash never swallows the next, and a malformed request is refused", () => {
+    const s = open();
+    s.recordForget({ chatId: CHAT, userId: ALICE, atMs: T0 });
+    appendFileSync(forgetPath(), '{"chatId":-1,"userId":');
+    assert.equal(s.recordForget({ chatId: CHAT, userId: BO, atMs: T0 + 1 }), true);
+    assert.deepEqual(onFile(), [
+      { chatId: CHAT, userId: ALICE, atMs: T0 },
+      { chatId: CHAT, userId: BO, atMs: T0 + 1 },
+    ]);
+    const before = readFileSync(forgetPath(), "utf8");
+    for (const bad of [
+      { chatId: 1.5, userId: ALICE, atMs: T0 },
+      { chatId: CHAT, userId: "alice", atMs: T0 },
+      { chatId: CHAT, userId: ALICE, atMs: Number.NaN },
+      null,
+    ]) {
+      assert.equal(s.recordForget(bad as unknown as TgForgetOp), false);
+    }
+    assert.equal(readFileSync(forgetPath(), "utf8"), before);
+  });
+
+  it("past its size bound the file is compacted: one request per chat and person, the latest, none lost", () => {
+    const s = open();
+    const rows: string[] = [];
+    for (let i = 0; rows.join("").length < TG_FORGET_LIMITS.fileBytes; i++) {
+      rows.push(`\n${JSON.stringify({ chatId: CHAT, userId: 100 + (i % 5), atMs: T0 + i })}\n`);
+    }
+    writeFileSync(forgetPath(), rows.join(""), { mode: 0o600 });
+    const n = rows.length;
+    assert.equal(s.recordForget({ chatId: OTHER, userId: "*", atMs: T0 + n }), true);
+    assert.ok(statSync(forgetPath()).size < TG_FORGET_LIMITS.fileBytes / 4, "compacted, not appended to");
+    const ops = onFile();
+    assert.equal(ops.length, 6);
+    for (let p = 0; p < 5; p++) {
+      const latest = Math.max(...Array.from({ length: n }, (_, i) => i).filter((i) => i % 5 === p)) + T0;
+      assert.deepEqual(ops.find((o) => o.userId === 100 + p), { chatId: CHAT, userId: 100 + p, atMs: latest });
+    }
+    assert.deepEqual(ops.at(-1), { chatId: OTHER, userId: "*", atMs: T0 + n });
+    assert.equal(readdirSync(home).filter((f) => f.startsWith(TG_GROUPS_FORGET_FILE)).length, 1, "no temp file left");
+  });
+
+  it("parseTgForgets keeps well-formed records only, the latest per chat and person, at most the cap", () => {
+    const text = [
+      JSON.stringify({ chatId: CHAT, userId: ALICE, atMs: T0 }),
+      "not json",
+      JSON.stringify({ chatId: CHAT, userId: ALICE, atMs: T0 + 5 }),
+      JSON.stringify({ chatId: CHAT, userId: ALICE, atMs: T0 + 2 }),
+      JSON.stringify({ chatId: CHAT, userId: "*", atMs: T0 + 1, extra: "dropped" }),
+      JSON.stringify({ chatId: "x", userId: ALICE, atMs: T0 }),
+      "",
+    ].join("\n");
+    assert.deepEqual(parseTgForgets(text), [
+      { chatId: CHAT, userId: "*", atMs: T0 + 1 },
+      { chatId: CHAT, userId: ALICE, atMs: T0 + 5 },
+    ]);
+    const many = Array.from({ length: TG_FORGET_LIMITS.ops + 10 }, (_, i) => JSON.stringify({ chatId: CHAT, userId: i + 1, atMs: T0 + i })).join("\n");
+    const kept = parseTgForgets(many);
+    assert.equal(kept.length, TG_FORGET_LIMITS.ops);
+    assert.equal(kept[0]!.userId, 11, "the newest are kept");
+  });
+
+  it("applyForgets does exactly what forgetPerson does (coin memos and summary included), and leaves its input alone", () => {
+    const s = open();
+    remembered(s);
+    const given = JSON.parse(JSON.stringify(s.state)) as TgGroupsState;
+    const snapshot = JSON.stringify(given);
+    const applied = applyForgets(given, [{ chatId: CHAT, userId: ALICE, atMs: clock }]);
+    assert.equal(JSON.stringify(given), snapshot, "pure: the state handed in is unchanged");
+
+    assert.equal(s.forgetPerson(CHAT, ALICE), 1);
+    assert.deepEqual(applied.rooms[String(CHAT)], s.room(CHAT), "the same room either way");
+    const r = s.room(CHAT)!;
+    assert.deepEqual(r.lines.map((l) => l.fromId), [BO]);
+    assert.deepEqual(r.people.map((p) => p.id), [BO]);
+    assert.deepEqual(
+      r.coins.map((c) => [c.address, c.byId, c.byName, c.verdict]),
+      [
+        [addr(1), 0, "", "passed"],
+        [addr(2), BO, "bo", "passed"],
+      ],
+      "their coin post keeps the coin and verdict, not who posted it",
+    );
+    assert.equal(r.summary, "", "a summary naming them is dropped");
+    assert.equal(onDisk().rooms[String(CHAT)].coins[0].byName, "", "and it is on disk before returning");
+  });
+
+  it("applyForgets does exactly what forgetChat does", () => {
+    const s = open();
+    remembered(s);
+    assert.equal(s.claim(CHAT, 1, addr(1)), true);
+    const applied = applyForgets(s.state as TgGroupsState, [{ chatId: CHAT, userId: "*", atMs: clock }]);
+    s.forgetChat(CHAT);
+    assert.deepEqual(applied.rooms[String(CHAT)], s.room(CHAT));
+    assert.deepEqual(Object.keys(s.room(CHAT)!.claims), [`1:${addr(1)}`], "claims stay");
+  });
+
+  it("bounded by when it was asked: applied again later, it never erases what was said after it", () => {
+    const s = open();
+    remembered(s);
+    const askedAt = clock;
+    clock += 5 * MIN;
+    // Alice comes back after the forget: a new line, a new note, a new coin, a new summary.
+    s.addLine(CHAT, line(3, { fromId: ALICE, name: "alice", text: "back again" }));
+    s.upsertPerson(CHAT, { id: ALICE, name: "alice", note: "came back" });
+    s.rememberCoin(CHAT, memo(addr(3), { byId: ALICE, byName: "alice" }));
+    const op: TgForgetOp = { chatId: CHAT, userId: ALICE, atMs: askedAt };
+    const once = applyForgets(s.state as TgGroupsState, [op]);
+    const r = once.rooms[String(CHAT)]!;
+    assert.deepEqual(r.lines.map((l) => l.messageId), [2, 3], "the line from before the request goes, the later one stays");
+    assert.equal(r.people.find((p) => p.id === ALICE)?.note, "came back");
+    assert.deepEqual(r.coins.find((c) => c.address === addr(1))?.byId, 0);
+    assert.deepEqual(r.coins.find((c) => c.address === addr(3))?.byId, ALICE);
+    assert.equal(r.summary, "", "the summary from before the request named her");
+    assert.deepEqual(applyForgets(once, [op]), once, "applying it again changes nothing");
+
+    // A summary written after the request is not the request's to drop.
+    const later = applyForgets(once, []);
+    later.rooms[String(CHAT)]!.summary = "alice is back";
+    later.rooms[String(CHAT)]!.lastSummaryAtMs = clock;
+    assert.equal(applyForgets(later, [op]).rooms[String(CHAT)]!.summary, "alice is back");
+    // Nor is one that does not name them.
+    const s2 = make(path.join(home, "other.json"));
+    remembered(s2);
+    s2.update(CHAT, (x) => {
+      x.summary = "bo doubts everything";
+    });
+    assert.equal(applyForgets(s2.state as TgGroupsState, [op]).rooms[String(CHAT)]!.summary, "bo doubts everything");
+    // A chat the state does not have is skipped.
+    const none = applyForgets(s.state as TgGroupsState, [{ chatId: 12345, userId: "*", atMs: clock }]);
+    assert.deepEqual(none, parseTgGroupsState(s.state));
+  });
+
+  // THE FINDING, at the store: the request was written, then the process
+  // died (or the memory write failed) before the memory reflected it. The
+  // next open must not hand the forgotten lines back.
+  it("open applies the forget file, so a memory written before the request never brings the lines back", () => {
+    const s = open();
+    remembered(s);
+    s.flush();
+    assert.equal(s.recordForget({ chatId: CHAT, userId: ALICE, atMs: clock }), true);
+    // No forgetPerson: the crash came first.
+    assert.ok(onDisk().rooms[String(CHAT)].lines.some((l: TgLine) => l.fromId === ALICE), "the file on disk still has her");
+
+    const again = open();
+    const r = again.room(CHAT)!;
+    assert.deepEqual(r.lines.map((l) => l.fromId), [BO]);
+    assert.deepEqual(r.people.map((p) => p.id), [BO]);
+    assert.equal(r.coins.find((c) => c.address === addr(1))?.byName, "");
+    assert.equal(r.summary, "");
+    again.flush();
+    assert.ok(!JSON.stringify(onDisk()).includes("wen lambo"), "and the file is rewritten without her");
+  });
+
+  it("an open with nothing left to forget writes nothing", () => {
+    const s = open();
+    remembered(s);
+    s.forgetPerson(CHAT, ALICE);
+    s.recordForget({ chatId: CHAT, userId: ALICE, atMs: clock });
+    s.flush();
+    // Every write is a new file renamed over the old one.
+    const ino = statSync(filePath()).ino;
+    const again = open();
+    again.flush();
+    assert.equal(statSync(filePath()).ino, ino);
+  });
+});
+
 // ─── Migration ───────────────────────────────────────────────────────────
 
 describe("migrate", () => {
@@ -1242,5 +1452,66 @@ describe("prune", () => {
     for (let c = 1; c <= 30; c++) assert.equal(Object.keys(s.room(-c)!.claims).length, 20, "every fresh claim kept");
     s.flush();
     assert.ok(statSync(filePath()).size < TG_LIMITS.fileBytes);
+  });
+});
+
+describe("self-hosted: the store clears its own forget file (ownsForgets)", () => {
+  const ALICE = 7;
+  const forgetPath = () => path.join(home, TG_GROUPS_FORGET_FILE);
+  const owned = () => TgGroupsStore.open(home, { now, debounceMs: 60_000, ownsForgets: true });
+
+  it("once the memory file reflects the request, the request is gone from disk", () => {
+    const s = owned();
+    approvedRoom(s);
+    s.addLine(CHAT, line(1, { fromId: ALICE, name: "alice", text: "wen lambo" }));
+    s.upsertPerson(CHAT, { id: ALICE, name: "alice", note: "shills frogs" });
+    s.flush();
+    assert.equal(s.recordForget({ chatId: CHAT, userId: ALICE, atMs: clock }), true);
+    assert.equal(existsSync(forgetPath()), true, "recorded before the wipe");
+    s.forgetPerson(CHAT, ALICE);
+    s.flush();
+    assert.equal(existsSync(forgetPath()), false, "nobody's id is kept once their memory is gone");
+    assert.equal(onDisk().rooms[String(CHAT)].people.length, 0);
+    s.close();
+  });
+
+  it("a request the memory does not reflect yet keeps the file", () => {
+    const s = owned();
+    approvedRoom(s);
+    s.addLine(CHAT, line(1, { fromId: ALICE, name: "alice", text: "wen lambo" }));
+    s.flush();
+    s.recordForget({ chatId: CHAT, userId: ALICE, atMs: clock });
+    // A write that happens before the wipe (another room changed) must not drop it.
+    s.ensureRoom(OTHER, { title: "other", kind: "supergroup" });
+    s.flush();
+    assert.equal(existsSync(forgetPath()), true);
+    s.forgetPerson(CHAT, ALICE);
+    s.flush();
+    assert.equal(existsSync(forgetPath()), false);
+    s.close();
+  });
+
+  it("a crash between the request and the wipe: the next open applies it, writes, then clears it", () => {
+    const s = owned();
+    approvedRoom(s);
+    s.addLine(CHAT, line(1, { fromId: ALICE, name: "alice", text: "wen lambo" }));
+    s.flush();
+    s.recordForget({ chatId: CHAT, userId: ALICE, atMs: clock });
+    // No forgetPerson: the process died here.
+    const again = owned();
+    again.flush();
+    assert.equal(again.room(CHAT)?.lines.some((l) => l.fromId === ALICE), false);
+    assert.equal(existsSync(forgetPath()), false);
+    again.close();
+  });
+
+  it("hosted (the default): the store never clears it; the ferry must see it first", () => {
+    const s = open();
+    approvedRoom(s);
+    s.recordForget({ chatId: CHAT, userId: ALICE, atMs: clock });
+    s.forgetPerson(CHAT, ALICE);
+    s.flush();
+    assert.equal(existsSync(forgetPath()), true);
+    s.close();
   });
 });

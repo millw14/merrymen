@@ -13,6 +13,12 @@
  *   - the row is ciphertext bound to its tenant: no plaintext in the column,
  *     and one tenant's row cannot be restored as another's;
  *   - nothing here throws, and no log line carries the memory or the DEK;
+ *   - a forget request reaches the stored copy whatever the child holds: a
+ *     publish applies it, a held child's row is patched in place, a restore
+ *     applies the home's requests, and they are cleared only once the child's
+ *     own file reflects them;
+ *   - the group files leave a home whose grant is gone while no child runs
+ *     there, so a re-grant never finds them "present";
  *   - the orchestrator calls all of it where the contract says, behind the
  *     lease, before spawn and on the kill switch, and the group model key
  *     reaches children while the DEK does not.
@@ -31,6 +37,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -48,6 +55,9 @@ import {
   TG_GROUPS_TABLE_SQL,
   deleteTgGroups,
   ensureTgGroupsSchema,
+  forgetStoredTgGroups,
+  forgetTgGroupsHome,
+  forgetTgGroupsInHomes,
   forgetUnwantedTgGroups,
   isTgGroupsText,
   publishTgGroups,
@@ -56,7 +66,7 @@ import {
   tgGroupsToForget,
   type TgGroupsRestore,
 } from "./tg-groups-ferry";
-import { TG_GROUPS_FILE, TG_LIMITS } from "./telegram/tg-groups/store";
+import { TG_GROUPS_FILE, TG_GROUPS_FORGET_FILE, TG_LIMITS, TgGroupsStore, parseTgForgets } from "./telegram/tg-groups/store";
 
 const A = `0x${"ab".repeat(20)}`;
 const B = `0x${"cd".repeat(20)}`;
@@ -985,6 +995,463 @@ describe("held off: a failed restore never lets an empty memory overwrite the st
   });
 });
 
+// ── forget requests reach the stored copy, whatever the child holds ─────────
+
+const CHAT = -1001234567890;
+const ALICE = 42;
+const BO = 43;
+const COIN = `0x${"11".repeat(20)}`;
+
+/**
+ * A child's own store in `dir`, remembering Alice (the MARKER line, a note, a
+ * coin post and a summary naming her) and Bo. Written before it returns.
+ */
+function childStore(dir: string): TgGroupsStore {
+  const s = TgGroupsStore.open(dir, { debounceMs: 60_000 });
+  const at = Date.now();
+  s.ensureRoom(CHAT, { title: "frog pond", kind: "supergroup" }, { owner: true });
+  s.setStatus(CHAT, "approved");
+  s.addLine(CHAT, { messageId: 1, fromId: ALICE, name: "alice", text: MARKER, atMs: at - 60_000 });
+  s.addLine(CHAT, { messageId: 2, fromId: BO, name: "bo", text: "bo was here", atMs: at - 50_000 });
+  s.upsertPerson(CHAT, { id: ALICE, name: "alice", note: "frogwhisperer", lastSeenMs: at - 60_000 });
+  s.upsertPerson(CHAT, { id: BO, name: "bo", note: "the skeptic", lastSeenMs: at - 50_000 });
+  s.rememberCoin(CHAT, { address: COIN, byId: ALICE, byName: "alice", messageId: 1, atMs: at - 60_000, verdict: "passed" });
+  s.update(CHAT, (r) => {
+    r.summary = "alice keeps saying wen lambo";
+    r.lastSummaryAtMs = at - 40_000;
+  });
+  s.flush();
+  return s;
+}
+
+/** The file text the stored row opens to. */
+async function storedText(db: Db, tenant = A): Promise<string> {
+  const plain = openSecret((await rowOf(db, tenant))!.sealed, DEK);
+  return plain.slice(plain.indexOf("\n") + 1);
+}
+
+/** Whether a memory's text still holds anything of Alice's. */
+function holdsAlice(text: string): boolean {
+  const st = JSON.parse(text) as { rooms: Record<string, { lines: { fromId: number }[]; people: { id: number }[]; coins: { byId: number }[]; summary: string }> };
+  const r = st.rooms[String(CHAT)]!;
+  return (
+    text.includes(MARKER) ||
+    r.lines.some((l) => l.fromId === ALICE) ||
+    r.people.some((p) => p.id === ALICE) ||
+    r.coins.some((c) => c.byId === ALICE) ||
+    /alice/i.test(r.summary)
+  );
+}
+
+const forgetFile = (dir: string) => path.join(dir, TG_GROUPS_FORGET_FILE);
+const aliceForgets = (s: TgGroupsStore) => assert.equal(s.recordForget({ chatId: CHAT, userId: ALICE, atMs: Date.now() }), true);
+
+describe("forget requests reach the stored memory, whatever the child holds", () => {
+  // The finding: a spawn could not read the row, so the child runs held with
+  // an empty store. Alice's /forgetme there erased nothing, nothing was
+  // published, and the next restore handed her lines, note and coin memo back.
+  test("THE FINDING: a /forgetme made while the child's groups are held off reaches the row, and no restore brings her back", async (t) => {
+    const { db, raw } = await sqlite(t);
+    const src = home(t);
+    const before = childStore(src);
+    before.close();
+    const seen = new Map<string, string>();
+    assert.equal(await publishTgGroups({ tenant: A, home: src, shared: db, dek: DEK, seen, log: () => {} }), "published");
+    assert.ok(holdsAlice(await storedText(db)), "the row holds her");
+
+    // A redeploy whose restore cannot reach the database: held off.
+    const held = home(t);
+    const unreachable = async (): Promise<Db> => {
+      throw new Error("connect ETIMEDOUT");
+    };
+    const r = await restoreTgGroups({ tenant: A, home: held, shared: unreachable, dek: DEK, log: () => {} });
+    assert.equal(tgGroupsHeldOff(r, false), true);
+
+    // The held child's empty store: it knows no room, but records the request.
+    const child = TgGroupsStore.open(held, { debounceMs: 60_000 });
+    assert.equal(child.room(CHAT), undefined);
+    aliceForgets(child);
+    child.close();
+
+    // The mirror pass for a held tenant.
+    const { lines, log } = logs();
+    assert.equal(await forgetStoredTgGroups({ tenant: A, home: held, shared: db, dek: DEK, seen, log }), "applied");
+    const stored = await storedText(db);
+    assert.equal(holdsAlice(stored), false, "the stored row no longer holds anything of hers");
+    assert.ok(stored.includes("bo was here"), "and nothing of anyone else's went");
+    assert.ok(existsSync(forgetFile(held)), "not cleared: the held child's own file does not reflect it");
+
+    // Nothing new: no second write.
+    raw.prepare("UPDATE tenant_tg_groups SET updated_at_ms = 0").run();
+    assert.equal(await forgetStoredTgGroups({ tenant: A, home: held, shared: db, dek: DEK, seen, log }), "unchanged");
+    assert.equal((await rowOf(db, A))!.updated_at_ms, 0);
+
+    // The next redeploy: a fresh home, the row comes back without her.
+    const next = home(t);
+    assert.equal(await restoreTgGroups({ tenant: A, home: next, shared: db, dek: DEK, log }), "restored");
+    assert.equal(holdsAlice(readFileSync(path.join(next, TG_GROUPS_FILE_NAME), "utf8")), false);
+    assertClean(lines, ["frogwhisperer", "alice"]);
+  });
+
+  test("a crash restart in the same container: the restore applies the home's requests before it writes", async (t) => {
+    const { db } = await sqlite(t);
+    const src = home(t);
+    childStore(src).close();
+    await publishTgGroups({ tenant: A, home: src, shared: db, dek: DEK, seen: new Map(), log: () => {} });
+    // A held child recorded the request, and the row was not patched (the
+    // database was down every pass since). No memory file in the home.
+    const h = home(t);
+    const held = TgGroupsStore.open(h, { debounceMs: 60_000 });
+    aliceForgets(held);
+    held.close();
+    assert.ok(holdsAlice(await storedText(db)), "the row still holds her");
+    assert.equal(await restoreTgGroups({ tenant: A, home: h, shared: db, dek: DEK, log: () => {} }), "restored");
+    const text = readFileSync(path.join(h, TG_GROUPS_FILE_NAME), "utf8");
+    assert.equal(holdsAlice(text), false);
+    assert.ok(text.includes("bo was here"));
+    assert.ok(isTgGroupsText(text));
+  });
+
+  test("a publish applies them to what it seals, and clears them only once the child's own file reflects them", async (t) => {
+    const { db } = await sqlite(t);
+    const src = home(t);
+    const s = childStore(src);
+    const seen = new Map<string, string>();
+    // Recorded, but the child's memory file lags it (its write failed, or the
+    // pass read the file between the two).
+    aliceForgets(s);
+    const { lines, log } = logs();
+    assert.equal(await publishTgGroups({ tenant: A, home: src, shared: db, dek: DEK, seen, log }), "published");
+    assert.equal(holdsAlice(await storedText(db)), false, "never sealed with what she asked to forget");
+    assert.ok(holdsAlice(readFileSync(path.join(src, TG_GROUPS_FILE_NAME), "utf8")), "the child's file is not touched");
+    assert.ok(existsSync(forgetFile(src)), "kept: the child's own memory still holds her");
+    assert.equal(await publishTgGroups({ tenant: A, home: src, shared: db, dek: DEK, seen, log }), "unchanged");
+
+    // The child catches up.
+    s.forgetPerson(CHAT, ALICE);
+    assert.equal(await publishTgGroups({ tenant: A, home: src, shared: db, dek: DEK, seen, log }), "published");
+    assert.equal(existsSync(forgetFile(src)), false, "cleared once the file it published already reflected it");
+    assert.equal(await publishTgGroups({ tenant: A, home: src, shared: db, dek: DEK, seen, log }), "unchanged");
+    assert.deepEqual(readdirSync(src).sort(), [TG_GROUPS_FILE_NAME], "no temp file left");
+    s.close();
+    assertClean(lines, ["frogwhisperer"]);
+  });
+
+  test("a request the child appends while a publish is carrying the file is kept", async (t) => {
+    const { db } = await sqlite(t);
+    const src = home(t);
+    const s = childStore(src);
+    aliceForgets(s);
+    s.forgetPerson(CHAT, ALICE);
+    // Between the publish's read of the forget file and its clear, the
+    // upsert: the child records Bo's /forgetme right then.
+    const racing: Db = {
+      prepare: (sql) => {
+        const stmt = db.prepare(sql);
+        return {
+          run: async (...params) => {
+            if (sql.startsWith("INSERT INTO tenant_tg_groups")) {
+              assert.equal(s.recordForget({ chatId: CHAT, userId: BO, atMs: Date.now() }), true);
+            }
+            return stmt.run(...params);
+          },
+          get: (...params) => stmt.get(...params),
+          all: (...params) => stmt.all(...params),
+        };
+      },
+      exec: (sql) => db.exec(sql),
+      tx: (fn) => db.tx(fn),
+    };
+    const seen = new Map<string, string>();
+    assert.equal(await publishTgGroups({ tenant: A, home: src, shared: racing, dek: DEK, seen, log: () => {} }), "published");
+    const left = parseTgForgets(readFileSync(forgetFile(src), "utf8"));
+    assert.ok(left.some((o) => o.userId === BO), "Bo's request survived the clear");
+    assert.ok(!left.some((o) => o.userId === ALICE), "Alice's, which the child's file reflected, went");
+
+    // The next pass carries Bo's too, and his lines never reach the row.
+    assert.equal(await publishTgGroups({ tenant: A, home: src, shared: db, dek: DEK, seen, log: () => {} }), "published");
+    assert.ok(!(await storedText(db)).includes("bo was here"));
+    assert.ok(existsSync(forgetFile(src)), "the child has not caught up with Bo's yet");
+    s.forgetPerson(CHAT, BO);
+    assert.equal(await publishTgGroups({ tenant: A, home: src, shared: db, dek: DEK, seen, log: () => {} }), "published");
+    assert.equal(existsSync(forgetFile(src)), false);
+    s.close();
+  });
+
+  test("the stored row is patched in place: never brought back once deleted, never written over a newer one", async (t) => {
+    const { db, raw } = await sqlite(t);
+    const src = home(t);
+    childStore(src).close();
+    await publishTgGroups({ tenant: A, home: src, shared: db, dek: DEK, seen: new Map(), log: () => {} });
+    const h = home(t);
+    const child = TgGroupsStore.open(h, { debounceMs: 60_000 });
+    aliceForgets(child);
+    child.close();
+
+    // Between the read and the write, the sweep (on another replica) deletes the row.
+    const between = (fn: () => void): Db => ({
+      prepare: (sql) => {
+        const stmt = db.prepare(sql);
+        return {
+          run: async (...params) => {
+            if (sql.startsWith("UPDATE tenant_tg_groups")) fn();
+            return stmt.run(...params);
+          },
+          get: (...params) => stmt.get(...params),
+          all: (...params) => stmt.all(...params),
+        };
+      },
+      exec: (sql) => db.exec(sql),
+      tx: (f) => db.tx(f),
+    });
+    const { lines, log } = logs();
+    const deleting = between(() => raw.prepare("DELETE FROM tenant_tg_groups WHERE tenant = ?").run(A));
+    assert.equal(await forgetStoredTgGroups({ tenant: A, home: h, shared: deleting, dek: DEK, seen: new Map(), log }), "failed");
+    assert.equal(await rowCount(db), 0, "the deleted row was not brought back");
+
+    // Republished, then replaced between the read and the write.
+    await publishTgGroups({ tenant: A, home: src, shared: db, dek: DEK, seen: new Map(), log: () => {} });
+    const newer = sealSecret(`tg-groups/v1 ${A}\n${memory("a newer copy")}`, DEK);
+    // (memory()'s line is from user 42, who is Alice here.)
+    const replacing = between(() => raw.prepare("UPDATE tenant_tg_groups SET sealed = ? WHERE tenant = ?").run(newer, A));
+    const seen = new Map<string, string>();
+    assert.equal(await forgetStoredTgGroups({ tenant: A, home: h, shared: replacing, dek: DEK, seen, log }), "failed");
+    assert.equal((await rowOf(db, A))!.sealed, newer, "the newer row stands");
+    // …and is judged afresh on the next pass: its line from her goes too.
+    assert.equal(await forgetStoredTgGroups({ tenant: A, home: h, shared: db, dek: DEK, seen, log }), "applied");
+    assert.ok(!(await storedText(db)).includes("a newer copy"));
+    assertClean(lines, [newer]);
+  });
+
+  test("nothing to do is nothing done: no file, no request, no row", async (t) => {
+    const { db } = await sqlite(t);
+    const seen = new Map<string, string>();
+    const empty = home(t);
+    assert.equal(await forgetStoredTgGroups({ tenant: A, home: empty, shared: db, dek: DEK, seen, log: () => {} }), "none");
+    const h = home(t);
+    const child = TgGroupsStore.open(h, { debounceMs: 60_000 });
+    aliceForgets(child);
+    child.close();
+    assert.equal(await forgetStoredTgGroups({ tenant: A, home: h, shared: db, dek: DEK, seen, log: () => {} }), "none", "no stored row");
+    assert.equal(await rowCount(db), 0, "and none is created");
+    assert.equal(await forgetStoredTgGroups({ tenant: "not-an-address", home: h, shared: db, dek: DEK, seen, log: () => {} }), "failed");
+  });
+
+  test("requests that cannot be read hold a restore back, and a publish goes on as the child wrote it", async (t) => {
+    const { db } = await sqlite(t);
+    const src = home(t);
+    childStore(src).close();
+    mkdirSync(forgetFile(src));
+    const { lines, log } = logs();
+    assert.equal(await publishTgGroups({ tenant: A, home: src, shared: db, dek: DEK, seen: new Map(), log }), "published");
+    assert.ok(existsSync(forgetFile(src)), "never cleared");
+    const dst = home(t);
+    mkdirSync(forgetFile(dst));
+    assert.equal(await restoreTgGroups({ tenant: A, home: dst, shared: db, dek: DEK, log }), "failed");
+    assert.equal(existsSync(path.join(dst, TG_GROUPS_FILE_NAME)), false, "nothing written");
+    assert.equal(tgGroupsHeldOff("failed", false), true, "so the child runs held, saying nothing");
+    assert.equal(await forgetStoredTgGroups({ tenant: A, home: dst, shared: db, dek: DEK, seen: new Map(), log }), "failed");
+    assertClean(lines);
+  });
+
+  test("the patch translates to numbered Postgres placeholders and is an UPDATE of the row it read", async (t) => {
+    const h = home(t);
+    const child = TgGroupsStore.open(h, { debounceMs: 60_000 });
+    aliceForgets(child);
+    child.close();
+    const src = home(t);
+    childStore(src).close();
+    const text = readFileSync(path.join(src, TG_GROUPS_FILE_NAME), "utf8");
+    const sealed = sealSecret(`tg-groups/v1 ${A}\n${text}`, DEK);
+    const seenSql: string[] = [];
+    const seenParams: unknown[][] = [];
+    const recorder: Db = {
+      prepare: (sql) => {
+        seenSql.push(sql);
+        return {
+          run: async (...params) => {
+            seenParams.push(params);
+            return { changes: 1, lastInsertRowid: 0 };
+          },
+          get: async () => ({ sealed }),
+          all: async () => [],
+        };
+      },
+      exec: async () => {},
+      tx: async (fn) => fn(recorder),
+    };
+    assert.equal(await forgetStoredTgGroups({ tenant: A, home: h, shared: recorder, dek: DEK, seen: new Map(), log: () => {} }), "applied");
+    assert.equal(seenSql.length, 2);
+    assert.equal(translateQuery(seenSql[0]!), "SELECT sealed FROM tenant_tg_groups WHERE tenant = $1");
+    assert.equal(
+      translateQuery(seenSql[1]!),
+      "UPDATE tenant_tg_groups SET sealed = $1, bytes = $2, updated_at_ms = $3 WHERE tenant = $4 AND sealed = $5",
+    );
+    const [newSealed, , , tenant, was] = seenParams[0]!;
+    assert.equal(tenant, A);
+    assert.equal(was, sealed, "it names the row it read");
+    assert.equal(holdsAlice(openSecret(newSealed as string, DEK).slice(`tg-groups/v1 ${A}\n`.length)), false);
+  });
+});
+
+// ── gone with the grant, from the home too ──────────────────────────────────
+
+describe("the group files leave a home whose grant is gone while no child runs there", () => {
+  const C = `0x${"ef".repeat(20)}`;
+
+  function fleet(t: T): string {
+    const dir = path.join(home(t), "children");
+    mkdirSync(dir);
+    return dir;
+  }
+
+  function tenantHome(children: string, tenant: string): string {
+    const dir = path.join(children, tenant);
+    mkdirSync(dir);
+    writeFileSync(path.join(dir, "grant.json"), "{}");
+    put(dir, memory());
+    return dir;
+  }
+
+  test("forgetTgGroupsHome: the memory, the requests and every copy of either go, and nothing else", (t) => {
+    const dir = home(t);
+    put(dir, memory());
+    for (const f of [
+      "tg-groups.json.tmp",
+      "tg-groups.json.bad",
+      TG_GROUPS_FORGET_FILE,
+      `${TG_GROUPS_FORGET_FILE}.tmp`,
+      ".tg-groups.json.123.abc.restore",
+      `.${TG_GROUPS_FORGET_FILE}.1.x.clear`,
+      "grant.json",
+      "settings.json",
+      "merrymen.db",
+      "telegram.json",
+    ]) {
+      writeFileSync(path.join(dir, f), MARKER);
+    }
+    const { lines, log } = logs();
+    assert.equal(forgetTgGroupsHome(dir, log), 7);
+    assert.deepEqual(readdirSync(dir).sort(), ["grant.json", "merrymen.db", "settings.json", "telegram.json"]);
+    assert.equal(forgetTgGroupsHome(dir, log), 0, "nothing left is nothing done");
+    assert.equal(forgetTgGroupsHome(path.join(dir, "gone"), log), 0, "a missing home is not an error");
+    assertClean(lines);
+  });
+
+  test("forgetTgGroupsHome with a bound leaves a file written since", (t) => {
+    const dir = home(t);
+    const file = put(dir, memory());
+    const at = Date.now();
+    utimesSync(file, new Date(at + 60_000), new Date(at + 60_000));
+    assert.equal(forgetTgGroupsHome(dir, () => {}, at), 0);
+    assert.ok(existsSync(file));
+    utimesSync(file, new Date(at - 60_000), new Date(at - 60_000));
+    assert.equal(forgetTgGroupsHome(dir, () => {}, at), 1);
+    assert.equal(existsSync(file), false);
+  });
+
+  // The finding: the grant went while the child was not running here (a
+  // restart back-off, a stand-down, a fleet halt, a lost lease), so no kill
+  // branch removed its home. The re-grant's restore found the old file
+  // "present", the child used it, and the mirror sealed it back into Postgres.
+  test("THE FINDING: a grant removed while its child is not running, then a re-grant: the restore finds nothing, not the old memory", async (t) => {
+    const { db } = await sqlite(t);
+    const children = fleet(t);
+    const a = tenantHome(children, A);
+    await publishTgGroups({ tenant: A, home: a, shared: db, dek: DEK, seen: new Map(), log: () => {} });
+    // The grant goes: the row sweep deletes the row…
+    assert.deepEqual(await forgetUnwantedTgGroups({ shared: db, wanted: new Set(), listedAtMs: Date.now() + 1, log: () => {} }), [A]);
+    // …and the home walk the file.
+    const { lines, log } = logs();
+    assert.deepEqual(forgetTgGroupsInHomes({ childrenDir: children, keep: () => false, before: Date.now() + 1, log }), [A]);
+    assert.equal(existsSync(path.join(a, TG_GROUPS_FILE_NAME)), false);
+    assert.ok(existsSync(path.join(a, "grant.json")), "the rest of the home is not the walk's");
+    // The same wallet signs again; its spawn restores.
+    assert.equal(await restoreTgGroups({ tenant: A, home: a, shared: db, dek: DEK, log }), "none", "not \"present\" with the old memory");
+    assertClean(lines);
+  });
+
+  test("the walk keeps what it is told to, skips what is not a tenant's home, and is bounded per pass", (t) => {
+    const children = fleet(t);
+    const a = tenantHome(children, A);
+    const b = tenantHome(children, B);
+    const c = tenantHome(children, C);
+    mkdirSync(path.join(children, "not-a-tenant"));
+    put(path.join(children, "not-a-tenant"), memory());
+    const keep = (x: string) => x === B;
+    const first = forgetTgGroupsInHomes({ childrenDir: children, keep, before: Date.now() + 1, max: 1, log: () => {} });
+    assert.equal(first.length, 1);
+    const second = forgetTgGroupsInHomes({ childrenDir: children, keep, before: Date.now() + 1, max: 1, log: () => {} });
+    assert.equal(second.length, 1);
+    assert.deepEqual([...first, ...second].sort(), [A, C].sort());
+    assert.deepEqual(forgetTgGroupsInHomes({ childrenDir: children, keep, before: Date.now() + 1, log: () => {} }), []);
+    assert.equal(existsSync(path.join(a, TG_GROUPS_FILE_NAME)), false);
+    assert.equal(existsSync(path.join(c, TG_GROUPS_FILE_NAME)), false);
+    assert.ok(existsSync(path.join(b, TG_GROUPS_FILE_NAME)), "a kept tenant's file stays");
+    assert.ok(existsSync(path.join(children, "not-a-tenant", TG_GROUPS_FILE_NAME)), "not a home childHome makes");
+    // A file written after the listing (a newer grant's spawn) is the next pass's.
+    const fresh = tenantHome(children, `0x${"12".repeat(20)}`);
+    assert.deepEqual(forgetTgGroupsInHomes({ childrenDir: children, keep, before: Date.now() - 60_000, log: () => {} }), []);
+    assert.ok(existsSync(path.join(fresh, TG_GROUPS_FILE_NAME)));
+    assert.deepEqual(forgetTgGroupsInHomes({ childrenDir: path.join(children, "gone"), keep, before: Date.now(), log: () => {} }), []);
+  });
+
+  test("the orchestrator, run: a reconcile clears a home no child runs in, and a /kill carried out with no child here clears it at once", async (t) => {
+    const saved = { ...process.env };
+    const fleetHome = home(t);
+    const { resetGrantStoreForTest, getGrantStore } = await import("./grant-store");
+    t.after(() => {
+      for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+      Object.assign(process.env, saved);
+      resetGrantStoreForTest();
+    });
+    process.env.MERRYMEN_HOME = fleetHome;
+    delete process.env.DATABASE_URL;
+    resetGrantStoreForTest();
+    const { reconcile, childHome, honourPendingKills } = await import("./orchestrator");
+    const { writeKillRequest } = await import("./kill-request");
+
+    // Not in the grant store, not running here: what a discard during a
+    // restart back-off leaves.
+    const gone = childHome(C);
+    mkdirSync(gone, { recursive: true });
+    writeFileSync(path.join(gone, "grant.json"), "{}");
+    put(gone, memory());
+    writeFileSync(path.join(gone, TG_GROUPS_FORGET_FILE), `\n${JSON.stringify({ chatId: CHAT, userId: ALICE, atMs: 1 })}\n`);
+    // An mtime before the pass's listing: the walk judges only older files.
+    const old = new Date(Date.now() - 60_000);
+    for (const f of [TG_GROUPS_FILE_NAME, TG_GROUPS_FORGET_FILE]) utimesSync(path.join(gone, f), old, old);
+    await reconcile();
+    assert.equal(existsSync(path.join(gone, TG_GROUPS_FILE_NAME)), false, "the reconcile removed the memory");
+    assert.equal(existsSync(path.join(gone, TG_GROUPS_FORGET_FILE)), false);
+    assert.ok(existsSync(path.join(gone, "grant.json")), "and nothing else");
+
+    // A /kill for a tenant whose child is not running here (it crashed): the
+    // three-second ferry carries it out, and the memory goes with the grant.
+    const nowSec = Math.floor(Date.now() / 1000);
+    const grant = {
+      smartAccount: "0x00000000000000000000000000000000000000c3",
+      owner: "0x00000000000000000000000000000000000000b2",
+      sessionKeyAddress: "0x00000000000000000000000000000000000000d4",
+      serialized: `eyJ-a-zerodev-blob-${nowSec}`,
+      chainId: 4663,
+      grantedAt: nowSec - 3600,
+      expiresAt: nowSec + 7 * 86_400,
+      caps: { perTradeUsdg: 10, dailyUsdg: 50, maxDrawdownPct: 20, expiryDays: 7 },
+      grantFeatures: ["tradeable-v2"],
+      grantTokens: [],
+    } as unknown as Parameters<ReturnType<typeof getGrantStore>["put"]>[1];
+    await getGrantStore().put(B as `0x${string}`, grant);
+    const killed = childHome(B);
+    mkdirSync(killed, { recursive: true });
+    put(killed, memory());
+    writeKillRequest(killed, grant, nowSec);
+    await honourPendingKills();
+    assert.equal(await getGrantStore().get(B as `0x${string}`), null, "the grant is removed");
+    assert.equal(existsSync(path.join(killed, TG_GROUPS_FILE_NAME)), false, "and its group memory with it, before any reconcile");
+  });
+});
+
 describe("the row is read here and nowhere else", () => {
   test("no other worker or web source names the table", () => {
     const repo = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "..");
@@ -1018,10 +1485,11 @@ describe("isTgGroupsText", () => {
 // ── the orchestrator's wiring ───────────────────────────────────────────────
 
 describe("the ferry and the child's store agree", () => {
-  // The ferry keeps its own copy of the name on purpose (it treats the file as
-  // opaque and imports nothing of the chat side), so the two can drift apart
-  // silently: a ferry reading a different name restores nothing and publishes
-  // nothing, and every redeploy would wipe every agent's group memory.
+  // The ferry keeps its own copy of the memory file's name (the file is opaque
+  // to it; only the forget requests are read, with the store's own helpers),
+  // so the two can drift apart silently: a ferry reading a different name
+  // restores nothing and publishes nothing, and every redeploy would wipe
+  // every agent's group memory.
   test("the same file name", () => {
     assert.equal(TG_GROUPS_FILE_NAME, TG_GROUPS_FILE);
   });
@@ -1077,10 +1545,36 @@ describe("the orchestrator ferries it where the contract says", () => {
     assert.equal(ORCH.split("env: childEnv(").length - 1, 1, "the one spawn site");
 
     const mirror = body("async function mirrorLedgers(");
-    assert.match(mirror, /if \(tgGroupsDekThisPass && !tgGroupsHeld\.has\(tenant\.toLowerCase\(\)\)\) \{\s*await publishTgGroups\(\{/);
+    assert.match(mirror, /if \(tgGroupsDekThisPass && !tgGroupsHeld\.has\(tenant\.toLowerCase\(\)\)\) \{\s*const published = await publishTgGroups\(\{/);
 
     const forget = body("async function forgetTgGroups(");
     assert.match(forget, /tgGroupsHeld\.delete\(/, "cleared with the grant");
+  });
+
+  test("forget requests: a held child's row is patched, and so is one whose file was not published, under the same lease", () => {
+    const mirror = body("async function mirrorLedgers(");
+    const gate = mirror.indexOf("if (!lease || !lease.healthy()) continue;");
+    const publish = mirror.indexOf("const published = await publishTgGroups({");
+    const unpublished = mirror.indexOf('if (published !== "published" && published !== "unchanged") {', publish);
+    const patchAfter = mirror.indexOf("await forgetStoredTgGroups({", unpublished);
+    const heldBranch = mirror.indexOf("} else if (tgGroupsDekThisPass) {", patchAfter);
+    const patchHeld = mirror.indexOf("await forgetStoredTgGroups({", heldBranch);
+    assert.ok(gate > 0 && publish > gate, "below the lease gate");
+    assert.ok(unpublished > publish && patchAfter > unpublished, "a file that was not published still carries its requests");
+    assert.ok(heldBranch > patchAfter && patchHeld > heldBranch, "a held child's requests reach the row");
+    assert.equal(ORCH.split("forgetStoredTgGroups(").length - 1, 2, "and nowhere else");
+  });
+
+  test("gone with the grant, from the home: forgetTgGroups clears a home no child runs in, before it awaits anything", () => {
+    const forget = body("async function forgetTgGroups(");
+    const clear = forget.indexOf("if (!children.has(lc)) forgetTgGroupsHome(childHome(tenant), log);");
+    assert.ok(clear > 0, "only when no child of it runs here");
+    assert.ok(forget.indexOf("await ") > clear, "synchronously, before the first await, so no spawn starts in between");
+    const sweep = body("async function sweepTgGroups(");
+    const walk = sweep.indexOf("forgetTgGroupsInHomes({");
+    assert.ok(walk > 0 && walk < sweep.indexOf("const url = process.env.DATABASE_URL;"), "every pass, with or without a database");
+    assert.match(sweep, /keep: \(t\) => wanted\.has\(t\) \|\| children\.has\(t\),\s*before: listedAtMs,/);
+    assert.match(sweep, /childrenDir: path\.join\(merrymenHome\(\), "children"\),/, "the directory childHome uses");
   });
 
   test("childEnv, run: a held child gets the operator's switch at 0, and nobody else's is changed", async (t) => {

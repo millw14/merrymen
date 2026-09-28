@@ -10,11 +10,24 @@
  * orchestrator is the one process that sees both a child's home and shared
  * Postgres, so it ferries the file: up on the mirror's clock, down at spawn.
  *
- * THE FILE IS OPAQUE HERE. This module never interprets the memory. It checks
- * only that the text is a JSON object with `version: 1` — on the way up so a
- * torn or foreign file never replaces a good copy, on the way down so a row
- * that opens but is not memory is never handed to a child — and it moves the
- * exact bytes the child wrote.
+ * THE FILE IS OPAQUE HERE, but for one thing. It checks that the text is a
+ * JSON object with `version: 1` — on the way up so a torn or foreign file
+ * never replaces a good copy, on the way down so a row that opens but is not
+ * memory is never handed to a child — and it moves the exact bytes the child
+ * wrote. The one thing: FORGET REQUESTS.
+ *
+ * A FORGET REACHES THE STORED COPY WHATEVER THE CHILD HOLDS. The child keeps
+ * every /forget and /forgetme in a second file beside the memory
+ * (TG_GROUPS_FORGET_FILE, store.ts). A child whose groups are held off started
+ * empty, so a forget done there erases nothing, and the sealed row, which
+ * still holds the person's lines, would come back at the next restore. So
+ * the requests are applied (the store's own applyForgets) wherever the
+ * memory is: to what a publish seals, to the stored row directly while a
+ * child is held or its file cannot be published (forgetStoredTgGroups), and
+ * to what a restore writes back. They are cleared from the home only after a
+ * publish of a file that already reflected them, so the child's own memory
+ * has caught up too. The row therefore carries every request the ferry has
+ * read as its effect, and nothing else needs storing beside it.
  *
  * SEALED, BECAUSE IT IS OTHER PEOPLE'S WORDS. The file holds what strangers
  * said in public groups, and notes about them. Shared Postgres is read by the
@@ -31,10 +44,19 @@
  * table.
  *
  * READ ONLY ON THE WAY UP. Publishing never writes, renames or touches the
- * child's file; a running child is its only writer. The read refuses anything
- * that is not a plain file (a symlink is not followed, a FIFO is never opened)
- * because the home is writable by the child and a read that blocked would
- * stall the fleet loop that supervises every tenant.
+ * child's memory file; a running child is its only writer. (The forget file
+ * is taken away once it is carried, and only ever appended to; see
+ * clearForgets.) Every read refuses anything that is not a plain file (a
+ * symlink is not followed, a FIFO is never opened) because the home is
+ * writable by the child and a read that blocked would stall the fleet loop
+ * that supervises every tenant.
+ *
+ * GONE WITH THE GRANT, FROM THE HOME TOO. A tenant whose grant is gone while
+ * no child of it runs here (a restart back-off, a crash-loop stand-down, a
+ * fleet halt, a lost lease) still has its files in the home this container
+ * keeps, and a re-grant by the same wallet would find them "present" and seal
+ * them straight back into Postgres. forgetTgGroupsHome and
+ * forgetTgGroupsInHomes remove them.
  *
  * NEVER THROWS, NEVER SAYS WHAT IT HOLDS. Every function here is called from
  * the orchestrator's loop, so each one catches its own failures and logs them.
@@ -46,12 +68,20 @@
  * Nothing on a trading path reads `tenant_tg_groups`.
  */
 import { randomBytes } from "node:crypto";
-import { constants as fsc, type Stats } from "node:fs";
-import { lstat, open, rename, rm, writeFile, type FileHandle } from "node:fs/promises";
+import { constants as fsc, lstatSync, readdirSync, rmSync, type Stats } from "node:fs";
+import { link, lstat, open, rename, rm, writeFile, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 
 import type { Db } from "./db";
 import { openSecret, sealSecret } from "./store-crypto";
+import {
+  TG_FORGET_LIMITS,
+  TG_GROUPS_FORGET_FILE,
+  applyForgets,
+  parseTgForgets,
+  parseTgGroupsState,
+  type TgForgetOp,
+} from "./telegram/tg-groups/store";
 
 /** In the child's home, beside merrymen.db. The child's store writes it; this only reads it (and restores it before spawn). */
 export const TG_GROUPS_FILE_NAME = "tg-groups.json";
@@ -95,6 +125,14 @@ const UPSERT_SQL =
 const SELECT_SQL = "SELECT sealed FROM tenant_tg_groups WHERE tenant = ?";
 const DELETE_SQL = "DELETE FROM tenant_tg_groups WHERE tenant = ?";
 /**
+ * Forget requests applied to the stored row in place (forgetStoredTgGroups).
+ * An UPDATE that names the row it read, never an insert: a row deleted with
+ * the grant meanwhile is not brought back, and one replaced meanwhile is
+ * judged afresh on the next pass.
+ */
+const PATCH_SQL =
+  "UPDATE tenant_tg_groups SET sealed = ?, bytes = ?, updated_at_ms = ? WHERE tenant = ? AND sealed = ?";
+/**
  * The sweep's pair. Both carry the `updated_at_ms` bound so a row published
  * after the grant listing was read (a tenant granted since, armed by another
  * replica) is never taken for a removed one; see forgetUnwantedTgGroups.
@@ -124,6 +162,7 @@ const defaultLog: TgGroupsLog = (line) => console.log(`[orchestrator] ${line}`);
 
 export type TgGroupsPublish = "unchanged" | "published" | "absent" | "too-big" | "failed";
 export type TgGroupsRestore = "restored" | "present" | "none" | "unreadable" | "failed";
+export type TgGroupsForgetStored = "none" | "unchanged" | "applied" | "failed";
 
 // ── schema ──────────────────────────────────────────────────────────────────
 
@@ -232,16 +271,140 @@ async function readCapped(fh: FileHandle, cap: number): Promise<Buffer> {
 interface PublishMemo {
   logged: Map<string, { what: string; atMs: number }>;
   refused: Map<string, string>;
+  /** Per tenant: the forget file version the stored row is known to reflect, so it is not patched again every pass. */
+  stored: Map<string, string>;
 }
 const publishMemos = new WeakMap<Map<string, string>, PublishMemo>();
 
 function memoOf(seen: Map<string, string>): PublishMemo {
   let m = publishMemos.get(seen);
   if (!m) {
-    m = { logged: new Map(), refused: new Map() };
+    m = { logged: new Map(), refused: new Map(), stored: new Map() };
     publishMemos.set(seen, m);
   }
   return m;
+}
+
+// ── forget requests (store.ts TG_GROUPS_FORGET_FILE) ────────────────────────
+
+const NO_FORGETS = "-";
+const FORGETS_UNREADABLE = "?";
+
+/** The forget file's version for a `seen` fingerprint: NO_FORGETS when there is none. Never throws. */
+async function forgetsVersion(home: string): Promise<string> {
+  try {
+    return fingerprint(await lstat(path.join(home, TG_GROUPS_FORGET_FILE)));
+  } catch (e) {
+    return (e as { code?: unknown }).code === "ENOENT" ? NO_FORGETS : FORGETS_UNREADABLE;
+  }
+}
+
+interface ForgetsRead {
+  ops: TgForgetOp[];
+  fp: string;
+  ino: number;
+  /** Bytes read up to the last complete record: what clearForgets may take away. */
+  applied: number;
+}
+
+/**
+ * The home's forget requests. null when there is no file; "failed" when
+ * something is there that cannot be read as one (not a plain file, too big,
+ * unreadable). Only complete records count: a record still being appended is
+ * left for the next read. Never throws.
+ */
+async function readForgets(home: string): Promise<ForgetsRead | null | "failed"> {
+  const file = path.join(home, TG_GROUPS_FORGET_FILE);
+  let fh: FileHandle;
+  try {
+    // Same flags and reasons as the memory file's read.
+    fh = await open(file, fsc.O_RDONLY | (fsc.O_NOFOLLOW ?? 0) | (fsc.O_NONBLOCK ?? 0));
+  } catch (e) {
+    return (e as { code?: unknown }).code === "ENOENT" ? null : "failed";
+  }
+  try {
+    const st = await fh.stat();
+    if (!st.isFile()) return "failed";
+    const buf = await readCapped(fh, TG_FORGET_LIMITS.readBytes + 1);
+    if (buf.length > TG_FORGET_LIMITS.readBytes) return "failed";
+    const applied = buf.lastIndexOf(0x0a) + 1;
+    return { ops: parseTgForgets(buf.subarray(0, applied).toString("utf8")), fp: fingerprint(st), ino: st.ino, applied };
+  } catch {
+    return "failed";
+  } finally {
+    await fh.close().catch(() => {});
+  }
+}
+
+/**
+ * The memory's text with these forget requests applied, or null when it
+ * already reflects every one of them (nothing left to erase). `text` is
+ * version 1 JSON (isTgGroupsText). Throws only on text that is not JSON.
+ */
+function forgotten(text: string, ops: readonly TgForgetOp[]): string | null {
+  if (ops.length === 0) return null;
+  const state = parseTgGroupsState(JSON.parse(text) as unknown);
+  const next = JSON.stringify(applyForgets(state, ops));
+  return next === JSON.stringify(state) ? null : next;
+}
+
+/**
+ * Take away the forget file a publish has just carried: the version read,
+ * and only it. It is renamed aside first, so the child's next record starts
+ * a new file rather than landing in one being deleted, and whatever the child
+ * appended after the read is appended back (store.ts appends too, so neither
+ * write can overwrite the other). A record the child was writing just as the
+ * file was taken, the child writes again itself (store.ts appendForget).
+ * True when the file is gone and nothing had to be put back. Never throws.
+ */
+async function clearForgets(home: string, read: ForgetsRead, log: TgGroupsLog, tenant: string): Promise<boolean> {
+  const file = path.join(home, TG_GROUPS_FORGET_FILE);
+  const taken = path.join(home, `.${TG_GROUPS_FORGET_FILE}.${process.pid}.${randomBytes(6).toString("hex")}.clear`);
+  try {
+    await rename(file, taken);
+  } catch (e) {
+    if ((e as { code?: unknown }).code === "ENOENT") return true;
+    log(`tg-groups: ${tenant} forget requests not cleared — ${why(e)} (carried again next pass)`);
+    return false;
+  }
+  try {
+    let rest: Buffer = Buffer.alloc(0);
+    const fh = await open(taken, fsc.O_RDONLY | (fsc.O_NOFOLLOW ?? 0) | (fsc.O_NONBLOCK ?? 0));
+    try {
+      const st = await fh.stat();
+      if (st.isFile()) {
+        const buf = await readCapped(fh, TG_FORGET_LIMITS.readBytes + 1);
+        if (buf.length > TG_FORGET_LIMITS.readBytes) throw new Error("the forget file grew past its cap");
+        // A different file (the child compacted it meanwhile) is put back whole.
+        rest = st.ino === read.ino ? buf.subarray(Math.min(read.applied, buf.length)) : buf;
+      }
+    } finally {
+      await fh.close().catch(() => {});
+    }
+    const kept = rest.toString("utf8").trim().length > 0;
+    if (kept) {
+      const out = await open(file, fsc.O_WRONLY | fsc.O_APPEND | fsc.O_CREAT | (fsc.O_NOFOLLOW ?? 0), 0o600);
+      try {
+        await out.write(Buffer.concat([Buffer.from("\n"), rest, Buffer.from("\n")]));
+        await out.sync();
+      } finally {
+        await out.close().catch(() => {});
+      }
+    }
+    await rm(taken, { force: true });
+    return !kept;
+  } catch (e) {
+    // Put the taken file back where it was, unless the child has started a
+    // new one meanwhile (link never replaces anything).
+    try {
+      await link(taken, file);
+      await rm(taken, { force: true });
+    } catch {
+      /* both failed: said below */
+    }
+    log(`tg-groups: ${tenant} forget requests could not be put back after clearing — ${why(e)}`);
+    return false;
+  }
 }
 
 function logOnce(memo: PublishMemo, log: TgGroupsLog, tenant: string, what: string, line: string): void {
@@ -261,8 +424,15 @@ function logOnce(memo: PublishMemo, log: TgGroupsLog, tenant: string, what: stri
  * ledger mirror uses, because a stale home left in this container by a child
  * that now runs elsewhere must never overwrite the live copy.
  *
- * `seen` holds each tenant's last published file version. It is written only
- * after the upsert succeeded, so any failure is simply tried again next pass.
+ * `seen` holds each tenant's last published file version (and the forget
+ * file's beside it). It is written only after the upsert succeeded, so any
+ * failure is simply tried again next pass.
+ *
+ * FORGET REQUESTS in the home are applied to what is sealed, so the row never
+ * holds what someone asked to be forgotten, even when the child's file lags
+ * the request. When the file already reflected every one of them, the child's
+ * own memory has caught up and the forget file is cleared (clearForgets);
+ * otherwise it stays, and is applied again to every publish until then.
  *
  *   unchanged — the file is the version already published
  *   published — sealed and upserted
@@ -303,7 +473,8 @@ export async function publishTgGroups(o: {
       return "failed";
     }
     const fp = fingerprint(st);
-    if (o.seen.get(tenant) === fp) return "unchanged";
+    const forgetsAt = await forgetsVersion(o.home);
+    if (o.seen.get(tenant) === `${fp}|${forgetsAt}`) return "unchanged";
     const refused = memo.refused.get(tenant);
     if (refused === `too-big:${fp}`) return "too-big";
     if (refused === `bad:${fp}`) return "failed";
@@ -341,7 +512,7 @@ export async function publishTgGroups(o: {
       logOnce(memo, log, tenant, `too-big:${fp}`, `tg-groups: ${tenant} memory file grew past the ${TG_GROUPS_MAX_BYTES} cap — not published`);
       return "too-big";
     }
-    const text = buf.toString("utf8");
+    let text = buf.toString("utf8");
     if (!isTgGroupsText(text)) {
       // Never replace a good stored copy with something the next restore
       // would refuse. The child rewrites the file atomically, so this is a
@@ -351,16 +522,118 @@ export async function publishTgGroups(o: {
       return "failed";
     }
 
+    // THE FORGET REQUESTS, applied to what is sealed. An unreadable forget
+    // file changes nothing here: the child did the forget in its own memory
+    // too, so its file is published as written, and the file is never cleared.
+    const forgets = forgetsAt === NO_FORGETS ? null : await readForgets(o.home);
+    let reflected = true;
+    if (forgets === "failed") {
+      logOnce(memo, log, tenant, `forgets:${forgetsAt}`, `tg-groups: ${tenant} forget requests unreadable — memory published as the child wrote it`);
+    } else if (forgets) {
+      const next = forgotten(text, forgets.ops);
+      if (next !== null) {
+        text = next;
+        reflected = false;
+      }
+    }
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes > TG_GROUPS_MAX_BYTES) return "too-big";
+
     const sealed = sealSecret(envelope(tenant, text), o.dek);
-    await o.shared.prepare(UPSERT_SQL).run(tenant, sealed, buf.length, Date.now());
+    await o.shared.prepare(UPSERT_SQL).run(tenant, sealed, bytes, Date.now());
     // ONLY NOW. A version remembered before the upsert landed would never be
     // tried again, and the stored copy would silently stop following the file.
-    o.seen.set(tenant, readFp);
+    o.seen.set(tenant, `${readFp}|${forgetsAt}`);
     memo.refused.delete(tenant);
     memo.logged.delete(tenant);
+    if (forgets && forgets !== "failed") {
+      // The row reflects these now, whichever way they got there.
+      memo.stored.set(tenant, forgets.fp);
+      // Cleared only once the child's own file reflected them: until then its
+      // memory still holds what they erase, and a crash restart would open it.
+      if (reflected && (await clearForgets(o.home, forgets, log, tenant))) o.seen.set(tenant, `${readFp}|${NO_FORGETS}`);
+    }
     return "published";
   } catch (e) {
     logOnce(memo, log, tenant, "publish", `tg-groups: ${tenant} memory not published — ${why(e)}`);
+    return "failed";
+  }
+}
+
+/**
+ * FORGET REQUESTS INTO THE STORED ROW, when no publish carries them: the
+ * child's groups are held off (its file is not its memory, and nothing of it
+ * is published; see tgGroupsHeldOff), or its file was not published this pass
+ * (absent, refused, failed). The row is opened, the home's requests applied
+ * (applyForgets), and the result sealed back in place, so a /forgetme reaches
+ * durable storage even while publishing is held. Called under the same lease
+ * gate as publishing: the caller's.
+ *
+ * Nothing is taken from the home: the child's own memory has not been seen
+ * to catch up (clearing is publishTgGroups', once it has). `seen` is the
+ * publish map; its memo remembers which forget file version the row already
+ * reflects, so a pass with nothing new costs one read of a small file.
+ *
+ *   none      — no forget file, nothing in it, or no stored row to forget from
+ *               (none, or one that will not open, which no restore uses either)
+ *   unchanged — the row already reflects every request in the file
+ *   applied   — the row was rewritten without what they asked to forget
+ *   failed    — the file or the row could not be read, or the write did not
+ *               land; logged once, tried again next pass
+ */
+export async function forgetStoredTgGroups(o: {
+  tenant: string;
+  home: string;
+  shared: Db;
+  dek: Buffer;
+  seen: Map<string, string>;
+  log?: TgGroupsLog;
+}): Promise<TgGroupsForgetStored> {
+  const log = o.log ?? defaultLog;
+  const memo = memoOf(o.seen);
+  const tenant = tenantKey(o.tenant);
+  if (!tenant) {
+    log("tg-groups: forget skipped — not a tenant address");
+    return "failed";
+  }
+  try {
+    const read = await readForgets(o.home);
+    if (read === null) {
+      memo.stored.delete(tenant);
+      return "none";
+    }
+    if (read === "failed") {
+      logOnce(memo, log, tenant, "forgets", `tg-groups: ${tenant} forget requests unreadable — not applied to the stored memory`);
+      return "failed";
+    }
+    if (memo.stored.get(tenant) === read.fp) return "unchanged";
+    if (read.ops.length === 0) {
+      memo.stored.set(tenant, read.fp);
+      return "none";
+    }
+    const row = (await o.shared.prepare(SELECT_SQL).get(tenant)) as { sealed?: unknown } | undefined;
+    const text = row ? openRow(tenant, row.sealed, o.dek) : null;
+    if (!row || text === null) {
+      if (row) logOnce(memo, log, tenant, "forget-unreadable", `tg-groups: ${tenant} stored memory is unreadable — no forget requests to apply to it`);
+      memo.stored.set(tenant, read.fp);
+      return "none";
+    }
+    const next = forgotten(text, read.ops);
+    if (next === null) {
+      memo.stored.set(tenant, read.fp);
+      return "unchanged";
+    }
+    const sealed = sealSecret(envelope(tenant, next), o.dek);
+    const r = await o.shared.prepare(PATCH_SQL).run(sealed, Buffer.byteLength(next, "utf8"), Date.now(), tenant, row.sealed);
+    if (r?.changes !== 1) {
+      logOnce(memo, log, tenant, "forget-raced", `tg-groups: ${tenant} stored memory changed while forget requests were applied — tried again next pass`);
+      return "failed";
+    }
+    memo.stored.set(tenant, read.fp);
+    log(`tg-groups: ${tenant} forget requests applied to the stored memory`);
+    return "applied";
+  } catch (e) {
+    logOnce(memo, log, tenant, "forget", `tg-groups: ${tenant} forget requests not applied to the stored memory — ${why(e)} (tried again next pass)`);
     return "failed";
   }
 }
@@ -384,14 +657,17 @@ export async function publishTgGroups(o: {
  * never turns a home that kept its file into `failed`: `failed` always means
  * there was no file, which is what tgGroupsHeldOff relies on.
  *
+ * The home's forget requests (TG_GROUPS_FORGET_FILE) are applied to what is
+ * written, so a forget made while the row could not follow never comes back.
+ *
  *   restored   — written (temp file then rename, mode 0600)
  *   present    — the home already has the file; nothing written
  *   none       — no stored copy; nothing written
  *   unreadable — a stored copy that will not open under this DEK for this
  *                tenant, or opens to something that is not version 1 JSON;
  *                nothing written, and the child's next publish replaces it
- *   failed     — the home had no file and the read or the write failed;
- *                nothing written
+ *   failed     — the home had no file and the read or the write failed,
+ *                or its forget requests could not be read; nothing written
  */
 export async function restoreTgGroups(o: {
   tenant: string;
@@ -420,17 +696,8 @@ export async function restoreTgGroups(o: {
     return "failed";
   }
 
-  let text: string | null = null;
-  if (typeof sealed === "string" && sealed.length <= SEALED_MAX_CHARS) {
-    try {
-      text = unwrap(tenant, openSecret(sealed, o.dek));
-    } catch {
-      // A tampered tag, another key, or a malformed row. openSecret's message
-      // says nothing we hold, but there is nothing in it worth printing either.
-      text = null;
-    }
-  }
-  if (text === null || Buffer.byteLength(text, "utf8") > TG_GROUPS_MAX_BYTES || !isTgGroupsText(text)) {
+  let text = openRow(tenant, sealed, o.dek);
+  if (text === null) {
     log(`tg-groups: ${tenant} stored memory is unreadable (tampered, another key or another tenant's) — not restored`);
     return "unreadable";
   }
@@ -446,6 +713,17 @@ export async function restoreTgGroups(o: {
     log(`tg-groups: ${tenant} home is gone — memory not restored`);
     return "failed";
   }
+
+  // THE CHILD'S FORGET REQUESTS, applied before the memory goes back: a
+  // /forgetme made while its groups were held off, or one the stored row has
+  // not caught up with yet. Requests that cannot be read hold the memory
+  // back: what they ask to forget would come back with it.
+  const forgets = await readForgets(o.home);
+  if (forgets === "failed") {
+    log(`tg-groups: ${tenant} forget requests in the home are unreadable — memory not restored`);
+    return "failed";
+  }
+  if (forgets) text = forgotten(text, forgets.ops) ?? text;
 
   // A fresh random name opened exclusively, so nothing already at that path
   // (a symlink left by an earlier run of the child included) is followed.
@@ -465,6 +743,25 @@ export async function restoreTgGroups(o: {
     return "failed";
   }
   return "restored";
+}
+
+/**
+ * A stored row's file text, or null when it will not open under this DEK for
+ * this tenant, or opens to something that is not version 1 JSON under the cap.
+ */
+function openRow(tenant: string, sealed: unknown, dek: Buffer): string | null {
+  let text: string | null = null;
+  if (typeof sealed === "string" && sealed.length <= SEALED_MAX_CHARS) {
+    try {
+      text = unwrap(tenant, openSecret(sealed, dek));
+    } catch {
+      // A tampered tag, another key, or a malformed row. openSecret's message
+      // says nothing we hold, but there is nothing in it worth printing either.
+      text = null;
+    }
+  }
+  if (text === null || Buffer.byteLength(text, "utf8") > TG_GROUPS_MAX_BYTES || !isTgGroupsText(text)) return null;
+  return text;
 }
 
 /** Anything at the path — a plain file, a link, anything — counts as there. An unreadable path counts too: never write over what cannot be seen. */
@@ -512,9 +809,9 @@ export function tgGroupsHeldOff(r: TgGroupsRestore, heldBefore: boolean): boolea
 /**
  * Forget a tenant's stored group memory. The kill switch calls this beside
  * removing the child's home, and when a /kill removes the grant or a spawn
- * finds none: an agent whose grant is gone must not leave strangers' words
- * behind in shared Postgres. forgetUnwantedTgGroups catches whatever these
- * miss. Never throws.
+ * finds none (beside forgetTgGroupsHome): an agent whose grant is gone must
+ * not leave strangers' words behind in shared Postgres.
+ * forgetUnwantedTgGroups catches whatever these miss. Never throws.
  */
 export async function deleteTgGroups(tenant: string, shared: Db, log: TgGroupsLog = defaultLog): Promise<void> {
   const key = tenantKey(tenant);
@@ -527,6 +824,92 @@ export async function deleteTgGroups(tenant: string, shared: Db, log: TgGroupsLo
   } catch (e) {
     log(`tg-groups: ${key} stored memory could not be deleted — ${why(e)}`);
   }
+}
+
+/** Every entry of a home that is Telegram group memory: the file, the forget requests, their temp and set-aside copies. */
+const TG_GROUPS_ENTRY = /^\.?tg-groups/;
+
+/**
+ * Remove a tenant's Telegram group files from its home: `tg-groups.json`,
+ * the forget file, and any temp, set-aside or restore copy of either (every
+ * entry named `tg-groups…` or `.tg-groups…`). Nothing else in the home is
+ * touched. For a home whose child is NOT running here: a running child is
+ * its files' writer, and the kill switch removes its whole home once it is
+ * stood down. Synchronous, so no spawn can start between the caller's check
+ * and the removal.
+ *
+ * `before`: only entries last modified before it, so a file a newer grant's
+ * child has just been given (see forgetTgGroupsInHomes) is left alone.
+ * Returns how many entries went. Never throws.
+ */
+export function forgetTgGroupsHome(home: string, log: TgGroupsLog = defaultLog, before = Infinity): number {
+  let names: string[];
+  try {
+    names = readdirSync(home);
+  } catch {
+    return 0; // no home, nothing to remove
+  }
+  let n = 0;
+  for (const name of names) {
+    if (!TG_GROUPS_ENTRY.test(name)) continue;
+    const full = path.join(home, name);
+    try {
+      if (before !== Infinity && lstatSync(full).mtimeMs >= before) continue;
+      // Recursive only so a directory planted under the name goes too; a
+      // symlink is removed itself, never followed.
+      rmSync(full, { recursive: true, force: true });
+      n++;
+    } catch (e) {
+      log(`tg-groups: group memory left in a home could not be deleted — ${why(e)} (tried again next pass)`);
+    }
+  }
+  return n;
+}
+
+/**
+ * THE KILL SWITCH, FOLLOWING THE GRANT STORE INTO THE HOMES. Remove the
+ * group files (forgetTgGroupsHome) from the home of every tenant under
+ * `childrenDir` that `keep` refuses: the reconcile keeps those it still
+ * wants and those running here, so what is left is a grant that is gone.
+ *
+ * The row sweep cannot do this: it visits only tenants that still have a row,
+ * and a home outlives its row. A grant discarded while its child was not
+ * running here (a restart back-off, a crash-loop stand-down, a fleet halt, a
+ * lost lease, an aborted spawn) left the file, and a re-grant by the same
+ * wallet found it "present", used it, and published it back into Postgres.
+ *
+ * `before` is when the grant listing was requested, as for the row sweep:
+ * files written since belong to a newer grant's spawn and are the next
+ * pass's to judge. Bounded: at most `max` homes lose files per pass (a home
+ * with nothing left costs one directory read). Returns those tenants. Never
+ * throws.
+ */
+export function forgetTgGroupsInHomes(o: {
+  childrenDir: string;
+  keep: (tenant: string) => boolean;
+  before: number;
+  max?: number;
+  log?: TgGroupsLog;
+}): string[] {
+  const log = o.log ?? defaultLog;
+  const max = o.max ?? TG_GROUPS_FORGET_BATCH;
+  let names: string[];
+  try {
+    names = readdirSync(o.childrenDir);
+  } catch {
+    return [];
+  }
+  const gone: string[] = [];
+  for (const name of names) {
+    if (gone.length >= max) break;
+    // Only a home childHome could have made: lowercased 0x + 40 hex.
+    if (!/^0x[0-9a-f]{40}$/.test(name) || o.keep(name)) continue;
+    if (forgetTgGroupsHome(path.join(o.childrenDir, name), log, o.before) > 0) {
+      gone.push(name);
+      log(`tg-groups: ${name} grant is gone — group memory left in its home deleted`);
+    }
+  }
+  return gone;
 }
 
 /**

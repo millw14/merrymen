@@ -854,7 +854,9 @@ async function main() {
   // the file), and the book lives in memory on purpose — see trencher-nominate.ts:
   // a restart forgets pending nominations, and the chat side's durable claim
   // means a forgotten one is dropped, never replayed into a second buy.
-  const tgGroupsStore = TgGroupsStore.open(merrymenHome());
+  // Self-hosted there is no ferry, so the store clears its own forget file
+  // (docs/tg-groups.md "Memory"); hosted, the orchestrator must see it first.
+  const tgGroupsStore = TgGroupsStore.open(merrymenHome(), { ownsForgets: !isHostedMode() });
   const tgBook = new NominationBook(tgGroupsStore);
   /** Unresolved nominations whose own token page rides on the tape (lowercased). */
   const tgNominated = new Set<string>();
