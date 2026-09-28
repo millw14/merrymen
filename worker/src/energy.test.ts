@@ -184,6 +184,26 @@ describe("the plan", () => {
     assert.equal(p.entries.open, false);
     assert.equal(p.entries.left, 0);
   });
+  it("AND A CLAIM AGAINST A DAY NOBODY COULD READ CLAIMS NOTHING — the hard filter trusts the claim, not the plan", () => {
+    // A rebuilt child whose history the orchestrator could not put back reads
+    // the day as null while its table still takes writes; a claim against the
+    // day's cap would be made on an EMPTY row — a fresh allowance.
+    const p = energyPlan({ mode: "enforce", level: "low", counters: null, reviewsAllowed: 5, entriesAllowed: 2, nowSec: now });
+    assert.equal(claimCap(p, "entries", now), 0);
+    assert.equal(claimCap(p, "reviews", now), 0);
+    const unread = energyPlan({ mode: "enforce", level: "unread", counters: null, reviewsAllowed: 5, entriesAllowed: 2, nowSec: now });
+    assert.equal(claimCap(unread, "entries", now), 0, "unread is throttled too");
+    // Untouched: full energy claims nothing and needs no count; observe counts and never refuses.
+    const full = energyPlan({ mode: "enforce", level: "full", counters: null, reviewsAllowed: 5, entriesAllowed: 2, nowSec: now });
+    assert.equal(full.entries.open, true);
+    assert.equal(claimCap(full, "entries", now), null);
+    const obs = energyPlan({ mode: "observe", level: "low", counters: null, reviewsAllowed: 5, entriesAllowed: 2, nowSec: now });
+    assert.equal(obs.entries.open, true);
+    assert.equal(claimCap(obs, "entries", now), Number.MAX_SAFE_INTEGER);
+    // One readable field is claimed by its own count only.
+    const readable = energyPlan({ mode: "enforce", level: "low", counters: { reviews: 0, entries: 0, toldAt: null }, reviewsAllowed: 5, entriesAllowed: 2, nowSec: now });
+    assert.equal(claimCap(readable, "entries", now), 2);
+  });
   it("enforce, low: open until used, and the reviews by the paced cap", () => {
     const p = energyPlan({ mode: "enforce", level: "low", counters: { reviews: 2, entries: 1, toldAt: null }, reviewsAllowed: 5, entriesAllowed: 2, nowSec: now });
     assert.equal(p.enforce, true);
@@ -349,6 +369,9 @@ describe("telling the owner", () => {
     const unread = at("enforce", null);
     assert.equal(unread.entries.open, false, "new work is still withheld");
     assert.equal(shouldTellOwnerSpent(unread), false);
+    // Nor is a withheld entry on that day: it was withheld by the fail-closed
+    // plan, and the day's notice stamp is as unknown as its count.
+    assert.equal(shouldTellOwner(unread, true), false);
   });
   it("and it agrees with the report's `spent`, which the desk and Telegram already show", () => {
     for (const entries of [0, 1, 2, 3]) {

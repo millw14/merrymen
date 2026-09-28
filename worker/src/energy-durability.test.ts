@@ -175,12 +175,20 @@ describe("seedEnergyForChild's place in spawnChild", () => {
 
   it("it runs the same plan and the same merge this file just drove", () => {
     const fn = body("seedEnergyForChild");
-    assert.match(fn, /if \(!url\) return;/, "self-hosted: the child's own ledger is never wiped");
-    assert.match(fn, /planEnergySeed\(/);
-    assert.match(fn, /readEnergyDaysSince\(shared, smartAccount, sinceDay\)/);
-    assert.match(fn, /mergeEnergyDayRow\(local, smartAccount, row\)/);
-    assert.match(fn, /utcDay\(Math\.floor\(Date\.now\(\) \/ 1000\) - 86_400\)/, "today and yesterday");
+    assert.match(fn, /if \(!url\) return true;/, "self-hosted: the child's own ledger is never wiped");
+    // The deciding half moved to energy-seed.ts, where energy-seed.test.ts
+    // runs it — including the failure this used to only log.
+    assert.match(fn, /seedEnergyDays\(\{\s*home,\s*agent: smartAccount,\s*nowSec: Math\.floor\(Date\.now\(\) \/ 1000\),/);
+    assert.match(fn, /shared: \(\) => makePgDb\(url\),/);
     assert.match(fn, /FAILED/, "a failed seed is said out loud");
+    const seedSrc = readFileSync(new URL("./energy-seed.ts", import.meta.url), "utf8");
+    const at = seedSrc.indexOf("export async function seedEnergyDays(");
+    const seed = seedSrc.slice(at, seedSrc.indexOf("\n}\n", at));
+    assert.match(seed, /planEnergySeed\(/);
+    assert.match(seed, /readEnergyDaysSince\(shared, i\.agent, sinceDay\)/);
+    assert.match(seed, /mergeEnergyDayRow\(local, i\.agent, row\)/);
+    assert.match(seed, /utcDay\(i\.nowSec - 86_400\)/, "today and yesterday");
+    assert.ok(seed.indexOf("clearEnergyUnrestored(i.home);") > seed.indexOf("mergeEnergyDayRow(local, i.agent, row)"), "the marker goes only after every row is in");
   });
 });
 

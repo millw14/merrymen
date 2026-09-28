@@ -17,6 +17,7 @@ import {
   type EnergyField,
 } from "./energy-days";
 import type { EnergyCounters, LastGood } from "./energy";
+import { energyDayUnrestored } from "./energy-seed";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import type { StoredGrant } from "../../packages/core/src/index";
@@ -27,7 +28,7 @@ import {
   officialCoinsFor,
   robinhoodChain,
 } from "../../packages/core/src/index";
-import { ensureHome, homePaths } from "./home";
+import { ensureHome, homePaths, merrymenHome } from "./home";
 import { wrapSqlite, makePgDb, type Db } from "./db";
 import { paperBrainCapital } from "./paper-brain-capital";
 export const getPaperBrainCapital = (agentId: string, epoch: number) => paperBrainCapital(getDb(), agentId, epoch);
@@ -2753,8 +2754,15 @@ export async function setAgentEnergy(agentId: string, json: string | null): Prom
 // an exit), a claim that errors is refused, a notice claim that errors is not
 // sent, and a refund or a read-note that errors only under-spends.
 
-/** Today's counters; zeros when there is no row; null when the ledger could not be read. */
+/**
+ * Today's counters; zeros when there is no row; null when the ledger could not
+ * be read — OR when this is a day whose history the orchestrator could not put
+ * back after a rebuild (energy-seed.ts). The table is empty then, but empty is
+ * not "nothing used": the day's durable counts are somewhere this child cannot
+ * see, and reading zeros would hand out the day's allowance again.
+ */
 export async function getEnergyDay(agentId: string, day: string): Promise<EnergyCounters | null> {
+  if (energyDayUnrestored(merrymenHome(), day)) return null;
   try {
     return await readEnergyDay(getDb(), agentId, day);
   } catch {
