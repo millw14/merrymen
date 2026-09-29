@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, it, mock } from "node:test";
 import {
   BOT_COMMANDS,
+  TG_CALL_TIMEOUT_MS,
   answerCallbackQuery,
   editMessageText,
   esc,
@@ -619,7 +620,7 @@ describe("every request is bounded", () => {
     assert.ok(seen.every((s) => !s!.aborted), "and a call that answered in time is not aborted");
   });
 
-  it("a getUpdates that never answers comes back with a reason at its long-poll window plus 10s — 35s by default", async () => {
+  it(`a getUpdates that never answers comes back with a reason at its long-poll window plus ${TG_CALL_TIMEOUT_MS / 1000}s — 35s by default`, async () => {
     mock.timers.enable({ apis: ["setTimeout"] });
     try {
       const { f, seen } = deaf();
@@ -630,7 +631,8 @@ describe("every request is bounded", () => {
       mock.timers.tick(1);
       await flush();
       assert.equal(r.done, true, "abandoned at 35s, though the fetch ignored its signal");
-      assert.match(r.value!.reason!, /timed out after 35s/);
+      assert.equal(r.value!.reason, "request failed: timed out");
+      assert.equal(r.value!.errorCode, undefined, "no code: the poll loop backs it off as a plain failure");
       assert.equal(r.value!.nextOffset, 7, "and the offset is kept, so nothing is skipped");
       assert.equal(seen[0]!.signal!.aborted, true, "the request itself was told to stop");
     } finally {
@@ -638,17 +640,17 @@ describe("every request is bounded", () => {
     }
   });
 
-  it("any other method gets 15 seconds", async () => {
+  it(`any other method gets TG_CALL_TIMEOUT_MS, ${TG_CALL_TIMEOUT_MS / 1000} seconds`, async () => {
     mock.timers.enable({ apis: ["setTimeout"] });
     try {
       const { f } = deaf();
       const r = settled(sendMessage({ token: "1:a", fetchFn: f }, 5, "hi"));
-      mock.timers.tick(14_999);
+      mock.timers.tick(TG_CALL_TIMEOUT_MS - 1);
       await flush();
       assert.equal(r.done, false);
       mock.timers.tick(1);
       await flush();
-      assert.deepEqual(r.value, { ok: false, reason: "request timed out after 15s" });
+      assert.deepEqual(r.value, { ok: false, reason: "request failed: timed out" });
     } finally {
       mock.timers.reset();
     }
@@ -668,10 +670,25 @@ describe("every request is bounded", () => {
       assert.equal(r.done, false, "still inside the window");
       mock.timers.tick(1);
       await waitFor(() => r.done, "the upload gives up");
-      assert.deepEqual(r.value, { ok: false, reason: "upload timed out after 60s" });
+      assert.deepEqual(r.value, { ok: false, reason: "request failed: timed out" });
       assert.equal(seen[0]!.signal!.aborted, true);
     } finally {
       mock.timers.reset();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a caller's own timeoutMs bounds an upload as it bounds a call", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "merrymen-upload-"));
+    const file = path.join(dir, "report.txt");
+    writeFileSync(file, "hello");
+    try {
+      const { f } = deaf();
+      assert.deepEqual(await sendDocument({ token: "1:a", fetchFn: f, timeoutMs: 20 }, 5, file), {
+        ok: false,
+        reason: "request failed: timed out",
+      });
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -681,10 +698,10 @@ describe("every request is bounded", () => {
     try {
       const f: FetchLike = async () => ({ ok: true, status: 200, json: () => new Promise(() => {}) });
       const r = settled(getMe({ token: "1:a", fetchFn: f }));
-      mock.timers.tick(15_000);
+      mock.timers.tick(TG_CALL_TIMEOUT_MS);
       await flush();
       assert.equal(r.done, true);
-      assert.match(r.value!.reason!, /timed out after 15s/);
+      assert.equal(r.value!.reason, "request failed: timed out");
     } finally {
       mock.timers.reset();
     }
@@ -756,9 +773,9 @@ describe("a refusal keeps what the poll loop backs off on", () => {
       const f: FetchLike = () => new Promise(() => {});
       let done: unknown;
       void sendMessage({ token: "1:a", fetchFn: f }, -1001, "hi", { replyToMessageId: 5, messageThreadId: 7 }).then((v) => (done = v));
-      mock.timers.tick(15_000);
+      mock.timers.tick(TG_CALL_TIMEOUT_MS);
       for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
-      assert.deepEqual(done, { ok: false, reason: "request timed out after 15s" });
+      assert.deepEqual(done, { ok: false, reason: "request failed: timed out" });
     } finally {
       mock.timers.reset();
     }
@@ -1431,6 +1448,72 @@ describe("sendChatAction", () => {
     assert.deepEqual(await sendChatAction({ token: "t", fetchFn: notFound }, 555), { ok: false, reason: "Bad Request: chat not found" });
     const blocked = fakeFetch(403, { ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user" });
     assert.deepEqual(await sendChatAction({ token: "t", fetchFn: blocked }, 555), { ok: false, reason: "Forbidden: bot was blocked by the user" });
+  });
+});
+
+describe("a call that never answers", () => {
+  /** A transport that takes the request and never answers it, keeping each request's abort signal. */
+  function silent(): FetchLike & { signals: Array<AbortSignal | undefined> } {
+    const signals: Array<AbortSignal | undefined> = [];
+    const f: FetchLike = async (_url, init) => {
+      signals.push(init?.signal);
+      return new Promise<never>(() => {});
+    };
+    return Object.assign(f, { signals });
+  }
+
+  it("is a failed request after the time limit, never a stuck promise; its request is aborted", async () => {
+    // A group send runs under its chat's lock: a call that never answered held
+    // every later line of that chat (tg-groups/handler.ts).
+    const f = silent();
+    const opts = { token: "123:abc", fetchFn: f, timeoutMs: 20 };
+    const sent = await sendMessage(opts, -100, "hi");
+    assert.deepEqual(sent, { ok: false, reason: "request failed: timed out" });
+    const typing = await sendChatAction(opts, -100, "typing");
+    assert.equal(typing.ok, false);
+    assert.equal((await setMessageReaction(opts, -100, 5, "👀")).ok, false);
+    assert.equal(f.signals.length, 3);
+    assert.ok(f.signals.every((s) => s?.aborted === true), "every request was aborted");
+  });
+
+  it("a reply whose body never arrives is the same", async () => {
+    const f: FetchLike = async () => ({ ok: true, status: 200, json: () => new Promise<never>(() => {}) });
+    assert.deepEqual(await sendMessage({ token: "t", fetchFn: f, timeoutMs: 20 }, -100, "hi"), { ok: false, reason: "request failed: timed out" });
+  });
+
+  it(`waits ${TG_CALL_TIMEOUT_MS / 1000} s by default; getUpdates on top of the long poll it asked for`, async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const f = silent();
+      let sent: unknown = null;
+      void sendMessage({ token: "t", fetchFn: f }, -100, "hi").then((r) => (sent = r));
+      let polled: { reason?: string } | null = null;
+      void getUpdates({ token: "t", fetchFn: f }, 0, 25).then((r) => (polled = r));
+      const settle = async () => {
+        for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+      };
+      await settle();
+      mock.timers.tick(TG_CALL_TIMEOUT_MS - 1);
+      await settle();
+      assert.equal(sent, null, "not yet");
+      mock.timers.tick(1);
+      await settle();
+      assert.deepEqual(sent, { ok: false, reason: "request failed: timed out" });
+      assert.equal(polled, null, "a long poll is held open by design");
+      mock.timers.tick(25_000 - 1);
+      await settle();
+      assert.equal(polled, null);
+      mock.timers.tick(1);
+      await settle();
+      assert.equal((polled as { reason?: string } | null)?.reason, "request failed: timed out");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("an answer in time is not cut short, and nothing is left waiting", async () => {
+    const f = fakeFetch(200, OK({ message_id: 9 }));
+    assert.deepEqual(await sendMessage({ token: "t", fetchFn: f, timeoutMs: 5_000 }, -100, "hi"), { ok: true, messageId: 9 });
   });
 });
 

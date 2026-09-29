@@ -11,10 +11,13 @@ import { describe, it } from "node:test";
 
 import {
   CHATTINESS,
+  FLOOD_ANSWERS,
+  FLOOD_WINDOW_MS,
   REACTION_FOR,
   REACTIONS,
   SendPacer,
   decide,
+  isFlooded,
   typingDelayMs,
   type PaceDecision,
   type PaceInput,
@@ -333,20 +336,38 @@ describe("decide: a shushed chat", () => {
 });
 
 describe("decide: flood", () => {
-  it("stops answering a person after 3 answers inside 2 minutes", () => {
-    const r = room({ lines: liveLines(), people: [person(ALICE, { answers: { count: 3, sinceMs: NOW - MIN } })] });
+  it("is six answers to one person inside two minutes: three silenced a normal back-and-forth", () => {
+    assert.equal(FLOOD_ANSWERS, 6);
+    assert.equal(FLOOD_WINDOW_MS, 2 * MIN);
+  });
+
+  it(`stops answering a person after ${FLOOD_ANSWERS} answers inside 2 minutes`, () => {
+    const r = room({ lines: liveLines(), people: [person(ALICE, { answers: { count: FLOOD_ANSWERS, sinceMs: NOW - MIN } })] });
     assert.deepEqual(decide(input({ room: r, addressed: "mention" })), { act: "skip", why: "flood" });
   });
 
-  it("applies to the owner too", () => {
-    const r = room({ lines: liveLines(), people: [person(OWNER, { answers: { count: 3, sinceMs: NOW - 30_000 } })] });
-    assert.deepEqual(decide(input({ room: r, addressed: "mention", isOwner: true, line: mk(OWNER, "yo", 0) })), { act: "skip", why: "flood" });
+  it("never applies to the owner: a chat with the person it trades for is not a flood", () => {
+    const r = room({ lines: liveLines(), people: [person(OWNER, { answers: { count: 20, sinceMs: NOW - 30_000 } })] });
+    assert.deepEqual(decide(input({ room: r, addressed: "mention", isOwner: true, line: mk(OWNER, "yo", 0) })), { act: "answer", mood: "normal" });
+    // Someone else with the owner's count is flooded.
+    const other = room({ lines: liveLines(), people: [person(ALICE, { answers: { count: 20, sinceMs: NOW - 30_000 } })] });
+    assert.deepEqual(decide(input({ room: other, addressed: "mention" })), { act: "skip", why: "flood" });
   });
 
-  it("answers the second answer, and again once the window has passed", () => {
-    const two = room({ lines: liveLines(), people: [person(ALICE, { answers: { count: 2, sinceMs: NOW - MIN } })] });
+  it("isFlooded is the rule the handler's coin lines read too", () => {
+    const full = { answers: { count: FLOOD_ANSWERS, sinceMs: NOW - MIN } };
+    assert.equal(isFlooded(full, false, NOW), true);
+    assert.equal(isFlooded(full, true, NOW), false, "never the owner");
+    assert.equal(isFlooded({ answers: { count: FLOOD_ANSWERS - 1, sinceMs: NOW - MIN } }, false, NOW), false);
+    assert.equal(isFlooded(full, false, NOW - MIN + FLOOD_WINDOW_MS), false, "the window closes");
+    assert.equal(isFlooded(undefined, false, NOW), false);
+    assert.equal(isFlooded({ answers: { count: Number.NaN, sinceMs: NOW } }, false, NOW), false);
+  });
+
+  it("answers up to the last answer of the window, and again once the window has passed", () => {
+    const two = room({ lines: liveLines(), people: [person(ALICE, { answers: { count: FLOOD_ANSWERS - 1, sinceMs: NOW - MIN } })] });
     assert.deepEqual(decide(input({ room: two, addressed: "mention" })), { act: "answer", mood: "normal" });
-    const stale = room({ lines: liveLines(), people: [person(ALICE, { answers: { count: 3, sinceMs: NOW - 2 * MIN } })] });
+    const stale = room({ lines: liveLines(), people: [person(ALICE, { answers: { count: FLOOD_ANSWERS, sinceMs: NOW - 2 * MIN } })] });
     assert.deepEqual(decide(input({ room: stale, addressed: "mention" })), { act: "answer", mood: "normal" });
   });
 
@@ -458,7 +479,7 @@ describe("decide: addressed", () => {
   });
 
   it("small talk still keeps the flood and shush rules, and is never said unaddressed", () => {
-    const flooded = room({ lines: liveLines(), people: [person(ALICE, { answers: { count: 3, sinceMs: NOW - MIN } })] });
+    const flooded = room({ lines: liveLines(), people: [person(ALICE, { answers: { count: FLOOD_ANSWERS, sinceMs: NOW - MIN } })] });
     assert.deepEqual(decide(input({ room: flooded, addressed: "mention", signals: { smallTalk: "thanks" } })), { act: "skip", why: "flood" });
     const shushed = room({ lines: liveLines(), shushedUntilMs: NOW + MIN });
     assert.deepEqual(decide(input({ room: shushed, addressed: "mention", signals: { smallTalk: "hail" } })), { act: "skip", why: "shushed" });

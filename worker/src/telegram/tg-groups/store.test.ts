@@ -166,6 +166,7 @@ function validRoom(over: Partial<TgRoom> = {}): TgRoom {
     lastReadyDmAtMs: T0 - 3 * HOUR,
     lastCapLineAtMs: T0 - 4 * HOUR,
     lastDropCaAtMs: T0 - 4 * HOUR,
+    lastCoinUnknownAtMs: T0 - 5 * MIN,
     welcomes: { day: "2026-09-28", n: 1 },
     llmHour: { hour: "2026-09-28T12", n: 3 },
     lines: [

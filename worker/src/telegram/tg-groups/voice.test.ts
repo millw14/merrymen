@@ -79,6 +79,7 @@ const ALL_INTENTS: TgIntent[] = [
   { kind: "coin-skipped" },
   { kind: "coin-exited", notes: [] },
   { kind: "coin-cap" },
+  { kind: "coin-unknown" },
   { kind: "drop-ca" },
   { kind: "ready-ask" },
   { kind: "ready-nudge" },
@@ -91,7 +92,7 @@ const ALL_INTENTS: TgIntent[] = [
 
 const TEMPLATE_ONLY_KINDS = new Set([
   "shushed", "coin-cap", "drop-ca", "ready-ask", "ready-nudge", "private-read-dm", "private-read-refuse", "forgot",
-  "forgot-me", "coin-look", "coin-seen", "coin-skipped", "greet", "smalltalk",
+  "forgot-me", "coin-look", "coin-seen", "coin-skipped", "coin-unknown", "greet", "smalltalk",
 ]);
 /** Template-only by what it answers, not by its kind: rule 6's "are you a bot?" has one right answer. */
 const templateOnly = (i: TgIntent): boolean => TEMPLATE_ONLY_KINDS.has(i.kind) || (i.kind === "answer" && i.mood === "bot-question");
@@ -213,6 +214,7 @@ describe("gateKindFor", () => {
     [{ kind: "coin-seen", verdict: "bought" }, "coin"],
     [{ kind: "coin-skipped" }, "coin"],
     [{ kind: "coin-cap" }, "coin"],
+    [{ kind: "coin-unknown" }, "coin"],
     [{ kind: "roast", owner: true }, "roast"],
     [{ kind: "kind" }, "kind"],
     [{ kind: "answer", mood: "injection" }, "answer"],
@@ -241,7 +243,7 @@ describe("gateKindFor", () => {
 describe("mentionFor", () => {
   it("the owner for the readiness ask, the sender for every line about their coin, nobody otherwise", () => {
     assert.equal(mentionFor({ kind: "ready-ask" }), "owner");
-    for (const kind of ["coin-ack", "coin-skipped"] as const) assert.equal(mentionFor({ kind }), "sender");
+    for (const kind of ["coin-ack", "coin-skipped", "coin-unknown"] as const) assert.equal(mentionFor({ kind }), "sender");
     assert.equal(mentionFor({ kind: "coin-look", look: "wallet" }), "sender");
     assert.equal(mentionFor({ kind: "coin-bought", paper: false, notes: [] }), "sender");
     assert.equal(mentionFor({ kind: "ready-nudge" }), null);
@@ -364,6 +366,7 @@ describe("templateLine", () => {
     has({ kind: "coin-seen", verdict: "passed" }, "already looked at that one, still not for me");
     has({ kind: "coin-seen", verdict: "bought" }, "already got some 🤝");
     has({ kind: "coin-cap" }, "one at a time lol");
+    has({ kind: "coin-unknown" }, "can't pull that one up rn 🤷");
     has({ kind: "drop-ca" }, "drop the ca");
     has({ kind: "coin-skipped" }, "gonna sit this one out");
     has({ kind: "private-read-dm" }, "sent it to your DMs 🤫");
@@ -373,6 +376,15 @@ describe("templateLine", () => {
     has({ kind: "faded-again" }, "still not sold on that one tbh");
     has({ kind: "coin-ack" }, "hmm is this good? i think i like it");
     has({ kind: "coin-bought", paper: false, notes: [] }, "ok grabbed a little 🤝");
+  });
+
+  it("'can't pull that one up rn' is never a verdict, a reason or a chain: nothing was looked at", () => {
+    const pool = templatePool({ kind: "coin-unknown" }, ctx({ coinName: "Froggy" }));
+    assert.ok(pool.length >= 6);
+    for (const e of pool) {
+      assert.match(e, /can't|won't|not loading|blank/, e);
+      assert.doesNotMatch(e, /pass|sit|skip|out of|buy|bought|grab|like|rug|scam|wallet|chain|robinhood|eth|rpc|error|broken|down|limit|froggy/i, e);
+    }
   });
 
   it("the look at its own address never says it is its own", () => {
@@ -429,12 +441,39 @@ describe("templateLine", () => {
     }
   });
 
-  it("a fixed line may recur when every one was said lately; a coin line that would repeat is dropped", () => {
+  it("a template-only line may recur when every one was said lately, the one said longest ago first; a model's intent may not", () => {
     const shushLines = templatePool({ kind: "shushed" }, ctx()).map((t) => line(99, "Pine", t, true));
     assert.ok(templateLine({ kind: "shushed" }, ctx({ room: room({ lines: shushLines }) })));
-    const passLines = templatePool({ kind: "coin-skipped" }, ctx()).map((t) => line(99, "Pine", t, true));
-    const out = templateLine({ kind: "coin-skipped" }, ctx({ room: room({ lines: passLines }) }));
-    if (out) assert.ok(admitTgLine(out, gateFor({ kind: "coin-skipped" }, ctx(), passLines.slice(-8).map((l) => l.text))).ok);
+    // Every template-only coin line: its whole pool said lately, and still a line.
+    const coinOnly: TgIntent[] = [
+      ...LOOKS.map((look): TgIntent => ({ kind: "coin-look", look })),
+      ...VERDICTS.map((verdict): TgIntent => ({ kind: "coin-seen", verdict })),
+      { kind: "coin-skipped" },
+      { kind: "coin-cap" },
+      { kind: "coin-unknown" },
+    ];
+    for (const intent of coinOnly) {
+      const said = templatePool(intent, ctx()).slice(0, 8);
+      const lines = said.map((t) => line(99, "Pine", t, true));
+      for (let i = 0; i < 10; i++) {
+        const out = templateLine(intent, ctx({ room: room({ lines }), rand: dice(i / 10, 0.5, 0.2) }));
+        assert.ok(out, `${JSON.stringify(intent)} recurs rather than going silent`);
+        // Judged by its own kind's clauses all the same: a coin line holds no figure.
+        assert.ok(admitTgLine(out!, gateFor(intent, ctx())).ok, `${JSON.stringify(intent)}: ${out}`);
+      }
+    }
+    // The oldest echo first: with the curve pool said in order, the first line said is the one that comes back.
+    const curve = templatePool({ kind: "coin-look", look: "curve" }, ctx());
+    const saidInOrder = curve.map((t) => line(99, "Pine", t, true));
+    const bare = (t: string) => t.toLowerCase().replace(/ \p{Extended_Pictographic}$/u, "").replace(/ (?:tbh|ngl|fr|lol)$/, "");
+    for (let i = 0; i < 10; i++) {
+      const out = templateLine({ kind: "coin-look", look: "curve" }, ctx({ room: room({ lines: saidInOrder }), rand: dice(i / 10, 0.9, 0.9) }));
+      assert.equal(bare(out!), curve[0], "the curve line said longest ago");
+    }
+    // A model's intent keeps the repeat clause for its template fallback too: silence, not an echo.
+    const passLines = templatePool({ kind: "coin-passed", notes: [] }, ctx()).map((t) => line(99, "Pine", t, true));
+    const passed = templateLine({ kind: "coin-passed", notes: [] }, ctx({ room: room({ lines: passLines }) }));
+    if (passed) assert.ok(admitTgLine(passed, gateFor({ kind: "coin-passed", notes: [] }, ctx(), passLines.slice(-8).map((l) => l.text))).ok);
   });
 
   it("never throws on a broken context", () => {

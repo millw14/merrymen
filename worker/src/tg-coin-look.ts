@@ -73,7 +73,56 @@ export const COIN_LOOK = {
   windowMs: 10 * MIN,
   /** Addresses remembered at once; the oldest answer goes first. */
   cacheMax: 500,
+  /**
+   * One chain read is given this long: the presence probe's getCode, the
+   * probe's multicall, the canonical factory's getPool, the local ledger's
+   * curve lookup. Past it the read FAILED — never "no code", never "no
+   * pool" — and the look goes on without it. The governed client can decline,
+   * the provider can rate-limit, and a transport can retry for most of a
+   * minute; without a bound, a read that never answered was a promise every
+   * later look at that address joined (the in-flight map), forever.
+   */
+  readMs: 4_000,
+  /**
+   * GeckoTerminal's token page is given this long, its turn at the fleet's
+   * shared request slot included (venues/fleet-feed-cache.ts). A presence
+   * probe that timed out plus this still fits inside the chat side's bound on
+   * the whole look (tg-groups/coins.ts COIN_FLOW.lookMs, 10 s).
+   */
+  poolsMs: 5_000,
 } as const;
+
+/** What `within` answers when the wait ran out first. */
+const TIMED_OUT: unique symbol = Symbol("timed out");
+
+/**
+ * `f()`, or TIMED_OUT once `ms` have passed, whichever comes first. A reader
+ * that throws before it returns a promise rejects like one that rejects. The
+ * timer never keeps the process up and is cleared as soon as the read settles.
+ */
+function within<T>(f: () => Promise<T> | T, ms: number): Promise<T | typeof TIMED_OUT> {
+  return new Promise<T | typeof TIMED_OUT>((resolve, reject) => {
+    let read: Promise<T>;
+    try {
+      read = Promise.resolve(f());
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    const t = setTimeout(() => resolve(TIMED_OUT), ms);
+    t.unref?.();
+    read.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
 
 const DEX_V3 = "uniswap-v3-robinhood";
 const ZERO_ADDRESS = "0x" + "0".repeat(40);
@@ -139,6 +188,8 @@ function displayName(address: string, pools: readonly GeckoPool[]): string | und
 }
 
 const UNKNOWN: CoinLook = Object.freeze({ kind: "unknown" });
+/** The presence probe's "the chain could not be asked" (step 3b): not an answer about the address. */
+const UNREAD: unique symbol = Symbol("unread");
 const NOT_TOKEN: CoinLook = Object.freeze({ kind: "not-token" });
 const WALLET: CoinLook = Object.freeze({ kind: "wallet" });
 
@@ -146,7 +197,8 @@ const WALLET: CoinLook = Object.freeze({ kind: "wallet" });
 const CASH_SIDES: ReadonlySet<string> = new Set([CASH.USDG.toLowerCase(), CASH.WETH.toLowerCase()]);
 
 /**
- * THE QUICK LOOK — `(address) => CoinLook`, cheapest first.
+ * THE QUICK LOOK — `(address) => CoinLook`, cheapest first, every read bounded
+ * (COIN_LOOK.readMs, COIN_LOOK.poolsMs) so a look always settles.
  *
  * 1. FREE: its own wallet or vault, cash, the energy reserve, a stock token,
  *    a coin it already holds. Answered every time, never cached, so a coin
@@ -160,6 +212,16 @@ const CASH_SIDES: ReadonlySet<string> = new Set([CASH.USDG.toLowerCase(), CASH.W
  *    the whole look for such an address, so other chains' CAs never spend
  *    the full looks below. Code found is remembered for the cache's 30
  *    minutes, so a coin refused a full look is not probed again.
+ * 3b. THE CHAIN COULD NOT BE ASKED. A getCode that failed — declined by the
+ *    governor, rate-limited by the provider, timed out (COIN_LOOK.readMs) —
+ *    is not "no code". Then GeckoTerminal's Robinhood token page stands in as
+ *    the presence signal, under the full-look allowance: pools listed there
+ *    for this address make it a Robinhood Chain coin, classified from those
+ *    pools exactly as in step 5; no pools there, or the page unreadable too,
+ *    is `unknown` (a wallet, another chain's token and a coin nobody has
+ *    traded yet all look alike to the index). Nothing is relaxed by it: a
+ *    `candidate` from here is still only a nomination, and discovery still
+ *    verifies its pool on chain before anything can be bought.
  * 4. RATE-CAPPED: past the full-look allowance the answer is `unknown`.
  * 5. GeckoTerminal's page for the token. When pools are known they decide:
  *    a Pons curve pool → `curve`; only 32-byte pool ids → `v4-only`; no
@@ -186,9 +248,12 @@ const CASH_SIDES: ReadonlySet<string> = new Set([CASH.USDG.toLowerCase(), CASH.W
  *    `held` through its chart link too.
  *
  * UNREADABLE IS NOT ABSENT. A page, a getCode or a probe that could not be
- * read is `unknown` — never `wallet` (viem's undefined-for-no-code conflation,
- * recover.ts) and never `no-pool` — and `unknown` is not cached, so the next
- * look can succeed.
+ * read (or did not answer in time) is `unknown` — never `wallet` (viem's
+ * undefined-for-no-code conflation, recover.ts) and never `no-pool` — and
+ * `unknown` is not cached, so the next look can succeed. The one read that
+ * can stand in for another is the index page for a failed getCode (3b),
+ * because pools on Robinhood Chain's own page are a positive signal; nothing
+ * ever reads a failure as an absence.
  *
  * `wallet`, `not-token` and `unknown` are the answers that do not show a
  * Robinhood Chain coin; the chat side says nothing about them (coins.ts).
@@ -251,13 +316,34 @@ export function createCoinLook(d: CoinLookReaders): (address: string) => Promise
     return asToken(token, await lookAt(token, 1));
   };
 
+  /** The full-look allowance (COIN_LOOK.maxUncached): one slot, or false when it is spent. */
+  const takeFullLook = (): boolean => {
+    const t = now();
+    started = started.filter((s) => t - s < COIN_LOOK.windowMs);
+    if (started.length >= COIN_LOOK.maxUncached) return false;
+    started.push(t);
+    return true;
+  };
+
+  /** GeckoTerminal's page for this token, bounded: this token's own pools, or null when it could not be read in time. */
+  const poolsOf = async (a: string): Promise<GeckoPool[] | null> => {
+    try {
+      const pools = await within(() => d.tokenPools(a), COIN_LOOK.poolsMs);
+      if (pools === TIMED_OUT || !Array.isArray(pools)) return null;
+      return pools.filter((p) => p.tokenAddress.toLowerCase() === a);
+    } catch {
+      return null;
+    }
+  };
+
   /**
    * Step 3: is anything deployed at this address on Robinhood Chain? `wallet`
    * when not, null when it is (go on to the full look), `unknown` when the
-   * read failed or the probe allowance is spent. Synchronous up to its one
-   * read, so two looks begun together cannot both pass the allowance.
+   * probe allowance is spent, UNREAD when the chain could not be asked (the
+   * read failed or timed out: step 3b). Synchronous up to its one read, so
+   * two looks begun together cannot both pass the allowance.
    */
-  const presence = async (a: `0x${string}`): Promise<CoinLook | null> => {
+  const presence = async (a: `0x${string}`): Promise<CoinLook | typeof UNREAD | null> => {
     const t = now();
     const seen = present.get(a);
     if (seen !== undefined && t - seen < COIN_LOOK.cacheMs) return null;
@@ -265,31 +351,47 @@ export function createCoinLook(d: CoinLookReaders): (address: string) => Promise
     probed = probed.filter((s) => t - s < COIN_LOOK.windowMs);
     if (probed.length >= COIN_LOOK.maxProbes) return UNKNOWN;
     probed.push(t);
-    let code: string | undefined;
+    let code: string | undefined | typeof TIMED_OUT;
     try {
-      code = await d.getCode(a);
+      code = await within(() => d.getCode(a), COIN_LOOK.readMs);
     } catch {
-      return UNKNOWN;
+      return UNREAD;
     }
+    if (code === TIMED_OUT) return UNREAD;
     if (typeof code !== "string" || code === "0x" || code === "") return WALLET;
     if (present.size >= COIN_LOOK.cacheMax) present.delete(present.keys().next().value!);
     present.set(a, now());
     return null;
   };
 
+  /**
+   * Step 3b: the chain could not be asked whether anything is deployed here.
+   * GeckoTerminal's Robinhood page is asked instead, under the full-look
+   * allowance: this token's pools there make it a Robinhood Chain coin, read
+   * like any (classifyPools); no pools, or no page, is `unknown`. The multicall
+   * probe is not tried: the chain it reads is the one that just failed.
+   */
+  const indexOnly = async (a: string): Promise<CoinLook> => {
+    if (!takeFullLook()) return UNKNOWN;
+    const mine = await poolsOf(a);
+    if (mine === null || mine.length === 0) return UNKNOWN;
+    return classifyPools(a, mine, Math.floor(now() / 1000));
+  };
+
   /** Steps 4–7, for an address with code on Robinhood Chain. */
   const read = async (a: `0x${string}`, depth: number): Promise<CoinLook> => {
-    const t = now();
-    started = started.filter((s) => t - s < COIN_LOOK.windowMs);
-    if (started.length >= COIN_LOOK.maxUncached) return UNKNOWN;
-    started.push(t);
-    const pools = await d.tokenPools(a);
-    if (pools === null) return UNKNOWN;
-    const mine = pools.filter((p) => p.tokenAddress.toLowerCase() === a);
+    if (!takeFullLook()) return UNKNOWN;
+    const mine = await poolsOf(a);
+    if (mine === null) return UNKNOWN;
     if (mine.length > 0) return classifyPools(a, mine, Math.floor(now() / 1000));
-    if (d.curveFor && (await d.curveFor(a).catch(() => null))) return { kind: "curve" };
-    const probe = await d.probe(a).catch(() => null);
-    if (probe === null) return UNKNOWN;
+    if (d.curveFor) {
+      // A ledger that cannot be read, or not in time, is "not known here".
+      const curve = await within(() => d.curveFor!(a), COIN_LOOK.readMs).catch(() => null);
+      if (curve !== TIMED_OUT && curve) return { kind: "curve" };
+    }
+    // A multicall and, for a pool-shaped answer, the factory's one more read.
+    const probe = await within(() => d.probe(a), 2 * COIN_LOOK.readMs).catch(() => null);
+    if (probe === null || probe === TIMED_OUT) return UNKNOWN;
     if (probe.pons) return { kind: "curve" };
     if (probe.erc20) return { kind: "no-pool" };
     if (depth === 0 && probe.pool) return poolLook(a, probe.pool);
@@ -314,7 +416,7 @@ export function createCoinLook(d: CoinLookReaders): (address: string) => Promise
     if (joining) return await joining;
     const addr = a as `0x${string}`;
     const job = presence(addr)
-      .then((absent) => absent ?? read(addr, depth))
+      .then((p) => (p === UNREAD ? indexOnly(a) : (p ?? read(addr, depth))))
       .catch(() => UNKNOWN)
       .then((look) => {
         if (look.kind !== "unknown") {
@@ -415,16 +517,26 @@ function wordAddress(r: SubCall): `0x${string}` | null {
  * canonical v3 factory (UNISWAP.v3Factory, the factory trencher-vault.ts pins)
  * says the pool for those two tokens at that fee is. That read failing is
  * `canonical: null` — unknown to the look, never "not that coin's pool".
+ *
+ * Each read is bounded (COIN_LOOK.readMs): a batch that does not answer in
+ * time is null, a factory read that does not is `canonical: null`.
  */
 export function chainTokenProbe(client: PublicClient): (address: `0x${string}`) => Promise<TokenProbe | null> {
   return async (address) => {
-    const r = await aggregate3(client, [
-      { target: address, callData: PONS_METADATA_SELECTOR },
-      { target: address, callData: DECIMALS_SELECTOR },
-      { target: address, callData: TOKEN0_SELECTOR },
-      { target: address, callData: TOKEN1_SELECTOR },
-      { target: address, callData: FEE_SELECTOR },
-    ]);
+    const batch = await within(
+      () =>
+        aggregate3(client, [
+          { target: address, callData: PONS_METADATA_SELECTOR },
+          { target: address, callData: DECIMALS_SELECTOR },
+          { target: address, callData: TOKEN0_SELECTOR },
+          { target: address, callData: TOKEN1_SELECTOR },
+          { target: address, callData: FEE_SELECTOR },
+        ]),
+      COIN_LOOK.readMs,
+    );
+    // No answer in time is a batch that could not be read.
+    if (batch === TIMED_OUT) return null;
+    const r = batch;
     if (r.length !== 5) return null;
     const pons = !!r[0]?.success && parseTokenMeta(address, r[0].returnData) !== null;
     const dec = word(r[1]);
@@ -435,12 +547,17 @@ export function chainTokenProbe(client: PublicClient): (address: `0x${string}`) 
     if (token0 === null || token1 === null || fee === null || fee > 0xffffffn) return { pons, erc20 };
     let canonical: string | null = null;
     try {
-      const got: unknown = await client.readContract({
-        address: UNISWAP.v3Factory as `0x${string}`,
-        abi: V3_FACTORY_ABI,
-        functionName: "getPool",
-        args: [token0, token1, Number(fee)],
-      });
+      const got: unknown = await within(
+        () =>
+          client.readContract({
+            address: UNISWAP.v3Factory as `0x${string}`,
+            abi: V3_FACTORY_ABI,
+            functionName: "getPool",
+            args: [token0, token1, Number(fee)],
+          }),
+        COIN_LOOK.readMs,
+      );
+      // Not in time is a read that failed: unknown to the look, never "not that coin's pool".
       canonical = typeof got === "string" && /^0x[0-9a-f]{40}$/i.test(got) ? got.toLowerCase() : null;
     } catch {
       canonical = null;

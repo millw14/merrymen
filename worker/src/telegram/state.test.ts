@@ -462,9 +462,9 @@ describe("the poll record", () => {
     assert.notEqual(later, st);
     assert.equal(later.poll!.okAt, T + POLL_RECORD_EVERY_SEC);
     // A failure right after a success is news, and so is a different failure.
-    st = recordPoll(st, "111", T + 1, "failed: request timed out after 35s");
+    st = recordPoll(st, "111", T + 1, "failed: request failed: timed out");
     assert.equal(st.poll!.errAt, T + 1);
-    const same = recordPoll(st, "111", T + 2, "failed: request timed out after 35s");
+    const same = recordPoll(st, "111", T + 2, "failed: request failed: timed out");
     assert.equal(same, st, "the same failure again inside the window is not");
     assert.equal(recordPoll(st, "111", T + 2, "refused: 401 Unauthorized").poll!.err, "refused: 401 Unauthorized");
     // And a success after a failure, at once.

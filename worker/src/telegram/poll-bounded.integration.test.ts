@@ -207,12 +207,13 @@ describe("bounded I/O: nothing Telegram does can hold the loop", () => {
         await h.advance(2_500);
         assert.equal(h.polls().length, 2, "given up at 35s, then 2s of backoff");
         assert.equal(h.polls()[1]!.at - T0, 37_000);
-        assert.equal(warns(h, /getUpdates — request timed out after 35s/).length, 1);
+        assert.equal(warns(h, /getUpdates — request failed: timed out$/).length, 1);
+        assert.match(h.state().poll?.err ?? "", /^failed: request failed: timed out/, "kept as a plain failure, which backs off");
       },
     );
   });
 
-  it("a reply that never lands costs its 15 seconds, not every message after it", async () => {
+  it("a reply that never lands costs its 10 seconds, not every message after it", async () => {
     let n = 0;
     await withService(
       {
@@ -224,10 +225,10 @@ describe("bounded I/O: nothing Telegram does can hold the loop", () => {
         },
       },
       async (h) => {
-        await h.advance(14_750);
+        await h.advance(9_750);
         assert.equal(h.polls().length, 1, "the refusal to a stranger is still in flight");
         await h.advance(1_000);
-        assert.equal(h.polls().length, 2, "abandoned at 15s and the next poll went out");
+        assert.equal(h.polls().length, 2, "abandoned at 10s and the next poll went out");
         assert.equal(h.polls()[1]!.body.offset, 11, "past the message it could not answer");
       },
     );

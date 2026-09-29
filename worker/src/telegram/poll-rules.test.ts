@@ -20,7 +20,9 @@ describe("a failed poll, as it is kept and published", () => {
     assert.equal(pollFailure({ errorCode: 409, reason: "Conflict: can't use getUpdates method while webhook is active" }, 1).err,
       "conflict: this bot has a webhook set (409)");
     assert.equal(pollFailure({ errorCode: 401, reason: "Unauthorized" }, 1).err, "refused: 401 Unauthorized");
-    assert.equal(pollFailure({ reason: "request timed out after 35s" }, 3).err, "failed: request timed out after 35s");
+    // A getUpdates past its bound, as api.ts words it: no code, so a plain failure.
+    assert.equal(pollFailure({ reason: "request failed: timed out" }, 3).err, "failed: request failed: timed out");
+    assert.equal(pollFailure({ reason: "request failed: timed out" }, 3).kind, "failed");
     for (const r of [{ errorCode: 409 }, { errorCode: 404 }, { errorCode: 502 }, {}]) {
       const f = pollFailure(r, 1);
       assert.equal(pollErrKind(f.err), f.kind);

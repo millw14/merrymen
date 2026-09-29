@@ -25,7 +25,32 @@ export interface TelegramOpts {
   fetchFn?: FetchLike;
   /** Override the API host (tests). */
   apiBase?: string;
+  /**
+   * The longest one request is waited for, in ms. When absent,
+   * TG_CALL_TIMEOUT_MS for a JSON call and UPLOAD_TIMEOUT_MS for a photo or
+   * document upload. getUpdates adds its long poll on top.
+   */
+  timeoutMs?: number;
 }
+
+/**
+ * THE LONGEST ONE CALL IS WAITED FOR, beyond any long poll it asked for.
+ * fetch has no deadline of its own — Node gives up waiting for headers only
+ * after about five minutes — and every group line is sent under its chat's
+ * lock (tg-groups/handler.ts): one sendChatAction that never answered held
+ * every later line of that chat until each had gone stale, and nothing was
+ * logged. The poll loop is strictly serial too, so one getUpdates or reply
+ * that never answered held every message behind it for as long as the
+ * process lived. Past this the call is a failed request ("request failed:
+ * timed out") and the request is aborted. Callers do not retry it: a send
+ * that timed out may still have landed.
+ *
+ * Ten seconds: a call still out at ten is not coming back in time to
+ * matter, and a group line or a poll that waits longer only goes stale.
+ * getUpdates gets its long poll on top (35 s at the default 25 s), and an
+ * upload gets UPLOAD_TIMEOUT_MS instead.
+ */
+export const TG_CALL_TIMEOUT_MS = 10_000;
 
 /** Telegram's kinds of chat (Chat.type). */
 export type TgChatType = "private" | "group" | "supergroup" | "channel";
@@ -240,14 +265,31 @@ function short(token: string): string {
 }
 
 /**
- * How long one bot method may take before it is abandoned. getUpdates is
- * allowed its long-poll window on top of POLL_SLACK_SEC instead.
+ * An upload carries the file itself, so it gets longer than a JSON call's
+ * TG_CALL_TIMEOUT_MS. It holds the serial poll loop while it runs, so it is
+ * bounded all the same.
  */
-const CALL_TIMEOUT_MS = 15_000;
-/** Past a long poll's own `timeout`, how long before it counts as hung. */
-const POLL_SLACK_SEC = 10;
-/** An upload carries the file itself, so it gets longer than a JSON call. */
 const UPLOAD_TIMEOUT_MS = 60_000;
+
+/**
+ * What a request past its limit comes back with, from call() and from an
+ * upload alike. "request failed: …" is how every caller tells the transport
+ * (no answer, which may still have landed) from Telegram saying no: the
+ * group sender logs it as "no answer" and does not retry it
+ * (tg-groups/handler.ts), notify.ts files it as "network", and the poll loop
+ * backs it off as a plain failure (poll-rules.ts pollFailure).
+ */
+const TIMED_OUT = "request failed: timed out";
+
+/**
+ * How long one request is waited for: the caller's `timeoutMs` when it gave
+ * a usable one, else `fallback` (TG_CALL_TIMEOUT_MS, or UPLOAD_TIMEOUT_MS for
+ * an upload). A long poll's own window is added on top by call().
+ */
+function limitOf(opts: TelegramOpts, fallback: number): number {
+  const own = opts.timeoutMs;
+  return typeof own === "number" && Number.isFinite(own) && own > 0 ? own : fallback;
+}
 
 /**
  * A signal that aborts after `ms`, and a way to disarm it once the call is done.
@@ -364,23 +406,22 @@ const SENDABLE_TOKEN = /^[A-Za-z0-9:_-]+$/;
  * reason and whatever ResponseParameters came with it. GET when no body,
  * POST+JSON when a body is given.
  *
- * EVERY CALL HAS A DEADLINE. The poll loop is strictly serial, one update after
- * the next, so a single request that never answered, a half-open socket after
- * a network blip, stalled every message behind it for as long as the process
- * lived, and nothing ever said so.
+ * EVERY CALL HAS A DEADLINE: TG_CALL_TIMEOUT_MS (or the caller's own
+ * `timeoutMs`), plus `pollMs`, the long poll a getUpdates asked Telegram to
+ * hold it open. Past it the request is aborted and the answer is "request
+ * failed: timed out" (TIMED_OUT), whether or not the transport honours the
+ * abort, and whether it was the answer or its body that never came. Two
+ * things waited on one that never answered: the poll loop, which is strictly
+ * serial, so a half-open socket after a network blip stalled every message
+ * behind it for as long as the process lived; and a group's send lock
+ * (tg-groups/handler.ts), so every later line of that chat went stale.
  */
-async function call(
-  opts: TelegramOpts,
-  method: string,
-  params?: Record<string, unknown>,
-  timeoutMs = CALL_TIMEOUT_MS,
-): Promise<CallResult> {
+async function call(opts: TelegramOpts, method: string, params?: Record<string, unknown>, pollMs = 0): Promise<CallResult> {
   if (!SENDABLE_TOKEN.test(opts.token)) return { result: null, reason: "not a bot token (it has characters no Telegram token has)" };
   const base = opts.apiBase ?? API_BASE;
   const fetchFn = opts.fetchFn ?? (fetch as unknown as FetchLike);
   const url = `${base}/bot${opts.token}/${method}`;
-  const { signal, disarm } = deadline(timeoutMs);
-  const timedOut = { result: null, reason: `request timed out after ${Math.round(timeoutMs / 1000)}s` };
+  const { signal, disarm } = deadline(limitOf(opts, TG_CALL_TIMEOUT_MS) + Math.max(0, pollMs));
 
   try {
     let res: Awaited<ReturnType<FetchLike>>;
@@ -392,7 +433,7 @@ async function call(
         signal,
       );
     } catch (e) {
-      if (signal.aborted) return timedOut;
+      if (signal.aborted) return { result: null, reason: TIMED_OUT };
       return { result: null, reason: `request failed: ${scrub(e instanceof Error ? e.message : String(e), opts.token)}` };
     }
     // READ THE BODY ON AN ERROR TOO. Telegram answers a refused request with
@@ -405,7 +446,7 @@ async function call(
     try {
       body = await orAbort(res.json(), signal);
     } catch {
-      if (signal.aborted) return timedOut;
+      if (signal.aborted) return { result: null, reason: TIMED_OUT };
       body = null;
     }
     const env = (body && typeof body === "object" ? body : {}) as {
@@ -476,10 +517,13 @@ const ALLOWED_UPDATES = ["message", "callback_query", "my_chat_member"] as const
 /**
  * Long-poll for new messages. `offset` is the last handled updateId + 1.
  *
- * Bounded at `timeoutSec` plus POLL_SLACK_SEC: Telegram holds the request for
- * up to `timeoutSec` and then answers, so anything much past that is a request
- * that will never come back. On failure `errorCode` and `retryAfter` say how
- * long the caller should leave it (service.ts).
+ * Bounded at `timeoutSec` plus TG_CALL_TIMEOUT_MS (35 s at the default 25 s
+ * poll): Telegram holds the request for up to `timeoutSec` and then answers,
+ * so anything much past that is a request that will never come back, and it
+ * comes back as "request failed: timed out" with the offset kept. A timeout
+ * carries no `errorCode`, so the poll loop backs it off as a plain failure;
+ * on a refusal `errorCode` and `retryAfter` say how long the caller should
+ * leave it (poll-rules.ts pollFailure).
  */
 export async function getUpdates(
   opts: TelegramOpts,
@@ -499,7 +543,8 @@ export async function getUpdates(
     opts,
     "getUpdates",
     { offset, timeout: timeoutSec, allowed_updates: ALLOWED_UPDATES },
-    (timeoutSec + POLL_SLACK_SEC) * 1000,
+    // Telegram holds a long poll open this long by design: the bound is on top of it.
+    Math.max(0, Number.isFinite(timeoutSec) ? timeoutSec : 0) * 1000,
   );
   if (!Array.isArray(result)) {
     return {
@@ -1180,7 +1225,7 @@ async function sendFile(
   const fetchFn = (opts.fetchFn ?? (fetch as unknown)) as typeof fetch;
   // Bounded like call(): an upload that never finishes would hold the serial
   // poll loop just as a hung sendMessage would.
-  const { signal, disarm } = deadline(UPLOAD_TIMEOUT_MS);
+  const { signal, disarm } = deadline(limitOf(opts, UPLOAD_TIMEOUT_MS));
   try {
     const { readFileSync } = await import("node:fs");
     const path = await import("node:path");
@@ -1195,10 +1240,10 @@ async function sendFile(
     const res = await orAbort(fetchFn(`${base}/bot${opts.token}/${method}`, { method: "POST", body: form, signal }), signal);
     const body = (await orAbort(res.json(), signal).catch(() => null)) as { ok?: boolean; description?: string } | null;
     if (body?.ok) return { ok: true };
-    if (signal.aborted) return { ok: false, reason: `upload timed out after ${UPLOAD_TIMEOUT_MS / 1000}s` };
+    if (signal.aborted) return { ok: false, reason: TIMED_OUT };
     return { ok: false, reason: body?.description ?? `HTTP ${res.status}` };
   } catch (e) {
-    if (signal.aborted) return { ok: false, reason: `upload timed out after ${UPLOAD_TIMEOUT_MS / 1000}s` };
+    if (signal.aborted) return { ok: false, reason: TIMED_OUT };
     return { ok: false, reason: scrub(e instanceof Error ? e.message : String(e), opts.token) };
   } finally {
     disarm();
