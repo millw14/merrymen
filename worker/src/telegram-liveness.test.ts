@@ -155,7 +155,8 @@ describe("alert only: in the orchestrator's source", () => {
     const mirror = body("mirrorLedgers");
     assert.match(mirror, /publishChildTelegram\(tenant as `0x\$\{string\}`, shared, "trading"\)/);
     assert.match(mirror, /publishChildTelegram\(tenant as `0x\$\{string\}`, shared, `held:\$\{held\.cls\}`\)/);
-    assert.match(mirror, /TELEGRAM_LIVENESS_DDL/);
+    // The columns, from the one sequence the Postgres suite races (telegram-store.ts ensureTelegramSchema).
+    assert.match(mirror, /await ensureTelegramSchema\(shared\);/);
     const publish = body("publishChildTelegram");
     assert.match(publish, /await publishTelegramRuntime\(/);
     // The bot only while this process is still handed its token

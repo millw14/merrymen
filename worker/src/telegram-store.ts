@@ -233,6 +233,33 @@ export const TELEGRAM_LIVENESS_DDL: readonly string[] = [
   "ALTER TABLE tenant_telegram ADD COLUMN child_state TEXT",
 ];
 
+/**
+ * EVERYTHING THE ORCHESTRATOR NEEDS OF tenant_telegram, IN ONE PLACE: the
+ * table, then hold_notified, then the liveness columns. The mirror pass runs
+ * it on its own clock and sendHoldNotice runs it before a notice
+ * (orchestrator.ts), and telegram-fix.postgres.test.ts races it, so the
+ * sequence a boot issues is the sequence that is tested.
+ *
+ * The CREATE throws, as it always has: without the table nothing here works.
+ * Each ALTER is tried on its own, and one that fails is returned, not thrown.
+ * On sqlite ADD COLUMN has no IF NOT EXISTS, so every run after the first
+ * fails on every ALTER, which is expected. On Postgres, Db.exec makes each one
+ * `ADD COLUMN IF NOT EXISTS`, so a failure there is a real one, and a caller
+ * that can say so (the Postgres suite) checks that there were none.
+ */
+export async function ensureTelegramSchema(db: Db): Promise<unknown[]> {
+  await db.exec(TELEGRAM_STATE_DDL);
+  const failed: unknown[] = [];
+  for (const ddl of [TELEGRAM_HOLD_NOTIFIED_DDL, ...TELEGRAM_LIVENESS_DDL]) {
+    try {
+      await db.exec(ddl);
+    } catch (e) {
+      failed.push(e);
+    }
+  }
+  return failed;
+}
+
 export interface TenantTelegramLiveness {
   botId: string | null;
   pollOkAt: number | null;

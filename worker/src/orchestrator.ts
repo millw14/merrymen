@@ -111,10 +111,8 @@ import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import {
-  TELEGRAM_HOLD_NOTIFIED_DDL,
-  TELEGRAM_LIVENESS_DDL,
-  TELEGRAM_STATE_DDL,
   clearHoldNotified,
+  ensureTelegramSchema,
   livenessFor,
   publishTelegramRuntime,
   publishTenantChildState,
@@ -2896,12 +2894,10 @@ let sendHoldNotice = async (tenant: `0x${string}`, cls: string, resettable: bool
   if (!url) return "no-owner";
   try {
     const shared = await makePgDb(url);
-    await shared.exec(translateSchema(TELEGRAM_STATE_DDL));
-    try {
-      await shared.exec(TELEGRAM_HOLD_NOTIFIED_DDL);
-    } catch {
-      /* already there */
-    }
+    // The mirror's own sequence (it may not have run yet on a fresh deploy).
+    // An ALTER that failed leaves no hold_notified, and notifyHoldOnce then
+    // answers "failed" without sending.
+    await ensureTelegramSchema(shared);
     return await notifyHoldOnce(
       {
         db: shared,
@@ -6893,26 +6889,14 @@ async function mirrorLedgers(): Promise<void> {
     }
     // Same clock, same reasoning: the one process that can reach this database
     // creates what it writes, so a fresh deploy heals itself rather than
-    // needing DDL run by hand.
-    await shared.exec(translateSchema(TELEGRAM_STATE_DDL));
-    // Which hold the owner was told about (sendHoldNotice). The same ALTER
-    // pattern as mirror_state's column above.
-    try {
-      await shared.exec(TELEGRAM_HOLD_NOTIFIED_DDL);
-    } catch {
-      /* already there */
-    }
-    // Whether the bot is heard, and whether the tenant trades
-    // (publishChildTelegram). Every pass, like the ALTER above: exec runs them
-    // through translateSchema, so on Postgres each is ADD COLUMN IF NOT EXISTS
-    // and costs nothing once the column is there.
-    for (const ddl of TELEGRAM_LIVENESS_DDL) {
-      try {
-        await shared.exec(ddl);
-      } catch {
-        /* already there */
-      }
-    }
+    // needing DDL run by hand. The table, then which hold the owner was told
+    // about (sendHoldNotice), then whether the bot is heard and whether the
+    // tenant trades (publishChildTelegram), with TELEGRAM_LIVENESS_DDL's
+    // columns. Every pass, like the ALTER above: exec runs them through
+    // translateSchema, so on Postgres each is ADD COLUMN IF NOT EXISTS and
+    // costs nothing once the column is there. A failed ALTER is not thrown
+    // (ensureTelegramSchema), as mirror_state's is not.
+    await ensureTelegramSchema(shared);
     // The command receipt, on the same clock and for the same reason: this
     // process writes it (landResults), so this process creates it.
     try {

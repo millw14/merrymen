@@ -21,7 +21,13 @@
  * practice book's positions and basis. Run twice it would open two epochs; run
  * on a live account it would hide real history. The claim that makes it at most
  * once is a row lock in Postgres, and sqlite, which every other test uses,
- * serialises the two attempts before they can race.
+ * serialises the two attempts before they can race. The other guard,
+ * `UPDATE agents ... AND epoch = ?`, is Postgres's alone in the same way: it
+ * decides only when another writer commits inside the reset's transaction,
+ * and sqlite runs that transaction alone. And some books here are written in
+ * another spelling than the one the reset is asked for, as the ledger's rows
+ * can be, so every LOWER() predicate the reset relies on is asked to match
+ * across spellings.
  */
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -31,6 +37,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { getAddress } from "viem";
 
 import { makePgDb, wrapSqlite, type Db } from "../../../worker/src/db";
 import { applyLedgerSchema } from "../../../worker/src/store";
@@ -75,8 +82,16 @@ const TSLA = "0x" + "5".repeat(40);
  * held tenant: a valuation at `EPOCH` and a paper fill after it, an older
  * book's checkpoint, a trade the mirror copied a step ahead of `agents.epoch`,
  * and holdings, paper and live basis, and paper and live floors.
+ *
+ * `spelledAs` is the account as the ledger's rows spell it, when that is not
+ * how the grant (and so the reset's command row) spells it.
  */
-async function heldBook(db: Db, acct: string, o: { mode?: "paper" | "live"; markMode?: "paper" | "live" } = {}): Promise<void> {
+async function heldBook(
+  db: Db,
+  grantSpelling: string,
+  o: { mode?: "paper" | "live"; markMode?: "paper" | "live"; spelledAs?: string } = {},
+): Promise<void> {
+  const acct = o.spelledAs ?? grantSpelling;
   await db
     .prepare(
       `INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, epoch, mode, hwm_usdg)
@@ -152,7 +167,12 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
     await applyLedgerSchema(one);
 
     const num = async (sql: string, ...args: unknown[]) => Number(((await one.prepare(sql).get(...args)) as { n: number | string }).n);
-    const epochOf = (acct: string) => num("SELECT epoch AS n FROM agents WHERE smart_account = ?", acct);
+    // The test's own reads match any spelling, so a row the reset left behind
+    // in another spelling than the one it was asked for is still counted.
+    const epochOf = (acct: string) => num("SELECT epoch AS n FROM agents WHERE LOWER(smart_account) = LOWER(?)", acct);
+    const count = (table: string, acct: string) => num(`SELECT COUNT(*) AS n FROM ${table} WHERE LOWER(agent_id) = LOWER(?)`, acct);
+    const basisLeft = async (table: "cost_basis" | "position_floors", acct: string) =>
+      (await one.prepare(`SELECT mode, symbol FROM ${table} WHERE LOWER(agent_id) = LOWER(?)`).all(acct)).map((r) => ({ ...(r as object) }));
     const command = async (id: string) =>
       ({ ...((await one.prepare("SELECT agent_id, kind, created_at, claimed_at, done_at, result FROM agent_commands WHERE id = ?").get(id)) as object) }) as {
         agent_id: string;
@@ -184,14 +204,34 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
     const [LIVE, LIVE_MARK, OWNER_LIVE, MOVED, OLD] = [0x11, 0x12, 0x13, 0x14, 0x15].map(account) as [
       `0x${string}`, `0x${string}`, `0x${string}`, `0x${string}`, `0x${string}`,
     ];
+    /**
+     * BOOKS IN ANOTHER SPELLING THAN THE GRANT'S. Ledger rows arrive in the
+     * child's spelling (ledger-mirror.ts spellingsOf copes with the account as
+     * written, lowercase and EIP-55), while the command row, and so
+     * applyHeldReset, carry the grant's. For these accounts the reset is still
+     * queued and applied under the grant's spelling.
+     */
+    const respelled = new Map<string, string>([
+      [RACED[1]!, RACED[1]!.toLowerCase()],
+      [RACED[2]!, getAddress(RACED[2]!.toLowerCase())],
+      [OLD, getAddress(OLD.toLowerCase())],
+    ]);
+    for (const [grant, ledger] of respelled) assert.notEqual(ledger, grant, `${grant}: another spelling`);
     const asked = new Map<string, string[]>();
 
     await t.test("A HELD BOOK: the restore refuses it, and Start over queues the reset the orchestrator looks for", async () => {
-      for (const a of RACED) await heldBook(one, a);
+      for (const a of RACED) await heldBook(one, a, { spelledAs: respelled.get(a) });
       await heldBook(one, LIVE, { mode: "live" });
       await heldBook(one, LIVE_MARK, { mode: "paper", markMode: "live" });
-      for (const a of [OWNER_LIVE, MOVED, OLD]) await heldBook(one, a);
-      await assert.rejects(restorePaperCheckpoint(await freshChild(), one, RACED[0]!), /paper fills are newer than the recoverable valuation/);
+      for (const a of [OWNER_LIVE, MOVED, OLD]) await heldBook(one, a, { spelledAs: respelled.get(a) });
+      for (const [grant, ledger] of respelled) {
+        assert.equal(await num("SELECT COUNT(*) AS n FROM agents WHERE smart_account = ?", grant), 0, `${grant}: no row in the grant's spelling`);
+        assert.equal(await num("SELECT COUNT(*) AS n FROM agents WHERE smart_account = ?", ledger), 1);
+        assert.equal(await num("SELECT COUNT(*) AS n FROM positions WHERE agent_id = ?", ledger), 1);
+      }
+      for (const a of RACED.slice(0, 2)) {
+        await assert.rejects(restorePaperCheckpoint(await freshChild(), one, a), /paper fills are newer than the recoverable valuation/);
+      }
 
       const before = Date.now();
       // The owner pressed it twice on the first account; once everywhere else.
@@ -230,14 +270,14 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
         assert.equal(out.id, asked.get(acct)![0]);
         assert.deepEqual((({ claimed_at, done_at, result }) => [claimed_at, done_at, result])(await command(asked.get(acct)![0]!)), [null, null, null]);
         assert.equal(await epochOf(acct), EPOCH);
-        assert.equal(await num("SELECT COUNT(*) AS n FROM positions WHERE agent_id = ?", acct), 1);
+        assert.equal(await count("positions", acct), 1);
       }
       // The ledger's own half, asked inside the transaction, refuses on its own too.
       assert.deepEqual(await resetBlockedPaperBook(two, LIVE, EPOCH), { ok: false, why: "the agent last reported the live rail" });
       assert.deepEqual(await resetBlockedPaperBook(two, LIVE_MARK, EPOCH), { ok: false, why: "the newest valuation is not a paper one (live)" });
       for (const acct of [LIVE, LIVE_MARK]) {
         assert.equal(await epochOf(acct), EPOCH);
-        assert.equal(await num("SELECT COUNT(*) AS n FROM cost_basis WHERE agent_id = ?", acct), 2, "no basis deleted");
+        assert.equal(await count("cost_basis", acct), 2, "no basis deleted");
       }
     });
 
@@ -274,14 +314,14 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
         }
         const events = (await one.prepare("SELECT level, message FROM events WHERE agent_id = ?").all(acct)) as { level: string; message: string }[];
         assert.deepEqual(events.map((e) => ({ ...e })), [{ level: "ok", message: heldResetEvent(EPOCH) }], "said once in the feed");
-        // The book is gone; its history is not.
-        assert.equal(await num("SELECT COUNT(*) AS n FROM positions WHERE agent_id = ?", acct), 0);
-        assert.deepEqual(await one.prepare("SELECT mode, symbol FROM cost_basis WHERE agent_id = ?").all(acct), [{ mode: "live", symbol: "TSLA" }]);
-        assert.deepEqual(await one.prepare("SELECT mode, symbol FROM position_floors WHERE agent_id = ?").all(acct), [{ mode: "live", symbol: "TSLA" }]);
-        assert.equal(await num("SELECT COUNT(*) AS n FROM equity WHERE agent_id = ?", acct), 1);
-        assert.equal(await num("SELECT COUNT(*) AS n FROM trades WHERE agent_id = ?", acct), 2);
-        assert.equal(await num("SELECT COUNT(*) AS n FROM flows WHERE agent_id = ?", acct), 1);
-        assert.equal(await num("SELECT epoch AS n FROM paper_checkpoints WHERE agent_id = ?", acct), EPOCH - 1);
+        // The book is gone, in whichever spelling the ledger holds it; its history is not.
+        assert.equal(await count("positions", acct), 0);
+        assert.deepEqual(await basisLeft("cost_basis", acct), [{ mode: "live", symbol: "TSLA" }]);
+        assert.deepEqual(await basisLeft("position_floors", acct), [{ mode: "live", symbol: "TSLA" }]);
+        assert.equal(await count("equity", acct), 1);
+        assert.equal(await count("trades", acct), 2);
+        assert.equal(await count("flows", acct), 1);
+        assert.equal(await num("SELECT epoch AS n FROM paper_checkpoints WHERE LOWER(agent_id) = LOWER(?)", acct), EPOCH - 1);
       }
       // Nothing is left for the ferry, nor for another attempt.
       assert.deepEqual([...(await resetsAsked(two, RACED, Date.now()))], []);
@@ -309,6 +349,8 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
       // Another writer (the mirror carrying a worker's own reset up) moves the
       // epoch after the decision, exactly where applyHeldReset runs its only
       // DDL before its transaction. The replica's own statements are untouched.
+      // The transaction's first read of the epoch refuses it; the conditional
+      // UPDATE, the guard for a move INSIDE the transaction, is the next test's.
       const other = await makePgDb(scoped("mirror"));
       const movedUnder: Db = {
         prepare: (sql) => one.prepare(sql),
@@ -322,11 +364,65 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
       const out = await applyHeldReset(movedUnder, MOVED, opts(now));
       assert.deepEqual(out, { applied: false, id, why: `the epoch moved (${EPOCH} → ${EPOCH + 1})`, transient: true });
       assert.deepEqual((({ claimed_at, done_at, result }) => [claimed_at, done_at, result])(await command(id)), [null, null, null], "unclaimed: a crash here leaves nothing to replay, and nothing lost");
-      assert.equal(await num("SELECT COUNT(*) AS n FROM positions WHERE agent_id = ?", MOVED), 1, "and nothing deleted");
-      assert.equal(await num("SELECT COUNT(*) AS n FROM events WHERE agent_id = ?", MOVED), 0);
+      assert.equal(await count("positions", MOVED), 1, "and nothing deleted");
+      assert.equal(await count("events", MOVED), 0);
       const next = await applyHeldReset(two, MOVED, opts(now + 1));
       assert.deepEqual(next, { applied: true, id, from: EPOCH + 1, epoch: EPOCH + 2 });
       assert.equal(await epochOf(MOVED), EPOCH + 2);
+    });
+
+    await t.test("THE EPOCH MOVES INSIDE THE RESET'S TRANSACTION: the conditional UPDATE refuses it, and nothing is claimed, deleted or overwritten", async () => {
+      // Postgres only. Under READ COMMITTED another connection can commit
+      // between the transaction's read of the epoch (which it passes) and its
+      // write. The other writer's UPDATE runs on its own connection just
+      // before the reset picks its new epoch, so only
+      // `UPDATE agents SET epoch = ? ... AND epoch = ?` (paper-checkpoint.ts
+      // resetBlockedPaperBookIn) stands between the reset and an epoch the
+      // other writer has just opened: without it the reset would claim the
+      // command, delete the book, and write over that epoch.
+      const acct = account(0x16);
+      await heldBook(one, acct);
+      const id = await queue(acct);
+      const other = await makePgDb(scoped("mirror"));
+      let injected = 0;
+      const inside = (db: Db): Db => ({
+        prepare: (sql) => {
+          const stmt = db.prepare(sql);
+          if (!/SELECT MAX\(e\) AS top/.test(sql)) return stmt;
+          return {
+            run: (...a) => stmt.run(...a),
+            all: (...a) => stmt.all(...a),
+            get: async (...a) => {
+              injected += 1;
+              await other.prepare("UPDATE agents SET epoch = epoch + 1 WHERE smart_account = ?").run(acct);
+              return stmt.get(...a);
+            },
+          };
+        },
+        exec: (sql) => db.exec(sql),
+        tx: (fn) => db.tx(fn),
+      });
+      // PgDb's methods are on its prototype, so the wrapper names each one.
+      const movedInside: Db = {
+        prepare: (sql) => one.prepare(sql),
+        exec: (sql) => one.exec(sql),
+        tx: (fn) => one.tx((db) => fn(inside(db))),
+      };
+      const now = Date.now();
+      const out = await applyHeldReset(movedInside, acct, opts(now));
+      assert.equal(injected, 1, "the other writer committed once, inside the reset's transaction");
+      assert.deepEqual(out, { applied: false, id, why: "the epoch moved", transient: true });
+      assert.deepEqual((({ claimed_at, done_at, result }) => [claimed_at, done_at, result])(await command(id)), [null, null, null], "the claim rolled back with it");
+      assert.equal(await count("positions", acct), 1, "nothing deleted");
+      assert.equal(await count("cost_basis", acct), 2);
+      assert.equal(await count("position_floors", acct), 2);
+      assert.equal(await count("events", acct), 0);
+      assert.equal(await epochOf(acct), EPOCH + 1, "the other writer's epoch stands");
+      // Asked again, the decision reads the new epoch and honours the reset once.
+      const next = await applyHeldReset(two, acct, opts(now + 1));
+      assert.deepEqual(next, { applied: true, id, from: EPOCH + 1, epoch: EPOCH + 2 });
+      assert.equal(await epochOf(acct), EPOCH + 2);
+      assert.equal(await count("positions", acct), 0);
     });
 
     await t.test("A RESET ASKED MORE THAN SEVEN DAYS AGO IS CLOSED UNRUN, and the book is not touched", async () => {
@@ -337,7 +433,7 @@ test("Postgres: Start over's practice reset, honoured while the book is held", {
       assert.ok(!out.applied && out.id === id && /closed unrun/.test(out.why) && !out.transient, JSON.stringify(out));
       assert.deepEqual((({ claimed_at, done_at, result }) => [claimed_at, done_at, result])(await command(id)), [later, later, HELD_RESET_EXPIRED]);
       assert.equal(await epochOf(OLD), EPOCH);
-      assert.equal(await num("SELECT COUNT(*) AS n FROM positions WHERE agent_id = ?", OLD), 1);
+      assert.equal(await count("positions", OLD), 1);
     });
   } finally {
     await admin.query(`DROP SCHEMA ${schema} CASCADE`).catch(() => {});

@@ -25,8 +25,10 @@ import ts from "typescript";
 import { wrapSqlite } from "./db";
 import {
   TELEGRAM_HOLD_NOTIFIED_DDL,
+  TELEGRAM_LIVENESS_DDL,
   TELEGRAM_STATE_DDL,
   clearHoldNotified,
+  ensureTelegramSchema,
   holdNotifiedClasses,
   recordHoldNotified,
 } from "./telegram-store";
@@ -448,6 +450,24 @@ describe("the durable notice record", () => {
       // A bare class, as a value that is not a list reads.
       await db.prepare("UPDATE tenant_telegram SET hold_notified = ? WHERE tenant = ?").run("restore error", "0xabc");
       assert.deepEqual(await holdNotifiedClasses(db, "0xabc"), ["restore error"]);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it("THE ORCHESTRATOR'S ONE SEQUENCE (ensureTelegramSchema): every column on the first run, and on sqlite every ALTER after it fails without throwing", async () => {
+    const raw = new DatabaseSync(":memory:");
+    const db = wrapSqlite(raw);
+    try {
+      assert.deepEqual(await ensureTelegramSchema(db), [], "a fresh database: the table and every column, nothing failed");
+      const cols = (raw.prepare("PRAGMA table_info(tenant_telegram)").all() as { name: string }[]).map((c) => c.name);
+      for (const c of ["hold_notified", "bot_id", "poll_ok_at", "poll_err", "poll_err_at", "child_state"]) assert.ok(cols.includes(c), c);
+      await db.prepare("INSERT INTO tenant_telegram (tenant, owner_id, updated_at) VALUES (?, ?, 0)").run("0xabc", 4242);
+      // sqlite's ADD COLUMN has no IF NOT EXISTS: each ALTER fails, and is handed back, not thrown.
+      const again = await ensureTelegramSchema(db);
+      assert.equal(again.length, 1 + TELEGRAM_LIVENESS_DDL.length);
+      assert.ok(again.every((e) => /duplicate column/i.test(String(e))), again.map(String).join("; "));
+      assert.equal((raw.prepare("SELECT COUNT(*) AS n FROM tenant_telegram").get() as { n: number }).n, 1, "and the rows survive it");
     } finally {
       raw.close();
     }

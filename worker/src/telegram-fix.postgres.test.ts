@@ -8,6 +8,12 @@
  * Skipped without it (MERRYMEN_TEST_POSTGRES_URL works too). A LOCAL Postgres
  * only, in a schema of its own, `mm_tgfix_test_<hex>`, dropped after; the test
  * never reads DATABASE_URL, and sets it only around the calls that read it.
+ * One thing is not in the schema: an advisory lock is DATABASE-WIDE, so the
+ * tenant the lease is taken for (T1) is random per run, and two runs against
+ * one database (two worktrees sharing a local Postgres) never take each
+ * other's lease. Two runs fit a default local Postgres; three do not: this
+ * file and start-over.postgres.test.ts hold about 34 connections at their
+ * peak, against a default max_connections of 100.
  *
  * WHY. Every other test of this branch runs its SQL on sqlite, and it ships to
  * a shared Postgres that already has the tables, with the web and the
@@ -40,7 +46,11 @@
  * THE HOLD NOTICE IS AT LEAST ONCE BY DESIGN (hold-notice.ts: recorded after
  * the send), so two unguarded attempts can both send. What makes concurrent
  * attempts one message is that only the replica holding the tenant's lease
- * reaches it (orchestrator.ts noteHold), and that is what is raced here.
+ * reaches it (orchestrator.ts noteHold), and that is what is raced here: ONE
+ * SENDER WHILE THE LEASE IS HELD. Not exactly once: noteHold starts the send
+ * and does not hold it under the lease, so a lease that changes hands mid-send
+ * (a redeploy, a dropped lease connection) can let the next holder read an
+ * empty hold_notified and say it again.
  */
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -61,10 +71,9 @@ import { ENERGY_DAYS_SCHEMA } from "./energy-days";
 import { RISK_PERIOD_SCHEMA } from "./risk-period";
 import { ANNOUNCE_DDL } from "./announce";
 import {
-  TELEGRAM_HOLD_NOTIFIED_DDL,
-  TELEGRAM_LIVENESS_DDL,
   TELEGRAM_STATE_DDL,
   clearHoldNotified,
+  ensureTelegramSchema,
   holdNotifiedClasses,
   livenessFor,
   publishTelegramRuntime,
@@ -106,8 +115,11 @@ const FIXTURE = path.join(path.dirname(new URL(import.meta.url).pathname), "test
 
 const tenantN = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as `0x${string}`;
 // Tenants as a login spells them (mixed case) and as the tables key them.
-const T1 = "0x1111111111111111111111111111111111111abc" as const;
-const T1_MIXED = "0x1111111111111111111111111111111111111ABC" as `0x${string}`;
+// T1 is RANDOM PER RUN: it is the tenant the lease subtest leases, and an
+// advisory lock is database-wide, not per schema (see the header). The fixed
+// `abc` makes sure its upper-cased spelling differs.
+const T1 = `0x${randomBytes(18).toString("hex")}0abc` as `0x${string}`;
+const T1_MIXED = `0x${T1.slice(2).toUpperCase()}` as `0x${string}`;
 const T2 = "0x2222222222222222222222222222222222222222" as const;
 const T3 = "0x3333333333333333333333333333333333333333" as const;
 const TA = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const;
@@ -253,12 +265,12 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
     });
 
     await t.test("BOOT: the new DDL from the orchestrator and the web, four at once, then again — all clean, and BIGINT where times are written", async () => {
-      // The orchestrator: tenant_telegram and its ALTERs as mirrorLedgers and
-      // sendHoldNotice issue them, and the claims table as botClaimsDb makes it.
+      // The orchestrator: tenant_telegram and its ALTERs through the one
+      // function mirrorLedgers and sendHoldNotice both call, and the claims
+      // table as botClaimsDb makes it. Production does not throw a failed
+      // ALTER; on Postgres there must be none, so here each one is a failure.
       const orchestratorBoot = async (db: Db) => {
-        await db.exec(translateSchema(TELEGRAM_STATE_DDL));
-        await db.exec(TELEGRAM_HOLD_NOTIFIED_DDL);
-        for (const ddl of TELEGRAM_LIVENESS_DDL) await db.exec(ddl);
+        assert.deepEqual((await ensureTelegramSchema(db)).map(String), [], "no ALTER failed");
         await ensureBotClaims(db);
       };
       // The web: a settings save carrying no token still makes the claims
@@ -312,6 +324,9 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
 
     await t.test("PUBLISH → DASHBOARD: the orchestrator's row is what GET /api/telegram reads, and the code is shown only for its own bot", async () => {
       // Published under the spelling a login uses; the row is keyed lower case.
+      // publishTelegramRuntime returns a failed liveness UPDATE rather than
+      // throwing it, so every call here asserts null: a type or column error
+      // is reported as itself, not as a wrong dashboard later.
       const pub = (tenant: `0x${string}`, poll: PollHealth | null, handed: string | null, code = "K7M2QX", child = "trading") =>
         publishTelegramRuntime(orch, tenant, { linkCode: code, ownerId: OWNER_CHAT, linkedAt: 1_790_000_000 }, livenessFor({ botId: "111", poll }, handed, child));
       assert.equal(await pub(T1_MIXED, heard("111"), "111"), null);
@@ -321,28 +336,33 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
       const live = await dashboard(T1, TOKEN_111, FAR);
       assert.deepEqual(live.listening, { state: "live", lastOkAt: FAR - 20, reason: null });
       assert.deepEqual([live.linkCode, live.linkPending, live.botElsewhere, live.tradingHeld], ["K7M2QX", false, false, null]);
+      // And read under the spelling a login uses: the reader lowercases too.
+      assert.deepEqual(await dashboard(T1_MIXED, TOKEN_111, FAR), live);
       // The owner saves a token for another bot: that code would not link it.
       const other = await dashboard(T1, "999:AAHotherbotsecret", FAR);
       assert.deepEqual([other.linkCode, other.linkPending, other.listening.state], [null, true, "unknown"]);
       // Heard, then not for longer than the dashboard calls live.
       assert.equal((await dashboard(T1, TOKEN_111, FAR - 20 + LIVE_WITHIN_SEC + 1)).listening.state, "not-listening");
       // A refused token is said at once, with Telegram's words and no token.
-      await pub(T1, heard("111", { okAt: FAR - 3_600, err: "refused: 401 Unauthorized", errAt: FAR - 30 }), "111");
+      assert.equal(await pub(T1, heard("111", { okAt: FAR - 3_600, err: "refused: 401 Unauthorized", errAt: FAR - 30 }), "111"), null);
       assert.deepEqual((await dashboard(T1, TOKEN_111, FAR)).listening, { state: "revoked", lastOkAt: FAR - 3_600, reason: "401 Unauthorized" });
       // Another program on the bot, once it has kept it unheard.
-      await pub(T1, heard("111", { okAt: FAR - 3_600, err: "conflict: 409 Conflict: terminated by other getUpdates request", errAt: FAR - 30 }), "111");
+      assert.equal(await pub(T1, heard("111", { okAt: FAR - 3_600, err: "conflict: 409 Conflict: terminated by other getUpdates request", errAt: FAR - 30 }), "111"), null);
       assert.equal((await dashboard(T1, TOKEN_111, FAR)).listening.state, "conflict");
       // A record about another bot publishes nulls: nothing heard on this one.
-      await pub(T1, heard("999"), "111");
+      assert.equal(await pub(T1, heard("999"), "111"), null);
       const unheard = await dashboard(T1, TOKEN_111, FAR);
       assert.deepEqual([unheard.listening.state, unheard.linkCode], ["unknown", "K7M2QX"]);
       // A process no longer handed the bot's token publishes no bot, so the code it still holds is never shown for it.
-      await pub(T1, heard("111"), null);
+      assert.equal(await pub(T1, heard("111"), null), null);
       assert.deepEqual((await orch.prepare("SELECT bot_id FROM tenant_telegram WHERE tenant = ?").get(T1)) as object, { bot_id: null });
       assert.equal((await dashboard(T1, TOKEN_111, FAR)).linkCode, null);
       // Each tenant reads its own row.
-      await pub(T1, heard("111"), "111");
-      await publishTelegramRuntime(orch, T2, { linkCode: "B0BC0D", ownerId: null, linkedAt: null }, livenessFor({ botId: "111", poll: heard("111") }, "111", "trading"));
+      assert.equal(await pub(T1, heard("111"), "111"), null);
+      assert.equal(
+        await publishTelegramRuntime(orch, T2, { linkCode: "B0BC0D", ownerId: null, linkedAt: null }, livenessFor({ botId: "111", poll: heard("111") }, "111", "trading")),
+        null,
+      );
       assert.deepEqual([(await dashboard(T1, TOKEN_111, FAR)).linkCode, (await dashboard(T2, TOKEN_111, FAR)).linkCode], ["K7M2QX", "B0BC0D"]);
     });
 
@@ -397,6 +417,11 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
       assert.equal(await releaseBotClaims(web, TA, bot), 0, "the bot it keeps is kept");
       assert.equal(await releaseBotClaims(orch, TA_MIXED), 1);
       assert.equal((await readBotClaims(web)).get(bot), undefined);
+      // "Move it here" onto a bot nobody holds is a fresh claim, and its undo deletes it.
+      assert.deepEqual(await moveBotClaim(web, bot, TB, bot, FAR_MS + 20), { moved: true, from: null, stamp: FAR_MS + 20 });
+      assert.deepEqual(await row(), { tenant: TB, claimed_at: FAR_MS + 20 });
+      await undoBotClaim(orch, bot, TB, FAR_MS + 20, null);
+      assert.equal((await readBotClaims(web)).get(bot), undefined);
       // The web's fresh claim for a save that then failed is taken back; one that landed lets go of the bot it left.
       const fresh = await decideBotClaim({ db: web, tenant: TB, token: `${bot}:BBB-secret`, moveBot: false, confirmBot: async () => bot });
       assert.ok(fresh.ok && !fresh.moved);
@@ -429,20 +454,85 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
       assert.equal(saves.filter((s) => s.ok).length, 1, "one save claims the bot");
       assert.ok(saves.every((s) => s.ok || (s.status === 409 && s.body.error === "bot_claimed")), "the rest are told it is taken");
 
-      // Two logins pressing "move it here" at once: both are confirmed, both
-      // move, and the row ends as the last one left it, never torn.
-      const bot3 = "9103";
-      await claimBot(orch, bot3, TA, bot3, FAR_MS);
-      const [m1, m2] = await Promise.all([moveBotClaim(orch, bot3, TB, bot3, FAR_MS + 1), moveBotClaim(web, bot3, T3, bot3, FAR_MS + 2)]);
-      assert.ok(m1.moved && m2.moved);
-      const end = (await orch.prepare("SELECT tenant, claimed_at FROM telegram_bot_claims WHERE bot_id = ?").get(bot3)) as { tenant: string; claimed_at: number };
-      const last = end.tenant === TB ? m1 : m2;
-      assert.ok(end.tenant === TB || end.tenant === T3);
-      assert.equal(end.claimed_at, last.moved ? last.stamp : -1, "the row is exactly what its last mover wrote");
-      const first = end.tenant === TB ? m2 : m1;
-      assert.ok(first.moved && first.from?.tenant === TA, "the other took it from the first holder");
-      const between: string[] = [TA, end.tenant === TB ? T3 : TB];
-      assert.ok(last.moved && last.from !== null && between.includes(last.from.tenant), "and the last from whoever held it then");
+      // Two logins pressing "move it here" at once, both confirmed. Both move,
+      // one after the other: each UPDATE names the holder and stamp it read,
+      // so the second changes the row only as the first left it, and says so.
+      // Its `from` is what undoBotClaim puts back when its save fails: a
+      // second move that claimed to have taken the bot from TA again would,
+      // on its undo, hand the bot to TA instead of to the account it
+      // displaced, the wrong-tenant hand-over this table exists to stop.
+      const claimRow = async (b: string) =>
+        ({ ...((await orch.prepare("SELECT tenant, claimed_at FROM telegram_bot_claims WHERE bot_id = ?").get(b)) as object) }) as {
+          tenant: string;
+          claimed_at: number;
+        };
+      const twoMoves = async (b: string, dbTB: Db, dbT3: Db) => {
+        await claimBot(orch, b, TA, b, FAR_MS);
+        const [m1, m2] = await Promise.all([moveBotClaim(dbTB, b, TB, b, FAR_MS + 1), moveBotClaim(dbT3, b, T3, b, FAR_MS + 2)]);
+        assert.ok(m1.moved && m2.moved);
+        const end = await claimRow(b);
+        assert.ok(end.tenant === TB || end.tenant === T3, JSON.stringify(end));
+        const [first, last, firstTenant] = end.tenant === TB ? [m2, m1, T3] : [m1, m2, TB];
+        assert.equal(end.claimed_at, last.stamp, "the row is exactly what its last mover wrote");
+        assert.deepEqual(first.from, { tenant: TA, claimedAt: FAR_MS }, "the first took it from the holder");
+        assert.deepEqual(last.from, { tenant: firstTenant, claimedAt: first.stamp }, "the last took it from the first, never from TA a second time");
+        // The last save fails: its undo puts the first mover back, not TA.
+        await undoBotClaim(orch, b, end.tenant, last.stamp, last.from);
+        assert.deepEqual(await claimRow(b), { tenant: firstTenant, claimed_at: first.stamp });
+        // And then the first's: TA, stamp and all.
+        await undoBotClaim(web, b, firstTenant, first.stamp, first.from);
+        assert.deepEqual(await claimRow(b), { tenant: TA, claimed_at: FAR_MS });
+      };
+      await twoMoves("9103", orch, web);
+
+      // The same, with the overlap made certain rather than likely: each mover
+      // is held after its first read of the row until the other has read it
+      // too, so both hold TA's row when they write. One UPDATE lands; the
+      // other's names a holder that is gone, changes nothing, and reads again.
+      // Without the compare-and-set both would land, and both say "from TA".
+      const both = (() => {
+        let arrived = 0;
+        let open!: () => void;
+        let stuck!: (e: Error) => void;
+        const all = new Promise<void>((res, rej) => ((open = res), (stuck = rej)));
+        all.catch(() => {});
+        const timer = setTimeout(() => stuck(new Error("the other mover never read the claim row")), 10_000);
+        timer.unref();
+        return () => {
+          if (++arrived === 2) {
+            clearTimeout(timer);
+            open();
+          }
+          return all;
+        };
+      })();
+      let rowReads = 0;
+      const readsThenWaits = (db: Db): Db => {
+        let first = true;
+        return {
+          prepare: (sql) => {
+            const stmt = db.prepare(sql);
+            if (!sql.startsWith("SELECT tenant, claimed_at FROM telegram_bot_claims")) return stmt;
+            return {
+              run: (...a) => stmt.run(...a),
+              all: (...a) => stmt.all(...a),
+              get: async (...a) => {
+                rowReads += 1;
+                const got = await stmt.get(...a);
+                if (first) {
+                  first = false;
+                  await both();
+                }
+                return got;
+              },
+            };
+          },
+          exec: (sql) => db.exec(sql),
+          tx: (fn) => db.tx(fn),
+        };
+      };
+      await twoMoves("9104", readsThenWaits(orch), readsThenWaits(web));
+      assert.equal(rowReads, 3, "one mover's UPDATE was refused as stale, and it read the row again");
     });
 
     await t.test("THE HOLD NOTICE: once per class across processes, a new class is news, and a restore makes the next hold news again", async () => {
@@ -471,11 +561,16 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
       assert.equal(sent.length, 3);
     });
 
-    await t.test("THE HOLD NOTICE UNDER THE TENANT LEASE: replicas trying at once send one message", async () => {
+    await t.test("THE HOLD NOTICE UNDER THE TENANT LEASE: while one replica holds it, replicas trying at once send one message", async () => {
       // Only the replica holding the tenant's lease reaches noteHold (spawnHolder,
       // retryHold). The lease is a real advisory lock here, taken as the
       // orchestrator takes it, and the send is slow enough that the others try
-      // while the first is still sending.
+      // while the first is still sending. Each replica keeps the lease for its
+      // whole send, as a replica that keeps the tenant does. That is the
+      // promise: one sender while the lease is held. Production does not hold
+      // the send under the lease (noteHold starts it and goes on), so a lease
+      // that changes hands mid-send can repeat the notice: at least once, as
+      // hold-notice.ts says, not exactly once.
       for (let round = 0; round < 4; round++) {
         await clearHoldNotified(orch, T1);
         sent.length = 0;
