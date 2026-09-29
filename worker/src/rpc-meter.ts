@@ -21,7 +21,7 @@
  * changes.
  */
 import { http, type Transport } from "viem";
-import { DECLINED_MARKER, classifyRpcError, type RpcErrorKind } from "./rpc-error";
+import { DECLINED_MARKER, QUOTA_MARKER, classifyRpcError, saysQuotaExhausted, type RpcErrorKind } from "./rpc-error";
 import { merrymenHome } from "./home";
 import { clearCooldown, publishCooldown, readCooldown } from "./rpc-cooldown";
 import {
@@ -230,7 +230,7 @@ export function chainRead(url: string | undefined, label = "read"): Transport {
       // the same 420 refusals classify as `rate-limited` again — and it costs
       // nothing on the single-request path, where viem raises the same thing
       // itself a moment later.
-      onFetchResponse(response: Response) {
+      async onFetchResponse(response: Response) {
         if (!response.ok) {
           /**
            * ── AND THE HEADERS COME WITH IT, which they did not ──────────────
@@ -254,9 +254,27 @@ export function chainRead(url: string | undefined, label = "read"): Transport {
            * the endpoint's own back-pressure usable: rpc-governor.ts takes
            * `retryAfterMs` as a floor on its backoff and could never receive one.
            */
+          /**
+           * ── AND THE BODY IS READ FOR ONE FACT, which the status hides ─────
+           *
+           * A 429 is two different things. Measured 2026-09-29, the house
+           * endpoint answered every request — at 0.2 calls a second, from any
+           * IP — with HTTP 429 and "Monthly capacity limit exceeded". Throwing
+           * away the body filed that as a rate limit, so the fleet spent a day
+           * backing off a quota that backing off cannot refill, and its meter
+           * pointed at the egress IP and the governor instead of at the plan.
+           *
+           * ONLY THE VERDICT IS CARRIED, NEVER THE BODY. A provider's response
+           * is not ours to put in a log line, so the error gains a fixed marker
+           * and nothing the provider wrote. A body that cannot be read changes
+           * nothing: the status is still raised exactly as before.
+           */
+          const body = await response.text().catch(() => "");
+          const quota = saysQuotaExhausted(body.slice(0, 4096));
           const e = new Error(
             `HTTP request failed. Status: ${response.status}` +
-              (response.status === 429 ? " Too Many Requests" : ""),
+              (response.status === 429 ? " Too Many Requests" : "") +
+              (quota ? ` · ${QUOTA_MARKER}: the provider says this endpoint's quota for the period is spent` : ""),
           ) as Error & { status?: number; headers?: Headers };
           e.status = response.status;
           e.headers = response.headers;
@@ -394,9 +412,18 @@ export function rpcSummaryLines(): string[] {
       })
       .join(" · ");
     const rateLimited = [...m.byMethod.values()].reduce((n, s) => n + (s.byKind["rate-limited"] ?? 0), 0);
+    const quota = [...m.byMethod.values()].reduce((n, s) => n + (s.byKind["quota-exhausted"] ?? 0), 0);
     out.push(
       `[rpc:${m.label}] ${m.calls} calls in ${secs}s (${(m.calls / secs).toFixed(2)}/s) · ` +
-        `${m.errors} err · ${rateLimited} rate-limited · peak concurrency ${m.peakInFlight} · ${top}`,
+        `${m.errors} err · ${rateLimited} rate-limited · peak concurrency ${m.peakInFlight} · ${top}` +
+        // IN WORDS, on the line an operator already reads. The bracketed kind is
+        // easy to scroll past, and the day this was written it was scrolled past
+        // as "rate-limited" by everyone who looked. The remedy is not in this
+        // process, so the line names who has it.
+        (quota > 0
+          ? ` · PROVIDER QUOTA EXHAUSTED: the read endpoint says its allowance for the period is spent; ` +
+            `backing off will not bring reads back — raise the provider's plan or point the read RPC elsewhere`
+          : ""),
     );
   }
   return out;

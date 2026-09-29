@@ -44,6 +44,23 @@ export type RpcErrorKind =
    * exists to prevent. The caller treats it as an unread, which it is.
    */
   | "declined"
+  /**
+   * The provider refused because the ACCOUNT behind the endpoint has spent its
+   * allowance for the period — a monthly compute-unit cap, not a rate.
+   *
+   * A SEPARATE KIND BECAUSE IT ARRIVES DRESSED AS A RATE LIMIT AND IS NOT ONE.
+   * Measured 2026-09-29: the house endpoint answered every request, at any rate
+   * and from any IP, with HTTP 429 and "Monthly capacity limit exceeded". Filed
+   * as `rate-limited`, the whole fleet reported a rate limit while it was making
+   * 0.2 calls a second, and the obvious readings of that — the egress IP is
+   * throttled, the governor's budget is too small, the breaker stays open too
+   * long — were all wrong. Nothing on this side of the provider can bring the
+   * reads back: backing off does not refill a monthly quota.
+   *
+   * NOT RETRYABLE. The remedy is an operator's — raise the provider's plan, or
+   * point the read RPC somewhere else — and the meter says so in words.
+   */
+  | "quota-exhausted"
   /** The request timed out or the socket died. Says nothing about the answer. */
   | "timeout"
   /** DNS, TLS, connection refused — the provider was not reachable at all. */
@@ -119,6 +136,31 @@ function headerRetryAfter(e: unknown): number | undefined {
  */
 export const DECLINED_MARKER = "merrymen-rpc-declined";
 
+/**
+ * The marker rpc-meter.ts stamps on a refusal whose body said the quota is
+ * spent. The body itself is never carried onto the error — a provider's
+ * response is not ours to log — so this is how the verdict survives the trip
+ * through viem's error wrapping.
+ */
+export const QUOTA_MARKER = "merrymen-rpc-quota-exhausted";
+
+/**
+ * Does this provider text say the account's allowance for the period is spent?
+ *
+ * NARROW ON PURPOSE. The first phrase is the one measured from the house
+ * endpoint; the rest are the same fact in other providers' words. What must NOT
+ * match is a per-second limit — Alchemy's own "exceeded its compute units per
+ * second capacity" is a rate, and backing off is exactly right for it.
+ */
+export function saysQuotaExhausted(text: string): boolean {
+  const t = text.toLowerCase();
+  return (
+    t.includes("monthly capacity limit exceeded") ||
+    /\b(monthly|daily) (request |compute unit |cu )?(quota|limit|count|capacity) (exceeded|reached|exhausted)\b/.test(t) ||
+    /\bquota (exceeded|exhausted)\b/.test(t)
+  );
+}
+
 export function classifyRpcError(e: unknown): RpcErrorVerdict {
   const err = e as { name?: string; message?: string; details?: string; shortMessage?: string; code?: unknown; status?: unknown; cause?: unknown } | null;
   const text = [err?.message, err?.details, err?.shortMessage, err?.name]
@@ -136,6 +178,15 @@ export function classifyRpcError(e: unknown): RpcErrorVerdict {
   // cannot be produced by anything upstream.
   if (lower.includes(DECLINED_MARKER)) {
     return { kind: "declined", retryable: false, detail };
+  }
+
+  // ── quota exhausted ───────────────────────────────────────────────────
+  // BEFORE the rate-limit arm, because it arrives as a 429 and usually says
+  // "Too Many Requests" on the way. A spent monthly quota read as a rate limit
+  // is retried and backed off forever, and sends whoever reads the log looking
+  // at the wrong layer.
+  if (lower.includes(QUOTA_MARKER) || saysQuotaExhausted(text)) {
+    return { kind: "quota-exhausted", retryable: false, detail };
   }
 
   // ── rate limited ──────────────────────────────────────────────────────
