@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { TrenchBrainReview, TrenchTapeReader, fetchTrenchTape, highVolumePools, trenchBrainPersona, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { TrenchBrainReview, TrenchTapeReader, fetchTrenchTape, type TrenchBrainOrder, highVolumePools, trenchBrainPersona, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, NOMINATED_PAGES_MAX, PRIORITY_RETRY_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { chooseFocus } from "./brain-focus";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
@@ -359,6 +359,47 @@ test("reset says whether the context changed; a dropped order names its decision
   assert.match(drops[0]![0], /past the 60s/);
   assert.equal(drops[0]![1], "decision-1");
   assert.equal(review.reset("live"), true);
+});
+
+test("every refusal after the ready slot is cleared is reported with its decision id", async () => {
+  // A nominated coin's group waits for this id: a silent null left it waiting
+  // out the whole TTL for an answer that could no longer come.
+  const cases: [string, (r: TrenchBrainReview) => TrenchBrainOrder | null, RegExp][] = [
+    ["held changed", (r) => r.take("MEME", TOKEN, 1_000_000n, 5, true), /held changed/],
+    ["no usable mark", (r) => r.take("MEME", TOKEN, 0n, 5), /no usable mark/],
+    ["another token", (r) => r.take("MEME", ROUTER, 1_000_000n, 5), /does not match/],
+  ];
+  for (const [name, take, why] of cases) {
+    const review = new TrenchBrainReview(() => 1000);
+    review.reset("paper");
+    const drops: [string, string | undefined][] = [];
+    review.onDrop = (w, id) => drops.push([w, id]);
+    review.launch("paper", input, TOKEN, async () => answer(), () => {});
+    await setImmediate();
+    assert.equal(take(review), null, name);
+    assert.equal(drops.length, 1, name);
+    assert.match(drops[0]![0], why, name);
+    assert.equal(drops[0]![1], "decision-1", name);
+  }
+  // The order itself refused (the gate said refuse): reported too.
+  const review = new TrenchBrainReview(() => 1000);
+  review.reset("paper");
+  const drops: [string, string | undefined][] = [];
+  review.onDrop = (w, id) => drops.push([w, id]);
+  review.launch("paper", input, TOKEN, async () => answer({ gate_verdict: "refuse" }), () => {});
+  await setImmediate();
+  assert.equal(review.take("MEME", TOKEN, 1_000_000n, 5), null);
+  assert.equal(drops.length, 1);
+  assert.equal(drops[0]![1], "decision-1");
+  // A HOLD was never an order: nothing is dropped, nothing is said.
+  const hold = new TrenchBrainReview(() => 1000);
+  hold.reset("paper");
+  const holdDrops: unknown[] = [];
+  hold.onDrop = (w, id) => holdDrops.push([w, id]);
+  hold.launch("paper", input, TOKEN, async () => answer({ action: "hold", suggested_delta_usdg: 0 }), () => {});
+  await setImmediate();
+  assert.equal(hold.take("MEME", TOKEN, 1_000_000n, 5), null);
+  assert.deepEqual(holdDrops, []);
 });
 
 test("a nominated coin's own page rides the tape: read with it, screened like it, dropped when it resolves", async () => {

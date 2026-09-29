@@ -418,29 +418,35 @@ export class TrenchBrainReview {
     const r = this.ready;
     if (!r || r.input.market.symbol !== symbol) return null;
     this.ready = null;
-    if (Boolean(r.input.positions?.some(p => p.symbol === symbol && Number(p.qtyRaw) > 0)) !== held) return null;
-    // A DROPPED ORDER IS SAID, NOT SWALLOWED. These three used to return null
-    // with `ready` already cleared, so a Brain BUY that aged out or whose price
-    // moved simply never happened and nothing counted it.
+    // A DROPPED ORDER IS SAID, NOT SWALLOWED — on EVERY path past the line
+    // above. `ready` is already cleared there, so a Brain decision refused
+    // after it silently never happened: nothing counted it, and a coin
+    // nominated from a Telegram group waited out its whole TTL for an answer
+    // that could no longer come (the onDrop handler turns the decision id into
+    // that group's `skipped`). Only the symbol mismatch above keeps `ready`.
     const act = r.decision.action.toUpperCase();
     const id = typeof r.decision.decision_id === "string" && r.decision.decision_id.trim() ? r.decision.decision_id : undefined;
-    if (r.context !== this.context) { this.onDrop?.(`Brain ${act} ${symbol} not used: the agent's context changed since the review`, id); return null; }
+    const drop = (reason: string): null => {
+      this.onDrop?.(`Brain ${act} ${symbol} not used: ${reason}`, id);
+      return null;
+    };
+    if (Boolean(r.input.positions?.some(p => p.symbol === symbol && Number(p.qtyRaw) > 0)) !== held) return drop("whether it is held changed since the review");
+    if (r.context !== this.context) return drop("the agent's context changed since the review");
     const age = this.now() - r.started;
-    if (age > 60_000) { this.onDrop?.(`Brain ${act} ${symbol} not used: ${Math.round(age / 1000)}s old, past the 60s a review stays valid`, id); return null; }
-    if (price8 <= 0n ||
-        r.token.toLowerCase() !== token.toLowerCase() ||
+    if (age > 60_000) return drop(`${Math.round(age / 1000)}s old, past the 60s a review stays valid`);
+    if (price8 <= 0n) return drop("no usable mark to price it at");
+    if (r.token.toLowerCase() !== token.toLowerCase() ||
         r.decision.instrument_id !== r.input.market.instrumentId || r.decision.symbol !== symbol ||
         typeof r.decision.agent_id !== "string" || typeof r.decision.decision_id !== "string" || !r.decision.decision_id.trim() ||
-        r.decision.agent_id.toLowerCase() !== r.input.agentId.toLowerCase()) return null;
+        r.decision.agent_id.toLowerCase() !== r.input.agentId.toLowerCase()) return drop("the decision does not match the coin or agent it was asked about");
     const before = Number(r.input.market.priceUsd);
     const price = Number(price8) / 1e8;
-    if (!Number.isFinite(before) || before <= 0) return null;
-    if (Math.abs(price / before - 1) > .02) {
-      this.onDrop?.(`Brain ${act} ${symbol} not used: price moved ${((price / before - 1) * 100).toFixed(1)}% since the review (limit 2%)`, id);
-      return null;
-    }
+    if (!Number.isFinite(before) || before <= 0) return drop("the review had no usable price to compare against");
+    if (Math.abs(price / before - 1) > .02) return drop(`price moved ${((price / before - 1) * 100).toFixed(1)}% since the review (limit 2%)`);
     const verdict = orderFromDecision(r.decision, { maxUsdg });
-    if (verdict.ok && verdict.order.side === "sell" && !held) return null;
-    return verdict.ok ? { side: verdict.order.side, usdgAmount: verdict.order.usdgAmount, decisionId: r.decision.decision_id } : null;
+    // A HOLD was never going to be an order; only a refused BUY or SELL is a drop.
+    if (!verdict.ok) return r.decision.action.toLowerCase() === "hold" ? null : drop(verdict.why);
+    if (verdict.order.side === "sell" && !held) return drop("a sell of a coin that is not held");
+    return { side: verdict.order.side, usdgAmount: verdict.order.usdgAmount, decisionId: r.decision.decision_id };
   }
 }
