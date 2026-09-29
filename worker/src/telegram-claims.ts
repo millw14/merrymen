@@ -297,6 +297,12 @@ export function storedBotOf(settings: MerrymenSettings | null): string | null {
  *   failed save can take back what a save that decided on its claim stands on
  *   (undoBotClaimUnlessSaved says when). Serialized saves have neither.
  *
+ * WHEN THE SETTINGS CANNOT BE READ BACK, it falls back to the rule from before
+ * it read them: every bot but `wrote`, the one this save stored (null for a
+ * clear, or a save with no token). Only a lost update, which the lock leaves
+ * to other writers, makes that the wrong bot. Then it throws, for the caller
+ * to say so.
+ *
  * ONLY A BOT THIS SAVE CONFIRMED IS CLAIMED, never merely the stored one. A
  * stored token may be one Telegram refused (saved as typed, claiming nothing),
  * and a claim made for it would let `<public id>:guess` take a free bot. The
@@ -312,6 +318,7 @@ export async function settleBotClaims(
   storedBot: () => Promise<string | null>,
   confirmedBot: string | null,
   now: number,
+  wrote?: string | null,
 ): Promise<void> {
   const t = lc(tenant);
   const claim = (bot: string, stamp: number) =>
@@ -326,7 +333,15 @@ export async function settleBotClaims(
     }[];
   /** Every claim this settle let go of, bot → claimed_at: what it puts back if the bot it let go of turns out to be the stored one. */
   const released = new Map<string, number>();
-  let bot = await storedBot();
+  let bot: string | null;
+  try {
+    bot = await storedBot();
+  } catch (e) {
+    if (wrote === undefined) throw e;
+    await release(wrote);
+    const why = e instanceof Error ? e.message : String(e);
+    throw new Error(`settings unreadable after the save (${why}): the claims were settled on the token this save wrote`, { cause: e });
+  }
   for (let attempt = 0; attempt < 4; attempt++) {
     for (const r of await release(bot)) released.set(String(r.bot_id), Number(r.claimed_at));
     if (bot !== null && bot === confirmedBot) await claim(bot, now);

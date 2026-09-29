@@ -122,8 +122,12 @@ export async function decideBotClaim(args: {
   await ensureBotClaims(db);
   const bot = token ? botIdOf(token) : null;
   const storedBot = async () => storedBotOf(await args.settings.read(tenant));
-  /** Let go of every bot but the one stored now, and claim that one if this save confirmed it. */
-  const settle = (confirmedBot: string | null) => () => settleBotClaims(db, tenant, storedBot, confirmedBot, now);
+  /**
+   * Let go of every bot but the one stored now, and claim that one if this
+   * save confirmed it. Settings that cannot be read back: every bot but this
+   * save's own, the rule from before settle read them.
+   */
+  const settle = (confirmedBot: string | null) => () => settleBotClaims(db, tenant, storedBot, confirmedBot, now, bot);
   /**
    * Has a write storing this save's bot (or, for a clear, no token) landed
    * since this save read the settings? With saves one at a time per account,
@@ -233,6 +237,8 @@ export async function telegramBotIdOf(token: string): Promise<string | null> {
 export async function settleWithoutToken(args: {
   db: Db;
   tenant: `0x${string}`;
+  /** What this save writes: its token is the one read at the start, and kept should the store not read back. */
+  next: MerrymenSettings;
   settings: { read: (tenant: `0x${string}`) => Promise<MerrymenSettings | null> };
   now?: number;
 }): Promise<Extract<BotClaimDecision, { ok: true }>> {
@@ -240,7 +246,7 @@ export async function settleWithoutToken(args: {
   const now = args.now ?? Date.now();
   await ensureBotClaims(db);
   const storedBot = async () => storedBotOf(await args.settings.read(tenant));
-  return { ok: true, moved: false, undo: nothing, settle: () => settleBotClaims(db, tenant, storedBot, null, now) };
+  return { ok: true, moved: false, undo: nothing, settle: () => settleBotClaims(db, tenant, storedBot, null, now, storedBotOf(args.next)) };
 }
 
 /** Test seam: the database the claims are kept in, in place of DATABASE_URL's. */
@@ -365,7 +371,7 @@ export async function botClaimForSave(args: {
     if ("error" in claims) throw claims.error;
     const db = claims.db;
     if (!db) return null;
-    if (!args.touched) return await settleWithoutToken({ db, tenant, settings: args.settings });
+    if (!args.touched) return await settleWithoutToken({ db, tenant, next: args.next, settings: args.settings });
     return await decideBotClaim({ db, tenant, token, moveBot: args.moveBot, confirmBot: telegramBotIdOf, settings: args.settings });
   } catch (e) {
     console.warn(`[settings] telegram bot claims unavailable: ${e instanceof Error ? e.message : String(e)}`);

@@ -373,6 +373,21 @@ describe("a write that landed and then failed", () => {
   });
 });
 
+describe("settleBotClaims, at its edges", () => {
+  it("SETTINGS THAT CANNOT BE READ BACK: every bot but the one this save wrote is let go, and it says so", async () => {
+    const d = await db();
+    await claimBot(d, "111", A, "111", 0);
+    write(A, "111:AAA-prior");
+    const x = await save(d, A, "222:AAA-new", {
+      now: 10,
+      settings: { before: stored.get(A)!, read: async () => { throw new Error("store down"); } },
+    });
+    assert.ok(x.ok);
+    await assert.rejects(x.settle(), /store down.*settled on the token this save wrote/);
+    assert.deepEqual(await claims(d), [["222", A]], "not 111 as well");
+  });
+});
+
 describe("settleWithoutToken — a save that does not carry the token", () => {
   it("LETS GO OF A CLAIM ON A BOT THE ACCOUNT NO LONGER STORES, CLAIMS NOTHING, AND TOUCHES NO OTHER ACCOUNT'S", async () => {
     // A token save stored 222 and settled; then a writer that does not settle
@@ -382,7 +397,7 @@ describe("settleWithoutToken — a save that does not carry the token", () => {
     await claimBot(d, "222", A, "222", 0);
     await claimBot(d, "333", B, "333", 0);
     write(A, "111:AAA-prior");
-    const s = await settleWithoutToken({ db: d, tenant: A, settings: settingsOf(A), now: 5 });
+    const s = await settleWithoutToken({ db: d, tenant: A, next: stored.get(A)!, settings: settingsOf(A), now: 5 });
     assert.ok(!s.moved);
     await s.undo();
     assert.deepEqual(await claims(d), [["222", A], ["333", B]], "a write that did not land changes nothing");
@@ -395,8 +410,18 @@ describe("settleWithoutToken — a save that does not carry the token", () => {
     await claimBot(d, "111", A, "111", 0);
     await claimBot(d, "222", A, "222", 0);
     write(A, "111:AAA-prior");
-    const s = await settleWithoutToken({ db: d, tenant: A, settings: settingsOf(A), now: 5 });
+    const s = await settleWithoutToken({ db: d, tenant: A, next: stored.get(A)!, settings: settingsOf(A), now: 5 });
     await s.settle();
+    assert.deepEqual(await claims(d), [["111", A]]);
+  });
+
+  it("THE STORE UNREADABLE: keeps the bot it wrote back, and says so", async () => {
+    const d = await db();
+    await claimBot(d, "111", A, "111", 0);
+    await claimBot(d, "222", A, "222", 0);
+    write(A, "111:AAA-prior");
+    const blind = await settleWithoutToken({ db: d, tenant: A, next: stored.get(A)!, settings: { read: async () => { throw new Error("store down"); } }, now: 6 });
+    await assert.rejects(blind.settle(), /store down/);
     assert.deepEqual(await claims(d), [["111", A]]);
   });
 });

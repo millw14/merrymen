@@ -747,7 +747,7 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
       const allowlistSave = withAdvisoryLock(web2, SETTINGS_SAVE_LOCK, key, async (pinned) => {
         const before = await settings.get(TL);
         const next = { ...before, telegramAllowlist: [4242] } as MerrymenSettings;
-        const d = await settleWithoutToken({ db: pinned, tenant: TL, settings: readBack });
+        const d = await settleWithoutToken({ db: pinned, tenant: TL, next, settings: readBack });
         await settings.put(TL, next);
         await d.settle();
       });
