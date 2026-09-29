@@ -25,7 +25,7 @@ import { upsertRefusal, type RefusalRow } from "./venues/refusal-rows";
 
 import { rmSync, writeFileSync } from "node:fs";
 import { grantTrencher, TRENCHER_VAULT_ABI } from "../../packages/core/src/trencher-vault";
-import { discoverTrencherUniverse } from "./trencher-discovery";
+import { TrencherPoolCache, discoverTrencherUniverse } from "./trencher-discovery";
 import { buildTrencherCalls, checkTrencherCalls, verifyTrencherCustody } from "./venues/trencher-vault";
 import { chainRead, resetRpcMeters, rpcSummaryLines } from "./rpc-meter";
 import { runShadowComparison, shadowEnabledFor, shadowLine } from "./reconcile-shadow";
@@ -751,6 +751,10 @@ async function main() {
   let autoTrenchPending = false;
   let autoTrenchNext = 0;
   let autoTrenchBalances = new Map<string,bigint>();
+  // Pools proved canonical stay proved across passes (trencher-discovery.ts).
+  // Not reset with the context: a pool's pair and the factory's answer are
+  // facts about the chain, not about this agent or its grant.
+  const trenchPoolCache = new TrencherPoolCache();
   function refreshAutoTrench() {
     if (!active || !grantTrencher(active.grant)) return;
     const context = `${active.agentId}:${active.grant.grantedAt}`;
@@ -760,7 +764,7 @@ async function main() {
     const current=active;
     // Nominated coins (Telegram groups) are verified beyond the top slice by
     // the same on-chain checks; the set is addresses only (trencher-discovery.ts).
-    void discoverTrencherUniverse(mainnetClient(),current.grant,freshTrenchTape(),{nominated:new Set(tgNominated)}).then(result=>{
+    void discoverTrencherUniverse(mainnetClient(),current.grant,freshTrenchTape(),{nominated:new Set(tgNominated),cache:trenchPoolCache}).then(result=>{
       if (autoTrenchContext===context) autoTrench=result;
       // The held coins' names are read now, minutes before any exit needs one:
       // a decision never waits for the chain (decision-name.ts).
