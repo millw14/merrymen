@@ -36,6 +36,7 @@ Rules for this directory:
 | `recentTrades.1.json` | `GET /api/v1/recentTrades?market_id=1` — its first trade is `tx.43de174b`'s fill (account 26085, ask, taker) | 2026-09-29 15:42 |
 | `recentTrades.3.json` | `GET /api/v1/recentTrades?market_id=3` — includes a trade with `taker_initial_margin_fraction_before` omitted | 2026-09-29 15:45 |
 | `withdrawalDelay.json` | `GET /api/v1/withdrawalDelay` | 2026-09-29 15:45 |
+| `ws.stream.0.jsonl` | every frame received on `wss://api.rh.lighter.xyz/stream?readonly=true`, one per line, verbatim: `connected`; `subscribed/market_stats` (all 57 perps) and its updates; `subscribed/order_book` for ETH (market 0) and 30 `update/order_book` deltas, a continuous `begin_nonce` → `nonce` chain; then the answers to `unsubscribe order_book/0` (`unsubscribed`), `ping` (`pong`) and `subscribe order_book/abc` (error 30005). Sent, in order: subscribe `market_stats/all`, subscribe `order_book/0`, then those three. Used by `feed.test.ts` | 2026-09-29 18:52 |
 | `tx.notfound.json` | body of `GET /api/v1/tx?by=hash&value=<random 80 hex>` → HTTP 400 (recorded in the venue-signer review notes) | 2026-09-29 |
 | `sendTx.400.invalid-market.json` | body of `POST /api/v1/sendTx` with `tx_type=14&tx_info={}` → HTTP 400 (the research geo-block probe) | 2026-09-29 |
 | `nextNonce.6560.6.json` | body of `GET /api/v1/nextNonce?account_index=6560&api_key_index=6` (research notes) | 2026-09-29 |
