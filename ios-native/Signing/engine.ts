@@ -12,7 +12,7 @@ import { stringToHex, bytesToHex, getTypesForEIP712Domain, recoverMessageAddress
 import { getUserOperationHash } from "viem/account-abstraction";
 import { ownerFromSigner, planRecovery } from "../../worker/src/recover";
 import { robinhoodChain } from "../../packages/core/src/chain";
-import { planFromBrowser, sweepFromBrowser, getRecoveryTicket, relayUrl, type BrowserWallet } from "../../web/src/lib/recover-client";
+import { planFromBrowser, sweepFromBrowser, getRecoveryTicket, grantExtraTokens, relayUrl, type BrowserWallet } from "../../web/src/lib/recover-client";
 
 declare const nativeCall: (operation: string, args: unknown) => Promise<any>;
 
@@ -109,7 +109,7 @@ export async function plan(input: Parameters<typeof recoveryWallet>[0]) {
 }
 export async function preview(input: { owner: Address; grantTokens?: string[] }) {
   if (!/^0x[0-9a-fA-F]{40}$/.test(input.owner) || /^0x0{40}$/.test(input.owner)) throw new Error("Invalid owner.");
-  const plan = await planRecovery({ chain: robinhoodChain, owner: ownerFromSigner(signer(input.owner)), extraTokens: (input.grantTokens ?? []).map(address => ({ address, symbol: '', decimals: 18 })) });
+  const plan = await planRecovery({ chain: robinhoodChain, owner: ownerFromSigner(signer(input.owner)), extraTokens: grantExtraTokens(input.grantTokens) });
   return { ...plan, needsGas: plan.gasWei === 0n, trencher: await trencherState(plan.smartAccount) };
 }
 async function trencherState(account: Address): Promise<{ state: string; funded?: boolean; vault?: string; factory?: string; balances?: { token: string; amount: string; symbol: string }[] }> {
