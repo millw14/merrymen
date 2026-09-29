@@ -202,6 +202,33 @@ test("redactSecrets strips known values and key-shaped blobs", () => {
   assert.equal(redactSecrets("Compiled successfully in 4.9s", known), "Compiled successfully in 4.9s");
 });
 
+test("a Lighter API key file never reaches the agent: refused by path, redacted by shape in every spelling", () => {
+  // docs/perps.md rule 5. MERRYMEN_HOME may be anywhere, so `.merr` is not
+  // enough: both key-file homes are refused by name.
+  assert.equal(isSensitivePath("/srv/agent/perp-keys/x.json"), true);
+  assert.equal(isSensitivePath("/data/tenants/t1/perp-key.json"), true);
+  assert.equal(shellTouchesSecrets("cat /data/tenants/t1/perp-key.json"), true);
+  // Exactly what writePerpKeyFile writes: the 64-hex shape alone used to leave
+  // the last 16 hex (a whole 64-bit limb) visible after "[redacted]".
+  const bare = "0123456789abcdef".repeat(4) + "a1b2c3d4e5f60718";
+  const pub = "11".repeat(40);
+  const file = `${JSON.stringify({ v: 1, publicKey: `0x${pub}`, privateKey: `0x${bare}` }, null, 2)}\n`;
+  for (const spelling of [`0x${bare}`, bare, `0x${bare.toUpperCase()}`, bare.toUpperCase()]) {
+    const red = redactSecrets(`key=${spelling} done`, []);
+    assert.equal(red, "key=[redacted] done", spelling);
+    assert.equal(containsSecret(spelling, []), true);
+  }
+  const red = redactSecrets(file, []);
+  assert.ok(!red.includes(bare.slice(-16)), "no tail of the key survives");
+  assert.match(red, /"privateKey": "\[redacted\]"/);
+  assert.equal(containsSecret(file, []), true);
+  // A Lighter auth token goes whole, account and key index with it.
+  const token = `1790700000:22149:16:${"ab".repeat(80)}`;
+  assert.equal(redactSecrets(`Authorization: ${token}`, []), "Authorization: [redacted]");
+  // Normal output is untouched.
+  assert.equal(redactSecrets("BTC-PERP long 0.01 @ 64000", []), "BTC-PERP long 0.01 @ 64000");
+});
+
 test("redactSecrets catches Google AIza keys (no separator after the prefix)", () => {
   const g = "AIzaSyD-ExAmPlEkEyVaLuE1234567890abcd";
   assert.ok(!redactSecrets(`GEMINI=${g}`, []).includes(g), "AIza key stripped");

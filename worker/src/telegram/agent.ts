@@ -93,7 +93,10 @@ export function isDestructive(cmd: string): boolean {
 /** Secret-bearing paths the agent's FILE tools refuse even inside the files
  * root, and its shell refuses to name outright. Defense in depth, not a vault —
  * the durable control is redactSecrets() on all output, which is value-based. */
-const SENSITIVE_PATH = /\.merr|grant\.json|settings\.json|\.env(\.|$|\b)|\.ssh|id_[rd]sa|\.pem\b|\.key\b|keystore|wallet\.dat|mnemonic|seed\.txt|secret/i;
+// `perp-key` covers both homes of the Lighter API private key (docs/perps.md
+// rule 5): self-hosted `perp-keys/<pubkey>.json` and a hosted child's
+// `perp-key.json`. `\.merr` alone does not: MERRYMEN_HOME may be any path.
+const SENSITIVE_PATH = /\.merr|grant\.json|settings\.json|perp-key|\.env(\.|$|\b)|\.ssh|id_[rd]sa|\.pem\b|\.key\b|keystore|wallet\.dat|mnemonic|seed\.txt|secret/i;
 
 export function isSensitivePath(p: string): boolean {
   return SENSITIVE_PATH.test(p);
@@ -126,12 +129,42 @@ const SECRET_SHAPES: RegExp[] = [
   /\b[0-9]{6,}:[A-Za-z0-9_-]{30,}/g, // Telegram bot tokens (id:hash)
 ];
 
+/**
+ * A Lighter auth token, `<deadline>:<account>:<keyIndex>:<160 hex>` — whole,
+ * so the account it authenticates goes with it (docs/perps.md rule 5). Run
+ * before LONG_HEX_RUN, which would otherwise take only its signature.
+ */
+const LIGHTER_AUTH_TOKEN = /\b\d{9,11}:\d{1,16}:\d{1,3}:[0-9a-fA-F]{160}\b/g;
+
+/**
+ * A Lighter API private key is 40 bytes: 80 hex, 0x or bare, either case
+ * (docs/perps.md rule 5). Run BEFORE the 64-hex shape, which would otherwise
+ * eat the first 66 characters of a 0x key and leave its last 16 hex — a whole
+ * 64-bit limb — on show, and which never sees a bare key at all. Greedy, so a
+ * key inside a longer hex run is never half-shown. Linear: no lookahead, so a
+ * megabyte of hex in a scanned file cannot turn this quadratic. Lighter tx
+ * hashes are 80 hex too and go with it: over-redacting is the safe side.
+ */
+const LONG_HEX_RUN = /(?:0x)?[0-9a-fA-F]{80,}/g;
+
+/**
+ * A digit AND a letter: a key, not somebody holding a key down. "aaaa…" in a
+ * group line is banter; a random 80-hex key lacks one of the two with
+ * probability ~(10/16)^80 + (6/16)^80, i.e. never.
+ */
+function isKeyLikeHexRun(run: string): boolean {
+  const hex = run.startsWith("0x") ? run.slice(2) : run;
+  return /[0-9]/.test(hex) && /[a-fA-F]/.test(hex);
+}
+
 /** Replace known secret values + secret-shaped blobs with a marker. */
 export function redactSecrets(text: string, knownSecrets: string[]): string {
   let out = text;
   for (const s of knownSecrets) {
     if (s && s.length >= 8) out = out.split(s).join("[redacted]");
   }
+  out = out.replace(LIGHTER_AUTH_TOKEN, "[redacted]");
+  out = out.replace(LONG_HEX_RUN, (m) => (isKeyLikeHexRun(m) ? "[redacted]" : m));
   for (const re of SECRET_SHAPES) out = out.replace(re, "[redacted]");
   return out;
 }
@@ -140,7 +173,8 @@ export function redactSecrets(text: string, knownSecrets: string[]): string {
  * refuse sending a file that would exfiltrate credentials). */
 export function containsSecret(text: string, knownSecrets: string[]): boolean {
   if (knownSecrets.some((s) => s && s.length >= 8 && text.includes(s))) return true;
-  return SECRET_SHAPES.some((re) => {
+  for (const m of text.matchAll(LONG_HEX_RUN)) if (isKeyLikeHexRun(m[0])) return true;
+  return [LIGHTER_AUTH_TOKEN, ...SECRET_SHAPES].some((re) => {
     re.lastIndex = 0;
     return re.test(text);
   });

@@ -402,6 +402,9 @@ describe("secret", () => {
   refuses("secret", [
     ["banter", `0x${"ab".repeat(32)}`],
     ["banter", `key ${"cd".repeat(32)}`],
+    // A Lighter API private key is 80 hex (docs/perps.md rule 5): bare, 0x, either case.
+    ["banter", `key ${"a1b2c3d4".repeat(10)}`],
+    ["banter", `0x${"A1B2C3D4".repeat(10)}`],
     ["banter", "my key is sk-abcdefghijklmnopqrstuvwx"],
     ["banter", "gsk_abcdefghijklmnopqrstuvwxyz0123"],
     ["banter", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"],

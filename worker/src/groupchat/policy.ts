@@ -306,6 +306,19 @@ const SECRET_SHAPES: readonly RegExp[] = [
 ];
 
 /**
+ * A Lighter API private key (docs/perps.md rule 5): 80 hex, bare or 0x, any
+ * case, anywhere — the bare-64 shape needs a word boundary at 64, which an
+ * 80-hex run never has. Also a Lighter auth token's 160-hex signature. A digit
+ * AND a letter, because "aaaa…" is somebody holding a key down, not a key.
+ */
+function hasLighterKeyRun(t: string): boolean {
+  for (const m of t.matchAll(/[0-9a-f]{80,}/gi)) {
+    if (/[0-9]/.test(m[0]) && /[a-f]/i.test(m[0])) return true;
+  }
+  return false;
+}
+
+/**
  * A base58 keypair (87–88 characters). Mixed case AND a digit, because a long
  * run of one letter is somebody holding a key down, not a key.
  */
@@ -419,7 +432,7 @@ const LINK_SHAPES: readonly RegExp[] = [
 
 /** The refusal both doors share, secret first: a private key filed as "address" would send whoever reads the log looking in the wrong place. */
 function hygieneRefusal(readings: string[]): string | null {
-  if (readings.some((t) => SECRET_SHAPES.some((re) => re.test(t)) || hasKeypairRun(t) || hasMnemonicRun(t))) return "secret";
+  if (readings.some((t) => SECRET_SHAPES.some((re) => re.test(t)) || hasLighterKeyRun(t) || hasKeypairRun(t) || hasMnemonicRun(t))) return "secret";
   if (readings.some((t) => ADDRESS_SHAPES.some((re) => re.test(t)) || hasEncodedRun(t))) return "address";
   if (readings.some((t) => LINK_SHAPES.some((re) => re.test(t)))) return "link";
   return null;
