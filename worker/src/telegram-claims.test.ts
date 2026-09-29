@@ -31,9 +31,11 @@ import {
   pollerKeyOf,
   readBotClaims,
   releaseBotClaims,
+  telegramDidNotAnswer,
   unclaimedBot,
   undoBotClaim,
 } from "./telegram-claims";
+import { getMe, type FetchLike } from "./telegram/api";
 
 const A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const B = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -317,6 +319,39 @@ describe("claimGate — who may poll the bot", () => {
   });
 });
 
+describe("telegramDidNotAnswer — no answer is not a refusal", () => {
+  /** getMe's own failure, through the real call(), for what the far end did. */
+  const failureOf = async (fetchFn: FetchLike, timeoutMs?: number) => {
+    const { bot, ...failure } = await getMe({ token: "111:secret", fetchFn, ...(timeoutMs ? { timeoutMs } : {}) });
+    assert.equal(bot, null);
+    return failure;
+  };
+  const answering = (status: number, body: unknown): FetchLike => async () => ({ ok: status < 400, status, json: async () => body });
+
+  it("a request that failed or timed out, Telegram down, or Telegram throttling: no answer about the token", async () => {
+    const cases: [string, Promise<{ reason?: string; errorCode?: number }>][] = [
+      ["timed out", failureOf(() => new Promise(() => {}), 20)],
+      ["connection reset", failureOf(async () => { throw new Error("ECONNRESET"); })],
+      ["502 from the front end, not JSON", failureOf(async () => ({ ok: false, status: 502, json: async () => { throw new SyntaxError("not JSON"); } }))],
+      ["500 with a description", failureOf(answering(500, { ok: false, error_code: 500, description: "Internal Server Error" }))],
+      ["429", failureOf(answering(429, { ok: false, error_code: 429, description: "Too Many Requests: retry after 3", parameters: { retry_after: 3 } }))],
+    ];
+    for (const [what, failure] of cases) assert.equal(telegramDidNotAnswer(await failure), true, what);
+  });
+
+  it("Telegram refusing the token is a refusal, as it always was", async () => {
+    const cases: [string, Promise<{ reason?: string; errorCode?: number }>][] = [
+      ["401", failureOf(answering(401, { ok: false, error_code: 401, description: "Unauthorized" }))],
+      ["404", failureOf(answering(404, { ok: false, error_code: 404, description: "Not Found" }))],
+      ["ok:false with no code", failureOf(answering(200, { ok: false, description: "Unauthorized" }))],
+      ["an answer with no bot in it", failureOf(answering(200, { ok: true, result: { id: 111 } }))],
+    ];
+    for (const [what, failure] of cases) assert.equal(telegramDidNotAnswer(await failure), false, what);
+    assert.equal(telegramDidNotAnswer({ reason: "not a bot token (it has characters no Telegram token has)" }), false, "never sent is not no answer");
+    assert.equal(telegramDidNotAnswer({}), false);
+  });
+});
+
 describe("the orchestrator asks the claims on every path that writes a settings.json", () => {
   const SRC = path.dirname(fileURLToPath(import.meta.url));
   const ORCH = readFileSync(path.join(SRC, "orchestrator.ts"), "utf8");
@@ -357,7 +392,8 @@ describe("the orchestrator asks the claims on every path that writes a settings.
     // After a restart every tenant is spawned, in listTenants order, before
     // any refresh: first one wins there was heap order.
     const fn = body("async function gateBot(");
-    const wait = fn.indexOf("if (unclaimed && spawn && !ownerLinked(settings)) {");
+    assert.match(fn, /const linked = ownerLinked\(settings\);/);
+    const wait = fn.indexOf("if (unclaimed && spawn && !linked) {");
     const backfill = fn.indexOf("await backfillBotClaim(");
     assert.ok(wait > 0 && backfill > wait, "decided before anything is claimed");
     assert.match(fn.slice(wait, backfill), /return withoutBotToken\(settings\);/);
@@ -366,11 +402,16 @@ describe("the orchestrator asks the claims on every path that writes a settings.
 
   it("THE ORCHESTRATOR CLAIMS ONLY FOR A TOKEN TELEGRAM CONFIRMS, and does not ask about a refused one every pass", () => {
     const fn = body("async function backfillBotClaim(");
-    assert.match(fn, /claimBot\(db, bot, tenant, await confirmBotId\(token\), Date\.now\(\)\)/);
+    const asked = fn.indexOf("const confirmed = await confirmBotId(token);");
+    const noAnswer = fn.indexOf("if (confirmed === NO_ANSWER) {");
+    const claim = fn.indexOf("await claimBot(db, bot, tenant, confirmed, Date.now())");
+    assert.ok(asked > 0 && noAnswer > asked && claim > noAnswer, "no answer claims nothing: it returns before claimBot is asked");
+    assert.match(fn.slice(noAnswer, claim), /return null;/);
     assert.match(fn, /if \(refused && refused\.tag === tag && Date\.now\(\) < refused\.until\) return null;/);
     const confirm = body("async function botIdFromTelegram(");
     assert.match(confirm, /telegramGetMe\(\{ token \}\)/);
     assert.ok(confirm.indexOf("if (botIdOf(token) === null) return null;") < confirm.indexOf("telegramGetMe("), "nothing but a token is sent");
+    assert.match(confirm, /if \(!bot && telegramDidNotAnswer\(failure\)\) return NO_ANSWER;/, "no answer only when there is no bot");
     assert.match(confirm, /return bot\?\.isBot \? String\(bot\.id\) : null;/, "and only a bot's answer vouches");
   });
 

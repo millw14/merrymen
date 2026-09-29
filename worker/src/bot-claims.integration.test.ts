@@ -22,7 +22,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { after, describe, it } from "node:test";
+import { after, describe, it, mock } from "node:test";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import type { StoredGrant } from "../../packages/core/src/index";
 
@@ -37,14 +37,15 @@ const { reconcile, childHome, setSpawnForTest, setBotClaimsDbForTest, setBotConf
 const { getGrantStore } = await import("./grant-store");
 const { getSettingsStore } = await import("./settings-store");
 const { wrapSqlite } = await import("./db");
-const { botIdOf, claimBot, ensureBotClaims, moveBotClaim, readBotClaims } = await import("./telegram-claims");
+const { NO_ANSWER, botIdOf, claimBot, ensureBotClaims, moveBotClaim, readBotClaims } = await import("./telegram-claims");
 
 const claimsDb = wrapSqlite(new DatabaseSync(":memory:"));
 await ensureBotClaims(claimsDb);
 setBotClaimsDbForTest(claimsDb);
 /**
  * getMe, standing in for Telegram: every token answers for the bot its prefix
- * names, except one whose secret starts "fake", which Telegram refuses.
+ * names, except one whose secret starts "fake", which Telegram refuses. A
+ * test that needs no answer at all (NO_ANSWER) sets its own for a while.
  */
 const getMeAsked: string[] = [];
 const confirm = async (token: string) => {
@@ -181,7 +182,7 @@ describe("a bot nobody has claimed yet", () => {
     await reconcile();
     assert.equal((await readBotClaims(claimsDb)).get("444"), undefined, "no claim for a token Telegram refused");
     assert.equal(getMeAsked.filter((t) => t.startsWith("444:fake")).length, 1, "and Telegram is not asked again every pass");
-    assert.ok(said.some((l) => l.includes(`${STRANGER}: telegram bot 444 did not answer for its token`)), said.join("\n"));
+    assert.ok(said.some((l) => l.includes(`${STRANGER}: Telegram refused the token for telegram bot 444`)), said.join("\n"));
     // The owner switches Telegram on: their confirmed claim decides, whoever
     // the pass meets first.
     await getSettingsStore().put(OWNER, withBot("444:the-real-secret") as never);
@@ -284,5 +285,101 @@ describe("a bot nobody has claimed yet", () => {
     assert.equal((await readBotClaims(claimsDb)).get("333"), F);
     assert.equal(spawnedWith.get(F), "333:FFF-secret");
     assert.equal(tokenInFile(E), "333:EEE-secret", "the switched-off login's file keeps what its owner saved");
+  });
+
+  /** A pass as if `ms` had gone by: only Date is the test's, the timers stay real. */
+  const passAfter = async (ms: number) => {
+    mock.timers.enable({ apis: ["Date"], now: Date.now() + ms });
+    try {
+      await reconcile();
+    } finally {
+      mock.timers.reset();
+    }
+  };
+
+  it("NO ANSWER IS NOT A REFUSAL: A LINKED AGENT TELEGRAM DID NOT ANSWER FOR AT ITS SPAWN IS ASKED AGAIN, AND THE UNLINKED LOGIN WAITS FOR IT", async () => {
+    // One blip on the deploy pass: getMe for the linked agent's token gets no
+    // answer (call() gives up at TG_CALL_TIMEOUT_MS). Read as a refusal, it
+    // was not asked again for ten minutes, and the unlinked login on the same
+    // token claimed the bot at the refresh that followed, for good. Two
+    // pairs, so one meets the unlinked login first whichever way the store
+    // lists them.
+    const pairs = [
+      { unlinked: tenant(0x61), linked: tenant(0x62), token: "881:one-token-and-a-blip" },
+      { unlinked: tenant(0x64), linked: tenant(0x63), token: "882:one-token-and-a-blip" },
+    ];
+    const blipped = new Set<string>();
+    setBotConfirmForTest(async (token) => {
+      if (!pairs.some((p) => p.token === token) || blipped.has(token)) return confirm(token);
+      blipped.add(token);
+      getMeAsked.push(token);
+      return NO_ANSWER;
+    });
+    try {
+      for (const [i, p] of pairs.entries()) {
+        await getSettingsStore().put(p.unlinked, { telegramEnabled: true, telegramBotToken: p.token } as never);
+        await getSettingsStore().put(p.linked, withBot(p.token) as never);
+        await getGrantStore().put(p.unlinked, grant(0x61 + i * 3));
+        await getGrantStore().put(p.linked, grant(0x62 + i * 3));
+      }
+      getMeAsked.length = 0;
+      await reconcile();
+      await reconcile();
+      for (const p of pairs) {
+        const bot = botIdOf(p.token)!;
+        assert.equal((await readBotClaims(claimsDb)).get(bot), undefined, `bot ${bot}: no answer claims nothing`);
+        assert.equal(spawnedWith.get(p.linked), p.token, "the linked agent starts with its bot, and polls it meanwhile");
+        assert.equal(spawnedWith.get(p.unlinked), undefined, "the unlinked login does not");
+        assert.equal(tokenInFile(p.unlinked), undefined, "nor is handed it by a refresh while the linked agent waits on Telegram");
+        assert.equal(tokenInFile(p.linked), p.token);
+        assert.equal(getMeAsked.filter((t) => t === p.token).length, 1, "Telegram was asked once, for the linked agent, and not every pass");
+        assert.ok(said.some((l) => l.includes(`${p.linked}: Telegram did not answer for telegram bot ${bot}`)), said.join("\n"));
+        assert.ok(said.some((l) => l.includes(`${p.unlinked}: telegram bot ${bot} is not claimed yet, and a linked agent on it is waiting on Telegram`)), said.join("\n"));
+      }
+      // A minute on, the linked agent is asked again, and Telegram answers.
+      await passAfter(61_000);
+      for (const p of pairs) {
+        const bot = botIdOf(p.token)!;
+        assert.equal((await readBotClaims(claimsDb)).get(bot), p.linked, `bot ${bot} is claimed for the linked agent`);
+        assert.equal(tokenInFile(p.linked), p.token);
+        assert.equal(tokenInFile(p.unlinked), undefined, "and the unlinked login is refused it by the claim");
+      }
+    } finally {
+      setBotConfirmForTest(confirm);
+    }
+  });
+
+  it("THE WAIT IS BOUNDED: A LINKED TOKEN TELEGRAM NEVER ANSWERS FOR KEEPS AN UNLINKED LOGIN OFF ITS BOT TEN MINUTES AT MOST", async () => {
+    // Anyone can put a chat id on their own allowlist, so "linked" is not
+    // proof of anything; a token that never gets an answer must not hold the
+    // bot from a login whose token Telegram does confirm for longer than a
+    // blip could last.
+    const LINKED = tenant(0x67);
+    const UNLINKED = tenant(0x68);
+    const deaf = "883:linked-never-answered";
+    setBotConfirmForTest(async (token) => {
+      if (token !== deaf) return confirm(token);
+      getMeAsked.push(token);
+      return NO_ANSWER;
+    });
+    try {
+      await getSettingsStore().put(LINKED, withBot(deaf) as never);
+      await getSettingsStore().put(UNLINKED, { telegramEnabled: true, telegramBotToken: "883:unlinked-live-secret" } as never);
+      await getGrantStore().put(LINKED, grant(0x67));
+      await getGrantStore().put(UNLINKED, grant(0x68));
+      await reconcile();
+      assert.equal((await readBotClaims(claimsDb)).get("883"), undefined);
+      assert.equal(tokenInFile(UNLINKED), undefined, "waits while the linked token could still be a blip");
+      await passAfter(5 * 60_000);
+      assert.equal((await readBotClaims(claimsDb)).get("883"), undefined, "and still waits five minutes on");
+      assert.equal(tokenInFile(UNLINKED), undefined);
+      await passAfter(10 * 60_000 + 1_000);
+      assert.equal((await readBotClaims(claimsDb)).get("883"), UNLINKED, "past ten minutes the token Telegram confirms claims it");
+      assert.equal(tokenInFile(UNLINKED), "883:unlinked-live-secret");
+      await passAfter(30 * 60_000);
+      assert.equal((await readBotClaims(claimsDb)).get("883"), UNLINKED, "and keeps it");
+    } finally {
+      setBotConfirmForTest(confirm);
+    }
   });
 });

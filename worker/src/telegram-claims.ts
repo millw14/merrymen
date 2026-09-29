@@ -434,6 +434,28 @@ export function ownerLinked(settings: MerrymenSettings): boolean {
 }
 
 /**
+ * What the orchestrator's getMe gives for a token Telegram said nothing about
+ * (telegramDidNotAnswer): neither a bot's id, which a claim rests on, nor null,
+ * which is a refusal.
+ */
+export const NO_ANSWER = "no-answer";
+
+/**
+ * DID getMe GET NO ANSWER ABOUT THE TOKEN, rather than a refusal? The request
+ * failed or timed out ("request failed: …", with no code: telegram/api.ts
+ * call()), or Telegram was down (5xx) or throttling (429). None of those says
+ * the token is not the bot's, so none may cost a tenant its claim.
+ *
+ * Only an answer about the token is a refusal: 401 or 404, as the poll loop
+ * reads them too (poll-rules.ts pollFailure), or an answer that is not a
+ * bot's. Anything else Telegram answered stays a refusal, as it always was.
+ */
+export function telegramDidNotAnswer(r: { reason?: string; errorCode?: number }): boolean {
+  if (r.errorCode === undefined) return /^request failed/.test(r.reason ?? "");
+  return r.errorCode === 429 || r.errorCode >= 500;
+}
+
+/**
  * WHAT THE PASS'S OWN RECORD IS KEYED ON: the token's fingerprint, taken from
  * its bot's id as a number and its secret, so ` 0111:x` and `111:x` are the
  * same poller. Null for a token with no bot. See claimGate for why the secret

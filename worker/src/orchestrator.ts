@@ -83,9 +83,11 @@ import {
   claimBot,
   claimGate,
   ensureBotClaims,
+  NO_ANSWER,
   ownerLinked,
   pollerKeyOf,
   readBotClaims,
+  telegramDidNotAnswer,
   unclaimedBot,
   withoutBotToken,
 } from "./telegram-claims";
@@ -1513,31 +1515,68 @@ async function readBotClaimsForPass(): Promise<BotClaimsRead> {
   }
 }
 
+/** getMe's word on a token: its bot's id, null for a refusal, or NO_ANSWER when Telegram said nothing about it. */
+type BotConfirmation = string | null | typeof NO_ANSWER;
+
 /**
- * getMe: the id of the bot `token` belongs to, as Telegram says it, or null
- * (refused, revoked, unreachable). Bounded, and never throws (telegram/api.ts).
+ * getMe: the id of the bot `token` belongs to, as Telegram says it; null when
+ * Telegram refused it (revoked, mistyped, not a bot's) or it is no token at
+ * all; NO_ANSWER when Telegram said nothing about it (telegramDidNotAnswer:
+ * the request failed or timed out, or Telegram was down or throttling).
+ * Bounded at TG_CALL_TIMEOUT_MS, and never throws (telegram/api.ts).
  *
  * WHAT A CLAIM RESTS ON, SO NOTHING ELSE MAY PASS FOR IT. Only a token of
  * Telegram's own shape is sent (botIdOf: one that could steer the URL could
  * make another method, on another bot, answer with the id it names), and
  * only an answer that says it is a bot counts (a chat's or a user's carries
  * an id too).
+ *
+ * NO ANSWER IS NOT A REFUSAL. Both used to be null, so one getMe that timed
+ * out at a linked agent's spawn read as a revoked token: it was not asked
+ * again for ten minutes, and the unlinked login on the same token claimed the
+ * bot at the refresh that followed, for good (backfillBotClaim, gateBot).
  */
-async function botIdFromTelegram(token: string): Promise<string | null> {
+async function botIdFromTelegram(token: string): Promise<BotConfirmation> {
   if (botIdOf(token) === null) return null;
-  const { bot } = await telegramGetMe({ token });
+  const { bot, ...failure } = await telegramGetMe({ token });
+  if (!bot && telegramDidNotAnswer(failure)) return NO_ANSWER;
   return bot?.isBot ? String(bot.id) : null;
 }
 let confirmBotId = botIdFromTelegram;
 /** Test seam: what getMe answers, in place of Telegram; null puts Telegram back. */
-export function setBotConfirmForTest(fn: ((token: string) => Promise<string | null>) | null): void {
+export function setBotConfirmForTest(fn: ((token: string) => Promise<BotConfirmation>) | null): void {
   confirmBotId = fn ?? botIdFromTelegram;
 }
 
-/** How long a token Telegram would not confirm is left before it is asked about again. */
+/** How long a token Telegram refused is left before it is asked about again. */
 const BOT_CONFIRM_RETRY_MS = 10 * 60_000;
-/** Per tenant, the token (by fingerprint) Telegram last would not confirm, and until when it is not asked again. */
-const botUnconfirmed = new Map<string, { tag: string; until: number }>();
+/**
+ * How long a token Telegram gave no answer for is left before it is asked
+ * again. A blip is over in seconds; a minute keeps an outage from costing
+ * every pass a getMe of up to TG_CALL_TIMEOUT_MS for each such tenant.
+ */
+const BOT_NO_ANSWER_RETRY_MS = 60_000;
+/** Per tenant, the token (by fingerprint) Telegram last would not confirm, why, and until when it is not asked again. */
+const botUnconfirmed = new Map<string, { tag: string; until: number; why: "refused" | "no answer" }>();
+
+/**
+ * THE LONGEST AN UNLINKED LOGIN IS KEPT OFF A BOT NOBODY HAS CLAIMED while
+ * Telegram gives no answer for a linked agent's token for it (gateBot). Long
+ * enough for the linked agent to be asked again several times
+ * (BOT_NO_ANSWER_RETRY_MS). Bounded, because anyone can put a chat id on
+ * their own allowlist, so "linked" proves nothing about the bot, and a token
+ * that never gets an answer must not hold the bot from one Telegram confirms.
+ */
+const LINKED_CLAIM_WAIT_MS = 10 * 60_000;
+/**
+ * Per bot: the linked tenant Telegram gave no answer for, and until when an
+ * unlinked login waits for its claim. Armed once per bot: a wait that has run
+ * out is kept, so the bot is not waited for again, until a claim is made for
+ * it or the tenant waited for is refused.
+ */
+const linkedClaimWait = new Map<string, { tenant: string; until: number }>();
+/** The wait each unlinked tenant was last told it is under, so it is logged once. */
+const botWaitLogged = new Map<string, number>();
 
 /**
  * CLAIM A BOT NOBODY HAS CLAIMED YET FOR THIS TENANT — first one wins, and only
@@ -1545,13 +1584,19 @@ const botUnconfirmed = new Map<string, { tag: string; until: number }>();
  * who holds it now: this tenant, or one that got there first. Null when no
  * claim was made; the tenant is then judged without one this pass.
  *
- * A token Telegram will not confirm is not asked about again for ten minutes:
- * it is revoked, mistyped, or not a token at all, and every pass would
- * otherwise spend a bot API call (and up to fifteen seconds) on it. Its
- * process could not poll with it either, so going without a claim costs
+ * A token Telegram refused is not asked about again for ten minutes: it is
+ * revoked, mistyped, or not a token at all, and every pass would otherwise
+ * spend a bot API call (and up to TG_CALL_TIMEOUT_MS, telegram/api.ts) on it.
+ * Its process could not poll with it either, so going without a claim costs
  * nobody an answer.
+ *
+ * A token Telegram gave NO ANSWER for is neither: it is asked again in a
+ * minute, and nothing is concluded from it. When its owner has linked a chat
+ * (`linked`), an unlinked login on the same bot waits for it (linkedClaimWait,
+ * gateBot) as it would at a spawn, LINKED_CLAIM_WAIT_MS at most. Meanwhile
+ * its own process polls the bot as it would any unclaimed one (claimGate).
  */
-async function backfillBotClaim(bot: string, tenant: `0x${string}`, token: string): Promise<string | null> {
+async function backfillBotClaim(bot: string, tenant: `0x${string}`, token: string, linked: boolean): Promise<string | null> {
   const lc = tenant.toLowerCase();
   const tag = tokenTagOf(token);
   const refused = botUnconfirmed.get(lc);
@@ -1559,13 +1604,29 @@ async function backfillBotClaim(bot: string, tenant: `0x${string}`, token: strin
   try {
     const db = await botClaimsDb();
     if (!db) return null;
-    const claim = await claimBot(db, bot, tenant, await confirmBotId(token), Date.now());
+    const confirmed = await confirmBotId(token);
+    if (confirmed === NO_ANSWER) {
+      botUnconfirmed.set(lc, { tag, until: Date.now() + BOT_NO_ANSWER_RETRY_MS, why: "no answer" });
+      if (linked && !linkedClaimWait.has(bot)) linkedClaimWait.set(bot, { tenant: lc, until: Date.now() + LINKED_CLAIM_WAIT_MS });
+      if (refused?.tag !== tag || refused.why !== "no answer") {
+        const w = linkedClaimWait.get(bot);
+        const wait = w?.tenant === lc && Date.now() < w.until ? `, and no unlinked login on it claims it meanwhile (until ${new Date(w.until).toISOString()})` : "";
+        log(`${tenant}: Telegram did not answer for telegram bot ${bot}'s token — not claimed, not refused; asked again in ${BOT_NO_ANSWER_RETRY_MS / 1000}s${wait}`);
+      }
+      return null;
+    }
+    const claim = await claimBot(db, bot, tenant, confirmed, Date.now());
     if (!claim) {
-      if (refused?.tag !== tag) log(`${tenant}: telegram bot ${bot} did not answer for its token (revoked or mistyped?) — not claimed; asked again in ${BOT_CONFIRM_RETRY_MS / 60_000} min`);
-      botUnconfirmed.set(lc, { tag, until: Date.now() + BOT_CONFIRM_RETRY_MS });
+      if (refused?.tag !== tag || refused.why !== "refused") {
+        log(`${tenant}: Telegram refused the token for telegram bot ${bot} (revoked or mistyped?) — not claimed; asked again in ${BOT_CONFIRM_RETRY_MS / 60_000} min`);
+      }
+      botUnconfirmed.set(lc, { tag, until: Date.now() + BOT_CONFIRM_RETRY_MS, why: "refused" });
+      // A refused token is no claim to wait for.
+      if (linkedClaimWait.get(bot)?.tenant === lc) linkedClaimWait.delete(bot);
       return null;
     }
     botUnconfirmed.delete(lc);
+    linkedClaimWait.delete(bot);
     return claim.holder;
   } catch (e) {
     log(`${tenant}: telegram bot claim could not be recorded, tried again next pass: ${e instanceof Error ? e.message : String(e)}`);
@@ -1607,6 +1668,13 @@ const botRefusedLogged = new Map<string, string>();
  * the next pass). Between two linked tenants, or two unlinked ones, nothing
  * says which is the owner's, and the first confirmed token still wins.
  *
+ * NO ANSWER FROM TELEGRAM IS WAITED OUT, NOT TAKEN FOR A REFUSAL. When getMe
+ * gets no answer for a linked tenant's token (backfillBotClaim), an unlinked
+ * login on the same bot goes without it, as it would at a spawn, until the
+ * linked tenant has been asked again and answered: LINKED_CLAIM_WAIT_MS at
+ * most. Before, one getMe that timed out on the deploy pass handed the bot to
+ * the unlinked login at the refresh that followed, for good.
+ *
  * THE TOKEN IS STRIPPED FROM THE CHILD'S FILE, NOT FROM THE STORE. The owner's
  * saved settings are theirs; the web tells them the bot is claimed (409
  * bot_claimed) and offers to move it, and a move is what gives it back.
@@ -1621,14 +1689,24 @@ async function gateBot(
   const lc = tenant.toLowerCase();
   const unclaimed = unclaimedBot(settings, claims);
   const spawn = claimsRead === undefined;
-  if (unclaimed && spawn && !ownerLinked(settings)) {
+  const linked = ownerLinked(settings);
+  if (unclaimed && spawn && !linked) {
     log(`${tenant}: telegram bot ${unclaimed} is not claimed yet and no chat is linked here — started without it; the refresh decides who claims it`);
+    return withoutBotToken(settings);
+  }
+  // And after a spawn, while a linked agent on this bot waits on Telegram.
+  const waiting = unclaimed && !linked ? linkedClaimWait.get(unclaimed) : undefined;
+  if (waiting && waiting.tenant !== lc && Date.now() < waiting.until) {
+    if (botWaitLogged.get(lc) !== waiting.until) {
+      botWaitLogged.set(lc, waiting.until);
+      log(`${tenant}: telegram bot ${unclaimed} is not claimed yet, and a linked agent on it is waiting on Telegram to confirm its token — this child goes without it meanwhile`);
+    }
     return withoutBotToken(settings);
   }
   // A bot no claim names yet is claimed BEFORE it is judged, so the pass's own
   // record never decides a bot a confirmed claim could have: see claimGate.
   if (unclaimed && claims) {
-    const holder = await backfillBotClaim(unclaimed, tenant, botTokenOf(settings)!);
+    const holder = await backfillBotClaim(unclaimed, tenant, botTokenOf(settings)!, linked);
     if (holder) claims.set(unclaimed, holder);
   }
   const gate = claimGate(settings, tenant, claims, seen);
@@ -3424,11 +3502,12 @@ export async function reconcile(): Promise<void> {
   // order, and a spawn claims such a bot only for a tenant whose owner has
   // linked a chat (gateBot). The rest meet it here. Holders going first only
   // orders the tenants judged here: two unlinked tenants on one bot, a linked
-  // one whose token Telegram would not confirm at its spawn, or a bot first
-  // saved while a hold was running. So the operator's step before the deploy
-  // that brings claims stays: claim each bot two tenants share for its
-  // owner's tenant by hand. It is the only answer when both are linked, or
-  // when Telegram does not answer on the deploy pass.
+  // one whose token Telegram refused at its spawn, or a bot first saved while
+  // a hold was running. (A linked one Telegram gave no answer for is waited
+  // for, up to LINKED_CLAIM_WAIT_MS: see gateBot.) So the operator's step
+  // before the deploy that brings claims stays: claim each bot two tenants
+  // share for its owner's tenant by hand. It is the only answer when both are
+  // linked, or when Telegram gives no answer for longer than that wait.
   const released: Holder[] = [];
   for (const [tenant, held] of [...holders]) {
     // NOT WANTED ANY MORE, and stood down below, this pass: its settings are

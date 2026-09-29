@@ -480,10 +480,18 @@ async function call(opts: TelegramOpts, method: string, params?: Record<string, 
   }
 }
 
-/** Validate a token and return the bot's identity (for the dashboard "test connection"). */
-export async function getMe(opts: TelegramOpts): Promise<{ bot: TgBotInfo | null; reason?: string }> {
-  const { result, reason } = await call(opts, "getMe");
-  if (!result || typeof result !== "object") return { bot: null, reason: reason ?? `invalid token ${short(opts.token)}` };
+/**
+ * Validate a token and return the bot's identity (for the dashboard "test
+ * connection"). A failure carries Telegram's error code when it answered
+ * with one, so a refusal (401, 404) can be told from no answer at all (a
+ * "request failed: …" reason and no code) or a Telegram that was down or
+ * throttling (5xx, 429): see telegramDidNotAnswer in telegram-claims.ts.
+ */
+export async function getMe(opts: TelegramOpts): Promise<{ bot: TgBotInfo | null; reason?: string; errorCode?: number }> {
+  const { result, reason, errorCode } = await call(opts, "getMe");
+  if (!result || typeof result !== "object") {
+    return { bot: null, reason: reason ?? `invalid token ${short(opts.token)}`, ...(errorCode !== undefined ? { errorCode } : {}) };
+  }
   const r = result as {
     id?: unknown;
     username?: unknown;

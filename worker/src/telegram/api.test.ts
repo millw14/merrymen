@@ -87,6 +87,15 @@ describe("getMe", () => {
     assert.equal(bot, null);
     assert.match(reason!, /ENOTFOUND/);
   });
+
+  it("a refusal carries Telegram's code; no answer carries none, so the two are never confused", async () => {
+    const refused = fakeFetch(401, { ok: false, error_code: 401, description: "Unauthorized" });
+    assert.deepEqual(await getMe({ token: "123:abc", fetchFn: refused }), { bot: null, reason: "Unauthorized", errorCode: 401 });
+    const boom: FetchLike = async () => {
+      throw new Error("ECONNRESET");
+    };
+    assert.deepEqual(await getMe({ token: "123:abc", fetchFn: boom }), { bot: null, reason: "request failed: ECONNRESET" });
+  });
 });
 
 describe("getUpdates", () => {
