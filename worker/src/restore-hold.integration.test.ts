@@ -565,6 +565,72 @@ describe("when the restore takes, trading comes back", () => {
       assert.equal(holds().length, 1);
     });
   });
+
+  it("PRACTICE SWITCHED OFF WITH A HOLD PROCESS THAT WILL NOT EXIT: NO WORKER UNTIL IT HAS, AND THE GATE SAYS SO ONCE", async () => {
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      await reconcile();
+      const hold = holds()[0]!;
+      hold.deaf = true;
+      // The restore still fails; the gate no longer holds a live owner for it.
+      await getSettingsStore().put(TENANT, { ...paperWithBot, paperTradingEnabled: false } as never);
+      mock.timers.tick(15_000);
+      const pass = reconcile();
+      await waitFor(() => hold.signals.includes("SIGTERM"), "the pass asks the hold process to stop");
+      mock.timers.tick(3_000);
+      assert.ok(hold.signals.includes("SIGKILL"), "and kills it three seconds later");
+      mock.timers.tick(7_000);
+      await pass;
+      await settle();
+      const released = () => said.filter((l) => l.includes(`${TENANT}: practice mode is off`));
+      const stuck = () => said.filter((l) => l.includes("[alert]") && l.includes(`pid ${hold.pid}`));
+      assert.equal(workers().length, 0, `no worker beside a process that may still poll the bot:\n${said.join("\n")}`);
+      assert.ok(isHeldForTest(TENANT));
+      assert.equal(stuck().length, 1, said.join("\n"));
+      for (let i = 0; i < 3; i++) {
+        mock.timers.tick(15_000);
+        await reconcile();
+      }
+      await settle();
+      assert.equal(workers().length, 0);
+      assert.equal(holds().length, 1, "no second hold process either");
+      assert.equal(stuck().length, 1, "the alert said once");
+      assert.equal(released().length, 1, "and the gate's release said once, not every pass it waits");
+      hold.die(null, "SIGKILL");
+      mock.timers.tick(15_000);
+      await reconcile();
+      await settle();
+      assert.equal(workers().length, 1, `then exactly one worker:\n${said.join("\n")}`);
+      assert.deepEqual(events, ["hold-spawn", "hold-exit", "worker-spawn"]);
+      assert.ok(!isHeldForTest(TENANT));
+      assert.equal(released().length, 1);
+      assert.equal(readSettings(TENANT).telegramBotToken, "111:a", "the worker keeps the bot its hold answered");
+    });
+  });
+
+  it("A LEASE LOST WHILE A HANDOVER WAITS ON A STUCK HOLD PROCESS STARTS NOTHING UNTIL IT HAS GONE, THEN ONE WORKER", async () => {
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      const hold = await stuckHandover();
+      loseLeaseForTest(TENANT);
+      for (let i = 0; i < 2; i++) {
+        mock.timers.tick(15_000);
+        await reconcile();
+      }
+      await settle();
+      assert.ok(said.some((l) => l.includes(`${TENANT}: lease lost`)), said.join("\n"));
+      assert.equal(spawned.length, 1, `the spawn loop does not take the lease again beside it:\n${said.join("\n")}`);
+      assert.ok(isHeldForTest(TENANT));
+      hold.die(null, "SIGKILL");
+      assert.ok(!isHeldForTest(TENANT), "stood down, it leaves with its process");
+      assert.ok(!said.some((l) => /hold process exited \(|keeps dying/.test(l)), said.join("\n"));
+      mock.timers.tick(15_000);
+      await reconcile();
+      await settle();
+      assert.equal(workers().length, 1, `the lease taken again, and one worker:\n${said.join("\n")}`);
+      assert.deepEqual(events, ["hold-spawn", "hold-exit", "worker-spawn"]);
+    });
+  });
 });
 
 describe("a held tenant is stood down like any other", () => {
