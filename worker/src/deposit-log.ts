@@ -45,13 +45,30 @@
  * load-bearing: this caller moves the peak whenever `addFlow` returns true, and
  * `addFlow` returns true on a duplicate — a second booker of the same leg would
  * lower the peak twice (the Shogun double-lowering). One live booker per flow.
+ *
+ * NOR PERP MARGIN (docs/perps.md rule 12). USDG posted to this account's own
+ * Lighter account, and paid back from it, is money moving between two places
+ * the book owns: equity carries the venue side itself (perpAccountUsdg), so a
+ * margin deposit booked here as a withdrawal would lower contributions and the
+ * peak by money that never left, and a payout booked as a deposit would raise
+ * both by money that was already the owner's. The classifier's `venue-margin`
+ * arm proves each such leg from the SAME receipt's proxy events — which is why
+ * every receipt below keeps its unfiltered logs — and this scanner logs
+ * `margin-out`/`margin-in` as "not capital", exactly like `reserve-out`. A
+ * proxy leg the receipt cannot prove is `ambiguous`, which blocks as always.
  */
 import { decodeEventLog, parseAbi, type Hex } from "viem";
 import { addressTopic, getLogsAdaptive, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 // The one rule that decides whether a USDG movement is the owner's capital or
 // the agent trading. Imported rather than restated so the scanner and the
 // accounting backfill cannot reach different answers about the same transfer.
-import { classifyUsdgMovement, energyReserveTokens, MERRYMEN_TOKEN, type TransferLeg } from "../../packages/core/src/index";
+import {
+  classifyUsdgMovement,
+  energyReserveTokens,
+  lighterVenueProxies,
+  MERRYMEN_TOKEN,
+  type TransferLeg,
+} from "../../packages/core/src/index";
 import type { ReceiptLog } from "./fills";
 
 /**
@@ -284,6 +301,13 @@ export async function findTransferFlows(opts: {
   // stale — see capital-classify.ts.
   const out: TransferFlow[] = [];
   const legsByTx = new Map<string, TransferLeg[]>();
+  /** Each receipt's logs UNFILTERED — the venue arm's evidence lives in the non-Transfer ones. */
+  const logsByTx = new Map<string, readonly ReceiptLog[]>();
+  // THE VENUE ON THIS CHAIN: Lighter's proxy on 4663, nothing anywhere else —
+  // from the one core table, never typed here. Named, the classifier decides
+  // every leg that touches it from the receipt; unnamed (every other chain)
+  // it is byte-identical to before perps.
+  const venueProxies = lighterVenueProxies(opts.chainId ?? MERRYMEN_TOKEN.chainId);
   for (const c of candidates) {
     const k = c.txHash.toLowerCase();
     if (legsByTx.has(k)) continue;
@@ -299,6 +323,7 @@ export async function findTransferFlows(opts: {
       );
     }
     legsByTx.set(k, legsFromReceiptLogs(receipt));
+    logsByTx.set(k, receipt);
   }
 
   for (const c of candidates) {
@@ -308,6 +333,10 @@ export async function findTransferFlows(opts: {
       from: c.from,
       to: c.to,
       amountRaw: c.amountUsdg6.toString(),
+      // WHERE THIS TRANSFER SITS IN ITS RECEIPT — the venue arm pairs a leg with
+      // its own Deposit/WithdrawPending by position, never by amount. The log
+      // index from eth_getLogs is the block-level one the receipt carries too.
+      logIndex: c.logIndex,
     };
     const v = classifyUsdgMovement({
       account: smartAccount,
@@ -326,6 +355,11 @@ export async function findTransferFlows(opts: {
       // which the condition below deliberately does NOT book: the worker is its
       // one live booker. See the header.
       reserveTokens: energyReserveTokens(opts.chainId ?? MERRYMEN_TOKEN.chainId),
+      // The perp venue and the receipt that proves each leg to it — see the
+      // header. A margin leg classifies `margin-out`/`margin-in`, which the
+      // condition below deliberately does NOT book.
+      venueProxies,
+      venueLogs: logsByTx.get(c.txHash.toLowerCase()) ?? [],
     });
 
     // EXACTLY capital-in or capital-out. Never widen this to `reserve-out`:
@@ -350,8 +384,8 @@ export async function findTransferFlows(opts: {
       throw new Error(`deposit scan: ${c.txHash}#${c.logIndex} could not be classified — ${v.why}`);
     }
 
-    // trade-in / trade-out / internal / protocol / reserve-out: real movements,
-    // not capital THIS scanner books.
+    // trade-in / trade-out / internal / protocol / reserve-out / margin-out /
+    // margin-in: real movements, not capital THIS scanner books.
     opts.log?.(`not capital: ${c.txHash.slice(0, 10)}…#${c.logIndex} is ${v.kind} — ${v.why}`);
   }
 

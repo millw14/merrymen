@@ -427,3 +427,190 @@ describe("an energy purchase is not capital to the scanner", () => {
     assert.doesNotMatch(src.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, ""), /kind === "reserve-out"/);
   });
 });
+
+/**
+ * PERP MARGIN IS NOT CAPITAL (docs/perps.md rule 12).
+ *
+ * USDG posted to this account's own Lighter account, and paid back from it,
+ * stays in the book — equity carries the venue side. Booked here it would be a
+ * withdrawal of money that never left (the deposit) and a fresh contribution of
+ * money that was already the owner's (the payout, which arrives in Lighter's
+ * relayer's transaction, so no ledger row of ours names it). The receipts below
+ * are shaped like the live ones: 0x28144cb2… (Approval, Transfer self→proxy,
+ * NewPriorityRequest, Deposit) and the relayer batch 0x0f82c519… (Transfer
+ * proxy→owner at i, WithdrawPending(owner) at i+1, per owner).
+ */
+describe("perp margin moving to and from Lighter is not capital", () => {
+  const PROXY = "0x94bab9693ba2f6358507effcbd372b0660afff9d";
+  const DEPOSIT_TOPIC = "0x493c3b8240368e8343bcd42cac5f4b8b161c06d061710e542a72f06a40ddd9d1";
+  const WITHDRAW_PENDING_TOPIC = "0xef80235b5f4cf1822ad6a8621af41ac64372ff672c402874f507fc63dbe5e06f";
+  const APPROVAL_TOPIC = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925";
+  const STRANGER = "0x7777777777777777777777777777777777777777";
+  const RELAYER_TARGET = "0xa91803ac00000000000000000000000000000000";
+  const word = (v: bigint | string) =>
+    (typeof v === "string" ? v.toLowerCase().replace(/^0x/, "") : v.toString(16)).padStart(64, "0");
+
+  interface Log {
+    address: string;
+    topics: string[];
+    data: string;
+    transactionHash: string;
+    blockNumber: string;
+    logIndex: string;
+  }
+  const at = (tx: string, block: number, logIndex: number) => ({
+    transactionHash: tx,
+    blockNumber: `0x${block.toString(16)}`,
+    logIndex: `0x${logIndex.toString(16)}`,
+  });
+  const usdgTransfer = (tx: string, block: number, i: number, from: string, to: string, value: bigint): Log => ({
+    address: USDG,
+    topics: [TRANSFER_TOPIC, addressTopic(from), addressTopic(to)],
+    data: `0x${word(value)}`,
+    ...at(tx, block, i),
+  });
+  const depositEvent = (tx: string, block: number, i: number, to: string, amount: bigint, accountIndex = 22_149n): Log => ({
+    address: PROXY,
+    topics: [DEPOSIT_TOPIC],
+    data: `0x${word(accountIndex)}${word(to)}${word(3n)}${word(0n)}${word(amount)}`,
+    ...at(tx, block, i),
+  });
+  const withdrawPending = (tx: string, block: number, i: number, owner: string, amount: bigint): Log => ({
+    address: PROXY,
+    topics: [WITHDRAW_PENDING_TOPIC, `0x${word(owner)}`],
+    data: `0x${word(3n)}${word(amount)}`,
+    ...at(tx, block, i),
+  });
+  const filler = (tx: string, block: number, i: number, address: string, topic: string): Log => ({
+    address,
+    topics: [topic],
+    data: "0x",
+    ...at(tx, block, i),
+  });
+
+  /**
+   * A chain whose receipts are WHOLE — every log, with its position — which is
+   * what the venue rule needs and what the plain fake above strips. eth_getLogs
+   * still honours the USDG address and topic filter.
+   */
+  function venueChain(receipts: Log[][]): ReconcileChain {
+    const all = receipts.flat();
+    return {
+      getBlockNumber: async () => 1000n,
+      async getReceiptLogs(txHash) {
+        const logs = all.filter((l) => l.transactionHash.toLowerCase() === String(txHash).toLowerCase());
+        return logs.length ? logs.map((l) => ({ address: l.address, topics: l.topics, data: l.data, logIndex: l.logIndex })) : null;
+      },
+      async getLogs(args) {
+        return all
+          .filter((l) => l.address.toLowerCase() === args.address.toLowerCase())
+          .filter((l) =>
+            args.topics.every((want, i) => {
+              if (want === null || want === undefined) return true;
+              const list = Array.isArray(want) ? want : [want];
+              return list.some((w) => String(w).toLowerCase() === String(l.topics[i]).toLowerCase());
+            }),
+          ) as unknown as RawLog[];
+      },
+    };
+  }
+  const run = (receipts: Log[][], lines: string[] = [], chainId = 4663) =>
+    findTransferFlows({
+      chain: venueChain(receipts),
+      smartAccount: ACCT,
+      usdgToken: USDG,
+      fromBlock: 0n,
+      toBlock: 1000n,
+      knownKeys: new Set<string>(),
+      // EMPTY on purpose: the payout is never in it (it is the relayer's
+      // transaction), and a deposit misses it after a redeploy. The receipt
+      // must decide, not ledger membership.
+      tradeTxHashes: new Set<string>(),
+      chainId,
+      log: (m) => lines.push(m),
+    });
+
+  // 82.973191 USDG, the live deposit's amount.
+  const AMT = 82_973_191n;
+  const OUR_DEPOSIT = [
+    filler("0xd0", 800, 1, USDG, APPROVAL_TOPIC),
+    usdgTransfer("0xd0", 800, 2, ACCT, PROXY, AMT),
+    filler("0xd0", 800, 3, PROXY, "0x" + "ab".repeat(32)),
+    depositEvent("0xd0", 800, 4, ACCT, AMT),
+  ];
+
+  it("OUR DEPOSIT: posted as margin, logged not capital, nothing booked", async () => {
+    const lines: string[] = [];
+    assert.deepEqual(await run([OUR_DEPOSIT], lines), []);
+    assert.ok(lines.some((l) => /margin-out/.test(l)), lines.join("\n"));
+  });
+
+  it("A RELAYER PAYOUT TO US: margin coming home, not a fresh deposit — even batched with other owners", async () => {
+    // The relayer pays a stranger first, then us; each Transfer is followed by
+    // its own WithdrawPending. Only ours touches this account.
+    const payout = [
+      usdgTransfer("0xp0", 810, 10, PROXY, STRANGER, 2_457_020_000n),
+      withdrawPending("0xp0", 810, 11, STRANGER, 2_457_020_000n),
+      usdgTransfer("0xp0", 810, 12, PROXY, ACCT, 8_085_000_000n),
+      withdrawPending("0xp0", 810, 13, ACCT, 8_085_000_000n),
+      filler("0xp0", 810, 14, RELAYER_TARGET, "0x" + "cd".repeat(32)),
+    ];
+    const lines: string[] = [];
+    assert.deepEqual(await run([payout], lines), []);
+    assert.ok(lines.some((l) => /margin-in/.test(l)), lines.join("\n"));
+  });
+
+  it("SOMEONE ELSE'S DEPOSIT IN THE SAME TRANSACTION changes nothing about ours", async () => {
+    // A router batch: a stranger's USDG credited to the stranger, then ours to
+    // us. Pairing is by position, so neither Deposit is mistaken for the other.
+    const batch = [
+      usdgTransfer("0xb0", 820, 1, STRANGER, PROXY, 135_000_000n),
+      depositEvent("0xb0", 820, 2, STRANGER, 135_000_000n, 30_001n),
+      usdgTransfer("0xb0", 820, 3, ACCT, PROXY, AMT),
+      depositEvent("0xb0", 820, 4, ACCT, AMT),
+    ];
+    const lines: string[] = [];
+    assert.deepEqual(await run([batch], lines), []);
+    assert.ok(lines.some((l) => /margin-out/.test(l)));
+  });
+
+  it("OUR USDG CREDITED TO SOMEBODY ELSE'S VENUE ACCOUNT left the book — capital-out, booked as today", async () => {
+    // Only the owner key can make this call (the wall pins `_to` to the
+    // account); the money is gone to an account this book does not own.
+    const gift = [usdgTransfer("0xg0", 830, 2, ACCT, PROXY, AMT), depositEvent("0xg0", 830, 4, STRANGER, AMT)];
+    const flows = await run([gift]);
+    assert.deepEqual(
+      flows.map((f) => [f.direction, f.amountUsdg6, f.txHash]),
+      [["out", AMT, "0xg0"]],
+    );
+  });
+
+  it("A PLAIN USDG TRANSFER TO A STRANGER is still a withdrawal, exactly as before", async () => {
+    const plain = [usdgTransfer("0xs0", 840, 0, ACCT, STRANGER, 5_000_000n)];
+    const flows = await run([plain]);
+    assert.deepEqual(
+      flows.map((f) => [f.direction, f.amountUsdg6]),
+      [["out", 5_000_000n]],
+    );
+  });
+
+  it("A PROXY LEG THE RECEIPT CANNOT PROVE BLOCKS — never booked as capital, never waved through as margin", async () => {
+    // USDG to the proxy with no Deposit after it: neither a proven margin post
+    // nor a proven gift. Ambiguous stops the scanner, as it always has.
+    await assert.rejects(() => run([[usdgTransfer("0xa0", 850, 2, ACCT, PROXY, AMT)]]), /could not be classified/);
+    // And a payout whose next log is not its WithdrawPending.
+    await assert.rejects(
+      () => run([[usdgTransfer("0xa1", 851, 5, PROXY, ACCT, AMT), filler("0xa1", 851, 6, PROXY, "0x" + "ef".repeat(32))]]),
+      /could not be classified/,
+    );
+  });
+
+  it("off Robinhood Chain there is no venue: a proxy-shaped leg is judged exactly as before", async () => {
+    const flows = await run([OUR_DEPOSIT], [], 46630);
+    assert.deepEqual(
+      flows.map((f) => [f.direction, f.amountUsdg6]),
+      [["out", AMT]],
+      "no venue named, so no margin rule — the pre-perps verdict",
+    );
+  });
+});

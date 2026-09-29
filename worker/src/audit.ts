@@ -24,12 +24,197 @@
  *
  * Everything here is pure and takes its inputs as data, so the verifier can run
  * against a file it did not produce, with no access to ~/.merrymen.
+ *
+ * PERPS ADD A FOURTH KIND OF EVIDENCE, AND IT IS NOT THE CHAIN (docs/perps.md,
+ * "Verify"; rule 10). A Lighter fill or funding payment happened on the venue's
+ * own rollup: it is attested by Lighter's API and cannot be re-derived from a
+ * Robinhood Chain receipt. So it is its own class — VENUE-ATTESTED — counted
+ * into the arithmetic (it is money), never counted as chain-verified, never
+ * counted as failed, and always said out loud as a gap in what was checked.
+ * Margin moving between the account and the venue DOES touch the chain, and is
+ * checked against its receipts by this file's own decoder.
  */
 
 import { createHash } from "node:crypto";
 
 /** Must match store.JOURNAL_GENESIS — duplicated so a verifier needs no store. */
 export const GENESIS = "0".repeat(64);
+
+// ── the export formats ──────────────────────────────────────────────────────
+//
+// WHY THE FORMAT STRING CHANGES, NOT JUST THE VERSION NUMBER. Every verifier
+// already shipped checks `format` and never `version` (audit-cli.ts readExport).
+// Bumping only `version` would let an old verifier read a perp book it does not
+// understand, skip every perp record, and then FAIL the arithmetic — equity
+// would include a venue term its composition check has never heard of — which
+// is a false accusation, exit 1, against an honest ledger. A new `format` is
+// refused by every shipped verifier instead ("not a merrymen journal export"):
+// the one outcome an old tool can give that is not a wrong verdict.
+//
+// THE DECISION, stated once: an agent that has never touched perps keeps
+// exporting v1, byte for byte, so every verifier ever shipped still reads it;
+// anything with a perp record, a perp term on a mark, or a venue account is
+// exported as v2. This verifier reads both, and refuses anything else with
+// exit 2 (INDETERMINATE: nothing was judged), never exit 1.
+
+/** The export every verifier has read since the audit trail shipped. No perps. */
+export const JOURNAL_FORMAT_V1 = "merrymen-journal";
+/** The export of a book that holds, or has held, perps. */
+export const JOURNAL_FORMAT_V2 = "merrymen-journal-v2";
+
+/** The journal kinds a perp book writes (store.ts JournalKind). Unknown to a v1 export by construction. */
+export const PERP_JOURNAL_KINDS: readonly string[] = Object.freeze(["perp-fill", "funding", "margin", "perp-carry"]);
+
+/**
+ * THE VENUES THIS VERIFIER KNOWS, PINNED HERE — never taken from the header.
+ *
+ * The header is written by the operator, and anything the auditor must accept
+ * from it is something the operator chose: a header naming a different proxy
+ * could point every margin check at a contract that emits whatever it is told.
+ * So a v2 header must name one of these, and every field it names must equal
+ * the pinned one, or the export is refused. Duplicated from core's
+ * LIGHTER_ROUTE_V1 on purpose (this file imports nothing); audit.test.ts holds
+ * the two equal.
+ */
+export const VERIFIER_VENUES = Object.freeze({
+  "lighter-rh": Object.freeze({
+    /** Robinhood Chain, where the settlement contract lives. */
+    chainId: 4663,
+    /** Lighter's Robinhood instance — the L2 chain id its transactions are signed for. */
+    l2ChainId: 466324,
+    proxy: "0x94bab9693ba2f6358507effcbd372b0660afff9d",
+    usdg: "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+    assetIndex: 3,
+    routeType: 0,
+    usdgTickSize: 1,
+    /** keccak256("Deposit(uint48,address,uint16,uint8,uint128)") — nothing indexed. */
+    depositTopic: "0x493c3b8240368e8343bcd42cac5f4b8b161c06d061710e542a72f06a40ddd9d1",
+    /** keccak256("WithdrawPending(address,uint16,uint128)") — owner indexed. */
+    withdrawPendingTopic: "0xef80235b5f4cf1822ad6a8621af41ac64372ff672c402874f507fc63dbe5e06f",
+  }),
+});
+export type VerifierVenueName = keyof typeof VERIFIER_VENUES;
+export type PinnedVenue = (typeof VERIFIER_VENUES)[VerifierVenueName];
+
+/** What a v2 header says about the venue — every field but the account checked against the pin. */
+export interface ExportVenue {
+  venue: VerifierVenueName;
+  l2ChainId: number;
+  proxy: string;
+  /** Lighter's account index for this agent; null before the first deposit landed (or on paper). */
+  accountIndex: number | null;
+}
+
+/** The venue as the verifier uses it: the pinned constants, plus the one fact only the export can give. */
+export type VerifiedVenue = PinnedVenue & { name: VerifierVenueName; accountIndex: number | null };
+
+export type ExportHeaderVerdict =
+  | { ok: true; version: 1 | 2; venue: VerifiedVenue | null }
+  | { ok: false; why: string };
+
+/**
+ * READ THE HEADER, OR REFUSE IT. Pure. A refusal is INDETERMINATE (exit 2):
+ * this verifier did not judge the record, which is a different fact from the
+ * record being wrong.
+ */
+export function readExportHeader(header: Record<string, unknown>): ExportHeaderVerdict {
+  if (header.format === JOURNAL_FORMAT_V1) {
+    // Every v1 export ever written says version 1; an absent one predates
+    // nothing and is read the same. Any OTHER number under the v1 name is a
+    // writer this verifier has never met.
+    if (header.version !== 1 && header.version !== undefined) {
+      return { ok: false, why: `a '${JOURNAL_FORMAT_V1}' export of version ${JSON.stringify(header.version)} — this verifier reads version 1` };
+    }
+    return { ok: true, version: 1, venue: null };
+  }
+  if (header.format === JOURNAL_FORMAT_V2) {
+    if (header.version !== 2) {
+      return { ok: false, why: `a '${JOURNAL_FORMAT_V2}' export of version ${JSON.stringify(header.version)} — this verifier reads version 2` };
+    }
+    const v = header.venue as Record<string, unknown> | null | undefined;
+    if (!v || typeof v !== "object") return { ok: false, why: "a v2 export must name its venue, and this one does not" };
+    const name = v.venue;
+    if (typeof name !== "string" || !Object.prototype.hasOwnProperty.call(VERIFIER_VENUES, name)) {
+      return { ok: false, why: `this export names a venue this verifier does not know (${JSON.stringify(name)})` };
+    }
+    const pin = VERIFIER_VENUES[name as VerifierVenueName];
+    if (v.l2ChainId !== pin.l2ChainId) {
+      return { ok: false, why: `the export says ${name} signs for L2 chain ${JSON.stringify(v.l2ChainId)}; the pinned one is ${pin.l2ChainId}` };
+    }
+    if (typeof v.proxy !== "string" || v.proxy.toLowerCase() !== pin.proxy) {
+      return {
+        ok: false,
+        why: `the export names ${JSON.stringify(v.proxy)} as ${name}'s settlement contract; the pinned one is ${pin.proxy} — ` +
+          `a margin record checked against the export's own contract would prove nothing`,
+      };
+    }
+    const idx = v.accountIndex;
+    if (idx !== null && !(typeof idx === "number" && Number.isSafeInteger(idx) && idx >= 0)) {
+      return { ok: false, why: `the export's venue account index ${JSON.stringify(idx)} is not an account index` };
+    }
+    return { ok: true, version: 2, venue: { ...pin, name: name as VerifierVenueName, accountIndex: idx as number | null } };
+  }
+  return {
+    ok: false,
+    why: `not a merrymen journal export this verifier knows (format ${JSON.stringify(header.format)}; it reads ` +
+      `'${JOURNAL_FORMAT_V1}' and '${JOURNAL_FORMAT_V2}')`,
+  };
+}
+
+/** Does this journal carry anything a v1 verifier would misread? A perp kind, or a mark with a perp term. */
+export function journalHasPerps(entries: readonly Pick<ExportedEntry, "kind" | "payload_json">[]): boolean {
+  return entries.some((e) => {
+    if (PERP_JOURNAL_KINDS.includes(e.kind)) return true;
+    if (e.kind !== "mark") return false;
+    try {
+      const p = JSON.parse(e.payload_json) as Record<string, unknown>;
+      return Object.keys(p).some((k) => k.startsWith("perp"));
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * THE EXPORT HEADER, v1 or v2 by the rule above. Pure, so the choice is
+ * testable without a ledger. `perpAccount` is the ledger's venue account row
+ * (undefined: the agent has none) — collateral carried into an epoch whose
+ * journal has no perp record yet still makes this a perp book.
+ *
+ * v1's keys, and their order, are exactly what they always were: an agent
+ * without perps exports the same bytes it did before perps existed.
+ */
+export function exportHeader(a: {
+  agentId: string;
+  epoch: number;
+  chainId: number | null;
+  usdgToken: string;
+  entries: readonly Pick<ExportedEntry, "kind" | "payload_json">[];
+  perpAccount?: { accountIndex: number | null };
+}): Record<string, unknown> {
+  const base = {
+    agentId: a.agentId,
+    epoch: a.epoch,
+    chainId: a.chainId,
+    usdgToken: a.usdgToken,
+    records: a.entries.length,
+  };
+  if (a.perpAccount === undefined && !journalHasPerps(a.entries)) {
+    return { format: JOURNAL_FORMAT_V1, version: 1, ...base };
+  }
+  const pin = VERIFIER_VENUES["lighter-rh"];
+  return {
+    format: JOURNAL_FORMAT_V2,
+    version: 2,
+    ...base,
+    venue: {
+      venue: "lighter-rh",
+      l2ChainId: pin.l2ChainId,
+      proxy: pin.proxy,
+      accountIndex: a.perpAccount?.accountIndex ?? null,
+    },
+  };
+}
 
 export interface ExportedEntry {
   seq: number;
@@ -159,6 +344,97 @@ export interface ReconstructedBook {
   chainRefs: { kind: string; txHash: string; seq: number }[];
   /** Records that move money but name NO transaction. */
   unanchored: { kind: string; seq: number; why: string }[];
+
+  // ── perps (v2 exports; every figure is 0 and every list empty in v1) ─────
+  //
+  // OPTIONAL, and absent means exactly what a v1 book means: no venue, a known
+  // zero, nothing refused. reconstruct always fills them; a caller building a
+  // book by hand from before perps (a test, a report) need not.
+
+  /** Which export this was read as — it decides what an absent perp term means. */
+  formatVersion?: 1 | 2;
+  /** Σ realized P&L on perp fills, USDG. Money the venue says was made or lost. */
+  perpRealizedUsdg?: number;
+  /** Σ perp trading fees, USDG (signed: a maker rebate is negative). */
+  perpFeesUsdg?: number;
+  /** Σ funding, USDG, from the holder's side: + received, − paid. */
+  perpFundingUsdg?: number;
+  /**
+   * Perp money terms this verifier could not read — a fill whose realized P&L
+   * the writer had not derived (null is unknown, never zero), or an amount that
+   * is not a canonical integer. Any at all and the identity is not closed.
+   */
+  perpUnreadTerms?: number;
+  /** Open positions carried into this epoch at mark. Their P&L is measured from the carry, the venue's U from the entry. */
+  perpCarries?: number;
+  /**
+   * The latest mark's venue terms, integer micro-USDG, taken from the SAME
+   * entry as its equity. In v1 they are a KNOWN zero (a v1 book has no venue);
+   * in v2 a mark that does not state them all is null — unknown, never zero.
+   */
+  publishedPerp?: {
+    collateralMicro: bigint;
+    isolatedMarginMicro: bigint;
+    unrealizedMicro: bigint;
+    unrealizedGainMicro: bigint;
+    inTransitMicro: bigint;
+  } | null;
+  /**
+   * VENUE-ATTESTED records: Lighter fills and funding, and the steps of a margin
+   * transfer that happen on the venue's rollup. Counted into the arithmetic,
+   * never chain-verified and never failed — and always a gap in what was checked.
+   */
+  venueAttested?: { kind: string; seq: number; why: string }[];
+  /**
+   * RECORDS THIS VERIFIER DOES NOT UNDERSTAND. Never skipped: a kind nobody
+   * taught this file moves money nobody can see, so the arithmetic is not judged
+   * at all (neither passed nor failed) and the verdict is INDETERMINATE.
+   */
+  unknownRecords?: { kind: string; seq: number; why: string }[];
+}
+
+/** How reconstruct reads an export: the version (from its header) decides what a perp record means. */
+export interface ReconstructOptions {
+  /** 1 (the default, and every caller before perps) or 2. */
+  version?: 1 | 2;
+}
+
+/** A canonical integer string (optionally signed), as micro-USDG — or null. The writer never emits anything else. */
+function microOf(v: unknown, signed: boolean): bigint | null {
+  if (typeof v !== "string" || !(signed ? /^-?(0|[1-9]\d*)$/ : /^(0|[1-9]\d*)$/).test(v) || v === "-0") return null;
+  return BigInt(v);
+}
+
+const microToUsdg = (m: bigint) => Number(m) / 1e6;
+
+/** A 0x-prefixed 32-byte transaction hash — the only kind an eth RPC is ever asked about. Lighter's 80-hex L2 hashes never are. */
+const EVM_TX_HASH = /^0x[0-9a-fA-F]{64}$/;
+
+/**
+ * THE ROBINHOOD CHAIN TRANSACTION A MARGIN RECORD STANDS ON, or null when this
+ * step of the transfer happened on the venue alone.
+ *
+ *   deposit, the step money LEFT the account (from nothing or `submitted`) —
+ *            its UserOp's transaction, which must carry the proxy's Deposit;
+ *   withdrawal, the step money ARRIVED (`paid`) — the payout, which must carry
+ *            the proxy's WithdrawPending naming the account.
+ * Every other step (credited, executed, failed, refunded) is the venue's word.
+ * Exported so reconstruct and compareRecord cannot pick different hashes.
+ */
+export function marginChainHash(p: Record<string, unknown>): string | null {
+  if (p.direction === "deposit" && (p.from === null || p.from === undefined || p.from === "submitted")) {
+    return typeof p.txHash === "string" && EVM_TX_HASH.test(p.txHash) ? p.txHash : null;
+  }
+  if (p.direction === "withdraw" && p.to === "paid") {
+    return typeof p.paidTxHash === "string" && EVM_TX_HASH.test(p.paidTxHash) ? p.paidTxHash : null;
+  }
+  return null;
+}
+
+/** Is this margin step one the chain saw, rather than one the venue reports? */
+function marginOnChainStep(p: Record<string, unknown>): boolean {
+  return (p.direction === "deposit" && (p.from === null || p.from === undefined || p.from === "submitted")) ||
+    (p.direction === "withdraw" && p.to === "paid");
 }
 
 /**
@@ -169,8 +445,10 @@ export interface ReconstructedBook {
  * listed. An auditor who wants only chain-verifiable figures drops them and
  * recomputes; one who accepts them at least knows what they accepted.
  */
-export function reconstruct(entries: readonly ExportedEntry[]): ReconstructedBook {
-  const book: ReconstructedBook = {
+export function reconstruct(entries: readonly ExportedEntry[], opts: ReconstructOptions = {}): ReconstructedBook {
+  const version = opts.version ?? 1;
+  // Every optional perp field is filled here — Required, so none can be missed.
+  const book: Required<ReconstructedBook> = {
     netContributionsUsdg: 0,
     realizedPnlUsdg: 0,
     gasWei: 0n,
@@ -186,6 +464,20 @@ export function reconstruct(entries: readonly ExportedEntry[]): ReconstructedBoo
     grossBuyNotionalUsdg: 0,
     chainRefs: [],
     unanchored: [],
+    formatVersion: version,
+    perpRealizedUsdg: 0,
+    perpFeesUsdg: 0,
+    perpFundingUsdg: 0,
+    perpUnreadTerms: 0,
+    perpCarries: 0,
+    // A v1 book has no venue: its perp term is a KNOWN zero, so the identity is
+    // exactly the one it always was. A v2 book's is read off its latest mark.
+    publishedPerp:
+      version === 1
+        ? { collateralMicro: 0n, isolatedMarginMicro: 0n, unrealizedMicro: 0n, unrealizedGainMicro: 0n, inTransitMicro: 0n }
+        : null,
+    venueAttested: [],
+    unknownRecords: [],
   };
 
   for (const e of entries) {
@@ -194,6 +486,28 @@ export function reconstruct(entries: readonly ExportedEntry[]): ReconstructedBoo
       p = JSON.parse(e.payload_json) as Record<string, unknown>;
     } catch {
       continue; // verifyChain already reports an unparseable payload as edited
+    }
+
+    // ── A KIND THIS VERIFIER WAS NEVER TAUGHT IS REFUSED, NOT SKIPPED ──────
+    //
+    // This loop used to fall through any kind it did not handle, so a newer
+    // writer's records — money, all of it — vanished from the reconstruction
+    // and the arithmetic then accused the ledger of not adding up. `fee` is an
+    // accrual (the performance fee is not in the equity identity) and is the
+    // one known kind with no arm below. The perp kinds are known only to a v2
+    // export: a v1 file carrying one was written wrong, and is not guessed at.
+    const known =
+      e.kind === "flow" || e.kind === "fill" || e.kind === "mark" || e.kind === "fee" ||
+      (version === 2 && PERP_JOURNAL_KINDS.includes(e.kind));
+    if (!known) {
+      book.unknownRecords.push({
+        kind: e.kind,
+        seq: e.seq,
+        why: PERP_JOURNAL_KINDS.includes(e.kind)
+          ? `a perp record in a '${JOURNAL_FORMAT_V1}' export — only '${JOURNAL_FORMAT_V2}' carries these; re-export it`
+          : `kind '${e.kind}' is not one this verifier knows — a newer merrymen wrote it`,
+      });
+      continue;
     }
 
     if (e.kind === "flow") {
@@ -260,8 +574,90 @@ export function reconstruct(entries: readonly ExportedEntry[]): ReconstructedBoo
         book.publishedVaultUsdg = typeof p.vaultUsdg === "number" ? p.vaultUsdg : null;
         book.publishedQuarantinedCostUsdg =
           typeof p.quarantinedCostUsdg === "number" ? p.quarantinedCostUsdg : null;
+        // THE VENUE'S TERMS, from the same entry. v2: all five, canonical, or
+        // unknown. v1: a known zero — and a v1 mark that nonetheless carries a
+        // perp term is not a v1 book, so it is refused rather than summed.
+        const perpKeys = Object.keys(p).filter((k) => k.startsWith("perp"));
+        if (version === 1) {
+          if (perpKeys.length > 0) {
+            book.unknownRecords.push({
+              kind: "mark",
+              seq: e.seq,
+              why: `a mark with perp terms in a '${JOURNAL_FORMAT_V1}' export — only '${JOURNAL_FORMAT_V2}' carries these; re-export it`,
+            });
+          }
+        } else {
+          const c = microOf(p.perpCollateralMicro, true);
+          const m = microOf(p.perpIsolatedMarginMicro, false);
+          const u = microOf(p.perpUnrealizedMicro, true);
+          const g = microOf(p.perpUnrealizedGainMicro, false);
+          const t = microOf(p.perpInTransitMicro, false);
+          book.publishedPerp =
+            c !== null && m !== null && u !== null && g !== null && t !== null
+              ? { collateralMicro: c, isolatedMarginMicro: m, unrealizedMicro: u, unrealizedGainMicro: g, inTransitMicro: t }
+              : null;
+        }
       }
     }
+
+    // ── perps (v2 only; refused above in a v1 export) ────────────────────
+    if (e.kind === "perp-fill") {
+      const fee = microOf(p.feeMicro, true);
+      const realized = p.realizedMicro === null ? null : microOf(p.realizedMicro, true);
+      // Unknown realized is not zero realized: the writer books it null until
+      // it is derived, and a sum that treated it as 0 would close an identity
+      // it has no right to close.
+      if (fee === null || realized === null) book.perpUnreadTerms += 1;
+      if (fee !== null) book.perpFeesUsdg += microToUsdg(fee);
+      if (realized !== null) book.perpRealizedUsdg += microToUsdg(realized);
+      if (p.mode === "paper") {
+        book.unanchored.push({ kind: "perp-fill", seq: e.seq, why: "simulated perp fill — nothing was signed, so there is nothing to check" });
+      } else {
+        book.venueAttested.push({
+          kind: "perp-fill",
+          seq: e.seq,
+          why: `a Lighter trade (${String(p.market ?? p.marketId)}) — attested by the venue's API, not re-derivable from Robinhood Chain`,
+        });
+      }
+    }
+
+    if (e.kind === "funding") {
+      const pay = microOf(p.paymentMicro, true);
+      if (pay === null) book.perpUnreadTerms += 1;
+      else book.perpFundingUsdg += microToUsdg(pay);
+      if (p.mode === "paper") {
+        book.unanchored.push({ kind: "funding", seq: e.seq, why: "simulated funding — nothing was paid, so there is nothing to check" });
+      } else {
+        book.venueAttested.push({
+          kind: "funding",
+          seq: e.seq,
+          why: `a Lighter funding payment (${String(p.market ?? p.marketId)}) — attested by the venue's API, not re-derivable from Robinhood Chain`,
+        });
+      }
+    }
+
+    // Margin moves money between two places the book owns, so it is not in the
+    // equity identity at all — equity carries both sides. What it IS, is
+    // evidence: the chain steps are checked against their receipts.
+    if (e.kind === "margin") {
+      if (p.mode === "paper") {
+        book.unanchored.push({ kind: "margin", seq: e.seq, why: "simulated margin transfer — instantaneous on paper, nothing on chain" });
+      } else if (marginOnChainStep(p)) {
+        const hash = marginChainHash(p);
+        if (hash) book.chainRefs.push({ kind: "margin", txHash: hash, seq: e.seq });
+        else book.unanchored.push({ kind: "margin", seq: e.seq, why: "a margin transfer's on-chain step with no Robinhood Chain transaction recorded" });
+      } else {
+        book.venueAttested.push({
+          kind: "margin",
+          seq: e.seq,
+          why: `a ${String(p.direction)} reaching '${String(p.to)}' on the venue — the venue's word, not a chain receipt`,
+        });
+      }
+    }
+
+    // An epoch boundary's carry at mark moves no money; it resets where the
+    // position's P&L is measured from (store.ts perp_carries).
+    if (e.kind === "perp-carry") book.perpCarries += 1;
   }
   return book;
 }
@@ -272,7 +668,8 @@ export function reconstruct(entries: readonly ExportedEntry[]): ReconstructedBoo
 export interface FetchedReceipt {
   /** '0x1' success, '0x0' reverted. */
   status: string;
-  logs: readonly { address: string; topics: readonly string[]; data: string }[];
+  /** `logIndex` as the RPC returns it (hex); read only by the margin check, which pairs by position when it can. */
+  logs: readonly { address: string; topics: readonly string[]; data: string; logIndex?: string | number }[];
 }
 
 /** ERC-20 Transfer. Re-declared here so the verifier depends on nothing. */
@@ -332,10 +729,14 @@ export function compareRecord(args: {
   receipt: FetchedReceipt | null;
   account: string;
   usdgToken: string;
+  /** The venue a v2 export names, already checked against the pin (readExportHeader). Needed for `margin`. */
+  venue?: VerifiedVenue | null;
 }): AuditFinding[] {
   const { seq, kind, payload, receipt, account, usdgToken } = args;
   const findings: AuditFinding[] = [];
-  const txHash = String(payload.txHash ?? "");
+  // A margin record's chain transaction is not always `txHash` (a payout is
+  // `paidTxHash`); marginChainHash is the one answer reconstruct also used.
+  const txHash = kind === "margin" ? String(marginChainHash(payload) ?? "") : String(payload.txHash ?? "");
 
   if (!receipt) {
     findings.push({ check: "onchain", seq, detail: `${txHash}: no such transaction on this chain` });
@@ -349,6 +750,8 @@ export function compareRecord(args: {
     });
     return findings;
   }
+
+  if (kind === "margin") return compareMargin({ seq, txHash, payload, receipt, account, venue: args.venue ?? null });
 
   const deltas = receiptDeltas(receipt, account);
   const usdgDelta = deltas.get(usdgToken.toLowerCase()) ?? 0n;
@@ -419,6 +822,163 @@ function absDiff(a: bigint, b: bigint): bigint {
   return a > b ? a - b : b - a;
 }
 
+// ── margin against its receipt ──────────────────────────────────────────────
+//
+// A SECOND DECODER, ON PURPOSE. core's capital-classify.ts decodes the same two
+// proxy events for the scanner that WROTE these records; importing it here
+// would let one decoding mistake confirm itself. So this is the tiny decode
+// again, by hand, strictly: exact topic count, exact data length, every word
+// inside its declared type.
+
+const WORD = /^[0-9a-fA-F]{64}$/;
+
+/** The 32-byte words of `data`, or null unless there are exactly `n`. */
+function dataWords(data: string, n: number): bigint[] | null {
+  if (typeof data !== "string" || !data.startsWith("0x") || data.length !== 2 + 64 * n) return null;
+  const out: bigint[] = [];
+  for (let i = 0; i < n; i++) {
+    const w = data.slice(2 + 64 * i, 2 + 64 * (i + 1));
+    if (!WORD.test(w)) return null;
+    out.push(BigInt(`0x${w}`));
+  }
+  return out;
+}
+
+/** A word holding an address and nothing else, lowercased — or null. */
+function wordAddress(w: bigint | undefined): string | null {
+  if (w === undefined || w >> 160n !== 0n) return null;
+  return `0x${w.toString(16).padStart(40, "0")}`;
+}
+
+function logPosition(v: string | number | undefined): number | null {
+  if (typeof v === "number") return Number.isSafeInteger(v) && v >= 0 ? v : null;
+  if (typeof v === "string" && /^(0x[0-9a-fA-F]+|\d+)$/.test(v)) {
+    const n = Number(v);
+    return Number.isSafeInteger(n) ? n : null;
+  }
+  return null;
+}
+
+type ReceiptLogOf = FetchedReceipt["logs"][number];
+
+/** Deposit(uint48 toAccountIndex, address toAddress, uint16 assetIndex, uint8 routeType, uint128 baseAmount), nothing indexed. */
+function readDeposit(l: ReceiptLogOf, venue: VerifiedVenue) {
+  if (l.address.toLowerCase() !== venue.proxy || l.topics.length !== 1 || l.topics[0]?.toLowerCase() !== venue.depositTopic) return null;
+  const w = dataWords(l.data, 5);
+  if (!w) return null;
+  const [acct, to, asset, route, amount] = w as [bigint, bigint, bigint, bigint, bigint];
+  const toAddress = wordAddress(to);
+  if (toAddress === null || acct >> 48n !== 0n || asset >> 16n !== 0n || route >> 8n !== 0n || amount >> 128n !== 0n) return null;
+  return { toAccountIndex: acct, toAddress, assetIndex: Number(asset), routeType: Number(route), amount: amount * BigInt(venue.usdgTickSize), at: logPosition(l.logIndex) };
+}
+
+/** WithdrawPending(address indexed owner, uint16 assetIndex, uint128 baseAmount). */
+function readWithdrawPending(l: ReceiptLogOf, venue: VerifiedVenue) {
+  if (l.address.toLowerCase() !== venue.proxy || l.topics.length !== 2 || l.topics[0]?.toLowerCase() !== venue.withdrawPendingTopic) return null;
+  const t1 = l.topics[1] ?? "";
+  if (!/^0x[0-9a-fA-F]{64}$/.test(t1)) return null;
+  const owner = wordAddress(BigInt(t1));
+  const w = dataWords(l.data, 2);
+  if (!owner || !w) return null;
+  const [asset, amount] = w as [bigint, bigint];
+  if (asset >> 16n !== 0n || amount >> 128n !== 0n) return null;
+  return { owner, assetIndex: Number(asset), amount: amount * BigInt(venue.usdgTickSize) };
+}
+
+/** Σ of the venue's USDG moving `from` → `to` in this receipt — Transfer logs of the pinned token only. */
+function usdgMoved(receipt: FetchedReceipt, venue: VerifiedVenue, from: string, to: string): bigint {
+  let sum = 0n;
+  for (const l of receipt.logs) {
+    if (l.address.toLowerCase() !== venue.usdg || l.topics.length !== 3 || l.topics[0]?.toLowerCase() !== TRANSFER_TOPIC) continue;
+    const f = `0x${(l.topics[1] ?? "").slice(-40)}`.toLowerCase();
+    const t = `0x${(l.topics[2] ?? "").slice(-40)}`.toLowerCase();
+    const w = dataWords(l.data, 1);
+    if (f === from && t === to && w) sum += w[0]!;
+  }
+  return sum;
+}
+
+/**
+ * CHECK ONE MARGIN STEP AGAINST THE RECEIPT IT NAMES (docs/perps.md, "Verify").
+ *
+ *   deposit — the account's USDG went to the PINNED proxy for the amount
+ *             claimed, and the proxy's own Deposit in the same receipt credits
+ *             THIS account (and, when the export names one, this venue account
+ *             index) with exactly that, asset 3, route 0 — at the log the
+ *             record names, when it names one. A Deposit crediting anybody else
+ *             is a finding: that money left the book.
+ *   payout  — the proxy paid this account in this receipt, and says so with a
+ *             WithdrawPending naming it; the USDG it received from the proxy
+ *             equals what those events say. The AMOUNT is not held to the one
+ *             record: payouts carry no withdrawal id, the relayer batches them,
+ *             and a row is marked paid when payouts in aggregate cover it — so
+ *             one payout may complete a row it only part-paid. That limit is
+ *             stated, not papered over.
+ */
+function compareMargin(a: {
+  seq: number;
+  txHash: string;
+  payload: Record<string, unknown>;
+  receipt: FetchedReceipt;
+  account: string;
+  venue: VerifiedVenue | null;
+}): AuditFinding[] {
+  const { seq, txHash, payload, receipt } = a;
+  const me = a.account.toLowerCase();
+  const finding = (detail: string): AuditFinding[] => [{ check: "onchain", seq, detail: `${txHash}: ${detail}` }];
+  if (!a.venue) return finding("a margin record, but the export names no venue to check it against");
+  const venue = a.venue;
+  const amount = microOf(payload.amountMicro, false);
+  if (amount === null || amount === 0n) return finding(`the record's amount ${JSON.stringify(payload.amountMicro)} is not a positive integer`);
+
+  if (payload.direction === "deposit") {
+    const sent = usdgMoved(receipt, venue, me, venue.proxy);
+    if (sent < amount) {
+      return finding(`ledger claims ${fmtUsdg(amount)} USDG posted to the venue, chain shows ${fmtUsdg(sent)} sent to ${venue.proxy}`);
+    }
+    const deposits = receipt.logs.map((l) => readDeposit(l, venue)).filter((d): d is NonNullable<typeof d> => d !== null);
+    const wantAt = typeof payload.logIndex === "number" ? payload.logIndex : null;
+    const candidates = wantAt === null ? deposits : deposits.filter((d) => d.at === wantAt);
+    const ours = candidates.find(
+      (d) =>
+        d.toAddress === me &&
+        d.assetIndex === venue.assetIndex &&
+        d.routeType === venue.routeType &&
+        d.amount === amount &&
+        (venue.accountIndex === null || d.toAccountIndex === BigInt(venue.accountIndex)),
+    );
+    if (ours) return [];
+    const elsewhere = candidates.find((d) => d.toAddress !== me && d.amount === amount);
+    if (elsewhere) {
+      return finding(
+        `the venue's Deposit credits ${elsewhere.toAddress}, not this account — ${fmtUsdg(amount)} USDG left the book, it was not posted as margin`,
+      );
+    }
+    return finding(
+      `no Deposit from ${venue.proxy} ${wantAt === null ? "" : `at log ${wantAt} `}credits this account` +
+        (venue.accountIndex === null ? "" : ` (venue account ${venue.accountIndex})`) +
+        ` with ${fmtUsdg(amount)} USDG of asset ${venue.assetIndex} on route ${venue.routeType}`,
+    );
+  }
+
+  if (payload.direction === "withdraw") {
+    let named = 0n;
+    for (const l of receipt.logs) {
+      const w = readWithdrawPending(l, venue);
+      if (w && w.owner === me && w.assetIndex === venue.assetIndex) named += w.amount;
+    }
+    if (named === 0n) return finding(`no WithdrawPending from ${venue.proxy} names this account — this is not a payout to it`);
+    const received = usdgMoved(receipt, venue, venue.proxy, me);
+    if (received !== named) {
+      return finding(
+        `the venue's WithdrawPending events name ${fmtUsdg(named)} USDG for this account, but it received ${fmtUsdg(received)} from ${venue.proxy}`,
+      );
+    }
+    return [];
+  }
+  return finding(`a margin record with direction ${JSON.stringify(payload.direction)}`);
+}
+
 function fmtUsdg(units: bigint): string {
   return (Number(units) / 1e6).toFixed(6);
 }
@@ -473,6 +1033,21 @@ export function reconcile(book: ReconstructedBook): {
    */
   findings: AuditFinding[];
 } {
+  // RECORDS NOBODY TAUGHT THIS FILE ARE NOT JUDGED AT ALL. Their money is in
+  // equity and in no figure here, so any residual would be the verifier's
+  // ignorance dressed as the ledger's fault. Not a pass (checked: false), not a
+  // failure (no finding) — the caller's verdict is INDETERMINATE.
+  const unknown = book.unknownRecords ?? [];
+  if (unknown.length > 0) {
+    return {
+      residualUsdg: null,
+      checked: false,
+      note:
+        `${unknown.length} record(s) of a kind this verifier does not understand ` +
+        `(${[...new Set(unknown.map((u) => u.kind))].join(", ")}) — the arithmetic is not judged`,
+      findings: [],
+    };
+  }
   if (book.publishedEquityUsdg === null) {
     return {
       residualUsdg: null,
@@ -489,9 +1064,36 @@ export function reconcile(book: ReconstructedBook): {
   // not part of what equity has to explain, and subtracting it here would
   // manufacture a residual that isn't there. It is charged against P&L
   // separately (see pnlUsdg), which is a different question from this one.
-  const explained = book.netContributionsUsdg + book.realizedPnlUsdg;
+  //
+  // PERPS (docs/perps.md, "Verify"): the venue's realized P&L and funding are
+  // money made or lost, and its fees money spent, so each is part of what
+  // equity must be explained by. Margin is not — it moved between two places
+  // the book owns, and equity carries both. What remains after them is
+  // unrealized: the spot positions' AND the venue's (U), which the envelope
+  // below takes back out before bounding the spot half. With no perps every
+  // one of these is 0 and the arithmetic is exactly what it always was.
+  const perpRealized = book.perpRealizedUsdg ?? 0;
+  const perpFees = book.perpFeesUsdg ?? 0;
+  const perpFunding = book.perpFundingUsdg ?? 0;
+  const hasPerpMoney = perpRealized !== 0 || perpFees !== 0 || perpFunding !== 0;
+  const explained = hasPerpMoney
+    ? book.netContributionsUsdg + book.realizedPnlUsdg + perpRealized - perpFees + perpFunding
+    : book.netContributionsUsdg + book.realizedPnlUsdg;
   const residual = book.publishedEquityUsdg - explained;
   const findings: AuditFinding[] = [];
+  // The latest mark's venue terms. Absent from a hand-built book is a v1 book:
+  // a known zero. Null (a v2 mark that did not state them all) is UNKNOWN.
+  const perpTerms =
+    book.publishedPerp === undefined
+      ? { collateralMicro: 0n, isolatedMarginMicro: 0n, unrealizedMicro: 0n, unrealizedGainMicro: 0n, inTransitMicro: 0n }
+      : book.publishedPerp;
+  const perpKnown = perpTerms !== null;
+  const perpAccount =
+    perpTerms === null
+      ? 0
+      : microToUsdg(perpTerms.collateralMicro + perpTerms.isolatedMarginMicro + perpTerms.unrealizedMicro + perpTerms.inTransitMicro);
+  const perpUnrealized = perpTerms === null ? 0 : microToUsdg(perpTerms.unrealizedMicro);
+  const hasPerpTerm = perpTerms !== null && perpAccount !== 0;
 
   // COMPOSITION. Only checked when EVERY term of the composition was published.
   //
@@ -546,17 +1148,40 @@ export function reconcile(book: ReconstructedBook): {
   // understated floor; that limit is real and is not papered over here, it is
   // simply smaller than the bug it replaces.
   const basisVisible = book.grossBuyNotionalUsdg > 0 || (pos ?? 0) <= ARITHMETIC_TOLERANCE_USDG;
-  if (cash !== null && pos !== null && vault !== null && quarantineKnown) {
-    const parts = cash + pos + vault + quarantine;
+  if (cash !== null && pos !== null && vault !== null && quarantineKnown && perpKnown) {
+    // + the venue's C + ΣM + ΣU + T (docs/perps.md rule 12) — 0 for a book
+    // without perps, and then this is the four-term sum it always was.
+    const parts = hasPerpTerm ? cash + pos + vault + quarantine + perpAccount : cash + pos + vault + quarantine;
     if (Math.abs(book.publishedEquityUsdg - parts) > ARITHMETIC_TOLERANCE_USDG) {
       findings.push({
         seq: 0,
         check: "arithmetic",
+        detail: hasPerpTerm
+          ? `published equity ${book.publishedEquityUsdg.toFixed(6)} does not equal the components published with it ` +
+            `(cash ${cash.toFixed(6)} + positions ${pos.toFixed(6)} + vault ${vault.toFixed(6)} + quarantined ` +
+            `${quarantine.toFixed(6)} + at Lighter ${perpAccount.toFixed(6)} = ${parts.toFixed(6)}, off by ` +
+            `${(book.publishedEquityUsdg - parts).toFixed(6)}). One of the six figures is wrong.`
+          : `published equity ${book.publishedEquityUsdg.toFixed(6)} does not equal the components published with it ` +
+            `(cash ${cash.toFixed(6)} + positions ${pos.toFixed(6)} + vault ${vault.toFixed(6)} + quarantined ` +
+            `${quarantine.toFixed(6)} = ${parts.toFixed(6)}, off by ${(book.publishedEquityUsdg - parts).toFixed(6)}). ` +
+            `One of the five figures is wrong.`,
+      });
+    }
+  }
+  // THE PEAK TERM MUST BE WHAT IT CLAIMS. Σ max(0, Uᵢ) can never be below 0 nor
+  // below max(0, ΣUᵢ) — per position it is at least the net. A figure under
+  // that would have let the high-water mark and the fee ratchet on an open
+  // gain the writer said it had left out. Our own arithmetic, so it may fail.
+  if (perpTerms !== null) {
+    const floor = perpTerms.unrealizedMicro > 0n ? perpTerms.unrealizedMicro : 0n;
+    if (perpTerms.unrealizedGainMicro < floor) {
+      findings.push({
+        seq: 0,
+        check: "arithmetic",
         detail:
-          `published equity ${book.publishedEquityUsdg.toFixed(6)} does not equal the components published with it ` +
-          `(cash ${cash.toFixed(6)} + positions ${pos.toFixed(6)} + vault ${vault.toFixed(6)} + quarantined ` +
-          `${quarantine.toFixed(6)} = ${parts.toFixed(6)}, off by ${(book.publishedEquityUsdg - parts).toFixed(6)}). ` +
-          `One of the five figures is wrong.`,
+          `the mark's open perp gain ${microToUsdg(perpTerms.unrealizedGainMicro).toFixed(6)} is less than its net ` +
+          `unrealized P&L ${microToUsdg(perpTerms.unrealizedMicro).toFixed(6)} — a per-position sum of gains cannot be, ` +
+          `so the figure every peak subtracts is wrong`,
       });
     }
   }
@@ -569,16 +1194,38 @@ export function reconcile(book: ReconstructedBook): {
   // and leaving it out would report the quarantine itself as money from nowhere.
   // Absent means unknown, and an unknown term makes the bound unusable rather
   // than smaller, so the check is skipped exactly as the composition one is.
-  if (pos !== null && quarantineKnown && contributionsRecorded && basisVisible) {
+  //
+  // PERPS NARROW WHEN IT CAN RUN, never widen it. The residual holds the
+  // venue's unrealized U too, and U is the venue's word — so it comes out
+  // before the spot half is bounded, and no perp-loss floor is added (an
+  // account can be bankrupt at mark before it is liquidated). Skipped when the
+  // venue terms are unknown, when a perp money term could not be read (a null
+  // realized is unknown, not zero), or when a position was carried into this
+  // epoch: its P&L here is measured from the carry's mark while the venue's U
+  // is measured from the original entry, and nothing in this journal says
+  // what that entry was.
+  const perpClosable = perpKnown && (book.perpUnreadTerms ?? 0) === 0 && (book.perpCarries ?? 0) === 0;
+  const spotResidual = hasPerpTerm ? residual - perpUnrealized : residual;
+  if (pos !== null && quarantineKnown && contributionsRecorded && basisVisible && perpClosable) {
     const ceiling = pos + quarantine + ARITHMETIC_TOLERANCE_USDG;
     const floor = -book.grossBuyNotionalUsdg - ARITHMETIC_TOLERANCE_USDG;
+    // The SPOT half, shadowing the whole residual on purpose: every message
+    // below is about what the spot positions can explain.
+    const residual = spotResidual;
+    // Said only when there is perp money, so a spot book's findings read word
+    // for word as they always have.
+    const perpClause =
+      hasPerpMoney || hasPerpTerm
+        ? ` + perp (realized ${perpRealized.toFixed(6)} − fees ${perpFees.toFixed(6)} + funding ${perpFunding.toFixed(6)}, ` +
+          `and the venue's unrealized ${perpUnrealized.toFixed(6)})`
+        : "";
     if (residual > ceiling) {
       findings.push({
         seq: 0,
         check: "arithmetic",
         detail:
           `equity exceeds what the record can explain by ${(residual - pos - quarantine).toFixed(6)} USDG: ` +
-          `contributions ${book.netContributionsUsdg.toFixed(6)} + realized ${book.realizedPnlUsdg.toFixed(6)} leaves ` +
+          `contributions ${book.netContributionsUsdg.toFixed(6)} + realized ${book.realizedPnlUsdg.toFixed(6)}${perpClause} leaves ` +
           `a residual of ${residual.toFixed(6)}, but what is held is marked at only ${pos.toFixed(6)}` +
           (quarantine > 0 ? ` (+ ${quarantine.toFixed(6)} quarantined at cost)` : "") +
           `. Unrealized gain cannot exceed the whole value of what is held, so money is unaccounted for — most ` +
@@ -590,7 +1237,7 @@ export function reconcile(book: ReconstructedBook): {
         check: "arithmetic",
         detail:
           `contributions exceed what the record can support by ${Math.abs(residual - floor).toFixed(6)} USDG: ` +
-          `contributions ${book.netContributionsUsdg.toFixed(6)} + realized ${book.realizedPnlUsdg.toFixed(6)} against ` +
+          `contributions ${book.netContributionsUsdg.toFixed(6)} + realized ${book.realizedPnlUsdg.toFixed(6)}${perpClause} against ` +
           `equity ${book.publishedEquityUsdg.toFixed(6)} implies an unrealized LOSS of ${Math.abs(residual).toFixed(6)}, ` +
           `but only ${book.grossBuyNotionalUsdg.toFixed(6)} was ever spent acquiring positions — you cannot lose more ` +
           `on a position than it cost. The usual cause is the same capital being booked as a contribution more than ` +
@@ -604,10 +1251,15 @@ export function reconcile(book: ReconstructedBook): {
     findings,
     // Both checks need every term of the composition; neither ran without them.
     checked:
-      quarantineKnown && cash !== null && pos !== null && vault !== null && contributionsRecorded && basisVisible,
+      quarantineKnown && cash !== null && pos !== null && vault !== null && contributionsRecorded && basisVisible &&
+      perpClosable,
     note:
-      "residual = published equity − (contributions + realized). It is the unrealized " +
-      "mark-to-market on open positions, and is expected to be non-zero while any position is open. " +
+      (hasPerpMoney || hasPerpTerm
+        ? "residual = published equity − (contributions + realized + perp realized − perp fees + funding). It is the " +
+          "unrealized mark-to-market on open positions, spot and perp (the venue's own U), and is expected to be " +
+          "non-zero while any position is open. "
+        : "residual = published equity − (contributions + realized). It is the unrealized " +
+          "mark-to-market on open positions, and is expected to be non-zero while any position is open. ") +
       "Gas is excluded here because it never entered equity; it is charged against P&L instead.",
   };
 }

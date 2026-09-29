@@ -74,7 +74,7 @@ import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } from "./telegram/chat-settings";
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
-import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
+import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, lighterVenueProxies, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
 import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
 import { makePgDb, translateSchema, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
@@ -107,6 +107,7 @@ import {
   type TgGroupsRestore,
 } from "./tg-groups-ferry";
 import { storeDek } from "./store-crypto";
+import { syncChildPerpKey, type ChildPerpKeyOutcome } from "./perps/child-key";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
 import { addressesOf, makeBuilderDesk, type BuilderDesk } from "./builder-pass";
@@ -891,6 +892,36 @@ async function sweepTgGroups(wanted: ReadonlySet<string>, listedAtMs: number): P
   }
 }
 
+/** The last failure logged per tenant, so a refresh pass every 15 s does not repeat it. */
+const perpKeyFailureLogged = new Map<string, ChildPerpKeyOutcome>();
+
+/**
+ * Keep `<home>/perp-key.json` in step with the grant (perps/child-key.ts).
+ * Logged by OUTCOME only — never a byte of the key — and only when it says
+ * something: a write, a removal, or (once per change) a key the child will be
+ * without.
+ */
+function childPerpKey(
+  tenant: `0x${string}`,
+  home: string,
+  grant: Parameters<typeof syncChildPerpKey>[0]["grant"],
+  phase: "before-grant" | "after-grant",
+): ChildPerpKeyOutcome {
+  const outcome = syncChildPerpKey({ home, tenant, grant, dek: storeDek(), phase });
+  const lc = tenant.toLowerCase();
+  if (outcome === "no-dek" || outcome === "unopenable" || outcome === "unsealed" || outcome === "io-error") {
+    if (perpKeyFailureLogged.get(lc) !== outcome) {
+      perpKeyFailureLogged.set(lc, outcome);
+      log(`${tenant}: Lighter key NOT written (${outcome}) — live perps stay unarmed for this agent`);
+    }
+    return outcome;
+  }
+  perpKeyFailureLogged.delete(lc);
+  if (outcome === "written") log(`${tenant}: Lighter key written to the child's home`);
+  else if (outcome === "removed") log(`${tenant}: grant has no perps — stale Lighter key removed from the child's home`);
+  return outcome;
+}
+
 /** Write the tenant's session-key-only grant into its child's grant.json. */
 async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` | null> {
   // A TELEGRAM KILL IS PENDING: hand this home no key. See kill-request.ts.
@@ -923,10 +954,17 @@ async function writeGrantForChild(tenant: `0x${string}`): Promise<`0x${string}` 
 
   const home = childHome(tenant);
   mkdirSync(home, { recursive: true });
+  // THE LIGHTER KEY FIRST (docs/perps.md rule 5): opened here with the DEK the
+  // child never holds, written 0600 beside grant.json, never into its env — so
+  // a child that arms on this grant finds its key already in place.
+  childPerpKey(tenant, home, grant, "before-grant");
   // grant.json holds the SESSION key (the store already refused any owner key),
   // so keep it owner-only. chmod is a POSIX no-op that throws on Windows — the
   // container is Linux, and self-hosted never runs the orchestrator.
   writeFileSync(path.join(home, "grant.json"), JSON.stringify(grant, null, 2), { encoding: "utf8", mode: 0o600 });
+  // And a stale key goes only AFTER the grant without a perp block is in place:
+  // the server proved the venue flat before it accepted that grant.
+  childPerpKey(tenant, home, grant, "after-grant");
   // The SMART ACCOUNT, returned rather than discarded: it is the key every
   // ledger table is on, the caller needs it to derive the accounting anchor, and
   // the grant is the only place the orchestrator can learn it without a second
@@ -985,12 +1023,21 @@ async function refreshGrantForChild(tenant: `0x${string}`): Promise<void> {
 
   const file = path.join(childHome(tenant), "grant.json");
   const next = JSON.stringify(grant, null, 2);
+  // THE LIGHTER KEY on every pass, before the compare: it writes only on
+  // change, and a key the spawn could not write (no DEK for a moment) is
+  // healed here rather than waiting for the next re-sign.
+  childPerpKey(tenant, childHome(tenant), grant, "before-grant");
   try {
-    if (readFileSync(file, "utf8") === next) return;
+    if (readFileSync(file, "utf8") === next) {
+      // Same grant: still drop a stale key a grant without perps left behind.
+      childPerpKey(tenant, childHome(tenant), grant, "after-grant");
+      return;
+    }
   } catch {
     // No file, or unreadable — writing it is the right answer either way.
   }
   writeFileSync(file, next, { encoding: "utf8", mode: 0o600 });
+  childPerpKey(tenant, childHome(tenant), grant, "after-grant");
   // AND THE ACCOUNT WITH IT. A re-sign under a new owner key derives a new
   // smart account, and that is the address the shared tables are keyed on — so
   // a child left holding the old one would be looked up under an account that
@@ -3213,6 +3260,14 @@ async function runHwmRepairIfAsked(): Promise<void> {
       // rather than a trade — otherwise the derived peak is too high by every
       // purchase and this repair is a no-op exactly when one went unbooked.
       reserveTokens: energyReserveTokens(Number(process.env.MERRYMEN_CHAIN_ID ?? 4663)),
+      // The Lighter proxy, so margin posted to the venue and a relayer's
+      // payout back read `venue-margin` (never capital, docs/perps.md rule 12)
+      // from the proxy's own events in the same receipt. Un-named, a margin
+      // deposit has no paired token and falls to `no-pair-external` =
+      // capital-out, a payout to capital-in — and this repair would move the
+      // peak and fee basis by every margin leg of a perps tenant. Empty (and
+      // byte-identical to before) off Robinhood Chain.
+      venueProxies: lighterVenueProxies(Number(process.env.MERRYMEN_CHAIN_ID ?? 4663)),
       log: (m) => log(`hwm| ${m}`),
     });
 
@@ -4993,6 +5048,10 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
       // 'energy-buy' capital-out the worker books (and collides with it by
       // identity) rather than dropped as a trade. See accounting-reconstruction.
       reserveTokens: energyReserveTokens(Number(process.env.MERRYMEN_CHAIN_ID ?? 4663)),
+      // The Lighter proxy, for the same reason as the HWM sweep above: without
+      // it a margin deposit is proposed as the owner withdrawing and a payout
+      // as a fresh deposit, and commit mode would write those contributions.
+      venueProxies: lighterVenueProxies(Number(process.env.MERRYMEN_CHAIN_ID ?? 4663)),
       log: (m) => log(`recon| ${m}`),
     });
 

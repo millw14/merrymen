@@ -14,6 +14,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { lighterVenueProxies } from "../../packages/core/src/index";
 import { classifyRpcError, scanFleetCapital, TRANSFER_TOPIC, type RpcCall } from "./chain-capital";
 
 const USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
@@ -231,5 +232,91 @@ describe("energy purchases in the fleet sweep", () => {
     assert.equal(cap.totals.grossReservePurchasesRaw, "0");
     assert.equal(cap.totals.tradeLegs, 1);
     assert.equal(cap.totals.netContributionsRaw, "10000000");
+  });
+});
+
+/**
+ * PERP MARGIN IN THE FLEET SWEEP (docs/perps.md rule 12).
+ *
+ * hwm-repair and reconstruction derive peaks from contributions, so they must
+ * see margin exactly as the worker's ledger does: posted and paid back within
+ * the book, never capital. Un-named, every payout Lighter's relayer sends home
+ * reads as a fresh owner deposit and the derived peak is too high by every one.
+ */
+describe("perp margin in the fleet sweep", () => {
+  const PROXY = "0x94bab9693ba2f6358507effcbd372b0660afff9d";
+  const DEPOSIT_TOPIC = "0x493c3b8240368e8343bcd42cac5f4b8b161c06d061710e542a72f06a40ddd9d1";
+  const WITHDRAW_PENDING_TOPIC = "0xef80235b5f4cf1822ad6a8621af41ac64372ff672c402874f507fc63dbe5e06f";
+  const STRANGER = "0x7777777777777777777777777777777777777777";
+  const word = (v: bigint | string) =>
+    (typeof v === "string" ? v.toLowerCase().replace(/^0x/, "") : v.toString(16)).padStart(64, "0");
+  const AMT = 82_973_191n;
+  const event = (tx: string, block: number, idx: number, topics: string[], data: string) => ({
+    address: PROXY,
+    topics,
+    data,
+    blockNumber: "0x" + block.toString(16),
+    transactionHash: tx,
+    logIndex: "0x" + idx.toString(16),
+  });
+  /** A Transfer as a node returns it — `data` one full 32-byte word, which the venue rule reads strictly. */
+  const canonical = (l: ReturnType<typeof transferLog>) => ({ ...l, data: `0x${word(BigInt(l.data))}` });
+  const OUT = canonical(transferLog({ from: ACCT, to: PROXY, amount: AMT, tx: "0xmargin", block: 4_300_000, idx: 2 }));
+  const DEPOSIT_EVT = event("0xmargin", 4_300_000, 4, [DEPOSIT_TOPIC], `0x${word(22_149n)}${word(ACCT)}${word(3n)}${word(0n)}${word(AMT)}`);
+  const THEIRS_OUT = canonical(transferLog({ from: STRANGER, to: PROXY, amount: 135_000_000n, tx: "0xmargin", block: 4_300_000, idx: 5 }));
+  const THEIRS_EVT = event("0xmargin", 4_300_000, 6, [DEPOSIT_TOPIC], `0x${word(30_001n)}${word(STRANGER)}${word(3n)}${word(0n)}${word(135_000_000n)}`);
+  const IN = canonical(transferLog({ from: PROXY, to: ACCT, amount: 8_085_000_000n, tx: "0xpayout", block: 4_300_100, idx: 12 }));
+  const WP = event("0xpayout", 4_300_100, 13, [WITHDRAW_PENDING_TOPIC, `0x${word(ACCT)}`], `0x${word(3n)}${word(8_085_000_000n)}`);
+  const GIFT = transferLog({ from: ACCT, to: STRANGER, amount: 5_000_000n, tx: "0xgift", block: 4_300_200, idx: 0 });
+  const RECEIPTS: Record<string, unknown[]> = {
+    "0xmargin": [OUT, DEPOSIT_EVT, THEIRS_OUT, THEIRS_EVT],
+    "0xpayout": [IN, WP],
+    "0xgift": [GIFT],
+    "0xfund": [DEPOSIT],
+  };
+  const rpc: RpcCall = async (method, params) => {
+    if (method === "eth_getTransactionReceipt") return { logs: RECEIPTS[String(params[0])] ?? [] };
+    const p = params[0] as { topics: (string | string[] | null)[] };
+    return [DEPOSIT, OUT, THEIRS_OUT, IN, GIFT].filter((log) =>
+      p.topics.every((want, i) => {
+        if (want === null || want === undefined) return true;
+        const list = Array.isArray(want) ? want : [want];
+        return list.some((w) => w.toLowerCase() === String(log.topics[i]).toLowerCase());
+      }),
+    );
+  };
+  const sweep = (venueProxies?: readonly string[]) =>
+    scanFleetCapital(rpc, { accounts: [ACCT], usdgToken: USDG, fromBlock: 0n, toBlock: 5_000_000n, venueProxies });
+
+  it("OUR DEPOSIT AND A RELAYER PAYOUT TO US are margin — totalled apart, never capital", async () => {
+    const cap = (await sweep(lighterVenueProxies(4663))).get(ACCT)!;
+    const kind = (tx: string) => cap.movements.find((m) => m.txHash === tx)!.classification.kind;
+    assert.equal(kind("0xmargin"), "margin-out", "a stranger's deposit in the same transaction changes nothing");
+    assert.equal(kind("0xpayout"), "margin-in");
+    assert.equal(kind("0xgift"), "capital-out", "a plain transfer to a stranger is still a withdrawal");
+    assert.equal(cap.totals.grossMarginOutRaw, AMT.toString());
+    assert.equal(cap.totals.grossMarginInRaw, "8085000000");
+    assert.equal(cap.totals.grossContributionsRaw, "10000000", "only the owner's real deposit");
+    assert.equal(cap.totals.grossWithdrawalsRaw, "5000000", "only the real withdrawal");
+    assert.equal(cap.totals.ambiguous, 0);
+    assert.equal(cap.complete, true);
+  });
+
+  it("the stranger's leg is not ours at all — the sweep never books another account's deposit", async () => {
+    const cap = (await sweep(lighterVenueProxies(4663))).get(ACCT)!;
+    assert.equal(cap.movements.filter((m) => m.txHash === "0xmargin").length, 1);
+  });
+
+  it("WITHOUT the venue named, the verdicts are exactly what they were before perps", async () => {
+    const cap = (await sweep()).get(ACCT)!;
+    const kind = (tx: string) => cap.movements.find((m) => m.txHash === tx)!.classification.kind;
+    assert.equal(kind("0xmargin"), "capital-out");
+    assert.equal(kind("0xpayout"), "capital-in");
+    assert.equal(cap.totals.marginLegs, 0);
+  });
+
+  it("lighterVenueProxies names the venue only on Robinhood Chain", () => {
+    assert.deepEqual(lighterVenueProxies(4663), [PROXY]);
+    assert.deepEqual(lighterVenueProxies(46630), []);
   });
 });

@@ -23,6 +23,16 @@
  * `complete: false`, and a caller that writes rows on an incomplete scan would
  * be inserting a contribution history with holes in it — which is worse than the
  * inferred rows it replaces, because it would look authoritative.
+ *
+ * PERP MARGIN IS NOT CAPITAL (docs/perps.md rule 12). USDG posted to an
+ * account's own Lighter account, or paid back from it, stays in the book —
+ * equity carries the venue side — so these tools, which re-derive peaks from
+ * contributions, must see it as the worker's ledger does: `margin-out` /
+ * `margin-in`, counted apart and never as a deposit or a withdrawal. Unnamed,
+ * every claim paid home by Lighter's relayer reads as a fresh owner deposit and
+ * the derived peak comes out too high by every payout. The classifier proves
+ * each such leg from the same receipt's proxy events, so this sweep hands it
+ * the receipt's logs whole.
  */
 import { classifyUsdgMovement, totalCapital, type CapitalTotals, type Classification, type TransferLeg } from "../../packages/core/src/index";
 
@@ -165,6 +175,16 @@ export async function scanFleetCapital(
      * byte-identical to before.
      */
     reserveTokens?: readonly string[];
+    /**
+     * The perp venue's settlement contracts on this chain —
+     * `lighterVenueProxies(chainId)`, never typed by a caller. Named, every
+     * USDG leg to or from the proxy is decided by the classifier's
+     * `venue-margin` rule from the same receipt: margin when the venue's own
+     * event proves it, capital-out when it credited somebody else's venue
+     * account, ambiguous otherwise. Absent is byte-identical to before perps —
+     * and wrong for any fleet holding perps, so a caller on 4663 passes it.
+     */
+    venueProxies?: readonly string[];
     log?: (m: string) => void;
   },
 ): Promise<Map<string, AccountCapital>> {
@@ -290,10 +310,13 @@ export async function scanFleetCapital(
 
   for (const [txHash, logsForTx] of byTx) {
     let legs: TransferLeg[] = [];
+    /** The receipt's logs UNFILTERED — the venue rule's evidence is in the non-Transfer ones. */
+    let receiptLogs: readonly RawChainLog[] = [];
     let readable = true;
     try {
       const receipt = (await rpc("eth_getTransactionReceipt", [txHash])) as { logs?: RawChainLog[] } | null;
-      legs = legsFromReceipt(receipt?.logs ?? []);
+      receiptLogs = receipt?.logs ?? [];
+      legs = legsFromReceipt(receiptLogs);
       if (!receipt) readable = false;
     } catch {
       readable = false;
@@ -312,6 +335,9 @@ export async function scanFleetCapital(
           from: fromAddr,
           to: toAddr,
           amountRaw: BigInt(l.data || "0x0").toString(),
+          // Its position in the receipt: the venue rule pairs a leg with its
+          // own proxy event by position, never by amount.
+          logIndex: hexNum(l.logIndex),
         };
         if (usdgLeg.token !== usdg) continue;
 
@@ -333,6 +359,9 @@ export async function scanFleetCapital(
               // same bug deposit-log carries per agent.
               custodyAddresses: args.custodyAddressesFor?.(account),
               reserveTokens: args.reserveTokens,
+              // See the arg. Absent is today's behaviour, whatever the logs hold.
+              venueProxies: args.venueProxies,
+              venueLogs: receiptLogs,
             })
           : {
               kind: "ambiguous",

@@ -14,15 +14,18 @@
  */
 
 import { readFileSync } from "node:fs";
-import { getAgentEpoch, readJournal, type JournalEntry } from "./store";
+import { getAgentEpoch, getPerpAccount, readJournal, type JournalEntry } from "./store";
 import {
   compareRecord,
+  exportHeader,
+  readExportHeader,
   reconcile,
   reconstruct,
   verifyChain,
   type AuditFinding,
   type ExportedEntry,
   type FetchedReceipt,
+  type VerifiedVenue,
 } from "./audit";
 import { gasQualifier, pnlUsdg } from "./equity";
 import { gasBasisOf } from "../../packages/core/src/gas-basis";
@@ -39,6 +42,20 @@ const cmd = args[0];
 function fail(msg: string): never {
   console.error(msg);
   process.exit(1);
+}
+
+/**
+ * THIS VERIFIER WILL NOT JUDGE THE FILE — exit 2, INDETERMINATE, never 1.
+ *
+ * A format or version it does not know is a fact about the VERIFIER, not
+ * about the record: the ledger may be perfectly sound and simply newer than
+ * this tool. Exit 1 means "the record does not hold up", and saying that about
+ * a file nobody read is the false accusation the v2 format exists to prevent.
+ */
+function refuse(msg: string): never {
+  console.error(msg);
+  console.error("verdict: INDETERMINATE — this verifier did not judge the record. Use a merrymen that reads this export.");
+  process.exit(2);
 }
 
 /** Whose ledger to export. One agent per install, so the armed one, else newest. */
@@ -80,6 +97,24 @@ async function exportContext(agentId: string): Promise<{ chainId: number | null;
   return { chainId, usdgToken: String(CASH.USDG) };
 }
 
+/**
+ * The agent's venue account, for the export header: the live one's index when
+ * there is one, else a paper account (index null), else undefined — no venue.
+ * A read that fails leaves the choice to the journal's own content, which
+ * still makes any epoch holding a perp record or term a v2 export.
+ */
+async function perpAccountOf(agentId: string): Promise<{ accountIndex: number | null } | undefined> {
+  try {
+    const live = await getPerpAccount(agentId, "live");
+    if (live) return { accountIndex: live.accountIndex };
+    const paper = await getPerpAccount(agentId, "paper");
+    if (paper) return { accountIndex: null };
+  } catch {
+    /* see above */
+  }
+  return undefined;
+}
+
 async function doExport(): Promise<void> {
   const agentFlag = args.indexOf("--agent");
   const epochFlag = args.indexOf("--epoch");
@@ -95,17 +130,18 @@ async function doExport(): Promise<void> {
   // movements for, which chain, and which token is cash. Without those the
   // verifier would have to be told them out of band — and anything the auditor
   // has to be told separately is something the operator gets to choose.
+  //
+  // v1 OR v2, BY WHAT THE BOOK HOLDS (audit.ts exportHeader): an agent that
+  // never touched perps exports the v1 header, byte for byte, which every
+  // verifier ever shipped reads; a perp book exports v2 with its venue, which
+  // a shipped verifier refuses by format instead of misjudging. The venue
+  // account is read from the ledger too, because collateral carried into an
+  // epoch makes it a perp book before this epoch has a perp record of its own.
   const { chainId, usdgToken } = await exportContext(agentId);
   process.stdout.write(
-    JSON.stringify({
-      format: "merrymen-journal",
-      version: 1,
-      agentId,
-      epoch,
-      chainId,
-      usdgToken,
-      records: entries.length,
-    }) + "\n",
+    JSON.stringify(
+      exportHeader({ agentId, epoch, chainId, usdgToken, entries, perpAccount: await perpAccountOf(agentId) }),
+    ) + "\n",
   );
   for (const e of entries) process.stdout.write(JSON.stringify(e) + "\n");
   if (entries.length === 0) {
@@ -117,7 +153,12 @@ async function doExport(): Promise<void> {
   }
 }
 
-function readExport(file: string): { header: Record<string, unknown>; entries: ExportedEntry[] } {
+function readExport(file: string): {
+  header: Record<string, unknown>;
+  version: 1 | 2;
+  venue: VerifiedVenue | null;
+  entries: ExportedEntry[];
+} {
   let text: string;
   try {
     text = readFileSync(file, "utf8");
@@ -132,7 +173,10 @@ function readExport(file: string): { header: Record<string, unknown>; entries: E
   } catch {
     return fail(`${file}: first line is not the export header`);
   }
-  if (header.format !== "merrymen-journal") fail(`${file}: not a merrymen journal export`);
+  // A FORMAT OR VERSION THIS VERIFIER DOES NOT KNOW IS REFUSED, NOT FAILED —
+  // and so is a v2 header whose venue is not the one pinned in audit.ts.
+  const read = readExportHeader(header);
+  if (!read.ok) refuse(`${file}: ${read.why}`);
   const entries: ExportedEntry[] = [];
   for (let i = 1; i < lines.length; i++) {
     try {
@@ -141,7 +185,7 @@ function readExport(file: string): { header: Record<string, unknown>; entries: E
       fail(`${file}: line ${i + 1} is not valid JSON`);
     }
   }
-  return { header, entries };
+  return { header, version: read.version, venue: read.venue, entries };
 }
 
 /**
@@ -164,10 +208,11 @@ async function rpcCall(url: string, method: string, params: unknown[]): Promise<
 async function doVerify(): Promise<void> {
   const file = args[1];
   if (!file) fail("usage: merrymen verify <ledger.jsonl> [--rpc <url>]");
-  const { header, entries } = readExport(file);
+  const { header, version, venue, entries } = readExport(file);
 
   console.log(`\n  merrymen ledger — agent ${header.agentId}, epoch ${header.epoch}`);
-  console.log(`  ${entries.length} record(s)\n`);
+  console.log(`  ${entries.length} record(s)` + (venue ? ` · perps at ${venue.name} (venue account ${venue.accountIndex ?? "not yet assigned"})` : ""));
+  console.log("");
 
   // ── 1. tamper evidence ────────────────────────────────────────────────
   const findings = verifyChain(entries);
@@ -179,11 +224,38 @@ async function doVerify(): Promise<void> {
   }
 
   // ── 2. what the arithmetic says ───────────────────────────────────────
-  const book = reconstruct(entries);
+  const book = reconstruct(entries, { version });
   const r = reconcile(book);
+  const unknownRecords = book.unknownRecords ?? [];
+  const venueAttested = book.venueAttested ?? [];
   console.log("");
+  // A KIND THIS VERIFIER DOES NOT KNOW IS SAID FIRST, and the arithmetic below
+  // is then not judged — never a record quietly skipped and a sum that
+  // silently leaves its money out.
+  if (unknownRecords.length > 0) {
+    console.log(`  ! ${unknownRecords.length} record(s) this verifier does not understand — refused, not skipped:`);
+    for (const u of unknownRecords.slice(0, 10)) console.log(`      seq ${u.seq} (${u.kind}): ${u.why}`);
+    if (unknownRecords.length > 10) console.log(`      … and ${unknownRecords.length - 10} more`);
+    console.log(`    The arithmetic is NOT judged — neither passed nor failed. Use a merrymen that reads them.`);
+    console.log("");
+  }
   console.log(`  contributed:  ${book.netContributionsUsdg.toFixed(2)} USDG`);
   console.log(`  realized P&L: ${book.realizedPnlUsdg.toFixed(2)} USDG (gross of gas)`);
+  if (version === 2) {
+    // The venue's money, as the journal records it — attested by Lighter, see below.
+    console.log(
+      `  perps:        realized ${(book.perpRealizedUsdg ?? 0).toFixed(2)} · fees ${(book.perpFeesUsdg ?? 0).toFixed(2)} · ` +
+        `funding ${(book.perpFundingUsdg ?? 0).toFixed(2)} USDG` +
+        ((book.perpUnreadTerms ?? 0) > 0 ? ` (+ ${book.perpUnreadTerms} term(s) not yet derived — UNKNOWN)` : ""),
+    );
+    if (book.publishedPerp) {
+      const p = book.publishedPerp;
+      const at = Number(p.collateralMicro + p.isolatedMarginMicro + p.unrealizedMicro + p.inTransitMicro) / 1e6;
+      console.log(`  at Lighter:   ${at.toFixed(2)} USDG (of which unrealized ${(Number(p.unrealizedMicro) / 1e6).toFixed(2)}, in transit ${(Number(p.inTransitMicro) / 1e6).toFixed(2)})`);
+    } else if (book.markCount > 0) {
+      console.log(`  at Lighter:   UNKNOWN — the latest mark does not state every venue term`);
+    }
+  }
   console.log(
     `  gas paid:     ${(Number(book.gasWei) / 1e18).toFixed(6)} ETH = ${book.gasUsdg.toFixed(2)} USDG` +
       (book.gasUnpricedFills > 0 ? ` (+ ${book.gasUnpricedFills} fill(s) whose gas is UNPRICED)` : ""),
@@ -205,11 +277,21 @@ async function doVerify(): Promise<void> {
     console.log(
       `  ✓ the published figures are internally consistent and the residual is within what the book can explain`,
     );
+  } else if (unknownRecords.length > 0) {
+    console.log(`  ! the arithmetic was NOT judged — see the records refused above. UNKNOWN, not sound.`);
   } else if (book.markCount > 0) {
     console.log(
       `  ! the arithmetic could NOT be checked — the latest mark does not carry every term of the equity ` +
         `identity (quarantined cost was added to the journal later), so the sum cannot be closed. UNKNOWN, not sound.`,
     );
+    // A perp book has three more ways to leave the identity open, each said by name.
+    if (version === 2) {
+      if (!book.publishedPerp) console.log(`    · the latest mark does not state every venue term (C, ΣM, ΣU, Σmax(0,U), T)`);
+      if ((book.perpUnreadTerms ?? 0) > 0) console.log(`    · ${book.perpUnreadTerms} perp figure(s) not yet derived — unknown, not zero`);
+      if ((book.perpCarries ?? 0) > 0) {
+        console.log(`    · ${book.perpCarries} position(s) carried into this epoch at mark: their P&L here runs from the carry, the venue's from its entry`);
+      }
+    }
   }
 
   // ── 3. the chain of custody ───────────────────────────────────────────
@@ -256,7 +338,7 @@ async function doVerify(): Promise<void> {
         }
         onchainChecked++;
         onchain.push(
-          ...compareRecord({ seq: ref.seq, kind: entry.kind, payload, receipt, account, usdgToken }),
+          ...compareRecord({ seq: ref.seq, kind: entry.kind, payload, receipt, account, usdgToken, venue }),
         );
       }
       if (onchain.length > 0) {
@@ -273,6 +355,21 @@ async function doVerify(): Promise<void> {
         console.log(`  ! ${unreachable} of ${book.chainRefs.length} could not be fetched — UNKNOWN, not verified`);
       }
     }
+  }
+
+  // ── the venue's word ────────────────────────────────────────────────
+  //
+  // A FOURTH CLASS OF EVIDENCE, and it is reported as one. Lighter's fills and
+  // funding happened on its own rollup; nothing on Robinhood Chain re-derives
+  // them. They are counted into the arithmetic above (they are money), and they
+  // are never shown as chain-verified and never as failed — only as what they
+  // are: the venue's word, which this verifier has not checked.
+  if (venueAttested.length) {
+    console.log("");
+    console.log(`  ${venueAttested.length} record(s) are VENUE-ATTESTED — Lighter's API, not Robinhood Chain:`);
+    for (const v of venueAttested.slice(0, 10)) console.log(`      seq ${v.seq} (${v.kind}): ${v.why}`);
+    if (venueAttested.length > 10) console.log(`      … and ${venueAttested.length - 10} more`);
+    console.log(`    Never counted as chain-verified, never counted as failed — and not checked here.`);
   }
 
   if (book.unanchored.length) {
@@ -304,6 +401,8 @@ async function doVerify(): Promise<void> {
     // with no marks has not passed this check; it has not taken it.
     // THREE STATES. `r.checked` is false when a term of the equity identity was
     // missing from the mark, and an unrun check is neither a pass nor a failure.
+    // (Records this verifier refused leave `r.checked` false, so they land in
+    // "unknown" here — the arithmetic is not judged, never passed.)
     arithmetic: arithmetic.length > 0 ? "failed" : book.markCount > 0 && r.checked ? "verified" : "unknown",
     // The journal alone cannot say whether a contribution is missing, only
     // whether what is recorded is self-consistent. The envelope check above is
@@ -364,7 +463,16 @@ async function doVerify(): Promise<void> {
   //      about detected wrongness can accept 2. Neither can mistake one for the
   //      other, which is the whole point of not sharing a code with 0.
   const failed = chainFindings.length + arithmetic.length + onchain.length > 0;
-  const unknowns = qualityGaps(quality);
+  const unknowns = [
+    ...qualityGaps(quality),
+    // Two gaps the three guarantees cannot express, each a reason the verdict
+    // is not CHECKED AND SOUND: records refused as unknown, and the venue's
+    // word, which nothing here checked. Neither is ever a failure.
+    ...(unknownRecords.length > 0 ? [`${unknownRecords.length} record(s) of a kind this verifier does not understand — not judged`] : []),
+    ...(venueAttested.length > 0
+      ? [`${venueAttested.length} venue-attested record(s) (Lighter) not checked against the venue — never chain-verified`]
+      : []),
+  ];
   // EVERY GAP COUNTS, not just the three headline guarantees.
   //
   // The first version tested only the three guarantee fields, so a book whose
