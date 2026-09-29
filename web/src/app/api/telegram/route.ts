@@ -1,6 +1,7 @@
 /**
  * Telegram connection status for the dashboard.
- *   GET  → { enabled, connected, botUsername, ownerId, allowlist, linkCode, control }
+ *   GET  → { enabled, connected, botUsername, ownerId, allowlist, linkCode, control,
+ *            canReadAllGroupMessages, canJoinGroups }
  *   POST → { action: "test" } validates the current/provided token live (getMe)
  *          and returns the bot @username, without saving anything.
  *
@@ -110,8 +111,37 @@ async function runtimeFor(
   });
 }
 
-/** getMe against the Bot API — returns the @username or null. */
-async function botUsername(token: string): Promise<string | null> {
+/**
+ * What getMe says about the bot: its @username, and the two getMe-only flags
+ * Telegram groups need (docs/tg-groups.md "What it can hear: privacy mode").
+ */
+interface BotInfo {
+  username: string;
+  /** `can_read_all_group_messages`: true when BotFather privacy mode is OFF. Null when getMe did not say. */
+  canReadAllGroupMessages: boolean | null;
+  /** `can_join_groups`: false when BotFather /setjoingroups is disabled. Null when getMe did not say. */
+  canJoinGroups: boolean | null;
+}
+
+/**
+ * The getMe answer, read strictly: no username means no bot, and a flag that is
+ * not a real boolean is UNKNOWN (null), never false. "Privacy mode is on" is a
+ * claim with instructions attached, and an answer that simply lacked the field
+ * must not be the thing that makes it.
+ */
+function readBotInfo(body: unknown): BotInfo | null {
+  const b = body as { ok?: unknown; result?: { username?: unknown; can_read_all_group_messages?: unknown; can_join_groups?: unknown } } | null;
+  if (!b || b.ok !== true || !b.result || typeof b.result.username !== "string" || b.result.username === "") return null;
+  const flag = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
+  return {
+    username: b.result.username,
+    canReadAllGroupMessages: flag(b.result.can_read_all_group_messages),
+    canJoinGroups: flag(b.result.can_join_groups),
+  };
+}
+
+/** getMe against the Bot API — returns what it says about the bot, or null. */
+async function botInfo(token: string): Promise<BotInfo | null> {
   try {
     // A TIMEOUT, because this is now reachable. While `hasToken` was
     // permanently false hosted, this call never fired; with the token resolving
@@ -120,11 +150,15 @@ async function botUsername(token: string): Promise<string | null> {
     const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, {
       signal: AbortSignal.timeout(8_000),
     });
-    const body = (await res.json()) as { ok?: boolean; result?: { username?: string } };
-    return body.ok && body.result?.username ? body.result.username : null;
+    return readBotInfo(await res.json());
   } catch {
     return null;
   }
+}
+
+/** getMe against the Bot API — returns the @username or null. */
+async function botUsername(token: string): Promise<string | null> {
+  return (await botInfo(token))?.username ?? null;
 }
 
 export interface TelegramStatus {
@@ -145,6 +179,22 @@ export interface TelegramStatus {
    * A stop instruction that might be a locked door is worse than no instruction.
    */
   control: boolean;
+  /**
+   * BotFather privacy mode, read live from the same getMe that sets
+   * `connected`: true when privacy mode is OFF and the bot can follow the
+   * whole of a group's conversation, false when it is on and the bot hears
+   * only commands and replies to itself. Null when unknown — no token, getMe
+   * failed, or it did not say — which is not the same as "on", and the
+   * screens show the steps without a verdict then. Optional so an older
+   * server's answer still reads as unknown.
+   *
+   * It reports the BotFather setting only: a bot already in a group before
+   * privacy was turned off keeps hearing the old way until it is removed and
+   * added back, and Telegram offers no way to ask which groups that is.
+   */
+  canReadAllGroupMessages?: boolean | null;
+  /** BotFather /setjoingroups: false means the bot cannot be added to groups at all. Null when unknown. */
+  canJoinGroups?: boolean | null;
 }
 
 export async function GET(req: Request) {
@@ -166,11 +216,18 @@ export async function GET(req: Request) {
     // absent key means enabled. `=== true` would report control off for every
     // install that never touched the toggle.
     control: settings.telegramControlEnabled !== false,
+    canReadAllGroupMessages: null,
+    canJoinGroups: null,
   };
   if (status.hasToken) {
-    const username = await botUsername(token!);
-    status.connected = username !== null;
-    status.botUsername = username;
+    // ONE getMe for all of it — the username, and the two flags Telegram
+    // groups need. A second call per Settings mount would double the work on
+    // a third party for a fact the first answer already carries.
+    const bot = await botInfo(token!);
+    status.connected = bot !== null;
+    status.botUsername = bot?.username ?? null;
+    status.canReadAllGroupMessages = bot?.canReadAllGroupMessages ?? null;
+    status.canJoinGroups = bot?.canJoinGroups ?? null;
   }
   return NextResponse.json(status);
 }

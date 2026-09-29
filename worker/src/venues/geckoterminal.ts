@@ -345,6 +345,109 @@ async function requestGeckoPools(feed: PoolFeed, opts: { timeoutMs?: number; pag
 }
 
 /**
+ * ONE TOKEN'S OWN POOLS — GeckoTerminal's `/tokens/{address}/pools` page.
+ *
+ * The only per-token read this module makes, and it exists for one caller
+ * shape: somebody handed the agent an ADDRESS (a coin posted in a Telegram
+ * group, docs/tg-groups.md) and the question is which of its pools the index
+ * knows about. The feed lists answer "what is busy", which a coin nobody has
+ * traded much yet is never on. The answer is a lookup, not a verdict: the
+ * pools found here are ranked and screened like every tape row
+ * (highVolumePools), and a v3 pool is still verified on chain by
+ * trencher-discovery.ts before anything can be bought.
+ *
+ * ONLY POOLS WHOSE BASE TOKEN IS THIS ADDRESS. The page also lists pools where
+ * the token is the QUOTE side, and `tokenAddress` on those is the other coin —
+ * something nobody asked about. Kept out here so no caller can mistake a pool
+ * against this token for a pool of it.
+ *
+ * A 404 IS AN ANSWER, NOT A FAILURE. The index returns it for an address it
+ * has never seen trade — a wallet, a router, a coin with no pool — and that is
+ * exactly the fact the caller is asking for. It reads as an empty, healthy
+ * page; the chain (getCode) decides what the address actually is. Every other
+ * refusal, timeout or odd body is `failed`, because unreadable is not absent.
+ *
+ * THE FLEET QUOTA IS SHARED, so this goes through `cachedGeckoDetail` (one
+ * spacing slot and one cooldown for every tenant on the host) and through a
+ * small in-process memo on top, so a coin looked at and then kept on the tape
+ * costs one request a minute rather than one per caller. Self-hosted has no
+ * fleet cache and the memo is the whole of the saving.
+ */
+export async function readTokenPoolsResult(address: string, opts: { timeoutMs?: number } = {}): Promise<GeckoFetch> {
+  const token = typeof address === "string" ? address.toLowerCase() : "";
+  // A lookup key, validated before it becomes part of a URL: nothing but an
+  // address may be spliced into the provider's path.
+  if (!/^0x[0-9a-f]{40}$/.test(token)) return { pools: [], failed: true, failure: "invalid-address" };
+  const source = geckoSource();
+  const memoKey = `${source.id}:${token}`;
+  const cached = tokenPoolsMemo.get(memoKey);
+  if (cached && cached.until > Date.now()) return cached.value;
+  const inFlight = tokenPoolsPending.get(memoKey);
+  if (inFlight) return inFlight;
+  const unavailable = (failure: string): GeckoFetch => ({ pools: [], failed: true, failure });
+  const job = cachedGeckoDetail(`tokenpools:${token}`, () => requestTokenPools(token, opts), unavailable)
+    .catch(() => unavailable("unavailable"))
+    .then((value) => {
+      if (tokenPoolsMemo.size >= 256) tokenPoolsMemo.delete(tokenPoolsMemo.keys().next().value!);
+      // The same lifetimes the fleet cache gives a page: a healthy answer for a
+      // minute from when it was OBSERVED (a cache hit never renews it), a
+      // failure for five seconds so a blip does not pin a coin as unreadable.
+      tokenPoolsMemo.set(memoKey, { until: value.failed ? Date.now() + 5000 : (value.observedAt ?? 0) + 60_000, value });
+      return value;
+    })
+    .finally(() => tokenPoolsPending.delete(memoKey));
+  tokenPoolsPending.set(memoKey, job);
+  return job;
+}
+
+/** The pools as a list, or null when the index could not be read. See readTokenPoolsResult. */
+export async function readTokenPools(address: string): Promise<GeckoPool[] | null> {
+  const r = await readTokenPoolsResult(address);
+  return r.failed ? null : r.pools;
+}
+
+const tokenPoolsMemo = new Map<string, { until: number; value: GeckoFetch }>();
+const tokenPoolsPending = new Map<string, Promise<GeckoFetch>>();
+
+async function requestTokenPools(token: string, opts: { timeoutMs?: number }): Promise<GeckoFetch> {
+  const observedAt = Date.now();
+  const source = geckoSource();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 10_000);
+  try {
+    const res = await fetch(`${source.base}/networks/${GECKO_NETWORK}/tokens/${token}/pools?page=1`, {
+      headers: source.headers,
+      redirect: "error",
+      signal: controller.signal,
+    });
+    if (res.status === 404) {
+      await res.body?.cancel().catch(() => {});
+      return { pools: [], failed: false, observedAt };
+    }
+    if (!res.ok) {
+      const retry = res.headers.get("retry-after");
+      const parsed = retry === null ? 0 : /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
+      await res.body?.cancel().catch(() => {});
+      return { pools: [], failed: true, failure: `http-${res.status}`, retryAfterMs: Number.isFinite(parsed) ? Math.max(0, parsed) : 0 };
+    }
+    const read = await readBoundedJson<{ data?: unknown[] }>(res);
+    if (!read.ok) return { pools: [], failed: true, failure: "invalid-body" };
+    if (!Array.isArray(read.value?.data)) return { pools: [], failed: true, failure: "invalid-shape" };
+    return {
+      pools: read.value.data
+        .map(parseGeckoPool)
+        .filter((p): p is GeckoPool => p !== null && p.tokenAddress === token),
+      failed: false,
+      observedAt,
+    };
+  } catch {
+    return { pools: [], failed: true, failure: controller.signal.aborted ? "timeout" : "network" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * The same fetch, as a plain list.
  *
  * Kept because the tick genuinely wants this shape: discovery is not a trading

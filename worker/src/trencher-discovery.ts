@@ -1,13 +1,42 @@
 import { erc20Abi, parseAbi, type Address, type PublicClient } from "viem";
 import { CASH, TRENCHER_VAULT_ABI, isEnergyReserveToken, type StockToken, type StoredGrant } from "../../packages/core/src/index";
 import { highVolumePools } from "./trencher-brain";
+import { NOMINATE } from "./trencher-nominate";
 import { verifyTrencherCustody } from "./venues/trencher-vault";
 import type { GeckoPool } from "./venues/geckoterminal";
 
 const POOL = parseAbi(["function token0() view returns (address)","function token1() view returns (address)","function fee() view returns (uint24)"]);
 const FACTORY = parseAbi(["function getPool(address a,address b,uint24 fee) view returns (address)"]);
+/** The busiest verified pools a pass reads on chain. */
+export const DISCOVERY_SLICE = 20;
+/** Nominated pools verified beyond that slice, at most — the nomination book's own queue bound. */
+export const NOMINATED_VERIFY_MAX = NOMINATE.queueMax;
+
+export interface DiscoveryOptions {
+  /**
+   * Lowercased token addresses somebody nominated (a coin posted in a Telegram
+   * group, docs/tg-groups.md) and the book still holds unresolved.
+   *
+   * WHAT IT CHANGES IS WHICH POOLS ARE CHECKED, NEVER HOW. A nominated coin is
+   * usually far from the top of the volume ranking, so the top-slice alone
+   * would never read it and the nomination could only ever expire. Its pool is
+   * added to this pass's reads — after the slice, up to NOMINATED_VERIFY_MAX —
+   * and then runs the loop every other pool runs: Uniswap v3 on this chain, a
+   * USDG or WETH quote, the pool the canonical factory's `getPool` returns for
+   * its own token0/token1/fee, the decimals bound, never the energy reserve.
+   * And it must already be in `highVolumePools`' output to be considered at
+   * all, so a quiet coin nominated by a chat is dropped by the same screen that
+   * drops a quiet coin on the trending list.
+   *
+   * The set holds only addresses. The pool, the quote and the factory answer
+   * all come from the tape and the chain, exactly as for every other pool:
+   * the chat picks what to look at, never what counts as verified.
+   */
+  nominated?: ReadonlySet<string>;
+}
+
 /** A bounded discovery pass. Feed text never chooses contract addresses or executable calldata. */
-export async function discoverTrencherUniverse(client: PublicClient, grant: StoredGrant, pools: readonly GeckoPool[]) {
+export async function discoverTrencherUniverse(client: PublicClient, grant: StoredGrant, pools: readonly GeckoPool[], opts: DiscoveryOptions = {}) {
   const custody = await verifyTrencherCustody(client,grant);
   const factory = await client.readContract({address:custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"poolFactory"}).catch(async()=>{
     const { TRENCHER_FACTORY_ABI } = await import("../../packages/core/src/index");
@@ -18,7 +47,12 @@ export async function discoverTrencherUniverse(client: PublicClient, grant: Stor
   const qualified: GeckoPool[] = [];
   // Filter supported venues before token deduplication: a larger V2/V4 pool
   // must not erase an otherwise eligible V3 route for the same token.
-  for (const p of highVolumePools(pools.filter(p => p.dex === "uniswap-v3-robinhood")).slice(0,20)) {
+  const ranked = highVolumePools(pools.filter(p => p.dex === "uniswap-v3-robinhood"));
+  const nominated = new Set([...(opts.nominated ?? [])].map(a => String(a).toLowerCase()));
+  const beyond = nominated.size
+    ? ranked.slice(DISCOVERY_SLICE).filter(p => nominated.has(p.tokenAddress.toLowerCase())).slice(0, NOMINATED_VERIFY_MAX)
+    : [];
+  for (const p of [...ranked.slice(0,DISCOVERY_SLICE), ...beyond]) {
     if (p.dex !== "uniswap-v3-robinhood" || !p.poolAddress || !/^0x[0-9a-fA-F]{40}$/.test(p.poolAddress)) continue;
     // The energy reserve is never a trencher candidate: it is held as energy,
     // never watched, bought or sold as a coin. Excluded here, where a NEW token

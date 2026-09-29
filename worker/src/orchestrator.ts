@@ -94,6 +94,19 @@ import { scanFleetCapital } from "./chain-capital";
 import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import { TELEGRAM_STATE_DDL, publishTenantTelegram, readTenantTelegram } from "./telegram-store";
+import {
+  deleteTgGroups,
+  ensureTgGroupsSchema,
+  forgetStoredTgGroups,
+  forgetTgGroupsHome,
+  forgetTgGroupsInHomes,
+  forgetUnwantedTgGroups,
+  publishTgGroups,
+  restoreTgGroups,
+  tgGroupsHeldOff,
+  type TgGroupsRestore,
+} from "./tg-groups-ferry";
+import { storeDek } from "./store-crypto";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
 import { addressesOf, makeBuilderDesk, type BuilderDesk } from "./builder-pass";
@@ -248,6 +261,12 @@ const ROOT = path.join(fileURLToPath(new URL(".", import.meta.url)), "..", "..")
  * DEK), forges any tenant's session (the signing secret), or reaches the shared
  * grant database (the URL). Strip those; forward everything else so the child
  * still has PATH and the OS essentials node needs to run.
+ *
+ * MERRYMEN_TG_GROUPS_LLM_KEY IS FORWARDED ON PURPOSE, unlike the room's and
+ * X's model keys below. Those are stripped because their passes run in this
+ * process; Telegram groups are polled inside the child, so the child is the
+ * only process that can spend that key (docs/tg-groups.md "The model"). It is
+ * a dedicated key so group chatter never draws on trading's house key.
  */
 const CHILD_SECRET_STRIP = [
   "MERRYMEN_STORE_DEK",
@@ -375,11 +394,17 @@ export function dedupeBotToken(settings: MerrymenSettings, seen: Set<string>): b
  * tenant's home and the hosted flag. Inheriting (rather than allowlisting) keeps
  * the OS essentials and the injected house keys; the strip is what makes it safe.
  */
-export function childEnv(tenant: string): NodeJS.ProcessEnv {
+export function childEnv(tenant: string, opts: { tgGroupsOff?: boolean } = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const k of CHILD_SECRET_STRIP) delete env[k];
   env.MERRYMEN_HOSTED = "1";
   env.MERRYMEN_HOME = childHome(tenant);
+  // TELEGRAM GROUPS HELD OFF for a child whose group memory could not be put
+  // back (tgGroupsHeldOff). The operator's own switch, set for this one child:
+  // on an empty memory it would re-ask about the owner's groups, leave them,
+  // and hand out a fresh day's allowances. Never set to "1": an operator's
+  // fleet-wide 0 is inherited above and stays.
+  if (opts.tgGroupsOff) env.MERRYMEN_TG_GROUPS = "0";
   /**
    * WHERE THE CHILDREN AGREE WITH EACH OTHER.
    *
@@ -710,6 +735,159 @@ async function promoteChatSettings(tenant: `0x${string}`, chat: ChatSettings | n
     );
   } catch (e) {
     log(`${tenant}: could not promote telegram settings — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * TELEGRAM GROUP MEMORY ACROSS A REDEPLOY (docs/tg-groups.md "Storage and the
+ * ferry"; the mechanics are in tg-groups-ferry.ts).
+ *
+ * The child keeps its groups in `tg-groups.json` in a home the next redeploy
+ * wipes. Up on the mirror's clock behind the lease (mirrorLedgers), down at
+ * spawn before the child starts (spawnChild), gone with the grant, from the
+ * row and from a home no child runs in: on the kill switch (reconcile), the
+ * moment a /kill removes the grant (honourKill), and for every tenant the
+ * grant store no longer lists (sweepTgGroups). Sealed under the store DEK,
+ * which never leaves this process; self-hosted has no DATABASE_URL and the
+ * file is the only store.
+ *
+ * Forget requests go up even when the file does not: while a child is held
+ * (below) or its file could not be published, the mirror applies the
+ * requests its home holds to the stored row (forgetStoredTgGroups), so a
+ * /forgetme is never undone by the next restore.
+ *
+ * `tgGroupsSeen` is the last version of each tenant's file that landed, so an
+ * unchanged file costs one lstat per pass.
+ *
+ * `tgGroupsHeld` is every tenant whose child runs with its groups held off,
+ * because its spawn could not put the stored memory back (tgGroupsHeldOff).
+ * Nothing is published for them, so the stored row outlives the empty memory
+ * the child started with; only their forget requests reach it. Cleared by a
+ * spawn that restores it, or with the grant.
+ */
+const tgGroupsSeen = new Map<string, string>();
+const tgGroupsHeld = new Set<string>();
+let tgGroupsNoDekLogged = false;
+
+/** The store DEK, or null (said once) when this process has none: nothing is ferried in the clear. */
+function tgGroupsDek(): Buffer | null {
+  const dek = storeDek();
+  if (!dek && !tgGroupsNoDekLogged) {
+    tgGroupsNoDekLogged = true;
+    log("tg-groups: MERRYMEN_STORE_DEK is not a 32-byte key — Telegram group memory is not carried across redeploys");
+  }
+  return dek;
+}
+
+/**
+ * PUT THE CHILD'S TELEGRAM GROUPS BACK, before it starts — beside the link
+ * restore and for its reason: a file restored once the child is polling would
+ * land beside a fresh, empty memory the child has already written. Only when
+ * the home has no file (restoreTgGroups decides). Never fatal: a child without
+ * its groups still trades.
+ *
+ * A RESTORE THAT FAILS HOLDS THE CHILD'S GROUPS OFF (tgGroupsHeld): spawned
+ * with the switch at 0 and never published, so a database blip at spawn can
+ * no longer let an empty memory overwrite the stored one. The database is
+ * opened only once the home is known to have no file, so a blip never holds
+ * off a child whose own file survived.
+ */
+async function restoreTgGroupsForChild(tenant: `0x${string}`): Promise<void> {
+  const lc = tenant.toLowerCase();
+  const url = process.env.DATABASE_URL;
+  const dek = url ? tgGroupsDek() : null;
+  if (!url || !dek) {
+    // Nothing is ferried either way, so there is no stored copy to protect.
+    tgGroupsHeld.delete(lc);
+    return;
+  }
+  const shared = async (): Promise<Db> => {
+    const db = await makePgDb(url);
+    await ensureTgGroupsSchema(db, "postgres");
+    return db;
+  };
+  let r: TgGroupsRestore;
+  try {
+    r = await restoreTgGroups({ tenant, home: childHome(tenant), shared, dek, log });
+  } catch (e) {
+    // restoreTgGroups never throws; if it ever does, nothing is known to have been put back.
+    log(`tg-groups: ${tenant} memory not restored — ${e instanceof Error ? e.message : String(e)}`);
+    r = "failed";
+  }
+  if (r === "restored") log(`tg-groups: ${tenant} memory restored`);
+  if (tgGroupsHeldOff(r, tgGroupsHeld.has(lc))) {
+    tgGroupsHeld.add(lc);
+    log(`tg-groups: ${tenant} memory not back (${r}) — this child runs with its groups off and publishes nothing until a spawn restores it`);
+  } else {
+    tgGroupsHeld.delete(lc);
+  }
+}
+
+/**
+ * THE KILL SWITCH'S HALF: an agent whose grant is gone leaves no group memory
+ * behind, in shared Postgres or in its home here. Never fatal.
+ *
+ * THE HOME TOO, when no child of it runs here. Only reconcile's kill branch
+ * removes a home, and only a running child's. A grant found gone during a
+ * restart back-off, a crash-loop stand-down, a fleet halt or after a lost
+ * lease (honourKill, spawnChild finding no grant) left tg-groups.json there,
+ * and a re-grant by the same wallet found it "present" and published it
+ * straight back. A running child is the file's writer and goes with its home
+ * when the kill branch stands it down. Checked and removed synchronously,
+ * before anything is awaited, so no spawn can start in between.
+ */
+async function forgetTgGroups(tenant: string): Promise<void> {
+  const lc = tenant.toLowerCase();
+  tgGroupsSeen.delete(lc);
+  tgGroupsHeld.delete(lc);
+  if (!children.has(lc)) forgetTgGroupsHome(childHome(tenant), log);
+  const url = process.env.DATABASE_URL;
+  if (!url) return;
+  try {
+    const shared = await makePgDb(url);
+    await ensureTgGroupsSchema(shared, "postgres");
+    await deleteTgGroups(tenant, shared, log);
+  } catch (e) {
+    log(`tg-groups: ${tenant} stored memory not deleted — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * THE KILL SWITCH, FOLLOWING THE GRANT STORE RATHER THAN THE CHILDREN.
+ *
+ * reconcile's kill branch forgets only a child running here at that moment. A
+ * grant discarded during a redeploy, a restart back-off, a crash-loop
+ * stand-down or a fleet halt never reached it, nor did a delete that failed
+ * once, and a later grant by the same wallet restored the old memory, other
+ * people's words included. So every pass, once the grant listing has been
+ * read, the stored memory of every tenant it no longer lists is deleted
+ * (forgetUnwantedTgGroups: bounded per pass, tried again on the next).
+ * `listedAtMs` is when that listing was requested. Never fatal.
+ *
+ * AND FROM THE HOMES. The row sweep visits only tenants that still have a
+ * row, and a home outlives its row, so the same pass removes the group files
+ * from the home of every tenant that is neither wanted nor running here
+ * (forgetTgGroupsInHomes, bounded per pass). Without a database too: the
+ * file is the memory either way.
+ */
+async function sweepTgGroups(wanted: ReadonlySet<string>, listedAtMs: number): Promise<void> {
+  // A tenant that comes back publishes afresh and is not held by a spawn of its old grant.
+  for (const t of [...tgGroupsSeen.keys()]) if (!wanted.has(t)) tgGroupsSeen.delete(t);
+  for (const t of [...tgGroupsHeld]) if (!wanted.has(t)) tgGroupsHeld.delete(t);
+  forgetTgGroupsInHomes({
+    childrenDir: path.join(merrymenHome(), "children"),
+    keep: (t) => wanted.has(t) || children.has(t),
+    before: listedAtMs,
+    log,
+  });
+  const url = process.env.DATABASE_URL;
+  if (!url) return;
+  try {
+    const shared = await makePgDb(url);
+    await ensureTgGroupsSchema(shared, "postgres");
+    await forgetUnwantedTgGroups({ shared, wanted, listedAtMs, log });
+  } catch (e) {
+    log(`tg-groups: stored memory of removed agents not swept this pass — ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -1416,6 +1594,11 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   const smartAccount = await writeGrantForChild(tenant);
   if (!smartAccount) {
     log(`${tenant}: no grant in the store — not spawning`);
+    // THE GRANT IS GONE, and its group memory goes with it now. A crash
+    // restart lands here with no reconcile kill branch to do it, because the
+    // tenant is no longer in `children`. The sweep would also catch it on the
+    // next pass.
+    await forgetTgGroups(tenant);
     return;
   }
   // The settings the child will actually read, so the watchdog can size its
@@ -1455,6 +1638,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   // child is already polling would be read from a file the child has by then
   // replaced with a fresh, unlinked default.
   await writeTelegramForChild(tenant);
+  // AND ITS TELEGRAM GROUPS, in the same place for the same reason. See
+  // restoreTgGroupsForChild.
+  await restoreTgGroupsForChild(tenant);
   void writeHistoryForChild(tenant, smartAccount);
   const tickSeconds = typeof settings?.tickSeconds === "number" ? settings.tickSeconds : envTickSeconds();
   const staleSec = staleThresholdSec(tickSeconds);
@@ -1462,7 +1648,8 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   const proc = spawn(
     process.execPath,
     [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
-    { cwd: ROOT, env: childEnv(tenant), stdio: ["ignore", "pipe", "pipe"] },
+    // Groups held off when the restore above could not put them back.
+    { cwd: ROOT, env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) }), stdio: ["ignore", "pipe", "pipe"] },
   );
   const child: Child = { proc, tenant, smartAccount, startedAt: Date.now(), restarts, staleSec, firstBeatSec };
   children.set(tenant, child);
@@ -1569,6 +1756,12 @@ async function honourKill(tenant: `0x${string}`, nowSec: number): Promise<KillOu
   if (k.outcome === "revoked" && k.removed) {
     log(`${tenant}: Telegram kill honoured — grant removed from the store`);
     void confirmKillDone(tenant);
+    // AND ITS STORED GROUP MEMORY, now rather than when a reconcile next
+    // finds its child here: the kill may be carried out by the order ferry or
+    // on shutdown, with no child here to stand down. Only the one call whose
+    // DELETE removed the grant gets here. A row a still-running child
+    // republishes before it is stood down goes on the next pass (sweepTgGroups).
+    await forgetTgGroups(tenant);
   }
   if (k.outcome === "superseded") log(`${tenant}: a grant signed after the Telegram kill replaces it — arming that one`);
   if (k.outcome === "failed") log(`${tenant}: Telegram kill pending, could not remove the grant yet (${k.error}) — nothing arms meanwhile`);
@@ -1611,6 +1804,9 @@ export async function reconcile(): Promise<void> {
   if (stopping) return;
   const store = getGrantStore();
   let tenants: `0x${string}`[];
+  // Before the listing is asked for: the group-memory sweep below judges only
+  // rows written before this, never one a newer grant's child has published.
+  const listedAtMs = Date.now();
   try {
     tenants = await store.listTenants();
   } catch (e) {
@@ -1719,8 +1915,16 @@ export async function reconcile(): Promise<void> {
       } catch {
         /* best-effort cleanup */
       }
+      // AND THE SEALED COPY OF ITS TELEGRAM GROUPS, which would otherwise
+      // outlive the home it came from. See forgetTgGroups.
+      await forgetTgGroups(tenant);
     }
   }
+  // AND EVERY OTHER TENANT'S WHOSE GRANT IS GONE, running here or not: the
+  // branch above reaches only a child running on this replica right now. The
+  // listing succeeded (an unreadable store returned above), so `wanted` is
+  // the fleet's. See sweepTgGroups.
+  await sweepTgGroups(wanted, listedAtMs);
   // Release any lease we still hold for a tenant that is no longer wanted — both
   // the kill-switch case above and a lease left over from a child that has since
   // exited. Holding a lease for a tenant we won't arm would block another replica
@@ -5225,6 +5429,8 @@ async function mirrorLedgers(): Promise<void> {
   const url = process.env.DATABASE_URL;
   if (!url || children.size === 0) return;
   let shared;
+  // Null unless the group-memory schema is in place and the DEK is present.
+  let tgGroupsDekThisPass: Buffer | null = null;
   try {
     shared = await makePgDb(url);
     // The full ledger schema, not just the cursor table. Nothing else applies
@@ -5255,6 +5461,15 @@ async function mirrorLedgers(): Promise<void> {
       await shared.exec(COMMAND_RECEIPT_DDL);
     } catch {
       /* already there */
+    }
+    // Telegram group memory, on the same clock for the same reason. Its own
+    // try: a failure here skips only the group ferry this pass, never the
+    // ledger mirror.
+    try {
+      await ensureTgGroupsSchema(shared, "postgres");
+      tgGroupsDekThisPass = tgGroupsDek();
+    } catch (e) {
+      log(`tg-groups: schema unavailable, not ferried this pass — ${e instanceof Error ? e.message : String(e)}`);
     }
   } catch (e) {
     log(`ledger mirror: shared db unavailable — ${e instanceof Error ? e.message : String(e)}`);
@@ -5344,6 +5559,28 @@ async function mirrorLedgers(): Promise<void> {
       log(`ledger mirror: ${tenant} failed — ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       handle.close();
+    }
+    // THE CHILD'S TELEGRAM GROUPS, beside the telegram link and under the same
+    // lease: only the replica that owns this child may speak for it, and a
+    // stale home left here by a child now running elsewhere must never
+    // overwrite the live copy. Outside the mirror's try, like the wire below:
+    // a stalled ledger is no reason to let group memory fall behind. Read
+    // only; sealed; skipped when the file has not changed. Never for a child
+    // whose groups are held off: its file is not its memory, and the stored
+    // row is what its next spawn will restore (tgGroupsHeld).
+    //
+    // FORGET REQUESTS REACH THE ROW EITHER WAY. A publish applies them to what
+    // it seals. When nothing is published (held, or a file that is absent,
+    // refused or failed), the requests in the home are applied to the stored
+    // row itself, under the same lease, so a /forgetme made while the child's
+    // groups are held off is not undone by the restore that ends the hold.
+    if (tgGroupsDekThisPass && !tgGroupsHeld.has(tenant.toLowerCase())) {
+      const published = await publishTgGroups({ tenant, home: childHome(tenant), shared, dek: tgGroupsDekThisPass, seen: tgGroupsSeen, log });
+      if (published !== "published" && published !== "unchanged") {
+        await forgetStoredTgGroups({ tenant, home: childHome(tenant), shared, dek: tgGroupsDekThisPass, seen: tgGroupsSeen, log });
+      }
+    } else if (tgGroupsDekThisPass) {
+      await forgetStoredTgGroups({ tenant, home: childHome(tenant), shared, dek: tgGroupsDekThisPass, seen: tgGroupsSeen, log });
     }
     // ── THE WIRE ────────────────────────────────────────────────────────────
     //
