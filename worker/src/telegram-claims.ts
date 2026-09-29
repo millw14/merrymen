@@ -297,6 +297,10 @@ export function storedBotOf(settings: MerrymenSettings | null): string | null {
  *   failed save can take back what a save that decided on its claim stands on
  *   (undoBotClaimUnlessSaved says when). Serialized saves have neither.
  *
+ * BOUNDED: four rounds. Settings still changing after that end with one last
+ * release on the last bot read, so this tenant holds at most that one; a later
+ * save's settle corrects it if it was not the last.
+ *
  * WHEN THE SETTINGS CANNOT BE READ BACK, it falls back to the rule from before
  * it read them: every bot but `wrote`, the one this save stored (null for a
  * clear, or a save with no token). Only a lost update, which the lock leaves
@@ -351,6 +355,8 @@ export async function settleBotClaims(
     if (stamp !== undefined) await claim(after!, stamp);
     bot = after;
   }
+  await release(bot);
+  if (bot !== null && bot === confirmedBot) await claim(bot, now);
 }
 
 /**

@@ -9,7 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import type { MerrymenSettings } from "@merrymen/core";
 import { wrapSqlite, type Db } from "../../../worker/src/db";
-import { botIdOf, claimBot, ensureBotClaims, readBotClaims } from "../../../worker/src/telegram-claims";
+import { botIdOf, claimBot, ensureBotClaims, readBotClaims, settleBotClaims } from "../../../worker/src/telegram-claims";
 import {
   BOT_CLAIMED_TEXT,
   BOT_UNCONFIRMED_TEXT,
@@ -385,6 +385,16 @@ describe("settleBotClaims, at its edges", () => {
     assert.ok(x.ok);
     await assert.rejects(x.settle(), /store down.*settled on the token this save wrote/);
     assert.deepEqual(await claims(d), [["222", A]], "not 111 as well");
+  });
+
+  it("SETTINGS STILL CHANGING AFTER FOUR ROUNDS: a last release leaves at most the bot read last", async () => {
+    const d = await db();
+    for (const b of ["201", "202", "203", "204", "205"]) await claimBot(d, b, A, b, 0);
+    const reads = ["201", "202", "203", "204", "205"];
+    let n = 0;
+    await settleBotClaims(d, A, async () => reads[Math.min(n++, reads.length - 1)]!, null, 5);
+    assert.equal(n, 5, "four rounds, each read again");
+    assert.deepEqual(await claims(d), [["205", A]]);
   });
 });
 
