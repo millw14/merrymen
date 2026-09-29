@@ -25,6 +25,18 @@ const settled = <T>(p: Promise<T>) => {
   });
   return box;
 };
+/**
+ * Turn the loop until `ready()` holds: a state to wait for, not a count of
+ * turns, which on Node 22 under tsx is not enough. Bounded by the real clock
+ * (only setTimeout is mocked here), so a state that never comes fails.
+ */
+const waitFor = async (ready: () => boolean, what: string) => {
+  const t0 = performance.now();
+  while (!ready()) {
+    if (performance.now() - t0 > 10_000) assert.fail(`never happened: ${what}`);
+    await new Promise((r) => setImmediate(r));
+  }
+};
 const opts = { key: "sk-test", base: "https://stt.example/v1" };
 
 describe("transcribeVoice is bounded", () => {
@@ -42,25 +54,32 @@ describe("transcribeVoice is bounded", () => {
     await flush();
     assert.equal(r.done, false);
     mock.timers.tick(1);
-    await flush();
+    await waitFor(() => r.done, "the download gives up");
     assert.deepEqual(r.value, { text: null, reason: "couldn't download the voice note: timed out after 60s" });
     assert.equal(signal?.aborted, true, "the request itself was told to stop");
     assert.equal(urls.length, 1);
   });
 
   it("a transcription that never answers gives up 60s after it was sent", async () => {
-    globalThis.fetch = ((url: string) =>
-      String(url).endsWith("/audio/transcriptions")
+    const urls: string[] = [];
+    globalThis.fetch = ((url: string) => {
+      urls.push(String(url));
+      return String(url).endsWith("/audio/transcriptions")
         ? new Promise(() => {})
-        : Promise.resolve(new Response(new Uint8Array([1, 2, 3])))) as typeof fetch;
+        : Promise.resolve(new Response(new Uint8Array([1, 2, 3])));
+    }) as typeof fetch;
     mock.timers.enable({ apis: ["setTimeout"] });
     const r = settled(transcribeVoice("https://api.telegram.org/file/bot1:a/voice.ogg", opts));
-    await flush();
+    // The transcription's deadline is armed only once the download, body and
+    // all, is in: a real Response's arrayBuffer() takes as many turns as it
+    // takes. Ticked before then, the deadline would be set after the clock
+    // had already jumped, and would never fire.
+    await waitFor(() => urls.some((u) => u.endsWith("/audio/transcriptions")), "the transcription is sent");
     mock.timers.tick(59_999);
     await flush();
     assert.equal(r.done, false);
     mock.timers.tick(1);
-    await flush();
+    await waitFor(() => r.done, "the transcription gives up");
     assert.deepEqual(r.value, { text: null, reason: "transcription timed out after 60s" });
   });
 
