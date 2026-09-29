@@ -132,3 +132,26 @@ export function linkReply(outcome: LinkOutcome, now: number): { ok: boolean; rea
     reason: `too many wrong codes from this chat — try again in about ${minutes} min (after ${at} UTC). Use the code in Settings → Telegram.`,
   };
 }
+
+/**
+ * Tell the log about a /link that did not link (poll-rules.ts makeChatTally):
+ * a wrong code, one refused because the chat is locked, or the wrong code that
+ * locked it, with until when. Read from `fails` just after tryLink, which is
+ * the only place that knows whether this attempt was the one that locked the
+ * chat.
+ */
+export function tallyFailedLink(
+  // poll-rules.ts ChatTally, by shape: this file imports only the state.
+  tally: { linkFailed(chatId: number, o: { locked: boolean; justLocked: boolean; lockedUntil?: number }): void },
+  fails: LinkFails,
+  chatId: number,
+  outcome: LinkOutcome,
+): void {
+  if (outcome.ok) return;
+  if (outcome.locked) {
+    tally.linkFailed(chatId, { locked: true, justLocked: false, lockedUntil: outcome.until });
+    return;
+  }
+  const lock = fails.get(chatId);
+  tally.linkFailed(chatId, { locked: false, justLocked: lock?.fails === LINK_MAX_FAILS, lockedUntil: lock?.until });
+}

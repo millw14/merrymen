@@ -295,3 +295,30 @@ describe("a backlog is held back by the child's rules", () => {
     });
   });
 });
+
+describe("what the hold process leaves for the dashboard and the log", () => {
+  it("RECORDS ITS POLLS AS THE CHILD DOES, so a held bot that answers reads as heard", async () => {
+    // The orchestrator publishes this record for held tenants too (plan §1.4),
+    // and watches it for a bot nobody hears.
+    await withHold(async (h) => {
+      await h.advance(1_000);
+      const onDisk = JSON.parse(readFileSync(path.join(HOME, "telegram.json"), "utf8")) as { poll?: unknown };
+      assert.deepEqual(onDisk.poll, { okAt: Math.floor(T0 / 1000), err: null, errAt: null, botId: "111" });
+    });
+  });
+
+  it("counts a stranger's messages and wrong codes, with the chat cut to its last digits", async () => {
+    await withHold(async (h) => {
+      h.queue.push(text(1, 123456789, "hi"), text(2, 123456789, "/link WRONG1"));
+      await h.advance(1_000);
+      assert.deepEqual(
+        h.notes.filter((m) => m.includes("…6789")),
+        [
+          "Telegram: message from unlisted chat …6789 refused (1 so far)",
+          "Telegram: /link from chat …6789 failed (wrong code) — 1 so far",
+        ],
+      );
+      assert.ok(!h.notes.some((m) => m.includes("123456789")));
+    });
+  });
+});

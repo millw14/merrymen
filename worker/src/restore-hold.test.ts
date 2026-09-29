@@ -136,6 +136,9 @@ describe("held tenants reach only the loops they belong in", () => {
       "spawnChild",
       "spawnHolder",
       "standDownHolder",
+      // Reads a held tenant's poll record to say when its bot has gone deaf,
+      // and does nothing else (orchestrator.test pins that it kills nothing).
+      "telegramLiveness",
       "watchHolder",
     ]);
   });
@@ -145,7 +148,9 @@ describe("held tenants reach only the loops they belong in", () => {
     const loops = loopsOver(mirror, "holders");
     assert.equal(loops.length, 1, "one loop over held tenants");
     const body = loops[0]!.statement.getText();
-    assert.match(body, /await publishChildTelegram\(tenant as `0x\$\{string\}`, shared\);/);
+    // Published as held, with the class its owner is told, so the dashboard
+    // says trading is held rather than "connected" (plan §3.1).
+    assert.match(body, /await publishChildTelegram\(tenant as `0x\$\{string\}`, shared, `held:\$\{held\.cls\}`\);/);
     assert.match(body, /if \(!lease \|\| !lease\.healthy\(\)\) continue;/, "only under the lease");
     for (const never of ["mirrorTenant", "openChildLedger", "mirrorSerially", "writePeersFor", "heldEquitySymbols"]) {
       assert.ok(!body.includes(never), `the holders loop must not call ${never}`);

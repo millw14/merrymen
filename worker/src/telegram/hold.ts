@@ -35,9 +35,9 @@
  * mirrors. It has no DATABASE_URL anyway (childEnv).
  */
 
-import { answerCallbackQuery, esc, getMe, getUpdates, sendMessage, type TgCallback, type TgMessage } from "./api";
-import { bindToken, ensureLinkCode, retireLegacyCode, type StateRef } from "./state";
-import { linkReply, tryLink, type LinkFails } from "./link";
+import { answerCallbackQuery, esc, getMe, getUpdates, sendMessage as sendTelegramMessage, type TgCallback, type TgMessage } from "./api";
+import { bindToken, botIdOf, ensureLinkCode, recordPoll, retireLegacyCode, type StateRef } from "./state";
+import { linkReply, tallyFailedLink, tryLink, type LinkFails } from "./link";
 import { CONFIRM_TTL_SEC, killDoneText, killPromptText, type KillResult } from "./kill-confirm";
 import {
   BACKOFF_MAX_SEC,
@@ -48,8 +48,10 @@ import {
   REARM_AFTER_SEC,
   STALE_LINK_TEXT,
   WAKE_SLICE_MS,
+  makeChatTally,
   onboardingText,
   pollFailure,
+  redactChat,
   refusalText,
   slashHead,
   span,
@@ -81,10 +83,6 @@ export interface HoldDeps {
   now?: () => number;
 }
 
-
-/** Only the last four digits of a chat id go to the fleet's log. */
-const redact = (chatId: number): string => `…${String(Math.abs(chatId)).slice(-4)}`;
-
 export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
   let stopped = false;
   const stateRef = deps.stateRef;
@@ -92,6 +90,14 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
   const note = deps.note ?? ((level, message) => console.log(`[telegram${level === "warn" ? " warn" : ""}] ${message}`));
   const blocker = deps.blocker ?? (() => readRestoreBlocked(merrymenHome()));
   const kill = deps.kill ?? (() => hostedKillFromChat(merrymenHome(), homePaths.grant(), loadGrantFile(), now()));
+  // Counted and logged as the child does (poll-rules.ts makeChatTally), and
+  // every reply through the same check for one Telegram would not take.
+  const tally = makeChatTally(note, now);
+  const sendMessage: typeof sendTelegramMessage = async (opts, chatId, text, extra) => {
+    const r = await sendTelegramMessage(opts, chatId, text, extra);
+    if (!r.ok) tally.sendFailed(chatId, r.reason);
+    return r;
+  };
   // The hold's own record unreadable: the class that names no cause, and no
   // practice reset offered, since nothing then says it would be honoured.
   const holdReply = (): string => {
@@ -119,27 +125,26 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
 
   /** A code from a chat not on the allowlist: link.ts decides, exactly as in the child. */
   const link = (msg: TgMessage, code: string, cfg: HoldConfig): string => {
-    const r = linkReply(
-      tryLink(
-        {
-          stateRef,
-          fails: linkFails,
-          now,
-          // The child's own settings.json, as the child's link writes it; the
-          // orchestrator promotes linkedChats into the stored allowlist on its
-          // mirror clock, for held tenants too.
-          allow: (chatId) => {
-            const next = new Set(cfg.telegramAllowlist);
-            next.add(chatId);
-            patchSettingsFile({ telegramAllowlist: [...next] });
-          },
-          onLinked: (who) => note("ok", `Telegram: linked chat ${redact(who.chatId)} while trading is held`),
+    const outcome = tryLink(
+      {
+        stateRef,
+        fails: linkFails,
+        now,
+        // The child's own settings.json, as the child's link writes it; the
+        // orchestrator promotes linkedChats into the stored allowlist on its
+        // mirror clock, for held tenants too.
+        allow: (chatId) => {
+          const next = new Set(cfg.telegramAllowlist);
+          next.add(chatId);
+          patchSettingsFile({ telegramAllowlist: [...next] });
         },
-        msg,
-        code,
-      ),
-      now(),
+        onLinked: (who) => note("ok", `Telegram: linked chat ${redactChat(who.chatId)} while trading is held`),
+      },
+      msg,
+      code,
     );
+    tallyFailedLink(tally, linkFails, msg.chatId, outcome);
+    const r = linkReply(outcome, now());
     // Linked, and told at once why nothing trades: /status would only say it again.
     return r.ok
       ? `🏹 you're linked — you now command this merryman.\n\n${holdReply()}`
@@ -203,6 +208,7 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
         return;
       }
       const onboarding = head?.cmd === "help" || (head?.cmd === "start" && !head.arg);
+      tally.refused(msg.chatId);
       await sendMessage({ token }, msg.chatId, onboarding ? onboardingText(msg.chatId) : refusalText(msg.chatId));
       return;
     }
@@ -218,6 +224,7 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
   const handlePress = async (cb: TgCallback, cfg: HoldConfig): Promise<void> => {
     const token = cfg.telegramBotToken!;
     if (!allowedIn(cfg, cb.chatId, cb.fromId)) {
+      tally.refused(cb.chatId);
       await answerCallbackQuery({ token }, cb.id, "Not authorized.");
       return;
     }
@@ -240,6 +247,7 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
       await handle(msg, cfg);
       return;
     }
+    if (action === "refuse") tally.refused(msg.chatId);
     const key = `${msg.chatId}:${action}`;
     if (told.has(key)) return;
     told.add(key);
@@ -256,6 +264,7 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
     const head = slashHead(msg.text);
     const lateCode = head?.cmd === "link" || (head?.cmd === "start" && head.arg !== "");
     const kind = lateCode ? "link" : allowedIn(cfg, msg.chatId, msg.fromId) ? "held" : "refused";
+    if (kind === "refused") tally.refused(msg.chatId);
     const key = `${msg.chatId}:${kind}`;
     if (earlyTold.has(key)) return;
     earlyTold.add(key);
@@ -293,12 +302,13 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
     if (bound.told) note("ok", "Telegram: bot token renewed, so the link code was re-minted");
   };
 
-  const pollFailed = (r: { reason?: string; errorCode?: number; retryAfter?: number }): number => {
+  const pollFailed = (r: { reason?: string; errorCode?: number; retryAfter?: number }, token: string): number => {
     const t = now();
     outage = outage ?? { since: t, streak: 0, told: new Set() };
     outage.streak += 1;
     deafSince ??= t;
-    const { kind, waitMs, line } = pollFailure(r, outage.streak);
+    const { kind, waitMs, line, err } = pollFailure(r, outage.streak);
+    notePoll(token, err);
     const conflictToldRecently = kind === "conflict" && conflictToldAt !== null && t - conflictToldAt < CONFLICT_RETELL_SEC;
     if (!outage.told.has(kind) && !conflictToldRecently) {
       outage.told.add(kind);
@@ -308,9 +318,21 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
     return waitMs;
   };
 
-  const pollWorked = (): void => {
+  const pollWorked = (token: string): void => {
+    notePoll(token, null);
     if (outage && outage.told.size > 0) note("ok", `Telegram: receiving updates again after ${span(now() - outage.since)}`);
     outage = null;
+  };
+
+  /**
+   * How the poll went, into telegram.json, as the child records it (state.ts
+   * recordPoll). The orchestrator publishes it for held tenants too, so the
+   * dashboard can tell a held bot that answers from one nobody hears.
+   */
+  const notePoll = (token: string, err: string | null): void => {
+    const held = stateRef.get();
+    const next = recordPoll(held, botIdOf(token), now(), err);
+    if (next !== held) stateRef.set(next);
   };
 
   const freshCfg = (): HoldConfig | undefined => {
@@ -345,8 +367,8 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
 
     const askedAt = now();
     const polled = await getUpdates({ token }, stateRef.get().offset);
-    if (polled.reason) return pollFailed(polled);
-    pollWorked();
+    if (polled.reason) return pollFailed(polled, token);
+    pollWorked(token);
     if (deafSince !== null && askedAt - deafSince >= REARM_AFTER_SEC) armedAt = null;
     deafSince = null;
     if (armedAt === null) armedAt = askedAt;

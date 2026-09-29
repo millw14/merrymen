@@ -184,3 +184,62 @@ export async function clearHoldNotified(db: Db, tenant: string): Promise<void> {
     .prepare("UPDATE tenant_telegram SET hold_notified = NULL WHERE tenant = ? AND hold_notified IS NOT NULL")
     .run(tenant.toLowerCase());
 }
+
+/**
+ * WHETHER ANYTHING IS HEARING THE TENANT'S BOT, AND WHETHER IT TRADES: the
+ * dashboard's half of plan §3.1, published beside the code on the same clock
+ * by the same writer (orchestrator.ts publishChildTelegram).
+ *
+ * The dashboard used to say "connected" whenever getMe accepted the token,
+ * and show whatever code this table last held. In the incident behind these
+ * columns nothing had polled the bot for days: its worker was held back by a
+ * practice book that would not restore, then a second login took the bot. The
+ * page showed "connected" and a frozen code throughout, and the owner kept
+ * sending that code into a bot nobody was reading.
+ *
+ * - `bot_id`: the bot the code in `link_code` was minted for (the numeric id
+ *   before the ':' in its token, never the token). The web shows the code only
+ *   when this matches the token the owner has saved; a code for the old bot
+ *   would not link the new one.
+ * - `poll_ok_at`, `poll_err`, `poll_err_at`: when a getUpdates last worked,
+ *   and the last one that failed and why (telegram/state.ts PollHealth). Null
+ *   when they are about another bot, or nothing has polled yet.
+ * - `child_state`: `trading`, or `held:<class>` while the tenant's practice
+ *   book will not restore (restore-block.ts). The class is the figure-free
+ *   phrase an owner is told anyway; never the restore's own reason.
+ *
+ * Added with ALTERs, like hold_notified, because every deployment already has
+ * the table. `poll_err_at` is one more than the plan named: without it, the
+ * last failure could not be told from the current one, and a single 409 at a
+ * redeploy handover would read as another program on the bot for ever.
+ */
+export const TELEGRAM_LIVENESS_DDL: readonly string[] = [
+  "ALTER TABLE tenant_telegram ADD COLUMN bot_id TEXT",
+  "ALTER TABLE tenant_telegram ADD COLUMN poll_ok_at INTEGER",
+  "ALTER TABLE tenant_telegram ADD COLUMN poll_err TEXT",
+  "ALTER TABLE tenant_telegram ADD COLUMN poll_err_at INTEGER",
+  "ALTER TABLE tenant_telegram ADD COLUMN child_state TEXT",
+];
+
+export interface TenantTelegramLiveness {
+  botId: string | null;
+  pollOkAt: number | null;
+  pollErr: string | null;
+  pollErrAt: number | null;
+  childState: string | null;
+}
+
+/**
+ * Publish the liveness columns for a tenant whose row publishTenantTelegram
+ * has just written. A separate statement on purpose: if these columns are
+ * missing (the ALTERs could not run), the code and the owner above must still
+ * be published, and they would not be if one INSERT carried both.
+ */
+export async function publishTelegramLiveness(db: Db, tenant: string, l: TenantTelegramLiveness): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE tenant_telegram SET bot_id = ?, poll_ok_at = ?, poll_err = ?, poll_err_at = ?, child_state = ?
+       WHERE tenant = ?`,
+    )
+    .run(l.botId, l.pollOkAt, l.pollErr, l.pollErrAt, l.childState, tenant.toLowerCase());
+}

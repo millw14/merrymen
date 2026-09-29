@@ -9,6 +9,8 @@
  *   - notifier bookkeeping: last trade row pinged, per-condition alert dedupe,
  *     the last day a digest went out
  *   - user-set price alerts
+ *   - how the last polls of the bot went, for the dashboard and the
+ *     orchestrator's liveness alert
  *
  * The allowlist itself lives in settings.json (dashboard-editable); this file
  * is worker-managed runtime bookkeeping.
@@ -174,6 +176,104 @@ export interface TelegramState {
   watchers: Watcher[];
   /** Monotonic id source for reminders/watchers. */
   nextId: number;
+  /**
+   * WHETHER ANYTHING IS HEARING THE BOT (recordPoll). Null until the first
+   * getUpdates, and in a file from before this existed.
+   */
+  poll: PollHealth | null;
+}
+
+/**
+ * HOW THE LAST POLLS OF THE BOT WENT, written by whichever process polls it
+ * (the child, or the hold process while trading is held) and read by the
+ * orchestrator: published to the dashboard, and watched for a bot nobody has
+ * heard in a while (orchestrator.ts telegramLiveness).
+ *
+ * Nothing recorded this, so nothing could say it. In the incident this came
+ * from the bot went unpolled for days while the dashboard showed "connected"
+ * and a link code nobody could use: "connected" was a getMe the web ran
+ * against the token, which says the token is good and nothing about whether
+ * anything is listening.
+ *
+ * The last failure is KEPT after a success, with its time, rather than
+ * cleared. Two programs polling one bot take turns failing with 409, so a
+ * process that cleared it would look healthy half the time; what says whether
+ * it is failing NOW is which of `okAt` and `errAt` is later.
+ */
+export interface PollHealth {
+  /** When a getUpdates last worked, unix seconds. Null until one has. */
+  okAt: number | null;
+  /** The last failure, as poll-rules.ts pollErrText writes it: `<kind>: <detail>`. */
+  err: string | null;
+  /** When `err` was last seen, unix seconds. */
+  errAt: number | null;
+  /** The bot these are about (botIdOf). What was heard on another bot says nothing about this one. */
+  botId: string | null;
+}
+
+/**
+ * A poll whose outcome matches the last one recorded is written at most this
+ * often. Every poll would be a write of telegram.json twice a minute for
+ * nothing; the readers need minutes, not seconds (the dashboard calls a bot
+ * live for three, the orchestrator alerts after ten).
+ */
+export const POLL_RECORD_EVERY_SEC = 30;
+
+/** The poll record as a file gave it, or null when it is missing or malformed. */
+export function parsePollHealth(raw: unknown): PollHealth | null {
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as Record<string, unknown>;
+  const sec = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null);
+  return {
+    okAt: sec(p.okAt),
+    err: typeof p.err === "string" && p.err !== "" ? p.err.slice(0, 200) : null,
+    errAt: sec(p.errAt),
+    // The same rule as `botId` above: a number, never anything a token could hide in.
+    botId: typeof p.botId === "string" && /^\d+$/.test(p.botId) ? p.botId : null,
+  };
+}
+
+/**
+ * Did the last recorded poll work? Only when its success is strictly later
+ * than its failure; recordPoll never writes the two in the same second, and a
+ * tie in a file from elsewhere is read as failing (telegram-liveness.ts
+ * pollFailingNow, the same rule).
+ */
+function lastPollWorked(p: PollHealth): boolean {
+  return p.okAt !== null && (p.errAt === null || p.okAt > p.errAt);
+}
+
+/**
+ * `at`, or one second past `other` when it is not already later. Seconds are
+ * coarse: a 409 and the good poll ten seconds later are far apart, but a
+ * failure and a success can land in the same second, and the record must
+ * still say which came last.
+ */
+const after = (at: number, other: number | null): number => (other !== null && at <= other ? other + 1 : at);
+
+/**
+ * RECORD ONE POLL of bot `botId` at `at`: `err` null when it worked, or the
+ * failure as pollErrText wrote it. The same state object comes back when
+ * there is nothing worth writing, so the caller can skip the save.
+ *
+ * Written at once when the answer changes: the first poll of a bot, a success
+ * after a failure or the other way round, or a different failure. Otherwise at
+ * most every POLL_RECORD_EVERY_SEC.
+ */
+export function recordPoll(state: TelegramState, botId: string | null, at: number, err: string | null): TelegramState {
+  // A record about a different bot is dropped, not carried: its successes were
+  // not this bot's.
+  const prev = state.poll && state.poll.botId === botId ? state.poll : null;
+  const next: PollHealth =
+    err === null
+      ? { okAt: after(at, prev?.errAt ?? null), err: prev?.err ?? null, errAt: prev?.errAt ?? null, botId }
+      : { okAt: prev?.okAt ?? null, err, errAt: after(at, prev?.okAt ?? null), botId };
+  const changed = prev === null || (err === null) !== lastPollWorked(prev) || (err !== null && err !== prev.err);
+  if (!changed) {
+    const last = err === null ? prev.okAt : prev.errAt;
+    if (last !== null && at - last < POLL_RECORD_EVERY_SEC) return state;
+  }
+  return { ...state, poll: next };
 }
 
 /**
@@ -207,6 +307,7 @@ const DEFAULT: TelegramState = {
   reminders: [],
   watchers: [],
   nextId: 1,
+  poll: null,
 };
 
 export function loadTelegramState(): TelegramState {
@@ -290,6 +391,7 @@ export function loadTelegramState(): TelegramState {
           )
         : [],
       nextId: typeof s.nextId === "number" && s.nextId > 0 ? s.nextId : 1,
+      poll: parsePollHealth(s.poll),
     };
   } catch {
     return { ...DEFAULT };

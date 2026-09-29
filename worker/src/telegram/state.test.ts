@@ -10,6 +10,8 @@ import {
   ensureLinkCode,
   loadTelegramState,
   retireLegacyCode,
+  POLL_RECORD_EVERY_SEC,
+  recordPoll,
   rotateLinkCode,
   saveTelegramState,
   switchBot,
@@ -41,6 +43,7 @@ const base: TelegramState = {
   reminders: [],
   watchers: [],
   nextId: 1,
+  poll: null,
 };
 
 /** An rng that hands out `bytes` in order, looping, so a test can say exactly which code comes next. */
@@ -367,5 +370,84 @@ describe("bindToken — the state a token's bot binds, shared by the child and t
     assert.equal(bindToken(on111, "111:a", 5).state, on111);
     assert.equal(bindToken(on111, "111:a", 5).change, "same");
     assert.equal(bindToken(on111, "not-a-token", 5).change, "invalid");
+  });
+});
+
+/**
+ * WHETHER ANYTHING IS HEARING THE BOT (plan §1.4). The process polling it
+ * records each poll here; the orchestrator publishes it and alerts on it.
+ * Nothing recorded it before, and the dashboard said "connected" for days in
+ * which nothing polled the owner's bot.
+ */
+describe("the poll record", () => {
+  const T = 1_790_000_000;
+
+  it("round-trips through save and load", () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), "merrymen-tg-poll-"));
+    const prev = process.env.MERRYMEN_HOME;
+    process.env.MERRYMEN_HOME = home;
+    try {
+      const poll = { okAt: T, err: "conflict: another program is reading this bot's updates (409)", errAt: T - 40, botId: "111" };
+      saveTelegramState({ ...base, botId: "111", poll });
+      assert.deepEqual(loadTelegramState().poll, poll);
+      // A file from before it existed, and one whose record is not an object.
+      writeFileSync(path.join(home, "telegram.json"), JSON.stringify({ offset: 1 }));
+      assert.equal(loadTelegramState().poll, null);
+      writeFileSync(path.join(home, "telegram.json"), JSON.stringify({ poll: "live" }));
+      assert.equal(loadTelegramState().poll, null);
+      // It is published: no token may ride in under the bot's name.
+      writeFileSync(path.join(home, "telegram.json"), JSON.stringify({ poll: { okAt: T, botId: "111:secret" } }));
+      assert.deepEqual(loadTelegramState().poll, { okAt: T, err: null, errAt: null, botId: null });
+    } finally {
+      if (prev === undefined) delete process.env.MERRYMEN_HOME;
+      else process.env.MERRYMEN_HOME = prev;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("a good poll records when, for which bot", () => {
+    assert.deepEqual(recordPoll(base, "111", T, null).poll, { okAt: T, err: null, errAt: null, botId: "111" });
+  });
+
+  it("A FAILURE IS KEPT AFTER A SUCCESS, so the latest outcome is whichever is later", () => {
+    // Two programs on one bot take turns failing with 409. A record that
+    // cleared the failure on every success would look healthy half the time.
+    const conflict = "conflict: another program is reading this bot's updates (409)";
+    let st = recordPoll(base, "111", T, null);
+    st = recordPoll(st, "111", T + 10, conflict);
+    assert.deepEqual(st.poll, { okAt: T, err: conflict, errAt: T + 10, botId: "111" });
+    st = recordPoll(st, "111", T + 20, null);
+    assert.deepEqual(st.poll, { okAt: T + 20, err: conflict, errAt: T + 10, botId: "111" });
+  });
+
+  it("WRITES AT ONCE WHEN THE ANSWER CHANGES, and otherwise at most every 30s", () => {
+    let st = recordPoll(base, "111", T, null);
+    // The same outcome inside the window: the same object, so nothing is saved.
+    assert.equal(recordPoll(st, "111", T + POLL_RECORD_EVERY_SEC - 1, null), st);
+    const later = recordPoll(st, "111", T + POLL_RECORD_EVERY_SEC, null);
+    assert.notEqual(later, st);
+    assert.equal(later.poll!.okAt, T + POLL_RECORD_EVERY_SEC);
+    // A failure right after a success is news, and so is a different failure.
+    st = recordPoll(st, "111", T + 1, "failed: request timed out after 35s");
+    assert.equal(st.poll!.errAt, T + 1);
+    const same = recordPoll(st, "111", T + 2, "failed: request timed out after 35s");
+    assert.equal(same, st, "the same failure again inside the window is not");
+    assert.equal(recordPoll(st, "111", T + 2, "refused: 401 Unauthorized").poll!.err, "refused: 401 Unauthorized");
+    // And a success after a failure, at once.
+    assert.equal(recordPoll(st, "111", T + 2, null).poll!.okAt, T + 2);
+  });
+
+  it("a failure and a success in the same second still say which came last", () => {
+    let st = recordPoll(base, "111", T, null);
+    st = recordPoll(st, "111", T, "conflict: another program is reading this bot's updates (409)");
+    assert.equal(st.poll!.errAt, T + 1, "the failure, after the success it followed");
+    st = recordPoll(st, "111", T + 1, null);
+    assert.equal(st.poll!.okAt, T + 2, "and the success after it, written at once");
+  });
+
+  it("a record about another bot is dropped, not carried: its successes were not this bot's", () => {
+    const on111 = recordPoll(base, "111", T, null);
+    const on222 = recordPoll(on111, "222", T + 5, "failed: HTTP 502");
+    assert.deepEqual(on222.poll, { okAt: null, err: "failed: HTTP 502", errAt: T + 5, botId: "222" });
   });
 });

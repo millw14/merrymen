@@ -90,7 +90,8 @@ import {
   withoutBotToken,
 } from "./telegram-claims";
 import { getMe as telegramGetMe } from "./telegram/api";
-import { tokenTagOf } from "./telegram/state";
+import { parsePollHealth, tokenTagOf, type PollHealth } from "./telegram/state";
+import { livenessAlertLine, telegramLivenessVerdict } from "./telegram-liveness";
 import { makePgDb, translateSchema, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
@@ -110,8 +111,10 @@ import { getFollowStore, MAX_FOLLOWS } from "./follow-store";
 import { MIRROR_STATE_DDL, mirrorCountsLine, mirrorTenant, openChildLedger } from "./ledger-mirror";
 import {
   TELEGRAM_HOLD_NOTIFIED_DDL,
+  TELEGRAM_LIVENESS_DDL,
   TELEGRAM_STATE_DDL,
   clearHoldNotified,
+  publishTelegramLiveness,
   publishTenantTelegram,
   readTenantTelegram,
 } from "./telegram-store";
@@ -765,6 +768,10 @@ function readChildTelegram(tenant: string): {
   linkedAt: number | null;
   linkedChats: number[];
   chatSettings: { at: number; patch: Record<string, unknown> } | null;
+  /** The bot `linkCode` belongs to (telegram/state.ts botId); null before the child has bound one. */
+  botId: string | null;
+  /** How its polls went (telegram/state.ts PollHealth); null before the first. */
+  poll: PollHealth | null;
 } | null {
   try {
     const raw = readFileSync(path.join(childHome(tenant), "telegram.json"), "utf8").replace(/^﻿/, "");
@@ -777,6 +784,9 @@ function readChildTelegram(tenant: string): {
         ? (t.linkedChats as unknown[]).filter((c): c is number => typeof c === "number")
         : [],
       chatSettings: readChatSettings(t.chatSettings),
+      // Digits only, as the child's own loader insists: this is published.
+      botId: typeof t.botId === "string" && /^\d+$/.test(t.botId) ? t.botId : null,
+      poll: parsePollHealth(t.poll),
     };
   } catch {
     // No file yet (no bot token set, or the child has not booted) is not an
@@ -921,7 +931,7 @@ export function restoredTelegramFile(
   return Object.keys(out).length > 0 ? out : null;
 }
 
-async function publishChildTelegram(tenant: `0x${string}`, shared: Db): Promise<void> {
+async function publishChildTelegram(tenant: `0x${string}`, shared: Db, childState: string): Promise<void> {
   const tg = readChildTelegram(tenant);
   if (!tg) return;
   try {
@@ -930,6 +940,10 @@ async function publishChildTelegram(tenant: `0x${string}`, shared: Db): Promise<
       ownerId: tg.ownerId,
       linkedAt: tg.linkedAt,
     });
+    // After the row is there to update. How the bot's polls are going, and
+    // whether the tenant trades, for the dashboard (telegram-store.ts
+    // TELEGRAM_LIVENESS_DDL says what each column means and why).
+    await publishLiveness(tenant, shared, tg, childState);
   } catch (e) {
     log(`${tenant}: could not publish telegram state — ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -952,6 +966,50 @@ async function publishChildTelegram(tenant: `0x${string}`, shared: Db): Promise<
     log(`${tenant}: telegram link promoted — ${missing.length} chat(s) added to the stored allowlist`);
   } catch (e) {
     log(`${tenant}: could not promote telegram link — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * Whether the liveness columns are known to exist on the shared database: the
+ * ALTERs that add them have run in this process (mirrorLedgers). Unlike the
+ * other ALTERs there, which run on every pass, these five run once: each
+ * fails once the column is there, and five failing statements every fifteen
+ * seconds is a Postgres error log with nothing else in it. An UPDATE that
+ * fails puts this back, so a column that went missing is added on the next
+ * pass.
+ */
+let livenessColumnsReady = false;
+/** A failing liveness publish is logged once until one succeeds, not once per tenant per pass. */
+let livenessPublishFailing = false;
+
+/**
+ * THE LIVENESS HALF OF THE PUBLISH. The poll record is published only when it
+ * is about the bot the code belongs to: a record about the bot before a
+ * change says nothing about this one, and the dashboard must not call a new
+ * bot live on the strength of the old one's polls.
+ */
+async function publishLiveness(
+  tenant: `0x${string}`,
+  shared: Db,
+  tg: { botId: string | null; poll: PollHealth | null },
+  childState: string,
+): Promise<void> {
+  const poll = tg.poll && tg.botId !== null && tg.poll.botId === tg.botId ? tg.poll : null;
+  try {
+    await publishTelegramLiveness(shared, tenant, {
+      botId: tg.botId,
+      pollOkAt: poll?.okAt ?? null,
+      pollErr: poll?.err ?? null,
+      pollErrAt: poll?.errAt ?? null,
+      childState,
+    });
+    livenessPublishFailing = false;
+  } catch (e) {
+    livenessColumnsReady = false;
+    if (!livenessPublishFailing) {
+      livenessPublishFailing = true;
+      log(`telegram liveness: could not publish (${tenant}) — ${e instanceof Error ? e.message : String(e)}; said once until it works`);
+    }
   }
 }
 
@@ -6569,6 +6627,18 @@ async function mirrorLedgers(): Promise<void> {
     } catch {
       /* already there */
     }
+    // Whether the bot is heard, and whether the tenant trades (publishLiveness).
+    // Once per process rather than every pass: see livenessColumnsReady.
+    if (!livenessColumnsReady) {
+      for (const ddl of TELEGRAM_LIVENESS_DDL) {
+        try {
+          await shared.exec(ddl);
+        } catch {
+          /* already there */
+        }
+      }
+      livenessColumnsReady = true;
+    }
     // The command receipt, on the same clock and for the same reason: this
     // process writes it (landResults), so this process creates it.
     try {
@@ -6613,7 +6683,7 @@ async function mirrorLedgers(): Promise<void> {
       // The link code and any chat the owner just linked. Not part of the
       // ledger — it is a file, not a table — but it needs the same ferry and
       // the same lease: only the replica that owns this child may speak for it.
-      await publishChildTelegram(tenant as `0x${string}`, shared);
+      await publishChildTelegram(tenant as `0x${string}`, shared, "trading");
       // Read while the handle is open, on the mirror's clock. The news desk
       // asks about what the fleet holds before what it merely may buy, and this
       // is the only place the orchestrator can see the difference.
@@ -6690,10 +6760,12 @@ async function mirrorLedgers(): Promise<void> {
   // snapshot tables would copy that emptiness over the checkpoint, positions
   // and cost basis the shared ledger still holds. Under the same lease rule as
   // the loop above: only the replica holding the tenant speaks for it.
-  for (const tenant of [...holders.keys()]) {
+  for (const [tenant, held] of [...holders]) {
     const lease = leases.get(tenant.toLowerCase());
     if (!lease || !lease.healthy()) continue;
-    await publishChildTelegram(tenant as `0x${string}`, shared);
+    // Held, and why in the words its owner is told (restore-block.ts): the
+    // dashboard says trading is held rather than "connected".
+    await publishChildTelegram(tenant as `0x${string}`, shared, `held:${held.cls}`);
   }
 
   // What the fleet has been thinking about, for the news desk to prioritise.
@@ -7027,6 +7099,75 @@ export function watchdog(nowSec = Math.floor(Date.now() / 1000)): void {
   }
 }
 
+/**
+ * THE BOT OF EVERY TENANT THIS REPLICA RUNS, WATCHED FOR SILENCE: the process
+ * being watched (a new one starts a new watch), when the watch began, and
+ * which alerts this incident has had. An incident ends when the bot is heard
+ * again, or Telegram is switched off.
+ */
+const livenessWatch = new Map<string, { proc: ChildProcess; since: number; told: Set<"not-polling" | "revoked"> }>();
+
+/** What a child's settings.json in its home says, as the child reads it; null when there is none. */
+function readChildSettings(tenant: string): MerrymenSettings | null {
+  try {
+    return JSON.parse(readFileSync(path.join(childHome(tenant), "settings.json"), "utf8")) as MerrymenSettings;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * SAY WHEN A TENANT'S BOT HAS GONE DEAF, AND DO NOTHING ELSE (telegram-liveness.ts).
+ *
+ * For each worker and hold process this replica runs under a healthy lease,
+ * with Telegram switched on and a token in the settings it was handed (after
+ * the bot claim, so a tenant whose token went to another is not expected to
+ * poll): the poll record in its telegram.json, for that token's bot. Not heard
+ * for LIVENESS_STALE_SEC is one `[alert] telegram not polling` line per
+ * incident, and a token Telegram refuses is one line of its own. The next
+ * good poll closes the incident with a plain line.
+ *
+ * IT KILLS NOTHING, AND NOTHING KILLS ON ITS WORD. A deaf bot beside a
+ * trading worker is still a trading worker, and a revoked token or a second
+ * program on the bot is not something a restart fixes. The watchdog does not
+ * read the poll record at all (telegram-liveness.test.ts pins both).
+ */
+export function telegramLiveness(nowSec = Math.floor(Date.now() / 1000)): void {
+  if (stopping) return;
+  const running = new Map<string, ChildProcess>();
+  for (const [tenant, child] of children) running.set(tenant, child.proc);
+  for (const [tenant, held] of holders) if (held.proc) running.set(tenant, held.proc);
+  for (const tenant of [...livenessWatch.keys()]) if (!running.has(tenant)) livenessWatch.delete(tenant);
+  for (const [tenant, proc] of running) {
+    // Only the replica holding the tenant runs its process, and only its home
+    // has the record; a stale entry elsewhere must not alert.
+    const lease = leases.get(tenant.toLowerCase());
+    if (!lease || !lease.healthy()) continue;
+    let watch = livenessWatch.get(tenant);
+    if (!watch || watch.proc !== proc) {
+      watch = { proc, since: nowSec, told: new Set() };
+      livenessWatch.set(tenant, watch);
+    }
+    const settings = readChildSettings(tenant);
+    const token = botTokenOf(settings);
+    const bot = token ? botIdOf(token) : null;
+    const tg = readChildTelegram(tenant);
+    const poll = tg?.poll && bot !== null && tg.poll.botId === bot ? tg.poll : null;
+    const p = { okAt: poll?.okAt ?? null, err: poll?.err ?? null, errAt: poll?.errAt ?? null };
+    const verdict = telegramLivenessVerdict({ enabled: botWillPoll(settings), ...p, since: watch.since, now: nowSec });
+    if (verdict === "live" || verdict === "off") {
+      if (verdict === "live" && watch.told.size > 0) log(`telegram polling again: ${tenant}`);
+      watch.told.clear();
+      continue;
+    }
+    const kind = verdict === "revoked" ? "revoked" : "not-polling";
+    if (watch.told.has(kind)) continue;
+    watch.told.add(kind);
+    const line = livenessAlertLine(tenant, verdict, { okAt: p.okAt, err: p.err, since: watch.since });
+    if (line) log(line);
+  }
+}
+
 function haltRequested(): boolean {
   try {
     readFileSync(fleetHaltFile());
@@ -7123,6 +7264,8 @@ export async function runOrchestrator(): Promise<void> {
       await runHolderClaimsBackfill();
       await reconcile();
       watchdog();
+      // Beside the watchdog, and nothing like it: this one only speaks.
+      telegramLiveness();
       await mirrorLedgers();
       startHistoryRepair();
       // AFTER the mirror, because the mirror is what tells the desk which

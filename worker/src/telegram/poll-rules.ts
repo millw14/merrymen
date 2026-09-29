@@ -5,8 +5,9 @@
  * (service.ts), and while trading is held, the hold process (hold.ts). The
  * hold process must not import the service, which pulls in the model, the
  * ledger and the chain. So what the two must agree on lives here: how long a
- * failed poll waits, what a stranger and a late code are told, and how a
- * slash command's name is read. They share telegram.json and one bot, and
+ * failed poll waits and how it is recorded, what a stranger and a late code
+ * are told and what the log says about them, and how a slash command's name
+ * is read. They share telegram.json and one bot, and
  * the owner should not be able to tell from the bot's manners which of them
  * is answering.
  *
@@ -83,31 +84,147 @@ export function span(sec: number): string {
 export function pollFailure(
   r: { reason?: string; errorCode?: number; retryAfter?: number },
   streak: number,
-): { kind: "conflict" | "refused" | "failed"; waitMs: number; line: string } {
+): { kind: PollErrKind; waitMs: number; line: string; err: string } {
   const reason = r.reason ?? "unknown error";
-  let kind: "conflict" | "refused" | "failed";
+  let kind: PollErrKind;
   let waitSec: number;
   let line: string;
+  let detail: string;
   if (r.errorCode === 409) {
     kind = "conflict";
     waitSec = CONFLICT_WAIT_SEC;
     // Both are a 409, and they need different fixes: stop the other program,
     // or delete the webhook. The webhook is never deleted from here; it may
     // be another deployment's.
-    line = /webhook/i.test(reason)
+    const webhook = /webhook/i.test(reason);
+    line = webhook
       ? "Telegram: this bot has a webhook set, so its updates can't be polled (409 Conflict)"
       : "Telegram: another program is reading this bot's updates (409 Conflict)";
+    detail = webhook ? "this bot has a webhook set (409)" : "another program is reading this bot's updates (409)";
   } else if (r.errorCode === 401 || r.errorCode === 404) {
     kind = "refused";
     waitSec = REFUSED_WAIT_SEC;
     line = `Telegram: the bot token was refused (${r.errorCode} ${reason}); trying again every 5 minutes, or as soon as the token changes`;
+    detail = `${r.errorCode} ${reason}`;
   } else {
     kind = "failed";
     waitSec = Math.min(BACKOFF_MAX_SEC, 2 ** streak);
     line = `Telegram: getUpdates — ${reason}`;
+    detail = reason;
   }
-  return { kind, waitMs: Math.max(r.retryAfter ?? 0, waitSec) * 1000, line };
+  return { kind, waitMs: Math.max(r.retryAfter ?? 0, waitSec) * 1000, line, err: pollErrText(kind, detail) };
 }
+
+/** The three ways a poll fails, as pollFailure tells them apart. */
+export type PollErrKind = "conflict" | "refused" | "failed";
+
+/** The longest poll error kept on disk and published: enough for the reason, never a page of HTML. */
+const POLL_ERR_MAX = 160;
+
+/**
+ * A POLL FAILURE AS IT IS KEPT (telegram.json `poll.err`) AND PUBLISHED
+ * (tenant_telegram.poll_err): `<kind>: <detail>`. The kind comes first so the
+ * orchestrator's liveness pass and the dashboard read it without parsing
+ * prose (pollErrKind); the detail is for the operator's log line.
+ *
+ * It leaves this process's home, for the shared database and the owner's
+ * dashboard, so nothing that could be the token may ride in it. Telegram's own
+ * descriptions never carry it, but a transport error names the URL it was
+ * asking, and the token is in that URL's path. Anything shaped like a token is
+ * blanked, as is anything that is not printable, and it is clipped.
+ */
+export function pollErrText(kind: PollErrKind, detail: string): string {
+  const clean = detail
+    .replace(/bot\d+:[A-Za-z0-9_-]+/g, "bot<token>")
+    .replace(/\b\d{5,}:[A-Za-z0-9_-]{20,}/g, "<token>")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .trim();
+  return `${kind}: ${clean || "unknown error"}`.slice(0, POLL_ERR_MAX);
+}
+
+/** The kind a kept poll error names (pollErrText), or null for anything else. */
+export function pollErrKind(err: string | null | undefined): PollErrKind | null {
+  const colon = typeof err === "string" ? err.indexOf(":") : -1;
+  const head = colon > 0 ? err!.slice(0, colon) : "";
+  return head === "conflict" || head === "refused" || head === "failed" ? head : null;
+}
+
+/**
+ * A chat id as the fleet's log may show it: its last four digits. Enough to
+ * tell two chats apart in one incident and to match an owner who reads theirs
+ * out, and not enough to message anyone.
+ */
+export const redactChat = (chatId: number): string => `…${String(Math.abs(chatId)).slice(-4)}`;
+
+/** How many chats each tally remembers before it starts over, so a flood of strangers cannot grow it without end. */
+const TALLY_CHATS_KEPT = 1_000;
+/** A failed send to one chat for one reason is logged at most this often. A blocked bot fails every reply the same way. */
+const SEND_FAIL_RETELL_SEC = 3_600;
+
+/**
+ * WHAT A STRANGER DID TO THE BOT, AND WHICH REPLIES NEVER ARRIVED, counted and
+ * logged by whichever process is answering (service.ts, hold.ts).
+ *
+ * All three were invisible. In the incident this came from, an owner's chat
+ * was refused a day's messages and locked out of /link by five codes that
+ * were compared against the wrong one, and nothing in any log said so: the
+ * refusals and the failed codes were not counted anywhere, and a reply
+ * Telegram would not deliver was dropped without a word.
+ *
+ * Counted per chat, with the chat id cut to its last four digits
+ * (redactChat). The first of each is logged and then the 2nd, 4th, 8th …, so
+ * a stranger hammering the bot costs a handful of lines, not one per message.
+ * A lockout is always logged: it is the one an owner will ask about. A failed
+ * send is logged once an hour per chat and reason.
+ */
+export function makeChatTally(note: (level: "ok" | "warn", message: string) => void, now: () => number) {
+  const refused = new Map<number, number>();
+  const wrongCodes = new Map<number, number>();
+  const sendFails = new Map<string, number>();
+  const bump = (m: Map<number, number>, chatId: number): number => {
+    if (m.size >= TALLY_CHATS_KEPT && !m.has(chatId)) m.clear();
+    const n = (m.get(chatId) ?? 0) + 1;
+    m.set(chatId, n);
+    return n;
+  };
+  const worthTelling = (n: number): boolean => n > 0 && (n & (n - 1)) === 0;
+  return {
+    /** A message from a chat not on the allowlist, answered with a refusal or the way in. */
+    refused(chatId: number): void {
+      const n = bump(refused, chatId);
+      if (worthTelling(n)) note("ok", `Telegram: message from unlisted chat ${redactChat(chatId)} refused (${n} so far)`);
+    },
+    /**
+     * A /link (or /start <code>) that did not link. `lockedUntil` is set when
+     * this attempt was refused unlooked-at because the chat is locked, or
+     * when this wrong code is the one that locked it (`justLocked`).
+     */
+    linkFailed(chatId: number, o: { locked: boolean; justLocked: boolean; lockedUntil?: number }): void {
+      const n = bump(wrongCodes, chatId);
+      if (o.justLocked && o.lockedUntil !== undefined) {
+        const at = new Date(o.lockedUntil * 1000).toISOString().slice(11, 16);
+        note("warn", `Telegram: chat ${redactChat(chatId)} locked out of /link until ${at} UTC after ${n} failed code(s)`);
+        return;
+      }
+      if (worthTelling(n)) {
+        note("warn", `Telegram: /link from chat ${redactChat(chatId)} failed${o.locked ? " (locked out)" : " (wrong code)"} — ${n} so far`);
+      }
+    },
+    /** A reply Telegram would not take. */
+    sendFailed(chatId: number, reason: string | undefined): void {
+      const why = pollErrText("failed", reason ?? "unknown error").slice("failed: ".length);
+      const key = `${chatId}:${why}`;
+      const t = now();
+      const last = sendFails.get(key);
+      if (last !== undefined && t - last < SEND_FAIL_RETELL_SEC) return;
+      if (sendFails.size >= TALLY_CHATS_KEPT && last === undefined) sendFails.clear();
+      sendFails.set(key, t);
+      note("warn", `Telegram: a reply to chat ${redactChat(chatId)} was not delivered — ${why}`);
+    },
+  };
+}
+
+export type ChatTally = ReturnType<typeof makeChatTally>;
 
 /**
  * A slash command's name and argument, read the way interpreter.ts parseSlash

@@ -38,7 +38,7 @@ import {
   getMe,
   getUpdates,
   sendChatAction,
-  sendMessage,
+  sendMessage as sendTelegramMessage,
   setMyCommands,
   publicBotCommands,
   type InlineKeyboard,
@@ -77,8 +77,8 @@ import {
   dashboardBase,
   type StatusContext,
 } from "./reads";
-import { bindToken, ensureLinkCode, retireLegacyCode, type StateRef } from "./state";
-import { linkReply, tryLink, type LinkFails } from "./link";
+import { bindToken, botIdOf, ensureLinkCode, recordPoll, retireLegacyCode, type StateRef } from "./state";
+import { linkReply, tallyFailedLink, tryLink, type LinkFails } from "./link";
 import {
   BACKOFF_MAX_SEC,
   CONFLICT_RETELL_SEC,
@@ -88,6 +88,7 @@ import {
   REARM_AFTER_SEC,
   STALE_LINK_TEXT,
   WAKE_SLICE_MS,
+  makeChatTally,
   onboardingText,
   pollFailure,
   refusalText,
@@ -292,6 +293,19 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   const earlyTold = new Set<string>();
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   ensureSoul(now()); // the merryman is born (IDENTITY/OWNER/JOURNAL.md) on first run
+  /** Refusals, failed /link codes and undelivered replies, counted for the log (poll-rules.ts). */
+  const tally = makeChatTally(deps.note, now);
+  /**
+   * EVERY REPLY GOES THROUGH HERE, so one Telegram would not take is logged
+   * rather than dropped. Every call site below ignored the answer: a blocked
+   * bot, a chat that no longer exists or a reply Telegram refused as too long
+   * looked, from here, exactly like a reply that arrived.
+   */
+  const sendMessage: typeof sendTelegramMessage = async (opts, chatId, text, extra) => {
+    const r = await sendTelegramMessage(opts, chatId, text, extra);
+    if (!r.ok) tally.sendFailed(chatId, r.reason);
+    return r;
+  };
 
   // Per-chat runtime (in-memory only — cleared on restart, which is safe):
   // Keyed by `${chatId}:${fromId}` — a parked action is bound to the USER who
@@ -467,28 +481,28 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // trading is held links a chat exactly as this one does. What a link means
     // HERE is handed in: the allowlist in settings.json, the owner's handle
     // remembered, and a line in the event feed.
-    const linkDep = (code: string): { ok: boolean; reason?: string } =>
-      linkReply(
-        tryLink(
-          {
-            stateRef,
-            fails: linkFails,
-            now,
-            allow: (chatId) => {
-              const next = new Set(cfg.telegramAllowlist);
-              next.add(chatId);
-              patchSettingsFile({ telegramAllowlist: [...next] });
-            },
-            onLinked: (who) => {
-              if (who.fromUsername) rememberOwnerFact(`Their Telegram handle is @${who.fromUsername}.`, now());
-              deps.note("ok", `Telegram: linked chat ${who.chatId}${who.fromUsername ? ` (@${who.fromUsername})` : ""}`);
-            },
+    const linkDep = (code: string): { ok: boolean; reason?: string } => {
+      const outcome = tryLink(
+        {
+          stateRef,
+          fails: linkFails,
+          now,
+          allow: (chatId) => {
+            const next = new Set(cfg.telegramAllowlist);
+            next.add(chatId);
+            patchSettingsFile({ telegramAllowlist: [...next] });
           },
-          msg,
-          code,
-        ),
-        now(),
+          onLinked: (who) => {
+            if (who.fromUsername) rememberOwnerFact(`Their Telegram handle is @${who.fromUsername}.`, now());
+            deps.note("ok", `Telegram: linked chat ${who.chatId}${who.fromUsername ? ` (@${who.fromUsername})` : ""}`);
+          },
+        },
+        msg,
+        code,
       );
+      tallyFailedLink(tally, linkFails, msg.chatId, outcome);
+      return linkReply(outcome, now());
+    };
 
     const statusCtx = () => deps.buildStatusContext();
     const cmdDeps: CommandDeps = {
@@ -780,6 +794,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // Transcribed text then flows through the SAME path as a typed message.
     if (msg.voiceFileId && !msg.text) {
       if (!allowed) {
+        tally.refused(msg.chatId);
         await sendMessage({ token }, msg.chatId, refusalText(msg.chatId));
         return;
       }
@@ -815,6 +830,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       if (slash?.kind !== "link") {
         // A bare /start or /help is how anyone meets the bot, so it gets the
         // way in rather than a refusal.
+        tally.refused(msg.chatId);
         await sendMessage({ token }, msg.chatId, slash?.kind === "help" ? onboardingText(msg.chatId) : refusalText(msg.chatId));
         return;
       }
@@ -1226,6 +1242,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     }
     const allowed = cfg.telegramAllowlist.includes(cb.chatId) || cfg.telegramAllowlist.includes(cb.fromId);
     if (!allowed) {
+      tally.refused(cb.chatId);
       await answerCallbackQuery(opts, cb.id, "Not authorized.");
       return;
     }
@@ -1346,8 +1363,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // late whenever the reply crossed a second.
     const askedAt = now();
     const polled = await getUpdates({ token }, stateRef.get().offset);
-    if (polled.reason) return pollFailed(polled);
-    pollWorked();
+    if (polled.reason) return pollFailed(polled, token);
+    pollWorked(token);
     // The backlog rule's silence: this poll ends one long enough that what
     // waited through it is backlog, so listening begins again now.
     if (deafSince !== null && askedAt - deafSince >= REARM_AFTER_SEC) armedAt = null;
@@ -1435,6 +1452,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       await handle(msg, cfg);
       return;
     }
+    // Counted per message, though answered once: the count is what arrived.
+    if (action === "refuse") tally.refused(msg.chatId);
     const key = `${msg.chatId}:${action}`;
     if (batch.told.has(key)) return;
     batch.told.add(key);
@@ -1478,6 +1497,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     const allowed = cfg.telegramAllowlist.includes(msg.chatId) || cfg.telegramAllowlist.includes(msg.fromId);
     const slashKind = parseSlash(msg.text)?.kind;
     const kind = slashKind === "link" || slashKind === "start" ? "link" : allowed ? "held" : "refused";
+    if (kind === "refused") tally.refused(msg.chatId);
     const key = `${msg.chatId}:${kind}`;
     if (earlyTold.has(key)) return;
     earlyTold.add(key);
@@ -1570,13 +1590,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * retry_after, and a second poller on the same bot turned into two processes
    * taking the bot's updates from each other as fast as they could.
    */
-  const pollFailed = (r: { reason?: string; errorCode?: number; retryAfter?: number }): number => {
+  const pollFailed = (r: { reason?: string; errorCode?: number; retryAfter?: number }, token: string): number => {
     const t = now();
     outage = outage ?? { since: t, streak: 0, told: new Set() };
     outage.streak += 1;
     deafSince ??= t;
     // How long, and in what words: poll-rules.ts, shared with the hold process.
-    const { kind, waitMs, line } = pollFailure(r, outage.streak);
+    const { kind, waitMs, line, err } = pollFailure(r, outage.streak);
+    notePoll(token, err);
     const conflictToldRecently = kind === "conflict" && conflictToldAt !== null && t - conflictToldAt < CONFLICT_RETELL_SEC;
     if (!outage.told.has(kind) && !conflictToldRecently) {
       outage.told.add(kind);
@@ -1587,11 +1608,22 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   };
 
   /** A poll that worked. An outage that was logged is closed with how long it lasted. */
-  const pollWorked = (): void => {
+  const pollWorked = (token: string): void => {
+    notePoll(token, null);
     if (outage && outage.told.size > 0) {
       deps.note("ok", `Telegram: receiving updates again after ${span(now() - outage.since)}`);
     }
     outage = null;
+  };
+
+  /**
+   * How the poll went, into telegram.json for the orchestrator to publish and
+   * watch (state.ts recordPoll, which says why and how often).
+   */
+  const notePoll = (token: string, err: string | null): void => {
+    const held = stateRef.get();
+    const next = recordPoll(held, botIdOf(token), now(), err);
+    if (next !== held) stateRef.set(next);
   };
 
   /**

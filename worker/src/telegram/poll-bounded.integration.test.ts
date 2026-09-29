@@ -48,7 +48,7 @@ function blankState(over: Partial<TelegramState> = {}): TelegramState {
     linkRound: 0, ownerId: null, linkedAt: null,
     linkedChats: [], messageCount: 0, lastNotifiedTradeId: -1, lastTradeDigestAt: 0, lastRemedyRule: null,
     firedAlerts: {}, signWatch: null, lastDigestDate: "", lastJournalDate: "", priceAlerts: [], reminders: [],
-    watchers: [], nextId: 1, ...over,
+    watchers: [], nextId: 1, poll: null, ...over,
   };
 }
 
@@ -664,6 +664,102 @@ describe("the menu, the 409s, the crashes and the off switch", () => {
           ["Telegram: receiving updates again after 2s"],
           "the outage is the one after switching on, not the minute it was off",
         );
+      },
+    );
+  });
+});
+
+/**
+ * WHAT THE LOOP LEAVES FOR THE ORCHESTRATOR AND THE LOG (plan §1.4, P5). The
+ * dashboard's "listening" and the fleet's `[alert] telegram not polling` are
+ * read from the record the loop keeps in telegram.json; the log is where a
+ * refused stranger, a failed code and a reply that never arrived are counted.
+ */
+describe("the poll record and the log", () => {
+  it("records each poll for the bot it was about: a good one's time, and a 409 kept beside it", async () => {
+    let n = 0;
+    const conflict = refused(409, "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running");
+    await withService(
+      { token: "111:a", script: (c) => (c.method === "getUpdates" && ++n === 2 ? conflict : undefined) },
+      async (h) => {
+        const t0 = Math.floor(T0 / 1000);
+        assert.deepEqual(h.state().poll, { okAt: t0, err: null, errAt: null, botId: "111" }, "the first poll, at once");
+        await h.advance(1_000);
+        // In the same second as the good poll, so stamped a second after it:
+        // the record must still say which came last.
+        assert.deepEqual(h.state().poll, {
+          okAt: t0,
+          err: "conflict: another program is reading this bot's updates (409)",
+          errAt: t0 + 1,
+          botId: "111",
+        });
+        await h.advance(11_000);
+        // Heard again: the success is written at once, and the conflict is
+        // kept, older than it, so the record says the bot is heard now.
+        const p = h.state().poll!;
+        assert.ok(p.okAt! > p.errAt!, JSON.stringify(p));
+        assert.equal(p.err, "conflict: another program is reading this bot's updates (409)");
+      },
+    );
+  });
+
+  it("a revoked token is recorded as refused, never with the token", async () => {
+    await withService(
+      { token: "111:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw", script: (c) => (c.method === "getUpdates" ? refused(401, "Unauthorized") : undefined) },
+      async (h) => {
+        assert.equal(h.state().poll?.err, "refused: 401 Unauthorized");
+        assert.ok(!JSON.stringify(h.state()).includes("AAHdq"));
+      },
+    );
+  });
+
+  it("A REPLY TELEGRAM WOULD NOT TAKE IS LOGGED, with the chat cut to four digits", async () => {
+    let n = 0;
+    await withService(
+      {
+        token: "111:a",
+        allowlist: [123456789],
+        script: (c) => {
+          if (c.method === "getUpdates" && ++n === 1) return ok([text(10, 123456789, "/reminders")]);
+          if (c.method === "sendMessage") return refused(403, "Forbidden: bot was blocked by the user");
+          return undefined;
+        },
+      },
+      async (h) => {
+        await h.advance(1_000);
+        const lost = warns(h, /was not delivered/);
+        assert.deepEqual(lost.map((x) => x.message), ["Telegram: a reply to chat …6789 was not delivered — Forbidden: bot was blocked by the user"]);
+      },
+    );
+  });
+
+  it("A STRANGER'S MESSAGES AND WRONG CODES ARE COUNTED, and the lockout is said with until when", async () => {
+    let n = 0;
+    const STRANGER = 987654321;
+    await withService(
+      {
+        token: "111:a",
+        script: (c) =>
+          c.method === "getUpdates" && ++n === 1
+            ? ok([
+                text(10, STRANGER, "hello?"),
+                text(11, STRANGER, "anyone?"),
+                ...[12, 13, 14, 15, 16].map((id) => text(id, STRANGER, "/link WRONG1")),
+              ])
+            : undefined,
+      },
+      async (h) => {
+        await h.advance(1_000);
+        const lines = h.notes.map((x) => x.message).filter((m) => /…4321/.test(m));
+        assert.deepEqual(lines, [
+          "Telegram: message from unlisted chat …4321 refused (1 so far)",
+          "Telegram: message from unlisted chat …4321 refused (2 so far)",
+          "Telegram: /link from chat …4321 failed (wrong code) — 1 so far",
+          "Telegram: /link from chat …4321 failed (wrong code) — 2 so far",
+          "Telegram: /link from chat …4321 failed (wrong code) — 4 so far",
+          `Telegram: chat …4321 locked out of /link until ${new Date(T0 + 600_000).toISOString().slice(11, 16)} UTC after 5 failed code(s)`,
+        ]);
+        assert.ok(!h.notes.some((x) => x.message.includes(String(STRANGER))), "never the whole chat id");
       },
     );
   });

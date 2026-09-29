@@ -24,6 +24,8 @@ const tg = (over: Partial<TelegramStatus> = {}): TelegramStatus => ({
   ownerId: 4242,
   allowlist: [],
   linkCode: null,
+  linkPending: false,
+  listening: { state: "live", lastOkAt: 1_790_000_000, reason: null },
   control: true,
   ...over,
 });
@@ -65,6 +67,7 @@ describe("the four states a tester can get stuck in", () => {
     assert.deepEqual(telegramRow(tg({ ownerId: null, linkCode: "K7M2QX" })), {
       kind: "unlinked",
       linkCode: "K7M2QX",
+      linkPending: false,
       botUsername: "merrybot",
     });
   });
@@ -76,8 +79,17 @@ describe("the four states a tester can get stuck in", () => {
     assert.deepEqual(telegramRow(tg({ ownerId: null, linkCode: null })), {
       kind: "unlinked",
       linkCode: null,
+      linkPending: false,
       botUsername: "merrybot",
     });
+  });
+
+  it("says when there is no code because the agent has not picked up this bot", () => {
+    // A different wait from the one above, with a different end: the code on
+    // file was minted for another bot, and would not link this one.
+    const row = telegramRow(tg({ ownerId: null, linkCode: null, linkPending: true }));
+    assert.equal(row.kind, "unlinked");
+    assert.equal(row.kind === "unlinked" && row.linkPending, true);
   });
 
   it("reports linked once somebody has claimed the bot", () => {
@@ -91,6 +103,71 @@ describe("the four states a tester can get stuck in", () => {
   it("treats an owner with no extra chats as linked, not unlinked", () => {
     // The normal case. An empty allowlist is not an unclaimed bot.
     assert.equal(telegramRow(tg({ ownerId: 99, allowlist: [] })).kind, "linked");
+  });
+});
+
+describe("what the polling process measured comes before the owner", () => {
+  // THE INCIDENT THESE STATES CAME FROM: nothing polled a linked owner's bot
+  // for days, and this row said "✓ connected" throughout, because the owner
+  // check came first and getMe (`connected`) only proves the token is good.
+
+  it("A LINKED BOT NOBODY HEARS IS NOT 'CONNECTED'", () => {
+    const row = telegramRow(tg({ ownerId: 99, listening: { state: "not-listening", lastOkAt: 1_700_000_000, reason: null } }));
+    assert.deepEqual(row, {
+      kind: "not-listening",
+      why: "stale",
+      lastOkAt: 1_700_000_000,
+      linked: true,
+      linkCode: null,
+      botUsername: "merrybot",
+    });
+    assert.notEqual(telegramLabel(row), telegramLabel(telegramRow(tg({ ownerId: 99 }))));
+  });
+
+  it("keeps the code on an unlinked bot that is not being heard, with the warning", () => {
+    // Hiding it would send the owner looking for another code; it works once
+    // the bot is heard again. The row carries it so the screen can show both.
+    const row = telegramRow(tg({ ownerId: null, linkCode: "K7M2QX", listening: { state: "not-listening", lastOkAt: null, reason: null } }));
+    assert.equal(row.kind, "not-listening");
+    assert.equal(row.kind === "not-listening" && row.linkCode, "K7M2QX");
+    assert.equal(row.kind === "not-listening" && row.linked, false);
+  });
+
+  it("names a conflict and a refused token apart from plain silence", () => {
+    // Three different remedies: wait or tell us, stop the other program, paste
+    // a new token.
+    const why = (state: "conflict" | "revoked" | "not-listening") => {
+      const r = telegramRow(tg({ listening: { state, lastOkAt: null, reason: "x" } }));
+      return r.kind === "not-listening" ? r.why : null;
+    };
+    assert.deepEqual([why("not-listening"), why("conflict"), why("revoked")], ["stale", "conflict", "revoked"]);
+  });
+
+  it("a held tenant says so, with the class, linked or not", () => {
+    const held = { state: "held" as const, lastOkAt: null, reason: "trades newer than the last valuation" };
+    assert.deepEqual(telegramRow(tg({ ownerId: 99, listening: held })), {
+      kind: "held",
+      reason: "trades newer than the last valuation",
+      linked: true,
+      linkCode: null,
+      botUsername: "merrybot",
+    });
+    assert.equal(telegramRow(tg({ ownerId: null, linkCode: "K7M2QX", listening: held })).kind, "held");
+  });
+
+  it("UNKNOWN IS NOT A VERDICT: the row says what it always said", () => {
+    const unknown = { state: "unknown" as const, lastOkAt: null, reason: null };
+    assert.equal(telegramRow(tg({ ownerId: 99, listening: unknown })).kind, "linked");
+    assert.equal(telegramRow(tg({ ownerId: null, listening: unknown })).kind, "unlinked");
+  });
+
+  it("the switch and the token are still read first", () => {
+    // A bot switched off is not "not listening" in any way the owner can act
+    // on except the switch; and an unconfirmed token is checked before what
+    // was heard on it.
+    const quiet = { state: "not-listening" as const, lastOkAt: null, reason: null };
+    assert.equal(telegramRow(tg({ enabled: false, listening: quiet })).kind, "off");
+    assert.equal(telegramRow(tg({ connected: false, listening: quiet })).kind, "unverified");
   });
 });
 
@@ -155,6 +232,10 @@ describe("the short label the settings field shows", () => {
       telegramRow(tg({ connected: false })),
       telegramRow(tg({ ownerId: null })),
       telegramRow(tg()),
+      telegramRow(tg({ listening: { state: "held", lastOkAt: null, reason: null } })),
+      telegramRow(tg({ listening: { state: "not-listening", lastOkAt: null, reason: null } })),
+      telegramRow(tg({ listening: { state: "conflict", lastOkAt: null, reason: null } })),
+      telegramRow(tg({ listening: { state: "revoked", lastOkAt: null, reason: null } })),
     ].map(telegramLabel);
     assert.equal(new Set(labels).size, labels.length, `two states share a label: ${labels.join(" / ")}`);
   });

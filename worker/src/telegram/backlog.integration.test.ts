@@ -58,7 +58,7 @@ function blankState(over: Partial<TelegramState> = {}): TelegramState {
     linkRound: 0, ownerId: null, linkedAt: null,
     linkedChats: [], messageCount: 0, lastNotifiedTradeId: -1, lastTradeDigestAt: 0, lastRemedyRule: null,
     firedAlerts: {}, signWatch: null, lastDigestDate: "", lastJournalDate: "", priceAlerts: [], reminders: [],
-    watchers: [], nextId: 1, ...over,
+    watchers: [], nextId: 1, poll: null, ...over,
   };
 }
 

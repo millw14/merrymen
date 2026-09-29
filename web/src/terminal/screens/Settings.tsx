@@ -14,9 +14,9 @@ import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import { ENERGY, MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isEnergyReserveToken, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
-import { telegramLabel, telegramRow } from "../agent-status";
+import { telegramLabel, telegramRow, type TelegramRow } from "../agent-status";
 import SetupChecklist from "../SetupChecklist";
-import { count } from "@/lib/format";
+import { count, shortDateTime } from "@/lib/format";
 import { unreadableSetting } from "@/lib/parse-amount";
 import { useT } from "@/lib/i18n";
 // QUARANTINED alongside /grant. A settings form is not a surface anybody shares
@@ -46,6 +46,40 @@ function Field(props: {
       <span className="mm-input">{props.children}</span>
     </label>
     {props.hint && <details className="setting-help"><summary aria-label={`About ${props.label}`}><CircleHelp size={15}/></summary><div className="mm-hint">{props.hint}</div></details>}
+    </div>
+  );
+}
+
+/**
+ * WHAT THE PROCESS POLLING THE BOT MEASURED, beside the code it is about.
+ *
+ * The code is what an owner sends into the bot, so this is where they must
+ * learn that nothing is reading it. In the incident behind these states the
+ * page said "the bot is listening" and showed a code for days in which
+ * nothing polled the bot; the owner sent that code five times and was locked
+ * out. Nothing is rendered for a bot being heard, or one we cannot tell about.
+ */
+function TelegramListeningNote({ row }: { row: TelegramRow }) {
+  const t = useT();
+  let text: string | null = null;
+  if (row.kind === "held") text = t("settings.tg.held", { reason: row.reason ?? "restore error" });
+  else if (row.kind === "not-listening") {
+    text =
+      row.why === "revoked"
+        ? t("settings.tg.revoked")
+        : row.why === "conflict"
+          ? t("settings.tg.conflict")
+          : row.lastOkAt !== null
+            ? t("settings.tg.notListeningSince", { when: shortDateTime(row.lastOkAt * 1000) })
+            : t("settings.tg.notListeningNever");
+  }
+  if (!text) return null;
+  // The code stays on screen below, and says when it will work.
+  const codeShown = (row.kind === "held" || row.kind === "not-listening") && row.linkCode !== null;
+  return (
+    <div className="mm-danger" role="status">
+      {text}
+      {row.kind === "not-listening" && codeShown ? <> {t("settings.tg.codeWhenBack")}</> : null}
     </div>
   );
 }
@@ -1382,6 +1416,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           <p className="mm-hint" style={{ marginTop: 0 }}>
             Create a bot with @BotFather and add its token below.
           </p>
+          <TelegramListeningNote row={telegramRow(tg)} />
           {tg?.linkCode ? (
             <p className="mm-hint">{t("settings.hint.thenSend")}<code>/link {tg.linkCode}</code> to your bot to connect it.{" "}
               {tg.botUsername ? (
@@ -1394,9 +1429,14 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
             </p>
           ) : (
             <p className="mm-hint">
-              {view.telegramBotToken.set
-                ? "No link code yet. Your agent mints one on its next pass with this token set — check back shortly."
-                : "Your link code appears here once a token is saved."}
+              {/* NO CODE BECAUSE THE AGENT HAS NOT PICKED UP THIS BOT: the code
+                  on file was minted for the bot saved before, and would not
+                  link this one (lib/telegram-listening.ts). */}
+              {tg?.linkPending && tg.enabled
+                ? t("settings.tg.pickingUp")
+                : view.telegramBotToken.set
+                  ? "No link code yet. Your agent mints one on its next pass with this token set — check back shortly."
+                  : "Your link code appears here once a token is saved."}
             </p>
           )}
           <div className="mm-grid">
@@ -1435,7 +1475,10 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <span className="mm-label">{t("settings.label.enableTelegram")}</span>
               <span className="mm-input">
                 <input type="checkbox" checked={tgEnabledVal} onChange={(e) => setTgEnabled(e.target.checked)} style={{ width: "auto" }} />
-                <span className="mm-unit">{tgEnabledVal ? "the bot is listening" : "off"}</span>
+                {/* WHAT THE SWITCH SAYS, NOT WHAT WAS HEARD. "the bot is
+                    listening" was printed here for a bot nothing had polled in
+                    days; whether it is heard is the connection field above. */}
+                <span className="mm-unit">{tgEnabledVal ? "on" : "off"}</span>
               </span>
             </label>
           </div>
@@ -1527,10 +1570,15 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <>
                 link code: <b className="mono">{tg.linkCode}</b> — send <code>/link {tg.linkCode}</code> from Telegram
               </>
+            ) : tg?.linkPending && tg.enabled ? (
+              t("settings.tg.pickingUp")
             ) : (
               "save a token to generate your link code"
             )}
           </div>
+          {/* The same warning where the code is repeated: this one is read on
+              its own, far from the first. */}
+          <TelegramListeningNote row={telegramRow(tg)} />
           <div className="mm-chips" style={{ marginTop: 6 }}>
             {allowlistVal.length === 0 && <span className="dim mono">no linked chats yet</span>}
             {allowlistVal.map((id) => (

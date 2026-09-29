@@ -141,3 +141,28 @@ describe("the link survives the orchestrator's next pass", () => {
     assert.match(ORCH, /if \(!tg\) return;/);
   });
 });
+
+describe("it says only what was measured about the bot (plan §3.1)", () => {
+  // The panel said "connected" and showed a frozen code for days in which
+  // nothing polled the owner's bot. The decision is lib/telegram-listening.ts,
+  // tested there; these pin that the route goes through it.
+
+  it("THE CODE COMES OUT OF THE DECISION, never straight from the row", () => {
+    // A code minted for another bot would not link this one.
+    const status = CODE.slice(CODE.indexOf("const status: TelegramStatus"), CODE.indexOf("if (status.hasToken)"));
+    assert.match(CODE, /const seen = telegramListening\(runtime, token, /);
+    assert.match(status, /linkCode: seen\.linkCode,/);
+    assert.match(status, /linkPending: seen\.linkPending,/);
+    assert.match(status, /listening: seen\.listening,/);
+    assert.ok(!/runtime\??\.linkCode/.test(status), "not the row's code, unchecked");
+  });
+
+  it("reads the liveness columns, and falls back to the old query when they are not there yet", () => {
+    // The web can be deployed before the orchestrator adds them. A failed
+    // SELECT must not take every tenant's code away.
+    const fn = CODE.slice(CODE.indexOf("async function runtimeFor"), CODE.indexOf("async function botUsername"));
+    const full = fn.indexOf("SELECT link_code, owner_id, bot_id, poll_ok_at, poll_err, poll_err_at, child_state FROM tenant_telegram WHERE tenant = ?");
+    const legacy = fn.indexOf("SELECT link_code, owner_id FROM tenant_telegram WHERE tenant = ?");
+    assert.ok(full > 0 && legacy > full, "the full read first, the old one after it");
+  });
+});
