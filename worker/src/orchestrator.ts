@@ -649,6 +649,13 @@ interface Holder {
   leaving: ChildProcess | null;
   /** When `leaving` was sent SIGTERM, ms: its SIGKILL is due three seconds on, and its alert ten (pressLeaving). */
   leftAt: number;
+  /**
+   * The bot `leaving` was reading when it was told to stop, as the pass's
+   * de-duplication keys it (homeBotKey), or null: counted as this tenant's in
+   * every pass until the exit is seen (reconcile), since the home it read may
+   * be wiped meanwhile.
+   */
+  leftBot: string | null;
   /** On its way to trading: the next pass after `leaving` has gone finishes the handover (handHoldBack). */
   handingBack: boolean;
   /**
@@ -736,7 +743,7 @@ export async function adoptHolderForTest(
     if (lease) leases.set(lc, lease);
   }
   const held: Holder = {
-    tenant: lc, smartAccount, proc: null, exited: null, leaving: null, leftAt: 0, handingBack: false, stoodDown: false, leaveAlerted: false,
+    tenant: lc, smartAccount, proc: null, exited: null, leaving: null, leftAt: 0, leftBot: null, handingBack: false, stoodDown: false, leaveAlerted: false,
     reason, cls: restoreBlockClass(reason),
     nextRetryAt: 0, backoffMs: HOLD_RETRY_FIRST_MS, quickMs: HOLD_RETRY_QUICK_MS, retrying: false, resetSeen: null,
     resettable: false,
@@ -2616,7 +2623,7 @@ async function spawnHolder(
   const resettable = settingsRefuseHeldReset(settings, liveConsentEnforced()) === null;
   writeRestoreBlocked(home, { reason: why, class: cls, since: prev?.since ?? Math.floor(Date.now() / 1000), resettable });
   const held: Holder = {
-    tenant, smartAccount, proc: null, exited: null, leaving: null, leftAt: 0, handingBack: false, stoodDown: false, leaveAlerted: false,
+    tenant, smartAccount, proc: null, exited: null, leaving: null, leftAt: 0, leftBot: null, handingBack: false, stoodDown: false, leaveAlerted: false,
     reason: why, cls,
     nextRetryAt: 0, backoffMs: HOLD_RETRY_FIRST_MS, quickMs: HOLD_RETRY_QUICK_MS, retrying: false,
     resetSeen: honour?.looked ?? null, resettable,
@@ -2755,6 +2762,7 @@ function standDownHolder(tenant: string): void {
     held.proc = null;
     held.leaving = proc;
     held.leftAt = Date.now();
+    held.leftBot = homeBotKey(tenant);
     proc.kill("SIGTERM");
     setTimeout(() => {
       try {
@@ -2906,6 +2914,7 @@ async function handHoldBack(held: Holder): Promise<void> {
       held.proc = null;
       held.leaving = proc;
       held.leftAt = Date.now();
+      held.leftBot = homeBotKey(tenant);
       proc.kill("SIGTERM");
       const hard = setTimeout(() => {
         try {
@@ -2948,6 +2957,16 @@ function killLeaving(held: Holder): void {
   } catch {
     /* gone after all: its exit clears `leaving` */
   }
+}
+
+/**
+ * The bot a process in this tenant's home would poll, as the pass's
+ * de-duplication keys it (pollerKeyOf), or null: what the settings.json there
+ * says, which is what a hold process reads, for every message (hold.ts).
+ */
+function homeBotKey(tenant: string): string | null {
+  const settings = readChildSettings(tenant);
+  return botWillPoll(settings) ? pollerKeyOf(botTokenOf(settings)!) : null;
 }
 
 /** After SIGTERM, when a hold process told to stop is sent SIGKILL, as killChild does. */
@@ -3362,6 +3381,18 @@ export async function reconcile(): Promise<void> {
   const holderClaims = await readHolderClaims();
   // And every bot claim, the same way.
   const botClaims = await readBotClaimsForPass();
+  // A HOLD PROCESS THIS PASS DOES NOT REFRESH MAY STILL BE POLLING ITS BOT:
+  // one told to stop that has not exited (`leaving`), stood down or signed
+  // again meanwhile, and one stood down below this pass because its grant is
+  // gone. Neither is written a settings.json here, so neither entered this
+  // record, and another tenant on the same token was handed it beside a
+  // process that may poll on. Each counts, for its own tenant, until its exit
+  // is seen. A claim still decides first (claimGate): this is the guard for a
+  // bot no claim names, and the only one while the claims cannot be read.
+  for (const [tenant, held] of holders) {
+    const bot = held.leaving ? held.leftBot : held.proc && !wanted.has(tenant) ? homeBotKey(tenant) : null;
+    if (bot && !seenBots.has(bot)) seenBots.set(bot, tenant);
+  }
   // HELD TENANTS FIRST, and with the same refresh: a chat the owner removes on
   // the dashboard, or a token they change, must reach the hold process as it
   // would a worker, and a held tenant's bot token is as much in use as a
@@ -3382,12 +3413,13 @@ export async function reconcile(): Promise<void> {
   const released: Holder[] = [];
   for (const [tenant, held] of [...holders]) {
     // NOT WANTED ANY MORE, and stood down below, this pass: its settings are
-    // not refreshed, its token claims no bot from a tenant that trades, and no
-    // hold process is started only to be killed a few lines later in a home
-    // that is about to be wiped.
+    // not refreshed, its token claims no bot beyond what its process may
+    // still be polling (counted above), and no hold process is started only
+    // to be killed a few lines later in a home that is about to be wiped.
     if (!wanted.has(tenant)) continue;
     // STOOD DOWN, waiting only for a process that would not go: its lease is
-    // gone or the fleet is halted, so nothing is ours to write or claim for it.
+    // gone, the fleet halted or its grant removed, so nothing is ours to write
+    // or claim for it beyond the bot that process reads (counted above).
     if (held.stoodDown) continue;
     const stored = await writeSettingsForChild(tenant as `0x${string}`, seenBots, holderClaims, botClaims);
     await refreshGrantForChild(tenant as `0x${string}`);

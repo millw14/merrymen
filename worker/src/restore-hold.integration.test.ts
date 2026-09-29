@@ -764,6 +764,43 @@ describe("a held tenant is stood down like any other", () => {
     });
   });
 
+  it("A STOOD-DOWN HOLD PROCESS THAT WILL NOT EXIT STILL COUNTS FOR ITS BOT: ANOTHER LOGIN ON THE SAME TOKEN IS NOT HANDED IT MEANWHILE", async () => {
+    // The incident's shape: the same bot under a second, trading login. No
+    // claims can be read here, so the pass's own record is the only guard.
+    await getSettingsStore().put(OTHER, { paperTradingEnabled: false, telegramEnabled: true, telegramBotToken: "111:a" } as never);
+    await store.put(TENANT, grant());
+    await store.put(OTHER, { ...grant(), smartAccount: "0x00000000000000000000000000000000000000c9" } as never);
+    await withClock(async () => {
+      await reconcile();
+      const hold = holds()[0]!;
+      assert.equal(readSettings(OTHER).telegramBotToken, undefined, "premise: the held tenant's bot, so the other login is refused it");
+      hold.deaf = true;
+      // Revoked: its process is told to stop at the end of this pass, and
+      // may poll on after it. The other login is not handed the bot beside it,
+      // not in this pass and not while it lives, signed again or not.
+      await store.remove(TENANT);
+      mock.timers.tick(15_000);
+      await reconcile();
+      assert.equal(readSettings(OTHER).telegramBotToken, undefined, `not in the pass that stands it down:\n${said.join("\n")}`);
+      mock.timers.tick(15_000);
+      await reconcile();
+      await store.put(TENANT, grant());
+      for (let i = 0; i < 2; i++) {
+        mock.timers.tick(15_000);
+        await reconcile();
+      }
+      assert.equal(readSettings(OTHER).telegramBotToken, undefined, `nor while it lives, its grant signed again:\n${said.join("\n")}`);
+      assert.equal(spawned.length, 2, "the other login's worker and the stuck hold process, and nothing else");
+      // Gone: one poller again, whichever login the pass hands it to.
+      hold.die(null, "SIGKILL");
+      mock.timers.tick(15_000);
+      await reconcile();
+      await settle();
+      const pollers = [TENANT, OTHER].filter((t) => readSettings(t).telegramBotToken === "111:a");
+      assert.equal(pollers.length, 1, `exactly one login is handed the bot:\n${said.join("\n")}`);
+    });
+  });
+
   it("UNDER FLEET_HALT THE LEASE A STUCK HOLD PROCESS KEPT IS LET GO WHEN IT EXITS, WITHOUT A SECOND WORD", async () => {
     await store.put(TENANT, grant());
     await withClock(async () => {
