@@ -2,9 +2,12 @@
  * A COIN POSTED IN A TELEGRAM GROUP, SEEN FROM THE TRADING SIDE
  * (docs/tg-groups.md). What is pinned here:
  *
- *   - the quick look: every kind, cheapest reads first, `unknown` whenever a
- *     read fails (never `wallet`, never `no-pool`), a 30-minute cache that the
- *     free checks still run in front of, and a per-process allowance;
+ *   - the quick look: every kind, cheapest reads first, one getCode on
+ *     Robinhood Chain before any GeckoTerminal read (no code is `wallet`, which
+ *     is what another chain's token is here) under its own allowance,
+ *     `unknown` whenever a read fails (never `wallet`, never `no-pool`), a
+ *     30-minute cache that the free checks still run in front of, and a
+ *     per-process allowance of full looks;
  *   - the port: safe at any time, never throws, outcomes reach every
  *     subscriber;
  *   - the tick's seams: a nominated coin's buy still needs a fresh Brain BUY
@@ -125,23 +128,33 @@ describe("the quick look: every kind, cheapest first", () => {
     assert.equal((await look1({ tokenPools: async () => [gp({ poolAddress: null, poolId: V4_ID })] })).kind, "v4-only");
   });
 
-  it("no pool known: one getCode read decides wallet, and one probe decides curve, token or not a token", async () => {
+  it("the presence probe comes first: no code on Robinhood Chain is a wallet, from one getCode and nothing else", async () => {
+    // An Ethereum, BNB or Base token has the same 0x + 40 hex and nothing deployed at it here.
+    for (const code of [undefined, "0x", ""]) {
+      const h = readers({ getCode: async () => { h.calls.code++; return code; } });
+      assert.deepEqual(await createCoinLook(h.r)(COIN), { kind: "wallet" }, String(code));
+      assert.deepEqual(h.calls, { pools: 0, code: 1, probe: 0, curve: 0 }, "GeckoTerminal, the ledger and the multicall are never asked");
+    }
+    // Code found: the full look goes on, and GeckoTerminal decides.
+    const found = readers();
+    assert.equal((await createCoinLook(found.r)(COIN)).kind, "candidate");
+    assert.deepEqual(found.calls, { pools: 1, code: 1, probe: 0, curve: 0 });
+  });
+
+  it("no pool known: one probe decides curve, token or not a token", async () => {
     const none = async () => [] as GeckoPool[];
-    const { r, calls } = readers({ tokenPools: none, getCode: async () => undefined });
-    assert.deepEqual(await createCoinLook(r)(COIN), { kind: "wallet" });
-    assert.equal(calls.code, 0, "the injected getCode was replaced");
-    assert.equal((await look1({ tokenPools: none, getCode: async () => "0x" })).kind, "wallet");
     assert.equal((await look1({ tokenPools: none, probe: async () => ({ pons: true, erc20: true }) })).kind, "curve");
     assert.equal((await look1({ tokenPools: none, probe: async () => ({ pons: false, erc20: true }) })).kind, "no-pool");
     assert.equal((await look1({ tokenPools: none, probe: async () => ({ pons: false, erc20: false }) })).kind, "not-token");
     // Pools where the coin is only the QUOTE side are not its pools.
-    assert.equal((await look1({ tokenPools: async () => [gp({ tokenAddress: "0x00000000000000000000000000000000000d0222" })], getCode: async () => undefined })).kind, "wallet");
+    assert.equal((await look1({ tokenPools: async () => [gp({ tokenAddress: "0x00000000000000000000000000000000000d0222" })] })).kind, "no-pool");
   });
 
-  it("local curve provenance answers before any chain read", async () => {
+  it("local curve provenance answers before the multicall probe", async () => {
     const h = readers({ tokenPools: async () => [], curveFor: async () => ({ curve: "0x1" }) });
     assert.deepEqual(await createCoinLook(h.r)(COIN), { kind: "curve" });
-    assert.equal(h.calls.code + h.calls.probe, 0);
+    assert.equal(h.calls.probe, 0);
+    assert.equal(h.calls.code, 1, "only the presence probe");
     // A ledger that cannot be read is not a verdict: the chain is asked.
     assert.equal((await look1({ tokenPools: async () => [], curveFor: async () => { throw new Error("db"); } })).kind, "no-pool");
   });
@@ -149,13 +162,22 @@ describe("the quick look: every kind, cheapest first", () => {
   it("UNREADABLE IS NOT ABSENT: every failed read is unknown, never wallet or no-pool", async () => {
     assert.equal((await look1({ tokenPools: async () => null })).kind, "unknown");
     assert.equal((await look1({ tokenPools: async () => { throw new Error("gecko"); } })).kind, "unknown");
-    assert.equal((await look1({ tokenPools: async () => [], getCode: async () => { throw new Error("rpc"); } })).kind, "unknown", "a failed getCode is not a wallet");
     assert.equal((await look1({ tokenPools: async () => [], probe: async () => null })).kind, "unknown", "a failed probe is not no-pool");
     assert.equal((await look1({ tokenPools: async () => [], probe: async () => { throw new Error("rpc"); } })).kind, "unknown");
     assert.equal((await look1({ own: () => { throw new Error("no grant"); } })).kind, "unknown", "never throws");
     const noPools = readers({ tokenPools: async () => null });
     await createCoinLook(noPools.r)(COIN);
-    assert.equal(noPools.calls.code, 0, "a failed index read does not fall through to the chain");
+    assert.equal(noPools.calls.probe, 0, "a failed index read does not fall through to the probe");
+  });
+
+  it("UNREADABLE IS NOT ABSENT: a presence probe that failed is unknown, never a wallet, and reads nothing more", async () => {
+    let fail = true;
+    const h = readers({ getCode: async () => { h.calls.code++; if (fail) throw new Error("rpc"); return "0x6000"; } });
+    const look = createCoinLook(h.r);
+    assert.deepEqual(await look(COIN), { kind: "unknown" });
+    assert.equal(h.calls.pools, 0, "GeckoTerminal is not asked about an address the chain could not be asked about");
+    fail = false;
+    assert.equal((await look(COIN)).kind, "candidate", "not cached: the next look can succeed");
   });
 
   it("anything that is not an address is unknown, and nothing is read for it", async () => {
@@ -220,6 +242,62 @@ describe("the quick look: cache and allowance", () => {
     assert.equal((await look(addr(0))).kind, "candidate", "a cached answer costs nothing and is still given");
     clock.t += COIN_LOOK.windowMs;
     assert.equal((await look(addr(99))).kind, "candidate", "the window rolls");
+  });
+
+  it("a wallet (another chain's token) is remembered 30 minutes: reposted, no read at all", async () => {
+    const h = readers({ getCode: async () => { h.calls.code++; return undefined; } });
+    const look = createCoinLook(h.r);
+    assert.equal((await look(COIN)).kind, "wallet");
+    assert.equal((await look(COIN)).kind, "wallet");
+    assert.equal(h.calls.code, 1);
+    h.clock.t += COIN_LOOK.cacheMs;
+    await look(COIN);
+    assert.equal(h.calls.code, 2);
+    assert.equal(h.calls.pools, 0);
+  });
+
+  it(`presence probes have their own allowance (${COIN_LOOK.maxProbes} per ${COIN_LOOK.windowMs / 60_000} minutes): a chat full of other chains' CAs cannot spend the full looks`, async () => {
+    const clock = { t: NOW };
+    const rh = new Set<string>();
+    const h = readers(
+      {
+        tokenPools: async (a) => { h.calls.pools++; return [gp({ tokenAddress: a as `0x${string}` })]; },
+        // Only the Robinhood coins have code here; the rest are Ethereum tokens.
+        getCode: async (a) => { h.calls.code++; return rh.has(a) ? "0x6000" : undefined; },
+      },
+      clock,
+    );
+    const look = createCoinLook(h.r);
+    const eth = (i: number) => `0x${(0xe7e000 + i).toString(16).padStart(40, "0")}`;
+    const coin = (i: number) => `0x${(0xc0de00 + i).toString(16).padStart(40, "0")}`;
+    const others = COIN_LOOK.maxProbes - COIN_LOOK.maxUncached;
+    for (let i = 0; i < others; i++) assert.equal((await look(eth(i))).kind, "wallet");
+    assert.equal(h.calls.pools, 0, "not one GeckoTerminal read for them");
+    // Every full look is still there for the Robinhood coins.
+    for (let i = 0; i < COIN_LOOK.maxUncached; i++) {
+      rh.add(coin(i));
+      assert.equal((await look(coin(i))).kind, "candidate", `coin ${i}`);
+    }
+    assert.equal(h.calls.code, COIN_LOOK.maxProbes);
+    // The probe allowance is spent: unknown, with no read at all.
+    assert.deepEqual(await look(eth(99)), { kind: "unknown" });
+    assert.equal(h.calls.code, COIN_LOOK.maxProbes, "the refused probe read nothing");
+    assert.equal((await look(eth(0))).kind, "wallet", "a remembered wallet costs nothing and is still given");
+    clock.t += COIN_LOOK.windowMs;
+    assert.equal((await look(eth(99))).kind, "wallet", "the window rolls");
+  });
+
+  it("an address with code that was refused a full look is not probed again for it", async () => {
+    const clock = { t: NOW };
+    const h = readers({ tokenPools: async (a) => { h.calls.pools++; return [gp({ tokenAddress: a as `0x${string}` })]; } }, clock);
+    const look = createCoinLook(h.r);
+    const addr = (i: number) => `0x${(0xc0de00 + i).toString(16).padStart(40, "0")}`;
+    for (let i = 0; i < COIN_LOOK.maxUncached; i++) await look(addr(i));
+    assert.deepEqual(await look(addr(99)), { kind: "unknown" }, "past the full-look allowance");
+    const probes = h.calls.code;
+    clock.t += COIN_LOOK.windowMs;
+    assert.equal((await look(addr(99))).kind, "candidate");
+    assert.equal(h.calls.code, probes, "its code was already found");
   });
 
   it("two looks at the same coin at once are one read and one use of the allowance", async () => {
@@ -719,6 +797,12 @@ describe("index.ts wires the seams in the order that makes them safe", () => {
     assert.match(CODE, /if \(decisionId\) tgDeliver\(tgBook\.onFill\(decisionId, "dropped", paperActive\(\)\)\);/);
     assert.match(CODE, /if \(trenchBrain\.reset\(trenchContext\)\) tgDeliver\(tgBook\.reset\(\)\);\n\s+tgDeliver\(tgBook\.expire\(\)\);/);
     assert.match(CODE, /discoverTrencherUniverse\(mainnetClient\(\),current\.grant,freshTrenchTape\(\),\{nominated:new Set\(tgNominated\)\}\)/);
+  });
+
+  it("the look's presence probe reads Robinhood Chain, through the governed mainnet client", () => {
+    const at = CODE.indexOf("const tgLook = createCoinLook({");
+    assert.ok(at > 0);
+    assert.match(CODE.slice(at, at + 800), /\n\s+getCode: \(a\) => mainnetClient\(\)\.getCode\(\{ address: a \}\),\n/);
   });
 
   it("the child hands the service its one store and the port", () => {

@@ -80,33 +80,302 @@ const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 const CA_RUN = /(?<![0-9a-f])0x[0-9a-f]{40}(?![0-9a-f])/gi;
 /** At most this many CAs per message are considered (the contract's "first 2"). */
 const MAX_CAS = 2;
+/**
+ * At most this many addresses are read out of one line with their chain. A
+ * remembered line is 400 characters, so this bounds nothing a person writes;
+ * it keeps a pasted wall of addresses from being a list.
+ */
+const MAX_HITS = 16;
 
 /**
- * Every CA in a line, lowercased, unique, in order of appearance, at most 2.
+ * Where a posted address says it lives, read from the link it sits in:
+ * "robinhood" in a Robinhood Chain explorer or chart link, "other" in a link
+ * that names another chain, null for a bare address or a link that names no
+ * chain this knows.
+ */
+export type CaChain = "robinhood" | "other" | null;
+
+/** One CA in a line, and the chain the link around it names. */
+export interface CaHit {
+  /** Lowercased 0x + 40 hex. */
+  address: string;
+  /**
+   * A HINT, AND ONLY EVER A QUIET ONE. "other" keeps the coin flow silent
+   * about the address: a false "other" costs one coin nobody hears about.
+   * Nothing is ever done BECAUSE of "robinhood": the look still reads the
+   * chain (tg-coin-look.ts), and a link anyone can type proves nothing.
+   */
+  chain: CaChain;
+}
+
+/**
+ * Every CA in a line with the chain its link names, lowercased, unique, in
+ * order of appearance, at most 16 (MAX_HITS).
  *
  * Found anywhere, including inside a GeckoTerminal / DexScreener / explorer
  * URL path or query string, because that is how most people post a coin.
  * Percent-escapes are read as separators first: in "…%2F0xabc…" the "F" of
  * the escaped slash is a hex character and would otherwise glue onto the
- * address and hide it.
+ * address and hide it. Blanked three spaces wide, so a match's index is its
+ * index in the line too, for reading the link around it.
+ *
+ * An address posted twice keeps the strongest reading: a Robinhood link
+ * anywhere in the line over another chain's, and either over a bare copy.
  */
-export function extractCas(text: string): string[] {
+export function extractCaHits(text: string): CaHit[] {
   if (typeof text !== "string" || !text) return [];
-  const t = text.normalize("NFKC").replace(/%[0-9a-f]{2}/gi, " ");
-  const out: string[] = [];
+  const line = text.normalize("NFKC");
+  const t = line.replace(/%[0-9a-f]{2}/gi, "   ");
+  const out: CaHit[] = [];
   for (const m of t.matchAll(CA_RUN)) {
     // The whole match is the address: the lookarounds take no characters, and
     // lowercasing turns a "0X" prefix into "0x" along with the hex.
-    const ca = m[0].toLowerCase();
-    if (!out.includes(ca)) out.push(ca);
-    if (out.length >= MAX_CAS) break;
+    const address = m[0].toLowerCase();
+    const at = m.index ?? 0;
+    const chain = chainOfLink(linkAround(line, at, at + m[0].length), address);
+    const seen = out.find((h) => h.address === address);
+    if (seen) {
+      if (chain === "robinhood" || (chain === "other" && seen.chain === null)) seen.chain = chain;
+      continue;
+    }
+    if (out.length >= MAX_HITS) break;
+    out.push({ address, chain });
   }
   return out;
 }
 
+/** Every CA in a line, lowercased, unique, in order of appearance, at most 2: extractCaHits' first two addresses. */
+export function extractCas(text: string): string[] {
+  return extractCaHits(text)
+    .slice(0, MAX_CAS)
+    .map((h) => h.address);
+}
+
+// ─── Which chain a link names ──────────────────────────────────────────────
+
+/** Where a link written in a line ends: space, quotes, brackets, and the separators people put between links. */
+const LINK_END = /[\s"'<>()[\]{}|,]/u;
+
+/** The run of text around [start, end) that a link written out in a line could be. */
+function linkAround(t: string, start: number, end: number): string {
+  let a = start;
+  while (a > 0 && !LINK_END.test(t.charAt(a - 1))) a--;
+  let b = end;
+  while (b < t.length && !LINK_END.test(t.charAt(b))) b++;
+  return t.slice(a, b);
+}
+
+/** Percent-escapes of plain ASCII, read back ("https%3A%2F%2Fetherscan.io" is a link to Etherscan). */
+const unescapeAscii = (s: string): string => s.replace(/%([0-7][0-9a-f])/gi, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
+
+/** A scheme, where one link inside another starts ("…/r?u=https://etherscan.io/…"). */
+const SCHEME = /[a-z][a-z0-9+.-]*:\/\//g;
+/** A host name: dotted labels ending in a TLD, then a path, port, query or the end. */
+const HOST = /(?<![a-z0-9.-])((?:[a-z0-9-]+\.)+[a-z]{2,})(?=[/?#:]|$)/;
+
+/**
+ * Robinhood Chain named in a host label, a path segment or a query value:
+ * "robinhoodchain.blockscout.com", "explorer.robinhood.com", "…/robinhood/…",
+ * "?chain=robinhood", "0x…-robinhood".
+ */
+const RH_WORD = /(?:^|[^a-z0-9])robinhood(?:[-_]?chain)?(?:[-_]?(?:mainnet|testnet))?(?![a-z0-9])/;
+/** Robinhood Chain's chain ids, mainnet and testnet (packages/core/src/chain.ts), as a link's query writes them. */
+const RH_CHAIN_IDS: ReadonlySet<string> = new Set(["4663", "46630"]);
+
+/** Query keys a link names its chain with ("?chain=bsc", "&chainId=8453"). */
+const CHAIN_PARAM = /(?:^|[?&#;])(?:chain|chainid|chain_id|chainname|network|networkid|blockchain|inputchain|outputchain|fromchain|tochain|fromchainid|tochainid)=([^&#;]*)/g;
+
+/**
+ * Other chains by the names links use for them: Ethereum and its testnets,
+ * the L2s, BNB, the other EVM chains, Solana, Tron and the rest. A value
+ * here in a chain parameter, or a path segment of a swap link, is another
+ * chain's coin.
+ */
+const OTHER_CHAINS: ReadonlySet<string> = new Set([
+  "ethereum", "eth", "mainnet", "sepolia", "goerli", "holesky", "base", "arbitrum", "arbitrum-one", "arbitrum_one", "arb",
+  "optimism", "op", "polygon", "polygon_pos", "polygon-pos", "matic", "zkevm", "bsc", "bnb", "binance", "bnbchain", "opbnb",
+  "avalanche", "avax", "fantom", "ftm", "sonic", "blast", "linea", "scroll", "zksync", "zksync-era", "era", "celo", "gnosis",
+  "xdai", "mantle", "unichain", "zora", "sei", "berachain", "bera", "ink", "abstract", "world", "worldchain", "apechain",
+  "hyperevm", "hyperliquid", "monad", "cronos", "moonbeam", "metis", "kava", "core", "pulsechain", "pulse", "degen", "mode",
+  "taiko", "manta", "starknet", "solana", "sol", "tron", "trx", "sui", "aptos", "ton", "near", "bitcoin", "btc",
+]);
+
+/**
+ * Explorers, launchpads and DEXes of one other chain. Also every host with a
+ * label ending in "scan" (etherscan, bscscan, basescan, arbiscan, polygonscan,
+ * ftmscan, blastscan, lineascan, solscan, tronscan…) and every Blockscout
+ * other than Robinhood Chain's own; see isOtherChainHost.
+ */
+const OTHER_CHAIN_HOSTS: readonly string[] = [
+  "snowtrace.io", "routescan.io", "oklink.com", "blockchair.com", "mempool.space", "explorer.solana.com", "solana.fm",
+  "solanabeach.io", "explorer.zksync.io", "era.zksync.network", "blastexplorer.io", "explorer.linea.build", "tonviewer.com",
+  "suivision.xyz", "pump.fun", "raydium.io", "jup.ag", "meteora.ag", "orca.so", "moonshot.money", "believe.app",
+  "letsbonk.fun", "bonk.fun", "bags.fm", "axiom.trade", "bullx.io", "tinyastro.io", "four.meme", "pancakeswap.finance",
+  "poocoin.app", "aerodrome.finance", "velodrome.finance", "zora.co", "clanker.world", "flaunch.gg", "traderjoexyz.com",
+  "lfj.gg", "quickswap.exchange", "camelot.exchange", "sunswap.com", "sun.io", "sunpump.meme", "debank.com",
+];
+
+/**
+ * Charts and screeners across many chains, whose links always name the
+ * chain: one that does not name Robinhood Chain names another.
+ */
+const MULTI_CHAIN_CHARTS: readonly string[] = [
+  "dexscreener.com", "geckoterminal.com", "dextools.io", "gmgn.ai", "defined.fi", "dexview.com", "ave.ai", "birdeye.so",
+  "coinmarketcap.com", "coingecko.com", "dex.guru", "dexcheck.ai", "tokensniffer.com", "honeypot.is", "gopluslabs.io", "de.fi",
+];
+
+/**
+ * Swap apps across many chains, whose links name the chain only sometimes
+ * ("app.uniswap.org/swap?chain=base", "/explore/tokens/ethereum/0x…"). One
+ * that names no chain says nothing either way.
+ */
+const MULTI_CHAIN_SWAPS: readonly string[] = [
+  "uniswap.org", "sushi.com", "1inch.io", "matcha.xyz", "jumper.exchange", "li.fi", "relay.link", "cow.fi",
+  "kyberswap.com", "odos.xyz", "openocean.finance", "paraswap.io", "velora.xyz", "okx.com",
+];
+
+const onHost = (host: string, domain: string): boolean => host === domain || host.endsWith(`.${domain}`);
+const onAnyHost = (host: string, domains: readonly string[]): boolean => domains.some((d) => onHost(host, d));
+
+function isOtherChainHost(host: string): boolean {
+  if (onAnyHost(host, OTHER_CHAIN_HOSTS)) return true;
+  if (host.endsWith(".blockscout.com")) return true;
+  // Every label but the TLD: "optimistic.etherscan.io" is Etherscan's too.
+  return host.split(".").slice(0, -1).some((label) => label.length > 4 && label.endsWith("scan"));
+}
+
+/** The chains a link names in its query ("?chain=…", "&chainId=…"): Robinhood's, another, or none. */
+function chainParams(rest: string): { robinhood: boolean; other: boolean } {
+  let robinhood = false;
+  let other = false;
+  for (const m of rest.matchAll(CHAIN_PARAM)) {
+    const v = (m[1] ?? "").trim();
+    if (!v) continue;
+    if (RH_CHAIN_IDS.has(v) || RH_WORD.test(v)) robinhood = true;
+    else if (/^\d+$/.test(v) || OTHER_CHAINS.has(v)) other = true;
+  }
+  return { robinhood, other };
+}
+
+/**
+ * Which chain the link around a posted address names (see CaHit.chain).
+ *
+ * The link is the innermost one holding the address: from the last scheme
+ * before it to the next one after it, so a redirect ("…?u=https://etherscan.io/…")
+ * is read as where it goes, and two links glued together are two. Read in
+ * order: a Robinhood host; another chain's explorer, launchpad or DEX; a
+ * Robinhood name in the path or query; a many-chains chart (whose links
+ * always name a chain); a chain named in the query, or in a swap link's path.
+ * Anything else, a bare address included, is null.
+ */
+function chainOfLink(around: string, address: string): CaChain {
+  const t = unescapeAscii(around).toLowerCase();
+  const at = t.indexOf(address);
+  if (at < 0) return null;
+  let from = 0;
+  let to = t.length;
+  for (const m of t.matchAll(SCHEME)) {
+    const i = m.index ?? 0;
+    if (i <= at) from = i;
+    else if (i >= at + address.length) {
+      to = i;
+      break;
+    }
+  }
+  const link = t.slice(from, to);
+  const h = HOST.exec(link);
+  // No host before the address: it is not in a link at all.
+  if (!h || h.index >= at - from) return null;
+  return chainNamedBy(h[1] ?? "", link.slice(h.index + h[0].length));
+}
+
+/**
+ * The chain a link names, from its host and what follows the host (path,
+ * query, fragment), both lowercased and percent-unescaped. The rules of
+ * chainOfLink, in its order.
+ */
+function chainNamedBy(host: string, rest: string): CaChain {
+  if (RH_WORD.test(host)) return "robinhood";
+  if (isOtherChainHost(host)) return "other";
+  const params = chainParams(rest);
+  if (params.robinhood || RH_WORD.test(rest)) return "robinhood";
+  if (onAnyHost(host, MULTI_CHAIN_CHARTS)) return "other";
+  if (params.other) return "other";
+  if (onAnyHost(host, MULTI_CHAIN_SWAPS)) {
+    const path = rest.split(/[?#]/, 1)[0] ?? "";
+    if (path.split("/").some((seg) => OTHER_CHAINS.has(seg))) return "other";
+  }
+  return null;
+}
+
+/**
+ * Path segments and query keys of a link to one transaction or block. That
+ * is not a coin, so another chain's tx link stays with the chatter path ("why
+ * did my tx fail?" still gets its answer). Hash-routed paths count too
+ * ("tronscan.org/#/transaction/…").
+ */
+const TX_PARTS: ReadonlySet<string> = new Set(["tx", "txs", "txn", "txns", "transaction", "transactions", "block", "blocks", "signature"]);
+
+/**
+ * A run in a link that can only be an on-chain id: 32 or more of [0-9a-z_-],
+ * a digit among them, and a stretch of at least 20 with no "-" or "_".
+ * Every chain's coin, pair, pool and account ids qualify, in either case: an
+ * EVM or Sui 0x id of any length, a Solana or Tron base58 one lowercased, a
+ * TON base64url one. A slug of words ("what-is-a-liquidity-pool-and-how-it-works")
+ * does not.
+ */
+const ID_RUN = /[0-9a-z_-]{32,}/g;
+
+/** What follows a link's host (lowercased) holds a coin, pair, pool or account id, and is not a tx or block link. */
+function carriesCoinId(rest: string): boolean {
+  if (rest.split(/[/?#&=;]+/).some((part) => TX_PARTS.has(part))) return false;
+  for (const m of rest.matchAll(ID_RUN)) {
+    const run = m[0];
+    if (/[0-9]/.test(run) && run.split(/[-_]/).some((piece) => piece.length >= 20)) return true;
+  }
+  return false;
+}
+
+/**
+ * True when the line carries a link that names another chain and holds a
+ * coin, pair, pool or account id: another chain's coin even when no 0x +
+ * 40-hex address and no mint shape is in it. That is how DexScreener itself
+ * hands out a Solana pair ("dexscreener.com/solana/4hzt…", all lowercase, so
+ * hasForeignMint cannot see it), and how TON, Sui and Tron pairs and a
+ * Uniswap v4 pool id ("dexscreener.com/base/0x" + 64 hex) are posted. Like
+ * hasForeignMint, recognised only so the coin flow can own the line and say
+ * nothing about it.
+ *
+ * Every link in the line is read, not only one around a CA, by the host and
+ * slug rules of extractCaHits' chain (chainNamedBy): another chain's explorer,
+ * launchpad or DEX, a many-chain chart whose link does not name Robinhood
+ * Chain, a chain parameter or swap path naming another chain. A Robinhood
+ * Chain link, a link that names no chain, a link with no id in it and a link
+ * to one transaction or block are not.
+ */
+export function hasOtherChainLink(text: string): boolean {
+  if (typeof text !== "string" || !text) return false;
+  const line = unescapeAscii(text.normalize("NFKC")).toLowerCase();
+  for (const run of line.split(LINK_END)) {
+    // A redirect ("…?u=https://dexscreener.com/…") or two links glued
+    // together: each link is read from its own scheme.
+    const starts = [0];
+    for (const m of run.matchAll(SCHEME)) if ((m.index ?? 0) > 0) starts.push(m.index ?? 0);
+    for (let k = 0; k < starts.length; k++) {
+      const link = run.slice(starts[k] ?? 0, starts[k + 1] ?? run.length);
+      const h = HOST.exec(link);
+      if (!h) continue;
+      const rest = link.slice(h.index + h[0].length);
+      if (carriesCoinId(rest) && chainNamedBy(h[1] ?? "", rest) === "other") return true;
+    }
+  }
+  return false;
+}
+
 /**
  * A Solana-style base58 run: 32–44 characters from the base58 alphabet (no 0,
- * O, I or l), a whole alphanumeric token on its own.
+ * O, I or l), a whole alphanumeric token on its own. Tron's "T…" addresses
+ * (34) are base58 too.
  *
  * Bounded by any alphanumeric, not just base58, so the "x…" after a CA's "0"
  * can never be read as a mint, and neither can a slice of a longer token.
@@ -114,22 +383,39 @@ export function extractCas(text: string): string[] {
 const B58_RUN = /(?<![0-9A-Za-z])[1-9A-HJ-NP-Za-km-z]{32,44}(?![0-9A-Za-z])/g;
 
 /**
- * True when the line carries something shaped like a Solana mint, so the coin
- * flow can say it is not on its chain. Recognised only to say that: it is
- * never looked up and never nominated.
+ * A TON address in its user-friendly form, a whole token: "EQ" or "UQ"
+ * (mainnet), "kQ" or "0Q" (testnet), then 46 more base64url characters.
+ */
+const TON_RUN = /(?<![0-9A-Za-z_-])[EUk0]Q[0-9A-Za-z_-]{46}(?![0-9A-Za-z_-])/g;
+
+/** A Sui or Aptos coin type: an 0x account, a module and a name ("0x2::sui::SUI"). */
+const MOVE_COIN = /(?<![0-9a-z])0x[0-9a-f]{1,64}::[a-z_][a-z0-9_]*::[a-z_][a-z0-9_]*/i;
+
+/**
+ * True when the line carries another chain's coin address in a shape no EVM
+ * chain uses: a Solana (or Tron) base58 mint, a TON address, a Sui or Aptos
+ * coin type. The coin flow owns such a line only to stay silent about it. It
+ * is never looked up, never nominated and never answered.
  *
  * A real mint mixes upper case, lower case and digits; "hahahaha…" and a held
  * key ("AAAAAA…") do not, so all three are required. A pure-hex run is an EVM
- * hash or key without its 0x, not a mint.
+ * hash or key without its 0x, not a mint. A TON address mixes cases the same
+ * way. A bare 0x + 64 hex is not read as anyone's coin: on Robinhood Chain
+ * it is a tx hash as often as not.
  */
 export function hasForeignMint(text: string): boolean {
   if (typeof text !== "string" || !text) return false;
-  for (const m of text.normalize("NFKC").matchAll(B58_RUN)) {
+  const t = text.normalize("NFKC");
+  for (const m of t.matchAll(B58_RUN)) {
     const run = m[0];
     if (/^[0-9a-f]+$/i.test(run)) continue;
     if (/[0-9]/.test(run) && /[a-z]/.test(run) && /[A-Z]/.test(run)) return true;
   }
-  return false;
+  for (const m of t.matchAll(TON_RUN)) {
+    const tail = m[0].slice(2);
+    if (/[a-z]/.test(tail) && /[A-Z]/.test(tail)) return true;
+  }
+  return MOVE_COIN.test(t);
 }
 
 /** "$PEPE": 2–10 letters/digits starting with a letter, not glued to a word or a longer run. */

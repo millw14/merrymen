@@ -20,10 +20,12 @@ import {
   addressedHow,
   addressedSmallTalk,
   asksHowItIs,
+  extractCaHits,
   extractCas,
   extractCashtags,
   greetingOf,
   hasForeignMint,
+  hasOtherChainLink,
   hatefulKey,
   insultAtBot,
   insultLevel,
@@ -47,6 +49,8 @@ const ca = CA.toLowerCase();
 const CA2 = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
 const CA3 = "0x1111111111111111111111111111111111111111";
 const HASH64 = `0x${"ab12".repeat(16)}`;
+/** USDT's jetton master on TON, the user-friendly form. */
+const TON = "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs";
 
 describe("extractCas", () => {
   const cases: Array<[string, string, string[]]> = [
@@ -88,6 +92,94 @@ describe("extractCas", () => {
   });
 });
 
+describe("extractCaHits: the chain the link around a CA names", () => {
+  const chainOf = (text: string): string | null | undefined => extractCaHits(text)[0]?.chain;
+  const cases: Array<[string, string, "robinhood" | "other" | null]> = [
+    // Robinhood Chain's own explorers and charts.
+    ["dexscreener robinhood", `https://dexscreener.com/robinhood/${CA}?maker=1`, "robinhood"],
+    ["geckoterminal robinhood pool", `https://www.geckoterminal.com/robinhood/pools/${CA}`, "robinhood"],
+    ["geckoterminal with a locale", `https://www.geckoterminal.com/ja/robinhood/pools/${CA}`, "robinhood"],
+    ["robinhood blockscout", `https://robinhoodchain.blockscout.com/token/${CA}`, "robinhood"],
+    ["robinhood explorer", `https://explorer.robinhood.com/address/${CA}#code`, "robinhood"],
+    ["robinhood testnet explorer", `explorer.testnet.chain.robinhood.com/address/${CA}`, "robinhood"],
+    ["a swap link on robinhood", `https://app.uniswap.org/swap?chain=robinhood&outputCurrency=${CA}`, "robinhood"],
+    ["a swap link by robinhood's chain id", `https://app.example/swap?chainId=4663&token=${CA}`, "robinhood"],
+    // Other chains' explorers.
+    ["etherscan", `https://etherscan.io/token/${CA}`, "other"],
+    ["etherscan, no scheme", `etherscan.io/address/${CA}`, "other"],
+    ["optimistic etherscan", `https://optimistic.etherscan.io/token/${CA}`, "other"],
+    ["bscscan", `https://bscscan.com/token/${CA}`, "other"],
+    ["basescan", `https://basescan.org/token/${CA}#code`, "other"],
+    ["arbiscan", `https://arbiscan.io/token/${CA}`, "other"],
+    ["polygonscan", `https://polygonscan.com/token/${CA}`, "other"],
+    ["snowtrace", `https://snowtrace.io/token/${CA}`, "other"],
+    ["ftmscan", `https://ftmscan.com/token/${CA}`, "other"],
+    ["blastscan", `https://blastscan.io/token/${CA}`, "other"],
+    ["lineascan", `https://lineascan.build/token/${CA}`, "other"],
+    ["another chain's blockscout", `https://eth.blockscout.com/token/${CA}`, "other"],
+    // Charts across many chains, naming another one.
+    ["dexscreener ethereum", `https://dexscreener.com/ethereum/${CA}`, "other"],
+    ["dexscreener bsc", `https://dexscreener.com/bsc/${CA}`, "other"],
+    ["dexscreener base", `dexscreener.com/base/${CA}`, "other"],
+    ["geckoterminal eth", `https://www.geckoterminal.com/eth/pools/${CA}`, "other"],
+    ["geckoterminal api, another network", `https://api.geckoterminal.com/api/v2/networks/bsc/tokens/${CA}`, "other"],
+    ["dextools", `https://www.dextools.io/app/en/ether/pair-explorer/${CA}`, "other"],
+    ["gmgn bsc", `https://gmgn.ai/bsc/token/${CA}`, "other"],
+    ["gmgn base", `https://gmgn.ai/base/token/${CA}`, "other"],
+    ["birdeye", `https://birdeye.so/token/${CA}?chain=ethereum`, "other"],
+    ["ave, the chain after the address", `https://ave.ai/token/${CA}-bsc`, "other"],
+    // Launchpads, DEXes and terminals of other chains.
+    ["pump.fun", `https://pump.fun/coin/${CA}`, "other"],
+    ["photon", `https://photon-base.tinyastro.io/en/lp/${CA}`, "other"],
+    ["bullx", `https://neo.bullx.io/terminal?chainId=8453&address=${CA}`, "other"],
+    ["pancakeswap", `https://pancakeswap.finance/swap?outputCurrency=${CA}`, "other"],
+    ["uniswap on another chain, by param", `https://app.uniswap.org/swap?chain=base&outputCurrency=${CA}`, "other"],
+    ["uniswap on another chain, by path", `https://app.uniswap.org/explore/tokens/ethereum/${CA}`, "other"],
+    ["any link naming another chain id", `https://swap.example/?chainId=56&token=${CA}`, "other"],
+    ["a redirect is read as where it goes", `https://t.co/r?u=https%3A%2F%2Fetherscan.io%2Ftoken%2F${CA}`, "other"],
+    // No chain named.
+    ["a bare CA", `ape ${CA}`, null],
+    ["after ca: with no space", `ca:${CA}`, null],
+    ["uniswap with no chain", `https://app.uniswap.org/swap?outputCurrency=${CA}`, null],
+    ["an unknown site", `https://blockscout.example/token/${CA}/token-transfers`, null],
+    ["an unknown chain param", `https://app.example/swap?outputCurrency=${CA}&chain=rh`, null],
+    ["a telegram bot link", `https://t.me/somebot?start=${CA}`, null],
+  ];
+  for (const [name, text, want] of cases) {
+    it(name, () => assert.equal(chainOf(text), want, text));
+  }
+
+  it("each CA is read in its own link, in order, lowercased and unique", () => {
+    const text = `eth https://etherscan.io/token/${CA} and ours: https://dexscreener.com/robinhood/${CA2}, also ${CA3}`;
+    assert.deepEqual(extractCaHits(text), [
+      { address: ca, chain: "other" },
+      { address: CA2, chain: "robinhood" },
+      { address: CA3, chain: null },
+    ]);
+    // Two links glued together are two links.
+    assert.deepEqual(
+      extractCaHits(`https://etherscan.io/token/${CA}https://dexscreener.com/robinhood/${CA2}`).map((h) => h.chain),
+      ["other", "robinhood"],
+    );
+  });
+
+  it("an address posted twice keeps the strongest reading: robinhood, then other, then bare", () => {
+    assert.deepEqual(extractCaHits(`${CA} https://bscscan.com/token/${CA}`), [{ address: ca, chain: "other" }]);
+    assert.deepEqual(extractCaHits(`https://bscscan.com/token/${CA} https://dexscreener.com/robinhood/${CA}`), [{ address: ca, chain: "robinhood" }]);
+  });
+
+  it("reads past the first two, which extractCas still stops at", () => {
+    const four = [CA, CA2, CA3, "0x2222222222222222222222222222222222222222"];
+    assert.equal(extractCaHits(four.join(" ")).length, 4);
+    assert.deepEqual(extractCas(four.join(" ")), [ca, CA2]);
+  });
+
+  it("a tx hash in another chain's link is still never a CA", () => {
+    assert.deepEqual(extractCaHits(`https://etherscan.io/tx/${HASH64}`), []);
+    assert.deepEqual(extractCaHits(undefined as unknown as string), []);
+  });
+});
+
 describe("hasForeignMint", () => {
   const USDC_SOL = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
   const PUMP = "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr";
@@ -108,12 +200,66 @@ describe("hasForeignMint", () => {
     ["45 characters is too long", `${USDC_SOL}x`, false],
     ["a 0 inside breaks the alphabet", `${USDC_SOL.slice(0, 20)}0${USDC_SOL.slice(21)}`, false],
     ["an 88-char keypair is not a mint", `${USDC_SOL}${USDC_SOL}`, false],
+    ["a Tron address", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", true],
+    ["a TON address", TON, true],
+    ["a non-bounceable TON address", `UQ${TON.slice(2)}`, true],
+    ["a TON address in a tonviewer link", `https://tonviewer.com/${TON}`, true],
+    ["a TON-shaped run in one case is not an address", `EQ${"a".repeat(46)}`, false],
+    ["a Sui coin type", "0x2::sui::SUI", true],
+    ["a long Sui coin type in a sentence", `ape 0x${"ab12".repeat(16)}::froggy::FROGGY now`, true],
+    ["a bare 64-hex (a tx hash as often as not) is not anyone's coin", `0x${"ab12".repeat(16)}`, false],
     ["plain chat", "gm frens what are we buying", false],
     ["empty", "", false],
   ];
   for (const [name, text, want] of cases) {
     it(name, () => assert.equal(hasForeignMint(text), want));
   }
+});
+
+describe("hasOtherChainLink: another chain's coin link with no EVM address in it", () => {
+  // The links DexScreener's own API hands out: Solana pair ids lowercased,
+  // so no mint shape survives (hasForeignMint is false for every one).
+  const SOL_PAIR = "4hzthuyzrpwtvqgru8trxb5tkaslgphuamdgtks2rdai";
+  const TON_PAIR = TON.toLowerCase();
+  const cases: Array<[string, string, boolean]> = [
+    ["dexscreener solana, lowercased", `https://dexscreener.com/solana/${SOL_PAIR}`, true],
+    ["addressed, in a sentence", `@pinebot thoughts on https://dexscreener.com/solana/${SOL_PAIR} ?`, true],
+    ["no scheme", `dexscreener.com/solana/${SOL_PAIR}`, true],
+    ["dexscreener ton", `https://dexscreener.com/ton/${TON_PAIR}`, true],
+    ["dexscreener sui, a 64-hex pair", `https://dexscreener.com/sui/${HASH64}`, true],
+    ["dexscreener base, a v4 pool id", `https://dexscreener.com/base/${HASH64}`, true],
+    ["dexscreener tron", "https://dexscreener.com/tron/tqn9y2khehb2i6xjmaxbvwokzqn5t6jqpy", true],
+    ["geckoterminal solana, lowercased", `https://www.geckoterminal.com/solana/pools/${SOL_PAIR}`, true],
+    ["dextools solana", `https://www.dextools.io/app/en/solana/pair-explorer/${SOL_PAIR}`, true],
+    ["gmgn sol, lowercased", `https://gmgn.ai/sol/token/${SOL_PAIR}`, true],
+    ["birdeye, by chain param", `https://birdeye.so/token/${SOL_PAIR}?chain=solana`, true],
+    ["pump.fun, lowercased", `https://pump.fun/coin/${SOL_PAIR}`, true],
+    ["a sui explorer's coin page", `https://suivision.xyz/coin/${HASH64}::froggy::froggy`, true],
+    ["a redirect is read as where it goes", `https://t.co/r?u=https%3A%2F%2Fdexscreener.com%2Fsolana%2F${SOL_PAIR}`, true],
+    ["one link beside chatter and another link", `lol https://x.com/a/status/1 and https://dexscreener.com/ton/${TON_PAIR}`, true],
+    // Not another chain's coin.
+    ["a Robinhood Chain v4 pool", `https://dexscreener.com/robinhood/${HASH64}`, false],
+    ["a Robinhood Chain explorer tx", `https://robinhoodchain.blockscout.com/tx/${HASH64}`, false],
+    ["another chain's tx is a tx, not a coin", `https://etherscan.io/tx/${HASH64}`, false],
+    ["a hash-routed tx", `https://tronscan.org/#/transaction/${"ab12".repeat(16)}`, false],
+    ["a solana tx", `https://solscan.io/tx/${SOL_PAIR}${SOL_PAIR}`, false],
+    ["a chain's front page", "https://dexscreener.com/solana", false],
+    ["an explorer page with no id", "https://etherscan.io/gastracker", false],
+    ["an article slug", "https://www.coingecko.com/learn/what-are-the-best-crypto-wallets-for-beginners", false],
+    ["a link that names no chain", `https://t.me/somebot?start=${SOL_PAIR}`, false],
+    ["a post on x", "https://x.com/someone/status/1839283746273645678", false],
+    ["a bare lowercased id is not a link", SOL_PAIR, false],
+    ["plain chat", "gm frens, dexscreener is lagging", false],
+    ["empty", "", false],
+  ];
+  for (const [name, text, want] of cases) {
+    it(name, () => {
+      assert.equal(hasOtherChainLink(text), want, text);
+      // Every one of these is invisible to the other readings: this is the only one that sees it.
+      if (name !== "a sui explorer's coin page") assert.equal(hasForeignMint(text) || extractCaHits(text).length > 0, false, text);
+    });
+  }
+  it("is not fooled by a non-string", () => assert.equal(hasOtherChainLink(undefined as unknown as string), false));
 });
 
 describe("extractCashtags", () => {

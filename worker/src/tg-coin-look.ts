@@ -5,10 +5,10 @@
  * chat side (telegram/tg-groups/) never imports anything that trades; it holds
  * a `TgCoinsPort`, and this file is what index.ts builds that port from:
  *
- *   - `createCoinLook` — the quick look (step 5): what kind of address was
- *     posted, cheapest reads first, cached, and rate-capped so a busy group
- *     cannot spend the process's RPC governor or the fleet's GeckoTerminal
- *     quota;
+ *   - `createCoinLook` — the quick look (step 4): what kind of address was
+ *     posted, cheapest reads first (is it on Robinhood Chain at all, before
+ *     GeckoTerminal is asked), cached, and rate-capped so a busy group cannot
+ *     spend the process's RPC governor or the fleet's GeckoTerminal quota;
  *   - `createTgCoinsPort` — the port object itself, whose every method is safe
  *     to call at any time and never throws;
  *   - three small rules the trencher tick applies at its own seams (the group
@@ -50,15 +50,26 @@ export const COIN_LOOK = {
   /** A definite answer about an address is reused this long (the contract's 30 min). */
   cacheMs: 30 * MIN,
   /**
-   * Looks that must read the network, per process, per rolling window. Beyond
-   * it the answer is `unknown` ("can't get a proper look rn"). Six in ten
-   * minutes is a busy group's worth of fresh coins, and at most ~6 GeckoTerminal
-   * slots and ~6 batched RPC requests against a governor the stop-loss tick
-   * shares — a price worth paying for chatter, and no more. A chart link is
-   * two looks (the pool, then the coin it trades), and the pool's costs one
-   * read more (the factory's getPool).
+   * Full looks, per process, per rolling window: the ones that read
+   * GeckoTerminal and the chain probe, for an address the presence probe
+   * found code at. Beyond it the answer is `unknown`. Six in ten minutes is a
+   * busy group's worth of fresh coins, and at most ~6 GeckoTerminal slots and
+   * ~6 batched RPC requests against a governor the stop-loss tick shares — a
+   * price worth paying for chatter, and no more. A chart link is two looks
+   * (the pool, then the coin it trades), and the pool's costs one read more
+   * (the factory's getPool).
    */
   maxUncached: 6,
+  /**
+   * Presence probes, per process, per rolling window, counted apart from the
+   * full looks: ONE getCode on Robinhood Chain, before anything else is read.
+   * An address posted from Ethereum, BNB or Base has no code here and is
+   * answered `wallet` by it alone, so a chat full of other chains' CAs spends
+   * these and never the six full looks a real Robinhood coin needs. Thirty in
+   * ten minutes is one single-request read every twenty seconds; beyond it
+   * the answer is `unknown`.
+   */
+  maxProbes: 30,
   windowMs: 10 * MIN,
   /** Addresses remembered at once; the oldest answer goes first. */
   cacheMax: 500,
@@ -94,7 +105,10 @@ export interface CoinLookReaders {
   held: (address: string) => { name?: string | null } | null;
   /** GeckoTerminal's token-pools page (venues/geckoterminal.ts readTokenPools). null = could not be read. */
   tokenPools: (address: string) => Promise<GeckoPool[] | null>;
-  /** eth_getCode. undefined or "0x" = no code. A rejection is a failed read, never "no code". */
+  /**
+   * eth_getCode on Robinhood Chain (index.ts: the governed mainnet client).
+   * undefined or "0x" = no code. A rejection is a failed read, never "no code".
+   */
   getCode: (address: `0x${string}`) => Promise<string | undefined>;
   /** One multicall: Pons template + ERC-20 shape. null = the batch could not be read. */
   probe: (address: `0x${string}`) => Promise<TokenProbe | null>;
@@ -126,6 +140,7 @@ function displayName(address: string, pools: readonly GeckoPool[]): string | und
 
 const UNKNOWN: CoinLook = Object.freeze({ kind: "unknown" });
 const NOT_TOKEN: CoinLook = Object.freeze({ kind: "not-token" });
+const WALLET: CoinLook = Object.freeze({ kind: "wallet" });
 
 /** The quote side a pool must have to be a coin's pool — discovery's own rule (trencher-discovery.ts). */
 const CASH_SIDES: ReadonlySet<string> = new Set([CASH.USDG.toLowerCase(), CASH.WETH.toLowerCase()]);
@@ -137,17 +152,24 @@ const CASH_SIDES: ReadonlySet<string> = new Set([CASH.USDG.toLowerCase(), CASH.W
  *    a coin it already holds. Answered every time, never cached, so a coin
  *    bought since the last look is `held` and not a stale `candidate`.
  * 2. CACHED: a definite answer from the last 30 minutes.
- * 3. RATE-CAPPED: past the per-process allowance the answer is `unknown`.
- * 4. GeckoTerminal's page for the token. When pools are known they decide:
+ * 3. ON ROBINHOOD CHAIN AT ALL? ONE getCode on Robinhood Chain, before any
+ *    GeckoTerminal request, under its own allowance (COIN_LOOK.maxProbes;
+ *    past it, `unknown`). No code → `wallet`, cached like any definite
+ *    answer: a Robinhood wallet, or a token that lives on Ethereum, BNB or
+ *    Base (the same 0x + 40 hex, and nothing deployed at it here). That is
+ *    the whole look for such an address, so other chains' CAs never spend
+ *    the full looks below. Code found is remembered for the cache's 30
+ *    minutes, so a coin refused a full look is not probed again.
+ * 4. RATE-CAPPED: past the full-look allowance the answer is `unknown`.
+ * 5. GeckoTerminal's page for the token. When pools are known they decide:
  *    a Pons curve pool → `curve`; only 32-byte pool ids → `v4-only`; no
  *    Uniswap v3 pool at all → `no-pool`; a v3 pool that fails
  *    `highVolumePools` → `too-quiet`; fails `shouldEnter(TRENCHER_FAST)` on
  *    depth or size → `too-thin`, on age → `too-new`; else `candidate`.
- * 5. No pool known: local curve provenance, then ONE getCode read (batched
- *    with one multicall probe): no code → `wallet`; a Pons template →
- *    `curve`; an ERC-20 → `no-pool`; a Uniswap v3 pool → step 6; anything
- *    else → `not-token`.
- * 6. A CHART LINK CARRIES THE POOL. A GeckoTerminal `/pools/…` or DexScreener
+ * 6. No pool known: local curve provenance, then ONE multicall probe: a Pons
+ *    template → `curve`; an ERC-20 → `no-pool`; a Uniswap v3 pool → step 7;
+ *    anything else → `not-token`.
+ * 7. A CHART LINK CARRIES THE POOL. A GeckoTerminal `/pools/…` or DexScreener
  *    pair link is how most coins get posted, and the only address in it is
  *    the pool's. The index has no token page for a pool, so it lands here.
  *    It is looked at as the coin it trades only when that is PROVEN on chain:
@@ -159,14 +181,17 @@ const CASH_SIDES: ReadonlySet<string> = new Set([CASH.USDG.toLowerCase(), CASH.W
  *    read that failed is `unknown`. The index's labels never resolve
  *    anything: the address is the identity, and a label is a claim about it.
  *    The coin's look is a look of its own — the free checks, its own cache,
- *    and its own slot of the allowance — and a pool is remembered only as
- *    WHICH coin it trades, so a coin bought since is `held` through its chart
- *    link too.
+ *    its own presence probe and its own slot of the allowance — and a pool
+ *    is remembered only as WHICH coin it trades, so a coin bought since is
+ *    `held` through its chart link too.
  *
  * UNREADABLE IS NOT ABSENT. A page, a getCode or a probe that could not be
  * read is `unknown` — never `wallet` (viem's undefined-for-no-code conflation,
  * recover.ts) and never `no-pool` — and `unknown` is not cached, so the next
  * look can succeed.
+ *
+ * `wallet`, `not-token` and `unknown` are the answers that do not show a
+ * Robinhood Chain coin; the chat side says nothing about them (coins.ts).
  *
  * `candidate` IS A PRE-SCREEN, NOT A VERDICT. The depth tested here is the
  * index's pool reserve, which is at least the on-chain route depth the tick
@@ -179,7 +204,10 @@ export function createCoinLook(d: CoinLookReaders): (address: string) => Promise
   const now = d.now ?? Date.now;
   const cache = new Map<string, { look: CoinLook; at: number }>();
   const pending = new Map<string, Promise<CoinLook>>();
+  /** Addresses the presence probe found code at, and when (step 3). */
+  const present = new Map<string, number>();
   let started: number[] = [];
+  let probed: number[] = [];
 
   const free = (a: string): CoinLook | null => {
     if (d.own().some((x) => typeof x === "string" && x.toLowerCase() === a)) return { kind: "own" };
@@ -206,7 +234,7 @@ export function createCoinLook(d: CoinLookReaders): (address: string) => Promise
     return { ...l, address: token };
   };
 
-  /** Step 6: the coin a canonical v3 pool against USDG or WETH trades, looked at in its place. */
+  /** Step 7: the coin a canonical v3 pool against USDG or WETH trades, looked at in its place. */
   const poolLook = async (a: string, p: NonNullable<TokenProbe["pool"]>): Promise<CoinLook> => {
     const t0 = typeof p.token0 === "string" ? p.token0.toLowerCase() : "";
     const t1 = typeof p.token1 === "string" ? p.token1.toLowerCase() : "";
@@ -223,19 +251,44 @@ export function createCoinLook(d: CoinLookReaders): (address: string) => Promise
     return asToken(token, await lookAt(token, 1));
   };
 
+  /**
+   * Step 3: is anything deployed at this address on Robinhood Chain? `wallet`
+   * when not, null when it is (go on to the full look), `unknown` when the
+   * read failed or the probe allowance is spent. Synchronous up to its one
+   * read, so two looks begun together cannot both pass the allowance.
+   */
+  const presence = async (a: `0x${string}`): Promise<CoinLook | null> => {
+    const t = now();
+    const seen = present.get(a);
+    if (seen !== undefined && t - seen < COIN_LOOK.cacheMs) return null;
+    if (seen !== undefined) present.delete(a);
+    probed = probed.filter((s) => t - s < COIN_LOOK.windowMs);
+    if (probed.length >= COIN_LOOK.maxProbes) return UNKNOWN;
+    probed.push(t);
+    let code: string | undefined;
+    try {
+      code = await d.getCode(a);
+    } catch {
+      return UNKNOWN;
+    }
+    if (typeof code !== "string" || code === "0x" || code === "") return WALLET;
+    if (present.size >= COIN_LOOK.cacheMax) present.delete(present.keys().next().value!);
+    present.set(a, now());
+    return null;
+  };
+
+  /** Steps 4–7, for an address with code on Robinhood Chain. */
   const read = async (a: `0x${string}`, depth: number): Promise<CoinLook> => {
+    const t = now();
+    started = started.filter((s) => t - s < COIN_LOOK.windowMs);
+    if (started.length >= COIN_LOOK.maxUncached) return UNKNOWN;
+    started.push(t);
     const pools = await d.tokenPools(a);
     if (pools === null) return UNKNOWN;
     const mine = pools.filter((p) => p.tokenAddress.toLowerCase() === a);
     if (mine.length > 0) return classifyPools(a, mine, Math.floor(now() / 1000));
     if (d.curveFor && (await d.curveFor(a).catch(() => null))) return { kind: "curve" };
-    // Issued together so the metered transport batches them into one request.
-    const [code, probe] = await Promise.all([
-      d.getCode(a).then((c) => ({ ok: true as const, c }), () => ({ ok: false as const })),
-      d.probe(a).catch(() => null),
-    ]);
-    if (!code.ok) return UNKNOWN;
-    if (typeof code.c !== "string" || code.c === "0x" || code.c === "") return { kind: "wallet" };
+    const probe = await d.probe(a).catch(() => null);
     if (probe === null) return UNKNOWN;
     if (probe.pons) return { kind: "curve" };
     if (probe.erc20) return { kind: "no-pool" };
@@ -243,7 +296,7 @@ export function createCoinLook(d: CoinLookReaders): (address: string) => Promise
     return NOT_TOKEN;
   };
 
-  /** Steps 1–6 for one lowercased, well-formed address. `depth` 1 is a pool's coin, which never resolves again. */
+  /** Steps 1–7 for one lowercased, well-formed address. `depth` 1 is a pool's coin, which never resolves again. */
   const lookAt = async (a: string, depth: number): Promise<CoinLook> => {
     const quick = free(a);
     if (quick) return quick;
@@ -259,10 +312,9 @@ export function createCoinLook(d: CoinLookReaders): (address: string) => Promise
     if (hit) cache.delete(a);
     const joining = pending.get(a);
     if (joining) return await joining;
-    started = started.filter((s) => t - s < COIN_LOOK.windowMs);
-    if (started.length >= COIN_LOOK.maxUncached) return UNKNOWN;
-    started.push(t);
-    const job = read(a as `0x${string}`, depth)
+    const addr = a as `0x${string}`;
+    const job = presence(addr)
+      .then((absent) => absent ?? read(addr, depth))
       .catch(() => UNKNOWN)
       .then((look) => {
         if (look.kind !== "unknown") {
