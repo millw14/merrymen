@@ -196,6 +196,12 @@ describe("held tenants reach only the loops they belong in", () => {
     const spawnAt = ts.isAwaitExpression(spawn.parent) ? spawn.parent.getStart() : spawn.getStart();
     const between = hand.body!.getText().slice(leave.getEnd() - hand.body!.getStart(), spawnAt - hand.body!.getStart());
     assert.doesNotMatch(between, /\bawait\b/);
+    // A process still there when the wait ends keeps the tenant held: it
+    // leaves `holders` only once an exit has been seen, never "anyway".
+    const stuck = all(hand, (n) => ts.isIfStatement(n) && n.expression.getText() === "leaving")[0] as ts.IfStatement | undefined;
+    assert.ok(stuck && all(stuck.thenStatement, ts.isReturnStatement).length === 1, "a hold process not yet gone returns before the handover");
+    assert.ok(wait.getEnd() < stuck.getStart() && stuck.getEnd() < leave.getStart());
+    assert.doesNotMatch(hand.body!.getText(), /anyway/);
     // And it is the only way out of a hold into trading: a restore that took,
     // or a gate that no longer holds. Neither spawns a worker itself.
     assert.equal(calls(fn("retryHold"), "spawnChild").length, 0);

@@ -632,12 +632,30 @@ interface Holder {
   smartAccount: `0x${string}`;
   /**
    * The hold process, or null: no bot to answer (Telegram off, no token), or
-   * the process is being stopped for the handover. A held tenant is recorded
-   * either way, so reconcile stops trying to spawn it every pass.
+   * the process is being stopped for the handover (then it is `leaving`). A
+   * held tenant is recorded either way, so reconcile stops trying to spawn it
+   * every pass.
    */
   proc: ChildProcess | null;
   /** Resolves when `proc` has exited. */
   exited: Promise<void> | null;
+  /**
+   * THE HOLD PROCESS THE HANDOVER HAS TOLD TO STOP, until its exit is seen
+   * (watchHolder clears it, and nothing else does). Until then it may still be
+   * polling the owner's bot and writing telegram.json in the home, so the
+   * tenant stays in `holders` and nothing starts beside it: not the worker,
+   * not another hold process. See handHoldBack.
+   */
+  leaving: ChildProcess | null;
+  /** On its way to trading: the next pass after `leaving` has gone finishes the handover (handHoldBack). */
+  handingBack: boolean;
+  /**
+   * Stood down while `leaving` had not gone. Nothing more is done for it; it
+   * leaves `holders` when that process does (standDownHolder, watchHolder).
+   */
+  stoodDown: boolean;
+  /** The [alert] that `leaving` would not go has been said: once, not every pass. */
+  leaveAlerted: boolean;
   /**
    * The restore's own error, and the class of it an owner may be told: the
    * last NAMED one once there has been one. A failure that names no rule of
@@ -715,7 +733,8 @@ export async function adoptHolderForTest(
     if (lease) leases.set(lc, lease);
   }
   const held: Holder = {
-    tenant: lc, smartAccount, proc: null, exited: null, reason, cls: restoreBlockClass(reason),
+    tenant: lc, smartAccount, proc: null, exited: null, leaving: null, handingBack: false, stoodDown: false, leaveAlerted: false,
+    reason, cls: restoreBlockClass(reason),
     nextRetryAt: 0, backoffMs: HOLD_RETRY_FIRST_MS, quickMs: HOLD_RETRY_QUICK_MS, retrying: false, resetSeen: null,
     resettable: false,
   };
@@ -2578,7 +2597,8 @@ async function spawnHolder(
   const resettable = settingsRefuseHeldReset(settings, liveConsentEnforced()) === null;
   writeRestoreBlocked(home, { reason: why, class: cls, since: prev?.since ?? Math.floor(Date.now() / 1000), resettable });
   const held: Holder = {
-    tenant, smartAccount, proc: null, exited: null, reason: why, cls,
+    tenant, smartAccount, proc: null, exited: null, leaving: null, handingBack: false, stoodDown: false, leaveAlerted: false,
+    reason: why, cls,
     nextRetryAt: 0, backoffMs: HOLD_RETRY_FIRST_MS, quickMs: HOLD_RETRY_QUICK_MS, retrying: false,
     resetSeen: honour?.looked ?? null, resettable,
   };
@@ -2634,7 +2654,9 @@ function startHolderProcess(held: Holder): void {
  * What a hold process's exit means. The child's rule (spawnChild's exit
  * handler): only an exit whose entry is still its own is news. A stood-down
  * hold process, or one being stopped for the handover to trading (its `proc`
- * already cleared), is said and nothing more.
+ * already cleared), is said and nothing more. Except that the exit of the one
+ * a handover is waiting on (`leaving`) is what that handover waits for: it is
+ * cleared here, and a tenant stood down meanwhile leaves `holders` with it.
  *
  * One that died on its own is dropped from `holders`, and the next pass
  * starts over from spawnChild: the restore is tried again, and a failure holds
@@ -2649,9 +2671,18 @@ function watchHolder(held: Holder, proc: ChildProcess): void {
   proc.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
     const ours = holders.get(tenant) === held && held.proc === proc;
     if (ours) holders.delete(tenant);
+    // Gone at last: nothing polls the bot for this tenant now. A stand-down
+    // that found it still going is complete, and its tenant free for the next
+    // pass to start over; a handover it held up goes ahead on the next pass.
+    const left = held.leaving === proc;
+    if (left) {
+      held.leaving = null;
+      if (held.stoodDown && holders.get(tenant) === held) holders.delete(tenant);
+    }
     if (stopping) return;
     if (!ours) {
-      log(`${tenant} stood-down hold process (pid ${proc.pid}) exited with ${code ?? signal}`);
+      const late = left && held.leaveAlerted ? ` — ${held.handingBack ? "the next pass hands the bot back to trading" : "its stand-down is complete"}` : "";
+      log(`${tenant} stood-down hold process (pid ${proc.pid}) exited with ${code ?? signal}${late}`);
       return;
     }
     const now = Date.now();
@@ -2673,10 +2704,23 @@ function watchHolder(held: Holder, proc: ChildProcess): void {
 /**
  * Stand a held tenant down: forget it, and stop its process, SIGTERM then
  * SIGKILL, as killChild does. Whoever calls this decides what comes next.
+ *
+ * EXCEPT A HANDOVER'S HOLD PROCESS THAT HAS NOT GONE (`leaving`). Forgotten,
+ * its tenant would be free for the next pass to start beside a process that
+ * may still poll its bot: after a lease blip, a halt lifted, or a grant signed
+ * again. So the entry stays, marked stood down, and is killed again; it leaves
+ * `holders` when that process does (watchHolder), and nothing is done for it
+ * meanwhile. Whatever handover it was waiting on is off either way.
  */
 function standDownHolder(tenant: string): void {
   const held = holders.get(tenant);
   if (!held) return;
+  held.handingBack = false;
+  if (held.leaving) {
+    held.stoodDown = true;
+    killLeaving(held);
+    return;
+  }
   holders.delete(tenant);
   const proc = held.proc;
   if (!proc) return;
@@ -2799,37 +2843,75 @@ async function retryHold(held: Holder): Promise<boolean> {
  * awaits anything. That spawn restores again: after a retry it finds the book
  * it just wrote, "local book retained"; with practice off, the gate lets the
  * worker start as it always did.
+ *
+ * AND ONLY ONCE THAT EXIT HAS BEEN SEEN. A hold process still there ten
+ * seconds after SIGTERM, and SIGKILL at three, is not gone because we stopped
+ * waiting: stopped and resumed later, or stuck in the kernel, it goes on
+ * polling the same bot and writing the same telegram.json, and a worker
+ * started beside it would lose updates to it, meet 409 after 409, and have
+ * its offsets written over. This used to start trading anyway. Now the tenant
+ * stays held with that process in `leaving`, an [alert] names it once,
+ * reconcile kills it again once a pass, and the first pass after its exit is
+ * seen calls this again, which finds nothing left to stop and hands over.
+ * Every other reader of `holders` leaves such a tenant alone meanwhile, and a
+ * stand-down keeps it counted until the process goes (standDownHolder).
  */
 async function handHoldBack(held: Holder): Promise<void> {
   const tenant = held.tenant;
-  // Kept out of every other pass until it is handed over.
+  // Kept out of every other pass while this runs, and from here on its way to
+  // trading: no restore retried, no hold process started (reconcile).
   held.retrying = true;
-  const proc = held.proc;
-  const exited = held.exited;
-  // Its exit is a stand-down now, not a crash (watchHolder).
-  held.proc = null;
-  if (proc) {
-    proc.kill("SIGTERM");
-    const hard = setTimeout(() => {
-      try {
-        proc.kill("SIGKILL");
-      } catch {
-        /* already gone */
-      }
-    }, 3_000);
-    let bound: ReturnType<typeof setTimeout> | undefined;
-    const gone = await Promise.race([
-      (exited ?? Promise.resolve()).then(() => true),
-      new Promise<boolean>((r) => (bound = setTimeout(() => r(false), 10_000))),
-    ]);
-    clearTimeout(hard);
-    clearTimeout(bound);
-    if (!gone) log(`${tenant}: the hold process (pid ${proc.pid}) has not exited 10s after SIGTERM — starting trading anyway`);
+  held.handingBack = true;
+  try {
+    const proc = held.proc;
+    const exited = held.exited;
+    if (proc) {
+      // Its exit is a stand-down now, not a crash, and the one this waits for
+      // (watchHolder, which clears `leaving`).
+      held.proc = null;
+      held.leaving = proc;
+      proc.kill("SIGTERM");
+      const hard = setTimeout(() => {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }, 3_000);
+      let bound: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([exited ?? Promise.resolve(), new Promise<void>((r) => (bound = setTimeout(r, 10_000)))]);
+      clearTimeout(hard);
+      clearTimeout(bound);
+    }
+  } finally {
+    held.retrying = false;
   }
-  if (holders.get(tenant) !== held) return; // stood down while it stopped
+  // Said even for a tenant stood down while it waited: it stays counted until
+  // this process goes (standDownHolder), and an operator should know why.
+  const leaving = held.leaving;
+  if (leaving) {
+    if (!held.leaveAlerted) {
+      held.leaveAlerted = true;
+      log(
+        `[alert] ${tenant}: its hold process (pid ${leaving.pid}) has not exited 10s after SIGTERM and SIGKILL — ` +
+          `trading stays held until it has, as a worker beside it would poll the same bot; SIGKILL is sent again each pass`,
+      );
+    }
+    return;
+  }
+  if (holders.get(tenant) !== held || !held.handingBack) return; // stood down while it stopped
   holders.delete(tenant);
   forgetHold(tenant);
   await spawnChild(tenant);
+}
+
+/** SIGKILL, again, to a hold process told to stop that has not gone (Holder.leaving). */
+function killLeaving(held: Holder): void {
+  try {
+    held.leaving?.kill("SIGKILL");
+  } catch {
+    /* gone after all: its exit clears `leaving` */
+  }
 }
 
 /** The classes each held tenant's [alert] has named during this hold: each is said once, not every pass or every flip. */
@@ -3130,6 +3212,8 @@ export async function reconcile(): Promise<void> {
     // the same restore every pass, which is what it used to do, every 17
     // seconds. Its restore is retried below, on a backoff, and a crashed hold
     // process leaves the map, so this loop picks it up again. See spawnHolder.
+    // Nor is one whose hold process was told to stop and has not gone, handed
+    // over or stood down: it may still be polling the bot (handHoldBack).
     if (holders.has(lc)) continue;
     /**
      * A TENANT THE RESTART POLICY GAVE UP ON IS NOT A TENANT THAT ISN'T RUNNING.
@@ -3180,6 +3264,21 @@ export async function reconcile(): Promise<void> {
   // nothing, and the press is still owed its early look on the next pass.
   const asked = await heldResetsAsked([...holders.values()].filter((h) => wanted.has(h.tenant)).map((h) => h.smartAccount));
   for (const held of [...holders.values()]) {
+    // A HOLD PROCESS TOLD TO STOP THAT HAS NOT GONE (handHoldBack): killed
+    // again, once a pass, and nothing else done for its tenant, stood down or
+    // not, until its exit is seen.
+    if (held.leaving) {
+      killLeaving(held);
+      continue;
+    }
+    // AND ONCE IT HAS, THE HANDOVER IT HELD UP. Decided already: the restore
+    // took, or the gate let the tenant go, and spawnChild asks both again.
+    if (held.handingBack) {
+      if (!wanted.has(held.tenant) || held.retrying || !holdMayLeave(held.tenant)) continue;
+      log(`${held.tenant}: its hold process has gone — handing the bot back to trading`);
+      await handHoldBack(held);
+      continue;
+    }
     const ask = asked.get(held.smartAccount);
     const early = ask !== undefined && ask !== held.resetSeen;
     if (!wanted.has(held.tenant) || held.retrying || (!early && Date.now() < held.nextRetryAt)) continue;
@@ -3220,9 +3319,15 @@ export async function reconcile(): Promise<void> {
     // hold process is started only to be killed a few lines later in a home
     // that is about to be wiped.
     if (!wanted.has(tenant)) continue;
+    // STOOD DOWN, waiting only for a process that would not go: its lease is
+    // gone or the fleet is halted, so nothing is ours to write or claim for it.
+    if (held.stoodDown) continue;
     const stored = await writeSettingsForChild(tenant as `0x${string}`, seenBots, holderClaims, botClaims);
     await refreshGrantForChild(tenant as `0x${string}`);
-    if (holders.get(tenant) !== held || held.retrying) continue;
+    // On its way to trading, and still counted for its bot above: the process
+    // that answered it may be polling yet, and the worker will. Not released
+    // twice, and never given a second hold process (handHoldBack).
+    if (holders.get(tenant) !== held || held.retrying || held.handingBack) continue;
     /**
      * THE GATE, ASKED AGAIN. spawnChild holds a tenant only while its stored
      * settings say practice (`paperTradingEnabled === true`), and before holds
@@ -3292,8 +3397,12 @@ export async function reconcile(): Promise<void> {
   // wiped. A Telegram /kill sent to a hold process lands here too, once the
   // order ferry has carried it to the store. Never mirrored first: a held
   // book is exactly the one the mirror must not copy (see `holders`).
-  for (const tenant of [...holders.keys()]) {
+  for (const [tenant, held] of [...holders]) {
     if (wanted.has(tenant)) continue;
+    // Stood down on an earlier pass, and still counted only until the process
+    // it could not stop has gone (standDownHolder): done already, home and all
+    // when it was this. A lease or halt stand-down's home is wiped below.
+    if (held.stoodDown) continue;
     log(`${tenant} grant removed — standing its hold down`);
     standDownHolder(tenant);
     holdAlerted.delete(tenant);
@@ -7514,6 +7623,8 @@ export async function runOrchestrator(): Promise<void> {
     log("stopping — calling the whole fleet home");
     for (const child of children.values()) child.proc.kill("SIGTERM");
     for (const held of holders.values()) held.proc?.kill("SIGTERM");
+    // And any a handover or stand-down is still waiting on.
+    for (const held of holders.values()) killLeaving(held);
     // Release every advisory lease so a restarting replica can take over at once
     // rather than waiting for our dropped connections to time out server-side.
     // Best-effort and unawaited — we exit in a second regardless.

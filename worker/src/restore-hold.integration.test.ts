@@ -91,13 +91,19 @@ class FakeProc extends EventEmitter {
   private gone = false;
   /** Takes a second (of the test's clock) to go after a signal, as a process shutting down does. */
   slowExit = false;
+  /**
+   * Does not go at all, SIGKILL included, until the test says (`die`): a
+   * process stuck in the kernel, or stopped and resumed, whose exit the
+   * orchestrator never sees in time.
+   */
+  deaf = false;
   constructor(readonly kind: "worker" | "hold") {
     super();
   }
   kill(signal?: NodeJS.Signals | number): boolean {
     this.signals.push(String(signal));
     const go = () => this.die(null, String(signal ?? "SIGTERM"));
-    if (!this.gone) {
+    if (!this.gone && !this.deaf) {
       if (this.slowExit) setTimeout(go, 1_000);
       else setImmediate(go);
     }
@@ -209,6 +215,9 @@ const readSettings = (t: string) =>
   JSON.parse(readFileSync(path.join(childHome(t), "settings.json"), "utf8")) as { telegramBotToken?: string };
 
 beforeEach(async () => {
+  // A hold process an earlier test left stuck, gone now, so the stand-down
+  // below is not left waiting on it.
+  for (const p of spawned) if (p.deaf) p.die(null, "SIGKILL");
   // With no stored grant, a pass stands down whatever an earlier test left.
   await store.remove(TENANT);
   await store.remove(OTHER);
@@ -452,6 +461,105 @@ describe("when the restore takes, trading comes back", () => {
       assert.equal(holds().length, 1);
       assert.equal(readSettings(TENANT).telegramBotToken, "111:a", "and it is not taken from it by its own claim");
       assert.ok(!said.some((l) => l.includes("already claimed")), said.join("\n"));
+    });
+  });
+
+  /**
+   * Hold the tenant, then let its restore take with a hold process that will
+   * not exit: the handover sends SIGTERM, SIGKILL three seconds later, and
+   * gives up waiting at ten. Returns once that pass is over.
+   */
+  async function stuckHandover(): Promise<FakeProc> {
+    await reconcile();
+    const hold = holds()[0]!;
+    hold.deaf = true;
+    restoreSays = { ok: true, line: "paper cash, holdings and basis restored" };
+    mock.timers.tick(2 * 60_000 + 1);
+    const pass = reconcile();
+    await waitFor(() => hold.signals.includes("SIGTERM"), "the pass asks the hold process to stop");
+    mock.timers.tick(3_000);
+    assert.ok(hold.signals.includes("SIGKILL"), "and kills it three seconds later");
+    mock.timers.tick(7_000);
+    await pass;
+    await settle();
+    return hold;
+  }
+
+  it("A HOLD PROCESS THAT WILL NOT EXIT KEEPS TRADING HELD UNTIL IT DOES: ONE ALERT, THEN EXACTLY ONE WORKER", async () => {
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      const hold = await stuckHandover();
+      assert.equal(workers().length, 0, `no worker beside a hold process that may still poll the bot:\n${said.join("\n")}`);
+      assert.ok(isHeldForTest(TENANT), "still held, so no pass spawns it");
+      const stuck = () => said.filter((l) => l.includes("[alert]") && l.includes(`pid ${hold.pid}`));
+      assert.equal(stuck().length, 1, `one alert, naming the process:\n${said.join("\n")}`);
+      // Passes go by: nothing starts, nothing is said again, the restore is
+      // not run again, and the process is killed again once a pass.
+      const kills = hold.signals.length;
+      const tried = restores;
+      for (let i = 0; i < 3; i++) {
+        mock.timers.tick(15_000);
+        await reconcile();
+      }
+      await settle();
+      assert.equal(workers().length, 0);
+      assert.equal(holds().length, 1, "and no second hold process beside it either");
+      assert.ok(isHeldForTest(TENANT));
+      assert.equal(stuck().length, 1, "the alert is said once, not every pass");
+      assert.equal(restores, tried, "the handover is decided: its restore is not tried again meanwhile");
+      assert.deepEqual(hold.signals.slice(kills), ["SIGKILL", "SIGKILL", "SIGKILL"], "SIGKILL again once a pass, not in a loop");
+      // It goes at last. Its exit ends a stand-down, not a crash: no brake,
+      // no hold put back, and nothing started from the exit itself.
+      hold.die(null, "SIGKILL");
+      assert.ok(said.some((l) => l.includes(`${TENANT} stood-down hold process (pid ${hold.pid}) exited`)), said.join("\n"));
+      assert.ok(!said.some((l) => /hold process exited \(|keeps dying/.test(l)), said.join("\n"));
+      assert.equal(workers().length, 0);
+      mock.timers.tick(15_000);
+      await reconcile();
+      await settle();
+      assert.equal(workers().length, 1, `the next pass hands over, to exactly one worker:\n${said.join("\n")}`);
+      assert.deepEqual(events, ["hold-spawn", "hold-exit", "worker-spawn"], "and only after the exit was seen");
+      assert.ok(!isHeldForTest(TENANT));
+      assert.equal(readRestoreBlocked(childHome(TENANT)), null, "and the hold's record with it");
+      for (let i = 0; i < 2; i++) {
+        mock.timers.tick(15_000);
+        await reconcile();
+      }
+      assert.equal(spawned.length, 2, "later passes leave the worker alone");
+    });
+  });
+
+  it("A GRANT REMOVED WHILE THE HOLD PROCESS WILL NOT EXIT STARTS NOTHING, NOR DOES ONE SIGNED AGAIN, UNTIL IT HAS GONE", async () => {
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      const hold = await stuckHandover();
+      assert.equal(workers().length, 0);
+      await store.remove(TENANT);
+      for (let i = 0; i < 2; i++) {
+        mock.timers.tick(15_000);
+        await reconcile();
+      }
+      await settle();
+      assert.equal(spawned.length, 1, `nothing started for a revoked tenant:\n${said.join("\n")}`);
+      assert.equal(existsSync(childHome(TENANT)), false, "its home wiped, as for any stand-down");
+      assert.equal(said.filter((l) => l.includes(`${TENANT} grant removed — standing its hold down`)).length, 1, "stood down once, not every pass");
+      assert.ok(isHeldForTest(TENANT), "and still counted until its process is seen to go");
+      // Signed again before the old process has gone: still nothing beside it.
+      await store.put(TENANT, grant());
+      for (let i = 0; i < 2; i++) {
+        mock.timers.tick(15_000);
+        await reconcile();
+      }
+      await settle();
+      assert.equal(spawned.length, 1, `nothing starts beside a process that may still poll the bot:\n${said.join("\n")}`);
+      hold.die(null, "SIGKILL");
+      assert.ok(!isHeldForTest(TENANT), "a stood-down hold leaves with its process");
+      assert.ok(!said.some((l) => /hold process exited \(|keeps dying/.test(l)), said.join("\n"));
+      mock.timers.tick(15_000);
+      await reconcile();
+      await settle();
+      assert.equal(workers().length, 1, `then the grant signed again starts one worker:\n${said.join("\n")}`);
+      assert.equal(holds().length, 1);
     });
   });
 });
