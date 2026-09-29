@@ -32,8 +32,16 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { merrymenHome } from "./home";
-import { carriesOwnerKey } from "../../packages/core/src/index";
+import {
+  assertNoPerpKeysAtRest,
+  carriesOwnerKey,
+  carriesPerpPrivateKey,
+  GRANT_PERP_LIGHTER,
+  grantPerp,
+  isHostedMode,
+} from "../../packages/core/src/index";
 import { openSecret, requireDek, sealSecret, storeDek } from "./store-crypto";
+import { openPerpKey } from "./perps/key-seal";
 import type { StoredGrant } from "../../packages/core/src/index";
 
 /** A grant safe to persist server-side: session-key-only, session key sealed. */
@@ -101,6 +109,7 @@ function toRecord(tenant: `0x${string}`, grant: StoredGrant): StoredRecord {
   };
   void demoOwnerPrivateKey; // discarded; the guard above already refused a real one
   const dek = storeDek();
+  assertPerpCustodyAtPut(tenant, grant, rest, dek);
   const sealedSessionKey = dek ? sealSecret(demoSessionPrivateKey, dek) : demoSessionPrivateKey;
   return {
     tenant,
@@ -111,8 +120,83 @@ function toRecord(tenant: `0x${string}`, grant: StoredGrant): StoredRecord {
   };
 }
 
+/**
+ * THE LIGHTER KEY'S CUSTODY, CHECKED WHERE BYTES HIT DISK (docs/perps.md
+ * rule 5). The route checks all of this first; the store is the last place it
+ * can be enforced, and it is enforced here for the reason the owner-key
+ * refusal above is — whatever writes a grant next, a new route, a script, a
+ * partner door, goes through put.
+ *
+ *   NO PLAINTEXT KEY, ANYWHERE. `apiKeySealed` (DEK ciphertext) may live in
+ *   grant_json; an 80-hex run outside `perp.apiPublicKey`, or any field named
+ *   apiPrivateKey / privateKey, may not (carriesPerpPrivateKey). Checked on
+ *   `rest` — exactly what is written — so the rule is about the bytes at rest,
+ *   not about a view of them.
+ *
+ *   A PERP BLOCK IS WHOLE OR REFUSED. The marker without a valid block, or a
+ *   block without the marker, is a grant whose wall and metadata disagree
+ *   (grantPerp is the one reader).
+ *
+ *   HOSTED: A DEK, AND A BLOB THAT IS THIS TENANT'S. Without a DEK nothing can
+ *   seal the key, so a perp grant is refused rather than stored in a state the
+ *   orchestrator cannot arm. The sealed blob must OPEN under this tenant, this
+ *   account and this public key (key-seal.ts AAD): a blob issued to anyone
+ *   else — another tenant, another account, another key — never reaches disk.
+ *   A hosted perp grant with NO blob is refused too: the route re-attaches the
+ *   stored one on a carry-forward, so reaching here without one means the key
+ *   the wall pins is held nowhere.
+ */
+function assertPerpCustodyAtPut(
+  tenant: `0x${string}`,
+  grant: StoredGrant,
+  rest: StoredRecord["grant"],
+  dek: Buffer | null,
+): void {
+  if (carriesPerpPrivateKey(rest)) {
+    throw new Error("refusing to store a grant that carries a plaintext Lighter API private key");
+  }
+  const marked = grant.grantFeatures?.includes(GRANT_PERP_LIGHTER) === true;
+  if (!marked && grant.perp === undefined) return;
+  const perp = grantPerp(grant);
+  if (perp === null || grant.perp === undefined) {
+    throw new Error("refusing to store a grant whose perps marker and perp block disagree");
+  }
+  const hosted = isHostedMode();
+  if (hosted && !dek) {
+    throw new Error("refusing to store a perps grant: MERRYMEN_STORE_DEK is not set, so its Lighter key could not be sealed");
+  }
+  if (perp.apiKeySealed === undefined) {
+    if (hosted) throw new Error("refusing to store a hosted perps grant without its sealed Lighter key");
+    return;
+  }
+  if (!dek) throw new Error("refusing to store a sealed Lighter key this store has no DEK to open");
+  try {
+    openPerpKey(
+      perp.apiKeySealed,
+      { tenant, smartAccount: grant.smartAccount, apiPublicKey: perp.apiPublicKey, apiKeyIndex: perp.apiKeyIndex },
+      dek,
+    );
+  } catch {
+    throw new Error("refusing to store a sealed Lighter key that was not issued to this login, account and public key");
+  }
+}
+
+/**
+ * The boot half of the same rule, over grants AS WRITTEN: hosted, a store that
+ * holds a plaintext Lighter key anywhere refuses to go on (the
+ * assertNoOwnerKeysAtRest pattern; inert self-hosted).
+ */
+function assertRecordsClean(grants: readonly unknown[]): void {
+  assertNoPerpKeysAtRest(grants);
+}
+
 /** Reassemble a full grant, decrypting the session key back in. */
 function fromRecord(rec: StoredRecord): StoredGrant {
+  // READ-TIME, PER RECORD, over the grant as it was written (never the
+  // rebuilt one, which is where secrets are joined back in): a record holding
+  // a plaintext Lighter key is refused on the way out as well as the way in,
+  // so one that got to disk some other way is never handed to a child.
+  assertRecordsClean([rec.grant]);
   const dek = storeDek();
   const sessionKey = dek ? openSecret(rec.sealedSessionKey, dek) : rec.sealedSessionKey;
   return { ...rec.grant, demoSessionPrivateKey: sessionKey as `0x${string}` } as StoredGrant;
@@ -197,7 +281,34 @@ export class FileGrantStore implements GrantStore {
       db.close();
     }
   }
+  /**
+   * The boot scan (hosted only): every tenant file, as written, once per
+   * process after it first comes back clean. Run from put and listTenants —
+   * listTenants is the orchestrator's first read, so a dirty store stops the
+   * fleet from arming instead of arming it.
+   */
+  private atRestClean = false;
+  private async scanAtRest(): Promise<void> {
+    if (this.atRestClean || !isHostedMode()) return;
+    let files: string[];
+    try {
+      files = (await readdir(this.dir)).filter((f) => f.endsWith(".json"));
+    } catch {
+      files = [];
+    }
+    const grants: unknown[] = [];
+    for (const f of files) {
+      try {
+        grants.push((JSON.parse(await readFile(path.join(this.dir, f), "utf8")) as StoredRecord).grant);
+      } catch {
+        /* unreadable is not a key at rest; get() on it answers null as before */
+      }
+    }
+    assertRecordsClean(grants);
+    this.atRestClean = true;
+  }
   async put(tenant: `0x${string}`, grant: StoredGrant): Promise<void> {
+    await this.scanAtRest();
     await this.locked(tenant, async () => {
       // Stamped inside the lock, so `updatedAt` is when the record landed.
       const rec = toRecord(tenant, grant);
@@ -215,6 +326,7 @@ export class FileGrantStore implements GrantStore {
     }
   }
   async listTenants(): Promise<`0x${string}`[]> {
+    await this.scanAtRest();
     try {
       const files = await readdir(this.dir);
       return files.filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5) as `0x${string}`);
@@ -313,6 +425,11 @@ export class PgGrantStore implements GrantStore {
              updated_at BIGINT NOT NULL
            )`,
         );
+        // THE BOOT SCAN: every grant_json as written, before this process
+        // serves a single read or write. A hosted store holding a plaintext
+        // Lighter key anywhere does not come up (assertNoPerpKeysAtRest).
+        const { rows } = await c.query(`SELECT grant_json FROM grants`);
+        assertRecordsClean(rows.map((r) => (typeof r.grant_json === "string" ? JSON.parse(r.grant_json) : r.grant_json)));
         return c;
       })();
     }

@@ -137,3 +137,20 @@ it("the Rialto target and the v4 UniversalRouter are refused the same way", asyn
   }
   assert.equal(noncesSpent, 0);
 });
+
+it("a perps grant whose wall pins a different Lighter key than it declares is refused before its nonce is spent", async () => {
+  // The owner-key attack on the one permission that pins key bytes: the tenant
+  // enables changePubKey for a key they hold while `perp.apiPublicKey` names
+  // the key the server would join to its sealed private half. The wall check
+  // rebuilds around the DECLARED key, so the bytes disagree.
+  const key = `0x${"1a".repeat(40)}` as `0x${string}`;
+  const { grant, owner } = await signerGrant({ account: SMART, perp: { apiPublicKey: key } });
+  const swapped = await resealed(grant, owner, {
+    perpLighter: { apiKeyIndex: 16, apiPublicKey: `0x${"2b".repeat(40)}` },
+  });
+  const res = await post(swapped, owner);
+  assert.equal(res.status, 400, JSON.stringify(res.body));
+  assert.equal(res.body.code, "invalid_wall");
+  assert.equal(noncesSpent, 0, "a refused wall must not burn the single-use nonce");
+  assert.equal(ownershipReads, 0);
+});

@@ -135,7 +135,9 @@ export function createPartnerRuntime(overrides: Partial<RuntimeDependencies> = {
     const blocker = typeof grantStatus.liveBlocker === "string" ? grantStatus.liveBlocker : null;
     const runtime: PartnerRuntime = {
       exists,
-      smart_account: exists ? grantStatus.grant!.smartAccount : null,
+      // The public view drops a field of the wrong shape rather than echo it,
+      // so an absent account is unread (null), never undefined.
+      smart_account: exists ? grantStatus.grant?.smartAccount ?? null : null,
       name: typeof feed?.agent?.name === "string" ? feed.agent.name : "Your Merryman",
       slug: typeof feed?.agent?.slug === "string" ? feed.agent.slug : null,
       status: !exists ? "awaiting_grant" : beat === null || (grantedAt !== null && beat < grantedAt) ? "starting" : fresh ? "running" : "stale",
@@ -202,8 +204,8 @@ export function createPartnerRuntime(overrides: Partial<RuntimeDependencies> = {
       moves,
       movesShown: moves.length,
       movesTotal: trades.length,
-      perTrade: exists ? numberOrNull(grantStatus.grant?.caps.perTradeUsdg) : null,
-      perDay: exists ? numberOrNull(grantStatus.grant?.caps.dailyUsdg) : null,
+      perTrade: exists ? numberOrNull(grantStatus.grant?.caps?.perTradeUsdg) : null,
+      perDay: exists ? numberOrNull(grantStatus.grant?.caps?.dailyUsdg) : null,
       stopped: !fresh || (mode !== "live" && mode !== "paper"),
     };
     // A large book must retain its identity/status rather than become an empty

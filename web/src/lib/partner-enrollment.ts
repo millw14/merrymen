@@ -17,6 +17,7 @@ import type { IdentityStore } from "../../../worker/src/identity-store";
 import { getPartnerStore, type PartnerConnection, type PartnerStore } from "./partner-store";
 import { onlyFields, PartnerError, requirePartnerScope, type PartnerPrincipal } from "./partner-bridge";
 import { AGENT_NAME_RE, AGENT_NAME_RULE, normalizeAgentName } from "./agent-name-rule";
+import { perpDropRefusal, type FlatnessReader } from "./perp-custody";
 
 export const PARTNER_ENROLLMENT_TTL_MS = 5 * 60_000;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -37,6 +38,8 @@ export interface PartnerEnrollmentDependencies {
   secret: () => string;
   derive: (owner: Address, chainId: number) => Promise<Derivation>;
   recover: (args: { message: string; signature: Hex }) => Promise<Address>;
+  /** Rule 5's venue read (lib/perp-custody.ts); the server's public read by default. */
+  flatness?: FlatnessReader;
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
@@ -210,6 +213,14 @@ export function createPartnerEnrollmentService(overrides: Partial<PartnerEnrollm
         if (holder && holder.toLowerCase() !== grant.owner) return fail(409, "account_already_claimed", "This account already belongs to a different Merrymen login");
         const ownGrant = await grantStore.get(grant.owner);
         if (ownGrant && ownGrant.owner.toLowerCase() !== grant.owner) return fail(409, "owner_model_mismatch", "This login already has an agent owned by a different wallet; use that owner's recovery and setup flow");
+        // NO PATH MAY LEAVE A NON-FLAT VENUE ACCOUNT WITHOUT ITS KEY
+        // (docs/perps.md rule 5). A partner grant never carries perps (onlyFields
+        // has no `perp`), so replacing a stored grant that does lets go of a
+        // registered Lighter key — refused unless that venue reads provably
+        // flat. Inside the lock, against the grant it just read; before any
+        // write, so a refusal leaves settings and grant exactly as they were.
+        const drop = await perpDropRefusal({ stored: ownGrant, incoming: grant, flatness: overrides.flatness });
+        if (drop) return fail(409, drop.flat === false ? "perp_venue_not_flat" : "perp_venue_unread", drop.error);
         const settingsStore = await settings();
         const previous = await settingsStore.get(grant.owner) ?? {};
         const safe: MerrymenSettings = {

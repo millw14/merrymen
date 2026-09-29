@@ -19,9 +19,12 @@ import {
   chainForId,
   derivationUnreachable,
   duplicateWallPermissions,
+  GRANT_PERP_LIGHTER,
   isHostedMode,
+  publicGrantView,
   type Derivation,
   type EnergyStatus,
+  type PublicGrantView,
   type StoredGrant,
 } from "@merrymen/core";
 import { requestOrigin, tenantOf, verifyGrantBinding } from "@/lib/auth";
@@ -34,6 +37,15 @@ import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
+import {
+  acceptIncomingPerp,
+  NO_STORE_HEADERS,
+  PERP_NOT_FLAT_MESSAGE,
+  perpDropRefusal,
+  perpsOptInOffered,
+  storeDek,
+  type PerpRefusal,
+} from "@/lib/perp-custody";
 
 const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
@@ -44,6 +56,24 @@ const ARCHIVE_DIR = homePaths.grantsArchive();
  * from. Rejecting anything else keeps `smartAccount` from smuggling path separators
  * (../, absolute paths) into archiveCurrentGrant's `${addr}.json`. */
 const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
+
+/**
+ * A rule-5 refusal (lib/perp-custody.ts) as a response. `ownerFacing` because
+ * every one of them is written for the owner, including the 503s the shell
+ * would otherwise replace with a bare status (terminal/request-json.ts).
+ */
+function perpRefused(r: PerpRefusal): NextResponse {
+  return NextResponse.json(
+    {
+      error: r.error,
+      code: r.code,
+      ...(r.detail !== undefined ? { detail: r.detail } : {}),
+      ...(r.flat !== undefined ? { flat: r.flat } : {}),
+      ownerFacing: true,
+    },
+    { status: r.status },
+  );
+}
 
 /**
  * Copy whatever grant.json currently holds into the archive, keyed by its smart
@@ -74,7 +104,13 @@ async function archiveCurrentGrant(): Promise<void> {
 
 export interface AgentStatus {
   exists: boolean;
-  grant?: Omit<StoredGrant, "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">;
+  /**
+   * The grant AS ANYBODY MAY SEE IT — core's publicGrantView, an ALLOWLIST of
+   * addresses, caps, times, markers and PUBLIC keys (docs/perps.md rule 5).
+   * Never the session key, the owner key, the serialized permission, the
+   * binding's signatures, or the Lighter key in any form.
+   */
+  grant?: PublicGrantView;
   /** Decimal strings as read from the chain; null for any read that failed. */
   balances?: GrantBalances;
   workerAliveAt?: number | null;
@@ -124,6 +160,14 @@ export interface AgentStatus {
    * never as a balance of 0 that sends somebody to buy what they already hold.
    */
   energy?: EnergyStatus | null;
+  /**
+   * MAY THIS OWNER TAKE A NEW PERPS OPT-IN HERE? The operator's word for this
+   * grant's account (perp-custody perpsOptInOffered: MERRYMEN_PERPS and,
+   * hosted, MERRYMEN_PERPS_LIVE_TENANTS). The dashboard shows the box only
+   * when true; keygen and the intake refuse a new key otherwise. Says nothing
+   * about perps a grant already carries — those are carried whatever this is.
+   */
+  perpsOptIn?: boolean;
 }
 
 export async function POST(req: Request) {
@@ -353,6 +397,48 @@ export async function POST(req: Request) {
       );
     }
 
+    // ── THE LIGHTER KEY (docs/perps.md rule 5) ─────────────────────────────
+    //
+    // After the binding, so only a tenant proven to hold this claim reaches a
+    // store read or a venue read; before the derivation, because both of
+    // these refuse on facts the derivation cannot change.
+    //
+    // (1) The block this grant carries must name a key this service holds for
+    //     THIS tenant and account: its sealed blob opens under that AAD, or the
+    //     stored grant for the same account carries the same public key and its
+    //     blob is re-attached here (carry-forward — GET never returns a blob, so
+    //     a phone re-signing has only the public key).
+    // (2) A grant that lets go of a venue key — the stored one carries perps and
+    //     this one drops the block, names another account, or names another
+    //     public key (a rotation strands the registered one) — is refused
+    //     unless that venue reads provably flat. The only layer an app build
+    //     that predates perps cannot sign its way past.
+    //
+    // An unreadable store refuses, as the ownership read above does: the stored
+    // grant is exactly what (1) and (2) are about.
+    let stored: StoredGrant | null;
+    try {
+      stored = await getGrantStore().get(tenant);
+    } catch {
+      return NextResponse.json(
+        { error: "couldn't read this agent's current permission to check it — please try again", ownerFacing: true },
+        { status: 503 },
+      );
+    }
+    const perpIntake = acceptIncomingPerp({
+      hosted: true,
+      tenant,
+      incoming: grant,
+      stored,
+      dek: storeDek(),
+      home: DATA_DIR,
+      perpsOffered: perpsOptInOffered(grant.smartAccount),
+    });
+    if (!perpIntake.ok) return perpRefused(perpIntake.refusal);
+    const drop = await perpDropRefusal({ stored, incoming: grant });
+    if (drop) return perpRefused(drop);
+    const toStore = perpIntake.grant;
+
     // FIRST-ARM IDENTITY PROOF. owner == tenant above only proves the CLAIMED
     // owner is this wallet — it says nothing about smartAccount, which the client
     // supplied as free JSON. A tenant could keep grant.owner == their own wallet
@@ -391,7 +477,7 @@ export async function POST(req: Request) {
     // store seals the session key at rest and refuses (again, defence in depth)
     // any grant carrying an owner key or whose owner isn't this tenant.
     try {
-      await getGrantStore().put(tenant, grant);
+      await getGrantStore().put(tenant, toStore);
     } catch (e) {
       return NextResponse.json({ error: e instanceof Error ? e.message : "store failed" }, { status: 500 });
     }
@@ -431,11 +517,61 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true });
   }
 
+  // ── THE LIGHTER KEY, SELF-HOSTED (docs/perps.md rule 5) ─────────────────
+  //
+  // BEFORE the archive, because the archive is the first thing that moves the
+  // outgoing grant. The same two checks as hosted: the block must name a key
+  // this install's key store holds ($MERRYMEN_HOME/perp-keys/<pub>.json), and
+  // a grant that lets go of a venue key needs that venue provably flat.
+  //
+  // A grant.json that exists but cannot be read is refused rather than
+  // assumed empty: it is exactly the grant (2) is about. A corrupt one is let
+  // through unless it mentions the perps marker — a file that cannot say it
+  // held perps cannot be the reason to keep an owner from re-signing.
+  let stored: StoredGrant | null = null;
+  let storedRaw: string | null = null;
+  try {
+    storedRaw = await readFile(GRANT_FILE, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      return NextResponse.json(
+        { error: "couldn't read this agent's current permission to check it — please try again", ownerFacing: true },
+        { status: 503 },
+      );
+    }
+  }
+  if (storedRaw !== null) {
+    try {
+      stored = JSON.parse(storedRaw) as StoredGrant;
+    } catch {
+      if (storedRaw.includes(GRANT_PERP_LIGHTER)) {
+        return perpRefused({
+          status: 409,
+          code: "perp-venue-unread",
+          error: `the current grant.json cannot be read, so merrymen must assume ${PERP_NOT_FLAT_MESSAGE}`,
+          flat: null,
+        });
+      }
+    }
+  }
+  const perpIntake = acceptIncomingPerp({
+    hosted: false,
+    tenant: null,
+    incoming: grant,
+    stored,
+    dek: null,
+    home: DATA_DIR,
+    perpsOffered: perpsOptInOffered(grant.smartAccount),
+  });
+  if (!perpIntake.ok) return perpRefused(perpIntake.refusal);
+  const drop = await perpDropRefusal({ stored, incoming: grant });
+  if (drop) return perpRefused(drop);
+
   await mkdir(DATA_DIR, { recursive: true });
   // Keep the outgoing wallet (and its owner key) before this one replaces it.
   await archiveCurrentGrant();
   // grant.json holds the owner + session PRIVATE KEYS — owner-only perms (0600).
-  await writeFile(GRANT_FILE, JSON.stringify(grant, null, 2), { encoding: "utf8", mode: 0o600 });
+  await writeFile(GRANT_FILE, JSON.stringify(perpIntake.grant, null, 2), { encoding: "utf8", mode: 0o600 });
   await chmod(GRANT_FILE, 0o600).catch(() => {});
   return NextResponse.json({ ok: true });
 }
@@ -458,19 +594,30 @@ export async function DELETE(req: Request) {
   return NextResponse.json({ ok: true });
 }
 
+/**
+ * EVERY GET ANSWER IS PER-USER AND NEVER STORED — `{exists:false}` included.
+ * Next 15 adds no Cache-Control to a dynamic route handler, so without this a
+ * browser or proxy may keep one owner's status (their account, caps and, with
+ * perps, their Lighter public key) on disk. The api/agents/[slug]/own
+ * precedent, applied to the route every screen polls.
+ */
+function statusResponse(status: AgentStatus): NextResponse {
+  return NextResponse.json(status, { headers: NO_STORE_HEADERS });
+}
+
 export async function GET(req: Request) {
   let grant: StoredGrant;
   if (isHostedMode()) {
     const tenant = tenantOf(req);
-    if (!tenant) return NextResponse.json({ exists: false } satisfies AgentStatus);
+    if (!tenant) return statusResponse({ exists: false });
     const g = await getGrantStore().get(tenant);
-    if (!g) return NextResponse.json({ exists: false } satisfies AgentStatus);
+    if (!g) return statusResponse({ exists: false });
     grant = g;
   } else {
     try {
       grant = JSON.parse(await readFile(GRANT_FILE, "utf8")) as StoredGrant;
     } catch {
-      return NextResponse.json({ exists: false } satisfies AgentStatus);
+      return statusResponse({ exists: false });
     }
   }
 
@@ -546,19 +693,23 @@ export async function GET(req: Request) {
   // deployments. Best effort: an unreadable report is null, never an error.
   const energy = await readAgentEnergy(grant.smartAccount);
 
-  // Never echo key material to the browser: the serialized session account, the
-  // session key, AND the generated owner key (which custodies the funds).
-  const { serialized: _s, demoSessionPrivateKey: _k, demoOwnerPrivateKey: _o, ...publicGrant } = grant;
-
+  // NEVER ECHO KEY MATERIAL, BY CONSTRUCTION: the grant goes out through core's
+  // publicGrantView, an ALLOWLIST. This used to be a denylist spread
+  // (serialized, the session key, the owner key) — safe exactly until a field
+  // was added, and perps add a nested one a top-level denylist cannot see into.
+  // Every field a screen reads (web, iOS, Android) is on the allowlist; a field
+  // nobody listed is simply not shown. public-view.test.ts deep-scans this
+  // answer, both deployments, for every secret in every spelling.
   const status: AgentStatus = {
     exists: true,
-    grant: publicGrant,
+    grant: publicGrantView(grant),
     balances,
     workerAliveAt,
     mode,
     gasSponsored,
     liveBlocker,
     energy,
+    perpsOptIn: perpsOptInOffered(grant.smartAccount),
   };
-  return NextResponse.json(status);
+  return statusResponse(status);
 }

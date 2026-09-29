@@ -50,7 +50,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import {
   LIGHTER_ROUTE_V1,
@@ -64,6 +63,7 @@ import {
   type PerpLeg,
   type PerpSide,
 } from "../../../packages/core/src/index";
+import { resolveLighterVendorDir } from "./vendor-dir";
 
 // ── the artifact ────────────────────────────────────────────────────────────
 
@@ -88,8 +88,15 @@ export const LIGHTER_SIGNER_ARTIFACT = Object.freeze({
   execSha256: "0c949f4996f9a89698e4b5c586de32249c3b69b7baadb64d220073cc04acba14",
 });
 
-/** worker/vendor/lighter, resolved from this file so it is right in a checkout, the npm package and the image. */
-export const LIGHTER_VENDOR_DIR = fileURLToPath(new URL("../../vendor/lighter/", import.meta.url));
+/**
+ * worker/vendor/lighter as this process resolved it at load: the
+ * MERRYMEN_LIGHTER_VENDOR_DIR override, else the first of the module-relative
+ * and cwd-relative candidates that holds the WASM (vendor-dir.ts says why —
+ * the web's keygen route runs with cwd = web/ and a webpack-rewritten
+ * import.meta.url). instantiateSigner re-resolves on every build, so an
+ * override set after import still counts.
+ */
+export const LIGHTER_VENDOR_DIR = resolveLighterVendorDir();
 
 /** Lighter tx types this module can produce. Nothing else is reachable. */
 export const LIGHTER_TX = Object.freeze({
@@ -1164,7 +1171,7 @@ async function readPinned(file: string, expected: string): Promise<Uint8Array> {
  * perps never call this; see loadSigner).
  */
 export async function instantiateSigner(opts: SignerOptions = {}): Promise<LighterSigner> {
-  const dir = opts.vendorDir ?? LIGHTER_VENDOR_DIR;
+  const dir = opts.vendorDir ?? resolveLighterVendorDir();
   const execBytes = await readPinned(path.join(dir, LIGHTER_SIGNER_ARTIFACT.execFile), LIGHTER_SIGNER_ARTIFACT.execSha256);
   const wasmBytes = await readPinned(path.join(dir, LIGHTER_SIGNER_ARTIFACT.wasmFile), LIGHTER_SIGNER_ARTIFACT.wasmSha256);
   const now = opts.now ?? (() => Date.now());

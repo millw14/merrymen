@@ -26,6 +26,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
+import { publicGrantView, type PublicGrantView } from "@merrymen/core";
+
+/**
+ * COMPILE-TIME: the shape GET /api/grants answers with has no field a key
+ * can live in. `tsc -p web` checks this file; adding any of these names to
+ * PublicGrantView fails the typecheck, not just a test run.
+ */
+type KeyBearing = "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey" | "apiKeySealed";
+type Leaks = Extract<keyof PublicGrantView | keyof NonNullable<PublicGrantView["perp"]>, KeyBearing>;
+const PUBLIC_VIEW_HAS_NO_KEY_FIELD: [Leaks] extends [never] ? true : false = true;
 
 const wallet = () => readFileSync(new URL("../terminal/screens/Wallet.tsx", import.meta.url), "utf8");
 const route = () => readFileSync(new URL("../app/api/grants/route.ts", import.meta.url), "utf8");
@@ -77,20 +87,35 @@ describe("the server's grant may be adopted, never stored", () => {
 });
 
 describe("what the endpoint may hand over", () => {
-  it("THE THREE KEY-BEARING FIELDS ARE STRIPPED, and that is why adoption is safe", () => {
+  it("THE KEY-BEARING FIELDS NEVER LEAVE, and that is why adoption is safe", () => {
     // `serialized` is base64 JSON that embeds the session key — it is not an
     // opaque handle — so it counts as key material exactly like the two named
-    // key fields.
+    // key fields; perps add a fourth, the sealed Lighter key.
+    //
+    // The route used to strip the first three with a top-level DENYLIST and
+    // spread the rest; it now builds the grant from core's publicGrantView, an
+    // ALLOWLIST, so a field added later is not shown until someone lists it.
     const src = route();
-    assert.match(
-      src,
-      /const \{ serialized: _s, demoSessionPrivateKey: _k, demoOwnerPrivateKey: _o, \.\.\.publicGrant \} = grant;/,
-    );
+    assert.match(src, /grant: publicGrantView\(grant\),/);
+    assert.ok(!/\.\.\.publicGrant\b|grant: grant\b|\.\.\.grant\b/.test(src.slice(src.indexOf("export async function GET"))), "no spread of the stored grant into the answer");
+    const leaky = {
+      smartAccount: "0x00000000000000000000000000000000000000a1",
+      serialized: "eyJwcml2YXRlS2V5IjoiMHgxMjMifQ==",
+      demoSessionPrivateKey: `0x${"cd".repeat(32)}`,
+      demoOwnerPrivateKey: `0x${"ef".repeat(32)}`,
+      perp: { route: "perp-lighter-v1", apiKeyIndex: 16, apiPublicKey: `0x${("01" + "00".repeat(7)).repeat(5)}`, apiKeySealed: "pk1.sealed" },
+      somethingAddedLater: `0x${"9f".repeat(40)}`,
+    };
+    const shown = JSON.stringify(publicGrantView(leaky));
+    for (const secret of [leaky.serialized, leaky.demoSessionPrivateKey, leaky.demoOwnerPrivateKey, "pk1.sealed", leaky.somethingAddedLater]) {
+      assert.ok(!shown.includes(secret.slice(2, 40)), `the public view carried ${secret.slice(0, 8)}…`);
+    }
   });
 
-  it("and the response is typed to exclude them, so a later field cannot slip through by name", () => {
+  it("and the response is typed to the allowlist, so a later field cannot slip through by name", () => {
     const src = route();
-    assert.match(src, /Omit<StoredGrant, "serialized" \| "demoSessionPrivateKey" \| "demoOwnerPrivateKey">/);
+    assert.match(src, /grant\?: PublicGrantView;/);
+    assert.equal(PUBLIC_VIEW_HAS_NO_KEY_FIELD, true);
   });
 
   it("AND ADOPTING ONE THIS BROWSER CANNOT SIGN IS STILL AN IMPROVEMENT, not a dead end", () => {

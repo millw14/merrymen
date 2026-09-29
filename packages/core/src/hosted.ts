@@ -71,6 +71,88 @@ export function carriesOwnerKey(obj: unknown): boolean {
 }
 
 /**
+ * Exactly 80 hex characters (0x optional) bounded by non-hex: the shape of a
+ * Lighter API key, public OR private — both halves are 40 bytes. Bounded so a
+ * 130-hex binding signature or a longer run never reads as one, the same way
+ * RAW_KEY above is bounded at 64.
+ */
+const RAW_PERP_KEY = /(?:^|[^0-9a-fA-F])(?:0x)?[0-9a-fA-F]{80}(?:[^0-9a-fA-F]|$)/;
+
+/** Field names that can only mean "a private key", compared without case, `_` or `-`. */
+const PERP_SECRET_NAMES: ReadonlySet<string> = new Set(["apiprivatekey", "privatekey"]);
+
+/**
+ * Does this object carry a LIGHTER API PRIVATE KEY in the clear?
+ *
+ * docs/perps.md rule 5: a grant carries `perp = { route, apiKeyIndex,
+ * apiPublicKey, apiKeySealed? }` and nothing else — the private key lives in a
+ * 0600 file (self-hosted) or only as `apiKeySealed`, DEK ciphertext bound to
+ * tenant|account|pubkey|index (hosted). So a stored or submitted grant that
+ * holds one anywhere else is a bug or an attack, and this is the one
+ * definition the grant intake, the grant store's put, and its boot/read check
+ * share.
+ *
+ * TWO TESTS, because a key can hide two ways:
+ *   BY NAME   a field called `apiPrivateKey` or `privateKey` (any case, any
+ *             depth), whatever it holds — nothing in a grant may be called
+ *             that, so its presence alone is the finding.
+ *   BY SHAPE  an 80-hex run anywhere, EXCEPT the one place a grant
+ *             legitimately holds one: the top-level `perp.apiPublicKey`.
+ *             Exempted by position, not by name — a field named
+ *             `apiPublicKey` anywhere else is scanned like any other, because
+ *             both halves are 80 hex and nothing but position tells a public
+ *             key from a private one.
+ *
+ * `apiKeySealed` is base64url ciphertext and passes; `demoSessionPrivateKey`
+ * (64 hex) is carriesOwnerKey's business, not this one's. An object that
+ * cannot be serialized to scan is treated as carrying one: a secret check that
+ * cannot look is not a pass.
+ */
+export function carriesPerpPrivateKey(obj: unknown): boolean {
+  if (obj == null) return false;
+  let view: unknown = obj;
+  if (typeof obj === "object" && !Array.isArray(obj)) {
+    const o = obj as Record<string, unknown>;
+    if (typeof o.perp === "object" && o.perp !== null && !Array.isArray(o.perp)) {
+      const { apiPublicKey: _public, ...perpRest } = o.perp as Record<string, unknown>;
+      void _public;
+      view = { ...o, perp: perpRest };
+    }
+  }
+  let named = false;
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(view, (k, v) => {
+      if (k !== "" && v !== undefined && PERP_SECRET_NAMES.has(k.toLowerCase().replace(/[_-]/g, ""))) named = true;
+      return v;
+    });
+  } catch {
+    return true;
+  }
+  if (named) return true;
+  return RAW_PERP_KEY.test(json ?? "");
+}
+
+/**
+ * The boot/read-time twin of assertNoOwnerKeysAtRest for the Lighter key: in
+ * hosted mode, refuse to go on while ANY stored grant record carries a
+ * plaintext API private key. Run it over the grants AS WRITTEN (a store
+ * record's `grant`, whose top-level `perp.apiPublicKey` is the one exempt
+ * 80-hex value), never over grants a store has rebuilt — the rebuild is where
+ * secrets are joined back in. Inert off hosted mode, like its twin.
+ */
+export function assertNoPerpKeysAtRest(grants: readonly unknown[]): void {
+  if (!isHostedMode()) return;
+  const offenders = grants.filter(carriesPerpPrivateKey).length;
+  if (offenders > 0) {
+    throw new Error(
+      `hosted mode refuses to go on: ${offenders} stored grant(s) carry a plaintext Lighter API private key. ` +
+        `The key is kept only as DEK ciphertext (perp.apiKeySealed) — purge them before booting.`,
+    );
+  }
+}
+
+/**
  * A boot-time refusal: in hosted mode, if ANY grant at rest carries an owner
  * key, throw rather than start.
  *
