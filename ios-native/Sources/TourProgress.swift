@@ -52,6 +52,7 @@ final class TourProgress: ObservableObject {
         replaying = replay
         if replay { record.step = 0; save() }
         active = true
+        TourProbe.spyOnTouches()
         TourProbe.log("begin generation=\(store.generation) owner=\(store.owner ?? "nil") tab=\(store.tab)")
         TourProbe.sample("begin", after: [0.5])
     }

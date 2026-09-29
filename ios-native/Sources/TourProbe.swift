@@ -1,4 +1,5 @@
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 
 /// TEMPORARY diagnostics for the iOS 18 "tab tap lost after Skip tour" CI
 /// failure. Only active in DEBUG UI-test launches. Remove before merging.
@@ -11,8 +12,17 @@ enum TourProbe {
         return false
         #endif
     }
-    /// Candidate fix under test: block taps with hit-testing only, no gesture.
-    static var noTapGesture: Bool { enabled && ProcessInfo.processInfo.arguments.contains("-tour-no-tap-gesture") }
+    private static var spying = false
+    /// Puts a passive recognizer on the window that logs where each real touch
+    /// was delivered and which recognizers received it.
+    static func spyOnTouches() {
+        guard enabled, !spying else { return }
+        let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+        guard let window = windows.first(where: \.isKeyWindow) ?? windows.first else { return }
+        spying = true
+        window.addGestureRecognizer(TouchSpy(target: nil, action: nil))
+        log("touch spy installed on \(type(of: window))")
+    }
 
     static func log(_ message: String) {
         guard enabled else { return }
@@ -53,5 +63,30 @@ enum TourProbe {
         }
         walk(window)
         log("\(label) tapRecognizersInWindow(\(taps.count)): \(taps.joined(separator: " | "))")
+    }
+}
+
+/// TEMPORARY: never recognizes, never cancels or delays touches.
+private final class TouchSpy: UIGestureRecognizer {
+    override init(target: Any?, action: Selector?) {
+        super.init(target: target, action: action)
+        cancelsTouchesInView = false; delaysTouchesBegan = false; delaysTouchesEnded = false
+    }
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) { report("began", touches) }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) { report("ended", touches); state = .failed }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) { report("cancelled", touches); state = .failed }
+    private func report(_ phase: String, _ touches: Set<UITouch>) {
+        for touch in touches {
+            var chain: [String] = []; var view = touch.view
+            while let current = view, chain.count < 4 { chain.append(String(describing: type(of: current))); view = current.superview }
+            let recognizers = (touch.gestureRecognizers ?? []).filter { $0 !== self }
+            func states() -> String { recognizers.map { "\(type(of: $0))@\($0.view.map { String(describing: type(of: $0)) } ?? "nil") s:\($0.state.rawValue) db:\($0.delaysTouchesBegan) c:\($0.cancelsTouchesInView)" }.joined(separator: " | ") }
+            TourProbe.log("touch \(phase) at=\(touch.location(in: nil)) view=\(chain.joined(separator: " < ")) recognizers(\(recognizers.count)): \(states())")
+            if phase != "began" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { TourProbe.log("touch \(phase)+50ms states: \(states())") }
+            }
+        }
     }
 }
