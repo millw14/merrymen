@@ -35,7 +35,7 @@ or `group-chat` (case-insensitive, so `GroupChat` fails too). Use `tgGroup`,
    extra caps on top (below). A nominated address is a lookup key: which
    GeckoTerminal token page to read. A chart link's pool address becomes the
    coin it trades only when the canonical v3 factory names that pool (The
-   coin flow, step 5); the coin, never the pool, is nominated. Its pool is
+   coin flow, step 4); the coin, never the pool, is nominated. Its pool is
    still verified the way discovery verifies every pool (v3, USDG/WETH
    quote, canonical `factory.getPool`), so the chat picks what to look at,
    never what counts as verified. Nothing from a group is ever written to
@@ -247,11 +247,53 @@ A CA is `0x` + exactly 40 hex characters, found anywhere in the visible text
 or caption, including inside a GeckoTerminal/DexScreener/explorer URL written
 out in the message. The hidden URL behind a `text_link` entity is never
 scanned: nobody in the chat can see it. A 64-hex
-string (tx hash, v4 pool id, key) is never a CA and is never echoed. A
-Solana-style base58 mint (32–44 chars) is recognised only to say it is not on
-its chain. At most the first 2 CAs in a message are considered. A line that
-reads as self-harm or real distress is not a coin post at all: it gets the
-kind line (see Banter and roasts).
+string (tx hash, v4 pool id, key) is never a CA and is never echoed. A line
+that reads as self-harm or real distress is not a coin post at all: it gets
+the kind line (see Banter and roasts).
+
+**It only ever reacts to Robinhood Chain coins.** Groups post coins from every
+chain, and an Ethereum, BNB or Base token has the same `0x` + 40-hex shape.
+Anything that is not shown to be a Robinhood Chain coin gets silence: no line,
+no reaction, no owner ask, no owner DM, no nomination, and no memo it could
+later answer from or the persona could talk about. The coin flow still owns
+such a message, so nothing else in the handler answers it either. That covers:
+
+* a CA in a link that names another chain (`extractCaHits` in `detect.ts`
+  reads the link around each CA): Etherscan and the other `*scan` explorers
+  (BscScan, BaseScan, Arbiscan, PolygonScan, FTMScan, BlastScan, LineaScan…),
+  Snowtrace and other chains' Blockscouts; DexScreener, GeckoTerminal,
+  DEXTools, GMGN, Birdeye, Defined, Ave and other many-chain charts whose link
+  does not name Robinhood Chain; pump.fun, Raydium, Jupiter, Photon, BullX,
+  PancakeSwap, Aerodrome and other launchpads and DEXes of one other chain;
+  and a swap link (Uniswap and the like) whose `chain` parameter or path names
+  another chain. Such a CA is set aside before the first 2 are counted and is
+  never claimed or looked at. A link that names no chain, and a bare address,
+  go to the look. A Robinhood link (`dexscreener.com/robinhood/…`,
+  `geckoterminal.com/robinhood/…`, `robinhoodchain.blockscout.com`,
+  `explorer(.testnet).chain.robinhood.com`, `?chain=robinhood`) is a hint and
+  never a proof: the look still decides;
+* another chain's coin with no `0x` + 40-hex address in it, which is
+  recognised only to stay silent about it (a ticker beside it gets no "drop
+  the ca": they did drop one): a Solana or Tron base58 mint (32–44 chars), a
+  TON address (`EQ…`/`UQ…`, 48 chars), a Sui or Aptos coin type
+  (`0x…::module::NAME`) (`hasForeignMint`), and a link naming another chain by
+  the same host and slug rules whose id is not an EVM address
+  (`hasOtherChainLink`): the all-lowercase Solana pair links DexScreener
+  itself hands out (`dexscreener.com/solana/4hzt…`), TON, Sui and Tron pairs,
+  and a Uniswap v4 pool id on another chain (`dexscreener.com/base/0x` + 64
+  hex). A link counts only when it carries a coin, pair, pool or account id
+  (32+ characters with a digit, not a slug of words); another chain's link to
+  one transaction or block is not a coin and stays with the chatter path, and
+  so does a bare `0x` + 64 hex, which on Robinhood Chain is a tx hash as often
+  as not;
+* an address the look answers `wallet` (no code on Robinhood Chain: a wallet,
+  or another chain's token), `not-token`, or `unknown` (the look could not be
+  made, so it is not provably a Robinhood Chain coin);
+* any CA while coins are off, from a stale post, or while there is no trading
+  port: without a look nothing shows it is a Robinhood Chain coin.
+
+At most the first 2 CAs in a message that are not in another chain's link are
+considered.
 
 A coin line is an answer to whoever posted the CA, and counts in pacing's
 flood rule like any other: past 3 answers to one person in 2 minutes, their
@@ -263,41 +305,43 @@ Per posted CA, in order:
 1. **Claim** `(chatId, messageId, address)` in the durable store before
    anything else. A replayed or duplicate update finds the claim and stops
    (at-most-once). A message older than 10 minutes (Telegram `date`) is
-   recorded but never nominated. For a chart link, the coin its pool trades
-   is claimed for the same message too once the look resolves it (step 5),
-   so a coin posted beside its own chart link is one coin; a claim that
-   cannot be written drops that coin.
-2. **Coins off** (`telegramGroupCoinsEnabled` false) → an opinion-free
-   reaction (👀) at most; no look, no ask, and no answer from memory either
-   (an answer from memory is a coin opinion too).
-3. **Seen before in this chat** within 24 h → it answers from memory
-   ("already looked at that one, still not for me" / "already got some 🤝"),
-   no new look, at most once per coin per chat per hour: a repost inside the
-   hour gets one 👀, and later ones nothing. Only a coin it actually looked
-   at counts: one recorded while coins were off, while it was not ready, from
-   a stale post or with a failed look is looked at afresh when it is posted
-   again.
-4. **Readiness** (`trencherReadiness`, below). Not `ready-*` → the **owner
-   ask**: in the group, tagging the owner, a fixed-template line with no
-   reason ("{owner} put me on trencher mode and i'll get in on stuff like this
-   with you 👀"), at most once per chat per 12 h (later CAs while not ready
-   get a light line or a 👀 reaction, at most once per hour, and never within
-   an hour of the ask); and in the owner's DM, once per chat per 12 h, the
-   private reason and a
-   **⚙️ Open Settings** button to `${dashboardBase()}/settings#trencher-mode`.
-   Real-money switches stay dashboard acts (`setting-spec.ts` DASHBOARD_ONLY).
-5. **Quick look** (`createCoinLook` in `tg-coin-look.ts`, reached through
-   `TgCoinsPort.look`; cheap, cached 30 min per address, and at most 6 looks
-   that read the network per 10 minutes, past which the answer is `unknown`): kinds
+   claimed and then left alone: never looked at, nominated, remembered or
+   answered. For a chart link, the coin its pool trades is claimed for the
+   same message too once the look resolves it (step 4), so a coin posted
+   beside its own chart link is one coin; a claim that cannot be written
+   drops that coin.
+2. **Coins off** (`telegramGroupCoinsEnabled` false) → silence: no look, no
+   ask, no 👀 (without a look nothing shows it is a Robinhood Chain coin), and
+   no answer from memory either (an answer from memory is a coin opinion too).
+3. **Seen before in this chat** within 24 h, as a Robinhood Chain coin → it
+   answers from memory ("already looked at that one, still not for me" /
+   "already got some 🤝"), no new look, at most once per coin per chat per
+   hour: a repost inside the hour gets one 👀, and later ones nothing. Only a
+   Robinhood Chain coin it actually looked at counts: one remembered while it
+   was not ready is looked at afresh when it is posted again, and a memo from
+   an older build that says `wallet`, `not-token`, `unknown` or `coins-off`
+   is never answered from.
+4. **Quick look**, ready or not (`createCoinLook` in `tg-coin-look.ts`,
+   reached through `TgCoinsPort.look`, which does not depend on readiness;
+   cheap and cached 30 min per address). First ONE `getCode` on Robinhood
+   Chain through the governed mainnet client, before any GeckoTerminal
+   request, under its own allowance (30 per 10 minutes per process, past
+   which the answer is `unknown`): no code → `wallet`, and nothing more is
+   read. So a chat full of Ethereum or BNB CAs spends these probes and never
+   the full looks. Then at most 6 full looks (GeckoTerminal, the chain probe)
+   per 10 minutes per process, past which the answer is `unknown`. Kinds
    `own` (its own wallet/vault), `cash` (USDG/WETH), `energy` ($MERRYMEN),
    `stock` (a STOCK_TOKENS address), `wallet` (no code), `not-token`,
    `curve` (a Pons bonding-curve coin), `v4-only`, `no-pool`, `too-new`,
    `too-thin`, `too-quiet` (fails `highVolumePools`), `held` (already
    holding it), `candidate` (eligible to be nominated), `unknown` (reads
-   failed). Each non-candidate kind maps to casual template lines, tagging the
-   sender, grounded in that kind ("barely anyone's trading it, i'd pass",
-   "still on the curve, can't touch those yet", "that's a wallet lol"), never
-   a figure. `unknown` → "can't get a proper look rn, sitting it out".
+   failed, or an allowance spent). `wallet`, `not-token` and `unknown` are
+   not a Robinhood Chain coin, or not provably one: silence, and no memo, so
+   a repost gets a fresh look. Every other non-candidate kind maps to casual
+   template lines, tagging the sender, grounded in that kind ("barely
+   anyone's trading it, i'd pass", "still on the curve, can't touch those
+   yet"), never a figure, ready or not: asking the owner to switch trencher
+   mode on would not get such a coin bought.
    **A chart link carries the pool.** A GeckoTerminal `/pools/…` or
    DexScreener pair link holds the pool's address, not the coin's. It is
    looked at as the coin that pool trades only when that is proved on chain:
@@ -306,9 +350,20 @@ Per posted CA, in order:
    `getPool(token0, token1, fee)` is that very address. The index's labels
    never decide it. Otherwise it is `not-token`, or `unknown` when the
    factory could not be read. Resolved, the answer is the coin's own look
-   (its free checks, its own cache and a second slot of the allowance), and
-   from then on the coin, never the pool, is claimed for that message,
-   remembered, answered from memory and nominated.
+   (its free checks, its own cache, its own presence probe and a second slot
+   of the allowance), and from then on the coin, never the pool, is claimed
+   for that message, remembered, answered from memory and nominated.
+5. **Readiness** (`trencherReadiness`, below), read after the look and only
+   for a `candidate`. Not `ready-*` → the **owner ask**: in the group,
+   tagging the owner, a fixed-template line with no reason ("{owner} put me
+   on trencher mode and i'll get in on stuff like this with you 👀"), at most
+   once per chat per 12 h (later candidates while not ready get a light line
+   or a 👀 reaction, at most once per hour, and never within an hour of the
+   ask); and in the owner's DM, once per chat per 12 h, the private reason
+   and a **⚙️ Open Settings** button to
+   `${dashboardBase()}/settings#trencher-mode`. Real-money switches stay
+   dashboard acts (`setting-spec.ts` DASHBOARD_ONLY). The coin is remembered
+   as `not-ready`, so a repost once it is ready is looked at and nominated.
 6. **Nominate** (`NominationBook.nominate`). Refusals are caps, answered as
    "one at a time lol" at most once per chat per hour, else silence; a capped
    coin leaves no memo, so a later repost gets its turn. A coin the book
@@ -409,7 +464,10 @@ Per chat, durable (survives hosted redeploys via the orchestrator ferry):
   No sensitive categories (health, religion, politics, sexuality, finances
   beyond "shills frogs"), no contact details, no addresses.
 * `coins`: up to 60 per chat, `{address, name?, byId, byName, messageId, atMs,
-  verdict, decisionId?, paper?, exitSaid?}` for 14 days.
+  verdict, decisionId?, paper?, exitSaid?}` for 14 days — Robinhood Chain
+  coins only (The coin flow). A memo an older build wrote as `wallet`,
+  `not-token`, `unknown` or `coins-off` is kept for its 14 days but never
+  answered from and never shown to the persona.
 * Memory never crosses chats: what was said in one group is never used in
   another, and never in the owner's DMs.
 * `/forget` (owner, in a group) wipes that chat's memory and nothing else
@@ -624,14 +682,16 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | "gm" / "gn" | Sometimes answers once per person per day (35%) or reacts |
 | "hey merryman" / "thanks pine!" / "merryman gm" | Small talk back ("hey 👋", "np 🤝", "gm"), from a template, no model call |
 | New member joins | Sometimes a short welcome (25%, 3 a day max) |
-| Someone posts a CA, not trencher mode | Tags owner politely (12 h), DMs owner the reason + button |
-| Someone posts a CA, trencher ready | Tags sender, thinks out loud, Brain decides, then a casual buy line or a grounded fade |
-| A GeckoTerminal pool / DexScreener pair link | Looked at as the coin that pool trades when the canonical factory names the pool; otherwise "not a token" |
+| Someone posts a Robinhood Chain coin, not trencher mode | Looked at first. A candidate: tags owner politely (12 h), DMs owner the reason + button. Any other kind: its grounded line, no ask, no DM |
+| Someone posts a Robinhood Chain coin, trencher ready | Tags sender, thinks out loud, Brain decides, then a casual buy line or a grounded fade |
+| A Robinhood Chain GeckoTerminal pool / DexScreener pair link | Looked at as the coin that pool trades when the canonical factory names the pool; otherwise silence |
 | Same CA posted again | Answers from memory, once per coin per hour; a repost inside the hour gets one 👀, then nothing |
 | CA spam | "one at a time lol", then silence; past 3 coin replies to one person in 2 min, one 👀, then nothing |
-| Wallet / its own address / USDG / $MERRYMEN / a stock | Casual one-liner, no look |
+| Its own address / USDG / $MERRYMEN / a stock | Casual one-liner, no look |
+| A wallet, or an Ethereum / BNB / Base token posted bare (no code on Robinhood Chain) | Silence: one presence probe, no GeckoTerminal read, nothing remembered; ready or not, no owner ask |
+| A coin in another chain's link (Etherscan, BscScan, BaseScan, dexscreener.com/ethereum, geckoterminal.com/eth, gmgn.ai/bsc, pump.fun…) | Silence, ready or not, coins on or off: not claimed, looked at or remembered, and not counted in the first 2 |
 | Bonding-curve coin, v4-only, no pool, too thin, too quiet | Casual grounded fade, no Brain spend |
-| Solana mint | "not on my chain" |
+| Solana mint, TON address, Sui coin type, or another chain's chart link with no `0x` + 40-hex address (DexScreener's lowercase Solana pair links, TON, Sui, a Base v4 pool id) | Silence, addressed or not, ready or not, coins on or off, and nothing else answers the line |
 | "$PEPE?" with no CA | "drop the ca" |
 | "buy this now" / "ape 100" | A nomination at most; words never size anything |
 | Bought a coin from the chat, later exits | Maybe one casual "out of that one" line |
@@ -671,6 +731,12 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 * A redeploy in the middle of an update batch can re-deliver that batch; the
   durable claim makes a replayed CA a no-op, and a claim written just before a
   crash means that CA is dropped rather than repeated.
+* Which chain a CA is on is read from the link around it and from the
+  chain itself, never from words ("eth ca: 0x…"). A bare address that has
+  code on Robinhood Chain is looked at as the Robinhood contract, even when
+  the poster meant the same address on another chain (a contract deployed
+  at one address on many chains); a link that names another chain always
+  wins silence.
 * Only a Uniswap v3 pool is resolved to its coin. A chart link to a v2 pair
   answers `decimals()` like a token, so its look reads `no-pool`.
 * The owner's first name for tagging is taken from what it has seen in that

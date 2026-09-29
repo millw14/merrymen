@@ -101,7 +101,7 @@ import type { ReactNode } from "react";
  * The date is fixed, not `new Date()`: a policy's date says when its words
  * last changed, and a build-time date claimed a new policy on every deploy.
  */
-const LAST_UPDATED = "September 28, 2026";
+const LAST_UPDATED = "September 29, 2026";
 
 const CONNECTED_APPS = "https://app.merrymen.dev/connect/apps";
 
@@ -299,9 +299,11 @@ export function PrivacyPolicyDoc() {
             health, religion, politics, sexuality, money matters, contact details or addresses.
           </li>
           <li>
-            The coin addresses posted in the group in the last 14 days, who posted each (display
-            name and Telegram user id) and what your agent decided about it; and, for 2 days, which
-            messages carried one, so that a message Telegram delivers twice is never acted on twice.
+            The addresses of Robinhood Chain coins posted in the group in the last 14 days, who
+            posted each (display name and Telegram user id) and what your agent decided about it;
+            and, for 2 days, which messages carried a coin address, so that a message Telegram
+            delivers twice is never acted on twice. Coins from other chains are not remembered, and
+            your agent says nothing about them.
           </li>
         </ul>
         <p>

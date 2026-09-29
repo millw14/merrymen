@@ -168,11 +168,12 @@ merrymen kill       # kill switch — destroys the grant`}
         <h2 id="tg-groups">Telegram groups</h2>
         <p>
           Your merryman can hang out in a Telegram group like one more person: it answers when
-          it&apos;s called, now and then joins in, remembers the chat, and when someone posts a coin
-          it takes a look, tags them, and says whether it&apos;s in or passing. In trencher mode its
-          Brain decides and every limit still applies — a group message can put a coin in front of
-          it, never order a trade. It never posts alerts, sizes, prices or P&amp;L, or anything
-          private.
+          it&apos;s called, now and then joins in, remembers the chat, and when someone posts a
+          Robinhood Chain coin it takes a look, tags them, and says whether it&apos;s in or passing.
+          Coins from other chains (Ethereum, Solana, BNB and the rest) it leaves alone. In trencher
+          mode its Brain decides and every limit still applies — a group message can put a coin in
+          front of it, never order a trade. It never posts alerts, sizes, prices or P&amp;L, or
+          anything private.
         </p>
         <ol>
           <li>Add your bot to a group. It only talks in groups you added it to or approved — if someone else adds it, it stays silent and DMs you <strong>Stay</strong> / <strong>Leave</strong>.</li>
