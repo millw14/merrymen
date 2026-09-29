@@ -32,6 +32,7 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { writeFile } from "node:fs/promises";
 import { Worker } from "node:worker_threads";
+import * as cliAtomic from "../../cli/atomic-write.mjs";
 import { RENAME_RETRY_MS, renameRetrying, renameRetryingSync, writeFileAtomic, writeFileAtomicSync } from "./atomic-write";
 import { patchSettingsFile } from "./settings";
 
@@ -87,6 +88,8 @@ describe("neither settings.json writer truncates the file in place", () => {
 const WRITERS: ReadonlyArray<{ name: string; write: (file: string, data: string, mode?: number) => void | Promise<void> }> = [
   { name: "writeFileAtomicSync", write: writeFileAtomicSync },
   { name: "writeFileAtomic (async, the web tier's)", write: writeFileAtomic },
+  // Plain .mjs: the CLI cannot import TypeScript, so it keeps a copy.
+  { name: "the CLI's writeFileAtomicSync (cli/atomic-write.mjs)", write: cliAtomic.writeFileAtomicSync },
 ];
 
 for (const { name, write } of WRITERS) describe(name, () => {

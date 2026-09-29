@@ -8,11 +8,11 @@
 
 import { webChainRead } from "@/lib/chain-read";
 import { readGrantBalancesFrom, type GrantBalances } from "@/lib/grant-balances";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { writeFileAtomic } from "@merrymen/atomic-write";
-import { homePaths, merrymenHome } from "@merrymen/home";
+import { fsyncDir, writeFileAtomic } from "@merrymen/atomic-write";
+import { homePaths, liftKillPause, merrymenHome, pauseForKeptGrant } from "@merrymen/home";
 import { createPublicClient } from "viem";
 import {
   accountsMatch,
@@ -53,23 +53,48 @@ const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x
  * grant.json is a single slot: creating a second wallet (or hitting the kill
  * switch) used to destroy the previous grant — and with it the ONLY on-disk copy
  * of that wallet's owner key, permanently stranding any funds still in it. This
- * is the safety net. Best-effort: archiving must never block arming a grant.
+ * is the safety net.
+ *
+ * ON DISK BEFORE IT SAYS `archived`: a synced temp file renamed into place, the
+ * archive directory synced after it (and its parent when it is new). A plain
+ * write is still in the page cache when grant.json is replaced a moment later,
+ * and a power loss on a filesystem with delayed allocation can keep that
+ * replace and lose the copy. A same-account copy is replaced whole, never
+ * truncated in place.
+ *
+ * Never throws. `failed` means a grant was there and no durable copy exists —
+ * what that costs is the caller's decision (POST arms anyway; DELETE does not).
  */
-async function archiveCurrentGrant(): Promise<void> {
+async function archiveCurrentGrant(): Promise<
+  { kind: "archived"; account: string } | { kind: "nothing" } | { kind: "failed"; why: string }
+> {
+  let raw: string;
   try {
-    const raw = await readFile(GRANT_FILE, "utf8");
-    const prev = JSON.parse(raw) as StoredGrant;
-    if (!isAddr(prev?.smartAccount)) return; // never derive a path from a malformed address
-    await mkdir(ARCHIVE_DIR, { recursive: true, mode: 0o700 });
-    // One file per wallet, named by its address. Re-arming the same wallet just
-    // refreshes its archive copy; a different wallet gets its own file.
-    const dst = path.join(ARCHIVE_DIR, `${prev.smartAccount.toLowerCase()}.json`);
-    await writeFile(dst, raw, { encoding: "utf8", mode: 0o600 });
-    // This file holds a plaintext OWNER KEY — keep it owner-only (0600), not the
-    // default world-readable 0644. chmod covers the file-already-existed case.
-    await chmod(dst, 0o600).catch(() => {});
+    raw = await readFile(GRANT_FILE, "utf8");
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === "ENOENT" ? { kind: "nothing" } : { kind: "failed", why: `grant.json could not be read (${code ?? "unknown error"})` };
+  }
+  let account: unknown;
+  try {
+    account = (JSON.parse(raw.replace(/^\ufeff/, "")) as Partial<StoredGrant> | null)?.smartAccount;
   } catch {
-    // no grant.json yet, or it's unreadable — nothing worth keeping
+    return { kind: "nothing" }; // not a grant — nothing to file it under
+  }
+  if (account === undefined || account === null || account === "") return { kind: "nothing" };
+  // Never derive a path from a malformed address — but a grant that names one
+  // is still a grant, and it was not kept.
+  if (!isAddr(account)) return { kind: "failed", why: "its smartAccount is not an address, so no archive can be named for it" };
+  try {
+    // mkdir returns the first directory it had to create, or undefined.
+    if ((await mkdir(ARCHIVE_DIR, { recursive: true, mode: 0o700 })) !== undefined) await fsyncDir(path.dirname(ARCHIVE_DIR));
+    // One file per wallet, named by its address. Re-arming the same wallet just
+    // refreshes its archive copy; a different wallet gets its own file. It holds
+    // a plaintext OWNER KEY — owner-only (0600), set before it is visible.
+    await writeFileAtomic(path.join(ARCHIVE_DIR, `${account.toLowerCase()}.json`), raw, 0o600, { durable: true });
+    return { kind: "archived", account };
+  } catch (e) {
+    return { kind: "failed", why: `the archive could not be written (${(e as NodeJS.ErrnoException).code ?? "unknown error"})` };
   }
 }
 
@@ -434,7 +459,14 @@ export async function POST(req: Request) {
 
   await mkdir(DATA_DIR, { recursive: true });
   // Keep the outgoing wallet (and its owner key) before this one replaces it.
-  await archiveCurrentGrant();
+  //
+  // BEST-EFFORT, deliberately: archiving must never block arming a grant. A
+  // failure is said loudly, because the grant it failed to keep is about to be
+  // replaced.
+  const kept = await archiveCurrentGrant();
+  if (kept.kind === "failed") {
+    console.error(`[grants] the outgoing grant was NOT archived (${kept.why}) — replacing grant.json anyway; its owner key is not in ~/.merrymen/grants/`);
+  }
   // grant.json holds the owner + session PRIVATE KEYS — owner-only perms (0600),
   // set on the temp file before it is renamed in.
   //
@@ -460,8 +492,27 @@ export async function DELETE(req: Request) {
   }
   // The kill switch destroys the session key, NOT the wallet — archive it so the
   // owner key survives and the funds stay reachable.
-  await archiveCurrentGrant();
+  const kept = await archiveCurrentGrant();
+  if (kept.kind === "failed") {
+    // AND NOT WITHOUT A COPY. Deleting grant.json now would lose the owner key
+    // for good. Trading stops anyway — the pause marker the worker honours on
+    // every tick — and the grant stays until it can be kept. Same rule as the
+    // worker's Telegram /kill and `merrymen kill`.
+    const paused = pauseForKeptGrant();
+    return NextResponse.json(
+      {
+        error:
+          `The grant was NOT deleted: ${kept.why}, and deleting it without a copy would lose your owner key for good. ` +
+          (paused ? "Trading is paused instead. " : "Trading could not be paused either — stop the worker. ") +
+          "Fix ~/.merrymen/grants/ (disk space, permissions), then try again.",
+        paused,
+      },
+      { status: 409 },
+    );
+  }
   await rm(GRANT_FILE, { force: true });
+  // A pause an earlier, refused kill left in its place has done its job.
+  liftKillPause();
   return NextResponse.json({ ok: true });
 }
 

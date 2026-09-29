@@ -281,7 +281,8 @@ describe("the child does not re-arm", () => {
     assert.match(sync, /const grant = loadArmableGrant\(\);/);
     assert.doesNotMatch(sync, /loadGrantFile\(\)/, "syncGrant must not read the raw file");
     const kill = src.slice(src.indexOf("    kill: () => {"), src.indexOf("// ARCHIVE FIRST.", src.indexOf("    kill: () => {")));
-    assert.match(kill, /if \(isHostedMode\(\)\) \{[\s\S]*killHosted\(merrymenHome\(\), homePaths\.grant\(\)/);
+    // grantFilePath(): the file loadGrantFile read, so the kill removes the copy that would arm.
+    assert.match(kill, /if \(isHostedMode\(\)\) \{[\s\S]*killHosted\(merrymenHome\(\), grantFilePath\(\)/);
   });
 });
 

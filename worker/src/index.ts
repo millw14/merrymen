@@ -154,7 +154,7 @@ import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus, readHolderStatusResult } from "./circle";
 import { CIRCLE_SHORT_CLASS_GATE, circleNote, circleNoteStep, circleStanding, circleStrategyTick, type CircleNoted } from "./circle-gate";
 import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
-import { archiveCurrentGrant, grantExpired, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
+import { archiveCurrentGrant, grantExpired, grantFilePath, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
 import { killHosted, killRequested } from "./kill-request";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
 import { execModeOf, liveBlockerText, publishedMode, type ExecMode, type RefuseRule } from "./exec-mode";
@@ -170,7 +170,7 @@ import {
   type AnchorVerdict,
   type ContributionTruth,
 } from "./bootstrap-state";
-import { ensureHome, homePaths, merrymenHome } from "./home";
+import { ensureHome, homePaths, liftKillPause, merrymenHome, pauseForKeptGrant } from "./home";
 import { startupSlotMs } from "./stagger";
 import { llmText, resolveLlm } from "./llm";
 import { applyPaperIntent, paperBookPositions, type PaperPosition } from "./paper";
@@ -13364,7 +13364,7 @@ async function main() {
               reason: killRequested(merrymenHome()) ? "already killed — the server is removing the grant" : "no grant",
             };
           }
-          const r = killHosted(merrymenHome(), homePaths.grant(), grant, Math.floor(Date.now() / 1000));
+          const r = killHosted(merrymenHome(), grantFilePath(), grant, Math.floor(Date.now() / 1000));
           void addEvent(
             active?.agentId ?? grant.smartAccount,
             "warn",
@@ -13382,8 +13382,30 @@ async function main() {
         // copy strands the funds permanently, and this path is reachable from a
         // Telegram message. The CLI and the web API have archived for months;
         // the worker was the one destructive route that did not.
-        const archived = archiveCurrentGrant();
-        rmSync(homePaths.grant(), { force: true });
+        const archive = archiveCurrentGrant();
+        // AND NOT WITHOUT ONE. A `failed` archive used to come back as the same
+        // null as "nothing to keep", and the grant was deleted anyway: on a full
+        // or read-only disk, that was the only copy of the owner key, gone for
+        // good. Trading still stops — the pause marker, which every tick and
+        // every chat trade honours — but the key stays where it is, and the
+        // owner is told why and what to do. The session key's own on-chain
+        // expiry and caps bound the agent meanwhile, as they always do.
+        if (archive.kind === "failed") {
+          const paused = pauseForKeptGrant();
+          console.log(`[kill] NOT deleting grant.json — the owner key could not be archived: ${archive.why}${paused ? "; trading paused" : "; could not pause either"}`);
+          void addEvent(
+            active?.agentId ?? grant.smartAccount,
+            "err",
+            `kill switch — the grant was NOT destroyed: ${archive.why}, and deleting grant.json without a copy would ` +
+              `lose the owner key for good. ${paused ? "Trading is paused instead." : "Trading could not be paused either."}`,
+          );
+          return { ok: false, reason: archive.why, archiveFailed: { why: archive.why, paused } };
+        }
+        // The file that was read and archived — not homePaths.grant() (grantFilePath).
+        rmSync(grantFilePath(), { force: true });
+        // A pause an earlier, refused kill left in its place has done its job.
+        liftKillPause();
+        const archived = archive.kind === "archived" ? archive.account : null;
         if (archived) {
           void addEvent(
             active?.agentId ?? archived,
