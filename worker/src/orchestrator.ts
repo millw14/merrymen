@@ -6998,12 +6998,14 @@ async function mirrorLedgers(): Promise<void> {
     // dashboard says trading is held rather than "connected".
     await publishChildTelegram(tenant as `0x${string}`, shared, `held:${held.cls}`);
     // ITS TELEGRAM GROUPS ARE NEVER PUBLISHED WHILE IT IS HELD. The hold
-    // process keeps no group memory (it ignores groups), so whatever file the
-    // home holds is the last child's, and the stored row is what the spawn
-    // that ends the hold restores (restoreTgGroupsForChild) when the home has
-    // none. Only forget requests a child left in the home reach the row, as
-    // for a child whose groups are held off, so no /forgetme is undone by the
-    // restore that ends the hold.
+    // process keeps no group memory (it answers nothing in groups), so
+    // whatever file the home holds is the last child's, and the stored row is
+    // what the spawn that ends the hold restores (restoreTgGroupsForChild)
+    // when the home has none. Only the forget requests in the home reach the
+    // row, as for a child whose groups are held off: the last child's, and
+    // every /forgetme typed in a group during the hold, which the hold process
+    // writes there (telegram/hold.ts). So no /forgetme is lost to a hold or
+    // undone by the restore that ends it.
     if (tgGroupsDekThisPass) {
       await forgetStoredTgGroups({ tenant, home: childHome(tenant), shared, dek: tgGroupsDekThisPass, seen: tgGroupsSeen, log });
     }

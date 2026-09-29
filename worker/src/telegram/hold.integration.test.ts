@@ -28,6 +28,8 @@ const { createStateRef } = await import("./state");
 const { resolveConfig } = await import("../settings");
 const { killRequested } = await import("../kill-request");
 const { writeRestoreBlocked, restoreBlockClass } = await import("../restore-block");
+const { TG_GROUPS_FORGET_FILE, parseTgForgets } = await import("./tg-groups/forget-file");
+const { HELD_GROUPS_FILE, takeHeldGroupUpdates } = await import("./held-groups");
 
 const T0 = Date.parse("2026-09-28T12:00:00Z");
 const TOKEN = "111:secret";
@@ -123,7 +125,9 @@ async function withHold(body: (h: Harness) => Promise<void>): Promise<void> {
 }
 
 beforeEach(() => {
-  for (const f of ["settings.json", "telegram.json", "grant.json", "restore-blocked.json"]) rmSync(path.join(HOME, f), { force: true });
+  for (const f of ["settings.json", "telegram.json", "grant.json", "restore-blocked.json", "tg-groups-forget.json", "telegram-held-groups.json"]) {
+    rmSync(path.join(HOME, f), { force: true });
+  }
   for (const f of readdirSync(HOME)) if (f.startsWith("kill-request-")) rmSync(path.join(HOME, f), { force: true });
   writeSettings();
   writeRestoreBlocked(HOME, { reason: REASON, class: CLASS, since: Math.floor(T0 / 1000) - 3_600, resettable: true });
@@ -384,6 +388,111 @@ describe("Telegram groups are not answered while trading is held", () => {
       assert.deepEqual(tg.linkedChats, []);
       assert.equal(tg.offset, 10, "every update is passed, membership and service messages included");
       assert.ok(!h.notes.some((m) => /refused|failed/.test(m)), "and no stranger tally for a room");
+      // The stranger's add is kept for the child, which asks the owner about
+      // it when trading resumes; the join and the lines are not.
+      const kept = takeHeldGroupUpdates(HOME);
+      assert.deepEqual(
+        kept.map((e) => e.kind),
+        ["member"],
+      );
+    });
+  });
+
+  it("A /forgetme WHILE HELD IS WRITTEN DOWN, late or live, and so is the owner's /forget; nothing is said", async () => {
+    writeFileSync(path.join(HOME, "telegram.json"), JSON.stringify({ ownerId: OWNER }));
+    await withHold(async (h) => {
+      await h.advance(600);
+      h.queue.push(
+        inGroup(1, STRANGER, "/forgetme"),
+        inGroup(2, OWNER, "/forget@heldbot"),
+        // Someone else's /forget is not theirs to give, another bot's
+        // /forgetme is that bot's, and a bot's line is nobody's.
+        inGroup(3, 555, "/forget"),
+        inGroup(4, 556, "/forgetme@otherbot"),
+        {
+          update_id: 5,
+          message: { message_id: 505, text: "/forgetme", date: nowSec(), chat: { id: GROUP, type: "supergroup" }, from: { id: 558, is_bot: true, first_name: "B" } },
+        },
+        // Every /forgetme wipes, whenever it was typed.
+        inGroup(6, 557, "/forgetme", nowSec() - 20 * 3_600),
+      );
+      await h.advance(1_000);
+      const ops = parseTgForgets(readFileSync(path.join(HOME, TG_GROUPS_FORGET_FILE), "utf8"));
+      assert.deepEqual(
+        ops.map((o) => `${o.chatId}:${o.userId}`).sort(),
+        [`${GROUP}:${STRANGER}`, `${GROUP}:*`, `${GROUP}:557`].sort(),
+      );
+      assert.ok(ops.every((o) => o.atMs >= T0 && o.atMs <= Date.now()), "stamped when it was handled, which erases all it said before");
+      assert.deepEqual(h.sentTo(GROUP), [], "nothing said in the room");
+      assert.deepEqual(h.sentTo(OWNER), []);
+      assert.deepEqual(h.sentTo(STRANGER), []);
+    });
+  });
+
+  it("the bot's membership, a migration and its own removal are kept for the child; joins and others' leaves are not", async () => {
+    await withHold(async (h) => {
+      const service = (id: number, extra: Record<string, unknown>): Update => ({
+        update_id: id,
+        message: { message_id: 500 + id, date: nowSec(), chat: { id: GROUP, type: "supergroup", title: "frens" }, from: { id: STRANGER, is_bot: false, first_name: "Cat" }, ...extra },
+      });
+      h.queue.push(
+        added(1, STRANGER),
+        joined(2),
+        service(3, { left_chat_member: { id: 31337, is_bot: false, first_name: "Zed" } }),
+        service(4, { migrate_to_chat_id: -1009999999999 }),
+        service(5, { left_chat_member: { id: 111, is_bot: true, first_name: "held" } }),
+        inGroup(6, STRANGER, "hey merryman"),
+      );
+      await h.advance(1_000);
+      assert.equal(existsSync(path.join(HOME, HELD_GROUPS_FILE)), true);
+      const kept = takeHeldGroupUpdates(HOME);
+      assert.deepEqual(
+        kept.map((e) => (e.kind === "service" ? `service:${e.service.migrateToChatId ?? e.service.leftChatMember?.id}` : e.kind)),
+        ["member", "service:-1009999999999", "service:111"],
+      );
+      assert.ok(kept.every((e) => e.bot === "111"), "tied to the bot the token names");
+      const member = kept[0]!;
+      assert.ok(member.kind === "member" && member.member.fromId === STRANGER && member.member.newStatus === "member");
+      assert.ok(!JSON.stringify(kept).includes("Cat") && !JSON.stringify(kept).includes("Zed"), "no names kept");
+      assert.equal(existsSync(path.join(HOME, HELD_GROUPS_FILE)), false, "taken once");
+      assert.deepEqual(h.sentTo(GROUP), []);
+    });
+  });
+
+  it("THE OWNER'S STAY, LEAVE OR FORGET IS KEPT, NEVER CALLED EXPIRED: the question asked before the hold still stands", async () => {
+    writeFileSync(path.join(HOME, "telegram.json"), JSON.stringify({ ownerId: OWNER }));
+    await withHold(async (h) => {
+      await h.advance(600);
+      const asked = nowSec() - 20 * 3_600;
+      const groupPress = (id: number, from: number, data: string): Update => ({
+        update_id: id,
+        callback_query: { id: `cb${id}`, data, from: { id: from }, message: { message_id: 40 + id, chat: { id: from }, date: asked } },
+      });
+      h.queue.push(
+        groupPress(1, OWNER, `tgg:stay:${GROUP}`),
+        groupPress(2, OWNER, "tgg:forget:-1005555555555"),
+        groupPress(3, STRANGER, `tgg:leave:${GROUP}`),
+      );
+      await h.advance(1_000);
+      assert.deepEqual(h.answers(), [
+        "Got it — I'll do that as soon as trading resumes.",
+        "Got it — I'll do that as soon as trading resumes.",
+        "Only my owner can do that.",
+      ]);
+      assert.deepEqual(h.sentTo(OWNER), [], "a toast, not the hold text: nothing is wrong with the button");
+      const kept = takeHeldGroupUpdates(HOME);
+      assert.deepEqual(
+        kept.map((e) => (e.kind === "press" ? `${e.press.fromId}:${e.press.chatId}:${e.press.messageId}:${e.press.data}` : e.kind)),
+        [`${OWNER}:${OWNER}:41:tgg:stay:${GROUP}`, `${OWNER}:${OWNER}:42:tgg:forget:-1005555555555`],
+        "the owner's two, for the child to carry out; not the stranger's",
+      );
+      // A Forget is written down at once too, so the stored copy is wiped
+      // within a mirror pass whatever happens to the hold.
+      const ops = parseTgForgets(readFileSync(path.join(HOME, TG_GROUPS_FORGET_FILE), "utf8"));
+      assert.deepEqual(
+        ops.map((o) => `${o.chatId}:${o.userId}`),
+        ["-1005555555555:*"],
+      );
     });
   });
 

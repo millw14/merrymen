@@ -160,6 +160,7 @@ const LRU_MAX = 2_000;
 
 /** Callback data this file owns. Short on purpose: Telegram caps it at 64 bytes. */
 const CB_PREFIX = "tgg:";
+/** The hold process reads presses by the same pattern (held-groups.ts GROUP_PRESS_RE). */
 const CB_RE = /^tgg:(stay|leave|forget):(-?\d{1,20})$/;
 
 /** Intents that report on a coin already decided: never stale, never blocked by "one reply per message". */
@@ -278,14 +279,23 @@ export interface TgGroups {
   onMember(u: TgMemberUpdate, o?: { late?: boolean }): void;
   /** A join, a leave or a supergroup migration. */
   onService(s: TgServiceMessage): void;
-  /** True when the press was one of this file's (`tgg:`), answered or refused. */
-  onCallback(cb: TgCallback): Promise<boolean>;
+  /**
+   * True when the press was one of this file's (`tgg:`), answered or refused.
+   * `late`: pressed while trading was held and kept for this process
+   * (telegram/held-groups.ts). It does what it did then, but its query is long
+   * gone, so it is not answered; the question is still edited to the outcome.
+   */
+  onCallback(cb: TgCallback, o?: { late?: boolean }): Promise<boolean>;
   /** The owner's /groups, in their DM `chatId`. */
   groupsCommand(chatId: number): Promise<void>;
-  /** The owner's /forget in a group: that chat's memory and nothing else. */
-  forgetChat(chatId: number, messageId?: number): void;
-  /** Anyone's /forgetme: their lines and note in that chat. */
-  forgetMe(chatId: number, userId: number, messageId?: number): Promise<void>;
+  /**
+   * The owner's /forget in a group: that chat's memory and nothing else.
+   * `late` (the service's backlog rule): wiped all the same, and nothing is
+   * said in the room.
+   */
+  forgetChat(chatId: number, messageId?: number, o?: { late?: boolean }): void;
+  /** Anyone's /forgetme: their lines and note in that chat. `late` as for forgetChat. */
+  forgetMe(chatId: number, userId: number, messageId?: number, o?: { late?: boolean }): Promise<void>;
   /** The casual group line after a slash command (see TgCommandNotice). Rate-limited here. */
   commandNotice(chatId: number, messageId: number | undefined, fromId: number, what: TgCommandNotice, threadId?: number): Promise<void>;
   /**
@@ -1753,7 +1763,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
   };
 
-  const forgetChat = (chatId: number, messageId?: number): void => {
+  const forgetChat = (chatId: number, messageId?: number, o?: { late?: boolean }): void => {
     try {
       recordForget(chatId, "*");
       if (!store.room(chatId)) return;
@@ -1761,6 +1771,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       store.forgetChat(chatId);
       forgetInMemory(chatId);
       note("ok", "Telegram groups: the owner wiped one group's memory");
+      // A late request is done, not answered: the room has moved on.
+      if (o?.late === true) return;
       enqueue(
         chatId,
         async () => {
@@ -2040,12 +2052,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       }
     },
 
-    async onCallback(cb: TgCallback): Promise<boolean> {
+    async onCallback(cb: TgCallback, o?: { late?: boolean }): Promise<boolean> {
       try {
         if (!cb || typeof cb.data !== "string" || !cb.data.startsWith(CB_PREFIX)) return false;
         const opts = optsNow();
         if (!opts) return true;
         const answer = async (text: string): Promise<void> => {
+          if (o?.late === true) return;
           try {
             await answerCallbackQuery(opts, cb.id, text);
           } catch (e) {
@@ -2143,7 +2156,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
 
     forgetChat,
 
-    async forgetMe(chatId: number, userId: number, messageId?: number): Promise<void> {
+    async forgetMe(chatId: number, userId: number, messageId?: number, o?: { late?: boolean }): Promise<void> {
       try {
         if (!Number.isSafeInteger(userId)) return;
         // The "done 🫡" is as old as the request: a backlog of them goes stale
@@ -2173,7 +2186,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
             { flush: true },
           );
         }
-        if (!canTalk(chatId)) return;
+        // A late request (the service's backlog rule) is wiped all the same,
+        // and nothing is said: the room has moved on.
+        if (o?.late === true || !canTalk(chatId)) return;
         // The words at most once per person per chat per FORGOT_ME_EVERY_MS;
         // a second /forgetme inside it is wiped all the same, silently.
         const k = `forgetme:${chatId}:${userId}`;

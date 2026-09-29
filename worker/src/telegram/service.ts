@@ -123,6 +123,7 @@ import { describeLlmFailure, isLlmProviderFailure } from "../llm-failure";
 import type { TgGroupsStore } from "./tg-groups/store";
 import type { TgCoinsPort } from "./tg-groups/types";
 import { createTgGroups, type TgCommandNotice, type TgGroups, type TgGroupsDeps } from "./tg-groups/handler";
+import type { HeldGroupEntry } from "./held-groups";
 
 /**
  * Commands that are really questions when they arrive as WORDS: answered by
@@ -177,6 +178,13 @@ export interface TelegramServiceDeps {
    */
   tgGroupsStore?: TgGroupsStore;
   tgCoins?: TgCoinsPort;
+  /**
+   * What a hold process kept about groups while trading was held
+   * (held-groups.ts takeHeldGroupUpdates over this home): taken once, at the
+   * first poll that can hand it to the group handler. Hosted only; without
+   * it there is nothing to take.
+   */
+  heldGroupUpdates?: () => HeldGroupEntry[];
   /** Injectable for tests. */
   now?: () => number;
   /** Injectable for tests: the group handler's clock, dice, waits, environment and log. */
@@ -245,6 +253,17 @@ function staleAction(text: string, allowed: boolean): "late-code" | "refuse" | "
   if (!allowed) return "refuse";
   if (kind === "pause" || kind === "kill") return "run";
   return "hold";
+}
+
+/**
+ * What a late slash command typed in a group may still do, by its name (ours,
+ * the @name gone) and text (routeGroup). "forget": a /forgetme or /forget,
+ * which only take something away, whenever it arrives. "run": /pause or
+ * /kill, which only reduce risk, as in a DM (staleAction). "hold": the rest.
+ */
+function lateGroupCommand(name: string, text: string): "forget" | "run" | "hold" {
+  if (name === "forgetme" || name === "forget") return "forget";
+  return staleAction(text, true) === "run" ? "run" : "hold";
 }
 
 /** One batch's backlog bookkeeping: who has been answered, and what each allowlisted chat had held back. */
@@ -415,6 +434,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * reads as the defaults, with Telegram off.
    */
   let offReads = 0;
+  /** Whether what a hold process kept about groups has been taken (replayHeldGroups). Once per process. */
+  let heldGroupsTaken = false;
   const history = new Map<number, { role: "user" | "assistant"; content: string }[]>();
   // Memory ids surfaced on the previous turn, per chat. A follow-up like "is it
   // done?" shares no words with anything on disk, so without carrying the last
@@ -1399,6 +1420,40 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   };
 
   /**
+   * The command's name when a group slash command is this bot's: bare
+   * ("/cmd"), or addressed to this bot by its username ("/cmd@thisbot"),
+   * lower-cased with the @name gone. Null when it names another bot, or any
+   * bot while getMe has not answered: not provably ours, so not ours.
+   */
+  const ownGroupCommand = (text: string, cfg: ResolvedConfig): string | null => {
+    const head = text.trim().slice(1).split(/\s+/)[0] ?? "";
+    const addressedTo = /@(\w+)$/.exec(head)?.[1];
+    const me = selfFor(cfg)?.username;
+    const ours = !addressedTo || (!!me && addressedTo.toLowerCase() === me.toLowerCase());
+    return ours ? head.replace(/@\w+$/, "").toLowerCase() : null;
+  };
+
+  /**
+   * A group slash command as the DM handleGroupCommand would forward it as,
+   * or null when it would reach nobody's DM: not ours, another bot's bare
+   * command, a code (/link, /start <code>: never compared from a group), a
+   * forget (the room's, not a DM's), or a sender who is not on the allowlist
+   * themselves, or speaks through a chat. The backlog rule counts and holds a
+   * late one as this DM (routeGroup), so a late /buy typed in a group gets the
+   * same "I was offline" note in the sender's DM as a late /buy sent there.
+   */
+  const groupCommandDm = (m: TgMessage, cfg: ResolvedConfig): TgMessage | null => {
+    if (!m.text.trim().startsWith("/") || m.senderChatId !== undefined || m.fromIsBot === true) return null;
+    if (!cfg.telegramAllowlist.includes(m.fromId)) return null;
+    const name = ownGroupCommand(m.text, cfg);
+    if (name === null || name === "forgetme" || name === "forget") return null;
+    const slash = parseSlash(m.text);
+    if (slash?.kind === "link" || slash?.kind === "start") return null;
+    if (slash?.kind === "unknown" && name !== "agent" && /^unknown command\b/.test(slash.text)) return null;
+    return { updateId: m.updateId, chatId: m.fromId, fromId: m.fromId, fromUsername: m.fromUsername, text: m.text, date: m.date };
+  };
+
+  /**
    * A SLASH COMMAND TYPED IN A GROUP (docs/tg-groups.md "Commands in groups").
    *
    * It still goes through `handle` and its sender rules; what changes is who
@@ -1424,15 +1479,18 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    *   - The owner's /groups is answered in their DM, like the DM command.
    *   - /forget wipes that group's memory only, and only for the owner: the
    *     owner's DM memory is not the room's to erase. /forgetme is anyone's.
+   *
+   * `late`: it waited out a silence, or reached this bot before this agent
+   * did (routeGroup), and it is one of the few a late line may still run: a
+   * /forgetme or the owner's /forget, which only take something away, or a
+   * /pause or /kill, which only reduce risk. It runs by every rule above, the
+   * DM's included, and the room hears nothing about it.
    */
-  const handleGroupCommand = async (msg: TgMessage, cfg: ResolvedConfig): Promise<void> => {
+  const handleGroupCommand = async (msg: TgMessage, cfg: ResolvedConfig, late = false): Promise<void> => {
     const text = msg.text.trim();
-    const head = text.slice(1).split(/\s+/)[0] ?? "";
-    const addressedTo = /@(\w+)$/.exec(head)?.[1];
-    // Unknown username (getMe not answered yet): not provably ours, so not ours.
-    const me = selfFor(cfg)?.username;
-    const ours = !addressedTo || (!!me && addressedTo.toLowerCase() === me.toLowerCase());
-    const name = head.replace(/@\w+$/, "").toLowerCase();
+    const own = ownGroupCommand(text, cfg);
+    const ours = own !== null;
+    const name = own ?? "";
     // A person speaking through a chat (an anonymous admin, a channel) cannot
     // be told apart from any other: nobody in particular to answer or forget.
     const via = msg.senderChatId !== undefined;
@@ -1444,7 +1502,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // a 429 pause; the poll loop must not wait on any of it (rule 7). Neither
     // call ever rejects.
     const notice = (what: TgCommandNotice): void => {
-      if (tgGroups) void tgGroups.commandNotice(msg.chatId, msg.messageId, msg.fromId, what, thread);
+      if (tgGroups && !late) void tgGroups.commandNotice(msg.chatId, msg.messageId, msg.fromId, what, thread);
     };
 
     const slash = parseSlash(text);
@@ -1472,11 +1530,13 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       return;
     }
     if (!ours) return;
+    // Whoever hands a late one over, nothing else a late one says runs.
+    if (late && lateGroupCommand(name, text) === "hold") return;
 
     if (name === "forgetme") {
       // The wipe itself happens before forgetMe first awaits; only the
-      // "done 🫡" is left to the group queue.
-      if (!via && tgGroups) void tgGroups.forgetMe(msg.chatId, msg.fromId, msg.messageId);
+      // "done 🫡" is left to the group queue, and a late one is not answered.
+      if (!via && tgGroups) void tgGroups.forgetMe(msg.chatId, msg.fromId, msg.messageId, { late });
       return;
     }
     // THE OWNER'S /groups is answered in their DM, as when they type it there;
@@ -1500,7 +1560,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       return;
     }
     if (slash?.kind === "forget") {
-      if (isOwner) tgGroups?.forgetChat(msg.chatId, msg.messageId);
+      if (isOwner) tgGroups?.forgetChat(msg.chatId, msg.messageId, { late });
       else notice("owner-only");
       return;
     }
@@ -1559,37 +1619,66 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * included, go to the group persona, which knows nothing private, and a
    * slash command to handleGroupCommand, which answers in the asker's DM.
    *
-   * A LATE ONE IS DROPPED (`late`: it waited out a silence, or reached this
-   * bot before this agent was switched onto it; the backlog rule in
-   * pollOnce). It is not answered, reacted to, remembered or run: a room has
-   * moved on hours after an outage, and a Merryman that answers it then, or
-   * runs a /buy typed into it then, is doing something nobody asked for any
-   * more. Nor does a room get any of a DM's backlog notes (the late-code
-   * prompt, the refusal, "I was offline"): the room is not waiting on them,
-   * and whether the bot was down is nobody's business there. The coin flow
-   * has its own, stricter clock besides (docs/tg-groups.md: a CA older than
-   * ten minutes is claimed and left alone).
+   * A LATE ONE IS DROPPED (`late`: "stale" when it waited out a silence,
+   * "early" when it reached this bot before this agent was switched onto it;
+   * the backlog rule in pollOnce). It is not answered, reacted to, remembered
+   * or run: a room has moved on hours after an outage, and a Merryman that
+   * answers it then, or runs a /buy typed into it then, is doing something
+   * nobody asked for any more. Nor does a room get any of a DM's backlog notes
+   * (the late-code prompt, the refusal, "I was offline"): the room is not
+   * waiting on them, and whether the bot was down is nobody's business there.
+   * The coin flow has its own, stricter clock besides (docs/tg-groups.md: a
+   * CA older than ten minutes is claimed and left alone).
    *
-   * One thing is done whatever the line's age: THE LIVE CODE IN ANY GROUP
-   * LINE ("try /link CODE", "code: CODE!", a caption, even another bot's
-   * line) is replaced before anything else looks at it. The room has seen it
-   * whenever it was typed, and replacing it only ever takes something away.
+   * What is done whatever the line's age, none of it said in the room:
+   *
+   * - THE LIVE CODE IN ANY GROUP LINE ("try /link CODE", "code: CODE!", a
+   *   caption, even another bot's line) is replaced before anything else looks
+   *   at it. The room has seen it whenever it was typed, and replacing it only
+   *   ever takes something away.
+   * - A /forgetme, or the owner's /forget, WIPES. Every /forgetme does
+   *   (docs/tg-groups.md Memory), and a redeploy's restart is a silence, so
+   *   dropping one would drop every request typed during one.
+   *
+   * And what a late DM still gets (holdStale), in the sender's own DM, for a
+   * command someone on the allowlist typed here while the bot was down, since
+   * that is where the answer to it would have gone (handleGroupCommand):
+   *
+   * - /pause and /kill RUN, because they only reduce risk, through every rule
+   *   a live one meets. A /kill still only asks for a /confirm sent live.
+   * - Anything else of ours is held back, and counted into that DM's one "I
+   *   was offline" note, so an owner who typed /buy in the room during an
+   *   outage learns that it did not run.
+   *
+   * Only from a silence, not from before the switch: holdEarly runs nothing,
+   * since on a bot that served another agent those commands were that
+   * agent's.
    */
-  const routeGroup = (m: TgMessage, cfg: ResolvedConfig, late: boolean): Promise<void> => {
+  const routeGroup = (m: TgMessage, cfg: ResolvedConfig, late: "early" | "stale" | null, batch: StaleBatch): Promise<void> => {
     if (m.text) {
       const text = m.text;
       replaceShownCode(m.chatId, cfg, (live) => groupLineShowsCode(text, live));
     }
-    if (late) return Promise.resolve();
     // Voice notes are not transcribed in groups: nobody asked the owner's
     // transcription key to listen to a room.
     if (m.voiceFileId && !m.text) return Promise.resolve();
     // The loop guard: another bot's line. An anonymous admin (a bot account
     // posting for a person, with sender_chat set) is a person.
     if (m.fromIsBot === true && m.senderChatId === undefined) return Promise.resolve();
-    if (m.text.trim().startsWith("/")) return handleGroupCommand(m, cfg);
-    tgGroups?.onMessage(m);
-    return Promise.resolve();
+    const command = m.text.trim().startsWith("/");
+    if (late === null) {
+      if (command) return handleGroupCommand(m, cfg);
+      tgGroups?.onMessage(m);
+      return Promise.resolve();
+    }
+    const name = command ? ownGroupCommand(m.text, cfg) : null;
+    if (name === null) return Promise.resolve();
+    const action = lateGroupCommand(name, m.text);
+    if (action === "forget") return handleGroupCommand(m, cfg, true);
+    if (late === "early") return Promise.resolve();
+    const dm = groupCommandDm(m, cfg);
+    if (!dm) return Promise.resolve();
+    return action === "run" ? handleGroupCommand(m, cfg, true) : holdStale(dm, cfg, batch);
   };
 
   /**
@@ -1747,13 +1836,22 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // and never moves the backlog boundary above.
     if (!botSelf || botSelf.token !== token) await refreshSelf(token);
     else if (Date.now() - botSelf.at > SELF_REFRESH_MS) void refreshSelf(token);
+    // What a hold process kept while trading was held, before this batch: it
+    // all happened before anything in it. Once the handler can tell the bot's
+    // own removal from anyone's, which takes getMe.
+    if (!heldGroupsTaken && tgGroups && deps.heldGroupUpdates && selfFor(cfg)) {
+      heldGroupsTaken = true;
+      await replayHeldGroups(tgGroups, deps.heldGroupUpdates, token);
+    }
     // Sent to this bot before this agent was switched onto it (boundAt).
     const boundAt = stateRef.get().boundAt;
     const early = (date: number) => boundAt !== null && date > 0 && date < boundAt;
     const stale = (date: number) => !early(date) && date > 0 && date < armed;
     // A group hears nothing about a backlog (routeGroup), so only DMs are
-    // counted into the one summary each allowlisted chat gets.
-    const batch: StaleBatch = { told: new Set(), held: heldPerChat(messages.filter((m) => !isGroupMessage(m) && stale(m.date)), cfg) };
+    // counted into the one summary each allowlisted chat gets, with the late
+    // group commands that would have been answered in one (groupCommandDm).
+    const lateDms = messages.filter((m) => stale(m.date)).map((m) => (isGroupMessage(m) ? groupCommandDm(m, cfg) : m));
+    const batch: StaleBatch = { told: new Set(), held: heldPerChat(lateDms.filter((m): m is TgMessage => m !== null), cfg) };
     /**
      * WHERE A MESSAGE GOES. A DM goes to `handle` exactly as it always has
      * (the owner's /groups aside), or, when it waited out a silence or reached
@@ -1767,7 +1865,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
      * own queue, so a busy group never holds up the owner's DMs or buttons.
      */
     const route = (m: TgMessage, c: ResolvedConfig): Promise<void> => {
-      if (isGroupMessage(m)) return routeGroup(m, c, early(m.date) || stale(m.date));
+      if (isGroupMessage(m)) return routeGroup(m, c, early(m.date) ? "early" : stale(m.date) ? "stale" : null, batch);
       if (early(m.date)) return holdEarly(m, c);
       if (stale(m.date)) return holdStale(m, c, batch);
       if (
@@ -1856,6 +1954,38 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     const fresh = freshCfg();
     if (fresh?.telegramEnabled && fresh.telegramBotToken === token) await pushMenus(fresh, token);
     return POLL_GAP_MS;
+  };
+
+  /**
+   * WHAT A HOLD PROCESS KEPT ABOUT GROUPS while trading was held
+   * (held-groups.ts): the bot's own membership, migrations, its removal, and
+   * the owner's Stay, Leave and Forget. Handed to the group handler in the
+   * order they happened, as late updates are: recorded, and nothing said in a
+   * room (no hello days after an add). A stranger's add is asked about now,
+   * with its own 24 hours; a press does what it did then, and its question is
+   * edited to say so. Only this bot's. Taken off the disk before any of it
+   * runs, so a crash part way never repeats one.
+   */
+  const replayHeldGroups = async (groups: TgGroups, take: () => HeldGroupEntry[], token: string): Promise<void> => {
+    const bot = botIdOf(token);
+    let entries: HeldGroupEntry[];
+    try {
+      entries = take().filter((e) => e.bot === bot);
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      try {
+        if (e.kind === "member") groups.onMember(e.member, { late: true });
+        else if (e.kind === "service") groups.onService({ ...e.service, newChatMembers: [] });
+        else await groups.onCallback({ ...e.press, updateId: 0, id: "" }, { late: true });
+      } catch (err) {
+        deps.note("warn", `Telegram: error applying a group update kept while trading was held — ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (entries.length > 0) {
+      deps.note("ok", `Telegram groups: applied ${entries.length === 1 ? "1 group update" : `${entries.length} group updates`} kept while trading was held`);
+    }
   };
 
   /**

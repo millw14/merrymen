@@ -476,7 +476,9 @@ Per chat, durable (survives hosted redeploys via the orchestrator ferry):
   chat's coin memos (the coin and its verdict stay), drops that chat's summary
   when it names them (the next memory pass rewrites it from the lines that are
   left), and says "done 🫡" (at most once per person per chat per 10 minutes;
-  every `/forgetme` wipes, only the words are limited). Each request is also
+  every `/forgetme` wipes, only the words are limited, and one that arrives
+  late or while trading is held wipes without them: After an outage, and
+  while trading is held). Each request is also
   written down on its own before the wipe (Storage and the ferry), so it holds
   even when the memory it erases is not the one this process holds. Whatever
   is still queued or typing for their earlier lines (for `/forget`, for
@@ -610,8 +612,19 @@ bot. In a group:
 * A late line is dropped: never answered, reacted to, remembered or run (a
   `/buy` typed into the room during the silence never trades), and the room
   hears none of a DM's backlog notes (the late-code prompt, the refusal,
-  "I was offline"). The one thing still done is replacing the live link code
-  when the line shows it.
+  "I was offline"). What is still done, none of it said in the room:
+  * The live link code is replaced when the line shows it.
+  * A `/forgetme`, or the owner's `/forget`, wipes and is written down, as
+    every one does (Memory); only the "done 🫡" is left out. A redeploy's
+    restart is such a silence, so dropping them would drop every request
+    typed during one.
+  * A command of ours typed by someone on the allowlist during a silence (not
+    before this agent was switched onto the bot, when nothing runs) is
+    handled as the DM it would have been answered in, by the DM backlog
+    rule: `/pause` and `/kill` run there by every DM rule (a `/kill` still
+    only asks for a `/confirm`, which must be sent live), and anything else
+    is held back and counted into that DM's one "I was offline" note. Anyone
+    else's hears nothing, in the room or a DM.
 * A late `my_chat_member` update is recorded as any other (approved, pending
   with the owner asked in their DM, left), but nothing is said in the group:
   no hello hours after the add. A late join gets no welcome; a late leave or
@@ -622,17 +635,37 @@ bot. In a group:
 
 While a paper tenant's trading is held (its practice book would not
 restore), a hold process answers the owner's bot in the child's place
-(`telegram/hold.ts`). It says nothing in any group, links nothing from one,
-runs nothing typed there and reads no membership or service update; a press
-in a group gets "That button has expired." A Stay, Leave or Forget pressed in
-the owner's DM is answered like any press there (nothing was done), and the
-same button works once trading resumes. It does replace a live link code a
-group line shows, and tells the owner in their DM. The group memory is left
-alone for the length of the hold: the orchestrator neither publishes nor
-restores it (forget requests still reach the stored row), and the spawn that
-ends the hold restores it as any spawn does. A group the bot was added to
-while held is adopted as soon as the owner writes there (Which groups it
-talks in).
+(`telegram/hold.ts`). It says nothing in any group, links nothing from one
+and runs nothing typed there; a press in a group gets "That button has
+expired." It keeps no group memory, so what it cannot do it writes down:
+
+* A `/forgetme`, or the owner's `/forget` (by the rules above: ours, from a
+  person, `/forget` from the owner only), late or live, goes into the forget
+  file (Storage and the ferry). The orchestrator applies it to the stored
+  copy within one mirror pass, and the child that ends the hold applies it
+  to the memory it opens.
+* The bot's own `my_chat_member` updates in groups, supergroup migrations and
+  its own removal are kept in `<MERRYMEN_HOME>/telegram-held-groups.json`
+  (`telegram/held-groups.ts`: the newest 100, no names, each tied to the bot
+  its token names). Joins and lines are not.
+* A Stay, Leave or Forget the owner presses in their DM is kept there too,
+  and answered "Got it — I'll do that as soon as trading resumes." (or, when
+  it could not be kept, "press it again once I'm back"), never "expired". A
+  Forget also goes into the forget file at once.
+
+The child that ends the hold takes that file at its first poll (removed
+before any of it runs, so nothing is applied twice) and applies this bot's
+entries in order, before anything newer and before its first sweep, as late
+updates: a stranger's add is pending, with the owner asked and its own 24 h
+from then; a removal starts the 30 days; a migration moves the memory; a
+press does what it did, and its question is edited to say so. The hold does
+replace a live link code a group line shows, and tells the owner in their DM.
+The group memory is left alone for the length of the hold: the orchestrator
+neither publishes nor restores it (forget requests still reach the stored
+row), and the spawn that ends the hold restores it as any spawn does. A
+redeploy that wipes the home during a hold loses what was kept there; a
+group the bot then finds itself in is adopted as soon as the owner writes
+there (Which groups it talks in).
 
 ## Commands in groups
 

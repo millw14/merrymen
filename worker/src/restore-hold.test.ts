@@ -224,9 +224,24 @@ describe("held tenants reach only the loops they belong in", () => {
  * through every relative import they reach, not only their own, since a
  * forbidden module one hop away is loaded all the same. Type-only imports are
  * erased and do not count.
+ *
+ * Nor the Telegram groups' memory or persona. The hold writes a /forgetme and
+ * what it passes over in groups down for whoever holds that memory
+ * (tg-groups/forget-file.ts, held-groups.ts), and reaches no further.
  */
 describe("the hold process's imports", () => {
-  const FORBIDDEN = ["store.ts", "db.ts", "ledger-mirror.ts", "llm.ts", "paper-checkpoint.ts", "telegram/service.ts", "telegram/interpreter.ts", "telegram/executor.ts"];
+  const FORBIDDEN = [
+    "store.ts",
+    "db.ts",
+    "ledger-mirror.ts",
+    "llm.ts",
+    "paper-checkpoint.ts",
+    "telegram/service.ts",
+    "telegram/interpreter.ts",
+    "telegram/executor.ts",
+    "telegram/tg-groups/store.ts",
+    "telegram/tg-groups/handler.ts",
+  ];
 
   const runtimeImports = (file: string): string[] => {
     const src = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
@@ -273,6 +288,7 @@ describe("the hold process's imports", () => {
   it("the walk does find a forbidden module when there is one (control)", () => {
     const reached = [...reach(path.join(SRC, "telegram/service.ts"))].map((f) => path.relative(SRC, f).split(path.sep).join("/"));
     assert.ok(reached.includes("store.ts") && reached.includes("llm.ts"));
+    assert.ok(reached.includes("telegram/tg-groups/store.ts") && reached.includes("telegram/tg-groups/handler.ts"));
   });
 });
 

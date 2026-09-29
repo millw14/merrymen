@@ -20,8 +20,9 @@
  * - An allowlisted chat can /kill, through the same confirm and the same
  *   hosted kill path as the child (kill-request.ts hostedKillFromChat), so
  *   the owner can always revoke. Everything else, /status and /help and
- *   button presses included, gets holdText: that trading is held, and why in
- *   a short class. Never the restore's own numbers.
+ *   button presses included (bar the owner's Telegram-group Stay, Leave and
+ *   Forget, below), gets holdText: that trading is held, and why in a short
+ *   class. Never the restore's own numbers.
  * - A backlog is handled by the child's rules (service.ts pollOnce): a late
  *   code is never compared or counted, a stranger gets one refusal, and only
  *   /kill runs. The same poll timings, backoff and bot binding, from
@@ -29,19 +30,38 @@
  *   expects to find it when trading resumes.
  * - Telegram groups (docs/tg-groups.md) are not answered at all: no line, no
  *   refusal, no link, no /kill, and no word that trading is held, which is
- *   the owner's business and not the room's. Membership changes and service
- *   messages are passed over (the child adopts a group it finds itself in
- *   once the owner writes there). The one thing done is the child's: a live
- *   link code a room has seen is replaced, and the owner told in their DM.
+ *   the owner's business and not the room's. Three things are done, none of
+ *   them said in the room. A live link code a room has seen is replaced, and
+ *   the owner told in their DM, as the child does. A /forgetme, or the
+ *   owner's /forget, is written to the forget file (tg-groups/forget-file.ts),
+ *   which the orchestrator carries to the stored memory and the child applies
+ *   when it opens it: every /forgetme wipes, held or not. And the bot's own
+ *   membership, migrations, its removal and the owner's Stay, Leave and
+ *   Forget presses are kept for the child to apply when trading resumes
+ *   (held-groups.ts), since nothing here can.
  *
  * WHAT IT MUST NOT TOUCH. No store, no database, no ledger, no model, no paper
- * book (restore-hold.test.ts pins the imports). The orchestrator is retrying
- * the restore against this home's merrymen.db while this runs, and a held
- * tenant must never look like a running one to anything that trades or
- * mirrors. It has no DATABASE_URL anyway (childEnv).
+ * book and no group memory (restore-hold.test.ts pins the imports): the two
+ * group files it writes are notes for whoever holds that memory, not the
+ * memory. The orchestrator is retrying the restore against this home's
+ * merrymen.db while this runs, and a held tenant must never look like a
+ * running one to anything that trades or mirrors. It has no DATABASE_URL
+ * anyway (childEnv).
  */
 
-import { answerCallbackQuery, esc, getMe, getUpdates, sendMessage as sendTelegramMessage, type TgCallback, type TgMessage } from "./api";
+import {
+  answerCallbackQuery,
+  esc,
+  getMe,
+  getUpdates,
+  sendMessage as sendTelegramMessage,
+  type TgCallback,
+  type TgMemberUpdate,
+  type TgMessage,
+  type TgServiceMessage,
+} from "./api";
+import { GROUP_PRESS_RE, keepHeldGroupUpdate, type HeldGroupEntry } from "./held-groups";
+import { appendForget, cleanForget } from "./tg-groups/forget-file";
 import { bindToken, botIdOf, ensureLinkCode, recordPoll, retireLegacyCode, rotateLinkCode, type StateRef } from "./state";
 import { linkReply, tallyFailedLink, tryLink, type LinkFails } from "./link";
 import { CONFIRM_TTL_SEC, killDoneText, killPromptText, type KillResult } from "./kill-confirm";
@@ -79,6 +99,14 @@ import { UNCLASSIFIED_BLOCK, holdText, readRestoreBlocked, type RestoreBlock } f
  */
 const CODE_SHOWN_TEXT =
   "your link code got posted in a group, so i swapped it for a new one. link codes only work here in DMs — the new one is in Settings → Telegram.";
+
+/**
+ * The toast for the owner's Stay, Leave or Forget pressed while trading is
+ * held (groupPress): kept for when trading resumes, or, when it could not be
+ * kept, what to do instead. Never "expired": the question still stands.
+ */
+const PRESS_KEPT_TEXT = "Got it — I'll do that as soon as trading resumes.";
+const PRESS_NOT_KEPT_TEXT = "I can't do that while trading is held — press it again once I'm back.";
 
 /** What the hold loop reads of the config. The real one is settings.ts resolveConfig. */
 export type HoldConfig = Pick<
@@ -137,6 +165,10 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
   let offReads = 0;
   const earlyTold = new Set<string>();
   const linkFails: LinkFails = new Map();
+  /** This bot's username, from getMe, for "/forgetme@name" (forgetAsked). */
+  let self: { token: string; username: string } | null = null;
+  /** A failure to keep a group update for the child is logged once, until one is kept again. */
+  let keepWarned = false;
   /** A /kill waiting for /confirm, keyed `${chatId}:${fromId}` like the child's, and until when. */
   const parkedKills = new Map<string, number>();
 
@@ -248,14 +280,134 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
    * credential, and while trading is held a /link is exactly what this
    * process answers. The owner is told in their DM why the code on their
    * Settings page changed.
+   *
+   * AND A /forgetme IS WRITTEN DOWN (forgetAsked), late or live, since it
+   * only ever takes something away.
    */
   const inGroup = async (msg: TgMessage, cfg: HoldConfig): Promise<void> => {
     const state = stateRef.get();
-    if (!state.linkCode || !groupLineShowsCode(msg.text, state.linkCode)) return;
-    stateRef.set(rotateLinkCode(state));
-    note("warn", `Telegram: a link code was typed in group ${redactChat(msg.chatId)} while trading is held; it was replaced`);
-    const owner = state.ownerId;
-    if (owner !== null) await sendMessage({ token: cfg.telegramBotToken! }, owner, CODE_SHOWN_TEXT);
+    if (state.linkCode && groupLineShowsCode(msg.text, state.linkCode)) {
+      stateRef.set(rotateLinkCode(state));
+      note("warn", `Telegram: a link code was typed in group ${redactChat(msg.chatId)} while trading is held; it was replaced`);
+      const owner = state.ownerId;
+      if (owner !== null) await sendMessage({ token: cfg.telegramBotToken! }, owner, CODE_SHOWN_TEXT);
+    }
+    await forgetAsked(msg, cfg);
+  };
+
+  /** This bot's username: asked of getMe once per token, and unknown while it does not answer. */
+  const selfName = async (token: string): Promise<string | null> => {
+    if (self?.token === token) return self.username;
+    const r = await getMe({ token });
+    if (!r.bot) return null;
+    self = { token, username: r.bot.username };
+    return self.username;
+  };
+
+  /** A forget request, into this home's forget file. Logged, without ids, only when it could not be. */
+  const recordForget = (chatId: number, userId: number | "*"): boolean => {
+    const op = cleanForget({ chatId, userId, atMs: now() * 1000 });
+    if (!op) return false;
+    try {
+      appendForget(merrymenHome(), op);
+      return true;
+    } catch (e) {
+      note("warn", `Telegram: a group forget request could not be saved while trading is held (${(e as NodeJS.ErrnoException).code ?? "error"})`);
+      return false;
+    }
+  };
+
+  /**
+   * A /forgetme, or the owner's /forget, typed in a group while trading is
+   * held. EVERY /forgetme WIPES (docs/tg-groups.md Memory), and a hold can
+   * last days, so the request is written down for whoever holds the memory
+   * (tg-groups/forget-file.ts): the orchestrator applies it to the stored copy
+   * on its mirror clock, and the child that ends the hold to the memory it
+   * opens. Nothing is said in the room, as nothing is while held.
+   *
+   * By the child's rules (service.ts handleGroupCommand): ours ("/forgetme" or
+   * "/forgetme@thisbot", never another bot's), from a person (not another bot,
+   * and not someone speaking through a chat, who could be anyone), and
+   * /forget only from the owner.
+   */
+  const forgetAsked = async (msg: TgMessage, cfg: HoldConfig): Promise<void> => {
+    const head = slashHead(msg.text);
+    if (head?.cmd !== "forgetme" && head?.cmd !== "forget") return;
+    if (msg.senderChatId !== undefined || msg.fromIsBot === true) return;
+    const addressedTo = /@(\w+)$/.exec(msg.text.trim().slice(1).split(/\s+/)[0] ?? "")?.[1];
+    if (addressedTo !== undefined) {
+      const me = await selfName(cfg.telegramBotToken!);
+      if (me === null || me.toLowerCase() !== addressedTo.toLowerCase()) return;
+    }
+    const owner = stateRef.get().ownerId;
+    const userId = head.cmd === "forgetme" ? msg.fromId : owner !== null && msg.fromId === owner ? "*" : null;
+    if (userId !== null) recordForget(msg.chatId, userId);
+  };
+
+  /** Kept for the child that ends the hold (held-groups.ts). */
+  const keep = (entry: HeldGroupEntry): boolean => {
+    const ok = keepHeldGroupUpdate(merrymenHome(), entry);
+    if (ok) keepWarned = false;
+    else if (!keepWarned) {
+      keepWarned = true;
+      note("warn", "Telegram: a group update could not be kept for when trading resumes");
+    }
+    return ok;
+  };
+
+  /**
+   * The bot's own membership in a group, a migration, or the bot's own
+   * removal. Nothing here can record them, so they are kept for the child,
+   * which records them as late updates when trading resumes: a stranger's add
+   * is then asked about with its own 24 hours, a removal starts the 30-day
+   * pruning, and a migrated group keeps its memory. Joins are not kept: a
+   * late join gets no welcome.
+   */
+  const keepMember = (u: TgMemberUpdate, token: string): void => {
+    const bot = botIdOf(token);
+    if (bot === null || (u.chatType !== "group" && u.chatType !== "supergroup")) return;
+    keep({ bot, kind: "member", member: u });
+  };
+  const keepService = (s: TgServiceMessage, token: string): void => {
+    const bot = botIdOf(token);
+    if (bot === null || (s.chatType !== "group" && s.chatType !== "supergroup")) return;
+    const removed = s.leftChatMember !== undefined && String(s.leftChatMember.id) === bot;
+    if (!removed && s.migrateToChatId === undefined && s.migrateFromChatId === undefined) return;
+    keep({ bot, kind: "service", service: { ...s, newChatMembers: [], leftChatMember: removed ? s.leftChatMember : undefined } });
+  };
+
+  /**
+   * The owner's Stay, Leave or Forget (tg-groups/handler.ts), pressed in their
+   * DM while trading is held. Its question lives in the group store, not in
+   * the process that asked it, so it still stands: the child counts such a
+   * press whenever it arrives. Nothing here can carry it out, so it is kept
+   * for the child that ends the hold, which does it then, before anything
+   * newer and before its first sweep could leave the group. A Forget is also
+   * written down at once, so the stored memory is wiped within a mirror pass.
+   *
+   * NEVER "EXPIRED". That was a lie about a button that still works, and an
+   * owner who took it at its word did not press Stay again: a stranger's
+   * group ran out its 24 hours while held and was left, and blocked, the
+   * moment trading resumed. The toast says what will happen, or, when it
+   * could not be kept, to press it again once trading resumes.
+   */
+  const groupPress = async (cb: TgCallback, cfg: HoldConfig): Promise<void> => {
+    const token = cfg.telegramBotToken!;
+    const owner = stateRef.get().ownerId;
+    // The child's rule (handler.ts onCallback): the owner, in their own DM.
+    if (owner === null || cb.fromId !== owner || cb.chatId !== owner) {
+      await answerCallbackQuery({ token }, cb.id, "Only my owner can do that.");
+      return;
+    }
+    const m = GROUP_PRESS_RE.exec(cb.data);
+    const bot = botIdOf(token);
+    if (!m || bot === null) {
+      await answerCallbackQuery({ token }, cb.id, "That button has expired.");
+      return;
+    }
+    const forgot = m[1] === "forget" && recordForget(Number(m[2]), "*");
+    const kept = keep({ bot, kind: "press", press: { chatId: cb.chatId, fromId: cb.fromId, messageId: cb.messageId, data: cb.data, date: cb.date } });
+    await answerCallbackQuery({ token }, cb.id, kept || forgot ? PRESS_KEPT_TEXT : PRESS_NOT_KEPT_TEXT);
   };
 
   /**
@@ -338,6 +490,7 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
       parkedKills.clear();
       armedAt = null;
       const me = await getMe({ token });
+      if (me.bot) self = { token, username: me.bot.username };
       note("ok", me.bot ? `Telegram: bot changed to @${me.bot.username}` : "Telegram: bot changed");
       return;
     }
@@ -419,9 +572,11 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
     const early = (date: number) => boundAt !== null && date > 0 && date < boundAt;
     const stale = (date: number) => !early(date) && date > 0 && date < armed;
     const told = new Set<string>();
+    const expire = (cb: TgCallback): Promise<void> => answerCallbackQuery({ token }, cb.id, "That button has expired.").then(() => {});
     // Groups first, whatever the date: nothing in a group goes down a DM's
-    // path (inGroup). my_chat_member updates and service messages are not
-    // read at all; the offset moves past them with the batch.
+    // path (inGroup). my_chat_member updates and service messages are kept
+    // for the child, whatever their date too, as the child records a late
+    // one (keepMember).
     const updates = [
       ...polled.messages.map((m) => ({
         at: m.updateId,
@@ -431,12 +586,22 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
       ...polled.callbacks.map((cb) => ({
         at: cb.updateId,
         // A press in a group gets the plain expiry too: the hold text in a
-        // toast would tell whoever pressed why the agent is not trading.
+        // toast would tell whoever pressed why the agent is not trading. So
+        // does one on a question from before this bot was switched to this
+        // agent, as in the child. The owner's Stay, Leave or Forget counts
+        // whenever it arrives (groupPress); any other press from before this
+        // process listened answers a question that died with the child.
         run: (c: HoldConfig) =>
-          early(cb.date) || stale(cb.date) || isGroupMessage({ chatId: cb.chatId })
-            ? answerCallbackQuery({ token }, cb.id, "That button has expired.").then(() => {})
-            : handlePress(cb, c),
+          isGroupMessage({ chatId: cb.chatId }) || early(cb.date)
+            ? expire(cb)
+            : cb.data.startsWith("tgg:")
+              ? groupPress(cb, c)
+              : stale(cb.date)
+                ? expire(cb)
+                : handlePress(cb, c),
       })),
+      ...polled.members.map((u) => ({ at: u.updateId, run: async () => keepMember(u, token) })),
+      ...polled.service.map((s) => ({ at: s.updateId, run: async () => keepService(s, token) })),
     ].sort((a, b) => a.at - b.at);
     let whole = true;
     for (const u of updates) {
@@ -490,9 +655,12 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
 
   const cfg0 = freshCfg();
   if (cfg0?.telegramEnabled && cfg0.telegramBotToken) {
-    void getMe({ token: cfg0.telegramBotToken }).then((r) => {
-      if (r.bot) note("ok", `Telegram: answering as @${r.bot.username} while trading is held`);
-      else note("warn", `Telegram: token check failed — ${r.reason}`);
+    const token0 = cfg0.telegramBotToken;
+    void getMe({ token: token0 }).then((r) => {
+      if (r.bot) {
+        self ??= { token: token0, username: r.bot.username };
+        note("ok", `Telegram: answering as @${r.bot.username} while trading is held`);
+      } else note("warn", `Telegram: token check failed — ${r.reason}`);
     });
   }
   loop();
