@@ -30,8 +30,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { TELEGRAM_RUNTIME_LEGACY_SQL, TELEGRAM_RUNTIME_SQL } from "@/lib/telegram-runtime";
 
 const ROUTE = readFileSync(new URL("./route.ts", import.meta.url), "utf8");
+/** The hosted read the route hands the tenant to (lib/telegram-runtime.ts), comments out. */
+const READ = readFileSync(new URL("../../../lib/telegram-runtime.ts", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, " ");
 
 /** Comments stripped — this header names what it refuses, so a raw scan lies. */
 const CODE = ROUTE.replace(/\/\*[\s\S]*?\*\//g, " ")
@@ -69,10 +72,19 @@ describe("a hosted request with no session gets nothing", () => {
   it("NO TENANT MEANS NO READ — not a file, and not an unscoped query", () => {
     const fn = CODE.slice(CODE.indexOf("async function runtimeFor"), CODE.indexOf("async function botUsername"));
     assert.match(fn, /if \(!tenant\) return \{ linkCode: null, ownerId: null \}/);
-    // The query that follows must be keyed on the tenant. A SELECT without a
-    // WHERE here would hand one owner another's credential.
-    assert.match(fn, /WHERE tenant = \?/);
-    assert.match(fn, /\.get\(tenant\.toLowerCase\(\)\)/);
+    // The queries that follow must be keyed on the tenant. A SELECT without a
+    // WHERE here would hand one owner another's credential. They live in
+    // lib/telegram-runtime.ts, where a test runs them against the worker's
+    // publish, and are handed this caller's tenant.
+    assert.match(fn, /readTelegramRuntime\(db, tenant, savedBot\)/);
+    assert.match(TELEGRAM_RUNTIME_SQL, /FROM tenant_telegram WHERE tenant = \?$/);
+    assert.match(TELEGRAM_RUNTIME_LEGACY_SQL, /FROM tenant_telegram WHERE tenant = \?$/);
+    assert.match(READ, /\.prepare\(TELEGRAM_RUNTIME_SQL\)\.get\(tenant\.toLowerCase\(\)\)/);
+    assert.match(READ, /\.prepare\(TELEGRAM_RUNTIME_LEGACY_SQL\)\.get\(tenant\.toLowerCase\(\)\)/);
+    // The one read keyed on something else is the bot's claim, and the tenant
+    // it names is compared, never returned.
+    assert.match(READ, /\.prepare\(TELEGRAM_BOT_CLAIM_SQL\)\.get\(savedBot\)/);
+    assert.match(READ, /runtime\.botElsewhere = claim\.tenant\.toLowerCase\(\) !== tenant\.toLowerCase\(\);/);
     // And the file must be unreachable hosted: it belongs to whoever runs the
     // web container, which hosted is the operator.
     const hosted = fn.indexOf("if (!isHostedMode())");
@@ -135,10 +147,16 @@ describe("the link survives the orchestrator's next pass", () => {
     assert.ok(lease > 0 && call > lease, "the publish sits below the lease check");
   });
 
-  it("an absent telegram.json publishes nothing, rather than a null code", () => {
+  it("an absent telegram.json publishes no code, rather than a null one", () => {
     // A child with no bot token has no file. Publishing an empty code would
-    // erase a real one during a restart.
-    assert.match(ORCH, /if \(!tg\) return;/);
+    // erase a real one during a restart. Only whether it trades goes up
+    // (telegram-store.ts publishTenantChildState), for a held owner with no
+    // bot, who hears it nowhere else.
+    const fn = ORCH.slice(ORCH.indexOf("async function publishChildTelegram"));
+    const branch = fn.slice(fn.indexOf("if (!tg) {"), fn.indexOf("return;\n  }") + "return;".length);
+    assert.ok(branch.length > 20, "the no-file branch moved: re-point this test");
+    assert.match(branch, /publishTenantChildState\(shared, tenant, childState\)/);
+    assert.ok(!/publishTelegramRuntime|publishTenantTelegram|linkCode/.test(branch), "and never a code");
   });
 });
 
@@ -160,9 +178,10 @@ describe("it says only what was measured about the bot (plan §3.1)", () => {
   it("reads the liveness columns, and falls back to the old query when they are not there yet", () => {
     // The web can be deployed before the orchestrator adds them. A failed
     // SELECT must not take every tenant's code away.
-    const fn = CODE.slice(CODE.indexOf("async function runtimeFor"), CODE.indexOf("async function botUsername"));
-    const full = fn.indexOf("SELECT link_code, owner_id, bot_id, poll_ok_at, poll_err, poll_err_at, child_state FROM tenant_telegram WHERE tenant = ?");
-    const legacy = fn.indexOf("SELECT link_code, owner_id FROM tenant_telegram WHERE tenant = ?");
+    const full = READ.indexOf("prepare(TELEGRAM_RUNTIME_SQL)");
+    const legacy = READ.indexOf("prepare(TELEGRAM_RUNTIME_LEGACY_SQL)");
     assert.ok(full > 0 && legacy > full, "the full read first, the old one after it");
+    // Which columns, and that the worker's publish writes them, is run for
+    // real in lib/telegram-runtime.db.test.ts.
   });
 });

@@ -57,7 +57,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useT } from "@/lib/i18n";
 import { shortDateTime } from "@/lib/format";
-import { telegramRow, trencherRow, type TelegramRow, type TrencherRow } from "./agent-status";
+import { heldNotice, telegramRow, trencherRow, type TelegramRow, type TrencherRow } from "./agent-status";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 
 interface SettingsShape {
@@ -88,11 +88,29 @@ export function AgentStrip({ hasAgent }: { hasAgent: boolean }) {
 
   if (!hasAgent) return null;
 
+  const row = telegramRow(tg);
+  const held = heldNotice(tg, row);
   return (
     <section className="agent-strip" aria-label={t("strip.aria")}>
-      <TelegramLine row={telegramRow(tg)} />
+      {held !== null ? <HeldLine reason={held} /> : null}
+      <TelegramLine row={row} />
       <TrencherLine row={trencherRow(settings)} />
     </section>
+  );
+}
+
+/**
+ * TRADING IS HELD, said whatever the Telegram row says. The row can say it
+ * only over a working bot; an owner with none, or with one switched off, is
+ * told nowhere else (agent-status.ts heldNotice). First, because it is the
+ * thing on this strip that matters most while it lasts.
+ */
+function HeldLine({ reason }: { reason: string }) {
+  const t = useT();
+  return (
+    <Row tone="warn" label={t("strip.held.label")} value={t("strip.held.value")}
+      action={<span className="mm-hint">{t("strip.held.why", { reason })}</span>}
+    />
   );
 }
 
@@ -117,6 +135,23 @@ function TelegramLine({ row }: { row: TelegramRow }) {
       return (
         <Row tone="warn" label="Telegram" value={t("strip.tg.unverified")}
           action={<Link href="/settings#telegram">{t("strip.tg.checkIt")}</Link>}
+        />
+      );
+    case "elsewhere":
+      /**
+       * ANOTHER AGENT HAS THIS BOT. No code: the one this agent last had is
+       * for a bot that now answers to another agent's code, and five sends of
+       * it lock the owner's chat out there. Saving the token again in
+       * Settings offers the move.
+       */
+      return (
+        <Row tone="warn" label="Telegram" value={t("strip.tg.elsewhere")}
+          action={
+            <>
+              <span className="mm-hint">{t("strip.tg.elsewhereWhy")}</span>
+              <Link href="/settings#telegram">{t("strip.tg.moveHere")}</Link>
+            </>
+          }
         />
       );
     case "unlinked":
@@ -273,7 +308,7 @@ function Row({
   action,
   tone,
 }: {
-  /** A product name — `Telegram`, `Trencher`. Never translated. */
+  /** A product name — `Telegram`, `Trencher`, never translated — or the translated `strip.held.label`. */
   label: string;
   value: string;
   action?: React.ReactNode;

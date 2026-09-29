@@ -1,7 +1,7 @@
 /**
  * Telegram connection status for the dashboard.
  *   GET  → { enabled, connected, botUsername, ownerId, allowlist, linkCode,
- *            linkPending, listening, control }
+ *            linkPending, botElsewhere, listening, tradingHeld, control }
  *   POST → { action: "test" } validates the current/provided token live (getMe)
  *          and returns the bot @username, without saving anything.
  *
@@ -49,6 +49,8 @@ import { tenantOf } from "@/lib/auth";
 import { withReadDb } from "@/lib/ledger";
 import { isBotToken } from "@/lib/telegram-claims";
 import { telegramListening, type Listening, type TelegramRuntime } from "@/lib/telegram-listening";
+import { readTelegramRuntime } from "@/lib/telegram-runtime";
+import { botIdOf, parsePollHealth } from "../../../../../worker/src/telegram/state";
 
 export const dynamic = "force-dynamic";
 
@@ -84,75 +86,32 @@ async function settingsFor(tenant: `0x${string}` | null): Promise<MerrymenSettin
  *
  * With it, whether anything is hearing the bot and whether the tenant trades
  * (lib/telegram-listening.ts, which decides what the screen may say from
- * these). Null when there is nothing to read.
+ * these), and whether the saved bot (`savedBot`, its id) is claimed by
+ * another tenant. Null when there is nothing to read.
  */
-async function runtimeFor(tenant: `0x${string}` | null): Promise<TelegramRuntime | null> {
+async function runtimeFor(tenant: `0x${string}` | null, savedBot: string | null): Promise<TelegramRuntime | null> {
   if (!isHostedMode()) {
     const tg = (await readJson<{ linkCode?: string; ownerId?: number | null; botId?: unknown; poll?: unknown }>(TELEGRAM_FILE)) ?? {};
-    // The worker's own record, as it wrote it. Self-hosted runs no holds.
+    // The worker's own record, read by the worker's own rules. Self-hosted
+    // runs no holds and has no other tenant to claim a bot.
     const botId = typeof tg.botId === "string" && /^\d+$/.test(tg.botId) ? tg.botId : null;
-    const poll = (tg.poll && typeof tg.poll === "object" ? tg.poll : {}) as { okAt?: unknown; err?: unknown; errAt?: unknown; botId?: unknown };
-    const ours = botId !== null && poll.botId === botId;
+    const poll = parsePollHealth(tg.poll);
+    const ours = botId !== null && poll?.botId === botId ? poll : null;
     return {
       linkCode: typeof tg.linkCode === "string" && tg.linkCode ? tg.linkCode : null,
       ownerId: typeof tg.ownerId === "number" ? tg.ownerId : null,
       botId,
-      pollOkAt: ours && typeof poll.okAt === "number" ? poll.okAt : null,
-      pollErr: ours && typeof poll.err === "string" ? poll.err : null,
-      pollErrAt: ours && typeof poll.errAt === "number" ? poll.errAt : null,
+      pollOkAt: ours?.okAt ?? null,
+      pollErr: ours?.err ?? null,
+      pollErrAt: ours?.errAt ?? null,
       childState: null,
     };
   }
   // NO TENANT, NO READ. Not a file fallback and not an unscoped query — either
-  // would hand a bearer credential to whoever asked.
+  // would hand this caller some other tenant's bearer credential. The read
+  // itself is lib/telegram-runtime.ts, keyed on this tenant.
   if (!tenant) return { linkCode: null, ownerId: null };
-  return withReadDb(async (db) => {
-    if (!db) return { linkCode: null, ownerId: null };
-    type Row = {
-      link_code?: string | null;
-      owner_id?: number | null;
-      bot_id?: string | null;
-      poll_ok_at?: number | string | null;
-      poll_err?: string | null;
-      poll_err_at?: number | string | null;
-      child_state?: string | null;
-    };
-    const base = (row: Row | undefined) => ({
-      linkCode: typeof row?.link_code === "string" && row.link_code ? row.link_code : null,
-      ownerId: typeof row?.owner_id === "number" ? row.owner_id : null,
-    });
-    try {
-      const row = (await db
-        .prepare(
-          "SELECT link_code, owner_id, bot_id, poll_ok_at, poll_err, poll_err_at, child_state FROM tenant_telegram WHERE tenant = ?",
-        )
-        .get(tenant.toLowerCase())) as Row | undefined;
-      if (!row) return null;
-      return {
-        ...base(row),
-        botId: typeof row.bot_id === "string" && row.bot_id ? row.bot_id : null,
-        pollOkAt: row.poll_ok_at === null || row.poll_ok_at === undefined ? null : Number(row.poll_ok_at),
-        pollErr: typeof row.poll_err === "string" ? row.poll_err : null,
-        pollErrAt: row.poll_err_at === null || row.poll_err_at === undefined ? null : Number(row.poll_err_at),
-        childState: typeof row.child_state === "string" ? row.child_state : null,
-      };
-    } catch {
-      // The liveness columns are added by the orchestrator on its own clock
-      // (telegram-store.ts), and the web can be deployed first. Read what was
-      // always there; the rest stays undefined, which the decision reads as
-      // "not published here yet" rather than as "nothing heard".
-    }
-    try {
-      const row = (await db
-        .prepare("SELECT link_code, owner_id FROM tenant_telegram WHERE tenant = ?")
-        .get(tenant.toLowerCase())) as Row | undefined;
-      return base(row);
-    } catch {
-      // The table is created by the orchestrator on its own clock, so a brand
-      // new deployment can be asked before it exists. Unknown, not empty.
-      return { linkCode: null, ownerId: null };
-    }
-  });
+  return withReadDb(async (db) => (db ? readTelegramRuntime(db, tenant, savedBot) : { linkCode: null, ownerId: null }));
 }
 
 /** getMe against the Bot API — returns the @username or null. */
@@ -194,11 +153,22 @@ export interface TelegramStatus {
    */
   linkPending: boolean;
   /**
+   * The saved bot is connected to another Merrymen agent (its claim names
+   * another account), so this one will never poll it, and there is no code.
+   * Which agent is never said.
+   */
+  botElsewhere: boolean;
+  /**
    * WHETHER ANYTHING IS HEARING THE BOT, as the process polling it recorded,
    * and whether trading is held. `connected` is only getMe against the token:
    * it said "connected" throughout days in which nothing polled the bot.
    */
   listening: Listening;
+  /**
+   * TRADING IS HELD, and why in the owner's words (the hold's class), bot or
+   * no bot; null otherwise. An owner without a bot hears it nowhere else.
+   */
+  tradingHeld: string | null;
   /**
    * Whether the chat may CHANGE anything, or only answer questions.
    *
@@ -214,8 +184,8 @@ export interface TelegramStatus {
 export async function GET(req: Request) {
   const tenant = isHostedMode() ? tenantOf(req) : null;
   const settings = await settingsFor(tenant);
-  const runtime = await runtimeFor(tenant);
   const token = settings.telegramBotToken;
+  const runtime = await runtimeFor(tenant, typeof token === "string" ? botIdOf(token.trim()) : null);
   const seen = telegramListening(runtime, token, Math.floor(Date.now() / 1000));
 
   const status: TelegramStatus = {
@@ -227,7 +197,9 @@ export async function GET(req: Request) {
     allowlist: Array.isArray(settings.telegramAllowlist) ? settings.telegramAllowlist : [],
     linkCode: seen.linkCode,
     linkPending: seen.linkPending,
+    botElsewhere: seen.botElsewhere,
     listening: seen.listening,
+    tradingHeld: seen.tradingHeld,
     // `!== false`, not `=== true`: the field defaults to true (core settings
     // DEFAULTS, mirrored by worker/src/settings.ts's bool() resolution), so an
     // absent key means enabled. `=== true` would report control off for every

@@ -29,9 +29,13 @@
  *   sent to them directly (orchestrator.ts sendHoldNotice).
  * - `revoked`: the last poll was refused (401/404): the token was revoked or
  *   is wrong. Only the owner can fix it.
- * - `conflict`: the last poll failed with 409: another program is reading this
- *   bot's messages (a copy of Merrymen on the owner's computer, say, or a
- *   webhook). The two take turns getting the messages.
+ * - `conflict`: the last poll failed with 409, and the bot has not been heard
+ *   for longer than LIVE_WITHIN_SEC: another program is reading this bot's
+ *   messages (a copy of Merrymen on the owner's computer, say, or a
+ *   webhook). Not before: a redeploy's handover, while the old worker's long
+ *   poll is still open, gives a 409 or two and then polls that work, and a
+ *   linked owner's panel must not flip to "another program has the bot" for
+ *   it. The orchestrator's alert waits for the same reason.
  * - `live`: a poll of this bot worked within LIVE_WITHIN_SEC.
  * - `not-listening`: nothing has heard this bot for longer than that.
  * - `unknown`: nothing to go on. No row yet, a deployment that does not
@@ -48,6 +52,19 @@
  * `linkPending`. A code that IS for this bot stays visible while nothing is
  * listening, and the screen says so beside it: it will work once the bot is
  * heard again, and hiding it would only send the owner looking for another.
+ *
+ * A BOT ANOTHER AGENT HAS CLAIMED is neither (`botElsewhere`). The owner's
+ * saved token stays in their settings when the bot is moved to another
+ * agent, but this agent is no longer handed it and will never pick it up
+ * again, so "waiting for your agent" would wait for ever. No code, and the
+ * screen says the bot is connected elsewhere, naming nothing about where.
+ *
+ * ── TRADING HELD, WHATEVER THE BOT ───────────────────────────────────────
+ *
+ * `tradingHeld` is the hold's class whenever the tenant is held, bot or no
+ * bot, heard or not. The Telegram row can only say it when there is a bot to
+ * talk about, and an owner with no bot gets no hold reply and no direct
+ * message either: the dashboard is the one place left to tell them.
  *
  * Neither the token nor the code is ever part of `reason`.
  */
@@ -89,6 +106,8 @@ export interface TelegramRuntime {
   pollErr?: string | null;
   pollErrAt?: number | null;
   childState?: string | null;
+  /** The saved token's bot is claimed by another tenant (telegram_bot_claims). Undefined when not asked. */
+  botElsewhere?: boolean;
 }
 
 export interface TelegramListening {
@@ -97,6 +116,10 @@ export interface TelegramListening {
   linkCode: string | null;
   /** A bot is saved that the agent has not picked up yet, so there is no code for it to show. */
   linkPending: boolean;
+  /** The saved bot is connected to another agent: this one will never pick it up. */
+  botElsewhere: boolean;
+  /** The class of the hold while trading is held, bot or no bot; null when it trades or is not known. */
+  tradingHeld: string | null;
 }
 
 const UNKNOWN: Listening = { state: "unknown", lastOkAt: null, reason: null };
@@ -128,30 +151,40 @@ export function telegramListening(
   token: string | null | undefined,
   now: number,
 ): TelegramListening {
-  if (!row) return { listening: UNKNOWN, linkCode: null, linkPending: false };
+  const none = { botElsewhere: false, tradingHeld: null };
+  if (!row) return { listening: UNKNOWN, linkCode: null, linkPending: false, ...none };
   // NOT PUBLISHED HERE YET: an orchestrator from before these columns, or a
   // worker from before the poll record. There is nothing to hold the code
   // against, so it is shown as it always was, and nothing is claimed about
   // listening either way.
-  if (row.botId === undefined) return { listening: UNKNOWN, linkCode: row.linkCode, linkPending: false };
+  if (row.botId === undefined) return { listening: UNKNOWN, linkCode: row.linkCode, linkPending: false, ...none };
 
+  // HELD is about trading, not about the bot, so it is true whichever bot is
+  // saved, or none.
+  const held = heldClass(row.childState);
   const saved = typeof token === "string" ? botIdOf(token.trim()) : null;
+  // ANOTHER AGENT HAS THIS BOT. Whatever the row says about it is this
+  // tenant's past, and nothing here will pick it up again: no code, and not
+  // "pending" either.
+  if (saved !== null && row.botElsewhere === true) {
+    const listening: Listening = held !== null ? { state: "held", lastOkAt: null, reason: held } : UNKNOWN;
+    return { listening, linkCode: null, linkPending: false, botElsewhere: true, tradingHeld: held };
+  }
   const sameBot = saved !== null && row.botId === saved;
   const linkCode = sameBot ? row.linkCode : null;
   const linkPending = saved !== null && !sameBot;
+  const rest = { linkCode, linkPending, botElsewhere: false, tradingHeld: held };
 
   // What was heard on THIS bot. Nothing, when the record is about another
   // bot or about none yet.
   const heard = sameBot ? hearing(row, now) : null;
 
-  // HELD, unless the bot is measurably deaf. It is about trading, not about
-  // the bot, so it is true whichever bot is saved, and the hold process
-  // answers and links, so the code stays.
-  const held = heldClass(row.childState);
+  // HELD, unless the bot is measurably deaf. The hold process answers and
+  // links, so the code stays.
   if (held !== null && (heard === null || heard.state === "live")) {
-    return { listening: { state: "held", lastOkAt: heard?.lastOkAt ?? null, reason: held }, linkCode, linkPending };
+    return { listening: { state: "held", lastOkAt: heard?.lastOkAt ?? null, reason: held }, ...rest };
   }
-  return { listening: heard ?? UNKNOWN, linkCode, linkPending };
+  return { listening: heard ?? UNKNOWN, ...rest };
 }
 
 /** What the poll record of the saved bot says, or null when it says nothing. */
@@ -163,8 +196,10 @@ function hearing(row: TelegramRuntime, now: number): Listening | null {
   if (okAt === null && err === null) return null;
   const failing = pollFailingNow(okAt, err, errAt);
   const kind = pollErrKind(err);
+  // A refused token is said at once: waiting cannot change it.
   if (failing && kind === "refused") return { state: "revoked", lastOkAt: okAt, reason: errDetail(err!) };
-  if (failing && kind === "conflict") return { state: "conflict", lastOkAt: okAt, reason: errDetail(err!) };
   if (okAt !== null && now - okAt <= LIVE_WITHIN_SEC) return { state: "live", lastOkAt: okAt, reason: null };
+  // A 409 only once it has kept the bot unheard: see `conflict` above.
+  if (failing && kind === "conflict") return { state: "conflict", lastOkAt: okAt, reason: errDetail(err!) };
   return { state: "not-listening", lastOkAt: okAt, reason: failing ? errDetail(err!) : null };
 }

@@ -1429,10 +1429,14 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
             </p>
           ) : (
             <p className="mm-hint">
-              {/* NO CODE BECAUSE THE AGENT HAS NOT PICKED UP THIS BOT: the code
-                  on file was minted for the bot saved before, and would not
-                  link this one (lib/telegram-listening.ts). */}
-              {tg?.linkPending && tg.enabled
+              {/* NO CODE BECAUSE ANOTHER AGENT HAS THIS BOT, which this one
+                  will never pick up; or because the agent has not picked
+                  it up YET: the code on file was minted for the bot saved
+                  before, and would not link this one
+                  (lib/telegram-listening.ts). Neither is "check back". */}
+              {tg?.botElsewhere
+                ? t("settings.tg.elsewhere")
+                : tg?.linkPending && tg.enabled
                 ? t("settings.tg.pickingUp")
                 : view.telegramBotToken.set
                   ? "No link code yet. Your agent mints one on its next pass with this token set — check back shortly."
@@ -1570,6 +1574,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <>
                 link code: <b className="mono">{tg.linkCode}</b> — send <code>/link {tg.linkCode}</code> from Telegram
               </>
+            ) : tg?.botElsewhere ? (
+              t("settings.tg.elsewhereShort")
             ) : tg?.linkPending && tg.enabled ? (
               t("settings.tg.pickingUp")
             ) : (

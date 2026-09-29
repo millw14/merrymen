@@ -29,6 +29,7 @@ after(() => rmSync(HOME, { recursive: true, force: true }));
 
 const { startTelegram } = await import("./service");
 const { ensureLinkCode, tokenTagOf } = await import("./state");
+const { makeChatTally } = await import("./poll-rules");
 
 const T0 = Date.parse("2026-09-28T12:00:00Z");
 const CONFLICT_LINE = "Telegram: another program is reading this bot's updates (409 Conflict)";
@@ -76,7 +77,10 @@ const settle = async () => {
 
 interface Harness {
   calls: Call[];
+  /** The owner's event feed (`note`, index.ts strategyNote). */
   notes: { level: string; message: string; at: number }[];
+  /** The fleet's log, where the chat tally writes (poll-rules.ts makeChatTally). */
+  logs: { level: string; message: string; at: number }[];
   cfg: { telegramEnabled: boolean; telegramBotToken: string; telegramAllowlist: number[]; telegramControlEnabled: boolean };
   /** While true, every read of the config throws, as an unreadable settings file would. */
   cfgBroken: boolean;
@@ -105,6 +109,7 @@ async function withService(
 ): Promise<void> {
   const calls: Call[] = [];
   const notes: { level: string; message: string; at: number }[] = [];
+  const logs: { level: string; message: string; at: number }[] = [];
   const cfg = {
     telegramEnabled: true,
     telegramBotToken: opts.token,
@@ -121,6 +126,7 @@ async function withService(
   const h: Harness = {
     calls,
     notes,
+    logs,
     cfg,
     cfgBroken: false,
     trades: [],
@@ -162,6 +168,8 @@ async function withService(
     },
     stateRef: { get: () => state, set: (s) => { state = s; } },
     note: (level, message) => notes.push({ level, message, at: Date.now() }),
+    // As index.ts hands one in: on the fleet's log, which here is `logs`.
+    tally: makeChatTally((level, message) => logs.push({ level, message, at: Date.now() }), () => Math.floor(Date.now() / 1000)),
     buildStatusContext: () => ({}) as never,
     setStrategy: () => ({ ok: true }),
     grantPerTradeUsdg: () => undefined,
@@ -727,8 +735,9 @@ describe("the poll record and the log", () => {
       },
       async (h) => {
         await h.advance(1_000);
-        const lost = warns(h, /was not delivered/);
+        const lost = h.logs.filter((x) => x.level === "warn" && /was not delivered/.test(x.message));
         assert.deepEqual(lost.map((x) => x.message), ["Telegram: a reply to chat …6789 was not delivered — Forbidden: bot was blocked by the user"]);
+        assert.deepEqual(warns(h, /was not delivered/), [], "the fleet's log, not the owner's feed");
       },
     );
   });
@@ -750,7 +759,7 @@ describe("the poll record and the log", () => {
       },
       async (h) => {
         await h.advance(1_000);
-        const lines = h.notes.map((x) => x.message).filter((m) => /…4321/.test(m));
+        const lines = h.logs.map((x) => x.message).filter((m) => /…4321/.test(m));
         assert.deepEqual(lines, [
           "Telegram: message from unlisted chat …4321 refused (1 so far)",
           "Telegram: message from unlisted chat …4321 refused (2 so far)",
@@ -759,7 +768,42 @@ describe("the poll record and the log", () => {
           "Telegram: /link from chat …4321 failed (wrong code) — 4 so far",
           `Telegram: chat …4321 locked out of /link until ${new Date(T0 + 600_000).toISOString().slice(11, 16)} UTC after 5 failed code(s)`,
         ]);
-        assert.ok(!h.notes.some((x) => x.message.includes(String(STRANGER))), "never the whole chat id");
+        assert.ok(!h.logs.some((x) => x.message.includes(String(STRANGER))), "never the whole chat id");
+      },
+    );
+  });
+
+  it("A STRANGER WRITES NOTHING INTO THE OWNER'S EVENT FEED", async () => {
+    // The owner's notice slot shows the newest warning among their last
+    // events, and some warnings are written once and never again. One
+    // `/link x` from anyone who knows the bot's name used to land there as a
+    // warning, over whatever real one was showing; a lockout line every ten
+    // minutes kept it covered, and forty strangers filled the whole window.
+    let n = 0;
+    const strangers = Array.from({ length: 40 }, (_, i) => -1_000_000_000_000 - i);
+    await withService(
+      {
+        token: "111:a",
+        script: (c) =>
+          c.method === "getUpdates" && ++n === 1
+            ? ok([
+                text(10, 555001234, "/link WRONG1"),
+                ...[11, 12, 13, 14].map((id) => text(id, 555001234, "/link WRONG1")),
+                ...strangers.map((chat, i) => text(20 + i, chat, "hello?")),
+              ])
+            : c.method === "sendMessage"
+              ? refused(403, "Forbidden: bot was blocked by the user")
+              : undefined,
+      },
+      async (h) => {
+        await h.advance(1_000);
+        assert.ok(h.logs.some((x) => /locked out of \/link/.test(x.message)), "premise: the log has the lockout");
+        // The one line the owner's feed gets is the service's own, at start.
+        assert.deepEqual(
+          h.notes.map((x) => x.message),
+          ["Telegram: connected as @bot111"],
+          "and the owner's feed has nothing a stranger caused",
+        );
       },
     );
   });

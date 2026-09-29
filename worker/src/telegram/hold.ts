@@ -55,6 +55,7 @@ import {
   refusalText,
   slashHead,
   span,
+  telegramLog,
 } from "./poll-rules";
 import { patchSettingsFile, type ResolvedConfig } from "../settings";
 import { homePaths, merrymenHome } from "../home";
@@ -87,11 +88,13 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
   let stopped = false;
   const stateRef = deps.stateRef;
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
-  const note = deps.note ?? ((level, message) => console.log(`[telegram${level === "warn" ? " warn" : ""}] ${message}`));
+  const note = deps.note ?? telegramLog;
   const blocker = deps.blocker ?? (() => readRestoreBlocked(merrymenHome()));
   const kill = deps.kill ?? (() => hostedKillFromChat(merrymenHome(), homePaths.grant(), loadGrantFile(), now()));
   // Counted and logged as the child does (poll-rules.ts makeChatTally), and
-  // every reply through the same check for one Telegram would not take.
+  // every reply through the same check for one Telegram would not take. On
+  // `note`, which here is the fleet's log and nothing else, as the child's
+  // tally is.
   const tally = makeChatTally(note, now);
   const sendMessage: typeof sendTelegramMessage = async (opts, chatId, text, extra) => {
     const r = await sendTelegramMessage(opts, chatId, text, extra);

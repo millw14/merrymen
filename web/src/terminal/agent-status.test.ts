@@ -13,7 +13,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { telegramLabel, telegramRow, trencherRow } from "./agent-status";
+import { heldNotice, telegramLabel, telegramRow, trencherRow } from "./agent-status";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 
 const tg = (over: Partial<TelegramStatus> = {}): TelegramStatus => ({
@@ -25,7 +25,9 @@ const tg = (over: Partial<TelegramStatus> = {}): TelegramStatus => ({
   allowlist: [],
   linkCode: null,
   linkPending: false,
+  botElsewhere: false,
   listening: { state: "live", lastOkAt: 1_790_000_000, reason: null },
+  tradingHeld: null,
   control: true,
   ...over,
 });
@@ -135,12 +137,35 @@ describe("what the polling process measured comes before the owner", () => {
 
   it("names a conflict and a refused token apart from plain silence", () => {
     // Three different remedies: wait or tell us, stop the other program, paste
-    // a new token.
+    // a new token. A revoked token fails getMe as well, so that is the
+    // combination the route really gives.
     const why = (state: "conflict" | "revoked" | "not-listening") => {
-      const r = telegramRow(tg({ listening: { state, lastOkAt: null, reason: "x" } }));
+      const r = telegramRow(tg({ connected: state !== "revoked", listening: { state, lastOkAt: null, reason: "x" } }));
       return r.kind === "not-listening" ? r.why : null;
     };
     assert.deepEqual([why("not-listening"), why("conflict"), why("revoked")], ["stale", "conflict", "revoked"]);
+  });
+
+  it("A REVOKED TOKEN GETS ITS REMEDY, not 'not verified'", () => {
+    // getMe is refused for a revoked token exactly as getUpdates is. With the
+    // getMe check first, the row could only ever say "not verified".
+    const row = telegramRow(tg({ connected: false, ownerId: 99, listening: { state: "revoked", lastOkAt: 1_700_000_000, reason: "401 Unauthorized" } }));
+    assert.deepEqual(row, { kind: "not-listening", why: "revoked", lastOkAt: 1_700_000_000, linked: true, linkCode: null, botUsername: "merrybot" });
+    // And with nothing measured, a token getMe refuses is still "not verified".
+    assert.equal(telegramRow(tg({ connected: false, listening: { state: "unknown", lastOkAt: null, reason: null } })).kind, "unverified");
+  });
+
+  it("BUT NOT RIGHT AFTER A NEW TOKEN WAS PASTED: getMe takes it, and the agent has not been handed it yet", () => {
+    // Telling the owner to paste a new token then is telling them to do what
+    // they just did. The row says what it would say without the record.
+    const revoked = { state: "revoked" as const, lastOkAt: null, reason: "401 Unauthorized" };
+    assert.equal(telegramRow(tg({ connected: true, ownerId: 99, listening: revoked })).kind, "linked");
+    assert.equal(telegramRow(tg({ connected: true, ownerId: null, linkCode: "K7M2QX", listening: revoked })).kind, "unlinked");
+  });
+
+  it("A BOT ANOTHER AGENT HAS IS SAID, with no code, whatever was heard on it here", () => {
+    const row = telegramRow(tg({ botElsewhere: true, ownerId: null, linkCode: null, listening: { state: "not-listening", lastOkAt: null, reason: null } }));
+    assert.deepEqual(row, { kind: "elsewhere", botUsername: "merrybot" });
   });
 
   it("a held tenant says so, with the class, linked or not", () => {
@@ -159,6 +184,26 @@ describe("what the polling process measured comes before the owner", () => {
     const unknown = { state: "unknown" as const, lastOkAt: null, reason: null };
     assert.equal(telegramRow(tg({ ownerId: 99, listening: unknown })).kind, "linked");
     assert.equal(telegramRow(tg({ ownerId: null, listening: unknown })).kind, "unlinked");
+  });
+
+  it("TRADING HELD IS SAID APART FROM THE BOT, for an owner the Telegram row cannot tell", () => {
+    // No bot, a bot switched off, or one getMe will not confirm: no hold
+    // reply and no direct message reach them, so the strip says it.
+    const held = "trades newer than the last valuation";
+    for (const over of [{ hasToken: false }, { enabled: false }, { connected: false }] as Partial<TelegramStatus>[]) {
+      const status = tg({ ...over, tradingHeld: held, listening: { state: "held", lastOkAt: null, reason: held } });
+      assert.equal(heldNotice(status, telegramRow(status)), held, JSON.stringify(over));
+    }
+    // A deaf bot's row says the bot's state; the hold is still said.
+    const deaf = tg({ tradingHeld: held, listening: { state: "not-listening", lastOkAt: null, reason: null } });
+    assert.equal(heldNotice(deaf, telegramRow(deaf)), held);
+    // Not twice: the Telegram row already says it.
+    const said = tg({ tradingHeld: held, listening: { state: "held", lastOkAt: null, reason: held } });
+    assert.equal(telegramRow(said).kind, "held");
+    assert.equal(heldNotice(said, telegramRow(said)), null);
+    // Nothing held, nothing said; and an unread status says nothing either.
+    assert.equal(heldNotice(tg(), telegramRow(tg())), null);
+    assert.equal(heldNotice(null, telegramRow(null)), null);
   });
 
   it("the switch and the token are still read first", () => {
@@ -235,7 +280,9 @@ describe("the short label the settings field shows", () => {
       telegramRow(tg({ listening: { state: "held", lastOkAt: null, reason: null } })),
       telegramRow(tg({ listening: { state: "not-listening", lastOkAt: null, reason: null } })),
       telegramRow(tg({ listening: { state: "conflict", lastOkAt: null, reason: null } })),
-      telegramRow(tg({ listening: { state: "revoked", lastOkAt: null, reason: null } })),
+      // Refused by getMe too, as a revoked token is.
+      telegramRow(tg({ connected: false, listening: { state: "revoked", lastOkAt: null, reason: null } })),
+      telegramRow(tg({ botElsewhere: true })),
     ].map(telegramLabel);
     assert.equal(new Set(labels).size, labels.length, `two states share a label: ${labels.join(" / ")}`);
   });

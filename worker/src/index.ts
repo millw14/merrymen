@@ -256,6 +256,7 @@ import { startNotifier } from "./telegram/notifier";
 import { energyToldDayOf, type EnergyToldHere } from "./telegram/energy-alert";
 import { startVirtualsStreamer } from "./virtuals-streamer";
 import { createStateRef, ensureLinkCode, retireLegacyCode } from "./telegram/state";
+import { makeChatTally, telegramLog } from "./telegram/poll-rules";
 import { readPositionRaw } from "./telegram/reads";
 import { formatDepth, formatNoDepth } from "./telegram/depth-format";
 import { bestCashPool } from "./venues/pool-price";
@@ -13268,6 +13269,12 @@ async function main() {
     }
   }
 
+  // What strangers did to the bot and which messages Telegram would not take,
+  // counted for the fleet's log (telegram/poll-rules.ts makeChatTally). One
+  // for the poll loop and the notifier, so a blocked bot is said once an hour
+  // between them; and never on strategyNote, which is the owner's event feed.
+  const tgTally = makeChatTally(telegramLog, () => Math.floor(Date.now() / 1000));
+
   startTelegram({
     // Resolve FRESH on every read: /link writes the allowlist to settings.json
     // and the very next message must see it — the tick-refreshed `cfg` snapshot
@@ -13275,6 +13282,7 @@ async function main() {
     getCfg: () => resolveConfig(),
     stateRef: tgState,
     note: strategyNote,
+    tally: tgTally,
     buildStatusContext,
     setStrategy: (name) => {
       if ((BUILTIN_STRATEGIES as readonly string[]).includes(name)) return { ok: true };
@@ -13345,6 +13353,7 @@ async function main() {
   notifierHandle = startNotifier({
     getCfg: () => resolveConfig(), // fresh for the same reason as the poller
     note: strategyNote,
+    tally: tgTally,
     stateRef: tgState,
     buildStatusContext,
     getAlertInputs: () => ({

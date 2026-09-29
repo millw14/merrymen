@@ -37,7 +37,7 @@ import type { TelegramStatus } from "@/app/api/telegram/route";
 /**
  * WHAT WE KNOW ABOUT THE TELEGRAM BRIDGE.
  *
- * Eight states, and the first one is the one the web UI gets wrong today.
+ * Nine states, and the first one is the one the web UI gets wrong today.
  * `loadTelegram()` only calls `setTg` on a truthy response, so a failed or
  * non-ok `/api/telegram` leaves `tg === null` — and the settings screen's
  * ternary chain then falls through to the literal string "no token". That is a
@@ -76,6 +76,13 @@ export type TelegramRow =
       botUsername: string | null;
     }
   /**
+   * THE BOT IS CONNECTED TO ANOTHER MERRYMEN AGENT: its claim names another
+   * account, so this agent is not handed its token and will never pick it
+   * up. No code, and nothing about which agent. Saving the token again here
+   * offers to move it (the settings save's 409).
+   */
+  | { kind: "elsewhere"; botUsername: string | null }
+  /**
    * The bot is real and reachable, but nobody has claimed it yet.
    * `linkPending`: there is no code because the agent has not picked this bot
    * up yet, rather than because the next one is still being minted.
@@ -91,21 +98,34 @@ export function telegramRow(tg: TelegramStatus | null | undefined): TelegramRow 
   // perfectly good token is not "unverified", and telling somebody to check
   // their token when the real problem is a checkbox wastes their afternoon.
   if (!tg.enabled) return { kind: "off" };
+  const l = tg.listening;
+  const linked = tg.ownerId !== null;
+  // A REFUSED TOKEN, BEFORE `connected`. getMe is refused for a revoked token
+  // exactly as getUpdates is, so with `connected` first this row could only
+  // ever say "not verified", and never the remedy: a new token from
+  // @BotFather. And only when getMe refuses it too. When getMe takes the
+  // saved token and the poller's last try was refused, the owner has just
+  // pasted a new token for the same bot, and the agent has not been handed
+  // it yet; "paste a new token" would be telling them to do what they did.
+  if (l?.state === "revoked" && !tg.connected) {
+    return { kind: "not-listening", why: "revoked", lastOkAt: l.lastOkAt, linked, linkCode: tg.linkCode, botUsername: tg.botUsername };
+  }
   if (!tg.connected) return { kind: "unverified" };
+  // Nothing below is about this agent's hearing of the bot: it no longer has it.
+  if (tg.botElsewhere === true) return { kind: "elsewhere", botUsername: tg.botUsername };
   // BEFORE THE OWNER, because "linked" was the lie. A linked bot that nothing
   // polls read "✓ connected" for days in the incident behind these states,
   // and an unlinked one showed a code nobody would ever read. What the
   // polling process measured goes first; `unknown` is not a measurement, so
-  // it falls through to what the screen always said.
-  const l = tg.listening;
-  const linked = tg.ownerId !== null;
+  // it falls through to what the screen always said, as does `revoked` here
+  // (see above).
   if (l?.state === "held") {
     return { kind: "held", reason: l.reason, linked, linkCode: tg.linkCode, botUsername: tg.botUsername };
   }
-  if (l && (l.state === "not-listening" || l.state === "conflict" || l.state === "revoked")) {
+  if (l && (l.state === "not-listening" || l.state === "conflict")) {
     return {
       kind: "not-listening",
-      why: l.state === "not-listening" ? "stale" : l.state,
+      why: l.state === "conflict" ? "conflict" : "stale",
       lastOkAt: l.lastOkAt,
       linked,
       linkCode: tg.linkCode,
@@ -119,6 +139,21 @@ export function telegramRow(tg: TelegramStatus | null | undefined): TelegramRow 
     return { kind: "unlinked", linkCode: tg.linkCode, linkPending: tg.linkPending === true, botUsername: tg.botUsername };
   }
   return { kind: "linked", botUsername: tg.botUsername, chats: tg.allowlist.length };
+}
+
+/**
+ * TRADING HELD, SAID APART FROM THE BOT: the hold's class when the tenant is
+ * held and the Telegram row does not already say so; null otherwise.
+ *
+ * The Telegram row can say it only for an owner whose bot works. An owner
+ * with no bot, one switched off or one getMe will not confirm gets no hold
+ * reply and no direct message either, both of which go over the bot. Without
+ * this the dashboard was silent for them too, and the only sign anywhere was
+ * a practice return gone blank.
+ */
+export function heldNotice(tg: TelegramStatus | null | undefined, row: TelegramRow): string | null {
+  if (!tg || typeof tg.tradingHeld !== "string" || tg.tradingHeld === "") return null;
+  return row.kind === "held" ? null : tg.tradingHeld;
 }
 
 /**
@@ -188,6 +223,7 @@ export function telegramLabel(row: TelegramRow): string {
     case "held": return "⏸ trading held";
     case "not-listening":
       return row.why === "revoked" ? "token refused by Telegram" : row.why === "conflict" ? "another program has the bot" : "not listening";
+    case "elsewhere": return "connected to another agent";
     case "unlinked": return "not linked yet";
     case "linked": return row.botUsername ? `✓ @${row.botUsername}` : "✓ connected";
   }

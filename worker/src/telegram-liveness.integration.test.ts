@@ -49,17 +49,31 @@ beforeEach(() => {
 });
 afterEach(() => mock.restoreAll());
 
-/** A fresh held tenant with a bot, its process, and a way to write what that process recorded. */
-async function heldTenant(settings: Record<string, unknown> = { telegramEnabled: true, telegramBotToken: "111:AAA" }) {
+/**
+ * A fresh held tenant with a bot, its process (none with `running: false`,
+ * as between two, or in a crash cool-off), and a way to write what that
+ * process recorded.
+ */
+async function heldTenant(
+  settings: Record<string, unknown> = { telegramEnabled: true, telegramBotToken: "111:AAA" },
+  o: { running?: boolean } = {},
+) {
   const tenant = `0x00000000000000000000000000000000000000${(0xa0 + n++).toString(16)}` as `0x${string}`;
   const home = childHome(tenant);
   mkdirSync(home, { recursive: true });
   writeFileSync(path.join(home, "settings.json"), JSON.stringify(settings));
   const proc = new FakeProc();
-  await adoptHolderForTest(tenant, ACCOUNT, proc as unknown as ChildProcess);
+  await adoptHolderForTest(tenant, ACCOUNT, o.running === false ? null : (proc as unknown as ChildProcess));
   return {
     tenant,
     proc,
+    /** The process dies and another takes its place, as a restart or a re-hold gives. */
+    respawn: async () => {
+      const next = new FakeProc();
+      await adoptHolderForTest(tenant, ACCOUNT, next as unknown as ChildProcess);
+      return next;
+    },
+    settings: (next: Record<string, unknown>) => writeFileSync(path.join(home, "settings.json"), JSON.stringify(next)),
     poll: (poll: Record<string, unknown> | null, botId = "111") =>
       writeFileSync(path.join(home, "telegram.json"), JSON.stringify({ botId, linkCode: "K7M2QX", ...(poll ? { poll } : {}) })),
     alerts: () => lines.filter((l) => l.includes(tenant) && l.includes("[alert]")),
@@ -125,6 +139,66 @@ describe("telegramLiveness", () => {
     telegramLiveness(T);
     telegramLiveness(T + 601);
     assert.equal(t.alerts().length, 1);
-    assert.match(t.alerts()[0]!, /since its start at /);
+    assert.match(t.alerts()[0]!, /since the watch began at /);
+  });
+
+  it("A BOT WHOSE PROCESSES KEEP DYING IS STILL SAID: the clock is the tenant's, not each process's", async () => {
+    // Keyed on the process, each respawn restarted the clock, and a bot that
+    // no process lived ten minutes to poll was never said. This is the
+    // incident's own shape: nothing polling the bot, for hours.
+    const t = await heldTenant();
+    t.poll(null);
+    telegramLiveness(T);
+    const procs = [t.proc];
+    for (let i = 1; i <= 3; i++) {
+      procs.push(await t.respawn());
+      telegramLiveness(T + i * 240);
+    }
+    assert.equal(t.alerts().length, 1, "said once, after ten minutes, across three processes");
+    assert.match(t.alerts()[0]!, new RegExp(`since the watch began at ${new Date(T * 1000).toISOString().replace(/\./g, "\\.")}`));
+    assert.deepEqual(procs.flatMap((p) => p.signals), [], "and nothing was killed");
+  });
+
+  it("A TENANT WITH NO PROCESS RUNNING IS WATCHED TOO, while its lease is held", async () => {
+    // Between two processes, or sitting out a crash cool-off: nothing polls
+    // its bot, and that is exactly what must be said.
+    const t = await heldTenant(undefined, { running: false });
+    t.poll({ okAt: T - 60, botId: "111" });
+    telegramLiveness(T);
+    telegramLiveness(T + 601);
+    assert.equal(t.alerts().length, 1);
+  });
+
+  it("another bot starts the clock again: a bot saved a minute ago is not deaf", async () => {
+    const t = await heldTenant();
+    t.poll(null);
+    telegramLiveness(T);
+    t.settings({ telegramEnabled: true, telegramBotToken: "222:BBB" });
+    telegramLiveness(T + 500);
+    telegramLiveness(T + 700);
+    assert.deepEqual(t.alerts(), [], "the new bot has had 200 seconds");
+    telegramLiveness(T + 1_101);
+    assert.equal(t.alerts().length, 1);
+  });
+
+  it("WHAT THE HOME'S FILE SAYS CANNOT FORGE A LINE IN THIS LOG", async () => {
+    // telegram.json is in the tenant's home, which an agent with shell or file
+    // tools can write. Its error goes into an [alert] line; a line break in it
+    // would put a second line of the file's choosing into the fleet's log,
+    // untagged, reading as the orchestrator's own.
+    const t = await heldTenant();
+    const forged = "[orchestrator] [alert] telegram bot token refused: 0xdeadbeef — forged";
+    t.poll({ okAt: T - 7_200, err: `failed: x\n${forged}\r\u2028y`, errAt: T - 5, botId: "111" });
+    telegramLiveness(T);
+    telegramLiveness(T + 601);
+    assert.equal(t.alerts().length, 1);
+    for (const l of lines) assert.ok(!/[\n\r\u2028\u2029]/.test(l), `one line per log call: ${JSON.stringify(l)}`);
+    assert.ok(!lines.some((l) => l.startsWith(forged)));
+    // Nor can a far-future stamp keep a deaf bot "heard".
+    const future = await heldTenant();
+    future.poll({ okAt: T + 30 * 86_400, botId: "111" });
+    telegramLiveness(T);
+    telegramLiveness(T + 601);
+    assert.equal(future.alerts().length, 1);
   });
 });

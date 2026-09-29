@@ -83,7 +83,7 @@ describe("the alert line", () => {
     );
     assert.match(
       livenessAlertLine(TENANT, "stale", { okAt: null, err: null, since: T })!,
-      /since its start at .*, with no poll that worked \(no failure recorded\)$/,
+      /since the watch began at .*, with no poll that worked \(no failure recorded\)$/,
     );
   });
 
@@ -125,9 +125,23 @@ describe("alert only: in the orchestrator's source", () => {
       assert.ok(!pass.includes(never), `telegramLiveness must not call ${never}`);
     }
     // It reads the record, under the lease, and logs.
-    assert.match(pass, /readChildTelegram\(tenant\)/);
-    assert.match(pass, /if \(!lease \|\| !lease\.healthy\(\)\) continue;/);
+    assert.match(pass, /readChildTelegram\(tenant, nowSec\)/);
+    assert.match(pass, /if \(!lease\.healthy\(\)\) continue;/);
+    assert.match(pass, /if \(!lease \|\| !lease\.healthy\(\)\) livenessWatch\.delete\(tenant\);/);
     assert.match(pass, /log\(line\)/);
+  });
+
+  it("WATCHES EVERY TENANT THIS REPLICA HOLDS, not every process it runs", () => {
+    // Keyed on the process, a bot whose processes kept dying was never said:
+    // each new one restarted the clock, and a tenant between processes (a
+    // crash cool-off) was not watched at all.
+    const pass = body("telegramLiveness");
+    assert.match(pass, /for \(const \[tenant, lease\] of leases\)/);
+    for (const never of ["children", "holders", ".proc"]) {
+      assert.ok(!pass.includes(never), `telegramLiveness must not key its watch on ${never}`);
+    }
+    // A new watch only for another bot.
+    assert.match(pass, /if \(!watch \|\| watch\.bot !== bot\)/);
   });
 
   it("runs every pass, beside the watchdog, outside FLEET_HALT", () => {
@@ -142,6 +156,14 @@ describe("alert only: in the orchestrator's source", () => {
     assert.match(mirror, /publishChildTelegram\(tenant as `0x\$\{string\}`, shared, "trading"\)/);
     assert.match(mirror, /publishChildTelegram\(tenant as `0x\$\{string\}`, shared, `held:\$\{held\.cls\}`\)/);
     assert.match(mirror, /TELEGRAM_LIVENESS_DDL/);
-    assert.match(body("publishChildTelegram"), /await publishLiveness\(tenant, shared, tg, childState\)/);
+    const publish = body("publishChildTelegram");
+    assert.match(publish, /await publishTelegramRuntime\(/);
+    // The bot only while this process is still handed its token
+    // (telegram-store.ts livenessFor, run for real in web
+    // lib/telegram-runtime.db.test.ts).
+    assert.match(publish, /const handed = botTokenOf\(readChildSettings\(tenant\)\);/);
+    assert.match(publish, /livenessFor\(tg, handed \? botIdOf\(handed\) : null, childState\)/);
+    // And a tenant with no bot file still says whether it trades.
+    assert.match(publish, /publishTenantChildState\(shared, tenant, childState\)/);
   });
 });

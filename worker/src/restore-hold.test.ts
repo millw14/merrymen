@@ -136,9 +136,6 @@ describe("held tenants reach only the loops they belong in", () => {
       "spawnChild",
       "spawnHolder",
       "standDownHolder",
-      // Reads a held tenant's poll record to say when its bot has gone deaf,
-      // and does nothing else (orchestrator.test pins that it kills nothing).
-      "telegramLiveness",
       "watchHolder",
     ]);
   });

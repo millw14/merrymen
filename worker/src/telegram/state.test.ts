@@ -11,6 +11,7 @@ import {
   loadTelegramState,
   retireLegacyCode,
   POLL_RECORD_EVERY_SEC,
+  parsePollHealth,
   recordPoll,
   rotateLinkCode,
   saveTelegramState,
@@ -403,6 +404,25 @@ describe("the poll record", () => {
       else process.env.MERRYMEN_HOME = prev;
       rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  it("IS READ AS UNTRUSTED: the orchestrator logs and publishes what it says", () => {
+    // The home is writable by an agent's tools, and by builds that wrote it
+    // under other rules. A line break in `err` would forge a line in the
+    // fleet's log; a fraction would fail the database's integer column on
+    // every pass; a far-future time would read as "heard" until it came.
+    const read = (poll: Record<string, unknown>) => parsePollHealth(poll, T);
+    const forged = read({ okAt: T, err: "failed: x\n[orchestrator] [alert] telegram not polling: 0xdead", errAt: T, botId: "111" })!;
+    assert.ok(!/[\n\r]/.test(forged.err!), forged.err!);
+    assert.equal(read({ err: "failed: bot8123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/getUpdates" })!.err, "failed: bot<token>/getUpdates");
+    assert.equal(read({ err: "\n\t" })!.err, null);
+    assert.ok(read({ err: "x".repeat(5_000) })!.err!.length <= 160);
+    for (const bad of [T + 0.5, T + 3_600, Number.MAX_SAFE_INTEGER + 2, -5, 0, Number.NaN, "1790000000"]) {
+      assert.equal(read({ okAt: bad, errAt: bad })!.okAt, null, String(bad));
+      assert.equal(read({ okAt: bad, errAt: bad })!.errAt, null, String(bad));
+    }
+    // A second or two ahead is recordPoll's own doing, and is kept.
+    assert.equal(read({ okAt: T + 2 })!.okAt, T + 2);
   });
 
   it("a good poll records when, for which bot", () => {

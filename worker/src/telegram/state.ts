@@ -19,6 +19,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { ensureHome, homePaths } from "../home";
+import { cleanPollErr } from "./poll-rules";
 
 export interface PriceAlert {
   id: number;
@@ -219,14 +220,35 @@ export interface PollHealth {
  */
 export const POLL_RECORD_EVERY_SEC = 30;
 
-/** The poll record as a file gave it, or null when it is missing or malformed. */
-export function parsePollHealth(raw: unknown): PollHealth | null {
+/**
+ * How far past the reader's clock a recorded poll time may be and still be
+ * believed. recordPoll stamps a success one second past a failure in the
+ * same second, so a record can run a little ahead; a time far ahead would
+ * read as "heard" until that moment came.
+ */
+const POLL_CLOCK_SKEW_SEC = 300;
+
+/**
+ * The poll record as a file gave it, or null when it is missing or malformed.
+ *
+ * READ AS UNTRUSTED, by the orchestrator as much as by the child. The file is
+ * in the tenant's home, which an agent with shell or file tools can write,
+ * and what is read here goes into the orchestrator's own log lines and the
+ * shared database. So the error text gets the writer's rules again
+ * (poll-rules.ts cleanPollErr: no line breaks, nothing shaped like a token,
+ * clipped), and a time is believed only as whole seconds between the epoch
+ * and a little past `now`: a fraction or a far-future stamp is a value no
+ * poller wrote, and the database's integer columns would refuse the first.
+ */
+export function parsePollHealth(raw: unknown, now = Math.floor(Date.now() / 1000)): PollHealth | null {
   if (!raw || typeof raw !== "object") return null;
   const p = raw as Record<string, unknown>;
-  const sec = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null);
+  const sec = (v: unknown): number | null =>
+    typeof v === "number" && Number.isSafeInteger(v) && v > 0 && v <= now + POLL_CLOCK_SKEW_SEC ? v : null;
+  const err = typeof p.err === "string" ? cleanPollErr(p.err) : "";
   return {
     okAt: sec(p.okAt),
-    err: typeof p.err === "string" && p.err !== "" ? p.err.slice(0, 200) : null,
+    err: err !== "" ? err : null,
     errAt: sec(p.errAt),
     // The same rule as `botId` above: a number, never anything a token could hide in.
     botId: typeof p.botId === "string" && /^\d+$/.test(p.botId) ? p.botId : null,

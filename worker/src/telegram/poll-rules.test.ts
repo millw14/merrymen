@@ -9,8 +9,9 @@
  * (poll-rules.ts), run directly.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { makeChatTally, pollErrKind, pollErrText, pollFailure, redactChat } from "./poll-rules";
+import { cleanPollErr, makeChatTally, pollErrKind, pollErrText, pollFailure, redactChat } from "./poll-rules";
 
 describe("a failed poll, as it is kept and published", () => {
   it("names its kind first, so the dashboard and the orchestrator need not parse prose", () => {
@@ -43,6 +44,21 @@ describe("a failed poll, as it is kept and published", () => {
     assert.ok(err.length <= 160);
     assert.ok(!/[\n\r]/.test(err));
     assert.equal(pollErrText("failed", "   "), "failed: unknown error");
+  });
+
+  it("CLEANED AGAIN WHEREVER IT IS READ: no line breaks of any kind, and no token, whoever wrote it", () => {
+    // The file is in the tenant's home, which an agent's tools can write, and
+    // the orchestrator puts what it reads there into its own [alert] lines.
+    const forged = "failed: x\n[orchestrator] [alert] telegram not polling: 0xdead\r\u0085\u2028\u2029\u0000y";
+    const clean = cleanPollErr(forged);
+    assert.ok(!/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(clean), JSON.stringify(clean));
+    assert.match(clean, /^failed: x \[orchestrator\]/);
+    assert.equal(cleanPollErr("bot8123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"), "bot<token>");
+    assert.ok(cleanPollErr("x".repeat(500)).length <= 160);
+    assert.equal(cleanPollErr(" \n\t "), "");
+    // What the writer wrote reads back unchanged.
+    const written = pollErrText("conflict", "another program is reading this bot's updates (409)");
+    assert.equal(cleanPollErr(written), written);
   });
 
   it("reads back only the three kinds it writes", () => {
@@ -118,5 +134,40 @@ describe("what the log says about strangers, codes and lost replies", () => {
     at(1_790_000_000 + 3_600);
     tally.sendFailed(4242, "Forbidden: bot was blocked by the user");
     assert.equal(lines.length, 3);
+  });
+});
+
+describe("the tally writes to the fleet's log, never the owner's event feed", () => {
+  // In the child, `note` is index.ts strategyNote, which adds an event to the
+  // owner's feed. Almost everything the tally says is something a stranger
+  // did, and the owner's notice slot shows the newest warning among their
+  // last events: one `/link x` would cover a real warning for good.
+  const src = (f: string) =>
+    readFileSync(new URL(f, import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
+
+  it("the poll loop and the notifier each count on telegramLog unless handed a tally", () => {
+    const service = src("./service.ts");
+    assert.ok(!/makeChatTally\(\s*deps\.note/.test(service), "service.ts must not build the tally on deps.note");
+    assert.match(service, /const tally = deps\.tally \?\? makeChatTally\(telegramLog, now\);/);
+    const notifier = src("./notifier.ts");
+    assert.ok(!/makeChatTally\(\s*deps\.note/.test(notifier));
+    assert.match(notifier, /const tally = deps\.tally \?\? makeChatTally\(telegramLog, now\);/);
+  });
+
+  it("and the child hands both the same one, built on telegramLog", () => {
+    const index = src("../index.ts");
+    assert.match(index, /const tgTally = makeChatTally\(telegramLog, /);
+    const telegram = index.slice(index.indexOf("startTelegram({"), index.indexOf("startTelegram({") + 600);
+    const notifier = index.slice(index.indexOf("startNotifier({"), index.indexOf("startNotifier({") + 300);
+    assert.match(telegram, /tally: tgTally,/);
+    assert.match(notifier, /tally: tgTally,/);
+  });
+
+  it("EVERY MESSAGE THE NOTIFIER SENDS IS CHECKED: none calls Telegram's sendMessage directly", () => {
+    const notifier = src("./notifier.ts");
+    // The one direct call is inside the checking wrapper.
+    assert.equal((notifier.match(/sendTelegramMessage\(/g) ?? []).length, 1);
+    assert.match(notifier, /if \(!r\.ok\) tally\.sendFailed\(chatId, r\.reason\);/);
+    assert.match(notifier, /import \{ esc, sendMessage as sendTelegramMessage \} from "\.\/api";/);
   });
 });

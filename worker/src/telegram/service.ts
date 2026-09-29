@@ -93,6 +93,8 @@ import {
   pollFailure,
   refusalText,
   span,
+  telegramLog,
+  type ChatTally,
 } from "./poll-rules";
 import {
   ageDays,
@@ -152,6 +154,13 @@ export interface TelegramServiceDeps {
   kill: () => KillResult;
   /** Mirror a /name change into the agents table (dashboard display). */
   onNameChange?: (name: string) => void;
+  /**
+   * Where refusals, failed codes and undelivered messages are counted and
+   * logged: the fleet's log, never `note` (poll-rules.ts makeChatTally).
+   * index.ts hands the same one to the notifier, so a blocked bot is said
+   * once an hour whichever of the two found it. One of its own otherwise.
+   */
+  tally?: ChatTally;
   /** Injectable for tests. */
   now?: () => number;
 }
@@ -293,8 +302,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   const earlyTold = new Set<string>();
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   ensureSoul(now()); // the merryman is born (IDENTITY/OWNER/JOURNAL.md) on first run
-  /** Refusals, failed /link codes and undelivered replies, counted for the log (poll-rules.ts). */
-  const tally = makeChatTally(deps.note, now);
+  /**
+   * Refusals, failed /link codes and undelivered replies, counted for the
+   * fleet's log (poll-rules.ts makeChatTally). NEVER ON `deps.note`: that is
+   * the owner's event feed, and almost all of this is what a stranger did.
+   * One `/link x` from anyone who knows the bot's name would otherwise be the
+   * newest warning on the owner's screen, over whatever real one was there.
+   */
+  const tally = deps.tally ?? makeChatTally(telegramLog, now);
   /**
    * EVERY REPLY GOES THROUGH HERE, so one Telegram would not take is logged
    * rather than dropped. Every call site below ignored the answer: a blocked

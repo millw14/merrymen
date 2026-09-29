@@ -42,10 +42,12 @@ export function pollFailingNow(okAt: number | null, err: string | null, errAt: n
 }
 
 /**
- * THE VERDICT. `since` is when the process now polling was first watched: a
- * success recorded before it was a predecessor's, and a process that has only
- * just started is not stale for having nothing yet. The later of the two is
- * the clock.
+ * THE VERDICT. `since` is when this replica began watching the tenant's bot
+ * (orchestrator.ts livenessWatch): a watch that has only just begun, after a
+ * redeploy or a lease taken over, is not stale for a record it cannot vouch
+ * for or for having none yet. The later of the two is the clock. It is not
+ * restarted with each new process, so a bot whose processes keep dying is
+ * still said.
  */
 export function telegramLivenessVerdict(p: {
   enabled: boolean;
@@ -70,8 +72,9 @@ const iso = (sec: number): string => new Date(sec * 1000).toISOString();
  * The [alert] line for a verdict worth one, or null. A revoked token gets a
  * line of its own because its remedy is the owner's, not the operator's; a
  * conflict is a bot not polling like any other, and its error says why.
- * Never the token, and never the link code: the error is pollErrText's, which
- * blanks anything shaped like a token.
+ * Never the token, and never the link code, and one line only: the error is
+ * as state.ts parsePollHealth read it, cleaned of anything shaped like a
+ * token and of line breaks, whatever wrote the file.
  */
 export function livenessAlertLine(
   tenant: string,
@@ -82,6 +85,6 @@ export function livenessAlertLine(
     return `[alert] telegram bot token refused: ${tenant} — its owner has to paste a new token from @BotFather (${p.err ?? "no reason recorded"})`;
   }
   if (verdict !== "stale" && verdict !== "conflict") return null;
-  const when = p.okAt !== null ? iso(p.okAt) : `its start at ${iso(p.since)}, with no poll that worked`;
+  const when = p.okAt !== null ? iso(p.okAt) : `the watch began at ${iso(p.since)}, with no poll that worked`;
   return `[alert] telegram not polling: ${tenant} since ${when} (${p.err ?? "no failure recorded"})`;
 }

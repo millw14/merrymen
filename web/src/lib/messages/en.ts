@@ -309,6 +309,8 @@ export const EN = {
   "settings.tg.revoked": "Telegram refused this bot's token. It was probably revoked in @BotFather: paste a new token below.",
   "settings.tg.codeWhenBack": "The code works once your bot is being heard again.",
   "settings.tg.pickingUp": "Your agent hasn't picked up this bot yet. Its link code appears here once it has; check back shortly.",
+  "settings.tg.elsewhere": "This bot is connected to another Merrymen agent, so this one doesn't read it and has no link code for it. To move it here, save its token again and confirm the move; you'll then /link again here.",
+  "settings.tg.elsewhereShort": "no link code: this bot is connected to another Merrymen agent",
 
   // ── THE CONNECTION STRIP ON HOME AND THE DESKTOP RAIL ──────────────────
   //
@@ -345,6 +347,14 @@ export const EN = {
   "strip.tg.newToken": "Paste a new one →",
   "strip.tg.codeWhenBack": "This code works once your bot is being heard again.",
   "strip.tg.pickingUp": "Your agent hasn't picked up this bot yet. Its link code appears here once it has.",
+  "strip.tg.elsewhere": "connected to another agent",
+  "strip.tg.elsewhereWhy": "This bot is connected to another Merrymen agent, so this one doesn't read it.",
+  "strip.tg.moveHere": "Move it here →",
+  // Trading held, said apart from Telegram: an owner with no working bot is
+  // told nowhere else (agent-status.ts heldNotice).
+  "strip.held.label": "Trading",
+  "strip.held.value": "held",
+  "strip.held.why": "Your practice book couldn't be restored after a server update ({reason}). Nothing was traded or lost, and the team has been alerted.",
   "strip.trencher.off": "not your strategy",
   "strip.trencher.whatIsThis": "What is this? →",
   "strip.trencher.noCrypto": "on, but your asset mode is stocks only — no coins can be considered",

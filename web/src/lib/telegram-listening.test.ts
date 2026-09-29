@@ -11,6 +11,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { LIVE_WITHIN_SEC, heldClass, telegramListening, type TelegramRuntime } from "./telegram-listening";
+import { TELEGRAM_RUNTIME_LEGACY_SQL, TELEGRAM_RUNTIME_SQL, runtimeFromRow } from "./telegram-runtime";
 
 const NOW = 1_790_000_000;
 const TOKEN = "111:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
@@ -44,12 +45,27 @@ describe("listening", () => {
     const revoked = telegramListening(row({ pollOkAt: NOW - 3_600, pollErr: "refused: 401 Unauthorized", pollErrAt: NOW - 30 }), TOKEN, NOW);
     assert.deepEqual(revoked.listening, { state: "revoked", lastOkAt: NOW - 3_600, reason: "401 Unauthorized" });
     const conflict = telegramListening(
-      row({ pollOkAt: NOW - 25, pollErr: "conflict: another program is reading this bot's updates (409)", pollErrAt: NOW - 5 }),
+      row({ pollOkAt: NOW - LIVE_WITHIN_SEC - 1, pollErr: "conflict: another program is reading this bot's updates (409)", pollErrAt: NOW - 5 }),
       TOKEN,
       NOW,
     );
     assert.equal(conflict.listening.state, "conflict");
     assert.equal(conflict.listening.reason, "another program is reading this bot's updates (409)");
+  });
+
+  it("A 409 IS A CONFLICT ONLY ONCE IT HAS KEPT THE BOT UNHEARD, as the orchestrator's alert waits", () => {
+    // A redeploy's handover: the old worker's long poll is still open, the new
+    // one gets a 409 and hears the bot a few seconds later. A linked owner's
+    // panel must not flip to "another program has the bot" for it.
+    const handover = telegramListening(
+      row({ pollOkAt: NOW - 25, pollErr: "conflict: another program is reading this bot's updates (409)", pollErrAt: NOW - 5 }),
+      TOKEN,
+      NOW,
+    );
+    assert.equal(handover.listening.state, "live");
+    // A refused token is said at once all the same: waiting cannot change it.
+    const refusedNow = telegramListening(row({ pollOkAt: NOW - 25, pollErr: "refused: 401 Unauthorized", pollErrAt: NOW - 5 }), TOKEN, NOW);
+    assert.equal(refusedNow.listening.state, "revoked");
   });
 
   it("A FAILURE A LATER POLL OVERTOOK SAYS NOTHING ABOUT NOW", () => {
@@ -75,6 +91,18 @@ describe("listening", () => {
   it("but a held tenant whose bot nothing hears is reported as the bot's state: that is what the owner can act on", () => {
     const r = telegramListening(row({ childState: "held:the saved book is unreadable", pollOkAt: NOW - 86_400 }), TOKEN, NOW);
     assert.equal(r.listening.state, "not-listening");
+    // And the hold is still there to say, apart from the bot.
+    assert.equal(r.tradingHeld, "the saved book is unreadable");
+  });
+
+  it("TRADING HELD IS KNOWN WITH NO BOT AT ALL: the owner hears it nowhere else", () => {
+    // A held tenant with no bot saved: the orchestrator publishes a row with
+    // no code, no owner and no bot, only the hold.
+    const noBot = row({ linkCode: null, botId: null, pollOkAt: null, childState: "held:trades newer than the last valuation" });
+    for (const token of [undefined, "", TOKEN]) {
+      assert.equal(telegramListening(noBot, token, NOW).tradingHeld, "trades newer than the last valuation", String(token));
+    }
+    assert.equal(telegramListening(row(), TOKEN, NOW).tradingHeld, null, "a trading tenant is not held");
   });
 
   it("unknown is not a verdict: nothing polled yet, no row, or a deployment that does not publish these", () => {
@@ -83,6 +111,8 @@ describe("listening", () => {
       listening: { state: "unknown", lastOkAt: null, reason: null },
       linkCode: null,
       linkPending: false,
+      botElsewhere: false,
+      tradingHeld: null,
     });
   });
 });
@@ -132,11 +162,52 @@ describe("the code belongs to a bot", () => {
       listening: { state: "unknown", lastOkAt: null, reason: null },
       linkCode: "K7M2QX",
       linkPending: false,
+      botElsewhere: false,
+      tradingHeld: null,
     });
+  });
+
+  it("A BOT ANOTHER AGENT HAS CLAIMED SHOWS NO CODE, and is not 'pending': this agent will never pick it up", () => {
+    // The owner's stored token outlives a move of the bot to another agent.
+    // This tenant's row still names the bot and a code for it, which now
+    // would be compared against the other agent's code, and five sends of
+    // it lock the owner's chat out there.
+    const r = telegramListening(row({ botElsewhere: true }), TOKEN, NOW);
+    assert.equal(r.linkCode, null);
+    assert.equal(r.linkPending, false);
+    assert.equal(r.botElsewhere, true);
+    assert.equal(r.listening.state, "unknown", "what was heard here is this tenant's past");
+    // Trading held is still said: it is not about the bot.
+    const held = telegramListening(row({ botElsewhere: true, childState: "held:the saved book is unreadable" }), TOKEN, NOW);
+    assert.deepEqual(held.listening, { state: "held", lastOkAt: null, reason: "the saved book is unreadable" });
+    assert.equal(held.linkCode, null);
+    // A claim this tenant holds, or none, changes nothing.
+    assert.equal(telegramListening(row({ botElsewhere: false }), TOKEN, NOW).linkCode, "K7M2QX");
   });
 
   it("never puts the token in a reason", () => {
     const r = telegramListening(row({ pollOkAt: NOW - 3_600, pollErr: "failed: request failed: bot<token>/getUpdates", pollErrAt: NOW }), TOKEN, NOW);
     assert.ok(!JSON.stringify(r).includes("AAHdq"));
+  });
+});
+
+describe("the row as the route reads it", () => {
+  it("a full read carries every column; Postgres's numbers may come back as strings", () => {
+    const r = runtimeFromRow(
+      { link_code: "K7M2QX", owner_id: 42, bot_id: "111", poll_ok_at: String(NOW - 20), poll_err: null, poll_err_at: null, child_state: "trading" },
+      true,
+    );
+    assert.deepEqual(r, { linkCode: "K7M2QX", ownerId: 42, botId: "111", pollOkAt: NOW - 20, pollErr: null, pollErrAt: null, childState: "trading" });
+  });
+
+  it("A LEGACY READ LEAVES THE LIVENESS FIELDS UNDEFINED, which the decision reads as 'not published here yet'", () => {
+    const r = runtimeFromRow({ link_code: "K7M2QX", owner_id: null }, false);
+    assert.deepEqual(r, { linkCode: "K7M2QX", ownerId: null });
+    assert.equal(telegramListening(r, TOKEN, NOW).linkCode, "K7M2QX");
+  });
+
+  it("every read is keyed on the tenant", () => {
+    assert.match(TELEGRAM_RUNTIME_SQL, /FROM tenant_telegram WHERE tenant = \?$/);
+    assert.match(TELEGRAM_RUNTIME_LEGACY_SQL, /FROM tenant_telegram WHERE tenant = \?$/);
   });
 });

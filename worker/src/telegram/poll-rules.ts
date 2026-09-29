@@ -130,16 +130,33 @@ const POLL_ERR_MAX = 160;
  * It leaves this process's home, for the shared database and the owner's
  * dashboard, so nothing that could be the token may ride in it. Telegram's own
  * descriptions never carry it, but a transport error names the URL it was
- * asking, and the token is in that URL's path. Anything shaped like a token is
- * blanked, as is anything that is not printable, and it is clipped.
+ * asking, and the token is in that URL's path. See cleanPollErr.
  */
 export function pollErrText(kind: PollErrKind, detail: string): string {
-  const clean = detail
+  return `${kind}: ${cleanPollErr(detail) || "unknown error"}`.slice(0, POLL_ERR_MAX);
+}
+
+/**
+ * POLL ERROR TEXT MADE SAFE TO KEEP, PUBLISH AND LOG: anything shaped like a
+ * token blanked, anything that is not printable (a line break above all) made
+ * a space, trimmed and clipped. Empty when nothing is left.
+ *
+ * Run by the writer (pollErrText) AND by every reader of the file
+ * (state.ts parsePollHealth). The file is in the tenant's home, and the
+ * orchestrator puts what it reads there into its own log lines and the
+ * shared database. The home is not the orchestrator's to trust: an agent
+ * with shell or file tools can write it, and an older build may have
+ * written it without these rules. A line break in `err` would put a line of
+ * the file's choosing into the fleet's log, untagged, where it reads as the
+ * orchestrator's own (`[orchestrator] [alert] …`, naming any tenant).
+ */
+export function cleanPollErr(text: string): string {
+  return text
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")
     .replace(/bot\d+:[A-Za-z0-9_-]+/g, "bot<token>")
     .replace(/\b\d{5,}:[A-Za-z0-9_-]{20,}/g, "<token>")
-    .replace(/[\u0000-\u001f\u007f]/g, " ")
-    .trim();
-  return `${kind}: ${clean || "unknown error"}`.slice(0, POLL_ERR_MAX);
+    .trim()
+    .slice(0, POLL_ERR_MAX);
 }
 
 /** The kind a kept poll error names (pollErrText), or null for anything else. */
@@ -156,14 +173,24 @@ export function pollErrKind(err: string | null | undefined): PollErrKind | null 
  */
 export const redactChat = (chatId: number): string => `…${String(Math.abs(chatId)).slice(-4)}`;
 
+/**
+ * A line for the fleet's log (stdout, which the orchestrator tags with the
+ * tenant), in the shape the hold process has always used. Not the owner's
+ * event feed: see makeChatTally.
+ */
+export function telegramLog(level: "ok" | "warn", message: string): void {
+  console.log(`[telegram${level === "warn" ? " warn" : ""}] ${message}`);
+}
+
 /** How many chats each tally remembers before it starts over, so a flood of strangers cannot grow it without end. */
 const TALLY_CHATS_KEPT = 1_000;
 /** A failed send to one chat for one reason is logged at most this often. A blocked bot fails every reply the same way. */
 const SEND_FAIL_RETELL_SEC = 3_600;
 
 /**
- * WHAT A STRANGER DID TO THE BOT, AND WHICH REPLIES NEVER ARRIVED, counted and
- * logged by whichever process is answering (service.ts, hold.ts).
+ * WHAT A STRANGER DID TO THE BOT, AND WHICH MESSAGES NEVER ARRIVED, counted
+ * and logged by whichever process is answering: the child (service.ts, and
+ * the notifier's own sends beside it, one tally for both) or hold.ts.
  *
  * All three were invisible. In the incident this came from, an owner's chat
  * was refused a day's messages and locked out of /link by five codes that
@@ -176,8 +203,17 @@ const SEND_FAIL_RETELL_SEC = 3_600;
  * a stranger hammering the bot costs a handful of lines, not one per message.
  * A lockout is always logged: it is the one an owner will ask about. A failed
  * send is logged once an hour per chat and reason.
+ *
+ * THE FLEET'S LOG, NEVER THE OWNER'S FEED. `log` is telegramLog in both
+ * processes, not the child's event sink: nearly everything here is
+ * something a stranger did, and a stranger must not be able to write into
+ * the owner's events. The owner's notice slot shows the newest warning
+ * among their last events, and warnings like the live-rail blocker are
+ * written once and never again; one `/link x` from anyone who knows the
+ * bot's @username would have covered it for good, and a lockout line every
+ * ten minutes would have kept it covered.
  */
-export function makeChatTally(note: (level: "ok" | "warn", message: string) => void, now: () => number) {
+export function makeChatTally(log: (level: "ok" | "warn", message: string) => void, now: () => number) {
   const refused = new Map<number, number>();
   const wrongCodes = new Map<number, number>();
   const sendFails = new Map<string, number>();
@@ -192,7 +228,7 @@ export function makeChatTally(note: (level: "ok" | "warn", message: string) => v
     /** A message from a chat not on the allowlist, answered with a refusal or the way in. */
     refused(chatId: number): void {
       const n = bump(refused, chatId);
-      if (worthTelling(n)) note("ok", `Telegram: message from unlisted chat ${redactChat(chatId)} refused (${n} so far)`);
+      if (worthTelling(n)) log("ok", `Telegram: message from unlisted chat ${redactChat(chatId)} refused (${n} so far)`);
     },
     /**
      * A /link (or /start <code>) that did not link. `lockedUntil` is set when
@@ -203,11 +239,11 @@ export function makeChatTally(note: (level: "ok" | "warn", message: string) => v
       const n = bump(wrongCodes, chatId);
       if (o.justLocked && o.lockedUntil !== undefined) {
         const at = new Date(o.lockedUntil * 1000).toISOString().slice(11, 16);
-        note("warn", `Telegram: chat ${redactChat(chatId)} locked out of /link until ${at} UTC after ${n} failed code(s)`);
+        log("warn", `Telegram: chat ${redactChat(chatId)} locked out of /link until ${at} UTC after ${n} failed code(s)`);
         return;
       }
       if (worthTelling(n)) {
-        note("warn", `Telegram: /link from chat ${redactChat(chatId)} failed${o.locked ? " (locked out)" : " (wrong code)"} — ${n} so far`);
+        log("warn", `Telegram: /link from chat ${redactChat(chatId)} failed${o.locked ? " (locked out)" : " (wrong code)"} — ${n} so far`);
       }
     },
     /** A reply Telegram would not take. */
@@ -219,7 +255,7 @@ export function makeChatTally(note: (level: "ok" | "warn", message: string) => v
       if (last !== undefined && t - last < SEND_FAIL_RETELL_SEC) return;
       if (sendFails.size >= TALLY_CHATS_KEPT && last === undefined) sendFails.clear();
       sendFails.set(key, t);
-      note("warn", `Telegram: a reply to chat ${redactChat(chatId)} was not delivered — ${why}`);
+      log("warn", `Telegram: a reply to chat ${redactChat(chatId)} was not delivered — ${why}`);
     },
   };
 }
