@@ -31,7 +31,9 @@
  *   lib/telegram-listening.ts), before the new columns exist and after;
  * - the bot claims (telegram-claims.ts) from both sides and across two
  *   connections, including the orchestrator's own pass (reconcile(), with the
- *   claims in Postgres) against the web's settings save (botClaimForSave);
+ *   claims in Postgres) against the web's settings save (botClaimForSave), and
+ *   two saves for one account at once, on two web pools, settling on what the
+ *   sealed settings hold after the write (settleBotClaims);
  * - the hold notice's durable dedupe (hold-notice.ts) and the tenant lease
  *   that makes it one writer.
  *
@@ -187,6 +189,10 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
     const orch = await makePgDb(scoped("orchestrator"));
     const web = await makePgDb(scoped("web"));
     const settings = new PgSettingsStore(scoped("settings"), connect);
+    /** What a save's claim step reads back after its write: the sealed settings in this Postgres. */
+    const pgSettings = (before: MerrymenSettings | null) => ({ before, read: (tn: `0x${string}`) => settings.get(tn) });
+    /** For a claim step whose settle and undo these subtests never run. */
+    const nothingStored = { before: null, read: async () => null };
     const cols = async (table: string) =>
       new Map(
         ((await orch
@@ -276,7 +282,7 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
       // The web: a settings save carrying no token still makes the claims
       // table (decideBotClaim), and the dashboard's read runs beside it.
       const webBoot = async (db: Db) => {
-        const d = await decideBotClaim({ db, tenant: T3, token: undefined, moveBot: false, confirmBot: async () => null });
+        const d = await decideBotClaim({ db, tenant: T3, token: undefined, moveBot: false, confirmBot: async () => null, settings: nothingStored });
         assert.equal(d.ok, true);
         await readTelegramRuntime(db, T3, null);
       };
@@ -395,7 +401,7 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
       assert.deepEqual(await claimBot(web, bot, TB, bot, FAR_MS + 1), { holder: TA, fresh: false, stamp: FAR_MS }, "first one wins");
       assert.deepEqual(await claimBot(web, bot, TA, bot, FAR_MS + 2), { holder: TA, fresh: false, stamp: FAR_MS }, "its own again: the stamp is the first");
       // The web's settings save over the same row: refused, naming nobody.
-      const refused = await decideBotClaim({ db: web, tenant: TB, token: `${bot}:BBB-secret`, moveBot: false, confirmBot: async () => bot });
+      const refused = await decideBotClaim({ db: web, tenant: TB, token: `${bot}:BBB-secret`, moveBot: false, confirmBot: async () => bot, settings: nothingStored });
       assert.ok(!refused.ok && refused.status === 409 && refused.body.error === "bot_claimed");
       assert.deepEqual(refused.body.errors, [BOT_CLAIMED_TEXT]);
       assert.ok(!JSON.stringify(refused).includes(TA.slice(2)));
@@ -423,14 +429,15 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
       await undoBotClaim(orch, bot, TB, FAR_MS + 20, null);
       assert.equal((await readBotClaims(web)).get(bot), undefined);
       // The web's fresh claim for a save that then failed is taken back; one that landed lets go of the bot it left.
-      const fresh = await decideBotClaim({ db: web, tenant: TB, token: `${bot}:BBB-secret`, moveBot: false, confirmBot: async () => bot });
+      const fresh = await decideBotClaim({ db: web, tenant: TB, token: `${bot}:BBB-secret`, moveBot: false, confirmBot: async () => bot, settings: nothingStored });
       assert.ok(fresh.ok && !fresh.moved);
       assert.equal((await readBotClaims(orch)).get(bot), TB);
       await fresh.undo();
       assert.equal((await readBotClaims(orch)).get(bot), undefined, "a claim never outlives a token that was not stored");
       await claimBot(web, "9003", TB, "9003", FAR_MS);
-      const switched = await decideBotClaim({ db: web, tenant: TB, token: `${bot}:BBB-secret`, moveBot: false, confirmBot: async () => bot });
+      const switched = await decideBotClaim({ db: web, tenant: TB, token: `${bot}:BBB-secret`, moveBot: false, confirmBot: async () => bot, settings: pgSettings(null) });
       assert.ok(switched.ok);
+      await settings.put(TB, { telegramBotToken: `${bot}:BBB-secret` } as MerrymenSettings);
       await switched.settle();
       const now = await readBotClaims(orch);
       assert.deepEqual([now.get(bot), now.get("9003")], [TB, undefined], "saved a different bot: the old one is free");
@@ -448,7 +455,7 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
       const bot2 = "9102";
       const saves = await Promise.all(
         racers.slice(0, 6).map((tn, i) =>
-          decideBotClaim({ db: i % 2 ? web : orch, tenant: tn, token: `${bot2}:secret-${i}`, moveBot: false, confirmBot: async (tok) => botIdOf(tok) }),
+          decideBotClaim({ db: i % 2 ? web : orch, tenant: tn, token: `${bot2}:secret-${i}`, moveBot: false, confirmBot: async (tok) => botIdOf(tok), settings: nothingStored }),
         ),
       );
       assert.equal(saves.filter((s) => s.ok).length, 1, "one save claims the bot");
@@ -533,6 +540,104 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
       };
       await twoMoves("9104", readsThenWaits(orch), readsThenWaits(web));
       assert.equal(rowReads, 3, "one mover's UPDATE was refused as stale, and it read the row again");
+    });
+
+    await t.test("TWO SAVES FOR ONE ACCOUNT AT ONCE, on two web pools over the sealed settings: the claims end on the bot stored last", async () => {
+      // The settings PUT's claim step (decideBotClaim, settleBotClaims,
+      // undoBotClaimUnlessSaved) as two web replicas run it: the claims on two
+      // pools, the settings read back from the sealed store the save writes.
+      // Before this, each save let go of every bot but its own, so the save
+      // whose settle ran last kept ITS bot, whichever token was stored.
+      const web2 = await makePgDb(scoped("web-replica"));
+      const TW = tenantN(0xe1);
+      const tokenOf = (bot: string, n: number | string) => `${bot}:WWW-secret-${n}`;
+      const mine = async () => [...(await readBotClaims(orch))].filter(([, tn]) => tn === TW).map(([b]) => b).sort();
+      const stampOf = async (bot: string) =>
+        Number(((await orch.prepare("SELECT claimed_at FROM telegram_bot_claims WHERE bot_id = ?").get(bot)) as { claimed_at: number }).claimed_at);
+      const storedBot = async () => botIdOf((await settings.get(TW))!.telegramBotToken!);
+      const write = (token: string) => settings.put(TW, { telegramEnabled: true, telegramBotToken: token } as MerrymenSettings);
+      const decide = async (db: Db, token: string, over: Partial<Parameters<typeof decideBotClaim>[0]> = {}) => {
+        const d = await decideBotClaim({ db, tenant: TW, token, moveBot: false, confirmBot: async (tok) => botIdOf(tok), settings: pgSettings(await settings.get(TW)), ...over });
+        assert.ok(d.ok, JSON.stringify(d));
+        return d;
+      };
+      /** TW stores bot 9300's token and holds its claim. */
+      const start = async () => {
+        await releaseBotClaims(orch, TW);
+        await write(tokenOf("9300", "prior"));
+        await claimBot(orch, "9300", TW, "9300", FAR_MS);
+      };
+      /** A read of the store that, once armed, returns what it read only after `meanwhile` has run. */
+      let meanwhile: (() => Promise<void>) | null = null;
+      const overtaken = async (tn: `0x${string}`) => {
+        const got = await settings.get(tn);
+        const fn = meanwhile;
+        meanwhile = null;
+        if (fn) await fn();
+        return got;
+      };
+
+      // Both claimed before either wrote; the writes and the settles after
+      // them in each order. The first two orders are the review's: the save
+      // for 9301's settle runs last, after 9302 was stored, and after 9301 was.
+      for (const [writes, settles] of [[[0, 1], [1, 0]], [[1, 0], [1, 0]], [[0, 1], [0, 1]], [[1, 0], [0, 1]]] as const) {
+        await start();
+        const tokens = [tokenOf("9301", "x"), tokenOf("9302", "x")] as const;
+        const saves = [await decide(web, tokens[0]), await decide(web2, tokens[1])] as const;
+        assert.deepEqual(await mine(), ["9300", "9301", "9302"]);
+        for (const i of writes) await write(tokens[i]);
+        for (const i of settles) await saves[i].settle();
+        const last = botIdOf(tokens[writes[1]])!;
+        assert.equal(await storedBot(), last);
+        assert.deepEqual(await mine(), [last], `written ${writes.join(",")}, settled ${settles.join(",")}`);
+      }
+
+      // A settle overtaken mid-flight: it reads 9301, and before it lets go of
+      // anything the save for 9302 writes and settles to the end. Its release
+      // (DELETE … RETURNING, on the other pool) takes 9302's claim with it; its
+      // next read says 9302, so it puts that claim back, stamp and all.
+      await start();
+      const one = await decide(web, tokenOf("9301", "o"), { settings: { before: await settings.get(TW), read: overtaken }, now: FAR_MS + 1 });
+      const two = await decide(web2, tokenOf("9302", "o"), { now: FAR_MS + 2 });
+      await write(tokenOf("9301", "o"));
+      meanwhile = async () => {
+        await write(tokenOf("9302", "o"));
+        await two.settle();
+        assert.deepEqual(await mine(), ["9302"]);
+      };
+      await one.settle();
+      assert.equal(meanwhile, null, "the overtaking save ran");
+      assert.deepEqual(await mine(), ["9302"]);
+      assert.equal(await stampOf("9302"), FAR_MS + 2, "put back as it was, milliseconds past 2038 and all");
+
+      // A failed save's undo, overtaken the same way by a save for the same
+      // bot that decided on its claim (made none of its own) and lands.
+      await start();
+      const failed = await decide(web, tokenOf("9303", "a"), { settings: { before: await settings.get(TW), read: overtaken }, now: FAR_MS + 3 });
+      const landed = await decide(web2, tokenOf("9303", "b"), { now: FAR_MS + 4 });
+      meanwhile = async () => {
+        await write(tokenOf("9303", "b"));
+        await landed.settle();
+      };
+      await failed.undo();
+      assert.equal(meanwhile, null);
+      assert.deepEqual(await mine(), ["9303"], "the failed save did not take the landed one's claim away");
+      assert.equal(await stampOf("9303"), FAR_MS + 3);
+
+      // And at once, with no order imposed: rounds of three saves, each its
+      // own claim, write and settle, on alternating pools. Whichever write the
+      // store kept, the account holds that bot and no other.
+      for (let round = 0; round < 10; round++) {
+        const tokens = ["9311", "9312", "9313"].map((b) => tokenOf(b, round));
+        await Promise.all(
+          tokens.map(async (token, i) => {
+            const d = await decide(i % 2 ? web2 : web, token);
+            await write(token);
+            await d.settle();
+          }),
+        );
+        assert.deepEqual(await mine(), [await storedBot()], `round ${round}`);
+      }
     });
 
     await t.test("THE HOLD NOTICE: once per class across processes, a new class is news, and a restore makes the next hold news again", async () => {
@@ -663,7 +768,7 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
         ({ telegramEnabled: true, telegramBotToken: token, ...(linked ? { telegramAllowlist: [4242] } : {}) }) as MerrymenSettings;
       /** The settings PUT for a token, in its order: the claim, then the write, then letting go of any bot left behind. */
       const webSave = async (tenant: `0x${string}`, next: MerrymenSettings, moveBot = false) => {
-        const claim = await botClaimForSave({ tenant, touched: true, next, moveBot });
+        const claim = await botClaimForSave({ tenant, touched: true, next, moveBot, settings: pgSettings(await settings.get(tenant)) });
         if (claim && !claim.ok) return claim;
         await settings.put(tenant, next);
         await claim?.settle();

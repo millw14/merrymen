@@ -818,8 +818,17 @@ export async function PUT(req: Request) {
    * `moveBot`, which getMe must confirm. Before the write, so a refusal writes
    * nothing; undone if the write fails, so a claim never outlives a token that
    * was not stored. See lib/telegram-claims.ts.
+   *
+   * What the claim step settles on afterwards is read back from the store, not
+   * taken from `next`: another save for this account may have written since.
    */
-  const botClaim = await botClaimForSave({ tenant, touched: touched.has("telegramBotToken"), next, moveBot });
+  const botClaim = await botClaimForSave({
+    tenant,
+    touched: touched.has("telegramBotToken"),
+    next,
+    moveBot,
+    settings: { before: stored, read: (t) => getSettingsStore().get(t) },
+  });
   if (botClaim && !botClaim.ok) return NextResponse.json(botClaim.body, { status: botClaim.status });
 
   if (tenant) {
@@ -832,9 +841,12 @@ export async function PUT(req: Request) {
       await botClaim?.undo().catch((u) => console.warn(`[settings] telegram bot claim not undone: ${u instanceof Error ? u.message : String(u)}`));
       throw e;
     }
-    // The bot this account left, if it left one: free for whoever takes it
-    // next. After the write, and not fatal: the save has landed, and a claim
-    // left behind is one the next owner's move resolves.
+    // The claims made to match the token stored NOW, read back after this
+    // write: the bot this account left, if it left one, is free for whoever
+    // takes it next, and the one it stores stays claimed even when another
+    // save for this account wrote after this one (settleBotClaims says why
+    // that converges). After the write, and not fatal: the save has landed,
+    // and a claim left behind is one the next owner's move resolves.
     await botClaim?.settle().catch((e) => console.warn(`[settings] telegram bot claim not released: ${e instanceof Error ? e.message : String(e)}`));
   } else {
     await mkdir(DATA_DIR, { recursive: true });

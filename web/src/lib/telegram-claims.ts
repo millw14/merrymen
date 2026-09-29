@@ -23,11 +23,14 @@ import type { MerrymenSettings } from "@merrymen/core";
 import { makePgDb, type Db } from "../../../worker/src/db";
 import {
   botIdOf,
+  botTokenOf,
   claimBot,
   ensureBotClaims,
   moveBotClaim,
-  releaseBotClaims,
-  undoBotClaim,
+  settleBotClaims,
+  storedBotOf,
+  undoBotClaimUnlessSaved,
+  type BotClaimHolder,
 } from "../../../worker/src/telegram-claims";
 
 /** The owner-facing refusal. Says nothing about whose agent holds the bot. */
@@ -47,9 +50,9 @@ export type BotClaimDecision =
       ok: true;
       /** True when the bot was taken from another account by this save. */
       moved: boolean;
-      /** The save did not land: take back what this claim changed. */
+      /** The save did not land: take back what this claim changed, unless a save for its bot has landed since. */
       undo(): Promise<void>;
-      /** The save landed: let go of any bot this account no longer uses. */
+      /** The save landed: make this account's claims match the token stored now (settleBotClaims). */
       settle(): Promise<void>;
     }
   | { ok: false; status: number; body: { error: string; errors: string[] } };
@@ -85,6 +88,13 @@ const nothing = async () => {};
  * and a save that said "saved" while the bot stayed with the other account
  * would be the silence this exists to end. A save that does not carry the
  * token (every other field on the page) asks nothing.
+ *
+ * WHAT A LANDED SAVE LETS GO OF IS JUDGED BY WHAT IS STORED, NOT BY WHAT THIS
+ * SAVE WROTE. Two saves for one account can be in flight at once (two tabs, a
+ * double click, the phone and the desktop), and their writes and settles land
+ * in any order; settle and undo read `settings.read` afresh, after the write,
+ * so the claims end on the token that was stored last whichever way round they
+ * ran. settleBotClaims and undoBotClaimUnlessSaved say why that converges.
  */
 export async function decideBotClaim(args: {
   db: Db;
@@ -94,34 +104,48 @@ export async function decideBotClaim(args: {
   moveBot: boolean;
   /** The bot id getMe answers for `token`, or null when Telegram does not confirm it. */
   confirmBot: (token: string) => Promise<string | null>;
+  /**
+   * This account's settings: `before`, as this save read them before changing
+   * anything, and `read`, the store read afresh, which settle and undo call
+   * after the write (or the failed write) to see what was stored in the end.
+   */
+  settings: { before: MerrymenSettings | null; read: (tenant: `0x${string}`) => Promise<MerrymenSettings | null> };
   now?: number;
 }): Promise<BotClaimDecision> {
   const { db, tenant, token, moveBot } = args;
   const now = args.now ?? Date.now();
   await ensureBotClaims(db);
   const bot = token ? botIdOf(token) : null;
+  const storedBot = async () => storedBotOf(await args.settings.read(tenant));
+  /** Let go of every bot but the one stored now, and claim that one if this save confirmed it. */
+  const settle = (confirmedBot: string | null) => () => settleBotClaims(db, tenant, storedBot, confirmedBot, now);
   // No bot to hold: a cleared token, or one that is not `<digits>:<secret>`,
   // which Telegram refuses and so polls nothing. The PUT refuses such a token
   // before this (400); here it is still never confirmed, claimed or moved, and
   // gets no 409 that would say whether its bot id is held.
-  const releaseAll = async () => void (await releaseBotClaims(db, tenant));
-  const leftBehind = async () => void (await releaseBotClaims(db, tenant, bot));
   if (!token || !bot) {
     if (token && moveBot) return unconfirmed;
-    return { ok: true, moved: false, undo: nothing, settle: releaseAll };
+    return { ok: true, moved: false, undo: nothing, settle: settle(null) };
   }
+  /** Has a save for this bot landed since this one read the settings? Then the claim it stands on stays. */
+  const before = botTokenOf(args.settings.before);
+  const landed = async () => {
+    const stored = botTokenOf(await args.settings.read(tenant));
+    return stored !== null && stored !== before && botIdOf(stored) === bot;
+  };
+  const undo = (stamp: number, from: BotClaimHolder | null) => () => undoBotClaimUnlessSaved(db, bot, tenant, stamp, from, landed);
   const confirmed = await args.confirmBot(token);
   const claim = await claimBot(db, bot, tenant, confirmed, now);
   if (!claim) {
     if (moveBot) return unconfirmed;
-    return { ok: true, moved: false, undo: nothing, settle: leftBehind };
+    return { ok: true, moved: false, undo: nothing, settle: settle(null) };
   }
   if (claim.holder === tenant.toLowerCase()) {
     return {
       ok: true,
       moved: false,
-      undo: claim.fresh ? () => undoBotClaim(db, bot, tenant, claim.stamp, null) : nothing,
-      settle: leftBehind,
+      undo: claim.fresh ? undo(claim.stamp, null) : nothing,
+      settle: settle(bot),
     };
   }
   if (!moveBot) {
@@ -132,8 +156,8 @@ export async function decideBotClaim(args: {
   return {
     ok: true,
     moved: true,
-    undo: () => undoBotClaim(db, bot, tenant, move.stamp, move.from),
-    settle: leftBehind,
+    undo: undo(move.stamp, move.from),
+    settle: settle(bot),
   };
 }
 
@@ -203,6 +227,8 @@ export async function botClaimForSave(args: {
   touched: boolean;
   next: MerrymenSettings;
   moveBot: boolean;
+  /** The account's settings as this save read them, and the store to read them afresh from (decideBotClaim). */
+  settings: { before: MerrymenSettings | null; read: (tenant: `0x${string}`) => Promise<MerrymenSettings | null> };
 }): Promise<BotClaimDecision | null> {
   if (!args.tenant || !args.touched) return null;
   const token = typeof args.next.telegramBotToken === "string" ? args.next.telegramBotToken : undefined;
@@ -210,7 +236,7 @@ export async function botClaimForSave(args: {
     const url = process.env.DATABASE_URL;
     const db = dbForTest ?? (url ? await makePgDb(url) : null);
     if (!db) return null;
-    return await decideBotClaim({ db, tenant: args.tenant, token, moveBot: args.moveBot, confirmBot: telegramBotIdOf });
+    return await decideBotClaim({ db, tenant: args.tenant, token, moveBot: args.moveBot, confirmBot: telegramBotIdOf, settings: args.settings });
   } catch (e) {
     console.warn(`[settings] telegram bot claims unavailable: ${e instanceof Error ? e.message : String(e)}`);
     if (!token) return null;

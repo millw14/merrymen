@@ -241,6 +241,125 @@ export async function releaseBotClaims(db: Db, tenant: string, keep?: string | n
   return r.changes;
 }
 
+/** The bot the token in these settings belongs to, judged as the child reads it (botTokenOf), or null. */
+export function storedBotOf(settings: MerrymenSettings | null): string | null {
+  const token = botTokenOf(settings);
+  return token === null ? null : botIdOf(token);
+}
+
+/**
+ * AFTER A SAVE LANDS: MAKE THIS TENANT'S CLAIMS MATCH WHAT IS STORED NOW, not
+ * what this save wrote. `storedBot` reads the tenant's settings fresh and names
+ * their token's bot (storedBotOf), or null. Every claim the tenant holds on any
+ * other bot is let go, and the stored bot is claimed if `confirmedBot` — the
+ * bot THIS save's token was confirmed for (getMe) — is that bot.
+ *
+ * WHY NOT SIMPLY "EVERY BOT BUT THE ONE THIS SAVE WROTE". Two saves for one
+ * account at once, for bots B and then C, both claim before either writes; the
+ * writes land in either order, and so do the settles after them. Settled on
+ * its own bot, the save for B let go of C's claim while C was what got stored
+ * (or C's let go of B's when B was), and the account was left storing a token
+ * for a bot it held no claim on: the orchestrator's to strip, or to hand to the
+ * next account that claimed it.
+ *
+ * WHY THIS CONVERGES. Every settle runs after its own save's write, so the
+ * settle of the LAST write starts after that write, and every read it makes
+ * names the final stored bot: it lets go of every other bot, and claims that
+ * one (it is the bot that save confirmed, unless Telegram refused its token,
+ * and then no claim is due). Reading is not enough on its own: an earlier
+ * settle can read the stored bot BEFORE the last write and let go AFTER the
+ * last settle is done, taking the final bot's claim with the rest. So every
+ * settle reads the stored bot again after letting go, and when it has changed
+ * underneath, puts back what it let go of for the bot stored now (the same
+ * row, stamp and all) and settles again on that. That second read comes after
+ * the stale release, hence after the last write, so it names the final bot and
+ * the claim comes back. Nothing else takes it from this tenant: a claim or a
+ * move only adds (and a save that makes one writes after it, so its settle
+ * comes later still), and an undo keeps a claim a landed save stands on
+ * (undoBotClaimUnlessSaved). A claim this tenant made for a bot it no longer
+ * stores is let go by whichever settle runs after it. Bounded: settings that
+ * keep changing through every read are being written by saves whose own
+ * settles come after this one. The window between a stale release and its
+ * put-back is the one place another account can take the bot, and only with
+ * a token Telegram confirms for it.
+ *
+ * ONLY A BOT THIS SAVE CONFIRMED IS CLAIMED, never merely the stored one. A
+ * stored token may be one Telegram refused (saved as typed, claiming nothing),
+ * and a claim made for it would let `<public id>:guess` take a free bot. The
+ * save that stored a confirmed token claims it in its own settle, and a claim
+ * put back is one this tenant already held. INSERT … ON CONFLICT DO NOTHING
+ * either way: a bot another account holds is never taken here.
+ *
+ * Only this tenant's rows are ever deleted or written, as releaseBotClaims.
+ */
+export async function settleBotClaims(
+  db: Db,
+  tenant: string,
+  storedBot: () => Promise<string | null>,
+  confirmedBot: string | null,
+  now: number,
+): Promise<void> {
+  const t = lc(tenant);
+  const claim = (bot: string, stamp: number) =>
+    db.prepare("INSERT INTO telegram_bot_claims (bot_id, tenant, claimed_at) VALUES (?, ?, ?) ON CONFLICT(bot_id) DO NOTHING").run(bot, t, stamp);
+  /** Every claim this settle let go of, bot → claimed_at: what it puts back if the bot it let go of turns out to be the stored one. */
+  const released = new Map<string, number>();
+  let bot = await storedBot();
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const gone = (bot === null
+      ? await db.prepare("DELETE FROM telegram_bot_claims WHERE tenant = ? RETURNING bot_id, claimed_at").all(t)
+      : await db.prepare("DELETE FROM telegram_bot_claims WHERE tenant = ? AND bot_id <> ? RETURNING bot_id, claimed_at").all(t, bot)) as {
+      bot_id: string;
+      claimed_at: number;
+    }[];
+    for (const r of gone) released.set(String(r.bot_id), Number(r.claimed_at));
+    if (bot !== null && bot === confirmedBot) await claim(bot, now);
+    const after = await storedBot();
+    if (after === bot) return;
+    const stamp = after === null ? undefined : released.get(after);
+    if (stamp !== undefined) await claim(after!, stamp);
+    bot = after;
+  }
+}
+
+/**
+ * THE SAVE DID NOT LAND: TAKE BACK ITS CLAIM (undoBotClaim), UNLESS A SAVE FOR
+ * THAT BOT HAS LANDED SINCE. `landed` says whether one has: the tenant's
+ * settings, read fresh, hold a token for this bot that is not the one stored
+ * when this save began — this save's own write after all (an error after the
+ * write), or another save for the same bot that decided while this claim stood
+ * and so made none of its own. Taken back under it, that save would be left
+ * storing a bot it holds no claim on. Asked again after taking it back, because
+ * such a save can land in between, and its settle find this claim still there
+ * and change nothing: then the claim is put back as this save left it.
+ *
+ * A token stored before this save began, even for the same bot, is no reason
+ * to keep it: the claim a failed save made or moved must not outlive it (a
+ * failed move keeps the bot from the account it was taken from). And when the
+ * settings cannot be read, it is taken back, as before.
+ */
+export async function undoBotClaimUnlessSaved(
+  db: Db,
+  botId: string,
+  tenant: string,
+  stamp: number,
+  from: BotClaimHolder | null,
+  landed: () => Promise<boolean>,
+): Promise<void> {
+  const saved = () => landed().catch(() => false);
+  if (await saved()) return;
+  await undoBotClaim(db, botId, tenant, stamp, from);
+  if (!(await saved())) return;
+  const t = lc(tenant);
+  if (from === null) {
+    await db.prepare("INSERT INTO telegram_bot_claims (bot_id, tenant, claimed_at) VALUES (?, ?, ?) ON CONFLICT(bot_id) DO NOTHING").run(botId, t, stamp);
+  } else if (!(from.tenant === t && from.claimedAt === stamp)) {
+    await db
+      .prepare("UPDATE telegram_bot_claims SET tenant = ?, claimed_at = ? WHERE bot_id = ? AND tenant = ? AND claimed_at = ?")
+      .run(t, stamp, botId, from.tenant, from.claimedAt);
+  }
+}
+
 /**
  * The token the process these settings are written for will use: trimmed, as
  * settings.ts `str()` trims it, or null. Judged as the child will read it, so
