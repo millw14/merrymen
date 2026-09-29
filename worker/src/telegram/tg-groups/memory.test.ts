@@ -214,6 +214,18 @@ describe("renderMemory", () => {
     assert.ok(!/wallet/i.test(out.split("\n").find((l) => l.includes("a while ago")) ?? ""), "its own address is never called its own");
   });
 
+  it("a memo that is not about a Robinhood Chain coin is never shown (an older build wrote them)", () => {
+    const out = renderMemory(
+      room({
+        coins: ["wallet", "not-token", "unknown", "coins-off"].map((verdict, i) =>
+          memo({ address: `0x${String(i + 1).repeat(40)}`, verdict: verdict as TgCoinMemo["verdict"], byName: `eth${i}` }),
+        ),
+      }),
+      T0,
+    );
+    assert.equal(out, "", "nothing to say about them at all");
+  });
+
   it("a hostile summary or note cannot close a fence or carry an address", () => {
     const out = renderMemory(
       room({

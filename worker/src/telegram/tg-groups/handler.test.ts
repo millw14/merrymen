@@ -1234,13 +1234,13 @@ describe("coins", () => {
     assert.deepEqual(dm?.body.reply_markup, { inline_keyboard: [[{ text: "⚙️ Open Settings", url: "https://app.test/settings#trencher-mode" }]] });
   });
 
-  it("coins switched off: a 👀 at most", async () => {
+  it("coins switched off: silence, not even a 👀, and no answer from the chatter path either", async () => {
     cfg.telegramGroupCoinsEnabled = false;
     make();
     approveRoom();
     await said(msg(CA1));
-    assert.deepEqual(tg.reactions(CHAT), ["👀"]);
-    assert.equal(tg.sends(CHAT).length, 0);
+    await said(msg(`@pinebot thoughts on ${ca(0xb2)}?`, { fromId: BOB, fromFirstName: "Bob" }));
+    assert.equal(tg.calls.length, 0, "no Bot API call at all");
     assert.equal(port.nominations.length, 0);
   });
 

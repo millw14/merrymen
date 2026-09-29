@@ -252,7 +252,6 @@ describe("the contract's fixed templates pass", () => {
     ["fixed", "drop the ca"],
     ["fixed", "can't get a proper look rn, sitting it out"],
     ["fixed", "that's a wallet lol"],
-    ["fixed", "not on my chain"],
     ["fixed", "already got some 🤝"],
     ["fixed", "already looked at that one, still not for me"],
     ["fixed", "gonna sit this one out"],

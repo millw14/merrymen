@@ -53,10 +53,12 @@ import { CoinFlow, type CoinIntent, type CoinSpeakOpts } from "./coins";
 import {
   addressedHow,
   addressedSmallTalk,
+  extractCaHits,
   extractCas,
   extractCashtags,
   greetingOf,
   hasForeignMint,
+  hasOtherChainLink,
   insultLevel,
   isBotQuestion,
   isDistress,
@@ -1599,8 +1601,15 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // person in trouble, not a coin to look at: it is never nominated, and it
     // gets the kind line (pacing), not "hmm is this good?".
     if (!j.deferred && !isDistress(text)) {
-      const cas = extractCas(text);
-      const foreignMint = hasForeignMint(text);
+      // Every CA with the chain its link names: the flow sets aside those in
+      // another chain's link before it counts the first two.
+      const hits = extractCaHits(text);
+      const cas = hits.map((h) => h.address);
+      const otherChain = hits.filter((h) => h.chain === "other").map((h) => h.address);
+      // Another chain's coin with no 0x + 40-hex address in it: a mint, a TON
+      // address, or a chart link DexScreener hands out for a Solana, TON, Sui
+      // or v4 pair. The flow owns the line and says nothing.
+      const foreignMint = hasForeignMint(text) || hasOtherChainLink(text);
       const cashtags = extractCashtags(text);
       if (cas.length > 0 || foreignMint || cashtags.length > 0) {
         const r = await flow.onPost(chatId, j.line, {
@@ -1609,6 +1618,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           senderName: j.via ? "" : j.line.name,
           ...(typeof j.msg.dateSec === "number" ? { dateSec: j.msg.dateSec } : {}),
           cas,
+          ...(otherChain.length > 0 ? { otherChain } : {}),
           foreignMint,
           cashtags,
           addressed: j.addressed !== null,

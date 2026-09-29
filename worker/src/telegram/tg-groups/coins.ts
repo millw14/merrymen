@@ -1,6 +1,15 @@
 /**
  * Telegram groups — the coin flow. The contract is docs/tg-groups.md, "The
- * coin flow" (steps 1–9), plus the "$PEPE?" and Solana-mint lines after it.
+ * coin flow" (steps 1–9), plus the "$PEPE?" line after it.
+ *
+ * ROBINHOOD CHAIN COINS ONLY. People post coins from every chain. A CA in a
+ * link that names another chain (Etherscan, BscScan, dexscreener.com/ethereum,
+ * gmgn.ai/bsc…), a Solana mint, and an address the look does not show is a
+ * Robinhood Chain coin (`wallet`, `not-token`, `unknown`: an Ethereum token
+ * has no code here, so it reads as a wallet) get silence: no line, no
+ * reaction, no owner ask, no DM, no nomination, and no memo anything could
+ * later be said from. Coins off and a stale post are silent the same way:
+ * without a look nothing shows the coin is one of Robinhood Chain's.
  *
  * WHAT THIS DECIDES AND WHAT IT DOES NOT. A posted CA is claimed, remembered
  * and, when every switch allows it, handed across as a nomination: the
@@ -56,9 +65,11 @@ const HOUR = 60 * MIN;
 
 /** The coin flow's clocks and counts. Every one of them is from the contract unless it says otherwise. */
 export const COIN_FLOW = {
-  /** "At most the first 2 CAs in a message are considered." */
+  /** "At most the first 2 CAs in a message are considered": counted once CAs in other chains' links are set aside. */
   maxCas: 2,
-  /** A post older than this (Telegram `date`) is recorded but never nominated. */
+  /** CAs read off one message at most, other chains' included (detect.ts MAX_HITS). */
+  maxPosted: 16,
+  /** A post older than this (Telegram `date`) is claimed and nothing more: never looked at, nominated or remembered. */
   staleMs: 10 * MIN,
   /** A coin seen in this chat this recently is answered from memory, no new look. */
   seenMs: 24 * HOUR,
@@ -72,8 +83,6 @@ export const COIN_FLOW = {
   capLineMs: HOUR,
   /** "drop the ca", per chat. */
   dropCaMs: HOUR,
-  /** "not on my chain", per chat. */
-  notMyChainMs: HOUR,
   /**
    * Not in the contract: an answer from memory ("already looked at that
    * one…") at most once per coin per chat this often. A CA reposted eight
@@ -111,7 +120,6 @@ export type CoinIntent =
   | { kind: "drop-ca" }
   | { kind: "ready-ask" }
   | { kind: "ready-nudge" }
-  | { kind: "not-my-chain" }
   | { kind: "faded-again" };
 
 /** Where a line goes and who it is about. Every field is optional; absent means "not this". */
@@ -153,9 +161,24 @@ export interface CoinPostInfo {
   senderName: string;
   /** Telegram `date` (seconds). */
   dateSec?: number;
-  /** extractCas output: lowercased 0x + 40 hex, unique, at most 2. */
+  /**
+   * The CAs in the line, lowercased 0x + 40 hex, unique, in order: the
+   * addresses of extractCaHits (extractCas's first two will do).
+   */
   cas: string[];
-  /** hasForeignMint: a Solana-style mint is in the line. */
+  /**
+   * The CAs of `cas` that sit in a link naming another chain (extractCaHits
+   * chain "other"). They are never claimed, looked at or answered, and do not
+   * count toward the first two. Absent means none.
+   */
+  otherChain?: string[];
+  /**
+   * Another chain's coin with no 0x + 40-hex address is in the line
+   * (hasForeignMint || hasOtherChainLink): a Solana or Tron mint, a TON
+   * address, a Sui or Aptos coin type, or another chain's chart, explorer or
+   * launchpad link whose id is not an EVM address (DexScreener's lowercase
+   * Solana pair links, TON and Sui pairs, a v4 pool id).
+   */
   foreignMint: boolean;
   /** extractCashtags output. */
   cashtags: string[];
@@ -193,14 +216,26 @@ const KINDS: ReadonlySet<string> = new Set<CoinKind>([
 ]);
 
 /**
- * VERDICTS THAT ARE NOT A LOOK, so a repost is not "answered from memory".
+ * VERDICTS NEVER ANSWERED FROM MEMORY: a repost of such a coin gets a fresh
+ * look, as if nothing were remembered.
  *
- * `coins-off` and `not-ready` were never looked at: answering them from memory
- * would be a coin line while coins are off, or a second readiness line that
- * skipped the readiness rate limits. `unknown` is a look that failed (or a
- * post recorded stale, never looked at): a repost is the moment to try again.
+ * `not-ready` is a candidate the owner was asked about: answering it from
+ * memory would be a second readiness line that skipped the readiness rate
+ * limits, and once it is ready the coin should be nominated. `coins-off` was
+ * never looked at. `unknown` is a look that failed: a repost is the moment
+ * to try again. `wallet` and `not-token` are not Robinhood Chain coins — an
+ * Ethereum or BNB token reads as a wallet here — and are never said anything
+ * about. The flow no longer writes the last three or `coins-off`; a memo from
+ * an older build may still carry them for its 14 days.
  */
-const NO_LOOK: ReadonlySet<CoinVerdict> = new Set<CoinVerdict>(["coins-off", "not-ready", "unknown"]);
+const NOT_ANSWERED: ReadonlySet<CoinVerdict> = new Set<CoinVerdict>(["coins-off", "not-ready", "unknown", "wallet", "not-token"]);
+
+/**
+ * LOOKS THAT DO NOT SHOW A ROBINHOOD CHAIN COIN: nothing deployed at the
+ * address here (a wallet, or another chain's token), something that is not a
+ * token, or a look that could not be made. Silence, and no memo.
+ */
+const NOT_A_COIN_HERE: ReadonlySet<CoinKind> = new Set<CoinKind>(["wallet", "not-token", "unknown"]);
 
 /** Verdicts that were a fade, for "still not sold on that one tbh". */
 const FADED: ReadonlySet<CoinVerdict> = new Set<CoinVerdict>(["passed", "too-quiet", "too-thin", "curve", "v4-only"]);
@@ -211,7 +246,7 @@ const CAP_REFUSALS: ReadonlySet<NominateRefusal> = new Set<NominateRefusal>(["bu
 /** Room stamps the coin flow rate-limits on. */
 type StampField = "lastReadyAskAtMs" | "lastReadyNudgeAtMs" | "lastReadyDmAtMs" | "lastCapLineAtMs" | "lastDropCaAtMs";
 
-/** The DM reason when there is no port to ask: plain words and a Settings act, like OWNER_REASON's. */
+/** The DM reason when the port's readiness could not be read: plain words and a Settings act, like OWNER_REASON's. */
 const NO_PORT_REASON = "I can't look at coins from your groups right now: check Trencher mode in Settings.";
 
 const SETTINGS_BUTTON = "⚙️ Open Settings";
@@ -274,8 +309,8 @@ function cleanNotes(v: unknown): string[] {
   return out;
 }
 
-/** The CAs worth a claim: well-formed, lowercased, unique, the first two. */
-function cleanCas(v: unknown): string[] {
+/** Well-formed CAs, lowercased, unique, in order, at most `max`. */
+function cleanCas(v: unknown, max: number): string[] {
   if (!Array.isArray(v)) return [];
   const out: string[] = [];
   for (const a of v) {
@@ -283,7 +318,7 @@ function cleanCas(v: unknown): string[] {
     const ca = a.toLowerCase();
     if (!ADDRESS.test(ca) || out.includes(ca)) continue;
     out.push(ca);
-    if (out.length >= COIN_FLOW.maxCas) break;
+    if (out.length >= max) break;
   }
   return out;
 }
@@ -336,14 +371,9 @@ export class CoinFlow {
   private port: TgCoinsPort | null | undefined = undefined;
   private unsub: (() => void) | null = null;
   /**
-   * "not on my chain" stamps, in memory: TgRoom has no field for it, and the
-   * worst a restart does is one extra "not on my chain" within the hour.
-   */
-  private readonly notMyChainAt = new Map<number, number>();
-  /**
    * Answers from memory per `${chatId}:${address}` (COIN_FLOW.seenLineMs), and
-   * whether a repost inside the window already got its 👀. In memory for the
-   * same reason as notMyChainAt: a restart costs one extra line at most.
+   * whether a repost inside the window already got its 👀. In memory: TgRoom
+   * has no field for it, and a restart costs one extra line at most.
    */
   private readonly seenSaidAt = new Map<string, { at: number; eyed: boolean }>();
 
@@ -370,19 +400,27 @@ export class CoinFlow {
   /**
    * One line of an approved room. "handled" means the coin flow owns the
    * message and the handler should not also answer it: it carried a CA
-   * (whatever happened to it, a replay included), a Solana mint, or a ticker
-   * the flow answered with "drop the ca". A ticker the flow said nothing to
-   * is ordinary chatter ("none"), so an addressed "@bot $PEPE?" can still get
-   * a normal answer once "drop the ca" has been used up for the hour.
+   * (whatever happened to it: another chain's, a replay, silence), a Solana
+   * mint (always silence), or a ticker the flow answered with "drop the ca".
+   * Owning another chain's coin is how it stays unanswered: the chatter path
+   * would otherwise talk about it. A ticker the flow said nothing to is
+   * ordinary chatter ("none"), so an addressed "@bot $PEPE?" can still get a
+   * normal answer once "drop the ca" has been used up for the hour.
    */
   async onPost(chatId: number, line: TgLine, m: CoinPostInfo): Promise<"handled" | "none"> {
     let owned = false;
     try {
       this.watchPort();
       if (!this.approvedRoom(chatId) || !line || typeof line !== "object" || !m || typeof m !== "object") return "none";
-      const cas = cleanCas(m.cas);
-      if (cas.length === 0) return await this.noCa(chatId, line, m);
+      const posted = cleanCas(m.cas, COIN_FLOW.maxPosted);
+      if (posted.length === 0) return await this.noCa(chatId, line, m);
       owned = true;
+      // A CA in another chain's link is set aside before the first two are
+      // counted: "live on eth, bsc and robinhood" with three links still gets
+      // its Robinhood coin looked at. Set aside means untouched: no claim, no
+      // look, no memo — there is nothing a replay of it could repeat.
+      const elsewhere = new Set(cleanCas(m.otherChain, COIN_FLOW.maxPosted));
+      const cas = posted.filter((a) => !elsewhere.has(a)).slice(0, COIN_FLOW.maxCas);
       const ctx: PostCtx = { reacted: false, askedOwner: false };
       for (const address of cas) {
         // The first CA's look may have taken seconds; a room left meanwhile
@@ -513,14 +551,15 @@ export class CoinFlow {
   // ─── A line with no CA ────────────────────────────────────────────────────
 
   private async noCa(chatId: number, line: TgLine, m: CoinPostInfo): Promise<"handled" | "none"> {
+    // ANOTHER CHAIN'S COIN with no EVM address (a Solana mint, a TON
+    // address, a DexScreener Solana pair link…). Owned, so the chatter path
+    // does not talk about it either, and nothing is said: coins on or off,
+    // fresh or stale. Not "drop the ca" for a ticker beside it: they did drop one.
+    if (m.foreignMint === true) return "handled";
     // Coins off is "no look, no ask": asking for a CA is asking to look.
     if (!this.coinsOn()) return "none";
     // An old line from a redelivered batch gets no coin line either.
     if (this.isStale(line, m)) return "none";
-    if (m.foreignMint === true) {
-      await this.onceInMemory(chatId, () => this.say(chatId, { kind: "not-my-chain" }, { replyTo: line.messageId, trigger: line }));
-      return "handled";
-    }
     const tags = Array.isArray(m.cashtags) ? m.cashtags.filter((t) => typeof t === "string" && t.length > 0) : [];
     if (tags.length === 0) return "none";
     if (m.addressed !== true && !onlyCashtags(line.text)) return "none";
@@ -564,45 +603,39 @@ export class CoinFlow {
     const say = (intent: CoinIntent, o: CoinSpeakOpts): Promise<boolean> => (gone() ? Promise.resolve(false) : this.say(chatId, intent, o));
     const eyes = (): Promise<void> => (gone() ? Promise.resolve() : this.eyes(chatId, line.messageId, ctx));
 
-    // 1. Stale: recorded, never nominated, nothing said. An existing memo is
-    // kept — it may be waiting for an outcome, and this post changes nothing.
-    if (this.isStale(line, m)) {
-      if (!d.store.coin(chatId, address)) d.store.rememberCoin(chatId, memo("unknown"));
-      return;
-    }
+    // 1. Stale: claimed, and nothing more. Never looked at, so never shown to
+    // be a Robinhood Chain coin: not nominated, not answered, not remembered.
+    // An existing memo is kept — it may be waiting for an outcome, and this
+    // post changes nothing.
+    if (this.isStale(line, m)) return;
 
+    // 2. Coins off: silence, not even a 👀 — without a look nothing shows
+    // this is a Robinhood Chain coin at all — and no answer from memory
+    // either, which is a coin opinion too.
+    if (!this.coinsOn()) return;
+
+    // 3. Seen here within 24 h as a Robinhood Chain coin: answered from
+    // memory, replying to the new post. The memo stays the original one: it
+    // names who posted it first and is the one an outcome still on its way
+    // will look for.
     const prior = d.store.coin(chatId, address, COIN_FLOW.seenMs);
-    const looked = prior && !NO_LOOK.has(prior.verdict) ? prior : undefined;
-
-    // 3 before 2: with coins off, even an answer from memory is a coin line,
-    // and the contract's coins-off is "an opinion-free reaction at most".
-    if (!this.coinsOn()) {
-      await eyes();
-      if (!looked) d.store.rememberCoin(chatId, memo("coins-off"));
+    if (prior && !NOT_ANSWERED.has(prior.verdict)) {
+      await this.fromMemory(chatId, address, line, prior, say, eyes);
       return;
     }
 
-    // 2. Seen here within 24 h: answered from memory, replying to the new post.
-    // The memo stays the original one: it names who posted it first and is
-    // the one an outcome still on its way will look for.
-    if (looked) {
-      await this.fromMemory(chatId, address, line, looked, say, eyes);
-      return;
-    }
-
-    // 4. Readiness. Not ready: the owner ask (group) and the reason (DM). No look.
+    // 4. The quick look, READY OR NOT: it is what says whether the address is
+    // a Robinhood Chain coin, and the port's look does not depend on trencher
+    // mode. No port, no look, and nothing to say.
     const port = this.portNow();
-    const readiness = port ? this.readinessOf(port) : null;
-    if (!port || !readiness || !READY.has(readiness.kind)) {
-      d.store.rememberCoin(chatId, memo("not-ready"));
-      if (!gone()) await this.askOwner(chatId, line, readiness, ctx);
-      return;
-    }
-
-    // 5. The quick look.
+    if (!port) return;
     const look = await this.lookAt(port, address);
     // The look took a while: the room may have been left, or coins switched off.
     if (!this.approvedRoom(chatId) || !this.coinsOn()) return;
+    // Not a Robinhood Chain coin (a wallet, another chain's token: no code
+    // here), not a token, or not provably anything: silence, and no memo, so
+    // nothing is ever said from it and a repost gets a fresh look.
+    if (NOT_A_COIN_HERE.has(look.kind)) return;
     const coinName = look.name ? { coinName: look.name } : {};
 
     // A CHART LINK CARRIES THE POOL. When the look proved the posted address
@@ -614,12 +647,16 @@ export class CoinFlow {
     if (coin !== address) {
       if (!d.store.claim(chatId, line.messageId, coin)) return;
       const seen = d.store.coin(chatId, coin, COIN_FLOW.seenMs);
-      if (seen && !NO_LOOK.has(seen.verdict)) {
+      if (seen && !NOT_ANSWERED.has(seen.verdict)) {
         await this.fromMemory(chatId, coin, line, seen, say, eyes);
         return;
       }
     }
 
+    // 5. A Robinhood Chain coin. Readiness decides only what a candidate
+    // gets: the owner ask while not ready, a nomination once ready. Every
+    // other kind is its grounded line either way (asking the owner to switch
+    // trencher mode on would not get a thin or a curve coin bought).
     if (look.kind === "held") {
       d.store.rememberCoin(chatId, memo("held", look.name, coin));
       const tag = tagSender();
@@ -630,6 +667,17 @@ export class CoinFlow {
       d.store.rememberCoin(chatId, memo(look.kind, look.name, coin));
       const tag = tagSender();
       await say({ kind: "coin-look", look: look.kind }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
+      return;
+    }
+
+    // Not ready: a coin trencher mode could trade, so the owner ask (group)
+    // and the reason (DM). Remembered as not-ready, so a repost once it is
+    // ready is looked at and nominated rather than answered from memory.
+    // Read now, after the look: the owner may have switched it on meanwhile.
+    const readiness = this.readinessOf(port);
+    if (!readiness || !READY.has(readiness.kind)) {
+      d.store.rememberCoin(chatId, memo("not-ready", look.name, coin));
+      if (!gone()) await this.askOwner(chatId, line, readiness, ctx);
       return;
     }
 
@@ -669,7 +717,7 @@ export class CoinFlow {
       // Recent in the book. Answered from memory only when the memory is this
       // chat's: a coin another group nominated is never mentioned here.
       const mine = d.store.coin(chatId, coin);
-      if (mine && !NO_LOOK.has(mine.verdict)) await this.fromMemory(chatId, coin, line, mine, say, eyes);
+      if (mine && !NOT_ANSWERED.has(mine.verdict)) await this.fromMemory(chatId, coin, line, mine, say, eyes);
       return;
     }
     // invalid / not-ready (readiness changed during the look): silence.
@@ -998,29 +1046,6 @@ export class CoinFlow {
         if (prev === undefined) delete r[field];
         else r[field] = prev;
       });
-    }
-    return ok;
-  }
-
-  /** `once` for "not on my chain", whose stamp lives in memory. */
-  private async onceInMemory(chatId: number, act: () => Promise<boolean>): Promise<boolean> {
-    const t = this.d.now();
-    const prev = this.notMyChainAt.get(chatId);
-    if (!elapsed(prev, t, COIN_FLOW.notMyChainMs)) return false;
-    this.notMyChainAt.set(chatId, t);
-    let ok = false;
-    try {
-      ok = (await act()) === true;
-    } catch (e) {
-      this.fail("send", e);
-    }
-    if (!ok && this.notMyChainAt.get(chatId) === t) {
-      if (prev === undefined) this.notMyChainAt.delete(chatId);
-      else this.notMyChainAt.set(chatId, prev);
-    }
-    // Bounded like the store's 30 chats: a map of every chat ever seen is not needed.
-    if (this.notMyChainAt.size > 64) {
-      for (const [k, at] of this.notMyChainAt) if (t - at >= COIN_FLOW.notMyChainMs) this.notMyChainAt.delete(k);
     }
     return ok;
   }

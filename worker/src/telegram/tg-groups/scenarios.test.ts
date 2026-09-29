@@ -397,12 +397,13 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     assert.equal(tg.sends(CHAT).length, 3);
   });
 
-  it("Someone posts a CA, not trencher mode → tags owner politely (12 h), DMs owner the reason + button", async () => {
+  it("Someone posts a Robinhood Chain coin, not trencher mode → looked at first; a candidate tags owner politely (12 h), DMs owner the reason + button", async () => {
     port.ready = { kind: "slow", ownerReason: "The fast trencher path is off, so I can't review coins people post." };
     make();
     approve();
     await said(msg("hey", { fromId: OWNER, fromFirstName: "Mike" }));
     await said(msg(CA1));
+    assert.deepEqual(port.lookCalls, [CA1], "the look says it is a Robinhood Chain coin before the owner is tagged");
     assert.match(tg.texts(CHAT)[0] ?? "", new RegExp(`^<a href="tg://user\\?id=${OWNER}">Mike</a> .*trencher mode`));
     assert.equal(tg.sends(OWNER).length, 1);
     assert.match(tg.texts(OWNER)[0] ?? "", /fast trencher path is off/);
@@ -410,6 +411,114 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     assert.ok(!tg.texts(CHAT).slice(1).some((t) => /^<a href="tg:\/\/user\?id=424242">/.test(t)), "no second owner tag within 12 h");
     assert.equal(tg.sends(OWNER).length, 1, "no second DM within 12 h");
     assert.equal(port.nominations.length, 0);
+  });
+
+  it("A Robinhood Chain coin that is not a candidate, not trencher mode → its grounded fade, tagging the sender; no owner ask, no DM", async () => {
+    port.ready = { kind: "off", ownerReason: "Trencher mode is off." };
+    port.looks.set(CA1, { kind: "too-quiet", name: "Slowcoin" });
+    make();
+    approve();
+    const post = msg(CA1);
+    await said(post);
+    const s = tg.sends(CHAT);
+    assert.equal(s.length, 1);
+    assert.equal(replyOf(s[0]), post.messageId);
+    assert.match(String(s[0]?.body.text), new RegExp(`^<a href="tg://user\\?id=${ANN}">Ann</a> `));
+    assert.ok(!/trencher/i.test(plain(String(s[0]?.body.text))), "not the owner ask");
+    assert.equal(tg.sends(OWNER).length, 0);
+    assert.equal(port.nominations.length, 0);
+  });
+
+  it("Coins from other chains → nothing at all: no line, no reaction, no owner ask or DM, ready or not, coins on or off", async () => {
+    const ETH_TOKEN = ca(0xe7);
+    // The real look reads Robinhood Chain first: an Ethereum token has no code here.
+    port.looks.set(ETH_TOKEN, { kind: "wallet" });
+    const posts = (n: number): string[] => [
+      `https://etherscan.io/token/${ca(0x100 + n)}`,
+      `https://bscscan.com/token/${ca(0x200 + n)} 🚀`,
+      `new gem https://basescan.org/token/${ca(0x300 + n)}`,
+      `https://dexscreener.com/ethereum/${ca(0x400 + n)}`,
+      `https://www.geckoterminal.com/eth/pools/${ca(0x500 + n)}`,
+      `https://gmgn.ai/bsc/token/${ca(0x600 + n)}`,
+      `ape ${ETH_TOKEN}`,
+      `@pinebot thoughts on ${ETH_TOKEN}?`,
+      `${MINT} 🚀`,
+      `https://pump.fun/coin/${MINT}`,
+    ];
+    let n = 0;
+    for (const [ready, on] of [[true, true], [false, true], [true, false], [false, false]] as const) {
+      port.ready = ready ? { kind: "ready-paper", ownerReason: "ready" } : { kind: "off", ownerReason: "Trencher mode is off." };
+      cfg.telegramGroupCoinsEnabled = on;
+      make();
+      approve();
+      await said(msg("hey", { fromId: OWNER, fromFirstName: "Mike" }));
+      for (const text of posts(n++)) await said(msg(text, { fromId: BOB + n, fromFirstName: "Bob" }));
+      assert.deepEqual(tg.calls, [], `ready ${ready}, coins ${on}: not one Bot API call`);
+      groups.stop();
+      await groups.drain();
+    }
+    assert.equal(port.nominations.length, 0);
+    assert.ok(port.lookCalls.every((a) => a === ETH_TOKEN), "only the bare address was ever looked at");
+    assert.ok(!store.room(CHAT)?.coins.length, "and nothing is remembered to answer from later");
+
+    // The same room still answers a Robinhood Chain coin, bare or in its own chart link.
+    port.ready = { kind: "ready-paper", ownerReason: "ready" };
+    cfg.telegramGroupCoinsEnabled = true;
+    make();
+    await said(msg(CA1));
+    await said(msg(`https://dexscreener.com/robinhood/${CA2}`, { fromId: CAT, fromFirstName: "Cat" }));
+    assert.equal(tg.sends(CHAT).length, 2, "an ack for each");
+    assert.deepEqual(port.nominations.map((x) => x.address), [CA1, CA2]);
+  });
+
+  it("Another chain's coin with no 0x address in it (DexScreener's own Solana, TON, Sui and v4 links; a TON address) → nothing at all, addressed or not, ready or not, coins on or off", async () => {
+    // A model that would answer, and odds that would join in: any reply here
+    // is the chatter path talking about another chain's coin.
+    const seen = fakeModel(() => "lol that one looks mid");
+    cfg.telegramGroupsChattiness = "chatty";
+    dice = () => 0.01;
+    const H64 = "0x" + "ab12".repeat(16);
+    const coins = [
+      // Exactly as DexScreener's API hands them out: a Solana pair id all
+      // lowercase, so it has no mint shape, and no 0x + 40 hex anywhere.
+      "https://dexscreener.com/solana/4hzthuyzrpwtvqgru8trxb5tkaslgphuamdgtks2rdai",
+      "https://dexscreener.com/ton/eqcxe6mutqjkfngfarotkot1lzbdiix1kcixrv7nw2id_sds",
+      `https://dexscreener.com/sui/${H64}`,
+      // A Uniswap v4 pool id on Base: 64 hex, never read as a CA.
+      `https://dexscreener.com/base/${H64}`,
+      "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs",
+    ];
+    let n = 0;
+    for (const [ready, on] of [[true, true], [false, true], [true, false], [false, false]] as const) {
+      port.ready = ready ? { kind: "ready-paper", ownerReason: "ready" } : { kind: "off", ownerReason: "Trencher mode is off." };
+      cfg.telegramGroupCoinsEnabled = on;
+      make();
+      approve();
+      liven();
+      for (const coin of coins) {
+        n++;
+        await said(msg(`@pinebot thoughts on ${coin} ?`, { fromId: BOB + n, fromFirstName: "Bob" }));
+        await said(msg(`this one is sending ${coin}`, { fromId: CAT + n, fromFirstName: "Cat" }));
+        await said(msg(`anyone looked at ${coin}?`, { fromId: ANN + n, fromFirstName: "Ann" }));
+      }
+      assert.deepEqual(tg.calls, [], `ready ${ready}, coins ${on}: not one Bot API call`);
+      groups.stop();
+      await groups.drain();
+    }
+    // The private notes pass reads the chat as ever (links and codes
+    // redacted); what matters is that nothing asked the model for a line.
+    assert.deepEqual(
+      seen.filter((s) => !/keep short private notes/.test(s.system)),
+      [],
+      "the model was never asked for a line about one",
+    );
+    assert.equal(port.lookCalls.length + port.nominations.length, 0);
+    assert.ok(!store.room(CHAT)?.coins.length, "and nothing is remembered to answer from later");
+
+    // The same room, the same model, still answers words addressed to it.
+    make();
+    await said(msg("@pinebot what do you think"));
+    assert.equal(tg.sends(CHAT).length, 1);
   });
 
   it("Someone posts a CA, trencher ready → tags sender, thinks out loud, Brain decides, then a casual buy line or a grounded fade", async () => {
@@ -490,17 +599,28 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     assert.match(plain(t[1] ?? ""), /one at a time|still on the last|chewing|slow down|hold up/);
   });
 
-  it("Wallet / its own address / USDG / $MERRYMEN / a stock → casual one-liner, no look beyond the quick one", async () => {
+  it("Its own address / USDG / $MERRYMEN / a stock → casual one-liner, no look beyond the quick one", async () => {
     make();
     approve();
-    // Five different people: one person's fourth CA in two minutes is the flood (a 👀 at most).
-    for (const [i, kind] of (["wallet", "own", "cash", "energy", "stock"] as const).entries()) {
+    // Different people: one person's fourth CA in two minutes is the flood (a 👀 at most).
+    for (const [i, kind] of (["own", "cash", "energy", "stock"] as const).entries()) {
       port.looks.set(ca(10 + i), { kind });
       await said(msg(ca(10 + i), { fromId: BOB + i, fromFirstName: `Bob${i}` }));
     }
     assert.equal(port.nominations.length, 0);
-    assert.equal(tg.sends(CHAT).length, 5);
+    assert.equal(tg.sends(CHAT).length, 4);
     for (const t of tg.texts(CHAT)) assert.ok(!/\d/.test(plain(t)), t);
+  });
+
+  it("A wallet, or anything the look cannot show is a Robinhood Chain coin → silence", async () => {
+    make();
+    approve();
+    for (const [i, kind] of (["wallet", "not-token", "unknown"] as const).entries()) {
+      port.looks.set(ca(30 + i), { kind });
+      await said(msg(ca(30 + i), { fromId: BOB + i, fromFirstName: `Bob${i}` }));
+    }
+    assert.deepEqual(tg.calls, []);
+    assert.equal(port.nominations.length, 0);
   });
 
   it("Bonding-curve coin, v4-only, no pool, too thin, too quiet → casual grounded fade, no Brain spend", async () => {
@@ -514,11 +634,12 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     assert.equal(tg.sends(CHAT).length, 5);
   });
 
-  it("Solana mint → 'not on my chain'", async () => {
+  it("Solana mint → silence", async () => {
     make();
     approve();
     await said(msg(`${MINT} 🚀`));
-    assert.match(tg.texts(CHAT)[0] ?? "", /chain/);
+    await said(msg(`@pinebot is ${MINT} good?`, { fromId: BOB, fromFirstName: "Bob" }));
+    assert.deepEqual(tg.calls, []);
   });
 
   it("'$PEPE?' with no CA → 'drop the ca'", async () => {

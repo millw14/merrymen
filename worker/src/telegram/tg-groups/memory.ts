@@ -225,6 +225,14 @@ const VERDICT_WORDS: Record<CoinVerdict, string> = {
   unknown: "you couldn't get a proper look",
 };
 
+/**
+ * Memos the persona is never shown: not a Robinhood Chain coin (`wallet` is
+ * what another chain's token reads as here), or never looked at. The coin
+ * flow no longer writes them (coins.ts); a memo from an older build may, for
+ * its 14 days, and the agent only ever talks about Robinhood Chain coins.
+ */
+const UNSHOWN: ReadonlySet<CoinVerdict> = new Set<CoinVerdict>(["wallet", "not-token", "unknown", "coins-off"]);
+
 /** A coin's name as the prompt may show it, or "a coin". Never address-shaped. */
 function coinLabel(memo: TgCoinMemo): string {
   const name = promptSafe(memo.name ?? "", 40);
@@ -261,7 +269,10 @@ export function renderMemory(room: TgRoom, nowMs: number): string {
     }
   }
 
-  const coins = [...(Array.isArray(room?.coins) ? room.coins : [])].sort((a, b) => b.atMs - a.atMs).slice(0, RENDER_COINS);
+  const coins = [...(Array.isArray(room?.coins) ? room.coins : [])]
+    .filter((c) => !UNSHOWN.has(c.verdict))
+    .sort((a, b) => b.atMs - a.atMs)
+    .slice(0, RENDER_COINS);
   if (coins.length > 0) {
     parts.push("Coins posted here:");
     for (const c of coins) {

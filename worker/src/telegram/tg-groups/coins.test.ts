@@ -7,8 +7,12 @@
  *     silent: nothing is looked at, nominated or said twice;
  *   - only the address and where it came from cross into a nomination, and a
  *     stale post is never nominated;
- *   - nothing is said in a room that is not approved, and coins-off is a 👀 at
- *     most;
+ *   - only a Robinhood Chain coin gets anything: a CA in another chain's link,
+ *     a Solana mint, and an address the look does not show is one (a wallet,
+ *     which is what an Ethereum token is here) get silence and no memo, ready
+ *     or not, coins on or off;
+ *   - nothing is said in a room that is not approved, and coins-off is
+ *     silence;
  *   - every once-per-window line holds across time, and a line that failed to
  *     go out does not use up its window;
  *   - outcomes reach the chat and the person the coin came from, once;
@@ -21,7 +25,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { COIN_FLOW, CoinFlow, type CoinFlowDeps, type CoinIntent, type CoinPostInfo, type CoinSpeakOpts } from "./coins";
-import { extractCas, extractCashtags, hasForeignMint } from "./detect";
+import { extractCaHits, extractCashtags, hasForeignMint, hasOtherChainLink } from "./detect";
 import { TG_GROUPS_FILE, TgGroupsStore } from "./store";
 import type {
   CoinKind,
@@ -162,12 +166,15 @@ function msg(chatId: number, text: string, o: MsgOpts = {}): { line: TgLine; inf
   const name = o.name ?? (from === BOB ? "bob" : "ann");
   const line: TgLine = { messageId: id, fromId: from, name, text, atMs: clock };
   store.addLine(chatId, line);
+  const hits = extractCaHits(text);
+  const otherChain = hits.filter((h) => h.chain === "other").map((h) => h.address);
   const info: CoinPostInfo = {
     senderId: from,
     senderName: name,
     dateSec: o.dateSec ?? Math.floor(clock / 1000),
-    cas: extractCas(text),
-    foreignMint: hasForeignMint(text),
+    cas: hits.map((h) => h.address),
+    ...(otherChain.length > 0 ? { otherChain } : {}),
+    foreignMint: hasForeignMint(text) || hasOtherChainLink(text),
     cashtags: extractCashtags(text),
     addressed: o.addressed ?? false,
   };
@@ -217,37 +224,43 @@ afterEach(() => {
 // ─── Lines with no CA ──────────────────────────────────────────────────────
 
 describe("a line with no CA", () => {
-  it("a Solana mint gets 'not on my chain' at most once per chat per hour", async () => {
+  it("a Solana mint is another chain's coin: handled, so nothing else answers it, and silent — ready or not, coins on or off, fresh or stale", async () => {
     const flow = makeFlow();
-    const first = await post(flow, CHAT, `aping ${MINT}`);
-    assert.equal(first.r, "handled");
-    assert.deepEqual(intents(), [{ kind: "not-my-chain" }]);
-    assert.equal(spoken[0]!.o.replyTo, first.line.messageId);
-    assert.equal(spoken[0]!.chatId, CHAT);
-
-    clock += 30 * MIN;
-    assert.equal((await post(flow, CHAT, `${MINT} again`)).r, "handled");
-    assert.equal(spoken.length, 1, "within the hour: nothing");
-
-    // Another chat has its own hour.
-    approve(OTHER, "Other");
-    await post(flow, OTHER, MINT);
-    assert.equal(spoken.length, 2);
-    assert.equal(spoken[1]!.chatId, OTHER);
-
-    clock += 31 * MIN;
-    await post(flow, CHAT, MINT);
-    assert.equal(spoken.length, 3, "an hour after the first: again");
+    for (const [ready, on] of [[true, true], [false, true], [true, false], [false, false]] as const) {
+      port!.ready = ready ? { kind: "ready-paper", ownerReason: "ready" } : { kind: "off", ownerReason: "off" };
+      coinsOn = on;
+      assert.equal((await post(flow, CHAT, `aping ${MINT}`)).r, "handled");
+      assert.equal((await post(flow, CHAT, `https://pump.fun/coin/${MINT}`, { addressed: true })).r, "handled");
+      assert.equal((await post(flow, CHAT, `$BONK ${MINT}`)).r, "handled", "not 'drop the ca': they did drop one");
+      assert.equal((await post(flow, CHAT, MINT, { dateSec: Math.floor((clock - 20 * MIN) / 1000) })).r, "handled");
+    }
+    assert.equal(spoken.length + reacts.length + dms.length + port!.lookCalls.length + port!.nominations.length, 0);
+    assert.deepEqual(store.room(CHAT)!.coins, []);
+    assert.equal(store.room(CHAT)!.lastDropCaAtMs, undefined);
   });
 
-  it("a 'not on my chain' that failed to go out does not use up the hour", async () => {
+  it("another chain's coin with no EVM address or mint shape (DexScreener's lowercase Solana, TON, Sui and v4 links, a TON address) is handled the same: silent", async () => {
     const flow = makeFlow();
-    speakOk = false;
-    await post(flow, CHAT, MINT);
-    speakOk = true;
-    clock += MIN;
-    await post(flow, CHAT, MINT);
-    assert.equal(spoken.length, 2);
+    const h64 = "0x" + "ab12".repeat(16);
+    const texts = [
+      "https://dexscreener.com/solana/4hzthuyzrpwtvqgru8trxb5tkaslgphuamdgtks2rdai",
+      "https://dexscreener.com/ton/eqcxe6mutqjkfngfarotkot1lzbdiix1kcixrv7nw2id_sds",
+      `https://dexscreener.com/sui/${h64}`,
+      `$FROG https://dexscreener.com/base/${h64}`,
+      "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs",
+    ];
+    for (const [ready, on] of [[true, true], [false, true], [true, false], [false, false]] as const) {
+      port!.ready = ready ? { kind: "ready-paper", ownerReason: "ready" } : { kind: "off", ownerReason: "off" };
+      coinsOn = on;
+      for (const [i, text] of texts.entries()) {
+        assert.equal((await post(flow, CHAT, text, { addressed: i % 2 === 0 })).r, "handled", text);
+      }
+    }
+    assert.equal(spoken.length + reacts.length + dms.length + port!.lookCalls.length + port!.nominations.length, 0);
+    assert.deepEqual(store.room(CHAT)!.coins, []);
+    assert.equal(store.room(CHAT)!.lastDropCaAtMs, undefined, "not 'drop the ca' for the ticker: they did drop one");
+    // A Robinhood Chain v4 pool link is not another chain's: not owned here, the chatter path has it.
+    assert.equal((await post(flow, CHAT, `https://dexscreener.com/robinhood/${h64}`)).r, "none");
   });
 
   it("'$PEPE?' alone gets 'drop the ca' at most once per chat per hour", async () => {
@@ -282,10 +295,9 @@ describe("a line with no CA", () => {
     assert.equal(spoken.length, 0);
   });
 
-  it("coins off: no mint line and no 'drop the ca'", async () => {
+  it("coins off: no 'drop the ca', and a ticker is ordinary chatter", async () => {
     coinsOn = false;
     const flow = makeFlow();
-    assert.equal((await post(flow, CHAT, MINT)).r, "none");
     assert.equal((await post(flow, CHAT, "$PEPE?")).r, "none");
     assert.equal(spoken.length + reacts.length, 0);
   });
@@ -294,8 +306,53 @@ describe("a line with no CA", () => {
     const flow = makeFlow();
     const old = Math.floor((clock - 20 * MIN) / 1000);
     assert.equal((await post(flow, CHAT, "$PEPE?", { dateSec: old })).r, "none");
-    assert.equal((await post(flow, CHAT, MINT, { dateSec: old })).r, "none");
     assert.equal(spoken.length, 0);
+  });
+});
+
+// ─── Other chains ──────────────────────────────────────────────────────────
+
+describe("a CA in another chain's link", () => {
+  const LINKS = [
+    (a: string) => `https://etherscan.io/token/${a}`,
+    (a: string) => `https://bscscan.com/token/${a}`,
+    (a: string) => `https://basescan.org/token/${a}#code`,
+    (a: string) => `https://dexscreener.com/ethereum/${a}`,
+    (a: string) => `https://www.geckoterminal.com/eth/pools/${a}`,
+    (a: string) => `https://gmgn.ai/bsc/token/${a}`,
+  ];
+
+  it("gets nothing at all — no claim, no look, no line, no 👀, no ask, no DM, no memo — ready or not, coins on or off", async () => {
+    const flow = makeFlow();
+    let n = 0;
+    for (const [ready, on] of [[true, true], [false, true], [true, false], [false, false]] as const) {
+      port!.ready = ready ? { kind: "ready-paper", ownerReason: "ready" } : { kind: "off", ownerReason: "off" };
+      coinsOn = on;
+      for (const link of LINKS) {
+        const r = await post(flow, CHAT, `aping this ${link(ca(0x300 + n++))}`, { addressed: n % 2 === 0 });
+        assert.equal(r.r, "handled", "owned, so nothing else answers it either");
+      }
+    }
+    assert.equal(port!.lookCalls.length + port!.nominations.length, 0);
+    assert.equal(spoken.length + reacts.length + dms.length, 0);
+    assert.deepEqual(store.room(CHAT)!.claims, {});
+    assert.deepEqual(store.room(CHAT)!.coins, []);
+  });
+
+  it("is set aside before the first two are counted: a multichain post's Robinhood CAs are still looked at", async () => {
+    const flow = makeFlow();
+    await post(flow, CHAT, `live on eth ${LINKS[0]!(ca(1))} bsc ${LINKS[1]!(ca(2))} and robinhood ${ca(3)} ${ca(4)} ${ca(5)}`);
+    assert.deepEqual(port!.lookCalls, [ca(3), ca(4)]);
+    assert.deepEqual(port!.nominations.map((x) => x.address), [ca(3), ca(4)]);
+    assert.deepEqual(intents(), [{ kind: "coin-ack" }, { kind: "coin-ack" }]);
+  });
+
+  it("a Robinhood chart link and a bare Robinhood coin are looked at as ever", async () => {
+    const flow = makeFlow();
+    await post(flow, CHAT, `https://dexscreener.com/robinhood/${CA1}`);
+    await post(flow, CHAT, CA2, { from: BOB });
+    assert.deepEqual(port!.lookCalls, [CA1, CA2]);
+    assert.deepEqual(intents(), [{ kind: "coin-ack" }, { kind: "coin-ack" }]);
   });
 });
 
@@ -333,16 +390,16 @@ describe("claims", () => {
     assert.equal(spoken.length, 1);
   });
 
-  it("a stale post is recorded, never looked at, and nothing is said", async () => {
+  it("a stale post is claimed, never looked at, not remembered, and nothing is said", async () => {
     const flow = makeFlow();
     const r = await post(flow, CHAT, `ape ${CA1}`, { dateSec: Math.floor((clock - 11 * MIN) / 1000) });
     assert.equal(r.r, "handled");
+    assert.ok(store.room(CHAT)!.claims[`${r.line.messageId}:${CA1}`], "claimed");
     assert.equal(port!.lookCalls.length + port!.nominations.length, 0);
     assert.equal(spoken.length + reacts.length + dms.length, 0);
-    const memo = memoOf(CA1)!;
-    assert.equal(memo.verdict, "unknown");
-    assert.equal(memo.byId, ANN);
-    // ...and recorded as never looked at: a fresh repost gets the real look.
+    // Never looked at, so not known to be a Robinhood Chain coin: no memo
+    // for the persona to talk from, and a fresh repost gets the real look.
+    assert.equal(memoOf(CA1), undefined);
     await post(flow, CHAT, `ape ${CA1}`, { from: BOB });
     assert.equal(port!.lookCalls.length, 1);
   });
@@ -558,15 +615,14 @@ describe("a sender forgotten mid-flow (/forgetme)", () => {
 // ─── Coins off ─────────────────────────────────────────────────────────────
 
 describe("coins off", () => {
-  it("a 👀 at most, remembered as coins-off: no look, no ask, no DM", async () => {
+  it("silence: no 👀 (nothing shows it is a Robinhood Chain coin without a look), no look, no ask, no DM, no memo", async () => {
     coinsOn = false;
     const flow = makeFlow();
     const r = await post(flow, CHAT, `${CA1} and ${CA2}`);
-    assert.equal(r.r, "handled");
-    assert.deepEqual(reacts, [{ chatId: CHAT, messageId: r.line.messageId, emoji: "👀" }], "one reaction per message");
-    assert.equal(spoken.length + dms.length + port!.lookCalls.length + port!.nominations.length, 0);
-    assert.equal(memoOf(CA1)!.verdict, "coins-off");
-    assert.equal(memoOf(CA2)!.verdict, "coins-off");
+    assert.equal(r.r, "handled", "still the coin flow's: nothing else talks about it");
+    assert.equal(spoken.length + reacts.length + dms.length + port!.lookCalls.length + port!.nominations.length, 0);
+    assert.equal(memoOf(CA1), undefined);
+    assert.equal(memoOf(CA2), undefined);
   });
 
   it("coins off also silences the answer from memory, and keeps the memory", async () => {
@@ -577,8 +633,7 @@ describe("coins off", () => {
     coinsOn = false;
     clock += HOUR;
     await post(flow, CHAT, `${CA1}`, { from: BOB });
-    assert.equal(spoken.length, 0);
-    assert.equal(reacts.length, 1);
+    assert.equal(spoken.length + reacts.length, 0);
     assert.equal(memoOf(CA1)!.verdict, "passed");
   });
 
@@ -589,28 +644,60 @@ describe("coins off", () => {
       },
     });
     await post(flow, CHAT, `ape ${CA1}`);
-    assert.equal(spoken.length + port!.lookCalls.length, 0);
-    assert.equal(reacts.length, 1);
+    assert.equal(spoken.length + reacts.length + port!.lookCalls.length, 0);
   });
 });
 
 // ─── Not ready: the owner ask ──────────────────────────────────────────────
 
 describe("not ready: the owner ask", () => {
-  it("no port: the group line tags the owner, the DM carries the reason and the Settings button", async () => {
-    port = null;
+  it("a Robinhood Chain candidate: the group line tags the owner, the DM carries the reason and the Settings button", async () => {
+    port!.ready = { kind: "off", ownerReason: "Trencher mode is off, so I can't look at coins people post." };
     const flow = makeFlow();
     const r = await post(flow, CHAT, `ape ${CA1}`);
     assert.equal(r.r, "handled");
+    assert.deepEqual(port!.lookCalls, [CA1], "looked at first: only a Robinhood Chain coin is worth asking about");
     assert.deepEqual(intents(), [{ kind: "ready-ask" }]);
     assert.deepEqual(spoken[0]!.o.mention, { id: OWNER, name: "boss" });
     assert.equal(spoken[0]!.o.replyTo, r.line.messageId);
     assert.equal(dms.length, 1);
     assert.match(dms[0]!.text, /«Frog Pond»/);
-    assert.match(dms[0]!.text, /Settings/);
+    assert.match(dms[0]!.text, /Trencher mode is off/);
     assert.deepEqual(dms[0]!.button, { text: "⚙️ Open Settings", url: "https://merrymen.example/settings#trencher-mode" });
     assert.equal(memoOf(CA1)!.verdict, "not-ready");
+    assert.equal(memoOf(CA1)!.name, "Froggy");
+    assert.equal(port!.nominations.length, 0);
     assert.doesNotMatch(dms[0]!.text, new RegExp(CA1, "i"), "the DM does not need the address");
+  });
+
+  it("no port: nothing can show it is a Robinhood Chain coin, so nothing at all", async () => {
+    port = null;
+    const flow = makeFlow();
+    assert.equal((await post(flow, CHAT, `ape ${CA1}`)).r, "handled");
+    assert.equal(spoken.length + reacts.length + dms.length, 0);
+    assert.equal(memoOf(CA1), undefined);
+  });
+
+  it("not a candidate: the grounded line as when ready, never the owner ask or the DM", async () => {
+    port!.ready = { kind: "slow", ownerReason: "fast path off" };
+    port!.looks.set(CA1, { kind: "too-quiet", name: "Slowcoin" });
+    port!.looks.set(CA2, { kind: "held", name: "Froggy" });
+    port!.looks.set(ca(3), { kind: "stock", name: "TSLA" });
+    const flow = makeFlow();
+    await post(flow, CHAT, CA1);
+    await post(flow, CHAT, CA2, { from: BOB });
+    await post(flow, CHAT, ca(3));
+    assert.deepEqual(intents(), [
+      { kind: "coin-look", look: "too-quiet" },
+      { kind: "coin-seen", verdict: "held" },
+      { kind: "coin-look", look: "stock" },
+    ]);
+    assert.deepEqual(spoken[0]!.o.mention, { id: ANN, name: "ann" }, "tags the sender, not the owner");
+    assert.equal(dms.length, 0);
+    assert.equal(store.room(CHAT)!.lastReadyAskAtMs, undefined);
+    assert.equal(memoOf(CA1)!.verdict, "too-quiet");
+    assert.equal(memoOf(CA2)!.verdict, "held");
+    assert.equal(port!.nominations.length, 0);
   });
 
   it("ask once per 12 h, a nudge at most hourly, a 👀 otherwise; the DM once per 12 h", async () => {
@@ -625,7 +712,7 @@ describe("not ready: the owner ask", () => {
     assert.deepEqual(spoken[0]!.o.mention, { id: OWNER, name: "milla" });
     assert.equal(dms.length, 1);
     assert.match(dms[0]!.text, /Trencher isn't allowed to trade for real yet\./);
-    assert.equal(port!.lookCalls.length, 0, "no look while not ready");
+    assert.equal(port!.lookCalls.length, 1, "looked at even while not ready");
 
     clock += 10 * MIN;
     const second = await post(flow, CHAT, `ape ${ca(2)}`);
@@ -670,7 +757,7 @@ describe("not ready: the owner ask", () => {
 
   it("never linked: nobody to tag or DM, a 👀 at most", async () => {
     owner = null;
-    port = null;
+    port!.ready = { kind: "off", ownerReason: "off" };
     const flow = makeFlow();
     await post(flow, CHAT, `ape ${CA1}`);
     assert.equal(spoken.length + dms.length, 0);
@@ -711,7 +798,7 @@ describe("not ready: the owner ask", () => {
   });
 
   it("an untitled group is named plainly in the DM", async () => {
-    port = null;
+    port!.ready = { kind: "off", ownerReason: "off" };
     store.update(CHAT, (r) => {
       r.title = "";
     });
@@ -723,12 +810,14 @@ describe("not ready: the owner ask", () => {
 // ─── The quick look ────────────────────────────────────────────────────────
 
 describe("the quick look", () => {
+  /** The kinds a Robinhood Chain coin (or its own money, cash, energy, a stock) can be, candidate and held aside. */
   const LOOK_KINDS: CoinKind[] = [
-    "own", "cash", "energy", "stock", "wallet", "not-token", "curve", "v4-only",
-    "no-pool", "too-new", "too-thin", "too-quiet", "unknown",
+    "own", "cash", "energy", "stock", "curve", "v4-only", "no-pool", "too-new", "too-thin", "too-quiet",
   ];
+  /** The kinds that do not show a Robinhood Chain coin. */
+  const NOT_HERE: CoinKind[] = ["wallet", "not-token", "unknown"];
 
-  it("every non-candidate kind is a line tagging the sender, replying to the post, remembered with its kind", async () => {
+  it("every Robinhood Chain non-candidate kind is a line tagging the sender, replying to the post, remembered with its kind", async () => {
     const flow = makeFlow();
     for (const [i, kind] of LOOK_KINDS.entries()) {
       const address = ca(0x100 + i);
@@ -748,6 +837,44 @@ describe("the quick look", () => {
     assert.equal(port!.nominations.length, 0, "no look kind but candidate is nominated");
   });
 
+  it("wallet (an Ethereum or BNB token has no code here), not-token and unknown: nothing, ready or not, and nothing remembered", async () => {
+    const flow = makeFlow();
+    for (const ready of [true, false]) {
+      port!.ready = ready ? { kind: "ready-live", ownerReason: "ready" } : { kind: "off", ownerReason: "off" };
+      for (const [i, kind] of NOT_HERE.entries()) {
+        const address = ca(0x200 + i + (ready ? 0 : 0x10));
+        port!.looks.set(address, { kind, name: "Frog Cash" });
+        const r = await post(flow, CHAT, `@pine what about ${address}`, { addressed: true });
+        assert.equal(r.r, "handled", `${kind}: owned, so nothing else answers it either`);
+        assert.equal(memoOf(address), undefined, kind);
+      }
+    }
+    assert.equal(port!.lookCalls.length, NOT_HERE.length * 2);
+    assert.equal(spoken.length + reacts.length + dms.length + port!.nominations.length, 0);
+    assert.equal(store.room(CHAT)!.lastReadyAskAtMs, undefined, "the owner is never asked about another chain's coin");
+  });
+
+  it("an Ethereum token posted again is looked at again (the look's cache makes it free), and still gets nothing", async () => {
+    const flow = makeFlow();
+    port!.looks.set(CA1, { kind: "wallet" });
+    await post(flow, CHAT, CA1);
+    clock += MIN;
+    await post(flow, CHAT, `${CA1} ser`, { from: BOB });
+    assert.deepEqual(port!.lookCalls, [CA1, CA1]);
+    assert.equal(spoken.length + reacts.length, 0);
+  });
+
+  it("a memo from an older build that called another chain's token a wallet is never answered from", async () => {
+    const flow = makeFlow();
+    store.rememberCoin(CHAT, { address: CA1, byId: BOB, byName: "bob", messageId: 3, atMs: clock - HOUR, verdict: "wallet" });
+    store.rememberCoin(CHAT, { address: CA2, byId: BOB, byName: "bob", messageId: 4, atMs: clock - HOUR, verdict: "not-token" });
+    port!.looks.set(CA1, { kind: "wallet" });
+    port!.looks.set(CA2, { kind: "not-token" });
+    await post(flow, CHAT, `${CA1} ${CA2}`);
+    assert.deepEqual(port!.lookCalls, [CA1, CA2], "looked at afresh");
+    assert.equal(spoken.length + reacts.length, 0);
+  });
+
   it("held: 'already got some', tagging the sender", async () => {
     port!.looks.set(CA1, { kind: "held", name: "Froggy" });
     const flow = makeFlow();
@@ -758,27 +885,26 @@ describe("the quick look", () => {
     assert.equal(port!.nominations.length, 0);
   });
 
-  it("a look that throws is 'unknown', logged without the address", async () => {
+  it("a look that throws is 'unknown': silence, logged without the address", async () => {
     port!.lookThrows = true;
     const flow = makeFlow();
     await post(flow, CHAT, `ape ${CA1}`);
-    assert.deepEqual(intents(), [{ kind: "coin-look", look: "unknown" }]);
+    assert.deepEqual(intents(), []);
+    assert.equal(memoOf(CA1), undefined);
     assert.equal(logs.length, 1);
     assert.match(logs[0]!, /look failed/);
     assert.ok(!logs[0]!.includes(CA1.slice(2, 12)));
   });
 
-  it("a malformed look is 'unknown'; an address-shaped name is never passed on", async () => {
+  it("a malformed look is 'unknown' (silence); an address-shaped name is never passed on", async () => {
     port!.looks.set(CA1, { kind: "moon" as CoinKind });
     port!.looks.set(CA2, { kind: "too-thin", name: "0xdeadbeefcafe" });
     const flow = makeFlow();
     await post(flow, CHAT, CA1);
     await post(flow, CHAT, CA2);
-    assert.deepEqual(intents(), [
-      { kind: "coin-look", look: "unknown" },
-      { kind: "coin-look", look: "too-thin" },
-    ]);
-    assert.equal(spoken[1]!.o.coinName, undefined);
+    assert.deepEqual(intents(), [{ kind: "coin-look", look: "too-thin" }]);
+    assert.equal(spoken[0]!.o.coinName, undefined);
+    assert.equal(memoOf(CA1), undefined);
     assert.equal(memoOf(CA2)!.name, undefined);
   });
 
@@ -883,9 +1009,18 @@ describe("a chart link carries the pool: the coin it trades is the coin", () => 
     const flow = makeFlow();
     await post(flow, CHAT, GECKO);
     await post(flow, CHAT, DEX);
-    assert.equal(memoOf(POOL)?.verdict, "not-token");
+    assert.equal(memoOf(POOL), undefined, "a pool the factory does not name is not a coin: silence, no memo");
     assert.equal(memoOf(PAIR)?.verdict, "too-thin");
+    assert.deepEqual(intents(), [{ kind: "coin-look", look: "too-thin" }]);
     assert.equal(port!.nominations.length, 0);
+  });
+
+  it("a pool whose coin is not a coin here (one level only) is silence, and its coin is not claimed", async () => {
+    port!.looks.set(POOL, { kind: "not-token", address: COIN_A });
+    const flow = makeFlow();
+    const r = await post(flow, CHAT, GECKO);
+    assert.equal(spoken.length + reacts.length, 0);
+    assert.deepEqual(Object.keys(store.room(CHAT)!.claims), [`${r.line.messageId}:${POOL}`]);
   });
 });
 
@@ -1323,11 +1458,21 @@ describe("never throws, logs no content", () => {
     assert.equal(store.room(CHAT)!.lastReadyAskAtMs, undefined);
   });
 
-  it("a port() that throws reads as no port; an ownerId() that throws as never linked", async () => {
+  it("a port() that throws reads as no port: nothing to look with, so silence", async () => {
     const flow = makeFlow({
       port: () => {
         throw new Error("x");
       },
+    });
+    assert.equal((await post(flow, CHAT, `ape ${CA1}`)).r, "handled");
+    assert.equal(spoken.length + dms.length + reacts.length, 0);
+    assert.equal(memoOf(CA1), undefined);
+    assert.match(logs.join("\n"), /port failed \(Error\)/);
+  });
+
+  it("an ownerId() that throws reads as never linked", async () => {
+    port!.ready = { kind: "off", ownerReason: "off" };
+    const flow = makeFlow({
       ownerId: () => {
         throw new Error("y");
       },
@@ -1345,7 +1490,8 @@ describe("never throws, logs no content", () => {
     const flow = makeFlow();
     await post(flow, CHAT, `ape ${CA1}`);
     assert.deepEqual(intents(), [{ kind: "ready-ask" }]);
-    assert.equal(port!.lookCalls.length, 0);
+    assert.equal(port!.nominations.length, 0);
+    assert.match(dms[0]!.text, /check Trencher mode in Settings/, "the DM's reason when readiness could not be read");
   });
 
   it("a log that throws does not throw through", async () => {

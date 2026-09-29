@@ -84,14 +84,13 @@ const ALL_INTENTS: TgIntent[] = [
   { kind: "ready-nudge" },
   { kind: "private-read-dm" },
   { kind: "private-read-refuse" },
-  { kind: "not-my-chain" },
   { kind: "forgot" },
   { kind: "forgot-me" },
   { kind: "faded-again" },
 ];
 
 const TEMPLATE_ONLY_KINDS = new Set([
-  "shushed", "coin-cap", "drop-ca", "ready-ask", "ready-nudge", "private-read-dm", "private-read-refuse", "not-my-chain", "forgot",
+  "shushed", "coin-cap", "drop-ca", "ready-ask", "ready-nudge", "private-read-dm", "private-read-refuse", "forgot",
   "forgot-me", "coin-look", "coin-seen", "coin-skipped", "greet", "smalltalk",
 ]);
 /** Template-only by what it answers, not by its kind: rule 6's "are you a bot?" has one right answer. */
@@ -223,7 +222,6 @@ describe("gateKindFor", () => {
     [{ kind: "ready-nudge" }, "fixed"],
     [{ kind: "private-read-dm" }, "fixed"],
     [{ kind: "private-read-refuse" }, "fixed"],
-    [{ kind: "not-my-chain" }, "fixed"],
     [{ kind: "forgot" }, "fixed"],
     [{ kind: "forgot-me" }, "fixed"],
     [{ kind: "greet", word: "gm" }, "fixed"],
@@ -367,7 +365,6 @@ describe("templateLine", () => {
     has({ kind: "coin-seen", verdict: "bought" }, "already got some 🤝");
     has({ kind: "coin-cap" }, "one at a time lol");
     has({ kind: "drop-ca" }, "drop the ca");
-    has({ kind: "not-my-chain" }, "not on my chain");
     has({ kind: "coin-skipped" }, "gonna sit this one out");
     has({ kind: "private-read-dm" }, "sent it to your DMs 🤫");
     has({ kind: "private-read-refuse" }, "that's between me and Mike 🙃");

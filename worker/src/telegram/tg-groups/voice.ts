@@ -66,7 +66,6 @@ export type TgIntent =
   | { kind: "ready-nudge" }
   | { kind: "private-read-dm" }
   | { kind: "private-read-refuse" }
-  | { kind: "not-my-chain" }
   | { kind: "forgot" }
   | { kind: "forgot-me" }
   | { kind: "faded-again" };
@@ -115,7 +114,6 @@ const TEMPLATE_ONLY: ReadonlySet<TgIntent["kind"]> = new Set<TgIntent["kind"]>([
   "ready-nudge",
   "private-read-dm",
   "private-read-refuse",
-  "not-my-chain",
   "forgot",
   "forgot-me",
   "coin-look",
@@ -281,7 +279,6 @@ const SLANG_OK: ReadonlySet<TgIntent["kind"]> = new Set<TgIntent["kind"]>([
   "coin-skipped",
   "coin-cap",
   "drop-ca",
-  "not-my-chain",
   "faded-again",
 ]);
 
@@ -771,14 +768,6 @@ const POOLS: Readonly<Record<string, readonly string[]>> = {
     "{owner} only, sorry 🙃",
     "not for the chat, that's {owner}'s business 🙃",
     "ask {owner} lol",
-  ],
-  "not-my-chain": [
-    "not on my chain",
-    "wrong chain for me 🤷",
-    "that's not on my chain lol",
-    "different chain, can't touch it",
-    "not my chain, sorry",
-    "i only do robinhood chain 🤷",
   ],
   forgot: [
     "done, clean slate 🫡",
