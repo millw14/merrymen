@@ -48,6 +48,7 @@ const {
   adoptHolderForTest,
   isHeldForTest,
   loseLeaseForTest,
+  hasLeaseForTest,
   honourFleetHalt,
   setHeldResetDbForTest,
 } = await import("./orchestrator");
@@ -665,6 +666,7 @@ describe("a held tenant is stood down like any other", () => {
       assert.equal(hold.signals[0], "SIGTERM");
       assert.equal(existsSync(childHome(TENANT)), false, "its home wiped, as for any stand-down");
       assert.ok(isHeldForTest(TENANT), "still counted until its process is seen to go");
+      assert.ok(hasLeaseForTest(TENANT), "and its lease kept, so no other replica starts one beside it either");
       // Signed again, with a book that restores now: still nothing beside it.
       await store.put(TENANT, grant());
       restoreSays = { ok: true, line: "paper cash, holdings and basis restored" };
@@ -677,9 +679,12 @@ describe("a held tenant is stood down like any other", () => {
       assert.equal(stoodDownAlerts(hold).length, 1, `one alert, naming the process:\n${said.join("\n")}`);
       assert.ok(hold.signals.filter((s) => s === "SIGKILL").length >= 3, "SIGKILL at three seconds, and again each pass");
       assert.equal(said.filter((l) => l.includes(`${TENANT} grant removed — standing its hold down`)).length, 1, "stood down once, not every pass");
+      assert.ok(hasLeaseForTest(TENANT));
+      assert.ok(stoodDownAlerts(hold)[0]!.includes("its lease is kept"), "and the alert says the lease is kept");
       // It goes at last: a stand-down's end, not a crash.
       hold.die(null, "SIGKILL");
       assert.ok(!isHeldForTest(TENANT), "a stood-down hold leaves with its process");
+      await waitFor(() => !hasLeaseForTest(TENANT), "the lease it kept is let go with it");
       assert.ok(!said.some((l) => /hold process exited \(|keeps dying/.test(l)), said.join("\n"));
       mock.timers.tick(15_000);
       await reconcile();
@@ -712,6 +717,7 @@ describe("a held tenant is stood down like any other", () => {
       await settle();
       assert.equal(spawned.length, 1, `nor on any pass after it:\n${said.join("\n")}`);
       assert.equal(stoodDownAlerts(hold).length, 1, said.join("\n"));
+      assert.ok(stoodDownAlerts(hold)[0]!.includes("its lease is gone"), "the alert says another replica may take the tenant meanwhile");
       hold.die(null, "SIGKILL");
       assert.ok(!isHeldForTest(TENANT));
       mock.timers.tick(15_000);
@@ -739,6 +745,8 @@ describe("a held tenant is stood down like any other", () => {
       assert.ok(hold.signals.filter((s) => s === "SIGKILL").length >= 3, "and killed again each loop, as a pass would");
       assert.equal(stoodDownAlerts(hold).length, 1, said.join("\n"));
       assert.ok(isHeldForTest(TENANT));
+      assert.ok(hasLeaseForTest(TENANT), "its lease kept while the process lives: another replica would start beside it");
+      assert.ok(stoodDownAlerts(hold)[0]!.includes("its lease is kept"), said.join("\n"));
       // The halt lifted before the process has gone: still nothing beside it.
       rmSync(fleetHaltFile(), { force: true });
       restoreSays = { ok: true, line: "paper cash, holdings and basis restored" };
@@ -753,6 +761,27 @@ describe("a held tenant is stood down like any other", () => {
       await settle();
       assert.equal(workers().length, 1, `then exactly one worker:\n${said.join("\n")}`);
       assert.equal(said.filter((l) => l.includes("FLEET_HALT present")).length, 1);
+    });
+  });
+
+  it("UNDER FLEET_HALT THE LEASE A STUCK HOLD PROCESS KEPT IS LET GO WHEN IT EXITS, WITHOUT A SECOND WORD", async () => {
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      await reconcile();
+      const hold = holds()[0]!;
+      hold.deaf = true;
+      writeFileSync(fleetHaltFile(), "halt\n");
+      await honourFleetHalt();
+      mock.timers.tick(15_000);
+      await honourFleetHalt();
+      assert.ok(hasLeaseForTest(TENANT), "kept while it lives");
+      hold.die(null, "SIGKILL");
+      await waitFor(() => !hasLeaseForTest(TENANT), "released on its exit");
+      assert.ok(!isHeldForTest(TENANT));
+      mock.timers.tick(15_000);
+      await honourFleetHalt();
+      assert.equal(said.filter((l) => l.includes("FLEET_HALT present")).length, 1, `not said again for the lease it kept:\n${said.join("\n")}`);
+      assert.equal(spawned.length, 1, "and nothing started under the halt");
     });
   });
 

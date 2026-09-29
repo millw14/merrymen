@@ -159,6 +159,26 @@ describe("held tenants reach only the loops they belong in", () => {
     assert.match(mirror.body!.getText(), /if \(!url \|\| \(children\.size === 0 && holders\.size === 0\)\) return;/);
   });
 
+  it("A LEASE KEPT FOR A HOLD PROCESS THAT HAS NOT EXITED SPEAKS FOR NOBODY AND MIRRORS NOTHING", () => {
+    // Kept past the stand-down only so no other replica starts beside that
+    // process (reconcile's last loop, honourFleetHalt), and let go on its exit.
+    const rec = fn("reconcile");
+    const release = loopsOver(rec, "leases").find((l) => calls(l.statement, "releaseLease").length > 0 && /wanted\.has/.test(l.statement.getText()));
+    assert.ok(release && /!holders\.get\(tenant\)\?\.leaving/.test(release.statement.getText()), "not released while its process lives");
+    assert.match(fn("honourFleetHalt").body!.getText(), /if \(!kept\(t\)\) await releaseLease\(t\);/);
+    assert.equal(calls(fn("watchHolder"), "releaseLease").length, 1, "released when the exit is seen");
+    // The mirror does not publish for such a tenant: its grant may be gone.
+    const loop = loopsOver(fn("mirrorLedgers"), "holders")[0]!.statement.getText();
+    const gate = loop.indexOf("if (!lease || !lease.healthy()) continue;");
+    const skip = loop.indexOf("if (held.stoodDown) continue;");
+    assert.ok(gate >= 0 && skip > gate && skip < loop.indexOf("publishChildTelegram("), "stood-down tenants are skipped before anything is published");
+    // And the sweep of homes never mirrors a held book on its way out, lease or no lease.
+    const sweep = calls(rec, "finalMirrorBeforeAnchor")[0]!;
+    let guard: ts.Node = sweep;
+    while (!ts.isIfStatement(guard)) guard = guard.parent;
+    assert.match((guard as ts.IfStatement).expression.getText(), /!holders\.has\(tenant\)/);
+  });
+
   it("RECONCILE STEPS ROUND A HELD TENANT, RETRIES ITS RESTORE, AND REFRESHES IT FIRST", () => {
     const rec = fn("reconcile");
     const skip = all(rec, (n) => ts.isIfStatement(n) && n.expression.getText() === "holders.has(lc)" && ts.isContinueStatement(n.thenStatement))[0];

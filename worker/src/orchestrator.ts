@@ -762,6 +762,11 @@ export function loseLeaseForTest(tenant: string): void {
   if (lease) leases.set(lc, { ...lease, healthy: () => false });
 }
 
+/** Does this replica hold the tenant's lease? For tests, which cannot see the map. */
+export function hasLeaseForTest(tenant: string): boolean {
+  return leases.has(tenant.toLowerCase());
+}
+
 /**
  * The advisory lease held for each tenant we are running, keyed by lowercased
  * tenant. Acquired in reconcile() BEFORE the first spawn and held across crash
@@ -2691,7 +2696,13 @@ function watchHolder(held: Holder, proc: ChildProcess): void {
     const left = held.leaving === proc;
     if (left) {
       held.leaving = null;
-      if (held.stoodDown && holders.get(tenant) === held) holders.delete(tenant);
+      if (held.stoodDown && holders.get(tenant) === held) {
+        holders.delete(tenant);
+        // And the lease kept for as long as it might poll (reconcile's last
+        // loop, honourFleetHalt): a grant signed again takes it afresh, and a
+        // lost lease is already gone.
+        void releaseLease(tenant);
+      }
     }
     if (stopping) return;
     if (!ours) {
@@ -2960,10 +2971,13 @@ function pressLeaving(held: Holder): void {
   if (waited >= LEAVE_KILL_MS) killLeaving(held);
   if (held.leaveAlerted || waited < LEAVE_WAIT_MS) return;
   held.leaveAlerted = true;
+  const lease = leases.has(held.tenant)
+    ? "its lease is kept, so no other replica starts one either"
+    : "its lease is gone, so another replica may";
   log(
     `[alert] ${held.tenant}: its hold process (pid ${leaving.pid}) has not exited ${Math.round(waited / 1000)}s after it was stood down ` +
-      `with SIGTERM and SIGKILL — nothing starts for this tenant here until it has, as anything beside it would poll the same bot; ` +
-      `SIGKILL is sent again each pass`,
+      `with SIGTERM and SIGKILL — nothing starts for this tenant here until it has, as anything beside it would poll the same bot, ` +
+      `and ${lease}; SIGKILL is sent again each pass`,
   );
 }
 
@@ -3500,7 +3514,9 @@ export async function reconcile(): Promise<void> {
     // while its ledger is being read.
     cancelRestart(tenant);
     const url = process.env.DATABASE_URL;
-    if (url && leases.get(tenant)?.healthy()) {
+    // Never a held book (see `holders`): a stood-down one whose process has
+    // not exited still has the lease it kept, and its home may reach here.
+    if (url && leases.get(tenant)?.healthy() && !holders.has(tenant)) {
       try {
         await finalMirrorBeforeAnchor(tenant, await makePgDb(url));
       } catch (e) {
@@ -3524,8 +3540,13 @@ export async function reconcile(): Promise<void> {
   // the kill-switch case above and a lease left over from a child that has since
   // exited. Holding a lease for a tenant we won't arm would block another replica
   // (or a later re-arm) for no reason.
+  //
+  // EXCEPT WHILE ITS HOLD PROCESS HAS NOT EXITED. That process may still poll
+  // the bot, and this replica starts nothing beside it (standDownHolder); the
+  // lease is what stops another replica, in a deploy overlap say, from arming
+  // a grant signed again beside it. It goes when the exit does (watchHolder).
   for (const tenant of [...leases.keys()]) {
-    if (!wanted.has(tenant)) await releaseLease(tenant);
+    if (!wanted.has(tenant) && !holders.get(tenant)?.leaving) await releaseLease(tenant);
   }
 }
 
@@ -7214,6 +7235,11 @@ async function mirrorLedgers(): Promise<void> {
   for (const [tenant, held] of [...holders]) {
     const lease = leases.get(tenant.toLowerCase());
     if (!lease || !lease.healthy()) continue;
+    // Stood down, and counted only until its process has gone: its grant is
+    // gone, or the fleet is halted, and the lease is kept only so nothing
+    // starts beside that process. Not a tenant to speak for: published, it
+    // would put a revoked tenant's row back.
+    if (held.stoodDown) continue;
     // Held, and why in the words its owner is told (restore-block.ts): the
     // dashboard says trading is held rather than "connected".
     await publishChildTelegram(tenant as `0x${string}`, shared, `held:${held.cls}`);
@@ -7670,7 +7696,10 @@ function haltRequested(): boolean {
  * loop, as a pass would, and alerted once (pressLeaving).
  */
 export async function honourFleetHalt(): Promise<void> {
-  if (children.size > 0 || [...holders.values()].some((h) => !h.stoodDown) || leases.size > 0) {
+  // A lease kept for a hold process that has not exited (below) is waited
+  // for, like its process, and not a reason to say all this again.
+  const kept = (t: string) => !!holders.get(t)?.leaving;
+  if (children.size > 0 || [...holders.values()].some((h) => !h.stoodDown) || [...leases.keys()].some((t) => !kept(t))) {
     log("FLEET_HALT present — standing every child down and releasing leases");
     for (const t of [...children.keys()]) killChild(t);
     // Held tenants' hold processes too: a halt stands down every process
@@ -7678,7 +7707,11 @@ export async function honourFleetHalt(): Promise<void> {
     for (const t of [...holders.keys()]) standDownHolder(t);
     // Release leases too: if only THIS replica is halted, another may take
     // the tenants over; if the whole fleet is halted, releasing is harmless.
-    for (const t of [...leases.keys()]) await releaseLease(t);
+    // BUT NOT ONE WHOSE HOLD PROCESS HAS NOT EXITED: the replica taking it
+    // over would start beside a process that may still poll the bot. Kept
+    // until the exit is seen, which lets it go (watchHolder); the alert says
+    // so. Holding it trades nothing: the tenant was held, not trading.
+    for (const t of [...leases.keys()]) if (!kept(t)) await releaseLease(t);
   }
   for (const held of holders.values()) pressLeaving(held);
 }
