@@ -76,7 +76,19 @@ import { CHAT_SETTABLE, promotedSettings, readChatSettings, type ChatSettings } 
 import { acquireTenantLease, type TenantLease } from "./tenant-lease";
 import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isHostedMode, STOCK_TOKENS, type MerrymenSettings } from "../../packages/core/src/index";
 import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
-import { botWillPoll, claimBot, claimGate, ensureBotClaims, readBotClaims, unclaimedBot } from "./telegram-claims";
+import {
+  botIdOf,
+  botTokenOf,
+  botWillPoll,
+  claimBot,
+  claimGate,
+  ensureBotClaims,
+  ownerLinked,
+  pollerKeyOf,
+  readBotClaims,
+  unclaimedBot,
+  withoutBotToken,
+} from "./telegram-claims";
 import { getMe as telegramGetMe } from "./telegram/api";
 import { tokenTagOf } from "./telegram/state";
 import { makePgDb, translateSchema, type Db } from "./db";
@@ -1157,10 +1169,17 @@ async function readBotClaimsForPass(): Promise<BotClaimsRead> {
 /**
  * getMe: the id of the bot `token` belongs to, as Telegram says it, or null
  * (refused, revoked, unreachable). Bounded, and never throws (telegram/api.ts).
+ *
+ * WHAT A CLAIM RESTS ON, SO NOTHING ELSE MAY PASS FOR IT. Only a token of
+ * Telegram's own shape is sent (botIdOf: one that could steer the URL could
+ * make another method, on another bot, answer with the id it names), and
+ * only an answer that says it is a bot counts (a chat's or a user's carries
+ * an id too).
  */
 async function botIdFromTelegram(token: string): Promise<string | null> {
+  if (botIdOf(token) === null) return null;
   const { bot } = await telegramGetMe({ token });
-  return bot ? String(bot.id) : null;
+  return bot?.isBot ? String(bot.id) : null;
 }
 let confirmBotId = botIdFromTelegram;
 /** Test seam: what getMe answers, in place of Telegram; null puts Telegram back. */
@@ -1213,17 +1232,33 @@ const botRefusedLogged = new Map<string, string>();
 /**
  * THE SETTINGS THIS TENANT'S PROCESS MAY HAVE, AS FAR AS ITS BOT GOES — the
  * stored ones, or a copy without `telegramBotToken` when another tenant holds
- * the bot's claim or already polls it this pass (claimGate, which says why
- * each case is what it is).
+ * the bot's claim or already polls the same token this pass (claimGate, which
+ * says why each case is what it is).
  *
  * Asked on every path that writes a settings.json: a spawn (spawnChild, and
  * through it a hold's spawnHolder and handHoldBack) and the refresh of held
  * and trading tenants in reconcile. A spawn has no pass, so it reads the
  * claims for itself, and only when there is a bot to judge: most tenants have
  * none. A bot nobody has claimed yet — any token saved before claims existed,
- * or while Telegram could not confirm it to the web — is claimed here for the
- * first tenant that polls it with a token Telegram confirms, and the pass map
- * learns the answer, so the rest of the pass is judged against the same claim.
+ * or while Telegram could not confirm it to the web — is claimed here, first
+ * one wins, for a tenant that polls it with a token Telegram confirms, and the
+ * pass map learns the answer, so the rest of the pass is judged against the
+ * same claim.
+ *
+ * AT A SPAWN, ONLY A TENANT WHOSE OWNER HAS LINKED A CHAT CLAIMS IT. After a
+ * restart nothing is running, so every tenant comes through reconcile's spawn
+ * loop, before any refresh, in listTenants order: `SELECT tenant FROM grants`,
+ * with no ORDER BY. And on the first pass after the deploy that brought
+ * claims, every bot is unclaimed. First one wins there is heap order: in the
+ * incident's shape, the second login, with nobody linked to it, could take the
+ * bot for good from the agent its owner had linked. So a spawning tenant whose
+ * owner has linked nothing (ownerLinked) starts without an unclaimed bot and is
+ * judged at the refresh that follows in the same pass, by which time a linked
+ * tenant spawned in that pass holds it. When no linked tenant wants it, the
+ * refresh claims it for the unlinked one as before, and its service picks the
+ * token up from the rewritten file (a spawn the restart timer made waits for
+ * the next pass). Between two linked tenants, or two unlinked ones, nothing
+ * says which is the owner's, and the first confirmed token still wins.
  *
  * THE TOKEN IS STRIPPED FROM THE CHILD'S FILE, NOT FROM THE STORE. The owner's
  * saved settings are theirs; the web tells them the bot is claimed (409
@@ -1236,26 +1271,31 @@ async function gateBot(
   claimsRead: BotClaimsRead | undefined,
 ): Promise<MerrymenSettings> {
   const claims = claimsRead !== undefined ? claimsRead : botWillPoll(settings) ? await readBotClaimsForPass() : null;
+  const lc = tenant.toLowerCase();
+  const unclaimed = unclaimedBot(settings, claims);
+  const spawn = claimsRead === undefined;
+  if (unclaimed && spawn && !ownerLinked(settings)) {
+    log(`${tenant}: telegram bot ${unclaimed} is not claimed yet and no chat is linked here — started without it; the refresh decides who claims it`);
+    return withoutBotToken(settings);
+  }
   // A bot no claim names yet is claimed BEFORE it is judged, so the pass's own
   // record never decides a bot a confirmed claim could have: see claimGate.
-  const unclaimed = unclaimedBot(settings, claims);
   if (unclaimed && claims) {
-    const holder = await backfillBotClaim(unclaimed, tenant, settings.telegramBotToken!);
+    const holder = await backfillBotClaim(unclaimed, tenant, botTokenOf(settings)!);
     if (holder) claims.set(unclaimed, holder);
   }
   const gate = claimGate(settings, tenant, claims, seen);
-  const lc = tenant.toLowerCase();
   const verdict = gate.verdict;
   if (verdict.kind === "strip") {
     if (botRefusedLogged.get(lc) !== verdict.bot) {
       botRefusedLogged.set(lc, verdict.bot);
-      const why = verdict.by === "claim" ? "the bot's claim names another account" : "another tenant polls it this pass";
+      const why = verdict.by === "claim" ? "the bot's claim names another account" : "another tenant polls the same token this pass";
       log(`${tenant}: telegram bot token already claimed by another tenant — telegram disabled for this child (bot ${verdict.bot}: ${why})`);
     }
   } else {
     botRefusedLogged.delete(lc);
   }
-  if (verdict.kind === "keep") seen?.set(verdict.bot, lc);
+  if (verdict.kind === "keep") seen?.set(pollerKeyOf(botTokenOf(settings)!)!, lc);
   return gate.settings;
 }
 
@@ -2833,9 +2873,9 @@ export async function reconcile(): Promise<void> {
   // Refresh every running child's settings.json so a tenant's config change
   // reaches it (the worker re-reads settings.json each tick). Cheap: one small
   // file per tenant, and unchanged content is a harmless rewrite. Each bot goes
-  // to the tenant its claim names, and the pass's own seenBots map (bot id →
-  // the tenant polling it) keeps it to one poller whatever the claims say (see
-  // gateBot in writeSettingsForChild).
+  // to the tenant its claim names, and the pass's own seenBots map (the token's
+  // fingerprint → the tenant polling it) keeps a bot no claim names to one
+  // poller per token (see gateBot in writeSettingsForChild, and claimGate).
   const seenBots = new Map<string, string>();
   // Every holder claim in one read for the whole fleet, not one per tenant.
   const holderClaims = await readHolderClaims();
@@ -2844,10 +2884,20 @@ export async function reconcile(): Promise<void> {
   // HELD TENANTS FIRST, and with the same refresh: a chat the owner removes on
   // the dashboard, or a token they change, must reach the hold process as it
   // would a worker, and a held tenant's bot token is as much in use as a
-  // trading one's, so the claims must be asked about it. First, so that a bot
-  // nobody has claimed yet, shared by a held tenant and one that took it up
-  // since, is claimed for the tenant that was answering it.
+  // trading one's, so the claims must be asked about it.
   // (A held tenant with Telegram off claims nothing: see claimGate.)
+  //
+  // WHO CLAIMS A BOT NOBODY HAS CLAIMED IS MOSTLY DECIDED BEFORE THIS. After a
+  // restart or a deploy nothing is running and no hold exists: every tenant,
+  // held ones included, comes through the spawn loop above, in listTenants
+  // order, and a spawn claims such a bot only for a tenant whose owner has
+  // linked a chat (gateBot). The rest meet it here. Holders going first only
+  // orders the tenants judged here: two unlinked tenants on one bot, a linked
+  // one whose token Telegram would not confirm at its spawn, or a bot first
+  // saved while a hold was running. So the operator's step before the deploy
+  // that brings claims stays: claim each bot two tenants share for its
+  // owner's tenant by hand. It is the only answer when both are linked, or
+  // when Telegram does not answer on the deploy pass.
   const released: Holder[] = [];
   for (const [tenant, held] of [...holders]) {
     // NOT WANTED ANY MORE, and stood down below, this pass: its settings are
@@ -2878,7 +2928,8 @@ export async function reconcile(): Promise<void> {
     // no longer sent towards a reset that would be refused. See keepResetOffer.
     if (stored) keepResetOffer(held, stored);
     // Held with no bot, and now there is one: the owner has just switched
-    // Telegram on. Answer it from this pass, not from the next failed restore.
+    // Telegram on, or its spawn left a bot nobody had claimed to this refresh
+    // (gateBot). Answer it from this pass, not from the next failed restore.
     const lease = leases.get(tenant);
     if (held.proc || !lease || !holderBotReady(stored)) continue;
     const late = lateSpawnRefusal(tenant as `0x${string}`, lease);
@@ -2901,7 +2952,7 @@ export async function reconcile(): Promise<void> {
   // one becomes is judged for its bot once, at its own spawn (gateBot), against
   // the claim its hold made. (This once also kept its own hold's entry in the
   // pass's de-duplication from reading its token as taken; seenBots names the
-  // tenant polling each bot now, so a tenant is never stripped by itself.)
+  // tenant polling each token now, so a tenant is never stripped by itself.)
   for (const held of released) {
     if (holders.get(held.tenant) !== held || held.retrying || !holdMayLeave(held.tenant)) continue;
     log(`${held.tenant}: practice mode is off, so trading is no longer held — handing the bot back to trading`);

@@ -46,6 +46,7 @@ import { isHostedMode, type MerrymenSettings } from "@merrymen/core";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb } from "@/lib/ledger";
+import { isBotToken } from "@/lib/telegram-claims";
 
 export const dynamic = "force-dynamic";
 
@@ -112,6 +113,9 @@ async function runtimeFor(
 
 /** getMe against the Bot API — returns the @username or null. */
 async function botUsername(token: string): Promise<string | null> {
+  // Only a token of Telegram's shape is sent: it goes into the URL's path, and
+  // one carrying '/', '..' or '?' would ask somewhere else (lib/telegram-claims.ts).
+  if (!isBotToken(token)) return null;
   try {
     // A TIMEOUT, because this is now reachable. While `hasToken` was
     // permanently false hosted, this call never fired; with the token resolving

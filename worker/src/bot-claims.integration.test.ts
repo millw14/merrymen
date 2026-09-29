@@ -47,10 +47,11 @@ setBotClaimsDbForTest(claimsDb);
  * names, except one whose secret starts "fake", which Telegram refuses.
  */
 const getMeAsked: string[] = [];
-setBotConfirmForTest(async (token) => {
+const confirm = async (token: string) => {
   getMeAsked.push(token);
   return /^\d+:fake/.test(token) ? null : botIdOf(token);
-});
+};
+setBotConfirmForTest(confirm);
 
 const tenant = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as `0x${string}`;
 const grant = (n: number): StoredGrant =>
@@ -189,6 +190,87 @@ describe("a bot nobody has claimed yet", () => {
     assert.equal(tokenInFile(OWNER), "444:the-real-secret", "the owner's child polls its bot");
     await reconcile();
     assert.equal(tokenInFile(STRANGER), undefined, "and the stranger's is refused it");
+  });
+
+  it("AT A SPAWN, THE AGENT ITS OWNER LINKED WINS OVER A LOGIN NOBODY LINKED, IN WHATEVER ORDER THEY COME", async () => {
+    // After a restart every tenant is spawned, in listTenants order, before
+    // any refresh, and after the deploy that brings claims no bot is claimed:
+    // first one wins was heap order there. The incident's shape: one token,
+    // saved under the owner's agent and again under a second login whose
+    // allowlist nobody ever linked. Two pairs, named so that one pair meets
+    // the unlinked login first whichever way the store lists them.
+    const pairs = [
+      { unlinked: tenant(0x31), linked: tenant(0x32), token: "555:one-token-two-logins" },
+      { unlinked: tenant(0x34), linked: tenant(0x33), token: "556:one-token-two-logins" },
+    ];
+    for (const p of pairs) {
+      await getSettingsStore().put(p.unlinked, { telegramEnabled: true, telegramBotToken: p.token } as never);
+      await getSettingsStore().put(p.linked, withBot(p.token) as never);
+      await getGrantStore().put(p.unlinked, grant(0x31 + pairs.indexOf(p) * 2));
+      await getGrantStore().put(p.linked, grant(0x32 + pairs.indexOf(p) * 2));
+    }
+    await reconcile();
+    for (const p of pairs) {
+      const bot = botIdOf(p.token)!;
+      assert.equal((await readBotClaims(claimsDb)).get(bot), p.linked, `bot ${bot} is claimed for the linked agent`);
+      assert.equal(spawnedWith.get(p.linked), p.token, "which starts with it");
+      assert.ok(spawnedWith.has(p.unlinked), "the other login trades");
+      assert.equal(spawnedWith.get(p.unlinked), undefined, "but never starts with the bot");
+      assert.equal(tokenInFile(p.unlinked), undefined, "nor is handed it by the refresh");
+    }
+  });
+
+  it("A BOT ONLY AN UNLINKED LOGIN USES IS STILL ITS OWN, BY THE END OF THE SAME PASS", async () => {
+    // Waiting for a linked owner costs a lone unlinked tenant its bot only
+    // from the spawn to the refresh that follows it: it must be able to poll
+    // to be linked at all.
+    const LONE = tenant(0x41);
+    await getSettingsStore().put(LONE, { telegramEnabled: true, telegramBotToken: "666:lone-login-secret" } as never);
+    await getGrantStore().put(LONE, grant(0x41));
+    await reconcile();
+    assert.equal(spawnedWith.get(LONE), undefined, "started without it");
+    assert.ok(said.some((l) => l.includes(`${LONE}: telegram bot 666 is not claimed yet and no chat is linked here`)), said.join("\n"));
+    assert.equal((await readBotClaims(claimsDb)).get("666"), LONE, "claimed at the refresh");
+    assert.equal(tokenInFile(LONE), "666:lone-login-secret", "and handed to its process in the same pass");
+  });
+
+  it("A TOKEN CRAFTED TO STEER getMe IS NEVER SENT, NEVER CLAIMS, AND THE OWNER KEEPS THEIR BOT", async () => {
+    // Through the real getMe (telegram/api.ts), with Telegram answering any
+    // request that is not a plain getMe the way the sender's own bot would:
+    // with the id they chose. `<victim id>:x/../../bot<own>/…` used to read as
+    // the victim's bot and be "confirmed" by that answer.
+    const ATTACKER = tenant(0x51);
+    const VICTIM = tenant(0x52);
+    const crafted = "777:x/../../bot999:attacker-secret/getChat?chat_id=777&z=";
+    const sent: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(String(input instanceof Request ? input.url : input)).href;
+      sent.push(url);
+      const getMe = /^https:\/\/api\.telegram\.org\/bot(\d+):[A-Za-z0-9_-]+\/getMe$/.exec(url);
+      const id = getMe ? Number(getMe[1]) : 777;
+      return Response.json({ ok: true, result: { id, is_bot: true, username: `bot${id}` } });
+    }) as typeof fetch;
+    setBotConfirmForTest(null);
+    try {
+      // The victim's Telegram is off at first, so the attacker's token is the
+      // only one on the bot: nothing of the victim's is there to win first.
+      await getSettingsStore().put(VICTIM, { telegramEnabled: false, telegramBotToken: "777:the-victims-live-secret" } as never);
+      await getSettingsStore().put(ATTACKER, withBot(crafted) as never);
+      await getGrantStore().put(ATTACKER, grant(0x51));
+      await getGrantStore().put(VICTIM, grant(0x52));
+      await reconcile();
+      assert.equal(sent.length, 0, `nothing was sent for the crafted token:\n${sent.join("\n")}`);
+      assert.equal((await readBotClaims(claimsDb)).get("777"), undefined, "and it claimed nothing");
+      await getSettingsStore().put(VICTIM, withBot("777:the-victims-live-secret") as never);
+      await reconcile();
+    } finally {
+      globalThis.fetch = realFetch;
+      setBotConfirmForTest(confirm);
+    }
+    assert.ok(!sent.some((u) => u.includes("attacker") || u.includes("getChat")), `nothing but the victim's getMe was sent:\n${sent.join("\n")}`);
+    assert.equal((await readBotClaims(claimsDb)).get("777"), VICTIM, "the bot is claimed for the token Telegram really answered for");
+    assert.equal(tokenInFile(VICTIM), "777:the-victims-live-secret", "and its owner's agent polls it");
   });
 
   it("A TENANT WITH TELEGRAM OFF CLAIMS NOTHING, so the one that polls keeps the bot", async () => {

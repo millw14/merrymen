@@ -26,12 +26,16 @@
  * move it). The orchestrator reads the claims once a pass, and before a spawn,
  * and hands a token only to the tenant the claim names (claimGate). A bot
  * nobody has claimed yet — every token saved before this existed — is claimed
- * by the first tenant that polls it, and stays theirs.
+ * by the first tenant that polls it, and stays theirs; at a spawn, only by a
+ * tenant whose owner has linked a chat (ownerLinked, and gateBot in the
+ * orchestrator says why).
  *
  * EVERY CLAIM AND EVERY MOVE NEEDS A TOKEN TELEGRAM HAS JUST CONFIRMED (getMe)
  * for that bot. The bot id is public, so the id alone proves nothing; the
  * store refuses a claim without the confirmation rather than trust each
- * caller to have asked.
+ * caller to have asked. And only a token of Telegram's own shape has a bot at
+ * all (botIdOf), so nothing that could steer the getMe URL elsewhere is ever
+ * sent to be confirmed.
  *
  * THE TOKEN IS NEVER STORED HERE. It is a bearer credential for the bot and it
  * already lives in one place, the sealed settings blob. The bot id is public:
@@ -42,7 +46,7 @@
  */
 import { SETTINGS_DEFAULTS, type MerrymenSettings } from "../../packages/core/src/index";
 import type { Db } from "./db";
-import { botIdOf } from "./telegram/state";
+import { botIdOf, tokenTagOf } from "./telegram/state";
 
 export { botIdOf };
 
@@ -238,6 +242,48 @@ export async function releaseBotClaims(db: Db, tenant: string, keep?: string | n
 }
 
 /**
+ * The token the process these settings are written for will use: trimmed, as
+ * settings.ts `str()` trims it, or null. Judged as the child will read it, so
+ * a stored ` 111:x` is bot 111 here as it is there, and not a token with no
+ * bot that the gate lets through untouched.
+ */
+export function botTokenOf(settings: MerrymenSettings | null): string | null {
+  const token = settings?.telegramBotToken;
+  return typeof token === "string" && token.trim() !== "" ? token.trim() : null;
+}
+
+/** The settings without the bot token: what a process that may not poll the bot is handed. Never mutates its input. */
+export function withoutBotToken(settings: MerrymenSettings): MerrymenSettings {
+  const { telegramBotToken: _taken, ...rest } = settings;
+  return rest;
+}
+
+/**
+ * HAS THIS TENANT'S OWNER LINKED A CHAT? A positive id on the stored
+ * allowlist, which is a person's own DM (Telegram gives groups negative ids),
+ * put there by a /link the child reported (publishChildTelegram). The same
+ * reading writeTelegramForChild recovers an owner by, and for the same reason:
+ * the allowlist is in the sealed settings and survives a redeploy, where the
+ * mirrored owner_id mostly does not.
+ */
+export function ownerLinked(settings: MerrymenSettings): boolean {
+  const list = settings.telegramAllowlist;
+  return Array.isArray(list) && list.some((c) => typeof c === "number" && c > 0);
+}
+
+/**
+ * WHAT THE PASS'S OWN RECORD IS KEYED ON: the token's fingerprint, taken from
+ * its bot's id as a number and its secret, so ` 0111:x` and `111:x` are the
+ * same poller. Null for a token with no bot. See claimGate for why the secret
+ * and not the bot.
+ */
+export function pollerKeyOf(token: string): string | null {
+  const t = token.trim();
+  const bot = botIdOf(t);
+  return bot === null ? null : tokenTagOf(`${bot}:${t.slice(t.indexOf(":") + 1)}`);
+}
+
+/**
  * WILL THE PROCESS THESE SETTINGS ARE WRITTEN FOR POLL THE BOT? The child and
  * the hold process each resolve it as settings.ts does: the file's own
  * `telegramEnabled`, else MERRYMEN_TELEGRAM_ENABLED from the env they inherit
@@ -245,8 +291,7 @@ export async function releaseBotClaims(db: Db, tenant: string, keep?: string | n
  * is off; and neither polls without a token.
  */
 export function botWillPoll(settings: MerrymenSettings | null): boolean {
-  const token = settings?.telegramBotToken;
-  if (!settings || typeof token !== "string" || token.trim() === "") return false;
+  if (!settings || botTokenOf(settings) === null) return false;
   if (typeof settings.telegramEnabled === "boolean") return settings.telegramEnabled;
   const env = process.env.MERRYMEN_TELEGRAM_ENABLED;
   if (env !== undefined) return env === "1" || env.toLowerCase() === "true";
@@ -256,17 +301,18 @@ export function botWillPoll(settings: MerrymenSettings | null): boolean {
 export type ClaimGateVerdict =
   /**
    * Nothing to poll: no token, Telegram off, or a token that is not
-   * `<digits>:<secret>` and which Telegram will refuse. Claims nothing, and the
-   * file keeps what the owner saved.
+   * `<digits>:<secret>` (botIdOf), which Telegram will refuse, or which
+   * telegram/api.ts will not even send when it could steer the URL. Claims
+   * nothing, and the file keeps what the owner saved.
    */
   | { kind: "idle" }
   /**
    * This tenant polls the bot: the claim names it, or no claim names anybody
    * (none made yet, or the claims could not be read) and nobody else polls it
-   * this pass.
+   * with the same token this pass.
    */
   | { kind: "keep"; bot: string }
-  /** Another tenant holds the claim, or, with no claim to go by, already polls the bot this pass. */
+  /** Another tenant holds the claim, or, with no claim to go by, already polls the same token this pass. */
   | { kind: "strip"; bot: string; by: "claim" | "pass" };
 
 /**
@@ -276,8 +322,8 @@ export type ClaimGateVerdict =
  * Null when the claims could not be read: there is nothing to add to.
  */
 export function unclaimedBot(settings: MerrymenSettings, claims: ReadonlyMap<string, string> | null): string | null {
-  const token = settings.telegramBotToken;
-  const bot = typeof token === "string" ? botIdOf(token) : null;
+  const token = botTokenOf(settings);
+  const bot = token === null ? null : botIdOf(token);
   return claims !== null && bot !== null && botWillPoll(settings) && !claims.has(bot) ? bot : null;
 }
 
@@ -285,7 +331,7 @@ export function unclaimedBot(settings: MerrymenSettings, claims: ReadonlyMap<str
  * WHO MAY POLL THIS BOT — pure, over claims read once for the whole pass.
  *
  * `claims` is bot id → holder, or null when it could not be read. `seen` is the
- * pass's own record of who polls each bot (bot id → tenant).
+ * pass's own record of who polls each token (pollerKeyOf → tenant).
  *
  * THE CLAIM DECIDES, WHEN THERE IS ONE. Only a token Telegram confirmed makes a
  * claim, so a claim is proof its holder has the bot; the pass's record is not
@@ -294,8 +340,17 @@ export function unclaimedBot(settings: MerrymenSettings, claims: ReadonlyMap<str
  * would keep the real owner off their own bot whenever the pass met it first.
  *
  * THE PASS'S RECORD IS THE SECOND GUARD, for a bot no claim names: at most one
- * poller for it per pass. It is the only guard while the claims cannot be read
- * (and a spawn has no pass, and passes none).
+ * poller per token per pass. It is the only guard while the claims cannot be
+ * read (and a spawn has no pass, and passes none).
+ *
+ * KEYED ON THE SECRET, NOT ON THE BOT, because here nothing has vouched for
+ * either token. Telegram keeps one secret live per bot (a re-issue revokes the
+ * last), so two tenants with different secrets for one bot are never two
+ * pollers: at most one of them gets past getUpdates. Keyed on the bot, the
+ * first one met took it from the other, and the first could be a stranger's
+ * `<id>:guess` or the secret the owner revoked last week, leaving the bot to
+ * nobody for as long as the claims could not say otherwise. The same secret
+ * under two logins, the incident's shape, is still one poller.
  *
  * ONLY A TENANT THAT WILL POLL CLAIMS. A token saved with Telegram switched off
  * is a token nobody reads updates for; it used to take the bot all the same,
@@ -319,17 +374,14 @@ export function claimGate(
   claims: ReadonlyMap<string, string> | null,
   seen?: ReadonlyMap<string, string>,
 ): { settings: MerrymenSettings; verdict: ClaimGateVerdict } {
-  const token = settings.telegramBotToken;
-  const bot = typeof token === "string" ? botIdOf(token) : null;
-  if (!botWillPoll(settings) || !bot) return { settings, verdict: { kind: "idle" } };
+  const token = botTokenOf(settings);
+  const bot = token === null ? null : botIdOf(token);
+  if (!botWillPoll(settings) || !token || !bot) return { settings, verdict: { kind: "idle" } };
   const t = lc(tenant);
-  const strip = (by: "claim" | "pass") => {
-    const { telegramBotToken: _taken, ...rest } = settings;
-    return { settings: rest, verdict: { kind: "strip", bot, by } as const };
-  };
+  const strip = (by: "claim" | "pass") => ({ settings: withoutBotToken(settings), verdict: { kind: "strip", bot, by } as const });
   const holder = claims?.get(bot);
   if (holder !== undefined) return holder === t ? { settings, verdict: { kind: "keep", bot } } : strip("claim");
-  const polling = seen?.get(bot);
+  const polling = seen?.get(pollerKeyOf(token)!);
   if (polling !== undefined && polling !== t) return strip("pass");
   return { settings, verdict: { kind: "keep", bot } };
 }

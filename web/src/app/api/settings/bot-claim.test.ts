@@ -15,14 +15,14 @@
  */
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, before, beforeEach, describe, it } from "node:test";
 
 import { mintSession } from "@/lib/auth";
-import { BOT_CLAIMED_TEXT, useBotClaimsDbForTest } from "@/lib/telegram-claims";
+import { BOT_CLAIMED_TEXT, NOT_A_BOT_TOKEN_TEXT, useBotClaimsDbForTest } from "@/lib/telegram-claims";
 import { getSettingsStore, resetSettingsStoreForTest, useSettingsStoreForTest } from "@merrymen/settings-store";
 import { wrapSqlite, type Db } from "../../../../../worker/src/db";
 import { readBotClaims } from "../../../../../worker/src/telegram-claims";
@@ -113,6 +113,32 @@ describe("PUT /api/settings claims the bot", () => {
     assert.ok(getMeAsked.includes("111:guessed-secret"), "Telegram was asked before any claim");
   });
 
+  it("A TOKEN THAT COULD STEER THE getMe URL IS REFUSED (400), NEVER SENT, AND MOVES NOTHING", async () => {
+    // `111:x/../../bot<own>/getChat?chat_id=111&z=` read as bot 111, fetch
+    // resolved it into a call on the sender's own bot, and that answer, id
+    // 111, "confirmed" them as bot 111's owner: a 409 that told them the bot
+    // was a Merrymen agent's, and with moveBot, the bot.
+    await put(A, { telegramBotToken: "111:AAA-first-secret", telegramAllowlist: [777] });
+    getMeAsked.length = 0;
+    for (const crafted of [
+      "111:x/../../bot999:own-secret/getChat?chat_id=111&z=",
+      "111:x/../../file/bot999:own-secret/documents/file_0.json#",
+    ]) {
+      for (const move of [{}, { moveBot: true }]) {
+        const res = await put(B, { telegramBotToken: crafted, ...move });
+        assert.equal(res.status, 400, `${crafted} ${JSON.stringify(move)}`);
+        assert.deepEqual(res.body.errors, [`telegramBotToken: ${NOT_A_BOT_TOKEN_TEXT}`]);
+        assert.equal(res.body.error, undefined, "no bot_claimed to say whether the bot is held");
+      }
+    }
+    assert.deepEqual(getMeAsked, [], "nothing was sent to Telegram");
+    assert.deepEqual(await held(), { "111": A }, "the owner keeps the bot");
+    assert.equal(await getSettingsStore().get(B), null, "and nothing was saved");
+    // A real token, pasted with the spaces a copy picks up, still saves.
+    assert.equal((await put(B, { telegramBotToken: "  222:AAH_dq-Tc  " })).status, 200);
+    assert.equal((await getSettingsStore().get(B))?.telegramBotToken, "222:AAH_dq-Tc");
+  });
+
   it("MOVE IT HERE: getMe must confirm the token, the claim moves, and no allowlist or owner comes with it", async () => {
     await put(A, { telegramBotToken: "111:AAA-first-secret", telegramAllowlist: [777] });
     // B's own settings, saved before: its own allowlist.
@@ -168,5 +194,19 @@ describe("PUT /api/settings claims the bot", () => {
     const res = await put(B, { telegramEnabled: true, buyPerTickUsdg: 5 });
     assert.equal(res.status, 200, JSON.stringify(res.body));
     assert.deepEqual(await held(), { "111": A });
+  });
+});
+
+describe("the Settings screen's answer to bot_claimed", () => {
+  it("KEEP IT THERE TAKES THE TOKEN OUT OF THE FORM, so the next Save saves everything else", () => {
+    // Left in the draft, the token rode along with every later save, each was
+    // refused the same way, and the owner's other changes were never saved.
+    const src = readFileSync(new URL("../../../terminal/screens/Settings.tsx", import.meta.url), "utf8");
+    const at = src.indexOf("{botClaimed && (");
+    assert.ok(at > 0);
+    const keep = src.slice(at, src.indexOf("Keep it there", at));
+    assert.match(keep, /setDraft\(\(\{ telegramBotToken: _kept, \.\.\.rest \}\) => rest\);/);
+    assert.match(keep, /setBotClaimed\(null\);/);
+    assert.match(keep, /Nothing has been saved yet\./, "and the owner is told the save did not land");
   });
 });

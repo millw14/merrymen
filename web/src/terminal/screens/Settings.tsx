@@ -1958,10 +1958,21 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           {botClaimed && (
             <div className="mm-note" role="alert">
               <p style={{ marginTop: 0 }}>{botClaimed}</p>
+              <p className="mm-hint">Nothing has been saved yet.</p>
               <button className="mm-btn danger sm" onClick={() => void save({ moveBot: true })} disabled={status === "saving…"}>
                 Move it here
               </button>{" "}
-              <button className="mm-btn sm" onClick={() => setBotClaimed(null)}>
+              {/* KEEPING IT THERE TAKES THE TOKEN OUT OF THE FORM. Left in the
+                  draft, it rode along with every later save, each one was
+                  refused the same way, and whatever else the owner changed
+                  was never saved. The rest of the draft stays for the next Save. */}
+              <button
+                className="mm-btn sm"
+                onClick={() => {
+                  setDraft(({ telegramBotToken: _kept, ...rest }) => rest);
+                  setBotClaimed(null);
+                }}
+              >
                 Keep it there
               </button>
             </div>

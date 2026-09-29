@@ -23,8 +23,36 @@ describe("getMe", () => {
     const f = fakeFetch(200, OK({ id: 42, username: "merryman_bot", is_bot: true }));
     const { bot, reason } = await getMe({ token: "123:abc", fetchFn: f });
     assert.equal(reason, undefined);
-    assert.deepEqual(bot, { id: 42, username: "merryman_bot" });
+    assert.deepEqual(bot, { id: 42, username: "merryman_bot", isBot: true });
     assert.match(f.lastUrl!, /\/bot123:abc\/getMe$/);
+  });
+
+  it("says when the answer is not a bot's, so no other method's answer can pass for getMe's", async () => {
+    // getChat on a private chat answers {id, username, type}: an id and a
+    // username, and no is_bot. A bot claim asks for isBot.
+    const f = fakeFetch(200, OK({ id: 111, username: "victimbot", type: "private" }));
+    const { bot } = await getMe({ token: "123:abc", fetchFn: f });
+    assert.equal(bot?.isBot, false);
+  });
+
+  it("NEVER SENDS A TOKEN THAT COULD STEER THE URL, whatever the far end would answer", async () => {
+    // Resolved by the URL parser, these become calls on the sender's own bot,
+    // or a download of a file they uploaded to it, whose answer carries the
+    // id they chose.
+    for (const token of [
+      "111:x/../../bot222:own/getChat?chat_id=111&z=",
+      "111:x/../../file/bot222:own/documents/file_0.json#",
+      "111:x?y",
+      "111:x#y",
+      "111:x%2F..",
+      "111:x y",
+    ]) {
+      const f = fakeFetch(200, OK({ id: 111, username: "victimbot", is_bot: true }));
+      const { bot, reason } = await getMe({ token, fetchFn: f });
+      assert.equal(bot, null, token);
+      assert.match(reason!, /not a bot token/);
+      assert.equal(f.lastUrl, undefined, `${token}: nothing was sent`);
+    }
   });
 
   it("degrades on ok:false (bad token)", async () => {

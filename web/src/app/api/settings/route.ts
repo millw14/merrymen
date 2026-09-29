@@ -32,7 +32,7 @@ import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { agentNameSave } from "@/lib/settings-agent-name";
 import { withoutEnergyReserve, withoutReserveBasket } from "@/lib/energy-reserve";
-import { botClaimForSave } from "@/lib/telegram-claims";
+import { botClaimForSave, isBotToken, NOT_A_BOT_TOKEN_TEXT } from "@/lib/telegram-claims";
 
 export const dynamic = "force-dynamic";
 
@@ -381,8 +381,15 @@ export async function PUT(req: Request) {
     if (!(key in body) || body[key] === undefined) continue;
     const v = body[key];
     if (v === "" || v === null) setOrClear(key, undefined);
-    else if (typeof v === "string" && v.trim().length >= 8) setOrClear(key, v.trim());
-    else errors.push(`${key}: too short to be a real key`);
+    else if (typeof v !== "string" || v.trim().length < 8) errors.push(`${key}: too short to be a real key`);
+    // A TELEGRAM TOKEN MUST BE ONE. It is pasted into the path of a Bot API
+    // URL, and getMe's answer to that URL decides who holds the bot
+    // (lib/telegram-claims.ts): a "token" carrying '/', '..' or '?' sent the
+    // question to another bot, which answered for the id it was given. No
+    // real token is refused, and a typo is told so now rather than saved to
+    // go unanswered.
+    else if (key === "telegramBotToken" && !isBotToken(v.trim())) errors.push(`${key}: ${NOT_A_BOT_TOKEN_TEXT}`);
+    else setOrClear(key, v.trim());
   }
 
   // ── URLs ────────────────────────────────────────────────────────────────

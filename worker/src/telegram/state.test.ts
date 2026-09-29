@@ -175,9 +175,33 @@ describe("botIdOf — the bot a token belongs to, never the token", () => {
   });
 
   it("is null for anything that is not <digits>:<secret>, rather than the whole string", () => {
-    for (const t of ["", "garbage", "abc:def", ":secret", "111:", "111", " 111:x"]) {
+    for (const t of ["", "garbage", "abc:def", ":secret", "111:", "111", " 111:x", "0:x", "000:x"]) {
       assert.equal(botIdOf(t), null, JSON.stringify(t));
     }
+  });
+
+  it("IS NULL FOR A TOKEN THAT COULD STEER THE URL IT IS PASTED INTO", () => {
+    // `111:x/../../bot<own>/getChat?chat_id=111&z=` read as bot 111, and
+    // fetch resolved it into a call on the sender's own bot whose answer
+    // carried id 111: a "confirmation" of somebody else's bot.
+    for (const t of [
+      "111:x/../../bot222:own/getChat?chat_id=111&z=",
+      "111:x/../../file/bot222:own/documents/file_0.json#",
+      "111:x?y",
+      "111:x#y",
+      "111:x%2Fy",
+      "111:x.y",
+      "111:x y",
+      "111:x\n",
+      "111:x/",
+    ]) {
+      assert.equal(botIdOf(t), null, JSON.stringify(t));
+    }
+    assert.equal(botIdOf("111:AAH_dq-Tc"), "111", "base64url is what Telegram issues");
+  });
+
+  it("is the number, so a zero typed in front names the same bot getMe does", () => {
+    assert.equal(botIdOf("0111:x"), "111");
   });
 });
 

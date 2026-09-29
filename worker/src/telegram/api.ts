@@ -90,6 +90,12 @@ export type InlineKeyboard = InlineButton[][];
 export interface TgBotInfo {
   id: number;
   username: string;
+  /**
+   * getMe's own `is_bot`, which every real getMe answer carries as true. A
+   * caller that trusts the id (a bot claim) asks for it, so no other method's
+   * answer, a chat's or a user's, can pass for getMe's.
+   */
+  isBot: boolean;
 }
 
 function short(token: string): string {
@@ -160,6 +166,16 @@ interface CallResult {
 }
 
 /**
+ * The characters a token may have and still be sent: Telegram's own, digits,
+ * ':' and base64url. The token is pasted into the URL's PATH, and one holding
+ * '/', '.', '?', '#' or '%' steers the request somewhere else on
+ * api.telegram.org: `x/../../bot<other>/getChat?…` is resolved by the URL
+ * parser into a call on another bot. A token that cannot be Telegram's is
+ * refused here, before anything is sent, whatever the caller checked.
+ */
+const SENDABLE_TOKEN = /^[A-Za-z0-9:_-]+$/;
+
+/**
  * Call a bot method. Returns the parsed `result` on `{ ok: true }`, else a
  * reason. GET when no body, POST+JSON when a body is given.
  *
@@ -174,6 +190,7 @@ async function call(
   params?: Record<string, unknown>,
   timeoutMs = CALL_TIMEOUT_MS,
 ): Promise<CallResult> {
+  if (!SENDABLE_TOKEN.test(opts.token)) return { result: null, reason: "not a bot token (it has characters no Telegram token has)" };
   const base = opts.apiBase ?? API_BASE;
   const fetchFn = opts.fetchFn ?? (fetch as unknown as FetchLike);
   const url = `${base}/bot${opts.token}/${method}`;
@@ -232,11 +249,11 @@ async function call(
 export async function getMe(opts: TelegramOpts): Promise<{ bot: TgBotInfo | null; reason?: string }> {
   const { result, reason } = await call(opts, "getMe");
   if (!result || typeof result !== "object") return { bot: null, reason: reason ?? `invalid token ${short(opts.token)}` };
-  const r = result as { id?: unknown; username?: unknown };
+  const r = result as { id?: unknown; username?: unknown; is_bot?: unknown };
   if (typeof r.id !== "number" || typeof r.username !== "string") {
     return { bot: null, reason: "getMe: missing id/username" };
   }
-  return { bot: { id: r.id, username: r.username } };
+  return { bot: { id: r.id, username: r.username, isBot: r.is_bot === true } };
 }
 
 /**
@@ -645,6 +662,8 @@ async function sendFile(
   filePath: string,
   caption?: string,
 ): Promise<{ ok: boolean; reason?: string }> {
+  // Refused like call() refuses it: this builds its own URL.
+  if (!SENDABLE_TOKEN.test(opts.token)) return { ok: false, reason: "not a bot token (it has characters no Telegram token has)" };
   const base = opts.apiBase ?? API_BASE;
   const fetchFn = (opts.fetchFn ?? (fetch as unknown)) as typeof fetch;
   // Bounded like call(): an upload that never finishes would hold the serial

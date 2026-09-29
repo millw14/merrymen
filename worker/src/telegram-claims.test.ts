@@ -27,6 +27,8 @@ import {
   claimGate,
   ensureBotClaims,
   moveBotClaim,
+  ownerLinked,
+  pollerKeyOf,
   readBotClaims,
   releaseBotClaims,
   unclaimedBot,
@@ -210,12 +212,15 @@ describe("claimGate — who may poll the bot", () => {
     assert.equal(out.verdict.kind, "keep");
   });
 
-  it("THE PASS'S OWN DE-DUPE IS THE SECOND GUARD, keyed on the bot, and never strips a tenant for its own entry", () => {
-    const seen = new Map([["111", A]]);
-    // With no claim to go by, a second poller in one pass is refused…
-    assert.deepEqual(claimGate(on(TOKEN_B), B, new Map(), seen).verdict, { kind: "strip", bot: "111", by: "pass" });
-    // …and with the claims unreadable it is the only guard there is.
-    assert.deepEqual(claimGate(on(TOKEN_B), B, null, seen).verdict, { kind: "strip", bot: "111", by: "pass" });
+  it("THE PASS'S OWN DE-DUPE IS THE SECOND GUARD, one poller per token, and never strips a tenant for its own entry", () => {
+    // The incident's shape: the same token saved under a second login.
+    const seen = new Map([[pollerKeyOf(TOKEN_A)!, A]]);
+    // With no claim to go by, a second poller of it in one pass is refused…
+    assert.deepEqual(claimGate(on(TOKEN_A), B, new Map(), seen).verdict, { kind: "strip", bot: "111", by: "pass" });
+    // …and with the claims unreadable it is the only guard there is…
+    assert.deepEqual(claimGate(on(TOKEN_A), B, null, seen).verdict, { kind: "strip", bot: "111", by: "pass" });
+    // …however it is typed: trimmed as the child trims it, and the id read as a number.
+    assert.deepEqual(claimGate(on(` 0${TOKEN_A} `), B, null, seen).verdict, { kind: "strip", bot: "111", by: "pass" });
     // A tenant already recorded as polling it (a hold handed back to trading
     // in the same pass) is not stripped by its own claim.
     assert.equal(claimGate(on(TOKEN_A), A, null, seen).verdict.kind, "keep");
@@ -223,11 +228,31 @@ describe("claimGate — who may poll the bot", () => {
     assert.equal(claimGate(on("222:CCCsecret"), B, null, seen).verdict.kind, "keep");
   });
 
+  it("WITH NOTHING TO VOUCH FOR EITHER, A DIFFERENT SECRET FOR THE SAME BOT STRIPS NOBODY", () => {
+    // Telegram keeps one secret live per bot, so two secrets are never two
+    // pollers. Keyed on the bot, whoever the pass met first took it: a
+    // stranger's `111:guess`, or the secret the owner revoked, and the live
+    // one went unpolled for as long as the claims could not say otherwise.
+    for (const first of ["111:guessed-by-a-stranger", TOKEN_A]) {
+      const seen = new Map([[pollerKeyOf(first)!, A]]);
+      const owner = claimGate(on(TOKEN_B), B, null, seen);
+      assert.deepEqual(owner.verdict, { kind: "keep", bot: "111" }, first);
+      assert.equal(owner.settings.telegramBotToken, TOKEN_B);
+    }
+  });
+
+  it("pollerKeyOf is the token, as the child reads it, and never the token itself", () => {
+    assert.equal(pollerKeyOf(" 0111:abc "), pollerKeyOf("111:abc"));
+    assert.notEqual(pollerKeyOf("111:abc"), pollerKeyOf("111:abd"));
+    assert.equal(pollerKeyOf("not-a-token"), null);
+    assert.ok(!pollerKeyOf(TOKEN_A)!.includes("AAAsecret"));
+  });
+
   it("A CONFIRMED CLAIM OUTRANKS THE PASS'S RECORD, which holds whoever the pass met first, confirmed or not", () => {
     // A stranger's `111:anything` met first in a pass is recorded as polling
     // the bot (its process cannot: Telegram refuses the token). The owner's
     // claim, made for a token Telegram confirmed, must still decide.
-    const seen = new Map([["111", B]]);
+    const seen = new Map([[pollerKeyOf(TOKEN_B)!, B]]);
     assert.deepEqual(claimGate(on(TOKEN_A), A, new Map([["111", A]]), seen).verdict, { kind: "keep", bot: "111" });
     assert.deepEqual(claimGate(on(TOKEN_B), B, new Map([["111", A]]), seen).verdict, { kind: "strip", bot: "111", by: "claim" });
   });
@@ -259,6 +284,36 @@ describe("claimGate — who may poll the bot", () => {
       const s = on(token);
       assert.deepEqual(claimGate(s, B, new Map([["111", A]])).verdict, { kind: "idle" });
     }
+  });
+
+  it("A TOKEN THAT COULD STEER THE getMe URL HAS NO BOT: it claims nothing, is judged against nothing, and is never sent", () => {
+    // `<victim id>:x/../../bot<own>/getChat?chat_id=<victim id>&z=` read as the
+    // victim's bot, and its "getMe" was answered by the sender's own bot. Its
+    // process cannot use it either: telegram/api.ts refuses to send it.
+    const crafted = "111:x/../../bot999:own-secret/getChat?chat_id=111&z=";
+    assert.equal(unclaimedBot(on(crafted), new Map()), null, "never offered for a claim");
+    assert.deepEqual(claimGate(on(crafted), B, new Map()).verdict, { kind: "idle" });
+    assert.deepEqual(claimGate(on(TOKEN_A), A, new Map([["111", A]]), new Map()).verdict, { kind: "keep", bot: "111" }, "the owner keeps the bot");
+  });
+
+  it("THE TOKEN IS JUDGED AS THE CHILD WILL READ IT: trimmed, with its bot's id as a number", () => {
+    // settings.ts trims the token, so ` 111:x` is polled as `111:x`; read
+    // untrimmed it had no bot, and was neither claimed nor de-duplicated.
+    const claims = new Map([["111", A]]);
+    for (const token of [` ${TOKEN_B}`, `${TOKEN_B}\n`, `0${TOKEN_B}`]) {
+      const out = claimGate(on(token), B, claims);
+      assert.deepEqual(out.verdict, { kind: "strip", bot: "111", by: "claim" }, JSON.stringify(token));
+      assert.equal("telegramBotToken" in out.settings, false);
+    }
+    assert.equal(unclaimedBot(on(" 222:x"), claims), "222");
+  });
+
+  it("ownerLinked: a person's own chat on the allowlist, not a group's, and not an empty list", () => {
+    assert.equal(ownerLinked({ telegramAllowlist: [4242] }), true);
+    assert.equal(ownerLinked({ telegramAllowlist: [-1001234, 4242] }), true);
+    assert.equal(ownerLinked({ telegramAllowlist: [-1001234] }), false, "a group is not an owner");
+    assert.equal(ownerLinked({ telegramAllowlist: [] }), false);
+    assert.equal(ownerLinked({}), false);
   });
 });
 
@@ -295,14 +350,28 @@ describe("the orchestrator asks the claims on every path that writes a settings.
     const gate = fn.indexOf("const gate = claimGate(settings, tenant, claims, seen);");
     assert.ok(backfill > 0 && gate > backfill, "the claim is made before the bot is judged, so the judgement sees it");
     assert.match(fn, /if \(holder\) claims\.set\(unclaimed, holder\);/, "and the pass learns who holds it");
-    assert.match(fn, /seen\?\.set\(verdict\.bot, lc\)/, "the pass records who polls each bot");
+    assert.match(fn, /seen\?\.set\(pollerKeyOf\(botTokenOf\(settings\)!\)!, lc\)/, "the pass records who polls each token");
+  });
+
+  it("AT A SPAWN, AN UNCLAIMED BOT IS CLAIMED ONLY FOR A LINKED OWNER; anyone else starts without it", () => {
+    // After a restart every tenant is spawned, in listTenants order, before
+    // any refresh: first one wins there was heap order.
+    const fn = body("async function gateBot(");
+    const wait = fn.indexOf("if (unclaimed && spawn && !ownerLinked(settings)) {");
+    const backfill = fn.indexOf("await backfillBotClaim(");
+    assert.ok(wait > 0 && backfill > wait, "decided before anything is claimed");
+    assert.match(fn.slice(wait, backfill), /return withoutBotToken\(settings\);/);
+    assert.match(fn, /const spawn = claimsRead === undefined;/);
   });
 
   it("THE ORCHESTRATOR CLAIMS ONLY FOR A TOKEN TELEGRAM CONFIRMS, and does not ask about a refused one every pass", () => {
     const fn = body("async function backfillBotClaim(");
     assert.match(fn, /claimBot\(db, bot, tenant, await confirmBotId\(token\), Date\.now\(\)\)/);
     assert.match(fn, /if \(refused && refused\.tag === tag && Date\.now\(\) < refused\.until\) return null;/);
-    assert.match(body("async function botIdFromTelegram("), /telegramGetMe\(\{ token \}\)/);
+    const confirm = body("async function botIdFromTelegram(");
+    assert.match(confirm, /telegramGetMe\(\{ token \}\)/);
+    assert.ok(confirm.indexOf("if (botIdOf(token) === null) return null;") < confirm.indexOf("telegramGetMe("), "nothing but a token is sent");
+    assert.match(confirm, /return bot\?\.isBot \? String\(bot\.id\) : null;/, "and only a bot's answer vouches");
   });
 
   it("THE SPAWN PATH IS GATED: spawnChild writes the settings with no pass, before a hold or a worker starts", () => {

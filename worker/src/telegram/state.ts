@@ -311,9 +311,23 @@ export function saveTelegramState(state: TelegramState): void {
  * Null for anything that is not `<digits>:<secret>`. What this returns is
  * written to disk and compared in the clear, so a malformed token must give
  * nothing rather than fall back to the whole string, which is the secret.
+ *
+ * THE SECRET MUST BE ONE TELEGRAM COULD HAVE ISSUED: letters, digits, '_' and
+ * '-' (base64url), and nothing else. A token is pasted into the path of
+ * `https://api.telegram.org/bot<token>/getMe`, and getMe's answer is what
+ * vouches for a bot claim (telegram-claims.ts). This used to accept anything
+ * after `<digits>:`, so `111:x/../../bot<own token>/getChat?chat_id=111&z=`
+ * read as bot 111, the URL parser resolved its dot segments into a call on
+ * the sender's own bot, and that call's answer, carrying id 111, "confirmed"
+ * a stranger as bot 111's owner. No '/', '.', '?', '#', '%' or space can
+ * reach a URL from here, and nothing a real owner pastes is refused.
+ *
+ * The id is the number, not the digits typed: `0111:…` is bot 111, the id
+ * getMe answers and the claims are keyed on, so a zero in front cannot give
+ * one bot a second claim.
  */
 export function botIdOf(token: string): string | null {
-  const m = /^(\d+):./.exec(token);
+  const m = /^0*([1-9]\d*):[A-Za-z0-9_-]+$/.exec(token);
   return m ? m[1]! : null;
 }
 

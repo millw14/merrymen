@@ -101,7 +101,9 @@ export async function decideBotClaim(args: {
   await ensureBotClaims(db);
   const bot = token ? botIdOf(token) : null;
   // No bot to hold: a cleared token, or one that is not `<digits>:<secret>`,
-  // which Telegram refuses and so polls nothing.
+  // which Telegram refuses and so polls nothing. The PUT refuses such a token
+  // before this (400); here it is still never confirmed, claimed or moved, and
+  // gets no 409 that would say whether its bot id is held.
   const releaseAll = async () => void (await releaseBotClaims(db, tenant));
   const leftBehind = async () => void (await releaseBotClaims(db, tenant, bot));
   if (!token || !bot) {
@@ -141,16 +143,39 @@ const unconfirmed: BotClaimDecision = {
   body: { error: "bot_unconfirmed", errors: [BOT_UNCONFIRMED_TEXT] },
 };
 
+/** A malformed token, refused at save: the owner is told what a token looks like. */
+export const NOT_A_BOT_TOKEN_TEXT =
+  "that isn't a Telegram bot token. Copy the whole token @BotFather gave you: digits, a colon, then letters, digits, '-' and '_' (like 123456789:AAH…).";
+
+/**
+ * Is this Telegram's shape of token, `<digits>:<secret>` with a base64url
+ * secret? Only such a token is ever sent to Telegram, saved, or asked about
+ * the claims. The one rule is botIdOf's, beside the claims it keys, and it
+ * says why the secret's alphabet matters.
+ */
+export function isBotToken(token: string): boolean {
+  return botIdOf(token) !== null;
+}
+
 /**
  * getMe: the id of the bot `token` belongs to, as Telegram says it, or null
  * (refused, revoked, unreachable). Bounded: a third party on the save path.
+ *
+ * THIS ANSWER AUTHORISES EVERY CLAIM AND EVERY MOVE, so nothing else may pass
+ * for it. A token not of Telegram's shape is never sent: it goes into the
+ * URL's path, and `111:x/../../bot<own>/getChat?chat_id=111&z=` is resolved
+ * by the URL parser into a call on the sender's own bot whose answer carries
+ * id 111. And only an answer that says it is a bot counts: a chat's or a
+ * user's carries an id too.
  */
 export async function telegramBotIdOf(token: string): Promise<string | null> {
+  if (!isBotToken(token)) return null;
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, { signal: AbortSignal.timeout(8_000) });
-    const body = (await res.json()) as { ok?: boolean; result?: { id?: unknown } };
-    const id = body.ok ? body.result?.id : undefined;
-    return typeof id === "number" || typeof id === "string" ? String(id) : null;
+    const body = (await res.json()) as { ok?: boolean; result?: { id?: unknown; is_bot?: unknown } };
+    const me = body.ok === true ? body.result : undefined;
+    if (!me || me.is_bot !== true) return null;
+    return typeof me.id === "number" || typeof me.id === "string" ? String(me.id) : null;
   } catch {
     return null;
   }

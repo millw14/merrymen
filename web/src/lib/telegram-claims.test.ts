@@ -6,10 +6,10 @@
  */
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 import { wrapSqlite, type Db } from "../../../worker/src/db";
 import { botIdOf, claimBot, ensureBotClaims, readBotClaims } from "../../../worker/src/telegram-claims";
-import { BOT_CLAIMED_TEXT, BOT_UNCONFIRMED_TEXT, decideBotClaim } from "./telegram-claims";
+import { BOT_CLAIMED_TEXT, BOT_UNCONFIRMED_TEXT, decideBotClaim, isBotToken, telegramBotIdOf } from "./telegram-claims";
 
 const A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const;
 const B = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as const;
@@ -107,5 +107,65 @@ describe("decideBotClaim", () => {
     assert.ok(again.ok && !again.moved);
     await again.undo();
     assert.deepEqual(await claims(d), [["111", A]]);
+  });
+});
+
+/**
+ * Tokens that read as bot 111 before botIdOf knew Telegram's alphabet, and
+ * that fetch resolves into a request on the sender's own bot: a getChat that
+ * answers with id 111, or a file they uploaded to it that says anything.
+ */
+const CRAFTED = [
+  "111:x/../../bot999:own-secret/getChat?chat_id=111&z=",
+  "111:x/../../file/bot999:own-secret/documents/file_0.json#",
+  "111:x?chat_id=111",
+  "111:x%2F..%2Fbot999",
+];
+
+describe("telegramBotIdOf — getMe, as a claim may trust it", () => {
+  const realFetch = globalThis.fetch;
+  let sent: string[] = [];
+  /** Telegram answering every request with `result`: what the sender's own bot, or a file on it, would say. */
+  const answerAll = (result: Record<string, unknown>) => {
+    sent = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      sent.push(String(input instanceof Request ? input.url : input));
+      return Response.json({ ok: true, result });
+    }) as typeof fetch;
+  };
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it("NEVER SENDS A TOKEN THAT COULD STEER THE URL, whatever the far end would answer", async () => {
+    answerAll({ id: 111, is_bot: true, username: "victimbot" });
+    for (const token of CRAFTED) {
+      assert.equal(isBotToken(token), false, token);
+      assert.equal(await telegramBotIdOf(token), null, token);
+    }
+    assert.deepEqual(sent, [], "nothing was sent");
+  });
+
+  it("counts only an answer that says it is a bot: a chat's or a user's carries an id too", async () => {
+    answerAll({ id: 111, username: "victimbot", type: "private" });
+    assert.equal(await telegramBotIdOf("111:AAA-secret"), null);
+    answerAll({ id: 111, is_bot: true, username: "bot111" });
+    assert.equal(await telegramBotIdOf("111:AAA-secret"), "111");
+    assert.deepEqual(sent, ["https://api.telegram.org/bot111:AAA-secret/getMe"]);
+  });
+
+  it("A CRAFTED TOKEN FOR A HELD BOT GETS NO 409 THAT SAYS SO, AND MOVES NOTHING", async () => {
+    answerAll({ id: 111, is_bot: true, username: "victimbot" });
+    const d = await db();
+    await claimBot(d, "111", A, "111", 1);
+    for (const token of CRAFTED) {
+      const plain = await decideBotClaim({ db: d, tenant: B, token, moveBot: false, confirmBot: telegramBotIdOf, now: 2 });
+      assert.ok(plain.ok && !plain.moved, `${token}: the answer a free bot's would get`);
+      const move = await decideBotClaim({ db: d, tenant: B, token, moveBot: true, confirmBot: telegramBotIdOf, now: 3 });
+      assert.ok(!move.ok);
+      assert.equal(move.body.error, "bot_unconfirmed");
+    }
+    assert.deepEqual(await claims(d), [["111", A]], "the owner keeps the bot");
+    assert.deepEqual(sent, [], "and Telegram was never asked");
   });
 });
