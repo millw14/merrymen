@@ -678,17 +678,31 @@ describe("every request is bounded", () => {
     }
   });
 
-  it("a caller's own timeoutMs bounds an upload as it bounds a call", async () => {
+  it("a caller's timeoutMs can raise an upload's 60 seconds, never cut it short", async () => {
+    // One TelegramOpts serves JSON calls and uploads alike: a bound set short
+    // to keep calls quick must not cut every photo and document to it.
     const dir = mkdtempSync(path.join(os.tmpdir(), "merrymen-upload-"));
     const file = path.join(dir, "report.txt");
     writeFileSync(file, "hello");
+    mock.timers.enable({ apis: ["setTimeout"] });
     try {
-      const { f } = deaf();
-      assert.deepEqual(await sendDocument({ token: "1:a", fetchFn: f, timeoutMs: 20 }, 5, file), {
-        ok: false,
-        reason: "request failed: timed out",
-      });
+      for (const [timeoutMs, gives] of [
+        [20, 60_000],
+        [90_000, 90_000],
+      ] as const) {
+        const { f, seen } = deaf();
+        const r = settled(sendDocument({ token: "1:a", fetchFn: f, timeoutMs }, 5, file));
+        await waitFor(() => seen.length === 1, `the upload reaches fetch (timeoutMs ${timeoutMs})`);
+        mock.timers.tick(gives - 1);
+        await flush();
+        assert.equal(r.done, false, `timeoutMs ${timeoutMs}: still inside ${gives} ms`);
+        mock.timers.tick(1);
+        await waitFor(() => r.done, `timeoutMs ${timeoutMs}: the upload gives up at ${gives} ms`);
+        assert.deepEqual(r.value, { ok: false, reason: "request failed: timed out" });
+        assert.equal(seen[0]!.signal!.aborted, true);
+      }
     } finally {
+      mock.timers.reset();
       rmSync(dir, { recursive: true, force: true });
     }
   });

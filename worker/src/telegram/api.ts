@@ -26,9 +26,10 @@ export interface TelegramOpts {
   /** Override the API host (tests). */
   apiBase?: string;
   /**
-   * The longest one request is waited for, in ms. When absent,
-   * TG_CALL_TIMEOUT_MS for a JSON call and UPLOAD_TIMEOUT_MS for a photo or
-   * document upload. getUpdates adds its long poll on top.
+   * The longest one JSON call is waited for, in ms; TG_CALL_TIMEOUT_MS when
+   * absent. getUpdates adds its long poll on top. A photo or document upload
+   * is waited for this long or UPLOAD_TIMEOUT_MS, whichever is longer: a
+   * bound set short to keep calls quick must not cut off a file.
    */
   timeoutMs?: number;
 }
@@ -267,7 +268,7 @@ function short(token: string): string {
 /**
  * An upload carries the file itself, so it gets longer than a JSON call's
  * TG_CALL_TIMEOUT_MS. It holds the serial poll loop while it runs, so it is
- * bounded all the same.
+ * bounded all the same. A caller's `timeoutMs` can raise it, never lower it.
  */
 const UPLOAD_TIMEOUT_MS = 60_000;
 
@@ -282,9 +283,10 @@ const UPLOAD_TIMEOUT_MS = 60_000;
 const TIMED_OUT = "request failed: timed out";
 
 /**
- * How long one request is waited for: the caller's `timeoutMs` when it gave
- * a usable one, else `fallback` (TG_CALL_TIMEOUT_MS, or UPLOAD_TIMEOUT_MS for
- * an upload). A long poll's own window is added on top by call().
+ * How long one JSON call is waited for: the caller's `timeoutMs` when it gave
+ * a usable one, else `fallback` (TG_CALL_TIMEOUT_MS). A long poll's own window
+ * is added on top by call(); an upload takes the longer of this and
+ * UPLOAD_TIMEOUT_MS (sendFile).
  */
 function limitOf(opts: TelegramOpts, fallback: number): number {
   const own = opts.timeoutMs;
@@ -1224,8 +1226,10 @@ async function sendFile(
   const base = opts.apiBase ?? API_BASE;
   const fetchFn = (opts.fetchFn ?? (fetch as unknown)) as typeof fetch;
   // Bounded like call(): an upload that never finishes would hold the serial
-  // poll loop just as a hung sendMessage would.
-  const { signal, disarm } = deadline(limitOf(opts, UPLOAD_TIMEOUT_MS));
+  // poll loop just as a hung sendMessage would. Never shorter than
+  // UPLOAD_TIMEOUT_MS: a `timeoutMs` set to keep JSON calls quick would
+  // otherwise cut every photo and document to it, without a word.
+  const { signal, disarm } = deadline(Math.max(limitOf(opts, TG_CALL_TIMEOUT_MS), UPLOAD_TIMEOUT_MS));
   try {
     const { readFileSync } = await import("node:fs");
     const path = await import("node:path");
