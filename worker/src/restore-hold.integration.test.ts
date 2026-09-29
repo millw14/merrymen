@@ -47,6 +47,7 @@ const {
   setHoldNoticeForTest,
   adoptHolderForTest,
   isHeldForTest,
+  loseLeaseForTest,
   setHeldResetDbForTest,
 } = await import("./orchestrator");
 const { applyLedgerSchema } = await import("./store");
@@ -640,6 +641,102 @@ describe("a held tenant is stood down like any other", () => {
     assert.equal(spawned.length, 0, "no process started to poll a revoked tenant's bot, only to be killed in a wiped home");
     assert.ok(!isHeldForTest(TENANT));
     assert.equal(existsSync(childHome(TENANT)), false);
+  });
+
+  /**
+   * A STAND-DOWN WAITS FOR THE HOLD PROCESS'S EXIT TOO, not only a handover.
+   * Forgotten on SIGTERM, as it was, a process that outlives SIGKILL (stopped
+   * and resumed, or stuck in the kernel) went on polling the bot while the
+   * next spawn started beside it: once the grant was signed again, or, for a
+   * lost lease, in the very same pass.
+   */
+  const stoodDownAlerts = (hold: FakeProc) => said.filter((l) => l.includes("[alert]") && l.includes(`pid ${hold.pid}`));
+
+  it("A GRANT REMOVED UNDER A HOLD PROCESS THAT WILL NOT EXIT, THEN SIGNED AGAIN, STARTS NOTHING UNTIL IT HAS GONE", async () => {
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      await reconcile();
+      const hold = holds()[0]!;
+      hold.deaf = true;
+      await store.remove(TENANT);
+      mock.timers.tick(15_000);
+      await reconcile();
+      assert.equal(hold.signals[0], "SIGTERM");
+      assert.equal(existsSync(childHome(TENANT)), false, "its home wiped, as for any stand-down");
+      assert.ok(isHeldForTest(TENANT), "still counted until its process is seen to go");
+      // Signed again, with a book that restores now: still nothing beside it.
+      await store.put(TENANT, grant());
+      restoreSays = { ok: true, line: "paper cash, holdings and basis restored" };
+      for (let i = 0; i < 3; i++) {
+        mock.timers.tick(15_000);
+        await reconcile();
+      }
+      await settle();
+      assert.equal(spawned.length, 1, `no worker and no second hold process beside it:\n${said.join("\n")}`);
+      assert.equal(stoodDownAlerts(hold).length, 1, `one alert, naming the process:\n${said.join("\n")}`);
+      assert.ok(hold.signals.filter((s) => s === "SIGKILL").length >= 3, "SIGKILL at three seconds, and again each pass");
+      assert.equal(said.filter((l) => l.includes(`${TENANT} grant removed — standing its hold down`)).length, 1, "stood down once, not every pass");
+      // It goes at last: a stand-down's end, not a crash.
+      hold.die(null, "SIGKILL");
+      assert.ok(!isHeldForTest(TENANT), "a stood-down hold leaves with its process");
+      assert.ok(!said.some((l) => /hold process exited \(|keeps dying/.test(l)), said.join("\n"));
+      mock.timers.tick(15_000);
+      await reconcile();
+      await settle();
+      assert.equal(workers().length, 1, `then the grant signed again starts exactly one worker:\n${said.join("\n")}`);
+      assert.equal(holds().length, 1);
+      assert.deepEqual(events, ["hold-spawn", "hold-exit", "worker-spawn"], "and only after the exit was seen");
+    });
+  });
+
+  it("A LEASE LOST UNDER A HOLD PROCESS THAT WILL NOT EXIT IS NOT TAKEN AGAIN BESIDE IT, IN THAT PASS OR ANY OTHER", async () => {
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      await reconcile();
+      const hold = holds()[0]!;
+      hold.deaf = true;
+      loseLeaseForTest(TENANT);
+      mock.timers.tick(15_000);
+      await reconcile();
+      assert.ok(said.some((l) => l.includes(`${TENANT}: lease lost`)), said.join("\n"));
+      assert.equal(hold.signals[0], "SIGTERM");
+      // The spawn loop runs in the same pass, straight after the stand-down.
+      assert.equal(spawned.length, 1, `the lease is not taken again and a second process started in the same pass:\n${said.join("\n")}`);
+      assert.ok(isHeldForTest(TENANT));
+      restoreSays = { ok: true, line: "paper cash, holdings and basis restored" };
+      for (let i = 0; i < 3; i++) {
+        mock.timers.tick(15_000);
+        await reconcile();
+      }
+      await settle();
+      assert.equal(spawned.length, 1, `nor on any pass after it:\n${said.join("\n")}`);
+      assert.equal(stoodDownAlerts(hold).length, 1, said.join("\n"));
+      hold.die(null, "SIGKILL");
+      assert.ok(!isHeldForTest(TENANT));
+      mock.timers.tick(15_000);
+      await reconcile();
+      await settle();
+      assert.equal(workers().length, 1, `the lease taken again once it has gone, and one worker:\n${said.join("\n")}`);
+      assert.deepEqual(events, ["hold-spawn", "hold-exit", "worker-spawn"]);
+    });
+  });
+
+  it("A HOLD PROCESS THAT GOES WHEN IT IS TOLD IS STOOD DOWN AS BEFORE: NO ALERT, AND THE TENANT FREE A PASS LATER", async () => {
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      await reconcile();
+      const hold = holds()[0]!;
+      loseLeaseForTest(TENANT);
+      mock.timers.tick(15_000);
+      await reconcile();
+      await waitFor(() => !isHeldForTest(TENANT), "its exit is seen");
+      assert.equal(hold.signals[0], "SIGTERM");
+      mock.timers.tick(15_000);
+      await reconcile();
+      await settle();
+      assert.equal(holds().length, 2, `the next pass takes the lease again and holds it afresh:\n${said.join("\n")}`);
+      assert.ok(!said.some((l) => l.includes("[alert]") && l.includes(`pid ${hold.pid}`)), said.join("\n"));
+    });
   });
 });
 
