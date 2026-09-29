@@ -79,7 +79,8 @@ export interface TokenBalance {
   /**
    * Human-readable amount, for display only. "unknown" when the holding is
    * real but not expressible — see the vault leg, where the share count is
-   * meaningless and the USDG value could not be read.
+   * meaningless and the USDG value could not be read. "<n> raw units" when the
+   * count is exact but the token will not state its decimals.
    */
   amount: string;
   /** Extra context for the owner when the number needs it. */
@@ -193,7 +194,20 @@ export interface RecoverResult extends RecoverPlan {
  *
  * $MERRYMEN IS SWEPT TOO, BUT ONLY WHERE IT EXISTS — see `reserveRows`.
  */
-const BUILTIN_SWEEPABLE: { symbol: string; address: Address; decimals: number }[] = [
+interface SweepToken {
+  symbol: string;
+  address: Address;
+  decimals: number;
+  /**
+   * True for an owner token known only by its ADDRESS, whose `decimals` is then
+   * a placeholder. The transfer never reads it — it moves `raw` — but the amount
+   * the owner confirms against does, so `planRecovery` reads the real figure on
+   * chain rather than formatting at a number nothing established.
+   */
+  decimalsUnknown?: true;
+}
+
+const BUILTIN_SWEEPABLE: SweepToken[] = [
   { symbol: "USDG", address: CASH.USDG as Address, decimals: USDG_DECIMALS },
   ...STOCK_TOKENS.map((t) => ({ symbol: t.symbol, address: t.address as Address, decimals: 18 })),
   { symbol: "vault", address: MORPHO.steakhouseUsdgVault as Address, decimals: USDG_DECIMALS },
@@ -216,7 +230,7 @@ const BUILTIN_SWEEPABLE: { symbol: string; address: Address; decimals: number }[
  * and was told nothing was left while it sat in the account. The reserve IS
  * $MERRYMEN wherever it is listed, so its label and decimals are the token's.
  */
-function reserveRows(chainId: number): { symbol: string; address: Address; decimals: number }[] {
+function reserveRows(chainId: number): SweepToken[] {
   return energyReserveTokens(chainId).map((address) => ({
     symbol: MERRYMEN_TOKEN.symbol,
     address: address as Address,
@@ -251,37 +265,62 @@ function reserveRows(chainId: number): { symbol: string; address: Address; decim
  * they have not checked — which is how an unvalidated address reaches an atomic
  * sweep of someone's whole account.
  *
+ * AN ADDRESS WITH NO NAME IS NOT MALFORMED. The browser and the phone recover
+ * signed out, so the only token list they hold is the grant's `grantTokens` —
+ * addresses, nothing else — and they pass each as `{ address, symbol: "" }`.
+ * isValidCustomToken refuses an empty symbol, which is right for settings,
+ * where a ticker is required; here it silently dropped every owner-added token
+ * from those sweeps and left it in the account. So an address-only entry is
+ * accepted, with its address checked exactly as strictly as any other.
+ *
+ * It is labelled BY ADDRESS, never by a symbol read off the token: a contract
+ * chooses its own `symbol()`, so a name the owner never typed — "USDG", say —
+ * would lend a stranger's token the look of a curated one on the screen where
+ * they agree to move money. A short address cannot collide with a ticker (the
+ * `…` is outside the ticker alphabet); if two share one, the later gets its
+ * full address — the same last resort a named collision takes.
+ *
  * `chainId` IS REQUIRED: a caller that forgot it would silently never sweep
  * the reserve on mainnet, or sweep a codeless one elsewhere.
  */
-export function sweepList(
-  chainId: number,
-  extra: readonly unknown[] = [],
-): { symbol: string; address: Address; decimals: number }[] {
+export function sweepList(chainId: number, extra: readonly unknown[] = []): SweepToken[] {
   const out = [...BUILTIN_SWEEPABLE, ...reserveRows(chainId)];
   const floor = out.length;
   const addresses = new Set(out.map((t) => t.address.toLowerCase()));
   const labels = new Set(out.map((t) => t.symbol.toUpperCase()));
   for (const t of extra) {
-    if (!isValidCustomToken(t)) continue;
+    const named = isValidCustomToken(t);
+    if (!named && !isAddressOnly(t)) continue;
     const addr = t.address.toLowerCase();
     if (addresses.has(addr)) continue;
     // A shortened address can itself repeat; the full one cannot.
-    const short = `${t.symbol} (${shortAddress(addr)})`;
-    const symbol = !labels.has(t.symbol.toUpperCase())
-      ? t.symbol
-      : !labels.has(short.toUpperCase())
-        ? short
-        : `${t.symbol} (${addr})`;
+    const short = shortAddress(addr);
+    const candidates = named ? [t.symbol, `${t.symbol} (${short})`, `${t.symbol} (${addr})`] : [short, addr];
+    const symbol = candidates.find((c) => !labels.has(c.toUpperCase())) ?? candidates[candidates.length - 1]!;
     addresses.add(addr);
     labels.add(symbol.toUpperCase());
-    out.push({ symbol, address: t.address as Address, decimals: t.decimals });
+    out.push(
+      named
+        ? { symbol, address: t.address as Address, decimals: t.decimals }
+        : { symbol, address: t.address, decimals: 18, decimalsUnknown: true },
+    );
     // The same ceiling settings.ts puts on customTokens. A recovery is one
     // atomic UserOp, and an unbounded call list is one that runs out of gas
     // and moves nothing at all.
     if (out.length >= floor + 50) break;
   }
   return out;
+}
+
+/** `{ address, symbol: "" }` (or no symbol at all), with a well-formed address. */
+function isAddressOnly(t: unknown): t is { address: Address } {
+  if (!t || typeof t !== "object") return false;
+  const c = t as { symbol?: unknown; address?: unknown };
+  return (
+    (c.symbol === undefined || c.symbol === "") &&
+    typeof c.address === "string" &&
+    /^0x[0-9a-fA-F]{40}$/.test(c.address)
+  );
 }
 
 export type BalanceOutcome =
@@ -526,6 +565,35 @@ export async function planRecovery(opts: {
 
   const balances: TokenBalance[] = await Promise.all(
     held.map(async ({ t, raw }) => {
+      if (t.decimalsUnknown) {
+        // ITS OWN DECIMALS, asked of the token, for the same reason the vault
+        // row below is priced: an address-only entry used to carry a guessed
+        // 18, and a 9-decimal memecoin formatted at 18 is shown to the owner a
+        // billion times smaller than what they are agreeing to move. Bounded as
+        // isValidCustomToken bounds a typed-in figure; outside that, or no
+        // answer, the amount is the exact raw count rather than a guess.
+        //
+        // NOT `unreadable`. That list says a BALANCE could not be read, so the
+        // plan may be missing money — and the phone refuses to start a
+        // withdrawal while it is non-empty. Here the balance was read and the
+        // token sweeps; only its display unit is missing, and letting that veto
+        // the whole withdrawal would strand everything else over a cosmetic gap.
+        const decimals = await publicClient
+          .readContract({ address: t.address, abi: erc20Abi, functionName: "decimals" })
+          .then((d) => Number(d))
+          .catch(() => null);
+        if (decimals !== null && Number.isInteger(decimals) && decimals >= 0 && decimals <= 36) {
+          return { symbol: t.symbol, address: t.address, raw, decimals, amount: formatUnits(raw, decimals) };
+        }
+        return {
+          symbol: t.symbol,
+          address: t.address,
+          raw,
+          decimals: t.decimals,
+          amount: `${raw} raw units`,
+          note: "held, but the token would not state its decimals, so this is its raw count. It sweeps regardless.",
+        };
+      }
       if (t.address.toLowerCase() !== (MORPHO.steakhouseUsdgVault as string).toLowerCase()) {
         return { symbol: t.symbol, address: t.address, raw, decimals: t.decimals, amount: formatUnits(raw, t.decimals) };
       }

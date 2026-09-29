@@ -86,12 +86,53 @@ test("malformed entries are dropped rather than trusted", () => {
     { symbol: "BAD", address: "0xnothex", decimals: 18 },
     { symbol: "WORSE", address: addr("c"), decimals: 999 },
     { symbol: "", address: addr("d"), decimals: 18 },
+    { symbol: "", address: "0xnothex" },
+    { symbol: "", address: addr("1").slice(0, 41) },
+    { symbol: "has space", address: addr("2"), decimals: 18 },
     null,
     "not even an object",
   ]);
   const extras = list.slice(sweepList(MAINNET).length);
-  assert.equal(extras.length, 1, "only the valid one survives");
+  // An EMPTY SYMBOL IS NOT MALFORMED. It is what the browser and the phone
+  // send for every grantTokens address, because an address is all a grant
+  // carries — and this pin used to drop it, which is how every owner-added
+  // token was left out of the signed-out sweeps. A malformed ADDRESS is still
+  // refused, with or without a name.
+  assert.deepEqual(
+    extras.map((t) => t.address),
+    [addr("b"), addr("d")],
+    "the named token and the address-only one survive; nothing with a bad address or a bad name does",
+  );
   assert.equal(extras[0]!.symbol, "OK");
+});
+
+test("an address-only token is labelled by its address, with its decimals left to the chain", () => {
+  const meme = "0x15e498ff2dbca95e8648a1f025cbbd12c2525461";
+  const [t] = sweepList(MAINNET, [{ address: meme, symbol: "" }]).slice(sweepList(MAINNET).length);
+  assert.ok(t, "an address-only entry must reach the sweep");
+  assert.equal(t.symbol, "0x15e4…5461", "labelled by address — never by a name the token picks for itself");
+  assert.equal(t.decimalsUnknown, true, "its decimals are a placeholder planRecovery must replace");
+  // A named entry is not flagged: its decimals were typed in and validated.
+  const [named] = sweepList(MAINNET, [{ symbol: "WIF", address: addr("a"), decimals: 9 }]).slice(sweepList(MAINNET).length);
+  assert.equal(named!.decimalsUnknown, undefined);
+});
+
+test("an address-only entry can neither shadow a builtin nor lose a label collision", () => {
+  const baseline = sweepList(MAINNET).length;
+  // Two addresses sharing their first six and last four characters.
+  const a = "0x1234aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcd";
+  const b = "0x1234bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbabcd";
+  const list = sweepList(MAINNET, [
+    { address: CASH.USDG, symbol: "" }, // a builtin's address: the builtin wins
+    { address: a, symbol: "" },
+    { address: b, symbol: "" },
+    { address: a.toUpperCase().replace("0X", "0x"), symbol: "" }, // the same token again
+  ]);
+  const extras = list.slice(baseline);
+  assert.deepEqual(extras.map((t) => t.address), [a, b], "both distinct tokens are swept, each once");
+  assert.equal(extras[0]!.symbol, "0x1234…abcd");
+  assert.equal(extras[1]!.symbol, b, "the second falls back to its full address rather than being dropped");
+  assert.equal(new Set(list.map((t) => t.symbol.toUpperCase())).size, list.length, "every row stays distinguishable");
 });
 
 test("a builtin cannot be shadowed — an address collision is dropped, a name collision is swept under its address", () => {
