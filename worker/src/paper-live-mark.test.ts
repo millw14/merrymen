@@ -195,7 +195,8 @@ describe("tick() re-reads the live peaks before anything judges them", () => {
       reload,
       TICK.indexOf("readAccountBalances(client, grant.smartAccount)"),
       TICK.indexOf("reconcileFlowsOrRetry("),
-      TICK.indexOf("accrueAboveHwm(equityUsdg, highWaterMarkUsdg"),
+      // On the peak basis (docs/perps.md rule 12) — equity itself with no perps.
+      TICK.indexOf("accrueAboveHwm(peakBasis, highWaterMarkUsdg"),
       TICK.indexOf("peakUsdg: drawdownPeak(),"),
     ];
     assert.ok(order.every((at, i) => at > 0 && (i === 0 || at > order[i - 1]!)), `out of order: ${order.join(" < ")}`);
