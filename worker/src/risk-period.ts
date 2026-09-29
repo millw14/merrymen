@@ -73,6 +73,19 @@ export async function adjustRiskCapital(db: Db, account: string, delta: number):
     CASE WHEN withdrawn_usdg + ? > hwm_usdg THEN hwm_usdg ELSE withdrawn_usdg + ? END WHERE id = ?`).run(-delta, -delta, r.id);
 }
 
+/**
+ * A mark's Σ max(0, Uᵢ) as integer micro-USDG. NULL is a mark with no perp
+ * term (every mark before perps, and every agent without them): nothing open,
+ * so nothing to take off. A value that is not a canonical non-negative integer
+ * is not guessed at — it refuses the start, because a baseline read from a
+ * corrupted term would be the period's peak for its whole life.
+ */
+function openGainMicro(v: string | null | undefined): bigint {
+  if (v === null || v === undefined) return 0n;
+  if (typeof v !== "string" || !/^(0|[1-9]\d*)$/.test(v)) throw new Error("Unreadable perp gain on the equity mark");
+  return BigInt(v);
+}
+
 /** Operational activation requires an explicit ID/reason and a fresh observed balance. */
 export async function startRiskPeriod(db: Db, account: string, id: string, reason: string, now: number): Promise<RiskPeriod> {
   return db.tx(async tx => {
@@ -86,12 +99,32 @@ export async function startRiskPeriod(db: Db, account: string, id: string, reaso
     // Never a mark taken while flow inference was held (store.ts `flows_held`):
     // its equity may hold a deposit not yet booked, which would sit in the
     // baseline once and then be added to the peak again when it is.
-    const mark = await tx.prepare("SELECT equity_usdg, at FROM equity WHERE agent_id = ? AND epoch = ? AND mode = 'live' AND COALESCE(flows_held, 0) = 0 ORDER BY at DESC, id DESC LIMIT 1").get(account, agent.epoch) as { equity_usdg: number; at: number } | undefined;
+    //
+    // NOR ONE TAKEN WHILE PERP MARGIN WAS MOVING (docs/perps.md rule 12c). The
+    // same USDG can be in its cash and in its transit term around a payout, and
+    // this baseline is also the period's first PEAK — which only ratchets. A
+    // mark with nothing in transit carries '0' or NULL (no perp term at all);
+    // anything else is skipped, and the freshness rule below then refuses the
+    // start until a settled tick writes a mark, rather than guessing.
+    const mark = await tx.prepare(
+      `SELECT equity_usdg, at, perp_unrealized_gain_micro FROM equity
+        WHERE agent_id = ? AND epoch = ? AND mode = 'live' AND COALESCE(flows_held, 0) = 0
+          AND COALESCE(perp_in_transit_micro, '0') = '0'
+        ORDER BY at DESC, id DESC LIMIT 1`,
+    ).get(account, agent.epoch) as { equity_usdg: number; at: number; perp_unrealized_gain_micro: string | null } | undefined;
     if (!mark || mark.at > now || now - mark.at > 300 || !(mark.equity_usdg > 0)) throw new Error("Fresh positive equity mark required");
-    const r: RiskPeriod = { id, agent_id: account, started_at: now, baseline_usdg: mark.equity_usdg, hwm_usdg: mark.equity_usdg, withdrawn_usdg: 0, reason };
+    // THE PEAK BASIS, not the equity (rule 12; equity.ts peakBasisUsdg): the
+    // baseline is the period's first peak, and a peak never includes an open
+    // perp gain — started over a wick, the whole period would measure its
+    // drawdown from a number the account never realised. No perp term (NULL,
+    // or '0') leaves the figure exactly the column, as before perps.
+    const gainMicro = openGainMicro(mark.perp_unrealized_gain_micro);
+    const baseline = gainMicro > 0n ? Math.round(mark.equity_usdg * 1e6 - Number(gainMicro)) / 1e6 : mark.equity_usdg;
+    if (!(baseline > 0)) throw new Error("Fresh positive equity mark required");
+    const r: RiskPeriod = { id, agent_id: account, started_at: now, baseline_usdg: baseline, hwm_usdg: baseline, withdrawn_usdg: 0, reason };
     await mergeRiskPeriod(tx, r);
     await tx.prepare("INSERT INTO events (agent_id, level, message) VALUES (?, 'warn', ?)").run(account,
-      `New risk period ${id}: baseline ${mark.equity_usdg.toFixed(6)} USDG. ${reason}. Signed limits, lifetime losses and fee high-water mark preserved.`);
+      `New risk period ${id}: baseline ${baseline.toFixed(6)} USDG. ${reason}. Signed limits, lifetime losses and fee high-water mark preserved.`);
     return r;
   });
 }

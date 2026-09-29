@@ -129,6 +129,22 @@ describe("heldBreakerObservationUsdg — what a held look may still show the bre
     assert.equal(obs(10n, 20n, 0n), 0n);
   });
 
+  it("PERP MARGIN IN TRANSIT IS LEFT OUT OF THE OBSERVATION (docs/perps.md rule 12c) — transit never raises a peak", () => {
+    // 10 in transit to the venue: in equity, and the one term a double count
+    // around a payout can inflate. The observation takes all of it out.
+    const held = (inTransit?: bigint) =>
+      heldBreakerObservationUsdg({ equityUsdg: 150n * U, cashUsdg: 50n * U, expectedCashUsdg: 50n * U, inTransitUsdg: inTransit });
+    assert.equal(held(10n * U), 140n * U);
+    assert.equal(held(0n), 150n * U, "no transit is the figure before perps");
+    assert.equal(held(undefined), 150n * U, "and so is no argument at all");
+    assert.equal(held(-5n * U), 150n * U, "a negative transit is not read as a raise");
+    // Both corrections at once, never below zero.
+    assert.equal(
+      heldBreakerObservationUsdg({ equityUsdg: 20n * U, cashUsdg: 20n * U, expectedCashUsdg: 10n * U, inTransitUsdg: 15n * U }),
+      0n,
+    );
+  });
+
   it("the expected cash folds only what the look itself would: settlements at or after `since`, unread ones not guessed", () => {
     const queued = [s(900, -5n * U), s(1_000, -10n * U), s(1_100, null)];
     assert.equal(expectedCashUsdg({ cashUsdg: 100n * U, since: 1_000 }, queued), 90n * U);

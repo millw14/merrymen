@@ -513,7 +513,10 @@ describe("P5 — no path converts uncertainty into a P&L figure", () => {
     // not to the accrual call.
     const src = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     assert.match(src, /const feeBpsThisTick = accounting\.contributionsKnown \? effFeeBps : 0;/);
-    assert.match(src, /accrueAboveHwm\(equityUsdg, highWaterMarkUsdg, feeBpsThisTick\)/);
+    // On the PEAK BASIS (docs/perps.md rule 12): equity less open perp gains,
+    // which is equity itself for an agent without perps (equity.ts peakBasisUsdg).
+    assert.match(src, /accrueAboveHwm\(peakBasis, highWaterMarkUsdg, feeBpsThisTick\)/);
+    assert.match(src, /const peakBasis = peakBasisUsdg\(equityUsdg, perpRead\);/);
   });
 
   it("the old inference is gone from the hosted path", () => {

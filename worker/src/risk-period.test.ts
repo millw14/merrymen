@@ -107,3 +107,61 @@ test("a new period's baseline is never a mark taken while flow inference was hel
     assert.equal(period.baseline_usdg, 41.629127);
   } finally { raw.close(); }
 });
+
+test("A NEW PERIOD STARTS ON THE PEAK BASIS — an open perp gain is not the period's first peak (docs/perps.md rule 12)", async () => {
+  // Started over a wick, the whole period would measure drawdown from a gain
+  // the account never realised. 12.5 of the 141.629127 is an open winner.
+  const { raw, db } = await fixture();
+  try {
+    await db.prepare(
+      `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, at, epoch, mode,
+                           perp_collateral_micro, perp_isolated_margin_micro, perp_unrealized_micro,
+                           perp_unrealized_gain_micro, perp_in_transit_micro)
+       VALUES (?, '0', 23.669414, 0, 17.959713, 141.629127, ?, 1, 'live', '75000000', '12500000', '12500000', '12500000', '0')`,
+    ).run(account, now);
+    const period = await startRiskPeriod(db, account, "approved-perp", "Owner approved fresh 5% risk period", now);
+    assert.equal(period.baseline_usdg, 129.129127);
+    assert.equal(period.hwm_usdg, 129.129127, "and the peak with it");
+  } finally { raw.close(); }
+});
+
+test("a mark with no perp term, or a zero gain, starts exactly where it always did", async () => {
+  const { raw, db } = await fixture();
+  try {
+    await db.prepare(
+      `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, at, epoch, mode,
+                           perp_unrealized_gain_micro, perp_in_transit_micro)
+       VALUES (?, '0', 23.669414, 0, 17.959713, 55.123456, ?, 1, 'live', '0', '0')`,
+    ).run(account, now);
+    const period = await startRiskPeriod(db, account, "approved-zero", "approved", now);
+    assert.equal(period.baseline_usdg, 55.123456, "the column itself, not a re-derivation of it");
+  } finally { raw.close(); }
+});
+
+test("NEVER A MARK TAKEN WHILE PERP MARGIN WAS MOVING — rule 12c: transit can never raise a peak", async () => {
+  // The newest mark has 10 in transit; the one before it is too old to start
+  // from, so the start is refused until a settled tick writes a mark.
+  const { raw, db } = await fixture();
+  try {
+    await db.prepare("UPDATE equity SET at = ?").run(now - 1_000);
+    await db.prepare(
+      `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, at, epoch, mode,
+                           perp_collateral_micro, perp_isolated_margin_micro, perp_unrealized_micro,
+                           perp_unrealized_gain_micro, perp_in_transit_micro)
+       VALUES (?, '0', 13.669414, 0, 17.959713, 41.629127, ?, 1, 'live', '0', '0', '0', '0', '10000000')`,
+    ).run(account, now);
+    await assert.rejects(startRiskPeriod(db, account, "in-transit", "approved", now), /Fresh/);
+    assert.equal(await readRiskPeriod(db, account), null);
+  } finally { raw.close(); }
+});
+
+test("a corrupted gain term refuses the start rather than guessing a baseline", async () => {
+  const { raw, db } = await fixture();
+  try {
+    await db.prepare(
+      `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, at, epoch, mode, perp_unrealized_gain_micro)
+       VALUES (?, '0', 1, 0, 1, 2, ?, 1, 'live', '-5')`,
+    ).run(account, now);
+    await assert.rejects(startRiskPeriod(db, account, "corrupt", "approved", now), /Unreadable perp gain/);
+  } finally { raw.close(); }
+});

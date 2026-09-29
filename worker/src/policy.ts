@@ -316,6 +316,27 @@ export interface AgentState {
    * behaviour; only a caller that KNOWS the book is short passes false.
    */
   equityKnown?: boolean;
+  /**
+   * THE PERP VENUE COULD NOT BE READ THIS TICK (docs/perps.md rule 11).
+   *
+   * An unread Lighter account makes equity unknown (`equityKnown: false`), and
+   * an unknown equity switches the drawdown rule below OFF — for every intent,
+   * spot included. That was fine for a quarantined dust token; it is not fine
+   * for a venue that may be carrying a leveraged loss the breaker cannot see.
+   * So while this is true and the venue's last known money was not a proven
+   * zero, every NON-EXIT intent is refused (`perp-unpriced`) and exits still go
+   * out — the owner can always get out; nothing new goes on in the dark.
+   *
+   * False or absent for an agent with no perps: its venue term is a known zero
+   * and Lighter is never read, so nothing here can refuse it.
+   */
+  perpVenueUnread?: boolean;
+  /**
+   * The venue's money (C + ΣM + ΣU + T, micro-USDG) at the last read that
+   * succeeded. Only `0n` — a READ zero — lets a non-exit through while the
+   * venue is unread; null (never read, or not known) is not zero.
+   */
+  perpLastKnownMicro?: bigint | null;
   nowSec: number;
 }
 
@@ -899,6 +920,23 @@ export function checkPolicy(
   // where the predicate and its reasons now live so the energy gate asks the
   // same question the breaker does.
   const isExit = isExitIntent(intent, limits);
+
+  // THE BREAKER'S STAND-IN WHILE THE VENUE IS DARK (rule 11; see
+  // AgentState.perpVenueUnread). Beside the breaker and after the caps on
+  // purpose: a trade that breaks a cap still says so, because that is the more
+  // useful fact about it, and an exit is judged by the same `isExit` the
+  // breaker uses — so the sell that clears a position is never the thing an
+  // outage at Lighter blocks.
+  // Only a READ zero lets a non-exit through; undefined and null are not zero.
+  if (!isExit && state.perpVenueUnread === true && state.perpLastKnownMicro !== 0n) {
+    return {
+      ok: false,
+      rule: "perp-unpriced",
+      detail:
+        "Lighter could not be read this tick, and money was at the venue when it last was — without it the book " +
+        "cannot be totalled or its drawdown judged, so nothing new is opened until it reads. Exits still go out.",
+    };
+  }
 
   if (!isExit && state.highWaterMarkUsdg > 0n && state.equityKnown !== false) {
     const drawdownBps = Number(

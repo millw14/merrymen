@@ -252,19 +252,37 @@ export function tickPlan(kind: TickKind): TickPlan {
  *                 stranded op's movement. So it is written with `flowsHeld`, and
  *                 the two readers that take a baseline from the newest row
  *                 (store.ts lastKnownCashReading, the anchor) skip it.
+ *   transitHeld — PERP MARGIN IS MOVING (docs/perps.md rule 12c): a
+ *                 perp_transfers row is not yet final, so the same USDG may be
+ *                 read both at home and at the venue, or in transit and already
+ *                 credited — and the venue's history can lag the chain, so no
+ *                 ordering of reads rules the double count out. The ratchets
+ *                 hold exactly as for `held` (no fee, no paper or lifetime
+ *                 peak; the breaker observes `breakerObservationUsdg`, which the
+ *                 caller builds WITHOUT the transit), and the error is always
+ *                 downward: a peak not raised. Kept apart from `held` for one
+ *                 reason — `held` also flags the equity row as no cash
+ *                 baseline, and a tick whose flows were fully explained has a
+ *                 perfectly good cash reading; stamping it `flows_held` would
+ *                 walk the restart baseline back for nothing.
  *
  * The reads stay unconditional. A command tick still needs the peak its order
  * is judged against — it is asked with `null`, which reads without observing
  * (risk-period.ts) — and the paper and live marks it already has.
+ *
+ * EVERY PEAK FIGURE HANDED IN HERE IS THE PEAK BASIS (docs/perps.md rule 12;
+ * equity.ts peakBasisUsdg): equity less every open perp gain, per position. A
+ * ratchet taken on raw equity would keep a wick at the venue's mark forever.
+ * With no perps the basis is equity, and nothing here can tell the difference.
  */
 export interface TickRatchets {
   /** The paper book's peak after this tick: raised on `book` and written only when this tick may, and past it. */
-  paperPeak<B extends { hwmUsdg: number }>(book: B, equityUsdg: number, write: (book: B) => Promise<unknown>): Promise<number>;
+  paperPeak<B extends { hwmUsdg: number }>(book: B, basisUsdg: number, write: (book: B) => Promise<unknown>): Promise<number>;
   /**
-   * The risk-period peak, read with this tick's equity as an observation only
-   * when this tick may — or, on a held tick, with the held observation.
+   * The risk-period peak, read with this tick's peak basis as an observation
+   * only when this tick may — or, on a held tick, with the held observation.
    */
-  riskPeak<P>(equityUsdg: number, read: (observe: number | null) => Promise<P>): Promise<P>;
+  riskPeak<P>(basisUsdg: number, read: (observe: number | null) => Promise<P>): Promise<P>;
   /** The live mark after the accrual: the fee and the mark persisted, on a profit, only when this tick may. */
   accrue(accrual: { profitUsdg: bigint; newHwmUsdg: bigint }, peakUsdg: bigint, persist: () => Promise<unknown>): Promise<bigint>;
   /**
@@ -286,24 +304,32 @@ export interface TickRatchets {
 
 export function tickRatchets(
   plan: TickPlan,
-  book: { incomplete: boolean; curveMarked: number; held?: boolean; breakerObservationUsdg?: bigint },
+  book: {
+    incomplete: boolean;
+    curveMarked: number;
+    held?: boolean;
+    transitHeld?: boolean;
+    breakerObservationUsdg?: bigint;
+  },
 ): TickRatchets {
   const held = book.held === true;
+  // Either hold stops the same writes; only `held` flags the row (see above).
+  const holding = held || book.transitHeld === true;
   const may = plan.ratchets && !book.incomplete && book.curveMarked === 0;
-  const peaks = may && !held;
+  const peaks = may && !holding;
   // A held tick's breaker observation, when it may make one: the same guards as
   // every other peak (a command tick or a curve mark observes nothing), and
   // only with the figure the caller computed — never the raw equity.
-  const observation = may && held && book.breakerObservationUsdg !== undefined ? book.breakerObservationUsdg : null;
+  const observation = may && holding && book.breakerObservationUsdg !== undefined ? book.breakerObservationUsdg : null;
   return {
-    async paperPeak(b, equityUsdg, write) {
-      if (peaks && equityUsdg > b.hwmUsdg) {
-        b.hwmUsdg = equityUsdg;
+    async paperPeak(b, basisUsdg, write) {
+      if (peaks && basisUsdg > b.hwmUsdg) {
+        b.hwmUsdg = basisUsdg;
         await write(b);
       }
       return b.hwmUsdg;
     },
-    riskPeak: (equityUsdg, read) => read(peaks ? equityUsdg : observation !== null ? Number(observation) / 1e6 : null),
+    riskPeak: (basisUsdg, read) => read(peaks ? basisUsdg : observation !== null ? Number(observation) / 1e6 : null),
     async accrue(accrual, peakUsdg, persist) {
       if (!peaks) return peakUsdg;
       if (accrual.profitUsdg > 0n) await persist();

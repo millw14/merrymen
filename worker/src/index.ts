@@ -85,7 +85,7 @@ import { impactBps, judgeImpact, probeAmountIn } from "./impact";
 import { checkEnergySwapCalls, checkV3SwapCalls } from "./final-fence";
 import { readPeers } from "./peer-files";
 import { peerLabel, peerView } from "./strategist/peer-view";
-import { SHADOW_SOURCES, publicationSourceFor, publishableThesis, rejectRuleLabel, rejectRuleRemedy, type PublicThesis } from "./thesis-policy";
+import { SHADOW_SOURCES, ownerRejectRuleLabel, publicationSourceFor, publishableThesis, rejectRuleLabel, rejectRuleRemedy, type PublicThesis } from "./thesis-policy";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import {
   NotRecorded,
@@ -124,7 +124,7 @@ import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import { provenanceOf, type Provenance } from "./provenance";
 import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
-import { bookGaps, composeEquityUsdg } from "./equity";
+import { bookGaps, composeEquityUsdg, peakBasisUsdg, type PerpBookTerm } from "./equity";
 import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
 import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
 import { getPaperBrainCapital } from "./store";
@@ -502,6 +502,7 @@ import {
   getAgentEpoch,
   getAgentFinancials,
   getRiskPeriodPeak,
+  listOpenPerpTransfers,
   restoreRiskPeriod,
   hasChainFlow,
   accountingHistoryAuditable,
@@ -4097,6 +4098,29 @@ async function main() {
   /** The live breaker's peak when no risk period stands: the lifetime mark plus what held looks saw above it. */
   const lifetimeBreakerPeak = () => highWaterMarkUsdg + heldBreakerLiftUsdg;
   const drawdownPeak = () => paperActive() ? highWaterMarkUsdg : (riskHighWaterMarkUsdg ?? lifetimeBreakerPeak());
+  /**
+   * THE PERP VENUE'S SIDE OF THE BOOK, as the perp lane last read it (docs/
+   * perps.md rules 11 and 12; equity.ts PerpBookTerm) — the one seam every
+   * equity, peak and policy site below reads, so the lane that reads Lighter
+   * sets it in one place and nothing composes the venue a second way.
+   *
+   *   undefined — this agent has no perps: a KNOWN zero, Lighter is never
+   *               read, and every path is byte-identical to before perps.
+   *   "unread"  — it has perps and the venue did not read: no equity row, no
+   *               peak, no fee, and every non-exit intent refused while
+   *               `perpLastKnownMicro` is not a read zero; exits still run.
+   *   a part    — C, ΣM, ΣU and T from one snapshot.
+   *
+   * Nothing assigns it yet: the venue read is the perp lane's, which lands
+   * after this plumbing. Until then every agent is the known zero. (Typed by
+   * assertion so the compiler does not narrow a not-yet-assigned `let` to its
+   * initialiser inside the closures that read it.)
+   */
+  let perpBook = undefined as PerpBookTerm;
+  /** C + ΣM + ΣU + T at the last venue read that succeeded (micro-USDG); null before any. */
+  let perpLastKnownMicro = null as bigint | null;
+  /** Whether the owner has been told about the current Lighter outage — once per outage, like `notedUnpriced`. */
+  let perpUnreadNoted = false;
   /**
    * AN ENERGY PURCHASE MOVED THE PERSISTED PEAKS, and the in-memory ones have
    * not caught up — on purpose.
@@ -7858,6 +7882,12 @@ async function main() {
           ),
       equityUsdg,
       equityKnown,
+      // LIGHTER DARK, NOTHING NEW (rule 11; policy.ts perp-unpriced). From the
+      // latest venue read, whoever placed this — a tick, the app, Telegram:
+      // the venue's state is the account's, not the order's. An agent with
+      // no perps is `undefined` there, so this is false and refuses nothing.
+      perpVenueUnread: perpBook === "unread",
+      perpLastKnownMicro,
       nowSec: Math.floor(Date.now() / 1000),
     };
     const verdict = checkPolicy(intent, limits, state, await scoutContextFor(intent));
@@ -10971,7 +11001,32 @@ async function main() {
       quarantine.totalCostUsdg + curveCostUsdg + lastClassCostUsdg - classCostInQuarantine;
 
     const unknownCost = quarantine.holdings.filter((h) => h.costUsdg === 0n).map((h) => h.symbol);
-    const bookIncomplete = unknownCost.length > 0;
+    // THE VENUE, AS THIS TICK TAKES IT — one snapshot of the perp lane's read,
+    // so the equity, the peak basis and the row below are all the SAME read
+    // even if the lane re-reads Lighter mid-tick (docs/perps.md rule 12).
+    const perpTerm = perpBook;
+    // AN UNREAD VENUE IS A BOOK GAP (rule 11), and it rides THIS path — the
+    // unknown-cost one — not the unread-balance return above. That return ends
+    // the tick before anything is proposed, which would switch off every spot
+    // stop-loss for as long as Lighter is down; the contract instead keeps
+    // exits running and refuses every non-exit by name (policy.ts
+    // perp-unpriced). So: no equity row, no peak, no fee, equity judged as
+    // unknown — and strategies still run, so the owner can always get out.
+    const venueGap = bookGaps({ unreadBalances: [], positionsReadFailed: false, missingPrice: [], perp: perpTerm });
+    const bookIncomplete = unknownCost.length > 0 || venueGap.length > 0;
+    if (venueGap.length > 0 && !perpUnreadNoted) {
+      perpUnreadNoted = true; // once per outage, not once per tick
+      await addEvent(
+        agentId,
+        "warn",
+        perpLastKnownMicro === 0n
+          ? `couldn't read Lighter this tick — it held nothing when last read, so trading continues, but equity, P&L ` +
+              `and the drawdown breaker are paused until it reads (fail-closed); this is a data gap, not a loss`
+          : `couldn't read Lighter this tick — equity, P&L, the high-water mark and the fee are paused, and nothing new ` +
+              `is opened (spot included) until it reads; exits still go out. This is a data gap, not a loss`,
+      );
+    }
+    if (venueGap.length === 0) perpUnreadNoted = false;
     if (unpricedByDesign.length > 0 && !notedUnpriced) {
       notedUnpriced = true; // once per run, not once per tick — this never clears
       // Say WHY. "No price feed" was true but useless once pool pricing exists:
@@ -10991,7 +11046,7 @@ async function main() {
       // condition `bookIncomplete` reports separately and by name.
       console.log(
         `[tick] held ${why} — carried at cost, not at a mark` +
-          (bookIncomplete
+          (unknownCost.length > 0
             ? `; ${unknownCost.join(",")} has no cost on record either, so equity and the breaker are paused`
             : `; equity and the breaker keep running`),
       );
@@ -11010,6 +11065,13 @@ async function main() {
     // quarantined holdings at cost. The cost term is what stops a scout buy from
     // reading as an instant loss: cash left the wallet, so without it equity
     // would drop by the full spend and book a drawdown that never happened.
+    //
+    // AND THE PERP VENUE (rule 12): C + ΣM + ΣU + T, read — or, for an agent
+    // with no perps, absent, which composes exactly the sum above. An UNREAD
+    // venue is left out of this figure and the figure is then PARTIAL:
+    // `bookIncomplete` says so, so it writes no row, moves no peak, charges no
+    // fee and is judged as unknown — the same treatment an unknown cost gets.
+    const perpRead = perpTerm === "unread" ? undefined : perpTerm;
     const equityUsdg = composeEquityUsdg({
       // PLUS THE QUOTE ASSET SITTING IN THE CLASS VAULT. It is the owner's
       // money at an address `readAccountBalances` does not cover, and it is
@@ -11019,7 +11081,14 @@ async function main() {
       vaultUsdg: balances.vaultUsdg,
       positionsUsdg,
       quarantinedCostUsdg: quarantine.totalCostUsdg,
+      perp: perpRead,
     });
+    // WHAT EVERY PEAK RATCHETS ON: equity less each open perp gain, per
+    // position (equity.ts peakBasisUsdg). The breaker's CURRENT figure stays
+    // `equityUsdg` — every unrealized loss is judged — while the paper peak,
+    // the risk-period peak, the lifetime mark and its fee, and the held-look
+    // lift below all take this. With no perps it IS equityUsdg.
+    const peakBasis = peakBasisUsdg(equityUsdg, perpRead);
 
     // Reconcile LIVE cost basis against the chain. A live fill is booked from
     // the receipt where one can be parsed and from the pre-trade quote where it
@@ -11227,7 +11296,14 @@ async function main() {
     // the drawdown one would trip the breaker on a token we simply can't price.
     // Skipped entirely; strategies below still run, so the position can be sold.
     if (bookIncomplete) {
-      console.log(`[account] book incomplete (${unknownCost.join(",")} unpriced AND no cost on record) — equity, HWM, fee and breaker skipped this tick`);
+      console.log(
+        `[account] book incomplete (` +
+          [
+            ...(unknownCost.length > 0 ? [`${unknownCost.join(",")} unpriced AND no cost on record`] : []),
+            ...(venueGap.length > 0 ? [`${venueGap.join(",")} could not be read`] : []),
+          ].join("; ") +
+          `) — equity, HWM, fee and breaker skipped this tick`,
+      );
     } else if (paper) {
       // Paper profit accrues NO fees and never touches the persistent agent
       // HWM — mixing paper peaks into real accounting would trip the breaker
@@ -11243,7 +11319,9 @@ async function main() {
       // Raised past the recorded peak and written only on a regular tick with no
       // curve mark: an owner's order is not a sample of the cadence the peak is
       // measured on. See command-wake.ts tickRatchets.
-      highWaterMarkUsdg = usdg(await ratchet.paperPeak(bookRow, usdgNum(equityUsdg), (b) => setPaperBook(agentId, b)));
+      // ON THE PEAK BASIS (rule 12): a paper perp's open gain is no more money
+      // than a live one's, and this peak is what the paper breaker judges.
+      highWaterMarkUsdg = usdg(await ratchet.paperPeak(bookRow, usdgNum(peakBasis), (b) => setPaperBook(agentId, b)));
       markBook = "paper";
       // The mark is the paper book's now, until a live tick re-reads the live
       // one (livePeaksStale); a live lift observed above the live mark means
@@ -11287,15 +11365,44 @@ async function main() {
       // a figure no unbooked deposit can reach (heldCashBaseline) — and the row
       // is written, flagged, so neither the restart baseline nor the hosted
       // anchor ever takes its cash.
-      if (flows === "held") {
+      //
+      // AND PERP MARGIN IN MOTION HOLDS THEM THE SAME WAY (docs/perps.md rule
+      // 12c). While any perp_transfers row is not yet final the same USDG may
+      // be counted at home and at the venue — a payout in cash before the
+      // venue's history says it left, a deposit in transit and already
+      // credited — and no order of reads rules that out, so safety comes from
+      // the hold: no fee, no lifetime peak, and the breaker's peak observation
+      // leaves the transit term out entirely (every error downward). A store
+      // read that fails is held too: the query exists to prove nothing is
+      // moving, and an unanswered question proves nothing. An agent with no
+      // perps has no rows, and this is the tick it always was.
+      //
+      // The venue read's own transit term holds too: T > 0 is money the lane
+      // found between the two places (a pending balance on the contract
+      // included), whether or not a row of ours names it yet.
+      let transitHeld: boolean;
+      try {
+        transitHeld =
+          (perpRead?.inTransitMicro ?? 0n) > 0n || (await listOpenPerpTransfers(agentId, "live")).length > 0;
+      } catch (e) {
+        console.log(`[account] perp transfers unreadable (${e instanceof Error ? e.message : String(e)}) — ratchets held this tick`);
+        transitHeld = true;
+      }
+      if (flows === "held" || transitHeld) {
         ratchet = tickRatchets(plan, {
           incomplete: bookIncomplete,
           curveMarked: curveMarked.length,
-          held: true,
+          held: flows === "held",
+          transitHeld,
           breakerObservationUsdg: heldBreakerObservationUsdg({
-            equityUsdg,
+            // THE PEAK BASIS, never raw equity: this figure feeds the breaker's
+            // PEAKS (flow-inference.ts), which never hold an open perp gain.
+            equityUsdg: peakBasis,
             cashUsdg: balances.cashUsdg,
-            expectedCashUsdg: await heldCashBaseline(agentId),
+            // A look that was NOT held explained its cash — nothing above what
+            // the account holds is unbooked — so only the transit comes out.
+            expectedCashUsdg: flows === "held" ? await heldCashBaseline(agentId) : balances.cashUsdg,
+            inTransitUsdg: perpRead?.inTransitMicro ?? 0n,
           }),
         });
       }
@@ -11341,7 +11448,7 @@ async function main() {
       // — null asks without observing (risk-period.ts markRiskPeriod), and
       // tickRatchets passes null on a command tick or under a curve mark. On a
       // held tick it passes the held observation, never the raw equity.
-      const riskPeak = await ratchet.riskPeak(usdgNum(equityUsdg), (observe) => getRiskPeriodPeak(agentId, observe));
+      const riskPeak = await ratchet.riskPeak(usdgNum(peakBasis), (observe) => getRiskPeriodPeak(agentId, observe));
       riskHighWaterMarkUsdg = riskPeak === null ? null : usdg(riskPeak);
       const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
       await setAgentQuality(agentId, {
@@ -11365,7 +11472,10 @@ async function main() {
       }
       // The Merry Circle discount is applied to the REAL fee here, so holders
       // actually accrue less — the perk is in the ledger, not just the marketing.
-      const accrual = accrueAboveHwm(equityUsdg, highWaterMarkUsdg, feeBpsThisTick);
+      // ON THE PEAK BASIS (rule 12): the fee is charged on realized money only.
+      // An open perp gain is left out until it closes, when the basis rises by
+      // exactly what was realized and the fee is charged on it once.
+      const accrual = accrueAboveHwm(peakBasis, highWaterMarkUsdg, feeBpsThisTick);
       // A CURVE-VALUED POSITION MAY NOT RATCHET THE PEAK.
       //
       // `setAgentHwm` is a one-way ratchet in SQL, with a real
@@ -11490,6 +11600,12 @@ async function main() {
         // The block the balances were read at — where an auditor re-reads from.
         // Non-null by construction: an unreadable market returned above.
         blockNumber: market.blockNumber ?? undefined,
+        // THE VENUE'S TERMS, beside the total (rule 12), so the identity closes
+        // for an auditor exactly as the quarantine term made it close: C, ΣM,
+        // ΣU, Σmax(0,Uᵢ) and T, and the snapshot they came from. Only when the
+        // venue was read — an agent with no perps writes a row, and a journal
+        // mark, byte-identical to before perps.
+        ...(perpRead ? { perp: perpRead } : {}),
       }),
     );
     await setPositions(
@@ -11545,7 +11661,17 @@ async function main() {
     // Brain execution uses this tick's book, including on the first tick; so
     // does every order until the next tick states its own — and the drain
     // below is handed this same statement: the book valued, and totalled or not.
-    const drainReads = tickBook.composed(equityUsdg, !bookIncomplete);
+    //
+    // WITH LIGHTER UNREAD, `equityUsdg` IS THE SPOT HALF ONLY — judged as
+    // unknown already, but it is also what the heartbeat divides a drawdown
+    // by, and a book with half its money at the venue would show the other
+    // half as a loss. So the figure DISPLAYED stays the last whole one, as a
+    // tick that cannot read a balance leaves it (order-gate.ts `unread`) —
+    // unless there never was one, when the partial figure beats a zero that
+    // reads as "still saddling up" and would refuse the owner's sells too.
+    const shownEquityUsdg =
+      venueGap.length > 0 && tickBook.latest().equityUsdg > 0n ? tickBook.latest().equityUsdg : equityUsdg;
+    const drainReads = tickBook.composed(shownEquityUsdg, !bookIncomplete);
     if (!paper) lastGasWei = balances.ethWei;
     // THE DRAWDOWN THE WALL WOULD JUDGE A BUY AGAINST, measured once from the
     // peak and equity settled above and read twice: by the Trencher's entry
@@ -13164,7 +13290,10 @@ async function main() {
          * is what support triages on, and an unknown rule must still be
          * traceable — it just stops being the whole sentence.
          */
-        const label = rejectRuleLabel(outcome.rejectRule);
+        // THE OWNER's register, so a rule withheld from the public (the perp
+        // rules, thesis-policy.ts WITHHELD_REJECT_RULES) still reaches the one
+        // person who can act on it as words and not a slug.
+        const label = rejectRuleLabel(outcome.rejectRule) ?? ownerRejectRuleLabel(outcome.rejectRule);
         const remedy = rejectRuleRemedy(outcome.rejectRule);
         const slug = outcome.rejectRule ?? outcome.status;
         if (!label) {

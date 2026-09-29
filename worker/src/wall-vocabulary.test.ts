@@ -32,7 +32,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
-import { REJECT_RULES, rejectRuleLabel, rejectRuleRemedy } from "./thesis-policy";
+import { REJECT_RULES, WITHHELD_REJECT_RULES, ownerRejectRuleLabel, rejectRuleLabel, rejectRuleRemedy } from "./thesis-policy";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const read = (f: string) => readFileSync(path.join(__dirname, f), "utf8");
@@ -80,9 +80,16 @@ const UNPUBLISHED: Readonly<Record<string, string>> = Object.freeze({
 describe("every rule the wall can return has been looked at", () => {
   it("IS EITHER PUBLISHED OR EXPLICITLY WITHHELD, WITH A REASON", () => {
     // The assertion that would have caught `no-exit` the day it was written.
+    // WITHHELD has two homes: UNPUBLISHED here (withheld, and the owner has
+    // nothing to be told), and thesis-policy.ts's WITHHELD_REJECT_RULES
+    // (withheld from the PUBLIC, with the owner's words — the perp rules). A
+    // rule in both is as undecided as a rule in neither.
     for (const rule of wallRules()) {
       const published = REJECT_RULES.includes(rule);
-      const withheld = Object.prototype.hasOwnProperty.call(UNPUBLISHED, rule);
+      const unpublished = Object.prototype.hasOwnProperty.call(UNPUBLISHED, rule);
+      const ownerOnly = Object.prototype.hasOwnProperty.call(WITHHELD_REJECT_RULES, rule);
+      assert.ok(!(unpublished && ownerOnly), `${rule} is withheld twice — keep it in one place`);
+      const withheld = unpublished || ownerOnly;
       assert.notEqual(
         published,
         withheld,
@@ -97,9 +104,31 @@ describe("every rule the wall can return has been looked at", () => {
   it("and nothing is withheld that the wall cannot actually produce", () => {
     // A stale exemption is how a rule quietly stops being covered.
     const rules = wallRules();
-    for (const rule of Object.keys(UNPUBLISHED)) {
+    for (const rule of [...Object.keys(UNPUBLISHED), ...Object.keys(WITHHELD_REJECT_RULES)]) {
       assert.ok(rules.includes(rule), `${rule} is withheld but policy.ts no longer returns it`);
     }
+  });
+
+  it("A RULE WITHHELD FROM THE PUBLIC IS NOT WITHHELD FROM ITS OWNER — words, a remedy, and no public label", () => {
+    // The `no-exit` lesson applied to the other side of the line: a rule kept
+    // off the public tape still reaches the owner, who is the one person who
+    // can act on it, as a sentence and a remedy rather than a slug.
+    for (const [rule, w] of Object.entries(WITHHELD_REJECT_RULES)) {
+      assert.ok(w.why.trim().length > 0, `${rule} needs a stated reason for being withheld`);
+      assert.equal(rejectRuleLabel(rule), null, `${rule} is withheld, so it has no PUBLIC sentence`);
+      assert.ok(!REJECT_RULES.includes(rule), `${rule} is withheld, so no public lane groups by it`);
+      const say = ownerRejectRuleLabel(rule);
+      assert.ok(say && say.trim().length > 0, `${rule} must have owner words`);
+      assert.ok(!say.includes(rule), `${rule}: never the slug echoed back`);
+      assert.ok((rejectRuleRemedy(rule) ?? "").trim().length > 0, `${rule} must have an owner remedy`);
+    }
+  });
+
+  it("perp-unpriced: withheld, says exits still run, and names Lighter", () => {
+    assert.equal(rejectRuleLabel("perp-unpriced"), null);
+    const say = ownerRejectRuleLabel("perp-unpriced")!;
+    assert.match(say, /Lighter/);
+    assert.match(say, /exits still/i, "the owner is told the way out is open");
   });
 
   it("the wall battery's expected rules are all published", () => {

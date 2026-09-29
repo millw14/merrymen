@@ -244,14 +244,32 @@ export function expectedCashUsdg(
  * raised — which is the direction the breaker's reference already errs in when
  * it is frozen, never a deposit counted into a peak twice once it is booked.
  * With no baseline at all, every dollar of cash is treated as possibly unbooked.
+ *
+ * `equityUsdg` IS THE PEAK BASIS, never raw equity (docs/perps.md rule 12):
+ * this figure feeds the breaker's PEAKS — the risk period's and the lift above
+ * the lifetime mark — and a peak ratchets on equity less every open perp gain
+ * (equity.ts peakBasisUsdg). Handed raw equity, a held tick would lift the
+ * breaker's peak by an unrealized gain the unheld ticks around it exclude, and
+ * `breakerLift` would be comparing two different units. With no perps the two
+ * are the same number.
+ *
+ * `inTransitUsdg` IS MARGIN MOVING BETWEEN THE ACCOUNT AND THE VENUE (rule
+ * 12c): T_in + T_out, already inside the equity figure. It is the one term a
+ * double count can inflate — money read at the venue AND at home around a
+ * payout, or in transit AND credited around a deposit — so while any of it is
+ * moving the peak observation leaves all of it out. Downward only, like the
+ * cash rule above: transit can never raise a peak. Absent or 0n is exactly the
+ * figure before perps existed.
  */
 export function heldBreakerObservationUsdg(a: {
   equityUsdg: bigint;
   cashUsdg: bigint;
   expectedCashUsdg: bigint | null;
+  inTransitUsdg?: bigint;
 }): bigint {
   const unexplained = a.cashUsdg - (a.expectedCashUsdg ?? 0n);
-  const observed = a.equityUsdg - (unexplained > 0n ? unexplained : 0n);
+  const transit = a.inTransitUsdg !== undefined && a.inTransitUsdg > 0n ? a.inTransitUsdg : 0n;
+  const observed = a.equityUsdg - (unexplained > 0n ? unexplained : 0n) - transit;
   return observed > 0n ? observed : 0n;
 }
 

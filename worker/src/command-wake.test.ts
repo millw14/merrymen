@@ -1209,4 +1209,44 @@ describe("what a tick may write down", () => {
     await r.riskPeak(120, w.risk);
     assert.deepEqual(w.calls, ["risk peak observe=null"]);
   });
+  it("PERP MARGIN IN TRANSIT HOLDS THE RATCHETS (docs/perps.md rule 12c) — no fee, no paper or lifetime peak — and the row is NOT flagged", async () => {
+    // A payout can be in cash before the venue's history says it left, so the
+    // same USDG may be counted twice while a transfer is still moving. The
+    // peaks wait; the equity row is a perfectly good cash reading (the flows
+    // were explained), so it stays a restart baseline — only `held` flags.
+    const r = tickRatchets(tickPlan("regular"), { ...BOOK, transitHeld: true });
+    const w = writers();
+    assert.equal(await r.paperPeak({ hwmUsdg: 100 }, 120, w.paper), 100);
+    await r.riskPeak(120, w.risk);
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), PEAK, "no fee and the lifetime mark stays");
+    await r.equityRow(w.equity);
+    assert.deepEqual(w.calls, ["risk peak observe=null", "equity row"]);
+  });
+
+  it("a transit hold still feeds the breaker the figure the caller built without the transit — never the raw basis", async () => {
+    // 12c: the breaker's peak observation on a held tick is basis − T.
+    const r = tickRatchets(tickPlan("regular"), { ...BOOK, transitHeld: true, breakerObservationUsdg: 105_000_000n });
+    const w = writers();
+    await r.riskPeak(115, w.risk);
+    assert.equal(r.breakerLift(0n, PEAK, PEAK), 5_000_000n);
+    await r.equityRow(w.equity);
+    assert.deepEqual(w.calls, ["risk peak observe=105", "equity row"]);
+  });
+
+  it("both holds at once hold as one, and the row carries the flow flag", async () => {
+    const r = tickRatchets(tickPlan("regular"), { ...BOOK, held: true, transitHeld: true, breakerObservationUsdg: 105_000_000n });
+    const w = writers();
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), PEAK);
+    await r.equityRow(w.equity);
+    assert.deepEqual(w.calls, ["equity row (flows held)"]);
+  });
+
+  it("transitHeld false or absent is the ordinary regular tick", async () => {
+    for (const book of [BOOK, { ...BOOK, transitHeld: false }]) {
+      const r = tickRatchets(tickPlan("regular"), book);
+      const w = writers();
+      assert.equal(await r.paperPeak({ hwmUsdg: 100 }, 120, w.paper), 120);
+      assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), ACCRUAL.newHwmUsdg);
+    }
+  });
 });

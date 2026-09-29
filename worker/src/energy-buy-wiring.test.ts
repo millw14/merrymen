@@ -369,13 +369,21 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     // The tick: a held look (or an aborted one) accrues no fee and moves no
     // lifetime peak — but the breaker observes the held figure, never the raw
     // equity, and the valuation is written flagged.
+    //
+    // (Perps, docs/perps.md rule 12: the held figure is built on the PEAK
+    // BASIS — equity less open perp gains, identical to equity with no perps —
+    // and perp margin in transit holds the ratchets the same way, with the
+    // transit taken out of the observation. A held FLOW look still takes the
+    // expected cash from heldCashBaseline and still flags its row; a
+    // transit-only hold has explained its cash and flags nothing.)
     const t = body("tick");
     assert.match(t, /const flows = await reconcileFlowsOrRetry\(/);
     assert.match(
       t,
-      /if \(flows === "held"\) \{\s*ratchet = tickRatchets\(plan, \{\s*incomplete: bookIncomplete,\s*curveMarked: curveMarked\.length,\s*held: true,\s*breakerObservationUsdg: heldBreakerObservationUsdg\(\{\s*equityUsdg,\s*cashUsdg: balances\.cashUsdg,\s*expectedCashUsdg: await heldCashBaseline\(agentId\),\s*\}\),\s*\}\);\s*\}/,
+      /if \(flows === "held" \|\| transitHeld\) \{\s*ratchet = tickRatchets\(plan, \{\s*incomplete: bookIncomplete,\s*curveMarked: curveMarked\.length,\s*held: flows === "held",\s*transitHeld,\s*breakerObservationUsdg: heldBreakerObservationUsdg\(\{[\s\S]{0,300}?equityUsdg: peakBasis,\s*cashUsdg: balances\.cashUsdg,[\s\S]{0,300}?expectedCashUsdg: flows === "held" \? await heldCashBaseline\(agentId\) : balances\.cashUsdg,\s*inTransitUsdg: perpRead\?\.inTransitMicro \?\? 0n,\s*\}\),\s*\}\);\s*\}/,
     );
-    assert.ok(t.indexOf('if (flows === "held") {') < t.indexOf("const riskPeak = await ratchet.riskPeak("));
+    assert.ok(t.indexOf('if (flows === "held" || transitHeld) {') > 0);
+    assert.ok(t.indexOf('if (flows === "held" || transitHeld) {') < t.indexOf("const riskPeak = await ratchet.riskPeak("));
     // The breaker's lift moves after the mark, from the mark on either side of the accrual.
     const accrue = t.indexOf("highWaterMarkUsdg = await ratchet.accrue(accrual, highWaterMarkUsdg, async () => {");
     assert.ok(t.indexOf("const markBeforeAccrual = highWaterMarkUsdg;") < accrue);

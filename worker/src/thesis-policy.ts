@@ -461,7 +461,14 @@ const IS_ACCOUNT_STATE: ReadonlySet<string> = new Set<string>(ACCOUNT_STATE_RULE
  * account-wide set, so the event line fires once per change, and the trade row
  * keeps its rule for the owner's desk. Only the public post goes.
  */
-export const ACCOUNT_HALT_RULES = ["drawdown-breaker"] as const;
+export const ACCOUNT_HALT_RULES = [
+  "drawdown-breaker",
+  // THE BREAKER'S STAND-IN WHILE LIGHTER IS UNREAD (policy.ts, docs/perps.md
+  // rule 11): every non-exit intent is refused for the same reason, so a
+  // refusal on it says nothing about the coin — and, published, it would say
+  // the agent trades perps, which nothing public may (rule 17). Withheld below.
+  "perp-unpriced",
+] as const;
 const IS_ACCOUNT_HALT: ReadonlySet<string> = new Set<string>(ACCOUNT_HALT_RULES);
 
 /**
@@ -856,6 +863,47 @@ const R: Readonly<Record<string, string>> = Object.freeze({
 export const REJECT_RULES: readonly string[] = Object.freeze(Object.keys(R));
 
 /**
+ * RULES THE OWNER HEARS AND THE PUBLIC NEVER DOES — each with why it is
+ * withheld, the owner's sentence, and the owner's remedy.
+ *
+ * `R` above is the public register and an entry there is a publication
+ * decision: the wall band groups by it and the feed renders it. The perp rules
+ * are withheld as a CLASS (docs/perps.md rule 17 — no perp decision, order or
+ * refusal reaches the feed, theses, X or the leaderboard's trade lists in v1),
+ * and a slug like "perp-unpriced" on a public lane would say the account trades
+ * perps just as surely as a fill would. But withholding a rule from the public
+ * is not withholding it from the person who can act on it, which is the
+ * mistake `no-exit` was: every entry here carries the owner's words.
+ *
+ * wall-vocabulary.test.ts reads this map as the second half of "published or
+ * withheld WITH A REASON", and holds every entry to an owner sentence, a
+ * remedy, and no public label.
+ */
+export const WITHHELD_REJECT_RULES: Readonly<Record<string, { why: string; owner: string; remedy: string }>> =
+  Object.freeze({
+    "perp-unpriced": {
+      why: "a perp rule (rule 17): published, it would say the account trades perps.",
+      owner:
+        "Lighter could not be read, and money was at the venue when it last was, so nothing new is opened until it " +
+        "reads again — exits still go out",
+      remedy:
+        "Nothing to do if it clears within a few minutes. If it lasts, close your Lighter positions from the Perpetuals " +
+        "panel on the dashboard — closes are never blocked by this.",
+    },
+  });
+
+/**
+ * The OWNER's sentence for a rule: the public one when there is one, else the
+ * withheld one. Never for a public surface — use `rejectRuleLabel` there, which
+ * returns null for everything in WITHHELD_REJECT_RULES.
+ */
+export function ownerRejectRuleLabel(rule: string | null | undefined): string | null {
+  const pub = rejectRuleLabel(rule);
+  if (pub || !rule) return pub;
+  return Object.prototype.hasOwnProperty.call(WITHHELD_REJECT_RULES, rule) ? WITHHELD_REJECT_RULES[rule]!.owner : null;
+}
+
+/**
  * The same sentence `outcomeOf` would use, for a reader GROUPING by rule.
  *
  * The wall band already knows which rule stopped each intent and renders it as
@@ -931,7 +979,10 @@ export function rejectRuleRemedy(rule: string | null | undefined): string | null
     case "would-exhaust-contributions":
       return "Send USDG to the agent's account first, then ask for energy again — or send $MERRYMEN to the agent's account on Robinhood Chain directly.";
     default:
-      return null;
+      // The withheld rules carry their remedy beside their owner sentence, so
+      // the two cannot be edited apart. Owner register only, like every other
+      // case here.
+      return Object.prototype.hasOwnProperty.call(WITHHELD_REJECT_RULES, rule) ? WITHHELD_REJECT_RULES[rule]!.remedy : null;
   }
 }
 
