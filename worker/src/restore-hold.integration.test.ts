@@ -48,6 +48,7 @@ const {
   adoptHolderForTest,
   isHeldForTest,
   loseLeaseForTest,
+  honourFleetHalt,
   setHeldResetDbForTest,
 } = await import("./orchestrator");
 const { applyLedgerSchema } = await import("./store");
@@ -718,6 +719,40 @@ describe("a held tenant is stood down like any other", () => {
       await settle();
       assert.equal(workers().length, 1, `the lease taken again once it has gone, and one worker:\n${said.join("\n")}`);
       assert.deepEqual(events, ["hold-spawn", "hold-exit", "worker-spawn"]);
+    });
+  });
+
+  it("FLEET_HALT STANDS A HOLD PROCESS DOWN ONCE AND SAYS SO ONCE, AND ONE THAT WILL NOT EXIT KEEPS THE TENANT DARK AFTER THE HALT", async () => {
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      await reconcile();
+      const hold = holds()[0]!;
+      hold.deaf = true;
+      writeFileSync(fleetHaltFile(), "halt\n");
+      for (let i = 0; i < 4; i++) {
+        await honourFleetHalt();
+        mock.timers.tick(15_000);
+      }
+      const halted = said.filter((l) => l.includes("FLEET_HALT present"));
+      assert.equal(halted.length, 1, `said once, not every loop the process lives:\n${said.join("\n")}`);
+      assert.equal(hold.signals.filter((s) => s === "SIGTERM").length, 1, "stood down once");
+      assert.ok(hold.signals.filter((s) => s === "SIGKILL").length >= 3, "and killed again each loop, as a pass would");
+      assert.equal(stoodDownAlerts(hold).length, 1, said.join("\n"));
+      assert.ok(isHeldForTest(TENANT));
+      // The halt lifted before the process has gone: still nothing beside it.
+      rmSync(fleetHaltFile(), { force: true });
+      restoreSays = { ok: true, line: "paper cash, holdings and basis restored" };
+      for (let i = 0; i < 2; i++) {
+        await reconcile();
+        mock.timers.tick(15_000);
+      }
+      await settle();
+      assert.equal(spawned.length, 1, `nothing starts beside it:\n${said.join("\n")}`);
+      hold.die(null, "SIGKILL");
+      await reconcile();
+      await settle();
+      assert.equal(workers().length, 1, `then exactly one worker:\n${said.join("\n")}`);
+      assert.equal(said.filter((l) => l.includes("FLEET_HALT present")).length, 1);
     });
   });
 

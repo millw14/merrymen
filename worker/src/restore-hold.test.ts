@@ -128,6 +128,7 @@ describe("held tenants reach only the loops they belong in", () => {
     assert.deepEqual(readers, [
       "adoptHolderForTest",
       "handHoldBack",
+      "honourFleetHalt",
       "isHeldForTest",
       "mirrorLedgers",
       "reconcile",
@@ -178,9 +179,11 @@ describe("held tenants reach only the loops they belong in", () => {
     const kill = loopsOver(fn("reconcile"), "holders").find((l) => /standDownHolder/.test(l.statement.getText()));
     assert.ok(kill && /rmSync\(childHome\(tenant\)/.test(kill.statement.getText()) && /wanted\.has\(tenant\)/.test(kill.statement.getText()));
     assert.ok(!/finalMirrorBeforeAnchor/.test(kill.statement.getText()), "a held book is never mirrored on the way out");
-    // FLEET_HALT and stop().
+    // FLEET_HALT, one loop of which the main loop runs in place of a pass, and stop().
+    const halt = fn("honourFleetHalt").body!.getText();
+    assert.match(halt, /for \(const t of \[\.\.\.holders\.keys\(\)\]\) standDownHolder\(t\);/);
     const run = fn("runOrchestrator").body!.getText();
-    assert.match(run, /for \(const t of \[\.\.\.holders\.keys\(\)\]\) standDownHolder\(t\);/);
+    assert.match(run, /if \(haltRequested\(\)\) \{\s*await honourFleetHalt\(\);\s*\} else \{/);
     assert.match(run, /for \(const held of holders\.values\(\)\) held\.proc\?\.kill\("SIGTERM"\);/);
   });
 

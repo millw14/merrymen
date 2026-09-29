@@ -7657,6 +7657,32 @@ function haltRequested(): boolean {
   }
 }
 
+/**
+ * ONE LOOP OF FLEET_HALT: every process this replica runs for a tenant stood
+ * down, and every lease released. The main loop calls this, instead of
+ * reconcile, for as long as the halt file is there.
+ *
+ * SAID AND DONE ONCE, NOT EVERY LOOP. A stood-down hold process that has not
+ * exited keeps its tenant in `holders` until it has (standDownHolder), so a
+ * guard that counted `holders` logged "standing every child down" and stood
+ * it down again every RECONCILE_MS for as long as that process lived. What is
+ * left once the halt has done its work is only waited for: killed again each
+ * loop, as a pass would, and alerted once (pressLeaving).
+ */
+export async function honourFleetHalt(): Promise<void> {
+  if (children.size > 0 || [...holders.values()].some((h) => !h.stoodDown) || leases.size > 0) {
+    log("FLEET_HALT present — standing every child down and releasing leases");
+    for (const t of [...children.keys()]) killChild(t);
+    // Held tenants' hold processes too: a halt stands down every process
+    // this replica runs for a tenant, and the leases go below.
+    for (const t of [...holders.keys()]) standDownHolder(t);
+    // Release leases too: if only THIS replica is halted, another may take
+    // the tenants over; if the whole fleet is halted, releasing is harmless.
+    for (const t of [...leases.keys()]) await releaseLease(t);
+  }
+  for (const held of holders.values()) pressLeaving(held);
+}
+
 export async function runOrchestrator(): Promise<void> {
   if (!isHostedMode()) {
     log("MERRYMEN_HOSTED is not set — the orchestrator only runs in hosted mode. Refusing to start.");
@@ -7708,18 +7734,7 @@ export async function runOrchestrator(): Promise<void> {
   for (;;) {
     if (stopping) return;
     if (haltRequested()) {
-      if (children.size > 0 || holders.size > 0 || leases.size > 0) {
-        log("FLEET_HALT present — standing every child down and releasing leases");
-        for (const t of [...children.keys()]) killChild(t);
-        // Held tenants' hold processes too: a halt stands down every process
-        // this replica runs for a tenant, and the leases go below.
-        for (const t of [...holders.keys()]) standDownHolder(t);
-        // And one whose process has not gone yet is killed again, as a pass would.
-        for (const held of holders.values()) pressLeaving(held);
-        // Release leases too: if only THIS replica is halted, another may take
-        // the tenants over; if the whole fleet is halted, releasing is harmless.
-        for (const t of [...leases.keys()]) await releaseLease(t);
-      }
+      await honourFleetHalt();
     } else {
       /**
        * BEFORE `reconcile()`, AND THAT ORDERING IS THE WHOLE SAFETY OF IT.
