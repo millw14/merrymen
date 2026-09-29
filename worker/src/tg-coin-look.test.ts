@@ -18,7 +18,7 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { encodeAbiParameters, type PublicClient } from "viem";
 import { CASH, MERRYMEN_TOKEN, STOCK_TOKENS, UNISWAP } from "../../packages/core/src/index";
@@ -170,14 +170,18 @@ describe("the quick look: every kind, cheapest first", () => {
     assert.equal(noPools.calls.probe, 0, "a failed index read does not fall through to the probe");
   });
 
-  it("UNREADABLE IS NOT ABSENT: a presence probe that failed is unknown, never a wallet, and reads nothing more", async () => {
+  it("UNREADABLE IS NOT ABSENT: a presence probe that failed is never a wallet; with nothing on the index either it is unknown, and not cached", async () => {
     let fail = true;
-    const h = readers({ getCode: async () => { h.calls.code++; if (fail) throw new Error("rpc"); return "0x6000"; } });
+    const h = readers({
+      getCode: async () => { h.calls.code++; if (fail) throw new Error("rpc"); return "0x6000"; },
+      tokenPools: async () => { h.calls.pools++; return fail ? [] : [gp()]; },
+    });
     const look = createCoinLook(h.r);
-    assert.deepEqual(await look(COIN), { kind: "unknown" });
-    assert.equal(h.calls.pools, 0, "GeckoTerminal is not asked about an address the chain could not be asked about");
+    assert.deepEqual(await look(COIN), { kind: "unknown" }, "no pools on the index: a wallet, another chain's token and a coin nobody traded look alike");
+    assert.deepEqual(h.calls, { pools: 1, code: 1, probe: 0, curve: 0 }, "the multicall reads the chain that just failed: not tried");
     fail = false;
     assert.equal((await look(COIN)).kind, "candidate", "not cached: the next look can succeed");
+    assert.equal(h.calls.code, 2);
   });
 
   it("anything that is not an address is unknown, and nothing is read for it", async () => {
@@ -196,6 +200,172 @@ describe("the quick look: every kind, cheapest first", () => {
       assert.equal(l.name, undefined, name);
     }
     assert.deepEqual(await look1({ held: () => ({ name: "NVDA" }) }), { kind: "held" });
+  });
+});
+
+describe("the quick look when the chain cannot be asked: GeckoTerminal's Robinhood page stands in", () => {
+  // Declined by the governor, rate-limited by the provider, or no answer:
+  // what the fleet's reads looked like the day a Pons coin went unanswered.
+  const declined = async (): Promise<string | undefined> => {
+    throw new Error("rpc declined by the governor");
+  };
+  const PONS_POOL = (over: Partial<GeckoPool> = {}) => gp({ dex: "pons-v2", poolAddress: null, poolId: V4_ID, name: "APPSHARE / WETH", ...over });
+
+  it("a failed getCode with this coin's pools on the index: a Robinhood Chain coin, classified from those pools", async () => {
+    const h = readers({ getCode: declined, tokenPools: async () => { h.calls.pools++; return [PONS_POOL()]; } });
+    assert.deepEqual(await createCoinLook(h.r)(COIN), { kind: "curve", name: "APPSHARE" }, "a Pons bonding-curve coin");
+    assert.deepEqual(h.calls, { pools: 1, code: 0, probe: 0, curve: 0 });
+    for (const [pools, want] of [
+      [[gp({ dex: "uniswap-v4-robinhood", poolAddress: null, poolId: V4_ID })], "v4-only"],
+      [[gp()], "candidate"],
+      [[gp({ volume24hUsd: 50_000 })], "too-quiet"],
+      [[gp({ reserveUsd: TRENCHER_FAST.minLiquidityUsd - 1 })], "too-thin"],
+      [[gp({ createdAt: NOW_SEC - 60 })], "too-new"],
+      [[gp({ dex: "uniswap-v2-robinhood" })], "no-pool"],
+      [[gp({ fdvUsd: null })], "unknown"],
+    ] as const) {
+      assert.equal((await look1({ getCode: declined, tokenPools: async () => [...pools] })).kind, want, want);
+    }
+  });
+
+  it("a candidate from the index alone is only that: the port still only nominates, and nothing is relaxed", async () => {
+    // The look answers the chat side; discovery still verifies the pool on
+    // chain before anything can be bought (trencher-discovery.ts), and the
+    // Brain, shouldEnter and the wall still decide. Here: the same
+    // classification a healthy chain gives, from the same pools.
+    const healthy = await look1({ tokenPools: async () => [gp()] });
+    const degraded = await look1({ getCode: declined, tokenPools: async () => [gp()] });
+    assert.deepEqual(degraded, healthy);
+  });
+
+  it("no pools on the index, only pools against it, or the index failing too: unknown, never a wallet", async () => {
+    assert.deepEqual(await look1({ getCode: declined, tokenPools: async () => [] }), { kind: "unknown" });
+    assert.deepEqual(await look1({ getCode: declined, tokenPools: async () => [gp({ tokenAddress: "0x00000000000000000000000000000000000d0222" })] }), { kind: "unknown" }, "a pool where it is only the quote side is not its pool");
+    assert.deepEqual(await look1({ getCode: declined, tokenPools: async () => null }), { kind: "unknown" });
+    assert.deepEqual(await look1({ getCode: declined, tokenPools: async () => { throw new Error("gecko"); } }), { kind: "unknown" });
+  });
+
+  it("a definite answer from the index is cached; the presence probe is spent from its own allowance, the page from the full looks'", async () => {
+    const clock = { t: NOW };
+    const h = readers({ getCode: async () => { h.calls.code++; throw new Error("rate limited"); }, tokenPools: async () => { h.calls.pools++; return [PONS_POOL()]; } }, clock);
+    const look = createCoinLook(h.r);
+    assert.equal((await look(COIN)).kind, "curve");
+    assert.equal((await look(COIN)).kind, "curve");
+    assert.deepEqual(h.calls, { pools: 1, code: 1, probe: 0, curve: 0 }, "the second look is the cache's");
+    // Other chains' CAs while the chain is down: each one a probe AND a page, bounded by the full looks.
+    const eth = (i: number) => `0x${(0xe7e000 + i).toString(16).padStart(40, "0")}`;
+    const g = readers({ getCode: declined, tokenPools: async () => { g.calls.pools++; return []; } }, clock);
+    const other = createCoinLook(g.r);
+    for (let i = 0; i < COIN_LOOK.maxUncached; i++) assert.equal((await other(eth(i))).kind, "unknown");
+    assert.equal(g.calls.pools, COIN_LOOK.maxUncached);
+    assert.deepEqual(await other(eth(99)), { kind: "unknown" });
+    assert.equal(g.calls.pools, COIN_LOOK.maxUncached, "past the full-look allowance, not one more GeckoTerminal read");
+  });
+});
+
+describe("the quick look: every read is bounded, so a look always settles", () => {
+  /** Let promise callbacks run (setImmediate is not a mocked timer here). */
+  const flush = async () => {
+    for (let i = 0; i < 8; i++) await setImmediate();
+  };
+  /** Settle `p` on the mocked clock in `step` ms ticks; how long it took, and what it said. */
+  async function settleOn<T>(p: Promise<T>, step: number, maxSteps = 40): Promise<{ value: T; ms: number }> {
+    let done = false;
+    let value!: T;
+    void p.then((v) => {
+      done = true;
+      value = v;
+    });
+    let ms = 0;
+    for (let i = 0; i < maxSteps && !done; i++) {
+      await flush();
+      if (done) break;
+      mock.timers.tick(step);
+      ms += step;
+    }
+    await flush();
+    assert.ok(done, "the look settled");
+    return { value, ms };
+  }
+  const never = <T>(): Promise<T> => new Promise<T>(() => {});
+
+  it(`a getCode that never answers is a failed read after ${COIN_LOOK.readMs / 1000} s: the index stands in`, async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const h = readers({ getCode: () => never(), tokenPools: async () => [gp({ dex: "pons-v2", poolAddress: null, poolId: V4_ID })] });
+      const { value, ms } = await settleOn(createCoinLook(h.r)(COIN), 500);
+      assert.equal(value.kind, "curve");
+      assert.equal(ms, COIN_LOOK.readMs);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it(`a GeckoTerminal page that never answers is unknown after ${COIN_LOOK.poolsMs / 1000} s, and the look after it reads again`, async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      let hang = true;
+      const h = readers({ tokenPools: () => (hang ? never() : Promise.resolve([gp()])) });
+      const look = createCoinLook(h.r);
+      const { value, ms } = await settleOn(look(COIN), 500);
+      assert.deepEqual(value, { kind: "unknown" });
+      assert.equal(ms, COIN_LOOK.poolsMs);
+      hang = false;
+      assert.equal((await settleOn(look(COIN), 500)).value.kind, "candidate", "no stuck read for the next look to join");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("the chain down AND the index hanging: unknown inside the chat side's ten seconds", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const h = readers({ getCode: () => never(), tokenPools: () => never() });
+      const { value, ms } = await settleOn(createCoinLook(h.r)(COIN), 500);
+      assert.deepEqual(value, { kind: "unknown" });
+      assert.equal(ms, COIN_LOOK.readMs + COIN_LOOK.poolsMs);
+      assert.ok(ms < 10_000, "inside tg-groups/coins.ts COIN_FLOW.lookMs");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("a ledger lookup that never answers is 'not known here'; a probe that never answers is unknown", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const ledger = readers({ tokenPools: async () => [], curveFor: () => never() });
+      const a = await settleOn(createCoinLook(ledger.r)(COIN), 500);
+      assert.equal(a.value.kind, "no-pool", "the multicall still decides");
+      assert.equal(a.ms, COIN_LOOK.readMs);
+      const probe = readers({ tokenPools: async () => [], probe: () => never() });
+      const b = await settleOn(createCoinLook(probe.r)(COIN), 500);
+      assert.deepEqual(b.value, { kind: "unknown" });
+      assert.equal(b.ms, 2 * COIN_LOOK.readMs, "a multicall and the factory's read");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("the chain probe: a multicall or a factory read that never answers is a read that failed", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const hung = chainTokenProbe({ readContract: () => never() } as unknown as PublicClient);
+      const a = await settleOn(hung(COIN), 500);
+      assert.equal(a.value, null);
+      assert.equal(a.ms, COIN_LOOK.readMs);
+      const nope = { success: false, returnData: "0x" };
+      const word = (a: string) => ({ success: true, returnData: `0x${a.slice(2).toLowerCase().padStart(64, "0")}` });
+      const fee = { success: true, returnData: `0x${(10_000).toString(16).padStart(64, "0")}` };
+      const factoryHangs = chainTokenProbe({
+        readContract: (q: { functionName: string }) =>
+          q.functionName === "aggregate3" ? Promise.resolve([nope, nope, word(CASH.WETH), word(COIN), fee]) : never(),
+      } as unknown as PublicClient);
+      const b = await settleOn(factoryHangs("0x0000000000000000000000000000000000000011"), 500);
+      assert.equal(b.value?.pool?.canonical, null, "unknown to the look, never 'not that coin's pool'");
+      assert.equal(b.ms, COIN_LOOK.readMs);
+    } finally {
+      mock.timers.reset();
+    }
   });
 });
 
