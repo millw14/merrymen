@@ -311,8 +311,13 @@ function limitOf(opts: TelegramOpts, fallback: number): number {
  */
 export function deadline(ms: number): { signal: AbortSignal; disarm: () => void } {
   const ac = new AbortController();
+  // NOT unref'd. The deadline is what ends a request whose transport holds
+  // nothing open — a fetch that never answers and owns no socket — and an
+  // unref'd timer is exactly the one that cannot: the event loop empties with
+  // the request still pending, and whoever awaited it never hears. CI (Node 22)
+  // cancelled a whole test file that way. Every caller disarms in a finally,
+  // so the timer never outlives the request it bounds.
   const t = setTimeout(() => ac.abort(new DOMException(`timed out after ${ms}ms`, "TimeoutError")), ms);
-  (t as { unref?: () => void }).unref?.();
   return { signal: ac.signal, disarm: () => clearTimeout(t) };
 }
 
