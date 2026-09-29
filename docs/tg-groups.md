@@ -142,13 +142,37 @@ chat's recent lines and the chat's counters. The model only writes the words
 **Addressed** (always considered): an `@username` mention or `text_mention` of
 the bot, a reply to one of its messages, its name said as a word (full name,
 or its first name when that name is at least 4 letters and not a common
-English word; `<name>'s owner` does not count), its Telegram display name
-(getMe's `first_name`) read the same way, or "merryman". Addressed
-messages get an answer unless: the chat is shushed, the sender already got 3
-answers in the last 2 minutes (flood), or the message is from a bot. When one
-person sends a burst of messages addressing it (each within 15 s of the
-next), it answers their last one; someone else addressing it meanwhile is a
-conversation of its own and never drops the first person's answer.
+English word; `<name>'s owner` does not count), the first word of a longer
+name that is an everyday word, and the last word of a longer name, each only
+as a call ("hey heron", "heron, thoughts?", "thanks heron!", "what do you
+think, heron?" for an agent called Amber Heron; never "saw a heron today"),
+its Telegram display name (getMe's `first_name`) read the same way, or
+"merryman". A call needs no comma or hail: the name opening a question to it
+("marian what do you think", "robin you there", "heron are you up") or ending
+one ("what do you think marian", "you there robin?") counts, for a word of
+three letters or more — never after a preposition or article ("what do you
+think about robin", "bridged to robin"), never "robin hood chain", and never
+for a word those shapes would misread: a verb ("hope you're well", "will you
+guys…"), an adjective or exclamation ("lucky you", "quick how do i…",
+"morning what's everyone on"), a word a room calls a person ("king you're
+right") or a market word ("i think bear"). Such a name still calls it as a
+vocative ("hey will", "king, thoughts?"). Addressed messages get an answer unless: the chat is shushed,
+the sender already got 6 answers in the last 2 minutes (flood; never the
+owner: a back-and-forth with the person it trades for is the conversation,
+and Telegram's own pace below still applies), or the message is from a bot.
+When one person sends a burst of messages addressing it (each within 15 s of
+the next), it answers their last one; someone else addressing it meanwhile
+is a conversation of its own and never drops the first person's answer.
+
+An addressed message that gets nothing (no line, no reaction) leaves one
+operator log line with a stable reason code and nothing else: `[tg-groups]
+addressed line got nothing (flood)`. The codes: `off`, `room-not-approved`,
+`no-token`, `flood`, `shushed`, `roast-cap`, `kind-recent`, `bot`, `burst`,
+`stale`, `forgotten`, `already-answered`, `not-wanted`,
+`model-null-and-no-template`, `send-failed`, `skipped`, and the coin flow's
+`coin-not-here`, `coin-unknown`, `coin-off`, `coin-stale`, `coin-busy`,
+`coin-no-port`, `coin-replay`, `coin-rate`, `coin-refused`, `coin-silent`.
+Never the text, a name, an id or an address.
 
 **Small talk said to it** (a hail, thanks, a gm or gn with its name and
 nothing more: "hey there merryman", "thanks pine!", "merryman gm"; a room's
@@ -190,6 +214,15 @@ addressed it (`reply_parameters`), in the same forum topic
 chat; a Telegram 429 pauses all sends from this bot for `retry_after` seconds
 (the queued lines older than 90 s are dropped, except coin follow-ups).
 
+**Every Bot API call is bounded** (`api.ts` `TG_CALL_TIMEOUT_MS`, 10 s; a
+`getUpdates` long poll gets its own poll time on top). A group line is sent
+under its chat's lock, so a `sendChatAction` or `sendMessage` that never
+answered used to hold every later line of that chat until each was stale,
+with nothing logged. Past the bound the request is aborted and is a failed
+request: that line is lost (`send-failed`, "send failed (no answer)"), never
+retried — a send that timed out may still have landed — and the chat's next
+line goes out as usual.
+
 **Shush**: "shut up", "stop talking", "quiet", "shush" and the like, addressed
 to it, or right after its line and not a reply to someone else's message →
 it replies "ok ok 🤐" (or reacts 🤐-like 🙈)
@@ -202,6 +235,15 @@ to someone in distress goes out shushed or not.
 * A casual human texter: mostly lowercase, short (often 2–12 words, never more
   than 3 short sentences), no hashtags, at most one emoji, slang used lightly,
   replies in the language the chat is using.
+* It avoids echoing its own last 8 lines in the chat: a template line too like
+  one of them is tried last, and a model's line (or a template standing in
+  for one) that repeats one is dropped. A **template-only** line — a coin
+  look's verdict, an answer from memory, "sitting this one out", "one at a
+  time lol", "can't pull that one up rn", small talk — recurs instead of
+  going silent when its whole pool was said lately, the one said longest ago
+  first, and is still judged by its own kind's clauses (a coin line holds no
+  figure). The curve pool's lines all say "curve": before this, the owner's
+  fifth bonding-curve CA in a row got nothing at all.
 * A consistent personality from its soul name and a per-agent style seed
   (`styleFor(agentId)`): how often lowercase, favourite emoji, slang level.
 * Knows: its name; that it is an AI trading agent on Robinhood Chain for its
@@ -288,7 +330,12 @@ such a message, so nothing else in the handler answers it either. That covers:
   as not;
 * an address the look answers `wallet` (no code on Robinhood Chain: a wallet,
   or another chain's token), `not-token`, or `unknown` (the look could not be
-  made, so it is not provably a Robinhood Chain coin);
+  made, so it is not provably a Robinhood Chain coin) — with one exception
+  for `unknown`: a post that ADDRESSED it, whose CAs all came back `unknown`
+  and got nothing else, gets one casual template line tagging the sender,
+  "can't pull that one up rn 🤷" (no verdict, no reason, no chain), at most
+  once per chat per 10 minutes. Nothing is remembered from it, so a repost
+  gets a fresh look. Unaddressed, `unknown` is silence like the rest;
 * any CA while coins are off, from a stale post, or while there is no trading
   port: without a look nothing shows it is a Robinhood Chain coin.
 
@@ -296,9 +343,38 @@ At most the first 2 CAs in a message that are not in another chain's link are
 considered.
 
 A coin line is an answer to whoever posted the CA, and counts in pacing's
-flood rule like any other: past 3 answers to one person in 2 minutes, their
-next CA gets one 👀 per window at most, then nothing. Outcomes (step 8) are
-the coin's report, not a new answer, and are not held back by it.
+flood rule like any other (the same `isFlooded`, imported, not mirrored):
+past 6 answers to one person in 2 minutes, their next CA gets one 👀 per
+window at most, then nothing. Never the owner. Outcomes (step 8) are the
+coin's report, not a new answer, and are not held back by it.
+
+**Off the chat's queue.** The handler runs a chat's lines one at a time. A
+CA's reads (the chain, GeckoTerminal) are not done there: the flow decides at
+once that it owns the line (nothing that decides it needs a read), and the
+claim, the look, the lines and the nomination run on that chat's **coin
+lane** (`CoinFlow.begin`), serial per chat — so a coin's second post is still
+answered from the first one's memo — but apart from the chatter queue. A look
+that hangs never holds the chat's next line. Every look is bounded (10 s,
+`COIN_FLOW.lookMs`): past it the answer is `unknown`, whatever the port does.
+An outcome that arrives while its ack is still going out waits for the ack.
+
+**Whoever asked goes first.** A shill's backlog of CAs must not make the
+owner's "@bot what about 0x…" wait past the 90 s send window. Of the posts
+waiting on a chat's lane, one that addresses the agent or is the owner's is
+worked first (the owner asking before anyone asking, before the owner's bare
+CA, before anyone else's; in arrival order among equals). A post still
+waiting when its send window has less than 12 s left (typing plus the send
+gap, `COIN_FLOW.lineMs`) is claimed and nothing more, like a stale one — its
+lines would be dropped anyway, and a look for them would spend the look
+allowance — and a look inside the window is cut to end 12 s before it
+(never shorter than 2 s). Past 12 posts waiting (`COIN_FLOW.laneMax`), a new
+post that neither addresses it nor is the owner's is claimed and let go
+(`coin-busy`).
+
+**A post that asked it never gets nothing.** When the line for a CA said to
+it cannot be written (every template too like its recent lines, a model's
+line refused), a 👀 goes on the post instead. A flood, a shush, a stale post
+or a refused send keep their own answer, which is nothing.
 
 Per posted CA, in order:
 
@@ -329,15 +405,31 @@ Per posted CA, in order:
    which the answer is `unknown`): no code → `wallet`, and nothing more is
    read. So a chat full of Ethereum or BNB CAs spends these probes and never
    the full looks. Then at most 6 full looks (GeckoTerminal, the chain probe)
-   per 10 minutes per process, past which the answer is `unknown`. Kinds
+   per 10 minutes per process, past which the answer is `unknown`. Every
+   read is bounded: 4 s for a chain read (the `getCode`, the multicall probe,
+   the canonical factory's `getPool`, the local ledger's curve lookup), 5 s
+   for the GeckoTerminal token page (its turn at the fleet's shared request
+   slot included); a read that does not answer in time FAILED — never "no
+   code", never "no pool". **When the `getCode` fails** (declined by the
+   governor, rate-limited by the provider, timed out — not "no code"),
+   GeckoTerminal's Robinhood token page stands in as the presence signal,
+   under the full-look allowance: this address's own pools there make it a
+   Robinhood Chain coin, classified from those pools exactly as below (a
+   Pons curve pool → `curve`; only 32-byte pool ids → `v4-only`; a Uniswap v3
+   pool → `highVolumePools` / `shouldEnter(TRENCHER_FAST)`); no pools there,
+   or the page failing too, is `unknown`. The multicall is not tried then: the
+   chain it reads is the one that just failed. A `candidate` from this path is
+   still only a nomination, and discovery still verifies its pool on chain
+   before anything can be bought; nothing is relaxed. Kinds
    `own` (its own wallet/vault), `cash` (USDG/WETH), `energy` ($MERRYMEN),
    `stock` (a STOCK_TOKENS address), `wallet` (no code), `not-token`,
    `curve` (a Pons bonding-curve coin), `v4-only`, `no-pool`, `too-new`,
    `too-thin`, `too-quiet` (fails `highVolumePools`), `held` (already
    holding it), `candidate` (eligible to be nominated), `unknown` (reads
-   failed, or an allowance spent). `wallet`, `not-token` and `unknown` are
-   not a Robinhood Chain coin, or not provably one: silence, and no memo, so
-   a repost gets a fresh look. Every other non-candidate kind maps to casual
+   failed or timed out, or an allowance spent). `wallet`, `not-token` and
+   `unknown` are not a Robinhood Chain coin, or not provably one: silence
+   (an addressed `unknown` excepted, above), and no memo, so a repost gets a
+   fresh look. Every other non-candidate kind maps to casual
    template lines, tagging the sender, grounded in that kind ("barely
    anyone's trading it, i'd pass", "still on the curve, can't touch those
    yet"), never a figure, ready or not: asking the owner to switch trencher
@@ -675,7 +767,7 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | It was already in the group (never saw the add) | Approved as soon as the owner writes there; until then silent, one DM "i'm in «title»" with Stay / Leave, never leaves on its own |
 | Removed / kicked | Marks `left`, keeps memory 30 days |
 | Group becomes a supergroup | Moves its state to the new id |
-| "@bot what do you think" / reply to its line / "pine what's up" | Answers, as a reply |
+| "@bot what do you think" / reply to its line / "pine what's up" / "hey heron" (Amber Heron) / "heron you there" / "what do you think marian" (Maid Marian) / "robin you there" | Answers, as a reply |
 | Nobody talking to it, chat lively | Occasionally joins in (odds, cooldown, daily cap) |
 | Chat dead | Says nothing (no lurker monologues) |
 | Two people going back and forth | Stays out |
@@ -686,9 +778,16 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | Someone posts a Robinhood Chain coin, trencher ready | Tags sender, thinks out loud, Brain decides, then a casual buy line or a grounded fade |
 | A Robinhood Chain GeckoTerminal pool / DexScreener pair link | Looked at as the coin that pool trades when the canonical factory names the pool; otherwise silence |
 | Same CA posted again | Answers from memory, once per coin per hour; a repost inside the hour gets one 👀, then nothing |
-| CA spam | "one at a time lol", then silence; past 3 coin replies to one person in 2 min, one 👀, then nothing |
+| CA spam | "one at a time lol", then silence; past 6 coin replies to one person in 2 min, one 👀, then nothing (never the owner) |
+| The owner chatting back and forth with it | Every line said to it answered: the owner is never flooded |
+| A CA posted while the chain reads are declined / rate-limited | GeckoTerminal's Robinhood page stands in: pools there → the coin's usual line (a Pons coin: "still on the curve"); nothing there → silence |
+| A CA said to it ("@bot 0x…?") whose look could not be made | "can't pull that one up rn 🤷", tagging them, once per chat per 10 min; never a verdict |
+| A read that never answers | The look is `unknown` after 10 s; the chat's other lines ("@bot didnt you see?") are answered meanwhile |
+| The owner posting bonding-curve CA after CA | Every one gets its curve line; the lines recur rather than run dry |
+| A backlog of CAs while the reads hang, then the owner asks about one | Hers is looked at next and answered inside the send window; posts whose window ran out are not looked at |
+| A Telegram call that never answers | Given up after 10 s; that line is lost, the chat's next lines go out |
 | Its own address / USDG / $MERRYMEN / a stock | Casual one-liner, no look |
-| A wallet, or an Ethereum / BNB / Base token posted bare (no code on Robinhood Chain) | Silence: one presence probe, no GeckoTerminal read, nothing remembered; ready or not, no owner ask |
+| A wallet, or an Ethereum / BNB / Base token posted bare (no code on Robinhood Chain) | Silence: one presence probe, no GeckoTerminal read (one, under the full-look allowance, only while the chain cannot be asked), nothing remembered; ready or not, no owner ask |
 | A coin in another chain's link (Etherscan, BscScan, BaseScan, dexscreener.com/ethereum, geckoterminal.com/eth, gmgn.ai/bsc, pump.fun…) | Silence, ready or not, coins on or off: not claimed, looked at or remembered, and not counted in the first 2 |
 | Bonding-curve coin, v4-only, no pool, too thin, too quiet | Casual grounded fade, no Brain spend |
 | Solana mint, TON address, Sui coin type, or another chain's chart link with no `0x` + 40-hex address (DexScreener's lowercase Solana pair links, TON, Sui, a Base v4 pool id) | Silence, addressed or not, ready or not, coins on or off, and nothing else answers the line |
