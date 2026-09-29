@@ -63,7 +63,7 @@ function startHistoryRepair(): void {
   })().catch(e=>log(`historical fills: FAILED — ${e instanceof Error ? e.message : String(e)}`));
 }
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
@@ -90,7 +90,8 @@ import {
   withoutBotToken,
 } from "./telegram-claims";
 import { getMe as telegramGetMe } from "./telegram/api";
-import { parsePollHealth, tokenTagOf, type PollHealth } from "./telegram/state";
+import { parseLinkedChatAt, parsePollHealth, tokenTagOf, type PollHealth } from "./telegram/state";
+import { linksToPromote } from "./telegram/link";
 import { livenessAlertLine, telegramLivenessVerdict } from "./telegram-liveness";
 import { makePgDb, translateSchema, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
@@ -793,6 +794,8 @@ function readChildTelegram(tenant: string, nowSec = Math.floor(Date.now() / 1000
   ownerId: number | null;
   linkedAt: number | null;
   linkedChats: number[];
+  /** When each of `linkedChats` last linked (telegram/state.ts linkedChatAt). */
+  linkedChatAt: Record<string, number>;
   chatSettings: { at: number; patch: Record<string, unknown> } | null;
   /** The bot `linkCode` belongs to (telegram/state.ts botId); null before the child has bound one. */
   botId: string | null;
@@ -809,6 +812,7 @@ function readChildTelegram(tenant: string, nowSec = Math.floor(Date.now() / 1000
       linkedChats: Array.isArray(t.linkedChats)
         ? (t.linkedChats as unknown[]).filter((c): c is number => typeof c === "number")
         : [],
+      linkedChatAt: parseLinkedChatAt(t.linkedChatAt),
       chatSettings: readChatSettings(t.chatSettings),
       // Digits only, as the child's own loader insists: this is published.
       botId: typeof t.botId === "string" && /^\d+$/.test(t.botId) ? t.botId : null,
@@ -838,9 +842,18 @@ function readChildTelegram(tenant: string, nowSec = Math.floor(Date.now() / 1000
  * the whole sealed blob and the web is its other writer, so an unconditional
  * write on a 15-second loop would race a tenant typing on the settings page and
  * silently discard their save. Guarded this way the write happens once, in the
- * seconds after a successful link, and never again — and removing a chat from
- * the dashboard still works, because the child only ever reports chats it has
- * just linked, and a code cannot be reused once it has rotated.
+ * seconds after a successful link, and never again.
+ *
+ * EACH LINK IS PROMOTED ONCE, so removing a chat on the dashboard sticks. The
+ * child's `linkedChats` only grows, and this used to add back whatever of it
+ * the stored allowlist lacked: a chat the owner had removed was restored on the
+ * next pass, with its command authority, until a redeploy wiped the home. Now
+ * the child records when each chat linked, and this process records, in
+ * PROMOTED_LINKS_FILE beside telegram.json, which link of each chat it has
+ * promoted (telegram/link.ts linksToPromote). A chat that links again, with a
+ * code of its own, is a new link and is promoted again. The record lives and
+ * dies with the file it describes: a redeploy wipes both, and
+ * writeTelegramForChild never restores `linkedChats`.
  */
 /**
  * PUT THE TENANT'S TELEGRAM LINK BACK, before the child starts.
@@ -1003,16 +1016,77 @@ async function publishChildTelegram(tenant: `0x${string}`, shared: Db, childStat
   await promoteChatSettings(tenant, tg.chatSettings);
   if (tg.linkedChats.length === 0) return;
   try {
+    const promoted = readPromotedLinks(tenant);
+    if (promoted === null) {
+      // A record that will not read cannot say which links were promoted, and
+      // guessing "none" would put back every chat the owner has removed. So
+      // every link in the file is taken as promoted, which at worst loses one
+      // made in the last pass: its owner links again.
+      writePromotedLinks(tenant, linksToPromote(tg.linkedChats, tg.linkedChatAt, {}).record);
+      log(`${tenant}: telegram link record unreadable — rewritten, and nothing promoted this pass`);
+      return;
+    }
+    const { due, record } = linksToPromote(tg.linkedChats, tg.linkedChatAt, promoted);
+    if (due.length === 0) return;
     const stored = (await getSettingsStore().get(tenant)) ?? {};
     const have = new Set(Array.isArray(stored.telegramAllowlist) ? stored.telegramAllowlist : []);
-    const missing = tg.linkedChats.filter((c) => !have.has(c));
-    if (missing.length === 0) return;
-    for (const c of missing) have.add(c);
-    await getSettingsStore().put(tenant, { ...stored, telegramAllowlist: [...have] });
-    log(`${tenant}: telegram link promoted — ${missing.length} chat(s) added to the stored allowlist`);
+    const missing = due.filter((c) => !have.has(c));
+    if (missing.length > 0) {
+      for (const c of missing) have.add(c);
+      await getSettingsStore().put(tenant, { ...stored, telegramAllowlist: [...have] });
+      log(`${tenant}: telegram link promoted — ${missing.length} chat(s) added to the stored allowlist`);
+    }
+    // AFTER the put, and only once it has landed: a failed put leaves these
+    // links due for the next pass. A crash between the two only means the next
+    // pass finds them in the store already and records them.
+    writePromotedLinks(tenant, record);
   } catch (e) {
     log(`${tenant}: could not promote telegram link — ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+/**
+ * WHICH LINKS THIS PROCESS HAS PROMOTED for a tenant (telegram/link.ts
+ * linksToPromote): chat id → the time of the link. Written by the
+ * orchestrator alone, never by the child or the hold process, in the same
+ * home as the telegram.json whose links it records.
+ */
+const PROMOTED_LINKS_FILE = "telegram-promoted.json";
+
+/** The record, {} when there is none yet, or null when there is one that will not read. */
+function readPromotedLinks(tenant: string): Record<string, number> | null {
+  let raw: string;
+  try {
+    raw = readFileSync(path.join(childHome(tenant), PROMOTED_LINKS_FILE), "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
+    return null;
+  }
+  try {
+    const v = JSON.parse(raw) as unknown;
+    if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+    const out: Record<string, number> = {};
+    for (const [chat, at] of Object.entries(v as Record<string, unknown>)) {
+      // 0 is a link from before link times were kept (linksToPromote).
+      if (/^-?\d+$/.test(chat) && typeof at === "number" && Number.isFinite(at) && at >= 0) out[chat] = at;
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** Replace the record whole, through a rename, so a crash mid-write leaves the old one and never half of a new one. */
+function writePromotedLinks(tenant: string, record: Record<string, number>): void {
+  const file = path.join(childHome(tenant), PROMOTED_LINKS_FILE);
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(record), { encoding: "utf8", mode: 0o600 });
+  renameSync(tmp, file);
+}
+
+/** Test seam: one tenant's publish and promotion, as the mirror pass runs it. */
+export function publishChildTelegramForTest(tenant: `0x${string}`, shared: Db, childState: string): Promise<void> {
+  return publishChildTelegram(tenant, shared, childState);
 }
 
 /** A failing liveness publish is logged once until one succeeds, not once per tenant per pass. */

@@ -50,8 +50,8 @@ export interface RestoreBlock {
  * would tell them their book is broken when it is not), it never replaces a
  * named class a hold already has, and the orchestrator tries the restore again
  * on the next pass or so rather than backing off (orchestrator.ts retryHold).
- * The hold process still says it, because something has to be said to a
- * message while trading is held.
+ * The hold process still answers a message while trading is held, but with
+ * the words for a retry, not for a broken book (holdText).
  */
 export const UNCLASSIFIED_BLOCK = "restore error";
 
@@ -117,6 +117,28 @@ const START_OVER =
 const NOTHING_TO_DO = "You don't need to do anything.";
 
 /**
+ * WHAT AN OWNER IS TOLD WHILE A HOLD NAMES NO CAUSE (UNCLASSIFIED_BLOCK).
+ *
+ * Every rejection restorePaperCheckpoint makes is a named class: each error
+ * it throws, and whatever it calls an invalid checkpoint
+ * (paper-checkpoint.ts, restoreBlockClass). So an unnamed one is a database
+ * that dropped the connection or timed a statement out, as a redeploy's
+ * restarts can, and the next attempt is fifteen seconds away, and at most two
+ * minutes apart after that (orchestrator.ts scheduleHoldRetry): "trying
+ * again" is true for as long as it is said.
+ *
+ * It used to get the broken book's words, reset offer and all. An owner who
+ * messaged during a blip was told their practice book "couldn't be restored"
+ * and to start it over, and a reset asked for is honoured even when the book
+ * would have restored a pass later: a healthy book, and the owner's signed
+ * key, thrown away for a dropped connection. Nor would a reset mend a
+ * database that cannot be reached: it needs the same one.
+ */
+const RETRYING =
+  "I'm not trading right now: I couldn't load your practice book just now, and I'm trying again. " +
+  "Nothing was traded or lost. /link still works.";
+
+/**
  * What the bot says to its owner while trading is held. The plan's wording,
  * with the class and nothing else from the reason.
  *
@@ -137,8 +159,15 @@ const NOTHING_TO_DO = "You don't need to do anything.";
  * down on the deployment). Offered to them, the advice would send a web owner
  * to discard a signed grant, sign again, and be held again with the same
  * advice. They are told what the text said before §3.4: nothing to do.
+ *
+ * A HOLD THAT NAMES NO CAUSE IS NOT A BROKEN BOOK, and is told so (RETRYING),
+ * whatever `resettable` says. `resettable` itself is left as the settings
+ * say: a named class that replaces the unnamed one (orchestrator.ts
+ * retryHold) carries it on, and must offer the reset where it would be
+ * honoured.
  */
 export function holdText(cls: string, resettable: boolean): string {
+  if (!isNamedBlock(cls)) return RETRYING;
   return (
     `I'm not trading right now: your practice book couldn't be restored after a server update (${cls}). ` +
     `Nothing was traded or lost, and the team has been alerted. ${resettable ? START_OVER : NOTHING_TO_DO} /link still works.`
@@ -149,8 +178,12 @@ export function holdText(cls: string, resettable: boolean): string {
  * The one message the orchestrator sends the owner, unasked, when a hold
  * begins (or its class changes to one they have not heard). Plain text: the
  * sender escapes it. The same way out as holdText, on the same condition.
+ *
+ * Never sent for a hold that names no cause (orchestrator.ts noteHold). Were
+ * it asked for one, it says what holdText says: a retry, not a broken book.
  */
 export function holdNoticeText(cls: string, resettable: boolean): string {
+  if (!isNamedBlock(cls)) return RETRYING;
   return (
     `⏸️ Your agent has stopped trading: your practice book couldn't be restored after a server update (${cls}). ` +
     `Nothing was traded or lost, and the team has been alerted. ${resettable ? START_OVER : NOTHING_TO_DO} ` +

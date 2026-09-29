@@ -39,7 +39,9 @@ const HOURS_AGO = (h: number) => NOW - h * 3_600;
 const ADDRESS = "0x1111111111111111111111111111111111111111";
 
 const LATE_CODE = /^that code reached me after I'd been offline, so I didn't use it — send the code shown in Settings → Telegram now\.$/;
-const SUMMARY = /^I was offline; /;
+const SUMMARY = /^(I was offline|I've just come back online); /;
+/** The note after a start from no saved offset: it cannot know the backlog was never acted on (service.ts staleSummaryText). */
+const MAY_HAVE_RUN = /I haven't acted on (it|them) since, but (it|some) may have gone through just before I went offline — check \/status and \/trades before you resend a trade or a transfer\.$/;
 const LOCKED = /too many wrong codes from this chat — try again in about \d+ min \(after \d\d:\d\d UTC\)\. Use the code in Settings → Telegram\./;
 const LINKED = /you're linked/;
 
@@ -56,7 +58,7 @@ function blankState(over: Partial<TelegramState> = {}): TelegramState {
   return {
     offset: 0, botId: null, priorBots: [], tokenTag: null, boundAt: null, chatSettings: null, linkCode: "",
     linkRound: 0, ownerId: null, linkedAt: null,
-    linkedChats: [], messageCount: 0, lastNotifiedTradeId: -1, lastTradeDigestAt: 0, lastRemedyRule: null,
+    linkedChats: [], linkedChatAt: {}, messageCount: 0, lastNotifiedTradeId: -1, lastTradeDigestAt: 0, lastRemedyRule: null,
     firedAlerts: {}, signWatch: null, lastDigestDate: "", lastJournalDate: "", priceAlerts: [], reminders: [],
     watchers: [], nextId: 1, poll: null, ...over,
   };
@@ -117,6 +119,8 @@ async function withService(
   opts: {
     token?: string;
     allowlist?: number[];
+    /** When the process starts, on the mocked clock; T0 unless a test runs a second process later. */
+    startAt?: number;
     state?: Partial<TelegramState>;
     script?: (c: Call, h: Harness) => Reply | undefined;
     /** A message that says "you're linked" puts its chat on the allowlist, as settings.json read back would. */
@@ -157,7 +161,7 @@ async function withService(
     },
   };
   const realFetch = globalThis.fetch;
-  mock.timers.enable({ apis: ["setTimeout", "Date"], now: T0 });
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: opts.startAt ?? T0 });
   globalThis.fetch = (async (url: unknown, init?: { body?: string }) => {
     const m = /\/bot([^/]+)\/(\w+)$/.exec(String(url));
     assert.ok(m, `unexpected url ${String(url)}`);
@@ -362,9 +366,11 @@ describe("the backlog rule (a message dated before this process started listenin
         assert.deepEqual(h.transfers, [], "no transfer from the backlog");
         const to555 = h.sentTo(555);
         assert.equal(to555.filter((t) => SUMMARY.test(t)).length, 1, "one summary for the chat");
+        // A first poll from no saved offset: a redeploy's, which may be handed
+        // back the batch the process before it ran (test 5d).
         assert.equal(
           to555[0],
-          "I was offline; 4 messages arrived late (oldest Sep 27 16:00 UTC). I didn't act on them — resend anything you still need.",
+          "I've just come back online; 4 messages arrived late (oldest Sep 27 16:00 UTC). I haven't acted on them since, but some may have gone through just before I went offline — check /status and /trades before you resend a trade or a transfer.",
         );
         assert.equal(isPaused(), true, "the stale /pause ran");
         assert.match(to555[1]!, /paused/);
@@ -386,10 +392,50 @@ describe("the backlog rule (a message dated before this process started listenin
       async (h) => {
         const to555 = h.sentTo(555);
         assert.match(to555[0]!, /confirm kill/);
-        assert.match(to555[1]!, /^I was offline; 1 message arrived late \(oldest 11:00 UTC\)\. I didn't act on it/);
+        assert.match(to555[1]!, /^I've just come back online; 1 message arrived late \(oldest 11:00 UTC\)\./);
+        assert.match(to555[1]!, MAY_HAVE_RUN);
         assert.equal(h.kills, 0, "nothing killed by the backlog");
         await h.advance(1_000);
         assert.equal(h.kills, 1, "the owner's live /confirm does it");
+      },
+    );
+  });
+
+  it("5c. with an offset saved, the same backlog is known never to have run, and is told so", async () => {
+    // The offset is saved past each update before it runs (test 7), so what
+    // Telegram hands back past it was never handled by anything.
+    await withService(
+      {
+        allowlist: [555],
+        state: { offset: 1, botId: "111" },
+        script: firstPoll(() => [text(1, 555, "/buy NVDA 5", HOURS_AGO(20)), text(2, 555, "hey", HOURS_AGO(19))]),
+      },
+      async (h) => {
+        assert.deepEqual(h.trades, []);
+        assert.deepEqual(h.sentTo(555), [
+          "I was offline; 2 messages arrived late (oldest Sep 27 16:00 UTC). I didn't act on them — resend anything you still need.",
+        ]);
+      },
+    );
+  });
+
+  it("5d. A /buy RUN JUST BEFORE A REDEPLOY AND HANDED BACK AFTER IT is not run again, and the owner is not told to resend it", async () => {
+    // Telegram confirms an update only when the next getUpdates asks past
+    // it. The redeploy lands after the /buy has filled and before that
+    // poll, wipes the home and the offset in it, and the next process asks
+    // from 0 and is handed the /buy again.
+    const buy = text(1, 555, "/buy NVDA 5", NOW);
+    await withService({ allowlist: [555], script: firstPoll(() => [buy]) }, async (h) => {
+      assert.deepEqual(h.trades, ["buy NVDA 5"], "premise: it filled");
+    });
+    await withService(
+      { allowlist: [555], startAt: T0 + 60_000, script: firstPoll(() => [buy]) },
+      async (h) => {
+        assert.deepEqual(h.trades, [], "not a second time");
+        const said = h.sentTo(555);
+        assert.equal(said.length, 1);
+        assert.doesNotMatch(said[0]!, /didn't act|resend anything/, "not the claim that would have bought it twice");
+        assert.match(said[0]!, MAY_HAVE_RUN);
       },
     );
   });
@@ -512,7 +558,9 @@ function assertHeldAndLinked(h: Harness): void {
   assert.deepEqual(h.trades, [], "no trade from the silence");
   const to555 = h.sentTo(555);
   assert.equal(to555.length, 1);
-  assert.match(to555[0]!, /^I was offline; 1 message arrived late \(oldest 13:00 UTC\)\./);
+  // Past an offset this process asked from before the silence, or after a
+  // first poll that came back: nothing in it can have run, and it says so.
+  assert.equal(to555[0], "I was offline; 1 message arrived late (oldest 13:00 UTC). I didn't act on it — resend anything you still need.");
   const to999 = h.sentTo(999);
   assert.equal(to999.filter((t) => LATE_CODE.test(t)).length, 1, "one late-code notice for five guesses");
   assert.ok(!to999.some((t) => LOCKED.test(t)), "the guesses from the silence counted toward nothing");

@@ -79,6 +79,29 @@ async function settingsFor(tenant: `0x${string}` | null): Promise<MerrymenSettin
 }
 
 /**
+ * THE TOKEN THE WORKER POLLS WITH, which is the bot every answer here is
+ * about: the saved one, or, SELF-HOSTED ONLY, MERRYMEN_TELEGRAM_BOT_TOKEN,
+ * by the worker's own rule (worker/src/settings.ts str(): trimmed, and blank
+ * is absent).
+ *
+ * An install configured by that variable (README) saves no token here, and
+ * the worker binds its bot all the same. Read as "no token", its code was
+ * then hidden as one minted for another bot, on every screen, while the CLI
+ * doctor sent the owner to the dashboard for it.
+ *
+ * NEVER HOSTED. The orchestrator strips this variable from every child
+ * because one token in the environment would be every tenant's bot, and the
+ * web container's environment must not stand in for a tenant's token either.
+ */
+function effectiveToken(settings: MerrymenSettings): string | undefined {
+  const saved = settings.telegramBotToken;
+  if (typeof saved === "string" && saved.trim() !== "") return saved.trim();
+  if (isHostedMode()) return undefined;
+  const env = process.env.MERRYMEN_TELEGRAM_BOT_TOKEN;
+  return env !== undefined && env.trim() !== "" ? env.trim() : undefined;
+}
+
+/**
  * The runtime half — minted by the child, ferried up by the orchestrator.
  *
  * Self-hosted there is no orchestrator and no ferry: the worker and the web
@@ -87,10 +110,11 @@ async function settingsFor(tenant: `0x${string}` | null): Promise<MerrymenSettin
  *
  * With it, whether anything is hearing the bot and whether the tenant trades
  * (lib/telegram-listening.ts, which decides what the screen may say from
- * these), and whether the saved bot (`savedBot`, its id) is claimed by
- * another tenant. Null when there is nothing to read.
+ * these), and whether the bot getMe has just confirmed for the saved token
+ * (`confirmedBot`, its id) is claimed by another tenant. Null when there is
+ * nothing to read.
  */
-async function runtimeFor(tenant: `0x${string}` | null, savedBot: string | null): Promise<TelegramRuntime | null> {
+async function runtimeFor(tenant: `0x${string}` | null, confirmedBot: string | null): Promise<TelegramRuntime | null> {
   if (!isHostedMode()) {
     const tg = (await readJson<{ linkCode?: string; ownerId?: number | null; botId?: unknown; poll?: unknown }>(TELEGRAM_FILE)) ?? {};
     // The worker's own record, read by the worker's own rules. Self-hosted
@@ -112,7 +136,7 @@ async function runtimeFor(tenant: `0x${string}` | null, savedBot: string | null)
   // would hand this caller some other tenant's bearer credential. The read
   // itself is lib/telegram-runtime.ts, keyed on this tenant.
   if (!tenant) return { linkCode: null, ownerId: null };
-  return withReadDb(async (db) => (db ? readTelegramRuntime(db, tenant, savedBot) : { linkCode: null, ownerId: null }));
+  return withReadDb(async (db) => (db ? readTelegramRuntime(db, tenant, confirmedBot) : { linkCode: null, ownerId: null }));
 }
 
 /**
@@ -121,6 +145,12 @@ async function runtimeFor(tenant: `0x${string}` | null, savedBot: string | null)
  */
 interface BotInfo {
   username: string;
+  /**
+   * The bot's id, as Telegram says it, from an answer that says it is a bot
+   * (lib/telegram-claims.ts telegramBotIdOf's rule). Null otherwise. It is
+   * what lets the saved token's bot be asked about (confirmedBot).
+   */
+  id: string | null;
   /** `can_read_all_group_messages`: true when BotFather privacy mode is OFF. Null when getMe did not say. */
   canReadAllGroupMessages: boolean | null;
   /** `can_join_groups`: false when BotFather /setjoingroups is disabled. Null when getMe did not say. */
@@ -134,11 +164,16 @@ interface BotInfo {
  * must not be the thing that makes it.
  */
 function readBotInfo(body: unknown): BotInfo | null {
-  const b = body as { ok?: unknown; result?: { username?: unknown; can_read_all_group_messages?: unknown; can_join_groups?: unknown } } | null;
+  const b = body as {
+    ok?: unknown;
+    result?: { id?: unknown; is_bot?: unknown; username?: unknown; can_read_all_group_messages?: unknown; can_join_groups?: unknown };
+  } | null;
   if (!b || b.ok !== true || !b.result || typeof b.result.username !== "string" || b.result.username === "") return null;
   const flag = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
+  const id = b.result.id;
   return {
     username: b.result.username,
+    id: b.result.is_bot === true && (typeof id === "number" || typeof id === "string") ? String(id) : null,
     canReadAllGroupMessages: flag(b.result.can_read_all_group_messages),
     canJoinGroups: flag(b.result.can_join_groups),
   };
@@ -166,6 +201,24 @@ async function botInfo(token: string): Promise<BotInfo | null> {
 /** getMe against the Bot API — returns the @username or null. */
 async function botUsername(token: string): Promise<string | null> {
   return (await botInfo(token))?.username ?? null;
+}
+
+/**
+ * THE SAVED BOT, AS TELEGRAM HAS JUST VOUCHED FOR IT: the id getMe answered
+ * with for `token`, when it is that token's own bot. Null otherwise: no
+ * token, getMe refused it or could not be reached, or it answered for
+ * something else.
+ *
+ * Only this is ever asked of the bot claims (lib/telegram-runtime.ts). A
+ * token getMe does not confirm is saved as typed, and a bot id is public, so
+ * the saved token's id alone would let any signed-in account learn whether a
+ * Merrymen agent holds a bot it names. A live token is proof of control of
+ * the bot, which is the rule the settings save's 409 already keeps
+ * (lib/telegram-claims.ts decideBotClaim).
+ */
+function confirmedBot(token: string | undefined, bot: BotInfo | null): string | null {
+  if (token === undefined || bot === null || bot.id === null) return null;
+  return bot.id === botIdOf(token) ? bot.id : null;
 }
 
 export interface TelegramStatus {
@@ -234,15 +287,23 @@ export interface TelegramStatus {
 export async function GET(req: Request) {
   const tenant = isHostedMode() ? tenantOf(req) : null;
   const settings = await settingsFor(tenant);
-  const token = settings.telegramBotToken;
-  const runtime = await runtimeFor(tenant, typeof token === "string" ? botIdOf(token.trim()) : null);
+  const token = effectiveToken(settings);
+  const hasToken = typeof token === "string" && token.length > 8;
+  // ONE getMe for all of it — the username, the two flags Telegram groups
+  // need, and the bot id that lets the claims be asked about this bot. A
+  // second call per Settings mount would double the work on a third party
+  // for a fact the first answer already carries. BEFORE the runtime read,
+  // because that read asks about no bot Telegram has not confirmed
+  // (confirmedBot).
+  const bot = hasToken ? await botInfo(token!) : null;
+  const runtime = await runtimeFor(tenant, confirmedBot(token, bot));
   const seen = telegramListening(runtime, token, Math.floor(Date.now() / 1000));
 
   const status: TelegramStatus = {
     enabled: settings.telegramEnabled === true,
-    hasToken: typeof token === "string" && token.length > 8,
-    connected: false,
-    botUsername: null,
+    hasToken,
+    connected: bot !== null,
+    botUsername: bot?.username ?? null,
     ownerId: runtime?.ownerId ?? null,
     allowlist: Array.isArray(settings.telegramAllowlist) ? settings.telegramAllowlist : [],
     linkCode: seen.linkCode,
@@ -255,19 +316,9 @@ export async function GET(req: Request) {
     // absent key means enabled. `=== true` would report control off for every
     // install that never touched the toggle.
     control: settings.telegramControlEnabled !== false,
-    canReadAllGroupMessages: null,
-    canJoinGroups: null,
+    canReadAllGroupMessages: bot?.canReadAllGroupMessages ?? null,
+    canJoinGroups: bot?.canJoinGroups ?? null,
   };
-  if (status.hasToken) {
-    // ONE getMe for all of it — the username, and the two flags Telegram
-    // groups need. A second call per Settings mount would double the work on
-    // a third party for a fact the first answer already carries.
-    const bot = await botInfo(token!);
-    status.connected = bot !== null;
-    status.botUsername = bot?.username ?? null;
-    status.canReadAllGroupMessages = bot?.canReadAllGroupMessages ?? null;
-    status.canJoinGroups = bot?.canJoinGroups ?? null;
-  }
   return NextResponse.json(status);
 }
 
@@ -285,7 +336,7 @@ export async function POST(req: Request) {
   let token = typeof body.token === "string" && body.token.trim().length > 8 ? body.token.trim() : undefined;
   if (!token) {
     const tenant = isHostedMode() ? tenantOf(req) : null;
-    token = (await settingsFor(tenant)).telegramBotToken;
+    token = effectiveToken(await settingsFor(tenant));
   }
   if (!token) return NextResponse.json({ ok: false, reason: "no token set" });
 

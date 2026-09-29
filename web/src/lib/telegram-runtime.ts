@@ -1,7 +1,8 @@
 /**
  * WHAT GET /api/telegram READS OF A HOSTED TENANT'S BOT: the row the
  * orchestrator publishes (worker telegram-store.ts publishTelegramRuntime),
- * and whether another tenant has claimed the saved bot. The decision about
+ * and whether another tenant has claimed the bot Telegram confirms for the
+ * saved token. The decision about
  * what the screen may say from it is lib/telegram-listening.ts.
  *
  * Here, not in the route, so a test can run the worker's publish and this
@@ -13,8 +14,10 @@
  * say so.
  *
  * THE CODE IS A BEARER CREDENTIAL. Every read of the row is keyed on the
- * tenant the caller authenticated as; the one read keyed on something else,
- * the claim, gives back only whether its holder is this tenant.
+ * tenant the caller authenticated as. The one read keyed on something else,
+ * the claim, is asked only about a bot Telegram has just confirmed this
+ * caller holds a live token for, and gives back only whether its holder is
+ * this tenant.
  */
 import type { Db } from "../../../worker/src/db";
 import type { TelegramRuntime } from "./telegram-listening";
@@ -26,7 +29,7 @@ export const TELEGRAM_RUNTIME_SQL =
 /** The read for a deployment whose orchestrator does not add the liveness columns yet. */
 export const TELEGRAM_RUNTIME_LEGACY_SQL = "SELECT link_code, owner_id FROM tenant_telegram WHERE tenant = ?";
 
-/** Who holds the saved token's bot (worker telegram-claims.ts). The tenant is compared, never returned. */
+/** Who holds the confirmed bot (worker telegram-claims.ts). The tenant is compared, never returned. */
 export const TELEGRAM_BOT_CLAIM_SQL = "SELECT tenant FROM telegram_bot_claims WHERE bot_id = ?";
 
 /** A row either read gives. */
@@ -67,24 +70,49 @@ export function runtimeFromRow(row: TelegramRuntimeRow, full: boolean): Telegram
 }
 
 /**
- * ONE TENANT'S ROW, and whether the saved bot (`savedBot`, its id, or null)
- * is claimed by another tenant. Null when there is no row.
+ * ONE TENANT'S ROW, and whether the bot Telegram has just confirmed for this
+ * caller's saved token (`confirmedBot`, its id, or null) is claimed by
+ * another tenant. Null when there is no row and nothing to say about the bot.
+ *
+ * ONLY A CONFIRMED BOT IS ASKED ABOUT, for decideBotClaim's reason
+ * (lib/telegram-claims.ts). A saved token is stored as typed when getMe does
+ * not confirm it, and a bot id is public, so asking the claims about the
+ * saved token's id told any signed-in account, for any bot it named with
+ * `<id>:anything`, whether a Merrymen agent held it: silently, while that
+ * agent was offline, and without the bot or its owner ever seeing the
+ * question. The route passes the id getMe answered with for the token, or
+ * null; an owner whose bot was moved to another agent still holds a live
+ * token for it, so they are still told where it went.
  */
 export async function readTelegramRuntime(
   db: Db,
   tenant: `0x${string}`,
-  savedBot: string | null,
+  confirmedBot: string | null,
 ): Promise<TelegramRuntime | null> {
   let runtime: TelegramRuntime | null = null;
+  let noRow = false;
   try {
     const row = (await db.prepare(TELEGRAM_RUNTIME_SQL).get(tenant.toLowerCase())) as TelegramRuntimeRow | undefined;
-    if (!row) return null;
-    runtime = runtimeFromRow(row, true);
+    if (row) runtime = runtimeFromRow(row, true);
+    else noRow = true;
   } catch {
     // The liveness columns are added by the orchestrator on its own clock
     // (telegram-store.ts), and the web can be deployed first. Read what was
     // always there; the rest stays undefined, which the decision reads as
     // "not published here yet" rather than as "nothing heard".
+  }
+  if (noRow) {
+    // NO ROW, AND THE BOT IS ANOTHER TENANT'S. A tenant the orchestrator
+    // never hands the bot's token (its claim names someone else) never
+    // writes a telegram.json, so it never gets a row: no code is minted
+    // without a token. Answered as "no row", its screen said "your agent
+    // mints a code on its next pass" for ever, and hid the one thing that
+    // would unstick it, that the bot is connected elsewhere and can be moved
+    // here. Only that verdict makes a row: anything else about a saved bot
+    // with no row is still unknown, not "pending".
+    return (await claimedElsewhere(db, tenant, confirmedBot)) === true
+      ? { linkCode: null, ownerId: null, botId: null, botElsewhere: true }
+      : null;
   }
   if (!runtime) {
     try {
@@ -99,15 +127,24 @@ export async function readTelegramRuntime(
   // WHETHER ANOTHER TENANT HOLDS THE SAVED BOT. The owner's saved token
   // outlives a move of its bot to another agent (the claim moves, the old
   // tenant's settings keep the token), and this agent will never pick it up
-  // again. Only whether the holder is this tenant is used; who it is never
-  // leaves this function.
-  if (savedBot !== null) {
-    try {
-      const claim = (await db.prepare(TELEGRAM_BOT_CLAIM_SQL).get(savedBot)) as { tenant?: unknown } | undefined;
-      if (typeof claim?.tenant === "string") runtime.botElsewhere = claim.tenant.toLowerCase() !== tenant.toLowerCase();
-    } catch {
-      // No claims table yet: nobody has claimed anything.
-    }
-  }
+  // again.
+  const elsewhere = await claimedElsewhere(db, tenant, confirmedBot);
+  if (elsewhere !== undefined) runtime.botElsewhere = elsewhere;
   return runtime;
+}
+
+/**
+ * Whether the claim on `confirmedBot` names another tenant: undefined when
+ * there is no bot to ask about, no claim, or no claims table yet. Only
+ * whether the holder is this tenant is used; who it is never leaves here.
+ */
+async function claimedElsewhere(db: Db, tenant: `0x${string}`, confirmedBot: string | null): Promise<boolean | undefined> {
+  if (confirmedBot === null) return undefined;
+  try {
+    const claim = (await db.prepare(TELEGRAM_BOT_CLAIM_SQL).get(confirmedBot)) as { tenant?: unknown } | undefined;
+    return typeof claim?.tenant === "string" ? claim.tenant.toLowerCase() !== tenant.toLowerCase() : undefined;
+  } catch {
+    // No claims table yet: nobody has claimed anything.
+    return undefined;
+  }
 }

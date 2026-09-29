@@ -123,8 +123,21 @@ export interface TelegramState {
    * `cfg.telegramAllowlist` and nothing else; this is the list the parent
    * promotes INTO that setting, which keeps the dashboard the one place a chat
    * can be removed.
+   *
+   * It only ever grows, so the parent promotes each LINK once, by its time in
+   * `linkedChatAt` below (link.ts linksToPromote). Promoting the whole list
+   * on every pass put a chat the owner had removed on the dashboard back into
+   * the allowlist fifteen seconds later, with full command authority, until
+   * a redeploy wiped this file.
    */
   linkedChats: number[];
+  /**
+   * WHEN EACH CHAT IN `linkedChats` LAST LINKED, unix seconds, keyed by chat
+   * id. A chat that links again, with a fresh code, gets a new time, and that
+   * new link is promoted again; the old one never is. A chat with none (a
+   * file from before this was kept) reads as linked at 0.
+   */
+  linkedChatAt: Record<string, number>;
   /**
    * SETTINGS THE OWNER CHANGED FROM CHAT, and when — recorded here because
    * the settings copy does not survive.
@@ -317,6 +330,7 @@ const DEFAULT: TelegramState = {
   ownerId: null,
   linkedAt: null,
   linkedChats: [],
+  linkedChatAt: {},
   messageCount: 0,
   lastNotifiedTradeId: -1,
   lastTradeDigestAt: 0,
@@ -331,6 +345,20 @@ const DEFAULT: TelegramState = {
   nextId: 1,
   poll: null,
 };
+
+/**
+ * `linkedChatAt` as read back from a file: chat ids and positive, finite
+ * times, and nothing else. The orchestrator reads the same record, and what
+ * it promotes lands in the tenant's stored allowlist.
+ */
+export function parseLinkedChatAt(v: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!v || typeof v !== "object" || Array.isArray(v)) return out;
+  for (const [chat, at] of Object.entries(v as Record<string, unknown>)) {
+    if (/^-?\d+$/.test(chat) && typeof at === "number" && Number.isFinite(at) && at > 0) out[chat] = at;
+  }
+  return out;
+}
 
 export function loadTelegramState(): TelegramState {
   try {
@@ -382,6 +410,7 @@ export function loadTelegramState(): TelegramState {
       linkedChats: Array.isArray(s.linkedChats)
         ? (s.linkedChats as unknown[]).filter((c): c is number => typeof c === "number")
         : [],
+      linkedChatAt: parseLinkedChatAt(s.linkedChatAt),
       messageCount: typeof s.messageCount === "number" ? s.messageCount : 0,
       lastNotifiedTradeId: typeof s.lastNotifiedTradeId === "number" ? s.lastNotifiedTradeId : -1,
       lastTradeDigestAt: typeof s.lastTradeDigestAt === "number" ? s.lastTradeDigestAt : 0,

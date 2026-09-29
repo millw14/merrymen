@@ -76,15 +76,16 @@ describe("a hosted request with no session gets nothing", () => {
     // WHERE here would hand one owner another's credential. They live in
     // lib/telegram-runtime.ts, where a test runs them against the worker's
     // publish, and are handed this caller's tenant.
-    assert.match(fn, /readTelegramRuntime\(db, tenant, savedBot\)/);
+    assert.match(fn, /readTelegramRuntime\(db, tenant, confirmedBot\)/);
     assert.match(TELEGRAM_RUNTIME_SQL, /FROM tenant_telegram WHERE tenant = \?$/);
     assert.match(TELEGRAM_RUNTIME_LEGACY_SQL, /FROM tenant_telegram WHERE tenant = \?$/);
     assert.match(READ, /\.prepare\(TELEGRAM_RUNTIME_SQL\)\.get\(tenant\.toLowerCase\(\)\)/);
     assert.match(READ, /\.prepare\(TELEGRAM_RUNTIME_LEGACY_SQL\)\.get\(tenant\.toLowerCase\(\)\)/);
-    // The one read keyed on something else is the bot's claim, and the tenant
-    // it names is compared, never returned.
-    assert.match(READ, /\.prepare\(TELEGRAM_BOT_CLAIM_SQL\)\.get\(savedBot\)/);
-    assert.match(READ, /runtime\.botElsewhere = claim\.tenant\.toLowerCase\(\) !== tenant\.toLowerCase\(\);/);
+    // The one read keyed on something else is the bot's claim, asked only
+    // about a bot getMe has confirmed, and the tenant it names is compared,
+    // never returned.
+    assert.match(READ, /\.prepare\(TELEGRAM_BOT_CLAIM_SQL\)\.get\(confirmedBot\)/);
+    assert.match(READ, /claim\.tenant\.toLowerCase\(\) !== tenant\.toLowerCase\(\) : undefined;/);
     // And the file must be unreachable hosted: it belongs to whoever runs the
     // web container, which hosted is the operator.
     const hosted = fn.indexOf("if (!isHostedMode())");
@@ -96,14 +97,27 @@ describe("a hosted request with no session gets nothing", () => {
     // The status object is what GET serialises, and POST answers with a
     // username or a reason. Reading the token into a local to CALL getMe is
     // the point of the route; returning it is the invariant.
-    const status = CODE.slice(CODE.indexOf("const status: TelegramStatus"), CODE.indexOf("if (status.hasToken)"));
+    const status = CODE.slice(CODE.indexOf("const status: TelegramStatus"), CODE.indexOf("return NextResponse.json(status)"));
+    assert.ok(status.length > 100, "the status object moved: re-point this test");
     // hasToken is a BOOLEAN derived from it and is the point of the field; what
     // must never appear is the value itself being assigned to a response key.
-    assert.ok(status.includes("hasToken:"), "the boolean is still reported");
+    assert.ok(/\bhasToken[,:]/.test(status), "the boolean is still reported");
+    assert.match(CODE, /const hasToken = typeof token === "string" && token\.length > 8;/);
     assert.ok(!status.includes(": token"), "no response key is assigned the token value");
     assert.ok(!status.includes("telegramBotToken"), "and the stored field is not echoed");
     const iface = CODE.slice(CODE.indexOf("export interface TelegramStatus"), CODE.indexOf("export async function GET"));
     assert.ok(!iface.includes("botToken"), "the wire type has no token field");
+  });
+
+  it("THE CLAIMS ARE ASKED ONLY ABOUT A BOT getMe HAS CONFIRMED, never the saved token's bare id", () => {
+    // A token getMe does not confirm is saved as typed, and a bot id is
+    // public: asking the claims about `<id>:anything` told any signed-in
+    // account whether a Merrymen agent held the bot. Run for real in
+    // bot-elsewhere.test.ts.
+    const get = CODE.slice(CODE.indexOf("export async function GET"), CODE.indexOf("export async function POST"));
+    assert.match(get, /const runtime = await runtimeFor\(tenant, confirmedBot\(token, bot\)\);/);
+    assert.ok(get.indexOf("await botInfo(token!)") < get.indexOf("await runtimeFor("), "getMe first");
+    assert.ok(!/runtimeFor\(tenant, [^)]*botIdOf/.test(get), "not the saved token's id, unchecked");
   });
 
   it("control keeps its `!== false` default", () => {
@@ -135,8 +149,12 @@ describe("the link survives the orchestrator's next pass", () => {
     assert.match(ORCH, /getSettingsStore\(\)\.put\(tenant, \{ \.\.\.stored, telegramAllowlist/);
     // ONLY WHEN SOMETHING IS NEW. `put` replaces the whole sealed blob and the
     // web is its other writer, so an unconditional write on a 15-second loop
-    // would race a tenant's save on the settings page.
-    assert.match(ORCH, /if \(missing\.length === 0\) return;/);
+    // would race a tenant's save on the settings page. And each link ONCE, so
+    // a chat the owner removes stays removed (worker
+    // telegram-link-promotion.integration.test.ts).
+    assert.match(ORCH, /const \{ due, record \} = linksToPromote\(tg\.linkedChats, tg\.linkedChatAt, promoted\);/);
+    assert.match(ORCH, /if \(due\.length === 0\) return;/);
+    assert.match(ORCH, /if \(missing\.length > 0\) \{/);
   });
 
   it("the ferry runs under the same lease as the ledger mirror", () => {
@@ -167,7 +185,7 @@ describe("it says only what was measured about the bot (plan §3.1)", () => {
 
   it("THE CODE COMES OUT OF THE DECISION, never straight from the row", () => {
     // A code minted for another bot would not link this one.
-    const status = CODE.slice(CODE.indexOf("const status: TelegramStatus"), CODE.indexOf("if (status.hasToken)"));
+    const status = CODE.slice(CODE.indexOf("const status: TelegramStatus"), CODE.indexOf("return NextResponse.json(status)"));
     assert.match(CODE, /const seen = telegramListening\(runtime, token, /);
     assert.match(status, /linkCode: seen\.linkCode,/);
     assert.match(status, /linkPending: seen\.linkPending,/);

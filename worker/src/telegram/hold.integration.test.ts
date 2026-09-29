@@ -183,6 +183,50 @@ describe("an allowlisted owner is told trading is held", () => {
   });
 });
 
+describe("a hold that names no cause is a retry, not a broken book", () => {
+  // A dropped connection or a timed-out statement during the restore names
+  // none of the book's rules. The owner used to be told their practice book
+  // "couldn't be restored" and to start it over, and a reset asked for is
+  // honoured even when the book would have restored a pass later.
+  const RETRYING =
+    /^I'm not trading right now: I couldn't load your practice book just now, and I'm trying again\. Nothing was traded or lost\. \/link still works\.$/;
+
+  it("A LIVE MESSAGE, A LATE ONE AND A NEW LINK ARE ALL TOLD IT IS RETRYING, with no reset offered", async () => {
+    writeRestoreBlocked(HOME, {
+      reason: "Connection terminated unexpectedly",
+      class: restoreBlockClass("Connection terminated unexpectedly"),
+      since: Math.floor(T0 / 1000) - 30,
+      // The owner's settings would let a reset be honoured: it is the class, not this, that withholds it.
+      resettable: true,
+    });
+    await withHold(async (h) => {
+      await h.advance(600);
+      const code = h.code();
+      h.queue.push(text(1, OWNER, "/status", nowSec() - 3_600));
+      await h.advance(1_000);
+      h.queue.push(text(2, OWNER, "hey"), text(3, STRANGER, `/link ${code}`));
+      await h.advance(1_000);
+      const said = [...h.sentTo(OWNER), ...h.sentTo(STRANGER)];
+      assert.equal(said.length, 3, said.join("\n"));
+      assert.match(h.sentTo(OWNER)[0]!, RETRYING, "the late one");
+      assert.match(h.sentTo(OWNER)[1]!, RETRYING, "the live one");
+      assert.match(h.sentTo(STRANGER)[0]!, /^🏹 you're linked/);
+      for (const s of said) {
+        assert.doesNotMatch(s, /Start over|start practice over|couldn't be restored|team has been alerted/, s);
+      }
+    });
+  });
+
+  it("an unreadable hold record is the same retry", async () => {
+    writeFileSync(path.join(HOME, "restore-blocked.json"), "{ not json");
+    await withHold(async (h) => {
+      h.queue.push(text(1, OWNER, "hey"));
+      await h.advance(1_000);
+      assert.match(h.sentTo(OWNER)[0]!, RETRYING);
+    });
+  });
+});
+
 describe("a stranger is treated as the child treats one", () => {
   it("\"hey\" gets the refusal, with the chat id and where the code is", async () => {
     await withHold(async (h) => {

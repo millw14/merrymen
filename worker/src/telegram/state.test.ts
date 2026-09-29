@@ -29,6 +29,7 @@ const base: TelegramState = {
   chatSettings: null,
   linkCode: "",
   linkedChats: [],
+  linkedChatAt: {},
   linkRound: 0,
   ownerId: null,
   linkedAt: null,
@@ -273,6 +274,19 @@ describe("telegram.json carries the bot id", () => {
       assert.deepEqual(st.priorBots, []);
       assert.equal(st.tokenTag, null);
       assert.equal(st.boundAt, null);
+    });
+  });
+
+  it("round-trips when each chat linked; a file from before has none, and a malformed entry is dropped", () => {
+    // What the orchestrator promotes by (link.ts linksToPromote): a time
+    // lost on load would make a removed chat's old link look new.
+    inHome((file) => {
+      saveTelegramState({ ...base, linkedChats: [555, -100123], linkedChatAt: { "555": 1_790_000_000, "-100123": 1_790_000_060 } });
+      assert.deepEqual(loadTelegramState().linkedChatAt, { "555": 1_790_000_000, "-100123": 1_790_000_060 });
+      writeFileSync(file, JSON.stringify({ linkedChats: [555] }));
+      assert.deepEqual(loadTelegramState().linkedChatAt, {});
+      writeFileSync(file, JSON.stringify({ linkedChatAt: { "555": "soon", abc: 1, "666": -1, "777": 1_790_000_000 } }));
+      assert.deepEqual(loadTelegramState().linkedChatAt, { "777": 1_790_000_000 });
     });
   });
 

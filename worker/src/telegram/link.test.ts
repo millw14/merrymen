@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
-import { LINK_LOCKOUT_SEC, LINK_MAX_FAILS, linkReply, tryLink, type LinkDeps, type LinkFails } from "./link";
+import { LINK_LOCKOUT_SEC, LINK_MAX_FAILS, linkReply, linksToPromote, tryLink, type LinkDeps, type LinkFails } from "./link";
 import type { TelegramState } from "./state";
 
 const T = Math.floor(Date.parse("2026-09-28T12:00:00Z") / 1000);
@@ -15,7 +15,7 @@ const T = Math.floor(Date.parse("2026-09-28T12:00:00Z") / 1000);
 function blank(over: Partial<TelegramState> = {}): TelegramState {
   return {
     offset: 0, botId: null, priorBots: [], tokenTag: null, boundAt: null, chatSettings: null, linkCode: "ABCDEF",
-    linkRound: 0, ownerId: null, linkedAt: null, linkedChats: [], messageCount: 0, lastNotifiedTradeId: -1,
+    linkRound: 0, ownerId: null, linkedAt: null, linkedChats: [], linkedChatAt: {}, messageCount: 0, lastNotifiedTradeId: -1,
     lastTradeDigestAt: 0, lastRemedyRule: null, firedAlerts: {}, signWatch: null, lastDigestDate: "",
     lastJournalDate: "", priceAlerts: [], reminders: [], watchers: [], nextId: 1, poll: null, ...over,
   };
@@ -105,6 +105,44 @@ describe("tryLink", () => {
     const minted = r.state().linkCode;
     assert.match(minted, /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/);
     assert.deepEqual(r.link(555, minted), { ok: true });
+  });
+});
+
+describe("each link is promoted once (linksToPromote)", () => {
+  it("A LINK RECORDS WHEN, and a second link of the same chat, with a fresh code, is a new time", () => {
+    const r = rig();
+    r.link(555, "ABCDEF");
+    assert.deepEqual(r.state().linkedChatAt, { "555": T });
+    r.at(T + 3_600);
+    r.link(555, r.state().linkCode);
+    assert.deepEqual(r.state().linkedChats, [555], "listed once");
+    assert.deepEqual(r.state().linkedChatAt, { "555": T + 3_600 });
+  });
+
+  it("A CHAT THE OWNER REMOVED IS NOT PROMOTED AGAIN, whatever the allowlist now says; a new link is", () => {
+    const first = linksToPromote([111, 222], { "111": T, "222": T + 5 }, {});
+    assert.deepEqual(first.due, [111, 222]);
+    // The owner removes 222 on the dashboard. The child's list still has it,
+    // and the promotion does not look at the allowlist to decide.
+    const again = linksToPromote([111, 222], { "111": T, "222": T + 5 }, first.record);
+    assert.deepEqual(again.due, []);
+    assert.deepEqual(again.record, first.record);
+    // A new chat, and 222 linking again with a code of its own.
+    const later = linksToPromote([111, 222, 333], { "111": T, "222": T + 900, "333": T + 60 }, first.record);
+    assert.deepEqual(later.due, [222, 333]);
+    assert.deepEqual(later.record, { "111": T, "222": T + 900, "333": T + 60 });
+  });
+
+  it("a chat with no link time (a file from before) is promoted once, then left alone", () => {
+    const once = linksToPromote([444], {}, {});
+    assert.deepEqual(once.due, [444]);
+    assert.deepEqual(linksToPromote([444], {}, once.record).due, []);
+  });
+
+  it("a group's negative id is keyed like any other", () => {
+    const r = linksToPromote([-100123], { "-100123": T }, {});
+    assert.deepEqual(r.due, [-100123]);
+    assert.deepEqual(linksToPromote([-100123], { "-100123": T }, r.record).due, []);
   });
 });
 

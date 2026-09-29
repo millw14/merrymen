@@ -104,6 +104,10 @@ export function tryLink(deps: LinkDeps, who: Linker, code: string): LinkOutcome 
       // This file is child-owned; the parent reads it and unions these ids
       // back into the stored allowlist, which is what makes the link durable.
       linkedChats: state.linkedChats.includes(who.chatId) ? state.linkedChats : [...state.linkedChats, who.chatId],
+      // And WHEN, so the parent promotes this link once and no other time: a
+      // chat the owner removes stays removed until it links again, with a
+      // code of its own (linksToPromote).
+      linkedChatAt: { ...state.linkedChatAt, [String(who.chatId)]: t },
     },
     deps.rng,
   );
@@ -114,6 +118,42 @@ export function tryLink(deps: LinkDeps, who: Linker, code: string): LinkOutcome 
   deps.fails.clear();
   deps.onLinked?.(who);
   return { ok: true };
+}
+
+/**
+ * WHICH LINKS THE ORCHESTRATOR HAS STILL TO PROMOTE into the tenant's stored
+ * allowlist, and the record to keep once it has: chat id → the time of the
+ * link it promoted.
+ *
+ * `linkedChats` only grows: nothing takes a chat out of it but a redeploy
+ * that wipes the home. Unioned into the stored allowlist on every pass, it
+ * put back a chat the owner had just removed on the dashboard, the one way
+ * they have to revoke a chat that linked with a shared or leaked code, and
+ * the chat kept full command authority (trades, /transfer, /kill) until the
+ * next redeploy.
+ *
+ * So each LINK is promoted once. A chat whose latest link (`linkedChatAt`) is
+ * the one `promoted` records is left alone, whatever the stored allowlist says
+ * now; one that has linked again since, with a fresh code, is due again.
+ * Compared for equality, not order: the times and the record are the same
+ * home's, and no clock is compared with another machine's. A chat with no
+ * time (a file from before these were kept) is a link at 0: promoted once, as
+ * it always was, and then left alone.
+ */
+export function linksToPromote(
+  linkedChats: readonly number[],
+  linkedChatAt: Readonly<Record<string, number>>,
+  promoted: Readonly<Record<string, number>>,
+): { due: number[]; record: Record<string, number> } {
+  const due: number[] = [];
+  const record: Record<string, number> = { ...promoted };
+  for (const chat of linkedChats) {
+    const at = linkedChatAt[String(chat)] ?? 0;
+    if (promoted[String(chat)] === at) continue;
+    due.push(chat);
+    record[String(chat)] = at;
+  }
+  return { due, record };
 }
 
 /**

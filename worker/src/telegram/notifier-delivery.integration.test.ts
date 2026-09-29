@@ -45,7 +45,7 @@ async function run(tally?: ReturnType<typeof makeChatTally>) {
   }) as typeof fetch;
   mock.timers.enable({ apis: ["setTimeout"] });
   let state = {
-    offset: 0, chatSettings: null, linkCode: "", linkRound: 0, ownerId: OWNER, linkedAt: null, linkedChats: [],
+    offset: 0, chatSettings: null, linkCode: "", linkRound: 0, ownerId: OWNER, linkedAt: null, linkedChats: [], linkedChatAt: {},
     messageCount: 0, lastNotifiedTradeId: 0, lastTradeDigestAt: 0, lastRemedyRule: null, firedAlerts: {} as Record<string, number>,
     signWatch: null, lastDigestDate: "", lastJournalDate: "", priceAlerts: [], watchers: [], nextId: 2, poll: null,
     reminders: [{ id: 1, text: "call the broker", fireAt: NOW - 60 }],

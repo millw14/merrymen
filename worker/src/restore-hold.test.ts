@@ -30,7 +30,7 @@ import {
   holdNotifiedClasses,
   recordHoldNotified,
 } from "./telegram-store";
-import { holdNoticeText, holdText, restoreBlockClass } from "./restore-block";
+import { UNCLASSIFIED_BLOCK, holdNoticeText, holdText, restoreBlockClass } from "./restore-block";
 
 const SRC = path.dirname(fileURLToPath(import.meta.url));
 const ORCH = readFileSync(path.join(SRC, "orchestrator.ts"), "utf8");
@@ -394,6 +394,25 @@ describe("what an owner is told", () => {
         assert.ok(!/\d/.test(holdText(c, resettable)) && !/\d/.test(holdNoticeText(c, resettable)), `no figure in what the owner reads: ${c}`);
       }
     }
+  });
+});
+
+describe("a hold that names no cause", () => {
+  it("IS TOLD AS A RETRY: no \"couldn't be restored\", and no reset offered, whatever the settings allow", () => {
+    for (const resettable of [true, false]) {
+      for (const text of [holdText(UNCLASSIFIED_BLOCK, resettable), holdNoticeText(UNCLASSIFIED_BLOCK, resettable)]) {
+        assert.doesNotMatch(text, /Start over|start practice over|couldn't be restored|wait for a fix|team has been alerted/);
+        assert.match(text, /trying again/);
+        assert.match(text, /Nothing was traded or lost\./);
+      }
+    }
+  });
+
+  it("a named class still offers the reset where it would be honoured, and only there", () => {
+    const named = restoreBlockClass("paper fills are newer than the recoverable valuation");
+    assert.match(holdText(named, true), /couldn't be restored after a server update \(trades newer than the last valuation\).*Wallet → Start over/);
+    assert.match(holdNoticeText(named, true), /Wallet → Start over/);
+    assert.doesNotMatch(holdText(named, false), /Start over/);
   });
 });
 

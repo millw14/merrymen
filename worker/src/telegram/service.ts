@@ -272,6 +272,13 @@ interface StaleBatch {
   told: Set<string>;
   /** Per chat, how many messages were held back and the oldest one's date. */
   held: Map<number, { n: number; oldest: number }>;
+  /**
+   * This batch was asked for from no saved offset, by the first good poll of
+   * this bot in this process (polledBot), so it may hold the last batch a
+   * process before this one ran: say so, rather than that none of it was
+   * acted on (staleSummaryText).
+   */
+  blind: boolean;
 }
 
 function heldPerChat(stale: TgMessage[], cfg: ResolvedConfig): Map<number, { n: number; oldest: number }> {
@@ -295,10 +302,38 @@ function utcStamp(sec: number, nowSec: number): string {
   return `${MONTHS[Number(d.slice(5, 7)) - 1]} ${Number(d.slice(8, 10))} ${hm}`;
 }
 
-/** The one note an allowlisted chat gets about what it sent while the bot was not listening. */
-function staleSummaryText(n: number, oldest: number, nowSec: number): string {
+/**
+ * The one note an allowlisted chat gets about what it sent while the bot was
+ * not listening.
+ *
+ * "I DIDN'T ACT ON IT" IS SAID ONLY WHERE IT IS KNOWN. Telegram confirms an
+ * update only when a later getUpdates asks past it, so the last batch a
+ * process handled is still pending there until its next poll (bindBot says
+ * the same of a switch). A redeploy in that window, the handling time plus
+ * POLL_GAP_MS, perhaps in the middle of the trade itself, wipes the home and
+ * the offset with it (orchestrator.ts restoredTelegramFile restores none), and
+ * the next process asks from 0 and is handed that batch again. The date rule
+ * holds it back, rightly; but told "I didn't act on it — resend", an owner
+ * whose /buy had filled before the redeploy, with the reply lost to it, would
+ * buy twice.
+ *
+ * So for a batch asked for from no saved offset (`blind`), the note says what
+ * this process can know: it has done nothing with them, and they may have
+ * gone through before, so look before resending a trade or a transfer. With
+ * an offset saved, every update handed back is past everything handled under
+ * it (the offset is saved before each update runs), and the plain claim is
+ * true.
+ */
+function staleSummaryText(n: number, oldest: number, nowSec: number, blind: boolean): string {
   const what = n === 1 ? "1 message arrived late" : `${n} messages arrived late`;
-  return `I was offline; ${what} (oldest ${utcStamp(oldest, nowSec)}). I didn't act on ${n === 1 ? "it" : "them"} — resend anything you still need.`;
+  const them = n === 1 ? "it" : "them";
+  if (blind) {
+    return (
+      `I've just come back online; ${what} (oldest ${utcStamp(oldest, nowSec)}). I haven't acted on ${them} since, ` +
+      `but ${n === 1 ? "it" : "some"} may have gone through just before I went offline — check /status and /trades before you resend a trade or a transfer.`
+    );
+  }
+  return `I was offline; ${what} (oldest ${utcStamp(oldest, nowSec)}). I didn't act on ${them} — resend anything you still need.`;
 }
 /** Anything else an allowlisted chat sent the bot before this agent was switched onto it (holdEarly). */
 const EARLY_HELD_TEXT =
@@ -422,6 +457,15 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * waited out a silence, and pollOnce holds it back.
    */
   let armedAt: number | null = null;
+  /**
+   * The bot this process has had a good poll of. Until it has, a poll from
+   * no saved offset (0: a first start, or a home a redeploy wiped) is handed
+   * everything Telegram still holds, which may include the last batch a
+   * process before this one handled: Telegram had not been told it was done
+   * (staleSummaryText). Once one such poll has come back, whatever was
+   * pending before it has been handed over, and no later batch can hold it.
+   */
+  let polledBot: string | null = null;
   /**
    * When this process stopped hearing the bot, unix seconds: the first poll
    * since the last good one that failed or threw. Null while polls work. Not
@@ -1780,7 +1824,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    *   restart, including a trade or a transfer that had already gone through.
    *   A command lost to a crash can be sent again; one run twice cannot be
    *   undone. After a redeploy that wipes the offset, the date rule above is
-   *   what stops the replayed backlog from running.
+   *   what stops the replayed backlog from running, and the note it sends
+   *   does not claim that none of it ran before (staleSummaryText).
    * - The allowlist is read per update, so a chat removed on the dashboard is
    *   refused from its next message, not after the rest of a batch that can
    *   run to a hundred.
@@ -1819,7 +1864,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // typed; that message is live, and the answer's own clock would call it
     // late whenever the reply crossed a second.
     const askedAt = now();
-    const polled = await getUpdates({ token }, stateRef.get().offset);
+    const askedFrom = stateRef.get().offset;
+    const polled = await getUpdates({ token }, askedFrom);
     if (polled.reason) return pollFailed(polled, token);
     pollWorked(token);
     // The backlog rule's silence: this poll ends one long enough that what
@@ -1828,6 +1874,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     deafSince = null;
     if (armedAt === null) armedAt = askedAt;
     const armed = armedAt;
+    const bot = botIdOf(token);
+    const blind = askedFrom === 0 && polledBot !== bot;
+    polledBot = bot;
     const { messages, callbacks, members, service, nextOffset } = polled;
     // Who the bot is, before a group line is read against it: first poll,
     // a new token, or half an hour since the last look (in the background).
@@ -1851,7 +1900,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // counted into the one summary each allowlisted chat gets, with the late
     // group commands that would have been answered in one (groupCommandDm).
     const lateDms = messages.filter((m) => stale(m.date)).map((m) => (isGroupMessage(m) ? groupCommandDm(m, cfg) : m));
-    const batch: StaleBatch = { told: new Set(), held: heldPerChat(lateDms.filter((m): m is TgMessage => m !== null), cfg) };
+    const batch: StaleBatch = {
+      told: new Set(),
+      held: heldPerChat(lateDms.filter((m): m is TgMessage => m !== null), cfg),
+      blind,
+    };
     /**
      * WHERE A MESSAGE GOES. A DM goes to `handle` exactly as it always has
      * (the owner's /groups aside), or, when it waited out a silence or reached
@@ -2005,7 +2058,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    *   /confirm, which must be sent live. Everything else is held back: trades,
    *   transfers, /confirm, settings, and anything a model would answer. One
    *   summary per chat says how many and since when, so the owner knows to
-   *   resend what they still want.
+   *   resend what they still want; after a start from no saved offset it
+   *   says they may have gone through already (staleSummaryText).
    */
   const holdStale = async (msg: TgMessage, cfg: ResolvedConfig, batch: StaleBatch): Promise<void> => {
     const token = cfg.telegramBotToken!;
@@ -2028,7 +2082,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       // part way through (a live /link earlier in it) was counted as refused
       // there, so it falls back to this one message.
       const held = batch.held.get(msg.chatId) ?? { n: 1, oldest: msg.date };
-      reply = staleSummaryText(held.n, held.oldest, now());
+      reply = staleSummaryText(held.n, held.oldest, now(), batch.blind);
     }
     await sendMessage({ token }, msg.chatId, reply);
   };
