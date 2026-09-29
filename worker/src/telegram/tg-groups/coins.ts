@@ -40,6 +40,27 @@
  * while the first is still typing, and a line that never went out does not
  * use up the hour.
  *
+ * NEVER ON THE CHAT'S QUEUE FOR LONG. A look reads the chain and
+ * GeckoTerminal, and on a bad day those reads are declined, rate-limited or
+ * simply never answer. The handler's per-chat queue runs one line at a time,
+ * so a look awaited there held every later line of that chat — the owner's
+ * "@bot didnt you see?" included — until it went stale and was dropped. So
+ * `begin` decides at once whether the flow owns a line (nothing it decides
+ * needs a read), and the rest of a CA's work — its claim, its look, its lines,
+ * its nomination — runs on this chat's COIN LANE: serial per chat, so two
+ * posts of one coin are still looked at in order and the second is answered
+ * from memory, but apart from the chatter queue. And a look is bounded
+ * (COIN_FLOW.lookMs): past it the answer is `unknown`, whatever the port does.
+ *
+ * AND THE LANE SERVES WHOEVER ASKED FIRST. One shill's backlog of CAs must
+ * not make the owner's "@bot what about <CA>" wait past the handler's send
+ * window: a post that addresses the agent, or is the owner's, is worked
+ * before anyone else's that is still waiting (in order among equals); a post
+ * whose reply window has run out is claimed and not looked at, so a backlog
+ * drains instead of spending the look allowance on lines that would be
+ * dropped; and past COIN_FLOW.laneMax waiting, nobody's-asked posts are
+ * claimed and let go.
+ *
  * NAMING: never write the web room's name (group + chat, joined or separated)
  * in code here. See types.ts.
  */
@@ -101,6 +122,35 @@ export const COIN_FLOW = {
   candidateMaxMs: 20 * MIN,
   /** How often the port is re-read, so a trading restart's new port gets subscribed. */
   portCheckMs: 60_000,
+  /**
+   * The longest one look is waited for. The look bounds each of its own reads
+   * (tg-coin-look.ts COIN_LOOK.readMs / poolsMs); this bounds the port as a
+   * whole, so a look that never answers is `unknown` after this and holds
+   * neither its post nor the chat's coin lane behind it.
+   */
+  lookMs: 10_000,
+  /**
+   * Not in the contract: what a coin line needs once its look is back — the
+   * typing it shows (at most 9 s, pacing.ts) and the gap between two sends to
+   * a chat (3 s). A post whose reply window (CoinPostInfo.replyByMs) leaves
+   * less than this is past answering, and a look is cut to end this long
+   * before the window does.
+   */
+  lineMs: 12_000,
+  /** Not in the contract: the shortest look worth starting inside a post's reply window. */
+  lookMinMs: 2_000,
+  /**
+   * Not in the contract: posts that may wait on one chat's coin lane. Past
+   * it, a post that neither addresses it nor is the owner's is claimed and
+   * nothing more, so a raid of CAs cannot bury the post somebody asked about.
+   */
+  laneMax: 12,
+  /**
+   * "can't pull that one up rn": an ADDRESSED post whose CA could not be
+   * looked at gets it, at most once per chat this often. Unaddressed, the
+   * same failed look is silence.
+   */
+  unknownLineMs: 10 * MIN,
 } as const;
 
 /**
@@ -117,6 +167,7 @@ export type CoinIntent =
   | { kind: "coin-skipped" }
   | { kind: "coin-exited"; notes: string[] }
   | { kind: "coin-cap" }
+  | { kind: "coin-unknown" }
   | { kind: "drop-ca" }
   | { kind: "ready-ask" }
   | { kind: "ready-nudge" }
@@ -153,6 +204,65 @@ export interface CoinFlowDeps {
   now: () => number;
   /** One line, never carrying message text, addresses, titles or names. */
   log: (s: string) => void;
+  /**
+   * Resolves once `ms` have passed: what bounds a look (COIN_FLOW.lookMs).
+   * Real time when absent. Injectable so a test can end a look that never
+   * answers without waiting for it, on a clock of its own.
+   */
+  timer?: (ms: number) => Promise<void>;
+}
+
+/**
+ * WHY A POST ENDED WITH NOTHING SAID OR SET ON IT: a stable code for the
+ * handler's one diagnostic line ("[tg-groups] addressed line got nothing
+ * (coin-unknown)"). Never the text, an address or a name.
+ *
+ * - `coin-not-here`: not a Robinhood Chain coin — another chain's link or
+ *   mint, a wallet, not a token. Silence by rule.
+ * - `coin-unknown`: the look could not be made (reads failed or timed out, an
+ *   allowance spent), and "can't pull that one up rn" was not said (the post
+ *   did not address it, or the line was used in the last 10 minutes).
+ * - `coin-off`, `coin-stale`, `coin-no-port`: no look was made. `coin-stale`
+ *   is also a post that waited on the coin lane past its reply window.
+ * - `coin-busy`: the chat's coin lane was full (COIN_FLOW.laneMax); a post
+ *   that neither addresses it nor is the owner's was claimed and let go.
+ * - `coin-replay`: already claimed (a redelivered update, or a claim that
+ *   could not be written).
+ * - `coin-rate`: the once-per-window line it would have said was used.
+ * - `coin-refused`: a nomination refusal that is silent by rule.
+ * - `forgotten`, `room-not-approved`: asked to forget, or the room left.
+ * - `send-failed`: a line was due and did not go out (the handler knows why).
+ */
+export type CoinQuiet =
+  | "coin-not-here"
+  | "coin-unknown"
+  | "coin-off"
+  | "coin-stale"
+  | "coin-busy"
+  | "coin-no-port"
+  | "coin-replay"
+  | "coin-rate"
+  | "coin-refused"
+  | "forgotten"
+  | "room-not-approved"
+  | "send-failed";
+
+/** What a post's work came to. `acted`: a line or a reaction for it went out. */
+export interface CoinPostEnd {
+  acted: boolean;
+  /** Why nothing went out, when nothing did. */
+  quiet?: CoinQuiet;
+}
+
+/**
+ * `onPost` in its two halves. `owned` is known at once: "handled" means the
+ * flow owns the line and nothing else answers it (see onPost). `done` is the
+ * rest of the post's work on the chat's coin lane — claims, looks, lines,
+ * nominations — and never rejects.
+ */
+export interface CoinPostStart {
+  owned: "handled" | "none";
+  done: Promise<CoinPostEnd>;
 }
 
 /** What the handler read off one message, for `onPost`. */
@@ -184,6 +294,16 @@ export interface CoinPostInfo {
   cashtags: string[];
   /** The line addresses the bot (mention, reply, name). */
   addressed: boolean;
+  /**
+   * The last moment a line answering this post can still go out (epoch ms):
+   * the handler's send window, STALE_MS after the line arrived. A post still
+   * waiting on the coin lane when less than COIN_FLOW.lineMs of it is left is
+   * claimed and nothing more — its lines would be dropped as stale, and a
+   * look for them would spend the look allowance for nothing — and a look
+   * made inside it is cut to leave that long. Absent: no window but the
+   * post's own staleness (COIN_FLOW.staleMs).
+   */
+  replyByMs?: number;
   /**
    * True once the sender has run /forgetme since this line arrived. A look
    * takes seconds; a person forgotten meanwhile must not have their name and
@@ -244,17 +364,52 @@ const FADED: ReadonlySet<CoinVerdict> = new Set<CoinVerdict>(["passed", "too-qui
 const CAP_REFUSALS: ReadonlySet<NominateRefusal> = new Set<NominateRefusal>(["busy", "chat-rate", "sender-rate", "daily"]);
 
 /** Room stamps the coin flow rate-limits on. */
-type StampField = "lastReadyAskAtMs" | "lastReadyNudgeAtMs" | "lastReadyDmAtMs" | "lastCapLineAtMs" | "lastDropCaAtMs";
+type StampField = "lastReadyAskAtMs" | "lastReadyNudgeAtMs" | "lastReadyDmAtMs" | "lastCapLineAtMs" | "lastDropCaAtMs" | "lastCoinUnknownAtMs";
+
+/** What `bounded` answers when the wait ran out first. */
+const TIMED_OUT: unique symbol = Symbol("timed out");
 
 /** The DM reason when the port's readiness could not be read: plain words and a Settings act, like OWNER_REASON's. */
 const NO_PORT_REASON = "I can't look at coins from your groups right now: check Trencher mode in Settings.";
 
 const SETTINGS_BUTTON = "⚙️ Open Settings";
 
-/** Per message: one reaction (Telegram keeps one per message anyway) and one readiness line. */
+/**
+ * Per message: one reaction (Telegram keeps one per message anyway) and one
+ * readiness line; and what came of it, for the handler's diagnostic line.
+ */
 interface PostCtx {
   reacted: boolean;
   askedOwner: boolean;
+  /** A line or a reaction for this post went out. */
+  acted: boolean;
+  /** A CA's look came back `unknown`: the reads failed, not "another chain's". */
+  unknown: boolean;
+  /** Why nothing went out, the latest reason. */
+  quiet?: CoinQuiet;
+}
+
+/** One post's work waiting on its chat's coin lane. */
+interface LaneJob {
+  /** Who is served first (CoinFlow.rankOf): higher first, then in arrival order. */
+  rank: number;
+  run: () => Promise<CoinPostEnd>;
+  done: (end: CoinPostEnd) => void;
+}
+
+/** A chat's coin lane: the post being worked, and the posts waiting. */
+interface Lane {
+  busy: Promise<void> | null;
+  waiting: LaneJob[];
+}
+
+/** True once the sender asked to be forgotten. A predicate that throws reads as forgotten. */
+function goneOf(m: CoinPostInfo): boolean {
+  try {
+    return typeof m.forgotten === "function" && m.forgotten() === true;
+  } catch {
+    return true;
+  }
 }
 
 const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -376,6 +531,22 @@ export class CoinFlow {
    * has no field for it, and a restart costs one extra line at most.
    */
   private readonly seenSaidAt = new Map<string, { at: number; eyed: boolean }>();
+  /**
+   * Each chat's coin lane: one post worked at a time, the rest waiting in the
+   * order they are served (onLane). A chat with nothing on its lane has no
+   * entry.
+   */
+  private readonly lanes = new Map<number, Lane>();
+  /**
+   * Acks still going out, per `${chatId}:${address}`. An outcome for that coin
+   * waits for its ack, so "ok grabbed a little" never lands before "hmm
+   * lemme look".
+   */
+  private readonly acks = new Map<string, Promise<unknown>>();
+  /** stop() was called: work still on a lane does nothing more. */
+  private halted = false;
+  /** Outcomes heard through the port and still being said, so drain() can wait for them. */
+  private readonly hearing = new Set<Promise<void>>();
 
   constructor(private readonly d: CoinFlowDeps) {}
 
@@ -391,6 +562,7 @@ export class CoinFlow {
   /** Unsubscribe and stop the timer. Outcomes that arrive after this are not heard. */
   stop(): void {
     this.running = false;
+    this.halted = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.dropSubscription();
@@ -408,12 +580,32 @@ export class CoinFlow {
    * normal answer once "drop the ca" has been used up for the hour.
    */
   async onPost(chatId: number, line: TgLine, m: CoinPostInfo): Promise<"handled" | "none"> {
+    const post = await this.begin(chatId, line, m);
+    await post.done;
+    return post.owned;
+  }
+
+  /**
+   * `onPost` WITHOUT WAITING FOR THE READS: what the handler calls from the
+   * chat's serial queue. Whether the flow owns the line is decided here and at
+   * once — nothing that decides it needs a read — and the rest of the post's
+   * work goes on this chat's coin lane (`done`), so a look that hangs never
+   * holds the chat's next line. At-most-once is unchanged: each CA is still
+   * claimed on disk before anything else happens to it, on the lane, in order.
+   * A "$PEPE?" with no CA is answered here ("drop the ca" reads nothing).
+   * Never throws, and `done` never rejects.
+   */
+  async begin(chatId: number, line: TgLine, m: CoinPostInfo): Promise<CoinPostStart> {
+    const none: CoinPostStart = { owned: "none", done: Promise.resolve({ acted: false }) };
     let owned = false;
     try {
       this.watchPort();
-      if (!this.approvedRoom(chatId) || !line || typeof line !== "object" || !m || typeof m !== "object") return "none";
+      if (!this.approvedRoom(chatId) || !line || typeof line !== "object" || !m || typeof m !== "object") return none;
       const posted = cleanCas(m.cas, COIN_FLOW.maxPosted);
-      if (posted.length === 0) return await this.noCa(chatId, line, m);
+      if (posted.length === 0) {
+        const r = await this.noCa(chatId, line, m);
+        return { owned: r.owned, done: Promise.resolve(r.end) };
+      }
       owned = true;
       // A CA in another chain's link is set aside before the first two are
       // counted: "live on eth, bsc and robinhood" with three links still gets
@@ -421,24 +613,143 @@ export class CoinFlow {
       // look, no memo — there is nothing a replay of it could repeat.
       const elsewhere = new Set(cleanCas(m.otherChain, COIN_FLOW.maxPosted));
       const cas = posted.filter((a) => !elsewhere.has(a)).slice(0, COIN_FLOW.maxCas);
-      const ctx: PostCtx = { reacted: false, askedOwner: false };
-      for (const address of cas) {
-        // The first CA's look may have taken seconds; a room left meanwhile
-        // gets nothing more, not even a claim.
-        if (!this.approvedRoom(chatId)) break;
-        // Each CA on its own: a failure with the first must not cost the second its claim.
-        try {
-          if (!this.d.store.claim(chatId, line.messageId, address)) continue;
-          await this.oneCa(chatId, line, m, address, ctx);
-        } catch (e) {
-          this.fail("post", e);
-        }
+      if (cas.length === 0) return { owned: "handled", done: Promise.resolve({ acted: false, quiet: "coin-not-here" }) };
+      const rank = this.rankOf(m);
+      // A FULL LANE sheds the posts nobody asked about: claimed, so a replay
+      // repeats nothing, and nothing more — never looked at, so never shown
+      // to be a Robinhood Chain coin, nominated or remembered, like a stale one.
+      if (rank === 0 && (this.lanes.get(chatId)?.waiting.length ?? 0) >= COIN_FLOW.laneMax) {
+        for (const address of cas) this.d.store.claim(chatId, line.messageId, address);
+        return { owned: "handled", done: Promise.resolve({ acted: false, quiet: "coin-busy" }) };
       }
-      return "handled";
+      return { owned: "handled", done: this.onLane(chatId, rank, () => this.work(chatId, line, m, cas)) };
     } catch (e) {
       this.fail("post", e);
-      return owned ? "handled" : "none";
+      return owned ? { owned: "handled", done: Promise.resolve({ acted: false, quiet: "send-failed" }) } : none;
     }
+  }
+
+  /** Resolves once every post's work on a lane, and every outcome being said, has settled. For tests and shutdown. */
+  async drain(): Promise<void> {
+    for (let i = 0; i < 1_000 && !this.idle(); i++) {
+      await Promise.allSettled([...[...this.lanes.values()].map((l) => l.busy ?? Promise.resolve()), ...this.hearing]);
+    }
+  }
+
+  /** Nothing on any lane, and no outcome being said. */
+  idle(): boolean {
+    return this.lanes.size === 0 && this.hearing.size === 0;
+  }
+
+  /** One post's CAs, in order, on its chat's lane. */
+  private async work(chatId: number, line: TgLine, m: CoinPostInfo, cas: readonly string[]): Promise<CoinPostEnd> {
+    const ctx: PostCtx = { reacted: false, askedOwner: false, acted: false, unknown: false };
+    for (const address of cas) {
+      if (this.halted) break;
+      // The first CA's look may have taken seconds, and this post may have
+      // waited behind another one's: a room left meanwhile gets nothing
+      // more, not even a claim, and neither does someone forgotten meanwhile.
+      if (!this.approvedRoom(chatId)) {
+        ctx.quiet = "room-not-approved";
+        break;
+      }
+      if (goneOf(m)) {
+        ctx.quiet = "forgotten";
+        break;
+      }
+      // Each CA on its own: a failure with the first must not cost the second its claim.
+      try {
+        if (!this.d.store.claim(chatId, line.messageId, address)) {
+          ctx.quiet = "coin-replay";
+          continue;
+        }
+        await this.oneCa(chatId, line, m, address, ctx);
+      } catch (e) {
+        this.fail("post", e);
+      }
+    }
+    if (!this.halted && !ctx.acted && ctx.unknown && m.addressed === true) await this.cannotLook(chatId, line, m, ctx);
+    return ctx.acted ? { acted: true } : { acted: false, ...(ctx.quiet ? { quiet: ctx.quiet } : {}) };
+  }
+
+  /**
+   * Put `job` on this chat's coin lane. One post at a time per chat, so a
+   * coin's second post finds the first one's memo; parallel across chats and
+   * apart from the handler's chatter queue. Of the posts waiting, the highest
+   * `rank` goes next and equals go in arrival order: an owner asking about a
+   * CA is not served after a shill's backlog. Never rejects.
+   */
+  private onLane(chatId: number, rank: number, job: () => Promise<CoinPostEnd>): Promise<CoinPostEnd> {
+    return new Promise<CoinPostEnd>((done) => {
+      let lane = this.lanes.get(chatId);
+      if (!lane) this.lanes.set(chatId, (lane = { busy: null, waiting: [] }));
+      lane.waiting.push({ rank, run: job, done });
+      this.nextOnLane(chatId);
+    });
+  }
+
+  /** Start the next post on this chat's lane when none is being worked; drop the lane once it is empty. */
+  private nextOnLane(chatId: number): void {
+    const lane = this.lanes.get(chatId);
+    if (!lane || lane.busy) return;
+    let at = -1;
+    for (let i = 0; i < lane.waiting.length; i++) if (at < 0 || lane.waiting[i]!.rank > lane.waiting[at]!.rank) at = i;
+    const job = at >= 0 ? lane.waiting.splice(at, 1)[0] : undefined;
+    if (!job) {
+      this.lanes.delete(chatId);
+      return;
+    }
+    lane.busy = (async () => {
+      let end: CoinPostEnd;
+      try {
+        end = await job.run();
+      } catch (e) {
+        this.fail("post", e);
+        end = { acted: false, quiet: "send-failed" };
+      }
+      job.done(end);
+    })().finally(() => {
+      lane.busy = null;
+      this.nextOnLane(chatId);
+    });
+  }
+
+  /**
+   * Who is served first on the lane: a post that addresses the agent (2), the
+   * owner's (1), both (3), anyone else's (0). Read off the post, never its text.
+   */
+  private rankOf(m: CoinPostInfo): number {
+    const owner = this.ownerIdNow();
+    return (m.addressed === true ? 2 : 0) + (owner !== null && m.senderId === owner ? 1 : 0);
+  }
+
+  /**
+   * How long this post's reply window has left (CoinPostInfo.replyByMs), or
+   * Infinity when it has none.
+   */
+  private windowLeft(m: CoinPostInfo): number {
+    return isNum(m.replyByMs) ? m.replyByMs - this.d.now() : Infinity;
+  }
+
+  /**
+   * "CAN'T PULL THAT ONE UP RN". Someone asked it about a CA and the look
+   * could not be made: the reads failed or timed out, not "another chain's
+   * coin" (that is `wallet` and stays silent). Leaving the person who asked on
+   * read is what made the agent look broken, so it says so, casually, from a
+   * template: no verdict, no reason, nothing about which chain. At most once
+   * per chat per COIN_FLOW.unknownLineMs; nothing is remembered, so a repost
+   * gets a fresh look.
+   */
+  private async cannotLook(chatId: number, line: TgLine, m: CoinPostInfo, ctx: PostCtx): Promise<void> {
+    ctx.quiet = "coin-unknown";
+    if (goneOf(m) || !this.approvedRoom(chatId) || !this.coinsOn()) return;
+    const tag = isInt(m.senderId) && typeof m.senderName === "string" && m.senderName ? { id: m.senderId, name: m.senderName } : undefined;
+    await this.once(
+      chatId,
+      "lastCoinUnknownAtMs",
+      (r, t) => elapsed(r.lastCoinUnknownAtMs, t, COIN_FLOW.unknownLineMs),
+      () => this.say(chatId, { kind: "coin-unknown" }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}) }, ctx),
+    );
   }
 
   /**
@@ -483,6 +794,9 @@ export class CoinFlow {
       // that was never a nomination) is ignored. The verdict moves BEFORE the
       // line is awaited, so a duplicate arriving meanwhile finds it moved.
       if (memo.verdict !== "candidate") return;
+      // Its ack may still be going out (a fast Brain): the verdict moves now,
+      // the line waits for the ack (ackOf).
+      const ack = this.ackOf(chatId, out.chatId, memo.address);
       switch (out.kind) {
         case "bought":
           this.d.store.updateCoin(chatId, address, {
@@ -490,6 +804,7 @@ export class CoinFlow {
             ...(out.decisionId ? { decisionId: out.decisionId } : {}),
             paper: out.paper ? true : undefined,
           });
+          if (ack) await ack;
           if (!quiet) await this.say(chatId, { kind: "coin-bought", paper: out.paper, notes: out.notes }, opts);
           return;
         case "passed":
@@ -497,6 +812,7 @@ export class CoinFlow {
             verdict: "passed",
             ...(out.decisionId ? { decisionId: out.decisionId } : {}),
           });
+          if (ack) await ack;
           if (!quiet) await this.say(chatId, { kind: "coin-passed", notes: out.notes }, opts);
           return;
         case "skipped":
@@ -504,10 +820,12 @@ export class CoinFlow {
             verdict: "skipped",
             ...(out.decisionId ? { decisionId: out.decisionId } : {}),
           });
+          if (ack) await ack;
           if (!quiet) await this.say(chatId, { kind: "coin-skipped" }, opts);
           return;
         case "expired": {
           this.d.store.updateCoin(chatId, address, { verdict: "expired" });
+          if (ack) await ack;
           // "or silence if the chat moved on": nobody has spoken for half an
           // hour, so a line about a coin from then would be talking to itself.
           const t = this.d.now();
@@ -550,26 +868,27 @@ export class CoinFlow {
 
   // ─── A line with no CA ────────────────────────────────────────────────────
 
-  private async noCa(chatId: number, line: TgLine, m: CoinPostInfo): Promise<"handled" | "none"> {
+  private async noCa(chatId: number, line: TgLine, m: CoinPostInfo): Promise<{ owned: "handled" | "none"; end: CoinPostEnd }> {
+    const none = { owned: "none" as const, end: { acted: false } };
     // ANOTHER CHAIN'S COIN with no EVM address (a Solana mint, a TON
     // address, a DexScreener Solana pair link…). Owned, so the chatter path
     // does not talk about it either, and nothing is said: coins on or off,
     // fresh or stale. Not "drop the ca" for a ticker beside it: they did drop one.
-    if (m.foreignMint === true) return "handled";
+    if (m.foreignMint === true) return { owned: "handled", end: { acted: false, quiet: "coin-not-here" } };
     // Coins off is "no look, no ask": asking for a CA is asking to look.
-    if (!this.coinsOn()) return "none";
+    if (!this.coinsOn()) return none;
     // An old line from a redelivered batch gets no coin line either.
-    if (this.isStale(line, m)) return "none";
+    if (this.isStale(line, m)) return none;
     const tags = Array.isArray(m.cashtags) ? m.cashtags.filter((t) => typeof t === "string" && t.length > 0) : [];
-    if (tags.length === 0) return "none";
-    if (m.addressed !== true && !onlyCashtags(line.text)) return "none";
+    if (tags.length === 0) return none;
+    if (m.addressed !== true && !onlyCashtags(line.text)) return none;
     const said = await this.once(
       chatId,
       "lastDropCaAtMs",
       (r, t) => elapsed(r.lastDropCaAtMs, t, COIN_FLOW.dropCaMs),
       () => this.say(chatId, { kind: "drop-ca" }, { replyTo: line.messageId, trigger: line }),
     );
-    return said ? "handled" : "none";
+    return said ? { owned: "handled", end: { acted: true } } : none;
   }
 
   // ─── One claimed CA ───────────────────────────────────────────────────────
@@ -579,12 +898,9 @@ export class CoinFlow {
     const postedAt = this.postedAt(line, m);
     // Asked at every step, not once: a look takes seconds, and /forgetme
     // can land while it is out. A predicate that throws reads as forgotten.
-    const gone = (): boolean => {
-      try {
-        return typeof m.forgotten === "function" && m.forgotten() === true;
-      } catch {
-        return true;
-      }
+    const gone = (): boolean => goneOf(m);
+    const hush = (why: CoinQuiet): void => {
+      ctx.quiet = why;
     };
     // Forgotten meanwhile: the coin and its verdict are kept, who posted it
     // is not, exactly as /forgetme leaves every memo it finds.
@@ -600,19 +916,27 @@ export class CoinFlow {
     const tagSender = (): CoinSpeakOpts["mention"] =>
       !gone() && isInt(m.senderId) && typeof m.senderName === "string" && m.senderName ? { id: m.senderId, name: m.senderName } : undefined;
     // Nothing is said, or reacted, to a post whose sender asked to be forgotten.
-    const say = (intent: CoinIntent, o: CoinSpeakOpts): Promise<boolean> => (gone() ? Promise.resolve(false) : this.say(chatId, intent, o));
+    const say = (intent: CoinIntent, o: CoinSpeakOpts): Promise<boolean> => {
+      if (gone()) {
+        hush("forgotten");
+        return Promise.resolve(false);
+      }
+      return this.say(chatId, intent, o, ctx);
+    };
     const eyes = (): Promise<void> => (gone() ? Promise.resolve() : this.eyes(chatId, line.messageId, ctx));
 
     // 1. Stale: claimed, and nothing more. Never looked at, so never shown to
     // be a Robinhood Chain coin: not nominated, not answered, not remembered.
     // An existing memo is kept — it may be waiting for an outcome, and this
-    // post changes nothing.
-    if (this.isStale(line, m)) return;
+    // post changes nothing. The same for a post that waited on the lane until
+    // its reply window ran out: every line for it would be dropped as stale,
+    // and a look for them would spend the look allowance for nothing.
+    if (this.isStale(line, m) || this.windowLeft(m) < COIN_FLOW.lineMs) return hush("coin-stale");
 
     // 2. Coins off: silence, not even a 👀 — without a look nothing shows
     // this is a Robinhood Chain coin at all — and no answer from memory
     // either, which is a coin opinion too.
-    if (!this.coinsOn()) return;
+    if (!this.coinsOn()) return hush("coin-off");
 
     // 3. Seen here within 24 h as a Robinhood Chain coin: answered from
     // memory, replying to the new post. The memo stays the original one: it
@@ -620,22 +944,34 @@ export class CoinFlow {
     // will look for.
     const prior = d.store.coin(chatId, address, COIN_FLOW.seenMs);
     if (prior && !NOT_ANSWERED.has(prior.verdict)) {
-      await this.fromMemory(chatId, address, line, prior, say, eyes);
+      await this.fromMemory(chatId, address, line, prior, say, eyes, ctx);
       return;
     }
 
     // 4. The quick look, READY OR NOT: it is what says whether the address is
     // a Robinhood Chain coin, and the port's look does not depend on trencher
-    // mode. No port, no look, and nothing to say.
+    // mode. No port, no look, and nothing to say. Bounded: a look that never
+    // answers is `unknown` after COIN_FLOW.lookMs.
     const port = this.portNow();
-    if (!port) return;
-    const look = await this.lookAt(port, address);
+    if (!port) return hush("coin-no-port");
+    // Inside the reply window, leaving a line the time it needs; a window
+    // with no room for a look worth making is past answering.
+    const lookMs = Math.min(COIN_FLOW.lookMs, this.windowLeft(m) - COIN_FLOW.lineMs);
+    if (lookMs < COIN_FLOW.lookMinMs) return hush("coin-stale");
+    const look = await this.lookAt(port, address, lookMs);
     // The look took a while: the room may have been left, or coins switched off.
-    if (!this.approvedRoom(chatId) || !this.coinsOn()) return;
+    if (!this.approvedRoom(chatId)) return hush("room-not-approved");
+    if (!this.coinsOn()) return hush("coin-off");
     // Not a Robinhood Chain coin (a wallet, another chain's token: no code
     // here), not a token, or not provably anything: silence, and no memo, so
-    // nothing is ever said from it and a repost gets a fresh look.
-    if (NOT_A_COIN_HERE.has(look.kind)) return;
+    // nothing is ever said from it and a repost gets a fresh look. A look
+    // that could not be made is noted: an addressed post whose looks all
+    // failed gets "can't pull that one up rn" (cannotLook), never a verdict.
+    if (look.kind === "unknown") {
+      ctx.unknown = true;
+      return hush("coin-unknown");
+    }
+    if (NOT_A_COIN_HERE.has(look.kind)) return hush("coin-not-here");
     const coinName = look.name ? { coinName: look.name } : {};
 
     // A CHART LINK CARRIES THE POOL. When the look proved the posted address
@@ -645,10 +981,10 @@ export class CoinFlow {
     // posted beside its own chart link is one coin, not two.
     const coin = look.address ?? address;
     if (coin !== address) {
-      if (!d.store.claim(chatId, line.messageId, coin)) return;
+      if (!d.store.claim(chatId, line.messageId, coin)) return hush("coin-replay");
       const seen = d.store.coin(chatId, coin, COIN_FLOW.seenMs);
       if (seen && !NOT_ANSWERED.has(seen.verdict)) {
-        await this.fromMemory(chatId, coin, line, seen, say, eyes);
+        await this.fromMemory(chatId, coin, line, seen, say, eyes, ctx);
         return;
       }
     }
@@ -677,14 +1013,15 @@ export class CoinFlow {
     const readiness = this.readinessOf(port);
     if (!readiness || !READY.has(readiness.kind)) {
       d.store.rememberCoin(chatId, memo("not-ready", look.name, coin));
-      if (!gone()) await this.askOwner(chatId, line, readiness, ctx);
+      if (gone()) return hush("forgotten");
+      await this.askOwner(chatId, line, readiness, ctx);
       return;
     }
 
     // Forgotten while the look was out: their id is not handed across in a
     // nomination either. No memo, like a capped coin: nothing was reviewed,
     // and a later post of it gets its turn.
-    if (gone()) return;
+    if (gone()) return hush("forgotten");
 
     // 6. Nominate: the address and where it came from, nothing else.
     const res = this.nominateVia(port, {
@@ -695,32 +1032,43 @@ export class CoinFlow {
       atMs: postedAt,
     });
     if (res.ok) {
-      // 7. Ack, thinking out loud; the verdict comes with the outcome.
+      // 7. Ack, thinking out loud; the verdict comes with the outcome, which
+      // waits for this ack to settle (ackFirst) so the two never swap places.
       d.store.rememberCoin(chatId, memo("candidate", look.name, coin));
       const tag = tagSender();
-      await say({ kind: "coin-ack" }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
+      const k = `${chatId}:${coin}`;
+      const ack = say({ kind: "coin-ack" }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...coinName });
+      this.acks.set(k, ack);
+      try {
+        await ack;
+      } finally {
+        if (this.acks.get(k) === ack) this.acks.delete(k);
+      }
       return;
     }
     if (CAP_REFUSALS.has(res.reason)) {
       // No memo: a capped coin was not looked at by the Brain, and a repost
       // once the queue has room should get its turn rather than an answer
       // from memory.
-      await this.once(
+      const said = await this.once(
         chatId,
         "lastCapLineAtMs",
         (r, t) => elapsed(r.lastCapLineAtMs, t, COIN_FLOW.capLineMs),
         () => say({ kind: "coin-cap" }, { replyTo: line.messageId, trigger: line }),
       );
+      if (!said) hush("coin-rate");
       return;
     }
     if (res.reason === "recent") {
       // Recent in the book. Answered from memory only when the memory is this
       // chat's: a coin another group nominated is never mentioned here.
       const mine = d.store.coin(chatId, coin);
-      if (mine && !NOT_ANSWERED.has(mine.verdict)) await this.fromMemory(chatId, coin, line, mine, say, eyes);
+      if (mine && !NOT_ANSWERED.has(mine.verdict)) await this.fromMemory(chatId, coin, line, mine, say, eyes, ctx);
+      else hush("coin-refused");
       return;
     }
     // invalid / not-ready (readiness changed during the look): silence.
+    hush("coin-refused");
   }
 
   /**
@@ -737,6 +1085,7 @@ export class CoinFlow {
     memo: TgCoinMemo,
     say: (intent: CoinIntent, o: CoinSpeakOpts) => Promise<boolean>,
     eyes: () => Promise<void>,
+    ctx: PostCtx,
   ): Promise<void> {
     const k = `${chatId}:${address}`;
     const t = this.d.now();
@@ -746,6 +1095,7 @@ export class CoinFlow {
         prev.eyed = true;
         await eyes();
       }
+      if (!ctx.acted) ctx.quiet = "coin-rate";
       return;
     }
     const mine = { at: t, eyed: false };
@@ -794,6 +1144,7 @@ export class CoinFlow {
           chatId,
           { kind: "ready-ask" },
           { replyTo: line.messageId, mention: { id: ownerId, name: ownerName }, trigger: line },
+          ctx,
         ),
     );
     if (!said) {
@@ -802,10 +1153,11 @@ export class CoinFlow {
         "lastReadyNudgeAtMs",
         (r, t) =>
           elapsed(r.lastReadyNudgeAtMs, t, COIN_FLOW.readyNudgeMs) && elapsed(r.lastReadyAskAtMs, t, COIN_FLOW.readyNudgeMs),
-        () => this.say(chatId, { kind: "ready-nudge" }, { replyTo: line.messageId, trigger: line }),
+        () => this.say(chatId, { kind: "ready-nudge" }, { replyTo: line.messageId, trigger: line }, ctx),
       );
     }
     if (!said) await this.eyes(chatId, line.messageId, ctx);
+    if (!ctx.acted) ctx.quiet = "coin-rate";
 
     // The DM is about this room: a room left while the line was typing is not asked about.
     if (!this.approvedRoom(chatId)) return;
@@ -885,7 +1237,9 @@ export class CoinFlow {
     try {
       const unsub = p.onOutcome((o) => {
         if (!this.running || this.port !== p) return;
-        void this.onOutcome(o);
+        const heard = this.onOutcome(o);
+        this.hearing.add(heard);
+        void heard.finally(() => this.hearing.delete(heard));
       });
       this.unsub = typeof unsub === "function" ? unsub : null;
     } catch (e) {
@@ -926,9 +1280,16 @@ export class CoinFlow {
     }
   }
 
-  private async lookAt(port: TgCoinsPort, address: string): Promise<CoinLook> {
+  /** The port's look, bounded by `ms` (COIN_FLOW.lookMs, or less inside a reply window): `unknown` past it. */
+  private async lookAt(port: TgCoinsPort, address: string, ms: number): Promise<CoinLook> {
     try {
-      const l = await port.look(address);
+      const l = await this.bounded(Promise.resolve(port.look(address)), ms);
+      if (l === TIMED_OUT) {
+        // The stage only: which read hung is the look's business, and the
+        // address is never logged.
+        this.note("[tg-groups] coin flow: look timed out");
+        return { kind: "unknown" };
+      }
       if (!l || typeof l !== "object" || !KINDS.has(l.kind)) return { kind: "unknown" };
       const name = cleanName(l.name);
       // The coin a posted pool trades: well-formed like any CA, or not passed on.
@@ -993,15 +1354,26 @@ export class CoinFlow {
     return this.d.now() - this.postedAt(line, m) > COIN_FLOW.staleMs;
   }
 
-  /** One line in an approved room. False (never a throw) when it did not go out. */
-  private async say(chatId: number, intent: CoinIntent, o: CoinSpeakOpts): Promise<boolean> {
-    if (!this.approvedRoom(chatId)) return false;
-    try {
-      return (await this.d.speak(chatId, intent, o)) === true;
-    } catch (e) {
-      this.fail("speak", e);
+  /**
+   * One line in an approved room. False (never a throw) when it did not go
+   * out. With the post's ctx, what came of it is noted there.
+   */
+  private async say(chatId: number, intent: CoinIntent, o: CoinSpeakOpts, ctx?: PostCtx): Promise<boolean> {
+    let ok = false;
+    if (!this.approvedRoom(chatId)) {
+      if (ctx) ctx.quiet = "room-not-approved";
       return false;
     }
+    try {
+      ok = (await this.d.speak(chatId, intent, o)) === true;
+    } catch (e) {
+      this.fail("speak", e);
+    }
+    if (ctx) {
+      if (ok) ctx.acted = true;
+      else ctx.quiet = "send-failed";
+    }
+    return ok;
   }
 
   /** 👀 on the post, once per message, in an approved room. */
@@ -1010,10 +1382,60 @@ export class CoinFlow {
     ctx.reacted = true;
     if (!this.approvedRoom(chatId)) return;
     try {
-      await this.d.react(chatId, messageId, "👀");
+      if ((await this.d.react(chatId, messageId, "👀")) === true) ctx.acted = true;
     } catch (e) {
       this.fail("react", e);
     }
+  }
+
+  /**
+   * An outcome never goes out ahead of its own ack ("ok grabbed a little"
+   * before "hmm lemme look" reads backwards): the ack still going out for
+   * this coin, to wait for, or null when there is none — no wait at all then,
+   * so an outcome's line starts exactly when it did before. The ack is
+   * bounded like any line (typing, the flood pacer, staleness), so neither is
+   * this wait.
+   */
+  private ackOf(chatId: number, postedIn: number, address: string): Promise<unknown> | null {
+    const pending = [...new Set([chatId, postedIn])]
+      .map((id) => this.acks.get(`${id}:${address}`))
+      .filter((a): a is Promise<unknown> => a !== undefined);
+    return pending.length === 0 ? null : Promise.allSettled(pending);
+  }
+
+  /**
+   * `p`, or TIMED_OUT once `ms` have passed, whichever comes first. Real time
+   * unless the deps hand a timer; a real timer never keeps the process up and
+   * is cleared as soon as `p` settles.
+   */
+  private bounded<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+    const timer = this.d.timer;
+    if (typeof timer === "function") {
+      let over: Promise<typeof TIMED_OUT>;
+      try {
+        over = Promise.resolve(timer(ms)).then(
+          () => TIMED_OUT,
+          () => TIMED_OUT,
+        );
+      } catch {
+        over = Promise.resolve(TIMED_OUT);
+      }
+      return Promise.race([p, over]);
+    }
+    return new Promise<T | typeof TIMED_OUT>((resolve, reject) => {
+      const t = setTimeout(() => resolve(TIMED_OUT), ms);
+      t.unref?.();
+      p.then(
+        (v) => {
+          clearTimeout(t);
+          resolve(v);
+        },
+        (e: unknown) => {
+          clearTimeout(t);
+          reject(e);
+        },
+      );
+    });
   }
 
   /**
@@ -1048,6 +1470,15 @@ export class CoinFlow {
       });
     }
     return ok;
+  }
+
+  /** A content-free log line; a log that throws has nothing more to say. */
+  private note(s: string): void {
+    try {
+      this.d.log(s);
+    } catch {
+      /* nothing more to say */
+    }
   }
 
   /** The stage and the error class only: an error message can quote the text or the address. */

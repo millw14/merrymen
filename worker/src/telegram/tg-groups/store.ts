@@ -386,6 +386,7 @@ function parseRoom(v: unknown, keyHint: string): TgRoom | null {
     "lastReadyDmAtMs",
     "lastCapLineAtMs",
     "lastDropCaAtMs",
+    "lastCoinUnknownAtMs",
     "lastSummaryAtMs",
   ] as const) {
     const t = v[k];

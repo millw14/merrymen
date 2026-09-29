@@ -516,6 +516,51 @@ const SEP = "[^\\p{L}\\p{N}]+";
 const HAIL = "(?:hey|hi|hello|hiya|yo|oi|oy|ayo|ay|sup|gm|gn|dear)";
 /** Openers that only make a vocative when the name ends the clause ("thanks will!" but not "thanks, will do"). */
 const THANKS = "(?:thanks|thank you|thx|ty|tysm|bye|cya|later|night|morning)";
+/**
+ * What, right after a name that opens the line, makes the line a call to it:
+ * "robin you there", "heron what do you think", "marian thoughts", "robin
+ * gm". A second-person word, a question word, a greeting, or an auxiliary
+ * with the pronoun after it ("heron are you up", "robin is it live") — never
+ * a bare verb or noun, so "robin hood chain" and "heron is a bird" stay words.
+ */
+const CALL_NEXT =
+  "(?:you|u|ya|ye|yall|y'all|ur|your|you're|youre|u're|what|what's|whats|wat|wut|how|how's|hows|why|why's|when|where|where's|wheres|who|who's|whos|which|" +
+  "wdyt|wyd|hbu|thoughts|thots|opinion|pls|plz|please|gm|gn|hi|hey|hello|sup|" +
+  "(?:do|does|did|are|r|is|was|can|could|would|will|should|have)[^\\p{L}\\p{N}]+(?:you|u|ya|ur|it|this|that|there|we|i))";
+/**
+ * What, right before a name that ends the line, makes the line a call to it:
+ * "what do you think robin", "you there heron?", "you up marian 👀". Never a
+ * preposition or an article ("what do you think about robin", "saw a heron"):
+ * those make the name a thing talked about.
+ */
+const CALL_PREV = "(?:you|u|ya|ye|yall|y'all|ur|think|thoughts|thots|wdyt|wyd|hbu|there|around|here|up|awake|alive|agree|right|pls|plz|please)";
+/**
+ * WORDS THAT OPEN OR CLOSE AN ORDINARY SENTENCE next to "you" or a question
+ * word, so the call shapes above would misread them: a verb ("hope you're
+ * well", "will you guys…", "mark my words"), an adjective or exclamation
+ * ("lucky you", "wild how it ran", "quick how do i bridge", "morning what's
+ * everyone on"), a word a room calls a PERSON ("king you're right", "you
+ * degen"), or a market word ("i think bear"). A name that is one of these
+ * still calls the agent as a vocative ("hey will", "king, thoughts?"), just
+ * not in these shapes.
+ */
+const NOT_A_CALL_SHAPE: ReadonlySet<string> = new Set([
+  // verbs
+  "will", "may", "hope", "mark", "bill", "grant", "chase", "rob", "chuck", "pat", "sue", "jack", "don", "frank", "drew",
+  "art", "tuck", "bow", "pump", "ape", "smile", "echo", "flash", "spark", "storm", "blaze", "ghost", "shadow",
+  // adjectives and exclamations
+  "lucky", "happy", "wild", "quiet", "quick", "calm", "bold", "keen", "gentle", "jolly", "little", "much", "rich",
+  "sunny", "merry", "based", "royal", "noble", "golden", "swift", "sly", "wry", "brisk", "pale", "lone", "clever",
+  "restless", "wandering",
+  // greetings and times of day
+  "morning", "evening", "midnight",
+  // what a room calls a person
+  "king", "queen", "prince", "lord", "boss", "chief", "chad", "degen", "anon", "fren", "ser", "buddy", "pal", "champ",
+  "honey", "angel", "sunshine", "tiger",
+  // market and crypto words
+  "bull", "bear", "whale", "shark", "moon", "gem", "alpha", "beta", "sigma", "bot", "agent", "robot", "doge", "pepe",
+  "shiba", "bonk", "wif", "trump", "elon", "satoshi", "sol", "eth", "cash", "gold", "silver",
+]);
 
 interface NameMatcher {
   /** The owner's label, "<name>'s owner", blanked before any other test. */
@@ -533,11 +578,14 @@ function bounded(core: string, first: string, last: string, lenient: boolean): s
   return `${pre}${core}${post}`;
 }
 
-/** The ways a stoplisted word still calls the agent: said AS a name, never as a word in a sentence. */
+/**
+ * The ways a stoplisted word — or the last word of a longer name — still
+ * calls the agent: said AS a name, never as a word in a sentence.
+ */
 function vocatives(w: string): RegExp[] {
   const W = escapeRe(w);
   const lead = `^[^\\p{L}\\p{N}]*(?:${HAIL}[^\\p{L}\\p{N}]+)?`;
-  return [
+  const out = [
     // the whole line is the name, perhaps after a hail: "robin", "hey rose 👋", "Will?"
     new RegExp(`${lead}${W}[^\\p{L}\\p{N}]*$`, "u"),
     // opens with the name and a pause: "rose, thoughts?", "will: you there"
@@ -549,6 +597,18 @@ function vocatives(w: string): RegExp[] {
     // a trailing vocative after a comma: "what do you think, rose?"
     new RegExp(`,\\s*${W}\\s*[?!.]*\\s*$`, "u"),
   ];
+  // HOW A ROOM CALLS SOMEONE WITHOUT A COMMA: the name first and a question
+  // to it ("robin you there", "marian what do you think"), or the question
+  // first and the name last ("what do you think heron", "you there robin?").
+  // Three letters at least ("ed what's up" may be anything), and never a
+  // word those shapes would misread (NOT_A_CALL_SHAPE).
+  if (letterCount(w) >= 3 && !NOT_A_CALL_SHAPE.has(w)) {
+    out.push(
+      new RegExp(`${lead}${W}[^\\p{L}\\p{N}]+${CALL_NEXT}${POST}`, "u"),
+      new RegExp(`${PRE}${CALL_PREV}[^\\p{L}\\p{N}]+${W}[^\\p{L}\\p{N}]*$`, "u"),
+    );
+  }
+  return out;
 }
 
 const NAME_CACHE = new Map<string, NameMatcher>();
@@ -584,6 +644,12 @@ function nameMatcher(name: string): NameMatcher {
       } else if (letterCount(first) >= 2) {
         hits.push(...vocatives(first));
       }
+      // THE LAST WORD, the way a room shortens a two-word name: "Amber
+      // Heron" is "heron" as often as "amber". Only as a vocative ("hey
+      // heron", "heron, thoughts?", "thanks heron!", "what do you think,
+      // heron?"), never as a word in a sentence: the chat may be about herons,
+      // and another agent may share it ("pine heron" is not "amber heron").
+      if (lastWord !== first && letterCount(lastWord) >= 3) hits.push(...vocatives(lastWord));
     }
   }
   const m: NameMatcher = { label, hits };
@@ -653,9 +719,13 @@ function mentionsSelf(m: AddressedInput, self: BotSelf): boolean {
  * - "reply": a reply to one of the bot's own messages.
  * - "name": its full name as words; its first word when that has at least 4
  *   letters and is not an everyday word; an everyday-word name only as a
- *   vocative ("hey will"); or "merryman". Each alias is read the same way as
- *   the name. "<name>'s owner" / "<name>'s human" is about the owner and
- *   never counts.
+ *   vocative ("hey will"); the last word of a longer name only as a vocative
+ *   ("hey heron", "heron, thoughts?"); or "merryman". A vocative is also the
+ *   name opening a question to it ("robin you there", "marian what do you
+ *   think") or ending one ("what do you think heron"), for a word of three
+ *   letters or more that those shapes would not misread (NOT_A_CALL_SHAPE).
+ *   Each alias is read the same way as the name. "<name>'s owner" /
+ *   "<name>'s human" is about the owner and never counts.
  *
  * Checked in that order, so a mention wins over a reply that also names it.
  */
@@ -678,9 +748,10 @@ export function addressedHow(m: AddressedInput, self: BotSelf): "mention" | "rep
  * nameMatcher reads one: a full name of more than one word, a one-word name
  * that is not an everyday word, and a first word of four letters or more
  * that is not one. An agent called "Red Fox" must not read "stupid red
- * candles" as "stupid bot". LOOSE also swaps an everyday one-word name and
- * any first word of two letters or more ("hey will"), for readings whose
- * own vocabulary is the guard (small talk, question shape).
+ * candles" as "stupid bot". LOOSE also swaps an everyday one-word name, any
+ * first word of two letters or more ("hey will") and the last word of a
+ * longer name ("hey heron"), for readings whose own vocabulary is the guard
+ * (small talk, question shape).
  */
 function withSelfNames(text: string, selfNames: readonly unknown[], to: string, loose: boolean): string {
   let t = fold(text);
@@ -700,6 +771,13 @@ function withSelfNames(text: string, selfNames: readonly unknown[], to: string, 
     }
     if (words.length > 1 && (loose ? letterCount(first) >= 2 : letterCount(first) >= 4 && !everyday)) {
       t = t.replace(new RegExp(`${PRE}${escapeRe(first)}${POST}`, "gu"), to);
+    }
+    // The last word calls it only as a vocative (nameMatcher), so only the
+    // loose readings, whose own vocabulary is the guard, swap it: "hey heron"
+    // is a hail. Strict (an insult "at" it) never does: "herons are trash".
+    const last = words[words.length - 1];
+    if (loose && words.length > 1 && last !== undefined && last !== first && letterCount(last) >= 3) {
+      t = t.replace(new RegExp(`${PRE}${escapeRe(last)}${POST}`, "gu"), to);
     }
   }
   return t;

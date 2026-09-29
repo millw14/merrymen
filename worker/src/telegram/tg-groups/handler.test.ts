@@ -28,9 +28,11 @@ import type { FetchLike, TgCallback, TgMemberUpdate, TgMessage, TgServiceMessage
 import type { StateRef, TelegramState } from "../state";
 import type { BotSelf } from "./detect";
 import { createTgGroups, type TgGroups, type TgGroupsDeps } from "./handler";
+import { FLOOD_ANSWERS, FLOOD_WINDOW_MS } from "./pacing";
 import { __resetMemoryPassThrottleForTest } from "./memory";
 import { TgGroupsStore, emptyTgGroupsState } from "./store";
 import type { CoinLook, CoinOutcome, NominateResult, Nomination, TgCoinsPort, TrencherReadiness } from "./types";
+import { templatePool, type SpeakCtx } from "./voice";
 
 const SEC = 1_000;
 const MIN = 60 * SEC;
@@ -47,6 +49,8 @@ const TOKEN = "123456:SECRET-TOKEN-XYZ";
 const BOT: BotSelf = { id: 999999, username: "pinebot", name: "Pine" };
 const ca = (n: number) => "0x" + n.toString(16).padStart(4, "0").repeat(10);
 const CA1 = ca(0xa1);
+/** Robinhood Chain coin kinds with a line each, in an order that never repeats a line's shape soon. */
+const KINDS = ["too-quiet", "curve", "too-thin", "too-new", "no-pool", "v4-only", "stock", "cash"] as const;
 
 // ─── A fake Bot API ──────────────────────────────────────────────────────────
 
@@ -649,6 +653,20 @@ describe("answering", () => {
     assert.equal(tg.sends(CHAT).length, 2);
   });
 
+  it("its names as the room says them: the soul name, its first or last word as a call, the Telegram display name, 'merryman'", async () => {
+    self = { ...BOT, name: "Amber Heron", aliases: ["Robinbot"] };
+    make();
+    approveRoom();
+    const called = ["amber heron you there", "heron, thoughts?", "hey amber", "robinbot what's up", "merryman you alive"].map((t, i) =>
+      msg(t, { fromId: 9_000 + i, fromFirstName: `P${i}` }),
+    );
+    for (const m of called) await said(m);
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), called.map((m) => m.messageId));
+    // …and the word in a sentence is not a call.
+    await said(msg("saw a heron at the lake", { fromId: 9_100, fromFirstName: "Q" }));
+    assert.equal(tg.sends(CHAT).length, called.length);
+  });
+
   it("another bot's line is ignored and not remembered; an anonymous admin is a person", async () => {
     make();
     approveRoom();
@@ -730,11 +748,22 @@ describe("answering", () => {
     assert.deepEqual(tg.sends(CHAT).slice(2).map(replyOf), [d.messageId, (c as TgMessage | null)?.messageId]);
   });
 
-  it("flood: after three answers to one person in two minutes, the fourth call is skipped", async () => {
+  it(`flood: after ${FLOOD_ANSWERS} answers to one person in two minutes, the next call is skipped, and the log says why`, async () => {
     make();
     approveRoom();
-    for (const t of ["@pinebot one", "@pinebot two", "@pinebot three", "@pinebot four"]) await said(msg(t));
-    assert.equal(tg.sends(CHAT).length, 3);
+    for (let i = 0; i <= FLOOD_ANSWERS; i++) await said(msg(`@pinebot line ${i}`));
+    assert.ok(clock - T0 < FLOOD_WINDOW_MS, "all inside one window");
+    assert.equal(tg.sends(CHAT).length, FLOOD_ANSWERS);
+    assert.deepEqual(logs.filter((l) => /got nothing/.test(l)), ["[tg-groups] addressed line got nothing (flood)"]);
+  });
+
+  it("the owner is never flooded: a back-and-forth with them is the conversation", async () => {
+    make();
+    approveRoom();
+    for (let i = 0; i < FLOOD_ANSWERS + 4; i++) await said(msg(`@pinebot line ${i}`, { fromId: OWNER, fromFirstName: "Mike" }));
+    assert.ok(clock - T0 < 2 * FLOOD_WINDOW_MS);
+    assert.equal(tg.sends(CHAT).length, FLOOD_ANSWERS + 4);
+    assert.ok(!logs.some((l) => /got nothing/.test(l)));
   });
 
   it("an answer that waited longer than 90 s is dropped", async () => {
@@ -1271,23 +1300,324 @@ describe("coins", () => {
     assert.match(tg.texts(CHAT)[1] ?? "", new RegExp(`^<a href="tg://user\\?id=${BOB}">fren</a> `));
   });
 
-  it("one person posting CA after CA: three coin lines in two minutes, then one 👀, then silence; others are not held back", async () => {
+  it(`one person posting CA after CA: ${FLOOD_ANSWERS} coin lines in two minutes, then one 👀, then silence; others are not held back`, async () => {
     make();
     approveRoom();
-    for (let i = 0; i < 6; i++) port.looks.set(ca(0x10 + i), { kind: "too-quiet", name: "Slowcoin" });
-    for (let i = 0; i < 6; i++) await said(msg(ca(0x10 + i), { fromId: BOB, fromFirstName: "Bob" }));
-    assert.equal(tg.sends(CHAT).length, 3);
+    const n = FLOOD_ANSWERS + 2;
+    // One kind over and over, as in a bonding-curve group: its lines recur
+    // rather than run dry, so only the flood holds them back.
+    for (let i = 0; i < n; i++) port.looks.set(ca(0x10 + i), { kind: "curve", name: "Slowcoin" });
+    for (let i = 0; i < n; i++) await said(msg(ca(0x10 + i), { fromId: BOB, fromFirstName: "Bob" }));
+    assert.equal(tg.sends(CHAT).length, FLOOD_ANSWERS);
     assert.deepEqual(tg.reactions(CHAT), ["👀"]);
-    assert.ok(clock - T0 < 2 * MIN, "all inside one flood window");
+    assert.ok(clock - T0 < FLOOD_WINDOW_MS, "all inside one flood window");
     // Ann is not Bob.
     port.looks.set(ca(0x20), { kind: "too-quiet", name: "Slowcoin" });
     await said(msg(ca(0x20)));
-    assert.equal(tg.sends(CHAT).length, 4);
+    assert.equal(tg.sends(CHAT).length, FLOOD_ANSWERS + 1);
     // A fresh window for Bob.
-    clock += 2 * MIN;
+    clock += FLOOD_WINDOW_MS;
     port.looks.set(ca(0x21), { kind: "too-quiet", name: "Slowcoin" });
     await said(msg(ca(0x21), { fromId: BOB, fromFirstName: "Bob" }));
-    assert.equal(tg.sends(CHAT).length, 5);
+    assert.equal(tg.sends(CHAT).length, FLOOD_ANSWERS + 2);
+  });
+
+  it("the owner posting CA after CA is never flooded", async () => {
+    make();
+    approveRoom();
+    const n = FLOOD_ANSWERS + 2;
+    for (let i = 0; i < n; i++) port.looks.set(ca(0x30 + i), { kind: KINDS[i % KINDS.length]!, name: "Curvy" });
+    for (let i = 0; i < n; i++) await said(msg(ca(0x30 + i), { fromId: OWNER, fromFirstName: "Mike" }));
+    assert.equal(tg.sends(CHAT).length, n);
+    assert.deepEqual(tg.reactions(CHAT), []);
+  });
+
+  it("the owner asking about bonding-curve coin after bonding-curve coin: every one gets its line, the pool recurring rather than running dry", async () => {
+    // The live report: "when I sent a ca she stopped responding", in a Pons
+    // group. The curve pool's lines all say "curve", so four in a row used
+    // them up and the gate's repeat clause refused the rest: nothing at all,
+    // logged as model-null-and-no-template. The model makes no difference
+    // (a look's line is template-only).
+    make();
+    approveRoom();
+    const names = ["Froggy", "Doge Two", "AppShare", "Moonpie", "Rocket", "Pumpkin", "Zebra", "Lambo", "Kitten", "Sushi", "Waffle", "Mango"];
+    const posts: TgMessage[] = [];
+    for (let i = 0; i < names.length; i++) {
+      port.looks.set(ca(0x30 + i), { kind: "curve", name: names[i]! });
+      const m = msg(`@pinebot ${ca(0x30 + i)}`, { fromId: OWNER, fromFirstName: "Milla" });
+      posts.push(m);
+      await said(m);
+      clock += 20 * SEC;
+    }
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), posts.map((m) => m.messageId), "a line for every one, as a reply to it");
+    for (const t of tg.texts(CHAT)) {
+      assert.match(t, new RegExp(`^<a href="tg://user\\?id=${OWNER}">Milla</a> .*curve`), t);
+      assert.ok(!/\d/.test(t.replace(/^<a [^>]*>[^<]*<\/a> /, "")), `no figure: ${t}`);
+    }
+    assert.deepEqual(quietLogs(), []);
+    // With chat in between, the same.
+    const chatter = ["nice", "what else is good", "lol ok", "you trading today"];
+    for (let i = 0; i < chatter.length; i++) {
+      port.looks.set(ca(0x50 + i), { kind: "curve", name: names[i]! });
+      await said(msg(`@pinebot ${ca(0x50 + i)}`, { fromId: OWNER, fromFirstName: "Milla" }));
+      clock += 30 * SEC;
+      await said(msg(`@pinebot ${chatter[i]}`, { fromId: OWNER, fromFirstName: "Milla" }));
+      clock += 30 * SEC;
+    }
+    assert.equal(tg.sends(CHAT).length, names.length + 2 * chatter.length);
+    assert.deepEqual(quietLogs(), []);
+  });
+
+  it("a coin line that cannot be written for a post that asked it: a 👀 on the post instead of nothing; unasked, nothing", async () => {
+    make();
+    approveRoom();
+    // Its own recent line holds every word of every ack it could say, so the
+    // gate's repeat clause refuses them all (an ack is a model's intent: its
+    // template fallback keeps that clause) and there is no line to send.
+    const words = new Set(templatePool({ kind: "coin-ack" }, { coinName: "Froggy" } as SpeakCtx).join(" ").toLowerCase().match(/[a-z]+/g) ?? []);
+    store.addLine(CHAT, { messageId: 1, fromId: BOT.id, name: "Pine", text: [...words].join(" "), atMs: clock - MIN, own: true });
+    const asked = msg(`@pinebot ${CA1}`, { fromId: OWNER, fromFirstName: "Milla" });
+    await said(asked);
+    assert.equal(port.nominations.length, 1, "the nomination is made all the same");
+    assert.equal(tg.sends(CHAT).length, 0);
+    assert.deepEqual(tg.of("setMessageReaction").map((c) => c.body.message_id), [asked.messageId]);
+    assert.deepEqual(tg.reactions(CHAT), ["👀"]);
+    assert.deepEqual(quietLogs(), [], "something landed on it");
+    // Nobody asked: nothing, no 👀 either.
+    await said(msg(ca(0xb2), { fromId: BOB, fromFirstName: "Bob" }));
+    assert.equal(tg.of("setMessageReaction").length, 1);
+    assert.equal(tg.sends(CHAT).length, 0);
+  });
+});
+
+// ─── A look that hangs; why an addressed line got nothing ───────────────────
+
+/** A timer the test fires by hand: the look's bound, on the test's own clock. */
+function handTimer(): { timer: (ms: number) => Promise<void>; waits: Array<{ ms: number; fire: () => void }> } {
+  const waits: Array<{ ms: number; fire: () => void }> = [];
+  return {
+    waits,
+    timer: (ms) =>
+      new Promise<void>((fire) => {
+        waits.push({
+          ms,
+          fire: () => {
+            clock += ms;
+            fire();
+          },
+        });
+      }),
+  };
+}
+
+/** Let queued work run (no timer fires meanwhile), until `done()` or a bound. */
+async function until(done: () => boolean): Promise<void> {
+  for (let i = 0; i < 200 && !done(); i++) await new Promise((r) => setImmediate(r));
+}
+
+const quietLogs = (): string[] => logs.filter((l) => /got nothing/.test(l));
+
+describe("a coin look that never answers", () => {
+  it("holds nothing in its own chat: the next addressed line is answered while the look is still out", async () => {
+    const t = handTimer();
+    make({ timer: t.timer });
+    approveRoom();
+    port.look = () => new Promise<CoinLook>(() => {});
+    const post = msg(CA1);
+    groups.onMessage(post);
+    const ask = msg("@pinebot you there?");
+    groups.onMessage(ask);
+    await until(() => tg.sends(CHAT).length > 0);
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), [ask.messageId], "answered with the look still out");
+    assert.equal(t.waits.length, 1, "the look is still being waited for");
+    t.waits[0]!.fire();
+    await groups.drain();
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), [ask.messageId], "the unaddressed CA whose look failed: silence");
+    assert.deepEqual(quietLogs(), [], "only addressed lines are explained");
+  });
+
+  it("addressed: 'can't pull that one up rn', tagging them, once the look is let go", async () => {
+    const t = handTimer();
+    make({ timer: t.timer });
+    approveRoom();
+    port.look = () => new Promise<CoinLook>(() => {});
+    const post = msg(`@pinebot what about ${CA1}`);
+    groups.onMessage(post);
+    await until(() => t.waits.length > 0);
+    t.waits[0]!.fire();
+    await groups.drain();
+    const s = tg.sends(CHAT);
+    assert.equal(s.length, 1);
+    assert.equal(replyOf(s[0]), post.messageId);
+    assert.match(String(s[0]?.body.text), new RegExp(`^<a href="tg://user\\?id=${ANN}">Ann</a> .*(?:can't|won't|not loading|blank)`));
+    assert.deepEqual(store.room(CHAT)?.coins, [], "nothing remembered");
+    // Another addressed CA inside ten minutes: nothing, and the log says why.
+    const again = msg(`@pinebot and ${ca(0xb2)}?`, { fromId: BOB, fromFirstName: "Bob" });
+    groups.onMessage(again);
+    await until(() => t.waits.length > 1);
+    t.waits[1]!.fire();
+    await groups.drain();
+    assert.equal(tg.sends(CHAT).length, 1);
+    assert.deepEqual(quietLogs(), ["[tg-groups] addressed line got nothing (coin-unknown)"]);
+  });
+});
+
+describe("a backlog on the coin lane", () => {
+  it("a shill's CAs while the reads hang do not bury the owner's '@bot what about <CA>': served next, inside the send window; posts past theirs are not looked at", async () => {
+    // Every look waits out its whole bound on the test's clock.
+    make({
+      timer: async (ms) => {
+        await new Promise((r) => setImmediate(r));
+        clock += ms;
+      },
+    });
+    approveRoom();
+    const looked: string[] = [];
+    port.look = (address: string) => {
+      looked.push(address);
+      return new Promise<CoinLook>(() => {});
+    };
+    for (let i = 0; i < 5; i++) groups.onMessage(msg(`${ca(0x100 + 2 * i)} ${ca(0x101 + 2 * i)}`, { fromId: BOB, fromFirstName: "Bob" }));
+    const mine = msg(`@pinebot what about ${CA1}`, { fromId: OWNER, fromFirstName: "Milla" });
+    const askedAt = clock;
+    let answeredAt: number | null = null;
+    const send = tg.fetchFn;
+    tg.fetchFn = async (url, init) => {
+      if (url.endsWith("/sendMessage") && answeredAt === null) answeredAt = clock;
+      return send(url, init);
+    };
+    groups.onMessage(mine);
+    await groups.drain();
+    const s = tg.sends(CHAT);
+    assert.deepEqual(s.map(replyOf), [mine.messageId], "hers, and only hers: nobody asked about the rest");
+    assert.match(String(s[0]?.body.text), /can't|won't|not loading|blank/);
+    assert.ok(answeredAt !== null && answeredAt - askedAt < 90 * SEC, `inside the send window: ${(answeredAt ?? 0) - askedAt} ms`);
+    assert.equal(looked[2], CA1, "the look after the one already out is hers");
+    assert.ok(looked.length < 11, `a post whose reply window ran out is claimed, not looked at: ${looked.length} looks`);
+    assert.deepEqual(quietLogs(), []);
+  });
+});
+
+describe("a Bot API call that never answers", () => {
+  it("fails after the call's time limit and lets the chat go: the next addressed lines are answered", async () => {
+    make({ opts: () => ({ token: TOKEN, fetchFn: tg.fetchFn, timeoutMs: 20 }) });
+    approveRoom();
+    const hang = new Set<string>(["sendChatAction"]);
+    const base = tg.fetchFn;
+    tg.fetchFn = async (url, init) => {
+      if (hang.delete(url.split("/").pop() ?? "")) return new Promise<never>(() => {});
+      return base(url, init);
+    };
+    const hi = msg("@pinebot hi", { fromId: OWNER, fromFirstName: "Milla" });
+    await said(hi);
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), [hi.messageId], "the typing action that hung does not cost the answer");
+    // The send itself hangs: that line is lost (a send that timed out may
+    // have landed, so it is not tried again), said so, and the lock let go.
+    hang.add("sendMessage");
+    await said(msg("@pinebot ??", { fromId: OWNER, fromFirstName: "Milla" }));
+    assert.equal(tg.sends(CHAT).length, 1);
+    assert.deepEqual(quietLogs(), ["[tg-groups] addressed line got nothing (send-failed)"]);
+    assert.ok(logs.includes("[tg-groups] send failed (no answer)"));
+    const again = msg("@pinebot you there", { fromId: OWNER, fromFirstName: "Milla" });
+    await said(again);
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), [hi.messageId, again.messageId]);
+  });
+});
+
+describe("an addressed line that gets nothing says why, and only why", () => {
+  it("burst: the earlier lines of one person's burst", async () => {
+    make();
+    approveRoom();
+    groups.onMessage(msg("@pinebot yo"));
+    groups.onMessage(msg("@pinebot answer me"));
+    await groups.drain();
+    assert.equal(tg.sends(CHAT).length, 1);
+    assert.deepEqual(quietLogs(), ["[tg-groups] addressed line got nothing (burst)"]);
+  });
+
+  it("stale: it waited past 90 s", async () => {
+    make();
+    approveRoom();
+    groups.onMessage(msg("@pinebot hi"));
+    clock += 91 * SEC;
+    await groups.drain();
+    assert.deepEqual(quietLogs(), ["[tg-groups] addressed line got nothing (stale)"]);
+  });
+
+  it("shushed: someone else calling it in a quiet chat", async () => {
+    make();
+    approveRoom();
+    store.update(CHAT, (r) => {
+      r.shushedUntilMs = clock + 10 * MIN;
+    });
+    await said(msg("@pinebot hey"));
+    assert.equal(tg.sends(CHAT).length, 0);
+    assert.deepEqual(quietLogs(), ["[tg-groups] addressed line got nothing (shushed)"]);
+  });
+
+  it("forgotten: /forgetme while it was queued", async () => {
+    make();
+    approveRoom();
+    groups.onMessage(msg("@pinebot hey"));
+    await groups.forgetMe(CHAT, ANN);
+    await groups.drain();
+    assert.ok(quietLogs().includes("[tg-groups] addressed line got nothing (forgotten)"));
+  });
+
+  it("send-failed: Telegram refused it", async () => {
+    make();
+    approveRoom();
+    tg.script.set("sendMessage", [{ ok: false, error_code: 400, description: "Bad Request: chat not found" }]);
+    await said(msg("@pinebot hey"));
+    assert.deepEqual(quietLogs(), ["[tg-groups] addressed line got nothing (send-failed)"]);
+  });
+
+  it("room-not-approved and off: said to it where it may not talk", async () => {
+    make();
+    store.ensureRoom(CHAT, { title: "frens", kind: "supergroup" });
+    await said(msg("@pinebot hello?"));
+    assert.deepEqual(quietLogs(), ["[tg-groups] addressed line got nothing (room-not-approved)"]);
+    approveRoom();
+    envVars.MERRYMEN_TG_GROUPS = "0";
+    await said(msg("@pinebot hello??"));
+    assert.deepEqual(quietLogs().slice(1), ["[tg-groups] addressed line got nothing (off)"]);
+    // Not addressed: nothing to explain.
+    await said(msg("just chatting"));
+    assert.equal(quietLogs().length, 2);
+  });
+
+  it("the coin flow's reasons: another chain's coin is 'coin-not-here'; a 👀 that landed is not 'nothing'; past it, the flood", async () => {
+    make();
+    approveRoom();
+    port.looks.set(CA1, { kind: "wallet" });
+    await said(msg(`@pinebot ${CA1}?`));
+    assert.deepEqual(quietLogs(), ["[tg-groups] addressed line got nothing (coin-not-here)"]);
+    await said(msg(`@pinebot https://bscscan.com/token/${ca(0xb3)}`));
+    assert.deepEqual(quietLogs().slice(1), ["[tg-groups] addressed line got nothing (coin-not-here)"]);
+    // Past the flood a coin line is one 👀: something landed, so no log line.
+    for (let i = 0; i < FLOOD_ANSWERS; i++) {
+      port.looks.set(ca(0x40 + i), { kind: KINDS[i % KINDS.length]!, name: "Meh" });
+      await said(msg(ca(0x40 + i), { fromId: BOB, fromFirstName: "Bob" }));
+    }
+    port.looks.set(ca(0x60), { kind: "curve", name: "Meh" });
+    await said(msg(`@pinebot ${ca(0x60)}`, { fromId: BOB, fromFirstName: "Bob" }));
+    assert.deepEqual(tg.reactions(CHAT), ["👀"]);
+    assert.equal(quietLogs().length, 2);
+    // …and past the 👀, nothing: the flood, said so.
+    port.looks.set(ca(0x61), { kind: "too-new", name: "Meh" });
+    await said(msg(`@pinebot ${ca(0x61)}`, { fromId: BOB, fromFirstName: "Bob" }));
+    assert.deepEqual(quietLogs().slice(2), ["[tg-groups] addressed line got nothing (flood)"]);
+  });
+
+  it("the log line is the code alone: no text, name, id or address", async () => {
+    make();
+    approveRoom();
+    port.looks.set(CA1, { kind: "wallet" });
+    await said(msg(`@pinebot xyzzy ${CA1}`, { fromFirstName: "Zelda" }));
+    const lines = quietLogs();
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!, /^\[tg-groups\] addressed line got nothing \([a-z-]+\)$/);
+    for (const s of ["xyzzy", "Zelda", String(ANN), String(CHAT), CA1.slice(2, 12)]) assert.ok(!lines[0]!.includes(s), s);
   });
 });
 
