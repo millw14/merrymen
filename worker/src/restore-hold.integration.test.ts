@@ -566,6 +566,28 @@ describe("when the restore takes, trading comes back", () => {
     });
   });
 
+  it("A HOLD PROCESS STILL THERE AN HOUR ON IS SAID AGAIN, HOURLY, AND NOT EVERY PASS", async () => {
+    await store.put(TENANT, grant());
+    await withClock(async () => {
+      const hold = await stuckHandover();
+      const stuck = () => said.filter((l) => l.includes("[alert]") && l.includes(`pid ${hold.pid}`));
+      assert.equal(stuck().length, 1);
+      mock.timers.tick(59 * 60_000);
+      await reconcile();
+      assert.equal(stuck().length, 1, "not before the hour");
+      mock.timers.tick(60_000);
+      await reconcile();
+      assert.equal(stuck().length, 2, `said again an hour after the first:\n${said.join("\n")}`);
+      assert.match(stuck()[1]!, /still has not exited, 60m after SIGTERM — trading stays held until it has/);
+      for (let i = 0; i < 3; i++) {
+        mock.timers.tick(15_000);
+        await reconcile();
+      }
+      assert.equal(stuck().length, 2, "and then not every pass");
+      assert.equal(workers().length, 0);
+    });
+  });
+
   it("PRACTICE SWITCHED OFF WITH A HOLD PROCESS THAT WILL NOT EXIT: NO WORKER UNTIL IT HAS, AND THE GATE SAYS SO ONCE", async () => {
     await store.put(TENANT, grant());
     await withClock(async () => {

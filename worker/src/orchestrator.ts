@@ -664,8 +664,11 @@ interface Holder {
    * watchHolder).
    */
   stoodDown: boolean;
-  /** The [alert] that `leaving` would not go has been said: once, not every pass. */
-  leaveAlerted: boolean;
+  /**
+   * When the [alert] that `leaving` would not go was last said, ms, or null:
+   * once, then again each LEAVE_REALERT_MS while it stays, not every pass.
+   */
+  leaveAlertedAt: number | null;
   /**
    * The restore's own error, and the class of it an owner may be told: the
    * last NAMED one once there has been one. A failure that names no rule of
@@ -743,7 +746,7 @@ export async function adoptHolderForTest(
     if (lease) leases.set(lc, lease);
   }
   const held: Holder = {
-    tenant: lc, smartAccount, proc: null, exited: null, leaving: null, leftAt: 0, leftBot: null, handingBack: false, stoodDown: false, leaveAlerted: false,
+    tenant: lc, smartAccount, proc: null, exited: null, leaving: null, leftAt: 0, leftBot: null, handingBack: false, stoodDown: false, leaveAlertedAt: null,
     reason, cls: restoreBlockClass(reason),
     nextRetryAt: 0, backoffMs: HOLD_RETRY_FIRST_MS, quickMs: HOLD_RETRY_QUICK_MS, retrying: false, resetSeen: null,
     resettable: false,
@@ -2623,7 +2626,7 @@ async function spawnHolder(
   const resettable = settingsRefuseHeldReset(settings, liveConsentEnforced()) === null;
   writeRestoreBlocked(home, { reason: why, class: cls, since: prev?.since ?? Math.floor(Date.now() / 1000), resettable });
   const held: Holder = {
-    tenant, smartAccount, proc: null, exited: null, leaving: null, leftAt: 0, leftBot: null, handingBack: false, stoodDown: false, leaveAlerted: false,
+    tenant, smartAccount, proc: null, exited: null, leaving: null, leftAt: 0, leftBot: null, handingBack: false, stoodDown: false, leaveAlertedAt: null,
     reason: why, cls,
     nextRetryAt: 0, backoffMs: HOLD_RETRY_FIRST_MS, quickMs: HOLD_RETRY_QUICK_MS, retrying: false,
     resetSeen: honour?.looked ?? null, resettable,
@@ -2713,7 +2716,7 @@ function watchHolder(held: Holder, proc: ChildProcess): void {
     }
     if (stopping) return;
     if (!ours) {
-      const late = left && held.leaveAlerted ? ` — ${held.handingBack ? "the next pass hands the bot back to trading" : "its stand-down is complete"}` : "";
+      const late = left && held.leaveAlertedAt !== null ? ` — ${held.handingBack ? "the next pass hands the bot back to trading" : "its stand-down is complete"}` : "";
       log(`${tenant} stood-down hold process (pid ${proc.pid}) exited with ${code ?? signal}${late}`);
       return;
     }
@@ -2935,8 +2938,8 @@ async function handHoldBack(held: Holder): Promise<void> {
   // this process goes (standDownHolder), and an operator should know why.
   const leaving = held.leaving;
   if (leaving) {
-    if (!held.leaveAlerted) {
-      held.leaveAlerted = true;
+    if (held.leaveAlertedAt === null) {
+      held.leaveAlertedAt = Date.now();
       log(
         `[alert] ${tenant}: its hold process (pid ${leaving.pid}) has not exited 10s after SIGTERM and SIGKILL — ` +
           `trading stays held until it has, as a worker beside it would poll the same bot; SIGKILL is sent again each pass`,
@@ -2973,6 +2976,8 @@ function homeBotKey(tenant: string): string | null {
 const LEAVE_KILL_MS = 3_000;
 /** And how long after SIGTERM its exit is waited for: by a handover, and before a stand-down says it has not come. */
 const LEAVE_WAIT_MS = 10_000;
+/** While it still has not gone, how often that is said again. */
+const LEAVE_REALERT_MS = 60 * 60_000;
 
 /**
  * A HOLD PROCESS TOLD TO STOP THAT HAS NOT GONE, once a pass (Holder.leaving):
@@ -2982,14 +2987,28 @@ const LEAVE_WAIT_MS = 10_000;
  * when its wait ends (handHoldBack), so this says a stand-down's. Without it a
  * stood-down tenant whose process would not go stayed dark for good with
  * nothing in the log: nothing starts for it here meanwhile.
+ *
+ * AND AGAIN, HOURLY, for as long as it stays. One line at the start of a stall
+ * that lasts for days is one line lost in a day of logs, while the tenant it
+ * holds up (its trading, or its re-arm) waits on an operator the whole time.
  */
 function pressLeaving(held: Holder): void {
   const leaving = held.leaving;
   if (!leaving) return;
-  const waited = Date.now() - held.leftAt;
+  const now = Date.now();
+  const waited = now - held.leftAt;
   if (waited >= LEAVE_KILL_MS) killLeaving(held);
-  if (held.leaveAlerted || waited < LEAVE_WAIT_MS) return;
-  held.leaveAlerted = true;
+  if (waited < LEAVE_WAIT_MS) return;
+  if (held.leaveAlertedAt !== null) {
+    if (now - held.leaveAlertedAt < LEAVE_REALERT_MS) return;
+    held.leaveAlertedAt = now;
+    log(
+      `[alert] ${held.tenant}: its hold process (pid ${leaving.pid}) still has not exited, ${Math.round(waited / 60_000)}m after SIGTERM — ` +
+        `${held.handingBack ? "trading stays held until it has" : "nothing starts for this tenant here until it has"}; SIGKILL is sent again each pass`,
+    );
+    return;
+  }
+  held.leaveAlertedAt = now;
   const lease = leases.has(held.tenant)
     ? "its lease is kept, so no other replica starts one either"
     : "its lease is gone, so another replica may";
