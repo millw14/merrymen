@@ -16,7 +16,7 @@ const API_BASE = "https://api.telegram.org";
 /** Minimal fetch surface — supports the POST+JSON that sendMessage needs. */
 export type FetchLike = (
   url: string,
-  init?: { method?: string; headers?: Record<string, string>; body?: string },
+  init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal },
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
 export interface TelegramOpts {
@@ -25,7 +25,21 @@ export interface TelegramOpts {
   fetchFn?: FetchLike;
   /** Override the API host (tests). */
   apiBase?: string;
+  /** The longest one call is waited for, in ms (TG_CALL_TIMEOUT_MS when absent); getUpdates adds its long poll. */
+  timeoutMs?: number;
 }
+
+/**
+ * THE LONGEST ONE CALL IS WAITED FOR, beyond any long poll it asked for.
+ * fetch has no deadline of its own — Node gives up waiting for headers only
+ * after about five minutes — and every group line is sent under its chat's
+ * lock (tg-groups/handler.ts): one sendChatAction that never answered held
+ * every later line of that chat until each had gone stale, and nothing was
+ * logged. Past this the call is a failed request ("request failed: timed
+ * out") and the request is aborted. Callers do not retry it: a send that
+ * timed out may still have landed.
+ */
+export const TG_CALL_TIMEOUT_MS = 10_000;
 
 /** Telegram's kinds of chat (Chat.type). */
 export type TgChatType = "private" | "group" | "supergroup" | "channel";
@@ -278,9 +292,31 @@ function nextStep(r: CallResult): { retryAfterSec?: number; migrateToChatId?: nu
 /**
  * Call a bot method. Returns the parsed `result` on `{ ok: true }`, else a
  * reason and whatever ResponseParameters came with it. GET when no body,
- * POST+JSON when a body is given.
+ * POST+JSON when a body is given. Bounded: past TG_CALL_TIMEOUT_MS (plus
+ * `pollMs`, the long poll a getUpdates asked Telegram to hold it open) the
+ * request is aborted and the answer is "request failed: timed out", whether
+ * or not the transport honours the abort.
  */
-async function call(opts: TelegramOpts, method: string, params?: Record<string, unknown>): Promise<CallResult> {
+async function call(opts: TelegramOpts, method: string, params?: Record<string, unknown>, pollMs = 0): Promise<CallResult> {
+  const own = opts.timeoutMs;
+  const limit = (typeof own === "number" && Number.isFinite(own) && own > 0 ? own : TG_CALL_TIMEOUT_MS) + Math.max(0, pollMs);
+  const abort = typeof AbortController === "function" ? new AbortController() : null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<CallResult>((resolve) => {
+    timer = setTimeout(() => {
+      abort?.abort();
+      resolve({ result: null, reason: "request failed: timed out" });
+    }, limit);
+  });
+  try {
+    return await Promise.race([exchange(opts, method, params, abort?.signal), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** One request and its answer, for `call`, which bounds it. Never throws. */
+async function exchange(opts: TelegramOpts, method: string, params: Record<string, unknown> | undefined, signal: AbortSignal | undefined): Promise<CallResult> {
   const base = opts.apiBase ?? API_BASE;
   const fetchFn = opts.fetchFn ?? (fetch as unknown as FetchLike);
   const url = `${base}/bot${opts.token}/${method}`;
@@ -288,8 +324,13 @@ async function call(opts: TelegramOpts, method: string, params?: Record<string, 
   let res: Awaited<ReturnType<FetchLike>>;
   try {
     res = params
-      ? await fetchFn(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(params) })
-      : await fetchFn(url);
+      ? await fetchFn(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(params),
+          ...(signal ? { signal } : {}),
+        })
+      : await fetchFn(url, signal ? { signal } : undefined);
   } catch (e) {
     return { result: null, reason: `request failed: ${scrub(e instanceof Error ? e.message : String(e), opts.token)}` };
   }
@@ -366,11 +407,17 @@ export async function getUpdates(
   nextOffset: number;
   reason?: string;
 }> {
-  const { result, reason } = await call(opts, "getUpdates", {
-    offset,
-    timeout: timeoutSec,
-    allowed_updates: ALLOWED_UPDATES,
-  });
+  const { result, reason } = await call(
+    opts,
+    "getUpdates",
+    {
+      offset,
+      timeout: timeoutSec,
+      allowed_updates: ALLOWED_UPDATES,
+    },
+    // Telegram holds a long poll open this long by design: the bound is on top of it.
+    Math.max(0, Number.isFinite(timeoutSec) ? timeoutSec : 0) * 1000,
+  );
   if (!Array.isArray(result)) return { messages: [], callbacks: [], members: [], service: [], nextOffset: offset, reason };
 
   const messages: TgMessage[] = [];

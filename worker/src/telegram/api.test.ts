@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import {
   BOT_COMMANDS,
+  TG_CALL_TIMEOUT_MS,
   answerCallbackQuery,
   editMessageText,
   esc,
@@ -1156,6 +1157,72 @@ describe("sendChatAction", () => {
     assert.deepEqual(await sendChatAction({ token: "t", fetchFn: notFound }, 555), { ok: false, reason: "Bad Request: chat not found" });
     const blocked = fakeFetch(403, { ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user" });
     assert.deepEqual(await sendChatAction({ token: "t", fetchFn: blocked }, 555), { ok: false, reason: "Forbidden: bot was blocked by the user" });
+  });
+});
+
+describe("a call that never answers", () => {
+  /** A transport that takes the request and never answers it, keeping each request's abort signal. */
+  function silent(): FetchLike & { signals: Array<AbortSignal | undefined> } {
+    const signals: Array<AbortSignal | undefined> = [];
+    const f: FetchLike = async (_url, init) => {
+      signals.push(init?.signal);
+      return new Promise<never>(() => {});
+    };
+    return Object.assign(f, { signals });
+  }
+
+  it("is a failed request after the time limit, never a stuck promise; its request is aborted", async () => {
+    // A group send runs under its chat's lock: a call that never answered held
+    // every later line of that chat (tg-groups/handler.ts).
+    const f = silent();
+    const opts = { token: "123:abc", fetchFn: f, timeoutMs: 20 };
+    const sent = await sendMessage(opts, -100, "hi");
+    assert.deepEqual(sent, { ok: false, reason: "request failed: timed out" });
+    const typing = await sendChatAction(opts, -100, "typing");
+    assert.equal(typing.ok, false);
+    assert.equal((await setMessageReaction(opts, -100, 5, "👀")).ok, false);
+    assert.equal(f.signals.length, 3);
+    assert.ok(f.signals.every((s) => s?.aborted === true), "every request was aborted");
+  });
+
+  it("a reply whose body never arrives is the same", async () => {
+    const f: FetchLike = async () => ({ ok: true, status: 200, json: () => new Promise<never>(() => {}) });
+    assert.deepEqual(await sendMessage({ token: "t", fetchFn: f, timeoutMs: 20 }, -100, "hi"), { ok: false, reason: "request failed: timed out" });
+  });
+
+  it(`waits ${TG_CALL_TIMEOUT_MS / 1000} s by default; getUpdates on top of the long poll it asked for`, async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const f = silent();
+      let sent: unknown = null;
+      void sendMessage({ token: "t", fetchFn: f }, -100, "hi").then((r) => (sent = r));
+      let polled: { reason?: string } | null = null;
+      void getUpdates({ token: "t", fetchFn: f }, 0, 25).then((r) => (polled = r));
+      const settle = async () => {
+        for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+      };
+      await settle();
+      mock.timers.tick(TG_CALL_TIMEOUT_MS - 1);
+      await settle();
+      assert.equal(sent, null, "not yet");
+      mock.timers.tick(1);
+      await settle();
+      assert.deepEqual(sent, { ok: false, reason: "request failed: timed out" });
+      assert.equal(polled, null, "a long poll is held open by design");
+      mock.timers.tick(25_000 - 1);
+      await settle();
+      assert.equal(polled, null);
+      mock.timers.tick(1);
+      await settle();
+      assert.equal((polled as { reason?: string } | null)?.reason, "request failed: timed out");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("an answer in time is not cut short, and nothing is left waiting", async () => {
+    const f = fakeFetch(200, OK({ message_id: 9 }));
+    assert.deepEqual(await sendMessage({ token: "t", fetchFn: f, timeoutMs: 5_000 }, -100, "hi"), { ok: true, messageId: 9 });
   });
 });
 
