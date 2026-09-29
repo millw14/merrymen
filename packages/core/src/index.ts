@@ -68,3 +68,8 @@ export * from "./grant-installable";
 // WAS THIS GRANT SIGNED AGAINST AN OLDER WALL? A release date, enforced by a
 // fingerprint test, because `serialized` never leaves the browser that minted it.
 export * from "./wall-release";
+
+// PERPETUALS ON LIGHTER — the frozen venue route, the market table, the API-key
+// shape the wall seals, and the integer arithmetic every perp risk check is made
+// of. docs/perps.md is the contract.
+export * from "./perps";

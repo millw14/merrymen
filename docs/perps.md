@@ -199,8 +199,9 @@ are recorded beside the constants in `packages/core/src/perps.ts`.
    1)`. Client order indexes are `nonce × 8 + leg` (0 entry, 1 stop, 2 take,
    3 close/standalone), so they never repeat across restarts or a wiped ledger.
    Only persisted bytes are re-sent, and never after `ExpiredAt`. A row is
-   resolved by tx hash (`status` 0 → rejected, final; 1 → still submitted; 2/3
-   → executed, ingest fills); `/tx` HTTP 400 code 21500 is `not-found`, any
+   resolved by tx hash (`status` 0 → rejected, final; 1 → still submitted; 2–5
+   (executed, packed, committed, verified) → executed, ingest fills — unless
+   `event_info.ae` carries an app error, which is a final refusal); `/tx` HTTP 400 code 21500 is `not-found`, any
    other failure is `unknown`, never not-found. A `not-found` row becomes
    `expired` only after `ExpiredAt + 120 s` with a measured clock skew under
    5 s. No new nonce is signed for an intent while its row is ambiguous —
