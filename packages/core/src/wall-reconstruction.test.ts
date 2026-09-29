@@ -6,6 +6,13 @@ import { CASH, STOCK_TOKENS, type CustomToken } from "./tokens";
 import type { GrantCaps } from "./grant";
 import { GRANT_ENERGY } from "./energy";
 import { MERRYMEN_TOKEN } from "./token";
+import { GRANT_PERP_LIGHTER, LIGHTER_ROUTE_V1 } from "./perps";
+
+/** A real Lighter API public key (the official signer's, from the spike). */
+const PERP_PK = "0x2427c4493c2df1a3ecdd750f1398b865e5428907c41065f0612cb3fa6b5ea0d7ac00465b07f3acd7" as const;
+const PERP_LIGHTER = { apiKeyIndex: LIGHTER_ROUTE_V1.apiKeyIndex, apiPublicKey: PERP_PK } as const;
+/** The perp block exactly as a stored grant carries it — sealed blob included, which the rebuild must ignore. */
+const PERP_BLOCK = { route: GRANT_PERP_LIGHTER, ...PERP_LIGHTER, apiKeySealed: "aes-gcm-blob" };
 
 /**
  * THE EXECUTOR REBUILDS A WALL IT NEVER SAW, AND IT HAS TO GET THE SAME ONE.
@@ -121,41 +128,84 @@ describe("a rebuilt wall is the same wall", () => {
     // it is rebuilt from the GRANT_ENERGY marker alone. It adds a permission
     // AND a spender entry on the USDG approve, so a rebuild that missed it
     // would be 1,408 bytes narrower than the wall that was signed.
+    //
+    // PERPS ARE A DIMENSION TOO, and the first one rebuilt from more than a
+    // marker: `grantWallOptions` reads the grant's chain and `perp` block
+    // through `grantPerp`, so the rebuild has to be handed both — three
+    // permissions, eleven rules and a spender entry (2,816 bytes) ride on it.
     const V4 = "0x" + "a".repeat(40);
     const PONS = "0x" + "b".repeat(40);
     for (const allowRialto of [false, true])
       for (const allowUniswapV4 of [false, true])
         for (const v4 of [false, true])
           for (const pons of [false, true])
-            for (const energyBuy of [false, true]) {
-              const caps = {
-                allowRialto,
-                allowUniswapV4,
-                ...(v4 ? { v4AdapterAddress: V4 } : {}),
-                ...(pons ? { ponsAdapterAddress: PONS } : {}),
-                energyBuy,
-              };
-              const tokens = [tok(1), tok(1), tok(2)];
-              const signed = shapeOf({ extraTokens: tokens, ...caps });
-              const grantTokens = usableExtraTokens(tokens).map((t) => t.address.toLowerCase());
-              const rebuilt = shapeOf({
-                ...grantWallOptions({
-                  grantTokens,
-                  grantFeatures: [
-                    ...(allowRialto ? ["rialto"] : []),
-                    ...(allowUniswapV4 ? ["v4"] : []),
-                    ...(energyBuy ? [GRANT_ENERGY] : []),
-                  ],
-                }),
-                ...(v4 ? { v4AdapterAddress: V4 } : {}),
-                ...(pons ? { ponsAdapterAddress: PONS } : {}),
-              });
-              assert.deepEqual(
-                rebuilt,
-                signed,
-                `combination r=${allowRialto} v4=${allowUniswapV4} a=${v4} p=${pons} e=${energyBuy}`,
-              );
-            }
+            for (const energyBuy of [false, true])
+              for (const perps of [false, true]) {
+                const caps = {
+                  allowRialto,
+                  allowUniswapV4,
+                  ...(v4 ? { v4AdapterAddress: V4 } : {}),
+                  ...(pons ? { ponsAdapterAddress: PONS } : {}),
+                  energyBuy,
+                  ...(perps ? { perpLighter: PERP_LIGHTER } : {}),
+                };
+                const tokens = [tok(1), tok(1), tok(2)];
+                const signed = shapeOf({ extraTokens: tokens, ...caps });
+                const grantTokens = usableExtraTokens(tokens).map((t) => t.address.toLowerCase());
+                const rebuilt = shapeOf({
+                  ...grantWallOptions({
+                    grantTokens,
+                    grantFeatures: [
+                      ...(allowRialto ? ["rialto"] : []),
+                      ...(allowUniswapV4 ? ["v4"] : []),
+                      ...(energyBuy ? [GRANT_ENERGY] : []),
+                      ...(perps ? [GRANT_PERP_LIGHTER] : []),
+                    ],
+                    chainId: LIGHTER_ROUTE_V1.chainId,
+                    ...(perps ? { perp: PERP_BLOCK } : {}),
+                  }),
+                  ...(v4 ? { v4AdapterAddress: V4 } : {}),
+                  ...(pons ? { ponsAdapterAddress: PONS } : {}),
+                });
+                assert.deepEqual(
+                  rebuilt,
+                  signed,
+                  `combination r=${allowRialto} v4=${allowUniswapV4} a=${v4} p=${pons} e=${energyBuy} perps=${perps}`,
+                );
+              }
+  });
+
+  it("PERPS REBUILD ONLY FROM MARKER + CHAIN + BLOCK, all three — a partial claim rebuilds the narrower wall", () => {
+    const full = { grantFeatures: ["tradeable-v2", GRANT_PERP_LIGHTER], chainId: 4663, perp: PERP_BLOCK };
+    assert.deepEqual(grantWallOptions(full).perpLighter, PERP_LIGHTER);
+    // Each missing piece is "perps not granted" — never a partial wall. Server
+    // side, the narrower rebuild then fails the byte comparison against a
+    // signature that carried perps, which is the refusal a half-formed grant
+    // deserves.
+    const partial: Record<string, Record<string, unknown>> = {
+      "no marker": { ...full, grantFeatures: ["tradeable-v2"] },
+      "no chain": { grantFeatures: full.grantFeatures, perp: full.perp },
+      testnet: { ...full, chainId: 46630 },
+      "no block": { grantFeatures: full.grantFeatures, chainId: 4663 },
+      "another index": { ...full, perp: { ...PERP_BLOCK, apiKeyIndex: 3 } },
+      "a key the contract would reject": { ...full, perp: { ...PERP_BLOCK, apiPublicKey: `0x${"0".repeat(80)}` } },
+      "a future route": { ...full, grantFeatures: ["tradeable-v2", "perp-lighter-v2"], perp: { ...PERP_BLOCK, route: "perp-lighter-v2" } },
+    };
+    const bare = shapeOf({});
+    for (const [why, g] of Object.entries(partial)) {
+      const opts = grantWallOptions(g as never);
+      assert.equal(opts.perpLighter, undefined, why);
+      assert.equal("perpLighter" in opts, false, `${why}: the options object keeps exactly the keys it always had`);
+      assert.deepEqual(shapeOf({ ...opts }), bare, why);
+    }
+    // And callers that pass neither chain nor block — today's hosted check —
+    // get exactly the object they always got.
+    assert.deepEqual(Object.keys(grantWallOptions({ grantFeatures: [GRANT_ENERGY] })).sort(), [
+      "allowRialto",
+      "allowUniswapV4",
+      "energyBuy",
+      "extraTokens",
+    ]);
   });
 
   it("THE ENERGY MARKER, AND ONLY THE MARKER, turns the energy buy on in a rebuild", () => {

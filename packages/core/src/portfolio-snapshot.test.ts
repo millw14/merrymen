@@ -12,6 +12,7 @@ import {
   buildPortfolioSnapshot,
   computePnl,
   microToString,
+  perpSnapshotIdParts,
   pnlPercent,
   toMicro,
   type PortfolioQuality,
@@ -95,6 +96,70 @@ describe("the equity identity is computed in one place", () => {
     });
     assert.equal(s.positionsUsdg, toMicro(6.55));
     assert.equal(s.equityUsdg, toMicro(3.334) + toMicro(6.55) + toMicro(5));
+  });
+});
+
+/**
+ * THE VENUE ACCOUNT IS PART OF THE BOOK (docs/perps.md rule 12).
+ *
+ * Margin posted to Lighter is still the owner's money. A book that left it out
+ * would read every deposit to the venue as a loss of exactly that size, trip
+ * the breaker on it, and let the next read ratchet the peak on money that was
+ * there all along. One term in the identity, never folded into positions.
+ */
+describe("the venue account is one term of the equity identity", () => {
+  it("is cash + vault + positions + quarantined + perpAccount", () => {
+    const s = build({
+      cashUsdg: toMicro(3.334),
+      vaultUsdg: toMicro(1),
+      quarantinedUsdg: toMicro(2),
+      perpAccountUsdg: toMicro(40.5),
+      positions: [pos({ valueUsdg: toMicro(6.55) })],
+    });
+    assert.equal(s.perpAccountUsdg, toMicro(40.5));
+    assert.equal(s.equityUsdg, toMicro(3.334) + toMicro(1) + toMicro(6.55) + toMicro(2) + toMicro(40.5));
+    assert.equal(s.positionsUsdg, toMicro(6.55), "margin is never a position");
+  });
+
+  it("posting margin moves nothing: cash down, venue up, equity and P&L unchanged", () => {
+    const before = build({ cashUsdg: toMicro(30) });
+    const after = build({ cashUsdg: toMicro(5), perpAccountUsdg: toMicro(25) });
+    assert.equal(after.equityUsdg, before.equityUsdg);
+    assert.deepEqual(after.pnl, before.pnl);
+  });
+
+  it("an unrealized loss at the venue is a loss of the book (the term may be below what was posted)", () => {
+    const s = build({ cashUsdg: toMicro(5), perpAccountUsdg: toMicro(20) });
+    assert.equal(s.equityUsdg, toMicro(5) + toMicro(6.55) + toMicro(20));
+  });
+
+  it("ABSENT IS ZERO — and every snapshot without a venue account is byte-identical to before", () => {
+    const without = build();
+    assert.equal(without.perpAccountUsdg, 0);
+    const { perpAccountUsdg: _p, ...rest } = without;
+    const explicitZero = build({ perpAccountUsdg: 0 });
+    assert.deepEqual(explicitZero, without);
+    // The fields that existed before are exactly the old computation.
+    assert.equal(rest.equityUsdg, rest.cashUsdg + rest.vaultUsdg + rest.positionsUsdg + rest.quarantinedUsdg);
+  });
+
+  it("UNKNOWN IS NEVER A SNAPSHOT: a non-integer venue value is refused, not turned into one", () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, 1.5, null as unknown as number]) {
+      assert.throws(() => build({ perpAccountUsdg: bad }), RangeError, String(bad));
+    }
+  });
+
+  it("the id gains a part only when the term is non-zero, so every existing id is unchanged", () => {
+    // Snapshot ids are content-addressed over a list of parts (worker
+    // brain-shadow.ts `snapshotId`); appending nothing leaves the list — and
+    // therefore the hash — exactly as it was for every agent without perps.
+    const parts = [3_334_000, 0, 0, 10_000_000, 2, "TSLA:6550000"];
+    assert.deepEqual([...parts, ...perpSnapshotIdParts(undefined)], parts);
+    assert.deepEqual([...parts, ...perpSnapshotIdParts(0)], parts);
+    assert.deepEqual(perpSnapshotIdParts(25_000_000), ["perp:25000000"]);
+    assert.deepEqual(perpSnapshotIdParts(-1), ["perp:-1"]);
+    // Two books that differ only at the venue are different books.
+    assert.notDeepEqual([...parts, ...perpSnapshotIdParts(1)], [...parts, ...perpSnapshotIdParts(2)]);
   });
 });
 

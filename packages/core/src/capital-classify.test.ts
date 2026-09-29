@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyUsdgMovement, totalCapital, type TransferLeg } from "./capital-classify";
+import { decodeEventLog, encodeAbiParameters, encodeEventTopics, pad, toHex } from "viem";
+import {
+  classifyUsdgMovement,
+  decodeLighterLog,
+  lighterEventsFromReceiptLogs,
+  lighterVenueProxies,
+  logIndexOf,
+  totalCapital,
+  type ReceiptLogLike,
+  type TransferLeg,
+} from "./capital-classify";
+import { LIGHTER_EVENTS_ABI } from "./abis";
+import { LIGHTER_ROUTE_V1 } from "./perps";
 
 /**
  * THE CANARY IS THE REFERENCE FIXTURE, and it is the case a naive rule gets
@@ -15,6 +27,7 @@ const USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
 const TSLA = "0x322F0929c4625eD5bAd873c95208D54E1c003b2d";
 const ROUTER = "0xf4acdaeeb7022862a763c9b1b885e11191c889e3";
 const OWNER_WALLET = "0xac563ac23bac8d803992502088ebf46ab892f95c";
+const ROUTER_C1 = ROUTER;
 
 const leg = (token: string, from: string, to: string, amountRaw: string): TransferLeg => ({
   token,
@@ -486,5 +499,423 @@ describe("the energy reserve purchase", () => {
     const t = totalCapital([]);
     assert.equal(t.grossReservePurchasesRaw, "0");
     assert.equal(t.reservePurchases, 0);
+  });
+});
+
+/**
+ * MARGIN IS NOT CAPITAL — the `venue-margin` rule, over receipts shaped exactly
+ * like the live ones.
+ *
+ * Without it, a USDG deposit to the Lighter proxy is `capital-out` and a payout
+ * is `capital-in`, both by `no-pair-external` (checked against mainnet receipts
+ * 0xf8b3f4bf… and 0x0f82c519…). The effect: perp P&L laundered into
+ * contributions, the performance fee charged on the owner's own money coming
+ * home or never charged on gains, and a payout raising the high-water mark by
+ * money that was already the owner's — which then reads as a drawdown.
+ *
+ * The fixtures are built from LIGHTER_EVENTS_ABI with viem's encoder, with the
+ * values and log positions of the real receipts:
+ *   0x28144cb2… a self-deposit — Approval 1, Transfer self→proxy 2,
+ *               NewPriorityRequest 3, Deposit 4 {22149, self, 3, 0, 82973191}
+ *   0x0f82c519… Lighter's relayer paying claims — per owner, Transfer
+ *               proxy→owner at i and WithdrawPending(owner, 3, amount) at i+1
+ *               (2457020000 and 8085000000)
+ */
+describe("the venue-margin rule", () => {
+  type Log = ReceiptLogLike;
+
+  const PROXY = LIGHTER_ROUTE_V1.proxy;
+  const USDG_ = LIGHTER_ROUTE_V1.usdg;
+  const ME = "0x8e93b78ef08d5e36da2e2473cd9027f8c286c176"; // the account behind venue account 22149
+  const OTHER = "0x9021b1670000000000000000000000000000beef";
+  const ROUTER = "0x8062df5b00000000000000000000000000000001"; // a Robinhood-intent-style router
+  const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+  const APPROVAL = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925";
+  /** A proxy log the rule never reads (the receipt's NewPriorityRequest stands here). */
+  const OPAQUE_TOPIC = pad("0x01", { size: 32 });
+
+  const word = (v: bigint | number) => pad(toHex(v), { size: 32 });
+  const addrTopic = (a: string) => pad(a as `0x${string}`, { size: 32 }).toLowerCase();
+  const transferLog = (logIndex: number, from: string, to: string, amount: bigint): Log => ({
+    address: USDG_,
+    topics: [TRANSFER, addrTopic(from), addrTopic(to)],
+    data: word(amount),
+    logIndex,
+  });
+  const approvalLog = (logIndex: number, owner: string, spender: string, amount: bigint): Log => ({
+    address: USDG_,
+    topics: [APPROVAL, addrTopic(owner), addrTopic(spender)],
+    data: word(amount),
+    logIndex,
+  });
+  const depositLog = (
+    logIndex: number,
+    ev: { toAccountIndex: bigint; toAddress: string; assetIndex: number; routeType: number; baseAmount: bigint },
+    address: string = PROXY,
+  ): Log => ({
+    address,
+    topics: encodeEventTopics({ abi: LIGHTER_EVENTS_ABI, eventName: "Deposit" }) as string[],
+    data: encodeAbiParameters(
+      LIGHTER_EVENTS_ABI[0].inputs,
+      [Number(ev.toAccountIndex), ev.toAddress as `0x${string}`, ev.assetIndex, ev.routeType, ev.baseAmount],
+    ),
+    logIndex,
+  });
+  const withdrawPendingLog = (logIndex: number, owner: string, assetIndex: number, baseAmount: bigint, address: string = PROXY): Log => ({
+    address,
+    topics: encodeEventTopics({ abi: LIGHTER_EVENTS_ABI, eventName: "WithdrawPending", args: { owner: owner as `0x${string}` } }) as string[],
+    data: encodeAbiParameters(
+      LIGHTER_EVENTS_ABI[1].inputs.filter((i) => !i.indexed),
+      [assetIndex, baseAmount],
+    ),
+    logIndex,
+  });
+  const opaqueLog = (logIndex: number): Log => ({ address: PROXY, topics: [OPAQUE_TOPIC], data: "0x", logIndex });
+
+  const AMOUNT = 82_973_191n;
+  /** 0x28144cb2…, as its logs lie. */
+  const selfDeposit: Log[] = [
+    approvalLog(1, ME, PROXY, AMOUNT),
+    transferLog(2, ME, PROXY, AMOUNT),
+    opaqueLog(3),
+    depositLog(4, { toAccountIndex: 22149n, toAddress: ME, assetIndex: 3, routeType: 0, baseAmount: AMOUNT }),
+  ];
+  const legOf = (l: Log) => {
+    const [, from, to] = l.topics;
+    return {
+      token: l.address,
+      from: `0x${from!.slice(-40)}`,
+      to: `0x${to!.slice(-40)}`,
+      amountRaw: BigInt(l.data).toString(),
+      logIndex: logIndexOf(l) ?? undefined,
+    };
+  };
+  /** Classify the Transfer at `at` in `logs`, the way a scanner holding the receipt would. */
+  const classifyAt = (logs: Log[], at: number, extra: Partial<Parameters<typeof classifyUsdgMovement>[0]> = {}) => {
+    const legs = logs.filter((l) => l.topics[0] === TRANSFER).map(legOf);
+    const usdg = legs.find((l) => l.logIndex === at)!;
+    return classifyUsdgMovement({
+      account: ME,
+      usdg,
+      txLegs: legs,
+      usdgToken: USDG_,
+      venueProxies: lighterVenueProxies(4663),
+      venueLogs: logs,
+      ...extra,
+    });
+  };
+
+  it("one source for the proxies: Lighter's on 4663, none anywhere else", () => {
+    assert.deepEqual(lighterVenueProxies(4663), [PROXY]);
+    for (const chainId of [46630, 1, 8453]) assert.deepEqual(lighterVenueProxies(chainId), []);
+  });
+
+  it("the decoder reads what viem's encoder writes for LIGHTER_EVENTS_ABI, and viem agrees", () => {
+    const events = lighterEventsFromReceiptLogs(selfDeposit, 4663);
+    assert.equal(events.length, 1, "Approval, Transfer and the opaque proxy log are not margin events");
+    assert.deepEqual(events[0], {
+      event: "Deposit",
+      proxy: PROXY,
+      logIndex: 4,
+      toAccountIndex: 22149n,
+      toAddress: ME,
+      assetIndex: 3,
+      routeType: 0,
+      baseAmount: AMOUNT,
+    });
+    const viemView = decodeEventLog({ abi: LIGHTER_EVENTS_ABI, data: selfDeposit[3]!.data as `0x${string}`, topics: selfDeposit[3]!.topics as [`0x${string}`] });
+    assert.equal(viemView.eventName, "Deposit");
+    assert.equal((viemView.args as { baseAmount: bigint }).baseAmount, AMOUNT);
+    assert.equal(selfDeposit[3]!.topics[0], LIGHTER_ROUTE_V1.topics.deposit, "topic0 is the route's pinned hash");
+    assert.equal(selfDeposit[3]!.topics.length, 1, "Deposit indexes nothing — it cannot be log-filtered by account");
+
+    const wp = withdrawPendingLog(7, ME, 3, 8_085_000_000n);
+    assert.equal(wp.topics[0], LIGHTER_ROUTE_V1.topics.withdrawPending);
+    assert.deepEqual(decodeLighterLog(wp), {
+      event: "WithdrawPending",
+      proxy: PROXY,
+      logIndex: 7,
+      owner: ME,
+      assetIndex: 3,
+      baseAmount: 8_085_000_000n,
+    });
+  });
+
+  it("the decoder reads only the venue, only on 4663, and only canonical encodings", () => {
+    // A contract copying the proxy's event signatures is not the venue.
+    const copycat = depositLog(4, { toAccountIndex: 1n, toAddress: ME, assetIndex: 3, routeType: 0, baseAmount: AMOUNT }, OTHER);
+    assert.deepEqual(lighterEventsFromReceiptLogs([copycat], 4663), []);
+    assert.deepEqual(lighterEventsFromReceiptLogs(selfDeposit, 46630), [], "no venue off mainnet");
+    // Case of the emitting address does not matter; the contents do.
+    assert.equal(lighterEventsFromReceiptLogs([{ ...selfDeposit[3]!, address: PROXY.toUpperCase().replace("0X", "0x") }], 4663).length, 1);
+
+    const good = selfDeposit[3]!;
+    const body = good.data.slice(2);
+    const w = (i: number) => body.slice(i * 64, (i + 1) * 64);
+    const withWord = (i: number, v: string) => `0x${[0, 1, 2, 3, 4].map((k) => (k === i ? v : w(k))).join("")}`;
+    const malformed: Record<string, Log> = {
+      "an extra data word": { ...good, data: `${good.data}${"00".repeat(32)}` },
+      "a missing data word": { ...good, data: `0x${body.slice(0, 64 * 4)}` },
+      "an indexed topic Deposit does not have": { ...good, topics: [...good.topics, addrTopic(ME)] },
+      "a dirty high byte on toAddress": { ...good, data: withWord(1, `ff${w(1).slice(2)}`) },
+      "a uint16 asset index past 2^16": { ...good, data: withWord(2, word(0x10003n).slice(2)) },
+      "a uint8 route past 2^8": { ...good, data: withWord(3, word(0x100n).slice(2)) },
+      "a uint48 account index past 2^48": { ...good, data: withWord(0, word(2n ** 48n).slice(2)) },
+      "odd-length data": { ...good, data: `${good.data}0` },
+    };
+    for (const [why, log] of Object.entries(malformed)) {
+      assert.equal(decodeLighterLog(log), null, why);
+    }
+    const wp = withdrawPendingLog(7, ME, 3, 1n);
+    assert.equal(decodeLighterLog({ ...wp, topics: [wp.topics[0]!] }), null, "WithdrawPending without its owner topic");
+    assert.equal(decodeLighterLog({ ...wp, topics: [wp.topics[0]!, `0xff${wp.topics[1]!.slice(4)}`] }), null, "a dirty owner topic");
+  });
+
+  it("THE BASELINE: without the rule, a deposit is a withdrawal and a payout is a deposit", () => {
+    // What every scanner does today, and what the rule exists to stop. Pinned
+    // so the two fields' absence is proven to change nothing.
+    const out = classifyAt(selfDeposit, 2, { venueProxies: undefined, venueLogs: undefined });
+    assert.equal(out.kind, "capital-out");
+    assert.equal(out.evidence.rule, "no-pair-external");
+    const payout = [transferLog(10, PROXY, ME, 8_085_000_000n), withdrawPendingLog(11, ME, 3, 8_085_000_000n)];
+    const back = classifyAt(payout, 10, { venueProxies: undefined, venueLogs: undefined });
+    assert.equal(back.kind, "capital-in");
+    assert.equal(back.evidence.rule, "no-pair-external");
+  });
+
+  it("ABSENT OR EMPTY venueProxies is byte-identical to before the fields existed, whatever else is passed", () => {
+    // Every movement shape this file already pins, plus the proxy legs, with
+    // and without the new fields: the verdict objects must be deepEqual.
+    const payout = [transferLog(10, PROXY, ME, 8_085_000_000n), withdrawPendingLog(11, ME, 3, 8_085_000_000n)];
+    const shapes: { logs: Log[]; at: number }[] = [
+      { logs: selfDeposit, at: 2 },
+      { logs: payout, at: 10 },
+      { logs: [transferLog(0, OTHER, ME, 10_000_000n)], at: 0 },
+      { logs: [transferLog(0, ME, OTHER, 10_000_000n)], at: 0 },
+      { logs: [transferLog(0, ME, ME, 1n)], at: 0 },
+    ];
+    for (const { logs, at } of shapes) {
+      const before = classifyAt(logs, at, { venueProxies: undefined, venueLogs: undefined });
+      assert.deepEqual(classifyAt(logs, at, { venueProxies: [], venueLogs: logs }), before, "empty proxies, logs present");
+      assert.deepEqual(classifyAt(logs, at, { venueProxies: undefined }), before, "logs alone switch nothing on");
+      assert.deepEqual(classifyAt(logs, at, { venueProxies: lighterVenueProxies(46630), venueLogs: logs }), before, "testnet has no venue");
+    }
+    // And with the proxies named, a leg that does not touch the proxy is
+    // untouched too.
+    const plain = [transferLog(0, OTHER, ME, 10_000_000n)];
+    assert.deepEqual(classifyAt(plain, 0), classifyAt(plain, 0, { venueProxies: undefined, venueLogs: undefined }));
+    // The canary fixture at the top of this file, with the fields on.
+    const usdg = leg(USDG, ACCOUNT, ROUTER_C1, "1666500");
+    const tsla = leg(TSLA, ROUTER_C1, ACCOUNT, "4420417473624633");
+    const base = { account: ACCOUNT, usdg, txLegs: [usdg, tsla], usdgToken: USDG };
+    assert.deepEqual(classifyUsdgMovement({ ...base, venueProxies: lighterVenueProxies(4663), venueLogs: [] }), classifyUsdgMovement(base));
+  });
+
+  it("a self-deposit is margin-out, proved by the Deposit its own call emitted", () => {
+    const v = classifyAt(selfDeposit, 2);
+    assert.equal(v.kind, "margin-out");
+    assert.equal(v.evidence.rule, "venue-margin");
+    assert.equal(v.evidence.direction, "out");
+    assert.equal(v.evidence.counterparty, PROXY);
+    assert.match(v.why, /log 4/);
+    assert.match(v.why, /22149/);
+    // The rule decides before the infrastructure and venue lists do, so naming
+    // the proxy there as well cannot demote it to `protocol` or `ambiguous`.
+    assert.equal(classifyAt(selfDeposit, 2, { protocolAddresses: [PROXY], systemAddresses: [PROXY] }).kind, "margin-out");
+  });
+
+  it("a Deposit naming SOMEONE ELSE is capital-out — today's verdict, now with its reason", () => {
+    const toOther = [
+      transferLog(2, ME, PROXY, AMOUNT),
+      depositLog(4, { toAccountIndex: 777n, toAddress: OTHER, assetIndex: 3, routeType: 0, baseAmount: AMOUNT }),
+    ];
+    const v = classifyAt(toOther, 2);
+    assert.equal(v.kind, "capital-out", "this account's USDG credited a venue account it does not own");
+    assert.equal(v.evidence.rule, "venue-margin");
+    assert.match(v.why, new RegExp(OTHER));
+  });
+
+  it("anything the receipt does not prove is ambiguous — never capital, never margin", () => {
+    const refused: Record<string, { logs: Log[]; at?: number; extra?: Record<string, unknown> }> = {
+      "an amount that differs": {
+        logs: [transferLog(2, ME, PROXY, AMOUNT), depositLog(4, { toAccountIndex: 22149n, toAddress: ME, assetIndex: 3, routeType: 0, baseAmount: AMOUNT - 1n })],
+      },
+      "another asset": {
+        logs: [transferLog(2, ME, PROXY, AMOUNT), depositLog(4, { toAccountIndex: 22149n, toAddress: ME, assetIndex: 1, routeType: 0, baseAmount: AMOUNT })],
+      },
+      "the spot route": {
+        logs: [transferLog(2, ME, PROXY, AMOUNT), depositLog(4, { toAccountIndex: 22149n, toAddress: ME, assetIndex: 3, routeType: 1, baseAmount: AMOUNT })],
+      },
+      "no Deposit at all (a plain transfer to the venue)": { logs: [transferLog(2, ME, PROXY, AMOUNT)] },
+      "a Deposit BEFORE the transfer, not after it": {
+        logs: [depositLog(1, { toAccountIndex: 22149n, toAddress: ME, assetIndex: 3, routeType: 0, baseAmount: AMOUNT }), transferLog(2, ME, PROXY, AMOUNT)],
+      },
+      "a Deposit emitted by some other contract": {
+        logs: [transferLog(2, ME, PROXY, AMOUNT), depositLog(4, { toAccountIndex: 22149n, toAddress: ME, assetIndex: 3, routeType: 0, baseAmount: AMOUNT }, OTHER)],
+      },
+      "other USDG entering the venue in between": {
+        logs: [
+          transferLog(2, ME, PROXY, AMOUNT),
+          transferLog(3, ROUTER, PROXY, AMOUNT),
+          depositLog(4, { toAccountIndex: 22149n, toAddress: ME, assetIndex: 3, routeType: 0, baseAmount: AMOUNT }),
+        ],
+      },
+      "an undecodable Deposit where the pair should be": {
+        logs: [transferLog(2, ME, PROXY, AMOUNT), { ...selfDeposit[3]!, data: `${selfDeposit[3]!.data}00` }],
+      },
+      "the logs withheld while the proxy is named": { logs: selfDeposit, extra: { venueLogs: undefined } },
+      "no position for the leg": { logs: selfDeposit, extra: { usdg: { ...legOf(selfDeposit[1]!), logIndex: undefined } } },
+      "a position that is not this transfer": { logs: selfDeposit, extra: { usdg: { ...legOf(selfDeposit[1]!), logIndex: 1 } } },
+    };
+    for (const [why, { logs, at = 2, extra = {} }] of Object.entries(refused)) {
+      const v = classifyAt(logs, at, extra as never);
+      assert.equal(v.kind, "ambiguous", why);
+      assert.equal(v.evidence.rule, "venue-margin", `${why}: the venue rule decided it, not a fall-through`);
+    }
+  });
+
+  it("SOMEONE ELSE'S deposit in the same transaction never pairs with ours", () => {
+    // A third of live Deposits are routed: a router pulls USDG and credits
+    // another address. Ours pairs by position with the Deposit its own call
+    // emitted, whichever side of it theirs falls.
+    const theirs = (t: number, d: number): Log[] => [
+      transferLog(t, ROUTER, PROXY, 135_000_000n),
+      depositLog(d, { toAccountIndex: 9n, toAddress: OTHER, assetIndex: 3, routeType: 0, baseAmount: 135_000_000n }),
+    ];
+    const after = [...selfDeposit, ...theirs(6, 8)];
+    const before = [...theirs(0, 1), ...selfDeposit.map((l) => ({ ...l, logIndex: logIndexOf(l)! + 10 }))];
+    assert.equal(classifyAt(after, 2).kind, "margin-out");
+    assert.equal(classifyAt(before, 12).kind, "margin-out");
+    // And two deposits of our own in one UserOp each find their own event.
+    const twice = [
+      ...selfDeposit,
+      transferLog(6, ME, PROXY, 5_000_000n),
+      opaqueLog(7),
+      depositLog(8, { toAccountIndex: 22149n, toAddress: ME, assetIndex: 3, routeType: 0, baseAmount: 5_000_000n }),
+    ];
+    assert.equal(classifyAt(twice, 2).kind, "margin-out");
+    assert.equal(classifyAt(twice, 6).kind, "margin-out");
+  });
+
+  it("a payout from the relayer's batch is margin-in; the other owner's is not ours at all", () => {
+    // 0x0f82c519…: the relayer claims for several owners in one transaction.
+    const batch = [
+      transferLog(20, PROXY, OTHER, 2_457_020_000n),
+      withdrawPendingLog(21, OTHER, 3, 2_457_020_000n),
+      transferLog(22, PROXY, ME, 8_085_000_000n),
+      withdrawPendingLog(23, ME, 3, 8_085_000_000n),
+    ];
+    const v = classifyAt(batch, 22);
+    assert.equal(v.kind, "margin-in");
+    assert.equal(v.evidence.rule, "venue-margin");
+    assert.equal(v.evidence.direction, "in");
+    assert.match(v.why, /log 23/);
+    assert.equal(classifyAt(batch, 20).kind, "ambiguous", "a transfer that does not touch this account decides nothing");
+    assert.equal(classifyAt(batch, 20).evidence.rule, "not-this-account");
+  });
+
+  it("the same owner paid twice with equal amounts pairs BY POSITION, one event each", () => {
+    const X = 1_000_000n;
+    const twice = [
+      transferLog(30, PROXY, ME, X),
+      withdrawPendingLog(31, ME, 3, X),
+      transferLog(32, PROXY, ME, X),
+      withdrawPendingLog(33, ME, 3, X),
+    ];
+    assert.equal(classifyAt(twice, 30).kind, "margin-in");
+    assert.equal(classifyAt(twice, 32).kind, "margin-in");
+    // Remove the second event: the second transfer has nothing of its own, and
+    // borrowing the first one's would be pairing by amount.
+    const oneEvent = twice.slice(0, 3);
+    assert.equal(classifyAt(oneEvent, 30).kind, "margin-in");
+    assert.equal(classifyAt(oneEvent, 32).kind, "ambiguous");
+  });
+
+  it("a proxy payout without its own WithdrawPending is ambiguous", () => {
+    const X = 8_085_000_000n;
+    const cases: Record<string, Log[]> = {
+      "no event": [transferLog(10, PROXY, ME, X)],
+      "the event names another owner": [transferLog(10, PROXY, ME, X), withdrawPendingLog(11, OTHER, 3, X)],
+      "another asset": [transferLog(10, PROXY, ME, X), withdrawPendingLog(11, ME, 0, X)],
+      "another amount": [transferLog(10, PROXY, ME, X), withdrawPendingLog(11, ME, 3, X - 1n)],
+      "not adjacent": [transferLog(10, PROXY, ME, X), opaqueLog(11), withdrawPendingLog(12, ME, 3, X)],
+      "emitted by another contract": [transferLog(10, PROXY, ME, X), withdrawPendingLog(11, ME, 3, X, OTHER)],
+    };
+    for (const [why, logs] of Object.entries(cases)) {
+      const v = classifyAt(logs, 10);
+      assert.equal(v.kind, "ambiguous", why);
+      assert.equal(v.evidence.rule, "venue-margin", why);
+    }
+  });
+
+  it("log positions are read as RPCs spell them, and a receipt with an unreadable one pairs nothing", () => {
+    // viem gives numbers; raw JSON-RPC gives hex strings. Both are the same receipt.
+    assert.equal(logIndexOf({ logIndex: 4 }), 4);
+    assert.equal(logIndexOf({ logIndex: "0x4" }), 4);
+    assert.equal(logIndexOf({ logIndex: "4" }), 4);
+    assert.equal(logIndexOf({ logIndex: 4n }), 4);
+    for (const bad of [undefined, null, -1, 1.5, "0xzz", "", 2n ** 64n, Number.NaN]) {
+      assert.equal(logIndexOf({ logIndex: bad as never }), null, String(bad));
+    }
+    const hexed = selfDeposit.map((l) => ({ ...l, logIndex: `0x${logIndexOf(l)!.toString(16)}` }));
+    assert.equal(classifyAt(hexed, 2).kind, "margin-out", "hex positions read exactly as numbers do");
+    assert.equal(lighterEventsFromReceiptLogs(hexed, 4663)[0]!.logIndex, 4);
+    // One unreadable position anywhere and "what sits between" is unknowable.
+    const holed = [...selfDeposit.slice(0, 2), { ...selfDeposit[2]!, logIndex: null }, selfDeposit[3]!];
+    const v = classifyAt(holed, 2);
+    assert.equal(v.kind, "ambiguous");
+    assert.match(v.why, /position could not be read/);
+    // Two logs at one position is not a receipt; nothing pairs in it either.
+    assert.equal(classifyAt([...selfDeposit, { ...selfDeposit[3]!, logIndex: 3 }], 2).kind, "ambiguous");
+    // The decoder still reports WHAT a log said when it cannot say WHERE.
+    assert.equal(lighterEventsFromReceiptLogs([{ ...selfDeposit[3]!, logIndex: undefined }], 4663)[0]!.logIndex, null);
+  });
+
+  it("the paired rule still comes first: a leg that was half of a swap is a trade", () => {
+    // The ordering the header argues for — transaction context needs no list.
+    const logs = [...selfDeposit];
+    const legs = logs.filter((l) => l.topics[0] === TRANSFER).map(legOf);
+    const v = classifyUsdgMovement({
+      account: ME,
+      usdg: legs[0]!,
+      txLegs: [...legs, { token: TSLA, from: ROUTER, to: ME, amountRaw: "1000" }],
+      usdgToken: USDG_,
+      venueProxies: lighterVenueProxies(4663),
+      venueLogs: logs,
+    });
+    assert.equal(v.kind, "trade-out");
+  });
+
+  it("totals: margin is its own figure and moves no contribution", () => {
+    const payout = [transferLog(10, PROXY, ME, 8_085_000_000n), withdrawPendingLog(11, ME, 3, 8_085_000_000n)];
+    const funding = [transferLog(0, OTHER, ME, 100_000_000n)];
+    const t = totalCapital([
+      { amountRaw: "100000000", classification: classifyAt(funding, 0) },
+      { amountRaw: AMOUNT.toString(), classification: classifyAt(selfDeposit, 2) },
+      { amountRaw: "8085000000", classification: classifyAt(payout, 10) },
+    ]);
+    assert.equal(t.grossContributionsRaw, "100000000", "the owner's funding is the only capital");
+    assert.equal(t.grossWithdrawalsRaw, "0", "a margin deposit is not a withdrawal");
+    assert.equal(t.netContributionsRaw, "100000000");
+    assert.equal(t.grossMarginOutRaw, AMOUNT.toString());
+    assert.equal(t.grossMarginInRaw, "8085000000");
+    assert.equal(t.marginLegs, 2);
+    assert.equal(t.tradeLegs, 0, "margin bought nothing");
+    assert.equal(t.internal, 0);
+    assert.equal(t.ambiguous, 0);
+  });
+
+  it("an account that never touched the venue totals zero margin", () => {
+    const t = totalCapital([]);
+    assert.equal(t.grossMarginOutRaw, "0");
+    assert.equal(t.grossMarginInRaw, "0");
+    assert.equal(t.marginLegs, 0);
+  });
+
+  it("totalCapital refuses a kind it does not know rather than counting it as nothing", () => {
+    assert.throws(
+      () => totalCapital([{ amountRaw: "1", classification: { kind: "mystery" } as never }]),
+      /unhandled classification kind mystery/,
+    );
   });
 });

@@ -181,7 +181,14 @@ export interface PortfolioSnapshot {
   vaultUsdg: MicroUsdg;
   positionsUsdg: MicroUsdg;
   quarantinedUsdg: MicroUsdg;
-  /** cash + vault + positions + quarantined. Computed, never read back. */
+  /**
+   * What the agent's own Lighter account is worth, as rule 12 of
+   * docs/perps.md composes it — cross collateral + isolated margin + unrealized
+   * P&L + transfers in transit, from one venue read. 0 for an agent with no
+   * venue account, which is every agent without perps.
+   */
+  perpAccountUsdg: MicroUsdg;
+  /** cash + vault + positions + quarantined + perpAccount. Computed, never read back. */
   equityUsdg: MicroUsdg;
 
   /**
@@ -209,6 +216,19 @@ export interface SnapshotInputs {
   cashUsdg: MicroUsdg;
   vaultUsdg?: MicroUsdg;
   quarantinedUsdg?: MicroUsdg;
+  /**
+   * The venue account's value, KNOWN. Absent means 0, and 0 means "this agent
+   * has no venue account" — a fact the worker can establish without reading
+   * Lighter at all (no perps marker, or `addressToAccountIndex(self) == 0`).
+   *
+   * NOT A PLACE FOR UNKNOWN. An unreadable venue is a book gap under rule 11:
+   * no snapshot is built on it, because a snapshot that silently valued the
+   * venue at zero would show the owner a drawdown that did not happen and let
+   * a later read ratchet the peak on money that was there all along. The
+   * builder refuses anything that is not an integer rather than turn it into
+   * one.
+   */
+  perpAccountUsdg?: MicroUsdg;
   netContributionsUsdg: MicroUsdg | null;
   grossContributionsUsdg?: MicroUsdg | null;
   grossWithdrawalsUsdg?: MicroUsdg | null;
@@ -229,14 +249,28 @@ export interface SnapshotInputs {
 export function buildPortfolioSnapshot(input: SnapshotInputs): PortfolioSnapshot {
   const vault = input.vaultUsdg ?? 0;
   const quarantined = input.quarantinedUsdg ?? 0;
+  // `=== undefined`, NOT `??`: a null here is some caller's "unread", and `??`
+  // would quietly make it the zero this field must never mean.
+  const perpAccount = input.perpAccountUsdg === undefined ? 0 : input.perpAccountUsdg;
+  if (!Number.isSafeInteger(perpAccount)) {
+    // NaN here would not fail loudly — it would make equity NaN, and every
+    // gate downstream compares against it. Unknown must stay out of the builder.
+    throw new RangeError("perpAccountUsdg must be integer micro-USDG; an unread venue is a book gap, not a snapshot");
+  }
   const positionsUsdg = input.positions
     .filter((p) => !p.quarantined)
     .reduce((sum, p) => sum + p.valueUsdg, 0);
 
-  // THE EQUITY IDENTITY, in one place. cash + vault + positions + quarantined.
-  // Quarantined holdings are carried at cost and are still the owner's, so
-  // leaving them out understates the book by exactly what cannot be sold.
-  const equityUsdg = input.cashUsdg + vault + positionsUsdg + quarantined;
+  // THE EQUITY IDENTITY, in one place. cash + vault + positions + quarantined
+  // + the venue account. Quarantined holdings are carried at cost and are
+  // still the owner's, so leaving them out understates the book by exactly
+  // what cannot be sold. The venue account is the same argument with more at
+  // stake: margin posted to Lighter is still the owner's money, and a book that
+  // dropped it would read every deposit to the venue as a loss of that size.
+  // It is ONE term, never folded into `positionsUsdg` — a perp is not a
+  // holding (no instrument id, no cost basis, keyed `BTC-PERP` not `BTC`), and
+  // a consumer that sums positions must not find margin among them.
+  const equityUsdg = input.cashUsdg + vault + positionsUsdg + quarantined + perpAccount;
 
   const pnl = computePnl({
     equityUsdg,
@@ -255,6 +289,7 @@ export function buildPortfolioSnapshot(input: SnapshotInputs): PortfolioSnapshot
     vaultUsdg: vault,
     positionsUsdg,
     quarantinedUsdg: quarantined,
+    perpAccountUsdg: perpAccount,
     equityUsdg,
     netContributionsUsdg: input.netContributionsUsdg,
     grossContributionsUsdg: input.grossContributionsUsdg ?? null,
@@ -264,6 +299,25 @@ export function buildPortfolioSnapshot(input: SnapshotInputs): PortfolioSnapshot
     quality: input.quality,
     pnl,
   };
+}
+
+/**
+ * THE VENUE ACCOUNT'S PART OF A SNAPSHOT ID — nothing when it is zero.
+ *
+ * Snapshot ids are content-addressed (the worker hashes the book's parts, so
+ * two runs over identical inputs carry one id and a decision can be traced to
+ * exactly what Brain saw). Two books that differ only in what sits at Lighter
+ * are different books and must not share an id — but every book WITHOUT a
+ * venue account must keep the id it has always had, or every recorded decision
+ * would stop matching the snapshot it was made on for no change in the book.
+ *
+ * So the part exists only when the term does: append the result to the parts
+ * the id is made of, and for 0 (every agent without perps) the parts — and so
+ * the id — are unchanged, byte for byte. A value is always written with its
+ * `perp:` label, so it cannot collide with a neighbouring numeric part.
+ */
+export function perpSnapshotIdParts(perpAccountUsdg: MicroUsdg | undefined): string[] {
+  return perpAccountUsdg === undefined || perpAccountUsdg === 0 ? [] : [`perp:${perpAccountUsdg}`];
 }
 
 /**

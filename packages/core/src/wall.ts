@@ -12,11 +12,16 @@ import {
   PONS_SELFTRADE_ABI,
   PONS_CLASS_VAULT_ABI,
   PONS_CLASS_VAULT_FACTORY_DEPLOY_ABI,
+  LIGHTER_DEPOSIT_ABI,
+  LIGHTER_CHANGE_PUBKEY_ABI,
+  LIGHTER_WITHDRAW_PENDING_ABI,
 } from "./abis";
 import { MORPHO, RIALTO, UNISWAP } from "./protocols";
 import { CASH, STOCK_TOKENS, TRADEABLE_SYMBOLS, USDG_DECIMALS, isValidCustomToken, type CustomToken } from "./tokens";
 import { builtinGrantTargets, type GrantCaps } from "./grant";
 import { ENERGY_ROUTE_V1, GRANT_ENERGY, isEnergyReserveToken } from "./energy";
+// perps.ts imports nothing, so this cannot become a cycle through grant.ts.
+import { LIGHTER_ROUTE_V1, grantPerp, pubKeyWords, validatePerpPubKey } from "./perps";
 // The deployability policy, for `energyBuyFits` below. first-enable-gas.ts
 // deliberately imports nothing (it counts permissions structurally), so this
 // is not a cycle and cannot become one without that file changing its rule.
@@ -391,6 +396,39 @@ export interface WallOptions extends TrencherPermission {
    * (usableExtraTokens drops it), so nothing here can spend it once bought.
    */
   energyBuy?: boolean;
+  /**
+   * PERPETUALS ON LIGHTER — USDG margin into this account's own Lighter
+   * account, registration of ONE sealed API key, and claims back home, over the
+   * frozen LIGHTER_ROUTE_V1 (perps.ts, docs/perps.md rule 3). CLOSED by
+   * default, like everything here.
+   *
+   * AN OBJECT, NOT A BOOLEAN, and that is the one way it differs from the
+   * energy buy. The route is a versioned constant exactly as ENERGY_ROUTE_V1 is
+   * — GRANT_PERP_LIGHTER ("perp-lighter-v1") names it forever — but the API key
+   * is per-agent and the wall pins its exact bytes, so the key has to be sealed
+   * here and recorded on the grant (StoredGrant.perp). `grantWallOptions`
+   * rebuilds this from `grantPerp(grant)` for that reason: marker + chain +
+   * block, all or nothing.
+   *
+   * PUBLIC KEY ONLY. There is no field here a private key fits in, and the
+   * refusal below never echoes what it was given: a signer that passed the
+   * wrong half of a key pair must not print it into a log on the way out.
+   *
+   * THE CHAIN IS NOT AN INPUT TO THIS FILE, for the energy buy's reason:
+   * nothing here can see which chain a signature is for. So the chain gate
+   * sits at the two doors that can set this field — `perpFits` answers false
+   * off 4663 (signers), and `grantPerp`, behind `grantWallOptions`, refuses the
+   * marker off 4663 (the executor and the hosted rebuild). On any other chain
+   * the proxy is codeless, a CALL to it succeeds with empty returndata, and a
+   * deposit would "land" having posted nothing.
+   *
+   * SEALED ONLY WHEN IT FITS, and — unlike the energy buy — NEVER DROPPED
+   * SILENTLY once a previous grant carried it: a registered Lighter key stays
+   * valid at the venue whatever the grant says, so a re-sign that lost the
+   * block would leave a live venue account with no key (rule 5). The refusal
+   * is the signers'; `perpFits` is what they ask.
+   */
+  perpLighter?: { apiKeyIndex: number; apiPublicKey: `0x${string}` };
 }
 
 /**
@@ -500,6 +538,40 @@ export function buildCallPermissions(
         "address. Pass ponsClassVaultFactoryAddress alongside ponsClassVaultAddress.",
     );
   }
+  // THE PERP KEY IS VALIDATED HERE, for the adapters' reason above and with
+  // more at stake. The wall pins the key's exact calldata words, so a key the
+  // contract would reject (a limb ≥ p, all zero, the wrong length) is a
+  // changePubKey permission that can never match an honest call — a perps route
+  // that looks granted and can never register its key, found out only after
+  // the owner has signed and deposited. Throwing beats sealing it.
+  //
+  // THE INDEX MUST BE THE ROUTE'S, not merely in range. GRANT_PERP_LIGHTER
+  // names LIGHTER_ROUTE_V1 forever, including its key index, and `grantPerp`
+  // refuses any other — so a wall pinned to another index is a signature whose
+  // marker the worker will never honour, and an index in Lighter's reserved set
+  // would register the agent's key over the owner's own Robinhood Wallet
+  // session. Neither is a choice a signer gets to make.
+  //
+  // The message never echoes the value: this is the one option a caller could
+  // plausibly fill with the wrong half of a key pair.
+  let perp: { keyIndex: number; words: readonly [`0x${string}`, `0x${string}`] } | undefined;
+  if (opts.perpLighter != null) {
+    const { apiKeyIndex, apiPublicKey } = opts.perpLighter;
+    if (apiKeyIndex !== LIGHTER_ROUTE_V1.apiKeyIndex) {
+      throw new Error(
+        `perpLighter.apiKeyIndex must be the route's key index ${LIGHTER_ROUTE_V1.apiKeyIndex}: ` +
+          "perp-lighter-v1 names that index forever, and the worker refuses any other",
+      );
+    }
+    const canonical = typeof apiPublicKey === "string" ? validatePerpPubKey(apiPublicKey) : null;
+    if (canonical === null) {
+      throw new Error(
+        "perpLighter.apiPublicKey is not a canonical Lighter API public key (40 bytes, five little-endian " +
+          "Goldilocks limbs each below p, not all zero) — refusing to seal a key the contract would reject",
+      );
+    }
+    perp = { keyIndex: apiKeyIndex, words: pubKeyWords(canonical) };
+  }
   // The Trencher vault joins the spender list rather than carrying its own
   // USDG approve — see `allowedSpenders` and `trencherPermissions` for why two
   // approves on one target made the whole wall uninstallable.
@@ -532,8 +604,23 @@ export function buildCallPermissions(
   // day any other router selector is granted they are live. That is the Permit2
   // trap documented above ("any one of the three alone is inert, all three is a
   // drain"), and it would also cost 448 bytes for nothing.
+  //
+  // THE LIGHTER PROXY JOINS ON EXACTLY THE SAME TERMS, for the same two
+  // reasons. `deposit` pulls USDG from msg.sender with safeTransferFrom
+  // (AdditionalZkLighter.sol), so the proxy must be nameable in the one USDG
+  // approve, capped at perTradeUsdg; a second USDG approve scoped to it would
+  // be the Trencher collision. And it must never join `spenders`: an uncapped
+  // allowance over every stock, held by an upgradeable contract whose
+  // governance can skip its notice period, is a licence nobody should sign for
+  // a venue that only ever takes cash. Because the proxy pulls only from
+  // msg.sender, the allowance this approve creates is spendable by no one but
+  // this account's own `deposit` call below.
   const energy = opts.energyBuy === true;
-  const usdgSpenders: Address[] = energy ? [...spenders, ENERGY_ROUTE_V1.router as Address] : spenders;
+  const usdgSpenders: Address[] = [
+    ...spenders,
+    ...(energy ? [ENERGY_ROUTE_V1.router as Address] : []),
+    ...(perp ? [LIGHTER_ROUTE_V1.proxy as Address] : []),
+  ];
   const extras = usableExtraTokens(opts.extraTokens);
   // Every asset this signature may hold a leg in: USDG plus everything the
   // approve permissions below cover. This is what the adapter's tokenIn and
@@ -594,8 +681,8 @@ export function buildCallPermissions(
     ...trencherPermissions(opts, smartAccount, usdgUnits(caps.perTradeUsdg)),
     {
       // approve USDG, only to the allowed spenders, only up to one trade's size.
-      // `usdgSpenders`, not `spenders`: the energy router, when sealed, is
-      // named HERE and nowhere else — see above.
+      // `usdgSpenders`, not `spenders`: the energy router and the Lighter
+      // proxy, when sealed, are named HERE and nowhere else — see above.
       target: CASH.USDG as Address,
       valueLimit: 0n,
       abi: erc20Abi,
@@ -827,6 +914,164 @@ export function buildCallPermissions(
               { condition: ParamCondition.EQUAL, value: ENERGY_ROUTE_V1.path[0] }, // w6 USDG
               { condition: ParamCondition.EQUAL, value: ENERGY_ROUTE_V1.path[1] }, // w7 VIRTUAL
               { condition: ParamCondition.EQUAL, value: ENERGY_ROUTE_V1.path[2] }, // w8 $MERRYMEN
+            ],
+          } as const,
+        ]
+      : []),
+    // ── PERPETUALS ON LIGHTER, when the signer sealed them ───────────────
+    //
+    // Three permissions on the ZkLighter proxy of LIGHTER_ROUTE_V1, plus the
+    // proxy's place in the USDG approve above — the four sealed things of
+    // docs/perps.md rule 3, and nothing else. Distinct selectors on one target,
+    // so Kernel's (target, selector) key never collides
+    // (wall-duplicate-permission.test.ts).
+    //
+    // WHAT IS NOT HERE, on purpose: the proxy's on-chain `withdraw`,
+    // `createOrder` and `cancelAllOrders`. They are the OWNER's escape hatches
+    // (LIGHTER_OWNER_RECOVER_ABI, driven by `recover` with the owner key); a
+    // session key holding `cancelAllOrders` could strip the venue stops rule 7
+    // depends on, and on-chain `createOrder`'s semantics on this instance are
+    // unproven. Everything the agent does at the venue it does with the API
+    // key, over Lighter's L2 — which this wall does not and cannot bound.
+    //
+    // WHAT A STOLEN SESSION KEY GAINS, said plainly and once for all three:
+    //   - It can move up to perTradeUsdg of USDG per call into THIS account's
+    //     own Lighter account, and repeat it: a UserOp can batch approve +
+    //     deposit, and there is no on-chain rate limit on 4663. So the whole
+    //     USDG balance can be put on Lighter — the per-trade cap bounds a call,
+    //     not a day, and the Settings collateral cap is software an attacker
+    //     does not run. No deposit can credit anyone else's account.
+    //   - Once there, the money is exactly as safe as the Lighter API key, and
+    //     that key can lose it to a counterparty (trading against an account
+    //     it controls, parking it in sub-accounts, minting pool shares).
+    //     Anyone holding this grant holds both keys — they live side by side —
+    //     so rule 4's worst case is theirs. That does not exceed what the same
+    //     grant can already lose through open-fee swaps into attacker pools.
+    //   - It can (re-)register the SEALED key at the route's index at any time
+    //     until expiry, including after the owner rotated it away with
+    //     `recover`. Rotation lasts only while nobody holding this grant undoes
+    //     it; recover's session-revoking leg is what closes that.
+    //   - It can make the proxy pay this account what it is already owed.
+    // It cannot register any other key, withdraw on-chain, deposit for another
+    // address or asset, move native value, or cancel a stop.
+    //
+    // PINNED VALUES ARE BIGINT OR FULL-WORD HEX, as for the energy buy: the
+    // library encodes a non-hex value with `toHex` and LEFT-pads anything
+    // shorter than 32 bytes, so a decimal string or a short hex pins a word the
+    // encoder never produces — a permission that matches nothing and reads as
+    // strict.
+    ...(perp
+      ? [
+          {
+            // deposit(_to, _assetIndex, _routeType, _amount) — ALL FOUR WORDS
+            // PINNED. Static arguments, one word each (`_routeType` is a
+            // Solidity enum, encoded uint8), proven against viem's encoder in
+            // wall.test.ts.
+            //
+            //   w0 _to — THIS account. The Lighter account is keyed on `_to`
+            //        and the proxy credits it whoever paid (registerDeposit), so
+            //        unpinned this is a USDG transfer to any stranger's venue
+            //        account wearing a deposit's clothes — the Morpho receiver
+            //        lesson below, on a venue with no withdraw-to-owner rule.
+            //   w1 _assetIndex — 3, USDG: the only asset the account approves
+            //        this proxy for, pinned so the permission says so rather
+            //        than leaning on that.
+            //   w2 _routeType — 0, perps. Route 1 is Lighter's spot book, which
+            //        nothing in merrymen reads, books or unwinds.
+            //   w3 _amount — ≤ perTradeUsdg, the same cap the approve carries.
+            //        Redundant under that approve today; pinned because a
+            //        future change to the approve must not silently uncap the
+            //        one call that moves money off-chain.
+            //
+            // `valueLimit: 0n` IS LOAD-BEARING: `deposit` is payable, and native
+            // ETH deposits share this entry point.
+            target: LIGHTER_ROUTE_V1.proxy as Address,
+            valueLimit: 0n,
+            abi: LIGHTER_DEPOSIT_ABI,
+            functionName: "deposit",
+            args: [
+              self, // w0 _to — this account's own Lighter account
+              { condition: ParamCondition.EQUAL, value: BigInt(LIGHTER_ROUTE_V1.assetIndex) }, // w1 USDG (3)
+              { condition: ParamCondition.EQUAL, value: BigInt(LIGHTER_ROUTE_V1.routePerps) }, // w2 perps (0)
+              { condition: ParamCondition.LESS_THAN_OR_EQUAL, value: usdgUnits(caps.perTradeUsdg) }, // w3 _amount
+            ],
+          } as const,
+          {
+            // changePubKey(_accountIndex, _apiKeyIndex, _pubKey) — ONE key, at
+            // ONE index, and nothing else. Authenticated on-chain only by
+            // msg.sender being the account's L1 address, which is why a Kernel
+            // can call it with no EIP-191/1271 signature (and why the wall's
+            // NOT_FOR_VALIDATE_SIG costs perps nothing).
+            //
+            // `bytes` is dynamic, so the layout is the energy route's trick
+            // again: SIX args for three parameters, because the call policy
+            // maps args[i] to offset i*32 with no arity check.
+            //
+            //   w0 _accountIndex — OPEN, BY NECESSITY. The index does not exist
+            //        at signing: the first deposit creates the account and the
+            //        sequencer numbers it. Lighter's GitHub has a NIL "my own
+            //        account" shortcut that would make this pinnable; it is not
+            //        deployed on 4663. The contract lets a registered L1 owner
+            //        name any index and leaves the check to the circuit, so the
+            //        only reachable effect of another w0 is a request to put the
+            //        SEALED key on an account this address does not own, which
+            //        the circuit rejects. (A dirty uint48 reverts in the ABI
+            //        decoder — measured by eth_call on 4663.)
+            //   w1 _apiKeyIndex — the route's index (16), never one Lighter
+            //        reserves for its own apps and never 255.
+            //   w2 offset of _pubKey — 0x60, straight after the three head
+            //        words. LOAD-BEARING: the deployed decoder follows this
+            //        word, so without it the calldata could point `_pubKey` at
+            //        bytes past w5 while w3..w5 still hold the sealed words —
+            //        and register any key at all. Measured: a relocated 0x80
+            //        call with another key succeeds on 4663 under eth_call; only
+            //        this pin refuses it.
+            //   w3 _pubKey.length — 40, so the decoder reads exactly w4 and
+            //        the first eight bytes of w5.
+            //   w4 pk[0:32] and w5 pk[32:40] ++ 24 zero bytes — the exact key,
+            //        from `pubKeyWords`, the one function the worker's final
+            //        fence uses too. w5 is RIGHT-padded because that is how ABI
+            //        `bytes` pads; the dirty-padding case is refused because
+            //        EQUAL compares the whole word.
+            //
+            // Trailing calldata is admitted — no pin reads past w5 — and
+            // harmless: the decoder takes 40 bytes from 0x60 and ignores it, so
+            // it still registers the sealed key (wall.test.ts proves it).
+            target: LIGHTER_ROUTE_V1.proxy as Address,
+            valueLimit: 0n,
+            abi: LIGHTER_CHANGE_PUBKEY_ABI,
+            functionName: "changePubKey",
+            args: [
+              null, // w0 _accountIndex — unknown at signing, see above
+              { condition: ParamCondition.EQUAL, value: BigInt(perp.keyIndex) }, // w1 the route's key index
+              { condition: ParamCondition.EQUAL, value: 0x60n }, // w2 offset of _pubKey — WHERE the key is read
+              { condition: ParamCondition.EQUAL, value: 40n }, // w3 _pubKey.length
+              { condition: ParamCondition.EQUAL, value: perp.words[0] }, // w4 pk[0:32]
+              { condition: ParamCondition.EQUAL, value: perp.words[1] }, // w5 pk[32:40], right-padded
+            ],
+          } as const,
+          {
+            // withdrawPendingBalance(_owner, _assetIndex, _baseAmount) — the
+            // claim that ends a secure withdrawal. Anyone may call it and it
+            // always pays `_owner` (ZkLighter.sol), so with `_owner` pinned to
+            // this account the only reachable effect is paying this account
+            // what the venue already owes it. Lighter's relayer usually claims
+            // first; this is the liveness fallback, and a claim for more than
+            // is pending, or zero, reverts.
+            //
+            //   w0 _owner — THIS account.
+            //   w1 _assetIndex — 3, the one asset this route moves.
+            //   w2 _baseAmount — OPEN: money coming home is not a risk the wall
+            //        needs to bound (the Morpho withdraw's reasoning), and the
+            //        pending figure is only known at claim time.
+            target: LIGHTER_ROUTE_V1.proxy as Address,
+            valueLimit: 0n,
+            abi: LIGHTER_WITHDRAW_PENDING_ABI,
+            functionName: "withdrawPendingBalance",
+            args: [
+              self, // w0 _owner — pays this account and no other
+              { condition: ParamCondition.EQUAL, value: BigInt(LIGHTER_ROUTE_V1.assetIndex) }, // w1 USDG (3)
+              null, // w2 _baseAmount — whatever is pending
             ],
           } as const,
         ]
@@ -1170,6 +1415,12 @@ export function buildWallPolicies(args: {
         // policy with no router permission and no router in the USDG approve.
         // The worker would build the buy, and the chain would refuse it.
         energyBuy: args.energyBuy,
+        // And a fifth, where the miss would be worst of all: a grant carrying
+        // `perp-lighter-v1` and a sealed key over a wall with no deposit, no
+        // key registration and no proxy in the USDG approve. The worker would
+        // plan an onboarding the chain refuses at its first step — or, after a
+        // re-sign, leave a funded venue account with no claim path home.
+        perpLighter: args.perpLighter,
       }) as never,
     }),
   ];
@@ -1208,20 +1459,41 @@ export function buildWallPolicies(args: {
  * there is no sealed address to read beside it, and none is needed. A rebuild
  * that dropped it would size (and, server-side, byte-compare) a wall one
  * permission and one spender entry narrower than the one that was signed.
+ *
+ * `perpLighter` FROM `grantPerp(grant)`, AND ONLY FROM IT. Unlike the energy
+ * buy the marker is not the whole permission — the wall pins the sealed API
+ * public key — so the rebuild needs the grant's `perp` block and its chain as
+ * well, and takes them through the one reader the worker trusts: marker,
+ * chain 4663, route, the route's key index and a canonical key, all or
+ * nothing. A grant missing any of them rebuilds WITHOUT perps, which is the
+ * narrower wall; server-side that fails the byte comparison against a
+ * signature that carried them, which is the refusal a half-formed perp grant
+ * deserves. Both fields are optional so a caller that passes neither (today's
+ * hosted check, which also refuses the marker outright) rebuilds exactly the
+ * wall it always did. The sealed private key never enters this object.
  */
 export function grantWallOptions(grant: {
   grantTokens?: readonly string[];
   grantFeatures?: readonly string[];
+  chainId?: number;
+  perp?: unknown;
 }): WallOptions {
   const features = new Set((grant.grantFeatures ?? []).map((f) => String(f).toLowerCase()));
   const extraTokens: CustomToken[] = (grant.grantTokens ?? [])
     .filter((a) => /^0x[0-9a-fA-F]{40}$/.test(String(a)))
     .map((address, i) => ({ symbol: `X${i}`, address: String(address) as `0x${string}`, decimals: 18 }));
+  const perp =
+    typeof grant.chainId === "number"
+      ? grantPerp({ grantFeatures: grant.grantFeatures, chainId: grant.chainId, perp: grant.perp })
+      : null;
   return {
     extraTokens,
     allowRialto: features.has("rialto"),
     allowUniswapV4: features.has("v4"),
     energyBuy: features.has(GRANT_ENERGY),
+    // Present only when granted, so a grant without perps yields an options
+    // object with exactly the keys it always had.
+    ...(perp ? { perpLighter: { apiKeyIndex: perp.apiKeyIndex, apiPublicKey: perp.apiPublicKey } } : {}),
   };
 }
 
@@ -1261,6 +1533,63 @@ export function energyBuyFits(
 ): boolean {
   if (chainId !== ENERGY_ROUTE_V1.chainId) return false;
   return wallSignable(wallShape(buildCallPermissions(caps, smartAccount, { ...opts, energyBuy: true })), {
+    deploying,
+  }).ok;
+}
+
+/**
+ * A canonical key used ONLY to size a wall before a real key exists: every
+ * limb is 1 (little-endian), which is below p and not all zero. Never returned,
+ * never sealed — `perpFits` answers a boolean and nothing else leaves it.
+ *
+ * Sound because the SIZE of the perp permissions does not depend on the key's
+ * bytes: w4 and w5 are one EQUAL rule each whatever they hold (wallShape
+ * counts rules and parameters, not values). first-enable-gas.test.ts pins that
+ * the answer is the same with a real key.
+ */
+const PERP_SIZING_KEY = `0x${"0100000000000000".repeat(5)}` as `0x${string}`;
+
+/**
+ * SHOULD THIS SIGNATURE CARRY PERPS? Asked by the signers before they sign, and
+ * the only door besides `grantWallOptions` through which `WallOptions.perpLighter`
+ * should be set.
+ *
+ * The energy buy's two conditions, for the energy buy's reasons:
+ *
+ *   - CHAIN 4663 ONLY. The proxy is a mainnet deployment and there is no
+ *     Lighter on testnet 46630; elsewhere a CALL to it succeeds with empty
+ *     returndata and a deposit would "land" having posted nothing.
+ *     (`grantPerp` refuses the marker off 4663 as well.)
+ *   - ONLY WHEN THE WALL STILL FITS. Three permissions, eleven EQUAL/LTE rules
+ *     and one spender entry: 2,816 stub bytes, about 2.5M bounded first-enable
+ *     gas — twice the energy buy.
+ *
+ * WHAT THE CALLER DOES WITH `false` IS NOT WHAT IT DOES FOR ENERGY. An energy
+ * buy that does not fit is dropped and the agent is funded another way. Perps
+ * that do not fit are REFUSED when the previous grant carried them — a
+ * registered key outlives any grant, so silently signing without the block
+ * would leave a live venue account with no key (docs/perps.md rule 3, rule 5).
+ * The same asymmetry decides the ORDER: settle perps first, then ask
+ * `energyBuyFits` over the wall that already carries them, so the droppable
+ * capability is the one that gives way.
+ *
+ * THE SAME POLICY, NOT A COPY OF IT: `wallSignable` over `wallShape` over the
+ * real `buildCallPermissions`, with the caller's own options — so a caller that
+ * passes its real key gets the key validated too (a non-canonical key throws
+ * here exactly as it would at signing). A caller asking before any key exists
+ * (so that no venue key is minted for a wall that cannot hold it) is sized with
+ * PERP_SIZING_KEY, which costs the same bytes.
+ */
+export function perpFits(
+  caps: GrantCaps,
+  smartAccount: Address,
+  chainId: number,
+  deploying: boolean,
+  opts: WallOptions,
+): boolean {
+  if (chainId !== LIGHTER_ROUTE_V1.chainId) return false;
+  const perpLighter = opts.perpLighter ?? { apiKeyIndex: LIGHTER_ROUTE_V1.apiKeyIndex, apiPublicKey: PERP_SIZING_KEY };
+  return wallSignable(wallShape(buildCallPermissions(caps, smartAccount, { ...opts, perpLighter })), {
     deploying,
   }).ok;
 }
