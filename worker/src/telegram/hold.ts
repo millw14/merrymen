@@ -27,6 +27,12 @@
  *   /kill runs. The same poll timings, backoff and bot binding, from
  *   poll-rules.ts and state.ts, so telegram.json is left exactly as the child
  *   expects to find it when trading resumes.
+ * - Telegram groups (docs/tg-groups.md) are not answered at all: no line, no
+ *   refusal, no link, no /kill, and no word that trading is held, which is
+ *   the owner's business and not the room's. Membership changes and service
+ *   messages are passed over (the child adopts a group it finds itself in
+ *   once the owner writes there). The one thing done is the child's: a live
+ *   link code a room has seen is replaced, and the owner told in their DM.
  *
  * WHAT IT MUST NOT TOUCH. No store, no database, no ledger, no model, no paper
  * book (restore-hold.test.ts pins the imports). The orchestrator is retrying
@@ -36,7 +42,7 @@
  */
 
 import { answerCallbackQuery, esc, getMe, getUpdates, sendMessage as sendTelegramMessage, type TgCallback, type TgMessage } from "./api";
-import { bindToken, botIdOf, ensureLinkCode, recordPoll, retireLegacyCode, type StateRef } from "./state";
+import { bindToken, botIdOf, ensureLinkCode, recordPoll, retireLegacyCode, rotateLinkCode, type StateRef } from "./state";
 import { linkReply, tallyFailedLink, tryLink, type LinkFails } from "./link";
 import { CONFIRM_TTL_SEC, killDoneText, killPromptText, type KillResult } from "./kill-confirm";
 import {
@@ -48,6 +54,8 @@ import {
   REARM_AFTER_SEC,
   STALE_LINK_TEXT,
   WAKE_SLICE_MS,
+  groupLineShowsCode,
+  isGroupMessage,
   makeChatTally,
   onboardingText,
   pollFailure,
@@ -62,6 +70,15 @@ import { homePaths, merrymenHome } from "../home";
 import { loadGrantFile } from "../grant";
 import { hostedKillFromChat } from "../kill-request";
 import { UNCLASSIFIED_BLOCK, holdText, readRestoreBlocked, type RestoreBlock } from "../restore-block";
+
+/**
+ * To the owner, in their DM, when a room has seen their live link code and it
+ * was replaced (inGroup). The child's group handler says the same
+ * (tg-groups/handler.ts codeLeaked); this process has no group store to name
+ * the room from.
+ */
+const CODE_SHOWN_TEXT =
+  "your link code got posted in a group, so i swapped it for a new one. link codes only work here in DMs — the new one is in Settings → Telegram.";
 
 /** What the hold loop reads of the config. The real one is settings.ts resolveConfig. */
 export type HoldConfig = Pick<
@@ -217,6 +234,28 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
     }
     const answer = head ? killFlow(msg, head.cmd, cfg) : null;
     await sendMessage({ token }, msg.chatId, answer ?? holdReply());
+  };
+
+  /**
+   * A LINE IN A TELEGRAM GROUP. Nothing is said in the room and nothing runs:
+   * no refusal, no link (a group is never allowlisted by a code, and one typed
+   * there is never compared or counted), no /kill, and no hold text, which
+   * would tell the room why the owner's agent is not trading. Late or live
+   * alike.
+   *
+   * THE LIVE CODE IS STILL REPLACED when the line shows it, as the child does
+   * (service.ts routeGroup): everyone in the room has seen a bearer
+   * credential, and while trading is held a /link is exactly what this
+   * process answers. The owner is told in their DM why the code on their
+   * Settings page changed.
+   */
+  const inGroup = async (msg: TgMessage, cfg: HoldConfig): Promise<void> => {
+    const state = stateRef.get();
+    if (!state.linkCode || !groupLineShowsCode(msg.text, state.linkCode)) return;
+    stateRef.set(rotateLinkCode(state));
+    note("warn", `Telegram: a link code was typed in group ${redactChat(msg.chatId)} while trading is held; it was replaced`);
+    const owner = state.ownerId;
+    if (owner !== null) await sendMessage({ token: cfg.telegramBotToken! }, owner, CODE_SHOWN_TEXT);
   };
 
   /**
@@ -380,15 +419,21 @@ export function startHoldTelegram(deps: HoldDeps): { stop: () => void } {
     const early = (date: number) => boundAt !== null && date > 0 && date < boundAt;
     const stale = (date: number) => !early(date) && date > 0 && date < armed;
     const told = new Set<string>();
+    // Groups first, whatever the date: nothing in a group goes down a DM's
+    // path (inGroup). my_chat_member updates and service messages are not
+    // read at all; the offset moves past them with the batch.
     const updates = [
       ...polled.messages.map((m) => ({
         at: m.updateId,
-        run: (c: HoldConfig) => (early(m.date) ? holdEarly(m, c) : stale(m.date) ? holdStale(m, c, told) : handle(m, c)),
+        run: (c: HoldConfig) =>
+          isGroupMessage(m) ? inGroup(m, c) : early(m.date) ? holdEarly(m, c) : stale(m.date) ? holdStale(m, c, told) : handle(m, c),
       })),
       ...polled.callbacks.map((cb) => ({
         at: cb.updateId,
+        // A press in a group gets the plain expiry too: the hold text in a
+        // toast would tell whoever pressed why the agent is not trading.
         run: (c: HoldConfig) =>
-          early(cb.date) || stale(cb.date)
+          early(cb.date) || stale(cb.date) || isGroupMessage({ chatId: cb.chatId })
             ? answerCallbackQuery({ token }, cb.id, "That button has expired.").then(() => {})
             : handlePress(cb, c),
       })),

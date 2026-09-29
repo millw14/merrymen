@@ -322,6 +322,28 @@ parse → validate → policy wall → signed grant discipline as the strategist
 There's an obvious **Chat on Telegram** button right on the dashboard (topbar +
 a card) so you don't have to hunt for it.
 
+**Bring it into your Telegram groups.** Your merryman can hang out in a group
+like one more person: it answers when it's called, now and then joins in,
+remembers the chat, and when someone posts a coin it takes a look, tags them,
+and says whether it's in or passing (in trencher mode, its Brain decides and
+every limit still applies — a group message can nominate a coin, never order a
+trade). It never posts alerts, sizes, prices or P&L, and nothing private.
+
+```
+4. Add your bot to a group — it only talks in groups you added it to or approved
+   (anyone else adds it → it stays silent and DMs you Stay / Leave)
+5. To let it follow the chat: @BotFather → /setprivacy → your bot → Disable,
+   then remove the bot from the group and add it back
+   (until then it only hears commands and replies to its own messages)
+6. /groups in your DM with the bot → every group it knows, with Stay · Leave · Forget
+```
+
+Turn it off, turn off "Look at coins people post", or pick how chatty it is in
+`/settings` → Telegram → Telegram groups. `/forget` in a group (you) wipes what
+it remembers of that group; `/forgetme` (anyone) removes theirs. (These are
+your own Telegram groups, not the hosted app's public group chat room.) The
+full rules: [`docs/tg-groups.md`](docs/tg-groups.md).
+
 Commands work bare; with an Anthropic key, plain English does too ("how are we
 doing?", "pause everything", "send 20 USDG to 0x…", "ping me when QQQ hits 600",
 "why did you buy that?"). Voice notes work as well.
@@ -335,6 +357,7 @@ doing?", "pause everything", "send 20 USDG to 0x…", "ping me when QQQ hits 600
 | `/alert <SYM> > <price>` `/alerts` `/unalert <n>` | one-shot price alerts |
 | `/pause` `/resume` · `/strategy <name>` · `/cap <usdg>` | steer the worker (cap only tightens) |
 | `/name <name>` · `/soul` · `/remember <fact>` | name it, see who it is, teach it about you |
+| `/groups` · `/forget` · `/forgetme` | your Telegram groups (Stay / Leave / Forget) · in a group: wipe its memory of that group · anyone in a group: drop what it remembers of them |
 | `/kill` | destroy the grant, stand the band down |
 | `/help` | the full list |
 

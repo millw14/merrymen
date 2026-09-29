@@ -25,6 +25,7 @@
 "{label}: enter an amount between {min} and {max}." = "{label}: {min}에서 {max} 사이의 금액을 입력하세요.";
 "{label}: enter an amount, for example 10 or 10{sep}50." = "{label}: 금액을 입력하세요. 예를 들어 10 또는 10{sep}50.";
 "{label}: that reads as either {a} or {b}. Which did you mean?" = "{label}: {a}인지 {b}인지 알 수 없습니다. 어느 쪽인가요?";
+"@BotFather → /setprivacy → your bot → Disable, then remove the bot from the group and add it back. Making it a group admin works too." = "@BotFather → /setprivacy → your bot → Disable, then remove the bot from the group and add it back. Making it a group admin works too.";
 "/agent" = "/agent";
 "/agent stop" = "/agent stop";
 "/confirm" = "/confirm";
@@ -54,6 +55,7 @@
 "Add funds" = "입금";
 "Add funds." = "입금하기.";
 "add token" = "add token";
+"Add your bot to a group and it acts like one more person there: it answers when someone calls it, joins in now and then, and remembers the chat. If someone else adds it, it stays silent until you answer Stay or Leave in your DMs. It never posts trade alerts, sizes, prices or P&L." = "Add your bot to a group and it acts like one more person there: it answers when someone calls it, joins in now and then, and remembers the chat. If someone else adds it, it stays silent until you answer Stay or Leave in your DMs. It never posts trade alerts, sizes, prices or P&L.";
 "Advanced settings" = "Advanced settings";
 "Agent connections" = "Agent connections";
 "Agent name" = "Agent name";
@@ -103,6 +105,7 @@
 "Changes saved" = "Changes saved";
 "Chat" = "채팅";
 "chat trade ceiling" = "chat trade ceiling";
+"Chatty — joins in more often" = "Chatty — joins in more often";
 "check every (minutes)" = "check every (minutes)";
 "Check it →" = "Check it →";
 "checking…" = "checking…";
@@ -177,11 +180,14 @@
 "Give an agent a strategy, set its limits, and follow the decisions it makes. Follow the full walkthrough or use Topics to jump to a feature. You can leave and replay it at any time." = "에이전트에 전략을 정해 주고, 한도를 설정하고, 에이전트가 내리는 판단을 지켜보세요. 안내를 처음부터 따라가도 되고, 목차에서 원하는 기능으로 바로 넘어가도 됩니다. 언제든 중간에 나가거나 다시 볼 수 있습니다.";
 "Give your agent a name." = "에이전트 이름을 입력하세요.";
 "h" = "h";
+"Hang out in Telegram groups" = "Hang out in Telegram groups";
 "Hard strategist ceiling per proposed trade — beneath the grant caps." = "Hard strategist ceiling per proposed trade — beneath the grant caps.";
 "Holdings" = "보유 자산";
 "Home" = "홈";
 "Home carries the leaderboard and the markets. Open any token to see its price history and the trades agents have recorded against it." = "홈에는 리더보드와 시장이 있습니다. 토큰을 열면 그 토큰의 가격 추이와, 에이전트들이 그 토큰에 대해 남긴 매매 기록을 볼 수 있습니다.";
+"How chatty in groups" = "How chatty in groups";
 "How many class positions may be held at once. 0 = no limit beyond the scout budget." = "How many class positions may be held at once. 0 = no limit beyond the scout budget.";
+"How often it joins in when nobody called it. A mention, a reply to it or its name gets an answer at any level." = "How often it joins in when nobody called it. A mention, a reply to it or its name gets an answer at any level.";
 "I understand this agent can trade real funds." = "이 에이전트가 실제 자금으로 매매할 수 있다는 점을 이해합니다.";
 "idle cash floor" = "idle cash floor";
 "If your agent holds positions bought with real funds, read this first." = "If your agent holds positions bought with real funds, read this first.";
@@ -201,6 +207,7 @@
 "Loading settings…" = "Loading settings…";
 "Loading…" = "불러오는 중…";
 "Local hour (0–23) after which the campfire report is sent." = "Local hour (0–23) after which the campfire report is sent.";
+"Look at coins people post" = "Look at coins people post";
 "mainnet RPC override" = "mainnet RPC override";
 "Manage →" = "Manage →";
 "Market check interval" = "Market check interval";
@@ -233,6 +240,7 @@
 "Next" = "다음";
 "No link code yet. Your agent mints one on its next pass with this token set — check back shortly." = "No link code yet. Your agent mints one on its next pass with this token set — check back shortly.";
 "no linked chats yet" = "no linked chats yet";
+"Normal — joins in now and then" = "Normal — joins in now and then";
 "not set" = "not set";
 "not set up" = "not set up";
 "not your strategy" = "not your strategy";
@@ -252,6 +260,7 @@
 "on, trading real money" = "on, trading real money";
 "Once you save, your agent can open positions with the funds in its account, up to the per-trade and daily caps in the permission you signed. It will not exceed those caps, and you can switch back to Paper at any time." = "Once you save, your agent can open positions with the funds in its account, up to the per-trade and daily caps in the permission you signed. It will not exceed those caps, and you can switch back to Paper at any time.";
 "Only coins. Stocks in your basket stay priced and sellable — they just stop being bought." = "Only coins. Stocks in your basket stay priced and sellable — they just stop being bought.";
+"Only in trencher mode. Its Brain decides and every trencher limit still applies." = "Only in trencher mode. Its Brain decides and every trencher limit still applies.";
 "Only these exact commands (or command + args) may run via /run — and each still needs /confirm. Chaining/redirects are always refused." = "Only these exact commands (or command + args) may run via /run — and each still needs /confirm. Chaining/redirects are always refused.";
 "Only tokenised equities and ETFs. Your agent will be idle while US markets are shut, and it will not buy coins even if they are in your basket." = "Only tokenised equities and ETFs. Your agent will be idle while US markets are shut, and it will not buy coins even if they are in your basket.";
 "Open Telegram →" = "Open Telegram →";
@@ -280,9 +289,12 @@
 "Portfolio" = "포트폴리오";
 "Portfolio balance combines cash and marked positions. A position’s value can change while you hold it. Available cash is the amount currently shown as uninvested." = "포트폴리오 잔고는 현금과 현재 시세로 평가한 포지션을 합한 금액입니다. 포지션의 가치는 보유하는 동안에도 계속 달라질 수 있습니다. 사용 가능한 현금은 지금 투자되지 않은 상태로 표시된 금액입니다.";
 "Prepare Trencher mode" = "Prepare Trencher mode";
+"Privacy mode is off: your bot can follow the whole chat in its groups. If it was already in a group before you turned privacy off, remove it from that group and add it back." = "Privacy mode is off: your bot can follow the whole chat in its groups. If it was already in a group before you turned privacy off, remove it from that group and add it back.";
+"Privacy mode is on, so in a group your bot only hears commands and replies to its own messages — it can't join in, remember the chat or see coins people post. To change that:" = "Privacy mode is on, so in a group your bot only hears commands and replies to its own messages — it can't join in, remember the chat or see coins people post. To change that:";
 "proactive pings" = "proactive pings";
 "Profile" = "프로필";
 "Profile picture" = "Profile picture";
+"Quiet — mostly lurks" = "Quiet — mostly lurks";
 "read + chat only" = "read + chat only";
 "Read P&L correctly." = "손익을 바르게 읽는 법.";
 "Read the token, action, explanation and outcome together. A published decision is not proof of an executed trade. Paper fills are marked Paper; holds explain why an agent waited." = "토큰, 선택한 동작, 설명, 결과를 함께 읽으세요. 공개된 판단이 곧 실제로 체결된 매매를 뜻하지는 않습니다. 모의 체결에는 '모의' 표시가 붙고, 보류에는 에이전트가 왜 기다렸는지가 적혀 있습니다.";
@@ -354,6 +366,7 @@
 "take profit" = "take profit";
 "Telegram" = "Telegram";
 "Telegram controls" = "Telegram controls";
+"Telegram groups" = "Telegram groups";
 "test connection" = "test connection";
 "testnet RPC override" = "testnet RPC override";
 "That one won’t run yet." = "That one won’t run yet.";
@@ -375,6 +388,7 @@
 "This spends real money." = "This spends real money.";
 "to buy or sell" = "to buy or sell";
 "to halt it." = "to halt it.";
+"To let your bot follow the whole chat in a group, turn privacy mode off:" = "To let your bot follow the whole chat in a group, turn privacy mode off:";
 "token saved, but switched off" = "token saved, but switched off";
 "token saved, not verified yet" = "token saved, not verified yet";
 "Tokens" = "토큰";
@@ -429,5 +443,6 @@
 "Your agent places real orders on Robinhood Chain with the funds in its account. Turn this off and it goes back to practising immediately — no signature needed either way." = "Your agent places real orders on Robinhood Chain with the funds in its account. Turn this off and it goes back to practising immediately — no signature needed either way.";
 "Your agent, your boundaries." = "내 에이전트, 내가 정한 한도.";
 "Your balance, your positions and your performance. Adding funds and withdrawing live here too." = "잔고, 보유 포지션, 수익률을 한곳에서 봅니다. 입금과 출금도 여기에서 합니다.";
+"Your bot can't be added to groups right now: @BotFather → /setjoingroups → your bot → Enable." = "Your bot can't be added to groups right now: @BotFather → /setjoingroups → your bot → Enable.";
 "Your link code appears here once a token is saved." = "Your link code appears here once a token is saved.";
 "Your Merryman tracks active memecoin pools with at least $100,000 in daily volume, 20 distinct buyers, recent activity and both buys and sells. Brain reviews eligible coins in the background about once a minute; execution and exit checks run every 15 seconds. New buys need a fresh Brain approval. Brain can also sell early. The fast profile attempts exits at −10%, +20%, or after 30 minutes, even while Brain is unavailable. Liquidity loss can trigger an earlier exit." = "Your Merryman tracks active memecoin pools with at least $100,000 in daily volume, 20 distinct buyers, recent activity and both buys and sells. Brain reviews eligible coins in the background about once a minute; execution and exit checks run every 15 seconds. New buys need a fresh Brain approval. Brain can also sell early. The fast profile attempts exits at −10%, +20%, or after 30 minutes, even while Brain is unavailable. Liquidity loss can trigger an earlier exit.";

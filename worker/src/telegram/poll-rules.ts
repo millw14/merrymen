@@ -274,3 +274,34 @@ export function slashHead(text: string): { cmd: string; arg: string } | null {
   const [head, ...rest] = t.slice(1).split(/\s+/);
   return { cmd: (head ?? "").toLowerCase().replace(/@[\w]+$/, ""), arg: rest.join(" ").trim() };
 }
+
+/**
+ * A group or supergroup; with no chat type (an older parse, or a button
+ * press, which carries none), a negative id — the repo's long-standing group
+ * test. Both processes that poll the bot ask this first: nothing in a group
+ * goes down a DM's path (the refusal, the way in, /link and its lockout, the
+ * backlog's notes), in the child (service.ts) or while trading is held
+ * (hold.ts).
+ */
+export function isGroupMessage(m: { chatType?: string; chatId: number }): boolean {
+  if (m.chatType === "group" || m.chatType === "supergroup") return true;
+  return m.chatType === undefined && m.chatId < 0;
+}
+
+/**
+ * WHETHER A LINE TYPED IN A GROUP SHOWS THE LIVE LINK CODE (docs/tg-groups.md
+ * "Link codes are for DMs only"): as a word of its own anywhere in it, or
+ * anywhere at all in what follows /link or /start ("/link CODE.", "/link
+ * `CODE`", a longer run holding it). Everyone in the room has then seen a
+ * bearer credential, so the process that reads it replaces it, whatever the
+ * line's age and whoever is answering the bot: a false positive only costs a
+ * fresh code.
+ */
+export function groupLineShowsCode(text: string, liveCode: string): boolean {
+  const live = liveCode.toUpperCase();
+  if (!live || !text) return false;
+  const word = new RegExp(`(?<![A-Z0-9])${live.replace(/[.*+?^${}()|[\]\\]/g, (c) => `\\${c}`)}(?![A-Z0-9])`, "i");
+  if (word.test(text)) return true;
+  const head = slashHead(text);
+  return (head?.cmd === "link" || head?.cmd === "start") && head.arg.toUpperCase().includes(live);
+}

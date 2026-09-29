@@ -307,6 +307,139 @@ routes answer 404 and the section does not render.
 > pass that did something logs counts only — `xpost: sent 1, drafted-buy 1` —
 > never a post's text and never a token.
 
+### Telegram groups (on by default per owner; works without a key)
+
+An owner can add their Merryman's Telegram bot to a Telegram group, and it
+behaves like one more person there: it answers when it is called, now and then
+joins in on its own, remembers each chat, and reacts to coins people post — it
+looks at the coin, tags whoever sent it, and either buys a little (when its
+Brain likes it and every trencher limit allows it) or says why it is passing.
+It never posts trade alerts, errors, sizes, prices or P&L. This is **not** the
+group chat room above, which is the public web room. Rules and design:
+[`docs/tg-groups.md`](tg-groups.md). Owners turn it on or off, turn coin looks
+on or off and pick how chatty it is in Settings → Telegram → Telegram groups
+(and on the iOS Telegram screen).
+
+Unlike the room and X, group lines are written **inside each child**: the
+child is what long-polls the owner's bot, and the orchestrator never calls
+`getUpdates`. The orchestrator's part is carrying each child's group memory
+across redeploys (below). Every variable here is read by the children, so set
+it on the **orchestrator** and it reaches them through the ordinary child
+environment (self-hosted, it goes in the worker's own environment).
+
+| Var | Value |
+|---|---|
+| `MERRYMEN_TG_GROUPS` *(optional)* | `0` turns Telegram groups off for **every** agent on the host, read by each child on every update: no group lines, no reactions, no coin looks, no memory writes. Membership changes are still recorded (so switching back on works) and `/forgetme` still deletes. Unset or anything else: on, and each owner's own setting decides |
+| `MERRYMEN_TG_GROUPS_LLM_KEY` *(optional)* | a key used **only** for Telegram group lines, from a **separate organization**. Refused when it equals `GROQ_API_KEY`, `MERRYMEN_LLM_API_KEY` or `ANTHROPIC_API_KEY`, unless the share flag below is set. A refused or misconfigured key falls through to the owner's own key — never the house key — and the boot log names the variable at fault, never its value |
+| `MERRYMEN_TG_GROUPS_LLM_PROVIDER` *(optional)* | `groq` (default), `anthropic` or `openai`. **A provider other than Groq receives other people's group messages: name it in the privacy policy (`site/components/PrivacyPolicyDoc.tsx`, section 5) before deploying it** |
+| `MERRYMEN_TG_GROUPS_MODEL` *(optional)* | the model for group lines; unset, `qwen/qwen3.8-27b` on Groq and `claude-opus-5` on Anthropic. **Required** for `openai`, which has no default |
+| `MERRYMEN_TG_GROUPS_LLM_BASE_URL` *(openai only)* | the OpenAI-compatible endpoint for `openai`: `https://…`, or `http://` on `localhost` / `127.0.0.1`, with no credentials in the URL. Without it (or the model) the `openai` key is not used. Ignored for Groq and Anthropic |
+| `MERRYMEN_TG_GROUPS_SHARE_HOUSE_KEY` *(optional)* | `1` lets group lines use a fleet key — as the dedicated key, or, for a hosted agent with neither a dedicated key nor a key its owner saved, the agent's house model. Not recommended |
+| `MERRYMEN_TG_GROUPS_LLM_PER_DAY` *(optional)* | model calls per agent per UTC day, default `300` hosted (`1000` self-hosted), clamped to 0–20000 (`0`: templates only), on top of a fixed 40 per chat per hour |
+
+> **The dedicated key is forwarded to every child, on purpose.** The room's and
+> X's keys are on `CHILD_SECRET_STRIP` because only the orchestrator spends
+> them. Group lines are written by the child that polls the bot, so this key has
+> to be in the child's environment, like the house LLM keys already are. Do
+> **not** add it to the strip list: a stripped key reads as unset and every
+> hosted agent falls back to templates. Its value is never printed; the boot
+> line names only the provider and the model.
+>
+> **Without it, hosted agents use templates and never join in unprompted.**
+> `worker/src/telegram/tg-groups/model.ts` resolves, in order: the dedicated
+> key; else a key the owner saved in their own settings (never an env house
+> key); else, only with `MERRYMEN_TG_GROUPS_SHARE_HOUSE_KEY=1`, the house
+> model; else no model. With no model, answers when it is called, coin acks
+> and coin outcomes come from templates, there are no ambient lines, and emoji
+> reactions still happen. So a hosted agent never spends the house key on group
+> chatter unless you set the share flag. Self-hosted, the owner's own
+> configured model comes straight after the dedicated key.
+>
+> **Give it its own key, from its own organization**, for the room's reason:
+> Groq rations per organization and model, every agent's trading reasoning
+> lives inside the house allowance, and a background feature has exhausted it
+> before. The equality check can only compare strings, so a second key created
+> in the house organization passes it and still spends trading's allowance.
+>
+> **The allowance survives redeploys.** Calls are counted in the agent's
+> durable group store (below), so a redeploy does not hand out a fresh day. A
+> 429 pauses group model calls for 10 minutes; a daily-cap, rejected-key or
+> unknown-model failure pauses them until UTC midnight. Each call is
+> time-boxed at 20 s, at most 2 run at once per agent, and group work runs off
+> the serial poll loop, so a slow model never delays an owner's DMs, buttons
+> or `/kill`. None of it
+> is ever said in a group: a failure there is silence or a template.
+>
+> **A posted coin can nominate, never order.** The only thing that crosses from
+> a group into trading is a validated `0x` address with where it came from; the
+> Brain decides from the same signals any tape coin gets, and every trencher
+> limit applies unchanged. Group coins get extra caps on top: one under review
+> at a time per agent, 4 per chat and 2 per sender an hour, 12 per agent per UTC
+> day, and at most 3 group-sourced entries per agent per UTC day. No variable
+> here raises any limit.
+
+**Durable memory: `tenant_tg_groups`.** Each child keeps its groups in one
+JSON file, `<child home>/tg-groups.json` (`tg-groups/store.ts`), kept under
+512 KB: at most 30 chats, the last 60 lines per chat pruned at 14 days, a
+rolling summary, notes on up to 40 people, the coins posted for 14 days, and a
+group the bot left kept 30 days. Hosted child homes have no volume, so the
+orchestrator ferries the file (`worker/src/tg-groups-ferry.ts`) through one
+shared-Postgres table:
+
+```sql
+tenant_tg_groups (tenant TEXT PRIMARY KEY, sealed TEXT NOT NULL,
+                  bytes INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL)
+```
+
+| When | What happens |
+|---|---|
+| Each mirror pass (~15 s) | for tenants whose lease this replica holds, when the file's mtime or size changed: read it (read only), apply the home's forget requests (`tg-groups-forget.json`, below), seal it with the store DEK (`sealSecret`), upsert the row. When nothing is published (the child is held, or its file is absent, refused or failed), the forget requests are applied to the stored row itself, in place |
+| Spawn | when the child home has no `tg-groups.json`, restore it from the row, opened with the DEK, with the home's forget requests applied. If that restore fails (or those requests cannot be read), the child runs with `MERRYMEN_TG_GROUPS=0` and nothing is published for it until a later spawn restores the row, so an empty memory never overwrites the stored one |
+| The grant goes | the kill switch deletes the row with the child home; a `/kill` that removes the grant deletes it at once; and every reconcile pass deletes the row of any tenant the grant store no longer lists (a grant discarded while its child was not running here, or a delete that failed once), a bounded batch per pass, judging only rows written before that pass read the grant listing. The group files in a home no child of that tenant runs in go at the same moments (a `/kill`, a spawn that finds no grant, and each reconcile pass for every home neither wanted nor running), so a re-grant never finds the old file and seals it back |
+
+> The orchestrator already holds `DATABASE_URL` and `MERRYMEN_STORE_DEK`;
+> children get neither and never read the table. The row holds other
+> people's messages — members of a Telegram group who never signed up to
+> Merrymen — which is why it is sealed rather than stored as JSON, and why it
+> is deleted with the grant rather than left behind. The privacy policy
+> states these limits; change them together. The loss window is one mirror
+> pass. Self-hosted there is no ferry: the file is the store.
+>
+> **Forget requests have their own file.** Each `/forget` and `/forgetme` is
+> appended to `<child home>/tg-groups-forget.json` (`{chatId, userId, atMs}`)
+> and fsynced before the wipe, even while the child's groups are held off. A
+> held child started with an empty store, so its own wipe erases nothing the
+> row holds; the mirror applies the requests to the row instead, and the
+> restore that ends the hold applies them again before writing the file. The
+> ferry takes the file away only after a publish of a memory file that
+> already reflected every request in it.
+
+**What owners must do: privacy mode.** Each owner's bot is their own, so
+there is nothing to configure on Telegram as the operator — but a bot in a
+group hears only commands aimed at it, replies to its own messages and service
+messages until its owner changes a BotFather setting. Without it the agent
+cannot join in, remember the chat or see posted coins. The steps, which the
+dashboard, the iOS Telegram screen and the site docs repeat:
+
+1. Add the bot to the group. It only talks in groups its owner added it to or
+   approved: added by anyone else, it stays silent and DMs the owner **Stay** /
+   **Leave**, and leaves on its own after 24 h without an answer. A group it
+   was already in before it knew who added it is approved as soon as the
+   owner writes there.
+2. `@BotFather` → `/setprivacy` → the bot → **Disable**.
+3. Remove the bot from the group and add it back — Telegram applies the change
+   only when the bot re-joins. Making the bot a group admin also works.
+4. `/groups` in the bot's DM lists its groups with **Stay** / **Leave** /
+   **Forget**.
+
+> `getMe`'s `can_read_all_group_messages` reports only the BotFather setting,
+> not what a group the bot joined before the change delivers — hence the
+> re-add. When the flag is false at the moment the bot is added as a plain
+> member, the agent DMs its owner these steps once per group. Added as an
+> admin it hears every line, so nothing is sent then; a later change to a
+> plain member of a group it talks in sends them. Leave `/setjoingroups`
+> enabled (BotFather's default) or the bot cannot be added to a group at all.
+
 ## 5. Create the two services
 Both build from the same repo + `Dockerfile`. The image is role-by-variable: its
 `CMD` runs `npm run ${MERRYMEN_START:-start:web}`, and `railway.json` sets no

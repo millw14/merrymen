@@ -6,6 +6,8 @@ import {
   fetchGeckoPools,
   fetchGeckoPoolsResult,
   geckoSource,
+  readTokenPools,
+  readTokenPoolsResult,
   type GeckoPool,
 } from "./geckoterminal";
 
@@ -409,5 +411,80 @@ describe("the size floor — the cap in high cap", () => {
     const r = screenPools([pool({ reserveUsd: 100, fdvUsd: 900_000_000 })], { ...LIMITS, minFdvUsd: 1_000 });
     assert.equal(r.kept.length, 0);
     assert.match(r.dropped[0]!.why, /depth/);
+  });
+});
+
+/**
+ * ONE TOKEN'S OWN POOLS — the lookup a posted address needs (docs/tg-groups.md).
+ * The address is a lookup key: validated before it reaches a URL, and what
+ * comes back is only pools OF that token. A 404 is the index answering "no
+ * pools I know of"; anything else unreadable is a failure, never "none".
+ */
+describe("readTokenPools", () => {
+  const realFetch = globalThis.fetch;
+  const withFetch = async (impl: typeof globalThis.fetch, run: () => Promise<void>) => {
+    const oldHome = process.env.MERRYMEN_FLEET_HOME;
+    delete process.env.MERRYMEN_FLEET_HOME;
+    globalThis.fetch = impl;
+    try {
+      await run();
+    } finally {
+      globalThis.fetch = realFetch;
+      if (oldHome === undefined) delete process.env.MERRYMEN_FLEET_HOME; else process.env.MERRYMEN_FLEET_HOME = oldHome;
+    }
+  };
+  // Each case its own address: the in-process memo is keyed by it.
+  const addr = (c: string) => `0x${c.repeat(40)}`;
+  const CHUMP_TOKEN = "0x0e0d2c89a5a019fe1cf762e5e33187631dacc21b";
+
+  it("asks the token's pools page and keeps only pools whose base token is that address", async () => {
+    const urls: string[] = [];
+    await withFetch((async (url) => {
+      urls.push(String(url));
+      return Response.json({ data: [CHUMP, MICRODUCK] });
+    }) as typeof globalThis.fetch, async () => {
+      const pools = await readTokenPools(CHUMP_TOKEN.toUpperCase().replace("0X", "0x"));
+      assert.deepEqual(pools?.map((p) => p.tokenAddress), [CHUMP_TOKEN]);
+    });
+    assert.deepEqual(urls, [`https://api.geckoterminal.com/api/v2/networks/robinhood/tokens/${CHUMP_TOKEN}/pools?page=1`]);
+  });
+
+  it("a 404 is an answer (no pools known), not a failure", async () => {
+    await withFetch((async () => new Response("not found", { status: 404 })) as typeof globalThis.fetch, async () => {
+      assert.deepEqual(await readTokenPools(addr("1")), []);
+      const r = await readTokenPoolsResult(addr("1"));
+      assert.equal(r.failed, false);
+    });
+  });
+
+  it("a rate limit, a timeout-shaped throw or a changed body is null — unreadable is not absent", async () => {
+    await withFetch((async () => new Response("slow down", { status: 429, headers: { "retry-after": "7" } })) as typeof globalThis.fetch, async () => {
+      assert.equal(await readTokenPools(addr("2")), null);
+    });
+    await withFetch((async () => { throw new Error("down"); }) as typeof globalThis.fetch, async () => {
+      assert.equal(await readTokenPools(addr("3")), null);
+    });
+    await withFetch((async () => Response.json({ nope: true })) as typeof globalThis.fetch, async () => {
+      assert.equal(await readTokenPools(addr("4")), null);
+    });
+  });
+
+  it("never splices anything but an address into the provider's path", async () => {
+    let calls = 0;
+    await withFetch((async () => { calls++; return Response.json({ data: [] }); }) as typeof globalThis.fetch, async () => {
+      for (const bad of ["0x1234", `0x${"g".repeat(40)}`, `${addr("5")}/../../x`, `0x${"a".repeat(64)}`, ""]) {
+        assert.equal(await readTokenPools(bad), null, bad);
+      }
+    });
+    assert.equal(calls, 0);
+  });
+
+  it("one request serves every caller for a minute — the look and the tape share it", async () => {
+    let calls = 0;
+    await withFetch((async () => { calls++; return Response.json({ data: [] }); }) as typeof globalThis.fetch, async () => {
+      await Promise.all([readTokenPools(addr("6")), readTokenPools(addr("6"))]);
+      await readTokenPools(addr("6"));
+    });
+    assert.equal(calls, 1);
   });
 });

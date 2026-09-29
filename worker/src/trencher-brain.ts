@@ -1,12 +1,20 @@
 import type { BrainDecision } from "./brain-client";
 import { orderFromDecision } from "./brain-live";
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
-import type { GeckoPool } from "./venues/geckoterminal";
-import { fetchGeckoPoolsResult } from "./venues/geckoterminal";
+import type { GeckoFetch, GeckoPool } from "./venues/geckoterminal";
+import { fetchGeckoPoolsResult, readTokenPoolsResult } from "./venues/geckoterminal";
+import { NOMINATE } from "./trencher-nominate";
 import { CASH, instrumentClassOf } from "../../packages/core/src/index";
 
 export const TRENCH_VOLUME_MIN = 100_000;
 export const TRENCH_TAPE_MAX_AGE_MS = 120_000;
+/** Tape pages kept for nominated coins, at most — the nomination book's own queue bound. */
+export const NOMINATED_PAGES_MAX = NOMINATE.queueMax;
+const NOMINATED_PREFIX = "nominated:";
+
+/** Safe diagnostic codes only; never provider bodies or credential-bearing URLs. */
+const pageFailure = (failure: string | undefined) =>
+  /^(http-\d{3}|timeout|network|invalid-body|invalid-shape|cache-unavailable|provider-cooldown|request-budget)$/.test(failure ?? "") ? failure! : "unavailable";
 /**
  * A HELD POSITION MAY NOT GO LONGER THAN THIS WITHOUT A REVIEW.
  *
@@ -18,12 +26,82 @@ export const TRENCH_TAPE_MAX_AGE_MS = 120_000;
 export const HELD_REVIEW_MAX_GAP_MS = 5 * 60_000;
 
 export const TRENCH_REVIEW_INTERVAL_MS = 30_000;
+/**
+ * A priority (nominated) coin is preferred only this long after the last
+ * review launched for ANY nominated coin, and after its own last review: two
+ * review intervals, so nominations together hold at most every other slot and
+ * the rotation keeps the rest. See `TrenchBrainReview.candidate`.
+ */
+export const PRIORITY_RETRY_MS = 2 * TRENCH_REVIEW_INTERVAL_MS;
 
 /** Keep each page on its own clock: partial outages must not erase fresh pages
  * or renew the age of old observations. Healthy empty pages replace old data. */
 export class TrenchTapeReader {
   private pages = new Map<string, { pools: GeckoPool[]; at: number }>();
-  constructor(private fetchPage = fetchGeckoPoolsResult, private now = Date.now) {}
+  /** Lowercased addresses whose own token page rides on the tape. See setNominated. */
+  private nominated = new Set<string>();
+  constructor(
+    private fetchPage = fetchGeckoPoolsResult,
+    private now = Date.now,
+    private fetchToken: (address: string) => Promise<GeckoFetch> = readTokenPoolsResult,
+  ) {}
+
+  /**
+   * THE COINS SOMEBODY NOMINATED GET A PAGE OF THEIR OWN — and nothing more.
+   *
+   * A coin posted in a Telegram group (docs/tg-groups.md) is usually not on
+   * the trending or top-pools lists, so without its own page it could never
+   * reach the tape and the nomination would have nothing to wait for. The
+   * page is its GeckoTerminal token-pools read, stored under
+   * `nominated:<address>` beside the feed pages and treated exactly like them:
+   * the same 120s freshness, the same newest-observation dedupe, and the same
+   * `highVolumePools` screen in `snapshot()`. So a nomination decides which
+   * page is READ, never what passes — a quiet coin on its own page is dropped
+   * by the same screen that drops a quiet coin on the trending list.
+   *
+   * REPLACES THE SET, so a nomination that resolved loses its page now rather
+   * than lingering for its freshness window, and a reader of the tape never
+   * sees a coin kept alive by a chat that has moved on. Bounded by the book's
+   * own queue: an address beyond it is not read at all.
+   */
+  setNominated(addresses: Iterable<string>): void {
+    const next = new Set<string>();
+    for (const a of addresses) {
+      const key = typeof a === "string" ? a.toLowerCase() : "";
+      if (!/^0x[0-9a-f]{40}$/.test(key) || next.has(key)) continue;
+      if (next.size >= NOMINATED_PAGES_MAX) break;
+      next.add(key);
+    }
+    for (const key of [...this.pages.keys()]) {
+      if (key.startsWith(NOMINATED_PREFIX) && !next.has(key.slice(NOMINATED_PREFIX.length))) this.pages.delete(key);
+    }
+    this.nominated = next;
+  }
+
+  /**
+   * Read only the nominated pages — what a fresh nomination asks for, so its
+   * coin does not wait for the next full tape refresh (up to a minute). Costs
+   * one request per nominated coin and none for the six feed pages.
+   */
+  async refreshNominated(): Promise<string[]> {
+    const failures: string[] = [];
+    await Promise.all([...this.nominated].map(address => this.readNominated(address, failures)));
+    return failures;
+  }
+
+  private async readNominated(address: string, failures: string[]): Promise<void> {
+    const key = `${NOMINATED_PREFIX}${address}`;
+    // The failure names the KIND of page, never the address: these lines are
+    // logged, and a coin somebody posted in a group is not log material.
+    try {
+      const r = await this.fetchToken(address);
+      if (r.failed) { failures.push(`nominated=${pageFailure(r.failure)}`); return; }
+      // Resolved while the read was in flight: the page must not come back.
+      if (!this.nominated.has(address)) return;
+      // Only the nominated coin's own pools, whatever the page carried.
+      this.pages.set(key, { pools: r.pools.filter(p => p.tokenAddress.toLowerCase() === address), at: r.observedAt ?? this.now() });
+    } catch { failures.push("nominated=unavailable"); }
+  }
 
   snapshot() {
     const pages = [...this.pages.values()].filter(p => this.now() - p.at <= TRENCH_TAPE_MAX_AGE_MS);
@@ -41,17 +119,20 @@ export class TrenchTapeReader {
 
   async refresh() {
     const failures: string[] = [];
-    await Promise.all([1, 2, 3].flatMap(page =>
-      (["trending_pools", "pools"] as const).map(async feed => {
-        const key = `${feed}:${page}`;
-        try {
-          const r = await this.fetchPage(feed, { page });
-          if (r.failed) {
-            const code = /^(http-\d{3}|timeout|network|invalid-body|invalid-shape|cache-unavailable|provider-cooldown|request-budget)$/.test(r.failure ?? "") ? r.failure : "unavailable";
-            failures.push(`${key}=${code}`);
-          } else this.pages.set(key, { pools: r.pools, at: r.observedAt ?? this.now() });
-        } catch { failures.push(`${key}=unavailable`); }
-      })));
+    await Promise.all([
+      ...[1, 2, 3].flatMap(page =>
+        (["trending_pools", "pools"] as const).map(async feed => {
+          const key = `${feed}:${page}`;
+          try {
+            const r = await this.fetchPage(feed, { page });
+            if (r.failed) failures.push(`${key}=${pageFailure(r.failure)}`);
+            else this.pages.set(key, { pools: r.pools, at: r.observedAt ?? this.now() });
+          } catch { failures.push(`${key}=unavailable`); }
+        })),
+      // Refreshed WITH the tape, on the tape's clock: a nominated page is
+      // never older than the feed pages it is read beside.
+      ...[...this.nominated].map(address => this.readNominated(address, failures)),
+    ]);
     return { ...this.snapshot(), failures };
   }
 }
@@ -138,18 +219,41 @@ export class TrenchBrainReview {
    * to answer.
    */
   private reviewedAtMs = new Map<string, number>();
+  /**
+   * When each TOKEN (lowercased) last had a review launched, ms epoch — read
+   * only to space out a priority coin's retries (see `candidate`).
+   */
+  private launchedAtMs = new Map<string, number>();
+  /** The priority hint the last `candidate` call was given (lowercased), for `launch`. */
+  private priorityKeys: ReadonlySet<string> = new Set();
+  /**
+   * When a review last launched for a token in that hint, ms epoch — the
+   * spacing that keeps nominations TOGETHER to every other slot. Its own
+   * stamp, not read off `launchedAtMs`: a nomination that resolved on its
+   * review leaves the hint, and its slot must still count.
+   */
+  private priorityLaunchedAtMs: number | undefined;
   private reviewSequence = 0;
   constructor(private now = Date.now) {}
 
-  reset(context = "") {
-    if (this.context === context) return;
+  /**
+   * True when the context actually changed — the moment every review in
+   * flight and every ready order stopped counting, which a caller holding
+   * state keyed to those reviews (the nomination book) must hear about.
+   */
+  reset(context = ""): boolean {
+    if (this.context === context) return false;
     this.context = context;
     this.generation++;
     this.ready = null;
     this.nextAt = 0;
     this.reviewed.clear();
     this.reviewedAtMs.clear();
+    this.launchedAtMs.clear();
+    this.priorityKeys = new Set();
+    this.priorityLaunchedAtMs = undefined;
     this.reviewSequence = 0;
+    return true;
   }
 
   /**
@@ -179,11 +283,51 @@ export class TrenchBrainReview {
    * what is bought: `shouldEnter` has already run, and the Brain still has to
    * say buy. Absent volume sorts last rather than first — an unknown tape is
    * not a busy one.
+   *
+   * ── A NOMINATED COIN GOES FIRST, AND ONLY FIRST ──────────────────────
+   *
+   * `priority` is the nomination book's hint (trencher-nominate.ts
+   * `priority()`: the coins Telegram groups posted that still wait for a
+   * review, in queue order). The FIRST of them that is ELIGIBLE is picked
+   * ahead of the rotation — eligible meaning it already passed everything the
+   * caller filters on (tape, verification, `shouldEnter`), so the hint moves a
+   * coin up the queue and never onto it. First eligible, not first: the head
+   * of the queue may never pass the tick's filters, and it must not hold the
+   * preference away from a coin behind it that does. Held positions are
+   * untouched: this only picks the entry candidate, and `chooseFocus`'s
+   * overdue rule still decides between it and a holding.
+   *
+   * SPACED, SO NOMINATIONS CANNOT TAKE EVERY SLOT. A review that produced no
+   * decision (the Brain down, a refusal) leaves a nomination unresolved, and
+   * an unspaced preference would re-ask every 30s until the TTL, starving the
+   * tape; several nominations taking turns would do the same. So nothing is
+   * preferred until `PRIORITY_RETRY_MS` has passed since a review last
+   * launched for any coin in the hint, and a coin is not preferred again
+   * until that long after its own last launch — together, at most every other
+   * review slot — and in between the rotation runs exactly as before.
    */
-  candidate<T extends { token: string; volume24hUsd?: number }>(eligible: readonly T[]): T | undefined {
+  candidate<T extends { token: string; volume24hUsd?: number }>(eligible: readonly T[], priority?: ReadonlySet<string>): T | undefined {
     const current = new Set(eligible.map(c => c.token.toLowerCase()));
     for (const key of this.reviewed.keys()) if (!current.has(key)) this.reviewed.delete(key);
+    const wanted = new Set([...(priority ?? [])].map(a => a.toLowerCase()));
+    this.priorityKeys = wanted;
     if (eligible.length === 0) return undefined;
+    if (wanted.size > 0) {
+      const now = this.now();
+      const spaced = (last: number | undefined) => last === undefined || now - last >= PRIORITY_RETRY_MS;
+      if (spaced(this.priorityLaunchedAtMs)) {
+        const byToken = new Map<string, T>();
+        for (const c of eligible) {
+          const key = c.token.toLowerCase();
+          if (!byToken.has(key)) byToken.set(key, c);
+        }
+        // Queue order: the hint's order, never the order discovery returned.
+        for (const key of wanted) {
+          const c = byToken.get(key);
+          if (c && spaced(this.launchedAtMs.get(key))) return c;
+        }
+      }
+    }
     const seq = (c: T) => this.reviewed.get(c.token.toLowerCase()) ?? 0;
     const busy = (c: T) => (typeof c.volume24hUsd === "number" && Number.isFinite(c.volume24hUsd) ? c.volume24hUsd : -1);
     // Reviewed longer ago than one full pass — or never.
@@ -217,9 +361,14 @@ export class TrenchBrainReview {
     // every tick that merely ASKED for one, and the holding it was meant to
     // protect would look permanently current.
     this.reviewedAtMs.set(input.market.symbol, started);
+    this.launchedAtMs.set(token.toLowerCase(), started);
+    // Any review of a nominated coin takes a nomination slot, picked through
+    // the hint or reached by the rotation on its own.
+    if (this.priorityKeys.has(token.toLowerCase())) this.priorityLaunchedAtMs = started;
     // The map is read only for currently-held symbols; anything older than an
     // hour is past every gap that could be asked about and is just growth.
     for (const [sym, at] of this.reviewedAtMs) if (started - at > 3_600_000) this.reviewedAtMs.delete(sym);
+    for (const [key, at] of this.launchedAtMs) if (started - at > 3_600_000) this.launchedAtMs.delete(key);
     const generation = this.generation;
     this.nextAt = started + TRENCH_REVIEW_INTERVAL_MS;
     void run().then(outcome => {
@@ -258,35 +407,46 @@ export class TrenchBrainReview {
     return this.reviewedAtMs.get(symbol);
   }
 
-  /** Told why a ready order was not used, so drops are countable. */
-  onDrop?: (why: string) => void;
+  /**
+   * Told why a ready order was not used, so drops are countable — and which
+   * Brain decision it was, so a caller waiting on that decision's fill (a
+   * nominated coin) hears that none is coming instead of waiting out a TTL.
+   */
+  onDrop?: (why: string, decisionId?: string) => void;
 
   take(symbol: string, token: string, price8: bigint, maxUsdg: number, held = false): TrenchBrainOrder | null {
     const r = this.ready;
     if (!r || r.input.market.symbol !== symbol) return null;
     this.ready = null;
-    if (Boolean(r.input.positions?.some(p => p.symbol === symbol && Number(p.qtyRaw) > 0)) !== held) return null;
-    // A DROPPED ORDER IS SAID, NOT SWALLOWED. These three used to return null
-    // with `ready` already cleared, so a Brain BUY that aged out or whose price
-    // moved simply never happened and nothing counted it.
+    // A DROPPED ORDER IS SAID, NOT SWALLOWED — on EVERY path past the line
+    // above. `ready` is already cleared there, so a Brain decision refused
+    // after it silently never happened: nothing counted it, and a coin
+    // nominated from a Telegram group waited out its whole TTL for an answer
+    // that could no longer come (the onDrop handler turns the decision id into
+    // that group's `skipped`). Only the symbol mismatch above keeps `ready`.
     const act = r.decision.action.toUpperCase();
-    if (r.context !== this.context) { this.onDrop?.(`Brain ${act} ${symbol} not used: the agent's context changed since the review`); return null; }
+    const id = typeof r.decision.decision_id === "string" && r.decision.decision_id.trim() ? r.decision.decision_id : undefined;
+    const drop = (reason: string): null => {
+      this.onDrop?.(`Brain ${act} ${symbol} not used: ${reason}`, id);
+      return null;
+    };
+    if (Boolean(r.input.positions?.some(p => p.symbol === symbol && Number(p.qtyRaw) > 0)) !== held) return drop("whether it is held changed since the review");
+    if (r.context !== this.context) return drop("the agent's context changed since the review");
     const age = this.now() - r.started;
-    if (age > 60_000) { this.onDrop?.(`Brain ${act} ${symbol} not used: ${Math.round(age / 1000)}s old, past the 60s a review stays valid`); return null; }
-    if (price8 <= 0n ||
-        r.token.toLowerCase() !== token.toLowerCase() ||
+    if (age > 60_000) return drop(`${Math.round(age / 1000)}s old, past the 60s a review stays valid`);
+    if (price8 <= 0n) return drop("no usable mark to price it at");
+    if (r.token.toLowerCase() !== token.toLowerCase() ||
         r.decision.instrument_id !== r.input.market.instrumentId || r.decision.symbol !== symbol ||
         typeof r.decision.agent_id !== "string" || typeof r.decision.decision_id !== "string" || !r.decision.decision_id.trim() ||
-        r.decision.agent_id.toLowerCase() !== r.input.agentId.toLowerCase()) return null;
+        r.decision.agent_id.toLowerCase() !== r.input.agentId.toLowerCase()) return drop("the decision does not match the coin or agent it was asked about");
     const before = Number(r.input.market.priceUsd);
     const price = Number(price8) / 1e8;
-    if (!Number.isFinite(before) || before <= 0) return null;
-    if (Math.abs(price / before - 1) > .02) {
-      this.onDrop?.(`Brain ${act} ${symbol} not used: price moved ${((price / before - 1) * 100).toFixed(1)}% since the review (limit 2%)`);
-      return null;
-    }
+    if (!Number.isFinite(before) || before <= 0) return drop("the review had no usable price to compare against");
+    if (Math.abs(price / before - 1) > .02) return drop(`price moved ${((price / before - 1) * 100).toFixed(1)}% since the review (limit 2%)`);
     const verdict = orderFromDecision(r.decision, { maxUsdg });
-    if (verdict.ok && verdict.order.side === "sell" && !held) return null;
-    return verdict.ok ? { side: verdict.order.side, usdgAmount: verdict.order.usdgAmount, decisionId: r.decision.decision_id } : null;
+    // A HOLD was never going to be an order; only a refused BUY or SELL is a drop.
+    if (!verdict.ok) return r.decision.action.toLowerCase() === "hold" ? null : drop(verdict.why);
+    if (verdict.order.side === "sell" && !held) return drop("a sell of a coin that is not held");
+    return { side: verdict.order.side, usdgAmount: verdict.order.usdgAmount, decisionId: r.decision.decision_id };
   }
 }

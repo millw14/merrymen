@@ -42,6 +42,9 @@ import {
   setMyCommands,
   publicBotCommands,
   type InlineKeyboard,
+  type SendExtra,
+  type SendResult,
+  type TgBotInfo,
   type TgCallback,
   type TgMessage,
 } from "./api";
@@ -77,7 +80,7 @@ import {
   dashboardBase,
   type StatusContext,
 } from "./reads";
-import { bindToken, botIdOf, ensureLinkCode, recordPoll, retireLegacyCode, type StateRef } from "./state";
+import { bindToken, botIdOf, ensureLinkCode, recordPoll, retireLegacyCode, rotateLinkCode, type StateRef } from "./state";
 import { linkReply, tallyFailedLink, tryLink, type LinkFails } from "./link";
 import {
   BACKOFF_MAX_SEC,
@@ -88,6 +91,8 @@ import {
   REARM_AFTER_SEC,
   STALE_LINK_TEXT,
   WAKE_SLICE_MS,
+  groupLineShowsCode,
+  isGroupMessage,
   makeChatTally,
   onboardingText,
   pollFailure,
@@ -115,6 +120,9 @@ import {
 import { appendChatTurn, clearChatTurns, lastChatTurnAt, recentChatTurns } from "../store";
 import { describeGap } from "../memory/retrieve";
 import { describeLlmFailure, isLlmProviderFailure } from "../llm-failure";
+import type { TgGroupsStore } from "./tg-groups/store";
+import type { TgCoinsPort } from "./tg-groups/types";
+import { createTgGroups, type TgCommandNotice, type TgGroups, type TgGroupsDeps } from "./tg-groups/handler";
 
 /**
  * Commands that are really questions when they arrive as WORDS: answered by
@@ -161,8 +169,18 @@ export interface TelegramServiceDeps {
    * once an hour whichever of the two found it. One of its own otherwise.
    */
   tally?: ChatTally;
+  /**
+   * Telegram groups (docs/tg-groups.md). The durable per-agent store of every
+   * group's memory, and the port through which a coin posted in a group can
+   * reach trading — as an address and nothing else. Both optional: without
+   * them the bot stays silent in groups.
+   */
+  tgGroupsStore?: TgGroupsStore;
+  tgCoins?: TgCoinsPort;
   /** Injectable for tests. */
   now?: () => number;
+  /** Injectable for tests: the group handler's clock, dice, waits, environment and log. */
+  tgGroupsTest?: Partial<Pick<TgGroupsDeps, "now" | "rand" | "sleep" | "env" | "log">>;
 }
 
 /** Toggle the pause marker the tick loop honors. */
@@ -181,6 +199,36 @@ export function isPaused(): boolean {
 }
 
 const HISTORY_TURNS = 6; // user+assistant pairs kept per chat for follow-ups
+/** How often the cached getMe (id, username, privacy flag) is read again. */
+const SELF_REFRESH_MS = 30 * 60 * 1000;
+
+/**
+ * Commands that read the owner's private state (docs/tg-groups.md rule 3).
+ * Asked in a group by the owner or an allowlisted sender, they are answered in
+ * THAT PERSON'S DM, never in the room. The contract's list, plus the other
+ * reads that print settings, alerts, reminders or the remote-control state —
+ * rule 3 keeps all of those out of a group too.
+ */
+const PRIVATE_READS: ReadonlySet<string> = new Set([
+  "status",
+  "positions",
+  "pnl",
+  "trades",
+  "wallet",
+  "why",
+  "report",
+  "soul",
+  "depth",
+  "brag",
+  "settings",
+  "alerts",
+  "reminders",
+  "watchers",
+  "pc",
+]);
+
+// What counts as a group (isGroupMessage) is in poll-rules.ts, which the hold
+// process shares: neither process sends a group down a DM's path.
 
 // The refusal, the onboarding line and the late-code prompt are in
 // poll-rules.ts, which the hold process shares: a stranger is told the same
@@ -397,6 +445,90 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    */
   // One detached /agent task per chat; /agent stop flips the flag mid-run.
   const agentRuns = new Map<number, { stopped: boolean }>();
+
+  /**
+   * WHO THE BOT IS, from getMe: its id (a reply to one of its messages is a
+   * reply to this id), its username (whether "/cmd@name" and "@name" mean it)
+   * and whether privacy mode is off. Read at start, again when the token
+   * changes, and every half hour — the owner can flip privacy mode in
+   * BotFather at any time. Bound to the token it was read with, so a new
+   * token never borrows the old bot's identity.
+   */
+  let botSelf: { token: string; bot: TgBotInfo; at: number } | null = null;
+  let selfReading: Promise<void> | null = null;
+  const refreshSelf = (token: string): Promise<void> => {
+    if (selfReading) return selfReading;
+    selfReading = getMe({ token })
+      .then((r) => {
+        if (r.bot) botSelf = { token, bot: r.bot, at: Date.now() };
+      })
+      .catch(() => {
+        /* the next poll tries again */
+      })
+      .finally(() => {
+        selfReading = null;
+      });
+    return selfReading;
+  };
+  const selfFor = (cfg: ResolvedConfig): TgBotInfo | null =>
+    botSelf && cfg.telegramBotToken && botSelf.token === cfg.telegramBotToken ? botSelf.bot : null;
+
+  /**
+   * The settings as the group handler reads them: fresh, but at most once a
+   * second. It reads them several times per group line, and every read here
+   * is a settings file parse; a busy group would otherwise mean dozens a
+   * second. A second is short enough that a /link or a dashboard switch
+   * still applies at once.
+   */
+  let groupCfgMemo: { at: number; cfg: ResolvedConfig } | null = null;
+  const groupCfg = (): ResolvedConfig => {
+    const t = Date.now();
+    if (!groupCfgMemo || t - groupCfgMemo.at >= 1000 || t < groupCfgMemo.at) groupCfgMemo = { at: t, cfg: deps.getCfg() };
+    return groupCfgMemo.cfg;
+  };
+
+  /**
+   * TELEGRAM GROUPS (docs/tg-groups.md), created once, and only when the child
+   * handed over the durable store. Without it the bot is silent in groups:
+   * slash commands keep their rules (handleGroupCommand), and nothing else is
+   * answered.
+   */
+  const tgGroups: TgGroups | null = deps.tgGroupsStore
+    ? createTgGroups({
+        opts: () => {
+          const token = groupCfg().telegramBotToken;
+          return token ? { token } : null;
+        },
+        store: deps.tgGroupsStore,
+        getCfg: groupCfg,
+        stateRef,
+        port: () => deps.tgCoins ?? null,
+        self: () => {
+          const bot = selfFor(groupCfg());
+          // The bot's display name (getMe's first_name) is what members see on
+          // its lines, so it is a name they call it by too ("pine bot, thoughts?").
+          return bot
+            ? { id: bot.id, username: bot.username, name: getName(), ...(bot.firstName ? { aliases: [bot.firstName] } : {}) }
+            : null;
+        },
+        privacyOff: () => {
+          const bot = selfFor(groupCfg());
+          return typeof bot?.canReadAllGroupMessages === "boolean" ? bot.canReadAllGroupMessages : null;
+        },
+        note: deps.note,
+        dashboardBase,
+        // The agent's own id seeds its typing style; before it is armed, the
+        // bot's id (one bot per agent) keeps the style stable meanwhile.
+        agentKey: () => {
+          const id = deps.buildStatusContext().agentId;
+          if (id) return id;
+          const bot = botSelf?.bot;
+          return bot ? `bot:${bot.id}` : getName();
+        },
+        hosted: isHostedMode(),
+        ...(deps.tgGroupsTest ?? {}),
+      })
+    : null;
 
   /**
    * The in-memory map is now a CACHE over the sqlite log, not the source of
@@ -801,8 +933,20 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     return cmdDeps;
   };
 
-  const handle = async (msg: TgMessage, cfg: ResolvedConfig): Promise<void> => {
+  /**
+   * `onSent`, when given, hears whether each message this call sends reached the
+   * chat. Only a command forwarded from a group passes it: the room is told
+   * "sent it to your DMs" only when something actually arrived there (a person
+   * who never opened a DM with the bot cannot be written to first). A DM is
+   * answered exactly as before either way.
+   */
+  const handle = async (msg: TgMessage, cfg: ResolvedConfig, onSent?: (ok: boolean) => void): Promise<void> => {
     const token = cfg.telegramBotToken!;
+    const say = async (text: string, extra?: SendExtra): Promise<SendResult> => {
+      const r = await sendMessage({ token }, msg.chatId, text, extra);
+      onSent?.(r.ok);
+      return r;
+    };
     const allowed = cfg.telegramAllowlist.includes(msg.chatId) || cfg.telegramAllowlist.includes(msg.fromId);
 
     // Voice note → text: only for allowlisted chats with the "voice" capability.
@@ -810,15 +954,15 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     if (msg.voiceFileId && !msg.text) {
       if (!allowed) {
         tally.refused(msg.chatId);
-        await sendMessage({ token }, msg.chatId, refusalText(msg.chatId));
+        await say(refusalText(msg.chatId));
         return;
       }
       if (!cfg.telegramPcControlEnabled || !cfg.telegramCapabilities.includes("voice")) {
-        await sendMessage({ token }, msg.chatId, "🎙️ voice is off — enable “remote control” + the voice capability in the dashboard.");
+        await say("🎙️ voice is off — enable “remote control” + the voice capability in the dashboard.");
         return;
       }
       if (!cfg.telegramTranscribeKey) {
-        await sendMessage({ token }, msg.chatId, "🎙️ add a transcription key (OpenAI-compatible) in the dashboard to talk to me by voice.");
+        await say("🎙️ add a transcription key (OpenAI-compatible) in the dashboard to talk to me by voice.");
         return;
       }
       const { url } = await getFileUrl({ token }, msg.voiceFileId);
@@ -826,11 +970,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         ? await transcribeVoice(url, { key: cfg.telegramTranscribeKey, base: cfg.telegramTranscribeBase })
         : { text: null as string | null, reason: "couldn't fetch the voice file" };
       if (!t.text) {
-        await sendMessage({ token }, msg.chatId, `🎙️ couldn't transcribe that: ${esc(t.reason ?? "unknown")}`);
+        await say(`🎙️ couldn't transcribe that: ${esc(t.reason ?? "unknown")}`);
         return;
       }
       msg = { ...msg, text: t.text };
-      await sendMessage({ token }, msg.chatId, `🎙️ <i>heard:</i> ${esc(t.text)}`);
+      await say(`🎙️ <i>heard:</i> ${esc(t.text)}`);
     }
 
     let slash = parseSlash(msg.text);
@@ -846,7 +990,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         // A bare /start or /help is how anyone meets the bot, so it gets the
         // way in rather than a refusal.
         tally.refused(msg.chatId);
-        await sendMessage({ token }, msg.chatId, slash?.kind === "help" ? onboardingText(msg.chatId) : refusalText(msg.chatId));
+        await say(slash?.kind === "help" ? onboardingText(msg.chatId) : refusalText(msg.chatId));
         return;
       }
     }
@@ -856,13 +1000,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // Every gate is checked here, so both entry points are equally locked down.
     const startAgent = async (task: string): Promise<void> => {
       if (!task.trim()) {
-        await sendMessage({ token }, msg.chatId, "what would you like me to do? Describe the task, e.g. “clone github.com/x/y, install, build, and tell me what breaks”.");
+        await say("what would you like me to do? Describe the task, e.g. “clone github.com/x/y, install, build, and tell me what breaks”.");
         return;
       }
       if (!cfg.telegramPcControlEnabled || !cfg.telegramAgentEnabled) {
-        await sendMessage(
-          { token },
-          msg.chatId,
+        await say(
           isHostedMode()
             ? "I can't work on your computer — I live on the merrymen servers. Ask me anything about your trades, coins or settings and I'll look it up."
             : "I can only work on your computer when PC control and agent mode are switched on in Settings. Ask me anything about your trades, coins or settings and I'll look it up.",
@@ -871,11 +1013,11 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       }
       const llm = resolveLlm(cfg);
       if (!llm) {
-        await sendMessage({ token }, msg.chatId, "🤖 agent mode needs an AI provider — pick one in the dashboard (Settings → AI provider).");
+        await say("🤖 agent mode needs an AI provider — pick one in the dashboard (Settings → AI provider).");
         return;
       }
       if (agentRuns.has(msg.chatId)) {
-        await sendMessage({ token }, msg.chatId, "⏳ I'm already on a task here — say “stop” (or /agent stop) first, or wait for it to finish.");
+        await say("⏳ I'm already on a task here — say “stop” (or /agent stop) first, or wait for it to finish.");
         return;
       }
       const st = stateRef.get();
@@ -901,7 +1043,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       ].filter((s): s is string => typeof s === "string" && s.length >= 8);
       const stopFlag = { stopped: false };
       agentRuns.set(msg.chatId, stopFlag);
-      await sendMessage({ token }, msg.chatId, "🏹 on it — I'll message progress here. Say “stop” to halt me.");
+      await say("🏹 on it — I'll message progress here. Say “stop” to halt me.");
       void runAgentTask(task, {
         creds: llm,
         cfg: {
@@ -937,7 +1079,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       // Same sender-level rule as other state-changing commands: in a group,
       // only individually-allowlisted users may drive the PC.
       if (msg.chatId !== msg.fromId && !cfg.telegramAllowlist.includes(msg.fromId)) {
-        await sendMessage({ token }, msg.chatId, "🚫 in a group, only individually-allowlisted users can run /agent.");
+        await say("🚫 in a group, only individually-allowlisted users can run /agent.");
         return;
       }
       const arg = (agentMatch[1] ?? "").trim();
@@ -945,14 +1087,14 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         const running = agentRuns.get(msg.chatId);
         if (running) {
           running.stopped = true;
-          await sendMessage({ token }, msg.chatId, "🛑 stopping after the current step…");
+          await say("🛑 stopping after the current step…");
         } else {
-          await sendMessage({ token }, msg.chatId, "nothing running.");
+          await say("nothing running.");
         }
         return;
       }
       if (!arg) {
-        await sendMessage({ token }, msg.chatId, "what's the task? e.g. <code>/agent clone github.com/x/y, install deps, build, and tell me what breaks</code> — or just say it in plain English. <code>/agent stop</code> halts.");
+        await say("what's the task? e.g. <code>/agent clone github.com/x/y, install deps, build, and tell me what breaks</code> — or just say it in plain English. <code>/agent stop</code> halts.");
         return;
       }
       await startAgent(arg);
@@ -963,7 +1105,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     if (agentRuns.has(msg.chatId) && /^\s*(stop|halt|cancel|abort)\b/i.test(msg.text ?? "")) {
       if (msg.chatId === msg.fromId || cfg.telegramAllowlist.includes(msg.fromId)) {
         agentRuns.get(msg.chatId)!.stopped = true;
-        await sendMessage({ token }, msg.chatId, "🛑 stopping after the current step…");
+        await say("🛑 stopping after the current step…");
         return;
       }
     }
@@ -1172,9 +1314,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       cmd.kind === "confirm" ||
       cmd.kind === "agent";
     if (stateChanging && msg.chatId !== msg.fromId && !cfg.telegramAllowlist.includes(msg.fromId)) {
-      await sendMessage(
-        { token },
-        msg.chatId,
+      await say(
         "🚫 in a group, only individually-allowlisted users can run that. The owner can add your Telegram user id in the dashboard.",
       );
       return;
@@ -1226,9 +1366,7 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     } else if (!parkedNow) {
       pendingMeta.delete(pendingKey);
     }
-    const sent = await sendMessage(
-      { token },
-      msg.chatId,
+    const sent = await say(
       strippedReply ||
         "that came back as reasoning with no answer in it — say it again, or use a slash command like /status.",
       keyboard ? { keyboard } : {},
@@ -1237,6 +1375,221 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // A typed "yes" may answer the NEXT message only if this reply was the
     // settings question itself.
     if (meta?.action.kind === "setting") typedAnswerable.add(pendingKey);
+  };
+
+  /**
+   * THE LIVE LINK CODE, ONCE A ROOM HAS SEEN IT, IS REPLACED (docs/tg-groups.md
+   * "Link codes are for DMs only"), and the owner is told why the code on
+   * their Settings page changed. Anyone who read it could DM "/link CODE" and
+   * be allowlisted — on a bot never linked, made its owner. `shows` says
+   * whether a text carries the live code (upper-cased); a false positive only
+   * costs a fresh code and one DM to the owner, so a caller errs that way.
+   */
+  const replaceShownCode = (chatId: number, cfg: ResolvedConfig, shows: (live: string) => boolean): void => {
+    const token = cfg.telegramBotToken;
+    if (!token) return;
+    // Random codes (state.ts): nothing here is derived from the token, which
+    // only says there is a bot whose code could have leaked.
+    const state = ensureLinkCode(stateRef.get());
+    const live = state.linkCode.toUpperCase();
+    if (!live || !shows(live)) return;
+    stateRef.set(rotateLinkCode(state));
+    deps.note("warn", "Telegram: a link code was typed in a group; it was replaced");
+    if (tgGroups) void tgGroups.codeLeaked(chatId);
+  };
+
+  /**
+   * A SLASH COMMAND TYPED IN A GROUP (docs/tg-groups.md "Commands in groups").
+   *
+   * It still goes through `handle` and its sender rules; what changes is who
+   * may reach it and where the answer goes:
+   *
+   *   - "/cmd@OtherBot" is another bot's, and is ignored (parseSlash strips
+   *     any @name without checking it is ours), and so is a bare command
+   *     parseSlash does not know ("/ban @spammer" is a moderation bot's).
+   *   - Someone who may not run commands gets one casual line per hour at
+   *     most, never "🚫 not authorized" — with privacy mode off that was one
+   *     refusal per message.
+   *   - /link never works in a group: codes are for DMs (see below).
+   *   - Every command's answer — a private read (rule 3) or an order's
+   *     receipt (rule 2) — goes to the asker's own DM, with a "sent it to
+   *     your DMs" in the room once it arrived there (else "dm me /start
+   *     first"); the room never sees a report or a figure. A command that
+   *     changes something runs only once their DM is proved reachable, and
+   *     one that ran is never answered "dm me first".
+   *   - A command reaches the DM only from a SENDER on the allowlist, as a
+   *     DM would need; that covers /name, /remember and /soul (today any
+   *     member of a linked group could run them, and /remember writes owner
+   *     facts).
+   *   - The owner's /groups is answered in their DM, like the DM command.
+   *   - /forget wipes that group's memory only, and only for the owner: the
+   *     owner's DM memory is not the room's to erase. /forgetme is anyone's.
+   */
+  const handleGroupCommand = async (msg: TgMessage, cfg: ResolvedConfig): Promise<void> => {
+    const text = msg.text.trim();
+    const head = text.slice(1).split(/\s+/)[0] ?? "";
+    const addressedTo = /@(\w+)$/.exec(head)?.[1];
+    // Unknown username (getMe not answered yet): not provably ours, so not ours.
+    const me = selfFor(cfg)?.username;
+    const ours = !addressedTo || (!!me && addressedTo.toLowerCase() === me.toLowerCase());
+    const name = head.replace(/@\w+$/, "").toLowerCase();
+    // A person speaking through a chat (an anonymous admin, a channel) cannot
+    // be told apart from any other: nobody in particular to answer or forget.
+    const via = msg.senderChatId !== undefined;
+    const ownerId = stateRef.get().ownerId;
+    const isOwner = !via && ownerId !== null && msg.fromId === ownerId;
+    const senderListed = !via && cfg.telegramAllowlist.includes(msg.fromId);
+    const thread = msg.isTopicMessage === true && typeof msg.messageThreadId === "number" ? msg.messageThreadId : undefined;
+    // NOT AWAITED. The group line takes typing time, the flood pacer and maybe
+    // a 429 pause; the poll loop must not wait on any of it (rule 7). Neither
+    // call ever rejects.
+    const notice = (what: TgCommandNotice): void => {
+      if (tgGroups) void tgGroups.commandNotice(msg.chatId, msg.messageId, msg.fromId, what, thread);
+    };
+
+    const slash = parseSlash(text);
+    if (slash?.kind === "link") {
+      // LINK CODES ARE FOR DMs ONLY. In a group there is nothing to link: the
+      // owner approves a group by adding the bot or pressing Stay, and nobody
+      // in it needs a code to talk to it. A code typed here is never consumed
+      // — linking from a group used to allowlist the whole group, handing
+      // every member the chat-level private reads (/pnl, /positions …). And
+      // when it is the live code, everyone in the room has just seen a bearer
+      // credential, so it is replaced and the owner told why.
+      //
+      // CHECKED BEFORE WHOSE COMMAND IT IS. "/link@SomeBot CODE" shows the room
+      // the code just the same — whether it names another bot, an old username
+      // of this one, or this one before getMe has answered — and a code left
+      // live would let any member DM "/link CODE" later and be allowlisted. For
+      // the same reason the code counts ANYWHERE in what follows /link, not
+      // only as a word of its own: "/link CODE.", "/link `CODE`" and
+      // "/link (CODE)" show the room the same six characters, and so does a
+      // longer run holding them (a handful of guesses finds where it starts).
+      // Only the "no code needed" line waits for the command to be ours.
+      const shown = slash.code.toUpperCase();
+      if (shown) replaceShownCode(msg.chatId, cfg, (live) => shown.includes(live));
+      if (ours) notice("link-here");
+      return;
+    }
+    if (!ours) return;
+
+    if (name === "forgetme") {
+      // The wipe itself happens before forgetMe first awaits; only the
+      // "done 🫡" is left to the group queue.
+      if (!via && tgGroups) void tgGroups.forgetMe(msg.chatId, msg.fromId, msg.messageId);
+      return;
+    }
+    // THE OWNER'S /groups is answered in their DM, as when they type it there;
+    // the room hears nothing (the listing names every group the bot is in).
+    if (name === "groups") {
+      if (isOwner) await tgGroups?.groupsCommand(msg.fromId);
+      else notice("owner-only");
+      return;
+    }
+    // A BARE COMMAND WE DO NOT KNOW IS ANOTHER BOT'S. Crypto groups run
+    // moderation and scanner bots whose commands ("/ban @spammer", "/price")
+    // carry no @name; forwarded, each one DMed the asker "unknown command" and
+    // told the room "sent it to your DMs". Only parseSlash's own "unknown
+    // command" marks a name it does not know: its usage lines ("usage: /buy …")
+    // are for our commands and still go through, and /agent is matched by
+    // `handle` itself rather than parseSlash.
+    if (slash?.kind === "unknown" && name !== "agent" && /^unknown command\b/.test(slash.text)) return;
+
+    if (!isOwner && !senderListed) {
+      notice(slash && PRIVATE_READS.has(slash.kind) ? "private-refused" : "owner-only");
+      return;
+    }
+    if (slash?.kind === "forget") {
+      if (isOwner) tgGroups?.forgetChat(msg.chatId, msg.messageId);
+      else notice("owner-only");
+      return;
+    }
+    // FORWARDED ONLY WHEN THE DM WOULD ANSWER IT. `handle` lets a DM in by the
+    // sender's own id on the allowlist. An owner who linked from a group
+    // before groups had their own rules has only that group there, so their DM
+    // would be "🚫 not authorized" while the room heard "sent it to your DMs";
+    // they are asked to DM the bot instead, which is where linking now
+    // happens. /name and /remember need the sender listed too (they shape the
+    // soul), and this is where they get it.
+    if (!senderListed) {
+      notice("dm-first");
+      return;
+    }
+    // EVERY OTHER ANSWER GOES TO THE ASKER'S DM, reads and orders alike. The
+    // same command, as if they had sent it to the bot directly: every DM rule
+    // applies (confirm buttons included), and the answer lands in their DM.
+    // A private read in the room would publish the owner's book (rule 3), and
+    // an order's receipt — "bought 10 USDG of …" — is exactly the figure a
+    // group must never see (rule 2). The room hears "sent it to your DMs" only
+    // when the DM arrived: a bot cannot write first to someone who never
+    // opened a DM with it.
+    //
+    // ANYTHING THAT CHANGES SOMETHING RUNS ONLY ONCE THE DM IS PROVED. /buy
+    // has no confirm step, so it used to trade first and try the DM after:
+    // for someone the bot cannot write to (added by id in the dashboard and
+    // never pressed /start, or who blocked it) the buy went through, the
+    // receipt bounced, and the room said "dm me /start first" — words that
+    // say it did not run, and that a person follows by sending /buy again.
+    // Now a "typing…" goes to their DM first, which Telegram refuses exactly
+    // where it would refuse the receipt, and when it is refused nothing runs.
+    // A read changes nothing, so it keeps the old order.
+    // "/start <anything>" from a sender on the allowlist is help too (the
+    // payload is a link code only for a chat that is not).
+    const readOnly = slash !== null && (PRIVATE_READS.has(slash.kind) || slash.kind === "help" || slash.kind === "start");
+    if (!readOnly) {
+      const token = cfg.telegramBotToken;
+      if (!token || !(await sendChatAction({ token }, msg.fromId)).ok) {
+        notice("dm-first");
+        return;
+      }
+    }
+    let delivered = false;
+    // Its own date: a forwarded command is exactly as live as the line it came in.
+    await handle({ updateId: msg.updateId, chatId: msg.fromId, fromId: msg.fromId, fromUsername: msg.fromUsername, text: msg.text, date: msg.date }, cfg, (ok) => {
+      if (ok) delivered = true;
+    });
+    // Once something ran, the room never hears "dm me first": a receipt that
+    // bounced after the DM was proved (a blip, or blocked in between) is "done,
+    // couldn't DM you the details", so nobody sends the order twice.
+    notice(delivered ? "dm-sent" : readOnly ? "dm-first" : "done-no-dm");
+  };
+
+  /**
+   * A MESSAGE IN A GROUP. Never `handle`: ordinary lines, the owner's
+   * included, go to the group persona, which knows nothing private, and a
+   * slash command to handleGroupCommand, which answers in the asker's DM.
+   *
+   * A LATE ONE IS DROPPED (`late`: it waited out a silence, or reached this
+   * bot before this agent was switched onto it; the backlog rule in
+   * pollOnce). It is not answered, reacted to, remembered or run: a room has
+   * moved on hours after an outage, and a Merryman that answers it then, or
+   * runs a /buy typed into it then, is doing something nobody asked for any
+   * more. Nor does a room get any of a DM's backlog notes (the late-code
+   * prompt, the refusal, "I was offline"): the room is not waiting on them,
+   * and whether the bot was down is nobody's business there. The coin flow
+   * has its own, stricter clock besides (docs/tg-groups.md: a CA older than
+   * ten minutes is claimed and left alone).
+   *
+   * One thing is done whatever the line's age: THE LIVE CODE IN ANY GROUP
+   * LINE ("try /link CODE", "code: CODE!", a caption, even another bot's
+   * line) is replaced before anything else looks at it. The room has seen it
+   * whenever it was typed, and replacing it only ever takes something away.
+   */
+  const routeGroup = (m: TgMessage, cfg: ResolvedConfig, late: boolean): Promise<void> => {
+    if (m.text) {
+      const text = m.text;
+      replaceShownCode(m.chatId, cfg, (live) => groupLineShowsCode(text, live));
+    }
+    if (late) return Promise.resolve();
+    // Voice notes are not transcribed in groups: nobody asked the owner's
+    // transcription key to listen to a room.
+    if (m.voiceFileId && !m.text) return Promise.resolve();
+    // The loop guard: another bot's line. An anonymous admin (a bot account
+    // posting for a person, with sender_chat set) is a person.
+    if (m.fromIsBot === true && m.senderChatId === undefined) return Promise.resolve();
+    if (m.text.trim().startsWith("/")) return handleGroupCommand(m, cfg);
+    tgGroups?.onMessage(m);
+    return Promise.resolve();
   };
 
   /**
@@ -1386,30 +1739,95 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     deafSince = null;
     if (armedAt === null) armedAt = askedAt;
     const armed = armedAt;
-    const { messages, callbacks, nextOffset } = polled;
+    const { messages, callbacks, members, service, nextOffset } = polled;
+    // Who the bot is, before a group line is read against it: first poll,
+    // a new token, or half an hour since the last look (in the background).
+    // After the poll rather than before it, so a getMe that fails or hangs
+    // through an outage never stands in front of the getUpdates that ends it,
+    // and never moves the backlog boundary above.
+    if (!botSelf || botSelf.token !== token) await refreshSelf(token);
+    else if (Date.now() - botSelf.at > SELF_REFRESH_MS) void refreshSelf(token);
     // Sent to this bot before this agent was switched onto it (boundAt).
     const boundAt = stateRef.get().boundAt;
     const early = (date: number) => boundAt !== null && date > 0 && date < boundAt;
     const stale = (date: number) => !early(date) && date > 0 && date < armed;
-    const batch: StaleBatch = { told: new Set(), held: heldPerChat(messages.filter((m) => stale(m.date)), cfg) };
+    // A group hears nothing about a backlog (routeGroup), so only DMs are
+    // counted into the one summary each allowlisted chat gets.
+    const batch: StaleBatch = { told: new Set(), held: heldPerChat(messages.filter((m) => !isGroupMessage(m) && stale(m.date)), cfg) };
+    /**
+     * WHERE A MESSAGE GOES. A DM goes to `handle` exactly as it always has
+     * (the owner's /groups aside), or, when it waited out a silence or reached
+     * this bot before this agent did, to the backlog rule above. A group
+     * message never does either: routeGroup has it, and a late one is
+     * dropped there rather than held with a note. Before groups had their own
+     * rules, the owner's words in a group ran the full DM pipeline, private
+     * state and all, and the answer was posted to the room.
+     *
+     * The group handler's methods return at once and do their work on their
+     * own queue, so a busy group never holds up the owner's DMs or buttons.
+     */
+    const route = (m: TgMessage, c: ResolvedConfig): Promise<void> => {
+      if (isGroupMessage(m)) return routeGroup(m, c, early(m.date) || stale(m.date));
+      if (early(m.date)) return holdEarly(m, c);
+      if (stale(m.date)) return holdStale(m, c, batch);
+      if (
+        tgGroups &&
+        m.chatId === m.fromId &&
+        m.fromId === stateRef.get().ownerId &&
+        /^\/groups(?:@\w+)?\s*$/i.test(m.text.trim())
+      ) {
+        return tgGroups.groupsCommand(m.chatId);
+      }
+      return handle(m, c);
+    };
     // In the order they happened: a press and a typed message in the same
-    // batch must not overtake each other.
+    // batch must not overtake each other, and a group's "you were added"
+    // must come before the first line said in it.
     const updates = [
-      ...messages.map((m) => ({
-        at: m.updateId,
-        run: (c: ResolvedConfig) => (early(m.date) ? holdEarly(m, c) : stale(m.date) ? holdStale(m, c, batch) : handle(m, c)),
-      })),
+      ...messages.map((m) => ({ at: m.updateId, run: (c: ResolvedConfig) => route(m, c) })),
       ...callbacks.map((cb) => ({
         at: cb.updateId,
-        // A button on a message from before the switch answers a question this
-        // agent may never have asked, and one from before this process started
-        // listening answers a question whose parked action died with the last
-        // process. Answered, so it stops spinning, and dropped.
-        run: (c: ResolvedConfig) =>
-          early(cb.date) || stale(cb.date)
-            ? answerCallbackQuery({ token }, cb.id, "That button has expired.").then(() => {})
-            : handleCallback(cb, c),
+        run: async (c: ResolvedConfig) => {
+          // A button on a message from before the switch answers a question
+          // this agent may never have asked. Answered, so it stops spinning,
+          // and dropped.
+          if (early(cb.date)) {
+            await answerCallbackQuery({ token }, cb.id, "That button has expired.");
+            return;
+          }
+          // Telegram groups' own buttons (Stay, Leave, Forget, in the owner's
+          // DM) answer questions kept in the group store, not parked in this
+          // process, and the handler checks the owner and the room as they are
+          // now. So one asked before a restart still counts: expiring it would
+          // void every open Stay or Leave at each redeploy, and leave a
+          // stranger's group to its 24-hour leave.
+          if (tgGroups && cb.data.startsWith("tgg:")) {
+            await tgGroups.onCallback(cb);
+            return;
+          }
+          // One from before this process started listening answers a question
+          // whose parked action died with the last process.
+          if (stale(cb.date)) {
+            await answerCallbackQuery({ token }, cb.id, "That button has expired.");
+            return;
+          }
+          await handleCallback(cb, c);
+        },
       })),
+      // The bot's own membership, and joins, leaves and migrations: recorded
+      // whenever they arrive, since a group the bot was added to or removed
+      // from while nobody listened is still a fact. A late one says nothing in
+      // the room, though: no hello hours after the add, and no welcome for
+      // someone who joined while the bot was away.
+      ...members
+        .filter((u) => u.chatType === "group" || u.chatType === "supergroup")
+        .map((u) => ({ at: u.updateId, run: async () => tgGroups?.onMember(u, { late: early(u.dateSec) || stale(u.dateSec) }) })),
+      ...service
+        .filter((s) => s.chatType === "group" || s.chatType === "supergroup")
+        .map((s) => ({
+          at: s.updateId,
+          run: async () => tgGroups?.onService(early(s.dateSec) || stale(s.dateSec) ? { ...s, newChatMembers: [] } : s),
+        })),
     ].sort((a, b) => a.at - b.at);
     let whole = true;
     for (const u of updates) {
@@ -1425,9 +1843,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
         deps.note("warn", `Telegram: error handling message — ${e instanceof Error ? e.message : String(e)}`);
       }
     }
-    // Past the updates that were neither a message nor a press too, but only
-    // when the batch ran to its end: a stopped batch leaves the rest to be
-    // asked for again.
+    // Past the updates none of the above reads too (a private chat's
+    // membership change, anything unparsed), but only when the batch ran to
+    // its end: a stopped batch leaves the rest to be asked for again.
     if (whole && nextOffset > stateRef.get().offset) {
       stateRef.set({ ...stateRef.get(), offset: nextOffset });
     }
@@ -1738,11 +2156,20 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
   // Announce the bot identity once at startup (best-effort).
   const cfg0 = deps.getCfg();
   if (cfg0.telegramEnabled && cfg0.telegramBotToken) {
-    void getMe({ token: cfg0.telegramBotToken }).then((r) => {
-      if (r.bot) deps.note("ok", `Telegram: connected as @${r.bot.username}`);
-      else deps.note("warn", `Telegram: token check failed — ${r.reason}`);
+    const token0 = cfg0.telegramBotToken;
+    void getMe({ token: token0 }).then((r) => {
+      if (r.bot) {
+        // The same answer seeds the cached identity, so the first poll need not ask again.
+        if (!botSelf) botSelf = { token: token0, bot: r.bot, at: Date.now() };
+        deps.note("ok", `Telegram: connected as @${r.bot.username}`);
+      } else deps.note("warn", `Telegram: token check failed — ${r.reason}`);
     });
   }
   loop();
-  return { stop: () => { stopped = true; } };
+  return {
+    stop: () => {
+      stopped = true;
+      tgGroups?.stop();
+    },
+  };
 }

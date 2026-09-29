@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { cleanPollErr, makeChatTally, pollErrKind, pollErrText, pollFailure, redactChat } from "./poll-rules";
+import { cleanPollErr, groupLineShowsCode, isGroupMessage, makeChatTally, pollErrKind, pollErrText, pollFailure, redactChat } from "./poll-rules";
 
 describe("a failed poll, as it is kept and published", () => {
   it("names its kind first, so the dashboard and the orchestrator need not parse prose", () => {
@@ -169,5 +169,26 @@ describe("the tally writes to the fleet's log, never the owner's event feed", ()
     assert.equal((notifier.match(/sendTelegramMessage\(/g) ?? []).length, 1);
     assert.match(notifier, /if \(!r\.ok\) tally\.sendFailed\(chatId, r\.reason\);/);
     assert.match(notifier, /import \{ esc, sendMessage as sendTelegramMessage \} from "\.\/api";/);
+  });
+});
+
+describe("what both processes treat as a group, and a code a room has seen", () => {
+  it("a group or supergroup by its type; with no type (a button press, an older parse), a negative id", () => {
+    assert.equal(isGroupMessage({ chatType: "group", chatId: -5 }), true);
+    assert.equal(isGroupMessage({ chatType: "supergroup", chatId: -1001234567890 }), true);
+    assert.equal(isGroupMessage({ chatType: "private", chatId: 42 }), false);
+    assert.equal(isGroupMessage({ chatId: -1001234567890 }), true);
+    assert.equal(isGroupMessage({ chatId: 42 }), false);
+  });
+
+  it("the live code as a word anywhere, or anywhere at all after /link or /start; never a code that is not live", () => {
+    const live = "ABC234";
+    for (const t of ["try /link ABC234", "code: abc234!", "dm the bot ABC234 lol", "/link@otherbot ABC234", "/link xabc234y", "/start (ABC234)", "/LINK `abc234`."]) {
+      assert.equal(groupLineShowsCode(t, live), true, t);
+    }
+    for (const t of ["anyone around?", "xABC234y", "/link WRONG1", "/status ABC23", ""]) {
+      assert.equal(groupLineShowsCode(t, live), false, t);
+    }
+    assert.equal(groupLineShowsCode("/link ABC234", ""), false, "no code, nothing to have leaked");
   });
 });

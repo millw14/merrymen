@@ -25,6 +25,7 @@
 "{label}: enter an amount between {min} and {max}." = "{label}: enter an amount between {min} and {max}.";
 "{label}: enter an amount, for example 10 or 10{sep}50." = "{label}: enter an amount, for example 10 or 10{sep}50.";
 "{label}: that reads as either {a} or {b}. Which did you mean?" = "{label}: that reads as either {a} or {b}. Which did you mean?";
+"@BotFather → /setprivacy → your bot → Disable, then remove the bot from the group and add it back. Making it a group admin works too." = "@BotFather → /setprivacy → your bot → Disable, then remove the bot from the group and add it back. Making it a group admin works too.";
 "/agent" = "/agent";
 "/agent stop" = "/agent stop";
 "/confirm" = "/confirm";
@@ -54,6 +55,7 @@
 "Add funds" = "Add funds";
 "Add funds." = "Add funds.";
 "add token" = "add token";
+"Add your bot to a group and it acts like one more person there: it answers when someone calls it, joins in now and then, and remembers the chat. If someone else adds it, it stays silent until you answer Stay or Leave in your DMs. It never posts trade alerts, sizes, prices or P&L." = "Add your bot to a group and it acts like one more person there: it answers when someone calls it, joins in now and then, and remembers the chat. If someone else adds it, it stays silent until you answer Stay or Leave in your DMs. It never posts trade alerts, sizes, prices or P&L.";
 "Advanced settings" = "Advanced settings";
 "Agent connections" = "Agent connections";
 "Agent name" = "Agent name";
@@ -103,6 +105,7 @@
 "Changes saved" = "Changes saved";
 "Chat" = "Chat";
 "chat trade ceiling" = "chat trade ceiling";
+"Chatty — joins in more often" = "Chatty — joins in more often";
 "check every (minutes)" = "check every (minutes)";
 "Check it →" = "Check it →";
 "checking…" = "checking…";
@@ -177,11 +180,14 @@
 "Give an agent a strategy, set its limits, and follow the decisions it makes. Follow the full walkthrough or use Topics to jump to a feature. You can leave and replay it at any time." = "Give an agent a strategy, set its limits, and follow the decisions it makes. Follow the full walkthrough or use Topics to jump to a feature. You can leave and replay it at any time.";
 "Give your agent a name." = "Give your agent a name.";
 "h" = "h";
+"Hang out in Telegram groups" = "Hang out in Telegram groups";
 "Hard strategist ceiling per proposed trade — beneath the grant caps." = "Hard strategist ceiling per proposed trade — beneath the grant caps.";
 "Holdings" = "Holdings";
 "Home" = "Home";
 "Home carries the leaderboard and the markets. Open any token to see its price history and the trades agents have recorded against it." = "Home carries the leaderboard and the markets. Open any token to see its price history and the trades agents have recorded against it.";
+"How chatty in groups" = "How chatty in groups";
 "How many class positions may be held at once. 0 = no limit beyond the scout budget." = "How many class positions may be held at once. 0 = no limit beyond the scout budget.";
+"How often it joins in when nobody called it. A mention, a reply to it or its name gets an answer at any level." = "How often it joins in when nobody called it. A mention, a reply to it or its name gets an answer at any level.";
 "I understand this agent can trade real funds." = "I understand this agent can trade real funds.";
 "idle cash floor" = "idle cash floor";
 "If your agent holds positions bought with real funds, read this first." = "If your agent holds positions bought with real funds, read this first.";
@@ -201,6 +207,7 @@
 "Loading settings…" = "Loading settings…";
 "Loading…" = "Loading…";
 "Local hour (0–23) after which the campfire report is sent." = "Local hour (0–23) after which the campfire report is sent.";
+"Look at coins people post" = "Look at coins people post";
 "mainnet RPC override" = "mainnet RPC override";
 "Manage →" = "Manage →";
 "Market check interval" = "Market check interval";
@@ -233,6 +240,7 @@
 "Next" = "Next";
 "No link code yet. Your agent mints one on its next pass with this token set — check back shortly." = "No link code yet. Your agent mints one on its next pass with this token set — check back shortly.";
 "no linked chats yet" = "no linked chats yet";
+"Normal — joins in now and then" = "Normal — joins in now and then";
 "not set" = "not set";
 "not set up" = "not set up";
 "not your strategy" = "not your strategy";
@@ -252,6 +260,7 @@
 "on, trading real money" = "on, trading real money";
 "Once you save, your agent can open positions with the funds in its account, up to the per-trade and daily caps in the permission you signed. It will not exceed those caps, and you can switch back to Paper at any time." = "Once you save, your agent can open positions with the funds in its account, up to the per-trade and daily caps in the permission you signed. It will not exceed those caps, and you can switch back to Paper at any time.";
 "Only coins. Stocks in your basket stay priced and sellable — they just stop being bought." = "Only coins. Stocks in your basket stay priced and sellable — they just stop being bought.";
+"Only in trencher mode. Its Brain decides and every trencher limit still applies." = "Only in trencher mode. Its Brain decides and every trencher limit still applies.";
 "Only these exact commands (or command + args) may run via /run — and each still needs /confirm. Chaining/redirects are always refused." = "Only these exact commands (or command + args) may run via /run — and each still needs /confirm. Chaining/redirects are always refused.";
 "Only tokenised equities and ETFs. Your agent will be idle while US markets are shut, and it will not buy coins even if they are in your basket." = "Only tokenised equities and ETFs. Your agent will be idle while US markets are shut, and it will not buy coins even if they are in your basket.";
 "Open Telegram →" = "Open Telegram →";
@@ -280,9 +289,12 @@
 "Portfolio" = "Portfolio";
 "Portfolio balance combines cash and marked positions. A position’s value can change while you hold it. Available cash is the amount currently shown as uninvested." = "Portfolio balance combines cash and marked positions. A position’s value can change while you hold it. Available cash is the amount currently shown as uninvested.";
 "Prepare Trencher mode" = "Prepare Trencher mode";
+"Privacy mode is off: your bot can follow the whole chat in its groups. If it was already in a group before you turned privacy off, remove it from that group and add it back." = "Privacy mode is off: your bot can follow the whole chat in its groups. If it was already in a group before you turned privacy off, remove it from that group and add it back.";
+"Privacy mode is on, so in a group your bot only hears commands and replies to its own messages — it can't join in, remember the chat or see coins people post. To change that:" = "Privacy mode is on, so in a group your bot only hears commands and replies to its own messages — it can't join in, remember the chat or see coins people post. To change that:";
 "proactive pings" = "proactive pings";
 "Profile" = "Profile";
 "Profile picture" = "Profile picture";
+"Quiet — mostly lurks" = "Quiet — mostly lurks";
 "read + chat only" = "read + chat only";
 "Read P&L correctly." = "Read P&L correctly.";
 "Read the token, action, explanation and outcome together. A published decision is not proof of an executed trade. Paper fills are marked Paper; holds explain why an agent waited." = "Read the token, action, explanation and outcome together. A published decision is not proof of an executed trade. Paper fills are marked Paper; holds explain why an agent waited.";
@@ -354,6 +366,7 @@
 "take profit" = "take profit";
 "Telegram" = "Telegram";
 "Telegram controls" = "Telegram controls";
+"Telegram groups" = "Telegram groups";
 "test connection" = "test connection";
 "testnet RPC override" = "testnet RPC override";
 "That one won’t run yet." = "That one won’t run yet.";
@@ -375,6 +388,7 @@
 "This spends real money." = "This spends real money.";
 "to buy or sell" = "to buy or sell";
 "to halt it." = "to halt it.";
+"To let your bot follow the whole chat in a group, turn privacy mode off:" = "To let your bot follow the whole chat in a group, turn privacy mode off:";
 "token saved, but switched off" = "token saved, but switched off";
 "token saved, not verified yet" = "token saved, not verified yet";
 "Tokens" = "Tokens";
@@ -429,5 +443,6 @@
 "Your agent places real orders on Robinhood Chain with the funds in its account. Turn this off and it goes back to practising immediately — no signature needed either way." = "Your agent places real orders on Robinhood Chain with the funds in its account. Turn this off and it goes back to practising immediately — no signature needed either way.";
 "Your agent, your boundaries." = "Your agent, your boundaries.";
 "Your balance, your positions and your performance. Adding funds and withdrawing live here too." = "Your balance, your positions and your performance. Adding funds and withdrawing live here too.";
+"Your bot can't be added to groups right now: @BotFather → /setjoingroups → your bot → Enable." = "Your bot can't be added to groups right now: @BotFather → /setjoingroups → your bot → Enable.";
 "Your link code appears here once a token is saved." = "Your link code appears here once a token is saved.";
 "Your Merryman tracks active memecoin pools with at least $100,000 in daily volume, 20 distinct buyers, recent activity and both buys and sells. Brain reviews eligible coins in the background about once a minute; execution and exit checks run every 15 seconds. New buys need a fresh Brain approval. Brain can also sell early. The fast profile attempts exits at −10%, +20%, or after 30 minutes, even while Brain is unavailable. Liquidity loss can trigger an earlier exit." = "Your Merryman tracks active memecoin pools with at least $100,000 in daily volume, 20 distinct buyers, recent activity and both buys and sells. Brain reviews eligible coins in the background about once a minute; execution and exit checks run every 15 seconds. New buys need a fresh Brain approval. Brain can also sell early. The fast profile attempts exits at −10%, +20%, or after 30 minutes, even while Brain is unavailable. Liquidity loss can trigger an earlier exit.";

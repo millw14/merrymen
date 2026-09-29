@@ -322,6 +322,37 @@ export function tickRatchets(
 }
 
 /**
+ * WHOSE PEAK THE IN-MEMORY MARK IS. tick() keeps one `highWaterMarkUsdg`, and a
+ * paper tick puts the PAPER book's peak in it — the figure the paper breaker
+ * judges against. On a live tick the same variable is the lifetime mark the
+ * performance fee ratchets, and the breaker's peak when no risk period stands.
+ */
+export type MarkBook = "live" | "paper";
+
+/**
+ * WHETHER A TICK RE-READS THE PERSISTED LIVE PEAKS, before it reads a balance.
+ *
+ *   capitalPeakDirty — an energy purchase lowered them in the ledger and the
+ *                      in-memory marks have not caught up, on purpose (index.ts,
+ *                      at the flag).
+ *   a paper mark     — the last tick to set the mark was a paper tick. Arm, a
+ *                      booked flow, a landed transfer and an energy purchase
+ *                      re-read the live mark; going live again is none of those.
+ *                      So the first live tick after one accrued a performance
+ *                      fee on live equity above the PAPER peak — the owner's
+ *                      principal, whenever the account sat below its real mark —
+ *                      and with no risk period standing the breaker judged live
+ *                      drawdown against the paper book. An owner turning Live off
+ *                      and on did it, and so did a live rail that broke and
+ *                      recovered: paper is the fallback while it is down.
+ *
+ * Never on a paper tick: the paper branch sets the mark that tick judges by.
+ */
+export function livePeaksStale(paper: boolean, markBook: MarkBook, capitalPeakDirty: boolean): boolean {
+  return !paper && (capitalPeakDirty || markBook === "paper");
+}
+
+/**
  * The tick's drain, run the way its plan says. Resolves to whether the tick
  * goes on to its producers.
  *

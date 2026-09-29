@@ -322,3 +322,101 @@ describe("what the hold process leaves for the dashboard and the log", () => {
     });
   });
 });
+
+describe("Telegram groups are not answered while trading is held", () => {
+  const GROUP = -1001234567890;
+  const inGroup = (id: number, from: number, t: string, date = nowSec()): Update => ({
+    update_id: id,
+    message: {
+      message_id: 500 + id,
+      text: t,
+      date,
+      chat: { id: GROUP, type: "supergroup", title: "frens" },
+      from: { id: from, is_bot: false, first_name: "Ann" },
+    },
+  });
+  const added = (id: number, by: number): Update => ({
+    update_id: id,
+    my_chat_member: {
+      chat: { id: GROUP, type: "supergroup", title: "frens" },
+      from: { id: by, is_bot: false, first_name: "Cat" },
+      date: nowSec(),
+      old_chat_member: { status: "left" },
+      new_chat_member: { status: "member" },
+    },
+  });
+  const joined = (id: number): Update => ({
+    update_id: id,
+    message: {
+      message_id: 500 + id,
+      date: nowSec(),
+      chat: { id: GROUP, type: "supergroup", title: "frens" },
+      from: { id: STRANGER, is_bot: false, first_name: "Cat" },
+      new_chat_members: [{ id: 31337, is_bot: false, first_name: "Zed" }],
+    },
+  });
+
+  it("nothing is said in a group, nothing links it and nothing runs, the owner's lines included; membership and joins are passed over", async () => {
+    await withHold(async (h) => {
+      await h.advance(600);
+      const code = h.code();
+      h.queue.push(
+        inGroup(1, STRANGER, "hey merryman"),
+        inGroup(2, STRANGER, "/link WRONG1"),
+        inGroup(3, STRANGER, "/start"),
+        inGroup(4, OWNER, "/status"),
+        inGroup(5, OWNER, "/kill"),
+        inGroup(6, OWNER, "/confirm"),
+        added(7, STRANGER),
+        joined(8),
+        // Late as well as live: a group gets nothing either way.
+        inGroup(9, STRANGER, "/link WRONG2", nowSec() - 20 * 3_600),
+      );
+      await h.advance(1_000);
+      assert.deepEqual(h.sentTo(GROUP), [], "no refusal, no hold text, no late-code prompt in the room");
+      assert.deepEqual(h.sentTo(OWNER), [], "and nothing to the owner: nothing happened");
+      assert.deepEqual(h.sentTo(STRANGER), []);
+      assert.equal(killRequested(HOME), false, "a /kill typed in a group is not this process's to run");
+      assert.equal(h.code(), code, "a wrong code typed in a group is never compared or counted");
+      const settings = JSON.parse(readFileSync(path.join(HOME, "settings.json"), "utf8")) as { telegramAllowlist: number[] };
+      assert.deepEqual(settings.telegramAllowlist, [OWNER], "a group is never linked");
+      const tg = JSON.parse(readFileSync(path.join(HOME, "telegram.json"), "utf8")) as { offset: number; linkedChats: number[] };
+      assert.deepEqual(tg.linkedChats, []);
+      assert.equal(tg.offset, 10, "every update is passed, membership and service messages included");
+      assert.ok(!h.notes.some((m) => /refused|failed/.test(m)), "and no stranger tally for a room");
+    });
+  });
+
+  it("the live code typed in a group is replaced, and only the owner is told, in their DM", async () => {
+    writeFileSync(path.join(HOME, "telegram.json"), JSON.stringify({ ownerId: OWNER }));
+    await withHold(async (h) => {
+      await h.advance(600);
+      const code = h.code();
+      h.queue.push(inGroup(1, STRANGER, `/link ${code}`));
+      await h.advance(1_000);
+      assert.notEqual(h.code(), code, "everyone in the room has seen it, and a held bot answers /link");
+      assert.deepEqual(h.sentTo(GROUP), []);
+      assert.equal(h.sentTo(OWNER).length, 1);
+      assert.match(h.sentTo(OWNER)[0]!, /link code got posted in a group/);
+      // Whoever read it in the room can no longer use it.
+      h.queue.push(text(2, STRANGER, `/link ${code}`));
+      await h.advance(1_000);
+      assert.match(h.sentTo(STRANGER)[0]!, /^couldn't link/);
+      const settings = JSON.parse(readFileSync(path.join(HOME, "settings.json"), "utf8")) as { telegramAllowlist: number[] };
+      assert.deepEqual(settings.telegramAllowlist, [OWNER]);
+    });
+  });
+
+  it("a press in a group gets the plain expiry, never the hold text", async () => {
+    await withHold(async (h) => {
+      h.queue.push({
+        update_id: 1,
+        callback_query: { id: "cb1", data: "mm:y:abcdefghjk", from: { id: OWNER }, message: { message_id: 9, chat: { id: GROUP }, date: nowSec() } },
+      });
+      await h.advance(1_000);
+      assert.deepEqual(h.answers(), ["That button has expired."]);
+      assert.deepEqual(h.sentTo(GROUP), []);
+      assert.deepEqual(h.sentTo(OWNER), []);
+    });
+  });
+});
