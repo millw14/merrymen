@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { PERPS_LIVE_CONSENT_VERSION, PERPS_NUM_BOUNDS, PERPS_SETTING_KEYS } from "../../../packages/core/src/index";
 import { CHAT_SETTING_KEYS, DASHBOARD_ONLY, formatSettingValue, parseSettingValue, specFor, stockSymbols, validStoredSetting, SETTING_SPECS } from "./setting-spec";
 import { SETTING_CHOICES } from "./interpreter";
+import { resolveSettingName } from "./settings-chat";
 
 const spec = (k: string) => specFor(k)!;
 
@@ -150,5 +152,79 @@ describe("Telegram groups are asked about, never set, by text", () => {
   it("the classifier may name it, so an owner's 'groups off' reaches the refusal rather than 'unknown'", () => {
     assert.ok(SETTING_CHOICES.includes("telegramGroups"));
     for (const k of GROUP_KEYS) assert.ok(!SETTING_CHOICES.includes(k), `${k} is a classifier choice`);
+  });
+});
+
+describe("perpetuals are asked about, never set, by text (docs/perps.md rule 1)", () => {
+  it("the exact perps keys: every switch, the consent record and every limit", () => {
+    // Pinned by name, so a perps key added to core without a decision about
+    // the chat boundary fails here rather than slipping past it.
+    assert.deepEqual([...PERPS_SETTING_KEYS].sort(), [
+      "perpsDriver",
+      "perpsEnabled",
+      "perpsLiqBufferPct",
+      "perpsLiveConsentAt",
+      "perpsLiveConsentVersion",
+      "perpsLiveEnabled",
+      "perpsMarkets",
+      "perpsMaxCollateralUsdg",
+      "perpsMaxLeverage",
+      "perpsMaxOpenNotionalUsdg",
+      "perpsMaxOpensPerDay",
+      "perpsMaxSlippageBps",
+      "perpsPerTradeUsdg",
+      "perpsRegionAttested",
+      "perpsStopLossPct",
+      "perpsStopSlipBps",
+      "perpsTakeProfitPct",
+    ]);
+  });
+
+  it("none is in the chat-settable table, so no value for one is ever valid to store", () => {
+    for (const k of PERPS_SETTING_KEYS) {
+      assert.equal(specFor(k), null, `${k} became chat-settable`);
+      assert.ok(!CHAT_SETTING_KEYS.includes(k), `${k} is in CHAT_SETTING_KEYS`);
+      const b = (PERPS_NUM_BOUNDS as Record<string, { min: number; max: number }>)[k];
+      for (const v of [true, false, 1, PERPS_LIVE_CONSENT_VERSION, "strategist", ["BTC-PERP"], ...(b ? [b.min, b.max] : [])]) {
+        assert.equal(validStoredSetting(k, v), false, `${k}=${JSON.stringify(v)}`);
+      }
+    }
+    for (const s of SETTING_SPECS) assert.ok(!s.key.startsWith("perps"), `${s.key} is a perps key in SETTING_SPECS`);
+  });
+
+  it("one dashboard-only pseudo-key answers for all of them, naming the Settings path and the way out", () => {
+    const said = DASHBOARD_ONLY.perps;
+    assert.ok(said, "DASHBOARD_ONLY.perps is missing");
+    assert.match(said, /Settings → Perpetuals on the dashboard/);
+    // "Turn perps off" is most often typed by an owner watching a position go
+    // against them: the answer says off only stops new ones, and how to close.
+    assert.match(said, /stops new positions/);
+    assert.match(said, /\/close/);
+    assert.match(said, /\/flatten/);
+    assert.equal(specFor("perps"), null, "the pseudo-key is not a real setting");
+  });
+
+  it("the classifier may name it, and never a real perps key", () => {
+    assert.ok(SETTING_CHOICES.includes("perps"));
+    for (const k of PERPS_SETTING_KEYS) assert.ok(!SETTING_CHOICES.includes(k), `${k} is a classifier choice`);
+    assert.equal(resolveSettingName("perps"), "perps");
+  });
+
+  it("the dashboard-only pseudo-keys, exactly", () => {
+    // Adding one is a decision about what a chat may be told it cannot do;
+    // removing one would turn its refusal into "I can't find that setting".
+    assert.deepEqual(Object.keys(DASHBOARD_ONLY).sort(), [
+      "aiProvider",
+      "customTokens",
+      "launchSniping",
+      "liveTrading",
+      "memecoinLive",
+      "perps",
+      "safetyFloors",
+      "scout",
+      "telegram",
+      "telegramGroups",
+      "xPosting",
+    ]);
   });
 });

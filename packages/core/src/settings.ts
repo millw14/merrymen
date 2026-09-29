@@ -10,6 +10,7 @@
  */
 
 import { DEFAULT_BASKET_SYMBOLS } from "./tokens";
+import { PERP_MAX_LEVERAGE } from "./perps";
 
 export interface MerrymenSettings {
   // ── connections ────────────────────────────────────────────────────────
@@ -599,6 +600,97 @@ export interface MerrymenSettings {
    * Outbound + public: nothing streams until you turn this on. */
   virtualsEnabled?: boolean;
 
+  // ── perpetuals on Lighter (docs/perps.md "Settings") ───────────────────
+  //
+  // DASHBOARD-ONLY, EVERY ONE OF THEM (rule 1). None is in SETTING_SPECS, so
+  // Telegram, MCP proposals and web chat cards cannot reach them
+  // (setting-spec.ts DASHBOARD_ONLY.perps); partner enrollment's onlyFields
+  // names none of them. The numeric ones are RISK WIDENINGS — leverage, sizes,
+  // collateral, stops — and a widening stays on the dashboard, the rule
+  // `safetyFloors` set.
+  //
+  // NO ENVIRONMENT TERM FOR ANY OF THEM (worker/src/settings.ts), the
+  // `liveTradingEnabled` precedent — not `trencherLiveEnabled` or
+  // `classSnipeEnabled`, which do read one. The operator's only levers are
+  // restrict-only variables resolved separately (MERRYMEN_PERPS,
+  // MERRYMEN_PERPS_LIVE_TENANTS, MERRYMEN_HALT_PERP_ENTRIES), and none of them
+  // can stand in for an owner's switch or consent.
+  //
+  // Not secret, not house-owned, not hosted-forbidden: whether an agent trades
+  // leverage with its owner's money is the owner's decision, like
+  // liveTradingEnabled.
+  //
+  // WHAT TURNING THEM OFF DOES — only ever stops OPENS (rule 8a). Venue state,
+  // not these switches, decides whether exits run: a live account with
+  // positions keeps closing, protecting and withdrawing whatever this block
+  // says, which is why the PUT never refuses an off.
+  /**
+   * Let the agent trade perpetuals — ON PAPER, unless the live consent below is
+   * also on file. The first of rule 1's two dashboard acts. Off by default.
+   */
+  perpsEnabled?: boolean;
+  /**
+   * REAL-MONEY PERPETUALS: the second act, and a CONSENT, so it never stands on
+   * its own. The worker honours it only together with
+   * `perpsLiveConsentVersion === PERPS_LIVE_CONSENT_VERSION`,
+   * `perpsRegionAttested === true` and a `perpsLiveConsentAt` stamp; the PUT
+   * accepts `true` only in a request that carries the first two, and stamps the
+   * third itself. It also needs the account's own live rail
+   * (`liveTradingEnabled`) and a grant carrying the perps permission — this
+   * field is necessary for live perps, never sufficient.
+   */
+  perpsLiveEnabled?: boolean;
+  /** Which consent text the owner agreed to (PERPS_LIVE_CONSENT_VERSION at the time). */
+  perpsLiveConsentVersion?: number;
+  /**
+   * When the owner gave it, Unix MILLISECONDS (Date.now(), like holderProof.at
+   * and xProof.at). WRITTEN ONLY BY THE SETTINGS PUT, from its own clock, at the
+   * moment consent is given — never taken from a request body, so a client can
+   * neither backdate a consent nor keep one alive by echoing an old stamp.
+   */
+  perpsLiveConsentAt?: number;
+  /**
+   * The owner's statement that they are not in a region Lighter's terms (or
+   * Robinhood Wallet's perps terms) exclude: the US, the UK, Canada,
+   * Switzerland, the UAE, Singapore and sanctioned jurisdictions. Part of the
+   * consent record, recorded only with it.
+   */
+  perpsRegionAttested?: boolean;
+  /** The one autonomous perp producer (docs/perps.md "The perps route"). */
+  perpsDriver?: PerpsDriver;
+  /**
+   * Which perp markets the agent may OPEN, by key (`BTC-PERP`, never bare
+   * `BTC`, which is a spot symbol). 1–8 keys of LIGHTER_MARKETS_V1; an unknown
+   * key is REFUSED at the PUT, never ignored — a list quietly shortened to what
+   * this build knows would trade a set the owner did not choose. Exits are never
+   * gated by it: a position in a market later unticked still closes.
+   */
+  perpsMarkets?: string[];
+  /** Highest leverage merrymen sets, an integer 1–10; also capped by each market's venue max. */
+  perpsMaxLeverage?: number;
+  /** Largest opening notional, USDG. Effective cap is min(the grant's sealed per-trade, this). */
+  perpsPerTradeUsdg?: number;
+  /** Total open notional across every perp position, USDG. Never below perpsPerTradeUsdg. */
+  perpsMaxOpenNotionalUsdg?: number;
+  /**
+   * USDG committed at Lighter (cross collateral + isolated margin + in
+   * transit): "the most you can lose on Lighter", IN SOFTWARE — rule 4 says out
+   * loud that a stolen grant is not bound by it.
+   */
+  perpsMaxCollateralUsdg?: number;
+  /** Opens per trailing day, whatever else has headroom. */
+  perpsMaxOpensPerDay?: number;
+  /** Stop distance from the entry reference, percent of PRICE (the UI also shows it as % of margin). */
+  perpsStopLossPct?: number;
+  /** The venue stop's worst execution price vs its trigger, bps — inside the venue's 5% band. */
+  perpsStopSlipBps?: number;
+  /** Take-profit distance, percent of price; 0 = none. Owner and strategist opens only. */
+  perpsTakeProfitPct?: number;
+  /** The stop's worst price must beat the estimated liquidation price by this, percent of entry. */
+  perpsLiqBufferPct?: number;
+  /** An IOC's worst price vs mark, bps. The stand-down uses max(this, 150). */
+  perpsMaxSlippageBps?: number;
+
   // ── telegram (chat with your merryman) ─────────────────────────────────
   /** Bot token from @BotFather (secret). Enables the Telegram bridge. */
   telegramBotToken?: string;
@@ -694,6 +786,107 @@ export interface MerrymenSettings {
  */
 export const TELEGRAM_GROUPS_CHATTINESS = ["quiet", "normal", "chatty"] as const;
 export type TelegramGroupsChattiness = (typeof TELEGRAM_GROUPS_CHATTINESS)[number];
+
+// ── perpetuals: the settings' shared rules ──────────────────────────────────
+//
+// ONE COPY, READ BY BOTH ENFORCEMENT POINTS. The worker's clamp
+// (worker/src/settings.ts) and the settings PUT (web/src/app/api/settings) take
+// every bound below from here, because two literal tables for one rule is how
+// NUM_FIELDS and the worker came to read 5_000 while the rule said nothing
+// (SLIPPAGE_BPS_MAX's note). spec-coverage.test.ts drives the PUT at each
+// bound and settings.test.ts drives the worker at the same ones.
+
+/**
+ * The perp producers, in one list for the resolver, the PUT and the Settings
+ * select (docs/perps.md "The perps route"): `perp-trend` is the deterministic
+ * producer, `strategist` the LLM strategist's perpActions, `manual` owner
+ * orders only.
+ */
+export const PERPS_DRIVERS = ["perp-trend", "strategist", "manual"] as const;
+export type PerpsDriver = (typeof PERPS_DRIVERS)[number];
+
+/** How many markets `perpsMarkets` may name (docs/perps.md "Settings": 1–8). */
+export const PERPS_MARKETS_MAX = 8;
+
+/**
+ * THE CURRENT REAL-MONEY PERPS CONSENT. A stored `perpsLiveEnabled` counts only
+ * while its `perpsLiveConsentVersion` equals this.
+ *
+ * Version 1 is rule 1's list (docs/perps.md): leverage, liquidation, funding,
+ * the venue (Lighter's Robinhood instance) and its terms, the excluded regions,
+ * that the venue publishes the account's positions, and what the wall does not
+ * bound (rule 4). BUMP IT whenever the consent the Settings page shows changes
+ * in substance — a venue upgrade, a region change, a new thing the wall cannot
+ * bound. Every stored consent then stops counting at once, live perps go to
+ * exits-only for everyone, and each owner re-consents to what is now true. A
+ * version that did not move would leave owners consented to a text they never
+ * read.
+ */
+export const PERPS_LIVE_CONSENT_VERSION = 1;
+
+/**
+ * Bounds for the numeric perps settings, and how fine a value may be.
+ *
+ * `decimals` is the GRID, and it matters more here than elsewhere: every one
+ * of these feeds integer arithmetic in perps.ts. Leverage, counts and bps must
+ * be whole (`leverageTarget` and `assertBps` throw otherwise — a thrown risk
+ * check at open time is an agent that stops trading for a reason nobody can
+ * see). Percentages take two places so `Math.round(pct × 100)` is EXACT bps,
+ * and USDG takes two so `BigInt(Math.round(usdg × 100)) × 10_000n` is exact
+ * micro-USDG — both conversions then lose nothing, and nothing has to choose a
+ * rounding direction for a cap.
+ *
+ * The ranges are the contract's table. Two that look arbitrary are not:
+ * perpsStopSlipBps stops at 450 so a stop's worst price stays inside the
+ * venue's 5% trigger band, and perpsMaxSlippageBps stops at 300, well short of
+ * that band, because an IOC allowed to fill 5% from mark is a fat-finger.
+ */
+export const PERPS_NUM_BOUNDS = Object.freeze({
+  perpsMaxLeverage: Object.freeze({ min: 1, max: PERP_MAX_LEVERAGE, decimals: 0 }),
+  perpsPerTradeUsdg: Object.freeze({ min: 10, max: 100_000, decimals: 2 }),
+  perpsMaxOpenNotionalUsdg: Object.freeze({ min: 10, max: 100_000, decimals: 2 }),
+  perpsMaxCollateralUsdg: Object.freeze({ min: 5, max: 100_000, decimals: 2 }),
+  perpsMaxOpensPerDay: Object.freeze({ min: 1, max: 50, decimals: 0 }),
+  perpsStopLossPct: Object.freeze({ min: 1, max: 25, decimals: 2 }),
+  perpsStopSlipBps: Object.freeze({ min: 50, max: 450, decimals: 0 }),
+  perpsTakeProfitPct: Object.freeze({ min: 0, max: 500, decimals: 2 }),
+  perpsLiqBufferPct: Object.freeze({ min: 1, max: 50, decimals: 2 }),
+  perpsMaxSlippageBps: Object.freeze({ min: 5, max: 300, decimals: 0 }),
+});
+export type PerpsNumKey = keyof typeof PERPS_NUM_BOUNDS;
+
+/**
+ * Is `v` a value `key` may hold: a finite number, inside the bounds, on the
+ * grid? The one test the worker and the PUT both apply — the PUT refuses what
+ * fails it, the worker resolves it to the default.
+ */
+export function perpsNumberOk(key: PerpsNumKey, v: unknown): v is number {
+  const b = PERPS_NUM_BOUNDS[key];
+  if (typeof v !== "number" || !Number.isFinite(v) || v < b.min || v > b.max) return false;
+  if (b.decimals === 0) return Number.isInteger(v);
+  // A float tolerance, not `Number.isInteger(v × 100)`: 0.29 × 100 is
+  // 28.999999999999996 in binary floating point, and refusing a value the owner
+  // typed exactly would be a bug. 1e-6 of a hundredth is far below any value a
+  // person types and far above float noise at these magnitudes.
+  const scaled = v * 10 ** b.decimals;
+  return Math.abs(scaled - Math.round(scaled)) < 1e-6;
+}
+
+/**
+ * EVERY perps settings key, the consent record included. What the chat
+ * boundary, partner enrollment and their tests hold against: none of these may
+ * ever be set from anywhere but the dashboard.
+ */
+export const PERPS_SETTING_KEYS = [
+  "perpsEnabled",
+  "perpsLiveEnabled",
+  "perpsLiveConsentVersion",
+  "perpsLiveConsentAt",
+  "perpsRegionAttested",
+  "perpsDriver",
+  "perpsMarkets",
+  ...(Object.keys(PERPS_NUM_BOUNDS) as PerpsNumKey[]),
+] as const satisfies readonly (keyof MerrymenSettings)[];
 
 /** Keys whose values must never be echoed back to a browser. */
 export const SECRET_SETTING_KEYS = [
@@ -969,4 +1162,29 @@ export const SETTINGS_DEFAULTS = {
   telegramAgentAutoShell: false,
   telegramAgentMaxSteps: 20,
   virtualsEnabled: false,
+  // PERPETUALS: off, and off again. Both switches default false and neither has
+  // an environment term, so no agent holds a leveraged position until its owner
+  // has said so twice on the dashboard (docs/perps.md rule 1). The consent
+  // record (version, stamp, attestation) has NO default on purpose: an absent
+  // consent is not a consent to anything.
+  perpsEnabled: false,
+  perpsLiveEnabled: false,
+  perpsDriver: "perp-trend" as PerpsDriver,
+  // The two deepest books, each reachable at the default per-trade size (a
+  // minimum BTC order was ~17 USDG on 2026-09-29, ETH ~13), and two of the
+  // three perp-trend trades.
+  perpsMarkets: ["BTC-PERP", "ETH-PERP"] as string[],
+  perpsMaxLeverage: 2,
+  perpsPerTradeUsdg: 25,
+  // Two default opens' worth: enough for perp-trend's two positions, and no more.
+  perpsMaxOpenNotionalUsdg: 50,
+  perpsMaxCollateralUsdg: 30,
+  perpsMaxOpensPerDay: 4,
+  perpsStopLossPct: 5,
+  perpsStopSlipBps: 200,
+  // 0 = no take-profit: perp-trend exits on its own signal, and a fixed target
+  // cuts a trend's winners short (docs/perps.md "Settings").
+  perpsTakeProfitPct: 0,
+  perpsLiqBufferPct: 2,
+  perpsMaxSlippageBps: 50,
 };

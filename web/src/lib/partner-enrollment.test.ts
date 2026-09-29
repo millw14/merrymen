@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { getActionSelector } from "@zerodev/sdk";
-import { buildWallPolicies, derivationOf, type MerrymenSettings, type StoredGrant } from "@merrymen/core";
+import { buildWallPolicies, derivationOf, PERPS_LIVE_CONSENT_VERSION, PERPS_SETTING_KEYS, type MerrymenSettings, type StoredGrant } from "@merrymen/core";
 import { partnerGrantDigest } from "../../../packages/core/src/partner-enrollment";
 import { createPartnerEnrollmentService, PARTNER_ENROLLMENT_TTL_MS, type PartnerEnrollmentDependencies } from "./partner-enrollment";
 import { FilePartnerStore, type PartnerConnection } from "./partner-store";
@@ -225,6 +225,39 @@ test("safe settings reject privileged fields, unsupported strategies, invalid ba
   await assert.rejects(f.challengeFor({ ...f.grant, chainId: 1 }), errorCode("unsupported_chain"));
   await assert.rejects(f.challengeFor(f.grant, settings, f.connection, { ...principal, scopes: ["read:agents"] }), errorCode("forbidden_scope"));
   assert.equal(f.events.length, 0);
+});
+
+test("a partner cannot set any perps field — not the switches, the consent or a limit — in either spelling", async () => {
+  // docs/perps.md rule 1: partners cannot set any perps field. onlyFields is
+  // the boundary; every perps key, and its snake_case twin in this API's own
+  // style, must be refused before anything is written.
+  const f = await fixture();
+  const snake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+  for (const k of PERPS_SETTING_KEYS) {
+    for (const field of [k, snake(k)]) {
+      await assert.rejects(f.challengeFor(f.grant, { ...settings, [field]: true } as typeof settings), errorCode("bad_request"), field);
+    }
+  }
+  assert.equal(f.events.length, 0);
+});
+
+test("enrollment writes no perps field, and leaves an owner's own perps settings exactly as they were", async () => {
+  const f = await fixture();
+  const tenant = f.owner.address.toLowerCase();
+  await f.service.activate(principal, f.connection, await f.activationFor());
+  const fresh = f.savedSettings.get(tenant) ?? {};
+  for (const k of PERPS_SETTING_KEYS) assert.equal(k in fresh, false, `${k} was written by enrollment`);
+
+  // An owner who had chosen perps on the dashboard before re-enrolling keeps
+  // exactly those choices: enrollment neither adds to them nor removes them.
+  const g = await fixture();
+  const owned = g.owner.address.toLowerCase();
+  const mine = { perpsEnabled: true, perpsMaxLeverage: 3, perpsMarkets: ["SOL-PERP"], perpsLiveEnabled: false } as MerrymenSettings;
+  g.savedSettings.set(owned, mine);
+  await g.service.activate(principal, g.connection, await g.activationFor(g.grant, { ...settings, live_trading_enabled: true }));
+  const after = g.savedSettings.get(owned) ?? {};
+  for (const k of PERPS_SETTING_KEYS) assert.deepEqual(after[k], mine[k], k);
+  assert.notEqual(after.perpsLiveConsentVersion, PERPS_LIVE_CONSENT_VERSION, "no consent was minted");
 });
 
 test("failed account derivation and mismatching account ownership refuse before writing", async () => {

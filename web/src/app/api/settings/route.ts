@@ -15,17 +15,24 @@ import {
   HOSTED_FORBIDDEN_SETTING_FIELDS,
   LLM_PROVIDER_IDS,
   LLM_PROVIDERS,
+  PERPS_DRIVERS,
+  PERPS_LIVE_CONSENT_VERSION,
+  PERPS_MARKETS_MAX,
+  PERPS_NUM_BOUNDS,
   SECRET_SETTING_KEYS,
   SETTINGS_DEFAULTS,
   SLIPPAGE_BPS_MAX,
   STOCK_TOKENS,
   TELEGRAM_GROUPS_CHATTINESS,
   isHostedMode,
+  isPerpKey,
   isValidCustomToken,
   officialCoinsFor,
+  perpsNumberOk,
   robinhoodChain,
   type LlmProviderInfo,
   type MerrymenSettings,
+  type PerpsNumKey,
 } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
 import { OWNER_CHANGED_SETTING, ownerMismatch } from "@/lib/order-owner";
@@ -266,7 +273,20 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   // assistant or saved from a client came back {ok:true, ignored:[…]} and
   // the owner's exit never moved (spec-coverage.test.ts holds the two lists equal).
   classExitAtGraduationPct: [1, 100],
+  // PERPETUALS (docs/perps.md "Settings"). Spread from core, NEVER retyped:
+  // the worker clamps with the same table, so the two enforcement points
+  // cannot come to read different numbers. Each also carries a GRID (whole
+  // leverage, counts and bps; hundredths of a USDG or a percent), checked in
+  // the loop below, because perps.ts refuses a fractional bps at open time and
+  // a value this route stored would then be an agent that silently stops.
+  ...(Object.fromEntries(
+    Object.entries(PERPS_NUM_BOUNDS).map(([k, b]) => [k, [b.min, b.max]]),
+  ) as Record<PerpsNumKey, [number, number]>),
 };
+/** A key of NUM_FIELDS that is a perps number (so its grid applies), or null. */
+function perpsNumKey(key: string): PerpsNumKey | null {
+  return Object.hasOwn(PERPS_NUM_BOUNDS, key) ? (key as PerpsNumKey) : null;
+}
 const BOOL_FIELDS = [
   "paperTradingEnabled",
   // THE CONSENT FLAG, and it must be here or the "Start live trading" control
@@ -324,7 +344,20 @@ const BOOL_FIELDS = [
   // how the owner's bot behaves in the owner's groups is the owner's call.
   "telegramGroupsEnabled",
   "telegramGroupCoinsEnabled",
+  // PAPER PERPETUALS, the first of the two dashboard acts (docs/perps.md rule
+  // 1). A plain switch: it risks no money by itself — real perps need the
+  // consent record below, which is NOT here, because a boolean alone must never
+  // be enough for that one. Off is never refused, and only ever stops opens.
+  "perpsEnabled",
 ] as const;
+/**
+ * Switches whose OFF is written even when the rest of the save is refused
+ * (see `offs` in PUT): paper perps, and the account's own live rail — "turning
+ * any perps or live switch off is never refused" (docs/perps.md rule 8a). The
+ * real-money perps consent is not a BOOL_FIELD; its withdrawal is recorded
+ * where it is decided.
+ */
+const OFF_IS_NEVER_REFUSED: ReadonlySet<string> = new Set(["perpsEnabled", "liveTradingEnabled"]);
 /** Telegram PC string-array allowlists: (field, per-entry maxLen). */
 const STR_ARRAY_FIELDS: Record<string, number> = {
   telegramCapabilities: 24,
@@ -344,6 +377,13 @@ export async function PUT(req: Request) {
   // never stored and never reported as an unknown key.
   const claimedOwner = (body as { owner?: unknown } | null)?.owner;
   if (body && typeof body === "object") delete (body as Record<string, unknown>).owner;
+  // THE PERPS CONSENT STAMP IS THIS ROUTE'S OWN, taken off before anything
+  // reads the body for the reason `owner` is: never stored from a request, and
+  // never reported as an unknown key. A client that echoes back the stored value
+  // changes nothing; one that sends another would backdate a consent, or keep an
+  // old one looking fresh. It is written below, from this server's clock, only
+  // at the moment consent is given.
+  if (body && typeof body === "object") delete (body as Record<string, unknown>).perpsLiveConsentAt;
 
   let tenant: `0x${string}` | null = null;
   if (isHostedMode()) {
@@ -379,6 +419,14 @@ export async function PUT(req: Request) {
     if (value === undefined) delete next[key];
     else next[key] = value;
   };
+  // THE "OFF"S THIS BODY CARRIES, each as the change it makes. Turning a perps
+  // or live switch off is never refused (docs/perps.md rules 1 and 8a), and
+  // this handler is otherwise all-or-nothing: without these, an off beside an
+  // unrelated bad value — the natural "untick every market and switch perps
+  // off", or a stale number echoed back — came back 400 with real perps still
+  // on. So when anything else in the save is refused, these alone are written
+  // (over what was stored, never over the rest of the body) and the 400 says so.
+  const offs: Array<{ key: string; apply: (s: MerrymenSettings) => void }> = [];
 
   // ── secrets: absent = keep, "" = clear, string = replace ────────────────
   for (const key of SECRET_SETTING_KEYS) {
@@ -411,13 +459,27 @@ export async function PUT(req: Request) {
     const k = key as keyof MerrymenSettings;
     if (!(k in body)) continue;
     const v = body[k];
+    const perps = perpsNumKey(key);
+    // What a refusal says. A perps number names its grid too, so "2.5" for a
+    // leverage reads as the whole-number rule it broke, not as out of range.
+    const rule = perps
+      ? `must be ${PERPS_NUM_BOUNDS[perps].decimals === 0 ? "a whole number" : "a number with at most 2 decimals"} between ${min} and ${max}`
+      : `must be a number between ${min} and ${max}`;
     if (v === "" || v === null || v === undefined) {
       setOrClear(k, undefined);
     } else if (typeof v === "number") {
       // Already a number, so it came from a JSON client rather than a typed
       // field. There is no separator to interpret.
-      if (Number.isFinite(v) && v >= min && v <= max) setOrClear(k, v as never);
-      else errors.push(`${key}: must be a number between ${min} and ${max}`);
+      if (perps ? perpsNumberOk(perps, v) : Number.isFinite(v) && v >= min && v <= max) setOrClear(k, v as never);
+      else errors.push(`${key}: ${rule}`);
+    } else if (perps) {
+      // A typed perps number: the same locale-aware reading as below, at the
+      // key's own grid rather than the suffix guess, then the same core check
+      // the worker applies.
+      const parsed = parseAmount(String(v), { maxDecimals: PERPS_NUM_BOUNDS[perps].decimals, min, max });
+      if (parsed.ok && perpsNumberOk(perps, parsed.value)) setOrClear(k, parsed.value as never);
+      else if (!parsed.ok && parsed.reason === "ambiguous") errors.push(`${key}: "${String(v)}" reads as either ${parsed.readings.join(" or ")}`);
+      else errors.push(`${key}: ${rule}`);
     } else {
       // WAS `Number(v)`, AND THAT IS THE ONE PATH IN THIS APP THAT STORED A
       // WRONG NUMBER RATHER THAN REFUSING. Ten of the fields feeding this loop
@@ -700,8 +762,11 @@ export async function PUT(req: Request) {
     if (!(key in body)) continue;
     const v = body[key];
     if (v === null || v === undefined) setOrClear(key, undefined);
-    else if (typeof v === "boolean") setOrClear(key, v as never);
-    else errors.push(`${key}: must be true or false`);
+    else if (typeof v === "boolean") {
+      setOrClear(key, v as never);
+      // Only a switch that is on has an off to keep (every one defaults off).
+      if (v === false && OFF_IS_NEVER_REFUSED.has(key) && stored[key] === true) offs.push({ key, apply: (s) => void (s[key] = false as never) });
+    } else errors.push(`${key}: must be true or false`);
   }
 
   // ── telegram allowlist (numeric chat IDs) ───────────────────────────────
@@ -771,6 +836,171 @@ export async function PUT(req: Request) {
     }
   }
 
+  /**
+   * ── perpetuals: the driver ───────────────────────────────────────────
+   *
+   * ITS OWN BRANCH for the reason assetMode has one: a string enum fits neither
+   * table, and a key no branch reads is dropped with {ok:true}. Validated
+   * against core's one list, the one the worker resolves with. Null or ""
+   * clears back to the default.
+   */
+  if ("perpsDriver" in body) {
+    const v = body.perpsDriver;
+    if (v === null || v === undefined || v === "") setOrClear("perpsDriver", undefined);
+    else if (typeof v === "string" && (PERPS_DRIVERS as readonly string[]).includes(v)) setOrClear("perpsDriver", v as never);
+    else errors.push(`perpsDriver: must be ${PERPS_DRIVERS.join(", ")}`);
+  }
+
+  /**
+   * ── perpetuals: the markets ──────────────────────────────────────────
+   *
+   * Modelled on basketSymbols, and stricter in one place on purpose: AN
+   * UNKNOWN KEY IS AN ERROR, NEVER DROPPED (docs/perps.md "Settings"). A basket
+   * leg quietly dropped trades a little less; a perps list quietly shortened
+   * reads "Changes saved" over a market set the owner did not choose. Keys only
+   * — `BTC-PERP`, never `BTC`, which is a spot symbol and would be the
+   * cross-wiring rule 11 forbids. Duplicates are refused rather than folded, so
+   * what is stored is exactly what was sent.
+   *
+   * An EMPTY list is refused too, not read as "clear": unticking every market
+   * and getting BTC and ETH back would be the default silently standing in for
+   * a choice. Stopping perps is the switch's job, and null clears to the default
+   * for the client that means that.
+   */
+  if ("perpsMarkets" in body) {
+    const v = body.perpsMarkets;
+    if (v === null || v === undefined) setOrClear("perpsMarkets", undefined);
+    else if (!Array.isArray(v)) errors.push("perpsMarkets: must be a list of market keys like BTC-PERP");
+    else if (v.length === 0) {
+      // Beside the switch going off, an empty list is that same gesture (the
+      // Perpetuals section unticked while switching off): the off says it all,
+      // and the stored list is left for the day perps come back on.
+      if (body.perpsEnabled === false) touched.add("perpsMarkets");
+      else errors.push("perpsMarkets: pick at least one market (to stop perpetuals, switch them off instead)");
+    }
+    else {
+      const shown = (k: unknown) => (typeof k === "string" ? k : JSON.stringify(k));
+      const unknown = v.filter((k) => !isPerpKey(k));
+      const twice = [...new Set(v.filter((k, i) => v.indexOf(k) !== i))];
+      if (unknown.length > 0) errors.push(`perpsMarkets: unknown markets ${unknown.map(shown).join(", ")} (keys look like BTC-PERP)`);
+      else if (twice.length > 0) errors.push(`perpsMarkets: listed more than once: ${twice.map(shown).join(", ")}`);
+      else if (v.length > PERPS_MARKETS_MAX) errors.push(`perpsMarkets: at most ${PERPS_MARKETS_MAX} markets`);
+      else setOrClear("perpsMarkets", v as string[]);
+    }
+  }
+
+  // ONE OPEN IS NEVER LARGER THAN ALL OPENS TOGETHER. Judged on what this save
+  // would leave stored (defaults filling the gaps), and only when it touches
+  // either number — a stored pair from an older build must not make every
+  // unrelated save fail. Skipped when either value was itself refused above,
+  // so the owner reads one error, not two. The worker reads an inversion that
+  // reaches it anyway in the restrictive direction.
+  if (
+    ("perpsPerTradeUsdg" in body || "perpsMaxOpenNotionalUsdg" in body) &&
+    !errors.some((e) => e.startsWith("perpsPerTradeUsdg:") || e.startsWith("perpsMaxOpenNotionalUsdg:"))
+  ) {
+    const perTrade = next.perpsPerTradeUsdg ?? SETTINGS_DEFAULTS.perpsPerTradeUsdg;
+    const open = next.perpsMaxOpenNotionalUsdg ?? SETTINGS_DEFAULTS.perpsMaxOpenNotionalUsdg;
+    if (open < perTrade) {
+      errors.push(`perpsMaxOpenNotionalUsdg: must be at least the per-trade limit (${perTrade} USDG) — one position can't be bigger than all of them together`);
+    }
+  }
+
+  /**
+   * ── perpetuals: the real-money consent ───────────────────────────────
+   *
+   * NOT A LINE IN BOOL_FIELDS, because a boolean is not a consent (docs/perps.md
+   * rule 1). `perpsLiveEnabled: true` is accepted only in a request that also
+   * carries `perpsLiveConsentVersion` equal to PERPS_LIVE_CONSENT_VERSION — the
+   * text the Settings page showed — and `perpsRegionAttested: true`; this route
+   * then stamps `perpsLiveConsentAt` from its own clock. The four are one
+   * record, written together.
+   *
+   * WITHDRAWING IS NEVER REFUSED. `perpsLiveEnabled` false or null, or any part
+   * of the consent withdrawn (attestation false or null, version null), clears
+   * the whole record and nothing else in the body is consulted for it — a
+   * malformed version beside an "off" must not keep an owner in, and neither
+   * must a `perpsLiveEnabled: true` a client echoes back beside the unticked
+   * attestation of an owner who has moved somewhere Lighter excludes. The
+   * withdrawal is written even if something else in the save is refused
+   * (`offs`). Off only stops opens; exits follow the venue (rule 8a).
+   *
+   * A BODY THAT REPEATS WHAT IS STORED CHANGES NOTHING, and is not refused: a
+   * client round-tripping the settings blob on an unrelated save must neither
+   * fail nor re-stamp the consent time. That includes a stored consent for an
+   * older text — it is left exactly as it is, and the worker, which honours
+   * only the current version, is what stops it counting. Anything else that
+   * mentions these keys without giving consent is an error, named.
+   */
+  const CONSENT_KEYS = ["perpsLiveEnabled", "perpsLiveConsentVersion", "perpsRegionAttested"] as const;
+  if (CONSENT_KEYS.some((k) => k in body)) {
+    for (const k of CONSENT_KEYS) if (k in body) touched.add(k);
+    const live = body.perpsLiveEnabled;
+    const version = body.perpsLiveConsentVersion;
+    const attested = body.perpsRegionAttested;
+    const revoke = (to: false | undefined) => {
+      setOrClear("perpsLiveEnabled", to);
+      setOrClear("perpsLiveConsentVersion", undefined);
+      setOrClear("perpsLiveConsentAt", undefined);
+      setOrClear("perpsRegionAttested", undefined);
+      // Only a record that exists has a withdrawal to keep.
+      const hadRecord = (["perpsLiveEnabled", "perpsLiveConsentVersion", "perpsLiveConsentAt", "perpsRegionAttested"] as const).some((k) => stored[k] !== undefined);
+      if (hadRecord) {
+        offs.push({
+          key: "perpsLiveEnabled",
+          apply: (s) => {
+            if (to === false) s.perpsLiveEnabled = false;
+            else delete s.perpsLiveEnabled;
+            delete s.perpsLiveConsentVersion;
+            delete s.perpsLiveConsentAt;
+            delete s.perpsRegionAttested;
+          },
+        });
+      }
+    };
+    const switchOnRefusal = () =>
+      version !== PERPS_LIVE_CONSENT_VERSION
+        ? `perpsLiveEnabled: real-money perpetuals are switched on only with the current consent (version ${PERPS_LIVE_CONSENT_VERSION}), confirmed in Settings → Perpetuals on the dashboard`
+        : "perpsLiveEnabled: real-money perpetuals are switched on only after you confirm you are not in a region Lighter excludes (the US, the UK, Canada, Switzerland, the UAE, Singapore or a sanctioned country)";
+    const repeatsStored = (k: (typeof CONSENT_KEYS)[number]) => !(k in body) || (body[k] ?? undefined) === (stored[k] ?? undefined);
+
+    // Withdrawals first, before any value beside them is type-checked.
+    if ("perpsLiveEnabled" in body && (live === false || live === null || live === undefined)) {
+      revoke(live === false ? false : undefined);
+    } else if ("perpsLiveEnabled" in body && live !== true) {
+      errors.push("perpsLiveEnabled: must be true or false");
+    } else if (attested === false || attested === null || version === null) {
+      // Part of the consent withdrawn: the whole record goes, WHATEVER the
+      // switch beside it says. Only when there was no consent to withdraw is a
+      // `perpsLiveEnabled: true` here an attempt to switch on without one —
+      // and refused as that, by name.
+      const wasOn = stored.perpsLiveEnabled === true;
+      revoke(wasOn ? false : undefined);
+      if (live === true && !wasOn) errors.push(switchOnRefusal());
+    } else if (attested !== undefined && attested !== null && typeof attested !== "boolean") {
+      errors.push("perpsRegionAttested: must be true or false");
+    } else if (version !== undefined && version !== null && !(typeof version === "number" && Number.isSafeInteger(version) && version >= 1)) {
+      errors.push("perpsLiveConsentVersion: must be the consent's version number");
+    } else if (live === true) {
+      if (stored.perpsLiveEnabled === true && repeatsStored("perpsLiveConsentVersion") && repeatsStored("perpsRegionAttested")) {
+        // Already on, and the body only echoes the record: nothing to write.
+      } else if (version !== PERPS_LIVE_CONSENT_VERSION || attested !== true) {
+        errors.push(switchOnRefusal());
+      } else {
+        setOrClear("perpsLiveEnabled", true);
+        setOrClear("perpsLiveConsentVersion", PERPS_LIVE_CONSENT_VERSION);
+        setOrClear("perpsRegionAttested", true);
+        setOrClear("perpsLiveConsentAt", Date.now());
+      }
+    } else if (repeatsStored("perpsLiveConsentVersion") && repeatsStored("perpsRegionAttested")) {
+      // No switch in the body, and the consent keys echo what is stored.
+    } else {
+      errors.push(
+        `${"perpsRegionAttested" in body ? "perpsRegionAttested" : "perpsLiveConsentVersion"}: recorded only when real-money perpetuals are switched on, together with perpsLiveEnabled: true`,
+      );
+    }
+  }
+
   // NAME WHAT WE DROPPED, so a documented-but-unwired field cannot hide again.
   //
   // This handler is an allowlist with no else, and it is the ONLY writer of the
@@ -795,20 +1025,35 @@ export async function PUT(req: Request) {
     console.warn(`[settings] ignored unknown keys: ${ignored.join(", ")}`);
   }
 
-  if (errors.length > 0) return NextResponse.json({ errors }, { status: 400 });
+  const persist = async (settings: MerrymenSettings) => {
+    if (tenant) {
+      // Hosted: the tenant's own settings go to the per-tenant store (sealed at
+      // rest), and the orchestrator hands the child worker a settings.json from it
+      // within a reconcile tick.
+      await getSettingsStore().put(tenant, settings);
+    } else {
+      await mkdir(DATA_DIR, { recursive: true });
+      // settings.json holds plaintext API keys (bundler/Groq/Anthropic/Telegram/…) —
+      // owner-only perms (0600), not the default world-readable 0644.
+      await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2), { encoding: "utf8", mode: 0o600 });
+      await chmod(SETTINGS_FILE, 0o600).catch(() => {});
+    }
+  };
 
-  if (tenant) {
-    // Hosted: the tenant's own settings go to the per-tenant store (sealed at
-    // rest), and the orchestrator hands the child worker a settings.json from it
-    // within a reconcile tick.
-    await getSettingsStore().put(tenant, next);
-  } else {
-    await mkdir(DATA_DIR, { recursive: true });
-    // settings.json holds plaintext API keys (bundler/Groq/Anthropic/Telegram/…) —
-    // owner-only perms (0600), not the default world-readable 0644.
-    await writeFile(SETTINGS_FILE, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
-    await chmod(SETTINGS_FILE, 0o600).catch(() => {});
+  if (errors.length > 0) {
+    if (offs.length === 0) return NextResponse.json({ errors }, { status: 400 });
+    // The offs, and nothing else, over what was stored (see `offs`).
+    const offOnly: MerrymenSettings = { ...stored };
+    for (const off of offs) off.apply(offOnly);
+    await persist(offOnly);
+    const saved = [...new Set(offs.map((o) => o.key))];
+    return NextResponse.json(
+      { errors, saved, note: `Switched off (${saved.join(", ")}) — that was saved. Nothing else in this save was, because of the errors above.` },
+      { status: 400 },
+    );
   }
+
+  await persist(next);
   return NextResponse.json({
     ok: true,
     appliesWithin: "one worker tick",

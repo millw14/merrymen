@@ -16,6 +16,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { PERPS_LIVE_CONSENT_VERSION, PERPS_SETTING_KEYS } from "../../../packages/core/src/index";
 import { rememberChatSetting, type TelegramState } from "./state";
 import { CHAT_SETTABLE, promotedSettings, readChatSettings } from "./chat-settings";
 
@@ -171,6 +172,37 @@ describe("what a chat may not change", () => {
     assert.ok(!("telegramGroupsEnabled" in out));
     assert.ok(!("telegramGroupsChattiness" in out));
   });
+
+  it("does not let a chat turn on perpetuals, consent to them, or loosen a single perps limit", () => {
+    // docs/perps.md rule 1: chat cannot set any perps field. A child whose
+    // chatSettings carried a full, well-formed consent record — a bug, or a
+    // chat talked into it — must still reach nothing, and the owner's
+    // dashboard values must stand.
+    const stored = { perpsEnabled: false, perpsMaxLeverage: 2 };
+    const out = promote(stored, {
+      at: 1,
+      patch: {
+        perpsEnabled: true,
+        perpsLiveEnabled: true,
+        perpsLiveConsentVersion: PERPS_LIVE_CONSENT_VERSION,
+        perpsLiveConsentAt: 1,
+        perpsRegionAttested: true,
+        perpsDriver: "strategist",
+        perpsMarkets: ["BTC-PERP", "PONS-PERP"],
+        perpsMaxLeverage: 10,
+        perpsPerTradeUsdg: 100_000,
+        perpsMaxOpenNotionalUsdg: 100_000,
+        perpsMaxCollateralUsdg: 100_000,
+        perpsMaxOpensPerDay: 50,
+        perpsStopLossPct: 25,
+        perpsStopSlipBps: 450,
+        perpsTakeProfitPct: 500,
+        perpsLiqBufferPct: 1,
+        perpsMaxSlippageBps: 300,
+      },
+    })!;
+    assert.deepEqual(out, { ...stored, telegramSettingsAt: 1 });
+  });
 });
 
 describe("a rename from chat survives the next tick", () => {
@@ -260,6 +292,27 @@ describe("a rename from chat survives the next tick", () => {
       "telegramGroupsEnabled",
       "telegramGroupCoinsEnabled",
       "telegramGroupsChattiness",
+      // Perpetuals (docs/perps.md rule 1): every switch, the consent record and
+      // every limit is dashboard-only, DASHBOARD_ONLY.perps. Listed by name so
+      // this file says it plainly; core's PERPS_SETTING_KEYS is checked below
+      // too, so a perps key added later is covered without editing this list.
+      "perpsEnabled",
+      "perpsLiveEnabled",
+      "perpsLiveConsentVersion",
+      "perpsLiveConsentAt",
+      "perpsRegionAttested",
+      "perpsDriver",
+      "perpsMarkets",
+      "perpsMaxLeverage",
+      "perpsPerTradeUsdg",
+      "perpsMaxOpenNotionalUsdg",
+      "perpsMaxCollateralUsdg",
+      "perpsMaxOpensPerDay",
+      "perpsStopLossPct",
+      "perpsStopSlipBps",
+      "perpsTakeProfitPct",
+      "perpsLiqBufferPct",
+      "perpsMaxSlippageBps",
       "bundlerApiKey",
       "groqApiKey",
       "llmApiKey",
@@ -269,6 +322,8 @@ describe("a rename from chat survives the next tick", () => {
       "swapVenue",
     ];
     for (const k of forbidden) assert.ok(!CHAT_SETTABLE.has(k), `${k} became chat-settable`);
+    for (const k of PERPS_SETTING_KEYS) assert.ok(forbidden.includes(k), `${k} is a perps key missing from this list`);
+    for (const k of CHAT_SETTABLE) assert.ok(!k.startsWith("perps"), `${k} became chat-settable`);
   });
 });
 
