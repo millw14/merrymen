@@ -51,7 +51,11 @@ export type BotClaimDecision =
       ok: true;
       /** True when the bot was taken from another account by this save. */
       moved: boolean;
-      /** The save did not land: take back what this claim changed, unless a save for its bot has landed since. */
+      /**
+       * The write failed: take back what this claim changed, unless the write
+       * landed after all (or, without the save lock, another save for its bot
+       * did), and then settle as that write would have.
+       */
       undo(): Promise<void>;
       /** The save landed: make this account's claims match the token stored now (settleBotClaims). */
       settle(): Promise<void>;
@@ -120,32 +124,44 @@ export async function decideBotClaim(args: {
   const storedBot = async () => storedBotOf(await args.settings.read(tenant));
   /** Let go of every bot but the one stored now, and claim that one if this save confirmed it. */
   const settle = (confirmedBot: string | null) => () => settleBotClaims(db, tenant, storedBot, confirmedBot, now);
+  /**
+   * Has a write storing this save's bot (or, for a clear, no token) landed
+   * since this save read the settings? With saves one at a time per account,
+   * that is this save's own write, gone through before the store failed to
+   * say so; then its claim stays, and what it left behind is let go.
+   */
+  const before = botTokenOf(args.settings.before);
+  const landed = async () => {
+    const stored = botTokenOf(await args.settings.read(tenant));
+    if (stored === before) return false;
+    return bot === null ? stored === null : stored !== null && botIdOf(stored) === bot;
+  };
+  /** No claim of this save's own to take back: settle if the write went through all the same. */
+  const settleIfLanded = (confirmedBot: string | null) => async () => {
+    if (await landed().catch(() => false)) await settle(confirmedBot)();
+  };
   // No bot to hold: a cleared token, or one that is not `<digits>:<secret>`,
   // which Telegram refuses and so polls nothing. The PUT refuses such a token
   // before this (400); here it is still never confirmed, claimed or moved, and
   // gets no 409 that would say whether its bot id is held.
   if (!token || !bot) {
     if (token && moveBot) return unconfirmed;
-    return { ok: true, moved: false, undo: nothing, settle: settle(null) };
+    return { ok: true, moved: false, undo: settleIfLanded(null), settle: settle(null) };
   }
-  /** Has a save for this bot landed since this one read the settings? Then the claim it stands on stays. */
-  const before = botTokenOf(args.settings.before);
-  const landed = async () => {
-    const stored = botTokenOf(await args.settings.read(tenant));
-    return stored !== null && stored !== before && botIdOf(stored) === bot;
+  const undo = (stamp: number, from: BotClaimHolder | null) => async () => {
+    if (await undoBotClaimUnlessSaved(db, bot, tenant, stamp, from, landed)) await settle(bot)();
   };
-  const undo = (stamp: number, from: BotClaimHolder | null) => () => undoBotClaimUnlessSaved(db, bot, tenant, stamp, from, landed);
   const confirmed = await args.confirmBot(token);
   const claim = await claimBot(db, bot, tenant, confirmed, now);
   if (!claim) {
     if (moveBot) return unconfirmed;
-    return { ok: true, moved: false, undo: nothing, settle: settle(null) };
+    return { ok: true, moved: false, undo: settleIfLanded(null), settle: settle(null) };
   }
   if (claim.holder === tenant.toLowerCase()) {
     return {
       ok: true,
       moved: false,
-      undo: claim.fresh ? undo(claim.stamp, null) : nothing,
+      undo: claim.fresh ? undo(claim.stamp, null) : settleIfLanded(bot),
       settle: settle(bot),
     };
   }

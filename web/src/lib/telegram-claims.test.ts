@@ -315,6 +315,64 @@ describe("two saves at once for one account", () => {
   });
 });
 
+/**
+ * A WRITE THAT WENT THROUGH AND THEN FAILED TO SAY SO (the store committed,
+ * the connection dropped before it answered). The route runs the undo; the
+ * undo finds the token stored, keeps the claim, and settles as the write's
+ * own settle would have, so the bot the account left is let go.
+ */
+describe("a write that landed and then failed", () => {
+  const start = async () => {
+    const d = await db();
+    await claimBot(d, "111", A, "111", 0);
+    write(A, "111:AAA-prior");
+    return d;
+  };
+
+  it("A FRESH CLAIM: kept, and the bot left behind is let go", async () => {
+    const d = await start();
+    const x = await save(d, A, "222:AAA-new", { now: 10 });
+    assert.ok(x.ok);
+    write(A, "222:AAA-new");
+    await x.undo();
+    assert.deepEqual(await claims(d), [["222", A]]);
+  });
+
+  it("A MOVE: kept, and the bot left behind is let go", async () => {
+    const d = await start();
+    await claimBot(d, "222", B, "222", 0);
+    const x = await save(d, A, "222:AAA-new", { moveBot: true, now: 10 });
+    assert.ok(x.ok && x.moved);
+    write(A, "222:AAA-new");
+    await x.undo();
+    assert.deepEqual(await claims(d), [["222", A]]);
+  });
+
+  it("A CLAIM THE ACCOUNT ALREADY HELD, AND A CLEARED TOKEN: nothing of their own to undo, and they settle all the same", async () => {
+    const d = await start();
+    await claimBot(d, "222", A, "222", 0);
+    const x = await save(d, A, "222:AAA-renewed", { now: 10 });
+    assert.ok(x.ok && !x.moved);
+    write(A, "222:AAA-renewed");
+    await x.undo();
+    assert.deepEqual(await claims(d), [["222", A]], "111 let go");
+    const clear = await save(d, A, undefined, { now: 20 });
+    assert.ok(clear.ok);
+    write(A, undefined);
+    await clear.undo();
+    assert.deepEqual(await claims(d), []);
+  });
+
+  it("A WRITE THAT DID NOT LAND STILL SETTLES NOTHING: the claims stay as they were before the save", async () => {
+    const d = await start();
+    await claimBot(d, "222", A, "222", 0);
+    const x = await save(d, A, "222:AAA-renewed", { now: 10 });
+    assert.ok(x.ok);
+    await x.undo();
+    assert.deepEqual(await claims(d), [["111", A], ["222", A]]);
+  });
+});
+
 describe("settleWithoutToken — a save that does not carry the token", () => {
   it("LETS GO OF A CLAIM ON A BOT THE ACCOUNT NO LONGER STORES, CLAIMS NOTHING, AND TOUCHES NO OTHER ACCOUNT'S", async () => {
     // A token save stored 222 and settled; then a writer that does not settle

@@ -353,6 +353,11 @@ export async function settleBotClaims(
  * to keep it: the claim a failed save made or moved must not outlive it (a
  * failed move keeps the bot from the account it was taken from). And when the
  * settings cannot be read, it is taken back, as before.
+ *
+ * With the settings PUT one save at a time per account (settleBotClaims), the
+ * save that "landed" is this one: a write that went through and then failed
+ * to say so. TRUE WHEN THE CLAIM WAS KEPT: the caller then settles, as the
+ * landed write's own settle would have, so the bot the account left is let go.
  */
 export async function undoBotClaimUnlessSaved(
   db: Db,
@@ -361,11 +366,11 @@ export async function undoBotClaimUnlessSaved(
   stamp: number,
   from: BotClaimHolder | null,
   landed: () => Promise<boolean>,
-): Promise<void> {
+): Promise<boolean> {
   const saved = () => landed().catch(() => false);
-  if (await saved()) return;
+  if (await saved()) return true;
   await undoBotClaim(db, botId, tenant, stamp, from);
-  if (!(await saved())) return;
+  if (!(await saved())) return false;
   const t = lc(tenant);
   if (from === null) {
     await db.prepare("INSERT INTO telegram_bot_claims (bot_id, tenant, claimed_at) VALUES (?, ?, ?) ON CONFLICT(bot_id) DO NOTHING").run(botId, t, stamp);
@@ -374,6 +379,7 @@ export async function undoBotClaimUnlessSaved(
       .prepare("UPDATE telegram_bot_claims SET tenant = ?, claimed_at = ? WHERE bot_id = ? AND tenant = ? AND claimed_at = ?")
       .run(t, stamp, botId, from.tenant, from.claimedAt);
   }
+  return true;
 }
 
 /**

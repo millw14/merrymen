@@ -317,6 +317,17 @@ describe("saves for one account take turns", () => {
     });
   }
 
+  it("A WRITE THAT WENT THROUGH AND THEN FAILED KEEPS ITS CLAIM, AND LETS GO OF THE BOT THE ACCOUNT LEFT", async () => {
+    assert.equal((await put(A, { telegramBotToken: PRIOR })).status, 200);
+    const g = gatedPuts();
+    const save = put(A, { telegramBotToken: TO_222 });
+    await g.arrived(0);
+    g.go(0, "write-then-fail");
+    await assert.rejects(save, /store down/);
+    assert.equal((await getSettingsStore().get(A))?.telegramBotToken, TO_222);
+    assert.deepEqual(await held(), { "222": A }, "not 111 as well, held by an account that no longer stores it");
+  });
+
   it("A SAVE WITHOUT THE TOKEN LETS GO OF A CLAIM ON A BOT THE ACCOUNT NO LONGER STORES, AND CLAIMS NOTHING", async () => {
     assert.equal((await put(B, { telegramBotToken: "333:BBB-own-bot" })).status, 200);
     assert.equal((await put(A, { telegramBotToken: PRIOR })).status, 200);
