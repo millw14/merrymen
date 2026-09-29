@@ -64,7 +64,7 @@ import path from "node:path";
 import test from "node:test";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import type { MerrymenSettings, StoredGrant } from "../../packages/core/src/index";
-import { makePgDb, translateSchema, type Db } from "./db";
+import { advisoryLockWaitersForTest, LockBusyError, makePgDb, translateSchema, withAdvisoryLock, type Db } from "./db";
 import { applyLedgerSchema } from "./store";
 import { PgSettingsStore, resetSettingsStoreForTest, useSettingsStoreForTest, type PgClientLike } from "./settings-store";
 import { resetGrantStoreForTest } from "./grant-store";
@@ -101,7 +101,15 @@ import type { PollHealth } from "./telegram/state";
 import { createReadDb } from "../../web/src/lib/ledger";
 import { readTelegramRuntime } from "../../web/src/lib/telegram-runtime";
 import { LIVE_WITHIN_SEC, telegramListening } from "../../web/src/lib/telegram-listening";
-import { BOT_CLAIMED_TEXT, botClaimForSave, decideBotClaim, useBotClaimsDbForTest } from "../../web/src/lib/telegram-claims";
+import {
+  BOT_CLAIMED_TEXT,
+  botClaimForSave,
+  decideBotClaim,
+  SETTINGS_SAVE_LOCK,
+  settingsSaveLockKey,
+  settleWithoutToken,
+  useBotClaimsDbForTest,
+} from "../../web/src/lib/telegram-claims";
 
 const url = process.env.MERRYMEN_TEST_PG_URL ?? process.env.MERRYMEN_TEST_POSTGRES_URL;
 
@@ -638,6 +646,121 @@ test("Postgres: the Telegram outage fix over production's schema", { skip: !url,
         );
         assert.deepEqual(await mine(), [await storedBot()], `round ${round}`);
       }
+    });
+
+    await t.test("ONE SETTINGS SAVE AT A TIME PER ACCOUNT, ACROSS TWO WEB PROCESSES: the lock, held on the connection the save's claims run on", async () => {
+      // withSettingsSaveLock's lock (withAdvisoryLock) on two web pools, as two
+      // web replicas take it: the second waits, trying, holding no connection,
+      // and then reads what the first stored. The save itself is the route's
+      // order: read, decide the claim, write the sealed settings, settle.
+      const web2 = await makePgDb(scoped("web-replica"));
+      const TL = tenantN(0xe2);
+      const key = settingsSaveLockKey(TL);
+      const until = async (what: string, ok: () => boolean | Promise<boolean>) => {
+        const deadline = Date.now() + 20_000;
+        while (!(await ok())) {
+          if (Date.now() > deadline) assert.fail(`never reached: ${what}`);
+          await sleep(5);
+        }
+      };
+      /** The backends holding this account's save lock, from Postgres's own view. */
+      const holders = async () =>
+        (
+          await admin.query(
+            `SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted AND objsubid = 2
+               AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+               AND classid = $1::bigint::oid AND objid = $2::bigint::oid`,
+            [SETTINGS_SAVE_LOCK, key >>> 0],
+          )
+        ).rows.map((r) => Number(r.pid));
+      const pidOf = async (db: Db) => Number(((await db.prepare("SELECT pg_backend_pid() AS pid").get()) as { pid: number }).pid);
+
+      // The holder's statements run on the connection that holds the lock.
+      let release!: () => void;
+      const released = new Promise<void>((r) => (release = r));
+      let entered!: () => void;
+      const inside = new Promise<void>((r) => (entered = r));
+      const order: string[] = [];
+      const first = withAdvisoryLock(web, SETTINGS_SAVE_LOCK, key, async (pinned) => {
+        assert.deepEqual(await holders(), [await pidOf(pinned)], "one holder, and it is the connection handed over");
+        order.push("first in");
+        entered();
+        await released;
+        order.push("first out");
+      });
+      await inside;
+      const second = withAdvisoryLock(web2, SETTINGS_SAVE_LOCK, key, async () => void order.push("second in"));
+      try {
+        await until("the other process trying the lock", () => advisoryLockWaitersForTest(web2, SETTINGS_SAVE_LOCK, key) === 1);
+        assert.deepEqual(order, ["first in"]);
+        await assert.rejects(
+          withAdvisoryLock(orch, SETTINGS_SAVE_LOCK, key, async () => assert.fail("never runs"), 60),
+          (e: unknown) => e instanceof LockBusyError,
+          "a third that cannot get it in time gives up",
+        );
+      } finally {
+        // Failing or not, the holder lets go, so a failure here fails the test instead of holding a connection for ever.
+        release();
+      }
+      await Promise.all([first, second]);
+      assert.deepEqual(order, ["first in", "first out", "second in"]);
+      assert.deepEqual(await holders(), [], "let go");
+
+      // Given back every time: more turns than the pool has connections.
+      for (let i = 0; i < 25; i++) assert.equal(await withAdvisoryLock(web, SETTINGS_SAVE_LOCK, key, async (pinned) => (await pinned.prepare("SELECT 1 AS one").get() as { one: number }).one), 1);
+
+      // A holder whose connection dies loses the lock with it, its statements
+      // fail, the process lives, and the connection is not pooled again.
+      await assert.rejects(
+        withAdvisoryLock(web, SETTINGS_SAVE_LOCK, key, async (pinned) => {
+          await admin.query("SELECT pg_terminate_backend($1)", [await pidOf(pinned)]);
+          await until("the lock gone with its connection", async () => (await holders()).length === 0);
+          await pinned.prepare("SELECT 1").get();
+        }),
+      );
+      assert.equal(await withAdvisoryLock(web2, SETTINGS_SAVE_LOCK, key, async () => "free", 2_000), "free");
+      assert.equal(await withAdvisoryLock(web, SETTINGS_SAVE_LOCK, key, async (pinned) => (await pidOf(pinned)) > 0), true, "the pool still serves");
+
+      // The save that wrote back the old token (review of d7d506ce, R1),
+      // across the two processes: a token save for 9401 holds the lock past
+      // its claim; the other process's save of the allowlist waits, then reads
+      // 9401 and writes it back with its own change.
+      await releaseBotClaims(orch, TL);
+      await settings.put(TL, { telegramEnabled: true, telegramBotToken: "9400:LLL-prior" } as MerrymenSettings);
+      await claimBot(orch, "9400", TL, "9400", FAR_MS);
+      const readBack = { read: (tn: `0x${string}`) => settings.get(tn) };
+      let write!: () => void;
+      const mayWrite = new Promise<void>((r) => (write = r));
+      let claimed!: () => void;
+      const hasClaimed = new Promise<void>((r) => (claimed = r));
+      const tokenSave = withAdvisoryLock(web, SETTINGS_SAVE_LOCK, key, async (pinned) => {
+        const before = await settings.get(TL);
+        const next = { ...before, telegramBotToken: "9401:LLL-new" } as MerrymenSettings;
+        const d = await decideBotClaim({ db: pinned, tenant: TL, token: next.telegramBotToken, moveBot: false, confirmBot: async (tok) => botIdOf(tok), settings: { before, ...readBack } });
+        assert.ok(d.ok);
+        claimed();
+        await mayWrite;
+        await settings.put(TL, next);
+        await d.settle();
+      });
+      await hasClaimed;
+      const allowlistSave = withAdvisoryLock(web2, SETTINGS_SAVE_LOCK, key, async (pinned) => {
+        const before = await settings.get(TL);
+        const next = { ...before, telegramAllowlist: [4242] } as MerrymenSettings;
+        const d = await settleWithoutToken({ db: pinned, tenant: TL, settings: readBack });
+        await settings.put(TL, next);
+        await d.settle();
+      });
+      try {
+        await until("the allowlist save waiting its turn", () => advisoryLockWaitersForTest(web2, SETTINGS_SAVE_LOCK, key) === 1);
+      } finally {
+        write();
+      }
+      await Promise.all([tokenSave, allowlistSave]);
+      const final = await settings.get(TL);
+      assert.equal(final?.telegramBotToken, "9401:LLL-new", "the new token was not written back over");
+      assert.deepEqual(final?.telegramAllowlist, [4242]);
+      assert.deepEqual([...(await readBotClaims(orch))].filter(([, tn]) => tn === TL), [["9401", TL]]);
     });
 
     await t.test("THE HOLD NOTICE: once per class across processes, a new class is news, and a restore makes the next hold news again", async () => {

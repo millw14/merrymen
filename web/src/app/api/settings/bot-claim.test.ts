@@ -19,12 +19,13 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { setImmediate } from "node:timers/promises";
 import { after, before, beforeEach, describe, it } from "node:test";
 
 import { mintSession } from "@/lib/auth";
-import { BOT_CLAIMED_TEXT, NOT_A_BOT_TOKEN_TEXT, useBotClaimsDbForTest } from "@/lib/telegram-claims";
+import { BOT_CLAIMED_TEXT, NOT_A_BOT_TOKEN_TEXT, SETTINGS_SAVE_LOCK, settingsSaveLockKey, useBotClaimsDbForTest } from "@/lib/telegram-claims";
 import { getSettingsStore, resetSettingsStoreForTest, useSettingsStoreForTest } from "@merrymen/settings-store";
-import { wrapSqlite, type Db } from "../../../../../worker/src/db";
+import { advisoryLockWaitersForTest, wrapSqlite, type Db } from "../../../../../worker/src/db";
 import { readBotClaims } from "../../../../../worker/src/telegram-claims";
 
 const A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const;
@@ -198,78 +199,138 @@ describe("PUT /api/settings claims the bot", () => {
 });
 
 /**
- * TWO SAVES AT ONCE FOR ONE ACCOUNT, a token for bot 222 and then one for bot
- * 333, both past their claim before either is written. Each save claims its
- * bot, writes, and then lets go of what it left behind; the writes and what
- * follows them are ordered here, every way round, by a store whose put waits
- * to be told when to write and when to return. However they land, the claims
- * must end naming the bot of the token that was stored LAST, and only it.
+ * SAVES FOR ONE ACCOUNT TAKE TURNS (lib/telegram-claims.ts withSettingsSaveLock).
  *
- * Settling on the bot the request itself saved, the earlier save's settle let
- * go of the later one's claim (or the later one's let go of the earlier's), and
- * the account was left storing a token for a bot it held no claim on: the
- * orchestrator's to hand to whoever claimed it next.
+ * Each save reads the whole settings blob, changes its fields and writes it
+ * all back, and a token save claims its bot before the write and settles or
+ * takes it back after. Two at once for one account (two tabs, a double click)
+ * used to overlap: a save of the allowlist that read before a token save
+ * wrote put the old token back, and a double-clicked "Move it here" whose
+ * first write failed handed the bot back to the other account after the
+ * second click's save had landed and said "saved". Now the second save waits
+ * for the first to finish, reads what it stored, and decides on what it left.
+ *
+ * A store whose put, call by call, arrives, then waits to be told to write,
+ * to fail, or to write and then fail; the second save's arrival at the lock
+ * is waited for as a state, never as a count of turns.
  */
-describe("two saves at once for one account", () => {
+describe("saves for one account take turns", () => {
   const PRIOR = "111:AAA-prior";
   const TO_222 = "222:AAA-bee";
   const TO_333 = "333:AAA-sea";
-  const deferred = () => {
-    let resolve!: () => void;
-    const promise = new Promise<void>((r) => (resolve = r));
+  const deferred = <T = void>() => {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => (resolve = r));
     return { promise, resolve };
   };
-  /** A store whose put, per token, arrives, then writes when told, then returns when told. */
+  type How = "write" | "fail" | "write-then-fail";
+  /** A store whose n-th put arrives, then does what it is told. */
   const gatedPuts = () => {
     const real = getSettingsStore();
-    const gates = new Map<string, { arrived: ReturnType<typeof deferred>; write: ReturnType<typeof deferred>; written: ReturnType<typeof deferred>; ret: ReturnType<typeof deferred> }>();
-    const gate = (token: string) => {
-      let g = gates.get(token);
-      if (!g) gates.set(token, (g = { arrived: deferred(), write: deferred(), written: deferred(), ret: deferred() }));
-      return g;
-    };
+    const calls: { arrived: ReturnType<typeof deferred<void>>; how: ReturnType<typeof deferred<How>> }[] = [];
+    const at = (i: number) => (calls[i] ??= { arrived: deferred(), how: deferred<How>() });
+    let n = 0;
     const store = Object.create(real) as typeof real;
     store.put = async (tenant, settings) => {
-      const g = gate(String(settings.telegramBotToken));
-      g.arrived.resolve();
-      await g.write.promise;
-      await real.put(tenant, settings);
-      g.written.resolve();
-      await g.ret.promise;
+      const call = at(n++);
+      call.arrived.resolve();
+      const how = await call.how.promise;
+      if (how !== "fail") await real.put(tenant, settings);
+      if (how !== "write") throw new Error("store down");
     };
-    return {
-      store,
-      arrived: (token: string) => gate(token).arrived.promise,
-      write: async (token: string) => {
-        gate(token).write.resolve();
-        await gate(token).written.promise;
-      },
-      ret: (token: string) => gate(token).ret.resolve(),
-    };
+    useSettingsStoreForTest(store);
+    return { arrived: (i: number) => at(i).arrived.promise, go: (i: number, how: How) => at(i).how.resolve(how) };
   };
-
-  for (const writes of [[TO_222, TO_333], [TO_333, TO_222]]) {
-    for (const returns of [[TO_222, TO_333], [TO_333, TO_222]]) {
-      it(`written ${writes.map(botOf).join(" then ")}, settled ${returns.map(botOf).join(" then ")}: the claim is the stored bot's, and only it`, async () => {
-        assert.equal((await put(A, { telegramBotToken: PRIOR })).status, 200);
-        assert.deepEqual(await held(), { "111": A });
-        const g = gatedPuts();
-        useSettingsStoreForTest(g.store);
-        const saves = new Map([TO_222, TO_333].map((token) => [token, put(A, { telegramBotToken: token })]));
-        // Both have claimed their bot, and wait in the store.
-        await Promise.all([g.arrived(TO_222), g.arrived(TO_333)]);
-        assert.deepEqual(await held(), { "111": A, "222": A, "333": A });
-        for (const token of writes) await g.write(token);
-        for (const token of returns) {
-          g.ret(token);
-          assert.equal((await saves.get(token)!).status, 200);
-        }
-        const stored = (await getSettingsStore().get(A))?.telegramBotToken;
-        assert.equal(stored, writes[1], "the last write is what is stored");
-        assert.deepEqual(await held(), { [botOf(stored!)]: A }, "the account holds the bot it stores, and only that bot");
-      });
+  /** Wait for a state, polled each turn; failing only after a real-time bound. */
+  const until = async (what: string, ok: () => boolean) => {
+    const deadline = Date.now() + 10_000;
+    while (!ok()) {
+      if (Date.now() > deadline) assert.fail(`never reached: ${what}`);
+      await setImmediate();
     }
+  };
+  const queuedBehind = (tenant: `0x${string}`) =>
+    until("a second save waiting for the account's lock", () => advisoryLockWaitersForTest(claims, SETTINGS_SAVE_LOCK, settingsSaveLockKey(tenant)) === 1);
+
+  it("A SAVE WITHOUT THE TOKEN WAITS FOR A TOKEN SAVE IN FLIGHT, AND NEITHER LOSES THE OTHER'S CHANGE", async () => {
+    assert.equal((await put(A, { telegramBotToken: PRIOR })).status, 200);
+    const g = gatedPuts();
+    const tokenSave = put(A, { telegramBotToken: TO_222 });
+    await g.arrived(0);
+    const allowlistSave = put(A, { telegramAllowlist: [4242] });
+    await queuedBehind(A);
+    g.go(0, "write");
+    assert.equal((await tokenSave).status, 200);
+    await g.arrived(1);
+    g.go(1, "write");
+    assert.equal((await allowlistSave).status, 200);
+    const a = await getSettingsStore().get(A);
+    assert.equal(a?.telegramBotToken, TO_222, "the new token was not written back over with the old one");
+    assert.deepEqual(a?.telegramAllowlist, [4242]);
+    assert.deepEqual(await held(), { "222": A }, "and the account holds the bot it stores");
+  });
+
+  for (const [first, second] of [[TO_222, TO_333], [TO_333, TO_222]]) {
+    it(`TWO TOKEN SAVES, ${botOf(first)} THEN ${botOf(second)}: the second decides after the first has settled, and the claims end on it`, async () => {
+      assert.equal((await put(A, { telegramBotToken: PRIOR })).status, 200);
+      const g = gatedPuts();
+      const one = put(A, { telegramBotToken: first });
+      await g.arrived(0);
+      const two = put(A, { telegramBotToken: second });
+      await queuedBehind(A);
+      assert.deepEqual(await held(), { "111": A, [botOf(first)]: A }, "the second has claimed nothing yet");
+      g.go(0, "write");
+      assert.equal((await one).status, 200);
+      await g.arrived(1);
+      g.go(1, "write");
+      assert.equal((await two).status, 200);
+      assert.equal((await getSettingsStore().get(A))?.telegramBotToken, second);
+      assert.deepEqual(await held(), { [botOf(second)]: A });
+    });
   }
+
+  for (const [label, firstToken, secondToken] of [
+    ["THE TOKEN IT ALREADY STORES", "111:AAA-same", "111:AAA-same"],
+    ["A NEW TOKEN EACH CLICK", "111:AAA-first", "111:AAA-second"],
+  ] as const) {
+    it(`A DOUBLE-CLICKED MOVE OF ${label}, WHOSE FIRST WRITE FAILS: THE SECOND CLICK MOVES THE BOT, AND IT STAYS`, async () => {
+      // B holds the bot. For the first case A stored its token before (its
+      // child was stripped of it) and re-enters it to get the bot back, the
+      // re-claim path the 409 offers.
+      assert.equal((await put(B, { telegramBotToken: "111:BBB-secret" })).status, 200);
+      if (firstToken === secondToken) await getSettingsStore().put(A, { telegramBotToken: firstToken });
+      const g = gatedPuts();
+      const one = put(A, { telegramBotToken: firstToken, moveBot: true });
+      await g.arrived(0);
+      assert.deepEqual(await held(), { "111": A }, "the first click moved it");
+      const two = put(A, { telegramBotToken: secondToken, moveBot: true });
+      await queuedBehind(A);
+      g.go(0, "fail");
+      await assert.rejects(one, /store down/);
+      await g.arrived(1);
+      g.go(1, "write");
+      const res = await two;
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      assert.equal(res.body.botMoved, true, "the second click moved it itself, from B, where the first one's undo put it");
+      assert.deepEqual(await held(), { "111": A }, "A stores the bot and holds it: the save that said so is true");
+      assert.equal((await getSettingsStore().get(A))?.telegramBotToken, secondToken);
+    });
+  }
+
+  it("A SAVE WITHOUT THE TOKEN LETS GO OF A CLAIM ON A BOT THE ACCOUNT NO LONGER STORES, AND CLAIMS NOTHING", async () => {
+    assert.equal((await put(B, { telegramBotToken: "333:BBB-own-bot" })).status, 200);
+    assert.equal((await put(A, { telegramBotToken: PRIOR })).status, 200);
+    assert.equal((await put(A, { telegramBotToken: TO_222 })).status, 200);
+    assert.deepEqual(await held(), { "222": A, "333": B });
+    // A writer that does not take the lock or settle (the orchestrator's
+    // allowlist promotion, holder, x-proof) read before the token save and
+    // writes what it read back: the old token.
+    await getSettingsStore().put(A, { telegramBotToken: PRIOR, telegramAllowlist: [4242] });
+    getMeAsked.length = 0;
+    assert.equal((await put(A, { telegramEnabled: true })).status, 200);
+    assert.deepEqual(await held(), { "333": B }, "222 is let go; 111 is not claimed on a token nobody confirmed; B's is not A's to touch");
+    assert.deepEqual(getMeAsked, [], "and Telegram was not asked");
+  });
 });
 function botOf(token: string): string {
   return token.slice(0, token.indexOf(":"));

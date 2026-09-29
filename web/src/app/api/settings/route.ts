@@ -33,7 +33,15 @@ import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { agentNameSave } from "@/lib/settings-agent-name";
 import { withoutEnergyReserve, withoutReserveBasket } from "@/lib/energy-reserve";
-import { botClaimForSave, isBotToken, NOT_A_BOT_TOKEN_TEXT } from "@/lib/telegram-claims";
+import {
+  botClaimForSave,
+  isBotToken,
+  NOT_A_BOT_TOKEN_TEXT,
+  SAVE_BUSY,
+  SETTINGS_BUSY_TEXT,
+  withSettingsSaveLock,
+  type SaveClaims,
+} from "@/lib/telegram-claims";
 
 export const dynamic = "force-dynamic";
 
@@ -372,6 +380,28 @@ export async function PUT(req: Request) {
     for (const k of HOSTED_FORBIDDEN_SETTING_FIELDS) delete (body as Record<string, unknown>)[k];
   }
 
+  if (!tenant) return saveSettings(body, null, moveBot, { db: null });
+  // ONE SAVE AT A TIME PER ACCOUNT, from the read below to the claims settled
+  // after the write: a save that read before another one wrote would write
+  // back what that one changed, the token included (lib/telegram-claims.ts
+  // withSettingsSaveLock). Held on the shared database, across web processes.
+  const account = tenant;
+  const saved = await withSettingsSaveLock(account, (claims) => saveSettings(body, account, moveBot, claims));
+  if (saved === SAVE_BUSY) return NextResponse.json({ error: "settings_busy", errors: [SETTINGS_BUSY_TEXT] }, { status: 503 });
+  return saved;
+}
+
+/**
+ * The save itself: everything from reading what is stored to writing it back.
+ * Hosted, it runs under the account's save lock, and `claims` is the database
+ * connection that lock is held on (see PUT).
+ */
+async function saveSettings(
+  body: Partial<Record<keyof MerrymenSettings, unknown>>,
+  tenant: `0x${string}` | null,
+  moveBot: boolean,
+  claims: SaveClaims,
+): Promise<NextResponse> {
   const errors: string[] = [];
   const stored = await readStored(tenant);
   const next: MerrymenSettings = { ...stored };
@@ -819,8 +849,10 @@ export async function PUT(req: Request) {
    * nothing; undone if the write fails, so a claim never outlives a token that
    * was not stored. See lib/telegram-claims.ts.
    *
-   * What the claim step settles on afterwards is read back from the store, not
-   * taken from `next`: another save for this account may have written since.
+   * A save without the token claims nothing and asks nothing, but settles all
+   * the same once it lands. What every save settles on is read back from the
+   * store, not taken from `next`: this PUT's saves take turns, but other
+   * writers of the blob do not (settleBotClaims names them).
    */
   const botClaim = await botClaimForSave({
     tenant,
@@ -828,6 +860,7 @@ export async function PUT(req: Request) {
     next,
     moveBot,
     settings: { before: stored, read: (t) => getSettingsStore().get(t) },
+    claims,
   });
   if (botClaim && !botClaim.ok) return NextResponse.json(botClaim.body, { status: botClaim.status });
 
@@ -843,11 +876,10 @@ export async function PUT(req: Request) {
     }
     // The claims made to match the token stored NOW, read back after this
     // write: the bot this account left, if it left one, is free for whoever
-    // takes it next, and the one it stores stays claimed even when another
-    // save for this account wrote after this one (settleBotClaims says why
-    // that converges). After the write, and not fatal: the save has landed,
-    // and a claim left behind is one the next owner's move resolves.
-    await botClaim?.settle().catch((e) => console.warn(`[settings] telegram bot claim not released: ${e instanceof Error ? e.message : String(e)}`));
+    // takes it next, and the one it stores stays claimed. After the write,
+    // and not fatal: the save has landed, and a claim left behind is one the
+    // next save lets go of, or the next owner's move resolves.
+    await botClaim?.settle().catch((e) => console.warn(`[settings] telegram bot claims not settled: ${e instanceof Error ? e.message : String(e)}`));
   } else {
     await mkdir(DATA_DIR, { recursive: true });
     // settings.json holds plaintext API keys (bundler/Groq/Anthropic/Telegram/…) —

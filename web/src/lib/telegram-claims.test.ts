@@ -10,7 +10,17 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import type { MerrymenSettings } from "@merrymen/core";
 import { wrapSqlite, type Db } from "../../../worker/src/db";
 import { botIdOf, claimBot, ensureBotClaims, readBotClaims } from "../../../worker/src/telegram-claims";
-import { BOT_CLAIMED_TEXT, BOT_UNCONFIRMED_TEXT, decideBotClaim, isBotToken, telegramBotIdOf } from "./telegram-claims";
+import {
+  BOT_CLAIMED_TEXT,
+  BOT_UNCONFIRMED_TEXT,
+  decideBotClaim,
+  isBotToken,
+  SAVE_BUSY,
+  settleWithoutToken,
+  telegramBotIdOf,
+  useBotClaimsDbForTest,
+  withSettingsSaveLock,
+} from "./telegram-claims";
 
 const A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const;
 const B = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as const;
@@ -124,11 +134,14 @@ describe("decideBotClaim", () => {
 });
 
 /**
- * TWO SAVES FOR ONE ACCOUNT AT ONCE. Both decide (and claim) before either
- * writes; then the writes, the settles after them, and the undo of a write
- * that failed, land in every order a web process — or two — can run them in.
- * Whatever the order, the account's claims end on the bot of the token stored
- * last, and a failed save takes back only what no landed save stands on.
+ * TWO SAVES FOR ONE ACCOUNT AT ONCE, WITHOUT THE SAVE LOCK. The settings PUT
+ * takes turns (withSettingsSaveLock, driven through the route in
+ * app/api/settings/bot-claim.test.ts); these are the claim functions on their
+ * own, as a caller that could not take the lock runs them. Both decide (and
+ * claim) before either writes; then the writes, the settles after them, and
+ * the undo of a write that failed, land in every order. Whatever the order,
+ * the account's claims end on the bot of the token stored last, and a failed
+ * save takes back only what no landed save stands on.
  */
 describe("two saves at once for one account", () => {
   const TO_222 = "222:AAA-bee";
@@ -299,6 +312,69 @@ describe("two saves at once for one account", () => {
       await failed.undo();
       assert.deepEqual(await claims(d), [["111", A]]);
     });
+  });
+});
+
+describe("settleWithoutToken — a save that does not carry the token", () => {
+  it("LETS GO OF A CLAIM ON A BOT THE ACCOUNT NO LONGER STORES, CLAIMS NOTHING, AND TOUCHES NO OTHER ACCOUNT'S", async () => {
+    // A token save stored 222 and settled; then a writer that does not settle
+    // put the old token (111) back. The claim on 222 is for a bot A no longer
+    // stores; 111 is free, and only a token Telegram confirms may claim it.
+    const d = await db();
+    await claimBot(d, "222", A, "222", 0);
+    await claimBot(d, "333", B, "333", 0);
+    write(A, "111:AAA-prior");
+    const s = await settleWithoutToken({ db: d, tenant: A, settings: settingsOf(A), now: 5 });
+    assert.ok(!s.moved);
+    await s.undo();
+    assert.deepEqual(await claims(d), [["222", A], ["333", B]], "a write that did not land changes nothing");
+    await s.settle();
+    assert.deepEqual(await claims(d), [["333", B]]);
+  });
+
+  it("KEEPS THE BOT IT STORES", async () => {
+    const d = await db();
+    await claimBot(d, "111", A, "111", 0);
+    await claimBot(d, "222", A, "222", 0);
+    write(A, "111:AAA-prior");
+    const s = await settleWithoutToken({ db: d, tenant: A, settings: settingsOf(A), now: 5 });
+    await s.settle();
+    assert.deepEqual(await claims(d), [["111", A]]);
+  });
+});
+
+describe("withSettingsSaveLock", () => {
+  afterEach(() => useBotClaimsDbForTest(null));
+
+  it("A SAVE THAT CANNOT GET ITS TURN IN TIME IS TOLD SO, AND RUNS NOTHING", async () => {
+    const d = await db();
+    useBotClaimsDbForTest(d);
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let entered!: () => void;
+    const inside = new Promise<void>((r) => (entered = r));
+    const holder = withSettingsSaveLock(A, async (c) => {
+      assert.equal(c.db, d, "handed the claims database it holds the lock on");
+      entered();
+      await released;
+      return "saved";
+    });
+    await inside;
+    assert.equal(await withSettingsSaveLock(A, async () => assert.fail("runs nothing"), 20), SAVE_BUSY);
+    assert.equal(await withSettingsSaveLock(B, async () => "another account's"), "another account's", "and no other account waits");
+    release();
+    assert.equal(await holder, "saved");
+    assert.equal(await withSettingsSaveLock(A, async () => "next"), "next");
+  });
+
+  it("NO SHARED DATABASE: no lock, and no claims database to hand over", async () => {
+    const url = process.env.DATABASE_URL;
+    delete process.env.DATABASE_URL;
+    try {
+      assert.deepEqual(await withSettingsSaveLock(A, async (c) => c), { db: null });
+    } finally {
+      if (url !== undefined) process.env.DATABASE_URL = url;
+    }
   });
 });
 

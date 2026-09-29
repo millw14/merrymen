@@ -19,8 +19,9 @@
  * other account's allowlist, not its owner. This account's own settings are
  * saved as they are, and its owner links the bot with this agent's own code.
  */
+import { createHash } from "node:crypto";
 import type { MerrymenSettings } from "@merrymen/core";
-import { makePgDb, type Db } from "../../../worker/src/db";
+import { LockBusyError, makePgDb, withAdvisoryLock, type Db } from "../../../worker/src/db";
 import {
   botIdOf,
   botTokenOf,
@@ -89,12 +90,12 @@ const nothing = async () => {};
  * would be the silence this exists to end. A save that does not carry the
  * token (every other field on the page) asks nothing.
  *
- * WHAT A LANDED SAVE LETS GO OF IS JUDGED BY WHAT IS STORED, NOT BY WHAT THIS
- * SAVE WROTE. Two saves for one account can be in flight at once (two tabs, a
- * double click, the phone and the desktop), and their writes and settles land
- * in any order; settle and undo read `settings.read` afresh, after the write,
- * so the claims end on the token that was stored last whichever way round they
- * ran. settleBotClaims and undoBotClaimUnlessSaved say why that converges.
+ * TWO SAVES FOR ONE ACCOUNT DO NOT OVERLAP: the settings PUT decides, writes
+ * and settles under withSettingsSaveLock (two tabs, a double click, the phone
+ * and the desktop take turns). Settle and undo still read `settings.read`
+ * afresh after the write, and match the claims to what is stored rather than
+ * to what this save wrote, for the writers the lock does not cover;
+ * settleBotClaims says which, and what reading back does and does not fix.
  */
 export async function decideBotClaim(args: {
   db: Db;
@@ -205,22 +206,130 @@ export async function telegramBotIdOf(token: string): Promise<string | null> {
   }
 }
 
+/**
+ * A HOSTED SAVE THAT DOES NOT CARRY THE TOKEN asks Telegram nothing and claims
+ * nothing, but once it lands it still lets go of every bot this account holds
+ * that it does not store (settleBotClaims, with no bot confirmed). A writer
+ * that does not settle (settleBotClaims names them) can have put an old token
+ * back after a token save; the claim it left on the bot no longer stored goes
+ * here, rather than waiting for the owner's next token save.
+ */
+export async function settleWithoutToken(args: {
+  db: Db;
+  tenant: `0x${string}`;
+  settings: { read: (tenant: `0x${string}`) => Promise<MerrymenSettings | null> };
+  now?: number;
+}): Promise<Extract<BotClaimDecision, { ok: true }>> {
+  const { db, tenant } = args;
+  const now = args.now ?? Date.now();
+  await ensureBotClaims(db);
+  const storedBot = async () => storedBotOf(await args.settings.read(tenant));
+  return { ok: true, moved: false, undo: nothing, settle: () => settleBotClaims(db, tenant, storedBot, null, now) };
+}
+
 /** Test seam: the database the claims are kept in, in place of DATABASE_URL's. */
 let dbForTest: Db | null = null;
 export function useBotClaimsDbForTest(db: Db | null): void {
   dbForTest = db;
 }
 
+/** The claims database: the test seam's, DATABASE_URL's, or null (no shared database). Throws when one is named and will not open. */
+async function claimsDb(): Promise<Db | null> {
+  const url = process.env.DATABASE_URL;
+  return dbForTest ?? (url ? await makePgDb(url) : null);
+}
+
+/**
+ * The claims database as a hosted save has it: the connection its account's
+ * save lock is held on, none (no shared database: nothing to claim), or one
+ * that would not open or lock (`error`).
+ */
+export type SaveClaims = { db: Db | null } | { db: null; error: unknown };
+
+/** The advisory lock class of an account's settings saves. Distinct from every other key in the repo (tg-groups-ferry.ts lists them), and the two-int form keeps it apart from the single-key ones. */
+export const SETTINGS_SAVE_LOCK = 1_297_692_130;
+/** The account's key within SETTINGS_SAVE_LOCK. A collision only makes two accounts take turns. */
+export function settingsSaveLockKey(tenant: string): number {
+  return createHash("sha256").update(tenant.toLowerCase()).digest().readInt32BE(0);
+}
+
+/** Another save for this account held the lock for the whole wait. */
+export const SAVE_BUSY: unique symbol = Symbol("settings save busy");
+export const SETTINGS_BUSY_TEXT = "Another save for this agent is still going through, so this one was not saved. Please try again in a moment.";
+
+/**
+ * ONE SETTINGS SAVE AT A TIME PER HOSTED ACCOUNT, from the read the save is
+ * built on to the claims settled after its write (or put back after it
+ * failed): withAdvisoryLock on the shared database, so it holds across web
+ * processes, and `fn` is handed the connection it is held on for the claims.
+ *
+ * WHY. Each save reads the whole settings blob, changes its own fields, and
+ * writes the whole blob back. Two at once for one account (two tabs, a double
+ * click, the phone and the desktop) each wrote back what the other had not
+ * seen: a save of the allowlist that read before a token save wrote put the
+ * old token back, so the owner's new bot was lost, and the claims named a bot
+ * nothing stored. And the bot claims, made before the write and settled or
+ * taken back after it, had interleavings no reading back could fix: a
+ * double-clicked "Move it here" whose first write failed could hand the bot
+ * back to the other account after the second click's save had landed and
+ * said "saved". Taking turns, each save reads what the one before it wrote,
+ * and decides its claim on what that one left.
+ *
+ * WHAT IT DOES NOT COVER: writers other than this PUT (settleBotClaims names
+ * them) read and write the same blob without it.
+ *
+ * NO SHARED DATABASE: no lock, and nothing to claim (self-hosted is one
+ * process with one file). ONE THAT WILL NOT OPEN OR LOCK: the save runs
+ * without the lock, as it did before there was one, and botClaimForSave
+ * refuses a token it cannot claim (503). THE LOCK HELD FOR THE WHOLE WAIT by
+ * another save (`waitMs`, past a getMe and a write): SAVE_BUSY, and nothing is
+ * read or written; the caller tells the owner to try again.
+ */
+export async function withSettingsSaveLock<T>(
+  tenant: `0x${string}`,
+  fn: (claims: SaveClaims) => Promise<T>,
+  waitMs?: number,
+): Promise<T | typeof SAVE_BUSY> {
+  let db: Db | null;
+  try {
+    db = await claimsDb();
+  } catch (error) {
+    return fn({ db: null, error });
+  }
+  if (!db) return fn({ db: null });
+  let entered = false;
+  try {
+    return await withAdvisoryLock(
+      db,
+      SETTINGS_SAVE_LOCK,
+      settingsSaveLockKey(tenant),
+      (locked) => {
+        entered = true;
+        return fn({ db: locked });
+      },
+      waitMs,
+    );
+  } catch (e) {
+    if (entered) throw e;
+    if (e instanceof LockBusyError) return SAVE_BUSY;
+    console.warn(`[settings] save lock unavailable, saving without it: ${e instanceof Error ? e.message : String(e)}`);
+    return fn({ db: null, error: e });
+  }
+}
+
 /**
  * The settings PUT's whole use of the claims: null when this save touches no
- * bot claim (self-hosted, or a body without the token), else the decision.
+ * bot claim (self-hosted, or no claims database), else the decision: for a
+ * body carrying the token, decideBotClaim's; for one that does not,
+ * settleWithoutToken's, which asks nothing and only settles.
  *
  * With no shared database there is no claim to make: one operator, one bot,
  * no orchestrator. With one that will not answer, a NEW token is refused
  * (503) rather than saved unclaimed, because the orchestrator would then give
  * the bot to the first account it met with a live token for it, which need not
- * be this one, and nobody would have been asked; clearing a token still
- * saves, and the claim it leaves is one a move resolves.
+ * be this one, and nobody would have been asked; clearing a token, or a save
+ * without one, still saves, and the claim it leaves is one a later save lets
+ * go of or a move resolves.
  */
 export async function botClaimForSave(args: {
   tenant: `0x${string}` | null;
@@ -229,14 +338,19 @@ export async function botClaimForSave(args: {
   moveBot: boolean;
   /** The account's settings as this save read them, and the store to read them afresh from (decideBotClaim). */
   settings: { before: MerrymenSettings | null; read: (tenant: `0x${string}`) => Promise<MerrymenSettings | null> };
+  /** The claims database under this account's save lock (withSettingsSaveLock). Omitted: opened here, with no lock. */
+  claims?: SaveClaims;
 }): Promise<BotClaimDecision | null> {
-  if (!args.tenant || !args.touched) return null;
-  const token = typeof args.next.telegramBotToken === "string" ? args.next.telegramBotToken : undefined;
+  const tenant = args.tenant;
+  if (!tenant) return null;
+  const token = args.touched && typeof args.next.telegramBotToken === "string" ? args.next.telegramBotToken : undefined;
   try {
-    const url = process.env.DATABASE_URL;
-    const db = dbForTest ?? (url ? await makePgDb(url) : null);
+    const claims = args.claims ?? { db: await claimsDb() };
+    if ("error" in claims) throw claims.error;
+    const db = claims.db;
     if (!db) return null;
-    return await decideBotClaim({ db, tenant: args.tenant, token, moveBot: args.moveBot, confirmBot: telegramBotIdOf, settings: args.settings });
+    if (!args.touched) return await settleWithoutToken({ db, tenant, settings: args.settings });
+    return await decideBotClaim({ db, tenant, token, moveBot: args.moveBot, confirmBot: telegramBotIdOf, settings: args.settings });
   } catch (e) {
     console.warn(`[settings] telegram bot claims unavailable: ${e instanceof Error ? e.message : String(e)}`);
     if (!token) return null;

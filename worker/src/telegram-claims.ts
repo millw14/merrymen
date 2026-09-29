@@ -45,7 +45,7 @@
  * so the tests run the SQL production runs.
  */
 import { SETTINGS_DEFAULTS, type MerrymenSettings } from "../../packages/core/src/index";
-import type { Db } from "./db";
+import { rootDb, type Db } from "./db";
 import { botIdOf, tokenTagOf } from "./telegram/state";
 
 export { botIdOf };
@@ -73,18 +73,21 @@ const ensured = new WeakMap<Db, Promise<void>>();
  * index (23505), see the table appear mid-statement (42P07) or find its row
  * type already made (42710). Each means the table now exists, which is all
  * this wanted (settings-store.ts createIfAbsent says the same). A failure that
- * is not one of those is forgotten, so the next call tries again.
+ * is not one of those is forgotten, so the next call tries again. Once per
+ * DATABASE, not per connection pinned from it (rootDb): a settings save runs
+ * on a connection of its own, and the table is not made again for each one.
  */
 export function ensureBotClaims(db: Db): Promise<void> {
-  let done = ensured.get(db);
+  const root = rootDb(db);
+  let done = ensured.get(root);
   if (!done) {
     done = db.exec(TELEGRAM_BOT_CLAIMS_DDL).catch((e: unknown) => {
       const code = (e as { code?: unknown }).code;
       if (code === "23505" || code === "42P07" || code === "42710") return;
-      ensured.delete(db);
+      ensured.delete(root);
       throw e;
     });
-    ensured.set(db, done);
+    ensured.set(root, done);
   }
   return done;
 }
@@ -262,26 +265,37 @@ export function storedBotOf(settings: MerrymenSettings | null): string | null {
  * for a bot it held no claim on: the orchestrator's to strip, or to hand to the
  * next account that claimed it.
  *
- * WHY THIS CONVERGES. Every settle runs after its own save's write, so the
- * settle of the LAST write starts after that write, and every read it makes
- * names the final stored bot: it lets go of every other bot, and claims that
- * one (it is the bot that save confirmed, unless Telegram refused its token,
- * and then no claim is due). Reading is not enough on its own: an earlier
- * settle can read the stored bot BEFORE the last write and let go AFTER the
- * last settle is done, taking the final bot's claim with the rest. So every
- * settle reads the stored bot again after letting go, and when it has changed
- * underneath, puts back what it let go of for the bot stored now (the same
- * row, stamp and all) and settles again on that. That second read comes after
- * the stale release, hence after the last write, so it names the final bot and
- * the claim comes back. Nothing else takes it from this tenant: a claim or a
- * move only adds (and a save that makes one writes after it, so its settle
- * comes later still), and an undo keeps a claim a landed save stands on
- * (undoBotClaimUnlessSaved). A claim this tenant made for a bot it no longer
- * stores is let go by whichever settle runs after it. Bounded: settings that
- * keep changing through every read are being written by saves whose own
- * settles come after this one. The window between a stale release and its
- * put-back is the one place another account can take the bot, and only with
- * a token Telegram confirms for it.
+ * THE SETTINGS PUT RUNS ONE SAVE AT A TIME PER ACCOUNT (web
+ * lib/telegram-claims.ts withSettingsSaveLock), so among its saves the stored
+ * token cannot change between a save's write and its settle, and this is, in
+ * effect, "every bot but the one this save stored". What reading back still
+ * buys is what the lock does not cover.
+ *
+ * - WRITERS THAT DO NOT SETTLE. The orchestrator's promotions (the allowlist,
+ *   chat settings), holder, x-proof, the grant's first name, partner
+ *   enrollment: each reads the whole settings blob and writes it back, without
+ *   the lock and without settling, so one that read before a token save wrote
+ *   can put the OLD token back after that save settled. The owner's token change is then lost
+ *   (a lost update in the settings store, not in the claims; the fix for that
+ *   is a compare-and-swap, or this lock, on every writer), and the claims name
+ *   the bot the save stored while the old one is what is stored: the old bot
+ *   unclaimed, for the first tenant that polls it. A settle running beside
+ *   such a write ends on what it last read; the next PUT's settle, token or
+ *   not, lets go of the bot nothing stores.
+ * - CALLERS WITHOUT THE LOCK: this function's own tests, and a web process
+ *   that could not take it. Two saves for one account can then decide before
+ *   either writes, and their writes and settles land in any order. Every
+ *   settle runs after its own save's write, so the settle of the LAST write
+ *   reads the final stored bot, lets go of every other, and claims that one
+ *   (the bot it confirmed). An earlier settle that read before the last write
+ *   can let go after the last settle is done, taking the final bot's claim
+ *   with the rest; so every settle reads the stored bot again after letting
+ *   go, and when it has changed underneath, puts back what it let go of for
+ *   the bot stored now (the same row, stamp and all) and settles again on
+ *   that. Between that stale release and the put-back another account can
+ *   take the bot, with a token Telegram confirms for it; and an undo of a
+ *   failed save can take back what a save that decided on its claim stands on
+ *   (undoBotClaimUnlessSaved says when). Serialized saves have neither.
  *
  * ONLY A BOT THIS SAVE CONFIRMED IS CLAIMED, never merely the stored one. A
  * stored token may be one Telegram refused (saved as typed, claiming nothing),
@@ -302,17 +316,19 @@ export async function settleBotClaims(
   const t = lc(tenant);
   const claim = (bot: string, stamp: number) =>
     db.prepare("INSERT INTO telegram_bot_claims (bot_id, tenant, claimed_at) VALUES (?, ?, ?) ON CONFLICT(bot_id) DO NOTHING").run(bot, t, stamp);
+  /** Let go of every bot but `keep`: what was let go of, bot → claimed_at. */
+  const release = async (keep: string | null) =>
+    (keep === null
+      ? await db.prepare("DELETE FROM telegram_bot_claims WHERE tenant = ? RETURNING bot_id, claimed_at").all(t)
+      : await db.prepare("DELETE FROM telegram_bot_claims WHERE tenant = ? AND bot_id <> ? RETURNING bot_id, claimed_at").all(t, keep)) as {
+      bot_id: string;
+      claimed_at: number;
+    }[];
   /** Every claim this settle let go of, bot → claimed_at: what it puts back if the bot it let go of turns out to be the stored one. */
   const released = new Map<string, number>();
   let bot = await storedBot();
   for (let attempt = 0; attempt < 4; attempt++) {
-    const gone = (bot === null
-      ? await db.prepare("DELETE FROM telegram_bot_claims WHERE tenant = ? RETURNING bot_id, claimed_at").all(t)
-      : await db.prepare("DELETE FROM telegram_bot_claims WHERE tenant = ? AND bot_id <> ? RETURNING bot_id, claimed_at").all(t, bot)) as {
-      bot_id: string;
-      claimed_at: number;
-    }[];
-    for (const r of gone) released.set(String(r.bot_id), Number(r.claimed_at));
+    for (const r of await release(bot)) released.set(String(r.bot_id), Number(r.claimed_at));
     if (bot !== null && bot === confirmedBot) await claim(bot, now);
     const after = await storedBot();
     if (after === bot) return;
