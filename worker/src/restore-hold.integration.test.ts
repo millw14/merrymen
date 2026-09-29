@@ -173,6 +173,24 @@ const store = getGrantStore();
 const settle = async (n = 20) => {
   for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r));
 };
+/**
+ * Turn the loop until `ready()` holds, however many turns that takes.
+ *
+ * A fixed number of turns is a guess about how much real I/O sits between here
+ * and the state the next line assumes, and CI guessed differently: on Node 22
+ * the pass had not yet signalled the hold process after fifty turns, so the
+ * one-second tick meant for its exit fired at nothing, the pass waited on a
+ * mocked timer nobody would ever advance, and the event loop emptied under it.
+ * Bounded by the real clock (`performance` is not among the mocked APIs), so
+ * a state that never comes fails here, by name, instead of hanging the file.
+ */
+const waitFor = async (ready: () => boolean, what: string) => {
+  const t0 = performance.now();
+  while (!ready()) {
+    if (performance.now() - t0 > 10_000) assert.fail(`never happened: ${what}\n${said.join("\n")}`);
+    await new Promise((r) => setImmediate(r));
+  }
+};
 const alerts = () => said.filter((l) => l.includes("[alert] paper restore blocked"));
 
 async function withClock(fn: () => Promise<void>) {
@@ -382,7 +400,8 @@ describe("when the restore takes, trading comes back", () => {
       restoreSays = { ok: true, line: "paper cash, holdings and basis restored" };
       mock.timers.tick(2 * 60_000 + 1);
       const pass = reconcile();
-      await settle(50);
+      await waitFor(() => hold.signals.includes("SIGTERM"), "the pass asks the hold process to stop");
+      await settle();
       assert.equal(workers().length, 0, "no worker while the hold process is still up: two pollers on one bot");
       assert.ok(isHeldForTest(TENANT), "and the tenant stays held meanwhile, so no pass spawns it");
       mock.timers.tick(1_000);
@@ -413,7 +432,8 @@ describe("when the restore takes, trading comes back", () => {
       await getSettingsStore().put(TENANT, { ...paperWithBot, paperTradingEnabled: false } as never);
       mock.timers.tick(15_000);
       const pass = reconcile();
-      await settle(50);
+      await waitFor(() => hold.signals.includes("SIGTERM"), "the pass asks the hold process to stop");
+      await settle();
       assert.equal(workers().length, 0, "no worker while the hold process is still up");
       mock.timers.tick(1_000);
       await pass;

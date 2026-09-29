@@ -590,6 +590,20 @@ describe("every request is bounded", () => {
   const flush = async () => {
     for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
   };
+  /**
+   * Turn the loop until `ready()` holds. The upload loads node:fs and node:path
+   * by dynamic import before it reaches fetch, and on Node 22 under tsx's loader
+   * that takes real time, not a count of turns: CI's five were not enough, so
+   * the result was read before the upload had even started. Bounded by the real
+   * clock (only setTimeout is mocked here) so a state that never comes fails.
+   */
+  const waitFor = async (ready: () => boolean, what: string) => {
+    const t0 = performance.now();
+    while (!ready()) {
+      if (performance.now() - t0 > 10_000) assert.fail(`never happened: ${what}`);
+      await new Promise((r) => setImmediate(r));
+    }
+  };
 
   it("hands fetch an AbortSignal, on GET and POST alike", async () => {
     const seen: (AbortSignal | undefined)[] = [];
@@ -648,12 +662,12 @@ describe("every request is bounded", () => {
     try {
       const { f, seen } = deaf();
       const r = settled(sendDocument({ token: "1:a", fetchFn: f }, 5, file));
-      await flush();
+      await waitFor(() => seen.length === 1, "the upload reaches fetch");
       mock.timers.tick(59_999);
       await flush();
       assert.equal(r.done, false, "still inside the window");
       mock.timers.tick(1);
-      await flush();
+      await waitFor(() => r.done, "the upload gives up");
       assert.deepEqual(r.value, { ok: false, reason: "upload timed out after 60s" });
       assert.equal(seen[0]!.signal!.aborted, true);
     } finally {
