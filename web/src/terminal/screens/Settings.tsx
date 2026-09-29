@@ -11,7 +11,7 @@ import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
-import { ENERGY, MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isEnergyReserveToken, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
+import { ENERGY, MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, TELEGRAM_GROUPS_CHATTINESS, isEnergyReserveToken, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant, type TelegramGroupsChattiness } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 import { telegramLabel, telegramRow } from "../agent-status";
@@ -24,6 +24,13 @@ import { useT } from "@/lib/i18n";
 // keeps it, and the sheet no longer reaches anything else.
 
 type Draft = Record<string, string>;
+
+/** What each Telegram groups level is called on the page, in core's order. */
+const CHATTINESS_LABEL = {
+  quiet: "settings.text.chattinessQuiet",
+  normal: "settings.text.chattinessNormal",
+  chatty: "settings.text.chattinessChatty",
+} as const satisfies Record<TelegramGroupsChattiness, string>;
 
 function Field(props: {
   label: string;
@@ -87,6 +94,12 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const [tgControl, setTgControl] = useState<boolean | null>(null);
   const [tgTransfer, setTgTransfer] = useState<boolean | null>(null);
   const [tgNotify, setTgNotify] = useState<boolean | null>(null);
+  // Telegram groups (docs/tg-groups.md "Settings"): two switches that default
+  // ON and a level. Dashboard-only — the chat refuses all three — so this form
+  // is where an owner changes them. Null = untouched this session.
+  const [tgGroups, setTgGroups] = useState<boolean | null>(null);
+  const [tgGroupCoins, setTgGroupCoins] = useState<boolean | null>(null);
+  const [tgChattiness, setTgChattiness] = useState<TelegramGroupsChattiness | null>(null);
   const [virtualsEnabled, setVirtualsEnabled] = useState<boolean | null>(null);
   // Scout mode is a boolean, so it can't ride the string `draft`.
   const [deskEnabled, setDeskEnabled] = useState<boolean | null>(null);
@@ -375,6 +388,12 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     if (tgControl !== null) body.telegramControlEnabled = tgControl;
     if (tgTransfer !== null) body.telegramTransferEnabled = tgTransfer;
     if (tgNotify !== null) body.telegramNotifyEnabled = tgNotify;
+    // Guarded like every toggle here, and it matters more for these two than
+    // for most: both default ON, so an unguarded send would write whatever the
+    // form happened to hold for every owner who saved anything at all.
+    if (tgGroups !== null) body.telegramGroupsEnabled = tgGroups;
+    if (tgGroupCoins !== null) body.telegramGroupCoinsEnabled = tgGroupCoins;
+    if (tgChattiness !== null) body.telegramGroupsChattiness = tgChattiness;
     if (virtualsEnabled !== null) body.virtualsEnabled = virtualsEnabled;
     if (deskEnabled !== null) body.deskEnabled = deskEnabled;
     if (scoutEnabled !== null) body.scoutEnabled = scoutEnabled;
@@ -417,6 +436,12 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
       setTgControl(null);
       setTgTransfer(null);
       setTgNotify(null);
+      // Cleared with the rest, so after a save the screen shows the SERVER's
+      // Telegram groups values — not "THE SEVEN THAT WERE LEFT BEHIND" below
+      // over again.
+      setTgGroups(null);
+      setTgGroupCoins(null);
+      setTgChattiness(null);
       setVirtualsEnabled(null);
       setScoutEnabled(null);
       setDiscoveryEnabled(null);
@@ -511,6 +536,12 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const tgControlVal = tgControl ?? view.values.telegramControlEnabled ?? d.telegramControlEnabled;
   const tgTransferVal = tgTransfer ?? view.values.telegramTransferEnabled ?? d.telegramTransferEnabled;
   const tgNotifyVal = tgNotify ?? view.values.telegramNotifyEnabled ?? d.telegramNotifyEnabled;
+  // `?? d.…` doing real work, as for officialCoinsEnabled: both switches
+  // default ON, so an owner who never saved them has no stored value, and
+  // falling through to `false` would show them off while the bot talked.
+  const tgGroupsVal = tgGroups ?? view.values.telegramGroupsEnabled ?? d.telegramGroupsEnabled;
+  const tgGroupCoinsVal = tgGroupCoins ?? view.values.telegramGroupCoinsEnabled ?? d.telegramGroupCoinsEnabled;
+  const tgChattinessVal = tgChattiness ?? view.values.telegramGroupsChattiness ?? d.telegramGroupsChattiness;
   const virtualsEnabledVal = virtualsEnabled ?? view.values.virtualsEnabled ?? d.virtualsEnabled;
   const deskEnabledVal = deskEnabled ?? view.values.deskEnabled ?? d.deskEnabled;
   const scoutEnabledVal = scoutEnabled ?? view.values.scoutEnabled ?? d.scoutEnabled;
@@ -1418,6 +1449,60 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               </span>
             </label>
           </div>
+
+          {/* TELEGRAM GROUPS (docs/tg-groups.md). Never the web room's name —
+              that belongs to the public room — and dashboard-only: the chat
+              answers "groups off" with a button to here, because a group is a
+              chat anyone in it can type into. Saved by "Save changes" like the
+              toggles above, and reset after it. */}
+          <div className="mm-section" id="telegram-groups">{t("settings.section.telegramGroups")}</div>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">{t("settings.label.hangOutInTelegramGroups")}</span>
+              <span className="mm-input">
+                <input type="checkbox" checked={tgGroupsVal} onChange={(e) => setTgGroups(e.target.checked)} style={{ width: "auto" }} />
+                <span className="mm-unit">{tgGroupsVal ? "answers when called, joins in now and then" : "silent in every group"}</span>
+              </span>
+              <span className="mm-hint">{t("settings.hint.hangOutInTelegramGroups")}</span>
+            </label>
+            <label className="mm-field">
+              <span className="mm-label">{t("settings.label.lookAtCoinsPeoplePost")}</span>
+              <span className="mm-input">
+                <input type="checkbox" checked={tgGroupCoinsVal} onChange={(e) => setTgGroupCoins(e.target.checked)} style={{ width: "auto" }} />
+                <span className="mm-unit">{tgGroupCoinsVal ? "looks, then its Brain decides" : "leaves coins alone"}</span>
+              </span>
+              <span className="mm-hint">{t("settings.hint.lookAtCoinsPeoplePost")}</span>
+            </label>
+            <Field label={t("settings.label.howChattyInGroups")} hint={t("settings.hint.howChattyInGroups")}>
+              <select value={tgChattinessVal} onChange={(e) => setTgChattiness(e.target.value as TelegramGroupsChattiness)}>
+                {TELEGRAM_GROUPS_CHATTINESS.map((level) => (
+                  <option key={level} value={level}>{t(CHATTINESS_LABEL[level])}</option>
+                ))}
+              </select>
+            </Field>
+          </div>
+          {/* WHAT IT CAN HEAR, from the getMe /api/telegram already makes.
+
+              Three states, not two. `false` is BotFather's privacy mode ON —
+              the default — and then a group bot hears only commands and
+              replies to itself, so it cannot join in, remember the chat or
+              see a posted coin. `true` is off. Anything else (no token, getMe
+              failed, an older server) is UNKNOWN, and gets the steps with no
+              verdict: telling an owner privacy is on when nobody knows sends
+              them to BotFather for nothing. The flag reports the BotFather
+              setting only — a bot added before it changed still has to be
+              removed and added back — so even "off" says so. */}
+          <p className="mm-hint" id="telegram-privacy-mode">
+            {tg?.canReadAllGroupMessages === true ? (
+              t("settings.text.privacyModeOff")
+            ) : (
+              <>
+                {tg?.canReadAllGroupMessages === false ? t("settings.text.privacyModeOn") : t("settings.text.privacyModeUnknown")}{" "}
+                {t("settings.text.privacyModeSteps")}
+              </>
+            )}
+            {tg?.canJoinGroups === false && <><br />{t("settings.text.joinGroupsOff")}</>}
+          </p>
 
           </details>
           {/* POSTING ON X — hosted only, and only on a RESOLVED `hosted`, so a

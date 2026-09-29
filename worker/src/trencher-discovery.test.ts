@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { keccak256, type PublicClient } from "viem";
 import { CASH, UNISWAP, GRANT_TRENCHER, MERRYMEN_TOKEN, type StoredGrant } from "../../packages/core/src/index";
-import { discoverTrencherUniverse } from "./trencher-discovery";
+import { NOMINATED_VERIFY_MAX, discoverTrencherUniverse } from "./trencher-discovery";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 
 const token="0x1111111111111111111111111111111111111111";
@@ -67,4 +67,140 @@ test("the energy reserve is never a trencher candidate, and held tokens are not 
   const held = await discoverTrencherUniverse(client({ tokens: [token] }), grant, [reservePool]);
   assert.deepEqual(held.held, [token]);
   assert.deepEqual(held.tokens.map((x) => x.address), [token]);
+});
+
+// ─── Nominated coins (Telegram groups, docs/tg-groups.md) ─────────────────
+//
+// A coin posted in a group is a LOOKUP KEY: it decides which pool this pass
+// reads on chain, never whether that pool counts as verified. These tests pin
+// both halves: a nominated pool far outside the top slice IS read, and it
+// passes or fails exactly the checks every other pool does.
+
+/** A pool per index, each with its own token and pool address and a descending volume. */
+const ranked = (n: number) => Array.from({ length: n }, (_, i) => {
+  const hex = (i + 1).toString(16).padStart(4, "0");
+  return {
+    ...pool,
+    tokenAddress: `0x${"a".repeat(36)}${hex}` as `0x${string}`,
+    poolAddress: `0x${"b".repeat(36)}${hex}` as `0x${string}`,
+    poolId: `0x${"b".repeat(36)}${hex}`,
+    volume24hUsd: 10_000_000 - i * 10_000,
+  } as GeckoPool;
+});
+
+/**
+ * A chain where each pool answers for ITS OWN token, and the canonical
+ * factory knows exactly the pools in `canonical` (by token). Every pool read
+ * is recorded, so a test can say which pools the pass actually looked at.
+ */
+function chain(canonical: ReadonlySet<string>, reads: string[]) {
+  const pools = new Map<string, string>();
+  return {
+    register(p: GeckoPool) { pools.set(p.poolAddress!.toLowerCase(), p.tokenAddress.toLowerCase()); },
+    client: {
+      getCode: async () => "0x6000",
+      readContract: async ({ address, functionName, args }: { address: string; functionName: string; args?: readonly unknown[] }) => {
+        const a = address.toLowerCase();
+        const values: Record<string, unknown> = { cash: CASH.USDG, bridge: CASH.WETH, router: UNISWAP.swapRouter02, poolFactory: UNISWAP.v3Factory, vaultFor: vault, owner, VERSION: 1n, tokens: [], decimals: 6 };
+        if (pools.has(a)) {
+          reads.push(a);
+          if (functionName === "token0") return CASH.USDG;
+          if (functionName === "token1") return pools.get(a);
+          if (functionName === "fee") return 3000;
+        }
+        if (functionName === "getPool") {
+          const token = String(args?.[1] ?? "").toLowerCase();
+          if (!canonical.has(token)) return owner; // someone else's pool — not the one posted
+          for (const [poolAddr, t] of pools) if (t === token) return poolAddr;
+        }
+        const result = values[functionName];
+        if (result === undefined) throw new Error(`Unexpected read ${functionName}`);
+        return result;
+      },
+    } as unknown as PublicClient,
+  };
+}
+
+test("a nominated pool outside the top slice is verified by the same on-chain checks", async (t) => {
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  const tape = ranked(30);
+  const far = tape[27]!; // 28th busiest: nowhere near the top 20
+  const reads: string[] = [];
+  const c = chain(new Set(tape.map(p => p.tokenAddress.toLowerCase())), reads);
+  tape.forEach(p => c.register(p));
+
+  // NON-NOMINATED BEHAVIOUR IS UNCHANGED: the top 20 and nothing else.
+  const plain = await discoverTrencherUniverse(c.client, grant, tape);
+  assert.equal(plain.qualified.length, 20);
+  assert.ok(!plain.qualified.some(p => p.tokenAddress === far.tokenAddress), "without a nomination the far pool is never read");
+  assert.ok(!reads.includes(far.poolAddress!.toLowerCase()));
+  const emptySet = await discoverTrencherUniverse(c.client, grant, tape, { nominated: new Set() });
+  assert.deepEqual(emptySet.qualified.map(p => p.tokenAddress), plain.qualified.map(p => p.tokenAddress));
+
+  // Nominated: read, verified, and in the universe — spelled any case.
+  reads.length = 0;
+  const withNomination = await discoverTrencherUniverse(c.client, grant, tape, { nominated: new Set([far.tokenAddress.toUpperCase().replace("0X", "0x")]) });
+  assert.ok(reads.includes(far.poolAddress!.toLowerCase()), "the nominated pool is read on chain");
+  assert.equal(withNomination.qualified.length, 21);
+  assert.ok(withNomination.qualified.some(p => p.tokenAddress === far.tokenAddress));
+  assert.ok(withNomination.tokens.some(tok => tok.address === far.tokenAddress && tok.symbol === `T${far.tokenAddress.slice(-11).toUpperCase()}`),
+    "its identity is address-derived like every other discovered coin");
+  // The rest of the top slice is exactly what it was.
+  assert.deepEqual(withNomination.qualified.slice(0, 20).map(p => p.tokenAddress), plain.qualified.map(p => p.tokenAddress));
+});
+
+test("a nominated pool that fails the canonical factory check is dropped, whoever posted it", async (t) => {
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  const tape = ranked(25);
+  const far = tape[22]!;
+  const reads: string[] = [];
+  // The factory does not return this pool for its token: a look-alike pool.
+  const c = chain(new Set(tape.filter(p => p !== far).map(p => p.tokenAddress.toLowerCase())), reads);
+  tape.forEach(p => c.register(p));
+  const result = await discoverTrencherUniverse(c.client, grant, tape, { nominated: new Set([far.tokenAddress]) });
+  assert.ok(reads.includes(far.poolAddress!.toLowerCase()), "it was read");
+  assert.ok(!result.qualified.some(p => p.tokenAddress === far.tokenAddress), "and refused: a nomination is not provenance");
+  assert.ok(!result.tokens.some(tok => tok.address === far.tokenAddress));
+  assert.equal(result.qualified.length, 20);
+});
+
+test("a nominated pool still has to pass highVolumePools, the v3 venue and the energy exclusion", async (t) => {
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  const tape = ranked(22);
+  const quiet = { ...tape[21]!, volume24hUsd: 99_999 } as GeckoPool; // under TRENCH_VOLUME_MIN
+  const v4 = { ...tape[20]!, dex: "uniswap-v4-robinhood" } as GeckoPool;
+  // Busy enough for highVolumePools, below every top-slice pool: only the
+  // energy exclusion can keep it out.
+  const reserve = { ...pool, tokenAddress: MERRYMEN_TOKEN.address, poolAddress: `0x${"c".repeat(40)}`, poolId: `0x${"c".repeat(40)}`, volume24hUsd: 200_000 } as GeckoPool;
+  const all = [...tape.slice(0, 20), v4, quiet, reserve];
+  const reads: string[] = [];
+  const c = chain(new Set(all.map(p => p.tokenAddress.toLowerCase())), reads);
+  all.forEach(p => c.register(p));
+  const result = await discoverTrencherUniverse(c.client, grant, all, {
+    nominated: new Set([quiet.tokenAddress, v4.tokenAddress, reserve.tokenAddress.toLowerCase()]),
+  });
+  for (const p of [quiet, v4, reserve]) {
+    assert.ok(!result.qualified.some(q => q.tokenAddress.toLowerCase() === p.tokenAddress.toLowerCase()), p.name);
+    assert.ok(!reads.includes(p.poolAddress!.toLowerCase()), "never even read on chain");
+  }
+  assert.equal(result.qualified.length, 20);
+});
+
+test("verification beyond the slice is bounded by the nomination queue", async (t) => {
+  const prior = process.env.TRENCHER_FACTORY_CODE_HASH;
+  process.env.TRENCHER_FACTORY_CODE_HASH = keccak256("0x6000");
+  t.after(() => { if (prior === undefined) delete process.env.TRENCHER_FACTORY_CODE_HASH; else process.env.TRENCHER_FACTORY_CODE_HASH = prior; });
+  const tape = ranked(40);
+  const reads: string[] = [];
+  const c = chain(new Set(tape.map(p => p.tokenAddress.toLowerCase())), reads);
+  tape.forEach(p => c.register(p));
+  const result = await discoverTrencherUniverse(c.client, grant, tape, { nominated: new Set(tape.slice(20).map(p => p.tokenAddress)) });
+  assert.equal(result.qualified.length, 20 + NOMINATED_VERIFY_MAX);
+  assert.equal(new Set(reads).size, 20 + NOMINATED_VERIFY_MAX);
 });

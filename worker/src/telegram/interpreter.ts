@@ -457,7 +457,9 @@ other powers. Rules:
   "liveTrading"; the memecoin strategy using real money → "memecoinLive"; buying brand-new
   unpriced coins → "scout"; launchpad sniping on/off → "launchSniping"; pool depth / price jump /
   price impact checks → "safetyFloors"; adding a token by address → "customTokens"; the AI
-  provider or its key → "aiProvider"; Telegram's own switches → "telegram". Still use kind "set"
+  provider or its key → "aiProvider"; Telegram's own switches → "telegram"; Telegram groups (being
+  in groups on or off, looking at coins people post in groups, how chatty you are in groups) →
+  "telegramGroups". Still use kind "set"
   for those, so the owner is told where to go. Nothing fits → setting "unknown". Never invent a
   value they didn't give.
 - Transfers: kind "transfer" with "address" and "usdg" — ONLY when the user's own message

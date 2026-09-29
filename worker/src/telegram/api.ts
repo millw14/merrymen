@@ -27,7 +27,47 @@ export interface TelegramOpts {
   apiBase?: string;
 }
 
-/** One inbound message, normalized to what the interpreter needs. */
+/** Telegram's kinds of chat (Chat.type). */
+export type TgChatType = "private" | "group" | "supergroup" | "channel";
+
+const CHAT_TYPES: ReadonlySet<string> = new Set<TgChatType>(["private", "group", "supergroup", "channel"]);
+
+/** A known chat type, or undefined for anything Telegram may add later (never guessed). */
+function chatTypeOf(v: unknown): TgChatType | undefined {
+  return typeof v === "string" && CHAT_TYPES.has(v) ? (v as TgChatType) : undefined;
+}
+
+/**
+ * One MessageEntity of the text (or caption) it came with. `offset` and
+ * `length` are UTF-16 code units, which is how JS indexes strings, so
+ * `text.slice(offset, offset + length)` is the entity's text.
+ */
+export interface TgEntity {
+  /** "mention", "text_mention", "bot_command", "url", "text_link", "cashtag", … */
+  type: string;
+  offset: number;
+  length: number;
+  /** The user a `text_mention` names (people without a username are mentioned this way). */
+  userId?: number;
+  /** A `text_link`'s target, which is NOT part of the visible text. */
+  url?: string;
+}
+
+/** The message a message replied to, in the same chat. */
+export interface TgReplyTo {
+  messageId: number;
+  fromId?: number;
+  fromIsBot?: boolean;
+}
+
+/**
+ * One inbound message, normalized to what the interpreter needs.
+ *
+ * Everything after `voiceFileId` is optional and set only when Telegram sent
+ * it, so a private message that carried none of it parses to exactly the
+ * shape it always had. The group code reads those fields; the DM path does
+ * not need them.
+ */
 export interface TgMessage {
   updateId: number;
   chatId: number;
@@ -36,6 +76,88 @@ export interface TgMessage {
   text: string;
   /** Telegram file_id of an attached voice/audio note, if any (for transcription). */
   voiceFileId?: string;
+  /** message_id within the chat: what a reply or a reaction targets. */
+  messageId?: number;
+  /** Telegram's `date`, unix seconds. */
+  dateSec?: number;
+  chatType?: TgChatType;
+  chatTitle?: string;
+  /** A supergroup with topics. */
+  isForum?: boolean;
+  /**
+   * from.is_bot. NOT a loop guard on its own: when `senderChatId` is set (an
+   * anonymous admin, or a linked channel's auto-forward) `from` is Telegram's
+   * placeholder user, and the anonymous-admin one is a bot account.
+   */
+  fromIsBot?: boolean;
+  fromFirstName?: string;
+  /** sender_chat.id: the message was sent on behalf of a chat, not by `from`. */
+  senderChatId?: number;
+  /** The forum topic (or thread) it belongs to; answer in the same one. */
+  messageThreadId?: number;
+  isTopicMessage?: boolean;
+  /** From `entities` when the text is the message text, `caption_entities` when it is the caption. */
+  entities?: TgEntity[];
+  replyTo?: TgReplyTo;
+}
+
+/**
+ * A change in the BOT's own membership of a chat (a `my_chat_member` update):
+ * added, removed, kicked, promoted. `fromId` is who did it, which is how a
+ * group added by the owner is told from one added by a stranger. In a private
+ * chat this only ever means the user blocked or unblocked the bot.
+ */
+export interface TgMemberUpdate {
+  updateId: number;
+  chatId: number;
+  chatType: TgChatType;
+  chatTitle?: string;
+  isForum?: boolean;
+  fromId: number;
+  fromUsername?: string;
+  fromFirstName?: string;
+  /** ChatMember.status: "creator" | "administrator" | "member" | "restricted" | "left" | "kicked". */
+  oldStatus: string;
+  newStatus: string;
+  /**
+   * Only a "restricted" ChatMember carries is_member, and when it is false the
+   * bot is not in the chat at all despite the status.
+   */
+  newIsMember?: boolean;
+  dateSec: number;
+}
+
+/** One person in a new_chat_members service message. */
+export interface TgServiceMember {
+  id: number;
+  isBot: boolean;
+  firstName: string;
+  username?: string;
+}
+
+/**
+ * A group service message: people joined or left, or the group became a
+ * supergroup (and so changed id). These arrive whatever the privacy mode.
+ *
+ * ITS OWN TYPE, NEVER A TgMessage. Everything in `messages` is treated as
+ * something a person typed; a join is not a line anyone said.
+ */
+export interface TgServiceMessage {
+  updateId: number;
+  chatId: number;
+  chatType: TgChatType;
+  chatTitle?: string;
+  messageId: number;
+  dateSec: number;
+  /** Who did it (who added the members, who upgraded the group), when Telegram says. */
+  fromId?: number;
+  newChatMembers?: TgServiceMember[];
+  /** The member who left or was removed; may be the bot itself. */
+  leftChatMember?: { id: number; isBot: boolean };
+  /** Sent in the OLD group: its new supergroup id. */
+  migrateToChatId?: number;
+  /** Sent in the NEW supergroup: the id it had as a group. */
+  migrateFromChatId?: number;
 }
 
 /**
@@ -76,6 +198,20 @@ export type InlineKeyboard = InlineButton[][];
 export interface TgBotInfo {
   id: number;
   username: string;
+  /**
+   * getMe's first_name: the display name members see on the bot's lines
+   * ("Pine Bot"), which is often what they call it rather than its username or
+   * soul name. Absent when Telegram left it out or it was not a string.
+   */
+  firstName?: string;
+  /** getMe's can_join_groups: false when BotFather's "Allow Groups" is off. */
+  canJoinGroups?: boolean;
+  /**
+   * getMe's can_read_all_group_messages: true when privacy mode is off. It
+   * reports the BotFather setting only; a group the bot joined before the
+   * change still delivers as before until the bot is removed and re-added.
+   */
+  canReadAllGroupMessages?: boolean;
 }
 
 function short(token: string): string {
@@ -83,14 +219,68 @@ function short(token: string): string {
 }
 
 /**
- * Call a bot method. Returns the parsed `result` on `{ ok: true }`, else a
- * reason. GET when no body, POST+JSON when a body is given.
+ * An error message with the token cut out. A fetch failure can quote the URL
+ * it failed on, and the URL carries the token. Very short strings are left
+ * alone: a real token is ~46 chars, and cutting a 1-char test token out of a
+ * reason would only mangle it.
  */
-async function call(
-  opts: TelegramOpts,
-  method: string,
-  params?: Record<string, unknown>,
-): Promise<{ result: unknown; reason?: string }> {
+function scrub(message: string, token: string): string {
+  return token.length >= 8 ? message.split(token).join(short(token)) : message;
+}
+
+/**
+ * What a call came back with. `result` on success; otherwise a reason plus
+ * the ResponseParameters Telegram attached, which say what to do next: wait
+ * `retryAfterSec` (flood control, for the whole bot), or send to
+ * `migrateToChatId` (the group became a supergroup and changed id).
+ */
+interface CallResult {
+  result: unknown;
+  reason?: string;
+  errorCode?: number;
+  retryAfterSec?: number;
+  migrateToChatId?: number;
+}
+
+/**
+ * The error details of a refused call. `error_code` falls back to the HTTP
+ * status. retry_after is read from `parameters`; the "retry after N" in the
+ * description is only a fallback for a reply that lost its parameters.
+ */
+function failureOf(env: { description?: unknown; error_code?: unknown; parameters?: unknown }, httpOk: boolean, status: number) {
+  const out: Pick<CallResult, "errorCode" | "retryAfterSec" | "migrateToChatId"> = {};
+  if (typeof env.error_code === "number") out.errorCode = env.error_code;
+  else if (!httpOk) out.errorCode = status;
+  const p = (env.parameters && typeof env.parameters === "object" ? env.parameters : {}) as {
+    retry_after?: unknown;
+    migrate_to_chat_id?: unknown;
+  };
+  if (typeof p.retry_after === "number" && Number.isFinite(p.retry_after) && p.retry_after >= 0) {
+    out.retryAfterSec = p.retry_after;
+  } else if (typeof env.description === "string") {
+    const m = /retry after (\d+)/i.exec(env.description);
+    if (m) out.retryAfterSec = Number(m[1]);
+  }
+  if (typeof p.migrate_to_chat_id === "number" && Number.isSafeInteger(p.migrate_to_chat_id)) {
+    out.migrateToChatId = p.migrate_to_chat_id;
+  }
+  return out;
+}
+
+/** retryAfterSec / migrateToChatId of a refused call, only the ones it has. */
+function nextStep(r: CallResult): { retryAfterSec?: number; migrateToChatId?: number } {
+  return {
+    ...(r.retryAfterSec !== undefined ? { retryAfterSec: r.retryAfterSec } : {}),
+    ...(r.migrateToChatId !== undefined ? { migrateToChatId: r.migrateToChatId } : {}),
+  };
+}
+
+/**
+ * Call a bot method. Returns the parsed `result` on `{ ok: true }`, else a
+ * reason and whatever ResponseParameters came with it. GET when no body,
+ * POST+JSON when a body is given.
+ */
+async function call(opts: TelegramOpts, method: string, params?: Record<string, unknown>): Promise<CallResult> {
   const base = opts.apiBase ?? API_BASE;
   const fetchFn = opts.fetchFn ?? (fetch as unknown as FetchLike);
   const url = `${base}/bot${opts.token}/${method}`;
@@ -101,7 +291,7 @@ async function call(
       ? await fetchFn(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(params) })
       : await fetchFn(url);
   } catch (e) {
-    return { result: null, reason: `request failed: ${e instanceof Error ? e.message : String(e)}` };
+    return { result: null, reason: `request failed: ${scrub(e instanceof Error ? e.message : String(e), opts.token)}` };
   }
   // READ THE BODY ON AN ERROR TOO. Telegram answers a refused request with
   // HTTP 400 AND a JSON description ("Bad Request: can't parse entities…",
@@ -115,84 +305,316 @@ async function call(
   } catch {
     body = null;
   }
-  const env = (body && typeof body === "object" ? body : {}) as { ok?: unknown; result?: unknown; description?: unknown };
+  const env = (body && typeof body === "object" ? body : {}) as {
+    ok?: unknown;
+    result?: unknown;
+    description?: unknown;
+    error_code?: unknown;
+    parameters?: unknown;
+  };
   if (res.ok && env.ok === true) return { result: env.result };
-  if (typeof env.description === "string") return { result: null, reason: env.description };
-  if (!res.ok) return { result: null, reason: `HTTP ${res.status}` };
-  return { result: null, reason: body ? "bot API returned ok:false" : "response is not JSON" };
+  const failure = failureOf(env, res.ok, res.status);
+  if (typeof env.description === "string") return { result: null, reason: env.description, ...failure };
+  if (!res.ok) return { result: null, reason: `HTTP ${res.status}`, ...failure };
+  return { result: null, reason: body ? "bot API returned ok:false" : "response is not JSON", ...failure };
 }
 
 /** Validate a token and return the bot's identity (for the dashboard "test connection"). */
 export async function getMe(opts: TelegramOpts): Promise<{ bot: TgBotInfo | null; reason?: string }> {
   const { result, reason } = await call(opts, "getMe");
   if (!result || typeof result !== "object") return { bot: null, reason: reason ?? `invalid token ${short(opts.token)}` };
-  const r = result as { id?: unknown; username?: unknown };
+  const r = result as { id?: unknown; username?: unknown; first_name?: unknown; can_join_groups?: unknown; can_read_all_group_messages?: unknown };
   if (typeof r.id !== "number" || typeof r.username !== "string") {
     return { bot: null, reason: "getMe: missing id/username" };
   }
-  return { bot: { id: r.id, username: r.username } };
+  return {
+    bot: {
+      id: r.id,
+      username: r.username,
+      ...(typeof r.first_name === "string" && r.first_name.trim() ? { firstName: r.first_name.trim() } : {}),
+      ...(typeof r.can_join_groups === "boolean" ? { canJoinGroups: r.can_join_groups } : {}),
+      ...(typeof r.can_read_all_group_messages === "boolean" ? { canReadAllGroupMessages: r.can_read_all_group_messages } : {}),
+    },
+  };
 }
+
+/**
+ * The update kinds the bot asks for. Telegram keeps this list server-side
+ * until it is changed, so anything left out here is never delivered at all.
+ *
+ * - callback_query is how an inline button press arrives. Without it the
+ *   press is never delivered — the button spins and nothing on this side can
+ *   tell it was tapped.
+ * - my_chat_member is how the bot learns it was added to a group (and by
+ *   whom), removed, or kicked. It is in Telegram's default list, but an
+ *   explicit list that leaves it out switches it off.
+ *
+ * edited_message stays out on purpose: edits are ignored (docs/tg-groups.md).
+ */
+const ALLOWED_UPDATES = ["message", "callback_query", "my_chat_member"] as const;
 
 /** Long-poll for new messages. `offset` is the last handled updateId + 1. */
 export async function getUpdates(
   opts: TelegramOpts,
   offset: number,
   timeoutSec = 25,
-): Promise<{ messages: TgMessage[]; callbacks: TgCallback[]; nextOffset: number; reason?: string }> {
+): Promise<{
+  messages: TgMessage[];
+  callbacks: TgCallback[];
+  members: TgMemberUpdate[];
+  service: TgServiceMessage[];
+  nextOffset: number;
+  reason?: string;
+}> {
   const { result, reason } = await call(opts, "getUpdates", {
     offset,
     timeout: timeoutSec,
-    // callback_query is how an inline button press arrives. Without it here
-    // Telegram never delivers the press at all — the button spins and nothing
-    // on this side can tell it was tapped.
-    allowed_updates: ["message", "callback_query"],
+    allowed_updates: ALLOWED_UPDATES,
   });
-  if (!Array.isArray(result)) return { messages: [], callbacks: [], nextOffset: offset, reason };
+  if (!Array.isArray(result)) return { messages: [], callbacks: [], members: [], service: [], nextOffset: offset, reason };
 
   const messages: TgMessage[] = [];
   const callbacks: TgCallback[] = [];
+  const members: TgMemberUpdate[] = [];
+  const service: TgServiceMessage[] = [];
   let nextOffset = offset;
   for (const raw of result) {
     if (!raw || typeof raw !== "object") continue;
-    const u = raw as { update_id?: unknown; message?: unknown; callback_query?: unknown };
+    const u = raw as { update_id?: unknown; message?: unknown; callback_query?: unknown; my_chat_member?: unknown };
     if (typeof u.update_id === "number") nextOffset = Math.max(nextOffset, u.update_id + 1);
     const cb = parseCallback(u.update_id, u.callback_query);
     if (cb) {
       callbacks.push(cb);
       continue;
     }
-    const m = u.message as
-      | {
-          chat?: { id?: unknown };
-          from?: { id?: unknown; username?: unknown };
-          text?: unknown;
-          caption?: unknown;
-          voice?: { file_id?: unknown };
-          audio?: { file_id?: unknown };
-        }
-      | undefined;
-    if (!m) continue;
-    const chatId = m.chat?.id;
-    const fromId = m.from?.id;
-    if (typeof chatId !== "number" || typeof fromId !== "number") continue;
-    // Accept text messages OR voice/audio notes (for transcription). Voice notes
-    // may carry no text; text falls back to the caption then empty.
-    const voiceFileId =
-      typeof m.voice?.file_id === "string" ? m.voice.file_id
-      : typeof m.audio?.file_id === "string" ? m.audio.file_id
-      : undefined;
-    const text = typeof m.text === "string" ? m.text : typeof m.caption === "string" ? m.caption : "";
-    if (!text && !voiceFileId) continue; // ignore stickers/photos/etc.
-    messages.push({
-      updateId: typeof u.update_id === "number" ? u.update_id : 0,
-      chatId,
-      fromId,
-      fromUsername: typeof m.from?.username === "string" ? m.from.username : undefined,
-      text,
-      voiceFileId,
+    const member = parseMemberUpdate(u.update_id, u.my_chat_member);
+    if (member) {
+      members.push(member);
+      continue;
+    }
+    // A service message goes to `service` or nowhere — never on to the text
+    // path below, even when it cannot be parsed. Telegram never puts text on
+    // one, so no line anyone typed is lost by this.
+    if (isServiceShaped(u.message)) {
+      const s = parseService(u.update_id, u.message);
+      if (s) service.push(s);
+      continue;
+    }
+    const m = parseMessage(u.update_id, u.message);
+    if (m) messages.push(m);
+  }
+  return { messages, callbacks, members, service, nextOffset };
+}
+
+/** The raw Message fields this file reads. */
+interface RawMessage {
+  message_id?: unknown;
+  date?: unknown;
+  chat?: { id?: unknown; type?: unknown; title?: unknown; is_forum?: unknown };
+  from?: { id?: unknown; username?: unknown; first_name?: unknown; is_bot?: unknown };
+  sender_chat?: { id?: unknown };
+  message_thread_id?: unknown;
+  is_topic_message?: unknown;
+  text?: unknown;
+  caption?: unknown;
+  entities?: unknown;
+  caption_entities?: unknown;
+  reply_to_message?: unknown;
+  voice?: { file_id?: unknown };
+  audio?: { file_id?: unknown };
+  new_chat_members?: unknown;
+  left_chat_member?: unknown;
+  migrate_to_chat_id?: unknown;
+  migrate_from_chat_id?: unknown;
+}
+
+/** A text / caption / voice message, or null for anything else (stickers, photos without a caption, …). */
+function parseMessage(updateId: unknown, raw: unknown): TgMessage | null {
+  if (!raw || typeof raw !== "object") return null;
+  const m = raw as RawMessage;
+  const chatId = m.chat?.id;
+  const fromId = m.from?.id;
+  if (typeof chatId !== "number" || typeof fromId !== "number") return null;
+  // Accept text messages OR voice/audio notes (for transcription). Voice notes
+  // may carry no text; text falls back to the caption then empty.
+  const voiceFileId =
+    typeof m.voice?.file_id === "string" ? m.voice.file_id
+    : typeof m.audio?.file_id === "string" ? m.audio.file_id
+    : undefined;
+  const text = typeof m.text === "string" ? m.text : typeof m.caption === "string" ? m.caption : "";
+  if (!text && !voiceFileId) return null; // ignore stickers/photos/etc.
+  // The entities that index into `text`: a caption's come separately.
+  const rawEntities =
+    typeof m.text === "string" ? m.entities
+    : typeof m.caption === "string" ? m.caption_entities
+    : undefined;
+  const chatType = chatTypeOf(m.chat?.type);
+  const replyTo = parseReplyTo(m.reply_to_message);
+  return {
+    updateId: typeof updateId === "number" ? updateId : 0,
+    chatId,
+    fromId,
+    fromUsername: typeof m.from?.username === "string" ? m.from.username : undefined,
+    text,
+    voiceFileId,
+    // Group fields: each only when present, so a message without them keeps
+    // the exact shape it always had.
+    ...(typeof m.message_id === "number" ? { messageId: m.message_id } : {}),
+    ...(typeof m.date === "number" ? { dateSec: m.date } : {}),
+    ...(chatType ? { chatType } : {}),
+    ...(typeof m.chat?.title === "string" ? { chatTitle: m.chat.title } : {}),
+    ...(typeof m.chat?.is_forum === "boolean" ? { isForum: m.chat.is_forum } : {}),
+    ...(typeof m.from?.is_bot === "boolean" ? { fromIsBot: m.from.is_bot } : {}),
+    ...(typeof m.from?.first_name === "string" ? { fromFirstName: m.from.first_name } : {}),
+    ...(typeof m.sender_chat?.id === "number" ? { senderChatId: m.sender_chat.id } : {}),
+    ...(typeof m.message_thread_id === "number" ? { messageThreadId: m.message_thread_id } : {}),
+    ...(typeof m.is_topic_message === "boolean" ? { isTopicMessage: m.is_topic_message } : {}),
+    ...(Array.isArray(rawEntities) ? { entities: parseEntities(rawEntities) } : {}),
+    ...(replyTo ? { replyTo } : {}),
+  };
+}
+
+/** MessageEntity[] → TgEntity[], dropping any entry without a type or a sane span. */
+function parseEntities(raw: unknown[]): TgEntity[] {
+  const out: TgEntity[] = [];
+  for (const e of raw) {
+    if (!e || typeof e !== "object") continue;
+    const x = e as { type?: unknown; offset?: unknown; length?: unknown; user?: { id?: unknown }; url?: unknown };
+    if (typeof x.type !== "string") continue;
+    if (!Number.isInteger(x.offset) || !Number.isInteger(x.length)) continue;
+    const offset = x.offset as number;
+    const length = x.length as number;
+    if (offset < 0 || length < 0) continue;
+    out.push({
+      type: x.type,
+      offset,
+      length,
+      ...(typeof x.user?.id === "number" ? { userId: x.user.id } : {}),
+      ...(typeof x.url === "string" ? { url: x.url } : {}),
     });
   }
-  return { messages, callbacks, nextOffset };
+  return out;
+}
+
+/**
+ * reply_to_message → TgReplyTo, or undefined.
+ *
+ * IN A FORUM, EVERY MESSAGE IN A TOPIC "REPLIES" TO THE TOPIC'S OPENING
+ * SERVICE MESSAGE (the one carrying forum_topic_created) even when nobody
+ * pressed reply. That is where the message lives, not what it answers, so it
+ * is not reported as a reply: a memory line would otherwise point at the
+ * topic's creation, and a topic the bot opened would read as "replied to me".
+ */
+function parseReplyTo(raw: unknown): TgReplyTo | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as { message_id?: unknown; from?: { id?: unknown; is_bot?: unknown }; forum_topic_created?: unknown };
+  if (typeof r.message_id !== "number") return undefined;
+  if (r.forum_topic_created) return undefined;
+  return {
+    messageId: r.message_id,
+    ...(typeof r.from?.id === "number" ? { fromId: r.from.id } : {}),
+    ...(typeof r.from?.is_bot === "boolean" ? { fromIsBot: r.from.is_bot } : {}),
+  };
+}
+
+/** A message carrying any of the service fields this file reports. */
+function isServiceShaped(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object") return false;
+  const m = raw as RawMessage;
+  return (
+    m.new_chat_members !== undefined ||
+    m.left_chat_member !== undefined ||
+    m.migrate_to_chat_id !== undefined ||
+    m.migrate_from_chat_id !== undefined
+  );
+}
+
+/**
+ * A group service message, or null. Needs a known chat type, a message id and
+ * a date; one without them is dropped rather than guessed, like a button
+ * press without its chat.
+ */
+function parseService(updateId: unknown, raw: unknown): TgServiceMessage | null {
+  if (!raw || typeof raw !== "object") return null;
+  const m = raw as RawMessage;
+  const chatId = m.chat?.id;
+  const chatType = chatTypeOf(m.chat?.type);
+  if (typeof chatId !== "number" || !chatType) return null;
+  if (typeof m.message_id !== "number" || typeof m.date !== "number") return null;
+
+  const joined: TgServiceMember[] = [];
+  if (Array.isArray(m.new_chat_members)) {
+    for (const x of m.new_chat_members) {
+      if (!x || typeof x !== "object") continue;
+      const p = x as { id?: unknown; is_bot?: unknown; first_name?: unknown; username?: unknown };
+      if (typeof p.id !== "number") continue;
+      joined.push({
+        id: p.id,
+        isBot: p.is_bot === true,
+        firstName: typeof p.first_name === "string" ? p.first_name : "",
+        ...(typeof p.username === "string" ? { username: p.username } : {}),
+      });
+    }
+  }
+  const leftRaw = (m.left_chat_member && typeof m.left_chat_member === "object" ? m.left_chat_member : null) as {
+    id?: unknown;
+    is_bot?: unknown;
+  } | null;
+  const left = leftRaw && typeof leftRaw.id === "number" ? { id: leftRaw.id, isBot: leftRaw.is_bot === true } : undefined;
+  const to = typeof m.migrate_to_chat_id === "number" && Number.isSafeInteger(m.migrate_to_chat_id) ? m.migrate_to_chat_id : undefined;
+  const from = typeof m.migrate_from_chat_id === "number" && Number.isSafeInteger(m.migrate_from_chat_id) ? m.migrate_from_chat_id : undefined;
+  if (!joined.length && !left && to === undefined && from === undefined) return null;
+
+  return {
+    updateId: typeof updateId === "number" ? updateId : 0,
+    chatId,
+    chatType,
+    ...(typeof m.chat?.title === "string" ? { chatTitle: m.chat.title } : {}),
+    messageId: m.message_id,
+    dateSec: m.date,
+    ...(typeof m.from?.id === "number" ? { fromId: m.from.id } : {}),
+    ...(joined.length ? { newChatMembers: joined } : {}),
+    ...(left ? { leftChatMember: left } : {}),
+    ...(to !== undefined ? { migrateToChatId: to } : {}),
+    ...(from !== undefined ? { migrateFromChatId: from } : {}),
+  };
+}
+
+/**
+ * A my_chat_member update, or null. Who made the change (`from`) is required:
+ * without it an add by the owner cannot be told from an add by a stranger,
+ * and that decides whether the bot speaks there at all.
+ */
+function parseMemberUpdate(updateId: unknown, raw: unknown): TgMemberUpdate | null {
+  if (!raw || typeof raw !== "object") return null;
+  const c = raw as {
+    chat?: { id?: unknown; type?: unknown; title?: unknown; is_forum?: unknown };
+    from?: { id?: unknown; username?: unknown; first_name?: unknown };
+    date?: unknown;
+    old_chat_member?: { status?: unknown };
+    new_chat_member?: { status?: unknown; is_member?: unknown };
+  };
+  const chatId = c.chat?.id;
+  const chatType = chatTypeOf(c.chat?.type);
+  const fromId = c.from?.id;
+  const oldStatus = c.old_chat_member?.status;
+  const newStatus = c.new_chat_member?.status;
+  if (typeof chatId !== "number" || !chatType || typeof fromId !== "number") return null;
+  if (typeof oldStatus !== "string" || typeof newStatus !== "string" || typeof c.date !== "number") return null;
+  return {
+    updateId: typeof updateId === "number" ? updateId : 0,
+    chatId,
+    chatType,
+    ...(typeof c.chat?.title === "string" ? { chatTitle: c.chat.title } : {}),
+    ...(typeof c.chat?.is_forum === "boolean" ? { isForum: c.chat.is_forum } : {}),
+    fromId,
+    ...(typeof c.from?.username === "string" ? { fromUsername: c.from.username } : {}),
+    ...(typeof c.from?.first_name === "string" ? { fromFirstName: c.from.first_name } : {}),
+    oldStatus,
+    newStatus,
+    ...(typeof c.new_chat_member?.is_member === "boolean" ? { newIsMember: c.new_chat_member.is_member } : {}),
+    dateSec: c.date,
+  };
 }
 
 /** A callback_query update, or null when it is not one we can act on. */
@@ -382,6 +804,39 @@ export function withoutLinks(keyboard: InlineKeyboard): { keyboard: InlineKeyboa
 export interface SendExtra {
   /** Inline buttons under the message. */
   keyboard?: InlineKeyboard;
+  /**
+   * Send as a Telegram reply to this message (reply_parameters). If that
+   * message is gone by the time this lands, it is sent as a plain message
+   * instead of failing (allow_sending_without_reply).
+   */
+  replyToMessageId?: number;
+  /** The forum topic to post in (message_thread_id). Only for forum supergroups. */
+  messageThreadId?: number;
+  /** Deliver without a notification sound. */
+  disableNotification?: boolean;
+  /** No link preview card under the text (link_preview_options.is_disabled). */
+  disablePreview?: boolean;
+}
+
+/** A positive integer: the only thing Telegram accepts as a message or thread id. */
+function isId(v: unknown): v is number {
+  return typeof v === "number" && Number.isSafeInteger(v) && v > 0;
+}
+
+/**
+ * The optional send parameters of `extra`, in Telegram's wire shape. Empty
+ * when none is set, so a DM send's request body is exactly what it was
+ * before these options existed.
+ */
+function sendOptions(extra: SendExtra): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (isId(extra.replyToMessageId)) {
+    out.reply_parameters = { message_id: extra.replyToMessageId, allow_sending_without_reply: true };
+  }
+  if (isId(extra.messageThreadId)) out.message_thread_id = extra.messageThreadId;
+  if (extra.disableNotification === true) out.disable_notification = true;
+  if (extra.disablePreview === true) out.link_preview_options = { is_disabled: true };
+  return out;
 }
 
 /** Telegram caps message text at 4096 chars. */
@@ -389,10 +844,23 @@ function clip(t: string): string {
   return t.length > 4096 ? t.slice(0, 4090) + "\n…" : t;
 }
 
+/** What sendMessage reports. `retryAfterSec` / `migrateToChatId` only on a refusal that carried them. */
+export interface SendResult {
+  ok: boolean;
+  reason?: string;
+  messageId?: number;
+  /** Flood control: nothing from this bot should go out for this many seconds. */
+  retryAfterSec?: number;
+  /** The group became a supergroup; this is its new chat id. */
+  migrateToChatId?: number;
+}
+
 /**
  * Send a message. Best-effort — returns a reason on failure, never throws.
  * Sends with HTML parse mode (formatters use <b>/<code>); if Telegram rejects
  * the entities, retries as plain text so a formatting bug never eats a reply.
+ * Every retry keeps the reply / topic / notification / preview options: a
+ * reply that lost them would land as a loose line in the wrong topic.
  *
  * `messageId` comes back on success so a question with buttons can later be
  * edited to show what was decided.
@@ -402,23 +870,23 @@ export async function sendMessage(
   chatId: number,
   text: string,
   extra: SendExtra = {},
-): Promise<{ ok: boolean; reason?: string; messageId?: number }> {
+): Promise<SendResult> {
   const idOf = (r: unknown) => {
     const id = (r as { message_id?: unknown } | null)?.message_id;
     return typeof id === "number" ? id : undefined;
   };
-  const attempt = async (
-    body: string,
-    keyboard: InlineKeyboard | undefined,
-  ): Promise<{ ok: boolean; reason?: string; messageId?: number }> => {
+  const options = sendOptions(extra);
+  const attempt = async (body: string, keyboard: InlineKeyboard | undefined): Promise<SendResult> => {
     const kb = keyboard && keyboard.length ? { reply_markup: markup(keyboard) } : {};
-    const html = await call(opts, "sendMessage", { chat_id: chatId, text: body, parse_mode: "HTML", ...kb });
+    const html = await call(opts, "sendMessage", { chat_id: chatId, text: body, parse_mode: "HTML", ...kb, ...options });
     if (html.result != null) return { ok: true, messageId: idOf(html.result) };
     if (html.reason && /parse|entit|tag/i.test(html.reason)) {
-      const plain = await call(opts, "sendMessage", { chat_id: chatId, text: body.replace(/<[^>]+>/g, ""), ...kb });
-      return plain.result != null ? { ok: true, messageId: idOf(plain.result) } : { ok: false, reason: plain.reason };
+      const plain = await call(opts, "sendMessage", { chat_id: chatId, text: body.replace(/<[^>]+>/g, ""), ...kb, ...options });
+      return plain.result != null
+        ? { ok: true, messageId: idOf(plain.result) }
+        : { ok: false, reason: plain.reason, ...nextStep(plain) };
     }
-    return { ok: false, reason: html.reason };
+    return { ok: false, reason: html.reason, ...nextStep(html) };
   };
 
   const first = await attempt(clip(text), extra.keyboard);
@@ -469,10 +937,65 @@ export async function editMessageText(
 
 /**
  * Show "typing…" in the chat while an answer is being looked up — the lookups
- * take a few seconds, and silence reads as a dead bot. Best-effort.
+ * take a few seconds, and silence reads as a dead bot. Best-effort, never
+ * throws. In a forum the status shows only in the topic named by
+ * `messageThreadId`.
+ *
+ * `ok` is also the cheapest proof that a chat can be written to, with nothing
+ * left behind in it: Telegram refuses it where it would refuse a message (a
+ * person who never opened a DM with the bot, or who blocked it).
  */
-export async function sendChatAction(opts: TelegramOpts, chatId: number, action: "typing" = "typing"): Promise<void> {
-  await call(opts, "sendChatAction", { chat_id: chatId, action });
+export async function sendChatAction(
+  opts: TelegramOpts,
+  chatId: number,
+  action: "typing" = "typing",
+  messageThreadId?: number,
+): Promise<{ ok: boolean; reason?: string }> {
+  const r = await call(opts, "sendChatAction", {
+    chat_id: chatId,
+    action,
+    ...(isId(messageThreadId) ? { message_thread_id: messageThreadId } : {}),
+  });
+  return r.result != null ? { ok: true } : { ok: false, reason: r.reason };
+}
+
+/**
+ * Put one emoji reaction on a message, or clear ours with `null`. Bots get
+ * one reaction per message, from Telegram's fixed emoji list; the caller
+ * picks from a subset of it. Best-effort, never throws; `retryAfterSec`
+ * comes back on flood control like a send.
+ */
+export async function setMessageReaction(
+  opts: TelegramOpts,
+  chatId: number,
+  messageId: number,
+  emoji: string | null,
+): Promise<{ ok: boolean; reason?: string; retryAfterSec?: number }> {
+  const r = await call(opts, "setMessageReaction", {
+    chat_id: chatId,
+    message_id: messageId,
+    reaction: emoji ? [{ type: "emoji", emoji }] : [],
+  });
+  if (r.result != null) return { ok: true };
+  return { ok: false, reason: r.reason, ...(r.retryAfterSec !== undefined ? { retryAfterSec: r.retryAfterSec } : {}) };
+}
+
+/** Leave a group (a stranger's group the owner said no to). Never throws. */
+export async function leaveChat(opts: TelegramOpts, chatId: number): Promise<{ ok: boolean; reason?: string }> {
+  const r = await call(opts, "leaveChat", { chat_id: chatId });
+  return r.result != null ? { ok: true } : { ok: false, reason: r.reason };
+}
+
+/**
+ * A member's status in a chat ("creator", "administrator", "member",
+ * "restricted", "left", "kicked"), or null when Telegram would not say.
+ * Telegram only guarantees this for other users when the bot is an admin, so
+ * null means "unknown", never "not a member".
+ */
+export async function getChatMember(opts: TelegramOpts, chatId: number, userId: number): Promise<{ status: string } | null> {
+  const r = await call(opts, "getChatMember", { chat_id: chatId, user_id: userId });
+  const status = (r.result && typeof r.result === "object" ? (r.result as { status?: unknown }).status : undefined);
+  return typeof status === "string" ? { status } : null;
 }
 
 /**
@@ -524,7 +1047,7 @@ async function sendFile(
     if (body?.ok) return { ok: true };
     return { ok: false, reason: body?.description ?? `HTTP ${res.status}` };
   } catch (e) {
-    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+    return { ok: false, reason: scrub(e instanceof Error ? e.message : String(e), opts.token) };
   }
 }
 

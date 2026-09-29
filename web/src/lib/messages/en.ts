@@ -258,6 +258,11 @@ export const EN = {
   "settings.label.allowControlCommands": "allow control commands",
   "settings.label.allowTransfers": "allow transfers",
   "settings.label.proactivePings": "proactive pings",
+  // TELEGRAM GROUPS (docs/tg-groups.md) — "Telegram groups" is the product
+  // term everywhere; the web room owns the other name.
+  "settings.label.hangOutInTelegramGroups": "Hang out in Telegram groups",
+  "settings.label.lookAtCoinsPeoplePost": "Look at coins people post",
+  "settings.label.howChattyInGroups": "How chatty in groups",
   "settings.label.enableRemoteControl": "enable remote control",
   "settings.label.capabilities": "capabilities",
   "settings.label.agentModeAgent": "🤖 agent mode · /agent",
@@ -270,6 +275,7 @@ export const EN = {
   "settings.section.agentSettings": "Agent settings",
   "settings.section.tradingBasket": "Trading basket",
   "settings.section.telegramControls": "Telegram controls",
+  "settings.section.telegramGroups": "Telegram groups",
   "settings.section.computerAccess": "Computer access",
   "settings.section.merryCircle": "Merry Circle",
   "settings.section.connections": "Connections",
@@ -287,6 +293,11 @@ export const EN = {
   "settings.hint.offTheBotCan": "Off = the bot can answer questions but not change state.",
   "settings.hint.requiresExistingTransferPermission": "\r\n                Requires existing transfer permission. Otherwise, use Withdraw in Profile.\r\n              ",
   "settings.hint.theBotMessagesYou": "The bot messages you first: trades landing, drawdown/gas/expiry warnings, price alerts, and the daily campfire report.",
+  "settings.hint.hangOutInTelegramGroups": "Add your bot to a group and it acts like one more person there: it answers when someone calls it, joins in now and then, and remembers the chat. If someone else adds it, it stays silent until you answer Stay or Leave in your DMs. It never posts trade alerts, sizes, prices or P&L.",
+  // Worded by the contract. The coin is only ever a nomination: the owner is
+  // told who decides and that no limit moves, in that order.
+  "settings.hint.lookAtCoinsPeoplePost": "Only in trencher mode. Its Brain decides and every trencher limit still applies.",
+  "settings.hint.howChattyInGroups": "How often it joins in when nobody called it. A mention, a reply to it or its name gets an answer at any level.",
   "settings.hint.theMasterSwitchOff": "The master switch. Off = every PC command is refused, regardless of the toggles below.",
   "settings.hint.clickToToggleOnly": "Click to toggle. Only enabled groups work; the rest are refused. “vision” and “voice” need extra keys below.",
   "settings.hint.sendATaskWith": "\r\n              Send a task with ",
@@ -458,6 +469,17 @@ export const EN = {
   "settings.text.aSummaryEvery15": "A summary every 15 minutes",
   "settings.text.aSummaryEvery30": "A summary every 30 minutes",
   "settings.text.aSummaryEveryHour": "A summary every hour",
+  "settings.text.chattinessQuiet": "Quiet — mostly lurks",
+  "settings.text.chattinessNormal": "Normal — joins in now and then",
+  "settings.text.chattinessChatty": "Chatty — joins in more often",
+  // PRIVACY MODE, three states: on (the steps, with the verdict), off (it can
+  // follow the chat, and the caveat Telegram imposes), unknown (the steps, no
+  // verdict). The steps are one string so no state can show half of them.
+  "settings.text.privacyModeOn": "Privacy mode is on, so in a group your bot only hears commands and replies to its own messages — it can't join in, remember the chat or see coins people post. To change that:",
+  "settings.text.privacyModeOff": "Privacy mode is off: your bot can follow the whole chat in its groups. If it was already in a group before you turned privacy off, remove it from that group and add it back.",
+  "settings.text.privacyModeUnknown": "To let your bot follow the whole chat in a group, turn privacy mode off:",
+  "settings.text.privacyModeSteps": "@BotFather → /setprivacy → your bot → Disable, then remove the bot from the group and add it back. Making it a group admin works too.",
+  "settings.text.joinGroupsOff": "Your bot can't be added to groups right now: @BotFather → /setjoingroups → your bot → Enable.",
   "settings.text.linkCode": "link code:",
   "settings.text.send": "— send",
   "settings.text.fromTelegram": "from Telegram",

@@ -12,10 +12,12 @@ import {
   SETTINGS_DEFAULTS,
   SLIPPAGE_BPS_MAX,
   STOCK_TOKENS,
+  TELEGRAM_GROUPS_CHATTINESS,
   isHostedMode,
   isValidCustomToken,
   type CustomToken,
   type MerrymenSettings,
+  type TelegramGroupsChattiness,
 } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
 import { writeFileAtomicSync } from "./atomic-write";
@@ -171,6 +173,17 @@ export interface ResolvedConfig {
   telegramNotifyEnabled: boolean;
   telegramNotifyEveryMin: number;
   telegramDigestHour: number;
+  /**
+   * Telegram groups (docs/tg-groups.md "Settings"). Read live on every poll
+   * like the rest of the Telegram block, so a dashboard change applies without
+   * a restart. Off = silent in every group, while membership changes are
+   * still recorded so turning it back on works.
+   */
+  telegramGroupsEnabled: boolean;
+  /** Look at coins posted in a group (trencher mode only; a nomination, never an order). */
+  telegramGroupCoinsEnabled: boolean;
+  /** How often it joins a group conversation unprompted. */
+  telegramGroupsChattiness: TelegramGroupsChattiness;
   telegramPcControlEnabled: boolean;
   telegramCapabilities: string[];
   telegramFilesRoot: string | undefined;
@@ -468,6 +481,15 @@ export function mergeSettings(
     telegramNotifyEnabled: bool(file.telegramNotifyEnabled, env.MERRYMEN_TELEGRAM_NOTIFY, d.telegramNotifyEnabled),
     telegramNotifyEveryMin: num(file.telegramNotifyEveryMin, env.MERRYMEN_TELEGRAM_NOTIFY_EVERY_MIN, d.telegramNotifyEveryMin, 0, 1440),
     telegramDigestHour: num(file.telegramDigestHour, env.MERRYMEN_TELEGRAM_DIGEST_HOUR, d.telegramDigestHour, 0, 23),
+    // Telegram groups. NOT forced off hosted, unlike the remote-execution block
+    // below: talking in a group runs no shell and moves no money (its model
+    // calls have their own daily allowance, docs/tg-groups.md rule 7), and a
+    // coin posted there is a nomination the Brain and every trencher limit
+    // still judge. A chattiness the resolver does not know (a typo, a level from
+    // a newer build) falls back to "normal" rather than to anything louder.
+    telegramGroupsEnabled: bool(file.telegramGroupsEnabled, env.MERRYMEN_TELEGRAM_GROUPS, d.telegramGroupsEnabled),
+    telegramGroupCoinsEnabled: bool(file.telegramGroupCoinsEnabled, env.MERRYMEN_TELEGRAM_GROUP_COINS, d.telegramGroupCoinsEnabled),
+    telegramGroupsChattiness: oneOf(file.telegramGroupsChattiness, env.MERRYMEN_TELEGRAM_GROUPS_CHATTINESS, TELEGRAM_GROUPS_CHATTINESS, d.telegramGroupsChattiness),
     // Remote-execution surface — FORCED OFF hosted, regardless of file or env.
     // Self-hosted these mean "a shell / PC control on the owner's own machine";
     // hosted they would mean "a shell on OUR server", with an allowlist the

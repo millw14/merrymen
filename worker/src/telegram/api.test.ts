@@ -1,7 +1,22 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { BOT_COMMANDS, answerCallbackQuery, editMessageText, esc, getMe, getUpdates, sendMessage, setMyCommands, publicBotCommands, type FetchLike } from "./api";
+import {
+  BOT_COMMANDS,
+  answerCallbackQuery,
+  editMessageText,
+  esc,
+  getChatMember,
+  getMe,
+  getUpdates,
+  leaveChat,
+  sendChatAction,
+  sendMessage,
+  setMessageReaction,
+  setMyCommands,
+  publicBotCommands,
+  type FetchLike,
+} from "./api";
 import { parseSlash } from "./interpreter";
 
 /** Fake fetch capturing the last call, returning a canned envelope. */
@@ -88,10 +103,15 @@ describe("getUpdates", () => {
     assert.match(reason!, /flood/);
   });
 
-  it("asks Telegram for button presses, or they are never delivered", async () => {
+  it("asks Telegram for button presses and its own membership changes, or they are never delivered", async () => {
+    // PINNED ON PURPOSE. Telegram keeps this list server-side, and whatever it
+    // leaves out is never delivered. callback_query carries button presses;
+    // my_chat_member (added for Telegram groups, docs/tg-groups.md) is how the
+    // bot learns it was added to a group, by whom, or removed. edited_message
+    // stays out: edits are ignored.
     const f = fakeFetch(200, OK([]));
     await getUpdates({ token: "t", fetchFn: f }, 1);
-    assert.match(f.lastBody!, /"allowed_updates":\["message","callback_query"\]/);
+    assert.match(f.lastBody!, /"allowed_updates":\["message","callback_query","my_chat_member"\]/);
   });
 
   it("returns a button press as a callback, never as a typed message", async () => {
@@ -480,5 +500,747 @@ describe("a refused request keeps Telegram's reason", () => {
     const f: FetchLike = async () => ({ ok: false, status: 502, json: async () => { throw new Error("html"); } });
     const { reason } = await getMe({ token: "t", fetchFn: f });
     assert.match(reason!, /HTTP 502/);
+  });
+});
+
+// ─── Telegram groups (docs/tg-groups.md) ──────────────────────────────────
+
+type Call = { url: string; body: Record<string, unknown> | null };
+
+/**
+ * Fake fetch that answers each call from `answers` in turn (the last one
+ * repeats) and records every request, parsed.
+ */
+function scripted(...answers: { status?: number; body: unknown }[]): FetchLike & { calls: Call[] } {
+  const f = (async (url: string, init?: { body?: string }) => {
+    f.calls.push({ url, body: init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : null });
+    const a = answers[Math.min(f.calls.length - 1, answers.length - 1)]!;
+    const status = a.status ?? 200;
+    return { ok: status < 400, status, json: async () => a.body };
+  }) as FetchLike & { calls: Call[] };
+  f.calls = [];
+  return f;
+}
+
+const BOT_ID = 9001;
+const GROUP = -1001234567890;
+
+describe("getUpdates — group messages", () => {
+  it("a group message with a caption, entities, a reply and a topic parses fully", async () => {
+    const caption = "@pine_bot Bo look at this chart";
+    const f = fakeFetch(
+      200,
+      OK([
+        {
+          update_id: 500,
+          message: {
+            message_id: 91,
+            date: 1_790_000_000,
+            chat: { id: GROUP, type: "supergroup", title: "frog pond", is_forum: true },
+            from: { id: 42, is_bot: false, first_name: "Ann", username: "ann" },
+            message_thread_id: 7,
+            is_topic_message: true,
+            photo: [{ file_id: "p" }],
+            caption,
+            caption_entities: [
+              { type: "mention", offset: 0, length: 9 },
+              { type: "text_mention", offset: 10, length: 2, user: { id: 77, is_bot: false, first_name: "Bo" } },
+              { type: "text_link", offset: 26, length: 5, url: "https://dexscreener.com/robinhood/0xabc" },
+            ],
+            reply_to_message: {
+              message_id: 88,
+              date: 1_789_999_990,
+              chat: { id: GROUP, type: "supergroup" },
+              from: { id: BOT_ID, is_bot: true, first_name: "Pine" },
+              text: "gm",
+            },
+          },
+        },
+      ]),
+    );
+    const { messages, service, members } = await getUpdates({ token: "t", fetchFn: f }, 500);
+    assert.deepEqual(service, []);
+    assert.deepEqual(members, []);
+    assert.deepEqual(messages, [
+      {
+        updateId: 500,
+        chatId: GROUP,
+        fromId: 42,
+        fromUsername: "ann",
+        text: caption,
+        voiceFileId: undefined,
+        messageId: 91,
+        dateSec: 1_790_000_000,
+        chatType: "supergroup",
+        chatTitle: "frog pond",
+        isForum: true,
+        fromIsBot: false,
+        fromFirstName: "Ann",
+        messageThreadId: 7,
+        isTopicMessage: true,
+        entities: [
+          { type: "mention", offset: 0, length: 9 },
+          { type: "text_mention", offset: 10, length: 2, userId: 77 },
+          { type: "text_link", offset: 26, length: 5, url: "https://dexscreener.com/robinhood/0xabc" },
+        ],
+        replyTo: { messageId: 88, fromId: BOT_ID, fromIsBot: true },
+      },
+    ]);
+    // Offsets index the caption (UTF-16, like JS strings).
+    const [mention, textMention] = messages[0]!.entities!;
+    assert.equal(caption.slice(mention!.offset, mention!.offset + mention!.length), "@pine_bot");
+    assert.equal(caption.slice(textMention!.offset, textMention!.offset + textMention!.length), "Bo");
+  });
+
+  it("text entities come from `entities` (never the caption's), and malformed ones are dropped, not guessed", async () => {
+    const f = fakeFetch(
+      200,
+      OK([
+        {
+          update_id: 1,
+          message: {
+            message_id: 2,
+            date: 3,
+            chat: { id: -55, type: "group", title: "g" },
+            from: { id: 4, is_bot: false, first_name: "Cy" },
+            text: "🐸 /help@pine_bot",
+            entities: [
+              { type: "bot_command", offset: 3, length: 14 },
+              { type: "mention", offset: -1, length: 3 },
+              { type: "mention", offset: 1.5, length: 3 },
+              { offset: 0, length: 1 },
+              "junk",
+              null,
+            ],
+            caption_entities: [{ type: "url", offset: 0, length: 1 }],
+          },
+        },
+      ]),
+    );
+    const { messages } = await getUpdates({ token: "t", fetchFn: f }, 1);
+    assert.deepEqual(messages[0]!.entities, [{ type: "bot_command", offset: 3, length: 14 }]);
+    const e = messages[0]!.entities![0]!;
+    // The frog is two UTF-16 units, and the offset counts them that way.
+    assert.equal(messages[0]!.text.slice(e.offset, e.offset + e.length), "/help@pine_bot");
+    assert.equal(messages[0]!.chatType, "group");
+    assert.equal(messages[0]!.isForum, undefined);
+  });
+
+  it("a text message with no entities array has no `entities` key; an empty one is kept empty", async () => {
+    const f = fakeFetch(
+      200,
+      OK([
+        { update_id: 1, message: { message_id: 1, date: 1, chat: { id: -5, type: "group" }, from: { id: 4 }, text: "hi" } },
+        { update_id: 2, message: { message_id: 2, date: 1, chat: { id: -5, type: "group" }, from: { id: 4 }, text: "yo", entities: [] } },
+      ]),
+    );
+    const { messages } = await getUpdates({ token: "t", fetchFn: f }, 1);
+    assert.equal("entities" in messages[0]!, false);
+    assert.deepEqual(messages[1]!.entities, []);
+  });
+
+  it("a private message parses exactly as before — the legacy shape has exactly the old keys", async () => {
+    const f = fakeFetch(
+      200,
+      OK([
+        { update_id: 100, message: { text: "/status", chat: { id: 555 }, from: { id: 555, username: "alice" } } },
+        { update_id: 101, message: { chat: { id: 555 }, from: { id: 555 }, voice: { file_id: "v1" } } },
+      ]),
+    );
+    const { messages, members, service } = await getUpdates({ token: "t", fetchFn: f }, 100);
+    assert.deepEqual(messages, [
+      { updateId: 100, chatId: 555, fromId: 555, fromUsername: "alice", text: "/status", voiceFileId: undefined },
+      { updateId: 101, chatId: 555, fromId: 555, fromUsername: undefined, text: "", voiceFileId: "v1" },
+    ]);
+    for (const m of messages) {
+      assert.deepEqual(Object.keys(m).sort(), ["chatId", "fromId", "fromUsername", "text", "updateId", "voiceFileId"]);
+    }
+    assert.deepEqual(members, []);
+    assert.deepEqual(service, []);
+  });
+
+  it("a real private message keeps every old field as it was, and only adds what Telegram sent", async () => {
+    const f = fakeFetch(
+      200,
+      OK([
+        {
+          update_id: 7,
+          message: {
+            message_id: 12,
+            date: 1_700_000_000,
+            chat: { id: 555, type: "private", first_name: "Alice", username: "alice" },
+            from: { id: 555, is_bot: false, first_name: "Alice", username: "alice", language_code: "en" },
+            text: "hi",
+          },
+        },
+      ]),
+    );
+    const { messages } = await getUpdates({ token: "t", fetchFn: f }, 7);
+    assert.deepEqual(messages, [
+      {
+        updateId: 7,
+        chatId: 555,
+        fromId: 555,
+        fromUsername: "alice",
+        text: "hi",
+        voiceFileId: undefined,
+        messageId: 12,
+        dateSec: 1_700_000_000,
+        chatType: "private",
+        fromIsBot: false,
+        fromFirstName: "Alice",
+      },
+    ]);
+  });
+
+  it("a topic message's implicit reply to the topic opener is not reported as a reply", async () => {
+    const f = fakeFetch(
+      200,
+      OK([
+        {
+          update_id: 1,
+          message: {
+            message_id: 40,
+            date: 1,
+            chat: { id: GROUP, type: "supergroup", is_forum: true },
+            from: { id: 4, is_bot: false, first_name: "Di" },
+            message_thread_id: 30,
+            is_topic_message: true,
+            text: "first!",
+            reply_to_message: {
+              message_id: 30,
+              date: 0,
+              chat: { id: GROUP, type: "supergroup" },
+              from: { id: BOT_ID, is_bot: true, first_name: "Pine" },
+              forum_topic_created: { name: "coins", icon_color: 1 },
+            },
+          },
+        },
+      ]),
+    );
+    const { messages } = await getUpdates({ token: "t", fetchFn: f }, 1);
+    assert.equal(messages[0]!.replyTo, undefined);
+    assert.equal("replyTo" in messages[0]!, false);
+    assert.equal(messages[0]!.messageThreadId, 30);
+  });
+
+  it("a reply without a sender (e.g. to a channel post) keeps just the message id; a reply without an id is none", async () => {
+    const f = fakeFetch(
+      200,
+      OK([
+        { update_id: 1, message: { chat: { id: -5, type: "group" }, from: { id: 4 }, text: "a", reply_to_message: { message_id: 3 } } },
+        { update_id: 2, message: { chat: { id: -5, type: "group" }, from: { id: 4 }, text: "b", reply_to_message: { from: { id: 9 } } } },
+      ]),
+    );
+    const { messages } = await getUpdates({ token: "t", fetchFn: f }, 1);
+    assert.deepEqual(messages[0]!.replyTo, { messageId: 3 });
+    assert.equal("replyTo" in messages[1]!, false);
+  });
+
+  it("an anonymous admin's line carries sender_chat; `from` is Telegram's placeholder and says is_bot", async () => {
+    const f = fakeFetch(
+      200,
+      OK([
+        {
+          update_id: 1,
+          message: {
+            message_id: 5,
+            date: 1,
+            chat: { id: GROUP, type: "supergroup", title: "frog pond" },
+            from: { id: 1087968824, is_bot: true, first_name: "Group", username: "GroupAnonymousBot" },
+            sender_chat: { id: GROUP, type: "supergroup", title: "frog pond" },
+            text: "hello from nobody",
+          },
+        },
+      ]),
+    );
+    const { messages } = await getUpdates({ token: "t", fetchFn: f }, 1);
+    assert.equal(messages[0]!.senderChatId, GROUP);
+    assert.equal(messages[0]!.fromIsBot, true);
+    assert.equal(messages[0]!.fromId, 1087968824);
+  });
+
+  it("an unknown chat type is left out rather than guessed", async () => {
+    const f = fakeFetch(200, OK([{ update_id: 1, message: { chat: { id: -5, type: "megagroup" }, from: { id: 4 }, text: "x" } }]));
+    const { messages } = await getUpdates({ token: "t", fetchFn: f }, 1);
+    assert.equal(messages.length, 1);
+    assert.equal("chatType" in messages[0]!, false);
+  });
+});
+
+describe("getUpdates — service messages", () => {
+  it("joins, leaves and migrations land in `service`, never in `messages`", async () => {
+    const chat = { id: -555, type: "group", title: "frog pond" };
+    const f = fakeFetch(
+      200,
+      OK([
+        {
+          update_id: 10,
+          message: {
+            message_id: 1,
+            date: 100,
+            chat,
+            from: { id: 42, is_bot: false, first_name: "Ann" },
+            new_chat_members: [
+              { id: BOT_ID, is_bot: true, first_name: "Pine", username: "pine_bot" },
+              { id: 43, is_bot: false, first_name: "Bo" },
+              { is_bot: false, first_name: "no id" },
+            ],
+            new_chat_member: { id: BOT_ID, is_bot: true, first_name: "Pine" },
+            new_chat_participant: { id: BOT_ID, is_bot: true, first_name: "Pine" },
+          },
+        },
+        {
+          update_id: 11,
+          message: { message_id: 2, date: 101, chat, from: { id: 43 }, left_chat_member: { id: 43, is_bot: false, first_name: "Bo" } },
+        },
+        {
+          update_id: 12,
+          message: { message_id: 3, date: 102, chat, from: { id: 42 }, migrate_to_chat_id: GROUP },
+        },
+        {
+          update_id: 13,
+          message: {
+            message_id: 1,
+            date: 102,
+            chat: { id: GROUP, type: "supergroup", title: "frog pond" },
+            from: { id: 1087968824, is_bot: true, first_name: "Group" },
+            sender_chat: { id: GROUP },
+            migrate_from_chat_id: -555,
+          },
+        },
+        { update_id: 14, message: { message_id: 4, date: 103, chat, from: { id: 42, first_name: "Ann" }, text: "welcome pine" } },
+      ]),
+    );
+    const { messages, service, members, nextOffset } = await getUpdates({ token: "t", fetchFn: f }, 10);
+    assert.deepEqual(members, []);
+    assert.deepEqual(service, [
+      {
+        updateId: 10,
+        chatId: -555,
+        chatType: "group",
+        chatTitle: "frog pond",
+        messageId: 1,
+        dateSec: 100,
+        fromId: 42,
+        newChatMembers: [
+          { id: BOT_ID, isBot: true, firstName: "Pine", username: "pine_bot" },
+          { id: 43, isBot: false, firstName: "Bo" },
+        ],
+      },
+      { updateId: 11, chatId: -555, chatType: "group", chatTitle: "frog pond", messageId: 2, dateSec: 101, fromId: 43, leftChatMember: { id: 43, isBot: false } },
+      { updateId: 12, chatId: -555, chatType: "group", chatTitle: "frog pond", messageId: 3, dateSec: 102, fromId: 42, migrateToChatId: GROUP },
+      { updateId: 13, chatId: GROUP, chatType: "supergroup", chatTitle: "frog pond", messageId: 1, dateSec: 102, fromId: 1087968824, migrateFromChatId: -555 },
+    ]);
+    // Only the line someone actually typed is a message.
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0]!.text, "welcome pine");
+    assert.equal(nextOffset, 15);
+  });
+
+  it("a service message without a sender still lands, with no fromId", async () => {
+    const f = fakeFetch(
+      200,
+      OK([{ update_id: 1, message: { message_id: 9, date: 5, chat: { id: -5, type: "group" }, left_chat_member: { id: BOT_ID, is_bot: true } } }]),
+    );
+    const { service } = await getUpdates({ token: "t", fetchFn: f }, 1);
+    assert.deepEqual(service, [{ updateId: 1, chatId: -5, chatType: "group", messageId: 9, dateSec: 5, leftChatMember: { id: BOT_ID, isBot: true } }]);
+  });
+
+  it("a service message that cannot be parsed is dropped from both lists — never typed text — and the offset still advances", async () => {
+    const f = fakeFetch(
+      200,
+      OK([
+        // no chat type
+        { update_id: 20, message: { message_id: 1, date: 1, chat: { id: -5 }, from: { id: 4 }, new_chat_members: [{ id: 6, first_name: "E" }] } },
+        // no message id
+        { update_id: 21, message: { date: 1, chat: { id: -5, type: "group" }, from: { id: 4 }, left_chat_member: { id: 6 } } },
+        // nothing usable in the service fields
+        { update_id: 22, message: { message_id: 3, date: 1, chat: { id: -5, type: "group" }, from: { id: 4 }, new_chat_members: [], migrate_to_chat_id: "x" } },
+        // a service field AND text: still not a typed line
+        { update_id: 23, message: { message_id: 4, date: 1, chat: { id: -5 }, from: { id: 4 }, text: "sneaky", left_chat_member: { id: 6 } } },
+      ]),
+    );
+    const { messages, service, nextOffset } = await getUpdates({ token: "t", fetchFn: f }, 20);
+    assert.deepEqual(messages, []);
+    assert.deepEqual(service, []);
+    assert.equal(nextOffset, 24);
+  });
+
+  it("other service messages (pins, titles, photos) are dropped as before", async () => {
+    const chat = { id: -5, type: "group" };
+    const f = fakeFetch(
+      200,
+      OK([
+        { update_id: 1, message: { message_id: 1, date: 1, chat, from: { id: 4 }, new_chat_title: "new name" } },
+        { update_id: 2, message: { message_id: 2, date: 1, chat, from: { id: 4 }, pinned_message: { message_id: 1, date: 1, chat, text: "pinned" } } },
+        { update_id: 3, message: { message_id: 3, date: 1, chat, from: { id: 4 }, sticker: { file_id: "s" } } },
+      ]),
+    );
+    const { messages, service, nextOffset } = await getUpdates({ token: "t", fetchFn: f }, 1);
+    assert.deepEqual(messages, []);
+    assert.deepEqual(service, []);
+    assert.equal(nextOffset, 4);
+  });
+});
+
+describe("getUpdates — my_chat_member", () => {
+  it("the bot's own membership changes land in `members`, with who made them", async () => {
+    const f = fakeFetch(
+      200,
+      OK([
+        {
+          update_id: 30,
+          my_chat_member: {
+            chat: { id: GROUP, type: "supergroup", title: "frog pond", is_forum: true },
+            from: { id: 42, is_bot: false, first_name: "Ann", username: "ann" },
+            date: 1_790_000_000,
+            old_chat_member: { status: "left", user: { id: BOT_ID, is_bot: true, first_name: "Pine" } },
+            new_chat_member: { status: "member", user: { id: BOT_ID, is_bot: true, first_name: "Pine" } },
+          },
+        },
+        {
+          update_id: 31,
+          my_chat_member: {
+            chat: { id: -555, type: "group", title: "old pond" },
+            from: { id: 43, is_bot: false, first_name: "Bo" },
+            date: 1_790_000_100,
+            old_chat_member: { status: "member", user: { id: BOT_ID } },
+            new_chat_member: { status: "kicked", until_date: 0, user: { id: BOT_ID } },
+          },
+        },
+        {
+          update_id: 32,
+          my_chat_member: {
+            chat: { id: 555, type: "private", first_name: "Alice" },
+            from: { id: 555, is_bot: false, first_name: "Alice" },
+            date: 1_790_000_200,
+            old_chat_member: { status: "member", user: { id: BOT_ID } },
+            new_chat_member: { status: "kicked", until_date: 0, user: { id: BOT_ID } },
+          },
+        },
+        {
+          update_id: 33,
+          my_chat_member: {
+            chat: { id: GROUP, type: "supergroup", title: "frog pond" },
+            from: { id: 42, first_name: "Ann" },
+            date: 1_790_000_300,
+            old_chat_member: { status: "member", user: { id: BOT_ID } },
+            new_chat_member: { status: "restricted", is_member: false, can_send_messages: false, user: { id: BOT_ID } },
+          },
+        },
+      ]),
+    );
+    const { members, messages, callbacks, service, nextOffset } = await getUpdates({ token: "t", fetchFn: f }, 30);
+    assert.deepEqual(messages, []);
+    assert.deepEqual(callbacks, []);
+    assert.deepEqual(service, []);
+    assert.deepEqual(members, [
+      {
+        updateId: 30,
+        chatId: GROUP,
+        chatType: "supergroup",
+        chatTitle: "frog pond",
+        isForum: true,
+        fromId: 42,
+        fromUsername: "ann",
+        fromFirstName: "Ann",
+        oldStatus: "left",
+        newStatus: "member",
+        dateSec: 1_790_000_000,
+      },
+      { updateId: 31, chatId: -555, chatType: "group", chatTitle: "old pond", fromId: 43, fromFirstName: "Bo", oldStatus: "member", newStatus: "kicked", dateSec: 1_790_000_100 },
+      // A private-chat block arrives too; the group code filters on chatType.
+      { updateId: 32, chatId: 555, chatType: "private", fromId: 555, fromFirstName: "Alice", oldStatus: "member", newStatus: "kicked", dateSec: 1_790_000_200 },
+      {
+        updateId: 33,
+        chatId: GROUP,
+        chatType: "supergroup",
+        chatTitle: "frog pond",
+        fromId: 42,
+        fromFirstName: "Ann",
+        oldStatus: "member",
+        newStatus: "restricted",
+        newIsMember: false,
+        dateSec: 1_790_000_300,
+      },
+    ]);
+    assert.equal(nextOffset, 34);
+  });
+
+  it("a membership change without who made it, a status or a known chat type is dropped — never guessed", async () => {
+    const base = {
+      chat: { id: -5, type: "group" },
+      from: { id: 42 },
+      date: 1,
+      old_chat_member: { status: "left" },
+      new_chat_member: { status: "member" },
+    };
+    const f = fakeFetch(
+      200,
+      OK([
+        { update_id: 1, my_chat_member: { ...base, from: undefined } },
+        { update_id: 2, my_chat_member: { ...base, chat: { id: -5 } } },
+        { update_id: 3, my_chat_member: { ...base, new_chat_member: {} } },
+        { update_id: 4, my_chat_member: { ...base, date: undefined } },
+        { update_id: 5, my_chat_member: "junk" },
+      ]),
+    );
+    const { members, messages, nextOffset } = await getUpdates({ token: "t", fetchFn: f }, 1);
+    assert.deepEqual(members, []);
+    assert.deepEqual(messages, []);
+    assert.equal(nextOffset, 6);
+  });
+
+  it("a failed poll returns empty members and service, keeping the offset", async () => {
+    const f = fakeFetch(502, null);
+    const r = await getUpdates({ token: "t", fetchFn: f }, 9);
+    assert.deepEqual(r, { messages: [], callbacks: [], members: [], service: [], nextOffset: 9, reason: "HTTP 502" });
+  });
+});
+
+describe("sendMessage — group options", () => {
+  const OPTS = { replyToMessageId: 91, messageThreadId: 7, disableNotification: true, disablePreview: true } as const;
+
+  it("sends reply_parameters, message_thread_id, disable_notification and link_preview_options", async () => {
+    const f = scripted({ body: OK({ message_id: 92 }) });
+    const r = await sendMessage({ token: "t", fetchFn: f }, GROUP, "lol same", OPTS);
+    assert.deepEqual(r, { ok: true, messageId: 92 });
+    assert.deepEqual(f.calls[0]!.body, {
+      chat_id: GROUP,
+      text: "lol same",
+      parse_mode: "HTML",
+      reply_parameters: { message_id: 91, allow_sending_without_reply: true },
+      message_thread_id: 7,
+      disable_notification: true,
+      link_preview_options: { is_disabled: true },
+    });
+  });
+
+  it("a DM send's request body is byte-for-byte what it was", async () => {
+    const bodies: (string | undefined)[] = [];
+    const f: FetchLike = async (_url, init) => {
+      bodies.push(init?.body);
+      return { ok: true, status: 200, json: async () => OK({ message_id: 1 }) };
+    };
+    await sendMessage({ token: "t", fetchFn: f }, 555, "<b>hi</b>");
+    await sendMessage({ token: "t", fetchFn: f }, 555, "q?", { keyboard: [[{ text: "Yes", callbackData: "mm:ok:1" }]] });
+    await sendMessage({ token: "t", fetchFn: f }, 555, "x", { disableNotification: false, disablePreview: false });
+    assert.equal(bodies[0], '{"chat_id":555,"text":"<b>hi</b>","parse_mode":"HTML"}');
+    assert.equal(bodies[1], '{"chat_id":555,"text":"q?","parse_mode":"HTML","reply_markup":{"inline_keyboard":[[{"text":"Yes","callback_data":"mm:ok:1"}]]}}');
+    assert.equal(bodies[2], '{"chat_id":555,"text":"x","parse_mode":"HTML"}');
+  });
+
+  it("the plain-text retry keeps every option — a reply never lands loose or in the wrong topic", async () => {
+    const f = scripted({ status: 400, body: { ok: false, error_code: 400, description: "Bad Request: can't parse entities" } }, { body: OK({ message_id: 93 }) });
+    const r = await sendMessage({ token: "t", fetchFn: f }, GROUP, "<b>broken <tag", OPTS);
+    assert.deepEqual(r, { ok: true, messageId: 93 });
+    assert.equal(f.calls.length, 2);
+    const retry = f.calls[1]!.body!;
+    assert.equal(retry.parse_mode, undefined);
+    assert.deepEqual(retry.reply_parameters, { message_id: 91, allow_sending_without_reply: true });
+    assert.equal(retry.message_thread_id, 7);
+    assert.equal(retry.disable_notification, true);
+    assert.deepEqual(retry.link_preview_options, { is_disabled: true });
+  });
+
+  it("the links-into-text retry keeps every option too", async () => {
+    const f = scripted(
+      { status: 400, body: { ok: false, error_code: 400, description: "Bad Request: inline keyboard button URL 'http://localhost:3100/x' is invalid" } },
+      { body: OK({ message_id: 94 }) },
+    );
+    const r = await sendMessage({ token: "t", fetchFn: f }, GROUP, "look", { ...OPTS, keyboard: [[{ text: "Open", url: "http://localhost:3100/x" }]] });
+    assert.equal(r.ok, true);
+    const retry = f.calls[1]!.body!;
+    assert.match(String(retry.text), /Open: http:\/\/localhost:3100\/x/);
+    assert.equal(retry.reply_markup, undefined);
+    assert.deepEqual(retry.reply_parameters, { message_id: 91, allow_sending_without_reply: true });
+    assert.equal(retry.message_thread_id, 7);
+  });
+
+  it("ids that are not positive integers are not sent", async () => {
+    const f = scripted({ body: OK({ message_id: 1 }) });
+    await sendMessage({ token: "t", fetchFn: f }, GROUP, "x", { replyToMessageId: 0, messageThreadId: Number.NaN });
+    await sendMessage({ token: "t", fetchFn: f }, GROUP, "x", { replyToMessageId: -3, messageThreadId: 1.5 });
+    for (const c of f.calls) {
+      assert.equal(c.body!.reply_parameters, undefined);
+      assert.equal(c.body!.message_thread_id, undefined);
+    }
+  });
+
+  it("a 429 surfaces retryAfterSec from ResponseParameters, and is not retried", async () => {
+    const f = scripted({
+      status: 429,
+      body: { ok: false, error_code: 429, description: "Too Many Requests: retry after 17", parameters: { retry_after: 17 } },
+    });
+    const r = await sendMessage({ token: "t", fetchFn: f }, GROUP, "x", { keyboard: [[{ text: "a", url: "https://x.y" }]] });
+    assert.deepEqual(r, { ok: false, reason: "Too Many Requests: retry after 17", retryAfterSec: 17 });
+    assert.equal(f.calls.length, 1);
+  });
+
+  it("ResponseParameters win over the description; the description is only a fallback", async () => {
+    const withParams = scripted({ status: 429, body: { ok: false, error_code: 429, description: "Too Many Requests: retry after 3", parameters: { retry_after: 40 } } });
+    assert.equal((await sendMessage({ token: "t", fetchFn: withParams }, GROUP, "x")).retryAfterSec, 40);
+    const without = scripted({ status: 429, body: { ok: false, error_code: 429, description: "Too Many Requests: retry after 5" } });
+    assert.equal((await sendMessage({ token: "t", fetchFn: without }, GROUP, "x")).retryAfterSec, 5);
+    const bogus = scripted({ status: 429, body: { ok: false, description: "Too Many Requests", parameters: { retry_after: -1 } } });
+    assert.equal("retryAfterSec" in (await sendMessage({ token: "t", fetchFn: bogus }, GROUP, "x")), false);
+  });
+
+  it("a 429 on the plain-text retry surfaces too", async () => {
+    const f = scripted(
+      { status: 400, body: { ok: false, error_code: 400, description: "Bad Request: can't parse entities" } },
+      { status: 429, body: { ok: false, error_code: 429, description: "Too Many Requests: retry after 9", parameters: { retry_after: 9 } } },
+    );
+    const r = await sendMessage({ token: "t", fetchFn: f }, GROUP, "<b>x");
+    assert.deepEqual(r, { ok: false, reason: "Too Many Requests: retry after 9", retryAfterSec: 9 });
+  });
+
+  it("migrate_to_chat_id surfaces — the group became a supergroup", async () => {
+    const f = scripted({
+      status: 400,
+      body: { ok: false, error_code: 400, description: "Bad Request: group chat was upgraded to a supergroup chat", parameters: { migrate_to_chat_id: GROUP } },
+    });
+    const r = await sendMessage({ token: "t", fetchFn: f }, -555, "hi");
+    assert.deepEqual(r, { ok: false, reason: "Bad Request: group chat was upgraded to a supergroup chat", migrateToChatId: GROUP });
+    assert.equal(f.calls.length, 1);
+  });
+
+  it("an ordinary refusal carries no next-step fields", async () => {
+    const f = scripted({ status: 403, body: { ok: false, error_code: 403, description: "Forbidden: bot was kicked from the supergroup chat" } });
+    assert.deepEqual(await sendMessage({ token: "t", fetchFn: f }, GROUP, "x"), {
+      ok: false,
+      reason: "Forbidden: bot was kicked from the supergroup chat",
+    });
+  });
+
+  it("never throws on a network failure", async () => {
+    const boom: FetchLike = async () => {
+      throw new Error("ECONNRESET");
+    };
+    const r = await sendMessage({ token: "t", fetchFn: boom }, GROUP, "x", OPTS);
+    assert.equal(r.ok, false);
+    assert.match(r.reason!, /ECONNRESET/);
+  });
+});
+
+describe("sendChatAction", () => {
+  it("a DM's typing body is unchanged", async () => {
+    const f = fakeFetch(200, OK(true));
+    await sendChatAction({ token: "t", fetchFn: f }, 555);
+    assert.match(f.lastUrl!, /\/sendChatAction$/);
+    assert.equal(f.lastBody, '{"chat_id":555,"action":"typing"}');
+  });
+
+  it("shows typing in the forum topic it is answering in", async () => {
+    const f = fakeFetch(200, OK(true));
+    await sendChatAction({ token: "t", fetchFn: f }, GROUP, "typing", 7);
+    assert.deepEqual(JSON.parse(f.lastBody!), { chat_id: GROUP, action: "typing", message_thread_id: 7 });
+  });
+
+  it("never throws", async () => {
+    const boom: FetchLike = async () => {
+      throw new Error("down");
+    };
+    const r = await sendChatAction({ token: "t", fetchFn: boom }, GROUP, "typing", 7);
+    assert.equal(r.ok, false);
+    assert.match(r.reason!, /down/);
+  });
+
+  it("says whether the chat can be written to: ok when Telegram took it", async () => {
+    assert.deepEqual(await sendChatAction({ token: "t", fetchFn: fakeFetch(200, OK(true)) }, 555), { ok: true });
+  });
+
+  it("a person who never opened a DM, or blocked the bot, is not ok, with Telegram's reason", async () => {
+    const notFound = fakeFetch(400, { ok: false, error_code: 400, description: "Bad Request: chat not found" });
+    assert.deepEqual(await sendChatAction({ token: "t", fetchFn: notFound }, 555), { ok: false, reason: "Bad Request: chat not found" });
+    const blocked = fakeFetch(403, { ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user" });
+    assert.deepEqual(await sendChatAction({ token: "t", fetchFn: blocked }, 555), { ok: false, reason: "Forbidden: bot was blocked by the user" });
+  });
+});
+
+describe("setMessageReaction / leaveChat / getChatMember", () => {
+  it("sets one emoji reaction", async () => {
+    const f = scripted({ body: OK(true) });
+    assert.deepEqual(await setMessageReaction({ token: "t", fetchFn: f }, GROUP, 91, "🔥"), { ok: true });
+    assert.match(f.calls[0]!.url, /\/setMessageReaction$/);
+    assert.deepEqual(f.calls[0]!.body, { chat_id: GROUP, message_id: 91, reaction: [{ type: "emoji", emoji: "🔥" }] });
+  });
+
+  it("null clears our reaction", async () => {
+    const f = scripted({ body: OK(true) });
+    await setMessageReaction({ token: "t", fetchFn: f }, GROUP, 91, null);
+    assert.deepEqual(f.calls[0]!.body, { chat_id: GROUP, message_id: 91, reaction: [] });
+  });
+
+  it("a refused reaction reports why, and a 429 its wait", async () => {
+    const refused = scripted({ status: 400, body: { ok: false, error_code: 400, description: "Bad Request: REACTION_INVALID" } });
+    assert.deepEqual(await setMessageReaction({ token: "t", fetchFn: refused }, GROUP, 91, "🦖"), { ok: false, reason: "Bad Request: REACTION_INVALID" });
+    const flood = scripted({ status: 429, body: { ok: false, error_code: 429, description: "Too Many Requests: retry after 6", parameters: { retry_after: 6 } } });
+    assert.deepEqual(await setMessageReaction({ token: "t", fetchFn: flood }, GROUP, 91, "👀"), {
+      ok: false,
+      reason: "Too Many Requests: retry after 6",
+      retryAfterSec: 6,
+    });
+  });
+
+  it("leaves a chat", async () => {
+    const f = scripted({ body: OK(true) });
+    assert.deepEqual(await leaveChat({ token: "t", fetchFn: f }, GROUP), { ok: true });
+    assert.match(f.calls[0]!.url, /\/leaveChat$/);
+    assert.deepEqual(f.calls[0]!.body, { chat_id: GROUP });
+    const gone = scripted({ status: 403, body: { ok: false, error_code: 403, description: "Forbidden: bot is not a member of the supergroup chat" } });
+    const r = await leaveChat({ token: "t", fetchFn: gone }, GROUP);
+    assert.equal(r.ok, false);
+    assert.match(r.reason!, /not a member/);
+  });
+
+  it("reads a member's status, and says null — unknown — when Telegram will not", async () => {
+    const f = scripted({ body: OK({ status: "administrator", user: { id: 42, is_bot: false, first_name: "Ann" }, can_manage_chat: true }) });
+    assert.deepEqual(await getChatMember({ token: "t", fetchFn: f }, GROUP, 42), { status: "administrator" });
+    assert.match(f.calls[0]!.url, /\/getChatMember$/);
+    assert.deepEqual(f.calls[0]!.body, { chat_id: GROUP, user_id: 42 });
+
+    const refused = scripted({ status: 400, body: { ok: false, error_code: 400, description: "Bad Request: user not found" } });
+    assert.equal(await getChatMember({ token: "t", fetchFn: refused }, GROUP, 42), null);
+    const odd = scripted({ body: OK({ user: { id: 42 } }) });
+    assert.equal(await getChatMember({ token: "t", fetchFn: odd }, GROUP, 42), null);
+    const boom: FetchLike = async () => {
+      throw new Error("down");
+    };
+    assert.equal(await getChatMember({ token: "t", fetchFn: boom }, GROUP, 42), null);
+  });
+});
+
+describe("getMe — group flags", () => {
+  it("exposes can_join_groups and can_read_all_group_messages", async () => {
+    const f = fakeFetch(200, OK({ id: 42, is_bot: true, first_name: "Pine", username: "pine_bot", can_join_groups: true, can_read_all_group_messages: false, supports_inline_queries: false }));
+    const { bot } = await getMe({ token: "t", fetchFn: f });
+    assert.deepEqual(bot, { id: 42, username: "pine_bot", firstName: "Pine", canJoinGroups: true, canReadAllGroupMessages: false });
+  });
+
+  it("privacy off reads as true", async () => {
+    const f = fakeFetch(200, OK({ id: 42, username: "pine_bot", can_read_all_group_messages: true }));
+    const { bot } = await getMe({ token: "t", fetchFn: f });
+    assert.equal(bot!.canReadAllGroupMessages, true);
+    assert.equal("canJoinGroups" in bot!, false);
+  });
+});
+
+describe("token hygiene", () => {
+  const TOKEN = "123456789:AAH-secretsecretsecretsecretsecret";
+
+  it("a fetch error that quotes the URL does not carry the token into the reason", async () => {
+    const quoting: FetchLike = async (url) => {
+      throw new TypeError(`Failed to parse URL from ${url}`);
+    };
+    const me = await getMe({ token: TOKEN, fetchFn: quoting });
+    assert.ok(!me.reason!.includes(TOKEN), me.reason);
+    assert.ok(!me.reason!.includes("AAH-secret"), me.reason);
+    assert.match(me.reason!, /Failed to parse URL/);
+    const sent = await sendMessage({ token: TOKEN, fetchFn: quoting }, GROUP, "x");
+    assert.ok(!sent.reason!.includes(TOKEN), sent.reason);
+    const up = await getUpdates({ token: TOKEN, fetchFn: quoting }, 1);
+    assert.ok(!up.reason!.includes(TOKEN), up.reason);
   });
 });

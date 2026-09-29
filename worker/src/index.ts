@@ -255,6 +255,9 @@ import { createPoolPriceReader } from "./venues/pool-prices";
 import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
 import type { Holding, Snapshot, Strategy, Tick } from "./strategies/types";
 import { isPaused, startTelegram } from "./telegram/service";
+import { TgGroupsStore } from "./telegram/tg-groups/store";
+import { NOMINATE, NominationBook, trencherReadiness } from "./trencher-nominate";
+import { chainTokenProbe, claimGroupEntry, createCoinLook, createTgCoinsPort, groupExitOf, reviewedDecisionOf, type GroupEntryClaim } from "./tg-coin-look";
 import { startNotifier } from "./telegram/notifier";
 import { energyToldDayOf, type EnergyToldHere } from "./telegram/energy-alert";
 import { startVirtualsStreamer } from "./virtuals-streamer";
@@ -281,7 +284,7 @@ import {
   quoteUsdOf,
   resolveBitquery,
 } from "./discovery";
-import { fetchGeckoPools, type ScreenLimits, type GeckoPool } from "./venues/geckoterminal";
+import { fetchGeckoPools, readTokenPools, type ScreenLimits, type GeckoPool } from "./venues/geckoterminal";
 import { createMemecoinScout, nullScout } from "./strategist/memecoin-scout";
 import { readCurvePrices } from "./venues/curve-prices";
 import { createV4KeyBook, keysForToken } from "./venues/v4-keys";
@@ -739,7 +742,13 @@ async function main() {
    */
   let lastPrices: Map<string, PriceQuote> = new Map();
   const trenchBrain = new TrenchBrainReview();
-  trenchBrain.onDrop = (why) => console.log(`[trencher] ${why}`);
+  trenchBrain.onDrop = (why, decisionId) => {
+    console.log(`[trencher] ${why}`);
+    // A ready BUY that will never become an order: if it answered a nominated
+    // coin, the chat hears `skipped` now instead of waiting out the TTL. The
+    // book ignores decisions that were not about a nomination.
+    if (decisionId) tgDeliver(tgBook.onFill(decisionId, "dropped", paperActive()));
+  };
   let autoTrench: Awaited<ReturnType<typeof discoverTrencherUniverse>> | null = null;
   let autoTrenchContext = "";
   let autoTrenchPending = false;
@@ -752,7 +761,9 @@ async function main() {
     if (autoTrenchPending || Date.now()<autoTrenchNext) return;
     autoTrenchPending=true; autoTrenchNext=Date.now()+60_000;
     const current=active;
-    void discoverTrencherUniverse(mainnetClient(),current.grant,freshTrenchTape()).then(result=>{
+    // Nominated coins (Telegram groups) are verified beyond the top slice by
+    // the same on-chain checks; the set is addresses only (trencher-discovery.ts).
+    void discoverTrencherUniverse(mainnetClient(),current.grant,freshTrenchTape(),{nominated:new Set(tgNominated)}).then(result=>{
       if (autoTrenchContext===context) autoTrench=result;
       // The held coins' names are read now, minutes before any exit needs one:
       // a decision never waits for the chain (decision-name.ts).
@@ -829,6 +840,244 @@ async function main() {
       enforceLiveIntent: cfg.enforceLiveIntent,
     });
   const paperActive = () => execMode().mode === "paper";
+
+  // ── TELEGRAM GROUPS: THE ONE DOOR FROM A GROUP INTO TRADING ─────────────
+  //
+  // docs/tg-groups.md, "The coin flow", "Trencher readiness", "Nomination
+  // caps". A coin posted in a group can NOMINATE, never order: what crosses is
+  // a validated address plus where it came from (NominationBook), and the only
+  // things it changes on this side are which token page the tape reads, which
+  // pools discovery verifies beyond its top slice, and which eligible coin the
+  // review rotation looks at first. The Brain's input for a nominated coin is
+  // exactly any tape coin's; the entry path sizes it; checkPolicy and the
+  // TrencherVault bound it; and group-sourced entries get an EXTRA cap
+  // (3 per UTC day, claimed before, refunded on no fill) on top of all of it.
+  //
+  // One store per child (the service is handed this one; nothing else opens
+  // the file), and the book lives in memory on purpose — see trencher-nominate.ts:
+  // a restart forgets pending nominations, and the chat side's durable claim
+  // means a forgotten one is dropped, never replayed into a second buy.
+  // Self-hosted there is no ferry, so the store clears its own forget file
+  // (docs/tg-groups.md "Memory"); hosted, the orchestrator must see it first.
+  const tgGroupsStore = TgGroupsStore.open(merrymenHome(), { ownsForgets: !isHostedMode() });
+  const tgBook = new NominationBook(tgGroupsStore);
+  /** Unresolved nominations whose own token page rides on the tape (lowercased). */
+  const tgNominated = new Set<string>();
+  /**
+   * Brain decision id → the nominated coin that review was about. The group
+   * entry claim reads it (tg-coin-look.ts claimGroupEntry) so an entry from a
+   * nominated review is still recognised as group-sourced after the book has
+   * let the nomination go. Pruned after an hour: a ready order lives 60s.
+   */
+  const tgReviewedNominated = new Map<string, { address: string; atMs: number }>();
+  /** Memecoins the book holds now → a display name safe to say, or null. Set by the tick. */
+  let tgHeld = new Map<string, string | null>();
+  /** A sale that would be the exit of a group-bought coin, waiting for its trade row. */
+  const tgExitWatch = new WeakMap<TradeIntent, { address: string; notes: string[] }>();
+  /** `${utcDay}:${address}` of group-entry refusals already logged — once each. */
+  const tgEntryRefusalsLogged = new Set<string>();
+  let tgNominatedTapePending = false;
+  const tgLook = createCoinLook({
+    own: () => (active ? bookAddresses(active.grant, active.grant.smartAccount) : []),
+    held: (a) => (tgHeld.has(a) ? { name: tgHeld.get(a) ?? null } : null),
+    tokenPools: readTokenPools,
+    // Through the governed mainnet client, like every identity read; asked for
+    // FRESH each time because setMainnetRpc can swap it.
+    getCode: (a) => mainnetClient().getCode({ address: a }),
+    probe: (a) => chainTokenProbe(mainnetClient())(a),
+    curveFor: (a) => curveFor(a),
+  });
+  const tgCoins = createTgCoinsPort({
+    // The same `cfg` the tick trades on, read at the moment of asking.
+    readiness: () =>
+      trencherReadiness({
+        strategy: cfg.strategy,
+        assetMode: cfg.assetMode,
+        trencherFastEnabled: cfg.trencherFastEnabled,
+        brainUrl: cfg.brainUrl,
+        brainToken: cfg.brainToken,
+        paper: paperActive(),
+        hasTrencherGrant: !!(active && grantTrencher(active.grant)),
+        trencherLiveEnabled: cfg.trencherLiveEnabled,
+      }),
+    look: tgLook,
+    book: tgBook,
+    onNominated: (address) => {
+      tgNominated.add(address);
+      trenchTapeReader.setNominated(tgNominated);
+      refreshNominatedTape();
+    },
+    heldNames: () => [...tgHeld.values()].filter((n): n is string => typeof n === "string" && n.length > 0),
+    paper: () => paperActive(),
+    log: (line) => console.log(line),
+  });
+  /**
+   * Hand outcomes to the chat side, then let resolved nominations go: their
+   * tape pages are dropped now (a coin kept alive by a chat that has its
+   * answer would be a coin the chat still chooses), and old review links are
+   * pruned. Never throws — the tick calls this between trades.
+   *
+   * DELIVERED ON THE NEXT TURN OF THE EVENT LOOP, not inside the call: this
+   * runs from recordTrade, inside the serialised trade path, and whatever a
+   * chat does with an outcome must not hold a trade (or the next one) up.
+   * The book's own state is already settled by the time this is called.
+   */
+  function tgDeliver(outcomes: Parameters<typeof tgCoins.emit>[0]): void {
+    try {
+      const list = outcomes == null ? [] : Array.isArray(outcomes) ? [...outcomes] : [outcomes];
+      if (list.length > 0) setImmediate(() => tgCoins.emit(list));
+      for (const a of [...tgNominated]) if (!tgBook.nominated(a)) tgNominated.delete(a);
+      trenchTapeReader.setNominated(tgNominated);
+      const now = Date.now();
+      for (const [id, r] of tgReviewedNominated) if (now - r.atMs > 3_600_000) tgReviewedNominated.delete(id);
+    } catch (e) {
+      console.warn(`[tg-groups] outcome delivery failed: ${e instanceof Error ? e.name : "error"}`);
+    }
+  }
+  /**
+   * A NEW NOMINATION'S PAGE, READ NOW. The full tape refreshes at most once a
+   * minute; this reads only the nominated pages (one request each) and then
+   * lets discovery run against them, so the coin can reach verification
+   * without waiting out the tape's own clock.
+   */
+  function refreshNominatedTape(): void {
+    if (tgNominatedTapePending) return;
+    tgNominatedTapePending = true;
+    void trenchTapeReader
+      .refreshNominated()
+      .then((failures) => {
+        if (failures.length) console.warn(`[trencher] ${failures.length} nominated tape page(s) could not be read; retried with the tape.`);
+        autoTrenchNext = 0;
+        refreshAutoTrench();
+      })
+      .catch(() => {})
+      .finally(() => {
+        tgNominatedTapePending = false;
+      });
+  }
+  /**
+   * AFTER A TRENCHER REVIEW IS PERSISTED (runShadow writes the decision before
+   * it returns): tell the book what the Brain decided about that token. The
+   * book ignores tokens nobody nominated. Never throws — a throw here would
+   * reject the review's promise and lose a ready order for everyone.
+   */
+  function tgNoteReview(token: string, outcome: ShadowOutcome): void {
+    try {
+      if (!outcome.ran || !outcome.result.ok) return;
+      const decided = reviewedDecisionOf(outcome.result.decision);
+      const address = token.toLowerCase();
+      if (decided.action === "buy" && decided.decisionId && tgBook.nominated(address)) {
+        tgReviewedNominated.set(decided.decisionId, { address, atMs: Date.now() });
+      }
+      tgDeliver(tgBook.onReviewed(address, decided));
+    } catch (e) {
+      console.warn(`[tg-groups] review note failed: ${e instanceof Error ? e.name : "error"}`);
+    }
+  }
+  /**
+   * THE GROUP-ENTRY CAP at the trencher entry loop (tg-coin-look.ts
+   * claimGroupEntry), asked before the energy claim. A refusal skips that one
+   * entry, is logged once per coin per UTC day — as a fact, with no address
+   * or name — and answers the nomination `skipped`.
+   */
+  function tgClaimGroupEntry(intent: TradeIntent): GroupEntryClaim {
+    let g: GroupEntryClaim;
+    try {
+      g = claimGroupEntry(tgBook, intent, (id) => tgReviewedNominated.get(id)?.address);
+    } catch {
+      // Unanswerable is not "not group-sourced": the entry does not go ahead.
+      return intent.kind === "swap"
+        ? { group: true, address: intent.buyToken.toLowerCase(), ok: false, why: "cap" }
+        : { group: false };
+    }
+    if (g.group && !g.ok) {
+      const day = new Date().toISOString().slice(0, 10);
+      const key = `${day}:${g.address}`;
+      if (!tgEntryRefusalsLogged.has(key)) {
+        if (tgEntryRefusalsLogged.size > 200) tgEntryRefusalsLogged.clear();
+        tgEntryRefusalsLogged.add(key);
+        console.log(
+          `[trencher] skipped a group-sourced entry: ${g.why === "cap" ? "today's group entries are used up" : "its nomination had already resolved"}`,
+        );
+      }
+      // The owner's feed hears the cap once per UTC day, as a count and a
+      // fact: no coin, no chat, no sender.
+      if (g.why === "cap" && active && !tgEntryRefusalsLogged.has(`${day}:event`)) {
+        tgEntryRefusalsLogged.add(`${day}:event`);
+        void addEvent(
+          active.agentId,
+          "ok",
+          `Telegram groups: today's ${NOMINATE.groupEntriesPerDay} buys of coins posted in your groups are used up, so further ones are passed on until the UTC day turns. Every other limit is unchanged.`,
+        ).catch(() => {});
+      }
+      if (intent.decisionId) tgDeliver(tgBook.onFill(intent.decisionId, "group-cap", paperActive()));
+    }
+    return g;
+  }
+  /**
+   * The group-entry claim goes back exactly where the energy claim does —
+   * whenever the entry did not become a trade (landed, submitted or paper) —
+   * and the nomination hears `skipped`, never why.
+   */
+  function tgSettleGroupEntry(g: GroupEntryClaim | null, decisionId: string | undefined, status: string | null | undefined): void {
+    if (!g || !g.group || !g.ok || tradeConsumesSnapshot(status)) return;
+    try {
+      tgBook.refundEntry(g.address);
+      if (decisionId) tgDeliver(tgBook.onFill(decisionId, status ?? "not-sent", paperActive()));
+    } catch {
+      // A refund that did not happen under-spends by one: the safe side.
+    }
+  }
+  /**
+   * A SALE THAT EMPTIES A POSITION, remembered until its trade row lands
+   * (tgNoteTradeRow). Only the book knows whether the coin came from a group;
+   * for any other coin onExit says nothing.
+   */
+  function tgWatchExit(intent: TradeIntent, why: { code: string; cause?: unknown } | null | undefined, held: readonly { token: string; rawBalance: bigint }[]): void {
+    try {
+      if (intent.kind !== "swap") return;
+      const sold = intent.sellToken.toLowerCase();
+      const exit = groupExitOf(intent, why, held.find((p) => p.token.toLowerCase() === sold)?.rawBalance ?? null);
+      if (exit) tgExitWatch.set(intent, exit);
+    } catch {
+      // No exit line is the fallback, never a wrong one.
+    }
+  }
+  /**
+   * A TRADE ROW WAS WRITTEN (recordTrade): a Brain decision's status answers a
+   * nominated coin — `landed`/`paper` is a buy, anything final is `skipped`,
+   * `submitted` is not an answer yet — and a watched exit that landed gets its
+   * one line.
+   */
+  function tgNoteTradeRow(intent: TradeIntent, decisionId: string | undefined, status: string): void {
+    try {
+      if (decisionId) tgDeliver(tgBook.onFill(decisionId, status, paperActive()));
+      if (status !== "landed" && status !== "paper") return;
+      const exit = tgExitWatch.get(intent);
+      if (!exit) return;
+      tgExitWatch.delete(intent);
+      tgDeliver(tgBook.onExit(exit.address, exit.notes));
+    } catch {
+      // Silence is the fallback; the trade itself is already recorded.
+    }
+  }
+  /** What the tick's book read says is held, for the look ("held") and the persona (names only). */
+  function tgNoteHeld(positions: readonly { token: string; symbol: string }[], unpriced: readonly string[]): void {
+    const next = new Map<string, string | null>();
+    const add = (token: string | undefined) => {
+      if (!token) return;
+      const a = token.toLowerCase();
+      if (instrumentClassOf(a) !== "memecoin" || isEnergyReserveToken(a)) return;
+      if (a === CASH.USDG.toLowerCase() || a === CASH.WETH.toLowerCase()) return;
+      next.set(a, coinDisplayName(watchTokens.find((t) => t.address.toLowerCase() === a)) ?? null);
+    };
+    for (const p of positions) add(p.token);
+    // Held but unpriced this tick is still held: absence from `positions` is
+    // "no mark", not "sold".
+    for (const s of unpriced) add(watchTokens.find((t) => t.symbol === s)?.address);
+    tgHeld = next;
+  }
+
   /** The last leg that blocked the live rail, so the event fires on change only. */
   let lastLiveBlocker: RefuseRule | null | undefined;
   /**
@@ -5700,7 +5949,7 @@ async function main() {
       };
     }
     await resetPaperLedger(id, cfg.paperStartUsdg);
-    trenchBrain.reset();
+    if (trenchBrain.reset()) tgDeliver(tgBook.reset());
     const opened = await openNextEpoch(id, cfg.paperStartUsdg);
     await addEvent(
       id,
@@ -7603,6 +7852,11 @@ async function main() {
        * be the agent talking about a trade the ledger cannot account for.
        */
       if (wrote && decision_id) void maybePost(decision_id, row.status);
+      // TELEGRAM GROUPS, on the same gate and for the same reason: a line in a
+      // group about a fill the ledger cannot account for is the agent talking
+      // about a trade it cannot show. Answers a nominated coin's decision and
+      // a group-bought coin's exit; never throws into the trade.
+      if (wrote) tgNoteTradeRow(intent, decision_id, row.status);
       // A landed or simulated row is an internal explanation for a cash change.
       // Flow inference keys off this: if the count didn't move, nothing the
       // agent did can account for the money, so it came from outside.
@@ -10068,7 +10322,12 @@ async function main() {
     let brainOrderAccepted = false;
     const fastTrencher = cfg.strategy === "trencher" && cfg.trencherFastEnabled;
     const trenchContext = fastTrencher && active ? `${active.agentId}:${paperActive() ? "paper" : "live"}:${active.grant.grantedAt}:${cfg.brainUrl}` : "";
-    trenchBrain.reset(trenchContext);
+    // A NEW CONTEXT ENDS EVERY REVIEW IN FLIGHT, so every nomination waiting on
+    // one is answered `expired` now rather than left to time out in silence;
+    // and nominations past their TTL are answered once per tick. Neither
+    // resets a cap (trencher-nominate.ts reset).
+    if (trenchBrain.reset(trenchContext)) tgDeliver(tgBook.reset());
+    tgDeliver(tgBook.expire());
     if (fastTrencher && active && (!cfg.brainUrl || !cfg.brainToken)) {
       trenchNotice(active.agentId, "Brain is not connected, so new buys are paused. Automatic exits remain active.");
     }
@@ -10789,6 +11048,8 @@ async function main() {
       );
     }
     if (unpricedByDesign.length === 0) notedUnpriced = false;
+    // What Telegram groups may know is held: memecoin names only, no sizes.
+    tgNoteHeld(positions, [...missingPrice, ...unpricedByDesign]);
 
     const positionsUsdg = positions.reduce((sum, p) => sum + p.valueUsdg, 0n);
     // Equity is the whole book — cash, vault, multiplier-aware stock value, and
@@ -11446,7 +11707,10 @@ async function main() {
         const entriesBraked = breakerTripped({ drawdown: drawdownNow }) || (energyNow.enforce && !energyNow.entries.open);
         const trenchEligible = fastTrencher && !entriesBraked ? await trenchCandidates() : [];
         const trenchHeld = fastTrencher ? new Set((await trenchOpen()).map(p => p.token.toLowerCase())) : new Set<string>();
-        const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => !market.pausedTokens.has(c.symbol) && !positions.some(p => p.token.toLowerCase() === c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter));
+        // A nominated coin (Telegram groups) is looked at first when it is
+        // ELIGIBLE here — the same filter every tape coin passes. The hint
+        // moves it up the queue, never onto it (trencher-brain.ts candidate).
+        const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => !market.pausedTokens.has(c.symbol) && !positions.some(p => p.token.toLowerCase() === c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter), tgBook.priority());
         const trenchSymbols = new Set(trenchCandidate ? [trenchCandidate.symbol] : []);
         // Braked, "no pool passes the entry checks" would be a false sentence:
         // none was looked at. The strategy's idle reason says why instead, as
@@ -11881,6 +12145,9 @@ async function main() {
                 // match is the thing to change.
                 console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: none — no fresh tape entry for this pool, so the review has no memecoin signals`);
               }
+              // Once the decision is persisted (runShadow writes it before it
+              // returns), the nomination book hears what was decided about this
+              // token — tgNoteReview never throws into the review's promise.
               return runShadow(brainConfig, inputs,
               m => console.log(`[${short(agentId)}] ${m}`),
               {
@@ -11895,7 +12162,7 @@ async function main() {
                 // A paid review, claimed against today's energy once the
                 // trigger has fired and before it is paid for.
                 admit: claimReview,
-              }); },
+              }).then(outcome => { tgNoteReview(focus.token, outcome); return outcome; }); },
               m => console.log(`[trencher] ${m}`));
           }
           const outcome: ShadowOutcome = fastTrencher ? { ran: false, why: "Trencher Brain review runs off the trading tick", nextReviewAt: Math.floor(Date.now() / 1000) + 60, trigger: { fire: false, reason: null, detail: "background review", candidates: [] } } : await runShadow(
@@ -12411,8 +12678,17 @@ async function main() {
       // `continue` rather than a filtered array (`w` is paired with the intent
       // by index): no decision row, no public post, no refusal on the tape.
       const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits), sellsHeldLeg(intent, heldLegs));
+      // ── TELEGRAM GROUPS: THE EXTRA CAP, FIRST ───────────────────────────
+      //
+      // An entry into a coin a group nominated must also win a group-entry
+      // claim (3 per UTC day, docs/tg-groups.md). It raises nothing: every gate
+      // below still runs. Refused → this entry alone is skipped, before any
+      // energy is claimed or any decision row is written.
+      const groupEntry = entry ? tgClaimGroupEntry(intent) : null;
+      if (groupEntry?.group && !groupEntry.ok) continue;
       const energyClaim = entry ? await claimEntry() : null;
       if (energyClaim && !energyClaim.ok) {
+        tgSettleGroupEntry(groupEntry, intent.decisionId, null);
         await withholdEntry(agentId);
         continue;
       }
@@ -12426,6 +12702,7 @@ async function main() {
       });
       if (!stamped.ok) {
         await refundEntry(energyClaim);
+        tgSettleGroupEntry(groupEntry, intent.decisionId, null);
         continue;
       }
       // equityUsdg excludes anything we couldn't value, so when the book is
@@ -12437,7 +12714,11 @@ async function main() {
         // wall, or never sent, the claim goes back.
         const facts = await processIntentReporting(intent, equityUsdg, !bookIncomplete);
         if (!tradeConsumesSnapshot(facts?.status)) await refundEntry(energyClaim);
+        tgSettleGroupEntry(groupEntry, intent.decisionId, facts?.status);
       } else {
+        // A sale that empties a coin bought through a group may earn one
+        // "out of that one" line once its row lands (tgNoteTradeRow).
+        tgWatchExit(intent, w, positions);
         await processIntent(intent, equityUsdg, !bookIncomplete);
       }
     }
@@ -13349,6 +13630,11 @@ async function main() {
     onNameChange: (name) => {
       if (active) void setAgentName(active.agentId, name);
     },
+    // Telegram groups (docs/tg-groups.md): the one store this child writes for
+    // group memory, and the port through which a posted coin reaches trading
+    // as an address and nothing else.
+    tgGroupsStore,
+    tgCoins,
     kill: () => {
       try {
         const grant = loadGrantFile();

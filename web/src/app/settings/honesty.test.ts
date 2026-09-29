@@ -173,7 +173,11 @@ describe("every control survives the restyle", () => {
     // must not start being bought on its own") protects owners from the
     // PLATFORM widening what gets bought, and a person typing an address is not
     // the platform — so the choice is theirs, visible, and defaulted on.
-    assert.equal(count(/type="checkbox"/g), 17, "checkboxes");
+    // 19 since TELEGRAM GROUPS (docs/tg-groups.md): "Hang out in Telegram
+    // groups" and "Look at coins people post". Both default ON, so — like the
+    // platform coin list — the control is what makes OFF reachable, and both
+    // are dashboard-only: the chat refuses them and points here.
+    assert.equal(count(/type="checkbox"/g), 19, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and
@@ -213,10 +217,12 @@ describe("every control survives the restyle", () => {
     // owners asked for it at once ("there should be an option mode for stocks
     // only, crypto only..."), and it is a filter over what may be BOUGHT, never
     // over what is watched: a class switched off stays priced and sellable.
-    assert.equal(count(/<select/g), 6, "selects");
+    // 7 since how chatty it is in Telegram groups (quiet / normal / chatty),
+    // the third Telegram groups control beside the two switches above.
+    assert.equal(count(/<select/g), 7, "selects");
   });
 
-  it("sends exactly the 23 fields save() guards", () => {
+  it("sends exactly the 26 fields save() guards", () => {
     // Every guard is "the user did not touch this, so do not overwrite it".
     // One dropped guard silently resets a setting to whatever the form had.
     //
@@ -240,7 +246,11 @@ describe("every control survives the restyle", () => {
     // silently narrow what their agent trades — the same class of failure as the
     // consent flag above, one step less dangerous.
     // 23 includes the opt-in fast Trencher profile.
-    assert.equal((code.match(/!== null\)/g) ?? []).length, 23);
+    // 26 since the three Telegram groups settings. Two of them default ON, so
+    // unguarded they would write whatever the form held for every owner who
+    // saved anything — silently taking a bot out of its groups, or switching
+    // coin-looking off, by visiting a page.
+    assert.equal((code.match(/!== null\)/g) ?? []).length, 26);
   });
 });
 
@@ -332,5 +342,76 @@ describe("the hosted refusals stay refused", () => {
 
   it("keeps the trencher live gate", () => {
     assert.match(SRC, /trencherLive/);
+  });
+});
+
+describe("nothing is left behind after a save", () => {
+  it("EVERY FIELD save() SENDS IS CLEARED AFTER IT, so the screen shows the server's value", () => {
+    // "THE SEVEN THAT WERE LEFT BEHIND": a toggle sent but not reset after the
+    // save keeps showing the LOCAL value while `view` holds the server's, and
+    // the two differ exactly when a write did not land. Derived from the
+    // guards themselves, so a toggle added tomorrow is held to it too.
+    const save = code.slice(code.indexOf("async function save()"));
+    const saved = save.indexOf('setStatus("Changes saved")');
+    const refetch = save.indexOf('const fresh = await fetch("/api/settings")');
+    assert.ok(saved > 0 && refetch > saved, "the post-save block was not found");
+    const reset = save.slice(saved, refetch);
+    const guarded = [...save.slice(0, saved).matchAll(/if \((\w+) !== null\) body\.\w+ = \1;/g)].map((m) => m[1]!);
+    assert.equal(guarded.length, 26, "every guard has the `if (x !== null) body.key = x;` shape");
+    const left = guarded.filter((name) => !reset.includes(`set${name[0]!.toUpperCase()}${name.slice(1)}(null)`));
+    assert.deepEqual(left, [], "sent by save() but not reset after it");
+  });
+});
+
+describe("Telegram groups (docs/tg-groups.md)", () => {
+  it("the three settings are bound, guarded and sent under their exact keys", () => {
+    // `telegramGroupsChattiness`, with "Groups": the other spelling trips the
+    // web room's boundary test in the worker and is not a setting.
+    assert.match(code, /if \(tgGroups !== null\) body\.telegramGroupsEnabled = tgGroups;/);
+    assert.match(code, /if \(tgGroupCoins !== null\) body\.telegramGroupCoinsEnabled = tgGroupCoins;/);
+    assert.match(code, /if \(tgChattiness !== null\) body\.telegramGroupsChattiness = tgChattiness;/);
+    assert.match(code, /onChange=\{\(e\) => setTgGroups\(e\.target\.checked\)\}/);
+    assert.match(code, /onChange=\{\(e\) => setTgGroupCoins\(e\.target\.checked\)\}/);
+    assert.match(code, /onChange=\{\(e\) => setTgChattiness\(e\.target\.value as TelegramGroupsChattiness\)\}/);
+    // Both switches default ON: without the default an unsaved owner would see
+    // them unticked while the bot talked.
+    assert.match(code, /view\.values\.telegramGroupsEnabled \?\? d\.telegramGroupsEnabled/);
+    assert.match(code, /view\.values\.telegramGroupCoinsEnabled \?\? d\.telegramGroupCoinsEnabled/);
+    assert.match(code, /view\.values\.telegramGroupsChattiness \?\? d\.telegramGroupsChattiness/);
+    // One list of levels, core's.
+    assert.match(code, /TELEGRAM_GROUPS_CHATTINESS\.map\(/);
+  });
+
+  it("they live inside the Telegram section, not under Advanced", () => {
+    const telegram = SRC.indexOf('id="telegram"');
+    const block = SRC.indexOf('t("settings.section.telegramGroups")');
+    const end = SRC.indexOf("</details>", telegram);
+    assert.ok(telegram > 0 && block > telegram && block < end, "the Telegram groups block is not inside <details id=\"telegram\">");
+  });
+
+  it("the words the contract fixes are the words shipped", () => {
+    assert.equal(EN["settings.section.telegramGroups"], "Telegram groups");
+    assert.equal(EN["settings.label.hangOutInTelegramGroups"], "Hang out in Telegram groups");
+    assert.equal(EN["settings.label.lookAtCoinsPeoplePost"], "Look at coins people post");
+    assert.equal(EN["settings.hint.lookAtCoinsPeoplePost"], "Only in trencher mode. Its Brain decides and every trencher limit still applies.");
+    assert.ok(
+      EN["settings.text.privacyModeSteps"].startsWith("@BotFather → /setprivacy → your bot → Disable, then remove the bot from the group and add it back"),
+      "the privacy-mode steps",
+    );
+    // "Telegram groups" everywhere: the web room owns the other name.
+    for (const [k, v] of Object.entries(EN)) {
+      if (k.includes("elegramGroups") || k.includes("privacyMode") || k.includes("chattiness") || k.includes("Chatty")) {
+        assert.doesNotMatch(v, /group ?chat/i, `${k} uses the web room's name`);
+      }
+    }
+  });
+
+  it("PRIVACY MODE HAS THREE STATES: off says it can follow the chat, on and UNKNOWN both show the steps", () => {
+    // Unknown (no token, a failed getMe, an older server) must never read as
+    // "on": that claim sends an owner to BotFather for nothing. Only an
+    // explicit false earns the verdict.
+    assert.match(code, /tg\?\.canReadAllGroupMessages === true \? \(\s*t\("settings\.text\.privacyModeOff"\)/);
+    assert.match(code, /tg\?\.canReadAllGroupMessages === false \? t\("settings\.text\.privacyModeOn"\) : t\("settings\.text\.privacyModeUnknown"\)\}\{" "\}\s*\{t\("settings\.text\.privacyModeSteps"\)\}/);
+    assert.match(code, /tg\?\.canJoinGroups === false && /);
   });
 });
