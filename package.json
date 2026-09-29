@@ -30,7 +30,8 @@
     "!web/.next/trace",
     "!web/tsconfig.tsbuildinfo",
     "!web/public/merrymenlogo.png",
-    "!**/*.test.ts"
+    "!**/*.test.ts",
+    "!worker/src/perps/fixtures"
   ],
   "scripts": {
     "onboard": "node cli/bin.mjs onboard",
