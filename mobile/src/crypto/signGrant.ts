@@ -19,6 +19,10 @@ import {
   energyBuyFits,
   GRANT_ENERGY,
   ENERGY_ROUTE_V1,
+  perpFits,
+  grantPerp,
+  GRANT_PERP_LIGHTER,
+  LIGHTER_ROUTE_V1,
   WALL_POLICY_FLAG,
   robinhoodChain,
   usableExtraTokens,
@@ -30,6 +34,7 @@ import {
   type StoredGrant,
 } from "@merrymen/core";
 import { accountFromMnemonic } from "./mnemonic";
+import { readGrant } from "./grantStore";
 import { isMock } from "@/net/api";
 
 /**
@@ -53,6 +58,57 @@ import { isMock } from "@/net/api";
  */
 
 export type SignProgress = (step: string) => void;
+
+/**
+ * THE PERPS BLOCK A PREVIOUS GRANT FOR THIS ACCOUNT CARRIED — CARRY-FORWARD ONLY.
+ *
+ * The phone offers no perps opt-in (docs/perps.md, rollout: the dashboard
+ * offers it; there is no keygen on this path, and there is no field here a key
+ * could arrive in). What it must never do is DROP one: a Lighter API key the
+ * worker registered stays valid at the venue whatever the grant says, so a
+ * phone re-sign that quietly lost the block would leave a live venue account
+ * with no worker holding its key. So the phone mirrors web/src/lib/session.ts
+ * exactly on the one thing it does — the previous grant's PUBLIC key is carried
+ * forward into the same wall option, under the same marker, from one value —
+ * and refuses where the dashboard would refuse, pointing the owner at the
+ * dashboard for everything else (turning perps off needs a flat-venue check the
+ * phone does not make).
+ *
+ * Read through core's `grantPerp`, the worker's own reader. Sources in the
+ * dashboard's order: the server's projection when the caller has one and it
+ * names this account, else this phone's stored grant. `apiKeySealed` rides
+ * along when the copy has one (the server's own opaque blob, bound to this
+ * account and key); a projection never does, and the server re-attaches it
+ * from its store by equal public key.
+ */
+function priorPerpOnPhone(
+  account: string,
+  server: unknown,
+  stored: unknown,
+): { apiPublicKey: `0x${string}`; apiKeySealed?: string } | null {
+  const same = (g: unknown): g is Record<string, unknown> =>
+    typeof g === "object" &&
+    g !== null &&
+    typeof (g as Record<string, unknown>).smartAccount === "string" &&
+    ((g as Record<string, unknown>).smartAccount as string).toLowerCase() === account.toLowerCase();
+  const from = same(server) ? "server" : same(stored) ? "phone" : null;
+  if (!from) return null;
+  const g = (from === "server" ? server : stored) as Record<string, unknown>;
+  const features = Array.isArray(g.grantFeatures) ? g.grantFeatures.filter((f): f is string => typeof f === "string") : [];
+  if (!features.includes(GRANT_PERP_LIGHTER)) return null;
+  const read = grantPerp({ grantFeatures: features, chainId: typeof g.chainId === "number" ? g.chainId : Number.NaN, perp: g.perp });
+  if (!read) {
+    // A grant that claims perps and cannot say which key: never "none".
+    throw new Error(
+      "Your agent's current permission includes perpetuals, but its Lighter key could not be read on this phone. " +
+        "Nothing was signed — re-sign from the dashboard, which can check Lighter before changing it.",
+    );
+  }
+  return {
+    apiPublicKey: read.apiPublicKey,
+    ...(read.apiKeySealed ? { apiKeySealed: read.apiKeySealed } : {}),
+  };
+}
 
 export interface SignedGrant {
   /** Safe to transmit: capped, expiring, and useless outside its policies. */
@@ -90,6 +146,13 @@ export async function signGrant(args: {
    * passes nothing today, so phone grants honestly carry no class marker.
    */
   ponsClassVaultFactory?: `0x${string}`;
+  /**
+   * The server's PUBLIC projection of the current grant (GET /api/grants →
+   * `grant`), when the caller has one. Only read to CARRY a perpetuals key
+   * forward — see priorPerpOnPhone. This phone's own stored grant is read as
+   * well, whether or not this is passed, so no caller can forget.
+   */
+  previousGrant?: unknown;
   rpcUrl?: string;
   onProgress?: SignProgress;
 }): Promise<SignedGrant> {
@@ -217,6 +280,29 @@ export async function signGrant(args: {
     alreadyDeployed = false;
   }
 
+  // ── PERPETUALS: CARRIED FORWARD, DECIDED ONCE, BEFORE THE ENERGY BUY ──────
+  //
+  // Identical to web/src/lib/session.ts in everything the phone does: the
+  // decision comes after the deployment read (whether perps fit depends on it)
+  // and BEFORE energyBuyFits and wallSignable, because perps are REFUSED when
+  // they do not fit while the energy buy is dropped — so perps take their room
+  // first and energy gives way. The phone never adds perps and never drops them.
+  const carriedPerp = priorPerpOnPhone(
+    sudoOnlyAccount.address,
+    args.previousGrant,
+    await readGrant().catch(() => null),
+  );
+  // The chain below is Robinhood Chain mainnet unconditionally; asserted anyway,
+  // because a carried key signed for any other chain is a venue account left
+  // without its worker.
+  if (carriedPerp && chain.id !== LIGHTER_ROUTE_V1.chainId) {
+    throw new Error("Your agent holds a perpetuals permission, which exists only on Robinhood Chain mainnet. Nothing was signed.");
+  }
+  // The ROUTE'S key index, never a stored one: perp-lighter-v1 names index 16.
+  const perpLighter = carriedPerp
+    ? { apiKeyIndex: LIGHTER_ROUTE_V1.apiKeyIndex, apiPublicKey: carriedPerp.apiPublicKey }
+    : undefined;
+
   const wallOpts = {
     extraTokens: sealedTokens,
     allowUniswapV4,
@@ -229,7 +315,18 @@ export async function signGrant(args: {
     ponsClassVaultFactoryAddress: args.ponsClassVaultFactory,
     // Decided just below, by energyBuyFits, and nowhere else.
     energyBuy: false as boolean,
+    // Decided just above, from the previous grant, and never reassigned.
+    perpLighter,
   };
+  // Refused, never dropped, when the carried perps no longer fit (e.g. more
+  // tokens than last time): the owner chooses what gives way.
+  if (wallOpts.perpLighter && !perpFits(args.caps, sudoOnlyAccount.address, chain.id, !alreadyDeployed, wallOpts)) {
+    throw new Error(
+      "This permission has no room left for the perpetuals your agent already holds, and they cannot be dropped " +
+        "silently — its Lighter key stays registered at the venue. Remove some tokens, or close its Lighter " +
+        "positions and turn perpetuals off from the dashboard first. Nothing was signed.",
+    );
+  }
   // THE ENERGY BUY, decided exactly as web/src/lib/session.ts decides it:
   // mainnet only (elsewhere the router is codeless and a buy would land having
   // bought nothing), and only when this wall still fits with it, so a full
@@ -332,7 +429,23 @@ export async function signGrant(args: {
         // From the SAME boolean that built the router permission above —
         // identical to web/src/lib/session.ts.
         ...(wallOpts.energyBuy ? [GRANT_ENERGY] : []),
+        // From the SAME value that sealed the proxy and the key into the wall —
+        // identical to web/src/lib/session.ts.
+        ...(wallOpts.perpLighter ? [GRANT_PERP_LIGHTER] : []),
       ],
+      // The carried key, from that same value: PUBLIC key (lowercase — the
+      // bytes the wall pinned), the route's index, and at most the hosted sealed
+      // blob. There is no field here a private key fits in.
+      ...(wallOpts.perpLighter
+        ? {
+            perp: {
+              route: GRANT_PERP_LIGHTER,
+              apiKeyIndex: wallOpts.perpLighter.apiKeyIndex,
+              apiPublicKey: wallOpts.perpLighter.apiPublicKey.toLowerCase() as `0x${string}`,
+              ...(carriedPerp?.apiKeySealed ? { apiKeySealed: carriedPerp.apiKeySealed } : {}),
+            },
+          }
+        : {}),
       ...(args.v4AdapterAddress ? { v4AdapterAddress: args.v4AdapterAddress.toLowerCase() } : {}),
       ...(sealedPonsAdapter ? { ponsAdapterAddress: sealedPonsAdapter.toLowerCase() } : {}),
       ...(ponsClassVaultAddress

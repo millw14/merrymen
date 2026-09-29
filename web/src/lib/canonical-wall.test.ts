@@ -6,10 +6,13 @@ import * as core from "@merrymen/core";
 import {
   ENERGY_ROUTE_V1,
   GRANT_ENERGY,
+  GRANT_PERP_LIGHTER,
   GRANT_TRANSFER,
+  LIGHTER_ROUTE_V1,
   WITHDRAWAL_ALLOWLIST_LANDED_AT,
   grantEnergyRoute,
   grantHasTransfer,
+  grantPerp,
   type StoredGrant,
 } from "@merrymen/core";
 import { CANONICAL_GRANT_FEATURES, checkCanonicalWall } from "./canonical-wall";
@@ -33,6 +36,9 @@ const ATTACKER = "0x000000000000000000000000000000000000bad1" as const;
 const V4_ADAPTER = "0x0000000000000000000000000000000000000a4a" as const;
 const PONS_ADAPTER = "0x0000000000000000000000000000000000000b0b" as const;
 const EXTRA = { symbol: "CATE", address: "0x0000000000000000000000000000000000ca7e00" as const, decimals: 18 };
+/** Two canonical Lighter API public keys (five little-endian limbs, each below p, not all zero). */
+const PERP_KEY = `0x${"1a".repeat(40)}` as `0x${string}`;
+const OTHER_PERP_KEY = `0x${"2b".repeat(40)}` as `0x${string}`;
 
 const verdict = (g: unknown) => checkCanonicalWall(g as Record<string, unknown>);
 const refusedWith = (g: unknown, code: string) => {
@@ -80,10 +86,16 @@ describe("grants from the real signer pass", () => {
 
     // So the default mint is what carries GRANT_ENERGY into the union.
     const { grant: plain } = await signerGrant({ account: ACCOUNT });
+    // And the perps opt-in is the fourth grant: on a first install the default
+    // wall has room for it, with the energy buy giving way (perps are decided
+    // first, and only the energy buy may be dropped).
+    const { grant: perps } = await signerGrant({ account: ACCOUNT, perp: { apiPublicKey: PERP_KEY } });
+    assert.deepEqual(verdict(perps), { ok: true });
     const minted = new Set([
       ...(trench.grantFeatures ?? []),
       ...(adapters.grantFeatures ?? []),
       ...(plain.grantFeatures ?? []),
+      ...(perps.grantFeatures ?? []),
     ]);
     assert.deepEqual([...minted].sort(), [...CANONICAL_GRANT_FEATURES].sort());
   });
@@ -230,6 +242,109 @@ describe("an owner-enabled permission that is not the Merrymen wall is refused",
 });
 
 /**
+ * PERPETUALS: A MARKER, A SEALED KEY AND FOUR PERMISSIONS, OR NONE OF THEM.
+ *
+ * The wall pins ONE Lighter API public key into `changePubKey`, so unlike the
+ * energy buy the marker is not the whole permission — the grant's `perp` block
+ * names the key, and the rebuild takes marker, chain and block together
+ * (grantWallOptions → grantPerp). What a tenant holding the owner key could
+ * build instead, each refused below: the key in the wall swapped for another,
+ * the block or the marker alone, a key at another index or in another spelling,
+ * a private key riding beside the public one, and all of it off mainnet.
+ */
+describe("perpetuals", () => {
+  it("the dashboard's opt-in passes: marker, block and wall from one decision", async () => {
+    const { grant } = await signerGrant({ account: ACCOUNT, perp: { apiPublicKey: PERP_KEY } });
+    assert.deepEqual(verdict(grant), { ok: true });
+    assert.ok(grant.grantFeatures?.includes(GRANT_PERP_LIGHTER));
+    assert.deepEqual(grant.perp, { route: GRANT_PERP_LIGHTER, apiKeyIndex: LIGHTER_ROUTE_V1.apiKeyIndex, apiPublicKey: PERP_KEY });
+    assert.ok(grantPerp(grant), "and the worker's reader arms it");
+    // The hosted sealed blob is opaque here — the route joins it to its key.
+    const { grant: hosted } = await signerGrant({ account: ACCOUNT, perp: { apiPublicKey: PERP_KEY, apiKeySealed: "sealed-blob" } });
+    assert.equal(hosted.perp?.apiKeySealed, "sealed-blob");
+    assert.deepEqual(verdict(hosted), { ok: true });
+  });
+
+  it("a hand-built wall pinning a DIFFERENT key than grant.perp names is refused", async () => {
+    // The attack the byte comparison exists for: the owner signs changePubKey
+    // for a key they control while the metadata names the key the server holds.
+    const { grant, owner } = await signerGrant({ account: ACCOUNT, perp: { apiPublicKey: PERP_KEY } });
+    const swapped = await resealed(grant, owner, {
+      perpLighter: { apiKeyIndex: LIGHTER_ROUTE_V1.apiKeyIndex, apiPublicKey: OTHER_PERP_KEY },
+    });
+    assert.equal(swapped.perp?.apiPublicKey, PERP_KEY, "premise: the metadata still names the signer's key");
+    const v = refusedWith(swapped, "invalid_wall");
+    assert.match(v.ok ? "" : v.why, /does not implement/);
+    // And the mirror image: the block edited to name another key over the real wall.
+    refusedWith({ ...grant, perp: { ...grant.perp!, apiPublicKey: OTHER_PERP_KEY } }, "invalid_wall");
+  });
+
+  it("the marker without the block, the block without the marker, and a perps wall declaring neither", async () => {
+    const { grant, owner } = await signerGrant({ account: ACCOUNT, perp: { apiPublicKey: PERP_KEY } });
+    const { perp: _perp, ...noBlock } = grant;
+    void _perp;
+    let v = refusedWith(noBlock, "invalid_grant");
+    assert.match(v.ok ? "" : v.why, /Perpetuals metadata does not match/);
+    v = refusedWith({ ...grant, grantFeatures: (grant.grantFeatures ?? []).filter((f) => f !== GRANT_PERP_LIGHTER) }, "invalid_grant");
+    assert.match(v.ok ? "" : v.why, /Perpetuals metadata does not match/);
+    // A block riding on a grant whose wall never had perps: the rebuild alone
+    // would pass it (both sides narrow), so it must be refused by name.
+    const { grant: plain } = await signerGrant({ account: ACCOUNT });
+    refusedWith({ ...plain, perp: grant.perp }, "invalid_grant");
+    // The four permissions sealed with neither marker nor block: metadata hides a power.
+    const hidden = await resealed(plain, owner, {
+      perpLighter: { apiKeyIndex: LIGHTER_ROUTE_V1.apiKeyIndex, apiPublicKey: PERP_KEY },
+    });
+    refusedWith(hidden, "invalid_wall");
+  });
+
+  it("a key at any index but the route's, a non-canonical key, or one spelled differently", async () => {
+    const { grant } = await signerGrant({ account: ACCOUNT, perp: { apiPublicKey: PERP_KEY } });
+    const perp = grant.perp!;
+    for (const apiKeyIndex of [0, 3, 157, 15, 17, 255, "16"]) {
+      const v = refusedWith({ ...grant, perp: { ...perp, apiKeyIndex } }, "invalid_grant");
+      assert.match(v.ok ? "" : v.why, /key index 16/);
+    }
+    // A limb at or above the Goldilocks prime (little-endian all-ones), all zero,
+    // the wrong length, and the right key in capitals or without its 0x.
+    for (const apiPublicKey of [
+      `0x${"ff".repeat(40)}`,
+      `0x${"00".repeat(40)}`,
+      `0x${"1a".repeat(39)}`,
+      `0x${"1a".repeat(40).toUpperCase()}`,
+      "1a".repeat(40),
+      42,
+    ]) {
+      const v = refusedWith({ ...grant, perp: { ...perp, apiPublicKey } }, "invalid_grant");
+      assert.match(v.ok ? "" : v.why, /not a canonical Lighter API public key/);
+      assert.ok(!(v.ok ? "" : v.why).toLowerCase().includes("1a1a1a1a"), "a refusal never echoes the key");
+    }
+    refusedWith({ ...grant, perp: { ...perp, route: "perp-lighter-v2" } }, "invalid_grant");
+    for (const apiKeySealed of ["", 7, "x".repeat(4097)]) {
+      refusedWith({ ...grant, perp: { ...perp, apiKeySealed } }, "invalid_grant");
+    }
+    refusedWith({ ...grant, perp: "perp-lighter-v1" }, "bad_request");
+  });
+
+  it("a private key riding beside the public one is refused, not stored", async () => {
+    const { grant } = await signerGrant({ account: ACCOUNT, perp: { apiPublicKey: PERP_KEY } });
+    for (const extra of [{ apiPrivateKey: `0x${"33".repeat(40)}` }, { privateKey: `0x${"33".repeat(40)}` }, { note: "x" }]) {
+      refusedWith({ ...grant, perp: { ...grant.perp!, ...extra } }, "bad_request");
+    }
+  });
+
+  it("perps on any chain but mainnet, even over a wall that carries them", async () => {
+    // There is no Lighter on the test network: the proxy is codeless there and a
+    // deposit would "land" having posted nothing.
+    const { grant } = await signerGrant({ account: ACCOUNT, perp: { apiPublicKey: PERP_KEY } });
+    for (const chainId of [46630, undefined, "4663"]) {
+      const v = refusedWith({ ...grant, chainId }, "invalid_grant");
+      assert.match(v.ok ? "" : v.why, /only on Robinhood Chain mainnet/);
+    }
+  });
+});
+
+/**
  * A SIGNER FROM BEFORE ENERGY, WITH $MERRYMEN IN THE OWNER'S CUSTOM TOKENS.
  *
  * Before energy, an owner who wanted $MERRYMEN in view listed it as a custom
@@ -365,6 +480,9 @@ describe("the accepted markers are exactly what the signers can mint", () => {
         // Rebuilt from the GRANT_ENERGY marker by grantWallOptions — a
         // versioned route, so the marker is the whole sealed fact.
         "energyBuy",
+        // Rebuilt from the GRANT_PERP_LIGHTER marker AND the grant's `perp`
+        // block (the sealed key) by grantWallOptions → grantPerp.
+        "perpLighter",
       ]);
       for (const key of keys) assert.ok(modelled.has(key), `${who} passes ${key} to the wall, which canonical-wall.ts does not rebuild`);
       assert.doesNotMatch(block[1], /withdrawalAddresses|allowRialto/, `${who} must not widen the wall with a transfer or Rialto`);

@@ -64,6 +64,7 @@
 "All" = "Все";
 "All assets" = "All assets";
 "allow control commands" = "allow control commands";
+"Allow my agent to trade perpetual futures on Lighter, with margin posted from this account." = "Allow my agent to trade perpetual futures on Lighter, with margin posted from this account.";
 "allow transfers" = "allow transfers";
 "Alpha" = "Alpha";
 "Alpha explains the research behind shortlisted tokens and those passed over. If access is gated, the page shows the requirement. Research is a starting point to inspect, not an instruction to buy." = "Alpha объясняет, на каком анализе основан отбор токенов — и тех, что попали в короткий список, и тех, что были отклонены. Если доступ ограничен, страница показывает условие. Исследование — это отправная точка для проверки, а не указание покупать.";
@@ -101,6 +102,7 @@
 "Calculated on new peak profits. Fees are recorded but not collected." = "Calculated on new peak profits. Fees are recorded but not collected.";
 "Cancel" = "Отмена";
 "capabilities" = "capabilities";
+"Carried forward: your agent already holds a Lighter key and this re-sign keeps it. Unchecking reads Lighter first — the permission can only be removed once everything there is closed." = "Carried forward: your agent already holds a Lighter key and this re-sign keeps it. Unchecking reads Lighter first — the permission can only be removed once everything there is closed.";
 "Change it →" = "Change it →";
 "Changes saved" = "Changes saved";
 "Chat" = "Чат";
@@ -108,6 +110,7 @@
 "Chatty — joins in more often" = "Chatty — joins in more often";
 "check every (minutes)" = "check every (minutes)";
 "Check it →" = "Check it →";
+"Checking Lighter…" = "Checking Lighter…";
 "checking…" = "checking…";
 "Choose a name and strategy, then review its wallet setup and spending limits. Creating an agent and authorizing live trading are separate steps." = "Выберите имя и стратегию, затем проверьте настройки кошелька и лимиты расходов. Создание агента и разрешение торговать на реальные деньги — два разных шага.";
 "Choose language" = "Выбор языка";
@@ -136,6 +139,7 @@
 "Copy message" = "Копировать сообщение";
 "Could not load your settings." = "Could not load your settings.";
 "could not reach the settings API" = "could not reach the settings API";
+"Couldn't create a Lighter key for your agent just now, so nothing was signed ({detail})." = "Couldn't create a Lighter key for your agent just now, so nothing was signed ({detail}).";
 "covers it — re-sign after saving, and it will. Adding a token on its own only means “watch this”." = "covers it — re-sign after saving, and it will. Adding a token on its own only means “watch this”.";
 "Create a bot with @BotFather and add its token below." = "Create a bot with @BotFather and add its token below.";
 "Create agent" = "Создать агента";
@@ -197,6 +201,10 @@
 "Language" = "Язык";
 "Leave an API key blank to keep the saved key." = "Leave an API key blank to keep the saved key.";
 "let trencher trade for real" = "let trencher trade for real";
+"Lighter could not be read just now, and unread is not empty, so the permission stays. Try again in a moment." = "Lighter could not be read just now, and unread is not empty, so the permission stays. Try again in a moment.";
+"Lighter no longer reads empty for this account, so the perpetuals permission stays. Your current key has not been replaced." = "Lighter no longer reads empty for this account, so the perpetuals permission stays. Your current key has not been replaced.";
+"Lighter reads empty for this account, so this re-sign removes the perpetuals permission." = "Lighter reads empty for this account, so this re-sign removes the perpetuals permission.";
+"Lighter's terms exclude the US, the UK, Canada and sanctioned regions." = "Lighter's terms exclude the US, the UK, Canada and sanctioned regions.";
 "link code:" = "link code:";
 "listing models…" = "listing models…";
 "Live rankings use eligible recorded returns. Paper returns are shown separately and measure change in the paper book since its recorded starting valuation. A dash means the required data is unavailable." = "Рейтинг по торговле на реальные деньги строится на учитываемой записанной доходности. Доходность в демо-режиме показывается отдельно и измеряет изменение демо-счёта с его начальной записанной оценки. Прочерк означает, что нужных данных нет.";
@@ -241,6 +249,7 @@
 "No link code yet. Your agent mints one on its next pass with this token set — check back shortly." = "No link code yet. Your agent mints one on its next pass with this token set — check back shortly.";
 "no linked chats yet" = "no linked chats yet";
 "Normal — joins in now and then" = "Normal — joins in now and then";
+"not granted." = "not granted.";
 "not set" = "not set";
 "not set up" = "not set up";
 "not your strategy" = "not your strategy";
@@ -280,6 +289,10 @@
 "Per trade" = "На сделку";
 "Per-trade limits cap each order; daily limits cap spending over the day. Review the current values before saving. A limit is a maximum, not a target the agent must spend." = "Лимит на сделку ограничивает каждую заявку, дневной лимит — расходы за сутки. Перед сохранением проверьте текущие значения. Лимит — это максимум, а не сумма, которую агент обязан потратить.";
 "performance fee" = "performance fee";
+"Perpetuals" = "Perpetuals";
+"Perpetuals exist only on Robinhood Chain mainnet." = "Perpetuals exist only on Robinhood Chain mainnet.";
+"Perpetuals permission" = "Perpetuals permission";
+"Perps need a per-trade cap of at least ~{min} USDG to reach BTC, ETH or SOL; the dashboard checks live minimums." = "Perps need a per-trade cap of at least ~{min} USDG to reach BTC, ETH or SOL; the dashboard checks live minimums.";
 "Pimlico API key" = "Pimlico API key";
 "PNG, JPEG or WebP. Cropped to a square and re-encoded; nothing else from the file is kept." = "PNG, JPEG or WebP. Cropped to a square and re-encoded; nothing else from the file is kept.";
 "PNG, JPEG or WebP. Cropped wide for the top of your agent&rsquo;s profile." = "PNG, JPEG or WebP. Cropped wide for the top of your agent&rsquo;s profile.";
@@ -288,6 +301,7 @@
 "PonsSelfTrade contract on your wallet’s network. Updating trading permissions authorizes this contract to spend your permitted tokens." = "PonsSelfTrade contract on your wallet’s network. Updating trading permissions authorizes this contract to spend your permitted tokens.";
 "Portfolio" = "Портфель";
 "Portfolio balance combines cash and marked positions. A position’s value can change while you hold it. Available cash is the amount currently shown as uninvested." = "Баланс портфеля складывается из денег и позиций по текущей рыночной оценке. Стоимость позиции может меняться, пока вы её держите. Свободные средства — это сумма, которая сейчас показана как невложенная.";
+"Positions on Lighter are publicly visible." = "Positions on Lighter are publicly visible.";
 "Prepare Trencher mode" = "Prepare Trencher mode";
 "Privacy mode is off: your bot can follow the whole chat in its groups. If it was already in a group before you turned privacy off, remove it from that group and add it back." = "Privacy mode is off: your bot can follow the whole chat in its groups. If it was already in a group before you turned privacy off, remove it from that group and add it back.";
 "Privacy mode is on, so in a group your bot only hears commands and replies to its own messages — it can't join in, remember the chat or see coins people post. To change that:" = "Privacy mode is on, so in a group your bot only hears commands and replies to its own messages — it can't join in, remember the chat or see coins people post. To change that:";
@@ -328,6 +342,7 @@
 "scout mode" = "scout mode";
 "scout mode · buying what can’t be priced yet" = "scout mode · buying what can’t be priced yet";
 "Scout mode is on but the budget is" = "Scout mode is on but the budget is";
+"sealed to Lighter key {key}. Anyone holding that key can lose what is on Lighter." = "sealed to Lighter key {key}. Anyone holding that key can lose what is on Lighter.";
 "Search" = "Поиск";
 "Search by token or agent name. Open a result to inspect its details; searching does not place a trade." = "Ищите по названию токена или имени агента. Откройте результат, чтобы посмотреть подробности; поиск не совершает сделок.";
 "seatbelt, not a cage" = "seatbelt, not a cage";
@@ -385,6 +400,7 @@
 "This is remote control of your computer." = "This is remote control of your computer.";
 "This is where you ask your agent to explain a decision in its own words. There is a first question waiting in the box — send it whenever you like." = "Здесь вы просите агента объяснить своё решение собственными словами. Первый вопрос уже ждёт в поле ввода — отправьте его, когда захотите.";
 "This lets Telegram touch this computer." = "This lets Telegram touch this computer.";
+"This only makes perpetuals possible: your agent trades them on paper until you turn on live perpetuals in Settings → Perpetuals." = "This only makes perpetuals possible: your agent trades them on paper until you turn on live perpetuals in Settings → Perpetuals.";
 "This spends real money." = "This spends real money.";
 "to buy or sell" = "to buy or sell";
 "to halt it." = "to halt it.";
@@ -436,11 +452,13 @@
 "With it on, an allowlisted chat can take screenshots, open apps, browse a folder you pick, and — if you enable them — run allowlisted shell commands and type keystrokes. Everything is" = "With it on, an allowlisted chat can take screenshots, open apps, browse a folder you pick, and — if you enable them — run allowlisted shell commands and type keystrokes. Everything is";
 "Withdraw" = "Вывести";
 "Withdraw available funds." = "Вывод свободных средств.";
+"Worst case: anyone holding your agent's Lighter key can lose everything you have on Lighter — by trading against an account they control, moving it into sub-accounts, or buying into a public pool. Each deposit to Lighter is capped by your per-trade limit, but that limit counts each deposit, not each day. Order size, leverage and markets are limited only by the agent's software, not by this permission." = "Worst case: anyone holding your agent's Lighter key can lose everything you have on Lighter — by trading against an account they control, moving it into sub-accounts, or buying into a public pool. Each deposit to Lighter is capped by your per-trade limit, but that limit counts each deposit, not each day. Order size, leverage and markets are limited only by the agent's software, not by this permission.";
 "You do not need to enter token contracts for Autonomous Trencher. Enable its permission when renewing your key. The new route supports verified Uniswap v3 pools; ungraduated bonding curves use a separate route." = "You do not need to enter token contracts for Autonomous Trencher. Enable its permission when renewing your key. The new route supports verified Uniswap v3 pools; ungraduated bonding curves use a separate route.";
 "You stay in control." = "Контроль остаётся за вами.";
 "Your agent can control this computer without asking for each action — running commands, typing, and opening links. It may damage files or expose private information. The destructive blocklist and the secret redaction are a" = "Your agent can control this computer without asking for each action — running commands, typing, and opening links. It may damage files or expose private information. The destructive blocklist and the secret redaction are a";
 "Your agent mints a link code on its next pass. Check back shortly." = "Your agent mints a link code on its next pass. Check back shortly.";
 "Your agent places real orders on Robinhood Chain with the funds in its account. Turn this off and it goes back to practising immediately — no signature needed either way." = "Your agent places real orders on Robinhood Chain with the funds in its account. Turn this off and it goes back to practising immediately — no signature needed either way.";
+"Your agent still has money, positions or orders on Lighter, so the permission stays: {detail}. Close them from the dashboard, then try again." = "Your agent still has money, positions or orders on Lighter, so the permission stays: {detail}. Close them from the dashboard, then try again.";
 "Your agent, your boundaries." = "Ваш агент — ваши границы.";
 "Your balance, your positions and your performance. Adding funds and withdrawing live here too." = "Ваш баланс, ваши позиции и ваши результаты. Пополнение и вывод средств — тоже здесь.";
 "Your bot can't be added to groups right now: @BotFather → /setjoingroups → your bot → Enable." = "Your bot can't be added to groups right now: @BotFather → /setjoingroups → your bot → Enable.";

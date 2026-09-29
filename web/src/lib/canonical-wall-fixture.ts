@@ -144,6 +144,13 @@ export interface SignerOptions {
   v4AdapterAddress?: `0x${string}`;
   ponsAdapterAddress?: `0x${string}`;
   trencher?: boolean;
+  /** A NEW perps opt-in: the public key keygen would have returned. */
+  perp?: { apiPublicKey: `0x${string}`; apiKeySealed?: string } | null;
+  /** The server's projection of the previous grant, for carry-forward. */
+  previousGrant?: unknown;
+  perpDrop?: boolean;
+  venueFlat?: boolean | null;
+  chainId?: number;
 }
 
 /** A grant exactly as the real signer mints it. */
@@ -154,11 +161,15 @@ export async function signerGrant(o: SignerOptions): Promise<{ grant: StoredGran
     prepareAgentGrant(owner, {
       caps: o.caps ?? TEST_CAPS,
       onStatus: () => {},
-      chainId: robinhoodChain.id,
+      chainId: o.chainId ?? robinhoodChain.id,
       extraTokens: o.extraTokens,
       v4AdapterAddress: o.v4AdapterAddress,
       ponsAdapterAddress: o.ponsAdapterAddress,
       trencherFactory: o.trencher ? TRENCHER_FACTORY : undefined,
+      perp: o.perp,
+      previousGrant: o.previousGrant,
+      perpDrop: o.perpDrop,
+      venueFlat: o.venueFlat,
     }),
   );
   return { grant, owner };

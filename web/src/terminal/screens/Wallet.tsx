@@ -25,6 +25,10 @@ import {
   TRADEABLE_V2,
   uncoveredBasketSymbols,
   type CustomToken,  PONS_SELFTRADE_ABI,
+  LIGHTER_ROUTE_V1,
+  grantPerp,
+  publicGrantView,
+  validatePerpPubKey,
 } from "@merrymen/core";
 import {
   clearGrant,
@@ -38,6 +42,8 @@ import {
   refusalMessage,
   restoreAgentWallet,
   createPrivyOwnedWallet,
+  priorPerpFor,
+  type PerpSealRequest,
   type Funding,
   type Grant,
   type GrantCaps,
@@ -45,6 +51,7 @@ import {
   type SavedWallet,
 } from "@/lib/session";
 import { SignOut } from "../SignOut";
+import { useT } from "@/lib/i18n";
 import { conceptTooltip } from "@merrymen/core";
 import { canStart } from "@/lib/can-start";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
@@ -232,6 +239,99 @@ const TESTNET = robinhoodTestnet.id; // 46630 — the sandbox
  */
 
 const MAINNET = robinhoodChain.id; // 4663 — real funds
+
+/**
+ * ROUGHLY THE SMALLEST PER-TRADE CAP THAT REACHES BTC, ETH OR SOL ON LIGHTER.
+ * A HINT SHOWN BEFORE SIGNING, NEVER A CHECK.
+ *
+ * Lighter's minimum order is max(10 USDG, min_base × price) — about 17 USDG for
+ * BTC, 13 for ETH and 12 for SOL when measured (docs/perps.md), and it moves
+ * with price. A static table here would be a second, staler copy of numbers
+ * the dashboard reads live (rule 6: an open under the venue minimum is refused
+ * as `perp-below-min`, never rounded up past the signed cap). So this is one
+ * round number with an honest "~" in the sentence that shows it, and it decides
+ * nothing: it only warns an owner about to seal a cap that probably cannot
+ * reach any perp market.
+ */
+const PERPS_REACH_HINT_USDG = 20;
+
+/**
+ * THE SERVER'S PUBLIC VIEW OF THE ARMED GRANT, three-valued on purpose:
+ * the grant (`publicGrantView` — public key, never a sealed blob), `null` when
+ * the server says it holds none, `undefined` when it could not be read. The
+ * signer treats those differently (priorPerpFor), and "could not read" must not
+ * collapse into "holds none", or an unread answer would let a re-sign drop a
+ * Lighter key the server still has.
+ */
+async function readServerGrant(): Promise<unknown> {
+  try {
+    const r = await fetch("/api/grants", { cache: "no-store" });
+    if (!r.ok) return undefined;
+    const s = (await r.json()) as { exists?: unknown; grant?: unknown };
+    if (s.exists === false) return null;
+    return s.exists === true && typeof s.grant === "object" && s.grant !== null ? s.grant : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * IS EVERY LIGHTER ACCOUNT UNDER THIS L1 ADDRESS EMPTY? From GET /api/perps/flat,
+ * which reads the venue and the chain. Only `true` is flat: `false` names what
+ * is left, and anything else — an error, a missing field, `null` — is "could
+ * not read", which rule 5 counts as NOT flat. The server re-checks on POST
+ * /api/grants (409) whatever this says; this is what lets the page say why
+ * before anybody signs.
+ */
+async function readVenueFlat(smartAccount: string): Promise<{ flat: boolean | null; detail: string }> {
+  try {
+    const r = await fetch(`/api/perps/flat?smartAccount=${encodeURIComponent(smartAccount)}`, { cache: "no-store" });
+    if (!r.ok) return { flat: null, detail: `HTTP ${r.status}` };
+    const body = (await r.json()) as { flat?: unknown; detail?: unknown };
+    return {
+      flat: body.flat === true ? true : body.flat === false ? false : null,
+      detail: typeof body.detail === "string" ? body.detail.slice(0, 300) : "",
+    };
+  } catch {
+    return { flat: null, detail: "" };
+  }
+}
+
+/**
+ * A NEW LIGHTER API KEY FOR THIS AGENT — THE PUBLIC HALF ONLY.
+ *
+ * POST /api/perps/keygen generates the pair server-side with the official
+ * signer: self-hosted it writes the private key to a 0600 file beside the
+ * worker's home; hosted it returns it only as `apiKeySealed` (AES-GCM under a
+ * key this page never sees). Everything that comes back is checked before it
+ * can reach a signature: the route's key index, a canonical public key, an
+ * opaque blob at most — and a response that carries anything shaped like a
+ * private key is refused outright rather than passed along, because the page
+ * would then be holding exactly what rule 5 says it never holds.
+ */
+async function mintPerpKey(smartAccount: string): Promise<PerpSealRequest> {
+  const r = await fetch("/api/perps/keygen", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    cache: "no-store",
+    body: JSON.stringify({ smartAccount }),
+  });
+  const body = (await r.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!r.ok) throw new Error(typeof body.error === "string" ? body.error.slice(0, 200) : `HTTP ${r.status}`);
+  if (Object.keys(body).some((k) => /private|secret|seed|mnemonic/i.test(k))) {
+    throw new Error("refusing a key response that carries private key material");
+  }
+  const key = typeof body.apiPublicKey === "string" ? validatePerpPubKey(body.apiPublicKey) : null;
+  if (!key || body.apiKeyIndex !== LIGHTER_ROUTE_V1.apiKeyIndex) {
+    throw new Error("the server returned a key this page cannot seal");
+  }
+  const sealed = body.apiKeySealed;
+  if (sealed !== undefined && (typeof sealed !== "string" || sealed === "")) {
+    throw new Error("the server returned a sealed key this page cannot carry");
+  }
+  return { apiPublicKey: key, ...(typeof sealed === "string" ? { apiKeySealed: sealed } : {}) };
+}
 
 /**
  * WHICH CHAIN THE PAGE WAS ASKED TO OPEN ON, from `?chain=`.
@@ -441,6 +541,52 @@ export default function GrantPage() {
   const [classFactory, setClassFactory] = useState<`0x${string}` | undefined>(undefined);
   const [autonomousTrencher, setAutonomousTrencher] = useState(false);
   useEffect(() => { setAutonomousTrencher(!!grantTrencher(grant)); }, [grant]);
+  /**
+   * PERPETUALS — CLOSED BY DEFAULT, AND ONLY EVER REMOVED ON A FLAT VENUE.
+   *
+   * Two different controls wearing one checkbox, because the two directions
+   * are not symmetric. Turning perps ON is an ordinary opt-in: a new Lighter
+   * key is minted at click time and sealed into the wall. Turning them OFF is
+   * not the reverse of that — a registered key stays valid at Lighter whatever
+   * the grant says (docs/perps.md rule 5) — so when the previous grant carried
+   * perps the box starts CHECKED, the signer carries the key forward by
+   * default, and unchecking it first asks the venue whether everything there
+   * is closed. Only a flat venue lets the box clear; anything else leaves it
+   * checked and says why.
+   *
+   * `perpsOptIn` is the new opt-in; `perpsDrop` is the owner's flat-checked
+   * request to remove carried perps. Both reset when the page moves to another
+   * agent, so a choice made for one account is never signed for the next.
+   */
+  const [perpsOptIn, setPerpsOptIn] = useState(false);
+  /**
+   * The account the SERVER offers a new perps opt-in for (GET /api/grants
+   * `perpsOptIn`, the operator's MERRYMEN_PERPS / live allowlist), lowercased,
+   * or null. Null until the server says yes — unread is not offered — and
+   * bound to the account it was answered for, so an answer about the armed
+   * agent never opens the box for another. Carried perps need no offer.
+   */
+  const [perpsOfferedFor, setPerpsOfferedFor] = useState<string | null>(null);
+  const [perpsDrop, setPerpsDrop] = useState(false);
+  const [perpsNote, setPerpsNote] = useState<string | null>(null);
+  const [perpsChecking, setPerpsChecking] = useState(false);
+  useEffect(() => {
+    setPerpsOptIn(false);
+    setPerpsDrop(false);
+    setPerpsNote(null);
+  }, [grant?.smartAccount]);
+  /**
+   * The server's PUBLIC view of the armed grant — see readServerGrant for the
+   * three values. The mount read feeds the box's display; every signing path
+   * reads it again at click time (serverGrantNow), because a Lighter key sealed
+   * from another device since this page loaded must be carried, not dropped.
+   */
+  const [serverGrant, setServerGrant] = useState<unknown>(undefined);
+  async function serverGrantNow(): Promise<unknown> {
+    const fresh = await readServerGrant();
+    return fresh === undefined ? serverGrant : fresh;
+  }
+  const t = useT();
   // The basket matters here for the same reason: /settings offers every registry
   // symbol, but only the ones sealed into the signature can be sold.
   const [basketSymbols, setBasketSymbols] = useState<string[]>([]);
@@ -464,8 +610,13 @@ export default function GrantPage() {
     setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
     fetch("/api/grants")
       .then((r) => (r.ok ? r.json() : { exists: false }))
-      .then((s: { exists?: boolean; gasSponsored?: boolean | null; grant?: Grant }) => {
+      .then((s: { exists?: boolean; gasSponsored?: boolean | null; grant?: Grant; perpsOptIn?: boolean }) => {
         setServerArmed(!!s.exists);
+        setPerpsOfferedFor(s.exists && s.perpsOptIn === true && s.grant?.smartAccount ? s.grant.smartAccount.toLowerCase() : null);
+        // For the perpetuals box only: what the server's armed grant carries,
+        // which a second browser or device cannot know any other way. The
+        // renew path re-reads it at click time (readServerGrant).
+        setServerGrant(s.exists ? (s.grant ?? undefined) : null);
         if (s.exists && !stored) {
           /**
            * A SECOND BROWSER IS NOT A LOST WALLET.
@@ -764,6 +915,10 @@ export default function GrantPage() {
         ponsAdapterAddress: await verifiedAdapter(ponsAdapter, chainId, setStatus),
         ponsClassVaultFactory: classFactory,
         hostedAs: session.hosted ? (session.address ?? undefined) : undefined,
+        // A NEW account replaces the armed grant. If that grant holds a Lighter
+        // key, the signer refuses (rule 5) rather than strand it — it needs to
+        // know what the server holds to say so.
+        previousGrant: await serverGrantNow(),
       });
       setGrant(g);
       // Take the ARMED state from what the server actually said. This used to be
@@ -816,6 +971,10 @@ export default function GrantPage() {
         ponsAdapterAddress: await verifiedAdapter(ponsAdapter, chainId, setStatus),
         ponsClassVaultFactory: classFactory,
         hostedAs: session?.hosted ? (session.address ?? undefined) : undefined,
+        // Restoring re-signs an account that may hold a Lighter key: the signer
+        // carries it forward from here (and from this browser's copies), and
+        // refuses to replace another account's armed key.
+        previousGrant: await serverGrantNow(),
       });
       // They just pasted the owner key, so it's demonstrably backed up — skip the
       // backup gate and drop them straight into the funded/manage view.
@@ -871,6 +1030,50 @@ export default function GrantPage() {
       ? "privy"
       : null;
 
+  /**
+   * WHAT THE PREVIOUS GRANT SAYS ABOUT PERPS, read the way the signer reads
+   * it — the server's view when it names this account, else the copy this page
+   * holds — so the box shows what signing will actually do. "unreadable"
+   * counts as carried: the signer refuses to drop it without a flat venue.
+   */
+  const priorPerp = grant
+    ? priorPerpFor(grant.smartAccount, { server: serverGrant, local: { current: grant } }).same
+    : ({ state: "none" } as const);
+  const perpsCarried = priorPerp.state !== "none";
+  /**
+   * May the box offer a NEW opt-in? Only when the server offered it for this
+   * very account. Rollout Phase 1 (and a hosted deploy on its default
+   * MERRYMEN_PERPS=paper) shows no box at all; keygen and the grant intake
+   * refuse a new key there regardless, so this is the page saying so first.
+   */
+  const perpsOffered = !!grant && perpsOfferedFor === grant.smartAccount.toLowerCase();
+  /** What this re-sign will seal, as the owner has set it. */
+  const perpsWanted = perpsCarried ? !perpsDrop : perpsOptIn;
+
+  async function onPerpsToggle(checked: boolean) {
+    setPerpsNote(null);
+    if (!perpsCarried) {
+      setPerpsOptIn(checked);
+      return;
+    }
+    if (checked) {
+      setPerpsDrop(false);
+      return;
+    }
+    // UNCHECKING CARRIED PERPS: ask the venue first. The box clears only on a
+    // provably flat venue; renewKey asks again at click time, and the server
+    // asks a third time before it stores anything.
+    if (!grant) return;
+    setPerpsChecking(true);
+    const read = await readVenueFlat(grant.smartAccount);
+    setPerpsChecking(false);
+    if (read.flat === true) {
+      setPerpsDrop(true);
+      return;
+    }
+    setPerpsNote(read.flat === false ? t("wallet.perps.notFlat", { detail: read.detail || "—" }) : t("wallet.perps.unread"));
+  }
+
   async function renewKey() {
     if (!grant || !resignBy) return;
     setError(null);
@@ -889,6 +1092,40 @@ export default function GrantPage() {
         }
       }
       if (autonomousTrencher && !TRENCHER_FACTORY) throw new Error("The verified Trencher deployment is unavailable; your existing permission has not been replaced.");
+      // ── PERPETUALS, AT CLICK TIME ──────────────────────────────────────
+      //
+      // The server's view is re-read now, like the settings below: a key
+      // sealed from another browser or device since this page loaded must be
+      // carried forward, not dropped. What the signer then does with it is
+      // decided in session.ts (decidePerpSeal) — this only gathers the three
+      // inputs it cannot gather itself:
+      //   - a NEW key, only when the owner ticked the box and nothing is
+      //     carried (keygen returns the public half; the private one never
+      //     reaches this page);
+      //   - the drop, only when the owner unchecked carried perps AND the venue
+      //     reads flat right now — a second read, because positions can open
+      //     between the click on the box and this one;
+      //   - the previous grant itself.
+      const previousGrant = await serverGrantNow();
+      const priorAtClick = priorPerpFor(grant.smartAccount, { server: previousGrant, local: { current: grant } }).same;
+      const perpsDropping = priorAtClick.state !== "none" && perpsDrop;
+      let perpSeal: PerpSealRequest | undefined;
+      let perpsFlat: boolean | undefined;
+      if (perpsDropping) {
+        const read = await readVenueFlat(grant.smartAccount);
+        if (read.flat !== true) throw new Error(t("wallet.perps.dropNotFlat"));
+        perpsFlat = true;
+      } else if (priorAtClick.state === "none" && perpsOptIn) {
+        // Ticked only where the box was offered; should the operator have
+        // withdrawn the offer since, keygen's 403 says so by name — the
+        // owner's choice is refused aloud, never quietly left out.
+        if (chainId !== MAINNET) throw new Error(t("wallet.perps.mainnetOnly"));
+        try {
+          perpSeal = await mintPerpKey(grant.smartAccount);
+        } catch (e) {
+          throw new Error(t("wallet.perps.keygenFailed", { detail: e instanceof Error ? e.message : String(e) }));
+        }
+      }
       // FETCH SETTINGS AT CLICK TIME, not from mount state. This is the exact
       // button an owner presses right after saving a new token or the adapter
       // address in /settings — and the mount-time fetch predates that save, so
@@ -952,6 +1189,17 @@ export default function GrantPage() {
          * nothing failing anywhere. mintGrant refuses instead.
          */
         expectAccount: grant.smartAccount as `0x${string}`,
+        /**
+         * PERPETUALS — the new key when the owner opted in, the server's view
+         * of the previous grant so a carried key is never lost, and the drop
+         * only with the venue read flat at this click. Omitting all four would
+         * still carry forward this browser's own copy (mintGrant reads it); the
+         * server projection is what covers a key sealed somewhere else.
+         */
+        perp: perpSeal,
+        previousGrant,
+        perpDrop: perpsDropping,
+        venueFlat: perpsFlat,
       };
       // TWO OWNERS, ONE CONTROL. Everything above — the fresh settings, the
       // selected chain, the current caps, the adapter verification — is shared;
@@ -964,6 +1212,13 @@ export default function GrantPage() {
       // Same correction as create/restore: report what the server said, so a
       // renewed key that the server refused doesn't read as a renewed agent.
       setServerArmed(handoff.ok);
+      // What the server now holds, for the perpetuals box — PROJECTED, so the
+      // page's idea of "the server's grant" never holds a key of any kind. A
+      // refused handoff leaves the server's old grant, and so this, in place.
+      if (handoff.ok) setServerGrant(publicGrantView(g));
+      setPerpsOptIn(false);
+      setPerpsDrop(false);
+      setPerpsNote(null);
       if (!handoff.ok) setError(handoff.error ?? "the server refused the renewed grant");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1995,6 +2250,16 @@ export default function GrantPage() {
                   )}
                 </li>
                 <li>
+                  <b>{t("wallet.perps.summaryLabel")}</b> —{" "}
+                  {grantPerp(grant) ? (
+                    <span style={{ color: "var(--amber, var(--red))" }}>
+                      {t("wallet.perps.summaryGranted", { key: short(grantPerp(grant)!.apiPublicKey) })}
+                    </span>
+                  ) : (
+                    t("wallet.perps.summaryNone")
+                  )}
+                </li>
+                <li>
                   <b>Class route</b> —{" "}
                   {grantPonsClassVault(grant) ? (
                     <span style={{ color: "var(--amber, var(--red))" }}>
@@ -2055,6 +2320,43 @@ export default function GrantPage() {
                         {!TRENCHER_FACTORY && " The new vault deployment is not configured yet; this permission is unavailable."}
                       </small>
                     </label>
+                    {/*
+                      PERPETUALS, beside the other opt-in that can hold money
+                      somewhere other than the account. Closed by default; the
+                      worst case is stated here, before the box is ticked, in
+                      the words rule 4 requires — what the wall does NOT bound.
+                      When the previous grant carried perps the box starts
+                      checked and can only clear on a flat venue (onPerpsToggle).
+                      A NEW opt-in is shown only where the server offers it
+                      (perpsOffered); carried perps are always shown, so they
+                      can never be signed away unseen.
+                    */}
+                    {(perpsCarried || perpsOffered) && (
+                    <label className="field">
+                      <span className="field-label">{t("wallet.perps.label")}</span>
+                      <span>
+                        <input
+                          type="checkbox"
+                          checked={perpsWanted}
+                          disabled={perpsChecking || (!perpsCarried && chainId !== MAINNET)}
+                          onChange={(e) => void onPerpsToggle(e.target.checked)}
+                        />
+                        {t("wallet.perps.allow")}
+                      </span>
+                      <small>
+                        {t("wallet.perps.worstCase")} {t("wallet.perps.paperFirst")} {t("wallet.perps.regions")}{" "}
+                        {t("wallet.perps.public")}
+                        {perpsCarried && !perpsDrop && <> {t("wallet.perps.carried")}</>}
+                        {perpsCarried && perpsDrop && <> {t("wallet.perps.dropping")}</>}
+                        {!perpsCarried && chainId !== MAINNET && <> {t("wallet.perps.mainnetOnly")}</>}
+                        {perpsWanted && caps.perTradeUsdg < PERPS_REACH_HINT_USDG && (
+                          <> {t("wallet.perps.capBelowMin", { min: PERPS_REACH_HINT_USDG })}</>
+                        )}
+                        {perpsChecking && <> {t("wallet.perps.checking")}</>}
+                        {perpsNote && <span style={{ color: "var(--red)" }}> {perpsNote}</span>}
+                      </small>
+                    </label>
+                    )}
                     <label className="field">
                       <span className="field-label">most it can spend on one trade</span>
                       <span className="field-input">

@@ -508,6 +508,31 @@ export const EN = {
   "settings.text.agentStop": "/agent stop",
   "settings.text.outboundPublic": "Outbound & public",
   "settings.text.offByDefaultNothing": "— off by default; nothing streams until you turn this on and add a key.",
+
+  // ── Wallet & permissions: the perpetuals opt-in ─────────────────────
+  //
+  // docs/perps.md rule 4 says what the signed wall does NOT bound "in plain
+  // words, on the consent". This is the signing screen's half of that: the
+  // worst case stated before the box is ticked, not after. Its own namespace,
+  // so it falls back to English whole until every sentence is translated.
+  "wallet.perps.label": "Perpetuals permission",
+  "wallet.perps.allow": "Allow my agent to trade perpetual futures on Lighter, with margin posted from this account.",
+  "wallet.perps.worstCase": "Worst case: anyone holding your agent's Lighter key can lose everything you have on Lighter — by trading against an account they control, moving it into sub-accounts, or buying into a public pool. Each deposit to Lighter is capped by your per-trade limit, but that limit counts each deposit, not each day. Order size, leverage and markets are limited only by the agent's software, not by this permission.",
+  "wallet.perps.paperFirst": "This only makes perpetuals possible: your agent trades them on paper until you turn on live perpetuals in Settings → Perpetuals.",
+  "wallet.perps.regions": "Lighter's terms exclude the US, the UK, Canada and sanctioned regions.",
+  "wallet.perps.public": "Positions on Lighter are publicly visible.",
+  "wallet.perps.carried": "Carried forward: your agent already holds a Lighter key and this re-sign keeps it. Unchecking reads Lighter first — the permission can only be removed once everything there is closed.",
+  "wallet.perps.dropping": "Lighter reads empty for this account, so this re-sign removes the perpetuals permission.",
+  "wallet.perps.checking": "Checking Lighter…",
+  "wallet.perps.notFlat": "Your agent still has money, positions or orders on Lighter, so the permission stays: {detail}. Close them from the dashboard, then try again.",
+  "wallet.perps.unread": "Lighter could not be read just now, and unread is not empty, so the permission stays. Try again in a moment.",
+  "wallet.perps.mainnetOnly": "Perpetuals exist only on Robinhood Chain mainnet.",
+  "wallet.perps.capBelowMin": "Perps need a per-trade cap of at least ~{min} USDG to reach BTC, ETH or SOL; the dashboard checks live minimums.",
+  "wallet.perps.keygenFailed": "Couldn't create a Lighter key for your agent just now, so nothing was signed ({detail}).",
+  "wallet.perps.dropNotFlat": "Lighter no longer reads empty for this account, so the perpetuals permission stays. Your current key has not been replaced.",
+  "wallet.perps.summaryGranted": "sealed to Lighter key {key}. Anyone holding that key can lose what is on Lighter.",
+  "wallet.perps.summaryNone": "not granted.",
+  "wallet.perps.summaryLabel": "Perpetuals",
 } as const;
 
 /** Every message the product can show. A key outside this set will not compile. */

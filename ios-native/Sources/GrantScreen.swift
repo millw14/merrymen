@@ -164,7 +164,10 @@ struct GrantScreen: View {
             guard parsed["perTradeUsdg"]!.number! <= parsed["dailyUsdg"]!.number!, parsed["expiryDays"]!.number! <= 90, parsed["maxDrawdownPct"]!.number! <= 50, parsed["maxOpsPerDay"]!.number! <= 10_000 else { throw APIError(status: 0, message: "Per-trade spending cannot exceed the daily limit. Maximums: 90 days, 50% drawdown, 10,000 operations per day.") }
             var input: [String: J] = ["caps": .object(parsed), "extraTokens": .array(fresh.setting("customTokens").array), "autonomousTrencher": .bool(trencher)]
             for key in ["v4AdapterAddress", "ponsAdapterAddress", "ponsClassVaultFactory"] { if let value = fresh.setting(key).string, !value.isEmpty { input[key] = .string(value) } }
-            if let grant { input["expectAccount"] = grant["smartAccount"]; if let factory = grant["trencherFactoryAddress"].string { input["priorTrencherFactory"] = .string(factory) } }
+            // previousGrant: the server's PUBLIC projection this screen already holds. The engine carries a
+            // Lighter key forward from it (docs/perps.md rule 5); without it the engine reads only this
+            // device's copies, which never hold perps enabled on the dashboard, and a re-sign drops them.
+            if let grant { input["expectAccount"] = grant["smartAccount"]; input["previousGrant"] = grant; if let factory = grant["trencherFactoryAddress"].string { input["priorTrencherFactory"] = .string(factory) } }
             if let recovery {
                 input["expectAccount"] = recovery["smartAccount"]; input["recoveryOwner"] = recovery["recoveryOwner"]
                 if recovery["trencher"]["funded"].bool == true { input["priorTrencherFactory"] = recovery["trencher"]["factory"] }
