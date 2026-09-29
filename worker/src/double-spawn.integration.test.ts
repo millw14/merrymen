@@ -256,6 +256,10 @@ describe("two paths reaching spawnChild at once", () => {
     await settle();
     g.open();
     await pass;
+    // The pass stepped round the tenant and did not wait for the timer's
+    // spawn, which does real I/O once released: wait for its worker, not for
+    // a count of turns (under a loaded full run twenty were not enough).
+    await until(() => spawned.length >= 2, "the timer's replacement");
     await settle();
     assert.equal(spawned.length, 2, "the timer's replacement and nothing else");
   });
