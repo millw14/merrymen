@@ -43,8 +43,16 @@ export interface TelegramOpts {
  * logged. The poll loop is strictly serial too, so one getUpdates or reply
  * that never answered held every message behind it for as long as the
  * process lived. Past this the call is a failed request ("request failed:
- * timed out") and the request is aborted. Callers do not retry it: a send
- * that timed out may still have landed.
+ * timed out") and the request is aborted.
+ *
+ * A send that timed out may still have landed, so the paths that answer a
+ * person do not retry it: a group line (tg-groups/handler.ts sends it once
+ * and logs "no answer"), a DM reply (service.ts), and sendMessage's and
+ * editMessageText's own fallbacks, which retry only on what Telegram refused.
+ * Some delayed re-senders do send again after one, and may repeat an
+ * informational message: the sign prompt and the energy alert (notifier.ts,
+ * after half an hour), the group Stay/Leave DM (after an hour), and the
+ * notify queue (mcp/notify.ts, by design). None of them repeats a trade.
  *
  * Ten seconds: a call still out at ten is not coming back in time to
  * matter, and a group line or a poll that waits longer only goes stale.
