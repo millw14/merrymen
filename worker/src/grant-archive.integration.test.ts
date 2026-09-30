@@ -12,7 +12,7 @@
  */
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -49,11 +49,13 @@ after(() => {
   }
 });
 
+const kept = () => path.join(homePaths.grantsArchive(), `${ACCOUNT.toLowerCase()}.json`);
+
 describe("archiveCurrentGrant", () => {
   it("keeps the owner key before anything deletes the grant", () => {
     writeGrant();
     const archived = archiveCurrentGrant();
-    assert.equal(archived, ACCOUNT);
+    assert.deepEqual(archived, { kind: "archived", account: ACCOUNT });
 
     const kept = path.join(homePaths.grantsArchive(), `${ACCOUNT.toLowerCase()}.json`);
     assert.ok(existsSync(kept), "archive file should exist");
@@ -80,18 +82,62 @@ describe("archiveCurrentGrant", () => {
     if (process.platform !== "win32") assert.equal(mode, 0o600, `mode was ${mode.toString(8)}`);
   });
 
-  it("returns null rather than throwing when there is nothing to keep", () => {
+  it("the copy is grant.json BYTE FOR BYTE — BOM, whitespace and all — and no temp file is left", () => {
+    // Not re-serialized: a copy that parses the same is not the file the
+    // recover tooling and the owner were told is kept.
+    const raw = "\ufeff" + JSON.stringify({ smartAccount: ACCOUNT, serialized: "0xs", demoOwnerPrivateKey: OWNER_KEY }, null, 4) + "\n";
+    writeFileSync(homePaths.grant(), raw, "utf8");
+    assert.equal(archiveCurrentGrant().kind, "archived");
+    assert.deepEqual(readFileSync(kept()), readFileSync(homePaths.grant()));
+    assert.deepEqual(readdirSync(homePaths.grantsArchive()).filter((n) => n.endsWith(".tmp")), []);
+  });
+
+  it("a same-account copy is REPLACED whole — a new file, 0600 even over a looser one, never truncated in place", () => {
+    writeGrant({ note: "first" });
+    archiveCurrentGrant();
+    if (process.platform !== "win32") chmodSync(kept(), 0o644);
+    const before = statSync(kept()).ino;
+    writeGrant({ note: "second, and longer than the first so a truncate-and-write would show" });
+    archiveCurrentGrant();
+    assert.match(readFileSync(kept(), "utf8"), /second, and longer/);
+    if (process.platform !== "win32") {
+      // writeFileSync keeps the inode it truncates; only a rename installs a new one.
+      assert.notEqual(statSync(kept()).ino, before, "rewritten in place");
+      assert.equal(statSync(kept()).mode & 0o777, 0o600);
+    }
+  });
+
+  it("NOTHING to keep: no grant.json, one that does not parse, one naming no account", () => {
     rmSync(homePaths.grant(), { force: true });
-    assert.equal(archiveCurrentGrant(), null);
-  });
-
-  it("returns null on a malformed grant instead of writing junk", () => {
+    assert.deepEqual(archiveCurrentGrant(), { kind: "nothing" });
     writeFileSync(homePaths.grant(), "{not json", "utf8");
-    assert.equal(archiveCurrentGrant(), null);
+    assert.deepEqual(archiveCurrentGrant(), { kind: "nothing" });
+    // …and no file under a bogus name.
+    writeFileSync(homePaths.grant(), JSON.stringify({ serialized: "0x", demoOwnerPrivateKey: OWNER_KEY }), "utf8");
+    assert.deepEqual(archiveCurrentGrant(), { kind: "nothing" });
   });
 
-  it("a grant with no smartAccount is not archived under a bogus name", () => {
-    writeFileSync(homePaths.grant(), JSON.stringify({ serialized: "0x", demoOwnerPrivateKey: OWNER_KEY }), "utf8");
-    assert.equal(archiveCurrentGrant(), null);
+  it("FAILED, not nothing, when there is a grant it cannot keep — and grant.json is left alone", { skip: process.platform === "win32" || process.getuid?.() === 0 }, () => {
+    // The two used to be the same `null`, and the kill switch deleted the
+    // grant either way — on a full or read-only disk, the only owner key.
+    writeGrant({ note: "must survive" });
+    const before = readFileSync(homePaths.grant());
+    mkdirSync(homePaths.grantsArchive(), { recursive: true });
+    chmodSync(homePaths.grantsArchive(), 0o500);
+    try {
+      const r = archiveCurrentGrant();
+      assert.equal(r.kind, "failed");
+      assert.match(r.kind === "failed" ? r.why : "", /could not be written \(EACCES\)/);
+      assert.deepEqual(readFileSync(homePaths.grant()), before, "archiving never touches grant.json");
+    } finally {
+      chmodSync(homePaths.grantsArchive(), 0o700);
+    }
+  });
+
+  it("FAILED for a grant whose smartAccount is not an address — it holds a key, and ../ is not a file name", () => {
+    writeFileSync(homePaths.grant(), JSON.stringify({ smartAccount: "../../escape", demoOwnerPrivateKey: OWNER_KEY }), "utf8");
+    const r = archiveCurrentGrant();
+    assert.equal(r.kind, "failed");
+    assert.ok(!existsSync(path.join(HOME, "escape.json")) && !existsSync(path.join(path.dirname(HOME), "escape.json")));
   });
 });

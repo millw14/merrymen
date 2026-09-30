@@ -91,7 +91,9 @@ describe("what the refresh costs, and what it refuses to do", () => {
 
   it("and the file keeps the same owner-only mode as the spawn-time write", () => {
     // grant.json holds the SESSION key. A refresh that widened the mode would
-    // quietly undo the permission the spawn path is careful to set.
-    assert.match(FN, /mode: 0o600/);
+    // quietly undo the permission the spawn path is careful to set. The mode is
+    // the helper's argument now, applied to the temp file before the rename
+    // (child-files-atomic.test.ts pins why the write is atomic at all).
+    assert.match(FN, /writeFileAtomicSync\(file, next, 0o600\);/);
   });
 });

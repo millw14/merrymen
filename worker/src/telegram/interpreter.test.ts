@@ -327,6 +327,24 @@ describe("executeCommand — code disposes", () => {
     assert.match(done, /merrymen recover/);
   });
 
+  it("A KILL THAT COULD NOT ARCHIVE SAYS THE GRANT WAS KEPT — not 'nothing to kill', not 'destroyed'", async () => {
+    // Self-hosted, deleting grant.json without a copy loses the owner key for
+    // good, so the worker keeps it and pauses instead (grant.ts GrantArchive).
+    const d = deps({ kill: () => ({ ok: false, reason: "the archive could not be written (ENOSPC)", archiveFailed: { why: "the archive could not be written (ENOSPC)", paused: true } }) });
+    await executeCommand({ kind: "kill" }, d);
+    const done = await executeCommand({ kind: "confirm" }, d);
+    assert.match(done, /the grant was NOT destroyed/);
+    assert.match(done, /\(the archive could not be written \(ENOSPC\)\)/);
+    assert.match(done, /Trading is PAUSED instead: nothing is proposed or traded until you \/resume/);
+    assert.match(done, /then \/kill again/);
+    assert.doesNotMatch(done, /nothing to kill|grant destroyed/);
+
+    const unpaused = deps({ kill: () => ({ ok: false, archiveFailed: { why: "the archive could not be written (EROFS)", paused: false } }) });
+    await executeCommand({ kind: "kill" }, unpaused);
+    const worse = await executeCommand({ kind: "confirm" }, unpaused);
+    assert.match(worse, /could not pause trading either, so the agent may still trade inside its caps/);
+  });
+
   it("HOSTED KILL PROMISES NO ARCHIVE: the server never held the owner key", async () => {
     // Hosted, grant.json holds only the session key and there is no CLI to
     // run on the server. The self-hosted wording promised both.

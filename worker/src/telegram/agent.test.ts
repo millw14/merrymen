@@ -272,10 +272,15 @@ test("loop: streams text, executes tools, stops when the model stops", async () 
     writeFileSync(path.join(root, "hello.txt"), "hi");
     const sent: string[] = [];
     const seen: AgentMsg[][] = [];
+    const anthropicContent: NonNullable<AgentTurn["anthropicContent"]> = [
+      { type: "thinking", thinking: "private reasoning", signature: "signed-thinking" },
+      { type: "text", text: "let me look around", citations: null },
+      { type: "tool_use", id: "1", name: "list_dir", input: {}, caller: { type: "direct" } },
+    ];
     const deps = makeDeps(
       baseCfg({ capabilities: new Set(["files"]), filesRoot: root }),
       [
-        { text: "let me look around", toolUses: [{ id: "1", name: "list_dir", input: {} }] },
+        { text: "let me look around", toolUses: [{ id: "1", name: "list_dir", input: {} }], anthropicContent },
         { text: "done — found hello.txt", toolUses: [] },
       ],
       sent,
@@ -285,6 +290,7 @@ test("loop: streams text, executes tools, stops when the model stops", async () 
     assert.deepEqual(sent, ["let me look around", "done — found hello.txt"]);
     // the tool result made it back to the model on the second turn
     const second = seen[1]!;
+    assert.deepEqual(second.find((m) => m.role === "assistant")?.anthropicContent, anthropicContent);
     const toolMsg = second.find((m) => m.role === "tools");
     assert.ok(toolMsg && toolMsg.role === "tools" && toolMsg.results[0]!.output.includes("hello.txt"));
   } finally {
@@ -307,6 +313,37 @@ test("loop: a refused shell command surfaces to the model as REFUSED, not an exc
   await runAgentTask("install deps", deps);
   const toolMsg = seen[1]!.find((m) => m.role === "tools");
   assert.ok(toolMsg && toolMsg.role === "tools" && toolMsg.results[0]!.output.startsWith("REFUSED"));
+});
+
+test("loop: changing directory keeps the signed conversation prefix stable", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "mm-agent-cwd-"));
+  try {
+    const command = `"${process.execPath}" -e "process.stdout.write(process.cwd())"`;
+    const content: NonNullable<AgentTurn["anthropicContent"]> = [
+      { type: "thinking", thinking: "", signature: "bound-to-initial-prompt" },
+      { type: "tool_use", id: "cwd", name: "run", input: { command, cwd: root }, caller: { type: "direct" } },
+    ];
+    const seen: AgentMsg[][] = [];
+    const deps = makeDeps(
+      baseCfg({ capabilities: new Set(["shell"]), filesRoot: os.tmpdir(), shellAllowlist: [command] }),
+      [
+        { text: "", toolUses: [{ id: "cwd", name: "run", input: { command, cwd: root } }], anthropicContent: content },
+        { text: "done", toolUses: [] },
+      ],
+      [], seen,
+    );
+    const systems: string[] = [];
+    const turn = deps.turnFn!;
+    deps.turnFn = (creds, opts) => { systems.push(opts.system); return turn(creds, opts); };
+    await runAgentTask("Check the working directory", deps);
+    assert.equal(systems.length, 2);
+    assert.equal(systems[1], systems[0], "signed thinking is bound to the unchanged prefix");
+    assert.deepEqual(seen[1]!.find((m) => m.role === "assistant")?.anthropicContent, content);
+    const result = seen[1]!.find((m) => m.role === "tools")!.results[0]!;
+    assert.ok(result.output.includes(`working dir ${root}`), "current directory is appended as tool data");
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
 });
 
 test("loop: hits the step budget and says so", async () => {

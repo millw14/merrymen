@@ -84,6 +84,110 @@ describe("requestJson", () => {
     assert.equal(e.status, 0);
     assert.match(e.message, /reach merrymen/);
   });
+
+  it("lets a caller abort an in-flight request", async () => {
+    const caller = new AbortController();
+    let received: AbortSignal | null | undefined;
+    globalThis.fetch = async (_url, init) => {
+      received = init?.signal;
+      assert.ok(received);
+      return new Promise<Response>((_resolve, reject) => {
+        received!.addEventListener("abort", () => reject(received!.reason), { once: true });
+      });
+    };
+
+    const pending = requestJson("/api/auth/privy", { signal: caller.signal });
+    const canceled = new DOMException("Sign-in was restarted", "AbortError");
+    caller.abort(canceled);
+
+    await assert.rejects(pending, (error: unknown) => error instanceof RequestError && error.status === 0);
+    assert.equal(received?.aborted, true, "the request must receive cancellation from its caller");
+    assert.equal(received?.reason, canceled);
+  });
+
+  it("supports caller cancellation in browsers without AbortSignal.any", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(AbortSignal, "any");
+    Object.defineProperty(AbortSignal, "any", { configurable: true, value: undefined });
+    try {
+      const caller = new AbortController();
+      let received: AbortSignal | null | undefined;
+      globalThis.fetch = async (_url, init) => {
+        received = init?.signal;
+        assert.ok(received);
+        return new Promise<Response>((_resolve, reject) => {
+          received!.addEventListener("abort", () => reject(received!.reason), { once: true });
+        });
+      };
+      const pending = requestJson("/api/auth/privy", { signal: caller.signal });
+      caller.abort();
+      await assert.rejects(pending, RequestError);
+      assert.equal(received?.aborted, true, "the request must reach fetch and retain cancellation");
+    } finally {
+      if (descriptor) Object.defineProperty(AbortSignal, "any", descriptor);
+      else Reflect.deleteProperty(AbortSignal, "any");
+    }
+  });
+
+  it("passes through cancellation that occurred before the request started", async () => {
+    const caller = new AbortController();
+    caller.abort();
+    globalThis.fetch = async (_url, init) => {
+      assert.equal(init?.signal?.aborted, true);
+      assert.equal(init.signal.reason, caller.signal.reason);
+      throw init.signal.reason;
+    };
+    await assert.rejects(requestJson("/api/auth/privy", { signal: caller.signal }), RequestError);
+  });
+
+  it("keeps cancellation active while reading the body and releases it afterwards", async () => {
+    const caller = new AbortController();
+    let received: AbortSignal | null | undefined;
+    let finishBody!: (value: unknown) => void;
+    const body = new Promise((resolve) => { finishBody = resolve; });
+    globalThis.fetch = async (_url, init) => {
+      received = init?.signal;
+      const response = new Response("{}", { headers: { "content-type": "application/json" } });
+      response.json = () => body;
+      return response;
+    };
+    const pending = requestJson("/api/auth/privy", { signal: caller.signal });
+    await Promise.resolve();
+    caller.abort();
+    assert.equal(received?.aborted, true, "body reading must still be cancellable");
+    finishBody({ ok: true });
+    await pending;
+
+    const nextCaller = new AbortController();
+    await requestJson("/api/auth/privy", { signal: nextCaller.signal });
+    nextCaller.abort();
+    assert.equal(received?.aborted, false, "completed requests must release their caller listener");
+  });
+
+  it("keeps the 20-second deadline when the caller supplies a signal", async (t) => {
+    const caller = new AbortController();
+    const deadline = new AbortController();
+    t.mock.method(AbortSignal, "timeout", (milliseconds: number) => {
+      assert.equal(milliseconds, 20000);
+      return deadline.signal;
+    });
+    let received: AbortSignal | null | undefined;
+    globalThis.fetch = async (_url, init) => {
+      received = init?.signal;
+      assert.ok(received);
+      return new Promise<Response>((_resolve, reject) => {
+        received!.addEventListener("abort", () => reject(received!.reason), { once: true });
+      });
+    };
+
+    const pending = requestJson("/api/auth/privy", { signal: caller.signal });
+    const expired = new DOMException("signal timed out", "TimeoutError");
+    deadline.abort(expired);
+
+    await assert.rejects(pending, (error: unknown) => error instanceof RequestError && error.status === 0);
+    assert.equal(received?.aborted, true, "the request must retain its own deadline");
+    assert.equal(received?.reason, expired);
+    assert.equal(caller.signal.aborted, false, "the request must not cancel the caller's other work");
+  });
 });
 
 describe("what a server error may say to the owner", () => {

@@ -283,7 +283,7 @@ describe("the child does not re-arm", () => {
     const kill = src.slice(src.indexOf("    kill: () => {"), src.indexOf("// ARCHIVE FIRST.", src.indexOf("    kill: () => {")));
     // Through hostedKillFromChat, which the hold process calls as well, and
     // which is killHosted once there is a grant to kill.
-    assert.match(kill, /if \(isHostedMode\(\)\) \{[\s\S]*hostedKillFromChat\(merrymenHome\(\), homePaths\.grant\(\)/);
+    assert.match(kill, /if \(isHostedMode\(\)\) \{[\s\S]*hostedKillFromChat\(merrymenHome\(\), grantFilePath\(\)/);
     const kr = readFileSync(new URL("./kill-request.ts", import.meta.url), "utf8");
     const fromChat = kr.slice(kr.indexOf("export function hostedKillFromChat("), kr.indexOf("\n}", kr.indexOf("export function hostedKillFromChat(")));
     assert.match(fromChat, /return killHosted\(home, grantFile, grant, nowSec\);/);

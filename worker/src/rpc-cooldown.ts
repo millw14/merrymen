@@ -38,9 +38,15 @@ import path from "node:path";
  * home explicitly at spawn; self-hosted there is one process and its own home
  * is the honest answer.
  */
-export function cooldownFile(home: string): string {
+export function cooldownFile(home: string, endpoint?: string): string {
   const fleet = process.env.MERRYMEN_FLEET_HOME?.trim();
-  return path.join(fleet && fleet.length > 0 ? fleet : home, "rpc-cooldown.json");
+  // ONE FILE PER ENDPOINT once reads can fail over (rpc-failover.ts). The
+  // house endpoint refusing and the public one refusing are different facts,
+  // and a single number would make the fleet stop asking one because the other
+  // said no. `endpoint` is rpc-failover's `endpointKey` — never a URL, which
+  // carries an API key.
+  const name = endpoint && /^[0-9a-f]{6,64}$/.test(endpoint) ? `rpc-cooldown-${endpoint}.json` : "rpc-cooldown.json";
+  return path.join(fleet && fleet.length > 0 ? fleet : home, name);
 }
 
 /**
@@ -51,9 +57,9 @@ export function cooldownFile(home: string): string {
  * A parse error must never become a cooldown of zero — that would be an
  * instruction to resume, invented out of a corrupt file.
  */
-export function readCooldown(home: string): number | null {
+export function readCooldown(home: string, endpoint?: string): number | null {
   try {
-    const raw = readFileSync(cooldownFile(home), "utf8");
+    const raw = readFileSync(cooldownFile(home, endpoint), "utf8");
     const j = JSON.parse(raw) as { until?: unknown };
     const until = typeof j.until === "number" && Number.isFinite(j.until) ? j.until : null;
     return until;
@@ -73,9 +79,9 @@ export function readCooldown(home: string): number | null {
  * BEST EFFORT. A failure to publish costs the fleet an optimisation, never a
  * read: the caller's own breaker is already set before this is called.
  */
-export function publishCooldown(home: string, until: number, by: string): void {
+export function publishCooldown(home: string, until: number, by: string, endpoint?: string): void {
   try {
-    const file = cooldownFile(home);
+    const file = cooldownFile(home, endpoint);
     mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify({ until, at: Date.now(), by }), "utf8");
@@ -92,9 +98,9 @@ export function publishCooldown(home: string, until: number, by: string): void {
  * resumes" has to be true and has to be one action. `adoptShared` caps what the
  * file can do, and this removes it outright.
  */
-export function clearCooldown(home: string): void {
+export function clearCooldown(home: string, endpoint?: string): void {
   try {
-    rmSync(cooldownFile(home), { force: true });
+    rmSync(cooldownFile(home, endpoint), { force: true });
   } catch {
     /* advisory only */
   }

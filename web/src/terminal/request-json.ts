@@ -44,32 +44,55 @@ function explained(data: unknown, status: number): string | null {
   return null;
 }
 
+// AbortSignal.any is absent in Safari 16.4–17.3. Those browsers support our
+// existing request deadline, so compose cancellation without raising the floor.
+function requestSignal(caller?: AbortSignal | null) {
+  const deadline = AbortSignal.timeout(20000);
+  if (!caller) return { signal: deadline, dispose: () => undefined };
+  const controller = new AbortController();
+  const cancel = () => controller.abort(caller.reason);
+  const expire = () => controller.abort(deadline.reason);
+  if (caller.aborted) cancel();
+  else caller.addEventListener("abort", cancel, { once: true });
+  deadline.addEventListener("abort", expire, { once: true });
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      caller.removeEventListener("abort", cancel);
+      deadline.removeEventListener("abort", expire);
+    },
+  };
+}
+
 export async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  let response: Response;
+  const { signal, dispose } = requestSignal(init?.signal);
   try {
-    response = await fetch(url, { ...init, cache: "no-store", signal: AbortSignal.timeout(20000) });
-  } catch {
-    throw new RequestError(UNREACHABLE, 0);
+    let response: Response;
+    try {
+      response = await fetch(url, { ...init, cache: "no-store", signal });
+    } catch {
+      throw new RequestError(UNREACHABLE, 0);
+    }
+    const isJson = /\bjson\b/i.test(response.headers.get("content-type") ?? "");
+    // A body that promised JSON and broke off half way is the same as no body.
+    const data: unknown = isJson ? await response.json().catch(() => undefined) : undefined;
+    if (!response.ok) {
+      // The server's sentence for a 4xx or an explicitly owner-facing 5xx.
+      // Unmarked 5xx details belong in the console, not an owner's sign-in UI.
+      const owned = explained(data, response.status);
+      if (response.status >= 500 && owned === null && data !== undefined) console.warn(`[merrymen] ${url} answered ${response.status}:`, data);
+      throw new RequestError(
+        owned ?? `merrymen answered with an error (${response.status}). Try again in a moment.`,
+        response.status,
+      );
+    }
+    if (data === undefined) {
+      throw new RequestError("merrymen sent back something that isn't data. Try again in a moment.", response.status);
+    }
+    return data as T;
+  } finally {
+    // Keep cancellation connected through body consumption, then release the
+    // listeners even when the request, parse or status validation fails.
+    dispose();
   }
-  const isJson = /\bjson\b/i.test(response.headers.get("content-type") ?? "");
-  // A body that promised JSON and broke off half way is the same as no body.
-  const data: unknown = isJson ? await response.json().catch(() => undefined) : undefined;
-  if (!response.ok) {
-    // THE SERVER'S SENTENCE FOR A 4xx, OR A 5xx THE ROUTE MARKED AS WRITTEN
-    // FOR THE OWNER. A 4xx is a route telling the owner something about their
-    // request. A 5xx is our own failure, and several routes fill `error` with
-    // the raw exception on one — so a database driver's "connect ECONNREFUSED
-    // 127.0.0.1:5432" reached the sign-in screen verbatim. An unmarked 5xx body
-    // goes to the console, where the person who can act on it looks.
-    const owned = explained(data, response.status);
-    if (response.status >= 500 && owned === null && data !== undefined) console.warn(`[merrymen] ${url} answered ${response.status}:`, data);
-    throw new RequestError(
-      owned ?? `merrymen answered with an error (${response.status}). Try again in a moment.`,
-      response.status,
-    );
-  }
-  if (data === undefined) {
-    throw new RequestError("merrymen sent back something that isn't data. Try again in a moment.", response.status);
-  }
-  return data as T;
 }

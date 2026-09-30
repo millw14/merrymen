@@ -8,8 +8,9 @@
  * string replaces it. Non-secret fields: null/empty clears back to default.
  */
 
-import { chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir } from "node:fs/promises";
 import { NextResponse } from "next/server";
+import { writeFileAtomic } from "@merrymen/atomic-write";
 import { homePaths, merrymenHome } from "@merrymen/home";
 import {
   HOSTED_FORBIDDEN_SETTING_FIELDS,
@@ -119,16 +120,44 @@ async function listCustomStrategies(): Promise<string[]> {
   }
 }
 
-async function readStored(tenant?: `0x${string}` | null): Promise<MerrymenSettings> {
+type StoredRead = { ok: true; settings: MerrymenSettings } | { ok: false; why: string };
+
+/**
+ * The stored settings, or why they could not be read.
+ *
+ * A MISSING FILE IS EMPTY; A BROKEN ONE IS NOT. Self-hosted, settings.json is
+ * the only copy of the owner's keys, strategy and wallets. PUT merges the body
+ * into what this returns and writes the result back whole, so reading a file
+ * that does not parse as `{}` — a hand edit with a stray comma, or a read that
+ * raced a truncating writer — saved the fields in the request and nothing else.
+ * patchSettingsFile (worker/src/settings.ts) refuses the same file for the
+ * same reason.
+ */
+async function readStoredStrict(tenant?: `0x${string}` | null): Promise<StoredRead> {
   // Hosted: a tenant's settings live in the per-tenant store, not the global
   // settings.json (which the child workers each have their own copy of).
-  if (tenant) return (await getSettingsStore().get(tenant)) ?? {};
+  if (tenant) return { ok: true, settings: (await getSettingsStore().get(tenant)) ?? {} };
+  let raw: string;
+  try {
+    raw = await readFile(SETTINGS_FILE, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, settings: {} };
+    return { ok: false, why: `settings.json could not be read (${(e as NodeJS.ErrnoException).code ?? "error"})` };
+  }
   try {
     // BOM-strip: hand-edited or PowerShell-written files may carry a UTF-8 BOM.
-    return JSON.parse((await readFile(SETTINGS_FILE, "utf8")).replace(/^\ufeff/, "")) as MerrymenSettings;
+    const parsed: unknown = JSON.parse(raw.replace(/^\ufeff/, ""));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return { ok: true, settings: parsed as MerrymenSettings };
   } catch {
-    return {};
+    /* reported below */
   }
+  return { ok: false, why: "settings.json is not valid JSON" };
+}
+
+/** For display: a file that cannot be read shows as nothing saved, as it always has. */
+async function readStored(tenant?: `0x${string}` | null): Promise<MerrymenSettings> {
+  const read = await readStoredStrict(tenant);
+  return read.ok ? read.settings : {};
 }
 
 function mask(value: string | undefined): SecretView {
@@ -404,7 +433,16 @@ async function saveSettings(
   claims: SaveClaims,
 ): Promise<NextResponse> {
   const errors: string[] = [];
-  const stored = await readStored(tenant);
+  const read = await readStoredStrict(tenant);
+  if (!read.ok) {
+    // Before any field is judged: nothing in this request can be saved without
+    // throwing away the rest of a file this handler could not read.
+    return NextResponse.json(
+      { errors: [`${read.why} — nothing was saved, so the rest of it is not lost. Fix or remove ${SETTINGS_FILE}, then save again.`] },
+      { status: 409 },
+    );
+  }
+  const stored = read.settings;
   const next: MerrymenSettings = { ...stored };
 
   // Every settings key this request actually processed. Used at the end to
@@ -885,9 +923,13 @@ async function saveSettings(
   } else {
     await mkdir(DATA_DIR, { recursive: true });
     // settings.json holds plaintext API keys (bundler/Groq/Anthropic/Telegram/…) —
-    // owner-only perms (0600), not the default world-readable 0644.
-    await writeFile(SETTINGS_FILE, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
-    await chmod(SETTINGS_FILE, 0o600).catch(() => {});
+    // owner-only perms (0600), set on the temp file before it is renamed in.
+    //
+    // REPLACED WHOLE. The worker re-reads this file every tick, and writeFile
+    // truncates before it writes: a tick that read in between got an empty or
+    // half file and ran on the defaults — paper, the default strategy, an empty
+    // Telegram allowlist. Async, so the fsync does not hold the event loop.
+    await writeFileAtomic(SETTINGS_FILE, JSON.stringify(next, null, 2), 0o600);
   }
   return NextResponse.json({
     ok: true,

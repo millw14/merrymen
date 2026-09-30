@@ -25,6 +25,8 @@ export interface KillResult {
   reason?: string;
   archived?: string | null;
   revocation?: "queued" | "failed";
+  /** The owner key could not be archived: keep the grant and pause instead. */
+  archiveFailed?: { why: string; paused: boolean };
 }
 
 /** The question /kill asks before anything happens. */
@@ -48,6 +50,19 @@ export function killPromptText(hosted: boolean, ttlSec = CONFIRM_TTL_SEC): strin
 
 /** The answer once /confirm has run the kill. */
 export function killDoneText(r: KillResult): string {
+  // Before the `!r.ok` line: this is not "nothing to kill". There was a
+  // grant, and it was deliberately left alone.
+  if (r.archiveFailed) {
+    return (
+      `⚠️ KILL SWITCH — the grant was NOT destroyed. I could not archive your owner key ` +
+      `(${r.archiveFailed.why.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}), and deleting the grant without a copy would lose that key — ` +
+      `the one <code>merrymen recover</code> needs to sweep your funds — for good.\n` +
+      (r.archiveFailed.paused
+        ? `Trading is PAUSED instead: nothing is proposed or traded until you /resume.\n`
+        : `I could not pause trading either, so the agent may still trade inside its caps — stop the worker on its machine.\n`) +
+      `Fix <code>~/.merrymen/grants/</code> (disk space, permissions), then /kill again.`
+    );
+  }
   if (!r.ok) return `nothing to kill: ${r.reason ?? "no grant"}`;
   // HOSTED: say only what THIS agent did. Nothing was archived. The
   // stored grant is deleted by the server a few seconds later, and the

@@ -419,6 +419,7 @@ export default function GrantPage() {
   /** Every agent account this browser holds a key for — current and superseded. */
   const [savedWallets, setSavedWallets] = useState<SavedWallet[]>([]);
   const [reArming, setReArming] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
   // ── restore: bring an already-funded wallet back with its owner key ──────
   const [mode, setMode] = useState<"create" | "restore">("restore");
   const [restoreKey, setRestoreKey] = useState("");
@@ -983,7 +984,8 @@ export default function GrantPage() {
     setBackedUp(true);
   }
 
-  function discard() {
+  async function discard() {
+    if (discarding) return;
     // Discarding forgets THIS wallet's keys from the browser. If it still holds
     // funds, those funds don't move — they stay in the smart account, reachable
     // only with the owner key. Make the user acknowledge that before they can
@@ -1040,8 +1042,6 @@ export default function GrantPage() {
       );
       if (!okToKeepHistory) return;
     }
-    clearGrant();
-    setRenewed(false);
     // Destroy the worker-side handoff — otherwise the "discarded" grant stays
     // armed and the worker keeps trading on it (kill-switch semantics) — AND
     // ask for the paper book to be restarted. The reset is best-effort and
@@ -1059,7 +1059,31 @@ export default function GrantPage() {
     // account is read, the grant removed as DELETE /api/grants removes it,
     // then the reset queued. keepalive, so closing the tab straight after
     // pressing this still delivers the kill.
-    void fetch("/api/grants/discard", { method: "POST", keepalive: true }).catch(() => {});
+    const discardedGrant = loadGrant();
+    setDiscarding(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/grants/discard", { method: "POST", keepalive: true });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null;
+        setError(body?.error ?? `The server did not discard the grant (${res.status}). Your wallet is still saved here; try again.`);
+        return;
+      }
+    } catch {
+      setError("The server could not confirm the kill. Your wallet is still saved here; check the connection and try again.");
+      return;
+    } finally {
+      setDiscarding(false);
+    }
+    // Another tab or a wallet switch can save a newer grant while the server
+    // answers. This response is not permission to clear that wallet or backup.
+    const currentGrant = loadGrant();
+    if (currentGrant?.smartAccount !== discardedGrant?.smartAccount || currentGrant?.serialized !== discardedGrant?.serialized) {
+      setError("The saved wallet changed while the kill was pending. The newer wallet and its backup were kept; check its status before trying again.");
+      return;
+    }
+    clearGrant();
+    setRenewed(false);
     localStorage.removeItem(BACKUP_KEY);
     setGrant(null);
     setBackedUp(false);
@@ -1288,8 +1312,8 @@ export default function GrantPage() {
               <button className="grant-btn" onClick={() => void reArm()} disabled={reArming} style={{ flex: 1 }}>
                 {reArming ? "re-arming…" : "re-arm this wallet"}
               </button>
-              <button className="btn-kill" onClick={discard} style={{ flex: 1 }}>
-                discard &amp; start fresh
+              <button className="btn-kill" onClick={() => void discard()} disabled={discarding} style={{ flex: 1 }}>
+                {discarding ? "discarding…" : "discard & start fresh"}
               </button>
             </div>
           </div>
@@ -2263,8 +2287,8 @@ export default function GrantPage() {
               >
                 switch to another wallet
               </button>
-              <button className="btn-kill" style={{ padding: "10px 16px" }} onClick={discard}>
-                discard &amp; start over
+              <button className="btn-kill" style={{ padding: "10px 16px" }} onClick={() => void discard()} disabled={discarding}>
+                {discarding ? "discarding…" : "discard & start over"}
               </button>
             </div>
           </div>

@@ -156,6 +156,27 @@ describe("POST /api/grants/discard", () => {
     assert.deepEqual(commands(), []);
   });
 
+  it("SELF-HOSTED: AN ARCHIVE FAILURE KEEPS THE KEY, PAUSES, AND QUEUES NO RESET", async () => {
+    const live = JSON.stringify(grant());
+    const archive = path.join(home, "grants");
+    writeFileSync(path.join(home, "grant.json"), live);
+    rmSync(archive, { recursive: true, force: true });
+    writeFileSync(archive, "not a directory");
+    try {
+      const res = await POST(new Request("http://localhost/api/grants/discard", { method: "POST" }));
+      assert.equal(res.status, 409);
+      const result = await res.json() as { error: string; paused: boolean };
+      assert.match(result.error, /The grant was NOT deleted/);
+      assert.equal(result.paused, true);
+      assert.equal(readFileSync(path.join(home, "grant.json"), "utf8"), live);
+      assert.ok(existsSync(path.join(home, "paused")));
+      assert.deepEqual(commands(), [], "a grant still armed cannot have half a Start over");
+    } finally {
+      rmSync(archive, { force: true });
+      rmSync(path.join(home, "paused"), { force: true });
+    }
+  });
+
   it("HOSTED: THE ACCOUNT IS READ FROM THE GRANT, THE GRANT REMOVED, AND A LEDGER OUT OF REACH COSTS ONLY THE RESET", async () => {
     process.env.MERRYMEN_HOSTED = "1";
     grants.resetGrantStoreForTest();

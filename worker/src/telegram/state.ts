@@ -17,7 +17,8 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { writeFileAtomicSync } from "../atomic-write";
 import { ensureHome, homePaths } from "../home";
 import { cleanPollErr } from "./poll-rules";
 
@@ -449,10 +450,20 @@ export function loadTelegramState(): TelegramState {
   }
 }
 
+/**
+ * REPLACED WHOLE, never truncated and refilled. This file is the only record
+ * of who the owner is, and loadTelegramState reads one that does not parse as
+ * a fresh default: a process that died inside a truncating write came back
+ * unlinked, with nothing to say why, and saved that default over the file. The
+ * orchestrator restores a lost link only when the file is MISSING, so a
+ * half-written one was never repaired. And it reads this file every pass
+ * (readChildTelegram) while the child writes it, so a torn read skipped that
+ * pass's publish and promotion.
+ */
 export function saveTelegramState(state: TelegramState): void {
   try {
     ensureHome();
-    writeFileSync(homePaths.telegram(), JSON.stringify(state, null, 2), "utf8");
+    writeFileAtomicSync(homePaths.telegram(), JSON.stringify(state, null, 2), 0o600);
   } catch {
     // best-effort; worst case we replay a few messages after a restart
   }

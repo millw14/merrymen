@@ -16,7 +16,7 @@ import { isHostedMode } from "@merrymen/core";
 import { getGrantStore } from "@merrymen/grant-store";
 import { tenantOf } from "@/lib/auth";
 import { diskAgent, hostedAgentFor } from "@/lib/agent-for";
-import { removeSelfHostedGrant } from "@/lib/grant-archive";
+import { GrantArchiveError, removeSelfHostedGrant } from "@/lib/grant-archive";
 import { queuePaperReset, startOver } from "@/lib/start-over";
 
 export const dynamic = "force-dynamic";
@@ -32,10 +32,15 @@ export async function POST(req: Request) {
     });
     return NextResponse.json({ ok: true, paperReset });
   }
-  const paperReset = await startOver({
-    account: () => diskAgent(),
-    remove: removeSelfHostedGrant,
-    queueReset: async (account) => (await queuePaperReset(false, account)).ok,
-  });
-  return NextResponse.json({ ok: true, paperReset });
+  try {
+    const paperReset = await startOver({
+      account: () => diskAgent(),
+      remove: removeSelfHostedGrant,
+      queueReset: async (account) => (await queuePaperReset(false, account)).ok,
+    });
+    return NextResponse.json({ ok: true, paperReset });
+  } catch (e) {
+    if (e instanceof GrantArchiveError) return NextResponse.json({ error: e.message, paused: e.paused }, { status: 409 });
+    throw e;
+  }
 }

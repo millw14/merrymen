@@ -53,9 +53,8 @@ export const TG_GROUPS_GROQ_BASE_URL = "https://api.groq.com/openai/v1";
 /** The same small open model the X writer and the in-app room default to: short casual lines need nothing bigger. */
 export const TG_GROUPS_GROQ_DEFAULT_MODEL = "qwen/qwen3.8-27b";
 /**
- * CLAUDE OPUS 5, as the X writer chose it: llm.ts's anthropic path sends
- * `thinking: {type: "disabled"}`, which Opus 5 accepts at its default effort
- * and newer models answer with a 400. A group line needs no thinking.
+ * Keep the X writer's default, which allows thinking to be disabled. llm.ts
+ * also supports models that require thinking, but a group line needs none.
  */
 export const TG_GROUPS_ANTHROPIC_DEFAULT_MODEL = "claude-opus-5";
 

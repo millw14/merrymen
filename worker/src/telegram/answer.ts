@@ -111,7 +111,9 @@ export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
         return text ? { text, used, needsSignature, signReason } : null;
       }
       const calls: AgentToolUse[] = t.toolUses.slice(0, MAX_CALLS_PER_ROUND);
-      messages.push({ role: "assistant", text: t.text, toolUses: calls });
+      // Claude's signed thinking and tool blocks must survive the tool-result
+      // round trip unchanged, including calls we decline at the lookup cap.
+      messages.push({ role: "assistant", ...t });
       const results = [];
       for (const call of calls) {
         const tool = toolByName(call.name);
@@ -128,6 +130,9 @@ export async function answerQuestion(i: AnswerInput): Promise<Answer | null> {
         }
         used.push(call.name);
         results.push({ id: call.id, name: call.name, output });
+      }
+      for (const call of t.toolUses.slice(MAX_CALLS_PER_ROUND)) {
+        results.push({ id: call.id, name: call.name, output: "Lookup not run: the per-round lookup limit was reached. Use the results already returned." });
       }
       // Last chance to look: say so, so the next turn answers instead of
       // asking for more and running out of rounds.

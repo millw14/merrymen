@@ -841,6 +841,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       kill: () => {
         const r = deps.kill();
         if (r.ok) deps.note("warn", `Telegram: KILL by chat ${msg.chatId}`);
+        // Refused on purpose, and still worth a record of who asked.
+        else if (r.archiveFailed) deps.note("warn", `Telegram: KILL by chat ${msg.chatId} kept the grant (${r.archiveFailed.why}) and paused instead`);
         return r;
       },
       link: linkDep,

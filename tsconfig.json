@@ -24,6 +24,9 @@
       "@merrymen/thesis": ["worker/src/thesis-policy.ts"],
       "@merrymen/identity-store": ["worker/src/identity-store.ts"],
       "@merrymen/home": ["worker/src/home.ts"],
+      // The settings route's writer (settings.json, replaced whole). Both
+      // tsconfigs, for the reason given above @merrymen/pnl-card below.
+      "@merrymen/atomic-write": ["worker/src/atomic-write.ts"],
       "@merrymen/settings-store": ["worker/src/settings-store.ts"],
       // The grants route's store. web/tsconfig.json has it for the build; the
       // runner resolves against THIS file, so without it no test can import

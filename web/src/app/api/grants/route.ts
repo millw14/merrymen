@@ -8,8 +8,9 @@
 
 import { webChainRead } from "@/lib/chain-read";
 import { readGrantBalancesFrom, type GrantBalances } from "@/lib/grant-balances";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
+import { writeFileAtomic } from "@merrymen/atomic-write";
 import { homePaths, merrymenHome } from "@merrymen/home";
 import { createPublicClient } from "viem";
 import {
@@ -33,7 +34,7 @@ import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
-import { archiveCurrentGrant, removeSelfHostedGrant } from "@/lib/grant-archive";
+import { archiveCurrentGrant, GrantArchiveError, removeSelfHostedGrant } from "@/lib/grant-archive";
 
 const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
@@ -404,10 +405,23 @@ export async function POST(req: Request) {
 
   await mkdir(DATA_DIR, { recursive: true });
   // Keep the outgoing wallet (and its owner key) before this one replaces it.
-  await archiveCurrentGrant();
-  // grant.json holds the owner + session PRIVATE KEYS — owner-only perms (0600).
-  await writeFile(GRANT_FILE, JSON.stringify(grant, null, 2), { encoding: "utf8", mode: 0o600 });
-  await chmod(GRANT_FILE, 0o600).catch(() => {});
+  //
+  // BEST-EFFORT, deliberately: archiving must never block arming a grant. A
+  // failure is said loudly, because the grant it failed to keep is about to be
+  // replaced.
+  const kept = await archiveCurrentGrant();
+  if (kept.kind === "failed") {
+    console.error(`[grants] the outgoing grant was NOT archived (${kept.why}) — replacing grant.json anyway; its owner key is not in ~/.merrymen/grants/`);
+  }
+  // grant.json holds the owner + session PRIVATE KEYS — owner-only perms (0600),
+  // set on the temp file before it is renamed in.
+  //
+  // REPLACED WHOLE. The worker re-reads grant.json every tick, and a read that
+  // raced writeFile's truncate got null — which an armed worker takes for the
+  // kill switch (syncGrant). And it is fsynced before the rename: self-hosted
+  // this file is the only copy of the new owner key, and a crash after a
+  // truncate-then-write could leave it empty.
+  await writeFileAtomic(GRANT_FILE, JSON.stringify(grant, null, 2), 0o600);
   return NextResponse.json({ ok: true });
 }
 
@@ -424,7 +438,12 @@ export async function DELETE(req: Request) {
   }
   // The kill switch destroys the session key, NOT the wallet — archived first.
   // The web's Start over removes it the same way, from /api/grants/discard.
-  await removeSelfHostedGrant();
+  try {
+    await removeSelfHostedGrant();
+  } catch (e) {
+    if (e instanceof GrantArchiveError) return NextResponse.json({ error: e.message, paused: e.paused }, { status: 409 });
+    throw e;
+  }
   return NextResponse.json({ ok: true });
 }
 

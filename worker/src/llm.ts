@@ -18,9 +18,10 @@
  * resolveLlm returns null and callers degrade to deterministic behavior (null
  * driver, slash-only chat).
  *
- * The safety contract is unchanged and provider-agnostic: the model can only
- * emit a member of a forced tool schema; deterministic code disposes. Swapping
- * the brain never widens what it can do.
+ * The safety contract is unchanged and provider-agnostic: model decisions use
+ * a tool schema (or structured JSON on models without forced tools), then
+ * deterministic code validates and disposes. Swapping the brain never widens
+ * what it can do.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -120,10 +121,6 @@ function chatUrl(creds: LlmCreds): string {
 }
 
 /**
- * One forced tool call → the validated arguments object. Throws on transport
- * error (callers wrap and degrade). The model MUST answer via the tool.
- */
-/**
  * ASK A REASONING MODEL NOT TO PUT ITS THINKING IN `content`.
  *
  * Two halves, and only one of them is universal.
@@ -206,22 +203,110 @@ export function resetReasoningRefusalsForTest(): void {
   REASONING_HINT_REFUSED.clear();
 }
 
+interface AnthropicCapabilities {
+  adaptiveThinking: boolean;
+  structuredTool: boolean;
+}
+
+// These are model capabilities, not account failures. Learn them only from the
+// API's specific validation errors; another model or endpoint starts fresh.
+const ANTHROPIC_CAPABILITIES = new Map<string, AnthropicCapabilities>();
+
+export function resetAnthropicCapabilitiesForTest(): void {
+  ANTHROPIC_CAPABILITIES.clear();
+}
+
+function anthropicThinking(capabilities: AnthropicCapabilities): Pick<Anthropic.MessageCreateParams, "thinking" | "output_config"> {
+  return capabilities.adaptiveThinking
+    ? { thinking: { type: "adaptive", display: "omitted" }, output_config: { effort: "low" } }
+    : { thinking: { type: "disabled" } };
+}
+
+/** Retry only rejected request capabilities, before a response/stream exists. */
+async function withAnthropicCapabilities<T>(
+  client: Anthropic,
+  creds: LlmCreds,
+  forcedTool: boolean,
+  request: (capabilities: AnthropicCapabilities) => PromiseLike<T>,
+): Promise<T> {
+  const key = JSON.stringify([client.baseURL, creds.model]);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const capabilities = ANTHROPIC_CAPABILITIES.get(key) ?? { adaptiveThinking: false, structuredTool: false };
+    try {
+      return await request(capabilities);
+    } catch (error) {
+      if (error instanceof Anthropic.APIError && error.status === 400 && attempt < 2) {
+        const body = error.error as { error?: { message?: unknown }; message?: unknown } | undefined;
+        const message = body?.error?.message ?? body?.message;
+        const next = { ...capabilities, ...ANTHROPIC_CAPABILITIES.get(key) };
+        if (typeof message === "string") {
+          if (!capabilities.adaptiveThinking && /["']?thinking\.type\.disabled["']?\s+is not supported for this model\b/i.test(message)) {
+            next.adaptiveThinking = true;
+          } else if (forcedTool && !capabilities.structuredTool && /\btool_choice:\s*type\s+["']tool["']\s+and\s+["']any["']\s+are not supported for this model\b/i.test(message)) {
+            next.structuredTool = true;
+          } else {
+            throw normalizedAnthropicError(creds, error);
+          }
+          ANTHROPIC_CAPABILITIES.set(key, next);
+          continue;
+        }
+      }
+      throw normalizedAnthropicError(creds, error);
+    }
+  }
+  throw new Error(`${creds.provider} request capabilities could not be resolved`);
+}
+
+/** Structured replies are data only when the provider completed a JSON object. */
+function anthropicStructuredReply(creds: LlmCreds, res: Anthropic.Message): Record<string, unknown> {
+  if (res.stop_reason !== "end_turn") {
+    throw new Error(`${creds.provider} ${creds.model} did not complete its structured reply (${res.stop_reason ?? "unknown"})`);
+  }
+  const text = res.content.filter((b) => b.type === "text").map((b) => b.text).join("");
+  let input: unknown;
+  try {
+    input = JSON.parse(text);
+  } catch {
+    throw new Error(`${creds.provider} ${creds.model} returned invalid structured JSON`);
+  }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error(`${creds.provider} ${creds.model} returned a structured reply that is not an object`);
+  }
+  return input as Record<string, unknown>;
+}
+
+/**
+ * One schema-shaped decision: forced tool arguments, or structured JSON when
+ * Anthropic explicitly rejects forced tools. Callers validate the decision
+ * before acting. Transport and incomplete structured-output failures throw.
+ */
 export async function llmToolCall(
   creds: LlmCreds,
   opts: { system: string; messages: ChatMsg[]; tool: ToolSpec; maxTokens?: number },
 ): Promise<Record<string, unknown>> {
   if (creds.transport === "anthropic") {
     const client = new Anthropic({ apiKey: creds.apiKey });
-    const res = await client.messages.create({
-      model: creds.model,
-      max_tokens: opts.maxTokens ?? 1024,
-      system: opts.system,
-      thinking: { type: "disabled" },
-      // strict schema + forced choice — the model can only fill the enum.
-      tools: [{ name: opts.tool.name, description: opts.tool.description, input_schema: opts.tool.schema } as never],
-      tool_choice: { type: "tool", name: opts.tool.name },
-      messages: opts.messages,
-    }).catch((error: unknown) => { throw normalizedAnthropicError(creds, error); });
+    const { res, structured } = await withAnthropicCapabilities(client, creds, true, async (capabilities) => {
+      const thinking = anthropicThinking(capabilities);
+      const structured = capabilities.structuredTool;
+      const res = await client.messages.create({
+        model: creds.model,
+        max_tokens: opts.maxTokens ?? 1024,
+        system: structured
+          ? `${opts.system}\n\nReturn the arguments for ${opts.tool.name} as one JSON object matching the required output schema. ${opts.tool.description}`
+          : opts.system,
+        ...thinking,
+        ...(structured
+          ? { output_config: { ...thinking.output_config, format: { type: "json_schema" as const, schema: opts.tool.schema } } }
+          : {
+              tools: [{ name: opts.tool.name, description: opts.tool.description, input_schema: opts.tool.schema } as never],
+              tool_choice: { type: "tool" as const, name: opts.tool.name },
+            }),
+        messages: opts.messages,
+      });
+      return { res, structured };
+    });
+    if (structured) return anthropicStructuredReply(creds, res);
     const t = res.content.find((b) => b.type === "tool_use");
     return t && t.type === "tool_use" ? (t.input as Record<string, unknown>) : {};
   }
@@ -291,12 +376,14 @@ export interface AgentToolUse {
 
 export type AgentMsg =
   | { role: "user"; text: string }
-  | { role: "assistant"; text: string; toolUses: AgentToolUse[] }
+  | { role: "assistant"; text: string; toolUses: AgentToolUse[]; anthropicContent?: Anthropic.ContentBlock[] }
   | { role: "tools"; results: { id: string; name: string; output: string }[] };
 
 export interface AgentTurn {
   text: string;
   toolUses: AgentToolUse[];
+  /** Opaque provider history for tool round-trips; never owner-facing text. */
+  anthropicContent?: Anthropic.ContentBlock[];
 }
 
 /** One model turn: text and/or tool calls. Throws on transport error. */
@@ -309,6 +396,7 @@ export async function llmAgentTurn(
     const messages = opts.messages.map((m) => {
       if (m.role === "user") return { role: "user" as const, content: m.text };
       if (m.role === "assistant") {
+        if (m.anthropicContent) return { role: "assistant" as const, content: m.anthropicContent as Anthropic.ContentBlockParam[] };
         const blocks: unknown[] = [];
         if (m.text) blocks.push({ type: "text", text: m.text });
         for (const t of m.toolUses) blocks.push({ type: "tool_use", id: t.id, name: t.name, input: t.input });
@@ -320,20 +408,20 @@ export async function llmAgentTurn(
         content: m.results.map((r) => ({ type: "tool_result", tool_use_id: r.id, content: r.output })) as never,
       };
     });
-    const res = await client.messages.create({
+    const res = await withAnthropicCapabilities(client, creds, false, (capabilities) => client.messages.create({
       model: creds.model,
       max_tokens: opts.maxTokens ?? 1500,
       system: opts.system,
-      thinking: { type: "disabled" },
+      ...anthropicThinking(capabilities),
       tools: opts.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.schema }) as never),
       messages,
-    }).catch((error: unknown) => { throw normalizedAnthropicError(creds, error); });
+    }));
     const text = res.content.filter((b) => b.type === "text").map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
     const toolUses: AgentToolUse[] = res.content
       .filter((b) => b.type === "tool_use")
       .map((b) => (b.type === "tool_use" ? { id: b.id, name: b.name, input: b.input as Record<string, unknown> } : null))
       .filter((t): t is AgentToolUse => t !== null);
-    return { text, toolUses };
+    return { text, toolUses, anthropicContent: res.content };
   }
 
   // openai-compatible: assistant tool_calls + role:"tool" results
@@ -472,13 +560,13 @@ export async function llmText(
 ): Promise<string> {
   if (creds.transport === "anthropic") {
     const client = new Anthropic({ apiKey: creds.apiKey });
-    const res = await client.messages.create({
+    const res = await withAnthropicCapabilities(client, creds, false, (capabilities) => client.messages.create({
       model: creds.model,
       max_tokens: opts.maxTokens ?? 400,
-      thinking: { type: "disabled" },
+      ...anthropicThinking(capabilities),
       system: opts.system,
       messages: [{ role: "user", content: opts.prompt }],
-    }).catch((error: unknown) => { throw normalizedAnthropicError(creds, error); });
+    }));
     const t = res.content.find((b) => b.type === "text");
     return t && t.type === "text" ? t.text.trim() : "";
   }
@@ -576,17 +664,17 @@ export async function llmTextStream(
   if (creds.transport === "anthropic") {
     try {
       const client = new Anthropic({ apiKey: creds.apiKey });
-      const stream = await client.messages.create(
+      const stream = await withAnthropicCapabilities(client, creds, false, (capabilities) => client.messages.create(
         {
           model: creds.model,
           max_tokens: opts.maxTokens ?? 400,
-          thinking: { type: "disabled" },
+          ...anthropicThinking(capabilities),
           system: opts.system,
           messages: [{ role: "user", content: opts.prompt }],
           stream: true,
         },
         { signal: opts.signal },
-      );
+      ));
       let raw = "";
       let stopped = false;
       for await (const ev of stream) {
