@@ -31,7 +31,7 @@ describe("sign out ends the browser session too", () => {
   it("the re-sign-in effect it has to beat still exists", () => {
     // If this guard ever stops depending on `authenticated`, the ordering below
     // is no longer load-bearing and this whole file should be re-read.
-    assert.match(PRIVY, /if \(!authenticated \|\| phase === "done" \|\| phase === "proving"\) return;/);
+    assert.match(code(PRIVY), /if \([^\n]*!authenticated[^\n]*\) return;/);
   });
 
   it("calls Privy logout BEFORE clearing the server cookie", () => {
