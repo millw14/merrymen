@@ -32,6 +32,7 @@ import { OWNER_CHANGED_SETTING, ownerMismatch } from "@/lib/order-owner";
 import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { agentNameSave } from "@/lib/settings-agent-name";
+import { clearsStaleProviderModel } from "@/lib/settings-llm-model";
 import { withoutEnergyReserve, withoutReserveBasket } from "@/lib/energy-reserve";
 import {
   botClaimForSave,
@@ -624,7 +625,7 @@ async function saveSettings(
   if ("llmModel" in body) {
     const v = body.llmModel;
     if (v === "" || v === null || v === undefined) setOrClear("llmModel", undefined);
-    else if (typeof v === "string" && /^[a-z0-9.-]{3,64}$/.test(v.trim()))
+    else if (typeof v === "string" && /^[A-Za-z0-9._/:-]{2,96}$/.test(v.trim()))
       setOrClear("llmModel", v.trim());
     else errors.push("llmModel: must be a model id like claude-opus-4-8");
   }
@@ -633,7 +634,7 @@ async function saveSettings(
   if ("groqModel" in body) {
     const v = body.groqModel;
     if (v === "" || v === null || v === undefined) setOrClear("groqModel", undefined);
-    else if (typeof v === "string" && /^[a-z0-9.-]{3,64}$/.test(v.trim()))
+    else if (typeof v === "string" && /^[A-Za-z0-9._/:-]{2,96}$/.test(v.trim()))
       setOrClear("groqModel", v.trim());
     else errors.push("groqModel: must be a model id like qwen/qwen3.8-27b");
   }
@@ -652,14 +653,15 @@ async function saveSettings(
     else if (typeof v === "string" && /^https?:\/\/.+/.test(v.trim())) setOrClear("llmBaseUrl", v.trim());
     else errors.push("llmBaseUrl: must be an http(s) URL");
   }
-  // Model id for the selected provider — looser than llmModel: vendor ids carry
-  // slashes and uppercase (e.g. meta-llama/Llama-3.3-70B-Instruct-Turbo).
+  // Model ids remain provider-defined: vendor ids carry slashes and uppercase
+  // (e.g. meta-llama/Llama-3.3-70B-Instruct-Turbo), including Groq's catalog.
   if ("llmProviderModel" in body) {
     const v = body.llmProviderModel;
     if (v === "" || v === null || v === undefined) setOrClear("llmProviderModel", undefined);
     else if (typeof v === "string" && /^[A-Za-z0-9._/:-]{2,96}$/.test(v.trim())) setOrClear("llmProviderModel", v.trim());
     else errors.push("llmProviderModel: must be a model id (letters, digits, . _ / : -)");
   }
+  if (clearsStaleProviderModel(stored, next, body)) setOrClear("llmProviderModel", undefined);
   // PC files root — an absolute path (or blank to disable file ops).
   if ("telegramFilesRoot" in body) {
     const v = body.telegramFilesRoot;
