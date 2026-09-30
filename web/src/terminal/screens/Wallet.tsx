@@ -805,6 +805,7 @@ export default function GrantPage() {
   /** Re-arm the funded account with a fresh session key under the caps above. */
   async function onRestore() {
     setError(null);
+    setRenewed(false);
     setStatus("starting…");
     try {
       const { local: g, handoff } = await restoreAgentWallet(restoreKey.trim() as `0x${string}`, {
@@ -1040,6 +1041,7 @@ export default function GrantPage() {
       if (!okToKeepHistory) return;
     }
     clearGrant();
+    setRenewed(false);
     // Destroy the worker-side handoff — otherwise the "discarded" grant stays
     // armed and the worker keeps trading on it (kill-switch semantics) — AND
     // ask for the paper book to be restarted. The reset is best-effort and
@@ -2253,6 +2255,7 @@ export default function GrantPage() {
                 className="copy-btn"
                 style={{ padding: "10px 16px" }}
                 onClick={() => {
+                  setRenewed(false);
                   setSwitching(true);
                   setMode("restore");
                   setError(null);

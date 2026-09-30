@@ -107,4 +107,16 @@ describe("the funded wallet's re-sign control", () => {
     assert.match(ui.container.textContent!, /Sign in again to renew your permission/);
     assert.doesNotMatch(ui.container.textContent!, /Permission renewed/);
   });
+
+  it("does not carry the previous renewal confirmation through switching wallets", async () => {
+    renew = async () => ({ local: grant, handoff: { ok: true } });
+    await ui.render(React.createElement(Wallet));
+    await ui.click("re-sign this key (free)");
+    assert.match(ui.container.textContent!, /Permission renewed/);
+    await ui.click("switch to another wallet");
+    assert.doesNotMatch(ui.container.textContent!, /Permission renewed/);
+    await ui.click("← never mind, keep 0x1111…1111");
+    assert.ok(ui.container.querySelector("#resign"), "the same screen returns to the current grant");
+    assert.doesNotMatch(ui.container.textContent!, /Permission renewed/);
+  });
 });
