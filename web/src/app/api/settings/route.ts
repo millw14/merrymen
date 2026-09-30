@@ -33,6 +33,15 @@ import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { agentNameSave } from "@/lib/settings-agent-name";
 import { withoutEnergyReserve, withoutReserveBasket } from "@/lib/energy-reserve";
+import {
+  botClaimForSave,
+  isBotToken,
+  NOT_A_BOT_TOKEN_TEXT,
+  SAVE_BUSY,
+  SETTINGS_BUSY_TEXT,
+  withSettingsSaveLock,
+  type SaveClaims,
+} from "@/lib/telegram-claims";
 
 export const dynamic = "force-dynamic";
 
@@ -344,6 +353,10 @@ export async function PUT(req: Request) {
   // never stored and never reported as an unknown key.
   const claimedOwner = (body as { owner?: unknown } | null)?.owner;
   if (body && typeof body === "object") delete (body as Record<string, unknown>).owner;
+  // "MOVE IT HERE", the owner's answer to a 409 bot_claimed (lib/telegram-claims.ts).
+  // Not a setting either, and taken off the same way. Only `true` moves.
+  const moveBot = (body as { moveBot?: unknown } | null)?.moveBot === true;
+  if (body && typeof body === "object") delete (body as Record<string, unknown>).moveBot;
 
   let tenant: `0x${string}` | null = null;
   if (isHostedMode()) {
@@ -367,6 +380,28 @@ export async function PUT(req: Request) {
     for (const k of HOSTED_FORBIDDEN_SETTING_FIELDS) delete (body as Record<string, unknown>)[k];
   }
 
+  if (!tenant) return saveSettings(body, null, moveBot, { db: null });
+  // ONE SAVE AT A TIME PER ACCOUNT, from the read below to the claims settled
+  // after the write: a save that read before another one wrote would write
+  // back what that one changed, the token included (lib/telegram-claims.ts
+  // withSettingsSaveLock). Held on the shared database, across web processes.
+  const account = tenant;
+  const saved = await withSettingsSaveLock(account, (claims) => saveSettings(body, account, moveBot, claims));
+  if (saved === SAVE_BUSY) return NextResponse.json({ error: "settings_busy", errors: [SETTINGS_BUSY_TEXT] }, { status: 503 });
+  return saved;
+}
+
+/**
+ * The save itself: everything from reading what is stored to writing it back.
+ * Hosted, it runs under the account's save lock, and `claims` is the database
+ * connection that lock is held on (see PUT).
+ */
+async function saveSettings(
+  body: Partial<Record<keyof MerrymenSettings, unknown>>,
+  tenant: `0x${string}` | null,
+  moveBot: boolean,
+  claims: SaveClaims,
+): Promise<NextResponse> {
   const errors: string[] = [];
   const stored = await readStored(tenant);
   const next: MerrymenSettings = { ...stored };
@@ -385,8 +420,15 @@ export async function PUT(req: Request) {
     if (!(key in body) || body[key] === undefined) continue;
     const v = body[key];
     if (v === "" || v === null) setOrClear(key, undefined);
-    else if (typeof v === "string" && v.trim().length >= 8) setOrClear(key, v.trim());
-    else errors.push(`${key}: too short to be a real key`);
+    else if (typeof v !== "string" || v.trim().length < 8) errors.push(`${key}: too short to be a real key`);
+    // A TELEGRAM TOKEN MUST BE ONE. It is pasted into the path of a Bot API
+    // URL, and getMe's answer to that URL decides who holds the bot
+    // (lib/telegram-claims.ts): a "token" carrying '/', '..' or '?' sent the
+    // question to another bot, which answered for the id it was given. No
+    // real token is refused, and a typo is told so now rather than saved to
+    // go unanswered.
+    else if (key === "telegramBotToken" && !isBotToken(v.trim())) errors.push(`${key}: ${NOT_A_BOT_TOKEN_TEXT}`);
+    else setOrClear(key, v.trim());
   }
 
   // ── URLs ────────────────────────────────────────────────────────────────
@@ -797,11 +839,47 @@ export async function PUT(req: Request) {
 
   if (errors.length > 0) return NextResponse.json({ errors }, { status: 400 });
 
+  /**
+   * ONE BOT, ONE TENANT. A save carrying the Telegram token claims its bot
+   * first, so a bot another account holds is refused here, in words the owner
+   * can act on, rather than saved and then quietly never polled: the
+   * orchestrator hands a token only to the account its bot's claim names. The
+   * 409 names no account, and "Move it here" sends the same save back with
+   * `moveBot`, which getMe must confirm. Before the write, so a refusal writes
+   * nothing; undone if the write fails, so a claim never outlives a token that
+   * was not stored. See lib/telegram-claims.ts.
+   *
+   * A save without the token claims nothing and asks nothing, but settles all
+   * the same once it lands. What every save settles on is read back from the
+   * store, not taken from `next`: this PUT's saves take turns, but other
+   * writers of the blob do not (settleBotClaims names them).
+   */
+  const botClaim = await botClaimForSave({
+    tenant,
+    touched: touched.has("telegramBotToken"),
+    next,
+    moveBot,
+    settings: { before: stored, read: (t) => getSettingsStore().get(t) },
+    claims,
+  });
+  if (botClaim && !botClaim.ok) return NextResponse.json(botClaim.body, { status: botClaim.status });
+
   if (tenant) {
     // Hosted: the tenant's own settings go to the per-tenant store (sealed at
     // rest), and the orchestrator hands the child worker a settings.json from it
     // within a reconcile tick.
-    await getSettingsStore().put(tenant, next);
+    try {
+      await getSettingsStore().put(tenant, next);
+    } catch (e) {
+      await botClaim?.undo().catch((u) => console.warn(`[settings] telegram bot claim not undone: ${u instanceof Error ? u.message : String(u)}`));
+      throw e;
+    }
+    // The claims made to match the token stored NOW, read back after this
+    // write: the bot this account left, if it left one, is free for whoever
+    // takes it next, and the one it stores stays claimed. After the write,
+    // and not fatal: the save has landed, and a claim left behind is one the
+    // next save lets go of, or the next owner's move resolves.
+    await botClaim?.settle().catch((e) => console.warn(`[settings] telegram bot claims not settled: ${e instanceof Error ? e.message : String(e)}`));
   } else {
     await mkdir(DATA_DIR, { recursive: true });
     // settings.json holds plaintext API keys (bundler/Groq/Anthropic/Telegram/…) —
@@ -812,6 +890,9 @@ export async function PUT(req: Request) {
   return NextResponse.json({
     ok: true,
     appliesWithin: "one worker tick",
+    // The bot now answers here and nowhere else; its owner links it again
+    // with this agent's code.
+    ...(botClaim?.ok && botClaim.moved ? { botMoved: true } : {}),
     // Present only when something was dropped, so a caller can tell the
     // difference between 'saved' and 'saved, minus the field you cared about'.
     ...(ignored.length > 0 ? { ignored } : {}),

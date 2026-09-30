@@ -176,6 +176,7 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
       fromFirstName: "Ann",
       fromIsBot: false,
       text,
+      date: Math.floor(clock / 1000),
       messageId: id,
       dateSec: Math.floor(clock / 1000),
       chatType: "supergroup",
@@ -194,7 +195,7 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     dateSec: 1,
     ...over,
   });
-  const press = (data: string): TgCallback => ({ updateId: nextMsg++, id: "cb", chatId: OWNER, fromId: OWNER, messageId: 77, data });
+  const press = (data: string): TgCallback => ({ updateId: nextMsg++, id: "cb", chatId: OWNER, fromId: OWNER, messageId: 77, data, date: 0 });
   const said = async (m: TgMessage): Promise<void> => {
     groups.onMessage(m);
     await groups.drain();
@@ -1200,6 +1201,9 @@ describe("docs/tg-groups.md Scenarios, through the poll service", () => {
       tgGroupsStore: store,
       tgCoins: port,
       tgGroupsTest: { now: () => clock, rand: () => 0.99, sleep: async () => {}, env: {}, log: () => {} },
+      // The poll's own clock too: its backlog rule dates every update against
+      // when it began listening, and these updates are dated by `clock`.
+      now: () => Math.floor(clock / 1000),
     });
     stop = h.stop;
   });
@@ -1276,7 +1280,7 @@ describe("docs/tg-groups.md Scenarios, through the poll service", () => {
 
   it("/link in a group: no code is asked for or taken; the room hears 'no code needed'; nothing is allowlisted", async () => {
     const groupBefore = sendsTo(CHAT).length;
-    tstate = ensureLinkCode(tstate, TOKEN);
+    tstate = ensureLinkCode(tstate);
     const codeBefore = tstate.linkCode;
     const l = groupMsg("/link WRONGCODE", { id: CAT, first: "Xfyt" });
     await deliver(l.update);
@@ -1293,7 +1297,7 @@ describe("docs/tg-groups.md Scenarios, through the poll service", () => {
   });
 
   it("the live link code typed in a group is never consumed: it is replaced, and the owner is told in their DM", async () => {
-    tstate = ensureLinkCode(tstate, TOKEN);
+    tstate = ensureLinkCode(tstate);
     const live = tstate.linkCode;
     const ownerBefore = tstate.ownerId;
     const dmBefore = sendsTo(OWNER).length;

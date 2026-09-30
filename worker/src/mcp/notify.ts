@@ -1592,12 +1592,20 @@ export async function runNotifyPass(shared: Db, deps: NotifyDeps): Promise<Notif
  * Send through the owner's own bot. The text is plain, so it is escaped for
  * the HTML parse mode sendMessage uses; a request that hangs is cut off rather
  * than holding the reconcile loop.
+ *
+ * THE BOUND IS call()'s, AND ONLY call()'s (telegram/api.ts): TG_CALL_TIMEOUT_MS,
+ * or `timeoutMs` when given. This used to wrap fetch in a timer of its own,
+ * which replaced the signal call() hands fetch: two timers raced to name the
+ * failure, call()'s abort never reached the socket, and a `timeoutMs` over ten
+ * seconds only kept a socket open after the send had already given up.
  */
 export function telegramSend(o: { fetchFn?: FetchLike; timeoutMs?: number } = {}): NotifyDeps["send"] {
-  const timeoutMs = o.timeoutMs ?? 10_000;
-  const fetchFn: FetchLike = o.fetchFn ?? ((url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) }));
   return async (token, chatId, text) => {
-    const r = await sendMessage({ token, fetchFn }, chatId, esc(text));
+    const r = await sendMessage(
+      { token, ...(o.fetchFn ? { fetchFn: o.fetchFn } : {}), ...(o.timeoutMs ? { timeoutMs: o.timeoutMs } : {}) },
+      chatId,
+      esc(text),
+    );
     if (r.ok) return { ok: true };
     const m = /retry after (\d+)/i.exec(r.reason ?? "");
     return m ? { ok: false, reason: r.reason, retryAfterSec: Number(m[1]) } : { ok: false, reason: r.reason };

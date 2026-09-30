@@ -197,6 +197,7 @@ function msg(text: string, over: Partial<TgMessage> = {}): TgMessage {
     fromFirstName: "Ann",
     fromIsBot: false,
     text,
+    date: Math.floor(clock / 1000),
     messageId: id,
     dateSec: Math.floor(clock / 1000),
     chatType: "supergroup",
@@ -221,7 +222,7 @@ function member(over: Partial<TgMemberUpdate> = {}): TgMemberUpdate {
 }
 
 function press(data: string, over: Partial<TgCallback> = {}): TgCallback {
-  return { updateId: nextMsg++, id: `cb${nextMsg}`, chatId: OWNER, fromId: OWNER, messageId: 77, data, ...over };
+  return { updateId: nextMsg++, id: `cb${nextMsg}`, chatId: OWNER, fromId: OWNER, messageId: 77, data, date: 0, ...over };
 }
 
 /** Say something and let everything it started finish. */
@@ -320,6 +321,26 @@ describe("membership", () => {
     assert.equal(tg.sends(OWNER).length, 1);
     assert.ok(notes.some((n) => /added to a group by the owner/.test(n)));
     assert.ok(!notes.some((n) => n.includes("frens")), "the feed never carries a group's title");
+  });
+
+  it("a LATE add by the owner (the service's backlog rule): approved all the same, no hello in the room, the privacy steps still DM'd", async () => {
+    privacy = false;
+    make();
+    groups.onMember(member(), { late: true });
+    await groups.drain();
+    const room = store.room(CHAT);
+    assert.equal(room?.status, "approved", "the owner's add stands");
+    assert.equal(room?.addedById, OWNER);
+    assert.deepEqual(tg.sends(CHAT), [], "no hello hours after the add");
+    assert.equal(tg.calls.filter((c) => c.method === "sendChatAction" && c.body.chat_id === CHAT).length, 0, "not even typing");
+    const dm = tg.sends(OWNER);
+    assert.equal(dm.length, 1, "the owner's DM is not the room");
+    assert.match(String(dm[0]?.body.text), /BotFather/);
+    // A later, live re-add says its hello as ever.
+    groups.onMember(member({ oldStatus: "member", newStatus: "left" }));
+    groups.onMember(member());
+    await groups.drain();
+    assert.equal(tg.sends(CHAT).length, 1);
   });
 
   it("no privacy DM when getMe says privacy is off, or cannot say", async () => {

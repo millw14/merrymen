@@ -8,8 +8,7 @@
 
 import { webChainRead } from "@/lib/chain-read";
 import { readGrantBalancesFrom, type GrantBalances } from "@/lib/grant-balances";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@merrymen/home";
 import { createPublicClient } from "viem";
@@ -34,43 +33,15 @@ import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
+import { archiveCurrentGrant, removeSelfHostedGrant } from "@/lib/grant-archive";
 
 const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
 const HEARTBEAT_FILE = homePaths.heartbeat();
-const ARCHIVE_DIR = homePaths.grantsArchive();
 
-/** A well-formed 0x EVM address — the ONLY thing we ever build an archive filename
- * from. Rejecting anything else keeps `smartAccount` from smuggling path separators
- * (../, absolute paths) into archiveCurrentGrant's `${addr}.json`. */
+/** A well-formed 0x EVM address. The archive (lib/grant-archive.ts) keeps its own
+ * copy of this check, since it builds a filename from the address. */
 const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
-
-/**
- * Copy whatever grant.json currently holds into the archive, keyed by its smart
- * account, BEFORE we overwrite or delete it.
- *
- * grant.json is a single slot: creating a second wallet (or hitting the kill
- * switch) used to destroy the previous grant — and with it the ONLY on-disk copy
- * of that wallet's owner key, permanently stranding any funds still in it. This
- * is the safety net. Best-effort: archiving must never block arming a grant.
- */
-async function archiveCurrentGrant(): Promise<void> {
-  try {
-    const raw = await readFile(GRANT_FILE, "utf8");
-    const prev = JSON.parse(raw) as StoredGrant;
-    if (!isAddr(prev?.smartAccount)) return; // never derive a path from a malformed address
-    await mkdir(ARCHIVE_DIR, { recursive: true, mode: 0o700 });
-    // One file per wallet, named by its address. Re-arming the same wallet just
-    // refreshes its archive copy; a different wallet gets its own file.
-    const dst = path.join(ARCHIVE_DIR, `${prev.smartAccount.toLowerCase()}.json`);
-    await writeFile(dst, raw, { encoding: "utf8", mode: 0o600 });
-    // This file holds a plaintext OWNER KEY — keep it owner-only (0600), not the
-    // default world-readable 0644. chmod covers the file-already-existed case.
-    await chmod(dst, 0o600).catch(() => {});
-  } catch {
-    // no grant.json yet, or it's unreadable — nothing worth keeping
-  }
-}
 
 export interface AgentStatus {
   exists: boolean;
@@ -451,10 +422,9 @@ export async function DELETE(req: Request) {
     await getGrantStore().remove(tenant);
     return NextResponse.json({ ok: true });
   }
-  // The kill switch destroys the session key, NOT the wallet — archive it so the
-  // owner key survives and the funds stay reachable.
-  await archiveCurrentGrant();
-  await rm(GRANT_FILE, { force: true });
+  // The kill switch destroys the session key, NOT the wallet — archived first.
+  // The web's Start over removes it the same way, from /api/grants/discard.
+  await removeSelfHostedGrant();
   return NextResponse.json({ ok: true });
 }
 

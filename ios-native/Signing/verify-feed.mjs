@@ -81,6 +81,16 @@ const connections = (telegram, settings) => JSON.parse(context.NativeFeed.connec
 assert.equal(connections(null, null).telegram.kind, 'unread');
 assert.equal(connections({ hasToken: true, enabled: false }, null).telegram.kind, 'off');
 assert.equal(connections({ hasToken: true, enabled: true, connected: true, ownerId: null, linkCode: 'CODE', botUsername: 'bot' }, null).telegram.kind, 'unlinked');
+// The states AgentConnections.swift draws beside the web strip: held, not heard (and why), and a bot another agent holds.
+const bot = { hasToken: true, enabled: true, connected: true, ownerId: null, linkCode: 'CODE', botUsername: 'bot', allowlist: [] };
+const held = connections({ ...bot, listening: { state: 'held', reason: 'restore error', lastOkAt: null } }, null).telegram;
+assert.deepEqual([held.kind, held.reason, held.linked, held.linkCode], ['held', 'restore error', false, 'CODE']);
+const deaf = connections({ ...bot, listening: { state: 'not-listening', reason: null, lastOkAt: 1 } }, null).telegram;
+assert.deepEqual([deaf.kind, deaf.why, deaf.lastOkAt, deaf.linked, deaf.linkCode], ['not-listening', 'stale', 1, false, 'CODE']);
+assert.equal(connections({ ...bot, listening: { state: 'conflict', reason: '409', lastOkAt: 1 } }, null).telegram.why, 'conflict');
+assert.equal(connections({ ...bot, connected: false, listening: { state: 'revoked', reason: '401', lastOkAt: 1 } }, null).telegram.why, 'revoked');
+assert.deepEqual(connections({ ...bot, botElsewhere: true }, null).telegram, { kind: 'elsewhere', botUsername: 'bot' });
+assert.equal(connections({ ...bot, linkCode: null, linkPending: true }, null).telegram.linkPending, true);
 assert.equal(connections(null, { values: { strategy: 'trencher', assetMode: 'stocks', trencherLiveEnabled: true } }).trencher.kind, 'no-crypto');
 console.log('Native owner views withhold estimated/stale returns, count only landed usage, and distinguish unread connections from disabled ones.');
 const resign = input => JSON.parse(context.NativeFeed.resign(JSON.stringify(input)));

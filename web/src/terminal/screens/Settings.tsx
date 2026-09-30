@@ -14,9 +14,9 @@ import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import { ENERGY, MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, TELEGRAM_GROUPS_CHATTINESS, isEnergyReserveToken, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant, type TelegramGroupsChattiness } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
-import { telegramLabel, telegramRow } from "../agent-status";
+import { telegramLabel, telegramRow, type TelegramRow } from "../agent-status";
 import SetupChecklist from "../SetupChecklist";
-import { count } from "@/lib/format";
+import { count, shortDateTime } from "@/lib/format";
 import { unreadableSetting } from "@/lib/parse-amount";
 import { useT } from "@/lib/i18n";
 // QUARANTINED alongside /grant. A settings form is not a surface anybody shares
@@ -57,6 +57,40 @@ function Field(props: {
   );
 }
 
+/**
+ * WHAT THE PROCESS POLLING THE BOT MEASURED, beside the code it is about.
+ *
+ * The code is what an owner sends into the bot, so this is where they must
+ * learn that nothing is reading it. In the incident behind these states the
+ * page said "the bot is listening" and showed a code for days in which
+ * nothing polled the bot; the owner sent that code five times and was locked
+ * out. Nothing is rendered for a bot being heard, or one we cannot tell about.
+ */
+function TelegramListeningNote({ row }: { row: TelegramRow }) {
+  const t = useT();
+  let text: string | null = null;
+  if (row.kind === "held") text = t("settings.tg.held", { reason: row.reason ?? "restore error" });
+  else if (row.kind === "not-listening") {
+    text =
+      row.why === "revoked"
+        ? t("settings.tg.revoked")
+        : row.why === "conflict"
+          ? t("settings.tg.conflict")
+          : row.lastOkAt !== null
+            ? t("settings.tg.notListeningSince", { when: shortDateTime(row.lastOkAt * 1000) })
+            : t("settings.tg.notListeningNever");
+  }
+  if (!text) return null;
+  // The code stays on screen below, and says when it will work.
+  const codeShown = (row.kind === "held" || row.kind === "not-listening") && row.linkCode !== null;
+  return (
+    <div className="mm-danger" role="status">
+      {text}
+      {row.kind === "not-listening" && codeShown ? <> {t("settings.tg.codeWhenBack")}</> : null}
+    </div>
+  );
+}
+
 /** `onSaved`: after a save the server accepted — App hands it the chat's re-read, so the chips already on screen offer the ceiling just set. */
 export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; slug: string | null; onSaved?: () => void}) {
   const t = useT();
@@ -71,6 +105,14 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (statusTimer.current) clearTimeout(statusTimer.current); }, []);
   const [errors, setErrors] = useState<string[]>([]);
+  /**
+   * THE BOT IS CLAIMED BY ANOTHER AGENT: what the server said, while the owner
+   * decides whether to move it here. Null when there is nothing to decide.
+   * The draft is kept as it was, so "Move it here" re-sends the same save.
+   */
+  const [botClaimed, setBotClaimed] = useState<string | null>(null);
+  /** The last save moved the bot here: nobody is linked to it here yet, so say so until the next save. */
+  const [botMoved, setBotMoved] = useState(false);
   // Telegram: booleans/allowlist can't ride the string `draft`, so track separately.
   /**
    * Is this the hosted service?
@@ -370,9 +412,12 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     setTokens(current.filter((t) => t.address.toLowerCase() !== address.toLowerCase()));
   }
 
-  async function save() {
+  /** `moveBot`: the owner answered "Move it here" to a bot another agent holds. */
+  async function save(opts: { moveBot?: boolean } = {}) {
     setStatus("saving…");
     setErrors([]);
+    setBotClaimed(null);
+    setBotMoved(false);
     // An unreadable field would be sent as typed and rejected, or — worse, if
     // it were ever blanked first — sent as "" and read as "clear to default".
     const unreadable = Object.entries(numError);
@@ -411,6 +456,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     if (appList !== null) body.telegramAppAllowlist = appList;
     if (agentEnabled !== null) body.telegramAgentEnabled = agentEnabled;
     if (agentAutoShell !== null) body.telegramAgentAutoShell = agentAutoShell;
+    if (opts.moveBot) body.moveBot = true;
     // Secrets: only send when the user typed something or hit clear ("").
     try {
       const res = await fetch("/api/settings", {
@@ -422,13 +468,22 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
         // a form read signed out, which no session is.
         body: JSON.stringify(view && view.owner !== null ? { ...body, owner: view.owner } : body),
       });
-      const json = (await res.json()) as { ok?: boolean; errors?: string[] };
+      const json = (await res.json()) as { ok?: boolean; errors?: string[]; error?: string; botMoved?: boolean };
+      // ANOTHER AGENT HOLDS THIS BOT. Not an error in the form: a question for
+      // the owner, asked beside the button they pressed. Nothing was saved.
+      if (res.status === 409 && json.error === "bot_claimed") {
+        setBotClaimed(json.errors?.[0] ?? "This bot is already connected to another Merrymen agent.");
+        setStatus(null);
+        return;
+      }
       if (!res.ok) {
         setErrors(json.errors ?? ["save failed"]);
         setStatus(null);
         return;
       }
       setStatus("Changes saved");
+      // A moved bot answers here now, but nobody is linked to it here yet.
+      setBotMoved(json.botMoved === true);
       onSaved?.();
       setDraft({});
       setSymbols(null);
@@ -1392,6 +1447,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           <p className="mm-hint" style={{ marginTop: 0 }}>
             Create a bot with @BotFather and add its token below.
           </p>
+          <TelegramListeningNote row={telegramRow(tg)} />
           {tg?.linkCode ? (
             <p className="mm-hint">{t("settings.hint.thenSend")}<code>/link {tg.linkCode}</code> to your bot to connect it.{" "}
               {tg.botUsername ? (
@@ -1404,9 +1460,18 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
             </p>
           ) : (
             <p className="mm-hint">
-              {view.telegramBotToken.set
-                ? "No link code yet. Your agent mints one on its next pass with this token set — check back shortly."
-                : "Your link code appears here once a token is saved."}
+              {/* NO CODE BECAUSE ANOTHER AGENT HAS THIS BOT, which this one
+                  will never pick up; or because the agent has not picked
+                  it up YET: the code on file was minted for the bot saved
+                  before, and would not link this one
+                  (lib/telegram-listening.ts). Neither is "check back". */}
+              {tg?.botElsewhere
+                ? t("settings.tg.elsewhere")
+                : tg?.linkPending && tg.enabled
+                ? t("settings.tg.pickingUp")
+                : view.telegramBotToken.set
+                  ? "No link code yet. Your agent mints one on its next pass with this token set — check back shortly."
+                  : "Your link code appears here once a token is saved."}
             </p>
           )}
           <div className="mm-grid">
@@ -1445,7 +1510,10 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <span className="mm-label">{t("settings.label.enableTelegram")}</span>
               <span className="mm-input">
                 <input type="checkbox" checked={tgEnabledVal} onChange={(e) => setTgEnabled(e.target.checked)} style={{ width: "auto" }} />
-                <span className="mm-unit">{tgEnabledVal ? "the bot is listening" : "off"}</span>
+                {/* WHAT THE SWITCH SAYS, NOT WHAT WAS HEARD. "the bot is
+                    listening" was printed here for a bot nothing had polled in
+                    days; whether it is heard is the connection field above. */}
+                <span className="mm-unit">{tgEnabledVal ? "on" : "off"}</span>
               </span>
             </label>
           </div>
@@ -1591,10 +1659,17 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <>
                 link code: <b className="mono">{tg.linkCode}</b> — send <code>/link {tg.linkCode}</code> from Telegram
               </>
+            ) : tg?.botElsewhere ? (
+              t("settings.tg.elsewhereShort")
+            ) : tg?.linkPending && tg.enabled ? (
+              t("settings.tg.pickingUp")
             ) : (
               "save a token to generate your link code"
             )}
           </div>
+          {/* The same warning where the code is repeated: this one is read on
+              its own, far from the first. */}
+          <TelegramListeningNote row={telegramRow(tg)} />
           <div className="mm-chips" style={{ marginTop: 6 }}>
             {allowlistVal.length === 0 && <span className="dim mono">no linked chats yet</span>}
             {allowlistVal.map((id) => (
@@ -2019,6 +2094,34 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
           <button className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…"}>
             {status ?? "Save changes"}
           </button>
+          {botClaimed && (
+            <div className="mm-note" role="alert">
+              <p style={{ marginTop: 0 }}>{botClaimed}</p>
+              <p className="mm-hint">Nothing has been saved yet.</p>
+              <button className="mm-btn danger sm" onClick={() => void save({ moveBot: true })} disabled={status === "saving…"}>
+                Move it here
+              </button>{" "}
+              {/* KEEPING IT THERE TAKES THE TOKEN OUT OF THE FORM. Left in the
+                  draft, it rode along with every later save, each one was
+                  refused the same way, and whatever else the owner changed
+                  was never saved. The rest of the draft stays for the next Save. */}
+              <button
+                className="mm-btn sm"
+                onClick={() => {
+                  setDraft(({ telegramBotToken: _kept, ...rest }) => rest);
+                  setBotClaimed(null);
+                }}
+              >
+                Keep it there
+              </button>
+            </div>
+          )}
+          {botMoved && (
+            <p className="mm-note" role="status">
+              The bot answers this agent now, and has stopped answering the other one. Link your chat to it here: send it
+              /link with the code shown under Telegram once it appears.
+            </p>
+          )}
           {errors.length > 0 && (
             <div className="mm-danger mono">
               {errors.map((e, i) => (
