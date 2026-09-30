@@ -553,7 +553,7 @@ export async function runAgentTask(task: string, deps: AgentRunDeps): Promise<vo
         deps.note("ok", "Telegram agent: task finished");
         return; // final answer — done
       }
-      messages.push({ role: "assistant", text: t.text, toolUses: t.toolUses });
+      messages.push({ role: "assistant", ...t });
 
       const results: { id: string; name: string; output: string }[] = [];
       for (const use of t.toolUses) {

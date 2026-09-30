@@ -568,10 +568,8 @@ export const XPOST_GROQ_BASE_URL = "https://api.groq.com/openai/v1";
 /** The same default model as the group room's writer: one small open model for short casual lines. */
 export const XPOST_GROQ_DEFAULT_MODEL = "qwen/qwen3.8-27b";
 /**
- * CLAUDE OPUS 5, and deliberately not a newer or bigger one. llm.ts's
- * anthropic path sends `thinking: {type: "disabled"}` with no effort, and Opus
- * 5 accepts disabled thinking at its default effort; Opus 5.5 and the Fable
- * models answer that request with a 400. A tweet needs no thinking.
+ * Keep a default that allows thinking to be disabled. llm.ts also supports
+ * models that require thinking, but a tweet needs none.
  */
 export const XPOST_ANTHROPIC_DEFAULT_MODEL = "claude-opus-5";
 

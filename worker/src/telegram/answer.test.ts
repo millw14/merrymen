@@ -84,9 +84,21 @@ describe("answerQuestion — look it up, then answer", () => {
 
   it("caps lookups per round", async () => {
     const many = Array.from({ length: 12 }, (_, i) => ({ id: `c${i}`, name: "agent_status", input: {} }));
-    const s = scripted([{ text: "", toolUses: many }, { text: "ok", toolUses: [] }]);
+    const anthropicContent: NonNullable<AgentTurn["anthropicContent"]> = [
+      { type: "thinking", thinking: "private reasoning", signature: "signed-thinking" },
+      { type: "redacted_thinking", data: "opaque-reasoning" },
+      ...many.map((call) => ({ type: "tool_use" as const, ...call, caller: { type: "direct" as const } })),
+    ];
+    const s = scripted([{ text: "", toolUses: many, anthropicContent }, { text: "ok", toolUses: [] }]);
     const a = await answerQuestion(base(s.turn));
+    assert.equal(a?.text, "ok");
     assert.equal(a?.used.length, 5);
+    const second = s.seen[1]!;
+    const assistant = second.find((m) => m.role === "assistant");
+    assert.deepEqual(assistant?.anthropicContent, anthropicContent, "signed content must stay complete and unchanged");
+    const results = second.find((m) => m.role === "tools")!.results;
+    assert.deepEqual(results.map((r) => r.id), many.map((c) => c.id), "every tool call needs a matching result");
+    for (const result of results.slice(5)) assert.match(result.output, /Lookup not run/);
   });
 
   it("a provider failure returns null, so the owner still gets the old reply", async () => {

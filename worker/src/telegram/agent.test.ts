@@ -272,10 +272,15 @@ test("loop: streams text, executes tools, stops when the model stops", async () 
     writeFileSync(path.join(root, "hello.txt"), "hi");
     const sent: string[] = [];
     const seen: AgentMsg[][] = [];
+    const anthropicContent: NonNullable<AgentTurn["anthropicContent"]> = [
+      { type: "thinking", thinking: "private reasoning", signature: "signed-thinking" },
+      { type: "text", text: "let me look around", citations: null },
+      { type: "tool_use", id: "1", name: "list_dir", input: {}, caller: { type: "direct" } },
+    ];
     const deps = makeDeps(
       baseCfg({ capabilities: new Set(["files"]), filesRoot: root }),
       [
-        { text: "let me look around", toolUses: [{ id: "1", name: "list_dir", input: {} }] },
+        { text: "let me look around", toolUses: [{ id: "1", name: "list_dir", input: {} }], anthropicContent },
         { text: "done — found hello.txt", toolUses: [] },
       ],
       sent,
@@ -285,6 +290,7 @@ test("loop: streams text, executes tools, stops when the model stops", async () 
     assert.deepEqual(sent, ["let me look around", "done — found hello.txt"]);
     // the tool result made it back to the model on the second turn
     const second = seen[1]!;
+    assert.deepEqual(second.find((m) => m.role === "assistant")?.anthropicContent, anthropicContent);
     const toolMsg = second.find((m) => m.role === "tools");
     assert.ok(toolMsg && toolMsg.role === "tools" && toolMsg.results[0]!.output.includes("hello.txt"));
   } finally {

@@ -106,6 +106,11 @@ describe("the desk finishes", () => {
 
   it("researches first, then submits", async () => {
     const asked: string[] = [];
+    const anthropicContent: NonNullable<AgentTurn["anthropicContent"]> = [
+      { type: "thinking", thinking: "private reasoning", signature: "signed-thinking" },
+      { type: "tool_use", id: "a", name: "look_up", input: { symbol: "NVDA" }, caller: { type: "direct" } },
+    ];
+    let round = 0;
     const r = await runDesk({
       creds: CREDS,
       signals: SIGNALS,
@@ -115,10 +120,11 @@ describe("the desk finishes", () => {
           return "price 100, source pool";
         },
       }),
-      turn: scripted([
-        { text: "let me look", toolUses: [{ id: "a", name: "look_up", input: { symbol: "NVDA" } }] },
-        submit([], "Only a pool mark to go on, so I sat on my hands."),
-      ]) as never,
+      turn: async (_creds, opts) => {
+        if (round++ === 0) return { text: "let me look", toolUses: [{ id: "a", name: "look_up", input: { symbol: "NVDA" } }], anthropicContent };
+        assert.deepEqual(opts.messages.find((m) => m.role === "assistant")?.anthropicContent, anthropicContent);
+        return submit([], "Only a pool mark to go on, so I sat on my hands.");
+      },
     });
     assert.deepEqual(asked, ["NVDA"]);
     assert.equal(r.steps, 2);

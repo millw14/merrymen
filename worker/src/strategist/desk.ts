@@ -387,7 +387,7 @@ export async function runDesk(opts: {
       return { actions: [], thesis: "", steps, refused };
     }
 
-    messages.push({ role: "assistant", text: turn.text, toolUses: turn.toolUses });
+    messages.push({ role: "assistant", ...turn });
     const results: { id: string; name: string; output: string }[] = [];
     for (const use of turn.toolUses) {
       let output: string;
