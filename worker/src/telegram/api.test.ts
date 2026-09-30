@@ -912,7 +912,7 @@ describe("getUpdates — group messages", () => {
           { type: "text_mention", offset: 10, length: 2, userId: 77 },
           { type: "text_link", offset: 26, length: 5, url: "https://dexscreener.com/robinhood/0xabc" },
         ],
-        replyTo: { messageId: 88, fromId: BOT_ID, fromIsBot: true },
+        replyTo: { messageId: 88, fromId: BOT_ID, fromIsBot: true, text: "gm" },
       },
     ]);
     // Offsets index the caption (UTF-16, like JS strings).
@@ -1067,6 +1067,22 @@ describe("getUpdates — group messages", () => {
     const { messages } = await getUpdates({ token: "t", fetchFn: f }, 1);
     assert.deepEqual(messages[0]!.replyTo, { messageId: 3 });
     assert.equal("replyTo" in messages[1]!, false);
+  });
+
+  it("a reply carries the text Telegram quoted (else its caption), so a question under a coin post can find the coin", async () => {
+    const CA = "0x7a3c0d5e11b2f4c6a8e9d0b1c2d3e4f5a6b7c8d9";
+    const f = fakeFetch(
+      200,
+      OK([
+        { update_id: 1, message: { chat: { id: -5, type: "group" }, from: { id: 4 }, text: "wdyt", reply_to_message: { message_id: 3, from: { id: 9, is_bot: false }, text: CA } } },
+        { update_id: 2, message: { chat: { id: -5, type: "group" }, from: { id: 4 }, text: "this?", reply_to_message: { message_id: 7, caption: `chart ${CA}` } } },
+        { update_id: 3, message: { chat: { id: -5, type: "group" }, from: { id: 4 }, text: "long", reply_to_message: { message_id: 8, text: "x".repeat(5_000) } } },
+      ]),
+    );
+    const { messages } = await getUpdates({ token: "t", fetchFn: f }, 1);
+    assert.deepEqual(messages[0]!.replyTo, { messageId: 3, fromId: 9, fromIsBot: false, text: CA });
+    assert.deepEqual(messages[1]!.replyTo, { messageId: 7, text: `chart ${CA}` });
+    assert.equal(messages[2]!.replyTo?.text?.length, 4096, "never longer than a Telegram message");
   });
 
   it("an anonymous admin's line carries sender_chat; `from` is Telegram's placeholder and says is_bot", async () => {

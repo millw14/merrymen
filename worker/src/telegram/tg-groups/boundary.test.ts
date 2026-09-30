@@ -468,6 +468,7 @@ const COIN_LOOK_FILE = path.join(WORKER_SRC, "tg-coin-look.ts");
 const PLAIN_TYPES = [
   "CoinKind",
   "CoinLook",
+  "CoinLookSource",
   "CoinOutcome",
   "NominateRefusal",
   "NominateResult",
@@ -594,6 +595,7 @@ describe("trading never receives message text", () => {
       "CoinLookReaders.own: () => readonly string[]",
       "CoinLookReaders.held: (address: string) => { name?: string | null } | null",
       "CoinLookReaders.tokenPools: (address: string) => Promise<GeckoPool[] | null>",
+      "CoinLookReaders.dexPairs?: (address: string) => Promise<GeckoPool[] | null>",
       "CoinLookReaders.getCode: (address: `0x${string}`) => Promise<string | undefined>",
       "CoinLookReaders.probe: (address: `0x${string}`) => Promise<TokenProbe | null>",
       "CoinLookReaders.curveFor?: (address: string) => Promise<unknown>",

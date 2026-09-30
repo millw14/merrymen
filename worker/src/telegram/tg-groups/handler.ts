@@ -60,7 +60,7 @@ import {
   type TgServiceMessage,
 } from "../api";
 import type { StateRef } from "../state";
-import { CoinFlow, type CoinIntent, type CoinQuiet, type CoinSpeakOpts } from "./coins";
+import { CoinFlow, type CoinIntent, type CoinPostEnd, type CoinQuiet, type CoinSpeakOpts } from "./coins";
 import {
   addressedHow,
   addressedSmallTalk,
@@ -664,7 +664,21 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * line went nowhere, so the log can tell "no messages reach the bot" from
    * "they arrive and are dropped here" from "a job is stuck".
    */
-  const stats = { lines: 0, addressed: 0, noSelf: 0, noRoom: 0, blocked: 0, notApproved: 0, off: 0, dropped: 0, stalled: 0, lockStalled: 0 };
+  const stats = {
+    lines: 0,
+    addressed: 0,
+    noSelf: 0,
+    noRoom: 0,
+    blocked: 0,
+    notApproved: 0,
+    off: 0,
+    dropped: 0,
+    stalled: 0,
+    lockStalled: 0,
+    /** Lines the coin flow owned (a CA, another chain's coin, a ticker it answered), and how many got a line or a reaction. */
+    coinPosts: 0,
+    coinAnswered: 0,
+  };
   /** Resolves after ms, or never holds the process open. */
   const after = (ms: number): Promise<"late"> =>
     new Promise((r) => {
@@ -1892,6 +1906,55 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (why !== null && j.addressed !== null) quietLine(why);
   };
 
+  /**
+   * A REPLY TO A COIN POST, SAID TO IT, ASKS ABOUT THAT COIN. "wdyt about
+   * this shogun" under someone's CA names no coin in its own words, so the
+   * coin is read off the post it answers: this chat's remembered line, else
+   * the text Telegram quoted with the reply. The reply then goes through the
+   * coin flow as a post of that coin by whoever asked — claimed under the
+   * reply's own message id, so the original post's claim is untouched and a
+   * replay of the reply repeats nothing — with every rule a CA said to it
+   * gets: looked at, answered from memory, the owner ask, a nomination, "can't
+   * pull that one up rn", or silence for another chain's coin.
+   *
+   * Only a line said to it: a reply that did not call it is chatter between
+   * people. Never its own line (it never writes an address). Never a distress
+   * post's coin: "lost everything on 0x… i want to die" is a person, not a
+   * coin to look at, whoever replies to it. And not while that post is still
+   * on the coin lane (CoinFlow.working): its own answer is on its way, and
+   * "@bot didnt you see" sent while its look hangs is answered now, as
+   * chatter, rather than queued behind the look it is asking about.
+   */
+  const repliedCoin = (j: LineJob): { cas: string[]; otherChain: string[]; foreignMint: boolean } | null => {
+    if (j.addressed === null) return null;
+    const to = j.line.replyTo;
+    if (!isMsgId(to) || flow.working(j.msg.chatId, to)) return null;
+    const room = store.room(j.msg.chatId);
+    const remembered = room?.lines.find((l) => l.messageId === to);
+    if (remembered?.own) return null;
+    const quoted = j.msg.replyTo?.messageId === to ? j.msg.replyTo.text : undefined;
+    const text = remembered ? remembered.text : typeof quoted === "string" ? quoted : "";
+    if (!text || isDistress(text)) return null;
+    const hits = extractCaHits(text);
+    const foreignMint = hasForeignMint(text) || hasOtherChainLink(text);
+    if (hits.length === 0 && !foreignMint) return null;
+    return { cas: hits.map((h) => h.address), otherChain: hits.filter((h) => h.chain === "other").map((h) => h.address), foreignMint };
+  };
+
+  /**
+   * ONE LOG LINE PER COIN POST: whether it was said to it, what came of it,
+   * and what each look found and which read answered — so a coin that got
+   * silence always says why. Kinds, source names and codes only: never the
+   * text, the address, the title or a name.
+   */
+  const coinPostLine = (how: "to me" | "reply to a coin post" | "not to me", end: CoinPostEnd, missed: Quiet | undefined): void => {
+    stats.coinPosts += 1;
+    if (end.acted) stats.coinAnswered += 1;
+    const what = end.acted ? "answered" : `nothing (${missed ?? end.quiet ?? "coin-silent"})`;
+    const looks = Array.isArray(end.looks) && end.looks.length > 0 ? `; look: ${end.looks.join(", ")}` : "";
+    log(`[tg-groups] coin post (${how}): ${what}${looks}`);
+  };
+
   /** processLine's work. Null when something landed or is still on its way (the coin lane); else why nothing will. */
   const lineOutcome = async (j: LineJob): Promise<Quiet | null> => {
     const chatId = j.msg.chatId;
@@ -1910,13 +1973,21 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // Every CA with the chain its link names: the flow sets aside those in
       // another chain's link before it counts the first two.
       const hits = extractCaHits(text);
-      const cas = hits.map((h) => h.address);
-      const otherChain = hits.filter((h) => h.chain === "other").map((h) => h.address);
+      let cas = hits.map((h) => h.address);
+      let otherChain = hits.filter((h) => h.chain === "other").map((h) => h.address);
       // Another chain's coin with no 0x + 40-hex address in it: a mint, a TON
       // address, or a chart link DexScreener hands out for a Solana, TON, Sui
       // or v4 pair. The flow owns the line and says nothing.
-      const foreignMint = hasForeignMint(text) || hasOtherChainLink(text);
-      const cashtags = extractCashtags(text);
+      let foreignMint = hasForeignMint(text) || hasOtherChainLink(text);
+      let cashtags = extractCashtags(text);
+      // No coin in its own words, said to it, under a coin post: it asks about
+      // that post's coin (repliedCoin). A ticker beside it ("wdyt $vrax") is
+      // the same coin, not a reason for "drop the ca".
+      const asked = cas.length === 0 && !foreignMint ? repliedCoin(j) : null;
+      if (asked) {
+        ({ cas, otherChain, foreignMint } = asked);
+        cashtags = [];
+      }
       if (cas.length > 0 || foreignMint || cashtags.length > 0) {
         stageOf(chatId, "coin flow");
         const post = await flow.begin(chatId, j.line, {
@@ -1940,9 +2011,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // queue: the next line here is read now, not after the reads.
         if (post.owned === "handled") {
           const key = msgKey(chatId, j.line.messageId);
+          const how = asked ? "reply to a coin post" : j.addressed !== null ? "to me" : "not to me";
           track(
             post.done.then((end) => {
-              if (j.addressed === null || end.acted || landedOn.has(key)) return;
+              const acted = end.acted || landedOn.has(key);
+              coinPostLine(how, { ...end, acted }, coinMissed.get(key));
+              if (j.addressed === null || acted) return;
               quietLine(coinMissed.get(key) ?? end.quiet ?? "coin-silent");
             }),
           );
@@ -2155,6 +2229,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           `[tg-groups] last ${Math.round(HEARTBEAT_MS / MIN)} min: ${stats.lines} group lines (${stats.addressed} to me), ` +
             `skipped: ${stats.notApproved} room not approved, ${stats.off} switched off, ${stats.noRoom} no room, ${stats.blocked} blocked, ${stats.noSelf} before I knew who I am; ` +
             `${stats.dropped} dropped (queue full), ${stats.stalled} jobs past ${Math.round(stallMs / SEC)}s and ${stats.lockStalled} sends past ${Math.round(stallMs / 2 / SEC)}s; ` +
+            `${stats.coinPosts} coin posts (${stats.coinAnswered} answered); ` +
             `${queued} queued${busy}`,
         );
       }

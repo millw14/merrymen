@@ -92,7 +92,17 @@ export interface TgReplyTo {
   messageId: number;
   fromId?: number;
   fromIsBot?: boolean;
+  /**
+   * The replied-to message's text (else its caption), as Telegram quoted it,
+   * at most REPLY_TEXT_MAX characters. What "wdyt about this" under a coin
+   * post is asking about when the post itself was never remembered. Absent
+   * when Telegram quoted none.
+   */
+  text?: string;
 }
+
+/** Telegram's own limit on a message's text: a quoted reply is never longer. */
+const REPLY_TEXT_MAX = 4096;
 
 /**
  * One inbound message, normalized to what the interpreter needs.
@@ -719,13 +729,15 @@ function parseEntities(raw: unknown[]): TgEntity[] {
  */
 function parseReplyTo(raw: unknown): TgReplyTo | undefined {
   if (!raw || typeof raw !== "object") return undefined;
-  const r = raw as { message_id?: unknown; from?: { id?: unknown; is_bot?: unknown }; forum_topic_created?: unknown };
+  const r = raw as { message_id?: unknown; from?: { id?: unknown; is_bot?: unknown }; forum_topic_created?: unknown; text?: unknown; caption?: unknown };
   if (typeof r.message_id !== "number") return undefined;
   if (r.forum_topic_created) return undefined;
+  const text = typeof r.text === "string" && r.text ? r.text : typeof r.caption === "string" && r.caption ? r.caption : "";
   return {
     messageId: r.message_id,
     ...(typeof r.from?.id === "number" ? { fromId: r.from.id } : {}),
     ...(typeof r.from?.is_bot === "boolean" ? { fromIsBot: r.from.is_bot } : {}),
+    ...(text ? { text: text.slice(0, REPLY_TEXT_MAX) } : {}),
   };
 }
 

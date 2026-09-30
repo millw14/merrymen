@@ -24,6 +24,7 @@ import { TgGroupsStore, emptyTgGroupsState } from "./telegram/tg-groups/store";
 import type { Nomination } from "./telegram/tg-groups/types";
 import { createCoinLook, createTgCoinsPort, type CoinLookReaders } from "./tg-coin-look";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
+import { readDexTokenPairs } from "./venues/dexscreener";
 
 const T0 = Date.UTC(2026, 8, 29, 12, 0, 0);
 const CHAT = -1001234567890;
@@ -231,5 +232,219 @@ describe("a Pons coin posted while the chain reads are declined: the real look, 
     assert.equal(sends.length, 1);
     assert.match(String(sends[0]?.text), /curve/);
     assert.deepEqual(reads, { code: 1, pools: 1, probe: 0 });
+  });
+});
+
+describe("the Shogun exchange: a Robinhood coin while the chain AND GeckoTerminal fail, then 'wdyt about this shogun' as a reply to it", () => {
+  // Commander Vrax, a Robinhood Chain coin with six figures of liquidity, was
+  // posted while the fleet's RPC reads were rate-limited and GeckoTerminal's
+  // shared quota was in cooldown. Its look was `unknown`, and a bare CA nobody
+  // asked about gets silence for that. Then "wdyt about this shogun", replying
+  // to the post, was answered by its words alone — no look — and the model
+  // said "my owner's rules say i don't do 'should you buy this' talks".
+  const SHOGUN = { id: 888888, username: "shogun_merry_bot", name: "Shogun" };
+  const VRAX = "0x7a3c0d5e11b2f4c6a8e9d0b1c2d3e4f5a6b7c8d9";
+  const DODGE = "my owner's rules say i don't do 'should you buy this' talks";
+  /** DexScreener's `/tokens/v1/robinhood/<token>` answer for it, as the real parser reads it. */
+  const dexBody = (nowMs: number) =>
+    JSON.stringify([
+      {
+        chainId: "robinhood",
+        dexId: "uniswap",
+        url: `https://dexscreener.com/robinhood/0x${"5".repeat(40)}`,
+        pairAddress: `0x${"5".repeat(40)}`,
+        labels: ["v3"],
+        baseToken: { address: VRAX, name: "Commander Vrax", symbol: "VRAX" },
+        quoteToken: { address: "0x0000000000000000000000000000000000000006", name: "Wrapped Ether", symbol: "WETH" },
+        priceUsd: "0.00041",
+        txns: { m5: { buys: 12, sells: 9 }, h1: { buys: 140, sells: 90 }, h6: { buys: 500, sells: 380 }, h24: { buys: 1900, sells: 1400 } },
+        volume: { m5: 1500, h1: 21000, h6: 120000, h24: 410000 },
+        priceChange: { m5: 0.4, h1: 2.1, h6: -3.2, h24: 12.5 },
+        liquidity: { usd: 190000 },
+        fdv: 1200000,
+        pairCreatedAt: nowMs - 3 * 24 * 3600_000,
+      },
+      // Another chain's pair of a same-looking address is never counted.
+      { chainId: "ethereum", dexId: "uniswap", pairAddress: `0x${"6".repeat(40)}`, labels: ["v3"], baseToken: { address: VRAX, symbol: "VRAX" }, quoteToken: { symbol: "WETH" }, liquidity: { usd: 9 } },
+    ]);
+
+  let home: string;
+  let clock: number;
+  let store: TgGroupsStore;
+  let groups: TgGroups;
+  let sends: Array<Record<string, unknown>>;
+  let nominations: Nomination[];
+  let logs: string[];
+  let prompts: number;
+  let dexUp: boolean;
+  let nextMsg: number;
+  let tstate: TelegramState;
+  const realFetch = globalThis.fetch;
+  const stateRef: StateRef = {
+    get: () => tstate,
+    set: (s) => {
+      tstate = s;
+    },
+  };
+  const fetchFn: FetchLike = async (url, init) => {
+    const method = url.split("/").pop() ?? "";
+    const body = init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+    if (method === "sendMessage") sends.push(body);
+    const env = method === "sendMessage" ? { ok: true, result: { message_id: 5_000 + sends.length } } : { ok: true, result: true };
+    return { ok: true, status: 200, json: async () => env };
+  };
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "tg-shogun-"));
+    clock = T0;
+    store = new TgGroupsStore(path.join(home, "tg-groups.json"), emptyTgGroupsState(), { now: () => clock, debounceMs: 60_000 });
+    sends = [];
+    nominations = [];
+    logs = [];
+    prompts = 0;
+    dexUp = true;
+    nextMsg = 300;
+    tstate = { ownerId: OWNER } as unknown as TelegramState;
+    // The group model answers every line with the dodge.
+    globalThis.fetch = (async () => {
+      prompts++;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: DODGE } }] }) };
+    }) as never;
+    const look = createCoinLook({
+      own: () => [],
+      held: () => null,
+      // GeckoTerminal's fleet quota in cooldown: the page cannot be read.
+      tokenPools: async () => null,
+      // The fleet's RPC rate-limited.
+      getCode: async () => {
+        throw new Error("429 Too Many Requests");
+      },
+      probe: async () => null,
+      dexPairs: (a) =>
+        readDexTokenPairs(a, {
+          fetchFn: (async () => (dexUp ? new Response(dexBody(clock), { status: 200 }) : new Response("", { status: 503 }))) as unknown as typeof fetch,
+        }),
+      now: () => clock,
+    });
+    const port = createTgCoinsPort({
+      readiness: () => ({ kind: "ready-paper", ownerReason: "ready" }),
+      look,
+      book: {
+        nominate: (n) => {
+          nominations.push(n);
+          return { ok: true };
+        },
+      },
+      heldNames: () => [],
+      paper: () => true,
+    });
+    groups = createTgGroups({
+      opts: () => ({ token: "123456:TOKEN", fetchFn }),
+      store,
+      getCfg: () =>
+        ({ telegramGroupsEnabled: true, telegramGroupCoinsEnabled: true, telegramGroupsChattiness: "normal", telegramAllowlist: [OWNER] }) as unknown as ResolvedConfig,
+      stateRef,
+      port: () => port,
+      self: () => SHOGUN,
+      privacyOff: () => true,
+      note: () => {},
+      dashboardBase: () => "https://app.test",
+      agentKey: () => "agent-1",
+      now: () => clock,
+      rand: () => 0.99,
+      env: {
+        MERRYMEN_TG_GROUPS_LLM_KEY: "k-test",
+        MERRYMEN_TG_GROUPS_LLM_PROVIDER: "openai",
+        MERRYMEN_TG_GROUPS_LLM_BASE_URL: "https://llm.test/v1",
+        MERRYMEN_TG_GROUPS_MODEL: "fake",
+      },
+      hosted: true,
+      sleep: async (ms) => {
+        clock += Math.max(0, ms);
+      },
+      log: (l) => logs.push(l),
+    });
+    store.ensureRoom(CHAT, { title: "test group", kind: "supergroup" });
+    store.setStatus(CHAT, "approved", OWNER);
+    store.update(CHAT, (r) => {
+      r.helloSaid = true;
+    });
+  });
+
+  afterEach(async () => {
+    groups?.stop();
+    await groups?.drain();
+    globalThis.fetch = realFetch;
+    store.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  const msg = (text: string, over: Partial<TgMessage> = {}): TgMessage => {
+    const id = nextMsg++;
+    return {
+      updateId: id,
+      chatId: CHAT,
+      fromId: OWNER,
+      fromFirstName: "Milla",
+      fromIsBot: false,
+      text,
+      messageId: id,
+      date: Math.floor(clock / 1000),
+      dateSec: Math.floor(clock / 1000),
+      chatType: "supergroup",
+      chatTitle: "test group",
+      ...over,
+    };
+  };
+  const said = async (m: TgMessage): Promise<void> => {
+    groups.onMessage(m);
+    await groups.drain();
+  };
+  const replyOf = (b: Record<string, unknown> | undefined): number | undefined => (b?.reply_parameters as { message_id?: number } | undefined)?.message_id;
+  const words = (b: Record<string, unknown> | undefined): string => String(b?.text ?? "").replace(/^<a href="tg:\/\/user\?id=\d+">[^<]*<\/a> /, "");
+
+  it("the coin post itself is answered: DexScreener shows the Robinhood coin, and the reply asking about it is answered about THAT coin — never with rules", async () => {
+    const post = msg(VRAX);
+    await said(post);
+    assert.equal(sends.length, 1, "no longer silent");
+    assert.equal(replyOf(sends[0]), post.messageId);
+    assert.match(String(sends[0]?.text), new RegExp(`^<a href="tg://user\\?id=${OWNER}">Milla</a> `), "thinking out loud, tagging her");
+    assert.deepEqual(nominations.map((n) => [n.address, n.messageId]), [[VRAX, post.messageId]], "handed across as the coin it is");
+    assert.equal(store.coin(CHAT, VRAX)?.verdict, "candidate");
+    assert.equal(store.coin(CHAT, VRAX)?.name, "VRAX");
+    assert.ok(logs.includes("[tg-groups] coin post (not to me): answered; look: candidate via dexscreener"), logs.join("\n"));
+
+    const wdyt = msg("wdyt about this shogun", { replyTo: { messageId: post.messageId!, fromId: OWNER, fromIsBot: false } });
+    await said(wdyt);
+    assert.equal(sends.length, 2);
+    assert.equal(replyOf(sends[1]), wdyt.messageId, "the question gets its answer");
+    assert.ok(logs.includes("[tg-groups] coin post (reply to a coin post): answered"), logs.join("\n"));
+    for (const s of sends) assert.doesNotMatch(words(s), /rules|allowed|advice|should you buy/, words(s));
+    assert.ok(prompts >= 1, "the model was asked, and its dodge was refused");
+    assert.equal(nominations.length, 1, "one coin, one nomination");
+    assert.ok(!logs.join("\n").includes(VRAX.slice(2, 12)), "never the address in a log");
+  });
+
+  it("DexScreener down too: the post is silent (not asked, not shown), and the reply asks again — answered once the coin can be seen", async () => {
+    dexUp = false;
+    const post = msg(VRAX);
+    await said(post);
+    assert.equal(sends.length, 0);
+    assert.ok(logs.includes("[tg-groups] coin post (not to me): nothing (coin-unknown); look: unknown"), logs.join("\n"));
+
+    const still = msg("wdyt about this shogun", { replyTo: { messageId: post.messageId!, fromId: OWNER, fromIsBot: false } });
+    await said(still);
+    assert.equal(sends.length, 1);
+    assert.equal(replyOf(sends[0]), still.messageId);
+    assert.match(words(sends[0]), /can't|won't|not loading|blank/, "asked, and the look could not be made: said so");
+
+    clock += 11 * 60_000;
+    dexUp = true;
+    const again = msg("shogun?? wdyt", { replyTo: { messageId: post.messageId!, fromId: OWNER, fromIsBot: false } });
+    await said(again);
+    assert.equal(sends.length, 2);
+    assert.equal(replyOf(sends[1]), again.messageId);
+    assert.deepEqual(nominations.map((n) => [n.address, n.messageId, n.senderId]), [[VRAX, again.messageId, OWNER]]);
+    assert.doesNotMatch(words(sends[1]), /rules|allowed|advice/);
   });
 });

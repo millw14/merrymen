@@ -880,7 +880,7 @@ describe("the quick look", () => {
     // Inside the 10 minutes: silence, from anyone, and the room says why.
     clock += 9 * MIN;
     const second = await begin(flow, CHAT, `@pine and ${CA2}?`, { from: BOB, addressed: true });
-    assert.deepEqual(await second.done, { acted: false, quiet: "coin-unknown" });
+    assert.deepEqual(await second.done, { acted: false, quiet: "coin-unknown", looks: ["unknown"] });
     assert.equal(spoken.length, 1);
     // Past them: said again.
     clock += MIN;
@@ -994,7 +994,7 @@ describe("the quick look", () => {
     assert.deepEqual(port!.lookCalls, [CA1]);
     assert.deepEqual(waits.map((w) => w.ms), [COIN_FLOW.lookMs]);
     waits.shift()!.fire();
-    assert.deepEqual(await quiet.done, { acted: false, quiet: "coin-unknown" });
+    assert.deepEqual(await quiet.done, { acted: false, quiet: "coin-unknown", looks: ["unknown"] });
     assert.deepEqual(spoken, [], "unaddressed: silence");
     assert.ok(logs.some((l) => /look timed out/.test(l)));
     assert.ok(!logs.join("\n").includes(CA1.slice(2, 12)), "never the address");
@@ -1002,7 +1002,7 @@ describe("the quick look", () => {
     const asked = await begin(flow, CHAT, `@pine ${CA2}`, { addressed: true });
     await settle();
     waits.shift()!.fire();
-    assert.deepEqual(await asked.done, { acted: true });
+    assert.deepEqual(await asked.done, { acted: true, looks: ["unknown"] });
     assert.deepEqual(intents(), [{ kind: "coin-unknown" }]);
     assert.equal(memoOf(CA1), undefined);
     assert.equal(memoOf(CA2), undefined);
@@ -1019,14 +1019,14 @@ describe("the quick look", () => {
       await settle();
       mock.timers.tick(COIN_FLOW.lookMs - 1);
       answer({ kind: "too-quiet", name: "Slowcoin" });
-      assert.deepEqual(await started.done, { acted: true });
+      assert.deepEqual(await started.done, { acted: true, looks: ["too-quiet"] });
       assert.deepEqual(intents(), [{ kind: "coin-look", look: "too-quiet" }]);
       // …and one that does not answer is let go at the bound.
       port!.look = () => new Promise<CoinLook>(() => {});
       const late = await begin(flow, CHAT, CA2);
       await settle();
       mock.timers.tick(COIN_FLOW.lookMs);
-      assert.deepEqual(await late.done, { acted: false, quiet: "coin-unknown" });
+      assert.deepEqual(await late.done, { acted: false, quiet: "coin-unknown", looks: ["unknown"] });
     } finally {
       mock.timers.reset();
     }
@@ -1085,7 +1085,7 @@ describe("the coin lane: a post's reads never hold the chat's queue", () => {
     assert.ok(onDisk().rooms[String(CHAT)]!.claims[`700:${CA1}`], "claimed before the look");
     assert.equal(spoken.length, 0);
     looks.release(CA1, { kind: "candidate", name: "Froggy" });
-    assert.deepEqual(await started.done, { acted: true });
+    assert.deepEqual(await started.done, { acted: true, looks: ["candidate"] });
     assert.deepEqual(intents(), [{ kind: "coin-ack" }]);
     assert.equal(port!.nominations.length, 1);
   });
@@ -1117,7 +1117,7 @@ describe("the coin lane: a post's reads never hold the chat's queue", () => {
     await settle();
     assert.deepEqual(looks.waiting().sort(), [CA1, CA2].sort(), "both looked at together");
     looks.release(CA2, { kind: "curve" });
-    assert.deepEqual(await other.done, { acted: true });
+    assert.deepEqual(await other.done, { acted: true, looks: ["curve"] });
     assert.equal(spoken.filter((s) => s.chatId === OTHER).length, 1);
     looks.release(CA1, { kind: "curve" });
     await stuck.done;
@@ -1233,7 +1233,7 @@ describe("the coin lane: a post's reads never hold the chat's queue", () => {
     await settle();
     assert.deepEqual(looks.waiting(), [ca(0x2fe)], "the asked one next");
     looks.release(ca(0x2fe), { kind: "curve" });
-    assert.deepEqual(await asked.done, { acted: true });
+    assert.deepEqual(await asked.done, { acted: true, looks: ["curve"] });
     await settle();
     assert.deepEqual(looks.waiting(), [ca(0x2fd)], "then the owner's");
     looks.release(ca(0x2fd), { kind: "curve" });

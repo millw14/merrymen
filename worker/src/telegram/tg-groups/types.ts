@@ -182,7 +182,18 @@ export interface CoinLook {
    * tg-coin-look.ts). Absent means the posted address is the coin.
    */
   address?: string;
+  /**
+   * Which read answered, for the log line every coin post gets (never the
+   * address): `free` (its own money, cash, energy, a stock, a holding: no
+   * read), `cache` (a definite answer from the last 30 minutes), `chain` (the
+   * presence probe or the multicall), `geckoterminal`, `dexscreener`. Absent
+   * when nothing answered (`unknown`).
+   */
+  source?: CoinLookSource;
 }
+
+/** See CoinLook.source. */
+export type CoinLookSource = "free" | "cache" | "chain" | "geckoterminal" | "dexscreener";
 
 /** A nomination request. Nothing else crosses into trading. */
 export interface Nomination {

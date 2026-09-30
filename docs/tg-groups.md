@@ -174,6 +174,14 @@ addressed line got nothing (flood)`. The codes: `off`, `room-not-approved`,
 `coin-no-port`, `coin-replay`, `coin-rate`, `coin-refused`, `coin-silent`.
 Never the text, a name, an id or an address.
 
+Every line the coin flow owns (addressed or not) also gets one line, when its
+work is done: whether it was said to it, what came of it, and what each look
+found with the read that answered — `[tg-groups] coin post (not to me):
+nothing (coin-unknown); look: unknown`, `[tg-groups] coin post (reply to a
+coin post): answered; look: candidate via dexscreener`. The five-minute
+heartbeat counts them: `… 2 coin posts (1 answered); …`. A coin that got
+silence always says why. Kinds, source names and codes only.
+
 **Small talk said to it** (a hail, thanks, a gm or gn with its name and
 nothing more: "hey there merryman", "thanks pine!", "merryman gm"; a room's
 "welcome to the group" counts) gets small talk back from a template, never a
@@ -185,6 +193,27 @@ question-shaped one ("hmm good question"); anything else gets a short ack
 
 **Coin posted** (a CA in the text, caption or a known explorer/DEX URL):
 handled by the coin flow (below) whether or not it was addressed.
+
+**A reply to a coin post, said to it** ("wdyt about this pine" under
+someone's CA) asks about that post's coin: its own words name none, so the
+coin is read off the post it answers (the remembered line, else the text
+Telegram quoted with the reply), and the reply goes through the coin flow as
+a post of that coin by whoever asked — claimed under the reply's own message
+id — with every rule a CA said to it gets: an answer from memory, a fresh
+look, the owner ask, a nomination, "can't pull that one up rn", or silence
+for another chain's coin. Not a reply that does not call it (chatter between
+people), not a distress post's coin, and not while that post is still on
+the coin lane (its own answer is on its way; "@bot didnt you see" sent while
+its look hangs is answered now, as chatter).
+
+**Its own take.** Asked what it thinks ("wdyt", "thoughts?", "is this
+good?"), it answers with its own first-person view — what it would do, what
+it likes or doesn't, or that it hasn't looked yet — and never tells anyone
+else to buy or sell. It never hides behind rules: a line citing rules, its
+owner's rules, what it is allowed to do, or a refusal to give a take or
+advice ("my owner's rules say i don't do 'should you buy this' talks", "cant
+give ya advice lol") is refused by the line gate (`dodge`) and a template
+answers instead.
 
 **Ambient join-in** (not addressed): only when the chat is live (a human line
 in the last 10 minutes), the bot has not spoken in this chat for at least the
@@ -392,7 +421,10 @@ Per posted CA, in order:
 3. **Seen before in this chat** within 24 h, as a Robinhood Chain coin → it
    answers from memory ("already looked at that one, still not for me" /
    "already got some 🤝"), no new look, at most once per coin per chat per
-   hour: a repost inside the hour gets one 👀, and later ones nothing. Only a
+   hour: a repost inside the hour gets one 👀, and later ones nothing. A post
+   that asked it (said to it, or a reply to the coin's post said to it) is
+   counted per person instead: everyone who asks about a coin gets the
+   answer, once an hour each, and the flood rule still bounds them. Only a
    Robinhood Chain coin it actually looked at counts: one remembered while it
    was not ready is looked at afresh when it is posted again, and a memo from
    an older build that says `wallet`, `not-token`, `unknown` or `coins-off`
@@ -420,7 +452,17 @@ Per posted CA, in order:
    or the page failing too, is `unknown`. The multicall is not tried then: the
    chain it reads is the one that just failed. A `candidate` from this path is
    still only a nomination, and discovery still verifies its pool on chain
-   before anything can be bought; nothing is relaxed. Kinds
+   before anything can be bought; nothing is relaxed. **When GeckoTerminal's
+   page cannot be read** (the fleet's quota in cooldown, an outage; or, with
+   the chain down too, a page that lists nothing), DexScreener's Robinhood
+   Chain pairs of the token (`venues/dexscreener.ts`, 3 s, inside the same
+   slot of the full-look allowance, asked beside the page when the chain is
+   down) are classified by the same rules, save one clause: DexScreener
+   publishes no distinct-buyer count, so `highVolumePools`' buyer clause is
+   left to the trading side, whose own tape of a nominated coin is
+   GeckoTerminal's and screens it again before any review. Only pairs on
+   Robinhood Chain with the token as the coin count; no pairs there (it lists
+   no Pons curve), or DexScreener failing too, is `unknown`, never `no-pool`. Kinds
    `own` (its own wallet/vault), `cash` (USDG/WETH), `energy` ($MERRYMEN),
    `stock` (a STOCK_TOKENS address), `wallet` (no code), `not-token`,
    `curve` (a Pons bonding-curve coin), `v4-only`, `no-pool`, `too-new`,
@@ -846,10 +888,13 @@ All three are dashboard-only (`DASHBOARD_ONLY.telegramGroups`, aliases
 | Someone posts a Robinhood Chain coin, not trencher mode | Looked at first. A candidate: tags owner politely (12 h), DMs owner the reason + button. Any other kind: its grounded line, no ask, no DM |
 | Someone posts a Robinhood Chain coin, trencher ready | Tags sender, thinks out loud, Brain decides, then a casual buy line or a grounded fade |
 | A Robinhood Chain GeckoTerminal pool / DexScreener pair link | Looked at as the coin that pool trades when the canonical factory names the pool; otherwise silence |
-| Same CA posted again | Answers from memory, once per coin per hour; a repost inside the hour gets one 👀, then nothing |
+| Same CA posted again | Answers from memory, once per coin per hour; a repost inside the hour gets one 👀, then nothing. Someone asking about it (said to it) gets the answer too, once an hour each |
+| "wdyt about this pine" as a reply to a coin post | About that post's coin: from memory, or a fresh look (tags them and thinks out loud / the owner ask / "can't pull that one up rn"); a reply that does not call it is chatter; never a distress post's coin |
+| "wdyt?" / "is it good?" said to it | Its own first-person take; never "my owner's rules", "not allowed" or "can't give advice" (refused as `dodge`, a template answers) |
 | CA spam | "one at a time lol", then silence; past 6 coin replies to one person in 2 min, one 👀, then nothing (never the owner) |
 | The owner chatting back and forth with it | Every line said to it answered: the owner is never flooded |
-| A CA posted while the chain reads are declined / rate-limited | GeckoTerminal's Robinhood page stands in: pools there → the coin's usual line (a Pons coin: "still on the curve"); nothing there → silence |
+| A CA posted while the chain reads are declined / rate-limited | GeckoTerminal's Robinhood page stands in: pools there → the coin's usual line (a Pons coin: "still on the curve"); nothing there → DexScreener's Robinhood pairs; nothing there either → silence |
+| A CA posted while GeckoTerminal is in cooldown (chain up or down) | DexScreener's Robinhood Chain pairs stand in, by the same rules (bar the buyer count it does not publish); nothing there → silence |
 | A CA said to it ("@bot 0x…?") whose look could not be made | "can't pull that one up rn 🤷", tagging them, once per chat per 10 min; never a verdict |
 | A read that never answers | The look is `unknown` after 10 s; the chat's other lines ("@bot didnt you see?") are answered meanwhile |
 | The owner posting bonding-curve CA after CA | Every one gets its curve line; the lines recur rather than run dry |

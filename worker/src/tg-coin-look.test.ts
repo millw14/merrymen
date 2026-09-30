@@ -25,7 +25,7 @@ import { CASH, MERRYMEN_TOKEN, STOCK_TOKENS, UNISWAP } from "../../packages/core
 import type { ShadowInputs, ShadowOutcome } from "./brain-shadow";
 import { makeTrencher, TRENCHER_FAST, type Candidate } from "./strategies/trencher";
 import { takeTick, type Snapshot } from "./strategies/types";
-import type { CoinOutcome, TrencherReadiness } from "./telegram/tg-groups/types";
+import type { CoinLook, CoinOutcome, TrencherReadiness } from "./telegram/tg-groups/types";
 import {
   COIN_LOOK,
   chainTokenProbe,
@@ -82,12 +82,23 @@ function readers(over: Partial<CoinLookReaders> = {}, clock = { t: NOW }) {
   };
   return { r, calls, clock };
 }
-const look1 = async (over: Partial<CoinLookReaders>, address = COIN) => createCoinLook(readers(over).r)(address);
+/**
+ * The look with the read that answered left off its answers: what most tests
+ * here compare. Which read answered (`source`) has tests of its own.
+ */
+function lookOf(r: CoinLookReaders): (address: string) => Promise<CoinLook> {
+  const look = createCoinLook(r);
+  return async (address) => {
+    const { source: _source, ...answer } = await look(address);
+    return answer;
+  };
+}
+const look1 = async (over: Partial<CoinLookReaders>, address = COIN) => lookOf(readers(over).r)(address);
 
 describe("the quick look: every kind, cheapest first", () => {
   it("answers its own money, cash, energy, stocks and holdings with no read at all", async () => {
     const { r, calls } = readers({ held: (a) => (a === COIN ? { name: "FROGGY" } : null) });
-    const look = createCoinLook(r);
+    const look = lookOf(r);
     assert.deepEqual(await look(ACCOUNT.toUpperCase().replace("0X", "0x")), { kind: "own" });
     assert.deepEqual(await look(VAULT), { kind: "own" });
     assert.deepEqual(await look(CASH.USDG), { kind: "cash", name: "USDG" });
@@ -132,12 +143,12 @@ describe("the quick look: every kind, cheapest first", () => {
     // An Ethereum, BNB or Base token has the same 0x + 40 hex and nothing deployed at it here.
     for (const code of [undefined, "0x", ""]) {
       const h = readers({ getCode: async () => { h.calls.code++; return code; } });
-      assert.deepEqual(await createCoinLook(h.r)(COIN), { kind: "wallet" }, String(code));
+      assert.deepEqual(await lookOf(h.r)(COIN), { kind: "wallet" }, String(code));
       assert.deepEqual(h.calls, { pools: 0, code: 1, probe: 0, curve: 0 }, "GeckoTerminal, the ledger and the multicall are never asked");
     }
     // Code found: the full look goes on, and GeckoTerminal decides.
     const found = readers();
-    assert.equal((await createCoinLook(found.r)(COIN)).kind, "candidate");
+    assert.equal((await lookOf(found.r)(COIN)).kind, "candidate");
     assert.deepEqual(found.calls, { pools: 1, code: 1, probe: 0, curve: 0 });
   });
 
@@ -152,7 +163,7 @@ describe("the quick look: every kind, cheapest first", () => {
 
   it("local curve provenance answers before the multicall probe", async () => {
     const h = readers({ tokenPools: async () => [], curveFor: async () => ({ curve: "0x1" }) });
-    assert.deepEqual(await createCoinLook(h.r)(COIN), { kind: "curve" });
+    assert.deepEqual(await lookOf(h.r)(COIN), { kind: "curve" });
     assert.equal(h.calls.probe, 0);
     assert.equal(h.calls.code, 1, "only the presence probe");
     // A ledger that cannot be read is not a verdict: the chain is asked.
@@ -166,7 +177,7 @@ describe("the quick look: every kind, cheapest first", () => {
     assert.equal((await look1({ tokenPools: async () => [], probe: async () => { throw new Error("rpc"); } })).kind, "unknown");
     assert.equal((await look1({ own: () => { throw new Error("no grant"); } })).kind, "unknown", "never throws");
     const noPools = readers({ tokenPools: async () => null });
-    await createCoinLook(noPools.r)(COIN);
+    await lookOf(noPools.r)(COIN);
     assert.equal(noPools.calls.probe, 0, "a failed index read does not fall through to the probe");
   });
 
@@ -176,7 +187,7 @@ describe("the quick look: every kind, cheapest first", () => {
       getCode: async () => { h.calls.code++; if (fail) throw new Error("rpc"); return "0x6000"; },
       tokenPools: async () => { h.calls.pools++; return fail ? [] : [gp()]; },
     });
-    const look = createCoinLook(h.r);
+    const look = lookOf(h.r);
     assert.deepEqual(await look(COIN), { kind: "unknown" }, "no pools on the index: a wallet, another chain's token and a coin nobody traded look alike");
     assert.deepEqual(h.calls, { pools: 1, code: 1, probe: 0, curve: 0 }, "the multicall reads the chain that just failed: not tried");
     fail = false;
@@ -186,7 +197,7 @@ describe("the quick look: every kind, cheapest first", () => {
 
   it("anything that is not an address is unknown, and nothing is read for it", async () => {
     const { r, calls } = readers();
-    const look = createCoinLook(r);
+    const look = lookOf(r);
     for (const bad of ["", "0x1234", `0x${"a".repeat(64)}`, `0x${"0".repeat(40)}`, `0x${"g".repeat(40)}`, undefined as unknown as string]) {
       assert.deepEqual(await look(bad), { kind: "unknown" });
     }
@@ -213,7 +224,7 @@ describe("the quick look when the chain cannot be asked: GeckoTerminal's Robinho
 
   it("a failed getCode with this coin's pools on the index: a Robinhood Chain coin, classified from those pools", async () => {
     const h = readers({ getCode: declined, tokenPools: async () => { h.calls.pools++; return [PONS_POOL()]; } });
-    assert.deepEqual(await createCoinLook(h.r)(COIN), { kind: "curve", name: "APPSHARE" }, "a Pons bonding-curve coin");
+    assert.deepEqual(await lookOf(h.r)(COIN), { kind: "curve", name: "APPSHARE" }, "a Pons bonding-curve coin");
     assert.deepEqual(h.calls, { pools: 1, code: 0, probe: 0, curve: 0 });
     for (const [pools, want] of [
       [[gp({ dex: "uniswap-v4-robinhood", poolAddress: null, poolId: V4_ID })], "v4-only"],
@@ -248,18 +259,160 @@ describe("the quick look when the chain cannot be asked: GeckoTerminal's Robinho
   it("a definite answer from the index is cached; the presence probe is spent from its own allowance, the page from the full looks'", async () => {
     const clock = { t: NOW };
     const h = readers({ getCode: async () => { h.calls.code++; throw new Error("rate limited"); }, tokenPools: async () => { h.calls.pools++; return [PONS_POOL()]; } }, clock);
-    const look = createCoinLook(h.r);
+    const look = lookOf(h.r);
     assert.equal((await look(COIN)).kind, "curve");
     assert.equal((await look(COIN)).kind, "curve");
     assert.deepEqual(h.calls, { pools: 1, code: 1, probe: 0, curve: 0 }, "the second look is the cache's");
     // Other chains' CAs while the chain is down: each one a probe AND a page, bounded by the full looks.
     const eth = (i: number) => `0x${(0xe7e000 + i).toString(16).padStart(40, "0")}`;
     const g = readers({ getCode: declined, tokenPools: async () => { g.calls.pools++; return []; } }, clock);
-    const other = createCoinLook(g.r);
+    const other = lookOf(g.r);
     for (let i = 0; i < COIN_LOOK.maxUncached; i++) assert.equal((await other(eth(i))).kind, "unknown");
     assert.equal(g.calls.pools, COIN_LOOK.maxUncached);
     assert.deepEqual(await other(eth(99)), { kind: "unknown" });
     assert.equal(g.calls.pools, COIN_LOOK.maxUncached, "past the full-look allowance, not one more GeckoTerminal read");
+  });
+});
+
+describe("the quick look when GeckoTerminal's page cannot be read: DexScreener's Robinhood pairs stand in", () => {
+  // GeckoTerminal's quota is the fleet's: in a cooldown every page read fails
+  // at once. That, with the chain's reads declined, is how a coin with six
+  // figures of liquidity read as `unknown` and got silence.
+  const cooldown = async (): Promise<GeckoPool[] | null> => null;
+  const declined = async (): Promise<string | undefined> => {
+    throw new Error("rpc declined by the governor");
+  };
+  /** A DexScreener pair as venues/dexscreener.ts maps it: no distinct-buyer count. */
+  const dx = (over: Partial<GeckoPool> = {}): GeckoPool => gp({ name: "VRAX / WETH", buyers24h: null, buckets: { ...emptyGeckoBuckets(), m5: { changePct: 1, volumeUsd: 1500, buys: 12, sells: 9, buyers: null, sellers: null } }, ...over });
+  const dexReader = (pools: GeckoPool[] | null | (() => Promise<GeckoPool[] | null>)) => {
+    const calls = { dex: 0 };
+    const dexPairs = async (): Promise<GeckoPool[] | null> => {
+      calls.dex++;
+      return typeof pools === "function" ? pools() : pools;
+    };
+    return { calls, dexPairs };
+  };
+
+  it("the page failing with the chain healthy: DexScreener's pairs, classified by the same rules", async () => {
+    const d = dexReader([dx()]);
+    const h = readers({ tokenPools: cooldown, dexPairs: d.dexPairs });
+    assert.deepEqual(await createCoinLook(h.r)(COIN), { kind: "candidate", name: "VRAX", source: "dexscreener" });
+    assert.equal(d.calls.dex, 1);
+    assert.equal(h.calls.probe, 0, "never the probe: it cannot tell no pool from an index that is down");
+  });
+
+  it("the chain AND the page failing (the day it went silent): DexScreener still shows the Robinhood coin", async () => {
+    const d = dexReader([dx()]);
+    const h = readers({ getCode: declined, tokenPools: cooldown, dexPairs: d.dexPairs });
+    assert.deepEqual(await createCoinLook(h.r)(COIN), { kind: "candidate", name: "VRAX", source: "dexscreener" });
+    // …and with the chain down, a page that answered but listed nothing gets DexScreener's word too.
+    const e = dexReader([dx()]);
+    const g = readers({ getCode: declined, tokenPools: async () => [], dexPairs: e.dexPairs });
+    assert.equal((await createCoinLook(g.r)(COIN)).source, "dexscreener");
+  });
+
+  it("the same rules: quiet, thin, new, no v3 pool, a figure left out — only the distinct-buyer count it does not publish is not held against it", async () => {
+    for (const [pools, want] of [
+      [[dx()], "candidate"],
+      [[dx({ volume24hUsd: 50_000 })], "too-quiet"],
+      [[dx({ sells24h: 0 })], "too-quiet"],
+      [[dx({ buckets: emptyGeckoBuckets() })], "too-quiet"],
+      [[dx({ reserveUsd: TRENCHER_FAST.minLiquidityUsd - 1 })], "too-thin"],
+      [[dx({ createdAt: NOW_SEC - 60 })], "too-new"],
+      [[dx({ dex: "uniswap-robinhood" })], "no-pool"],
+      [[dx({ dex: "uniswap-v4-robinhood", poolAddress: null, poolId: V4_ID })], "v4-only"],
+      [[dx({ fdvUsd: null })], "unknown"],
+    ] as const) {
+      const d = dexReader([...pools]);
+      assert.equal((await look1({ tokenPools: cooldown, dexPairs: d.dexPairs })).kind, want, want);
+    }
+    // A pool that does publish its buyers is screened on them as ever.
+    const counted = dexReader([dx({ buyers24h: 3 })]);
+    assert.equal((await look1({ tokenPools: cooldown, dexPairs: counted.dexPairs })).kind, "too-quiet");
+  });
+
+  it("GeckoTerminal answering: DexScreener is never asked", async () => {
+    const d = dexReader([dx()]);
+    const l = await createCoinLook(readers({ dexPairs: d.dexPairs }).r)(COIN);
+    assert.equal(l.source, "geckoterminal");
+    assert.equal(d.calls.dex, 0);
+    const e = dexReader([dx()]);
+    const probed = readers({ tokenPools: async () => [], dexPairs: e.dexPairs });
+    assert.equal((await createCoinLook(probed.r)(COIN)).kind, "no-pool", "the chain answers a page that lists nothing");
+    assert.equal(e.calls.dex, 0);
+  });
+
+  it("DexScreener listing nothing, failing, or listing only other tokens: unknown, never no-pool, never cached", async () => {
+    for (const pools of [[], null, [dx({ tokenAddress: "0x00000000000000000000000000000000000d0222" })]] as const) {
+      const d = dexReader(pools === null ? null : [...pools]);
+      assert.deepEqual(await look1({ tokenPools: cooldown, dexPairs: d.dexPairs }), { kind: "unknown" });
+    }
+    const thrown = dexReader(async () => {
+      throw new Error("dexscreener 429");
+    });
+    assert.deepEqual(await look1({ getCode: declined, tokenPools: cooldown, dexPairs: thrown.dexPairs }), { kind: "unknown" });
+    let up = false;
+    const later = dexReader(async () => (up ? [dx()] : null));
+    const look = createCoinLook(readers({ tokenPools: cooldown, dexPairs: later.dexPairs }).r);
+    assert.equal((await look(COIN)).kind, "unknown");
+    up = true;
+    assert.equal((await look(COIN)).kind, "candidate", "not cached: the next look can succeed");
+  });
+
+  it("inside the same slot of the full-look allowance: no extra look is spent on it", async () => {
+    const d = dexReader([dx()]);
+    const look = createCoinLook(readers({ tokenPools: cooldown, dexPairs: d.dexPairs }).r);
+    const coin = (i: number) => `0x${(0xc0de00 + i).toString(16).padStart(40, "0")}`;
+    for (let i = 0; i < COIN_LOOK.maxUncached; i++) await look(coin(i));
+    const before = d.calls.dex;
+    assert.deepEqual(await look(coin(99)), { kind: "unknown" });
+    assert.equal(d.calls.dex, before, "past the allowance, not one DexScreener read either");
+  });
+
+  it(`a DexScreener read that never answers is let go after ${COIN_LOOK.dexMs / 1000} s`, async () => {
+    mock.timers.enable({ apis: ["setTimeout"], now: 0 });
+    try {
+      const look = createCoinLook(readers({ tokenPools: cooldown, dexPairs: () => new Promise<GeckoPool[] | null>(() => {}) }).r);
+      let got: CoinLook | undefined;
+      void look(COIN).then((l) => (got = l));
+      for (let i = 0; i < 10 && got === undefined; i++) {
+        await setImmediate();
+        mock.timers.tick(COIN_LOOK.dexMs);
+      }
+      for (let i = 0; i < 10 && got === undefined; i++) await setImmediate();
+      assert.deepEqual(got, { kind: "unknown" });
+    } finally {
+      mock.timers.reset();
+    }
+  });
+});
+
+describe("every answer says which read gave it", () => {
+  it("free, cache, chain, geckoterminal, dexscreener — and unknown says none", async () => {
+    const clock = { t: NOW };
+    const h = readers({ held: (a) => (a === COIN ? { name: "FROGGY" } : null) }, clock);
+    const look = createCoinLook(h.r);
+    assert.equal((await look(ACCOUNT)).source, "free");
+    assert.equal((await look(CASH.USDG)).source, "free");
+    assert.equal((await look(COIN)).source, "free", "a holding is answered with no read");
+    const other = "0x00000000000000000000000000000000000d0222";
+    const g = createCoinLook(readers({ tokenPools: async () => [gp({ tokenAddress: other })] }, clock).r);
+    assert.equal((await g(other)).source, "geckoterminal");
+    assert.equal((await g(other)).source, "cache");
+    assert.deepEqual(await createCoinLook(readers({ getCode: async () => "0x" }).r)(other), { kind: "wallet", source: "chain" });
+    assert.deepEqual(await createCoinLook(readers({ tokenPools: async () => [] }).r)(other), { kind: "no-pool", source: "chain" });
+    assert.deepEqual(await createCoinLook(readers({ tokenPools: async () => null }).r)(other), { kind: "unknown" });
+  });
+
+  it("the port carries it to the chat side", async () => {
+    const port = createTgCoinsPort({
+      readiness: () => ({ kind: "ready-paper", ownerReason: "ready" }),
+      look: createCoinLook(readers({ tokenPools: async () => null, dexPairs: async () => [gp({ buyers24h: null })] }).r),
+      book: { nominate: () => ({ ok: true }) },
+      heldNames: () => [],
+      paper: () => true,
+    });
+    assert.equal((await port.look(COIN)).source, "dexscreener");
   });
 });
 
@@ -293,7 +446,7 @@ describe("the quick look: every read is bounded, so a look always settles", () =
     mock.timers.enable({ apis: ["setTimeout"] });
     try {
       const h = readers({ getCode: () => never(), tokenPools: async () => [gp({ dex: "pons-v2", poolAddress: null, poolId: V4_ID })] });
-      const { value, ms } = await settleOn(createCoinLook(h.r)(COIN), 500);
+      const { value, ms } = await settleOn(lookOf(h.r)(COIN), 500);
       assert.equal(value.kind, "curve");
       assert.equal(ms, COIN_LOOK.readMs);
     } finally {
@@ -306,7 +459,7 @@ describe("the quick look: every read is bounded, so a look always settles", () =
     try {
       let hang = true;
       const h = readers({ tokenPools: () => (hang ? never() : Promise.resolve([gp()])) });
-      const look = createCoinLook(h.r);
+      const look = lookOf(h.r);
       const { value, ms } = await settleOn(look(COIN), 500);
       assert.deepEqual(value, { kind: "unknown" });
       assert.equal(ms, COIN_LOOK.poolsMs);
@@ -321,7 +474,7 @@ describe("the quick look: every read is bounded, so a look always settles", () =
     mock.timers.enable({ apis: ["setTimeout"] });
     try {
       const h = readers({ getCode: () => never(), tokenPools: () => never() });
-      const { value, ms } = await settleOn(createCoinLook(h.r)(COIN), 500);
+      const { value, ms } = await settleOn(lookOf(h.r)(COIN), 500);
       assert.deepEqual(value, { kind: "unknown" });
       assert.equal(ms, COIN_LOOK.readMs + COIN_LOOK.poolsMs);
       assert.ok(ms < 10_000, "inside tg-groups/coins.ts COIN_FLOW.lookMs");
@@ -334,11 +487,11 @@ describe("the quick look: every read is bounded, so a look always settles", () =
     mock.timers.enable({ apis: ["setTimeout"] });
     try {
       const ledger = readers({ tokenPools: async () => [], curveFor: () => never() });
-      const a = await settleOn(createCoinLook(ledger.r)(COIN), 500);
+      const a = await settleOn(lookOf(ledger.r)(COIN), 500);
       assert.equal(a.value.kind, "no-pool", "the multicall still decides");
       assert.equal(a.ms, COIN_LOOK.readMs);
       const probe = readers({ tokenPools: async () => [], probe: () => never() });
-      const b = await settleOn(createCoinLook(probe.r)(COIN), 500);
+      const b = await settleOn(lookOf(probe.r)(COIN), 500);
       assert.deepEqual(b.value, { kind: "unknown" });
       assert.equal(b.ms, 2 * COIN_LOOK.readMs, "a multicall and the factory's read");
     } finally {
@@ -372,7 +525,7 @@ describe("the quick look: every read is bounded, so a look always settles", () =
 describe("the quick look: cache and allowance", () => {
   it("reuses a definite answer for 30 minutes, then reads again", async () => {
     const h = readers();
-    const look = createCoinLook(h.r);
+    const look = lookOf(h.r);
     assert.equal((await look(COIN)).kind, "candidate");
     assert.equal((await look(COIN.toUpperCase().replace("0X", "0x"))).kind, "candidate");
     assert.equal(h.calls.pools, 1);
@@ -384,7 +537,7 @@ describe("the quick look: cache and allowance", () => {
   it("does not cache unknown, so the next look can succeed", async () => {
     let fail = true;
     const h = readers({ tokenPools: async () => (fail ? null : [gp()]) });
-    const look = createCoinLook(h.r);
+    const look = lookOf(h.r);
     assert.equal((await look(COIN)).kind, "unknown");
     fail = false;
     assert.equal((await look(COIN)).kind, "candidate");
@@ -393,7 +546,7 @@ describe("the quick look: cache and allowance", () => {
   it("the free checks run in front of the cache: a coin bought since is held, not a stale candidate", async () => {
     let held = false;
     const h = readers({ held: () => (held ? { name: "FROGGY" } : null) });
-    const look = createCoinLook(h.r);
+    const look = lookOf(h.r);
     assert.equal((await look(COIN)).kind, "candidate");
     held = true;
     assert.deepEqual(await look(COIN), { kind: "held", name: "FROGGY" });
@@ -403,7 +556,7 @@ describe("the quick look: cache and allowance", () => {
     let reads = 0;
     const clock = { t: NOW };
     const h = readers({ tokenPools: async (a) => { reads++; return [gp({ tokenAddress: a as `0x${string}` })]; } }, clock);
-    const look = createCoinLook(h.r);
+    const look = lookOf(h.r);
     const addr = (i: number) => `0x${(0xc0de00 + i).toString(16).padStart(40, "0")}`;
     for (let i = 0; i < COIN_LOOK.maxUncached; i++) assert.equal((await look(addr(i))).kind, "candidate");
     assert.equal(reads, COIN_LOOK.maxUncached);
@@ -416,7 +569,7 @@ describe("the quick look: cache and allowance", () => {
 
   it("a wallet (another chain's token) is remembered 30 minutes: reposted, no read at all", async () => {
     const h = readers({ getCode: async () => { h.calls.code++; return undefined; } });
-    const look = createCoinLook(h.r);
+    const look = lookOf(h.r);
     assert.equal((await look(COIN)).kind, "wallet");
     assert.equal((await look(COIN)).kind, "wallet");
     assert.equal(h.calls.code, 1);
@@ -437,7 +590,7 @@ describe("the quick look: cache and allowance", () => {
       },
       clock,
     );
-    const look = createCoinLook(h.r);
+    const look = lookOf(h.r);
     const eth = (i: number) => `0x${(0xe7e000 + i).toString(16).padStart(40, "0")}`;
     const coin = (i: number) => `0x${(0xc0de00 + i).toString(16).padStart(40, "0")}`;
     const others = COIN_LOOK.maxProbes - COIN_LOOK.maxUncached;
@@ -460,7 +613,7 @@ describe("the quick look: cache and allowance", () => {
   it("an address with code that was refused a full look is not probed again for it", async () => {
     const clock = { t: NOW };
     const h = readers({ tokenPools: async (a) => { h.calls.pools++; return [gp({ tokenAddress: a as `0x${string}` })]; } }, clock);
-    const look = createCoinLook(h.r);
+    const look = lookOf(h.r);
     const addr = (i: number) => `0x${(0xc0de00 + i).toString(16).padStart(40, "0")}`;
     for (let i = 0; i < COIN_LOOK.maxUncached; i++) await look(addr(i));
     assert.deepEqual(await look(addr(99)), { kind: "unknown" }, "past the full-look allowance");
@@ -475,7 +628,7 @@ describe("the quick look: cache and allowance", () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     const h = readers({ tokenPools: async () => { reads++; await gate; return [gp()]; } });
-    const look = createCoinLook(h.r);
+    const look = lookOf(h.r);
     const both = Promise.all([look(COIN), look(COIN)]);
     release();
     assert.deepEqual((await both).map((l) => l.kind), ["candidate", "candidate"]);
@@ -593,14 +746,14 @@ describe("a chart link carries the POOL: the look resolves it to its coin on cha
   it("a GeckoTerminal pool and a DexScreener pair are looked at as the coin they trade, and carry its address", async () => {
     for (const posted of [POOL, PAIR]) {
       const h = chart();
-      assert.deepEqual(await createCoinLook(h.r)(posted), { kind: "candidate", name: "FROGGY", address: COIN }, posted);
+      assert.deepEqual(await lookOf(h.r)(posted), { kind: "candidate", name: "FROGGY", address: COIN }, posted);
       assert.deepEqual(h.asked, [posted, COIN], "the coin's own page decides, like any posted coin");
     }
     // Whatever the coin's look says is the answer, with the coin's address.
-    assert.deepEqual(await createCoinLook(chart({ tokenPools: async (a) => (a === COIN ? [gp({ volume24hUsd: 50_000 })] : []) }).r)(POOL), { kind: "too-quiet", name: "FROGGY", address: COIN });
+    assert.deepEqual(await lookOf(chart({ tokenPools: async (a) => (a === COIN ? [gp({ volume24hUsd: 50_000 })] : []) }).r)(POOL), { kind: "too-quiet", name: "FROGGY", address: COIN });
     const stock = STOCK_TOKENS[0]!;
     assert.deepEqual(
-      await createCoinLook(chart({}, { [POOL]: { token0: stock.address.toLowerCase(), token1: USDG, canonical: POOL } }).r)(POOL),
+      await lookOf(chart({}, { [POOL]: { token0: stock.address.toLowerCase(), token1: USDG, canonical: POOL } }).r)(POOL),
       { kind: "stock", name: stock.symbol, address: stock.address.toLowerCase() },
     );
   });
@@ -608,7 +761,7 @@ describe("a chart link carries the POOL: the look resolves it to its coin on cha
   it("the coin's look is its own: the free checks run every time, and its cache serves the coin posted bare", async () => {
     let held = false;
     const h = chart({ held: (a) => (held && a === COIN ? { name: "FROGGY" } : null) });
-    const look = createCoinLook(h.r);
+    const look = lookOf(h.r);
     assert.equal((await look(POOL)).kind, "candidate");
     held = true;
     assert.deepEqual(await look(POOL), { kind: "held", name: "FROGGY", address: COIN }, "bought since: held through its chart link too");
@@ -629,7 +782,7 @@ describe("a chart link carries the POOL: the look resolves it to its coin on cha
     for (const [why, pool] of cases) {
       // The index even labels the impostor as COIN's pool: a label is a claim, the factory is the proof.
       const h = chart({ tokenPools: async (a) => { h.asked.push(a); return a === COIN ? [gp()] : [gp({ tokenAddress: COIN as `0x${string}` })]; } }, { [POOL]: pool });
-      assert.deepEqual(await createCoinLook(h.r)(POOL), { kind: "not-token" }, why);
+      assert.deepEqual(await lookOf(h.r)(POOL), { kind: "not-token" }, why);
       assert.deepEqual(h.asked, [POOL], `${why}: the coin is never looked at`);
     }
   });
@@ -637,14 +790,14 @@ describe("a chart link carries the POOL: the look resolves it to its coin on cha
   it("UNREADABLE IS NOT ABSENT: a failed factory read, or a coin that could not be looked at, is unknown and not cached", async () => {
     let canonical: string | null = null;
     const h = chart({ probe: async (a) => (a === POOL ? { pons: false, erc20: false, pool: { token0: WETH, token1: COIN, canonical } } : null) });
-    const look = createCoinLook(h.r);
+    const look = lookOf(h.r);
     assert.deepEqual(await look(POOL), { kind: "unknown" }, "the factory could not be asked");
     canonical = POOL;
     assert.deepEqual(await look(POOL), { kind: "candidate", name: "FROGGY", address: COIN }, "not cached: the next look can succeed");
 
     let fail = true;
     const g = chart({ tokenPools: async (a) => (a === COIN ? (fail ? null : [gp()]) : []) });
-    const again = createCoinLook(g.r);
+    const again = lookOf(g.r);
     assert.deepEqual(await again(POOL), { kind: "unknown" }, "the coin's page could not be read");
     fail = false;
     assert.deepEqual(await again(POOL), { kind: "candidate", name: "FROGGY", address: COIN });
@@ -652,7 +805,7 @@ describe("a chart link carries the POOL: the look resolves it to its coin on cha
 
   it("the coin's look spends its own slot of the allowance; none left is unknown", async () => {
     const h = chart();
-    const look = createCoinLook(h.r);
+    const look = lookOf(h.r);
     const addr = (i: number) => `0x${(0xc0de00 + i).toString(16).padStart(40, "0")}`;
     for (let i = 0; i < COIN_LOOK.maxUncached - 1; i++) await look(addr(i));
     assert.deepEqual(await look(POOL), { kind: "unknown" }, "the pool took the last slot, and the coin found none");
@@ -661,7 +814,7 @@ describe("a chart link carries the POOL: the look resolves it to its coin on cha
 
   it("one level only: a pool whose coin is itself pool-shaped is not a coin", async () => {
     const h = chart({ tokenPools: async (a) => { h.asked.push(a); return []; } }, { [COIN]: { token0: WETH, token1: OTHER, canonical: COIN } });
-    assert.deepEqual(await createCoinLook(h.r)(POOL), { kind: "not-token", address: COIN });
+    assert.deepEqual(await lookOf(h.r)(POOL), { kind: "not-token", address: COIN });
     assert.ok(!h.asked.includes(OTHER), "never followed a second time");
   });
 });
@@ -973,6 +1126,12 @@ describe("index.ts wires the seams in the order that makes them safe", () => {
     const at = CODE.indexOf("const tgLook = createCoinLook({");
     assert.ok(at > 0);
     assert.match(CODE.slice(at, at + 800), /\n\s+getCode: \(a\) => mainnetClient\(\)\.getCode\(\{ address: a \}\),\n/);
+  });
+
+  it("the look's last index is DexScreener's Robinhood Chain pairs, inside the look's own bound", () => {
+    const at = CODE.indexOf("const tgLook = createCoinLook({");
+    const block = CODE.slice(at, CODE.indexOf("});", at));
+    assert.match(block, /\n\s+dexPairs: \(a\) => readDexTokenPairs\(a, \{ timeoutMs: COIN_LOOK\.dexMs \}\),\n/);
   });
 
   it("the child hands the service its one store and the port", () => {

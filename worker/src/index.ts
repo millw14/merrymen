@@ -255,7 +255,8 @@ import { isPaused, startTelegram } from "./telegram/service";
 import { TgGroupsStore } from "./telegram/tg-groups/store";
 import { takeHeldGroupUpdates } from "./telegram/held-groups";
 import { NOMINATE, NominationBook, trencherReadiness } from "./trencher-nominate";
-import { chainTokenProbe, claimGroupEntry, createCoinLook, createTgCoinsPort, groupExitOf, reviewedDecisionOf, type GroupEntryClaim } from "./tg-coin-look";
+import { COIN_LOOK, chainTokenProbe, claimGroupEntry, createCoinLook, createTgCoinsPort, groupExitOf, reviewedDecisionOf, type GroupEntryClaim } from "./tg-coin-look";
+import { readDexTokenPairs } from "./venues/dexscreener";
 import { startNotifier } from "./telegram/notifier";
 import { energyToldDayOf, type EnergyToldHere } from "./telegram/energy-alert";
 import { startVirtualsStreamer } from "./virtuals-streamer";
@@ -885,6 +886,9 @@ async function main() {
     getCode: (a) => mainnetClient().getCode({ address: a }),
     probe: (a) => chainTokenProbe(mainnetClient())(a),
     curveFor: (a) => curveFor(a),
+    // Asked only when GeckoTerminal's page could not be read: its own quota,
+    // Robinhood Chain pairs only (venues/dexscreener.ts).
+    dexPairs: (a) => readDexTokenPairs(a, { timeoutMs: COIN_LOOK.dexMs }),
   });
   const tgCoins = createTgCoinsPort({
     // The same `cfg` the tick trades on, read at the moment of asking.
