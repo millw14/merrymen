@@ -371,6 +371,48 @@ describe("meta", () => {
   ]);
 });
 
+describe("dodge: hiding behind rules instead of having a take", () => {
+  refuses("dodge", [
+    // What it said in a group to "wdyt about this shogun", word for word.
+    ["answer", "my owner's rules say i don't do 'should you buy this' talks"],
+    ["answer", "my owner’s rules say i don’t do “should you buy this” talks"],
+    ["answer", "cant give ya advice lol"],
+    ["answer", "no advice from me lol"],
+    ["answer", "i don't do advice"],
+    ["answer", "that's against my rules"],
+    ["answer", "my rules say no coin talk"],
+    ["answer", "owner's rules lol"],
+    ["answer", "i'm not allowed to talk about that"],
+    ["answer", "not allowed to say tbh"],
+    ["answer", "i'm not supposed to say"],
+    ["answer", "my owner won't let me talk coins"],
+    ["answer", "i don't give opinions on coins"],
+    ["answer", "can't share my take on that one"],
+    ["answer", "i dont do calls"],
+    ["answer", "i can't tell you whether to buy"],
+    ["answer", "i can't comment on that one"],
+    ["banter", "lol rules say no"],
+    ["coin", "should you buy it? can't say"],
+  ]);
+  passes([
+    // Its own view, always allowed.
+    ["answer", "i like it tbh, might grab a bit"],
+    ["answer", "not for me ngl"],
+    ["answer", "haven't looked at it yet"],
+    ["answer", "i'd pass on that one"],
+    ["answer", "honestly no clue"],
+    ["answer", "thin pool, i'd sit this one out"],
+    ["answer", "looks fun ngl, i'd take a small bite"],
+    ["answer", "can't say i know"],
+    ["answer", "hard to say tbh"],
+    ["banter", "rules are made to be broken lol"],
+    ["answer", "my rule: never chase green candles"],
+    ["answer", "my one rule is no chasing pumps, so nah"],
+    ["banter", "let me see 👀"],
+    ["coin", "can't pull that one up rn 🤷"],
+  ]);
+});
+
 describe("too-long", () => {
   refuses("too-long", [
     ["banter", "a".repeat(TG_LINE_MAX + 1)],

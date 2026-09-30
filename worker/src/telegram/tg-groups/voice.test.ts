@@ -567,6 +567,14 @@ describe("buildPrompt", () => {
     assert.ok(!/\p{N}/u.test(system), "the persona holds no digit to repeat");
   });
 
+  it("asked what it thinks, it has its own take: never rules, permission or advice talk", () => {
+    const { system, prompt } = buildPrompt({ kind: "answer", mood: "normal" }, ctx())!;
+    assert.match(system, /YOUR OWN TAKE/);
+    assert.match(system, /honest view in the first person/);
+    assert.match(system, /Never refuse to have an opinion, and never mention rules, your owner's rules, what you're allowed to do, or advice/);
+    assert.match(prompt, /If they ask what you think, give your own take/);
+  });
+
   it("without the owner's name it says 'my owner'", () => {
     const p = buildPrompt({ kind: "answer", mood: "normal" }, ctx({ ownerName: null }))!;
     assert.match(p.system, /say "my owner"/);
@@ -668,6 +676,17 @@ describe("say", () => {
     assert.equal(await say({ kind: "ambient", topic: "coin" }, c(), model, gate), null);
     const out = await say({ kind: "coin-passed", notes: [] }, c(), model, gate);
     assert.ok(inPool({ kind: "coin-passed", notes: [] }, out), out ?? "null");
+  });
+
+  it("a dodge ('my owner's rules say…') is refused, and a template answers instead", async () => {
+    // What it said in a group to "wdyt about this shogun", replying to a coin post.
+    for (const dodge of ["my owner's rules say i don't do 'should you buy this' talks", "cant give ya advice lol"]) {
+      reply = ok(dodge);
+      const trigger = { messageId: 90, fromId: 7, name: "milla", text: "wdyt about this shogun", atMs: T0 };
+      const cc = c({ trigger });
+      const out = await say({ kind: "answer", mood: "normal" }, cc, model, gate);
+      assert.ok(out !== null && out !== dodge && inPool({ kind: "answer", mood: "normal" }, out, cc), out ?? "null");
+    }
   });
 
   it("a paper buy the model forgot to call paper is refused, and the template says paper", async () => {

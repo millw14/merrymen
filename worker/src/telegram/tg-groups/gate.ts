@@ -434,6 +434,38 @@ function metaRefusal(r: Readings): boolean {
   return r.low.some((t) => META.some((re) => re.test(t)));
 }
 
+/**
+ * A DODGE: hiding behind rules instead of having a take. "my owner's rules
+ * say i don't do 'should you buy this' talks" answered "wdyt about this" in a
+ * group, and "cant give ya advice lol" is the same line said casually. The
+ * agent's own view is always allowed — "i'd pass", "not for me", "haven't
+ * looked yet" — and advice to others is refused by its own clause; a line
+ * that cites rules, permission, or a refusal to give a take is neither, and
+ * reads as a bot reciting its settings. Refused whole, so a template answers.
+ */
+const TAKE = String.raw`(?:opinions?|takes?|views?|thoughts?|predictions?|calls?|recs?|recommendations?|picks?)`;
+const NOT_WILLING = String.raw`(?:can'?t|cant|cannot|won'?t|wont|don'?t|dont|do not|doesn'?t|never|not gonna|not going to|not able to|unable to)`;
+const DODGE: readonly RegExp[] = [
+  // Rules and permission.
+  // Someone else's rules. Its own ("my rule: never chase green candles") is a take.
+  /\b(?:owner|boss|human|dev|devs|creator|maker)(?:'s|s'|s)?\s+rules?\b/,
+  /\bagainst (?:my|the|our|house) (?:rules|policy|policies|guidelines|programming)\b/,
+  /\brules? (?:say|says|said|won'?t let|don'?t let|doesn'?t let|forbid|forbids|stop)\b/,
+  /\bnot (?:allowed|permitted)\b|\b(?:aren'?t|isn'?t|ain'?t|wasn'?t) allowed\b|\bnot supposed to\b|\b(?:forbidden|prohibited|banned) (?:from|to)\b/,
+  /\b(?:won'?t|wont|doesn'?t|don'?t|wouldn'?t) let me\b/,
+  // Refusing a take: "cant give ya advice", "no advice from me", "i don't give opinions".
+  new RegExp(String.raw`\b${NOT_WILLING}\b[^.!?\n]{0,25}\badvice\b|\badvice\b[^.!?\n]{0,12}\b(?:from me|here|lol)\b|\bno advice\b`),
+  new RegExp(String.raw`\b${NOT_WILLING}\s+(?:really\s+|just\s+)?(?:give|giving|share|sharing|offer|do|doing|voice|make)\s+(?:(?:you|ya|u|y'?all|out)\s+)?(?:my |an? |any |no )?(?:coin |trading |financial )?${TAKE}\b`),
+  new RegExp(String.raw`\b${NOT_WILLING}\s+(?:tell|say to)\s+(?:you|ya|u|anyone|people|y'?all|folks)\s+(?:whether|if|what|when|which|to)\b`),
+  new RegExp(String.raw`\b${NOT_WILLING}\s+(?:comment|weigh in|speak to|opine)\b`),
+  // "should you buy this" talk, quoted back as the thing it does not do.
+  /\bshould (?:you|u|ya|y'?all|anyone|people) (?:buy|sell|ape|get in|hold)\b/,
+].map(U);
+
+function dodgeRefusal(r: Readings): boolean {
+  return r.low.some((t) => DODGE.some((re) => re.test(t)));
+}
+
 /** Markup or a transcript label: judged after the link clause, so "pump [.] fun" is logged as the link it is. */
 function markupRefusal(r: Readings, names: readonly string[]): boolean {
   if (r.cased.some((t) => MARKUP.test(t.replace(/<3+/g, " ")))) return true;
@@ -1327,7 +1359,7 @@ function lowNames(agentName: string, names: readonly string[]): string[] {
 /**
  * MAY THE AGENT SAY THIS IN A GROUP? `ok` carries the exact text to send.
  *
- * Reason codes (stable, log-only): empty · pass · hidden-chars · meta ·
+ * Reason codes (stable, log-only): empty · pass · hidden-chars · meta · dodge ·
  * too-long · secret · address · link · handle · cashtag · hateful · selfharm · threat ·
  * sexual · profanity · appearance · money · figures · alert · advice · accuse ·
  * private · ops · human · emoji · paper-unsaid · repeat.
@@ -1352,6 +1384,7 @@ export function admitTgLine(raw: unknown, ctx: TgGateCtx): TgVerdict {
   if (isPass(r)) return refuse("pass");
   if (PAYLOAD_CHARS.test(tidied)) return refuse("hidden-chars");
   if (metaRefusal(r)) return refuse("meta");
+  if (dodgeRefusal(r)) return refuse("dodge");
 
   // No floor: "same", "lol" and "ok ok 🤐" are whole lines in a group.
   if (Array.from(lines.join("\n")).length > TG_LINE_MAX) return refuse("too-long");
