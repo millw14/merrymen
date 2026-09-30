@@ -209,6 +209,15 @@ export function isPaused(): boolean {
 const HISTORY_TURNS = 6; // user+assistant pairs kept per chat for follow-ups
 /** How often the cached getMe (id, username, privacy flag) is read again. */
 const SELF_REFRESH_MS = 30 * 60 * 1000;
+/**
+ * THE POLL HEARTBEAT: how many updates of each kind arrived, every few
+ * minutes when any did, and a liveness line after a long quiet. Counts only.
+ * It is what tells "no group message reaches this bot" (Telegram, privacy
+ * mode, a second poller on the token) apart from "they arrive and something
+ * after the poll drops them".
+ */
+const POLL_HEARTBEAT_MS = 5 * 60 * 1000;
+const POLL_QUIET_NOTE_MS = 30 * 60 * 1000;
 
 /**
  * Commands that read the owner's private state (docs/tg-groups.md rule 3).
@@ -520,6 +529,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * token never borrows the old bot's identity.
    */
   let botSelf: { token: string; bot: TgBotInfo; at: number } | null = null;
+  /** What the poll has delivered since the last heartbeat (POLL_HEARTBEAT_MS). */
+  let pollCounts = { since: Date.now(), group: 0, groupLate: 0, dm: 0, buttons: 0, members: 0, service: 0 };
   let selfReading: Promise<void> | null = null;
   const refreshSelf = (token: string): Promise<void> => {
     if (selfReading) return selfReading;
@@ -1710,6 +1721,9 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     // posting for a person, with sender_chat set) is a person.
     if (m.fromIsBot === true && m.senderChatId === undefined) return Promise.resolve();
     const command = m.text.trim().startsWith("/");
+    // Counted for the poll heartbeat: a group line that waited out a silence
+    // is dropped below, and the heartbeat must be able to say so.
+    if (late !== null && !command) pollCounts.groupLate += 1;
     if (late === null) {
       if (command) return handleGroupCommand(m, cfg);
       tgGroups?.onMessage(m);
@@ -1880,6 +1894,26 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     const { messages, callbacks, members, service, nextOffset } = polled;
     // Who the bot is, before a group line is read against it: first poll,
     // a new token, or half an hour since the last look (in the background).
+    // The poll heartbeat (POLL_HEARTBEAT_MS): what this poll delivered, by kind.
+    for (const m of messages) {
+      if (isGroupMessage(m)) pollCounts.group += 1;
+      else pollCounts.dm += 1;
+    }
+    pollCounts.buttons += callbacks.length;
+    pollCounts.members += members.length;
+    pollCounts.service += service.length;
+    {
+      const t = Date.now();
+      const total = pollCounts.group + pollCounts.dm + pollCounts.buttons + pollCounts.members + pollCounts.service;
+      if ((total > 0 && t - pollCounts.since >= POLL_HEARTBEAT_MS) || (total === 0 && t - pollCounts.since >= POLL_QUIET_NOTE_MS)) {
+        console.log(
+          total > 0
+            ? `[telegram] last ${Math.round((t - pollCounts.since) / 60_000)} min: ${total} updates (${pollCounts.group} group messages of which ${pollCounts.groupLate} were backlog, ${pollCounts.dm} DMs, ${pollCounts.buttons} buttons, ${pollCounts.members} membership, ${pollCounts.service} service)`
+            : `[telegram] no updates in ${Math.round((t - pollCounts.since) / 60_000)} min (polling)`,
+        );
+        pollCounts = { since: t, group: 0, groupLate: 0, dm: 0, buttons: 0, members: 0, service: 0 };
+      }
+    }
     // After the poll rather than before it, so a getMe that fails or hangs
     // through an outage never stands in front of the getUpdates that ends it,
     // and never moves the backlog boundary above.

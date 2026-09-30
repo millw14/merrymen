@@ -169,6 +169,18 @@ const MODEL_RECHECK_MS = MIN;
 const NEUTRAL_TAG = "fren";
 /** At most this many lines waiting per chat. Past it, new chatter is remembered but not answered. */
 const MAX_QUEUED = 40;
+/**
+ * A GROUP JOB THAT NEVER FINISHES MUST NOT SILENCE THE GROUP. Every job and
+ * every send is bounded where it is written, but a single missed bound — a
+ * provider that holds a connection open, an await on something that never
+ * settles — used to hold the chat's serial queue (or its send lock) for good:
+ * live, a group went silent for hours with not one log line, because every
+ * later line waited behind it. Past this long the queue moves on without it
+ * and the log names the step it was stuck at.
+ */
+const JOB_STALL_MS = 60 * SEC;
+/** How often the handler says what it has seen (content-free counts). */
+const HEARTBEAT_MS = 5 * MIN;
 /** In-memory books (reply targets, topics, stamps) are bounded like the store is. */
 const LRU_MAX = 2_000;
 
@@ -269,6 +281,8 @@ export interface TgGroupsDeps {
   hosted?: boolean;
   /** Waits (typing, a person's pace, a flood pause). Injectable so tests need not wait. */
   sleep?: (ms: number) => Promise<void>;
+  /** How long a group job or send may hold its chat (JOB_STALL_MS). Injectable so tests need not wait a minute. */
+  stallMs?: number;
   /**
    * What bounds a read (the coin look, coins.ts COIN_FLOW.lookMs): resolves
    * once `ms` have passed. Real time when absent — never `sleep`, which a test
@@ -542,6 +556,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const clock = typeof d.now === "function" ? d.now : Date.now;
   const rand = typeof d.rand === "function" ? d.rand : Math.random;
   const sleep = typeof d.sleep === "function" ? d.sleep : defaultSleep;
+  const stallMs = typeof d.stallMs === "number" && Number.isFinite(d.stallMs) && d.stallMs > 0 ? d.stallMs : JOB_STALL_MS;
   const env = (): Record<string, string | undefined> => d.env ?? process.env;
   const hosted = typeof d.hosted === "boolean" ? d.hosted : safeHosted();
   const pacer = new SendPacer(clock);
@@ -638,6 +653,24 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   };
 
   const queues = new Map<number, { tail: Promise<void>; size: number }>();
+  /** Where each chat's running job is (a stage name, never content), and since when. */
+  const running = new Map<number, { stage: string; since: number }>();
+  const stageOf = (chatId: number, stage: string): void => {
+    const r = running.get(chatId);
+    if (r) r.stage = stage;
+  };
+  /**
+   * Counts since the last heartbeat. Content-free: what arrived and why a
+   * line went nowhere, so the log can tell "no messages reach the bot" from
+   * "they arrive and are dropped here" from "a job is stuck".
+   */
+  const stats = { lines: 0, addressed: 0, noSelf: 0, noRoom: 0, blocked: 0, notApproved: 0, off: 0, dropped: 0, stalled: 0, lockStalled: 0 };
+  /** Resolves after ms, or never holds the process open. */
+  const after = (ms: number): Promise<"late"> =>
+    new Promise((r) => {
+      const t = setTimeout(() => r("late"), ms);
+      t.unref?.();
+    });
   /**
    * Run `job` after every earlier job of this chat. Serial per chat, so the
    * room is read and written in order; parallel across chats. Returns the
@@ -645,11 +678,31 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    */
   const enqueue = (chatId: number, job: () => Promise<void>, opts: { force?: boolean } = {}): Promise<void> | null => {
     const q = queues.get(chatId) ?? { tail: Promise.resolve(), size: 0 };
-    if (!opts.force && q.size >= MAX_QUEUED) return null;
+    if (!opts.force && q.size >= MAX_QUEUED) {
+      stats.dropped += 1;
+      return null;
+    }
     q.size += 1;
     const next = q.tail
       .then(async () => {
-        if (!stopped) await job();
+        if (stopped) return;
+        running.set(chatId, { stage: "start", since: clock() });
+        // The job keeps running if it outlives the bound (it cannot be
+        // cancelled), but the chat's next line no longer waits for it; its
+        // own rejection, whenever it comes, is still caught and logged.
+        const work = Promise.resolve()
+          .then(job)
+          .catch((e) => fail("line", e));
+        track(work);
+        const done = await Promise.race([work.then(() => "done" as const), after(stallMs)]);
+        if (done === "late") {
+          stats.stalled += 1;
+          // No longer waited for by anyone, drain() included: a job that
+          // never settles must not hold a shutdown either.
+          inflight.delete(work);
+          log(`[tg-groups] a group job ran past ${Math.round(stallMs / SEC)}s at "${running.get(chatId)?.stage ?? "?"}"; the chat moves on without it`);
+        }
+        running.delete(chatId);
       })
       .catch((e) => fail("line", e))
       .finally(() => {
@@ -672,7 +725,17 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     });
     const chained = prev.then(() => mine);
     locks.set(chatId, chained);
-    await prev;
+    // The same bound as a job: a send that never ended must not hold every
+    // later one. Past it this send goes ahead (the pacer still spaces sends).
+    // Half a job's bound: a job may spend part of its own waiting here, and a
+    // stuck send must free the lock before the job waiting on it is itself
+    // given up on. Stepping past a lock whose holder is only waiting out the
+    // flood pacer (a 429's retry_after, a full minute's window) is safe: the
+    // pacer hands out one slot at a time (waitTurn), so pacing holds.
+    if ((await Promise.race([prev.then(() => "done" as const), after(stallMs / 2)])) === "late") {
+      stats.lockStalled += 1;
+      log(`[tg-groups] a group send held the chat's lock past ${Math.round(stallMs / 2 / SEC)}s; the next one goes ahead`);
+    }
     try {
       return await fn();
     } finally {
@@ -812,9 +875,18 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const waitTurn = async (chatId: number): Promise<void> => {
     for (let i = 0; i < 8; i++) {
       const w = pacer.waitMs(chatId);
-      if (w <= 0) return;
+      if (w <= 0) break;
       await sleep(w);
     }
+    // THE SLOT IS TAKEN HERE, not after the send lands. Checking the pacer
+    // and taking its slot happen with no await between them, so two sends
+    // that both wake at a window's edge cannot both pass it — which matters
+    // now that the chat's lock can be stepped past (withLock): a successor
+    // that goes ahead of a send still waiting out a 429 or a full minute
+    // waits for its own slot here, it does not share the other's. A slot
+    // taken by a send that then fails or is dropped just spaces the next one
+    // out a little more.
+    pacer.noteSent(chatId);
   };
 
   /** Still worth sending? Null when it is, else why not. Re-read at every step, because every step can take seconds. */
@@ -876,25 +948,28 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         return null;
       }
       try {
+        stageOf(o.chatId, "send: typing");
         await sendChatAction(opts, chatId, "typing", threadId);
       } catch (e) {
         fail("typing", e);
       }
+      stageOf(o.chatId, "send: typing delay");
       await sleep(typingDelayMs(o.text, false, rand));
       for (let attempt = 0; attempt < 4; attempt++) {
+        stageOf(o.chatId, "send: flood pacer");
         await waitTurn(chatId);
         const late = whyNot(o, chatId);
         if (late) {
           missed(o, late);
           return null;
         }
+        stageOf(o.chatId, "send: message");
         const r = await sendMessage(opts, chatId, htmlOf(o), {
           ...(isMsgId(replyTo) ? { replyToMessageId: replyTo } : {}),
           ...(isMsgId(threadId) ? { messageThreadId: threadId } : {}),
           disablePreview: true,
         });
         if (r.ok) {
-          pacer.noteSent(chatId);
           if (isMsgId(o.replyTo)) landedOn.set(msgKey(o.chatId, o.replyTo), true);
           return r.messageId !== undefined ? { chatId, messageId: r.messageId } : { chatId };
         }
@@ -968,7 +1043,6 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         }
         const r = await setMessageReaction(opts, chatId, messageId, emoji);
         if (r.ok) {
-          pacer.noteSent(chatId);
           landedOn.set(msgKey(chatId, messageId), true);
           return true;
         }
@@ -1844,6 +1918,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       const foreignMint = hasForeignMint(text) || hasOtherChainLink(text);
       const cashtags = extractCashtags(text);
       if (cas.length > 0 || foreignMint || cashtags.length > 0) {
+        stageOf(chatId, "coin flow");
         const post = await flow.begin(chatId, j.line, {
           senderId: j.line.fromId,
           // Nobody to tag behind an anonymous admin or a channel: the tag would name the chat's placeholder.
@@ -1907,6 +1982,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (j.addressed !== null && burstPassed(chatId, j)) return "burst";
 
     const m = modelNow();
+    stageOf(chatId, "decide");
     const dec = decide({
       room,
       line: j.line,
@@ -1920,6 +1996,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       signals,
     });
     if ((dec.act === "skip" || dec.act === "react") && j.addressed === null && (await maybeFadedAgain(j, cfg))) return null;
+    stageOf(chatId, `act: ${dec.act}`);
     return act(dec, j);
   };
 
@@ -2061,6 +2138,33 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
 
   const sweepTimer = setInterval(() => void track(sweep()), SWEEP_MS);
   sweepTimer.unref?.();
+  /**
+   * THE HEARTBEAT: what the handler has seen in the last few minutes, when it
+   * has seen anything or is holding something. Counts and stage names only.
+   */
+  const heartbeat = (): void => {
+    try {
+      const t = clock();
+      let oldest: { stage: string; since: number } | null = null;
+      for (const r of running.values()) if (!oldest || r.since < oldest.since) oldest = r;
+      const queued = [...queues.values()].reduce((n, q) => n + q.size, 0);
+      const busy = oldest ? `, oldest job ${Math.round((t - oldest.since) / SEC)}s at "${oldest.stage}"` : "";
+      const any = Object.values(stats).some((n) => n > 0) || queued > 0;
+      if (any) {
+        log(
+          `[tg-groups] last ${Math.round(HEARTBEAT_MS / MIN)} min: ${stats.lines} group lines (${stats.addressed} to me), ` +
+            `skipped: ${stats.notApproved} room not approved, ${stats.off} switched off, ${stats.noRoom} no room, ${stats.blocked} blocked, ${stats.noSelf} before I knew who I am; ` +
+            `${stats.dropped} dropped (queue full), ${stats.stalled} jobs past ${Math.round(stallMs / SEC)}s and ${stats.lockStalled} sends past ${Math.round(stallMs / 2 / SEC)}s; ` +
+            `${queued} queued${busy}`,
+        );
+      }
+      for (const k of Object.keys(stats) as (keyof typeof stats)[]) stats[k] = 0;
+    } catch (e) {
+      fail("heartbeat", e);
+    }
+  };
+  const heartbeatTimer = setInterval(heartbeat, HEARTBEAT_MS);
+  heartbeatTimer.unref?.();
   // The boot line: which model writes group lines (names only).
   try {
     modelNow();
@@ -2074,11 +2178,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         if (stopped || !msg || typeof msg !== "object") return;
         const chatId = msg.chatId;
         if (typeof chatId !== "number" || !isTgGroup(msg.chatType, chatId)) return;
+        stats.lines += 1;
         const cfg = cfgNow();
         const from = typeof msg.fromId === "number" && !fromBot(msg) ? { fromId: msg.fromId, via: viaChat(msg) } : undefined;
         const room = knownRoom(chatId, { title: msg.chatTitle, kind: msg.chatType, isForum: msg.isForum }, cfg, from);
-        if (!room) return;
+        if (!room) {
+          stats.noRoom += 1;
+          return;
+        }
         if (room.status === "blocked") {
+          stats.blocked += 1;
           // The owner said leave; a line proves it is back. Leave again, once per process.
           if (!releft.has(chatId) && featureOn(cfg)) {
             releft.add(chatId);
@@ -2089,6 +2198,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         // Everything below is a group line or a memory write: the operator's
         // switch, the owner's setting and the room's status each stop it.
         if (!featureOn(cfg) || room.status !== "approved") {
+          if (featureOn(cfg)) stats.notApproved += 1;
+          else stats.off += 1;
           // Said to it where it may not talk: the operator hears why, never what.
           const me = selfNow();
           const said = typeof msg.text === "string" ? msg.text.trim() : "";
@@ -2140,7 +2251,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         const threadId = msg.isTopicMessage === true && isMsgId(msg.messageThreadId) ? msg.messageThreadId : undefined;
         if (threadId !== undefined) threads.set(key, threadId);
         const addressed = me ? addressedHow(msg, me) : null;
+        // Without getMe's answer nothing can be addressed to it: counted, so
+        // "every mention is ignored" shows up as what it is.
+        if (!me) stats.noSelf += 1;
         if (addressed !== null) {
+          stats.addressed += 1;
           lastAddressed.set(`${chatId}:${msg.fromId}`, { messageId, atMs: now });
           askedIn.set(key, true);
         }
@@ -2559,6 +2674,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       try {
         stopped = true;
         clearInterval(sweepTimer);
+        clearInterval(heartbeatTimer);
         flow.stop();
       } catch (e) {
         fail("stop", e);
