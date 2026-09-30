@@ -40,7 +40,8 @@ import path from "node:path";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-hwm-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, ensureAgent, adjustAgentHwm, getAgentFinancials, restoreAgentHwmParts } =
+const {
+  closeStoreForTest, initStore, ensureAgent, adjustAgentHwm, getAgentFinancials, restoreAgentHwmParts } =
   await import("./store");
 const { mirrorTenant, MIRROR_STATE_DDL } = await import("./ledger-mirror");
 const { deriveBootstrapAccounting } = await import("./bootstrap-source");
@@ -136,11 +137,8 @@ after(() => {
   shared?.raw?.close?.();
   // Windows holds the sqlite handle until the process exits, so a failed unlink
   // here is housekeeping, not a result. Swallowing it keeps a green suite green.
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* the OS still has the file open */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("a peak lowered by a withdrawal survives the redeploy that follows it", () => {

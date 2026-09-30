@@ -2,7 +2,8 @@ package dev.merrymen.app.net
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
-import okhttp3.FormBody
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -13,6 +14,7 @@ import okhttp3.Response
 import java.io.IOException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 /**
@@ -33,11 +35,81 @@ import kotlinx.coroutines.suspendCancellableCoroutine
  */
 sealed interface ApiResult<out T> {
   data class Ok<T>(val value: T) : ApiResult<T>
-  /** The server answered, and said no. `status` is load-bearing. */
-  data class Refused(val status: Int, val message: String) : ApiResult<Nothing>
-  /** We never got an answer. Not the same as being told no. */
-  data class Unreachable(val cause: String) : ApiResult<Nothing>
+  /**
+   * The server answered, and said no. `status` is load-bearing. `message` is a
+   * sentence the server wrote for a person, or "HTTP <code>" / the generic 5xx
+   * line when it wrote none — never a raw body.
+   *
+   * [retryAfterSec] is the Retry-After header in seconds, when a rate limit
+   * sent one (group chat's 429 does), so "slow down, try again in 7s" can say
+   * the real number instead of a guess. Null when absent or not in seconds.
+   *
+   * ONE REFUSAL IS THIS APP'S OWN: status [NOT_SENT], a write that was not
+   * sent because the Server changed after it was asked for. No server said
+   * it, and nothing left the phone — a known outcome, so it is said as "not
+   * sent", never looked up like a lost answer.
+   */
+  data class Refused(val status: Int, val message: String, val retryAfterSec: Long? = null) : ApiResult<Nothing>
+  /**
+   * We never got an answer we could read. Not the same as being told no.
+   *
+   * That includes a 2xx whose body would not decode: the server may well have
+   * done the thing, we just cannot say what it said. So for a WRITE this is an
+   * UNKNOWN outcome, never a failure — an order whose answer was lost may
+   * exist, and the caller must look it up rather than tell the owner it failed.
+   *
+   * [unreadable] tells the two apart for the READER, not for the logic: true
+   * when merrymen DID answer and this app could not read it, false when no
+   * answer came (a timeout, no network, an address that is not a web address).
+   * "Couldn't reach merrymen" is false about the first — the server was
+   * reached. [cause] is a sentence either way, never a type name or a body;
+   * [said] is the whole line to show.
+   */
+  data class Unreachable(val cause: String, val unreadable: Boolean = false) : ApiResult<Nothing>
 }
+
+/** The web's words for no answer (terminal/request-json.ts UNREACHABLE), less its full stop. */
+const val CANT_REACH = "Can't reach merrymen right now"
+
+/** What [ApiResult.Unreachable.cause] says when merrymen answered in a shape this app cannot read. */
+const val UNREADABLE_ANSWER = "merrymen sent back something this app couldn't read. Try again in a moment."
+
+/** What [ApiResult.Unreachable.cause] says when the stored Server address cannot be a URL at all. */
+const val NOT_A_WEB_ADDRESS = "the Server address in Settings isn't a web address — fix it there"
+
+/**
+ * NO ANSWER, SAID AS WHAT HAPPENED — never OkHttp's own words.
+ *
+ * [ApiResult.Unreachable.cause] reaches the owner verbatim ([said], the
+ * LoadedBlock notice, the stale line under Home's figures), and it used to be
+ * the exception's message, or its class name when it had none. An HTTP/2
+ * GOAWAY, common behind Cloudflare on a phone, has no message, so the notice
+ * ended in "ConnectionShutdownException"; others read "stream was reset:
+ * CANCEL" or "Unable to resolve host … No address associated with hostname".
+ * So the cause is picked by what kind of failure it was, in words the owner
+ * can act on, and the raw message goes to logcat. A timeout is checked before
+ * the rest because OkHttp's call timeout is an InterruptedIOException too.
+ */
+internal fun noAnswerCause(e: IOException): String {
+  android.util.Log.i("MerrymenApi", "no answer: ${e.javaClass.name}: ${e.message}")
+  return when (e) {
+    is java.net.SocketTimeoutException -> "the connection timed out"
+    is java.net.UnknownHostException -> "this phone couldn't look up the server's address — it may be offline"
+    is java.net.ConnectException -> "this phone couldn't open a connection to the server"
+    is javax.net.ssl.SSLException -> "a secure connection to the server couldn't be set up"
+    is java.net.UnknownServiceException -> "this phone won't talk to that server without https"
+    is java.io.InterruptedIOException -> "the connection timed out"
+    else -> if (e.message == "Canceled") "the request was cancelled" else "the connection dropped before an answer came back"
+  }
+}
+
+/**
+ * THE ONE LINE TO SHOW for an answer we did not get, so no screen has to
+ * prefix "Couldn't reach merrymen" by hand — which is false for an answer
+ * that arrived and could not be read.
+ */
+val ApiResult.Unreachable.said: String
+  get() = if (unreadable) cause else "$CANT_REACH: $cause"
 
 inline fun <T, R> ApiResult<T>.map(f: (T) -> R): ApiResult<R> = when (this) {
   is ApiResult.Ok -> ApiResult.Ok(f(value))
@@ -47,126 +119,323 @@ inline fun <T, R> ApiResult<T>.map(f: (T) -> R): ApiResult<R> = when (this) {
 
 fun <T> ApiResult<T>.valueOrNull(): T? = (this as? ApiResult.Ok)?.value
 
-class MerrymenApi(private val http: OkHttpClient, private val session: Session) {
+/**
+ * WHERE THE SERVER IS, asked at the moment of each call.
+ *
+ * An interface rather than [Session] itself so the whole client runs on the
+ * JVM: Session needs an Android Context for its DataStore, and a unit test
+ * wants to point the real [MerrymenApi] — its decoding, its refusal wording —
+ * at a MockWebServer without an emulator. Session implements it for the app.
+ */
+fun interface OriginSource {
+  /** The origin with no trailing slash, so a path can be appended as-is. */
+  suspend fun originNow(): String
+}
 
-  val json = Json {
+/**
+ * ADDING AN ENDPOINT. New routes do not go in this file. Write them as
+ * extension functions in your own net/<Area>Wire.kt (OrdersWire.kt,
+ * MarketWire.kt, …), over the plumbing below:
+ *
+ *   suspend fun MerrymenApi.ceiling(): ApiResult<Ceiling> = getJson("/api/orders/ceiling")
+ *
+ * getJson, sendJson, callAt, call, aim, decoded and json are
+ * `@PublishedApi internal` for exactly that, so a new route gets the same
+ * three-state result, the same refusal wording and the same decode-failure
+ * handling as every route here, without this file becoming everybody's merge
+ * conflict. A raw body goes through callAt, never
+ * `Request.Builder().url(String)` — see [aim] for why. A request built by
+ * hand from [aim] leaves through [ServerTurns.sendIf] with the turn [aim]
+ * gave, so it too goes nowhere once the Server has changed under it.
+ *
+ * EVERY WRITE GOES THROUGH [writeHttp] OR sendJson/callAt/call, which put it
+ * there. Never `http.newCall` for a non-GET: see [writeHttp] for what a
+ * transport retry of a lost answer does to an order.
+ */
+class MerrymenApi(
+  /** The shared client: one cookie jar, one connection pool, the app's headers. */
+  val http: OkHttpClient,
+  private val origins: OriginSource,
+  /**
+   * Whether a READ on [http] may be asked again when its connection turns out
+   * stale ([readHttp]). The app says yes (AppGraph). Anything else gets
+   * exactly the client it passed: a test that built a client with no retry
+   * means "a dropped connection is that call's answer", and a read that
+   * quietly took the next queued answer would make it lie.
+   */
+  private val recoverReads: Boolean = false,
+) {
+
+  @PublishedApi internal val json = Json {
     ignoreUnknownKeys = true
     explicitNulls = false
     isLenient = true
     coerceInputValues = false
   }
 
-  private val jsonType: MediaType = "application/json; charset=utf-8".toMediaType()
+  @PublishedApi internal val jsonType: MediaType = "application/json; charset=utf-8".toMediaType()
+
+  /**
+   * The origin every call is made against right now — for building a web URL
+   * beside an API one. The server the stored address names ([serverOf]), so a
+   * page an older build stored after it is not in front of every path.
+   */
+  suspend fun originNow(): String = serverOf(origins.originNow())
+
+  /**
+   * THE CLIENT EVERY WRITE GOES OUT ON: [http] with no transport retry and
+   * [SendWritesOnce] last, whatever client this API was built with.
+   *
+   * A write whose answer is lost — an order, a snipe, a confirm, a settings
+   * save, an upload — is UNKNOWN, and the caller looks it up. It is never sent
+   * a second time by OkHttp: that would be a second order nobody decided on.
+   * sendJson, callAt and call put every non-GET here by themselves; a raw
+   * write says so with `writeHttp.newCall(...)`, never `http.newCall(...)`.
+   *
+   * In the app [http] (Http.client) already is this, so it is the same
+   * object; built from anything else — a test's plain OkHttpClient, which
+   * retries — it is a derivative sharing the pool, jar and headers.
+   */
+  val writeHttp: OkHttpClient by lazy { http.forWrites() }
+
+  /**
+   * THE TRANSPORT'S OWN RECOVERY, FOR READS ONLY, when [recoverReads] asks for
+   * it. A GET that meets a stale pooled connection is sent again on a fresh
+   * one, which asks the same question twice and changes nothing. Private, and
+   * [call] hands it nothing but a GET or HEAD — that is the whole proof that
+   * no write rides on it (and [SendWritesOnce], which it inherits in the app,
+   * would still hold one).
+   */
+  private val readHttp: OkHttpClient by lazy {
+    if (recoverReads) http.newBuilder().retryOnConnectionFailure(true).build() else http
+  }
 
   // ── plumbing ──────────────────────────────────────────────────────────────
 
-  private suspend fun url(path: String): String = session.originNow() + path
-
-  private suspend fun call(req: Request): ApiResult<String> = suspendCancellableCoroutine { cont ->
-    // CANCELLABLE, so a screen that goes away takes its request with it.
-    // suspendCoroutine leaked one in-flight call per abandoned LaunchedEffect.
-    val theCall = http.newCall(req)
-    cont.invokeOnCancellation { theCall.cancel() }
-    theCall.enqueue(object : okhttp3.Callback {
-      override fun onFailure(call: okhttp3.Call, e: IOException) {
-        cont.resume(ApiResult.Unreachable(e.message ?: e.javaClass.simpleName))
-      }
-
-      override fun onResponse(call: okhttp3.Call, response: Response) {
-        response.use { r ->
-          val body = try {
-            r.body?.string().orEmpty()
-          } catch (e: IOException) {
-            cont.resume(ApiResult.Unreachable(e.message ?: "read failed"))
-            return
-          }
-          if (r.isSuccessful) {
-            cont.resume(ApiResult.Ok(body))
-          } else {
-            // The API answers with several error shapes, and two routes answer
-            // in PLAIN TEXT (the middleware's host and cross-site refusals).
-            // Try JSON, fall back to the raw body, never invent a sentence.
-            // Prefer a VALIDATION list, then a single error/detail, then chat's
-            // `why`; only fall back to the raw body when the JSON says nothing.
-            // The list is what /api/settings and its read-modify-write callers
-            // return, and joining it here means every screen gets clean per-line
-            // messages without each one re-parsing the body.
-            val msg = runCatching { json.decodeFromString<ApiError>(body) }
-              .getOrNull()?.let {
-                it.errors?.takeIf { e -> e.isNotEmpty() }?.joinToString("\n")
-                  ?: it.error ?: it.detail ?: it.why
-              }
-              ?: body.ifBlank { "HTTP ${r.code}" }
-            cont.resume(ApiResult.Refused(r.code, msg))
-          }
-        }
-      }
-    })
-  }
-
-  private suspend inline fun <reified T> getJson(path: String): ApiResult<T> =
-    call(Request.Builder().url(url(path)).get().build()).map { json.decodeFromString<T>(it) }
-
-  private suspend inline fun <reified T> sendJson(
-    path: String,
-    method: String,
-    bodyJson: String?,
-  ): ApiResult<T> {
-    val body: RequestBody = (bodyJson ?: "{}").toRequestBody(jsonType)
-    val req = Request.Builder().url(url(path)).method(method, body).build()
-    return call(req).map { json.decodeFromString<T>(it) }
-  }
-
-  // ── the doorknob ──────────────────────────────────────────────────────────
+  /**
+   * WHICH SERVER EVERY REQUEST IS FOR — see [ServerTurns]. Repository.setOrigin
+   * moves it, and nothing else does.
+   */
+  val servers = ServerTurns()
 
   /**
-   * POST /api/gate — FORM DATA, not JSON, and it answers 303.
-   *
-   * The whole deployment sits behind this while it is in beta: every API path
-   * except this one returns 401 {"error":"gated"} without the cookie. (Written
-   * without the glob on purpose — Kotlin nests block comments, so a literal
-   * slash-star inside a KDoc opens a comment that never closes and takes the
-   * whole file down with a syntax error 100 lines away.) The
-   * password is checked with a constant-time compare and the cookie value IS
-   * the password, so it is stored the way a password is.
+   * THE BINDING A DECISION TAKES: every request made in a coroutine started
+   * with it goes to the server on screen now, or is not sent. Take it at the
+   * tap (`scope.launch(api.boundHere()) { … }`), not later: a request that
+   * reads the stored address after the Server was changed would otherwise go
+   * to a server the owner never looked at.
    */
-  suspend fun gate(password: String): ApiResult<Unit> {
-    val form = FormBody.Builder().add("password", password).build()
-    val req = Request.Builder().url(url("/api/gate")).post(form).build()
-    /*
-     * REDIRECTS OFF, BECAUSE BOTH ANSWERS ARE A 303.
-     *
-     * The route replies 303 to "/" when the password is right and 303 to
-     * "/gate?again=1" when it is wrong. Following either lands on a 200 HTML
-     * page, so a client that follows redirects reports SUCCESS for a wrong
-     * password — and then stores it, leaving every later request 401 "gated"
-     * with the UI insisting it saved. The destination is the only thing that
-     * distinguishes them, so we have to see it.
-     */
-    val once = http.newBuilder().followRedirects(false).build()
-    return suspendCancellableCoroutine { cont ->
-      val c = once.newCall(req)
-      cont.invokeOnCancellation { c.cancel() }
-      c.enqueue(object : okhttp3.Callback {
+  fun boundHere(): ServerBound = ServerBound(servers.now.value)
+
+  /** A request's address, and the server turn it was read in (see [ServerTurns]). */
+  @PublishedApi internal class Aimed(val url: HttpUrl, val turn: Long)
+
+  /**
+   * THE URL FOR [path] AND THE TURN IT BELONGS TO, OR NULL WHEN THE STORED
+   * ORIGIN IS NOT A WEB ADDRESS.
+   *
+   * The turn is the coroutine's [ServerBound] when it carries one — the moment
+   * the owner decided — else the turn now, and it is taken BEFORE the address
+   * is read. Whoever sends the request checks it again right before it leaves
+   * ([ServerTurns.sendIf]); see [ServerTurns] for why that is the whole proof
+   * that the address is that turn's server.
+   *
+   * Never a String handed to Request.Builder.url(String): that overload THROWS
+   * on an address it cannot parse, and it used to run outside anything that
+   * caught, so an owner who typed a server without "https://" crashed the app
+   * on that call and on every launch after. Settings now refuses such an
+   * address, but one stored by an older build is still on the device, so every
+   * request is built from this and a null is [NOT_A_WEB_ADDRESS], not a throw.
+   *
+   * [path] is appended to the SERVER the stored address names, not to the
+   * address as typed: an older build also stored "https://app.merrymen.dev/home"
+   * as it was pasted, and every route became /home/api/… and a 404. See
+   * [serverOf].
+   */
+  @PublishedApi internal suspend fun aim(path: String): Aimed? {
+    val turn = currentCoroutineContext()[ServerBound]?.turn ?: servers.now.value
+    val url = (serverOf(origins.originNow()) + path).toHttpUrlOrNull() ?: return null
+    return Aimed(url, turn)
+  }
+
+  /**
+   * ONE REQUEST TO [path] that getJson/sendJson do not cover — raw bytes,
+   * another header — built by [build] on a builder whose URL is already set.
+   * A malformed stored origin is Unreachable here too.
+   */
+  @PublishedApi internal suspend inline fun callAt(
+    path: String,
+    client: OkHttpClient = http,
+    build: Request.Builder.() -> Unit,
+  ): ApiResult<String> {
+    val at = aim(path) ?: return ApiResult.Unreachable(NOT_A_WEB_ADDRESS)
+    return call(Request.Builder().url(at.url).apply(build).build(), client, at.turn)
+  }
+
+  /**
+   * One request, as the three-state result. [client] is [http] unless a route
+   * needs its own timeouts. [turn] is the server turn its address was read in
+   * ([aim]); it is not sent if the Server has moved since.
+   *
+   * THE CLIENT IS CHOSEN BY THE METHOD, HERE, for every route: a write goes
+   * on [writeHttp] (or on [client] made fit for writes), so no caller can
+   * send one on a client that retries; a read on the default client goes on
+   * [readHttp], which in the app recovers from a stale connection.
+   */
+  @PublishedApi internal suspend fun call(req: Request, client: OkHttpClient = http, turn: Long = servers.now.value): ApiResult<String> {
+    val via = when {
+      !isWrite(req.method) -> if (client === http) readHttp else client
+      client === http -> writeHttp
+      else -> client.forWrites()
+    }
+    return send(req, via, turn)
+  }
+
+  /**
+   * WHAT A REQUEST THE SERVER MOVED UNDER COMES BACK AS. A write: refused here,
+   * [NOT_SENT] — nothing left the phone, which is known, never "unknown", so it
+   * is not looked up. A read: no answer this app can use.
+   */
+  private fun serverMoved(req: Request): ApiResult<Nothing> =
+    if (isWrite(req.method)) ApiResult.Refused(NOT_SENT, SERVER_CHANGED_SENTENCE) else ApiResult.Unreachable(SERVER_CHANGED_READ)
+
+  private suspend fun send(req: Request, client: OkHttpClient, turn: Long): ApiResult<String> =
+    suspendCancellableCoroutine { cont ->
+      // CANCELLABLE, so a screen that goes away takes its request with it.
+      // suspendCoroutine leaked one in-flight call per abandoned LaunchedEffect.
+      val theCall = client.newCall(req)
+      cont.invokeOnCancellation { theCall.cancel() }
+      val callback = object : okhttp3.Callback {
         override fun onFailure(call: okhttp3.Call, e: IOException) {
-          cont.resume(ApiResult.Unreachable(e.message ?: "gate unreachable"))
+          cont.resume(ApiResult.Unreachable(noAnswerCause(e)))
         }
 
         override fun onResponse(call: okhttp3.Call, response: Response) {
           response.use { r ->
-            val where = r.header("location").orEmpty()
-            cont.resume(
-              when {
-                where.startsWith("/gate") ->
-                  ApiResult.Refused(401, "that password was not accepted")
-                r.isRedirect || r.isSuccessful -> ApiResult.Ok(Unit)
-                else -> ApiResult.Refused(r.code, "HTTP ${r.code}")
-              },
-            )
+            // A READ ANSWERED BY THE SERVER THE OWNER LEFT is that server's
+            // answer. Handed on, a screen — or the chat's picture of the book —
+            // would show it as the new server's. A write's answer is kept: it
+            // happened, and whoever sent it decides who may hear about it.
+            if (!isWrite(req.method) && !servers.holds(turn)) {
+              cont.resume(ApiResult.Unreachable(SERVER_CHANGED_READ))
+              return
+            }
+            val body = try {
+              r.body?.string().orEmpty()
+            } catch (e: IOException) {
+              cont.resume(ApiResult.Unreachable(noAnswerCause(e)))
+              return
+            }
+            if (r.isSuccessful) {
+              cont.resume(ApiResult.Ok(body))
+            } else {
+              val retryAfter = r.header("retry-after")?.trim()?.toLongOrNull()?.takeIf { it >= 0 }
+              cont.resume(ApiResult.Refused(r.code, refusalMessage(r.code, body), retryAfter))
+            }
           }
         }
-      })
+      }
+      // THE LAST MOMENT THE SERVER CAN BE CHECKED, and the one that counts: the
+      // turn is compared under the lock a Server change takes to begin, and
+      // the request is handed over inside it, so no change can start between
+      // the check and the send.
+      if (!servers.sendIf(turn) { theCall.enqueue(callback) }) cont.resume(serverMoved(req))
     }
+
+  /**
+   * WHAT A REFUSAL SAYS, in words a person was meant to read — or its status.
+   *
+   * A 4xx: the JSON's validation list (one line each, which is how /api/settings
+   * and its read-modify-write callers refuse), else its error, detail or why. A
+   * body with none of those — plain text from the middleware, a Next 404 page,
+   * JSON that says nothing — gives "HTTP <code>" and is NEVER pasted in: a page
+   * of markup in an amber notice is not a sentence, and it is somebody else's
+   * words in ours.
+   *
+   * A 5xx is the server failing, and its body is usually a stack's words, so
+   * it reads as one generic line — unless the route marked it `ownerFacing`,
+   * which is how a 5xx written for the owner ("couldn't check this account's
+   * ownership") says so. That is the web's rule too, and the generic line is
+   * the web's own sentence (terminal/request-json.ts), so the two clients say
+   * the same thing about the same outage.
+   */
+  private fun refusalMessage(code: Int, body: String): String {
+    val err = try {
+      json.decodeFromString<ApiError>(body)
+    } catch (e: IllegalArgumentException) {
+      null
+    }
+    val said = err?.let {
+      it.errors?.filter { e -> e.isNotBlank() }?.takeIf { e -> e.isNotEmpty() }?.joinToString("\n")
+        ?: it.error?.takeIf { e -> e.isNotBlank() }
+        ?: it.detail?.takeIf { e -> e.isNotBlank() }
+        ?: it.why?.takeIf { e -> e.isNotBlank() }
+    }
+    return if (code >= 500) {
+      if (err?.ownerFacing == true && said != null) said else "merrymen answered with an error ($code). Try again in a moment."
+    } else {
+      said ?: "HTTP $code"
+    }
+  }
+
+  /**
+   * A 2xx BODY THAT WILL NOT DECODE IS AN ANSWER WE COULD NOT READ — never a crash.
+   *
+   * It used to decode inside ApiResult.map with nothing catching, so an HTML
+   * 200, a null where a model has a default, a missing required field or a
+   * number past Int threw out of whichever LaunchedEffect asked, and the
+   * process died on whatever screen was open. `IllegalArgumentException` is
+   * what kotlinx.serialization throws for all of those (SerializationException
+   * extends it).
+   *
+   * UNREACHABLE, NOT REFUSED, because nobody refused anything: see
+   * [ApiResult.Unreachable] for what that means to a write. And coercion stays
+   * off in [json]: coercing would read an unread null as the default, and for
+   * a figure the default is a confident 0.
+   *
+   * WHICH MODEL FAILED GOES TO THE LOG, NOT THE SCREEN. It used to be pasted
+   * into the notice — "(ThesesPage)" — which is our name for our type, and in a
+   * release build R8 renames it to a letter. The reader gets the sentence; the
+   * person debugging gets the type and the JSON path in logcat.
+   */
+  @PublishedApi internal inline fun <reified T> decoded(r: ApiResult<String>): ApiResult<T> = when (r) {
+    is ApiResult.Ok -> try {
+      ApiResult.Ok(json.decodeFromString<T>(r.value))
+    } catch (e: IllegalArgumentException) {
+      unreadable(T::class.simpleName, e)
+    }
+    is ApiResult.Refused -> r
+    is ApiResult.Unreachable -> r
+  }
+
+  /**
+   * Log why an answer would not decode and say so as [ApiResult.Unreachable].
+   * Only the part of the message BEFORE "JSON input": kotlinx.serialization
+   * appends an excerpt of the body there, and a body can be somebody's book.
+   */
+  @PublishedApi internal fun unreadable(type: String?, e: Exception): ApiResult.Unreachable {
+    val why = (e.message ?: e.javaClass.simpleName).substringBefore("JSON input").trim()
+    android.util.Log.w("MerrymenApi", "could not decode ${type ?: "?"}: $why")
+    return ApiResult.Unreachable(UNREADABLE_ANSWER, unreadable = true)
+  }
+
+  @PublishedApi internal suspend inline fun <reified T> getJson(path: String): ApiResult<T> =
+    decoded(callAt(path) { get() })
+
+  /**
+   * A JSON body (`{}` when null) with a write's method. On [writeHttp]: a
+   * lost answer comes back as Unreachable — unknown, to be looked up — and is
+   * never sent again. A [client] of a route's own is made fit for writes the
+   * same way by [call].
+   */
+  @PublishedApi internal suspend inline fun <reified T> sendJson(
+    path: String,
+    method: String,
+    bodyJson: String?,
+    client: OkHttpClient = writeHttp,
+  ): ApiResult<T> {
+    val body: RequestBody = (bodyJson ?: "{}").toRequestBody(jsonType)
+    return decoded(callAt(path, client) { this.method(method, body) })
   }
 
   // ── sign-in ───────────────────────────────────────────────────────────────
@@ -177,16 +446,10 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
   /** Sign-out must invalidate the SERVER session, not just the local jar. */
   suspend fun logout(): ApiResult<JsonElement> = sendJson("/api/auth/logout", "POST", null)
 
-  suspend fun challenge(): ApiResult<Challenge> = getJson("/api/auth/challenge")
-
-  suspend fun verify(address: String, signature: String, nonce: String): ApiResult<VerifyResult> =
-    sendJson("/api/auth/verify", "POST", json.encodeToString(VerifyBody.serializer(), VerifyBody(address, signature, nonce)))
-
   // ── read: who am I, what do I hold ───────────────────────────────────────
 
   suspend fun version(): ApiResult<Version> = getJson("/api/version")
   suspend fun feed(): ApiResult<Feed> = getJson("/api/feed")
-  suspend fun scoreboard(): ApiResult<JsonElement> = getJson("/api/scoreboard")
   suspend fun grants(): ApiResult<GrantView> = getJson("/api/grants")
   suspend fun proposals(): ApiResult<ProposalsView> = getJson("/api/proposals")
 
@@ -204,9 +467,14 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
    * becomes 1h; the six buttons are spans of history, which is a different
    * question. `barSize` below maps one to the other, and the span is applied
    * by trimming — never by padding.
+   *
+   * [activity] adds `&activity=1`, which makes the route attach pool evidence
+   * (recent pool trades, the tape) to a COIN's answer as [TokenDetail.evidence].
+   * Off by default: it is a second upstream read, and only the token page's
+   * market-activity panel needs it.
    */
-  suspend fun token(address: String, window: String = "1h"): ApiResult<TokenDetail> =
-    getJson("/api/tokens/" + address + "?window=" + window)
+  suspend fun token(address: String, window: String = "1h", activity: Boolean = false): ApiResult<TokenDetail> =
+    getJson("/api/tokens/" + address + "?window=" + window + (if (activity) "&activity=1" else ""))
 
   /**
    * A STOCK'S BARS, through our own proxy.
@@ -223,10 +491,7 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
     )
   suspend fun leaderboard(): ApiResult<Leaderboard> = getJson("/api/leaderboard")
   suspend fun agent(slug: String): ApiResult<JsonElement> = getJson("/api/agents/" + slug)
-  suspend fun discoveries(): ApiResult<JsonElement> = getJson("/api/discoveries")
-  suspend fun venue(): ApiResult<JsonElement> = getJson("/api/venue")
-  suspend fun wall(): ApiResult<JsonElement> = getJson("/api/wall")
-  suspend fun wallTape(): ApiResult<JsonElement> = getJson("/api/wall-tape")
+  suspend fun discoveries(): ApiResult<Discoveries> = getJson("/api/discoveries")
   /** Session-free by design, so it is cacheable and carries nobody's identity. */
   suspend fun likeCounts(): ApiResult<LikeCounts> = getJson("/api/like-counts")
 
@@ -239,14 +504,6 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
   suspend fun circle(): ApiResult<CircleView> = getJson("/api/circle")
   suspend fun alpha(): ApiResult<AlphaView> = getJson("/api/alpha")
 
-  /** GET returns a challenge to sign; PATCH reads back what is linked. */
-  suspend fun holderChallenge(holder: String): ApiResult<HolderChallenge> =
-    getJson("/api/holder?holder=" + java.net.URLEncoder.encode(holder, "UTF-8"))
-
-  suspend fun holderLinked(): ApiResult<HolderLinked> = sendJson("/api/holder", "PATCH", "{}")
-
-  suspend fun holderUnlink(): ApiResult<JsonElement> = sendJson("/api/holder", "DELETE", null)
-
   // ── settings ──────────────────────────────────────────────────────────────
 
   suspend fun settings(): ApiResult<SettingsEnvelope> = getJson("/api/settings")
@@ -258,9 +515,22 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
    * are left alone. Sending the whole object back would echo masked secrets
    * (GET returns `set`/`hint`, never the value) and overwrite real keys with
    * asterisks.
+   *
+   * [owner] is the wallet the values being saved were READ for — the
+   * [SettingsEnvelope.owner] of the GET behind this write, "" included when that
+   * read was signed out. It is merged into the body; hosted, the server refuses
+   * a mismatch with its session (409 OWNER_CHANGED_SETTING) and writes nothing,
+   * so a form loaded for one wallet cannot save onto another. Null sends no
+   * owner and the save is judged by session alone.
    */
-  suspend fun patchSettings(patch: JsonElement): ApiResult<SettingsEnvelope> =
-    sendJson("/api/settings", "PUT", json.encodeToString(JsonElement.serializer(), patch))
+  suspend fun patchSettings(patch: JsonElement, owner: String? = null): ApiResult<SettingsSaved> {
+    val body = if (owner != null && patch is kotlinx.serialization.json.JsonObject) {
+      kotlinx.serialization.json.JsonObject(patch + ("owner" to kotlinx.serialization.json.JsonPrimitive(owner)))
+    } else {
+      patch
+    }
+    return sendJson("/api/settings", "PUT", json.encodeToString(JsonElement.serializer(), body))
+  }
 
   // ── telegram ──────────────────────────────────────────────────────────────
 
@@ -270,31 +540,72 @@ class MerrymenApi(private val http: OkHttpClient, private val session: Session) 
     sendJson(
       "/api/telegram",
       "POST",
-      json.encodeToString(TelegramTestBody.serializer(), TelegramTestBody(token = token)),
+      json.encodeToString(TelegramTestBody.serializer(), TelegramTestBody(action = "test", token = token)),
     )
 
   // ── acting ────────────────────────────────────────────────────────────────
 
-  suspend fun chat(body: ChatBody): ApiResult<ChatReply> =
-    sendJson("/api/chat", "POST", json.encodeToString(ChatBody.serializer(), body))
+  /**
+   * THE CHAT'S OWN CLIENT: the shared one, with the patience a model needs.
+   *
+   * A non-streamed /api/chat sends nothing until the whole completion is done,
+   * and the web waits 60s for it. The shared client's 30s read timeout cut a
+   * slow model off halfway and reported it as "Couldn't reach merrymen" — our
+   * failure, invented out of the model thinking. 90s to read, 120s for the
+   * whole call, so a reply the web would have waited for arrives here too and
+   * a dead connection still ends.
+   *
+   * Derived with newBuilder, so it shares the cookie jar, the headers and the
+   * connection pool. A streamed reader (SSE) should use this client as well.
+   *
+   * FROM [writeHttp], because every chat call is a POST that spends a model
+   * call and can come back proposing a trade: a second copy sent behind the
+   * owner's back is a second answer they never asked for. So it never retries
+   * and its body is one-shot, even when a streamed reader calls
+   * `chatHttp.newCall` directly.
+   */
+  val chatHttp: OkHttpClient by lazy {
+    writeHttp.newBuilder()
+      .readTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
+      .callTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
+      .build()
+  }
 
-  suspend fun order(side: String, symbol: String, usdg: Double): ApiResult<OrderResult> =
-    sendJson("/api/orders", "POST", json.encodeToString(OrderBody.serializer(), OrderBody(side, symbol, usdg)))
+  suspend fun chat(body: ChatBody): ApiResult<ChatReply> =
+    sendJson("/api/chat", "POST", json.encodeToString(ChatBody.serializer(), body), client = chatHttp)
+
+  /**
+   * Queue one order. [owner] is the wallet that confirmed it (see [OrderBody]);
+   * null leaves it to the session, as before.
+   *
+   * NO SCREEN PLACES AN ORDER THROUGH THIS. Chat and Trade use
+   * OrdersWire.postOrder, which keeps the route's own refusal apart from a
+   * gateway's page (a 502 may stand in front of a placed order); here every
+   * unmarked 5xx is the generic sentence, so a caller would have to read any
+   * Refused 5xx as unknown and look it up. The transport tests use it as their
+   * example write.
+   */
+  suspend fun order(side: String, symbol: String, usdg: Double, owner: String? = null): ApiResult<OrderResult> =
+    sendJson(
+      "/api/orders",
+      "POST",
+      json.encodeToString(OrderBody.serializer(), OrderBody(side, symbol, usdg, owner)),
+    )
 
   /** What became of one order. Polled after placing it. */
   suspend fun orderStatus(id: String): ApiResult<OrderState> =
     getJson("/api/orders?id=" + java.net.URLEncoder.encode(id, "UTF-8"))
 
-  suspend fun snipe(query: String, usdg: Double): ApiResult<SnipeResult> =
-    sendJson("/api/snipe", "POST", json.encodeToString(SnipeBody.serializer(), SnipeBody(query, usdg)))
-
-  suspend fun selftest(): ApiResult<OrderResult> = sendJson("/api/selftest", "POST", null)
-  suspend fun selftestStatus(): ApiResult<JsonElement> = getJson("/api/selftest")
+  /** Resolve a coin by name, then (on "resolved" only) the caller places the order. [owner] as on [order]. */
+  suspend fun snipe(query: String, usdg: Double, owner: String? = null): ApiResult<SnipeResult> =
+    sendJson(
+      "/api/snipe",
+      "POST",
+      json.encodeToString(SnipeBody.serializer(), SnipeBody(query, usdg, owner)),
+    )
 
   /** Practice book only. The worker refuses this outright on the live rail. */
   suspend fun paperReset(): ApiResult<OrderResult> = sendJson("/api/paper-reset", "POST", null)
-
-  suspend fun models(): ApiResult<JsonElement> = sendJson("/api/models", "POST", "{}")
 
   // ── likes and follows ─────────────────────────────────────────────────────
 

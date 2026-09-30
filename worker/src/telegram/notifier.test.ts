@@ -235,7 +235,36 @@ test("every condition alert that fires is observable", () => {
   // an owner had actually been told, there was nothing to look at but the
   // absence of a complaint. The KEY only — never the message body, which is
   // chat content.
-  const fire = NOTIFIER.slice(NOTIFIER.indexOf("const fire = "), NOTIFIER.indexOf("if (inputs.grantExpiresAt"));
+  const end = NOTIFIER.indexOf(`// ── "SIGN NOW"`);
+  assert.ok(end > 0, "the slice's end marker moved — re-anchor this test");
+  const fire = NOTIFIER.slice(NOTIFIER.indexOf("const fire = "), end);
   assert.match(fire, /console\.log\(`\[notify\] condition alert sent — \$\{key\}`\)/);
   assert.doesNotMatch(fire, /console\.log\([^)]*\$\{message\}/, "the message body must not reach the log");
+});
+
+test("a dollar figure is escaped — '<$0.01' is a tag to Telegram's HTML parser", () => {
+  const row = {
+    id: 5, kind: "swap", amount_usdg: 0.003, status: "landed", reject_rule: null, tx_hash: null,
+    fill_side: "sell", fill_cash_usdg: 0.003, realized_pnl_usdg: -4.997,
+  };
+  const line = tradeLine(row, null, false, { label: "RUG", side: "sell" });
+  assert.doesNotMatch(line, /<\$/, "a raw '<$' would make Telegram refuse the whole message");
+  assert.match(line, /&lt;\$0\.01/);
+});
+
+test("a near-total loss is never called a leftover", () => {
+  const row = {
+    id: 6, kind: "swap", amount_usdg: 0.003, status: "landed", reject_rule: null, tx_hash: null,
+    fill_side: "sell", fill_cash_usdg: 0.003, realized_pnl_usdg: -4.997,
+  };
+  const line = tradeLine(row, null, false, { label: "RUG", side: "sell" });
+  assert.doesNotMatch(line, /leftover/);
+  assert.match(line, /Sold RUG for &lt;\$0\.01 \(−\$5\.00\)/);
+});
+
+test("with no coin, a ping says what KIND of move it was — a transfer is never 'a trade'", () => {
+  const transfer = { id: 7, kind: "transfer", amount_usdg: 20, status: "landed", reject_rule: null, tx_hash: null };
+  assert.match(tradeLine(transfer, null), /A transfer out of your account went through — \$20\.00/);
+  const deposit = { ...transfer, kind: "vault-deposit" };
+  assert.match(tradeLine(deposit, null), /move into your savings vault/);
 });

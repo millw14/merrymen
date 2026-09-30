@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { EN } from "@/lib/messages/en";
 
 /**
  * WHAT /settings MUST STILL DO AFTER IT IS RESTYLED.
@@ -102,16 +103,38 @@ describe("every control survives the restyle", () => {
    * input. A label may become plainer; a control may not vanish.
    */
   it("keeps all 45 field labels", () => {
-    const missing = FIELDS.filter((f) => !SRC.includes(`label="${f}"`));
+    // MEASURED AGAINST THE CATALOGUE, because that is where the labels live
+    // now. The census is unchanged — these forty-five fields must still be on
+    // the page — but the component names a key and the English sits in en.ts,
+    // so looking for `label="…"` in the JSX would report every field missing
+    // the moment the screen became translatable.
+    // `Set<string>`, not the literal union `Object.values` infers — the point
+    // is to ask whether an arbitrary label is present, which a union of the
+    // exact strings will not let you do.
+    const shipped = new Set<string>(Object.values(EN));
+    const missing = FIELDS.filter((f) => !shipped.has(f));
     assert.deepEqual(missing, [], "these fields disappeared from the page");
+    // And the screen must still RENDER a label for each, rather than merely
+    // having the string sit unused in the catalogue. Counted with a plain
+    // substring, because the thing being looked for is full of regex
+    // metacharacters and an escaping slip here would silently match nothing.
+    const rendered = SRC.split('label={t("settings.label.').length - 1;
+    assert.ok(rendered >= 40, `only ${rendered} field labels are rendered from the catalogue`);
   });
 
   it("AND THE SETTINGS BEHIND THE RENAMED FOUR ARE STILL BOUND TO AN INPUT", () => {
     // The half a label census cannot see. A rename is cosmetic; losing the
     // binding means the owner keeps a setting they can no longer change — and
     // for `bundlerApiKey` that is the difference between paper and live.
+    // `set` OR `setNum` — the numeric ones moved to a handler that keeps the
+    // owner's raw text instead of letting a number input throw it away. What
+    // this test cares about is that the control is still bound to something,
+    // which is the half a label census cannot see.
     for (const key of ["bundlerApiKey", "tickSeconds", "buyPerTickUsdg", "llmIntervalMin"]) {
-      assert.ok(SRC.includes(`set("${key}")`), `${key} lost its onChange binding`);
+      assert.ok(
+        SRC.includes(`set("${key}")`) || SRC.includes(`setNum("${key}")`),
+        `${key} lost its onChange binding`,
+      );
     }
   });
 
@@ -150,27 +173,56 @@ describe("every control survives the restyle", () => {
     // must not start being bought on its own") protects owners from the
     // PLATFORM widening what gets bought, and a person typing an address is not
     // the platform — so the choice is theirs, visible, and defaulted on.
-    assert.equal(count(/type="checkbox"/g), 16, "checkboxes");
+    // 19 since TELEGRAM GROUPS (docs/tg-groups.md): "Hang out in Telegram
+    // groups" and "Look at coins people post". Both default ON, so — like the
+    // platform coin list — the control is what makes OFF reachable, and both
+    // are dashboard-only: the chat refuses them and points here.
+    assert.equal(count(/type="checkbox"/g), 19, "checkboxes");
     // 13 since "take profit" — the only exit steady-basket has. It was added to
     // core and read by the worker while being absent from the settings route's
     // field list AND from this screen, so it was unreachable from the app and
     // an owner could not turn it on at all.
-    assert.equal(count(/type="number"/g), 13, "number inputs");
+    // 14 includes the owner-configurable class-position exit timer.
+    //
+    // COUNTED BY HANDLER, NOT BY `type`. The census used to count
+    // `type="number"`, and every one of those became `type="text"` with an
+    // `inputMode`: a number input hands JavaScript an EMPTY STRING for anything
+    // its own locale cannot parse, and empty means "clear to default" at the
+    // server — so a comma keystroke silently reset the setting. `setNum` is now
+    // the thing that makes a field numeric, so it is the thing to count.
+    //
+    // 22, not 14, because the eight fields that were ALREADY plain text with an
+    // `inputMode` were on the same broken path and now share the handler.
+    assert.equal(count(/setNum\("/g), 22, "numeric settings");
+    // And every one of them shows its own refusal, rather than relying on a
+    // save-time error for a field the reader has already scrolled past.
+    assert.equal(count(/aria-invalid=/g), 22, "numeric settings marking themselves invalid");
     assert.equal(count(/type="password"/g), 8, "password inputs");
     // 13 since the class vault factory. The number moved for the reason this
     // census exists to allow — a control was ADDED, deliberately — and the
     // check below pins that it is bound, because an address field nobody can
     // save is how ponsAdapterAddress spent a release being undocumentedly dead.
-    assert.equal(count(/type="text"/g), 13, "text inputs");
+    //
+    // 27 since the fourteen `type="number"` fields became `type="text"`. No
+    // control was added or removed — the SAME fourteen are on the page — but a
+    // number input destroys the owner's raw text before JavaScript sees it,
+    // handing over an empty string for anything its locale cannot parse, and
+    // empty means "clear to default" at the server. It is also what kept
+    // `<html lang>` static: Firefox picks a number input's decimal separator
+    // from the page language, so translating the UI would have changed which
+    // strings these fields accept.
+    assert.equal(count(/type="text"/g), 27, "text inputs");
     assert.equal(count(/type="url"/g), 3, "url inputs");
     // 6 since ASSET MODE — All assets / Stocks only / Crypto only. Several
     // owners asked for it at once ("there should be an option mode for stocks
     // only, crypto only..."), and it is a filter over what may be BOUGHT, never
     // over what is watched: a class switched off stays priced and sellable.
-    assert.equal(count(/<select/g), 6, "selects");
+    // 7 since how chatty it is in Telegram groups (quiet / normal / chatty),
+    // the third Telegram groups control beside the two switches above.
+    assert.equal(count(/<select/g), 7, "selects");
   });
 
-  it("sends exactly the 21 fields save() guards", () => {
+  it("sends exactly the 26 fields save() guards", () => {
     // Every guard is "the user did not touch this, so do not overwrite it".
     // One dropped guard silently resets a setting to whatever the form had.
     //
@@ -193,7 +245,12 @@ describe("every control survives the restyle", () => {
     // anything at all would send whatever the form happened to hold and could
     // silently narrow what their agent trades — the same class of failure as the
     // consent flag above, one step less dangerous.
-    assert.equal((code.match(/!== null\)/g) ?? []).length, 22);
+    // 23 includes the opt-in fast Trencher profile.
+    // 26 since the three Telegram groups settings. Two of them default ON, so
+    // unguarded they would write whatever the form held for every owner who
+    // saved anything — silently taking a bot out of its groups, or switching
+    // coin-looking off, by visiting a page.
+    assert.equal((code.match(/!== null\)/g) ?? []).length, 26);
   });
 });
 
@@ -268,7 +325,12 @@ describe("the hosted refusals stay refused", () => {
     // only thing between an owner and arming it by accident, and it is prose —
     // exactly the shape a restyle deletes without any test noticing.
     assert.match(SRC, /shell/i);
-    assert.match(SRC, /Only enabled groups work; the rest are refused/);
+    // The warning itself moved into the catalogue with the rest of the screen.
+    // Asserting on the WORDS still, just where they are.
+    assert.ok(
+      Object.values(EN).some((v) => /Only enabled groups work; the rest are refused/.test(v)),
+      "the auto-shell warning must survive somewhere in the shipped copy",
+    );
   });
 
   it("keeps the capability chips announcing whether they are armed", () => {
@@ -280,5 +342,78 @@ describe("the hosted refusals stay refused", () => {
 
   it("keeps the trencher live gate", () => {
     assert.match(SRC, /trencherLive/);
+  });
+});
+
+describe("nothing is left behind after a save", () => {
+  it("EVERY FIELD save() SENDS IS CLEARED AFTER IT, so the screen shows the server's value", () => {
+    // "THE SEVEN THAT WERE LEFT BEHIND": a toggle sent but not reset after the
+    // save keeps showing the LOCAL value while `view` holds the server's, and
+    // the two differ exactly when a write did not land. Derived from the
+    // guards themselves, so a toggle added tomorrow is held to it too.
+    // `save(` and not `save()`: it takes the "Move it here" answer to a 409
+    // bot claim (lib/telegram-claims.ts), and the guards are the same either way.
+    const save = code.slice(code.indexOf("async function save("));
+    const saved = save.indexOf('setStatus("Changes saved")');
+    const refetch = save.indexOf('const fresh = await fetch("/api/settings")');
+    assert.ok(saved > 0 && refetch > saved, "the post-save block was not found");
+    const reset = save.slice(saved, refetch);
+    const guarded = [...save.slice(0, saved).matchAll(/if \((\w+) !== null\) body\.\w+ = \1;/g)].map((m) => m[1]!);
+    assert.equal(guarded.length, 26, "every guard has the `if (x !== null) body.key = x;` shape");
+    const left = guarded.filter((name) => !reset.includes(`set${name[0]!.toUpperCase()}${name.slice(1)}(null)`));
+    assert.deepEqual(left, [], "sent by save() but not reset after it");
+  });
+});
+
+describe("Telegram groups (docs/tg-groups.md)", () => {
+  it("the three settings are bound, guarded and sent under their exact keys", () => {
+    // `telegramGroupsChattiness`, with "Groups": the other spelling trips the
+    // web room's boundary test in the worker and is not a setting.
+    assert.match(code, /if \(tgGroups !== null\) body\.telegramGroupsEnabled = tgGroups;/);
+    assert.match(code, /if \(tgGroupCoins !== null\) body\.telegramGroupCoinsEnabled = tgGroupCoins;/);
+    assert.match(code, /if \(tgChattiness !== null\) body\.telegramGroupsChattiness = tgChattiness;/);
+    assert.match(code, /onChange=\{\(e\) => setTgGroups\(e\.target\.checked\)\}/);
+    assert.match(code, /onChange=\{\(e\) => setTgGroupCoins\(e\.target\.checked\)\}/);
+    assert.match(code, /onChange=\{\(e\) => setTgChattiness\(e\.target\.value as TelegramGroupsChattiness\)\}/);
+    // Both switches default ON: without the default an unsaved owner would see
+    // them unticked while the bot talked.
+    assert.match(code, /view\.values\.telegramGroupsEnabled \?\? d\.telegramGroupsEnabled/);
+    assert.match(code, /view\.values\.telegramGroupCoinsEnabled \?\? d\.telegramGroupCoinsEnabled/);
+    assert.match(code, /view\.values\.telegramGroupsChattiness \?\? d\.telegramGroupsChattiness/);
+    // One list of levels, core's.
+    assert.match(code, /TELEGRAM_GROUPS_CHATTINESS\.map\(/);
+  });
+
+  it("they live inside the Telegram section, not under Advanced", () => {
+    const telegram = SRC.indexOf('id="telegram"');
+    const block = SRC.indexOf('t("settings.section.telegramGroups")');
+    const end = SRC.indexOf("</details>", telegram);
+    assert.ok(telegram > 0 && block > telegram && block < end, "the Telegram groups block is not inside <details id=\"telegram\">");
+  });
+
+  it("the words the contract fixes are the words shipped", () => {
+    assert.equal(EN["settings.section.telegramGroups"], "Telegram groups");
+    assert.equal(EN["settings.label.hangOutInTelegramGroups"], "Hang out in Telegram groups");
+    assert.equal(EN["settings.label.lookAtCoinsPeoplePost"], "Look at coins people post");
+    assert.equal(EN["settings.hint.lookAtCoinsPeoplePost"], "Only in trencher mode. Its Brain decides and every trencher limit still applies.");
+    assert.ok(
+      EN["settings.text.privacyModeSteps"].startsWith("@BotFather → /setprivacy → your bot → Disable, then remove the bot from the group and add it back"),
+      "the privacy-mode steps",
+    );
+    // "Telegram groups" everywhere: the web room owns the other name.
+    for (const [k, v] of Object.entries(EN)) {
+      if (k.includes("elegramGroups") || k.includes("privacyMode") || k.includes("chattiness") || k.includes("Chatty")) {
+        assert.doesNotMatch(v, /group ?chat/i, `${k} uses the web room's name`);
+      }
+    }
+  });
+
+  it("PRIVACY MODE HAS THREE STATES: off says it can follow the chat, on and UNKNOWN both show the steps", () => {
+    // Unknown (no token, a failed getMe, an older server) must never read as
+    // "on": that claim sends an owner to BotFather for nothing. Only an
+    // explicit false earns the verdict.
+    assert.match(code, /tg\?\.canReadAllGroupMessages === true \? \(\s*t\("settings\.text\.privacyModeOff"\)/);
+    assert.match(code, /tg\?\.canReadAllGroupMessages === false \? t\("settings\.text\.privacyModeOn"\) : t\("settings\.text\.privacyModeUnknown"\)\}\{" "\}\s*\{t\("settings\.text\.privacyModeSteps"\)\}/);
+    assert.match(code, /tg\?\.canJoinGroups === false && /);
   });
 });

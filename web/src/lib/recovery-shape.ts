@@ -145,11 +145,19 @@ const SWEEP_SELECTOR = "0x01681a62";
 
 export interface ShapeOptions {
   /**
-   * The vault this ticket blesses, from the ticket's own signed body. A sweep
-   * leg is admitted only when its target equals this, case-insensitively.
-   * Absent or null means no sweep may be relayed at all.
+   * The vaults this ticket blesses, from the ticket's own signed body. A sweep
+   * leg is admitted only when its target is IN this set, case-insensitively.
+   * Absent or empty means no sweep may be relayed at all.
+   *
+   * A SET RATHER THAN ONE ADDRESS, because after v2 an account has two vaults
+   * and an owner may still hold a balance in the older one. This is the only
+   * rule in this file that loosens, and it loosens by exactly one address that
+   * the SERVER derived from the same account — nothing a caller sends can add
+   * to it, and everything else here is unchanged: a sweep still cannot be mixed
+   * with transfers, still cannot carry value, and still must be four bytes plus
+   * exactly one address word.
    */
-  classVault?: `0x${string}` | null;
+  classVaults?: readonly `0x${string}`[];
 }
 
 export function isRecoveryShape(callData: Hex, opts: ShapeOptions = {}): ShapeVerdict {
@@ -168,25 +176,41 @@ export function isRecoveryShape(callData: Hex, opts: ShapeOptions = {}): ShapeVe
    * requiring that keeps this function a pair of narrow allowances instead of
    * one wide one.
    */
-  const vault = opts.classVault ?? null;
+  const vaults = (opts.classVaults ?? []).map((v) => v.toLowerCase());
   const sweepLegs = legs.filter((l) => l.data.slice(0, 10).toLowerCase() === SWEEP_SELECTOR);
   if (sweepLegs.length > 0) {
     if (sweepLegs.length !== legs.length) {
       return { ok: false, why: "a vault sweep cannot be mixed with transfers in one operation" };
     }
-    if (!vault) {
+    if (vaults.length === 0) {
       return { ok: false, why: "this ticket does not name a class vault, so no vault sweep may be relayed" };
     }
+    // ONE VAULT PER OPERATION, still. `recoverFunds` sends one op per vault
+    // because the batch is atomic, so a mixed-target sweep is not something
+    // this system produces — and admitting it would let one refusing vault take
+    // another's sweep down with it, inside a shape this file had blessed.
+    let target: string | null = null;
     for (const leg of sweepLegs) {
       if (leg.value !== 0n) return { ok: false, why: "a vault sweep carrying native value" };
-      if (leg.to.toLowerCase() !== vault.toLowerCase()) {
+      const to = leg.to.toLowerCase();
+      if (!vaults.includes(to)) {
         return { ok: false, why: "a sweep aimed at something other than this account's own class vault" };
       }
+      if (target && target !== to) {
+        return { ok: false, why: "a vault sweep naming two different vaults in one operation" };
+      }
+      target = to;
       // 4-byte selector plus exactly one address word. Anything longer is a
       // different call wearing the same first four bytes.
       if (leg.data.length !== 10 + 64) return { ok: false, why: "a vault sweep with unexpected arguments" };
     }
-    return { ok: true, to: vault, tokenLegs: sweepLegs.length, nativeLeg: false, classSweep: true };
+    return {
+      ok: true,
+      to: target as `0x${string}`,
+      tokenLegs: sweepLegs.length,
+      nativeLeg: false,
+      classSweep: true,
+    };
   }
 
   let dest: `0x${string}` | null = null;

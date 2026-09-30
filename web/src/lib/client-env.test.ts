@@ -50,8 +50,20 @@ function code(file: string): string {
 
 test("no client module imports isHostedMode — it is always false in the browser", () => {
   const apiDir = path.join(SRC, "app", "api");
+  // These services run behind the signed partner route. Their Node-only
+  // dependencies (session crypto / SQLite and Postgres) cannot run in a client
+  // bundle; unlike session.ts they are never wallet/browser helpers.
+  const partnerServerModules = new Set([
+    path.join(SRC, "lib", "partner-runtime.ts"),
+    path.join(SRC, "lib", "partner-store.ts"),
+    // The MCP server's config: read only by route handlers (/mcp, /oauth/*,
+    // /.well-known/*, /api/mcp/*). It imports node:crypto-backed modules and is
+    // never part of a client bundle.
+    path.join(SRC, "mcp", "config.ts"),
+  ]);
   const offenders = walk(SRC)
     .filter((f) => !f.startsWith(apiDir)) // route handlers are server-side
+    .filter((f) => !partnerServerModules.has(f))
     .filter((f) => /\bisHostedMode\b/.test(code(f)))
     .map((f) => path.relative(process.cwd(), f));
 

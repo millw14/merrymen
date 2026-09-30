@@ -109,6 +109,64 @@ export interface Snapshot {
    * proposer shrinks itself; checkPolicy and the on-chain caps remain the wall.
    */
   spendHeadroomUsdg: bigint;
+  /**
+   * OPERATIONS still allowed in the trailing 24h: the grant's `maxOpsPerDay`
+   * minus what has already gone. Zero means the count is used up.
+   *
+   * THE OTHER HALF OF THE DAY'S ALLOWANCE, and the half this snapshot never
+   * carried. `spendHeadroomUsdg` let a strategy see the money run out; nothing
+   * let it see the COUNT run out, so once `maxOpsPerDay` was reached
+   * steady-basket still saw budget, proposed the same legs every tick, and
+   * checkPolicy refused every one with `ops-cap`. A paper book fills instantly,
+   * so a paper agent reached its count early and posted the same refusal once a
+   * tick for the rest of the day.
+   *
+   * A hint exactly like the money figure above: it only ever SHRINKS what a
+   * strategy proposes, and checkPolicy remains the rule. It does NOT bind an
+   * exit — policy.ts exempts a sell into cash from the count, and a strategy
+   * that withheld one here would be stricter than the wall.
+   *
+   * Absent or NULL means "not read" — a backtest, a fixture, a grant with no
+   * count. That is not zero and must not be treated as zero: a strategy that
+   * went quiet on an unread count would be inventing a refusal nobody made.
+   */
+  opsHeadroom?: number | null;
+  /**
+   * THE ACCOUNT'S DRAWDOWN, as the wall measures it: how far equity sits below
+   * the peak the breaker judges against, in bps, beside the limit sealed into
+   * the grant. Built by `drawdownOf` from the same peak, equity and limit
+   * checkPolicy compares for `drawdown-breaker`.
+   *
+   * A HINT EXACTLY LIKE `opsHeadroom`. Once the breaker is tripped the wall
+   * refuses every buy, so a strategy that goes on proposing them is a refusal a
+   * tick — and for a Trencher a paid Brain review a tick too. This only ever
+   * SHRINKS what is proposed; checkPolicy remains the rule, and an exit is
+   * never withheld because of it — the breaker is a brake on taking risk,
+   * never a lock on the doors.
+   *
+   * Absent or NULL means NOT MEASURED: no peak yet, equity that could not be
+   * totalled, a fixture, a backtest. That is not a tripped breaker, and a
+   * strategy that went quiet on it would be inventing a refusal nobody made.
+   */
+  drawdown?: { bps: number; limitBps: number } | null;
+  /**
+   * TODAY'S ENERGY, when it is limiting anything: how many NEW trades this
+   * agent may still start on its own before 00:00 UTC (core energy.ts).
+   * Present only while the gate is enforcing on a low-energy agent.
+   *
+   * A HINT EXACTLY LIKE `opsHeadroom`, and read by one strategy only — the
+   * strategist, so it does not pay for a model call whose only possible answer
+   * is a buy that would be withheld. The rule itself is index.ts's hard filter,
+   * which every producer passes through; no builtin needs to read this. It
+   * never binds an exit: exit orders, stop-losses, take-profits and the
+   * owner's own orders are never withheld by energy. (The strategist's paid
+   * window itself is paced, by claimWindow — so its OWN exit decisions wait
+   * for the next window like everything else it starts.)
+   *
+   * Absent or NULL means NOT LIMITED — full energy, the gate off or observing,
+   * a fixture. That is not zero and must not be treated as zero.
+   */
+  energy?: { entriesLeft: number } | null;
   /** The grant's per-trade cap (6dp) — the ceiling for a single swap. Deposits are
    * capped at the DAILY limit instead (see policy.ts), hence the separate figure. */
   perTradeCapUsdg: bigint;
@@ -168,6 +226,80 @@ export interface Strategy {
    * tenant's own strategy file returns, and why one can never publish prose.
    */
   tick(snap: Snapshot): TradeIntent[] | Tick | Promise<TradeIntent[] | Tick>;
+}
+
+/**
+ * Has the day's operation count been MEASURED at zero?
+ *
+ * One definition for every strategy that reads it, because the whole risk here
+ * is the unread case: `undefined`, `null` and `NaN` are all "nobody counted",
+ * and each must answer false rather than be coerced into a spent day.
+ */
+export function opsSpent(snap: Snapshot): boolean {
+  const h = snap.opsHeadroom;
+  return typeof h === "number" && Number.isFinite(h) && h <= 0;
+}
+
+/**
+ * Has today's energy allowance for new trades been MEASURED as used up? The
+ * unread and unlimited cases — absent, null, non-finite — all answer false,
+ * the same rule as `opsSpent`.
+ */
+export function energyEntriesSpent(snap: Pick<Snapshot, "energy">): boolean {
+  const left = snap.energy?.entriesLeft;
+  return typeof left === "number" && Number.isFinite(left) && left <= 0;
+}
+
+/**
+ * The snapshot's `opsHeadroom`, from the grant's ceiling and the count so far —
+ * the same two numbers checkPolicy compares for `ops-cap`, so the strategy goes
+ * quiet on exactly the tick the wall would start refusing. A ceiling that is not
+ * a finite number is a count nobody can read, and comes back null, never zero.
+ */
+export function opsHeadroomOf(maxOpsPerDay: number, opsToday: number): number | null {
+  if (!Number.isFinite(maxOpsPerDay) || !Number.isFinite(opsToday)) return null;
+  return Math.max(0, maxOpsPerDay - opsToday);
+}
+
+/**
+ * The drawdown the wall would judge a buy against, or null when it would not
+ * judge one at all.
+ *
+ * checkPolicy's own arithmetic, line for line: no peak, or a book whose total
+ * is known to be partial, and the rule does not run — so neither does this. A
+ * limit that is not a finite number is a limit nobody read.
+ */
+export function drawdownOf(s: {
+  peakUsdg: bigint;
+  equityUsdg: bigint;
+  equityKnown: boolean;
+  maxDrawdownBps: number;
+}): { bps: number; limitBps: number } | null {
+  if (s.peakUsdg <= 0n || !s.equityKnown || !Number.isFinite(s.maxDrawdownBps)) return null;
+  return { bps: Number(((s.peakUsdg - s.equityUsdg) * 10_000n) / s.peakUsdg), limitBps: s.maxDrawdownBps };
+}
+
+/**
+ * Has the drawdown breaker been MEASURED as tripped? One definition for every
+ * reader, because the risk is the unread case: absent, null and non-finite are
+ * all "nobody measured", and each answers false.
+ */
+export function breakerTripped(snap: Pick<Snapshot, "drawdown">): boolean {
+  const d = snap.drawdown;
+  return !!d && Number.isFinite(d.bps) && Number.isFinite(d.limitBps) && d.bps >= d.limitBps;
+}
+
+/**
+ * The idle reason a tripped breaker gives, or undefined.
+ *
+ * THE LIMIT, NOT THE DRAWDOWN. The idle channel tells the owner once per
+ * CHANGE of sentence, and the drawdown moves every tick the book does — a
+ * sentence carrying it would be a new event every tick for as long as the
+ * breaker stays tripped. The limit is sealed into the key and does not move.
+ */
+export function breakerIdle(snap: Pick<Snapshot, "drawdown">): Why | undefined {
+  const d = snap.drawdown;
+  return d && breakerTripped(snap) ? { code: "breaker-tripped", limitBps: d.limitBps } : undefined;
 }
 
 /** Normalise either return shape. The one place that knows about both. */

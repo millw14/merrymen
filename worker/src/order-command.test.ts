@@ -13,6 +13,11 @@
  * be imported without booting a worker, an RPC and a grant. What is being pinned
  * is the ORDER OF THE CHECKS and the fact that each exists at all, which is
  * exactly what words on the page can carry.
+ *
+ * THE GATES THEMSELVES ARE RUN NOW, not read. The reads, the pause, the
+ * arguments and the owner's ceiling moved out of main() into order-gate.ts, and
+ * order-gate.test.ts runs every one of them against a submitter that records
+ * being called — so the source-reads of them that lived here are gone.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -28,8 +33,6 @@ const codeOf = (src: string) =>
     .join("\n");
 
 const CODE = codeOf(SRC);
-/** The order dispatch alone. */
-const ORDER = CODE.slice(CODE.indexOf("async function runOrderCommand"), CODE.indexOf("async function runSelftestProbe"));
 const RUN = CODE.slice(CODE.indexOf("async function runCommand"), CODE.indexOf("async function runOrderCommand"));
 
 describe("an order that waited too long is not the order that was placed", () => {
@@ -54,40 +57,11 @@ describe("pause is the owner's stop button and an order honours it", () => {
     // The drain deliberately runs ABOVE the tick's own isPaused() return — you
     // want to be able to probe a paused agent. An order is the opposite: a
     // trade that executes through a pause is the worst surprise this app could
-    // produce. Moving the call site would break the probe; the gate belongs
-    // here.
-    assert.match(ORDER, /if \(isPaused\(\)\)/);
-    assert.match(ORDER, /you have me paused/);
-    // And the probe is NOT gated, so the two really are separate decisions.
+    // produce. The order's refusal is run in order-gate.test.ts; what is pinned
+    // here is that the probe is NOT gated, so the two really are separate
+    // decisions.
     const probe = CODE.slice(CODE.indexOf("async function runSelftestProbe"), CODE.indexOf("async function runSelftestProbe") + 2000);
     assert.ok(!/isPaused\(\)/.test(probe));
-  });
-});
-
-describe("what an argument is allowed to be, proved a second time", () => {
-  it("A SIDE IS BUY OR SELL", () => {
-    assert.match(ORDER, /a\.side === "buy" \|\| a\.side === "sell" \? a\.side : null/);
-    assert.match(ORDER, /is not a buy or a sell/);
-  });
-
-  it("A SIZE IS FINITE AND POSITIVE — NaN and Infinity die before usdg()", () => {
-    // `usdg()` on a NaN is a BigInt throw, which makes the refusal a stack
-    // trace instead of a sentence. And a negative size passes every cap in the
-    // wall, because every cap is an upper bound.
-    assert.match(ORDER, /if \(!Number\.isFinite\(size\) \|\| size <= 0\)/);
-    const check = ORDER.indexOf("Number.isFinite(size)");
-    const submit = ORDER.indexOf("submitChatTrade(");
-    assert.ok(check > 0 && check < submit, "checked before anything is sized");
-  });
-
-  it("A SYMBOL IS A TICKER, not a sentence or a path", () => {
-    assert.match(ORDER, /\/\^\[A-Z0-9\]\{1,12\}\$\/\.test\(symbol\)/);
-  });
-
-  it("AND THE OWNER'S CEILING IS APPLIED HERE TOO, not only in the route", () => {
-    assert.match(ORDER, /cfg\.telegramMaxActionUsdg/);
-    const ceiling = ORDER.indexOf("telegramMaxActionUsdg");
-    assert.ok(ceiling < ORDER.indexOf("submitChatTrade("), "the ceiling is checked before the order is placed");
   });
 });
 
@@ -138,7 +112,8 @@ describe("the receipt says what the ledger says", () => {
     // trimmed — asked and actual are now both passed and the direction derived.
     const submit = CODE.slice(CODE.indexOf("async function submitChatTrade"), CODE.indexOf("async function submitChatTransfer"));
     assert.match(submit, /if \(!partial\) sold = Number\(pos\.valueUsdg\) \/ 1e6;/);
-    assert.match(submit, /sayTradeOutcome\(outcome, side, symbol, usdgAmount, sold \?\? usdgAmount\)/);
+    // `named` is the symbol as the watch set spells it (energy-buy.ts resolveOrderToken).
+    assert.match(submit, /sayTradeOutcome\(outcome, side, named, usdgAmount, sold \?\? usdgAmount\)/);
     const curve = CODE.slice(CODE.indexOf("async function submitChatCurveTrade"), CODE.indexOf("function sayTradeOutcome"));
     assert.match(curve, /sayTradeOutcome\(outcome, side, symbol, usdgAmount, actual\)/);
     assert.match(CODE, /less than the \$\{asked\.toFixed\(2\)\} you asked for/);
@@ -164,13 +139,16 @@ describe("a verdict, not a sentence somebody reads a verdict out of", () => {
     // no surface in this app renders, so an owner refused for being paused,
     // expired, over their ceiling or in an unwatched symbol saw nothing at all.
     assert.ok(!/\/\^\(🧱\|🤔\|↩️\)\//.test(CODE), "the emoji sniff is gone");
-    assert.match(CODE, /type OrderReply = \{ ok: boolean; line: string \};/);
+    // The verdict rides beside `ok` as DATA (order-receipt.ts builds the
+    // receipt from it); `ok` itself is still set by each path, never derived.
+    assert.match(CODE, /type OrderReply = \{ ok: boolean; line: string; executionStatus\?: TradeRow\["status"\]; verdict\?: OrderVerdict \};/);
     assert.match(CODE, /const no = \(line: string\): OrderReply => \(\{ ok: false, line \}\);/);
     // Both submitters return the verdict, and the dispatch passes it straight
     // through rather than re-deriving one.
     const trade = CODE.slice(CODE.indexOf("async function submitChatTrade"), CODE.indexOf("async function submitChatTransfer"));
     assert.match(trade, /Promise<OrderReply>/);
-    assert.match(CODE, /return submitChatTrade\(side, symbol, size\);/);
+    // (With the order's own source and deadline — order-gate.ts orderAsked.)
+    assert.match(CODE, /return submitChatTrade\(side, symbol, size, asked\);/);
   });
 
   it("and PAPER is not a success either", () => {
@@ -202,21 +180,13 @@ describe("an unreadable market answers the order instead of starving it", () => 
     const at = CODE.indexOf("the market could not be read this tick");
     assert.ok(at > 0);
     const branch = CODE.slice(at, CODE.indexOf("return;", at) + 8);
-    assert.match(branch, /runQueuedCommand\(active\.agentId, true\)/);
-    // And it is still ahead of the normal drain, which stays where it was.
-    assert.ok(CODE.indexOf("runQueuedCommand(active.agentId, true)") < CODE.indexOf("void runQueuedCommand(active.agentId)"));
-  });
-
-  it("AND A TRADE IS REFUSED BY NAME, never filled on stale data", () => {
-    // The equity snapshot behind the drawdown breaker is precisely what could
-    // not be read, and checkPolicy SKIPS the breaker when equity is unknown —
-    // so filling here would place a trade with that guard silently off.
-    assert.match(ORDER, /if \(marketUnreadable\) \{/);
-    assert.match(ORDER, /I could not read the market this tick, so I did not place it/);
-    // Checked before anything is sized, and before the pause gate.
-    const unread = ORDER.indexOf("if (marketUnreadable)");
-    assert.ok(unread > 0 && unread < ORDER.indexOf("isPaused()"), "the earliest gate in the order path");
-    assert.ok(unread < ORDER.indexOf("submitChatTrade("));
+    assert.match(branch, /const marketUnread = tickBook\.unread\("market"\);\s*if \(active\) await runQueuedCommand\(active\.agentId, marketUnread\)/);
+    // The refusal those reads produce — by name, before the pause and before
+    // anything is sized, with nothing reaching a submitter — is run in
+    // order-gate.test.ts, and so is the same refusal for a Telegram order after
+    // this tick. The reads are a required argument, and only the tick book can
+    // make them (StatedReads), so a drain that states nothing to it does not
+    // compile.
   });
 
   it("but the PROBE still runs, because it needs no market data at all", () => {
@@ -224,6 +194,8 @@ describe("an unreadable market answers the order instead of starving it", () => 
     // that depends on a price, so an unreadable tick is no reason to refuse it.
     // The probe arm takes no flag; only the trade arm does.
     assert.match(RUN, /if \(cmd\.kind === "selftest"\) return runSelftestProbe\("dashboard"\);/);
-    assert.match(RUN, /if \(cmd\.kind === "trade"\) return runOrderCommand\(cmd, marketUnreadable\);/);
+    // The trade arm takes the tick's reads whole, and its reply is only
+    // wrapped — the sentence and the verdict pass through orderOutcome untouched.
+    assert.match(RUN, /if \(cmd\.kind === "trade"\) return orderOutcome\(cmd, await runOrderCommand\(cmd, reads\)\);/);
   });
 });

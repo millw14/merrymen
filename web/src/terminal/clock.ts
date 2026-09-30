@@ -83,7 +83,7 @@ export function runLeft(id: StrategyId, now: number): number {
 }
 
 /**
- * How long ago, for the feed rail — "now" under a minute, else the figure.
+ * How long ago, for the feed rail — "12s", "4m", "3h", "2d".
  *
  * MOVED HERE FROM `wire.tsx`, AND THAT MOVE IS THE POINT. It was a private
  * function in a `.tsx` file, and the test runner globs `*.test.ts` only — there
@@ -91,20 +91,17 @@ export function runLeft(id: StrategyId, now: number): number {
  * from a test. The `20688d` bug lived in its one call site for as long as it
  * did because no test could have been written against it without this move.
  *
+ * SECONDS UNDER A MINUTE, NOT "now". "now" was honest while the feed refreshed
+ * once a minute and the rail re-rendered every thirty seconds: nothing on it
+ * could be timed closer than that. The feed now reads every ten seconds, so a
+ * trade that landed twelve seconds ago can be on screen twelve seconds after it
+ * happened — and "now" said the same word for it as for one fifty-nine seconds
+ * old, which is exactly the difference a reader watching the tape wants to see.
+ * It also agrees with `ageOf` on the agent screen at every age, where it used
+ * to agree only past the first minute.
+ *
  * Milliseconds, like everything else in this module.
  */
 export function whenOf(atMs: number, nowMs: number): string {
-  const age = elapsed(atMs, nowMs);
-  switch (age.unit) {
-    case "s":
-      return "now";
-    case "m":
-    case "h":
-    case "d":
-      return age.text;
-    default: {
-      const _x: never = age.unit;
-      return _x;
-    }
-  }
+  return elapsed(atMs, nowMs).text;
 }

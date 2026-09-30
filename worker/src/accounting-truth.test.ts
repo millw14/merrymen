@@ -415,7 +415,9 @@ describe("P3c — a doubt raised by watching the account is never lifted by a fi
     // asymmetry, so the call sites are pinned as well as the reducer.
     const src = strip(readFileSync(new URL("./index.ts", import.meta.url), "utf8"));
     assert.match(src, /setTruth\(foldLicence\(truth, l\)\);/);
-    assert.equal((src.match(/doubtContributions\(/g) ?? []).length, 3, "one definition, two call sites");
+    // One definition, three call sites: resume-with-drift, stand-down, and a
+    // settled op whose cash movement could not be read (flow-inference.ts).
+    assert.equal((src.match(/doubtContributions\(/g) ?? []).length, 4, "one definition, three call sites");
     // And nothing writes contributionsKnown outside setTruth.
     const writes = src.match(/accounting\.contributionsKnown\s*=/g) ?? [];
     assert.equal(writes.length, 1, `contributionsKnown must have exactly one writer, found ${writes.length}`);

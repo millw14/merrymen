@@ -19,17 +19,178 @@
  * exactly that reason — the budget is the risk control, not the analysis.
  */
 
+import type { PriceQuote } from "../../../packages/core/src/index";
 import type { TradeIntent } from "../policy";
-import type { Snapshot, Strategy, Tick } from "./types";
+import { breakerIdle, type Snapshot, type Strategy, type Tick } from "./types";
 import type { Why } from "./reasons";
+import type { TrenchBrainOrder } from "../trencher-brain";
+
+/**
+ * WHY A CANDIDATE COULD NOT BE PRICED WELL ENOUGH TO OPEN A POSITION.
+ *
+ * ── A STABLE KIND, NEVER PROSE ───────────────────────────────────────────
+ *
+ * The obvious way to fix a vague refusal is to carry the pricer's own sentence
+ * through to the owner. It is the wrong one here. Those sentences embed a live
+ * pool balance and a divergence percentage (`venues/pool-price.ts`), so they
+ * change every time anyone trades — and this refusal is emitted per candidate
+ * per tick into `events`, which has no dedupe (`addEvent`, store.ts) and no
+ * pruning. `index.ts` already settled the same question for the sibling warn:
+ * "Key on the refusal KIND, never the prose."
+ *
+ * So the kind travels, the sentence is written here in advance, and the live
+ * figures stay in the rate-limited `[price] refusing to value` warn that
+ * already carries them once per change rather than once per tick.
+ *
+ * ── AND WHY "NOBODY ANSWERED" AND "A QUOTE OF ZERO" ARE SEPARATE MEMBERS ─
+ *
+ * They are different facts, and folding them together is the one mistake this
+ * repo refuses everywhere it counts (see `liquidityUsdg` in
+ * packages/core/src/tokens.ts: absence is a real value, never 0). An owner
+ * told "its quote came back at zero" about a token no pricer ever looked at
+ * would go hunting for a broken pool that does not exist.
+ */
+export type UnpriceableCause =
+  | "no-quote"
+  | "stale-price"
+  | "zero-price"
+  | "curve-priced"
+  | "v4-priced"
+  | "feed-priced"
+  | "unknown-source"
+  | "not-watched";
+
+/** The quote fields this needs. Typed from `PriceQuote` so a new SOURCE breaks the build. */
+type QuoteEvidence = Pick<PriceQuote, "stale" | "price8" | "source">;
+
+/**
+ * The gate and its explanation, from ONE expression.
+ *
+ * `priceable` was four booleans ANDed at the call site while the refusal was a
+ * fixed string in another file, so the two could drift — and they had. That
+ * string blamed "the pool guards" both for a token priced perfectly well off a
+ * v4 pool and for a token no pricer ever found, which is precisely the
+ * confusion `shouldEnter`'s own header says it exists to prevent. Deriving the
+ * boolean FROM the cause makes the drift unrepresentable rather than merely
+ * fixed.
+ *
+ * `requirePoolSource` is the CALLER'S POLICY, not a fact about the quote: a v4
+ * or curve mark is good enough to VALUE a holding and deliberately not good
+ * enough to authorise a new buy — `lastUnpriceable` in index.ts draws the same
+ * line for the scout budget, and the two must agree.
+ *
+ * Returns null when the candidate is priceable.
+ */
+export function unpriceableCause(
+  quote: QuoteEvidence | undefined,
+  requirePoolSource: boolean,
+): UnpriceableCause | null {
+  if (!quote) return "no-quote";
+  if (quote.stale) return "stale-price";
+  if (quote.price8 <= 0n) return "zero-price";
+  if (!requirePoolSource) return null;
+  switch (quote.source) {
+    case "pool":
+      return null;
+    case "curve":
+      return "curve-priced";
+    case "v4":
+      return "v4-priced";
+    case "chainlink":
+    case "broker":
+      return "feed-priced";
+    default: {
+      // A SWITCH RATHER THAN A CATCH-ALL, and this is the reason. An `else` here
+      // would classify a future `PriceQuote.source` as a stock feed and tell an
+      // owner a DEX quote came from one — the original bug's exact shape, in the
+      // one branch no test sweep can reach, because a sweep's alphabet is a copy
+      // of the union rather than the union.
+      //
+      // The `never` makes adding a source a COMPILE error, so somebody has to
+      // decide. The return is what happens if one is ever added without that
+      // decision reaching here: refuse, and say only what is known.
+      const unhandled: never = quote.source;
+      void unhandled;
+      return "unknown-source";
+    }
+  }
+}
+
+/**
+ * The two fields TOGETHER, so a call site cannot set one and forget the other.
+ *
+ * The pair has two illegal states — priceable with a cause, and unpriceable
+ * without one — and both are silent when they happen: the first hides a reason
+ * nothing will ever read, the second makes the owner's note say "nobody
+ * recorded why" about a tick that knew perfectly well. Neither shows up in a
+ * typecheck, so the pair is built in one place and spread at the call sites
+ * rather than assembled field by field.
+ */
+export function priceability(
+  quote: QuoteEvidence | undefined,
+  requirePoolSource: boolean,
+): { priceable: boolean; unpriceable?: UnpriceableCause } {
+  const cause = unpriceableCause(quote, requirePoolSource);
+  return cause === null ? { priceable: true } : { priceable: false, unpriceable: cause };
+}
+
+/**
+ * A token the tick was never asked to price, which is not a pricing failure.
+ *
+ * Its own constant because it is a fact about the WATCH SET rather than about
+ * a quote — `unpriceableCause` is handed a quote and must not be able to guess
+ * it (see the test that pins exactly that).
+ */
+export const NOT_WATCHED = { priceable: false, unpriceable: "not-watched" } as const;
+
+/**
+ * What the owner actually reads. One sentence per cause, all written here.
+ *
+ * Short on purpose: the note these land in is prefixed with
+ * `trencher: passing on <symbol> — `, and Telegram slices an event at 160
+ * characters (`telegram/reads.ts`), so a long sentence loses its own ending —
+ * which for a refusal means losing the half that says what happened.
+ *
+ * Each is a bare fact with no lead-in, because the note already supplies the
+ * subject and one em-dash. "passing on CATE — can't be priced — no venue…"
+ * reads as two sentences fighting; the siblings below ("only $12,000 deep")
+ * set the register.
+ */
+const UNPRICEABLE_WHY: Record<UnpriceableCause, string> = {
+  // "NO USABLE PRICE", not "no venue answered" — the two are different and the
+  // absence cannot tell them apart. A token is missing from the tick's quotes
+  // both when nothing could be found to price it AND when a pool answered and
+  // the answer was refused (too thin, divergent, an extortionate fee). The
+  // live case that prompted all this was the second kind: a pool quoted
+  // $11,926 against a $25,000 floor. Which of the two it was is in the
+  // `[price] refusing to value` warn, which carries the figures once per
+  // change; claiming it here would be guessing.
+  "no-quote": "no venue gave a usable price this tick",
+  "stale-price": "its price stopped updating",
+  "zero-price": "its quote came back at zero",
+  "curve-priced": "priced off its bonding curve, which has no oracle — enough to value it, not to buy it",
+  "v4-priced": "priced off a v4 pool, which has no oracle — enough to value it, not to buy it",
+  "feed-priced": "the only price under this symbol is a stock feed, not this token's own market",
+  // BOTH AXES, because the check is both. The site tests symbol AND address,
+  // and the symbol is the conjunct that fails on the ordinary path: discovery
+  // records a token under its on-chain `symbol()` casing, the owner is told to
+  // add it, and they type it differently — so a sentence naming only the
+  // address is false exactly when the owner could check it and see a token
+  // sitting at that address. Vague would have been safer than precisely wrong.
+  "not-watched": "no watched token matches that symbol and address",
+  "unknown-source": "priced from a source this strategy doesn't know how to judge",
+};
 
 /** What the tick knows about a token it might enter. All chain-derived. */
 export interface Candidate {
+  custodyVault?: `0x${string}`;
   symbol: string;
   token: `0x${string}`;
   decimals: number;
-  /** Passed the depth + divergence guards this tick. */
+  /** Had pool-grade evidence to OPEN on this tick — see `unpriceableCause`. */
   priceable: boolean;
+  /** Why not, when `priceable` is false. Absent means nobody recorded it. */
+  unpriceable?: UnpriceableCause;
   /** USD depth of the shallowest leg of its route. */
   liquidityUsd: number;
   /** Fully diluted value — supply × price. NOT float; see token-stats.ts. */
@@ -37,10 +198,12 @@ export interface Candidate {
   /** Seconds since the pool was initialized. */
   ageSec: number;
   price8: bigint;
+  volume24hUsd?: number;
 }
 
 /** What we remember about something already held, so exits can be judged. */
 export interface OpenPosition {
+  custodyVault?: `0x${string}`;
   symbol: string;
   token: `0x${string}`;
   entryPrice8: bigint;
@@ -96,6 +259,18 @@ export const TRENCHER_DEFAULTS: TrencherConfig = {
 
 export type EntryVerdict = { enter: true } | { enter: false; why: string };
 
+/** Faster exits without relaxing entry quality or increasing position size. */
+export const TRENCHER_FAST: TrencherConfig = {
+  ...TRENCHER_DEFAULTS,
+  stopLossBps: 1_000,
+  takeProfitBps: 2_000,
+  maxHoldSec: 30 * 60,
+  // Active older memecoins are eligible too; volume, depth and price still gate entry.
+  maxAgeSec: Number.MAX_SAFE_INTEGER,
+  // Volume-led trading includes established memecoins, not only small launches.
+  maxFdvUsd: Number.POSITIVE_INFINITY,
+};
+
 /**
  * Should this be entered? EVERY condition must hold.
  *
@@ -104,7 +279,15 @@ export type EntryVerdict = { enter: true } | { enter: false; why: string };
  * "nothing qualified" from "nothing was checked".
  */
 export function shouldEnter(c: Candidate, cfg: TrencherConfig, nowSec: number): EntryVerdict {
-  if (!c.priceable) return { enter: false, why: "can't be priced — the pool guards refused it" };
+  if (![c.liquidityUsd, c.fdvUsd, c.ageSec].every(Number.isFinite)) {
+    return { enter: false, why: "incomplete market data" };
+  }
+  // An UNSET cause reads as "nobody recorded why", never as "there is no
+  // reason". The field is optional so that a caller written before it existed
+  // still refuses — it must not be able to claim an explanation it never had.
+  if (!c.priceable) {
+    return { enter: false, why: c.unpriceable ? UNPRICEABLE_WHY[c.unpriceable] : "can't be priced — nobody recorded why" };
+  }
   if (c.liquidityUsd < cfg.minLiquidityUsd) {
     return { enter: false, why: `only $${Math.round(c.liquidityUsd).toLocaleString()} deep` };
   }
@@ -174,7 +357,62 @@ export function priceMoveBps(entry8: bigint, now8: bigint): number {
   return Number(((now8 - entry8) * 10_000n) / entry8);
 }
 
+/** A remainder worth less than this (USDG, 6dp) is not left behind: $0.10. */
+export const DUST_REMAINDER_USDG = 100_000n;
+/** …nor one under this share of the position: 1%. */
+export const DUST_REMAINDER_BPS = 100n;
+
+/**
+ * HOW MUCH OF A POSITION ONE EXIT SELLS — and never a leftover.
+ *
+ * A Brain exit names a dollar size, and the old arithmetic sold exactly that
+ * share: `raw * notional / available`. The Brain sizes a sell a hair under the
+ * position's value as often as not, so Shogun sold 13,300.78 of 13,306.85
+ * musebook and left 6.06 behind — 0.05% of the position, worth $0.002. The
+ * next exit sold that for a fraction of a cent: a whole operation, a trade ping
+ * reading "0.00", and a P&L card of "-6.5% · 0.00 · 0.00 · 0.00".
+ *
+ * So a partial that would leave under 1% of the position, or under $0.10, is
+ * a whole exit instead. A deliberate trim — half, a third — still leaves what
+ * it meant to. A rule exit (`forced`) always sells everything, as before.
+ *
+ * Pure: `raw` is the quantity held, `available` its value and `notional` the
+ * value the exit asked for, both USDG 6dp. Returns what to sell and the value
+ * that stands for.
+ */
+export function exitSize(
+  raw: bigint,
+  available: bigint,
+  notional: bigint,
+  forced: boolean,
+): { amount: bigint; notional: bigint } {
+  if (forced) return { amount: raw, notional };
+  if (available <= 0n || raw <= 0n) return { amount: 0n, notional };
+  const asked = notional < available ? notional : available;
+  const left = available - asked;
+  if (left < DUST_REMAINDER_USDG || left * 10_000n < available * DUST_REMAINDER_BPS) {
+    return { amount: raw, notional: available };
+  }
+  return { amount: (raw * asked) / available, notional: asked };
+}
+
+/**
+ * Was the holding a buy lands on only dust — worth under one micro-USDG at the
+ * buy's own fill price? The Trencher never adds to a real position, so a buy
+ * onto dust is a fresh entry and must not inherit the old entry's clock: the
+ * stale `entry_sec` would read a brand-new position as hours old and sell it on
+ * the next tick as past its window. Priced from the fill itself, so no lookup
+ * can disagree with it.
+ */
+export function buysOntoDust(prevQtyRaw: bigint, fillQtyRaw: bigint, fillCashUsdg: bigint): boolean {
+  if (prevQtyRaw <= 0n || fillQtyRaw <= 0n || fillCashUsdg <= 0n) return false;
+  return (prevQtyRaw * fillCashUsdg) / fillQtyRaw <= 0n;
+}
+
 export interface TrencherDeps {
+  /** When required, no rule-based entry may bypass a fresh Brain approval. */
+  brainRequired?: boolean;
+  brainOrder?: (symbol: string, token: string, price8: bigint, held: boolean) => TrenchBrainOrder | null;
   cfg: TrencherConfig;
   swapRouter: `0x${string}`;
   usdgToken: `0x${string}`;
@@ -215,6 +453,8 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
       // ── exits first, always ────────────────────────────────────────────
       const openNow = await deps.open();
       const unpriceable = deps.unpriceable?.() ?? new Set<string>();
+      // Positions whose whole priced value rounds to nothing (see below).
+      const dust = new Set<string>();
       for (const pos of openNow) {
         const held = snap.holdings.get(pos.symbol);
         // A HELD-BUT-UNPRICEABLE position is the case this loop used to drop,
@@ -228,6 +468,19 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
         if (!held || held.rawBalance <= 0n) {
           if (!stillUnpriceable || pos.qtyRaw <= 0n) continue;
         }
+        const raw = pos.custodyVault ? pos.qtyRaw : held?.rawBalance ?? pos.qtyRaw;
+        const available = held && pos.custodyVault && held.rawBalance > 0n ? held.valueUsdg * raw / held.rawBalance : held?.valueUsdg ?? pos.costUsdg;
+        // A PRICED SLIVER WORTH NOTHING IS NOT A POSITION. A sell sized at 0 USDG
+        // is refused by the wall as `non-positive`, and the next tick asks again:
+        // measured 2026-09-25, a 4e13-raw DELTA remainder valued at 0 USDG was
+        // re-proposed every ~15s for 29 hours, and because it still counted as
+        // held, the desk could not re-enter DELTA — its only candidate — for the
+        // whole of it. Nothing is lost by not selling it: there is no cash in it.
+        // Unpriceable positions are untouched — "no price" is not "worth zero".
+        if (held && held.rawBalance > 0n && !stillUnpriceable && available <= 0n) {
+          dust.add(pos.symbol);
+          continue;
+        }
         const quote = snap.prices.get(pos.symbol);
         const verdict = shouldExit(
           pos,
@@ -238,43 +491,68 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
           },
           deps.cfg,
         );
-        if (!verdict.exit) continue;
-        deps.onNote?.("warn", `trencher: selling ${pos.symbol} — ${verdict.why}`);
+        const brain = !verdict.exit && quote && !quote.stale ? deps.brainOrder?.(pos.symbol, pos.token, quote.price8, true) : null;
+        if (!verdict.exit && brain?.side !== "sell") continue;
+        const brainNotional = brain ? BigInt(Math.round(brain.usdgAmount * 1e6)) : available;
+        // Never a leftover: a partial that would strand a sliver sells it all (exitSize).
+        const { amount, notional } = exitSize(raw, available, brainNotional < available ? brainNotional : available, verdict.exit);
+        if (amount <= 0n) continue;
+        deps.onNote?.("warn", `trencher: selling ${pos.symbol} — ${verdict.exit ? verdict.why : "Brain exit"}`);
         intents.push({
+          ...(brain ? { decisionId: brain.decisionId } : {}),
           kind: "swap",
-          target: deps.swapRouter,
+          target: pos.custodyVault ?? deps.swapRouter,
+          ...(pos.custodyVault ? {custody:"trencher" as const} : {}),
           sellToken: pos.token,
           buyToken: deps.usdgToken,
-          // The whole position; partials leave a tail. From the ledger when
-          // there is no priced holding to read it from.
-          sellAmountRaw: held?.rawBalance ?? pos.qtyRaw,
+          // The whole position, or a deliberate part of it — never a sliver
+          // (exitSize). From the ledger when there is no priced holding to
+          // read it from.
+          sellAmountRaw: amount,
           // Cost is the honest stand-in for a position with no mark — the same
           // substitution quarantine makes when it carries an unvaluable
           // holding into equity at what was paid for it.
-          notionalUsdg: held?.valueUsdg ?? pos.costUsdg,
+          notionalUsdg: notional,
         });
-        why.push({
+        why.push(verdict.exit ? {
           code: "trench-exit",
           symbol: pos.symbol,
           cause: verdict.cause,
           pct: verdict.pct,
-        });
+        } : null);
       }
 
+      // ── no entries at all while the drawdown breaker is tripped ─────────
+      //
+      // The wall refuses every one of them, so each was a refusal a tick — and,
+      // with the Brain required, a paid review of a coin it would never be
+      // allowed to buy. Seen on the live feed: thirty refused buys in fifteen
+      // minutes, each in fresh model words. So the candidates are not read and
+      // the Brain is not asked; exits above ran first and are untouched.
+      const brake = breakerIdle(snap);
+      if (brake) return intents.length === 0 ? { intents, why, idle: brake } : { intents, why };
+
       // ── entries, only with what's left ─────────────────────────────────
-      const heldSymbols = new Set(openNow.map((p) => p.symbol));
+      const heldSymbols = new Set(openNow.map((p) => p.symbol).filter((s) => !dust.has(s)));
       for (const c of await deps.candidates()) {
         if (heldSymbols.has(c.symbol)) continue;
         if (snap.pausedTokens.has(c.token.toLowerCase())) continue;
-        const size = deps.cfg.perEntryUsdg;
+        let size = deps.cfg.perEntryUsdg;
         // Respect the daily headroom as a sizing hint, exactly as other
         // strategies do — the wall still refuses anything over, this just stops
         // the same oversized intent being re-proposed every tick forever.
-        if (size > snap.spendHeadroomUsdg || size > snap.perTradeCapUsdg) continue;
+        if (!deps.brainRequired && (size > snap.spendHeadroomUsdg || size > snap.perTradeCapUsdg)) continue;
         const verdict = shouldEnter(c, deps.cfg, nowSec);
         if (!verdict.enter) {
           deps.onNote?.("ok", `trencher: passing on ${c.symbol} — ${verdict.why}`);
           continue;
+        }
+        const brain = deps.brainRequired ? deps.brainOrder?.(c.symbol, c.token, c.price8, false) : null;
+        if (deps.brainRequired) {
+          if (brain?.side !== "buy" || !Number.isFinite(brain.usdgAmount) || brain.usdgAmount <= 0) continue;
+          const approved = BigInt(Math.floor(brain.usdgAmount * 1e6));
+          if (approved < size) size = approved;
+          if (size <= 0n || size > snap.spendHeadroomUsdg || size > snap.perTradeCapUsdg) continue;
         }
         deps.onNote?.(
           "ok",
@@ -282,8 +560,10 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
             `FDV $${Math.round(c.fdvUsd).toLocaleString()}, ${Math.round(c.ageSec / 60)}m old`,
         );
         intents.push({
+          ...(brain ? { decisionId: brain.decisionId } : {}),
           kind: "swap",
-          target: deps.swapRouter,
+          target: c.custodyVault ?? deps.swapRouter,
+          ...(c.custodyVault ? {custody:"trencher" as const} : {}),
           sellToken: deps.usdgToken,
           buyToken: c.token,
           sellAmountRaw: size,

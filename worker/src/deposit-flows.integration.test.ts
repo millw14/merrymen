@@ -25,6 +25,7 @@ const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-flows-"));
 process.env.MERRYMEN_HOME = HOME;
 
 const {
+  closeStoreForTest,
   initStore,
   addFlow,
   addTrade,
@@ -37,11 +38,8 @@ const { flowKey } = await import("./deposit-log");
 
 await initStore();
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* best effort */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const grant = (account: string) =>

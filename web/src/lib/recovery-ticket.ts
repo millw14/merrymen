@@ -70,21 +70,38 @@ export interface Ticket {
   smartAccount: `0x${string}`;
   chainId: number;
   /**
-   * This account's class vault, resolved at mint time. Null when there is none
-   * on this chain, or when the factory would not answer.
+   * This account's class vaults, resolved at mint time. EMPTY when there are
+   * none on this chain, or when no factory would answer.
    *
-   * IN THE TICKET, NOT DERIVED PER REQUEST, and that is the point. The relay
-   * admits a `sweep(address)` leg ONLY when its target equals this — so the
-   * pinning is carried by the same HMAC that already binds the account, and the
-   * relay needs no chain read on a money path to know which vault is legitimate
-   * for this caller. A ticket that names no vault admits no sweep at all.
+   * A SET, BECAUSE AFTER v2 AN ACCOUNT HAS TWO. The vault address is a CREATE2
+   * function of the factory, so a second factory means a second vault — and an
+   * owner who has re-signed onto v2 may still have a balance sitting in their
+   * v1 one. A ticket that blesses one of them tells the other's owner their own
+   * vault is "something other than this account's own class vault".
+   *
+   * IN THE TICKET, NOT DERIVED PER REQUEST, and that is still the point. The
+   * relay admits a `sweep(address)` leg ONLY when its target is IN this set —
+   * so the pinning is carried by the same HMAC that already binds the account,
+   * and the relay needs no chain read on a money path to know which vaults are
+   * legitimate for this caller. A ticket that names none admits no sweep at all.
+   *
+   * It is a closed set decided by the SERVER from the account. Nothing a caller
+   * sends can add to it, which is the property that survives going plural.
    */
-  classVault: `0x${string}` | null;
+  classVaults: readonly `0x${string}`[];
   exp: number;
 }
 
 /** The wire spelling of "this ticket names no vault". */
 const NO_VAULT = "none";
+/**
+ * Separates vaults INSIDE the third body field.
+ *
+ * Not a dot: the body is dot-delimited and a fourth field would change the wire
+ * shape for every reader. Addresses are hex, so a hyphen cannot occur inside
+ * one and the split is unambiguous.
+ */
+const VAULT_SEP = "-";
 
 /** Stateless: the ticket IS its own proof, so no server-side store to keep or leak. */
 export function mintTicket(t: Omit<Ticket, "exp">, now = Date.now()): string {
@@ -92,7 +109,8 @@ export function mintTicket(t: Omit<Ticket, "exp">, now = Date.now()): string {
   // The vault is INSIDE the signed body. Appending it outside the hmac would
   // let a caller edit which vault their ticket blesses, which is the whole
   // thing this field exists to prevent.
-  const vault = t.classVault ? t.classVault.toLowerCase() : NO_VAULT;
+  const vault =
+    t.classVaults.length > 0 ? t.classVaults.map((v) => v.toLowerCase()).join(VAULT_SEP) : NO_VAULT;
   const body = `${t.smartAccount.toLowerCase()}.${t.chainId}.${vault}.${exp}`;
   return `${body}.${hmac(body, secretOrThrow())}`;
 }
@@ -124,14 +142,21 @@ export function readTicket(token: string | undefined | null, now = Date.now()): 
   if (!Number.isFinite(chainId)) return null;
   if (!/^0x[0-9a-f]{40}$/.test(account)) return null;
   // A MALFORMED VAULT IS NOT "NO VAULT". The hmac already proves we wrote it, so
-  // anything here that is neither an address nor the literal absence marker
+  // anything here that is neither an address list nor the literal absence marker
   // means this codec and its minter disagree — and silently reading that as
-  // "no class sweep" would strand a vault rather than fail loudly.
-  if (vault !== NO_VAULT && !/^0x[0-9a-f]{40}$/.test(vault)) return null;
+  // "no class sweep" would strand a vault rather than fail loudly. ONE bad entry
+  // fails the whole ticket for the same reason: dropping it would quietly shrink
+  // the set the owner was shown.
+  let classVaults: `0x${string}`[] = [];
+  if (vault !== NO_VAULT) {
+    const parsed = vault.split(VAULT_SEP);
+    if (parsed.some((v) => !/^0x[0-9a-f]{40}$/.test(v))) return null;
+    classVaults = parsed as `0x${string}`[];
+  }
   return {
     smartAccount: account as `0x${string}`,
     chainId,
-    classVault: vault === NO_VAULT ? null : (vault as `0x${string}`),
+    classVaults,
     exp: expMs,
   };
 }

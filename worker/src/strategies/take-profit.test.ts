@@ -176,11 +176,11 @@ describe("the sweep stops eating the day's buying power", () => {
       snap({ cashUsdg: 500_000_000n, spendHeadroomUsdg: 100_000_000n, perTradeCapUsdg: 10_000_000n }),
     );
     const dep = t.intents.find((i) => i.kind === "vault-deposit");
-    // No buy fires (cash < tick size), so nothing is spent; 100 - 10 reserved.
-    assert.equal(dep!.kind === "vault-deposit" && dep!.amountUsdg, 90_000_000n);
+    // The buy shrinks to the cap: 100 - 10 spent - 10 reserved.
+    assert.equal(dep!.kind === "vault-deposit" && dep!.amountUsdg, 80_000_000n);
   });
 
-  it("and a buy that cannot fit today reserves NOTHING, rather than stranding the cash", () => {
+  it("uses the remaining budget for a smaller buy before parking cash", () => {
     // If even the wall-sized buy does not fit in what is left, the buy is
     // impossible today — holding cash back for it enables nothing.
     const t = steadyBasketTick(
@@ -188,6 +188,8 @@ describe("the sweep stops eating the day's buying power", () => {
       snap({ cashUsdg: 500_000_000n, spendHeadroomUsdg: 5_000_000n, perTradeCapUsdg: 900_000_000n }),
     );
     const dep = t.intents.find((i) => i.kind === "vault-deposit");
-    assert.equal(dep!.kind === "vault-deposit" && dep!.amountUsdg, 5_000_000n, "the whole remaining budget sweeps");
+    assert.equal(dep, undefined);
+    const buy = t.intents.find(i => i.kind === "swap");
+    assert.equal(buy?.kind === "swap" && buy.sellAmountRaw, 5_000_000n);
   });
 });

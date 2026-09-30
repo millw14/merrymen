@@ -243,12 +243,13 @@ export async function decide(cfg: BrainConfig, args: DecideArgs): Promise<BrainR
       signal: ac.signal,
     });
   } catch (e) {
-    return { ok: false, kind: "unreachable", detail: e instanceof Error ? e.message : String(e) };
-  } finally {
     clearTimeout(timer);
+    return { ok: false, kind: "unreachable", detail: e instanceof Error ? e.message : String(e) };
   }
 
   if (!res.ok && res.status !== 200) {
+    clearTimeout(timer);
+    void res.body?.cancel().catch(() => {});
     return { ok: false, kind: "unreachable", detail: `brain returned HTTP ${res.status}` };
   }
 
@@ -258,6 +259,10 @@ export async function decide(cfg: BrainConfig, args: DecideArgs): Promise<BrainR
     payload = JSON.parse(text) as Record<string, unknown>;
   } catch (e) {
     return { ok: false, kind: "malformed", detail: e instanceof Error ? e.message : String(e) };
+  } finally {
+    // Headers are not a completed decision. Keep the deadline armed while a
+    // response body streams, otherwise a stalled provider can stop every tick.
+    clearTimeout(timer);
   }
 
   if (payload.ok === false && payload.refusal) {

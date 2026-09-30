@@ -64,6 +64,25 @@ export interface FollowEdge {
   createdAt: number;
 }
 
+/**
+ * Would this follow wire an agent to ITSELF?
+ *
+ * A one-line predicate gets a function around it because the ABSENT case is the
+ * whole point. A tenant who has signed in and not yet minted an agent has no
+ * slug at all — `IdentityStore.get` returns null for them, which is a real and
+ * common state — and absent is not a match: they must be able to follow anyone.
+ *
+ * Stated as "a self-follow requires a KNOWN slug on both sides" rather than as
+ * `a === b`, because the failure mode of the short version is silent and points
+ * the wrong way. Two unknowns compare equal, so every agentless tenant would be
+ * refused every follow, and it would read as the feature being broken for new
+ * users specifically — the hardest kind of report to act on.
+ */
+export function isSelfFollow(mySlug: string | null | undefined, target: string): boolean {
+  if (!mySlug) return false;
+  return mySlug === target;
+}
+
 export interface FollowStore {
   /** Slugs this tenant's agent reads, newest first. */
   following(tenant: `0x${string}`): Promise<FollowEdge[]>;

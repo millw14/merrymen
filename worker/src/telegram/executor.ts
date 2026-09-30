@@ -15,6 +15,7 @@ import { esc } from "./api";
 import { CONTROL_KINDS, PC_CAP_OF, PC_KINDS, type Command } from "./interpreter";
 import { resolveInRoot, shellAllowed, type PcActions } from "./pc";
 import { WALLET_TEXT } from "./reads";
+import { CONFIRM_TTL_SEC, killDoneText, killPromptText, type KillResult } from "./kill-confirm";
 
 /** A vetted action awaiting the user's explicit /confirm. Widened from the
  * original transfer-only store so a pending PC action and a pending transfer
@@ -34,10 +35,29 @@ export type PendingAction =
    * key — so a misread instruction was a permanent loss of funds. A transfer of
    * $5 asks first; ending the agent should too.
    */
-  | { kind: "kill"; expiresAt: number };
+  | { kind: "kill"; expiresAt: number }
+  /**
+   * A settings change the owner asked for by text, already parsed and
+   * range-checked (settings-chat.ts). Applied only on confirm, and the control
+   * switch is checked again then.
+   */
+  | { kind: "setting"; key: string; value: unknown; expiresAt: number };
+
+/**
+ * What a kill actually did, so the reply can say exactly that. Defined with
+ * the kill's words in kill-confirm.ts, which the hold process shares.
+ */
+export type { KillResult };
 
 export interface CommandDeps {
   controlEnabled: boolean;
+  /**
+   * Hosted fleet (MERRYMEN_HOSTED)? The kill prompt has to say what a kill
+   * does HERE. Self-hosted it archives an owner key on the owner's machine.
+   * Hosted there is no owner key on the server to archive. Optional: absent
+   * means self-hosted, which is what every fixture predating it describes.
+   */
+  hosted?: boolean;
   /** Current chat per-action ceiling (telegramMaxActionUsdg). */
   maxActionUsdg: number;
   /** On-chain per-trade ceiling for clamping /cap; undefined when no grant armed. */
@@ -55,16 +75,29 @@ export interface CommandDeps {
     /** Liquidity depth for one ticker — a chain read, so always async. */
     depth(symbol: string): Promise<string>;
     pnl(): string;
-    trades(): string;
+    trades(): string | Promise<string>;
     report(): string | Promise<string>;
     why(): string | Promise<string>;
     brag(): string | Promise<string>;
+    /** `/settings` — optional so fixtures that predate it still typecheck. */
+    settings?(): string;
   };
+  /**
+   * Settings by text. `proposeSetting` turns the owner's words into either a
+   * question (and parks it) or a plain reply; `applySetting` saves a confirmed
+   * change. Optional so hosts without them answer honestly instead of failing.
+   */
+  proposeSetting?(setting: string, value: string): string;
+  applySetting?(key: string, value: unknown): string;
   setStrategy(name: string): { ok: boolean; reason?: string };
   setCap(usdg: number): void;
   setPaused(paused: boolean): void;
-  /** Destroy the grant. Archives the owner key first — `archived` names the account kept. */
-  kill(): { ok: boolean; reason?: string; archived?: string | null };
+  /**
+   * Destroy the grant. Self-hosted it archives the owner key first, and
+   * `archived` names the account kept. Hosted it queues the store removal
+   * (`revocation`).
+   */
+  kill(): KillResult;
   link(code: string): { ok: boolean; reason?: string };
   /** Build a bounded TradeIntent and route it through processIntent → policy wall. */
   trade(side: "buy" | "sell", symbol: string, usdg: number): Promise<string>;
@@ -101,7 +134,13 @@ export interface CommandDeps {
   now?: () => number;
 }
 
-const CONFIRM_TTL_SEC = 90;
+export { CONFIRM_TTL_SEC };
+/**
+ * A settings question waits longer than a transfer: nothing leaves the account
+ * and the owner may be answering from a phone later. Ten minutes, then it
+ * expires and has to be asked again.
+ */
+export const SETTING_CONFIRM_TTL_SEC = 600;
 
 /** Refuse a PC command when the master switch is off or its capability isn't
  * enabled. Returns the refusal string, or null when the command may proceed.
@@ -137,6 +176,12 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
     }
     case "help":
       return deps.help();
+    // Only a chat already on the allowlist gets here with a payload: the
+    // service hands an unlisted chat's payload to /link, with its counting and
+    // lockout. Someone already linked is shown what they can do, and the
+    // payload is not looked at, so it counts toward nothing.
+    case "start":
+      return deps.help();
     // Static signpost — no state, no gating: it only tells you where the
     // dashboard is. Safe to answer even unlinked/read-only.
     case "wallet":
@@ -154,7 +199,7 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
     case "pnl":
       return deps.reads.pnl();
     case "trades":
-      return deps.reads.trades();
+      return await deps.reads.trades();
     case "report":
       return await deps.reads.report();
     case "why":
@@ -234,6 +279,11 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           deps.clearPending();
           return "🔒 transfers were turned off before you confirmed — nothing moved.";
         }
+      } else if (p.kind === "setting") {
+        if (!deps.controlEnabled) {
+          deps.clearPending();
+          return "🔒 control was turned off before you confirmed — nothing changed.";
+        }
       } else if (p.kind === "kill") {
         // Kill is a control command, not a PC capability — re-vet the control
         // switch rather than running it through pcRefusal, which knows nothing
@@ -263,19 +313,20 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           return await deps.pc.hotkey(p.combo);
         case "power":
           return await deps.pc.power(p.action);
-        case "kill": {
-          const r = deps.kill();
-          if (!r.ok) return `nothing to kill: ${r.reason ?? "no grant"}`;
-          return (
-            `🛑 KILL SWITCH — grant destroyed, the band stands down on the next tick.\n` +
-            (r.archived
-              ? `Owner key archived to <code>~/.merrymen/grants/</code> — <code>merrymen recover</code> can still sweep the funds.`
-              : `⚠️ nothing could be archived — if this account held funds, check ~/.merrymen/grants/ before re-granting.`) +
-            `\nRe-grant in the dashboard to ride again.`
-          );
-        }
+        case "setting":
+          return deps.applySetting ? deps.applySetting(p.key, p.value) : "settings can't be changed from chat here — nothing changed.";
+        case "kill":
+          // What THIS agent did, in the words the hold process uses too
+          // (kill-confirm.ts).
+          return killDoneText(deps.kill());
       }
     }
+    case "set":
+      return deps.proposeSetting
+        ? deps.proposeSetting(cmd.setting, cmd.value)
+        : "settings can't be changed from chat on this deployment — use Settings on the dashboard.";
+    case "settings":
+      return deps.reads.settings ? deps.reads.settings() : "your settings live on the dashboard, under Settings.";
     case "cancel": {
       const had = deps.getPending() !== null;
       deps.clearPending();
@@ -368,12 +419,7 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       return deps.removeWatcher(cmd.id);
     case "kill": {
       deps.setPending({ kind: "kill", expiresAt: now() + CONFIRM_TTL_SEC });
-      return (
-        `⚠️ <b>confirm kill</b> — this destroys the grant and stands the band down.\n` +
-        `Your owner key is archived to <code>~/.merrymen/grants/</code> first, so ` +
-        `<code>merrymen recover</code> can still sweep the funds.\n\n` +
-        `/confirm to kill (${CONFIRM_TTL_SEC}s) or /cancel.`
-      );
+      return killPromptText(deps.hosted === true, CONFIRM_TTL_SEC);
     }
     case "chat":
       return cmd.reply;

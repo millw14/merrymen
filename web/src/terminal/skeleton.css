@@ -1,0 +1,71 @@
+/*
+ * Loading and can't-reach states for the terminal — see Skeleton.tsx and
+ * LoadFailure.tsx. A file of its own so it is imported once, by App, and not by
+ * the components the test runner renders (node cannot import CSS).
+ */
+
+.terminal-host .term-skel {
+  display: grid;
+}
+
+.terminal-host .term-skel-row {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.terminal-host .term-skel-row i {
+  display: block;
+  height: 14px;
+  margin-bottom: 8px;
+  background: var(--raised);
+  border-radius: 8px;
+  animation: term-skel-pulse 1.6s ease-in-out infinite;
+}
+
+.terminal-host .term-skel-row i.face {
+  width: 36px;
+  height: 36px;
+  margin: 0;
+  border-radius: 50%;
+}
+
+@keyframes term-skel-pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-host .term-skel-row i {
+    animation: none;
+  }
+}
+
+.terminal-host .load-failure {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin: 12px 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--tx-2);
+}
+
+.terminal-host .load-failure strong {
+  color: var(--down);
+  font-weight: 600;
+}
+
+.terminal-host .load-failure button {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--tx);
+  font: inherit;
+  cursor: pointer;
+}

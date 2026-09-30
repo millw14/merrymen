@@ -23,9 +23,35 @@ import path from "node:path";
 import { merrymenHome } from "./home";
 import { renderMemories, selectMemories, type MemoryItem } from "./memory/retrieve";
 import { fnv1a } from "./memory/tokens";
+import {
+  AGENT_NAME_RE,
+  DEFAULT_AGENT_NAME,
+  STORED_AGENT_NAME_RE,
+  normalizeAgentName,
+} from "../../packages/core/src/agent-name";
+import type { NameSeat } from "./name-reconcile";
 
-export const DEFAULT_NAME = "Robin";
-const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 '.-]{0,23}$/;
+/** The stock name, defined once in core — the Agent screen's name chip compares against it. */
+export const DEFAULT_NAME = DEFAULT_AGENT_NAME;
+/**
+ * A NAME IS WRITTEN IN THE OWNER'S OWN ALPHABET, with at least one letter —
+ * the rule for a name somebody is CHOOSING NOW (chat /name here). Why it reads
+ * as it does is written beside it in packages/core/src/agent-name.ts.
+ *
+ * THE SAME CONSTANT the web tier's settings form, wizard and partner
+ * enrollment test against, not a copy of it. It was a copy, byte-identical by
+ * test, and when the two drifted the worker won and silently kept the old name
+ * while the settings save had told the owner it succeeded.
+ */
+const NAME_RE = AGENT_NAME_RE;
+/**
+ * THE RULE A NAME WAS STORED UNDER — everything above except the letter, so an
+ * agent named "007" before the letter rule is not renamed by reading its own
+ * identity file back, or by a restart carrying the stored name in. Also core's,
+ * and also the web tier's: a re-saved "007" the web accepted and the soul
+ * refused would run as Robin.
+ */
+const STORED_NAME_RE = STORED_AGENT_NAME_RE;
 const MAX_OWNER_FACTS = 60;
 const MAX_NOTES = 120;
 const MAX_JOURNAL_CHARS = 40_000;
@@ -123,7 +149,9 @@ export function ensureSoul(nowSec?: number): void {
 export function getName(): string {
   const m = readSafe(identityFile()).match(/^#\s+(.+?)\s+of the merrymen\s*$/m);
   const name = m?.[1]?.trim() ?? "";
-  return NAME_RE.test(name) ? name : DEFAULT_NAME;
+  // The stored rule, not the rule for a new name: this file holds a name that
+  // was already given, and reading "007" back as the default is a rename.
+  return STORED_NAME_RE.test(name) ? name : DEFAULT_NAME;
 }
 
 export function getBornDate(): string {
@@ -140,12 +168,37 @@ export function ageDays(nowSec?: number): number {
   return Math.max(0, Math.floor((nowMs - bornMs) / 86_400_000));
 }
 
-/** Validate + apply a new name. Returns the applied name or an error reason. */
-export function setName(raw: string): { ok: true; name: string } | { ok: false; reason: string } {
-  const name = raw.trim().replace(/\s+/g, " ");
-  if (!NAME_RE.test(name)) {
-    return { ok: false, reason: "a name is 1-24 letters/numbers/spaces (', . - allowed), starting with a letter or number" };
-  }
+type NameResult = { ok: true; name: string } | { ok: false; reason: string };
+
+const STORED_RULE =
+  "a name is 1-24 characters in any alphabet (', . - and spaces allowed), starting with a letter or number";
+
+/**
+ * Validate + apply a name somebody is choosing NOW (chat /name). Returns the
+ * applied name or an error reason.
+ */
+export function setName(raw: string): NameResult {
+  return writeName(raw, NAME_RE, `${STORED_RULE} and containing at least one letter`);
+}
+
+/**
+ * Carry a name that settings ALREADY holds into the soul — the reconcile's
+ * write, not a new choice. Held to the rule it was stored under, so an agent
+ * named "007" before the letter rule is not renamed by a restart, or by a
+ * hosted redeploy that rebuilds the soul empty. The reason, when it refuses,
+ * names only that rule: the owner is told what the name actually failed.
+ */
+export function carryStoredName(raw: string): NameResult {
+  return writeName(raw, STORED_NAME_RE, STORED_RULE);
+}
+
+function writeName(raw: string, rule: RegExp, reason: string): NameResult {
+  // NFC first, so "José" typed as e + combining acute and "José" typed as the
+  // precomposed é are the same name, spend the same number of the 24
+  // characters, and compare equal to whatever the web tier stored — which it
+  // stored through this same function.
+  const name = normalizeAgentName(raw);
+  if (!rule.test(name)) return { ok: false, reason };
   ensureSoul();
   const current = readSafe(identityFile());
   const old = getName();
@@ -156,6 +209,17 @@ export function setName(raw: string): { ok: true; name: string } | { ok: false; 
   writeSafe(identityFile(), next);
   return { ok: true, name };
 }
+
+/**
+ * THE SOUL AS THE NAME RECONCILE AND THE ARM SEE IT — built once, here.
+ *
+ * Which writer the reconcile gets is the whole difference between carrying a
+ * stored "007" and renaming it to "Robin", and index.ts exports nothing a test
+ * can reach. So the worker and name-reconcile.test.ts wire this one object
+ * rather than each assembling their own, and a test run is a run of the seat
+ * the worker actually uses.
+ */
+export const nameSeat: NameSeat = { ensureSoul, getName, carryName: carryStoredName };
 
 // ── owner memory ────────────────────────────────────────────────────────────
 

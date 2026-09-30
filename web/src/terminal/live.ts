@@ -1,4 +1,21 @@
-import { loadTokenQuotes, applyTokenQuotes } from "./quotes";
+/**
+ * THE TERMINAL'S FIGURES COME FROM THE SAME PLACE AS EVERY OTHER FIGURE.
+ *
+ * These were five hand-written formatters here and ten more elsewhere, each
+ * pinning "en-US" — except the chat confirmation card, which used the browser's
+ * locale. So the last sentence read before an order was placed rendered its
+ * number in a different system from the balance above it.
+ */
+import {
+  compactUsd as fmtCompactUsd,
+  pctBps as fmtPctBps,
+  pctPts as fmtPctPts,
+  subCentUsd as fmtCoinPrice,
+  usd as fmtUsd,
+  usdFixed as fmtDecimals,
+  fullDateTime as fmtFullDateTime,
+} from "@/lib/format";
+import { loadTokenQuotes, applyTokenQuotes, type TokenQuote } from "./quotes";
 import { STOCK_TOKENS } from "@merrymen/core";
 import { rejectRuleLabel } from "@merrymen/thesis";
 import { parseStrategy, strategyLabel, type StrategyGlance } from "./strategy";
@@ -30,7 +47,8 @@ export type Screen =
   | { kind: "create" }
   | { kind: "settings" }
   | { kind: "grant" }
-  | { kind: "limits" };
+  | { kind: "limits" }
+  | { kind: "groupchat" };
 
 export interface AgentRef {
   slug: string;
@@ -64,6 +82,21 @@ export interface LiveToken {
   kind: "stock" | "etf" | "memecoin";
   marks: number[];
   cast: AgentRef[];
+  /**
+   * Trading halted on the token contract, as the market read reported it —
+   * NULL when that read could not say (lib/market.ts), absent for a token it
+   * does not list. Only a true is ever shown: an unread halt is neither a halt
+   * nor "trading normally".
+   */
+  halted?: boolean | null;
+  /** 24h traded volume in USD from the market read; null when it could not read one. */
+  volume24hUsd?: number | null;
+  /**
+   * When the market read's OWN price last updated (the Chainlink feed), unix
+   * seconds. Kept apart from priceUpdatedAt, which is the Robinhood quote's
+   * clock and is what quoteTitle prints.
+   */
+  feedUpdatedAt?: number | null;
 }
 
 export interface LiveAgent {
@@ -83,6 +116,7 @@ export interface LiveAgent {
    */
   ownerVerified?: boolean;
   pnlBps: number | null;
+  paperPnlBps?: number | null;
   /**
    * The series a chart may draw — AND WHICH QUANTITY IT IS.
    *
@@ -108,6 +142,10 @@ export interface LiveAgent {
    * surface that still draws the curve.
    */
   contributionsEvidenced?: boolean;
+  profileAvailable?: boolean;
+  mode?: string;
+  recentTrades?: import("@/lib/profile-trades").ProfileTrade[];
+  activityRead?: boolean;
   publicBook?: boolean;
   holdingsUsd?: number | null;
   landed: number;
@@ -127,6 +165,8 @@ export interface LiveAgent {
 }
 
 export interface Thesis {
+  /** Current author mode supplied by the server. */
+  trencher?: boolean;
   name: string;
   slug: string | null;
   handle: string | null;
@@ -134,6 +174,17 @@ export interface Thesis {
   symbol: string | null;
   sizeUsdg: number | null;
   reason: string | null;
+  /**
+   * WHAT THE AGENT SAID IN ITS OWN VOICE, when it had something to say.
+   *
+   * Preferred over `reason` wherever prose is shown, and never instead of it in
+   * the DATA: the two carry different trust and a drill-down needs both. Null on
+   * almost every row, because a post is written only for a class trade that
+   * filled and whose writer cleared its gate. Absent is the normal case, and the
+   * fallback to `reason` is what stops an agent being silent about a trade it
+   * made.
+   */
+  post?: string | null;
   paper: boolean;
   head: string;
   when?: string;
@@ -192,6 +243,24 @@ export interface Thesis {
    * wallet-minter can inflate.
    */
   postId?: string | null;
+  /**
+   * THE OWNER'S OWN TAPE ONLY (mineOf, from lib/desk-trades.ts) — absent on
+   * every public post. Null where the ledger said nothing: an older ledger, a
+   * refusal that filled nothing, a sell whose basis was unknown.
+   *
+   * `displayName` is the coin's own name from the decision, for display only.
+   * `txHash` is the fill's transaction, which is how a receipt the chat heard
+   * about is matched to the row that shows it filled. `realizedPnlUsdg` is
+   * what the executor booked on a sell, in whole USDG; a loss is negative and
+   * zero is a result, never a stand-in for unknown. `realizedVouched` is true
+   * only when the tape checked both the sell's proceeds and the cost it closed
+   * (lib/desk-trades.ts `realized_vouched`); the desk prints the dollars only
+   * then, so anything else — absent included — withholds them.
+   */
+  displayName?: string | null;
+  txHash?: string | null;
+  realizedPnlUsdg?: number | null;
+  realizedVouched?: boolean;
 }
 
 export interface ChainHolder {
@@ -221,8 +290,19 @@ export interface LiveMine {
    */
   notice?: { level: string; message: string; at: string } | null;
   history?: number[];
-  positions?: {symbol:string;valueUsd:number;stale:boolean;costUsd:number|null;pnlPct:number|null;floorBps:number|null;floorWhy:string|null}[];
+  /**
+   * `costFromQuote` is whether a fill booked from the pre-trade quote, rather
+   * than its receipt, may still be in `costUsd` — false only when the ledger
+   * said so, and null when that could not be read. See positionsOf.
+   */
+  positions?: {symbol:string;valueUsd:number;stale:boolean;costUsd:number|null;costFromQuote:boolean|null;pnlPct:number|null;floorBps:number|null;floorWhy:string|null}[];
   name: string;
+  /**
+   * Where /api/feed read the name: "settings", "ledger", or "fallback" when it
+   * could not read one and printed what was left. Null from a feed that does
+   * not say. Only a measured "Robin" is offered a new name — see NameChip.
+   */
+  nameSource?: "settings" | "ledger" | "fallback" | null;
   slug: string | null;
   handle: string | null;
   owner: string | null;
@@ -252,6 +332,12 @@ export interface LiveState {
   agents: LiveAgent[];
   theses: Thesis[];
   mine: FeedMine | null;
+  /**
+   * How many accounts the leaderboard folded into a count instead of a row, or
+   * null when it could not tell (or did not say). The board prints the count
+   * only when it is a number — see read-leaderboard.ts.
+   */
+  retired: number | null;
   /**
    * WHETHER EACH READ ACTUALLY HAPPENED — carried beside the data, not instead
    * of it.
@@ -288,33 +374,23 @@ const LOGO = (addr: string) =>
 const COMPANY = (symbol: string) =>
   `https://financialmodelingprep.com/image-stock/${symbol}.png`;
 
-export function compactUsd(n: number | null): string {
-  if (n === null || !Number.isFinite(n)) return "—";
-  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
-  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `$${Math.round(n / 1e3)}k`;
-  return `$${Math.round(n)}`;
-}
+export const compactUsd = fmtCompactUsd;
 
 export function coinPrice(n: number | null): string {
   if (n === null || !Number.isFinite(n)) return "—";
-  if (n === 0) return "$0";
-  if (n < 0.01) return `$${n.toPrecision(3)}`;
-  if (n >= 100)
-    return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  return `$${n.toFixed(n >= 1 ? 2 : 4)}`;
+  if (n === 0) return fmtUsd(0);
+  if (n < 0.01) return fmtCoinPrice(n);
+  if (n >= 100) return fmtUsd(n);
+  return fmtDecimals(n, n >= 1 ? 2 : 4);
 }
 
 export function quoteTitle(token: LiveToken): string | undefined {
   if (token.priceSource !== "robinhood" || !token.priceUpdatedAt)
     return undefined;
-  return `Robinhood bid/ask midpoint · ${new Date(token.priceUpdatedAt * 1000).toLocaleString()}`;
+  return `Robinhood bid/ask midpoint · ${fmtFullDateTime(token.priceUpdatedAt * 1000)}`;
 }
 
-export function pctPts(n: number | null): string {
-  if (n === null || !Number.isFinite(n)) return "—";
-  return `${n > 0 ? "+" : ""}${n.toFixed(n >= 100 || n <= -100 ? 0 : 2)}%`;
-}
+export const pctPts = fmtPctPts;
 
 /**
  * WHICH COLOUR A CHANGE GETS — and the one that says "we do not know".
@@ -333,17 +409,9 @@ export function deltaClass(n: number | null | undefined): "up" | "down" | "flat"
   return n < 0 ? "down" : "up";
 }
 
-export function pctBps(bps: number | null): string {
-  if (bps === null) return "—";
-  const pct = bps / 100;
-  if (Math.abs(pct) < 0.05) return "0.0%";
-  return `${pct > 0 ? "+" : "\u2212"}${Math.abs(pct).toFixed(1)}%`;
-}
+export const pctBps = fmtPctBps;
 
-export function money(n: number | null): string {
-  if (n === null || !Number.isFinite(n)) return "—";
-  return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
+export const money = fmtUsd;
 
 /**
  * How long ago this printed.
@@ -382,9 +450,16 @@ function relSec(seconds: number): string {
 }
 
 export function sizeOf(t: Thesis): number | null {
-  if (t.sizeUsdg != null && t.sizeUsdg > 0) return t.sizeUsdg;
+  // A MEASURED ZERO IS NOT A FIGURE TO SHOW, and it is not an absence either.
+  // `sizeUsdg: 0` used to fall through to the head regex, which re-parsed the
+  // "0.00 USDG" out of "hold NVDA 0.00 USDG" and the card printed "$0.00"
+  // beside a real 24h change — a price nobody could account for. When the API
+  // gave a number, that number is the answer; the regex is only for rows from
+  // before sizeUsdg existed, and it never returns 0 as a size worth printing.
+  if (typeof t.sizeUsdg === "number" && Number.isFinite(t.sizeUsdg)) return t.sizeUsdg > 0 ? t.sizeUsdg : null;
   const m = t.head?.match(/(\d+(?:\.\d+)?)\s*USDG/i);
-  return m ? Number(m[1]) : null;
+  const n = m ? Number(m[1]) : null;
+  return n != null && n > 0 ? n : null;
 }
 
 /**
@@ -427,6 +502,7 @@ export function seedLive(): LiveState {
     agents: [],
     theses: [],
     mine: null,
+    retired: null,
     // NOBODY HAS ASKED YET. The seed exists so the shell has a market list to
     // draw before the first fetch returns; every empty array beside it is an
     // absence of a request, and a screen that reads them as an absence of
@@ -474,6 +550,7 @@ function robinhoodFallback(): LiveToken[] {
  */
 export type ReadState = "unread" | "unreadable" | "ok";
 
+/** A JSON body, or null for any failure. The shell's reads use fetchRead, which also says whether anything answered. */
 async function getJson<T>(url: string): Promise<T | null> {
   try {
     const r = await fetch(url, { signal: AbortSignal.timeout(20000) });
@@ -494,18 +571,222 @@ export function readStateOf(body: { source?: string } | null | undefined): ReadS
   return body.source === "none" ? "unreadable" : "ok";
 }
 
-export async function loadLive(onMine?: (mine: FeedMine | null) => void): Promise<LiveState> {
-  const [market, board, thesesRes, feed, quotes, disc] = await Promise.all([
-    getJson<{ tokens: MarketTok[]; source?: string }>("/api/market"),
-    getJson<{ agents: BoardRow[]; source?: string }>("/api/leaderboard"),
-    getJson<{ theses: Thesis[]; source?: string }>("/api/theses"),
-    getJson<Feed>("/api/feed").then(feed=>{onMine?.(mineOf(feed,[]));return feed;}),
-    loadTokenQuotes(),
-    getJson<Disc>("/api/discoveries"),
-  ]);
+/**
+ * A market load that came back with nothing to draw — and whether anything
+ * answered at all. `answered` false means no merrymen route replied, which is
+ * the only case the shell may call "can't reach merrymen"; true means it
+ * replied and could not load the data, which is a different sentence.
+ */
+export class LiveLoadError extends Error {
+  readonly answered: boolean;
+  constructor(answered: boolean) {
+    super("Market and agent data could not be loaded.");
+    this.name = "LiveLoadError";
+    this.answered = answered;
+  }
+}
 
+/**
+ * THE FIVE READS THE SHELL IS BUILT FROM — four public, and the owner's book —
+ * each on its own clock now.
+ *
+ * They were one Promise.all inside one 60s pass, so the feed could not render
+ * until the market, the board, the owner's book, the quotes and the launchpad
+ * sweep had all come back, and the sweep measured 10-12s cold. Each is now
+ * fetched on its own schedule (refresh-loop.ts) and applied the moment it
+ * arrives; everything the screens read is DERIVED from the latest answer of
+ * each (`liveOf`), so no read ever has to wait for, or overwrite, another.
+ */
+export type LiveReadKey = "market" | "board" | "theses" | "feed" | "discoveries";
 
-  if(!market && !board && !thesesRes) throw new Error("Market and agent data could not be loaded.");
+export const LIVE_READ_URLS: Record<LiveReadKey, string> = {
+  market: "/api/market",
+  board: "/api/leaderboard",
+  theses: "/api/theses",
+  feed: "/api/feed",
+  discoveries: "/api/discoveries",
+};
+
+type MarketBody = { tokens: MarketTok[]; source?: string };
+type BoardBody = { agents: BoardRow[]; source?: string; retired?: unknown };
+type ThesesBody = { theses: Thesis[]; source?: string };
+
+interface Bodies {
+  market: MarketBody;
+  board: BoardBody;
+  theses: ThesesBody;
+  feed: Feed;
+  discoveries: Disc;
+}
+
+/**
+ * One read's latest answer, and where that read stands. `text` is the raw body
+ * — kept so an answer identical to the last one changes nothing, and a ten-
+ * second feed that has not moved does not re-render every screen.
+ */
+export interface Sourced<T> {
+  body: T | null;
+  read: ReadState;
+  text: string | null;
+}
+
+export type LiveSources = { [K in LiveReadKey]: Sourced<Bodies[K]> } & {
+  /** The Robinhood quotes last read, by token id. Kept per token — see withQuotes. */
+  quotes: Map<string, TokenQuote>;
+  /** The session change last read, by token id. Same rule. */
+  changes: Map<string, number>;
+};
+
+/** Nobody has asked for anything yet — the same absence `seedLive` draws. */
+export function seedSources(): LiveSources {
+  const unread = { body: null, read: "unread" as const, text: null };
+  return {
+    market: unread,
+    board: unread,
+    theses: unread,
+    feed: unread,
+    discoveries: unread,
+    quotes: new Map(),
+    changes: new Map(),
+  };
+}
+
+/** What one fetch amounted to: the body, and whether anything answered. */
+export interface RawRead {
+  text: string | null;
+  /** A route replied at all — the difference LiveLoadError carries. */
+  answered: boolean;
+}
+
+export async function fetchRead(key: LiveReadKey): Promise<RawRead> {
+  let answered = false;
+  try {
+    const r = await fetch(LIVE_READ_URLS[key], { signal: AbortSignal.timeout(20000) });
+    answered = true;
+    if (!r.ok) return { text: null, answered };
+    return { text: await r.text(), answered };
+  } catch {
+    return { text: null, answered };
+  }
+}
+
+/** The body a raw read carried, and whether it counts as read — see readStateOf. */
+export function parseRead<T>(raw: RawRead): { body: T | null; read: ReadState } {
+  let body: T | null = null;
+  if (raw.text !== null) {
+    try {
+      body = JSON.parse(raw.text) as T;
+    } catch {
+      body = null;
+    }
+  }
+  return { body, read: readStateOf(body as { source?: string } | null) };
+}
+
+/**
+ * ONE READ'S ANSWER, APPLIED — and what a failed read does to what is on screen.
+ *
+ * A readable answer replaces the last one, unless it is byte-for-byte the same
+ * answer, in which case nothing changes at all.
+ *
+ * A FAILED ANSWER AFTER A GOOD ONE, with `keep`, leaves the good one on screen
+ * and still marked as read. That is what the outage line has always claimed —
+ * "Showing market data as we last read 2m ago" — and what the single pass did
+ * not do: it replaced the feed with an empty unreadable one while the line
+ * above it said the old one was still showing. The read's own clock reports the
+ * failure, and the line dates the answer that stayed.
+ *
+ * Without `keep`, or when nothing good was ever read, the failure is what is
+ * shown: unreadable, with whatever body came with it. The owner's book is read
+ * that way (see App.tsx), because it is not on the outage line — a signed-out
+ * visitor reads it as unreadable by design — so a stale book would be stale
+ * with nothing saying so.
+ */
+export function withRead<K extends LiveReadKey>(
+  prev: LiveSources,
+  key: K,
+  raw: RawRead,
+  keep: boolean,
+): LiveSources {
+  const was = prev[key];
+  const { body, read } = parseRead<Bodies[K]>(raw);
+  if (read === "ok" && was.read === "ok" && was.text === raw.text) return prev;
+  if (read !== "ok" && keep && was.read === "ok") return prev;
+  if (read !== "ok" && was.read === "unreadable" && was.text === raw.text) return prev;
+  return { ...prev, [key]: { body, read, text: raw.text } };
+}
+
+/**
+ * The quotes just read, laid over the ones before, PER TOKEN.
+ *
+ * `loadTokenQuotes` answers an empty map when the venue refuses, and a token it
+ * could not quote this time simply is not in the map. The single pass carried
+ * the last price forward in both cases (`priceUsd ?? old.priceUsd`), so this
+ * keeps that: a quote stays until a newer one for the same token replaces it,
+ * and every quote carries its own `priceUpdatedAt`, which the token page's
+ * title prints, so a kept quote is dated, not disguised.
+ */
+export function withQuotes(prev: LiveSources, quotes: ReadonlyMap<string, TokenQuote>): LiveSources {
+  let changed = false;
+  for (const [id, q] of quotes) {
+    const old = prev.quotes.get(id);
+    if (!old || old.priceUsd !== q.priceUsd || old.priceUpdatedAt !== q.priceUpdatedAt || old.uiMultiplier !== q.uiMultiplier) {
+      changed = true;
+      break;
+    }
+  }
+  if (!changed) return prev;
+  return { ...prev, quotes: new Map([...prev.quotes, ...quotes]) };
+}
+
+/** The session changes just read, over the ones before — the same rule as withQuotes. */
+export function withChanges(prev: LiveSources, changes: ReadonlyMap<string, number>): LiveSources {
+  let changed = false;
+  for (const [id, v] of changes) if (prev.changes.get(id) !== v) changed = true;
+  if (!changed) return prev;
+  return { ...prev, changes: new Map([...prev.changes, ...changes]) };
+}
+
+/**
+ * EVERY READ AT ONCE, for a caller that wants one answer rather than a stream
+ * of them. The shell does not use this any more; it runs a clock per read.
+ */
+export async function loadLive(): Promise<LiveState> {
+  const keys = ["market", "board", "theses", "feed", "discoveries"] as const;
+  const [raws, quotes] = await Promise.all([Promise.all(keys.map((k) => fetchRead(k))), loadTokenQuotes()]);
+  let s = seedSources();
+  keys.forEach((k, i) => {
+    s = withRead(s, k, raws[i]!, false);
+  });
+  s = withQuotes(s, quotes);
+  if (!s.market.body && !s.board.body && !s.theses.body) throw new LiveLoadError(raws.some((r) => r.answered));
+  return liveOf(s);
+}
+
+/**
+ * The tokens a market answer alone lists — for the session-change read, which
+ * needs the stock symbols and nothing else, and must not wait on the other
+ * reads to learn them.
+ */
+export function marketTokensOf(raw: RawRead): LiveToken[] {
+  return liveOf(withRead(seedSources(), "market", raw, false)).tokens;
+}
+
+/**
+ * WHAT THE SCREENS READ, from the latest answer of every read.
+ *
+ * Pure, and cheap enough to run on every arrival: a list of tokens and agents,
+ * joined to the posts by symbol. Deriving rather than patching is what lets a
+ * feed read land on its own — the token rows count who is buying from the
+ * posts, so a new post has to reach them, and a patch per read would be a
+ * second copy of this join for each one.
+ */
+export function liveOf(s: LiveSources): LiveState {
+  const market = s.market.body;
+  const board = s.board.body;
+  const thesesRes = s.theses.body;
+  const feed = s.feed.body;
+  const disc = s.discoveries.body;
   const theses = (thesesRes?.theses ?? []).filter((t) => t.slug || t.name);
   const bySymbol = new Map<string, Thesis[]>();
   for (const t of theses) {
@@ -537,6 +818,9 @@ export async function loadLive(onMine?: (mine: FeedMine | null) => void): Promis
       kind: t.kind,
       marks: [],
       cast: castOf(posts),
+      halted: typeof t.paused === "boolean" ? t.paused : null,
+      volume24hUsd: finiteOrNull(t.volume24hUsd),
+      feedUpdatedAt: finiteOrNull(t.priceUpdatedAt),
     });
   }
 
@@ -597,12 +881,15 @@ export async function loadLive(onMine?: (mine: FeedMine | null) => void): Promis
   }
 
   const agents: LiveAgent[] = (board?.agents ?? [])
-    .filter((a) => a.slug)
-    .map((a) => ({
-      slug: a.slug!,
+    .map((a, index) => ({
+      slug: a.slug ?? `unlinked-${index}`,
+      profileAvailable: !!a.slug,
       name: a.name,
+      mode: a.mode,
+      filledPaper: a.filledPaper,
       handle: a.handle,
       pnlBps: a.pnlBps,
+      paperPnlBps: a.paperPnlBps,
       unrankedWhy: a.unrankedWhy,
       curve: a.curve ?? [],
       // RAW EQUITY from the leaderboard read — never a growth index, and the
@@ -640,21 +927,39 @@ export async function loadLive(onMine?: (mine: FeedMine | null) => void): Promis
 
   const mine = mineOf(feed, theses);
 
+  // The Robinhood quotes over the market's own prices, then the session change
+  // over the null the market row carries. Both are kept per token across reads
+  // (withQuotes, withChanges), so a market answer arriving on its own does not
+  // wipe a quote the quote read has not replaced yet.
+  const priced = applyTokenQuotes([...tokens.values()], s.quotes).map((t) =>
+    s.changes.has(t.id) ? { ...t, change24hPct: s.changes.get(t.id)! } : t,
+  );
+
   return ({
-    tokens: applyTokenQuotes([...tokens.values()], quotes),
+    tokens: priced,
     agents,
     theses,
     mine,
+    // THE ROWS THE BOARD FOLDED, which this dropped: the fold shipped, the
+    // count did not reach a screen, and folded agents left the board without
+    // a word. A number only when the server sent one.
+    retired: typeof board?.retired === "number" && Number.isFinite(board.retired) ? board.retired : null,
     // WHETHER EACH READ HAPPENED, carried alongside what it returned. A body
     // that arrived with `source: "none"` counts as unreadable even though the
     // request succeeded: that shape IS the reader telling us it could not open
-    // the ledger. See `readStateOf`.
+    // the ledger. See `readStateOf`, which `withRead` applied on arrival.
+    //
+    // FROM THE SOURCE, NOT RE-DERIVED FROM THE BODY. With every read on its own
+    // clock, a read that has not come back yet sits beside ones that have, and
+    // a null body is "unread" for it — re-deriving turned that into
+    // "unreadable", and the token page told a reader a coin was unavailable
+    // while the sweep that lists it was still in flight.
     reads: {
-      market: readStateOf(market),
-      discoveries: readStateOf(disc),
-      board: readStateOf(board),
-      theses: readStateOf(thesesRes),
-      mine: readStateOf(feed),
+      market: s.market.read,
+      discoveries: s.discoveries.read,
+      board: s.board.read,
+      theses: s.theses.read,
+      mine: s.feed.read,
     },
   });
 }
@@ -758,7 +1063,31 @@ export function equityDayAgo(
   return best;
 }
 
-function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
+/**
+ * A symbol the ledger recorded, admitted only if it looks like one. An address
+ * is not a symbol, and a guessed one is worse than none: the chat model would
+ * repeat it as fact.
+ */
+function recordedSymbol(raw: unknown): string | null {
+  return typeof raw === "string" && /^[A-Za-z0-9$._-]{1,32}$/.test(raw) && !/^0x/i.test(raw) ? raw : null;
+}
+
+/**
+ * A figure as the ledger handed it back — a number, or the text of one, which
+ * is how a database driver returns a NUMERIC — else null. `Number("")` is 0,
+ * and an empty cell is not a zero.
+ */
+function ledgerNumber(raw: unknown): number | null {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw === "string" && raw.trim()) {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/** Exported for its test; loadLive is the only caller. */
+export function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
   if (!feed?.agent?.name && !feed?.equity?.length) return null;
   const name = feed.agent?.name ?? "Your agent";
   const mineTheses = feed.agent?.slug ? theses.filter((t) => t.slug === feed.agent?.slug) : [];
@@ -798,8 +1127,10 @@ function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
   const notice = (feed.events ?? []).find(
     (e) => (e.level === "warn" || e.level === "err" || e.level === "error") && !!e.message,
   );
+  const nameSource = feed.agent?.nameSource;
   return {
     name,
+    nameSource: nameSource === "settings" || nameSource === "ledger" || nameSource === "fallback" ? nameSource : null,
     slug,
     handle: mineTheses[0]?.handle ?? null,
     owner: "you",
@@ -820,6 +1151,9 @@ function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
         valueUsd:p.value_usdg,
         stale:!!p.price_stale,
         costUsd,
+        // THE LEDGER'S WORD ON WHERE THAT COST CAME FROM, carried and not inferred:
+        // true or false only as /api/feed replayed it, null when it could not.
+        costFromQuote: typeof p.cost_from_quote === "boolean" ? p.cost_from_quote : null,
         pnlPct: costUsd === null ? null : ((p.value_usdg - costUsd) / costUsd) * 100,
         // THIS position's own floor, when it carries one. Null means the
         // owner's single setting applies — what the whole book did before a
@@ -834,12 +1168,26 @@ function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
     moves: (feed.trades ?? []).map(t=>{
       const buy=STOCK_TOKENS.find(s=>s.address.toLowerCase()===t.buy_token?.toLowerCase());
       const sell=STOCK_TOKENS.find(s=>s.address.toLowerCase()===t.sell_token?.toLowerCase());
+      // THE LEDGER'S OWN WORD FIRST. This resolved a side only by matching the
+      // pair against STOCK_TOKENS, so every curve and class trade came back
+      // with no side, the desk dropped it, and an agent that had bought and
+      // sold CASHCAT showed "Trades · 0" while its chat could not say what it
+      // had bought. The fill's side, then the side its decision asked for (a
+      // refusal filled nothing and still had one), then the stock pair as
+      // before. A row none of those can name is KEPT with a null side — the
+      // chat tape still sees that something happened — and never guessed.
+      const recorded = t.fill_side==="buy"||t.fill_side==="sell" ? t.fill_side : t.action==="buy"||t.action==="sell" ? t.action : null;
+      const action = recorded ?? (buy ? "buy" as const : sell ? "sell" as const : null);
+      const stock = action==="buy" ? buy : action==="sell" ? sell : buy ?? sell;
       return {
         slug,name,handle:null,
-        action:buy ? "buy" as const : sell ? "sell" as const : null,
-        symbol:buy?.symbol ?? sell?.symbol ?? null,
+        action,
+        symbol:stock?.symbol ?? recordedSymbol(t.symbol),
         sizeUsdg:t.amount_usdg,
-        reason:null,
+        // Why the agent did it, from the decision that made the trade. It was
+        // hard-coded null, so every row on the owner's desk read "No
+        // explanation available." for a decision that had one.
+        reason:typeof t.reason==="string" && t.reason.trim() ? t.reason : null,
         paper:t.status==="paper",
         head:t.kind,
         at:ledgerSeconds(t.created_at),
@@ -859,6 +1207,17 @@ function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
         // matches on phrases in `outcomeText` ("per-trade", "spending",
         // "drawdown") which could never match a slug.
         outcomeText:rejectRuleLabel(t.reject_rule) ?? t.reject_rule ?? null,
+        // WHAT THE TAPE ALREADY READ, carried rather than dropped (D3): the
+        // desk prints the coin's name and the sell's result, and the chat
+        // matches a receipt to its fill by hash. Null where the ledger said
+        // nothing — never a guessed name, never a zero for an unknown P&L.
+        displayName:typeof t.display_name==="string" && t.display_name.trim() ? t.display_name.trim() : null,
+        txHash:typeof t.tx_hash==="string" && t.tx_hash ? t.tx_hash : null,
+        realizedPnlUsdg:ledgerNumber(t.realized_pnl_usdg),
+        // WHETHER THAT FIGURE IS A MEASUREMENT (R3P-2). The tape says so per
+        // sell and the route carries it; dropped here, the desk withheld the
+        // dollars of every sell, vouched ones too. Only an explicit true.
+        realizedVouched:t.realized_vouched === true,
       };
     }),
     glance: {
@@ -942,10 +1301,29 @@ export async function chainHolders(addr: string): Promise<ChainHolder[]> {
   return rows;
 }
 
+/**
+ * WHERE AN AGENT'S FACE COMES FROM — our origin, always.
+ *
+ * This returned `https://robohash.org/<slug>.png` and every `Face` on every
+ * terminal screen hotlinked it. On a public feed that sends every reader's IP
+ * to a third party, once per avatar per page — which is the exact objection
+ * `api/agent-face` was written to answer, and only the unmounted `AgentAvatar`
+ * ever used that proxy.
+ *
+ * Now it points at the agent's own uploaded picture. When there is none the
+ * route answers 404 and the component's `onError` falls through to the seeded
+ * gradient and initials it already draws — no network, no third party, and an
+ * absent image that stays absent rather than becoming a cached placeholder.
+ */
 export function faceSrc(slug: string | null): string | null {
   if (!slug) return null;
-  const seed = slug;
-  return `https://robohash.org/${encodeURIComponent(seed)}.png?set=set1&size=160x160`;
+  return `/api/agent-image/${encodeURIComponent(slug)}/avatar`;
+}
+
+/** The banner, same rule: our origin, 404 when unset, the header renders plain. */
+export function bannerSrc(slug: string | null): string | null {
+  if (!slug) return null;
+  return `/api/agent-image/${encodeURIComponent(slug)}/banner`;
 }
 
 export function lede(text: string | null | undefined): string {
@@ -983,7 +1361,10 @@ export function lastLine(t: Thesis | null): string {
           : shadow ? "Would hold" : "Holding";
     return `${verb} ${t.symbol}`;
   }
-  return t.reason || "";
+  // THE AGENT'S OWN WORDS FIRST. Falls back rather than blanking: a trade with
+  // no post still has our sentence, and silence would be a worse answer than a
+  // plainer one.
+  return t.post || t.reason || "";
 }
 
 interface MarketTok {
@@ -994,9 +1375,17 @@ interface MarketTok {
   logo: string;
   priceUsd: number | null;
   holders: number | null;
+  /** Optional: an older server does not send these, and absent is unread. */
+  paused?: boolean | null;
+  volume24hUsd?: number | null;
+  priceUpdatedAt?: number | null;
 }
 
+const finiteOrNull = (n: unknown): number | null => (typeof n === "number" && Number.isFinite(n) ? n : null);
+
 interface BoardRow {
+  mode?: string;
+  filledPaper?: number;
   unrankedWhy?: import("@/lib/rank-pnl").UnrankedWhy | null;
   slug: string | null;
   name: string;
@@ -1004,6 +1393,7 @@ interface BoardRow {
   /** Optional so an older server, which does not send it, reads as unproven. */
   handleVerified?: boolean;
   pnlBps: number | null;
+  paperPnlBps?: number | null;
   curve?: number[];
   landed: number;
 }
@@ -1057,7 +1447,7 @@ interface Feed {
    * and still tracked in mounted.test.ts KNOWN_DEBT; that half has not moved.
    */
   events?: { level?: string; message?: string; created_at?: string }[];
-  agent?: { name?: string; strategy?: string; slug?: string | null } | null;
+  agent?: { name?: string; nameSource?: string; strategy?: string; slug?: string | null } | null;
   trades?: {
     kind: string;
     buy_token: string | null;
@@ -1077,7 +1467,21 @@ interface Feed {
     /** The rule the wall refused it under. Selected by the route, was dropped here. */
     reject_rule?: string | null;
     created_at: string;
+    /** What the fill did, as the executor recorded it. See lib/desk-trades.ts. */
+    fill_side?: string | null;
+    /** The fill's symbol, else its decision's. Not yet vetted — recordedSymbol does that. */
+    symbol?: string | null;
+    display_name?: string | null;
+    /** The side the decision asked for, which is how a refusal has one. */
+    action?: string | null;
+    reason?: string | null;
+    /** Whole USDG, booked on a sell. A driver may hand a NUMERIC back as text. */
+    realized_pnl_usdg?: number | string | null;
+    /** The tape checked both halves of that figure — see lib/desk-trades.ts. */
+    realized_vouched?: boolean;
+    /** The fill's transaction; null for a refusal and for a paper fill. */
+    tx_hash?: string | null;
   }[];
   equity?: { equity_usdg: number; cash_usdg?: number; vault_usdg?: number; at?: string }[];
-  positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:number|null; stop_floor_bps?:number|null; stop_floor_why?:string|null}[];
+  positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:number|null; cost_from_quote?:boolean|null; stop_floor_bps?:number|null; stop_floor_why?:string|null}[];
 }

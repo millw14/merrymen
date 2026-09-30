@@ -211,7 +211,7 @@ describe("the class vault sweep", () => {
       { to: VAULT, value: 0n, data: sweep(DOGGOS) },
       { to: VAULT, value: 0n, data: sweep(USDG) },
     ]);
-    const v = isRecoveryShape(cd, { classVault: VAULT });
+    const v = isRecoveryShape(cd, { classVaults: [VAULT] });
     assert.equal(v.ok, true, v.ok ? "" : v.why);
     assert.equal(v.ok && v.classSweep, true, "and is reported as the vault shape, not a transfer");
     assert.equal(v.ok && v.tokenLegs, 2, "both assets");
@@ -219,7 +219,7 @@ describe("the class vault sweep", () => {
 
   it("and as a SINGLE call too, since one token is not a batch", async () => {
     const cd = await single({ to: VAULT, value: 0n, data: sweep(DOGGOS) });
-    assert.equal(isRecoveryShape(cd, { classVault: VAULT }).ok, true);
+    assert.equal(isRecoveryShape(cd, { classVaults: [VAULT] }).ok, true);
   });
 
   it("IS REFUSED when the ticket names no vault", async () => {
@@ -235,14 +235,14 @@ describe("the class vault sweep", () => {
     // The pin. Without it a ticket holder could call sweep(address) on any
     // contract that happens to have that selector.
     const cd = await batch([{ to: OTHER, value: 0n, data: sweep(DOGGOS) }]);
-    const v = isRecoveryShape(cd, { classVault: VAULT });
+    const v = isRecoveryShape(cd, { classVaults: [VAULT] });
     assert.equal(v.ok, false);
     assert.match(v.ok ? "" : v.why, /other than this account's own class vault/);
   });
 
   it("IS REFUSED when it carries native value", async () => {
     const cd = await batch([{ to: VAULT, value: 1n, data: sweep(DOGGOS) }]);
-    assert.equal(isRecoveryShape(cd, { classVault: VAULT }).ok, false);
+    assert.equal(isRecoveryShape(cd, { classVaults: [VAULT] }).ok, false);
   });
 
   it("IS REFUSED when mixed with a transfer", async () => {
@@ -252,7 +252,7 @@ describe("the class vault sweep", () => {
       { to: VAULT, value: 0n, data: sweep(DOGGOS) },
       { to: USDG, value: 0n, data: xfer(DEST, 5n) },
     ]);
-    const v = isRecoveryShape(cd, { classVault: VAULT });
+    const v = isRecoveryShape(cd, { classVaults: [VAULT] });
     assert.equal(v.ok, false);
     assert.match(v.ok ? "" : v.why, /cannot be mixed/);
   });
@@ -261,7 +261,7 @@ describe("the class vault sweep", () => {
     // Four bytes are not a function. A longer payload wearing the same prefix
     // is a different call.
     const cd = await batch([{ to: VAULT, value: 0n, data: `${sweep(DOGGOS)}deadbeef` as `0x${string}` }]);
-    assert.equal(isRecoveryShape(cd, { classVault: VAULT }).ok, false);
+    assert.equal(isRecoveryShape(cd, { classVaults: [VAULT] }).ok, false);
   });
 
   it("and an ordinary withdrawal is unaffected by any of this", async () => {
@@ -271,8 +271,78 @@ describe("the class vault sweep", () => {
       { to: USDG, value: 0n, data: xfer(DEST, 318_000000n) },
       { to: DEST, value: 4_000_000_000_000_000n, data: "0x" },
     ]);
-    const v = isRecoveryShape(cd, { classVault: VAULT });
+    const v = isRecoveryShape(cd, { classVaults: [VAULT] });
     assert.equal(v.ok, true, v.ok ? "" : v.why);
     assert.equal(v.ok && v.classSweep, false);
+  });
+});
+
+/**
+ * A SET OF VAULTS, AND THE REFUSALS TESTED HARDER THAN THE ACCEPTANCES.
+ *
+ * This is the one rule in the file that loosened: a sweep leg used to have to
+ * equal ONE address and now has to be IN a set. It loosens by exactly the
+ * addresses the SERVER derived from the same account, carried inside the same
+ * HMAC — nothing a caller sends can add to it. Everything else is unchanged, and
+ * the point of these tests is that it stayed unchanged.
+ */
+describe("a ticket blessing two vaults, after v2", () => {
+  const VAULT_V1 = "0x3fcdde6e011769ca05f0115f1543290862473216" as const;
+  const VAULT_V2 = "0x5a1c9f0dd2a41b7c9e2b8f4d6a3c1e7b0d9f2a84" as const;
+  const STRANGER = "0x9999999999999999999999999999999999999999" as const;
+
+  it("either vault in the set is carried", async () => {
+    for (const v of [VAULT_V1, VAULT_V2]) {
+      const cd = await batch([{ to: v, value: 0n, data: sweep(DOGGOS) }]);
+      const verdict = isRecoveryShape(cd, { classVaults: [VAULT_V1, VAULT_V2] });
+      assert.equal(verdict.ok, true, verdict.ok ? "" : verdict.why);
+      assert.equal(verdict.ok && verdict.to.toLowerCase(), v.toLowerCase(), "and the target is reported");
+    }
+  });
+
+  it("A THIRD ADDRESS IS STILL REFUSED — the set is closed", async () => {
+    const cd = await batch([{ to: STRANGER, value: 0n, data: sweep(DOGGOS) }]);
+    const v = isRecoveryShape(cd, { classVaults: [VAULT_V1, VAULT_V2] });
+    assert.equal(v.ok, false);
+    assert.match(v.ok ? "" : v.why, /other than this account's own class vault/);
+  });
+
+  it("an EMPTY set blesses nothing, exactly as a null one did", async () => {
+    const cd = await batch([{ to: VAULT_V1, value: 0n, data: sweep(DOGGOS) }]);
+    assert.equal(isRecoveryShape(cd, { classVaults: [] }).ok, false);
+    assert.equal(isRecoveryShape(cd, {}).ok, false);
+  });
+
+  it("TWO VAULTS IN ONE OPERATION IS REFUSED, even though both are blessed", async () => {
+    // recoverFunds sends one operation per vault because the batch is atomic.
+    // Admitting a mixed-target sweep would let one refusing vault take the
+    // other's down with it, inside a shape this file had already blessed — and
+    // nothing in this system produces that calldata, so accepting it could only
+    // ever be someone else's idea.
+    const cd = await batch([
+      { to: VAULT_V1, value: 0n, data: sweep(DOGGOS) },
+      { to: VAULT_V2, value: 0n, data: sweep(USDG) },
+    ]);
+    const v = isRecoveryShape(cd, { classVaults: [VAULT_V1, VAULT_V2] });
+    assert.equal(v.ok, false);
+    assert.match(v.ok ? "" : v.why, /two different vaults/);
+  });
+
+  it("every other refusal is untouched by the set", async () => {
+    const opts = { classVaults: [VAULT_V1, VAULT_V2] } as const;
+    // A sweep mixed with a transfer.
+    const mixed = await batch([
+      { to: VAULT_V1, value: 0n, data: sweep(DOGGOS) },
+      { to: USDG, value: 0n, data: encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [OTHER, 1n] }) },
+    ]);
+    assert.equal(isRecoveryShape(mixed, opts).ok, false, "a sweep mixed with a transfer");
+    // A sweep carrying native value.
+    const valued = await batch([{ to: VAULT_V1, value: 1n, data: sweep(DOGGOS) }]);
+    assert.equal(isRecoveryShape(valued, opts).ok, false, "a sweep carrying value");
+    // A call wearing sweep's four bytes with a longer argument list.
+    const fat = await batch([
+      { to: VAULT_V1, value: 0n, data: (sweep(DOGGOS) + "00".repeat(32)) as `0x${string}` },
+    ]);
+    assert.equal(isRecoveryShape(fat, opts).ok, false, "a sweep with unexpected arguments");
   });
 });

@@ -50,21 +50,23 @@ function Test-NodeOk {
   try {
     $v = (& node -v) -replace "^v", ""
     $p = $v.Split(".")
-    return ([int]$p[0] -gt 22) -or (([int]$p[0] -eq 22) -and ([int]$p[1] -ge 12))
+    return ([int]$p[0] -gt 23) -or
+      (([int]$p[0] -eq 23) -and ([int]$p[1] -ge 4)) -or
+      (([int]$p[0] -eq 22) -and ([int]$p[1] -ge 13))
   } catch { return $false }
 }
 
 if (Test-NodeOk) {
   Say "[ok] node $(node -v) already installed" "Green"
 } else {
-  Say "[..] Node 22.12+ not found -- installing Node LTS..." "Yellow"
+  Say "[..] Compatible Node LTS not found -- installing Node LTS..." "Yellow"
   if (Get-Command winget -ErrorAction SilentlyContinue) {
     winget install --id OpenJS.NodeJS.LTS -e --accept-source-agreements --accept-package-agreements
     # refresh PATH for this session so `node`/`npm` resolve immediately
     $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
                 [Environment]::GetEnvironmentVariable("Path", "User")
   } else {
-    Say "winget isn't available. Install Node 22.12+ from https://nodejs.org/en/download" "Red"
+    Say "winget isn't available. Install Node 22.13+ from https://nodejs.org/en/download" "Red"
     Say "then re-run:  irm https://raw.githubusercontent.com/millw14/merrymen/main/install.ps1 | iex" "DarkGray"
     return
   }

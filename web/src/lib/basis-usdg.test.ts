@@ -65,7 +65,7 @@ describe("every reader goes through it", () => {
     // written the obvious way would have it too, which is the only reason this
     // test reads source rather than behaviour.
     const { readFileSync } = await import("node:fs");
-    for (const f of ["./read-agent.ts", "./read-token.ts", "../app/api/feed/route.ts"]) {
+    for (const f of ["./read-agent.ts", "./read-token.ts", "./desk-positions.ts"]) {
       const src = readFileSync(new URL(f, import.meta.url), "utf8");
       assert.match(src, /basisUsdg\(/, `${f} must convert through basisUsdg`);
       assert.ok(

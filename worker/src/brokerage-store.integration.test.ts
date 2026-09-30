@@ -15,7 +15,7 @@ import path from "node:path";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-brk-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, addTrade, getRealizedPnlUsdg, getSpentTodayUsdg, getOpsToday, getBasis, setBasis } =
+const { closeStoreForTest, initStore, addTrade, getRealizedPnlUsdg, getSpentTodayUsdg, getOpsToday, getBasis, setBasis } =
   await import("./store");
 const { homePaths } = await import("./home");
 const { brokerAgentId } = await import("./venues/robinhood-id");
@@ -27,11 +27,8 @@ const rawDb = () => new DatabaseSync(homePaths.db());
 const AGENT = brokerAgentId("TESTACCT1");
 
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* temp dir cleanup is best-effort */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("brokerage columns on trades", () => {

@@ -12,12 +12,17 @@
  * is doing its job for that part. So the peak is not set to equity, not set to
  * contributions, and not nudged until the refusal stops. It is DERIVED:
  *
- *     proposed peak = capital in − capital out + profit already ratcheted in
+ *     proposed peak = capital in − capital out − energy bought + profit already ratcheted in
  *
  * Every term is evidence. `capital in` and `capital out` come from the chain,
  * classified by `classifyUsdgMovement` — so an account→vault transfer that
  * funded a buy is a trade, not a withdrawal, and a vault→account leg of a
- * recovery is not a deposit. `profit already ratcheted in` is Σ
+ * recovery is not a deposit. `energy bought` is USDG the agent spent on its
+ * energy reserve (`reserve-out`): capital that left the trading book without
+ * leaving the account, which the worker books as an 'energy-buy' flow and lowers
+ * the peak for — so this derivation must subtract it too, or it lands above the
+ * ledger's peak by every purchase and "never raise" makes it a no-op exactly when
+ * a purchase went unbooked. `profit already ratcheted in` is Σ
  * `fee_accruals.profit_usdg`: the only durable record of the peak being raised
  * by performance rather than by capital. An agent that never made a profit has
  * no such rows, and for it the peak simply IS net contributions.
@@ -58,6 +63,14 @@ export interface TenantCapitalFacts {
   depositsUsdg: number | null;
   /** Σ external capital out of it — to the owner, or anywhere outside. */
   withdrawalsUsdg: number | null;
+  /**
+   * Σ USDG spent buying the energy reserve (`reserve-out` on the chain).
+   *
+   * Capital leaving the trading BOOK while staying in the account — the reserve
+   * is never a position and never in equity. Kept apart from withdrawals so the
+   * report says which happened; subtracted from the peak exactly as they are.
+   */
+  reservePurchasesUsdg: number;
   /** account↔vault legs and the like. Counted, never totalled: they are not capital. */
   internalMoves: number;
   /** Swap legs. Counted for the same reason. */
@@ -106,9 +119,9 @@ export interface HwmRepairPlan {
   currentDrawdownBps: number | null;
   /** Would the breaker refuse a buy right now? */
   refusingNow: boolean;
-  /** Net capital still under management: deposits − withdrawals − swept-at-cost. */
+  /** Net capital still under management: deposits − withdrawals − swept-at-cost − energy bought. */
   netContributionsUsdg: number | null;
-  /** equity + withdrawals − deposits: what the book made, net of capital. */
+  /** equity + withdrawals + swept + energy bought − deposits: what the book made, net of capital. */
   lifetimeResultUsdg: number | null;
   /** The derived peak, before the clamps. */
   derivedHwmUsdg: number | null;
@@ -241,10 +254,12 @@ export function planHwmRepair(
 
   // ── the derivation ────────────────────────────────────────────────────────
   const swept = facts.sweptAtCostUsdg ?? 0;
-  const net = micro(facts.depositsUsdg - facts.withdrawalsUsdg - swept);
+  const reserve = facts.reservePurchasesUsdg;
+  const net = micro(facts.depositsUsdg - facts.withdrawalsUsdg - swept - reserve);
   // WHAT THE BOOK ACTUALLY MADE, net of capital: everything it still has, plus
-  // everything that was taken out, less everything that was put in.
-  const lifetime = micro(facts.equityUsdg + facts.withdrawalsUsdg + swept - facts.depositsUsdg);
+  // everything that was taken out (energy bought included — it left the book),
+  // less everything that was put in.
+  const lifetime = micro(facts.equityUsdg + facts.withdrawalsUsdg + swept + reserve - facts.depositsUsdg);
   // AN OPERATOR MAY DECLARE THE PROFIT TERM PHANTOM, for one named tenant, and
   // the reason below records that they did so rather than letting the figure
   // quietly vanish from the arithmetic.
@@ -332,6 +347,7 @@ export function planHwmRepair(
     reason:
       `${f(facts.depositsUsdg)} in − ${f(facts.withdrawalsUsdg)} out` +
       (swept > 0 ? ` − ${f(swept)} swept out at cost` : "") +
+      (reserve > 0 ? ` − ${f(reserve)} spent on energy` : "") +
       (profit > 0 ? ` + ${f(profit)} profit already in the peak` : "") +
       (judgement.treatProfitAsPhantom && facts.ratchetedProfitUsdg > 0
         ? ` (the ${f(facts.ratchetedProfitUsdg)} of recorded profit was DECLARED PHANTOM by an operator: ` +
@@ -368,7 +384,8 @@ export function repairLines(plans: readonly HwmRepairPlan[]): string[] {
     L.push(
       `   chain: deposits ${x.depositsUsdg === null ? "UNKNOWN" : f(x.depositsUsdg)} · ` +
         `withdrawals ${x.withdrawalsUsdg === null ? "UNKNOWN" : f(x.withdrawalsUsdg)} · ` +
-        `swept out at cost ${x.sweptAtCostUsdg === null ? "UNKNOWN" : f(x.sweptAtCostUsdg)}`,
+        `swept out at cost ${x.sweptAtCostUsdg === null ? "UNKNOWN" : f(x.sweptAtCostUsdg)} · ` +
+        `energy bought ${f(x.reservePurchasesUsdg)}`,
     );
     L.push(
       `   ignored: ${x.internalMoves} internal custody move(s) · ${x.tradeLegs} trade leg(s)` +
@@ -474,7 +491,8 @@ export function hwmWriteTargets(
       `gross ${f(current.grossUsdg)} → ${f(gross)}, withdrawn ${f(current.withdrawnUsdg)} → ${f(withdrawn)} ` +
       `(both raised; the peak falls because the second grows, not because anything was written down). ` +
       `Derived from chain history: deposits ${f(x.depositsUsdg ?? 0)}, withdrawals ${f(x.withdrawalsUsdg ?? 0)}, ` +
-      `swept out at cost ${f(x.sweptAtCostUsdg ?? 0)}, across ${x.internalMoves} internal custody move(s) and ` +
+      `swept out at cost ${f(x.sweptAtCostUsdg ?? 0)}, energy bought ${f(x.reservePurchasesUsdg)}, ` +
+      `across ${x.internalMoves} internal custody move(s) and ` +
       `${x.tradeLegs} trade leg(s) which are not capital. Equity ${f(x.equityUsdg ?? 0)}, best equity ever ` +
       `${x.maxEquityUsdg === null ? "unknown" : f(x.maxEquityUsdg)}, lifetime result ` +
       `${f(plan.lifetimeResultUsdg ?? 0)}. ${plan.reason}`,

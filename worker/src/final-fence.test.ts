@@ -191,3 +191,113 @@ test("the swap must be addressed to the router, not merely mention it", () => {
   assert.equal(v.ok, false);
   assert.equal(v.ok === false ? v.rule : null, "build-integrity");
 });
+
+// ── the energy lane ─────────────────────────────────────────────────────────
+//
+// Fed from the REAL builder (venues/uniswap-v2-energy.ts), for the reason the
+// header gives: the pass case is the production shape, and every refusal is a
+// mutation of it, one field at a time.
+import { ENERGY_ROUTE_V1, ENERGY_SWAP_SELECTOR, UNISWAP_V2_ENERGY_ABI } from "../../packages/core/src/index";
+import { checkEnergySwapCalls, type EnergyFenceExpect } from "./final-fence";
+import { buildEnergyCalls } from "./venues/uniswap-v2-energy";
+
+const E_IN = 10_000_000n;
+const E_MIN = 21_000_000_000_000_000_000_000n;
+const E_DEADLINE = 1_800_000_180n;
+const eExpect: EnergyFenceExpect = { route: ENERGY_ROUTE_V1, recipient: ME, amountIn: E_IN, minOut: E_MIN, deadline: E_DEADLINE };
+const eCalls = (): FenceCall[] =>
+  buildEnergyCalls({ route: ENERGY_ROUTE_V1, amountIn: E_IN, minOut: E_MIN, recipient: ME, deadline: E_DEADLINE }) as FenceCall[];
+const eSwap = (args: { amountIn?: bigint; minOut?: bigint; path?: readonly `0x${string}`[]; to?: `0x${string}`; deadline?: bigint }) =>
+  encodeFunctionData({
+    abi: UNISWAP_V2_ENERGY_ABI,
+    functionName: "swapExactTokensForTokensSupportingFeeOnTransferTokens",
+    args: [args.amountIn ?? E_IN, args.minOut ?? E_MIN, [...(args.path ?? ENERGY_ROUTE_V1.path)], args.to ?? ME, args.deadline ?? E_DEADLINE],
+  });
+const withEnergySwap = (data: `0x${string}`): FenceCall[] => {
+  const [a, s] = eCalls();
+  return [a!, { ...s!, data }];
+};
+const eRule = (calls: FenceCall[]) => {
+  const v = checkEnergySwapCalls(calls, eExpect);
+  return v.ok ? "ok" : v.rule;
+};
+const [USDG_E, VIRTUAL_E, MERRY_E] = ENERGY_ROUTE_V1.path;
+
+test("ENERGY: the real builder's output passes", () => {
+  assert.deepEqual(checkEnergySwapCalls(eCalls(), eExpect), { ok: true });
+  // Case never matters — only the bytes do.
+  const [a, s] = eCalls();
+  assert.deepEqual(checkEnergySwapCalls([a!, { ...s!, data: s!.data.toUpperCase().replace("0X", "0x") as `0x${string}` }], eExpect), { ok: true });
+});
+
+test("ENERGY PROVENANCE: count, value, and the approval bound to this buy", () => {
+  const [a, s] = eCalls();
+  assert.equal(eRule([s!]), "build-integrity");
+  assert.equal(eRule([a!, s!, s!]), "build-integrity");
+  assert.equal(eRule([{ ...a!, value: 1n }, s!]), "build-integrity");
+  assert.equal(eRule([a!, { ...s!, value: 1n }]), "build-integrity");
+  assert.equal(eRule([{ ...a!, to: QQQ }, s!]), "asset");
+  const approve = (spender: `0x${string}`, amount: bigint) =>
+    ({ ...a!, data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [spender, amount] }) }) as FenceCall;
+  assert.equal(eRule([approve(ROUTER, E_IN), s!]), "approval", "the v3 router is not the energy router");
+  assert.equal(eRule([approve(ENERGY_ROUTE_V1.router, E_IN + 1n), s!]), "approval", "a ceiling above the buy is a standing permission");
+  assert.equal(eRule([approve(ENERGY_ROUTE_V1.router, E_IN - 1n), s!]), "approval");
+  assert.equal(
+    eRule([{ ...a!, data: encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [ENERGY_ROUTE_V1.router, E_IN] }) }, s!]),
+    "approval",
+  );
+  assert.equal(eRule([{ ...a!, data: `${a!.data}${"00".repeat(32)}` as `0x${string}` }, s!]), "build-integrity", "trailing bytes on the approve");
+});
+
+test("ENERGY MEANING: the swap's target, selector, floor, recipient and path", () => {
+  const [a, s] = eCalls();
+  assert.equal(eRule([a!, { ...s!, to: ROUTER }]), "build-integrity", "addressed anywhere but the energy router");
+  // The NON fee-on-transfer variant: it would revert on every honest fill, and
+  // the wall never granted it.
+  const plain = `0x38ed1739${s!.data.slice(10)}` as `0x${string}`;
+  assert.equal(eRule(withEnergySwap(plain)), "build-integrity");
+  // The floor, in EITHER direction — a higher floor is a different trade.
+  assert.equal(eRule(withEnergySwap(eSwap({ minOut: E_MIN - 1n }))), "price-floor");
+  assert.equal(eRule(withEnergySwap(eSwap({ minOut: E_MIN + 1n }))), "price-floor");
+  assert.equal(eRule(withEnergySwap(eSwap({ minOut: 0n }))), "price-floor");
+  assert.equal(eRule(withEnergySwap(eSwap({ to: THIEF }))), "recipient");
+  // The path: two hops buys VIRTUAL, four adds an unpinned hop, and a swapped
+  // middle token is somebody else's pair.
+  assert.equal(eRule(withEnergySwap(eSwap({ path: [USDG_E, VIRTUAL_E] }))), "asset");
+  assert.equal(eRule(withEnergySwap(eSwap({ path: [USDG_E, VIRTUAL_E, MERRY_E, QQQ] }))), "asset");
+  assert.equal(eRule(withEnergySwap(eSwap({ path: [USDG_E, WETH, MERRY_E] }))), "asset");
+  assert.equal(eRule(withEnergySwap(eSwap({ path: [USDG_E, VIRTUAL_E, QQQ] }))), "asset");
+  assert.equal(eRule(withEnergySwap(eSwap({ deadline: E_DEADLINE + 1n }))), "build-integrity", "a deadline nobody built");
+  assert.equal(eRule(withEnergySwap(eSwap({ amountIn: E_IN + 1n }))), "build-integrity", "the swap sells more than the approve");
+});
+
+test("ENERGY: STRICTER THAN THE WALL — calldata that decodes right but is not canonical is refused", () => {
+  const [, s] = eCalls();
+  // 32 trailing bytes: the wall ignores them and so would the router.
+  assert.equal(eRule(withEnergySwap(`${s!.data}${"00".repeat(32)}` as `0x${string}`)), "build-integrity");
+  // The path relocated to 0xc0 behind a padding word: every value decodes
+  // exactly as approved (viem follows the offset), but it is not the layout the
+  // wall's w2 pin describes, and nothing we sign may be anything but the one.
+  const body = s!.data.slice(10);
+  const words = body.match(/.{64}/g)!;
+  const relocated = [words[0], words[1], (0xc0).toString(16).padStart(64, "0"), words[3], words[4], "0".repeat(64), ...words.slice(5)];
+  const reLaid = `${ENERGY_SWAP_SELECTOR}${relocated.join("")}` as `0x${string}`;
+  assert.equal(eRule(withEnergySwap(reLaid)), "build-integrity");
+  const v = checkEnergySwapCalls(withEnergySwap(reLaid), eExpect);
+  assert.match(!v.ok ? v.detail : "", /non-canonical encoding/);
+});
+
+test("ENERGY: the lanes never cross — the v3 fence refuses energy calls, the energy fence refuses v3 calls", () => {
+  const v3 = checkV3SwapCalls(eCalls(), { ...expect, router: ENERGY_ROUTE_V1.router, tokenIn: USDG_E, tokenOut: MERRY_E, amountIn: E_IN, minOut: E_MIN });
+  assert.equal(v3.ok, false);
+  const single = buildTradeCalls({
+    quote: { amountOut: 1_000_000_000_000_000_000n, fee: 3000, gasEstimate: 100_000n },
+    tokenIn: USDG_E,
+    tokenOut: MERRY_E,
+    recipient: ME,
+    amountIn: E_IN,
+    minAmountOut: E_MIN,
+    deadline: Number(E_DEADLINE),
+  } as Parameters<typeof buildTradeCalls>[0]) as FenceCall[];
+  assert.equal(checkEnergySwapCalls(single, eExpect).ok, false);
+});

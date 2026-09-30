@@ -25,6 +25,10 @@
       "@merrymen/identity-store": ["worker/src/identity-store.ts"],
       "@merrymen/home": ["worker/src/home.ts"],
       "@merrymen/settings-store": ["worker/src/settings-store.ts"],
+      // The grants route's store. web/tsconfig.json has it for the build; the
+      // runner resolves against THIS file, so without it no test can import
+      // web/src/app/api/grants/route.ts at all.
+      "@merrymen/grant-store": ["worker/src/grant-store.ts"],
       // The P&L card, reached from web/src/app/api/pnl/route.ts. Registered in
       // BOTH tsconfigs: this one governs `tsx --test`, web/ governs the build.
       "@merrymen/pnl-card": ["worker/src/pnl-card.ts"]

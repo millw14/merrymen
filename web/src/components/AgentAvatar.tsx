@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { avatarGradient, initialsOf } from "@/lib/agent-avatar";
+import { avatarGradient, faceSeed, initialsOf } from "@/lib/agent-avatar";
 import { useWired } from "@/components/WiredProvider";
 
 /**
@@ -61,7 +61,8 @@ export function AgentAvatar({
       style={{
         width: size,
         height: size,
-        background: avatarGradient(name),
+        // The SLUG when there is a real one, as the terminal Face does — see faceSeed.
+        background: avatarGradient(faceSeed(name, slug)),
         fontSize: Math.round(size * 0.34),
       }}
     >

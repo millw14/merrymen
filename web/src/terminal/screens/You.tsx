@@ -5,7 +5,8 @@ import { strategyName } from "../strategy";
 import { Empty, Face } from "../ui";
 import { BalanceFigure } from "../studio";
 import Link from "next/link";
-import { SlidersHorizontal, Wallet, Settings, ChevronRight } from "lucide-react";
+import { SlidersHorizontal, Wallet, Settings, ChevronRight, Plug } from "lucide-react";
+import { CONNECT_ASSISTANT_HREF, useConnectAssistantOffered } from "../assistant-connect";
 
 export function You({
   onLimits,
@@ -25,11 +26,14 @@ export function You({
   onDeposit: () => void;
   onWithdraw: () => void;
   stopped: boolean;
-  perTrade: string;
-  perDay: string;
+  /** Null until the signed caps are read — a dash, never "$0.00 per trade". */
+  perTrade: number | null;
+  perDay: number | null;
   mine: LiveMine | null;
   history: number[];
 }) {
+  // Before the early return: a hook may not be skipped on some renders.
+  const assistants = useConnectAssistantOffered();
   if (!mine)
     return (
       <Empty
@@ -106,7 +110,7 @@ export function You({
           <span>
             <strong>Trading limits</strong>
             <small>
-              {money(Number(perTrade))} per trade · {money(Number(perDay))} per
+              {money(perTrade)} per trade · {money(perDay)} per
               day
             </small>
           </span>
@@ -114,19 +118,26 @@ export function You({
         </button>
         <button type="button" className="account-control" onClick={onStop}><Wallet size={24} aria-hidden="true"/><span><strong>Wallet & permissions</strong></span><ChevronRight size={18} aria-hidden="true"/></button>
         <Link className="account-control" href="/settings"><Settings size={24} aria-hidden="true"/><span><strong>Settings</strong></span><ChevronRight size={18} aria-hidden="true"/></Link>
+        {/* Hosted only: a self-hosted install has no assistant connections (assistant-connect.ts). */}
+        {assistants && <Link className="account-control" href={CONNECT_ASSISTANT_HREF}><Plug size={24} aria-hidden="true"/><span><strong>Connect to Claude</strong><small>Ask Claude about your agent</small></span><ChevronRight size={18} aria-hidden="true"/></Link>}
         <section className="profile-usage" aria-label="Daily limit usage">
         <div className="account-usage">
           <div>
             <span>Used today</span>
             <span>
-              {money(spent)} / {money(Number(perDay))}
+              {money(spent)} / {money(perDay)}
             </span>
           </div>
-          <progress
-            aria-label="Daily trading limit used"
-            max={Math.max(1, Number(perDay) || 1)}
-            value={Math.min(spent, Math.max(1, Number(perDay) || 1))}
-          />
+          {/* NO BAR AGAINST A CAP WE HAVE NOT READ. The old fallback of 1
+              drew any spend at all as a full bar — a limit reached, measured
+              against nothing. */}
+          {perDay !== null && (
+            <progress
+              aria-label="Daily trading limit used"
+              max={Math.max(1, perDay)}
+              value={Math.min(spent, Math.max(1, perDay))}
+            />
+          )}
         </div>
         </section>
       </section>

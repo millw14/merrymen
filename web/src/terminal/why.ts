@@ -1,4 +1,4 @@
-import { REASON_MAX } from "@merrymen/thesis";
+import { REASON_MAX, clip } from "@merrymen/thesis";
 import type { Thesis } from "./live";
 
 export type WhyView =
@@ -98,11 +98,15 @@ export function takeFor(posted?: string | null, standing?: string | null): strin
  * the policy split in thesis-policy.ts), so without a limit here one long
  * deterministic reason could take the whole rail. The truncation stays visible
  * — an ellipsis, never a silent cut.
+ *
+ * AND IT IS THE GATE'S CUTTER, not a second one. This was a fixed-index slice,
+ * so the ~500-character market review — strategy trust, never clipped by the
+ * gate — met it first and was cut mid-word on every row. `clip` already
+ * prefers a sentence end, then a space, and is what every model reason passes
+ * through; one cutter means one idea of where a sentence may stop.
  */
 function shortWhy(text: string): string {
-  const r = text.trim();
-  if (r.length <= REASON_MAX) return r;
-  return `${r.slice(0, REASON_MAX - 3).trimEnd()}…`;
+  return clip(text, REASON_MAX);
 }
 
 /** One line for the feed. Book weight is not a thesis — use thesisLine for that. */

@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision } from "./brain-live";
+import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import type { BrainDecision } from "./brain-client";
 
 const decision = (over: Partial<BrainDecision> = {}): BrainDecision =>
@@ -48,6 +48,11 @@ const decision = (over: Partial<BrainDecision> = {}): BrainDecision =>
   }) as BrainDecision;
 
 const LIMITS = { maxUsdg: 50, minUsdg: BRAIN_MIN_TRADE_USDG };
+
+it("paper fills and submitted live trades both invalidate the pre-trade snapshot", () => {
+  for (const status of ["paper", "submitted", "landed"]) assert.equal(tradeConsumesSnapshot(status), true);
+  for (const status of ["rejected", "reverted", null, undefined]) assert.equal(tradeConsumesSnapshot(status), false);
+});
 
 describe("who may trade on model output", () => {
   it("NOBODY, BY DEFAULT", () => {
@@ -139,6 +144,19 @@ describe("what it refuses to trade", () => {
 });
 
 describe("the ceiling clamps, it does not refuse", () => {
+  it("rechecks the floor after clamping and never rounds above a cap", () => {
+    assert.equal(orderFromDecision(decision(), { maxUsdg: 2, minUsdg: 5 }).ok, false);
+    const sized = orderFromDecision(decision(), { maxUsdg: 5.999, minUsdg: 5 });
+    assert.ok(sized.ok);
+    assert.equal(sized.order.usdgAmount, 5.99);
+    for (const maxUsdg of [NaN, Infinity, -Infinity]) assert.equal(orderFromDecision(decision(), { maxUsdg }).ok, false);
+  });
+
+  it("does not turn an explicitly shut portfolio gate into an order", () => {
+    for (const gate_verdict of ["refuse", "downgrade-to-hold"] as const) {
+      assert.equal(orderFromDecision(decision({ gate_verdict }), LIMITS).ok, false);
+    }
+  });
   it("AN OVER-ASK BECOMES WHAT IT MAY HAVE", () => {
     // The same shape the strategist's own ceiling uses: min() can only tighten.
     // Refusing instead would turn one over-ask into a permanent hold, and the

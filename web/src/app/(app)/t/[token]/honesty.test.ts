@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
+import type { Thesis } from "../../../../terminal/live";
+import { seatsOf } from "../../../../terminal/token-seats";
+
 /**
  * WHAT THE TOKEN PAGE IS ALLOWED TO SAY.
  *
@@ -150,19 +153,48 @@ describe("the timeline says why it is empty", () => {
 });
 
 describe("the page does not attribute words to the wrong token", () => {
+  // EXECUTED NOW, NOT SCANNED. The join of holders to theses moved out of
+  // Token.tsx's read effect into terminal/token-seats.ts, so that a feed read
+  // every ten seconds lays a thesis over the holders instead of re-reading
+  // them, and a function can be called where a source line had to be matched.
+  const holder = (slug: string | null) => ({
+    slug,
+    name: slug ?? "Private",
+    handle: null,
+    paper: false,
+    valueUsdg: 10,
+    costUsdg: 9,
+    pnlBps: 1100,
+    enteredAt: 1_700_000_000,
+    entryPriceUsd: 3.1,
+    basisSource: "receipt" as const,
+  });
+  const said = {
+    name: "shogun",
+    slug: "shogun",
+    handle: null,
+    action: "buy",
+    symbol: "TSLA",
+    sizeUsdg: 5,
+    reason: "cheap into earnings",
+    paper: false,
+    head: "",
+  } as Thesis;
+
   it("symbolClash gates the thesis read entirely", () => {
     // Both tickers are attacker-chosen: the index's label is a string the pool
     // carries, the ledger's comes from the contract's own symbol(). Matching
     // theses by symbol without this gate prints an agent's real reasoning about
     // the listed token on an impostor's page, attributed to a holder of the
     // impostor.
-    assert.match(SCREEN, /thesis:data\.market\.symbolClash \? "" : theses\.find/);
+    assert.equal(seatsOf([holder("shogun")], [said], "TSLA", true)[0]!.thesis, "");
+    assert.equal(seatsOf([holder("shogun")], [said], "TSLA", false)[0]!.thesis, "cheap into earnings", "and only the clash");
   });
 
   it("distinguishes 'said nothing' from 'cannot be matched'", () => {
     // An agent with no slug cannot be looked up at all. Printing "nothing said"
     // for it puts words in its mouth on the strength of a failed join.
-    assert.match(SCREEN, /holders\.filter\(h=>h\.slug\)/);
+    assert.deepEqual(seatsOf([holder(null), holder("robin")], [said], "TSLA", false).map((s) => s.slug), ["robin"]);
     assert.match(SCREEN, /symbolClash &&[\s\S]{0,120}reasoning cannot be matched/);
   });
 });

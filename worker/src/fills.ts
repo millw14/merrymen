@@ -27,6 +27,16 @@ export interface ReceiptLog {
   address: string;
   topics: readonly string[];
   data: string;
+  /**
+   * WHERE the log sits, when the source carried it. Optional because the fill
+   * readers never needed it and hand-built fixtures omit it; viem receipt logs
+   * always carry all three. The energy booking needs them: a capital flow is
+   * identified by tx#logIndex, and one that cannot be identified cannot be
+   * booked exactly once (energy-accounting.ts).
+   */
+  logIndex?: number | string | bigint | null;
+  blockNumber?: bigint | number | string | null;
+  transactionHash?: string | null;
 }
 
 /** A 32-byte topic carries an address in its low 20 bytes. */
@@ -117,6 +127,7 @@ export function fillFromDeltas(opts: {
   usdgToken: string;
   stockToken: string;
   symbol: string;
+  decimals?: number;
 }): ReceiptFill | null {
   const usdgDelta = opts.deltas.get(opts.usdgToken.toLowerCase()) ?? 0n;
   const stockDelta = opts.deltas.get(opts.stockToken.toLowerCase()) ?? 0n;
@@ -140,7 +151,9 @@ export function fillFromDeltas(opts: {
   }
 
   // Stock tokens are 18dp, USDG is 6dp — the same convention bookFill uses.
-  const priceUsd = Number(cashUsdg) / 1e6 / (Number(qtyRaw) / 1e18);
+  const decimals = opts.decimals ?? 18;
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) return null;
+  const priceUsd = Number(cashUsdg) / 1e6 / (Number(qtyRaw) / 10 ** decimals);
   return { side, symbol: opts.symbol, qtyRaw, cashUsdg, priceUsd };
 }
 

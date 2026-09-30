@@ -20,15 +20,12 @@ import path from "node:path";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-curves-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, markPoolSeen, recentCandidates, recordCandidate, seenCurves, seenPools, setTrenchEntry, getTrenchEntry, upgradeTrenchEntry } = await import("./store");
+const { closeStoreForTest, initStore, markPoolSeen, recentCandidates, recordCandidate, seenCurves, seenPools, setTrenchEntry, getTrenchEntry, upgradeTrenchEntry } = await import("./store");
 
 await initStore();
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* Windows holds the sqlite handle a moment longer; the dir is disposable */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const NATIVE = `0x${"0".repeat(40)}`;

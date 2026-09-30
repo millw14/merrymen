@@ -22,7 +22,7 @@ node_ok() {
   local v maj rest min
   v=$(node -v | sed 's/^v//')
   maj=${v%%.*}; rest=${v#*.}; min=${rest%%.*}
-  [ "$maj" -gt 22 ] || { [ "$maj" -eq 22 ] && [ "$min" -ge 12 ]; }
+  [ "$maj" -gt 23 ] || { [ "$maj" -eq 23 ] && [ "$min" -ge 4 ]; } || { [ "$maj" -eq 22 ] && [ "$min" -ge 13 ]; }
 }
 
 RERUN="curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/install.sh | bash"
@@ -30,14 +30,14 @@ RERUN="curl -fsSL https://raw.githubusercontent.com/millw14/merrymen/main/instal
 if node_ok; then
   grn "[ok] node $(node -v) already installed"
 else
-  ylw "[..] Node 22.12+ not found -- installing..."
+  ylw "[..] Compatible Node not found -- installing..."
   if command -v brew >/dev/null 2>&1; then
     brew install node
   elif command -v fnm >/dev/null 2>&1; then
     fnm install 22 && fnm use 22
   else
     red "No Homebrew or fnm found to install Node automatically."
-    dim "Install Node 22.12+ from https://nodejs.org/en/download (or via nvm), then re-run:"
+    dim "Install Node 22.13+ from https://nodejs.org/en/download (or via nvm), then re-run:"
     dim "  $RERUN"
     exit 1
   fi

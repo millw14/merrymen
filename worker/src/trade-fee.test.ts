@@ -93,7 +93,10 @@ describe("it is accrued, and nothing is moved", () => {
     // as a flow rather than a trade for the same reason.
     const at = INDEX.indexOf("trade_fee_usdg: usdgNum(tradeFeeUsdg(");
     const around = INDEX.slice(at - 200, at + 120);
-    assert.match(around, /intent\.kind === "transfer"\s*\n?\s*\? \{\}/);
+    // AND AN ENERGY PURCHASE IS NOT ONE EITHER — capital set aside as the
+    // agent's own capacity, booked as a flow (energy-settle.ts). The transfer
+    // exemption is still the first term; the energy one sits beside it.
+    assert.match(around, /intent\.kind === "transfer" \|\| isEnergyIntent\(intent\)\s*\n?\s*\? \{\}/);
   });
 
   it("NOTHING TRANSFERS THE FEE ANYWHERE", () => {

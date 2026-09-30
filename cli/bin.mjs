@@ -356,9 +356,8 @@ async function onboard() {
       `  Blank answers keep what's saved. Ctrl+C to slip back into the forest anytime.\n`,
   );
 
-  const major = Number(process.versions.node.split(".")[0]);
-  if (major < 22) {
-    bad(`Node ${process.versions.node} — merrymen needs Node 22+ (node:sqlite). Install from nodejs.org and rerun.`);
+  if (!nodeVersionOk()) {
+    bad(`Node ${process.versions.node} — merrymen needs ${NODE_REQUIREMENT} (node:sqlite). Install from nodejs.org and rerun.`);
     process.exit(1);
   }
   if (!existsSync(path.join(ROOT, "node_modules"))) {
@@ -681,7 +680,7 @@ async function doctor() {
 
   nodeVersionOk()
     ? ok(`node ${process.versions.node}`)
-    : bad(`node ${process.versions.node} — need ${NODE_MIN.join(".")}+ for node:sqlite (run: merrymen setup)`);
+    : bad(`node ${process.versions.node} — need ${NODE_REQUIREMENT} for node:sqlite (run: merrymen setup)`);
   const npmV = sh("npm", ["--version"]);
   npmV ? ok(`npm ${npmV}`) : warn("npm not found on PATH — reinstall Node (run: merrymen setup)");
   const binDir = npmGlobalBinDir();
@@ -1240,8 +1239,24 @@ async function recover() {
   // 1,063,408.141815 DOGGOS out of the vault. The engine was right; the
   // disclosure was not, and a confirmation that understates what it moves is
   // not a confirmation.
-  const classHoldings = plan.result.classHoldings ?? [];
-  const classVault = plan.result.classVault ?? null;
+  // EVERY VAULT, not the primary one. After v2 an account has two, and this
+  // early return is the line that used to say "nothing to recover" over a full
+  // vault — printing it over a full SECOND vault would be the same defect with
+  // a different cause. `classVaults` is absent from an older worker's output,
+  // so the singular fields are the fallback rather than the source.
+  const classVaults =
+    plan.result.classVaults ??
+    (plan.result.classVault
+      ? [
+          {
+            vault: plan.result.classVault,
+            version: null,
+            note: plan.result.classNote ?? null,
+            holdings: plan.result.classHoldings ?? [],
+          },
+        ]
+      : []);
+  const classHoldings = classVaults.flatMap((v) => v.holdings ?? []);
   // A BALANCE WE COULD NOT READ IS NOT A ZERO, and this is the one place that
   // forgot. The child already refuses to say "empty" when anything was
   // unreadable — recover-cli writes "that is NOT a zero balance. Check the RPC
@@ -1288,10 +1303,17 @@ async function recover() {
   const list = [...classParts, ...accountParts].join(", ");
   console.log();
   warn("about to sweep — read this before confirming:");
-  if (classParts.length) {
+  // ONE BLOCK PER VAULT, labelled by version. Both are "this account's class
+  // vault" and only one is the current one, so an owner needs to be able to tell
+  // which address a given balance is sitting at — the confirmation naming a
+  // strict subset of what the operation moves has shipped here once already.
+  for (const v of classVaults) {
+    const parts = (v.holdings ?? []).map((h) => `${h.amount} ${h.symbol}`);
+    if (parts.length === 0) continue;
     console.log();
-    console.log(`  ${bold("CLASS VAULT")}${classVault ? ` ${dim(classVault)}` : ""}`);
-    for (const line of classParts) console.log(`  ${bold(line)}`);
+    const label = v.version === null ? "CLASS VAULT" : `CLASS VAULT v${v.version}`;
+    console.log(`  ${bold(label)}${v.vault ? ` ${dim(v.vault)}` : ""}`);
+    for (const line of parts) console.log(`  ${bold(line)}`);
   }
   if (accountParts.length) {
     console.log();
@@ -1332,11 +1354,12 @@ async function recover() {
 
 // ──────────────────────────────────────────────────────── environment setup ──
 
-const NODE_MIN = [22, 12]; // node:sqlite + the modern APIs the worker leans on
+const NODE_REQUIREMENT = "Node 22.13+ on 22.x, or Node 23.4+";
 
 function nodeVersionOk(v = process.versions.node) {
   const [maj, min] = v.split(".").map(Number);
-  return maj > NODE_MIN[0] || (maj === NODE_MIN[0] && min >= NODE_MIN[1]);
+  // SQLite was unflagged separately on both release lines.
+  return maj > 23 || (maj === 23 && min >= 4) || (maj === 22 && min >= 13);
 }
 
 /** Run a command, capture trimmed stdout, never throw. null on any failure. */
@@ -1395,9 +1418,9 @@ async function setup() {
 
   const v = process.versions.node;
   if (nodeVersionOk(v)) {
-    ok(`node ${v} ${dim(`(need ${NODE_MIN.join(".")}+)`)}`);
+    ok(`node ${v} ${dim(`(need ${NODE_REQUIREMENT})`)}`);
   } else {
-    bad(`node ${v} is too old — merrymen needs ${NODE_MIN.join(".")}+ (node:sqlite)`);
+    bad(`node ${v} is unsupported — merrymen needs ${NODE_REQUIREMENT} (node:sqlite)`);
     console.log(`      ${bold("install a newer Node:")} ${dim(nodeInstallHint())}`);
   }
 
@@ -1432,7 +1455,7 @@ async function setup() {
 function warnIfOldNode() {
   if (!nodeVersionOk()) {
     warn(
-      `node ${process.versions.node} is below ${NODE_MIN.join(".")} — the worker needs node:sqlite. Run ${bold("merrymen setup")} for the fix.`,
+      `node ${process.versions.node} is unsupported — the worker needs ${NODE_REQUIREMENT}. Run ${bold("merrymen setup")} for the fix.`,
     );
   }
 }

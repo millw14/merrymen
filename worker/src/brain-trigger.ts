@@ -1,21 +1,15 @@
 /**
  * WHEN IS IT WORTH WAKING BRAIN AT ALL?
  *
- * The tick runs every 240 seconds. A Brain run costs 5-11 model calls and 4-10
- * seconds; wiring it to the tick unconditionally would be 360 runs per agent per
- * day, 24 agents, for a market that mostly did nothing — and the fleet has
- * already had one incident where an unwatched background feature emptied a daily
- * token allowance.
- *
- * So the expensive thing is gated by a cheap one. This module is deterministic,
- * pure, and calls no model: it looks at what changed since the last run and
- * decides whether anything did. THAT IS THE POINT — a trigger layer that needed
- * a model to decide whether to call a model would cost what it was meant to save.
+ * Events can bring research forward, and a quiet market still gets a review
+ * within five minutes. The gate remains deterministic and per-reason cooldowns
+ * prevent repeated events from spending the model budget on every poll.
  *
  * COOLDOWN IS PER REASON, not global. A price move and a portfolio change are
  * different questions, and a global cooldown would let a stale price trigger
  * suppress a genuine risk event minutes later.
  */
+import { MAX_DECISION_INTERVAL_SEC, reviewLookaheadSec } from "./decision-cadence";
 
 export type TriggerReason =
   | "scheduled-review"
@@ -29,13 +23,17 @@ export interface TriggerState {
   lastFiredAt: Partial<Record<TriggerReason, number>>;
   /** What the world looked like when Brain last ran. */
   lastPriceUsd: number | null;
+  lastInstrumentId?: string;
   lastEquityUsdg: number | null;
   lastNewsKey: string | null;
 }
 
 export interface TriggerInputs {
   now: number;
+  /** Observed time needed to prepare a tick; permits a bounded early review. */
+  reviewPreparationMs?: number;
   priceUsd: number | null;
+  instrumentId?: string;
   equityUsdg: number;
   /** A stable identity for the latest material news item, or null. */
   newsKey: string | null;
@@ -57,20 +55,20 @@ export interface TriggerConfig {
 /**
  * How long Brain may sleep with nothing happening, in seconds.
  *
- * FOUR HOURS BY DEFAULT — long enough that a quiet market costs six runs a day
- * rather than 360, short enough that an agent is never silent for a session.
- *
- * Configurable because SHADOW EVALUATION wants a tighter cadence than
- * production does: gathering ten real decisions at four hours apart takes a day
- * and a half, and the whole point of shadow mode is learning what the thing
- * does before it matters. Bounded on both sides — under a minute is refused,
- * because a scheduled review firing faster than the tick cannot mean anything,
- * and the per-reason cooldowns and the per-run budget still apply underneath.
+ * Five minutes by default and at most five minutes, including deployments that
+ * still carry the old four-hour environment setting. A shorter explicit
+ * interval is allowed down to one minute. Model/run budgets remain in force.
  */
 export function scheduledInterval(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number((env.MERRYMEN_BRAIN_INTERVAL_SEC ?? "").trim());
-  if (!Number.isFinite(raw) || raw < 60) return 4 * 3600;
-  return Math.floor(raw);
+  if (!Number.isFinite(raw) || raw < 60) return MAX_DECISION_INTERVAL_SEC;
+  return Math.min(MAX_DECISION_INTERVAL_SEC, Math.floor(raw));
+}
+
+/** The next quiet-market review, including after a non-scheduled trigger. */
+export function nextReviewAt(state: TriggerState, now: number, cfg: TriggerConfig = DEFAULT_TRIGGERS): number {
+  const last = Math.max(0, ...Object.values(state.lastFiredAt).filter((v): v is number => v !== undefined));
+  return last === 0 ? now : last + cfg.scheduledIntervalSec;
 }
 
 export const DEFAULT_TRIGGERS: TriggerConfig = {
@@ -130,11 +128,13 @@ export function shouldWake(
 
   if (input.newsKey && input.newsKey !== state.lastNewsKey) candidates.push("news-event");
 
-  const priceMove = pctMove(input.priceUsd, state.lastPriceUsd);
+  const priceMove = input.instrumentId === state.lastInstrumentId
+    ? pctMove(input.priceUsd, state.lastPriceUsd) : 0;
   if (priceMove >= cfg.priceMovePct) candidates.push("price-move");
 
   const lastAny = Math.max(0, ...Object.values(state.lastFiredAt).filter((v): v is number => v !== undefined));
-  if (lastAny === 0 || input.now - lastAny >= cfg.scheduledIntervalSec) candidates.push("scheduled-review");
+  const lookahead = reviewLookaheadSec(input.reviewPreparationMs, cfg.scheduledIntervalSec);
+  if (lastAny === 0 || input.now + lookahead - lastAny >= cfg.scheduledIntervalSec) candidates.push("scheduled-review");
 
   for (const r of candidates) {
     if (cooled(r)) {
@@ -187,6 +187,7 @@ export function afterFiring(
     // scheduled review leaves an old price in place and the next tick reads the
     // same drift as a fresh move — one real movement billing twice.
     lastPriceUsd: input.priceUsd,
+    ...(input.instrumentId ? { lastInstrumentId: input.instrumentId } : {}),
     lastEquityUsdg: input.equityUsdg,
     lastNewsKey: input.newsKey,
   };

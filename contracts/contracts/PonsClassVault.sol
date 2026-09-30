@@ -112,8 +112,103 @@ contract PonsClassVault {
         owner = owner_;
     }
 
+    /**
+     * @notice The most quote asset this vault may SPEND in one rolling window.
+     *
+     * ─────────────────────────────────────────────────────────────────────────
+     * WHY A SPEND CAP EXISTS HERE AND NOWHERE ELSE
+     *
+     * `_checkCurve` interrogates the curve about ITSELF — `pairToken()`,
+     * `graduated()`, `token()` — and every one of those answers is supplied by
+     * the contract being checked. The launchpad mints ~475 curve addresses an
+     * hour, so no call policy can enumerate the legitimate ones, and the Pons
+     * factory exposes no registry to verify against (probed on mainnet 4663:
+     * eighteen candidate view signatures, none answers). Provenance is simply
+     * not available on chain.
+     *
+     * So a compromised session key can name a contract it controls as the
+     * curve. That contract answers the three questions correctly, takes the
+     * approved quote, and returns one wei so the `tokensOut == 0` floor does
+     * not trip — `minTokensOut` being caller-supplied and therefore also
+     * attacker-supplied.
+     *
+     * The wall bounds that to `perTradeUsdg` PER CALL, and nothing bounded the
+     * REPETITION: `RateLimitPolicy` has zero bytecode on this chain, so
+     * `maxOpsPerDay` is enforced only by the worker — which is the party a
+     * compromise owns. The true ceiling was therefore the whole balance, taken
+     * one capped call at a time, and the wall's own header says so.
+     *
+     * This restores the missing bound where it can actually be enforced: in the
+     * contract that holds the allowance. It is a ceiling on LOSS, not a
+     * statement about provenance, because a ceiling is the only thing this
+     * chain lets us say.
+     *
+     * ─────────────────────────────────────────────────────────────────────────
+     * WHY IT CANNOT BE RAISED BY THE THING IT BOUNDS
+     *
+     * `setSpendCap` is callable only by `owner` — the smart account — and the
+     * wall grants the session key exactly two selectors on this target, `buy`
+     * and `sell`. A session key therefore cannot reach it; the owner's sudo key
+     * can, in one transaction, at any time. That asymmetry is the whole control,
+     * and `wall-battery` pins that no granted permission names this selector.
+     *
+     * SELLS ARE NOT CAPPED, deliberately. A sell brings quote back IN, and a
+     * ceiling that could refuse an exit would rebuild the no-exit trap this
+     * whole contract exists to remove.
+     */
+    uint256 public spendCapPerWindow = DEFAULT_SPEND_CAP;
+
+    /// @notice Quote units. 250 USDG at 6dp — generous against the canary preset
+    /// (5 per entry, 3 positions) and a hard ceiling on a drain. Owner-settable.
+    uint256 public constant DEFAULT_SPEND_CAP = 250_000_000;
+
+    /// @notice The window the cap is measured over.
+    uint256 public constant SPEND_WINDOW = 1 days;
+
+    /// @dev Start of the current window, and what has been spent inside it.
+    uint256 private windowStart;
+    uint256 private spentInWindow;
+
+    event SpendCapSet(uint256 cap);
+
+    /**
+     * @notice Raise or lower what this vault may spend per window.
+     * @dev Owner only. Unreachable from the session key, which is the point —
+     * see the note on `spendCapPerWindow`. Zero disables buying entirely, which
+     * is a legitimate thing for an owner to want and still leaves selling open.
+     */
+    function setSpendCap(uint256 cap) external {
+        if (msg.sender != owner) revert NotOwner();
+        spendCapPerWindow = cap;
+        emit SpendCapSet(cap);
+    }
+
+    /// @notice What may still be spent in the current window, for the owner to read.
+    function spendRemaining() external view returns (uint256) {
+        if (block.timestamp >= windowStart + SPEND_WINDOW) return spendCapPerWindow;
+        return spentInWindow >= spendCapPerWindow ? 0 : spendCapPerWindow - spentInWindow;
+    }
+
+    /// @dev Charge a buy against the window, rolling it forward when it has passed.
+    function _chargeSpend(uint256 quoteIn) private {
+        // ROLLED, NOT SLIDING. A sliding window needs per-call history and the
+        // gas to walk it; a rolling one is bounded by the same ceiling and
+        // costs two words. The worst case is two windows' worth across a
+        // boundary, which is a bound, which is the whole point.
+        if (block.timestamp >= windowStart + SPEND_WINDOW) {
+            windowStart = block.timestamp;
+            spentInWindow = 0;
+        }
+        uint256 spent = spentInWindow + quoteIn;
+        if (spent > spendCapPerWindow) {
+            revert SpendCapExceeded(quoteIn, spendCapPerWindow - spentInWindow);
+        }
+        spentInWindow = spent;
+    }
+
     error NotOwner();
     error Reentrant();
+    error SpendCapExceeded(uint256 wanted, uint256 remaining);
     error Expired();
     error ZeroAmount();
     error ZeroOwner();
@@ -161,6 +256,10 @@ contract PonsClassVault {
     ) external only returns (uint256 tokensOut) {
         if (block.timestamp > deadline) revert Expired();
         if (quoteIn == 0) revert ZeroAmount();
+        // BEFORE the pull and before the approve. The curve is untrusted and is
+        // about to be handed an allowance; the ceiling has to bind before
+        // anything leaves the account, not after the call returns.
+        _chargeSpend(quoteIn);
         address token = _checkCurve(curve, quoteAsset);
 
         // MEASURED, NOT TRUSTED. The curve is an untrusted contract asked to

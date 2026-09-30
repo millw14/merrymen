@@ -225,7 +225,7 @@ test("send_file scans the WHOLE file — a secret past the old 200KB window is r
     assert.match(out, /REFUSED/);
     assert.match(out, /secret/i);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -288,7 +288,7 @@ test("loop: streams text, executes tools, stops when the model stops", async () 
     const toolMsg = second.find((m) => m.role === "tools");
     assert.ok(toolMsg && toolMsg.role === "tools" && toolMsg.results[0]!.output.includes("hello.txt"));
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
@@ -376,6 +376,6 @@ test("loop: file write + read round-trip inside the root; secrets path refused",
     assert.ok(results.results[2]!.output.startsWith("REFUSED")); // secrets
     assert.ok(results.results[3]!.output.startsWith("REFUSED")); // escape
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });

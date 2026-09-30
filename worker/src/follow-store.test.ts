@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { FileFollowStore, MAX_FOLLOWS, SLUG_SHAPE, resetFollowStoreForTest } from "./follow-store";
+import { FileFollowStore, MAX_FOLLOWS, SLUG_SHAPE, isSelfFollow, resetFollowStoreForTest } from "./follow-store";
 
 const A = "0x00000000000000000000000000000000000000aa" as const;
 const B = "0x00000000000000000000000000000000000000bb" as const;
@@ -22,7 +22,7 @@ afterEach(async () => {
   if (prev === undefined) delete process.env.MERRYMEN_HOME;
   else process.env.MERRYMEN_HOME = prev;
   resetFollowStoreForTest();
-  await rm(home, { recursive: true, force: true });
+  await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("the follow graph", () => {
@@ -153,5 +153,56 @@ describe("the follow graph", () => {
     assert.equal(SLUG_SHAPE.test(slug(1)), true);
     assert.equal(SLUG_SHAPE.test("iloubase32xxxxxx"), false, "i/l/o/u are not in the alphabet");
     assert.equal(SLUG_SHAPE.test("a7k3m9qz2n4vb8"), false, "sixteen characters, not fourteen");
+  });
+});
+
+/**
+ * WIRING YOURSELF IN.
+ *
+ * The rule became reachable the moment the control went on a screen: a viewer
+ * can open their own agent's public profile like anybody else's. The UI hides
+ * the button there, but the UI is the courtesy and this is the rule — a curl
+ * reaches the route directly.
+ *
+ * It matters because an agent ALREADY reads its own theses. The orchestrator
+ * materialises them into peers.json as `own`, precisely so an agent's memory
+ * survives the redeploy that wipes its sqlite. A self-edge spends one of eight
+ * prompt slots re-delivering what is already in the prompt.
+ */
+describe("an agent may not wire itself in", () => {
+  const mine = slug(1);
+
+  it("refuses when the target is this tenant's own agent", () => {
+    assert.equal(isSelfFollow(mine, mine), true);
+  });
+
+  it("allows every other agent", () => {
+    assert.equal(isSelfFollow(mine, slug(2)), false);
+  });
+
+  /**
+   * THE CASE THE WHOLE FUNCTION EXISTS FOR.
+   *
+   * `IdentityStore.get` returns null for a tenant who has signed in and not yet
+   * minted an agent — a real and common state, not an edge case. ABSENT IS NOT
+   * A MATCH: such a tenant has no slug to collide with and must be able to
+   * follow anyone.
+   *
+   * Written as three separate cases rather than one, because the failure they
+   * guard is a caller "simplifying" this to `a === b`, at which point
+   * `null === null` is true and every agentless tenant is refused every follow
+   * — silently, and in the direction that looks like the feature being broken
+   * for new users specifically.
+   */
+  it("does not refuse a tenant who has no agent yet", () => {
+    assert.equal(isSelfFollow(null, mine), false);
+    assert.equal(isSelfFollow(undefined, mine), false);
+    assert.equal(isSelfFollow("", mine), false);
+  });
+
+  it("two unknowns are not the same agent", () => {
+    // The mutation this catches directly: `mySlug === target` with both empty.
+    assert.equal(isSelfFollow(null, ""), false);
+    assert.equal(isSelfFollow("", ""), false);
   });
 });

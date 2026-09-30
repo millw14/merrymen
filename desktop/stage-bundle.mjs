@@ -36,7 +36,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdtempSync, readdirSync, renameSync, rmSync, unlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -187,7 +187,7 @@ renameSync(extracted, STAGED);
 
 // npm never packs dependencies; point the staged copy back at the repo's, the
 // same resolution the symlink gave us.
-execFileSync("cmd", ["/c", "mklink", "/J", INNER_NM, ROOT_NM], { encoding: "utf8" });
+symlinkSync(ROOT_NM, INNER_NM, process.platform === "win32" ? "junction" : "dir");
 
 const banned = ["desktop", ".data", "site", "gateway", "contracts", "scripts", ".claude", ".git", ".env"];
 const leaked = banned.filter((d) => existsSync(path.join(STAGED, d)));

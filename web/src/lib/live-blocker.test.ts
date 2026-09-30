@@ -17,6 +17,10 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import { ADVISED_RULES, blockerAdvice } from "./live-blocker";
+import { chatStateOf } from "../terminal/chat-payload";
+
+/** An agent as the chat screen holds it — only what the state builder reads. */
+const CHAT_MINE = { name: "Robin", equity: 1, moves: [], glance: { id: "steady-basket" } } as never;
 
 /**
  * Every member of the `RefuseRule` union, read from its source.
@@ -223,14 +227,19 @@ describe("the chat is told what the screen already knows", () => {
     // never sent to the chat — so an owner asking "do I still need to send gas
     // in ETH?" got a general answer while the specific one sat in the same
     // component. Reported verbatim in the beta.
-    const agent = readFileSync(new URL("../terminal/screens/Agent.tsx", import.meta.url), "utf8");
-    assert.match(agent, /liveBlocker:liveBlocker \?\? null,/);
+    const state = chatStateOf({ mine: CHAT_MINE, settings: null, liveBlocker: "no-gas", perTrade: null, perDay: null, stopped: false });
+    assert.equal(state.liveBlocker, "no-gas");
+    assert.equal(
+      chatStateOf({ mine: CHAT_MINE, settings: null, liveBlocker: undefined, perTrade: null, perDay: null, stopped: false }).liveBlocker,
+      null,
+      "no verdict is null, not a missing key the model reads as nothing to say",
+    );
   });
 
   it("and the prompt names every rule the screen advises on", () => {
     // If a new RefuseRule gains screen advice but the prompt does not learn it,
     // the agent falls back to a guess about the one thing it could have known.
-    const chat = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8");
+    const chat = readFileSync(new URL("./agent-chat.ts", import.meta.url), "utf8");
     for (const rule of ADVISED_RULES) {
       // The prompt lives inside a template literal, so its backticks are
       // escaped in the source. Match the rule name and its bullet, not the
@@ -247,7 +256,7 @@ describe("the chat is told what the screen already knows", () => {
     // Null means trading for real OR never beaten. The prompt has to carry that
     // ambiguity, because reading it as health is how an idle agent gets told it
     // is working.
-    const chat = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8");
+    const chat = readFileSync(new URL("./agent-chat.ts", import.meta.url), "utf8");
     assert.match(chat, /A NULL \\?`liveBlocker\\?` IS TWO ANSWERS/);
   });
 });
@@ -266,7 +275,7 @@ describe("the chat is not instructed to deny the switch it now has", () => {
    * the retired sentence inside the prompt would risk the model repeating it,
    * which is precisely the failure being fixed.
    */
-  const PROMPT = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8")
+  const PROMPT = readFileSync(new URL("./agent-chat.ts", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, " ")
     .split(/\r?\n/)
     .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
@@ -299,10 +308,10 @@ describe("the chat is not instructed to deny the switch it now has", () => {
   it("and the STATE actually carries it", () => {
     // The prompt can only reason about fields the client sends. This one was
     // sending the misleading field and not the decisive one.
-    const AGENT = readFileSync(
-      new URL("../terminal/screens/Agent.tsx", import.meta.url),
-      "utf8",
-    );
-    assert.match(AGENT, /liveTradingEnabled:settings\?\.values\?\.liveTradingEnabled/);
+    const state = (settings: Parameters<typeof chatStateOf>[0]["settings"]) =>
+      chatStateOf({ mine: CHAT_MINE, settings, liveBlocker: null, perTrade: null, perDay: null, stopped: false });
+    assert.equal(state({ values: { liveTradingEnabled: true }, defaults: { liveTradingEnabled: false } }).liveTradingEnabled, true);
+    assert.equal(state({ values: {}, defaults: { liveTradingEnabled: false } }).liveTradingEnabled, false);
+    assert.equal(state(null).liveTradingEnabled, null, "an unread switch is not an off one");
   });
 });

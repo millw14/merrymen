@@ -9,7 +9,7 @@
  */
 
 import type { TradeIntent } from "../policy";
-import type { Snapshot, Strategy, Tick } from "./types";
+import { breakerIdle, opsSpent, type Snapshot, type Strategy, type Tick } from "./types";
 
 export interface DipHunterConfig {
   legs: { symbol: string; token: `0x${string}` }[];
@@ -69,6 +69,28 @@ export function makeDipHunter(cfg: DipHunterConfig): Strategy {
           best = { token: leg.token, symbol: leg.symbol, dipBps };
         }
       }
+
+      /**
+       * THE DAY'S TRADE COUNT, checked AFTER the price loop and never before it.
+       *
+       * With `maxOpsPerDay` used up the wall refuses every buy with `ops-cap`,
+       * so proposing one is a refusal a tick. But the loop above is also where
+       * the rolling highs are kept, and returning ahead of it would freeze them
+       * for as long as the count stays spent — the first dip after it frees
+       * would then be measured against a stale peak, which is a different
+       * strategy from the one the owner picked.
+       *
+       * Ahead of `!best`, so the sentence does not flicker with the price: a
+       * dip appearing and vanishing tick to tick would otherwise alternate
+       * "ops-spent" with silence, and every change is an event to the owner.
+       */
+      if (opsSpent(snap)) return { intents: [], why: [], idle: { code: "ops-spent" } };
+      // The drawdown breaker, on the same terms and for the same reasons: after
+      // the loop so the highs keep moving, ahead of `!best` so the sentence
+      // does not flicker with the price. This strategy only ever buys, so
+      // tripped, there is nothing it may propose.
+      const brake = breakerIdle(snap);
+      if (brake) return { intents: [], why: [], idle: brake };
 
       if (!best) {
         /**

@@ -46,8 +46,9 @@ describe("a closed position reaches the owner in both notify modes", () => {
   it("captions the digest card but not the immediate one", () => {
     // Immediate mode prints a full receipt directly above the picture; a digest
     // sends counts, so an uncaptioned card there is numbers with no position.
-    assert.ok(/sendCardFor\(t, token, chatId, false\)/.test(CODE), "immediate card should be uncaptioned");
-    assert.ok(/sendCardFor\(t, token, chatId, true\)/.test(CODE), "digest card must carry its own caption");
+    // The trailing argument is the coin's name — the card never falls back to an address.
+    assert.ok(/sendCardFor\(t, token, chatId, false, coin\?\.label\)/.test(CODE), "immediate card should be uncaptioned");
+    assert.ok(/sendCardFor\(t, token, chatId, true, /.test(CODE), "digest card must carry its own caption");
   });
 });
 

@@ -1,4 +1,6 @@
 import { segments, type FeedHistory, type FeedPoint } from "@/lib/read-feed-history";
+import { usd } from "@/lib/format";
+import { dayLabel } from "@/lib/format";
 
 /**
  * The oracle's own series.
@@ -45,10 +47,10 @@ const GUTTER = 5;
 const WINDOW_DAYS = 14;
 
 const money = (n: number) =>
-  `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  usd(n);
 
 const day = (sec: number) =>
-  new Date(sec * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  dayLabel(sec * 1000);
 
 export function PriceLine({ history, symbol }: { history: FeedHistory; symbol: string | null }) {
   // Three states, and only the first is an error.

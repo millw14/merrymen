@@ -1,0 +1,101 @@
+/*
+ * Wave 2 chat — the thread as messages, the typing bubble, receipts, chips and
+ * the unread dot. Its own file rather than appended to terminal.css, which
+ * several changes touch at once; every selector here is new, so nothing in the
+ * shared sheet changes meaning.
+ */
+
+:where(.terminal-host) .chat-msg { margin-top: 18px; }
+:where(.terminal-host) .chat-msg-owner + .chat-msg-agent { margin-top: 0; }
+:where(.terminal-host) .chat-msg-owner .desk-question { margin-bottom: 14px; }
+
+/* The typing bubble: three dots until the first words stream in. */
+:where(.terminal-host) .chat-typing-dots { display: inline-flex; gap: 4px; align-items: center; min-height: 18px; }
+:where(.terminal-host) .chat-typing-dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tx-2);
+  opacity: 0.35;
+  animation: chat-typing 1.2s infinite ease-in-out;
+}
+:where(.terminal-host) .chat-typing-dots i:nth-child(2) { animation-delay: 0.15s; }
+:where(.terminal-host) .chat-typing-dots i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes chat-typing {
+  0%, 80%, 100% { opacity: 0.35; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-2px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  :where(.terminal-host) .chat-typing-dots i { animation: none; opacity: 0.7; }
+}
+
+/* A receipt: "[Buy] $5.00 CASHCAT · Filled" — the pill, then the templated line. */
+:where(.terminal-host) .chat-receipt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--tx);
+  overflow-wrap: anywhere;
+}
+:where(.terminal-host) .chat-pill {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+:where(.terminal-host) .chat-pill.is-buy { color: var(--up); background: color-mix(in srgb, var(--up) 14%, transparent); }
+:where(.terminal-host) .chat-pill.is-sell { color: var(--down); background: color-mix(in srgb, var(--down) 14%, transparent); }
+
+/* One of the agent's own fills: centred and quiet, because nobody said it. */
+:where(.terminal-host) .chat-event {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px 12px 10px;
+}
+:where(.terminal-host) .chat-event .chat-receipt { margin-top: 0; }
+
+/* A failure in the agent's voice, and what to do about it. */
+:where(.terminal-host) .chat-failed-actions { display: flex; gap: 10px; align-items: center; margin-top: 8px; font-size: 12px; }
+:where(.terminal-host) .chat-retry {
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--tx);
+  font-size: 12px;
+}
+
+/* The unread dot on the chat tab. */
+:where(.terminal-host) .tab { position: relative; }
+:where(.terminal-host) .tab-unread {
+  position: absolute;
+  top: 12px;
+  right: calc(50% - 16px);
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--lime);
+  box-shadow: 0 0 0 2px rgb(18 19 15);
+}
+
+/* Desktop has no tab bar: the same dot rides a pill that opens the dock. */
+:where(.terminal-host) .chat-unread-pill {
+  position: fixed;
+  right: 28px;
+  bottom: 24px;
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--tx);
+  font-size: 13px;
+}
+:where(.terminal-host) .chat-unread-pill .tab-unread { position: static; box-shadow: none; }

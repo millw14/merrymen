@@ -54,8 +54,8 @@ describe("re-signing lands on the account it claims", () => {
     // so, and every entry point forwards it.
     assert.equal(
       (SESSION.match(/o\.expectAccount,/g) ?? []).length,
-      3,
-      "createAgentWallet, createPrivyOwnedWallet and restoreAgentWallet must all forward it",
+      4,
+      "prepareAgentGrant, createAgentWallet, createPrivyOwnedWallet and restoreAgentWallet must all forward it",
     );
     assert.match(SESSION, /expectAccount\?: Address;/, "and MintOptions carries it");
   });

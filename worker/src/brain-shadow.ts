@@ -31,27 +31,21 @@ import {
   DEFAULT_TRIGGERS,
   EMPTY_TRIGGER_STATE,
   shouldWake,
+  nextReviewAt,
   type TriggerInputs,
   type TriggerState,
   type TriggerVerdict,
+  type TriggerConfig,
 } from "./brain-trigger";
 import { addDecision, addEvent, loadTriggerState, newDecisionId, saveTriggerState } from "./store";
+import { publishableThesis } from "./thesis-policy";
 
 /**
- * How long after a COLD start the first run may happen.
- *
- * A child's sqlite is wiped by every redeploy, so a cold start is common and
- * says nothing about whether Brain ran recently. Two choices were available and
- * both are wrong on their own: treat cold as "never ran" and every deploy fires
- * every reason for every agent; treat it as "just ran" and a fresh agent waits
- * four hours to think for the first time.
- *
- * So a cold start seeds the cooldowns as though Brain ran
- * `scheduledIntervalSec - COLD_START_DELAY_SEC` ago: the first run comes a
- * couple of minutes in, and a redeploy costs AT MOST one run per enabled agent
- * rather than one per reason per agent.
+ * The worker already staggers startup by tenant. Review on its first tick;
+ * adding another cold-start delay could push the first decision past five
+ * minutes. Durable trigger state still prevents a normal restart double-run.
  */
-const COLD_START_DELAY_SEC = 120;
+const COLD_START_DELAY_SEC = 0;
 
 export interface ShadowInputs {
   agentId: string;
@@ -71,6 +65,8 @@ export interface ShadowInputs {
    */
   decisionSource?: string;
   now: number;
+  /** Observed preparation budget shared with the outer tick scheduler. */
+  reviewPreparationMs?: number;
   epoch: number;
   /** Micro-USDG, straight off the tick. */
   cashUsdg: number;
@@ -107,9 +103,9 @@ export interface ShadowInputs {
   newsKey?: string | null;
 }
 
-export type ShadowOutcome =
+export type ShadowOutcome = { nextReviewAt: number | null } & (
   | { ran: false; why: string; trigger: TriggerVerdict }
-  | { ran: true; trigger: TriggerVerdict; snapshot: PortfolioSnapshot; result: BrainResult };
+  | { ran: true; trigger: TriggerVerdict; snapshot: PortfolioSnapshot; result: BrainResult });
 
 /**
  * A snapshot id that IS the state it describes.
@@ -168,8 +164,74 @@ export function buildShadowSnapshot(i: ShadowInputs): PortfolioSnapshot {
 function holdKindTag(d: { action: string; hold_kind?: string | null }): string {
   if (d.action !== "hold") return "";
   if (d.hold_kind === "GATE_FORCED_HOLD") return "[GATE_FORCED]";
+  if (d.hold_kind === "STALE_MARK_HOLD") return "[STALE_MARK]";
   if (d.hold_kind === "MODEL_HOLD") return "[MODEL]";
   return "[kind-unreported]";
+}
+
+/**
+ * THE HOLD KIND THE LEDGER RECORDS — the Brain's, unless the mark was stale.
+ *
+ * A hold made against a price the tick already knew was stale is the model
+ * describing the ABSENCE of a market ("price feed stale, no volume…"), and it
+ * was published as a view about the coin, because the staleness lived only in
+ * the private `signals_json`. Stamped here, where the decision and its mark
+ * meet, so the publication gate can treat it the way it treats a gate-forced
+ * hold: kept for the owner, not said in public.
+ *
+ * A gate-forced hold keeps its kind — that is the stronger fact and already
+ * private. A buy or sell is left alone: this only reclassifies a HOLD, and
+ * cannot turn anything into or out of a trade.
+ */
+export function recordedHoldKind(
+  d: { action: string; hold_kind?: string | null },
+  market: { priceStale: boolean },
+): string | undefined {
+  if (d.action === "hold" && market.priceStale && d.hold_kind !== "GATE_FORCED_HOLD") return "STALE_MARK_HOLD";
+  return d.hold_kind ?? undefined;
+}
+
+/**
+ * THE MARK THE LEDGER RECORDS for a decision: the price it was made against, or
+ * null when that price was stale or was not a price at all.
+ *
+ * Same seam as recordedHoldKind and for the same reason: the staleness is known
+ * here and nowhere a public reader can see, so a stale mark written as a number
+ * would later be measured against as though somebody had read it.
+ */
+export function markOf(market: { priceUsd: string | null; priceStale: boolean }): number | null {
+  if (market.priceStale || market.priceUsd === null) return null;
+  const n = Number(market.priceUsd);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * DID THIS DECISION PUT A VIEW ON THE PUBLIC FEED? Asked before the quiet
+ * review is pushed back, because that review exists so a quiet agent still
+ * says something in public.
+ *
+ * Asked about the kind the ledger RECORDS (recordedHoldKind), not the one the
+ * Brain reported. The worker used to pass the Brain's raw kind: a model hold on
+ * a stale mark is recorded as STALE_MARK_HOLD and kept private, but the clock
+ * was told it was published, so the review was deferred on the strength of a
+ * post nobody saw, and the agent went silent on the feed.
+ */
+export function publishesAView(
+  d: { action: string; symbol: string; thesis: string; hold_kind?: string | null },
+  /** `source` as ShadowInputs carries it; absent is filed as brain-shadow, so it is asked as that. */
+  who: { name: string; source?: string },
+  market: { priceStale: boolean },
+): boolean {
+  return (
+    publishableThesis({
+      name: who.name,
+      source: who.source ?? "brain-shadow",
+      action: d.action,
+      symbol: d.symbol,
+      reason: d.thesis,
+      hold_kind: recordedHoldKind(d, market),
+    }) !== null
+  );
 }
 
 /**
@@ -182,13 +244,44 @@ export async function runShadow(
   cfg: BrainConfig | null,
   i: ShadowInputs,
   log: (m: string) => void,
+  options: {
+    triggers?: TriggerConfig;
+    tier?: "pulse" | "research";
+    /**
+     * The coin's own name, when the tape gave one.
+     *
+     * Passed IN rather than resolved here, because this module knows a
+     * symbol and the caller knows the watch set. Display only: it reaches
+     * the decision row so a feed can say what was traded, and nothing
+     * prices, routes, matches or settles against it.
+     */
+    displayName?: string | null;
+    /**
+     * A memecoin's market cap from the tape the caller already read, USD —
+     * recorded with the decision so a trade can say what size of coin it was.
+     * Passed in for the same reason as the name: the caller holds the tape.
+     */
+    mcapUsd?: number | null;
+    /**
+     * MAY THIS REVIEW BE PAID FOR? Asked only once the trigger has FIRED —
+     * a quiet tick costs nothing and claims nothing — and BEFORE the fired
+     * state is saved, so a refusal leaves the cooldowns exactly as they were
+     * and the same trigger fires again the moment the allowance allows.
+     *
+     * A CALLBACK, NOT AN IMPORT. The caller (index.ts) binds it to the energy
+     * allowance; this module learns nothing about energy, stores or counters,
+     * which keeps the shadow path's import list what brain-disconnected.test.ts
+     * says it is. Absent means always yes.
+     */
+    admit?: () => Promise<boolean>;
+  } = {},
 ): Promise<ShadowOutcome> {
   const idle: TriggerVerdict = { fire: false, reason: null, detail: "brain not configured", candidates: [] };
   if (!cfg || !cfg.url || !cfg.token) {
     // ABSENT MEANS ABSENT. Not "fall back to the local strategist" — a feed that
     // attributed a thesis to Brain when a different reasoner wrote it would be
     // lying about provenance, and provenance is the product.
-    return { ran: false, why: "brainUrl/brainToken not configured", trigger: idle };
+    return { ran: false, why: "brainUrl/brainToken not configured", trigger: idle, nextReviewAt: null };
   }
 
   const snapshot = buildShadowSnapshot(i);
@@ -207,18 +300,31 @@ export async function runShadow(
 
   const triggerInput: TriggerInputs = {
     now: i.now,
+    reviewPreparationMs: i.reviewPreparationMs,
     priceUsd: i.market.priceUsd === null ? null : Number(i.market.priceUsd),
+    instrumentId: i.market.instrumentId,
     equityUsdg: snapshot.equityUsdg,
     newsKey: i.newsKey ?? null,
     userRequested: i.userRequested ?? false,
   };
 
-  const trigger = shouldWake(state, triggerInput);
+  const trigger = shouldWake(state, triggerInput, options.triggers);
   if (!trigger.fire) {
     // Persist anyway when this is the first sighting, so a cold start's seeded
     // cooldowns survive the next restart rather than being re-seeded forever.
     if (!stored) await saveTriggerState(i.agentId, state);
-    return { ran: false, why: trigger.detail, trigger };
+    return { ran: false, why: trigger.detail, trigger, nextReviewAt: nextReviewAt(state, i.now, options.triggers) };
+  }
+
+  // THE ALLOWANCE, CLAIMED BETWEEN THE TRIGGER AND THE SAVE. Claimed before
+  // the call for the same reason the state is saved before it — a crash
+  // costs at most one unused claim, never a second paid run. On refusal the
+  // answer is `nextReviewAt: null`, NEVER the unfired state's deadline: that
+  // deadline is already in the past (it is why the trigger fired), and a past
+  // deadline handed to nextTickDelayMs schedules the next tick one second
+  // out — an agent that asks, is refused, and asks again every second.
+  if (options.admit && !(await options.admit())) {
+    return { ran: false, why: "energy: today's reviews are paced or spent", trigger, nextReviewAt: null };
   }
 
   // THE STATE IS SAVED BEFORE THE CALL, not after.
@@ -227,7 +333,8 @@ export async function runShadow(
   // unset, and the next tick would ask again — paying twice for one situation.
   // Saving first means a crash costs one wasted run at most, and the failure
   // direction is "thought once and lost it" rather than "thinks forever".
-  await saveTriggerState(i.agentId, afterFiring(state, trigger.reason!, triggerInput));
+  const firedState = afterFiring(state, trigger.reason!, triggerInput);
+  await saveTriggerState(i.agentId, firedState);
 
   const runId = `brain_${i.agentId.slice(2, 10)}_${i.now}`;
   const triggerId = `${trigger.reason}_${i.now}`;
@@ -297,11 +404,34 @@ export async function runShadow(
     },
     persona: i.persona,
     memory: i.memory,
-    tier: "research",
+    tier: options.tier ?? "research",
   });
 
-  await persist(i.agentId, i.decisionSource ?? "brain-shadow", runId, triggerId, trigger, snapshot, result, i.market, log);
-  return { ran: true, trigger, snapshot, result };
+  await persistBrainDecision(i.agentId, i.decisionSource ?? "brain-shadow", runId, triggerId, trigger, snapshot, result, i.market, log, options.displayName, options.mcapUsd);
+  return { ran: true, trigger, snapshot, result, nextReviewAt: nextReviewAt(firedState, i.now, options.triggers) };
+}
+
+/**
+ * WHAT A REVIEW IS RECORDED WITH, from what the caller already holds — the
+ * `displayName` and `mcapUsd` runShadow's options carry to the decision row.
+ *
+ * Built here rather than inline in the tick, where no test could reach it:
+ * both of the tick's Brain call sites spread this, so a review of a coin the
+ * tape sized says "at $3.1M MC" and one the tape did not says nothing.
+ *
+ * THE MARKET CAP IS GECKOTERMINAL'S fdv_usd — price times TOTAL supply — which
+ * is the figure a memecoin trader quotes as its cap; the tape carries no
+ * circulating count to do better with. Absent tape, or a tape that did not
+ * size the coin, is ABSENT — never a zero. persistBrainDecision refuses a
+ * non-positive one as well.
+ */
+export function reviewRecord(args: {
+  /** Display only; see decision-name.ts for where it comes from. */
+  displayName: string | null;
+  /** The tape entry this review read, when it had one. */
+  tape?: { fdvUsd: number | null } | null;
+}): { displayName: string | null; mcapUsd: number | null } {
+  return { displayName: args.displayName, mcapUsd: args.tape?.fdvUsd ?? null };
 }
 
 /** Parse a stored blob, or say it is unusable. A partial state is not a state. */
@@ -313,6 +443,7 @@ function readTriggerState(raw: Record<string, unknown> | null): TriggerState | n
   return {
     lastFiredAt: fired as TriggerState["lastFiredAt"],
     lastPriceUsd: num(raw.lastPriceUsd),
+    ...(typeof raw.lastInstrumentId === "string" ? { lastInstrumentId: raw.lastInstrumentId } : {}),
     lastEquityUsdg: num(raw.lastEquityUsdg),
     lastNewsKey: typeof raw.lastNewsKey === "string" ? raw.lastNewsKey : null,
   };
@@ -340,7 +471,7 @@ function coldStart(now: number): TriggerState {
  * social thesis is read from it rather than generated separately. One decision,
  * two readings; that is the product invariant.
  */
-async function persist(
+export async function persistBrainDecision(
   agentId: string,
   /**
    * What to file this run under. `brain-shadow` unless the caller has enrolled
@@ -356,6 +487,16 @@ async function persist(
   /** The mark the decision was made against — replay cannot work without it. */
   market: { priceUsd: string | null; priceStale: boolean },
   log: (m: string) => void,
+  /**
+   * The coin's own name, when the tape gave one.
+   *
+   * Passed in rather than resolved here: this module knows a symbol, the
+   * caller knows the watch set. Display only, so a feed can say what was
+   * traded instead of printing an address-derived id at a reader.
+   */
+  displayName?: string | null,
+  /** A memecoin's market cap from the caller's tape, USD. See runShadow's options. */
+  mcapUsd?: number | null,
 ): Promise<void> {
   if (!result.ok) {
     // A REFUSAL IS A RESULT, and it is recorded. The runs that produced nothing
@@ -370,6 +511,7 @@ async function persist(
       id: newDecisionId(),
       agent_id: agentId,
       source,
+      provenance: "brain",
       strategy: "brain",
       // undefined, not null: DecisionRow leaves these out entirely for a run
       // that produced no decision, which is a different row shape from one that
@@ -411,8 +553,9 @@ async function persist(
         : `${v.lens}:${v.direction}/${v.confidence.toFixed(2)}~${(v.evidence_strength ?? 0).toFixed(2)}`,
     )
     .join(" ");
+  const holdKind = recordedHoldKind(d, market);
   log(
-    `[brain] ${d.action.toUpperCase()}${holdKindTag(d)} ${d.symbol} conf=${d.confidence.toFixed(2)} ` +
+    `[brain] ${d.action.toUpperCase()}${holdKindTag({ action: d.action, hold_kind: holdKind })} ${d.symbol} conf=${d.confidence.toFixed(2)} ` +
       `delta=${d.suggested_delta_usdg} · depth=${d.depth_used}` +
       (d.escalation_reasons.length ? ` (escalated: ${d.escalation_reasons.join(", ")})` : "") +
       ` · ${d.cost.model_calls} calls ${d.cost.tokens_in + d.cost.tokens_out} tok ` +
@@ -442,12 +585,20 @@ async function persist(
     // execution connected, this became "brain" for the agents the owner
     // enrolled, and it is still one place.
     source,
+    provenance: "brain",
+    display_name: displayName ?? null,
+    // WHAT IT SAW, as columns a public reader may select — the copy in
+    // signals_json below is the owner's and is never published. A stale mark
+    // is recorded as no mark: the author saw the absence of a market, and a
+    // "since posted" measured from it would be a figure nobody read.
+    mark_usd: markOf(market),
+    mcap_usd: typeof mcapUsd === "number" && Number.isFinite(mcapUsd) && mcapUsd > 0 ? mcapUsd : null,
     strategy: "brain",
     provider: d.models[0]?.provider,
     model: d.models[0]?.model,
     symbol: d.symbol,
     action: d.action,
-    size_usdg: d.suggested_delta_usdg / 1e6,
+    size_usdg: d.action === "hold" ? 0 : Math.abs(d.suggested_delta_usdg) / 1e6,
     // The model's own words — the thesis, which the feed publishes verbatim.
     reason: d.thesis,
     // NOT DROPPED. A shadow decision was not rejected by anything — it simply
@@ -458,8 +609,9 @@ async function persist(
     // ledger rather than from logs. Carried from the Brain, never inferred:
     // absent on a non-hold and on any build that does not report it, and absent
     // must stay absent — counting unknown holds as model holds would report a
-    // healthy fleet while it was being gated.
-    hold_kind: d.hold_kind ?? undefined,
+    // healthy fleet while it was being gated. A hold on a stale mark is
+    // stamped as such; see recordedHoldKind.
+    hold_kind: holdKind,
     signals_json: JSON.stringify({
       brain_run_id: runId,
       decision_id: d.decision_id,
@@ -507,11 +659,9 @@ async function persist(
       latency_seconds: result.seconds,
       quality: snapshot.quality,
       pnl_publishable: snapshot.pnl.publishable,
-      // EXPLICIT, so a reader of the tape never has to infer it. Until
-      // execution is connected this is always zero, and a future non-zero is a
-      // change someone made on purpose.
-      executor_calls: 0,
-      execution_connected: false,
+      // This is the pre-trade source, not evidence that anything executed.
+      // Actual attempts and fills are recorded by trades.decision_id.
+      execution_connected: source === "brain",
     }),
   }).catch((e) => log(`[brain] decision write failed: ${e instanceof Error ? e.message : String(e)}`));
 }

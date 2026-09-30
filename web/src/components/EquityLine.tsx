@@ -1,4 +1,5 @@
 import type { AgentProfile } from "@/lib/read-agent";
+import { dayLabel } from "@/lib/format";
 
 /**
  * WHAT THE BOOK DID, WITH THE OWNER'S CASH TAKEN OUT OF IT.
@@ -39,7 +40,7 @@ const MIN_RUN = 6;
 const pctOf = (g: number) => `${g >= 1 ? "+" : ""}${((g - 1) * 100).toFixed(1)}%`;
 
 const day = (sec: number) =>
-  new Date(sec * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  dayLabel(sec * 1000);
 
 /** "8 hours" / "3 days" / "12 minutes" — a window a reader can hold. */
 function span(sec: number): string {

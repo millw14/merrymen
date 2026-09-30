@@ -71,10 +71,19 @@ describe("with sponsorship", () => {
 });
 
 describe("a balance that could not be read is not a balance", () => {
+  it("never reads an unread balance as gas or capital", () => {
+    // The status route now says null for a chain read that failed, rather
+    // than "0". Null must close the gate exactly as zero did — unknown money is
+    // not money to start with.
+    assert.equal(canStart({ balances: { ethWei: null, cashUsdg: null, vaultUsdg: null }, gasSponsored: true }), false);
+    assert.equal(canStart({ balances: { ethWei: null, cashUsdg: "5000000" }, gasSponsored: false }), false);
+    assert.equal(hasGas(null), false);
+    assert.equal(hasCapital({ cashUsdg: null, vaultUsdg: "1" }), true, "the leg that WAS read still counts");
+  });
+
   it("never reads unparseable capital as funded", () => {
-    // The status route collapses a failed chain read to "0" and has no channel
-    // to say "unread". Coercing junk here would wave an owner past a funding
-    // step they still need.
+    // Coercing junk here would wave an owner past a funding step they still
+    // need.
     for (const v of ["", "nope", "0x", "1.5", "-1"]) {
       assert.equal(
         canStart({ balances: { ethWei: "0", cashUsdg: v }, gasSponsored: true }),

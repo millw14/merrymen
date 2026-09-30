@@ -222,17 +222,36 @@ const toBase = (n: number) => BigInt(Math.round(n * 10 ** USDG_DECIMALS));
  * and what the labels mean. It is not restricted to a position reaching zero,
  * because the trades table does not record the remaining quantity.
  */
-export function pnlCardFromFill(row: ClosedFillRow): PnlCardData | null {
+export function pnlCardFromFill(row: ClosedFillRow, coin?: string | null): PnlCardData | null {
   if (row.fill_side !== "sell") return null;
   if (row.realized_pnl_usdg === null || row.realized_pnl_usdg === undefined) return null;
   if (row.fill_cash_usdg === null || row.fill_cash_usdg === undefined) return null;
-  const symbol = (row.target ?? "").trim();
+  // THE COIN'S NAME, NEVER AN ADDRESS. `target` is the router, the vault or
+  // the adapter on every on-chain row — a card once showed an owner their own
+  // Trencher vault's address as if it were the coin they sold. It is the
+  // ticker only on an equity order, so it is used only when it is not an
+  // address; the caller passes the resolved name (token-label.ts) otherwise.
+  const fromTarget = (row.target ?? "").trim();
+  const named = (coin ?? "").trim();
+  // Neither may be address-shaped: a resolver that could not name the coin
+  // falls back to a short address, and that is exactly what must never be drawn.
+  const symbol = (/^0x/i.test(named) ? "" : named) || (/^0x/i.test(fromTarget) ? "" : fromTarget);
   if (!symbol) return null;
 
   const proceeds = toBase(row.fill_cash_usdg);
   const realised = toBase(row.realized_pnl_usdg);
-  return { symbol, investedUsdg: proceeds - realised, proceedsUsdg: proceeds, realisedUsdg: realised };
+  const invested = proceeds - realised;
+  // A LEFTOVER IS NOT A RESULT. Selling the last dust of a position prints
+  // "invested 0.00 · position 0.00 · pnl -0.00" under a big "-6.5%" — the
+  // parent position's return, applied to a fraction of a cent. So a close with
+  // under a cent INVESTED gets no card. Proceeds alone are not the test: a
+  // near-total loss also sells for under a cent, and that card must be sent.
+  if (invested < DUST_USDG) return null;
+  return { symbol, investedUsdg: invested, proceedsUsdg: proceeds, realisedUsdg: realised };
 }
+
+/** One cent, in USDG base units — below this a figure prints as 0.00. */
+const DUST_USDG = 10_000n;
 
 /**
  * Where the template lives, resolved from this module rather than the cwd.

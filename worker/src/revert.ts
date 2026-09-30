@@ -55,10 +55,40 @@ export type RevertClass =
   | "curve-graduated"
   /**
    * The adapter refused the trade's SHAPE — a native-quoted curve, assets that do
-   * not match the curve, a non-contract asset, identical legs, a zero size. None
-   * of these change by waiting, and all are decided before any money moves.
+   * not match the curve, a curve whose own `token()` is not the token named, a
+   * non-contract asset, identical legs, a zero size. None of these change by
+   * waiting, and all are decided before any money moves.
    */
   | "curve-unsupported"
+  /**
+   * The contract that holds the allowance refused to spend more this window.
+   *
+   * THE ONE CLASS WHOSE CAUSE CHANGES ON ITS OWN, and it is still not retryable,
+   * which needs saying. The window is a day. Marking it retryable would put a
+   * reverted UserOperation on chain every tick until it rolls — up to a
+   * thousand of them, each paying gas to be told the same thing, which is
+   * precisely the loop this file's header exists to have stopped. Suppression
+   * here is per-arm (index.ts clears the map at every arm), so it self-heals on
+   * the next re-arm rather than lasting forever, and the owner's own sudo key
+   * can raise the cap at any moment.
+   */
+  | "spend-cap"
+  /**
+   * The vault holds NO ceiling for the asset this trade was funded in.
+   *
+   * A DIFFERENT FACT FROM `spend-cap`, and the distinction is the reason
+   * PonsClassVaultV2 raises two errors where v1 raised one. A spend cap clears
+   * when the window rolls; this one never clears by waiting, because a cap of
+   * zero IS the allowlist and only the owner's own key can seal one. A loop that
+   * could not tell them apart would wait out a day for a condition that a day
+   * does not change, and then wait out another.
+   *
+   * Both are non-retryable, so the taxonomy could have collapsed them and been
+   * mechanically correct. It does not, because the only thing anyone does with
+   * this class is read the sentence and act: one says wait, the other says
+   * re-seal.
+   */
+  | "quote-not-approved"
   /** We do not recognise it. Retryable, deliberately — see the header. */
   | "unclassified";
 
@@ -107,6 +137,48 @@ export interface RevertVerdict {
  * added with the transaction that produced it.
  */
 const PONS_ERR = {
+  /**
+   * The rolling spend ceiling in the contract that holds the allowance, added
+   * to both `PonsSelfTrade` and `PonsClassVault` because a compromised session
+   * key could otherwise drain an account one capped call at a time (the wall
+   * bounds the CALL; `RateLimitPolicy` has no bytecode on 4663, so nothing
+   * bounded the repetition).
+   *
+   * Selector derived here rather than copied from a log, per this file's rule:
+   * `toFunctionSelector("function SpendCapExceeded(uint256,uint256)")`.
+   */
+  SpendCapExceeded: "0x605cd727",
+  /**
+   * The SAME error, one argument wider, from PonsClassVaultV2.
+   *
+   * `SpendCapExceeded(address quoteAsset, uint256 wanted, uint256 remaining)` —
+   * contracts/contracts/PonsClassVaultV2.sol:130. v2 keys its ceiling by the
+   * asset the trade was funded in, so the error names that asset, and a wider
+   * signature is a DIFFERENT SELECTOR. Without this line a v2 spend-cap revert
+   * would classify `unclassified`, which is retryable — and the window is a day,
+   * so it would put up to a thousand reverted UserOperations on chain being told
+   * the same thing. That is the precise loop this file exists to have stopped,
+   * and versioning the contract would have quietly reintroduced it.
+   *
+   * Both selectors stay. v1 is deployed on mainnet 4663 and may still be traded.
+   */
+  SpendCapExceededV2: "0xa6dfc94a",
+  /**
+   * `QuoteNotApproved(address quoteAsset)` — PonsClassVaultV2.sol:129. The vault
+   * has no ceiling sealed for this asset at all, which in v2 means it is not
+   * approved: the cap doubles as the allowlist and zero means refused.
+   */
+  QuoteNotApproved: "0xae9665be",
+  /**
+   * `TokenDoesNotMatchCurve(address curveToken)` — PonsClassVault.sol:218 and
+   * PonsClassVaultV2.sol:144, identical in both. The vault was handed a curve
+   * whose own `token()` is not the token the trade named.
+   *
+   * A PRE-EXISTING GAP, not a v2 one: v1 has raised this since it was deployed
+   * and the table never carried it, so it has been classifying `unclassified`
+   * and therefore retryable. Nothing about a mismatched curve changes by waiting.
+   */
+  TokenDoesNotMatchCurve: "0xe6208274",
   Expired: "0x203d82d8",
   ZeroAmount: "0x1f2a2005",
   NotAContract: "0x09ee12d5",
@@ -125,6 +197,30 @@ const PONS_ERR = {
 export const PONS_ERROR_SELECTORS: readonly string[] = Object.values(PONS_ERR);
 
 const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; detail: string }[] = [
+  {
+    // ABOVE the other four-byte matches only for readability; they cannot
+    // collide with each other.
+    re: new RegExp([PONS_ERR.SpendCapExceeded, PONS_ERR.SpendCapExceededV2].join("|"), "i"),
+    rule: "spend-cap",
+    retryable: false,
+    detail:
+      "the venue contract refused to spend more of this quote asset in the current window — the " +
+      "ceiling that bounds how much a compromised key could take one capped call at a time. Nothing " +
+      "moved. It clears when the window rolls, and the owner's own key can raise it; retrying before " +
+      "either happens would pay gas to be refused again, so this is suppressed for now.",
+  },
+  {
+    // BESIDE the spend cap rather than folded into it. Same answer to "retry?",
+    // opposite answer to "what do I do about it?".
+    re: new RegExp(PONS_ERR.QuoteNotApproved, "i"),
+    rule: "quote-not-approved",
+    retryable: false,
+    detail:
+      "the vault holds no spending ceiling for the asset this trade was funded in, and in this vault a " +
+      "ceiling of zero is how an asset is refused rather than merely limited. Nothing moved. Waiting " +
+      "will not change it — the owner has to seal a cap for this asset with their own key — so the " +
+      "intent is suppressed rather than repeated every tick.",
+  },
   {
     // ABOVE the generic entries. These are exact four-byte matches and cannot
     // collide with a prose revert string, so specificity costs nothing.
@@ -145,6 +241,7 @@ const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; de
         PONS_ERR.IdenticalAssets,
         PONS_ERR.ZeroAmount,
         PONS_ERR.Reentrant,
+        PONS_ERR.TokenDoesNotMatchCurve,
       ].join("|"),
       "i",
     ),
@@ -152,8 +249,9 @@ const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; de
     retryable: false,
     detail:
       "the adapter refused the shape of this trade before any money moved — a native-quoted curve, " +
-      "assets that do not belong to it, a non-contract asset, identical legs, or a zero size. None of " +
-      "these change by waiting, so the intent is suppressed rather than repeated every tick.",
+      "assets that do not belong to it, a curve whose own token is not the one this trade named, a " +
+      "non-contract asset, identical legs, or a zero size. None of these change by waiting, so the " +
+      "intent is suppressed rather than repeated every tick.",
   },
   {
     // The adapter's own floor, measured against the ACCOUNT's balance delta
@@ -257,6 +355,28 @@ const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; de
     detail:
       "the account could not pay the EntryPoint's gas prefund. It pays its own gas and there is no paymaster, so this " +
       "needs ETH at the smart account — not a retry.",
+  },
+  {
+    // ABOVE the generic AA23 entry, because the generic detail is WRONG for this
+    // one and the remedy it offers would send an owner looking in the wrong
+    // place. "duplicate permissionHash" is not the policy turning a trade down:
+    // the operation carries an enable for a permission the validator already
+    // knows, so validation reverts before any policy is consulted. The trade
+    // itself was never judged.
+    //
+    // Measured on 4663, 2026-09-20: agent 0x8e93ba produced 20 of these in 3.5
+    // hours, every one of them after a Brain BUY and an entry the strategy had
+    // already approved — and every one was reported as `gas-unreadable`, a rule
+    // that reads as a transient bundler hiccup and invites the retry that has
+    // been running ever since. Nothing about it is transient.
+    re: /duplicate permissionHash/i,
+    rule: "wall-refused",
+    retryable: false,
+    detail:
+      "the account refused this operation during validation: it carries an enable for a session permission the " +
+      "account already knows, and the same permission cannot be installed twice. This is not the policy turning the " +
+      "trade down — the trade was never reached. Retrying cannot change it, because nothing about the operation or " +
+      "the market decides it. Re-signing the grant mints a fresh session key and clears it.",
   },
   {
     // AA23/AA24 are validation failures. On this account the validator IS the
@@ -363,9 +483,15 @@ export function suppressionLegs(
   intent:
     | { kind: "swap"; sellToken: string; buyToken: string }
     | { kind: "curve-trade"; assetIn: string; assetOut: string }
+    | { kind: "energy-buy"; sellToken: string; buyToken: string }
     | { kind: string },
 ): [string | undefined, string | undefined] {
   if (intent.kind === "swap" && "sellToken" in intent) return [intent.sellToken, intent.buyToken];
+  // The energy buy has legs too, and one route: a non-retryable revert on it
+  // (a tax the token's owner raised past the floor, a pair drained) suppresses
+  // the energy route for the arm, never a swap over the same tokens — the kind
+  // is part of the key.
+  if (intent.kind === "energy-buy" && "sellToken" in intent) return [intent.sellToken, intent.buyToken];
   if (intent.kind === "curve-trade" && "assetIn" in intent) return [intent.assetIn, intent.assetOut];
   return [undefined, undefined];
 }

@@ -1,0 +1,473 @@
+import type { Db } from "./db";
+
+export const PAPER_CHECKPOINT_SCHEMA = `CREATE TABLE IF NOT EXISTS paper_checkpoints (
+  agent_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL, cash_usdg REAL NOT NULL,
+  vault_usdg REAL NOT NULL, hwm_usdg REAL NOT NULL, shares TEXT NOT NULL,
+  basis_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+);`;
+
+export async function recordPaperRecoveryHealth(db:Db,account:string,blocked:boolean):Promise<void> {
+  await db.exec(`CREATE TABLE IF NOT EXISTS paper_recovery_health (
+    agent_id TEXT PRIMARY KEY, blocked INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  )`);
+  await db.prepare(`INSERT INTO paper_recovery_health(agent_id,blocked,updated_at) VALUES(?,?,?)
+    ON CONFLICT(agent_id) DO UPDATE SET blocked=excluded.blocked,updated_at=excluded.updated_at`)
+    .run(account.toLowerCase(),blocked?1:0,Math.floor(Date.now()/1000));
+}
+
+type Checkpoint = {agent_id:string; epoch:number; cash_usdg:number; vault_usdg:number; hwm_usdg:number; shares:string; basis_json:string; updated_at:number};
+type Basis = {symbol:string; qty_raw:string; cost_usdg:string};
+
+/**
+ * How far the terms of ONE equity row may disagree with their own total.
+ *
+ * These are REAL columns summed in floating point, so the slack is for binary
+ * representation and nothing else. It is deliberately NOT a business tolerance:
+ * every term comes from the same row written in the same instant, so anything
+ * a float cannot explain is a row that was never coherent.
+ */
+const MARK_TOLERANCE_USDG = 0.00001;
+
+/**
+ * BASIS_UNITS — WHAT A PAPER BASIS QUANTITY IS COUNTED IN, AND WHY IT IS TWO THINGS.
+ *
+ * Since d2c652db (2026-09-19) a paper fill books its basis in the SAME
+ * split-invariant units as the book: index.ts passes `qtyRaw: rawShares * 1e18`,
+ * and rawShares is exactly what the book stores. Before it, the basis took the
+ * TRADEABLE quantity at the multiplier of the day. A position bought across the
+ * change holds some of each, so a sound checkpoint's basis lies between
+ * `shares` and `shares × multiplier`.
+ *
+ * The comment below (from 912502b5) read the old half as the whole rule and
+ * compared every basis with `shares × multiplier`. That passed the pre-change
+ * rows and refused every book today's engine writes, as soon as a multiplier
+ * left 1.0 — and a refused checkpoint is an agent the orchestrator never
+ * starts. Production, 2026-09-24: ten paper agents refused on every ferry
+ * pass since the deploy that shipped it, one of them the only agent there with
+ * a Telegram bot, which went silent while the dashboard said connected.
+ */
+
+/**
+ * THE MULTIPLIER DRIFT A LEGACY BASIS MAY CARRY — dividend-scale, never a split.
+ *
+ * A basis in the old tradeable units differs from its shares by at most the
+ * multiplier, which for every stock token today is within 0.08% of 1.0. A
+ * range that wide cannot hide a torn write of any real size. At a split the
+ * multiplier is ~2 and the same range would admit a sell that updated the book
+ * but crashed before its basis (Kaka's review of #164: book 0.6, stale basis
+ * 1.0, inside [0.6, 1.2]) — so past this bound the check is exact, and a
+ * legacy basis there is refused as it was before.
+ */
+export const LEGACY_DRIFT = 0.01;
+
+/**
+ * HOW A BASIS QUANTITY RELATES TO THE BOOK'S SHARES: "current" (today's units,
+ * equal within the engine's rounding), "legacy" (the old tradeable units at a
+ * drift-scale multiplier, or a mix of both), or null (neither — refuse it).
+ */
+export function basisUnits(qty: number, shares: number, mul: number): "current" | "legacy" | null {
+  if (Math.abs(qty - shares) <= 1e-6) return "current";
+  if (Math.abs(mul - 1) > LEGACY_DRIFT) return null;
+  const lo = shares * Math.min(1, mul), hi = shares * Math.max(1, mul);
+  return qty >= lo - 1e-6 && qty <= hi + 1e-6 ? "legacy" : null;
+}
+
+/**
+ * EVERY LEGACY BASIS REWRITTEN IN TODAY'S UNITS — qty := shares, cost kept.
+ *
+ * Admitting a mixed basis is not enough on its own (Kaka's review of #164): a
+ * sell takes split-invariant quantity off a basis whose older part is
+ * tradeable, so a legacy position that is later sold down drifts past
+ * shares × multiplier and would be refused on the NEXT restart. So a legacy
+ * basis is admitted only to be normalised: after this, basis == shares, and
+ * every later fill and sell keeps it so. The cost is untouched; the average
+ * cost per share moves by the multiplier's drift (≤ 0.08% today), which is the
+ * units correction and nothing else. A basis the check refuses is not touched.
+ */
+export function normalizedBasis(
+  sharesJson: string,
+  basisJson: string,
+  multiplierOf: MultiplierOf,
+): { basis: Basis[]; normalized: string[] } {
+  const shares = JSON.parse(sharesJson) as Record<string, { shares: number }>;
+  const basis = JSON.parse(basisJson) as Basis[];
+  const normalized: string[] = [];
+  const out = basis.map((b) => {
+    const held = shares[b.symbol];
+    if (!held) return b;
+    if (basisUnits(Number(b.qty_raw) / 1e18, held.shares, multiplierOf(b.symbol)) !== "legacy") return b;
+    normalized.push(b.symbol);
+    // The expression index.ts books a paper fill with: the stored shares, in 18dp.
+    return { ...b, qty_raw: String(BigInt(Math.round(held.shares * 1e18))) };
+  });
+  return { basis: out, normalized };
+}
+
+const saidNormalized = (symbols: string[]) =>
+  symbols.length ? ` (basis for ${symbols.join(", ")} moved to split-invariant units)` : "";
+
+/**
+ * WHAT ONE SPLIT-INVARIANT SHARE IS WORTH IN TRADEABLE UNITS, PER SYMBOL.
+ *
+ * The two numbers a checkpoint carries are in DIFFERENT UNITS and nothing said
+ * so. `paper_book.shares` is split-invariant — shares at multiplier 1.0, which
+ * paper.ts holds deliberately so that a corporate action does not read as a 50%
+ * loss and retire an agent over a stock split. `cost_basis.qty_raw` is a raw
+ * balance, which is tradeable units. They are equal only while the multiplier
+ * is exactly 1.0, and paper.ts said as much in writing:
+ *
+ *   "Every token in the registry currently sits at exactly 1.0, which is why
+ *    existing books carry over unchanged — the two readings only diverge after
+ *    the first real split."
+ *
+ * Production has now outgrown that sentence. Measured 2026-09-22, across seven
+ * blocked agents: NVDA 1.000775 on five of them, AAPL 1.000566, and one holding
+ * at 2.001550 — which is exactly twice NVDA's, a 2:1 split on top. Every ratio
+ * constant per symbol across different agents and different sizes, which is
+ * what a multiplier looks like and what a fee does not.
+ *
+ * ABSENT MEANS 1.0, and that is what makes this safe to roll out. A checkpoint
+ * written before this existed carries no multiplier, and every token that never
+ * split still sits at exactly 1.0, so the old comparison and the new one agree
+ * everywhere except on the rows that were already failing.
+ */
+export type MultiplierOf = (symbol: string) => number;
+
+const ONE: MultiplierOf = () => 1;
+
+/** `ui_multiplier` is an 18-decimal fixed-point integer. Unreadable means 1.0. */
+export function multipliersFrom(rows: readonly Record<string, unknown>[]): MultiplierOf {
+  const bySymbol = new Map<string, number>();
+  for (const r of rows) {
+    const raw = Number(r.ui_multiplier);
+    // A zero or unreadable multiplier is NOT a zero holding — it is a column we
+    // could not use, and the only safe reading of it is the identity.
+    if (Number.isFinite(raw) && raw > 0) bySymbol.set(String(r.symbol), raw / 1e18);
+  }
+  return (symbol) => bySymbol.get(symbol) ?? 1;
+}
+
+/**
+ * WHY A CHECKPOINT WAS REJECTED, or null when it was not.
+ *
+ * This used to be a bare boolean, and the boolean is why eight agents sat dead
+ * without anybody being able to say which clause was firing. A rejection here
+ * is not a detail: `mirrorPaperCheckpoints` silently skips the row, so the
+ * durable path never gets a checkpoint, every later restore falls through to
+ * the fragile upgrade path, and the only trace in the log is the word
+ * "invalid". A validator that cannot say what it disliked turns a one-line fix
+ * into an investigation.
+ *
+ * The RULES ARE UNCHANGED — every clause accepts and rejects exactly what it
+ * did before. Only the answer got wider.
+ */
+export function paperCheckpointRejection(row: Checkpoint, multiplierOf: MultiplierOf = ONE): string | null {
+  try {
+    for (const [name,v] of [["cash",row.cash_usdg],["vault",row.vault_usdg],["hwm",row.hwm_usdg]] as const) {
+      if (!Number.isFinite(Number(v)) || Number(v)<0) return `${name} is ${String(v)}, not a non-negative number`;
+    }
+    const shares = JSON.parse(row.shares) as Record<string,{token:string;shares:number}>;
+    const basis = JSON.parse(row.basis_json) as Basis[];
+    if (!shares || Array.isArray(shares)) return 'shares is not an object';
+    if (!Array.isArray(basis)) return 'basis_json is not an array';
+    for (const [symbol,p] of Object.entries(shares)) {
+      if (!/^0x[0-9a-f]{40}$/i.test(p.token)) return `${symbol} has no usable token address`;
+      if (!Number.isFinite(p.shares) || p.shares<=0) return `${symbol} holds ${String(p.shares)} shares`;
+      const b = basis.find(b=>b.symbol===symbol);
+      // A snapshot between cash/book and basis writes must not become a restore point.
+      if (!b) return `${symbol} is held with no paper cost basis`;
+      if (BigInt(b.cost_usdg)<0n) return `${symbol} has a negative cost basis`;
+      // IN THE UNITS THE ENGINE WROTE — see BASIS_UNITS. Today's fills book the
+      // split-invariant quantity, so basis == shares; the 1e-6 is the engine's
+      // own rounding (a sell rounds the book's shares to 6dp, the basis stays
+      // exact). A basis from before 2026-09-19 may also sit anywhere up to
+      // shares × multiplier — see legacyBasis for when that is admitted and
+      // why it is admitted only to be normalised away.
+      if (basisUnits(Number(b.qty_raw)/1e18, p.shares, multiplierOf(symbol)) === null) {
+        return `${symbol} basis ${b.qty_raw} raw disagrees with ${p.shares} shares at multiplier ${multiplierOf(symbol)}`;
+      }
+    }
+    for (const b of basis) {
+      if (BigInt(b.qty_raw)<0n || BigInt(b.cost_usdg)<0n) return `${b.symbol} basis is negative`;
+      if (!shares[b.symbol] && BigInt(b.qty_raw)!==0n) return `${b.symbol} has basis for ${b.qty_raw} raw but is not held`;
+    }
+    return null;
+  } catch (e) { return `unreadable (${e instanceof Error ? e.message : String(e)})`; }
+}
+
+export function validPaperCheckpoint(row: Checkpoint, multiplierOf: MultiplierOf = ONE): boolean {
+  return paperCheckpointRejection(row, multiplierOf) === null;
+}
+
+/**
+ * The multipliers for one agent's holdings, from whichever book is to hand.
+ *
+ * Best-effort: a table that will not answer gives the identity, which is what
+ * every unsplit token is anyway. Recovery must not be blocked by the lookup
+ * that exists to unblock it.
+ */
+async function multipliersFor(db: Db, account: string): Promise<MultiplierOf> {
+  try {
+    return multipliersFrom(await db.prepare(
+      `SELECT symbol, ui_multiplier FROM positions WHERE LOWER(agent_id)=LOWER(?)`,
+    ).all(account) as Record<string, unknown>[]);
+  } catch { return ONE; }
+}
+
+export async function mirrorPaperCheckpoints(child:Db, shared:Db): Promise<number> {
+  if (!await child.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='paper_book'").get()) return 0;
+  await shared.exec(PAPER_CHECKPOINT_SCHEMA);
+  const snapshots = await child.tx(async db => {
+    const books = await db.prepare(`SELECT p.*, a.epoch FROM paper_book p JOIN agents a ON LOWER(a.smart_account)=LOWER(p.agent_id)`).all() as Checkpoint[];
+    for (const book of books) book.basis_json = JSON.stringify(await db.prepare(`SELECT symbol, qty_raw, cost_usdg FROM cost_basis WHERE agent_id=? AND mode='paper'`).all(book.agent_id));
+    return books;
+  });
+  let count=0;
+  for(const b of snapshots) {
+    // FROM THE CHILD, which is the book these shares were written against.
+    const multiplierOf = await multipliersFor(child, b.agent_id);
+    const why = paperCheckpointRejection(b, multiplierOf);
+    if (why) {
+      // SAID OUT LOUD, because this skip is the start of the whole failure
+      // chain. No checkpoint written here means every later restore falls to
+      // the upgrade path, and until now the only evidence that this line had
+      // run at all was a count that was one lower than expected.
+      console.warn(`[paper] checkpoint not mirrored for ${b.agent_id}: ${why}`);
+      continue;
+    }
+    // The durable row is written in today's units, so a restore from it never
+    // carries a legacy basis back into a book (see normalizedBasis).
+    b.basis_json = JSON.stringify(normalizedBasis(b.shares, b.basis_json, multiplierOf).basis);
+    await shared.prepare(`INSERT INTO paper_checkpoints(agent_id,epoch,cash_usdg,vault_usdg,hwm_usdg,shares,basis_json,updated_at)
+      VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET epoch=excluded.epoch,cash_usdg=excluded.cash_usdg,
+      vault_usdg=excluded.vault_usdg,hwm_usdg=excluded.hwm_usdg,shares=excluded.shares,basis_json=excluded.basis_json,updated_at=excluded.updated_at
+      WHERE excluded.epoch > paper_checkpoints.epoch OR (excluded.epoch=paper_checkpoints.epoch AND excluded.updated_at>=paper_checkpoints.updated_at)`)
+      .run(b.agent_id,b.epoch,b.cash_usdg,b.vault_usdg,b.hwm_usdg,b.shares,b.basis_json,b.updated_at);
+    count++;
+  }
+  return count;
+}
+
+/** Restore only an empty local book, including its matching basis. */
+export async function restorePaperCheckpoint(child:Db, shared:Db, account:string):Promise<string> {
+  const local = await child.prepare("SELECT agent_id, shares FROM paper_book WHERE LOWER(agent_id)=LOWER(?)").get(account) as {agent_id:string;shares:string} | undefined;
+  if (local) {
+    // A BOOK THAT SURVIVED THE RESTART IS KEPT — and its legacy basis, if any,
+    // moved to today's units now, so the next sell cannot drift it past the
+    // check (see normalizedBasis). Best-effort: a local book is never blocked.
+    try {
+      const rows = await child.prepare("SELECT symbol, qty_raw, cost_usdg FROM cost_basis WHERE agent_id=? AND mode='paper'").all(local.agent_id) as Basis[];
+      const { basis, normalized } = normalizedBasis(local.shares, JSON.stringify(rows), await multipliersFor(shared, account));
+      if (normalized.length) {
+        await child.tx(async (db) => {
+          for (const b of basis.filter((b) => normalized.includes(b.symbol))) {
+            await db.prepare("UPDATE cost_basis SET qty_raw=? WHERE agent_id=? AND mode='paper' AND symbol=?").run(b.qty_raw, local.agent_id, b.symbol);
+          }
+        });
+      }
+      return `local book retained${saidNormalized(normalized)}`;
+    } catch { return 'local book retained'; }
+  }
+  await shared.exec(PAPER_CHECKPOINT_SCHEMA);
+  let row = await shared.prepare(`SELECT p.* FROM paper_checkpoints p JOIN agents a ON LOWER(a.smart_account)=LOWER(p.agent_id)
+    WHERE LOWER(p.agent_id)=LOWER(?) AND p.epoch=a.epoch`).get(account) as Checkpoint | undefined;
+  /**
+   * READ ONCE, FOR BOTH PATHS, AND FROM THE SHARED BOOK ON PURPOSE.
+   *
+   * A checkpoint written before multipliers were understood carries none, and
+   * the agents that need this most are precisely the ones that are NOT running
+   * — their child was never spawned, so nothing has re-mirrored their book and
+   * their stale row would go on failing for ever. The shared `positions` table
+   * is mirrored and current, so resolving the multiplier HERE fixes the legacy
+   * rows as well as the new ones, which a checkpoint-side field could not.
+   */
+  const multiplierOf = await multipliersFor(shared, account);
+  if (!row) {
+    // Upgrade path: recover a fully reconciled recorded valuation. Never take
+    // today's on-chain cash or a configured seed as the old paper bankroll.
+    const mark = await shared.prepare(`SELECT e.* FROM equity e JOIN agents a ON LOWER(a.smart_account)=LOWER(e.agent_id) AND a.epoch=e.epoch
+      WHERE LOWER(e.agent_id)=LOWER(?) ORDER BY e.at DESC,e.id DESC LIMIT 1`).get(account) as Record<string,unknown> | undefined;
+    if (!mark || mark.mode !== 'paper') return 'no durable checkpoint';
+    const later = await shared.prepare(`SELECT COUNT(*) AS n FROM trades WHERE LOWER(agent_id)=LOWER(?) AND epoch=? AND status='paper' AND created_at>=?`)
+      .get(account,Number(mark.epoch),Number(mark.at)) as {n:number};
+    if (Number(later.n)>0) throw new Error('paper fills are newer than the recoverable valuation');
+    /**
+     * ── THE CHECK THAT USED TO BE HERE, AND WHY IT COULD NEVER PASS ──────
+     *
+     * It asserted `value === mark.positions_usdg` to within 0.00001 USDG,
+     * where `value` is summed from the `positions` table and
+     * `mark.positions_usdg` comes from an `equity` row. Those are the same
+     * quantity read at DIFFERENT INSTANTS: `setPositions` REPLACES the
+     * positions table every tick, while the equity row is written only
+     * `if (!bookIncomplete)` — so a single unpriceable holding, or simply a
+     * price that moved, desynchronises them for good.
+     *
+     * A hundredth of a cent is a tolerance only a same-instant comparison
+     * could meet, so the assertion was a mark-to-market test dressed as a
+     * consistency test, and it failed by design. Production, 2026-09-22:
+     * eight agents, twenty-four consecutive failures, zero successes, with
+     * deltas from 0.0066 to 948.40 USDG. Because the caller treats a failed
+     * restore as "do not start this agent", every one of them was dead.
+     *
+     * ── WHAT ACTUALLY GUARANTEES COHERENCE, AND IT IS ALREADY ABOVE ──────
+     *
+     * `later.n` proves NO PAPER FILL LANDED AFTER THE MARK. That is the real
+     * invariant: with no fills, the QUANTITIES cannot have changed, so the
+     * mark's cash and vault are still exactly right and the holdings in
+     * `positions` are still exactly the holdings the mark was taken over.
+     * Only the prices moved — which is not a discrepancy, it is a market.
+     *
+     * So the value equality is gone and two checks stand in its place, both
+     * of which test one instant against itself rather than against another:
+     *
+     *   the MARK is internally consistent — cash + vault + positions = equity,
+     *   every term from the same row. Production passes this every time, and
+     *   the old error proved it: `snapshotDelta` and `equityDelta` were equal
+     *   in all six numeric failures, which reduces algebraically to exactly
+     *   this identity holding.
+     *
+     *   the VALUE is readable at all. A NaN would otherwise become an equity.
+     */
+    const positions = await shared.prepare(`SELECT symbol,token,raw_balance,value_usdg FROM positions WHERE LOWER(agent_id)=LOWER(?)`).all(account) as Record<string,unknown>[];
+    const value = positions.reduce((sum,p)=>sum+Number(p.value_usdg),0);
+    if (!Number.isFinite(value)) throw new Error(`paper positions do not value (positions=${positions.length})`);
+    const markDelta = Number(mark.cash_usdg)+Number(mark.vault_usdg)+Number(mark.positions_usdg)-Number(mark.equity_usdg);
+    if (Math.abs(markDelta)>MARK_TOLERANCE_USDG) throw new Error(`the recoverable valuation does not add up (cash+vault+positions-equity=${markDelta})`);
+    /**
+     * SPLIT-INVARIANT, LIKE THE BOOK THIS IS RESTORING INTO — AND A PAPER
+     * `raw_balance` ALREADY IS.
+     *
+     * index.ts writes a paper position's raw balance as `shares * 1e18` ("shares
+     * is split-invariant, so it IS the raw balance in 18dp terms"), so it comes
+     * back as `raw_balance / 1e18` with nothing applied. 912502b5 divided it by
+     * the multiplier as well, reading it as a tradeable on-chain balance: every
+     * restore through here then understated the holding by that multiplier and,
+     * against the basis, disagreed by it twice over — which is how three
+     * agents on this path were refused on every pass.
+     */
+    const shares=Object.fromEntries(positions.filter(p=>BigInt(String(p.raw_balance))>0n).map(p=>{
+      const symbol=String(p.symbol);
+      return [symbol,{token:String(p.token),shares:Number(p.raw_balance)/1e18}];
+    }));
+    const basis=await shared.prepare(`SELECT symbol,qty_raw,cost_usdg FROM cost_basis WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).all(account) as Basis[];
+    const peak=await shared.prepare(`SELECT MAX(equity_usdg) AS peak FROM equity WHERE LOWER(agent_id)=LOWER(?) AND epoch=? AND mode='paper'`).get(account,Number(mark.epoch)) as {peak:number};
+    /**
+     * THE HIGH-WATER MARK TAKES TODAY'S VALUATION TOO.
+     *
+     * The book being restored is worth `cash + vault + value` at today's
+     * prices, which may be above anything the equity series ever recorded —
+     * the agent was down while the market moved. An HWM must never step down,
+     * and it is what the fee and the drawdown breaker are judged against, so
+     * leaving a real rise out would let a fee accrue on a gain that was never
+     * realised. All three candidates, and the largest wins.
+     */
+    row={agent_id:account,epoch:Number(mark.epoch),cash_usdg:Number(mark.cash_usdg),vault_usdg:Number(mark.vault_usdg),hwm_usdg:Math.max(Number(mark.equity_usdg),Number(peak.peak),Number(mark.cash_usdg)+Number(mark.vault_usdg)+value),shares:JSON.stringify(shares),basis_json:JSON.stringify(basis.filter(b=>shares[b.symbol])),updated_at:Number(mark.at)};
+  }
+  const why = paperCheckpointRejection(row, multiplierOf);
+  if (why) throw new Error(`invalid paper checkpoint: ${why}`);
+  // Restored in today's units, so the book comes back with basis == shares and
+  // stays so through every later fill (see normalizedBasis).
+  const { basis, normalized } = normalizedBasis(row.shares, row.basis_json, multiplierOf);
+  await child.tx(async db=>{
+    await db.prepare(`INSERT INTO paper_book(agent_id,cash_usdg,vault_usdg,hwm_usdg,shares,updated_at) VALUES(?,?,?,?,?,?)`)
+      .run(account,row.cash_usdg,row.vault_usdg,row.hwm_usdg,row.shares,row.updated_at);
+    await db.prepare("DELETE FROM cost_basis WHERE agent_id=? AND mode='paper'").run(account);
+    for(const b of basis) await db.prepare(`INSERT INTO cost_basis(agent_id,mode,symbol,qty_raw,cost_usdg,updated_at) VALUES(?,'paper',?,?,?,?)`)
+      .run(account,b.symbol,b.qty_raw,b.cost_usdg,row.updated_at);
+  });
+  return `paper cash, holdings and basis restored${saidNormalized(normalized)}`;
+}
+
+/**
+ * What a reset of a blocked book came to: the epoch it opened, or why nothing
+ * was changed. `moved` marks the one refusal that asking again can undo: the
+ * epoch changed under the decision, and the next decision reads the new one.
+ */
+export type BlockedBookReset = { ok: true; epoch: number } | { ok: false; why: string; moved?: true };
+
+/**
+ * START A PRACTICE BOOK OVER WHEN NO WORKER CAN, from the shared ledger alone.
+ *
+ * A book restorePaperCheckpoint refuses holds its tenant (orchestrator.ts
+ * spawnHolder), and a held tenant has no worker, which is the only process
+ * that could run the owner's Practice reset (index.ts runPaperReset). So the
+ * reset the owner was told to press waited for a worker that could not start.
+ * This is the same reset, done where the book's durable copy lives.
+ *
+ * WHAT THE WORKER'S RESET LEAVES IN THE SHARED LEDGER, AND SO WHAT THIS DOES.
+ * runPaperReset clears the local paper_book, positions and the paper rows of
+ * cost_basis and position_floors (store.ts resetPaperLedger), and opens the
+ * next accounting epoch with no capital flow (a paper carry is refused by
+ * admitCapitalFlow). The mirror then carries it up: the epoch by its ratchet,
+ * and the three snapshots by delete-then-insert. So, in one transaction:
+ *
+ * - `agents.epoch` moves to an epoch nothing has been filed under. Every old
+ *   trade, mark, flow and the old checkpoint stay where they are and stop
+ *   counting, which is what the epoch is for. restorePaperCheckpoint then finds
+ *   no checkpoint and no valuation in the new epoch and answers "no durable
+ *   checkpoint", the worker seeds its book at its own starting stake, and its
+ *   first mirror pass writes the new epoch's checkpoint, which the checkpoint
+ *   upsert prefers to the old one (a higher epoch always wins).
+ * - `positions`, and the PAPER rows of `cost_basis` and `position_floors`, are
+ *   deleted. Not only for the dashboard, which would go on showing the old
+ *   holdings: the worker that comes next starts in a fresh home, and the
+ *   mirror never deletes a rebuilt worker's cost basis, nor its positions
+ *   while its book is empty (ledger-mirror.ts), so nothing else would. And
+ *   the restore's upgrade path builds a book from exactly these two tables:
+ *   left behind, one missed checkpoint in the new epoch would restore the old
+ *   book's shares beside the new book's cash. A live basis is another book
+ *   (the primary key has a mode) and is never touched.
+ *
+ * "NOTHING FILED UNDER" IS NOT ALWAYS epoch + 1. The mirror copies the append-
+ * only tables before the agents row, so a pass that failed between the two,
+ * followed by a redeploy, leaves rows a step ahead of `agents.epoch`. Reusing
+ * that epoch would hand the new book an old valuation and old fills, which is
+ * the failure being recovered from. So the new epoch is one past the highest
+ * any of this account's rows carries, and never less than one past the
+ * observed one.
+ *
+ * CONDITIONAL ON THE EPOCH THE CALLER DECIDED ON: `observedEpoch` must still be
+ * the account's, or nothing changes. Whatever moved it (a worker's own reset
+ * carried up by the mirror) has changed the book this decision was about.
+ *
+ * AND ONLY A PRACTICE BOOK, asked again here, inside the transaction, of the
+ * ledger itself: the newest valuation must be a paper one, and the agent must
+ * not last have reported the live rail. The caller asks the owner's stored
+ * settings as well (held-reset.ts). Neither check relies on the other, the same
+ * rule runOrderCommand states: on a live account this would hide real history
+ * from reporting without carrying its capital across, and delete the positions
+ * real P&L is read against.
+ */
+export async function resetBlockedPaperBook(shared: Db, account: string, observedEpoch: number): Promise<BlockedBookReset> {
+  await shared.exec(PAPER_CHECKPOINT_SCHEMA);
+  return shared.tx((db) => resetBlockedPaperBookIn(db, account, observedEpoch));
+}
+
+/**
+ * resetBlockedPaperBook inside a transaction the caller already holds, so the
+ * claim of the owner's command can commit with it (held-reset.ts). The caller
+ * has run PAPER_CHECKPOINT_SCHEMA: DDL does not belong inside the transaction.
+ */
+export async function resetBlockedPaperBookIn(db: Db, account: string, observedEpoch: number): Promise<BlockedBookReset> {
+  if (!Number.isSafeInteger(observedEpoch) || observedEpoch < 1) return { ok: false, why: `no usable epoch (${String(observedEpoch)})` };
+  const agent = await db.prepare(`SELECT epoch, mode FROM agents WHERE LOWER(smart_account)=LOWER(?)`).get(account) as { epoch: number; mode: string | null } | undefined;
+  if (!agent) return { ok: false, why: "the account has no agent row" };
+  if (Number(agent.epoch) !== observedEpoch) return { ok: false, why: `the epoch moved (${observedEpoch} → ${Number(agent.epoch)})`, moved: true };
+  if (agent.mode === "live") return { ok: false, why: "the agent last reported the live rail" };
+  const mark = await db.prepare(`SELECT mode FROM equity WHERE LOWER(agent_id)=LOWER(?) ORDER BY at DESC, id DESC LIMIT 1`).get(account) as { mode: string | null } | undefined;
+  if (mark?.mode !== "paper") return { ok: false, why: mark ? `the newest valuation is not a paper one (${String(mark.mode)})` : "there is no valuation to show the book is a paper one" };
+  const top = await db.prepare(`SELECT MAX(e) AS top FROM (
+      SELECT MAX(epoch) AS e FROM equity WHERE LOWER(agent_id)=LOWER(?)
+      UNION ALL SELECT MAX(epoch) AS e FROM trades WHERE LOWER(agent_id)=LOWER(?)
+      UNION ALL SELECT MAX(epoch) AS e FROM flows WHERE LOWER(agent_id)=LOWER(?)
+      UNION ALL SELECT MAX(epoch) AS e FROM paper_checkpoints WHERE LOWER(agent_id)=LOWER(?)
+    ) filed`).get(account, account, account, account) as { top: number | string | null } | undefined;
+  const filed = Number(top?.top ?? 0);
+  const epoch = Math.max(observedEpoch, Number.isFinite(filed) ? filed : 0) + 1;
+  const moved = await db.prepare(`UPDATE agents SET epoch=? WHERE LOWER(smart_account)=LOWER(?) AND epoch=?`).run(epoch, account, observedEpoch);
+  if (Number(moved.changes) === 0) return { ok: false, why: "the epoch moved", moved: true };
+  await db.prepare(`DELETE FROM positions WHERE LOWER(agent_id)=LOWER(?)`).run(account);
+  await db.prepare(`DELETE FROM cost_basis WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).run(account);
+  await db.prepare(`DELETE FROM position_floors WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).run(account);
+  return { ok: true, epoch };
+}

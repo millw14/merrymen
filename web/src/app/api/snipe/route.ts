@@ -27,8 +27,11 @@ import {
 } from "@merrymen/core";
 import { isHostedMode } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
+import { OWNER_CHANGED, ownerMismatch } from "@/lib/order-owner";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { sharedRead } from "@/lib/read-discoveries";
+import { usd } from "@/lib/format";
+import { snipeEnergyAnswer } from "@/lib/energy-reserve";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -107,11 +110,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "sign in first" }, { status: 401 });
   }
 
-  let body: { query?: unknown; usdgAmount?: unknown };
+  let body: { query?: unknown; usdgAmount?: unknown; owner?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: "bad body" }, { status: 400 });
+  }
+  // THE OWNER WHO CONFIRMED, not whoever is signed in now (lib/order-owner.ts):
+  // a lookup under another wallet's session would resolve against that
+  // wallet's coins, and hand back an order for the card to place.
+  if (isHostedMode() && ownerMismatch(body.owner, tenant)) {
+    return NextResponse.json({ error: OWNER_CHANGED }, { status: 409 });
   }
 
   const query = typeof body.query === "string" ? body.query.slice(0, 64).trim() : "";
@@ -160,6 +169,12 @@ export async function POST(req: Request) {
   }
 
   const t = resolved.target;
+  // $MERRYMEN IS ENERGY, NOT A COIN TO SNIPE — covered or not. Uncovered, the
+  // answer below would say "add it and re-sign", which no signature can ever
+  // satisfy; covered (an old grant), a snipe card would place an energy buy
+  // under words that never said so. It has one way in: get-energy.
+  const energy = snipeEnergyAnswer(t);
+  if (energy) return NextResponse.json(energy);
   if (!t.covered) {
     return NextResponse.json({
       outcome: "needs-signature",
@@ -193,6 +208,6 @@ export async function POST(req: Request) {
     say:
       `${t.symbol} at ${shortAddress(t.address)}` +
       (resolved.matchedOn === "name" ? ` — matched on its name, not its ticker` : "") +
-      `. Placing $${usdgAmount}.`,
+      `. Placing ${usd(usdgAmount)}.`,
   });
 }

@@ -19,14 +19,14 @@
  * that reason, and partitioning it by custody would mean a `sweep` — which moves
  * a position with no economic event at all — silently split one basis into two.
  */
-import { grantPonsClassVault, type StoredGrant } from "../../packages/core/src/index";
+import { grantPonsClassVault, grantTrencher, type StoredGrant } from "../../packages/core/src/index";
 
 /**
  * Where a holding sits. An open union with an exhaustive switch below, so
  * adding a third custody fails to COMPILE rather than falling through to a
  * default that quietly treats it like an account balance.
  */
-export type Custody = "account" | "class-vault";
+export type Custody = "account" | "class-vault" | "trencher-vault";
 
 /**
  * Contracts that hold assets for this account, beyond the account itself.
@@ -39,10 +39,11 @@ export type Custody = "account" | "class-vault";
  * reader at another owner's vault.
  */
 export function custodyAddressesOf(
-  grant: Pick<StoredGrant, "grantFeatures" | "ponsClassVaultAddress"> | null | undefined,
+  grant: Pick<StoredGrant, "grantFeatures" | "ponsClassVaultAddress" | "trencherVaultAddress" | "trencherFactoryAddress"> | null | undefined,
 ): `0x${string}`[] {
   const vault = grantPonsClassVault(grant);
-  return vault ? [vault] : [];
+  const trench = grantTrencher(grant);
+  return [...(vault ? [vault] : []), ...(trench ? [trench.vault] : [])];
 }
 
 /**
@@ -53,7 +54,7 @@ export function custodyAddressesOf(
  * key built from this list is reproducible.
  */
 export function bookAddresses(
-  grant: Pick<StoredGrant, "grantFeatures" | "ponsClassVaultAddress"> | null | undefined,
+  grant: Pick<StoredGrant, "grantFeatures" | "ponsClassVaultAddress" | "trencherVaultAddress" | "trencherFactoryAddress"> | null | undefined,
   smartAccount: string,
 ): string[] {
   return [smartAccount.toLowerCase(), ...custodyAddressesOf(grant)];
@@ -73,6 +74,8 @@ export function exitTargetFor(custody: Custody): string {
       return "sell it from the account, through the venue it trades on";
     case "class-vault":
       return "sell it through the vault, which needs no approve — or sweep it back with the owner key";
+    case "trencher-vault":
+      return "sell it through the Trencher vault for USDG returned to your account, or recover the token with the owner key";
   }
 }
 

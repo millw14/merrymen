@@ -42,8 +42,10 @@
 
 import type { PublicThesis } from "./thesis-policy";
 
-/** How many past decisions Brain is reminded of. */
-const MEMORY_LINES = 6;
+/** How many of its own LANDED trades Brain is reminded of, newest first. */
+const MEMORY_TRADES = 3;
+/** How many names it is reminded of its latest view on — one line per name. */
+const MEMORY_VIEWS = 3;
 /** How many peer voices reach the sentiment lens. */
 const PEER_LINES = 5;
 /** Hard ceiling per lens. A dossier is billed on every analyst call. */
@@ -175,8 +177,10 @@ export function sentimentLine(
     // TSLA 5.00 USDG" — so a peer that only thought about a trade is never
     // reported to Brain as one that made it.
     const what = [p.head, p.outcomeText].filter(Boolean).join(" · ");
-    const why = (p.reason ?? "").trim();
-    return `${p.name}: ${what}${why ? ` — "${why}"` : ""}`;
+    const why = (p.post || p.reason || "").trim();
+    const identity = p.slug ? ` /a/${p.slug}` : "";
+    const when = p.at ? ` at ${new Date(p.at * 1000).toISOString()}` : "";
+    return `${p.paper ? "PAPER MONEY — " : ""}${p.name}: ${what}${identity}${when}${why ? ` — "${why}"` : ""}`;
   });
 
   // LENS_MAX bounds the PEER MATERIAL, which is what other models wrote; the
@@ -196,26 +200,79 @@ export function sentimentLine(
 }
 
 /**
- * What this agent thought before, and what came of it.
+ * What this agent DID, how it ended, and where it last stood on each name.
  *
- * THROUGH THE PUBLICATION GATE — see the module comment. The outcome is the
- * half that makes memory worth having: "I said buy and it landed" and "I said
- * buy and the wall refused it" are different lessons, and a thesis remembered
- * without its ending teaches nothing.
+ * THROUGH THE PUBLICATION GATE — see the module comment. It used to be the
+ * agent's last six published rows, and on a thirty-second review cadence those
+ * were its own holds from the last three minutes: the Brain was shown a
+ * template ("edge unclear, so hold") and repeated it. So it is now two things:
+ *
+ *   - its last MEMORY_TRADES LANDED trades, each with its ending — a closed
+ *     trade's realized return, an open buy's entry price — because "I bought
+ *     and it went +12%" is a lesson and "I held" twenty times is not. A
+ *     refused or pending trade is not something it did.
+ *   - its LATEST VIEW on each of MEMORY_VIEWS names, one line per name, so a
+ *     name it reviewed forty times is one line and not forty.
+ *
+ * NOT ITS OWN HOLDS, in either lane. The first cut of this counted a hold as
+ * a view and kept the newest one per name — and a Trencher reviewing three
+ * coins every thirty seconds still opened its memory with three lines of
+ * "edge unclear, so hold", newest first, which is the template it was being
+ * cured of. A hold is the absence of a decision; the Brain learns nothing from
+ * being shown it declined again. That drops a published market review too: it
+ * is filed as a hold, and it is one shared oracle series restated, not this
+ * agent's own word (market-review.ts says so of its own sentence).
+ *
+ * A figure is printed only when it was read: an unread result is no figure,
+ * never "0%". Newest first across both.
  */
 export function memoryLines(
   own: readonly PublicThesis[],
   now: number,
 ): string[] {
-  const out: string[] = [];
+  const trades = own.filter((t) => (t.action === "buy" || t.action === "sell") && t.outcome === "landed").slice(0, MEMORY_TRADES);
+  // A view is a pure view about the book, or a shadow agent's stated call —
+  // the agent's standing word on a name, as opposed to something it did. A
+  // hold is neither; see above.
+  const views: PublicThesis[] = [];
+  const named = new Set<string>();
   for (const t of own) {
-    const age = Math.max(0, Math.floor((now - (t.at || now)) / 60));
-    const when = age < 90 ? `${age}m ago` : `${Math.floor(age / 60)}h ago`;
-    const said = t.said > 1 ? ` (said ${t.said}×)` : "";
-    out.push(
-      `${when}${said}: ${t.head || "a view"} · ${t.outcomeText}${t.reason ? ` — "${t.reason}"` : ""}`,
-    );
-    if (out.length >= MEMORY_LINES) break;
+    if (views.length >= MEMORY_VIEWS) break;
+    if (t.outcome !== "view" && t.outcome !== "shadow") continue;
+    if (t.action === "hold") continue;
+    // `own` arrives newest first, so the first line per name is its latest.
+    // A view about the whole book names nothing, and is one "name" of its own.
+    const key = (t.symbol ?? "").toUpperCase();
+    if (named.has(key)) continue;
+    named.add(key);
+    views.push(t);
   }
-  return out;
+  return [...trades, ...views]
+    .sort((a, b) => (b.at || 0) - (a.at || 0))
+    .map((t) => {
+      const age = Math.max(0, Math.floor((now - (t.at || now)) / 60));
+      const when = age < 90 ? `${age}m ago` : `${Math.floor(age / 60)}h ago`;
+      const said = t.said > 1 ? ` (said ${t.said}×)` : "";
+      const words = t.post || t.reason;
+      return `${when}${said}: ${t.paper ? "PAPER MONEY — " : ""}${t.head || "a view"} · ${t.outcomeText}${endingOf(t)}${words ? ` — "${words}"` : ""}`;
+    });
+}
+
+/**
+ * What a landed trade came to, in the figures the gate published — or nothing.
+ *
+ * `realizedPct` and `entryPriceUsd` are null (or, from an older orchestrator,
+ * absent) unless every input was read, and an absent figure prints nothing.
+ */
+function endingOf(t: PublicThesis): string {
+  if (t.outcome !== "landed") return "";
+  const pct = t.realizedPct;
+  if (t.action === "sell" && typeof pct === "number" && Number.isFinite(pct)) {
+    return `, ${pct >= 0 ? "+" : "-"}${Math.abs(pct).toFixed(1)}% realized`;
+  }
+  const entry = t.entryPriceUsd;
+  if (t.action === "buy" && typeof entry === "number" && Number.isFinite(entry) && entry > 0) {
+    return ` at ${entry} USD`;
+  }
+  return "";
 }

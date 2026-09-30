@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Candle } from "@/lib/read-candles";
+import { usdFixed, subCentUsd } from "@/lib/format";
 
 /**
  * THE PRICE CHART, drawn by TradingView's lightweight-charts.
@@ -135,9 +136,9 @@ export function CandleChart({
             priceFormatter: (p: number) => {
               if (!Number.isFinite(p) || Math.abs(p) < 1e-12) return "$0";
               if (p < 0) return "";
-              if (p >= 1) return `$${p.toFixed(2)}`;
-              if (p >= 0.01) return `$${p.toFixed(4)}`;
-              return `$${p.toPrecision(3)}`;
+              if (p >= 1) return usdFixed(p, 2);
+              if (p >= 0.01) return usdFixed(p, 4);
+              return subCentUsd(p);
             },
           },
         });
@@ -201,7 +202,7 @@ export function CandleChart({
   const lo = Math.min(...candles.map((k) => k.l));
   const hi = Math.max(...candles.map((k) => k.h));
   const money = (n: number) =>
-    n >= 0.01 ? `$${n.toFixed(4)}` : `$${n.toPrecision(3)}`;
+    n >= 0.01 ? usdFixed(n, 4) : subCentUsd(n);
 
   return (
     <div

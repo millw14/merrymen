@@ -604,6 +604,124 @@
   unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
 
+/*
+ * ── THE SIX LANGUAGES DM SANS CANNOT WRITE ───────────────────────────────
+ *
+ * DM Sans publishes exactly two subsets, `latin` and `latin-ext`. Measured
+ * against the ranges declared above, that covers Spanish, Portuguese,
+ * Indonesian and Turkish completely, and covers Russian, Thai, Chinese,
+ * Japanese and Korean not at all.
+ *
+ * VIETNAMESE IS THE INTERESTING ONE, AND THE REASON THIS IS NOT PURELY A
+ * unicode-range PROBLEM. It measures 62% covered, which is worse than 0%:
+ * `U+1EA0-1EF9` is missing while the base letters around it are present, so
+ * "Tiếng Việt" renders half in DM Sans and half in whatever the system
+ * supplies — two typefaces, two weights, two sets of metrics, INSIDE ONE
+ * WORD. A script that is wholly absent at least falls back cleanly.
+ *
+ * So the rule is: a locale whose script INTERLEAVES with Latin inside a word
+ * changes face entirely, rather than being stitched together per codepoint.
+ * Vietnamese and Russian take Inter, which covers Latin, Latin-ext,
+ * Vietnamese and Cyrillic in one family. Thai keeps DM Sans for its Latin
+ * and adds Noto Sans Thai, because Thai and Latin meet at word boundaries
+ * rather than inside words.
+ *
+ * NOTHING IS DOWNLOADED BY A READER WHO DOES NOT NEED IT. Each face is
+ * declared with the subset's own unicode-range, and the stacks below only
+ * name a family for the locales that require it, so an English, Spanish,
+ * Portuguese, Indonesian or Turkish reader fetches zero of these bytes.
+ *
+ * Subsets are the woff2 files from the Google Fonts CSS API, same as DM Sans
+ * and Geist above; licences sit beside them in /public/fonts.
+ */
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter-latin.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter-latin-ext.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* The range DM Sans stops short of, and the whole reason vi changes face. */
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter-vietnamese.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter-cyrillic.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+@font-face {
+  font-family: "Noto Sans Thai";
+  src: url("/fonts/NotoSansThai-thai.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+02D7, U+0303, U+0331, U+0E01-0E5B, U+200C-200D, U+25CC;
+}
+
+/*
+ * ── THE STACKS, ONE PER SCRIPT ───────────────────────────────────────────
+ *
+ * "Geist Numerals" STAYS FIRST IN EVERY ONE OF THESE. It carries U+0030-0039
+ * and nothing else, and it is first so that digits come from it rather than
+ * from whatever family follows — which is what gives every figure in the
+ * product equal-width digits. Move it and the money columns stop lining up,
+ * in every language at once, including English.
+ *
+ * CJK TAKES SYSTEM FONTS, DELIBERATELY. A full Noto Sans SC is eight
+ * megabytes or so; the system faces are excellent, universally present, and
+ * cost nothing. They are listed per language rather than pooled because Han
+ * unification means the SAME codepoint has different correct shapes in
+ * Chinese and Japanese — one shared stack would render Japanese text in
+ * Chinese letterforms, which is legible and wrong.
+ */
+
+html[lang="vi"] .terminal-host,
+html[lang="ru"] .terminal-host {
+  --sans: "Geist Numerals", "Inter", system-ui, sans-serif;
+}
+
+html[lang="th"] .terminal-host {
+  --sans: "Geist Numerals", "Noto Sans Thai", "DM Sans", system-ui, sans-serif;
+}
+
+html[lang|="zh"] .terminal-host {
+  --sans: "Geist Numerals", "DM Sans", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+}
+
+html[lang|="ja"] .terminal-host {
+  --sans: "Geist Numerals", "DM Sans", "Hiragino Sans", "Hiragino Kaku Gothic ProN",
+    "Yu Gothic", "Meiryo", "Noto Sans CJK JP", system-ui, sans-serif;
+}
+
+html[lang|="ko"] .terminal-host {
+  --sans: "Geist Numerals", "DM Sans", "Apple SD Gothic Neo", "Malgun Gothic",
+    "Noto Sans CJK KR", system-ui, sans-serif;
+}
+
 .terminal-host {
   --bg: #070806;
   --card: #12130f;
@@ -6754,6 +6872,8 @@
 .terminal-host .ranking-help {margin:0 0 20px;color:var(--tx-2);font-size:12px;line-height:1.6;}
 .terminal-host .ranking-help summary {cursor:pointer;}
 .terminal-host .ranking-help p {margin:10px 0;}
+/* The accounts the board folded into a count, under the list. Quiet: an account of what is not shown, not a row. */
+.terminal-host .board-retired {margin:12px 0 0;color:var(--tx-2);font-size:12px;}
 
 /* An entry that is not a settled fill — a paper book or a pre-trade estimate.
    read-token.ts: "a pretend fill must not look like a real one". */
@@ -7853,6 +7973,98 @@
 }
 :where(.terminal-host) .desk-circle-locked { margin: 0; }
 
+/* ── ENERGY: what the agent may start on its own today ─────────────────────
+   Modelled on the Circle banner above, at two volumes. Low energy that is not
+   yet spent is a quiet line — most agents without $MERRYMEN sit there for
+   good, and it must never shout over anything that matters more. Spent is the
+   full panel with every remedy, in the Circle banner's own amber: nothing is
+   broken, the owner simply has a choice to make, including "change nothing". */
+:where(.terminal-host) .desk-energy {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border-left: 2px solid #6b5a1f;
+  background: #17170f;
+  color: var(--tx-2);
+  font-size: 12px;
+  line-height: 1.55;
+}
+:where(.terminal-host) .desk-energy p { margin: 0; }
+:where(.terminal-host) .desk-energy p + p,
+:where(.terminal-host) .desk-energy code + button + p { margin-top: 6px; }
+:where(.terminal-host) .desk-energy.spent {
+  padding: 12px 14px;
+  border: 1px solid #6b5a1f;
+  border-left-width: 3px;
+  border-radius: 10px;
+  background: #221d0c;
+}
+:where(.terminal-host) .desk-energy.spent strong {
+  display: block;
+  margin-bottom: 4px;
+  color: #d8b44a;
+  font-size: 13px;
+}
+/* A bar only against an allowance the worker actually reported. */
+:where(.terminal-host) .desk-energy progress {
+  display: block;
+  width: 100%;
+  height: 4px;
+  margin-top: 8px;
+  accent-color: #d8b44a;
+}
+/* THE ADDRESS IN FULL, wrapped rather than shortened, and selectable whole —
+   the copy button's fallback is "select the address above". */
+:where(.terminal-host) .desk-energy .funding-address {
+  display: block;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--tx);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+:where(.terminal-host) .desk-energy button,
+:where(.terminal-host) .desk-circle-locked button {
+  margin-top: 8px;
+  margin-right: 8px;
+  padding: 6px 13px;
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--tx);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+:where(.terminal-host) .desk-conversation > .desk-circle-locked + .desk-energy,
+:where(.terminal-host) .desk-conversation > .desk-energy + .desk-notice { margin-top: 12px; }
+
+/* The same fact on the funding screen, beside the address it is about. Amber
+   rather than the blocker's lime or red: it is neither "send this to trade"
+   nor "money will not help" — both routes are real, and so is doing nothing. */
+:where(.terminal-host) .fund-energy {
+  margin: 12px 0 6px;
+  padding: 11px 13px;
+  border-radius: 10px;
+  border: 1px solid #6b5a1f;
+  background: #221d0c;
+  color: var(--tx);
+  font-size: 13px;
+  line-height: 1.55;
+}
+:where(.terminal-host) .fund-energy + p { margin-top: 0; font-size: 13px; color: var(--tx-2); }
+
+/* A fact to know before creating an agent, not a warning: quiet, beside the
+   standing it qualifies. */
+:where(.terminal-host) .create-energy {
+  margin: 10px 0 0;
+  color: var(--tx-2);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 
 /* The owner line under an agent name. A PROVEN handle is a link; an
    unproven one, or an address, is plain text — see NameBlock. */
@@ -7930,3 +8142,573 @@
   font-weight: 550;
   cursor: pointer;
 }
+
+/* ── THE WIRE CONTROL ──────────────────────────────────────────────────────
+ *
+ * WHY THESE RULES ARE HERE AND NOT IN styles/agent.css, WHICH ALREADY HAS THEM.
+ *
+ * agent.css styles `.mm-wire` against the `--mm-*` token set. `app/layout.tsx`
+ * loads exactly four stylesheets — terminal.css, forms.css, polish.css and
+ * root.css — and styles/tokens.css is not one of them, so every `--mm-*` in
+ * that file resolves to nothing inside the terminal. The button would have
+ * mounted and rendered as unstyled inline text with no ring, no budget and no
+ * section edge: the control would have been there, done its job, and looked
+ * broken. Ported rather than cross-imported, because pulling agent.css in would
+ * bring a whole second design system's cascade with it.
+ *
+ * `--wire` is its own hue, deliberately NOT --lime. Lime is this terminal's
+ * action colour — the thing you press. A ring is not an action; it is a fact
+ * about who your agent reads, printed on somebody else's face, and it appears
+ * next to lime controls constantly. Same blue as styles/tokens.css --mm-wire,
+ * so the two surfaces mean the same thing by the same colour.
+ */
+:where(.terminal-host) {
+  --wire: #5cc8ff;
+}
+
+:where(.terminal-host) .mm-wire {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+:where(.terminal-host) .mm-wire .row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 8px;
+}
+
+:where(.terminal-host) .mm-wire .mm-btn {
+  padding: 10px 16px;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--tx);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+:where(.terminal-host) .mm-wire .mm-btn.on {
+  border-color: var(--wire);
+  color: var(--wire);
+}
+
+/* AT CAPACITY IS NOT AN ERROR — the note beside it explains, so the control
+   only has to look unavailable rather than wrong. */
+:where(.terminal-host) .mm-wire .mm-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* A prompt has a context window, and nobody caps bookmarks — the denominator is
+   the clearest statement in the product that this is wiring, not saving. */
+:where(.terminal-host) .mm-wire .budget {
+  font-size: 12px;
+  color: var(--faint);
+}
+
+:where(.terminal-host) .mm-wire .mm-note {
+  margin: 0;
+  max-width: 58ch;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--tx-2);
+}
+
+:where(.terminal-host) .mm-wire .mm-note.quiet {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+/* THE RING. This agent feeds your agent's thinking, and it shows up wherever
+   this agent shows up — which is what lets an owner see their own network by
+   scrolling rather than by opening a settings page.
+   Two shadows, not a border: a border would change the element's box and shift
+   every row it sits in by two pixels. The inner ring is the page ground, so the
+   wire colour reads as a detached halo at 16px as well as at 48px. */
+:where(.terminal-host) .face.wired {
+  box-shadow:
+    0 0 0 2px var(--bg),
+    0 0 0 4px var(--wire);
+}
+
+/* ── AN AGENT'S OWN PICTURE ────────────────────────────────────────────────
+ *
+ * The banner sits ABOVE the header rather than behind it. Behind is the fomo
+ * shape, and it needs the avatar to overlap the seam — which means a negative
+ * margin whose size depends on the face size, and this product draws the face
+ * at four different sizes. Above is honest at every one of them and cannot
+ * clip the name.
+ *
+ * `object-fit: cover` on a fixed aspect because the stored image is already
+ * cropped to 3:1 server-side; this only handles a viewport narrower than the
+ * stored width, where the browser would otherwise letterbox it.
+ */
+:where(.terminal-host) .public-agent-banner {
+  display: block;
+  width: 100%;
+  aspect-ratio: 3 / 1;
+  object-fit: cover;
+  border-radius: var(--r);
+  margin-bottom: 14px;
+  background: var(--card);
+}
+
+/* The Settings control. A preview, a file input and a remove button — no Save,
+   because choosing a file IS the change (AgentImageField says why). */
+:where(.terminal-host) .agent-image-pick {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 6px 0 2px;
+}
+
+:where(.terminal-host) .agent-image-preview.avatar,
+:where(.terminal-host) .agent-image-empty.avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  object-fit: cover;
+}
+
+:where(.terminal-host) .agent-image-preview.banner,
+:where(.terminal-host) .agent-image-empty.banner {
+  width: 132px;
+  aspect-ratio: 3 / 1;
+  border-radius: 10px;
+  flex-shrink: 0;
+  object-fit: cover;
+}
+
+/* AN EMPTY SLOT IS NOT A BROKEN ONE. Dashed rather than a grey block, so it
+   reads as "nothing here yet" rather than as an image that failed to load. */
+:where(.terminal-host) .agent-image-empty {
+  border: 1px dashed var(--line);
+  background: var(--card);
+}
+
+:where(.terminal-host) .agent-image-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+:where(.terminal-host) .agent-image-actions input[type="file"] {
+  font: inherit;
+  font-size: 12px;
+  color: var(--tx-2);
+  max-width: 100%;
+}
+
+:where(.terminal-host) .mm-hint.mm-bad {
+  color: var(--down);
+}
+
+/* Strategy identity is amber; buy/sell colours still describe outcomes. */
+:where(.terminal-host) .wire-beat.is-trencher {
+  border: 1px solid #695629;
+  border-radius: 14px;
+  padding: 18px 16px;
+  background: linear-gradient(115deg, #242012 0%, #12130d 70%);
+  margin-block: 10px;
+}
+:where(.terminal-host) .trench-byline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  color: #d4c398;
+  font-size: 12px;
+  letter-spacing: .04em;
+}
+:where(.terminal-host) .trench-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #b7913f;
+  border-radius: 5px;
+  padding: 3px 7px;
+  color: #ffe0a0;
+  background: #342b16;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+:where(.terminal-host) .wire-beat.is-trencher.view .wire-body {
+  border-left: 2px solid #b7913f;
+  padding-left: 14px;
+  min-width: 0;
+}
+
+:where(.terminal-host) .token-activity { margin: 32px 0; padding: 24px; border: 1px solid var(--line); border-radius: 16px; }
+:where(.terminal-host) .token-activity header { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+:where(.terminal-host) .token-activity h3 { margin: 0 0 16px; }
+:where(.terminal-host) .token-activity h4 { margin: 28px 0 8px; }
+:where(.terminal-host) .activity-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+:where(.terminal-host) .activity-facts span, :where(.terminal-host) .activity-facts strong { display: block; }
+:where(.terminal-host) .activity-facts strong { margin-top: 8px; font-size: 20px; }
+:where(.terminal-host) .activity-note, :where(.terminal-host) .token-activity header > span, :where(.terminal-host) .activity-facts span { color: var(--tx-2); font-size: 12px; }
+:where(.terminal-host) .activity-scroll { overflow-x: auto; }
+:where(.terminal-host) .token-activity table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+:where(.terminal-host) .token-activity caption { text-align: left; margin: 16px 0 8px; }
+:where(.terminal-host) .token-activity th, :where(.terminal-host) .token-activity td { text-align: right; padding: 12px 8px; white-space: nowrap; }
+:where(.terminal-host) .token-activity th:first-child, :where(.terminal-host) .token-activity td:first-child { text-align: left; }
+:where(.terminal-host) .token-activity tbody tr { border-top: 1px solid var(--line); }
+@media (max-width: 600px) {
+  :where(.terminal-host) .token-activity { padding: 16px; }
+  :where(.terminal-host) .activity-facts { grid-template-columns: 1fr; }
+}
+
+:where(.terminal-host) .activity-buy { color: var(--up); }
+:where(.terminal-host) .activity-sell { color: var(--down); }
+
+/* ── THE OUT-OF-DATE PERMISSION PROMPT ──────────────────────────────────────
+   Reuses .portfolio-dialog's geometry rather than inventing a second modal:
+   it is the terminal's only native <dialog> shape, and a prompt about money
+   should look like the other thing in this product that covers the screen.
+   Only the actions row below is new.
+
+   The strip left behind afterwards borrows .desk-notice, which is the quiet
+   left-border card the worker's own notices use — deliberately NOT .desk-blocked,
+   whose red is reserved for a fault. An old wall is not yet a failure, and a
+   beta owner once concluded the product was broken because a non-fault state
+   wore the red box. */
+:where(.terminal-host) .resign-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+:where(.terminal-host) .resign-strip {
+  margin: 12px 0;
+}
+/* `.mm-btn` IS ONLY STYLED INSIDE `.terminal-form-page`, and this dialog is
+   mounted in the shell so it can be true on every screen. Without these the
+   buttons render as bare text — measured in the browser: no background, no
+   border, no padding, so the one action this prompt exists to offer did not
+   look pressable at all.
+
+   The geometry is copied from the form page's own rules rather than invented,
+   so a prompt about money looks like every other control in the product. */
+:where(.terminal-host) .resign-actions .mm-btn,
+:where(.terminal-host) .resign-strip .mm-btn {
+  padding: 10px 14px;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--tx);
+  cursor: pointer;
+}
+:where(.terminal-host) .resign-actions .mm-btn.primary {
+  padding: 14px 22px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--tx);
+  color: var(--ink);
+}
+/* The header's close control is a bare glyph, not a pill — it sits inside
+   .portfolio-dialog-header, which already positions it. */
+:where(.terminal-host) .resign-dialog .portfolio-dialog-header .mm-btn {
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  background: none;
+}
+
+/* ── WHAT IS CONNECTED, ON THE HOME SCREEN ──────────────────────────────────
+   A reading, not a control panel, so it is styled as a list of facts rather
+   than as a card competing with the hero above it. One quiet rule between
+   rows; no border, no fill, no shadow — those say "separate object", and this
+   belongs to the screen it sits on.
+
+   `is-warn` is amber and there is deliberately no red state. Red in this
+   product means a FAULT (.desk-blocked), and none of these are one — a bot
+   nobody has linked yet is an unfinished setup, not a broken agent. A beta
+   owner once concluded the product was broken because a non-fault state wore
+   the red box. */
+:where(.terminal-host) .agent-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+:where(.terminal-host) .agent-strip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+:where(.terminal-host) .agent-strip-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+:where(.terminal-host) .agent-strip-label {
+  min-width: 72px;
+  font-weight: 600;
+}
+/* The status itself carries the tone, so the label and the link stay neutral
+   and the eye lands on the one word that changes. */
+:where(.terminal-host) .agent-strip-value {
+  flex: 1 1 auto;
+  color: var(--dim);
+}
+:where(.terminal-host) .agent-strip-row.is-ok .agent-strip-value { color: var(--up, #4ade80); }
+:where(.terminal-host) .agent-strip-row.is-warn .agent-strip-value { color: var(--warn, #fbbf24); }
+:where(.terminal-host) .agent-strip-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  flex-basis: 100%;
+}
+/* The link code is the one piece of text here somebody has to read exactly.
+   It must not wrap mid-code or be mistaken for prose. */
+:where(.terminal-host) .agent-strip-action code {
+  white-space: nowrap;
+  user-select: all;
+}
+
+/* ══ WAVE 2 — THE FEED ROW ════════════════════════════════════════════════
+   Appended as one block rather than edited into the shared selectors above,
+   so it can be read, reviewed and reverted as a unit. Everything here is new
+   classes; nothing above changes meaning. */
+
+/* A POST THE PAGE HAD NOT SHOWN BEFORE (feed-fresh.ts). 400ms: long enough to
+   be seen arriving, short enough to be over before it is read. The highlight
+   fades to nothing, so a row that stays on screen ends up like every other. */
+:where(.terminal-host) .wire-beat.wire-new {
+  animation: wire-arrive 400ms var(--ease) both;
+}
+:where(.terminal-host) .wire-beat.wire-new > .wire-body {
+  animation: wire-glow 400ms ease-out both;
+  border-radius: 10px;
+}
+@keyframes wire-arrive {
+  from {
+    transform: translateY(-8px);
+    opacity: 0;
+  }
+}
+@keyframes wire-glow {
+  from {
+    background: color-mix(in srgb, var(--up) 14%, transparent);
+  }
+  to {
+    background: transparent;
+  }
+}
+/* Motion is opt-out at the OS, and that answer wins: the row simply appears. */
+@media (prefers-reduced-motion: reduce) {
+  :where(.terminal-host) .wire-beat.wire-new,
+  :where(.terminal-host) .wire-beat.wire-new > .wire-body {
+    animation: none;
+  }
+}
+
+/* "[Buy] $5.00 at $3.1M MC". The colour means money moved (beat.ts pillOf):
+   a muted pill for a refusal or a shadow call, and a dashed edge while an
+   order is still in flight, the way the card's "buying" chip does it. */
+:where(.terminal-host) .wire-deal {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+:where(.terminal-host) .wire-pill {
+  display: inline-block;
+  padding: 1px 7px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+}
+:where(.terminal-host) .wire-pill.buy {
+  color: var(--up);
+  background: color-mix(in srgb, var(--up) 14%, transparent);
+}
+:where(.terminal-host) .wire-pill.sell {
+  color: var(--down);
+  background: color-mix(in srgb, var(--down) 14%, transparent);
+}
+:where(.terminal-host) .wire-pill.muted {
+  color: var(--faint);
+  border-color: var(--line);
+}
+:where(.terminal-host) .wire-pill.unsettled {
+  border-style: dashed;
+  border-color: currentColor;
+}
+:where(.terminal-host) .wire-mc {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+/* THE CALL'S OWN FIGURE, where the token's 24h change used to sit: "+10.0%
+   since entry", "−4.0% realized", "+2.1% since posted". Absent — not grey,
+   not 0% — when an input was not read. */
+:where(.terminal-host) .wire-call {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+:where(.terminal-host) .wire-call.up { color: var(--up); }
+:where(.terminal-host) .wire-call.down { color: var(--down); }
+:where(.terminal-host) .wire-call.flat { color: var(--tx-2); }
+:where(.terminal-host) .wire-call small {
+  color: var(--faint);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+/* Takes the figure's tone: the shared `.wire-part-fig b` rule would paint it
+   the neutral text colour, and a loss would read like a size. */
+:where(.terminal-host) .wire-call .wire-call-usd {
+  margin-left: 2px;
+  color: inherit;
+  font-size: 11.5px;
+}
+
+/* THE AGENT'S OWN LINE leads the row when it wrote one; our reason sits
+   behind "why". The post is the brighter of the two because it is the voice. */
+:where(.terminal-host) .wire-why.wire-post {
+  color: var(--tx);
+}
+:where(.terminal-host) .wire-more {
+  margin: -4px 0 8px;
+}
+:where(.terminal-host) .wire-more > summary {
+  display: inline-block;
+  cursor: pointer;
+  color: var(--faint);
+  font-size: 11px;
+  list-style: none;
+}
+:where(.terminal-host) .wire-more > summary::-webkit-details-marker {
+  display: none;
+}
+:where(.terminal-host) .wire-more > summary::after {
+  content: " ›";
+}
+:where(.terminal-host) .wire-more[open] > summary::after {
+  content: " ⌄";
+}
+:where(.terminal-host) .wire-more > .wire-why {
+  margin-top: 4px;
+  color: var(--tx-2);
+}
+
+/* "Real money" — one tap that hides every paper book. */
+:where(.terminal-host) .feed-real-row {
+  display: flex;
+  justify-content: flex-end;
+  margin: -8px 0 8px;
+}
+:where(.terminal-host) .feed-real {
+  min-height: 32px;
+  padding: 4px 12px;
+  color: var(--tx-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+}
+:where(.terminal-host) .feed-real.on {
+  color: var(--ink);
+  background: var(--up);
+  border-color: var(--up);
+}
+
+/* The same "why" on the card and in the alerts column. Unscoped because those
+   two render outside the terminal host; this sheet is loaded globally. */
+.mm-why,
+.mm-alert-why {
+  margin: 4px 0 0;
+  font-size: 12px;
+  opacity: 0.85;
+}
+.mm-why > summary,
+.mm-alert-why > summary {
+  cursor: pointer;
+  opacity: 0.7;
+}
+.mm-why > p {
+  margin: 4px 0 0;
+}
+.mm-alert-why > span {
+  display: block;
+  margin-top: 2px;
+}
+/* ══ end Wave 2 — the feed row ═══════════════════════════════════════════ */
+
+/* ── POSTING ON X (Settings) ────────────────────────────────────────────────
+   terminal/XPosting.tsx. A quiet list of facts and one switch, in the form
+   page's own vocabulary (.mm-btn, .mm-hint); only the layout is new. The
+   warning reuses .portfolio-dialog and the re-sign prompt's .resign-actions
+   row, because a prompt that decides what goes out under an owner's name
+   should look like the other thing in this product that covers the screen.
+   Drafts wrap on any character: a post body is the one thing here whose
+   width nobody chose. */
+:where(.terminal-host) .xpost { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+:where(.terminal-host) .xpost > p { margin: 0; }
+:where(.terminal-host) .xpost-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+:where(.terminal-host) .xpost-account { font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+:where(.terminal-host) .xpost-connect { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+:where(.terminal-host) .xpost-connect .mm-hint { margin: 0; }
+:where(.terminal-host) .xpost-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+:where(.terminal-host) .xpost-confirm p { margin: 0; font-size: 13px; }
+:where(.terminal-host) .xpost-confirm .xpost-row { justify-content: flex-start; }
+:where(.terminal-host) .xpost-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+:where(.terminal-host) .xpost-switch > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+:where(.terminal-host) .xpost-switch strong { font-size: 14px; font-weight: 500; }
+:where(.terminal-host) .xpost-switch .switch { flex-shrink: 0; }
+:where(.terminal-host) .xpost-list-block { display: flex; flex-direction: column; gap: 8px; }
+:where(.terminal-host) .xpost-list-title { margin: 6px 0 0; font-size: 13px; font-weight: 500; color: var(--tx-2); }
+:where(.terminal-host) .xpost-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+:where(.terminal-host) .xpost-post {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  min-width: 0;
+}
+:where(.terminal-host) .xpost-post > p { margin: 0; font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+:where(.terminal-host) .xpost-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .xpost-meta a { color: var(--tx); text-decoration: underline; text-underline-offset: 3px; }
+:where(.terminal-host) .xpost-dialog .portfolio-body p { margin: 0 0 12px; font-size: 13px; line-height: 1.6; }

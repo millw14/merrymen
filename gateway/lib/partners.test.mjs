@@ -19,9 +19,9 @@ const { createPartners, hashSecret, loadRegistry, makeKey, parseKey, writeRecord
 const SECRET = "x".repeat(40);
 const FILE = path.join(dir, "partners.jsonl");
 
-async function issue({ name = "prism", scopes = [...DEFAULT_SCOPES], status = "active" } = {}) {
+async function issue({ name = "prism", scopes = [...DEFAULT_SCOPES], status = "active", appId } = {}) {
   const { key, keyId, secret } = makeKey();
-  await writeRecord({ keyId, name, hash: hashSecret(SECRET, secret), scopes, status });
+  await writeRecord({ keyId, appId, name, hash: hashSecret(SECRET, secret), scopes, status });
   return { key, keyId, secret };
 }
 
@@ -108,7 +108,20 @@ test("the consent-gated scopes are not handed out by default", () => {
   // carry them because someone forgot to pass --scopes.
   assert.ok(!DEFAULT_SCOPES.includes("read:book"));
   assert.ok(!DEFAULT_SCOPES.includes("read:trades"));
+  assert.ok(!DEFAULT_SCOPES.includes("write:agents"));
+  assert.ok(!DEFAULT_SCOPES.includes("chat:agents"));
   for (const s of DEFAULT_SCOPES) assert.ok(SCOPES.includes(s));
+});
+
+test("stable app identity survives key rotation and legacy keys retain their identity", async () => {
+  const original = await issue({ appId: "stable_partner_app", scopes: ["read:agents", "write:agents", "chat:agents"] });
+  const replacement = await issue({ appId: "stable_partner_app" });
+  const legacy = await issue({});
+  const partners = createPartners({ secret: SECRET });
+  assert.equal((await partners.verify(original.key)).key.appId, "stable_partner_app");
+  assert.equal((await partners.verify(replacement.key)).key.appId, "stable_partner_app");
+  assert.equal((await partners.verify(legacy.key)).key.appId, legacy.keyId);
+  assert.deepEqual((await partners.verify(original.key)).key.scopes, ["read:agents", "write:agents", "chat:agents"]);
 });
 
 test("the file overrides the env, so a revocation on the volume always wins", async () => {

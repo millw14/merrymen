@@ -42,6 +42,19 @@ interface Ctx {
   /** The class vault's contents, and the vault itself. Absent is not empty. */
   classHoldings?: ClassHolding[];
   classVault?: string | null;
+  /**
+   * EVERY vault, because after v2 an account has two.
+   *
+   * `classVault`/`classHoldings` above stay, meaning the PRIMARY one, so every
+   * existing render keeps working. This is what lets the confirmation name a
+   * balance sitting in the other one instead of quietly omitting it.
+   */
+  classVaults?: {
+    vault: string;
+    version: 1 | 2 | null;
+    note: string | null;
+    holdings: ClassHolding[];
+  }[];
   /** Labels whose balance could not be READ. Never conflate with "not held". */
   unreadable?: string[];
   error?: string;
@@ -59,6 +72,19 @@ interface PlanRes {
   /** The class vault's contents, and the vault itself. Absent is not empty. */
   classHoldings?: ClassHolding[];
   classVault?: string | null;
+  /**
+   * EVERY vault, because after v2 an account has two.
+   *
+   * `classVault`/`classHoldings` above stay, meaning the PRIMARY one, so every
+   * existing render keeps working. This is what lets the confirmation name a
+   * balance sitting in the other one instead of quietly omitting it.
+   */
+  classVaults?: {
+    vault: string;
+    version: 1 | 2 | null;
+    note: string | null;
+    holdings: ClassHolding[];
+  }[];
   /** The ETH leg: what would move, and what stays to pay for the move. */
   nativeRecoverableWei?: string;
   nativeReserveWei?: string;
@@ -250,6 +276,9 @@ export function RecoverPanelView({
         // would have confirmed a sweep whose screen said "20.000000 USDG".
         classHoldings: b.classHoldings,
         classVault: b.classVault,
+        // AND THE WHOLE BOOK. Carrying only the primary vault here is the same
+        // defect the comment above describes, one version later.
+        classVaults: b.classVaults,
         // THE ETH LEG. It moves on every recovery and was in neither
         // classHoldings nor balances, so the confirmation listed the tokens and
         // silently omitted it.
@@ -304,9 +333,19 @@ export function RecoverPanelView({
         ...classHoldings.map((h) => `${h.amount} ${h.symbol}`),
         ...balances.map((b) => `${b.amount} ${b.symbol}`),
       ].join(", ") || "the balance";
+    // SAID BEFORE THE PRESS, not discovered after. One approval covers one
+    // vault, so a balance in the other is real, visible on this screen, and not
+    // moving this time — and a confirmation that stayed silent about that would
+    // be the "names less than it moves" defect inverted.
+    const alsoHeld = otherVaults
+      .flatMap((v) => v.holdings.map((h) => `${h.amount} ${h.symbol}`))
+      .join(", ");
     if (
       !window.confirm(
-        `Sweep ${list} to ${normalizeAddr(to)}?\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.`,
+        `Sweep ${list} to ${normalizeAddr(to)}?\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.` +
+          (alsoHeld
+            ? `\n\nNOT in this sweep: ${alsoHeld}, held in another of your class vaults. Run this again afterwards to move it.`
+            : ""),
       )
     ) {
       return;
@@ -369,6 +408,22 @@ export function RecoverPanelView({
   // withdrawal confirmation is the difference between consent and a surprise.
   const classHoldings = plan?.classHoldings ?? ctx?.classHoldings ?? [];
   const classVault = plan?.classVault ?? ctx?.classVault ?? null;
+  /**
+   * Every vault, falling back to the primary one for a server that predates it.
+   *
+   * ONE APPROVAL COVERS ONE VAULT, deliberately: `recoverFunds` sends one
+   * operation per vault because the batch is atomic, and the approved intent is
+   * what pins that operation's identity. So a second vault holding something is
+   * DISCLOSED and then needs its own run, which the confirmation says out loud
+   * — the alternative is a screen that names money this press will not move.
+   */
+  const classVaults =
+    plan?.classVaults ??
+    ctx?.classVaults ??
+    (classVault ? [{ vault: classVault, version: null, note: null, holdings: classHoldings }] : []);
+  const otherVaults = classVaults.filter(
+    (v) => v.holdings.length > 0 && v.vault.toLowerCase() !== (classVault ?? "").toLowerCase(),
+  );
   const smartAccount = plan?.smartAccount ?? ctx?.smartAccount;
   const explorer = plan?.explorer ?? ctx?.explorer;
   const activeChain = plan?.chainId ?? ctx?.chainId ?? chainId;

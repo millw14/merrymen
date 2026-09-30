@@ -21,6 +21,7 @@ const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-flows-"));
 process.env.MERRYMEN_HOME = HOME;
 
 const {
+  closeStoreForTest,
   initStore,
   addFlow,
   addEquity,
@@ -85,11 +86,8 @@ function grant(smartAccount: string) {
 }
 
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* temp dir cleanup is best-effort */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("the flow ledger", () => {

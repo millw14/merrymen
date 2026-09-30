@@ -1,8 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Proposals } from "../Proposals";
+import { TrencherAnnouncement } from "../TrencherAnnouncement";
 import { blockerAdvice } from "@/lib/live-blocker";
 import { badgeOf } from "@/lib/thesis-badge";
 import { commandFor, commandPayload, type CommandArg } from "@/lib/chat-commands";
+import { fetchOpenOrder, followWindowMs, routeAnswer, serverPlacedAt, SNIPE_LOOKUP_MS } from "../order-follow";
+import type { ChatContext, ChatController, ConfirmScope } from "../chat-controller";
+import { chatChips, fillParts, receiptParts, refocusAfterSend } from "../chat-thread";
+import type { OrderReceipt } from "@/lib/order-state";
 import {
   ArrowDown,
   ArrowUp,
@@ -14,71 +19,32 @@ import {
 } from "lucide-react";
 import {
   dailyChange,
+  positionFigures,
   positionsOf,
   spentToday,
-  type ChatTurn,
+  type ChatMessage,
 } from "../account";
 import { ageOf, money, pctPts, type LiveMine, type LiveToken } from "../live";
 import { strategyName } from "../strategy";
 import { Coin, Empty, Face } from "../ui";
+import { NameChip } from "../NameChip";
 import { BalanceFigure } from "../studio";
 import { TradeTokenCard } from "../TradeTokenCard";
+import { SwapsTable } from "../SwapsTable";
+import { DESK_TAPE_ROWS, isTrade, swapRowsOfDesk } from "../swaps";
 import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
-
-/**
- * How many recent moves the agent is shown.
- *
- * The whole tape used to go, which on its own overran the prompt's state
- * budget before the positions were even added — so the clamp downstream cut it
- * mid-object. Eight is what fits comfortably and is what a person means by
- * "recently".
- */
-const TAPE_SHOWN = 8;
+import { count } from "@/lib/format";
+import { ENERGY_NOTICE_PREFIX, type EnergyStatus } from "@merrymen/core";
+import { energyRemedies, energyView, workerSaysFull } from "../energy-view";
+import { EnergyNote } from "../EnergyNote";
 
 /** Sentence case for a badge label that is written lower-case by design. */
 const capitalise = (w: string) => (w ? w[0]!.toUpperCase() + w.slice(1) : w);
 
-/**
- * The newest moves, reduced to what the model can actually use.
- *
- * `at` travels so the agent can tell last month's refusal from this morning's.
- * Without it, a tape of stale rejections reads as the present tense — which is
- * exactly how a tester's agent came to report a months-old `no-gas` as its
- * current state. `movesShown`/`movesTotal` go beside it so the agent can say
- * "the last 8 of 30" rather than implying it saw everything.
- *
- * IT WAS HANDING OVER THE OLDEST EIGHT AND CALLING THEM THE LAST EIGHT.
- * `slice(-TAPE_SHOWN)` takes the TAIL, and the tape arrives newest-first —
- * /api/feed selects `ORDER BY created_at DESC` — so the model got the eight
- * stalest rows of the window while `movesShown` told it these were the recent
- * ones. That is the same present-tense-stale-refusal failure this comment was
- * written about, rebuilt one line below it; the 7-day window bounded how old
- * the lie could be and did not stop it being told.
- *
- * Sorted here rather than trusting the caller. The order is a fact about a SQL
- * clause two services away, and reading the tape backwards is silent — nothing
- * throws, nothing looks empty, the agent simply narrates the wrong week.
- */
-const tapeFor = (moves: LiveMine["moves"]) =>
-  [...moves]
-    .sort((a, b) => (b.at ?? 0) - (a.at ?? 0))
-    .slice(0, TAPE_SHOWN)
-    .map((m) => ({
-      at: m.at,
-      action: m.action,
-      symbol: m.symbol,
-      sizeUsdg: m.sizeUsdg,
-      outcome: m.outcome,
-      outcomeText: m.outcomeText,
-    }));
-
-const ASKS = [
-  { label: "My strategy", question: "Explain your trading strategy." },
-  { label: "My holdings", question: "What do you hold?" },
-  { label: "Trading limits", question: "Explain my trading limits." },
-];
+/** A request that acts, naming the owner it acts for, so the route can refuse anyone else's session (ConfirmScope.owner). */
+const ownedBy = (on: ConfirmScope, payload: Record<string, unknown>) => (on.owner ? { ...payload, owner: on.owner } : payload);
 
 export function Agent({
   mine,
@@ -86,10 +52,7 @@ export function Agent({
   perTrade,
   perDay,
   stopped,
-  turns,
-  draft: ask,
-  onDraft: setAsk,
-  onTurn,
+  chat,
   onToken,
   onDeposit,
   onWithdraw,
@@ -98,16 +61,21 @@ export function Agent({
   onSettings,
   liveBlocker,
   staleBlocker,
+  energy,
+  account,
+  chainId,
 }: {
   mine: LiveMine | null;
   tokens: LiveToken[];
-  perTrade: string;
-  perDay: string;
+  perTrade: number | null;
+  perDay: number | null;
   stopped: boolean;
-  turns: ChatTurn[];
-  draft: string;
-  onDraft: (value: string) => void;
-  onTurn: (turn: ChatTurn) => void;
+  /**
+   * THE CONVERSATION, owned by App (chat-controller.ts) and only drawn here —
+   * so closing this screen no longer ends a reply in flight or an order being
+   * followed. The phone tab and the desktop dock draw the same one.
+   */
+  chat: ChatController;
   onToken: (id: string) => void;
   onDeposit: () => void;
   onWithdraw: () => void;
@@ -139,22 +107,31 @@ export function Agent({
    * re-sign. One of them did, repeatedly, and reported the product as broken.
    */
   staleBlocker?: boolean;
+  /**
+   * THIS AGENT'S ENERGY, as its worker reported it (AgentStatus.energy).
+   * Null or absent is "not said yet" — the desk then says nothing about energy
+   * rather than guessing, and never renders an unread count as 0.
+   */
+  energy?: EnergyStatus | null;
+  /** The agent's account address in full (grant.smartAccount), for the energy remedy. */
+  account?: string | null;
+  /** The grant's chain: $MERRYMEN sent to the account only counts on Robinhood Chain. */
+  chainId?: number | null;
 }) {
-  const [sending,setSending]=useState(false);
-  const [chatError,setChatError]=useState("");
+  const ask = chat.draft;
+  const setAsk = chat.setDraft;
   /**
    * THE ONE THING THE AGENT HAS ASKED PERMISSION TO DO.
    *
-   * Deliberately NOT part of a ChatTurn. Turns are persisted to this browser,
-   * and a confirmation card restored from storage would be an offer to act,
-   * made by nobody, on a page the owner reopened days later. A proposal lives
-   * as long as the conversation is on screen and no longer.
+   * Deliberately NOT part of a message. The thread is persisted to this
+   * browser, and a confirmation card restored from storage would be an offer to
+   * act, made by nobody, on a page the owner reopened days later. The
+   * controller holds it in memory only, and the next message clears it.
    */
-  const [pending,setPending]=useState<{id:string;args:Record<string,CommandArg>}|null>(null);
-  const [running,setRunning]=useState(false);
-  /** Live while this screen is mounted, so a poll cannot outlive it. */
-  const alive = useRef(true);
-  useEffect(() => () => { alive.current = false; }, []);
+  const pending: { id: string; args: Record<string, CommandArg> } | null = chat.proposal;
+  const setPending = chat.setProposal;
+  /** The card is being carried out — the controller's, so every screen drawing it agrees. */
+  const running = chat.confirming;
   const [expanded, setExpanded] = useState(false);
   const [view, setView] = useState<"positions" | "trades">("positions");
   const viewport = useRef<HTMLElement>(null);
@@ -182,7 +159,7 @@ export function Agent({
   };
   useLayoutEffect(() => {
     if (follow.current) scrollLatest();
-  }, [turns.length]);
+  }, [chat.messages.length, chat.streaming, chat.sending]);
   useLayoutEffect(() => {
     const node = input.current;
     if (!node) return;
@@ -217,6 +194,15 @@ export function Agent({
     if (expanded && !dialog?.open) dialog?.showModal();
     if (!expanded && dialog?.open) dialog.close();
   }, [expanded]);
+  // NO RELEASE NOTICE HERE.
+  //
+  // `TrencherAnnouncement` used to render in this branch — an announcement
+  // about a trading mode, stacked directly on top of the empty state whose
+  // whole job is to get this reader to create an agent in the first place.
+  // It also fired a one-shot desktop notification and marked it spent, so a
+  // visitor who never had an agent consumed the notification meant for the
+  // owner they might become. The component now refuses that case itself;
+  // not mounting it here is the other half.
   if (!mine)
     return (
       <Empty
@@ -226,6 +212,16 @@ export function Agent({
       />
     );
   /**
+   * THE WORKER'S WORD ON ENERGY, and what the desk makes of it (energy-view.ts).
+   *
+   * `workerSaysFull` also stands the Circle banner down. /api/tier caches a
+   * balance for ten minutes; the worker reads the same combined balance every
+   * tick. Right after a top-up the two disagree, and it is the worker — the
+   * process that actually runs or idles the strategy — that is current.
+   */
+  const energyNow = energyView(energy, Date.now() / 1000);
+  const remedies = energyRemedies(energy, chainId);
+  /**
    * Has this owner chosen a strategy their tier will not run?
    *
    * Both halves have to be known: an unread tier is not a locked one, so the
@@ -234,7 +230,20 @@ export function Agent({
    * change here.
    */
   const circleLocked =
-    isCircleStrategyId(mine.glance.id) && tier !== null && tier.why !== "sign-in" && !tier.bonusStrategies;
+    isCircleStrategyId(mine.glance.id) && tier !== null && tier.why !== "sign-in" && !tier.bonusStrategies &&
+    !workerSaysFull(energy);
+  /**
+   * THE SAME SENTENCE ONCE. The worker writes one dated warn event the first
+   * time a day's allowance runs out ("Energy spent for 27 Sep (UTC): …"), and
+   * that is the newest warn in the feed for the rest of the day. While the
+   * energy panel below is already saying it, the notice slot would only repeat
+   * it — so that one notice steps aside, and every other notice still shows.
+   */
+  const notice =
+    mine.notice &&
+    !(energyNow.kind !== "none" && energyNow.spent && mine.notice.message.startsWith(ENERGY_NOTICE_PREFIX))
+      ? mine.notice
+      : null;
   const positions = positionsOf(mine);
   const trades = mine.moves
     .filter((t) => t.action === "buy" || t.action === "sell")
@@ -244,51 +253,26 @@ export function Agent({
     (t) => t.symbol.toUpperCase() === latest?.symbol?.toUpperCase(),
   );
   const change = dailyChange(mine);
+  // WHAT IT ACTUALLY HOLDS, and everything else it is told — built in
+  // chat-payload.ts by the controller, from this screen's own view of it.
+  const context: ChatContext = { mine, liveBlocker, perTrade, perDay, stopped };
+  /**
+   * ASK, AND SHOW IT AT ONCE.
+   *
+   * The owner's line and a typing bubble appear the moment they press send,
+   * and the composer clears — the reply streams into the bubble as it is
+   * written (chat-controller.ts). It used to wait for a settings GET and then
+   * the whole reply before anything moved, and cleared the draft only on
+   * success.
+   *
+   * THE CURSOR GOES BACK ONLY WITH A MOUSE. Refocusing the textarea on a phone
+   * reopens the keyboard, and the answer arrived underneath it.
+   */
   const send = async (question: string) => {
-    if (!question.trim() || sending) return;
-    setSending(true);setChatError("");
+    if (!question.trim() || chat.sending) return;
     follow.current = true;
-    try {
-      const settings = await fetch("/api/settings", {signal:AbortSignal.timeout(5000)}).then(r=>r.ok?r.json():null).catch(()=>null);
-      // WHAT IT ACTUALLY HOLDS, under the key the system prompt names.
-      //
-      // `positions` used to be `mine.glance` — a STRATEGY descriptor whose
-      // `legs` are percentage weights. So an owner asked their agent what NVDA
-      // and QQQ had cost and when it would sell, and it answered that it held
-      // nothing but cash, while the panel eighteen inches to its right listed
-      // both. It was not hallucinating; it was reading the payload it was given.
-      //
-      // Cost and P&L travel with each holding, because "should I take this
-      // profit" cannot be answered from a value alone. NULL, never 0, when the
-      // ledger has no basis — the difference between not knowing what something
-      // cost and believing it was free.
-      const sizeOf = (settings?.values ?? {}) as Record<string, unknown>;
-      const num = (k: string) => {
-        const v = sizeOf[k] ?? (settings?.defaults as Record<string, unknown> | undefined)?.[k];
-        return typeof v === "number" ? v : null;
-      };
-      const response = await fetch("/api/chat", {method:"POST",headers:{"Content-Type":"application/json"},signal:AbortSignal.timeout(45000),body:JSON.stringify({message:question.trim(),state:JSON.stringify({name:mine.name,equity:mine.equity,strategy:settings?.values?.strategy ?? settings?.defaults?.strategy ?? mine.glance.id,basketSymbols:(settings?.values?.basketSymbols ?? settings?.defaults?.basketSymbols ?? null) as string[]|null,paperTradingEnabled:settings?.values?.paperTradingEnabled ?? settings?.defaults?.paperTradingEnabled ?? null,liveTradingEnabled:settings?.values?.liveTradingEnabled ?? settings?.defaults?.liveTradingEnabled ?? null,workerStatus:mine.statusLabel ?? "Unknown",liveBlocker:liveBlocker ?? null,positions:(mine.positions ?? []).map(p=>({symbol:p.symbol,valueUsd:p.valueUsd,costUsd:p.costUsd,unrealisedPct:p.pnlPct===null?null:Math.round(p.pnlPct*10)/10,priceStale:p.stale,
-        // THIS holding's own stop, graded when it was bought. Null means it
-        // carries no grade and the book-wide `stopLossBps` below applies — the
-        // distinction matters because "what would make you sell THIS" is the
-        // question owners actually ask, and one number for a whole book was
-        // never the honest answer to it.
-        stopLossBps:p.floorBps,stopWhy:p.floorWhy})),cashUsd:mine.glance.cashUsd ?? null,vaultUsd:mine.glance.vaultUsd ?? null,
-        // The two rules that answer "what would make you get out" — the levels
-        // that sell WITHOUT asking the model. Null means none is armed, which
-        // is a different answer from a level at zero.
-        stopLossBps:num("strategistStopLossBps"),takeProfitBps:num("takeProfitBps"),
-        moves:tapeFor(mine.moves),movesShown:Math.min(mine.moves.length,TAPE_SHOWN),movesTotal:mine.moves.length,perTrade,perDay,stopped}),history:turns.flatMap(t=>[{role:"user",content:t.question},{role:"assistant",content:t.answer}]).slice(-8)})});
-      const data = await response.json();
-      if(!response.ok || !data.reply) throw new Error(response.status===401 ? "Sign in again to chat with your agent." : data.why === "no-llm" ? "Chat is not configured yet. Open Settings to connect an AI provider." : "Your agent could not reply. Try sending again.");
-      onTurn({question:question.trim(),answer:data.reply});
-      // VALIDATED AGAIN HERE. The route checks the id against the registry, and
-      // so does this — the client must not render a card for something it
-      // cannot describe, and `say` is where the description comes from.
-      setPending(data.command && commandFor(data.command.id) ? data.command : null);
-      setAsk("");
-    } catch(error) {setChatError(error instanceof Error ? error.message : "Could not send. Try again.");}
-    finally {setSending(false);input.current?.focus();}
+    await chat.send(question, context);
+    if (refocusAfterSend(window)) input.current?.focus();
   };
   /**
    * WAIT FOR THE ANSWER, AND SAY IT IN THE AGENT'S OWN WORDS.
@@ -297,45 +281,97 @@ export function Agent({
    * queued, ferried, claimed, put to the wall and signed — seconds to a minute
    * later — and until this existed the owner was told "placed it" and then
    * nothing, ever. A refusal that never reaches the wall writes no trade row,
-   * so the tape cannot carry it either: this poll is the ONLY way the reason
+   * so the tape cannot carry it either: this follow is the ONLY way the reason
    * reaches the person who asked.
    *
-   * The sentence comes from the WORKER, which read the ledger row. Nothing here
-   * infers an outcome — a browser guessing at what a trade did is exactly the
-   * claim this codebase refuses to make.
+   * The sentence comes from the WORKER, which read the ledger row, and the
+   * receipt beside it from the same row. Nothing here infers an outcome — a
+   * browser guessing at what a trade did is exactly the claim this codebase
+   * refuses to make.
    *
-   * Bounded and best-effort: it stops when the answer lands, when the order
-   * outlives its own five-minute window, or when the screen goes away. A poll
-   * that cannot end is a worse bug than a missing sentence.
+   * FOLLOWED BY THE APP, NOT BY THIS SCREEN. It used to die with this screen,
+   * so closing the dock mid-order lost the answer. The controller keeps the
+   * order and its deadline and follows it whatever the screens do — see
+   * order-follow.ts for the deadline and chat-controller.ts for the resume.
+   *
+   * AND FOR THE OWNER WHO TAPPED. Everything below changes the conversation
+   * through `on`, the controller's scope for this one confirm: if the owner
+   * changes on this browser while the order is being placed, what it would
+   * have said, followed or cleared goes nowhere, rather than into the next
+   * owner's thread (chat-controller.ts `confirm`).
    */
-  const followOrder = async (id: string) => {
-    const started = Date.now();
-    while (Date.now() - started < 7 * 60_000) {
-      await new Promise((r) => setTimeout(r, 5_000));
-      if (!alive.current) return;
-      let data: { state?: string; result?: string | null } | null = null;
-      try {
-        const r = await fetch(`/api/orders?id=${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(8_000) });
-        data = r.ok ? await r.json() : null;
-      } catch {
-        continue; // a dropped poll is not an outcome
-      }
-      if (data?.state === "done" && data.result) {
-        onTurn({ question: "", answer: data.result });
-        return;
-      }
-    }
-    // NOT SILENCE. Seven minutes without an answer means the worker never took
-    // it — which is a real thing an owner needs told, and the state they were
-    // left in before was an unexplained absence.
-    if (alive.current) {
-      onTurn({
-        question: "",
-        answer:
-          "I never got to that order — my worker did not pick it up in time, so nothing was sent. " +
-          "Ask again and I will try once more.",
+
+  /**
+   * AN ORDER WHOSE PLACING NEVER ANSWERED IS NOT A REFUSAL.
+   *
+   * The connection can drop after the server wrote the row, so nothing here
+   * is known — and the card goes, because tapping it again may be a second
+   * order at a second price. The key is asked, once, what is open on it: an
+   * open order is followed to its answer like any other; otherwise the owner
+   * is told plainly that it is unknown, and where to look.
+   */
+  const orderLost = async (on: ConfirmScope) => {
+    on.setProposal(null);
+    on.say({ role: "owner", text: "✓ Confirmed" });
+    // Asked under the session the browser holds NOW: once the owner has
+    // changed, what is open is somebody else's, and it is not looked for —
+    // and naming the owner who tapped, so a session another tab changed
+    // unseen is refused rather than read as theirs.
+    const open = on.alive() ? await fetchOpenOrder(on.owner) : null;
+    if (open) {
+      on.say({
+        role: "agent",
+        text: "I lost the line while placing that, but there is an order open on my key now — I'll tell you how it ends.",
+        order: { id: open },
       });
+      on.followOrder(open, null);
+      return;
     }
+    on.say({
+      role: "agent",
+      text: "I couldn't confirm that order reached my key — the connection dropped before I heard back. Check your trades before asking again.",
+    });
+  };
+
+  /**
+   * Place one order through the ONE channel orders take, and say what is true
+   * the moment it exists — placed, not filled — then follow it to its answer.
+   *
+   * FOR THE OWNER WHO TAPPED, OR NOT AT ALL. The POST carries whatever session
+   * this browser holds when it leaves, and a snipe reaches here only after its
+   * lookup answered — time enough for another owner to sign in. So nothing is
+   * sent once the owner has changed (on.alive), and what is sent names the
+   * owner it is for, so the route refuses a session that is not theirs.
+   */
+  const placeOrder = async (on: ConfirmScope, payload: Record<string, unknown>, words: (duplicate: boolean) => string) => {
+    if (!on.alive()) {
+      // Said only where the owner who tapped can read it (on.say): back on
+      // this browser, never in the thread of whoever signed in meanwhile.
+      on.say({
+        role: "agent",
+        text: "I didn't place that — the wallet signed in here changed after you confirmed, so nothing was sent. Ask again if you still want it.",
+      });
+      return;
+    }
+    const placed = await routeAnswer<{ error?: string; id?: string; duplicate?: boolean; expiresAt?: number; expiresInMs?: number }>("/api/orders", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(ownedBy(on, payload)),
+    });
+    // A 200 is a row that exists, but one whose id could not be read cannot be
+    // followed — so it is looked for, exactly like an answer that was lost.
+    if (!placed || (placed.ok && typeof placed.body?.id !== "string")) return orderLost(on);
+    if (!placed.ok) throw new Error(placed.body?.error ?? `that was refused (${placed.status})`);
+    const body = placed.body!;
+    // THE SERVER'S OWN TIME FOR THE PLACEMENT goes on the line that says it,
+    // said the moment the reply is in hand: the thread reads the order's life
+    // from the two, on the ledger's clock, so a browser minutes off cannot make
+    // its fill a second line (chat-thread.ts lifeOf).
+    const serverAt = serverPlacedAt(body);
+    on.say({ role: "owner", text: "✓ Confirmed" });
+    on.say({ role: "agent", text: words(!!body.duplicate), order: { id: body.id!, ...(serverAt !== null ? { serverPlacedAt: serverAt } : {}) } });
+    on.setProposal(null);
+    on.followOrder(body.id!, followWindowMs(body));
   };
 
   /**
@@ -345,11 +381,9 @@ export function Agent({
    * authenticated route the buttons already call. Nothing here is a new way
    * into the app — it is the existing way, reached by asking.
    */
-  const confirm = async () => {
-    const cmd = pending && commandFor(pending.id);
-    if (!cmd || running) return;
-    setRunning(true);
-    setChatError("");
+  const confirm = () => chat.confirm(async (proposal, on) => {
+    const cmd = commandFor(proposal.id);
+    if (!cmd) return;
     try {
       if (cmd.via === "navigate") {
         window.location.href = cmd.to!;
@@ -363,45 +397,55 @@ export function Agent({
         // which, not covered by the key yet, or nothing found. Rendering it
         // verbatim is deliberate: every one of those is a fact the browser does
         // not have and must not invent, and three of them are not errors.
-        const res = await fetch("/api/snipe", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(commandPayload(cmd, pending!.args)),
-        });
-        const out = (await res.json().catch(() => null)) as {
+        const found = await routeAnswer<{
           outcome?: string;
           say?: string;
           error?: string;
           target?: { symbol?: string };
           usdgAmount?: number;
-        } | null;
-        if (!res.ok && !out?.say) throw new Error(out?.error ?? `that was refused (${res.status})`);
+        }>(
+          "/api/snipe",
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(ownedBy(on, commandPayload(cmd, proposal.args))),
+          },
+          // BOUNDED: the order it resolves to goes out only after it answers,
+          // so an open-ended lookup was an open-ended gap between the tap and
+          // the order (SNIPE_LOOKUP_MS).
+          SNIPE_LOOKUP_MS,
+        );
+        // A lookup places nothing, so a lost answer costs only the asking —
+        // and the card stays for exactly that.
+        if (!found) {
+          on.say({ role: "agent", text: "I couldn't look that coin up — no answer came back, and nothing was placed. Try again." });
+          return;
+        }
+        const out = found.body;
+        if (!found.ok && !out?.say) throw new Error(out?.error ?? `that was refused (${found.status})`);
         // RESOLVED IS NOT PLACED. The route's job ends at "this query means this
         // one coin, and your key covers it"; the order goes through the SAME
         // channel the buy card uses, from here, so there is exactly one way an
         // order is ever created. The other three outcomes never reach an order
         // at all and are rendered as what they are.
         if (out?.outcome === "resolved" && out.target?.symbol) {
-          const placed = await fetch("/api/orders", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ side: "buy", symbol: out.target.symbol, usdgAmount: out.usdgAmount }),
-          });
-          const body = (await placed.json().catch(() => null)) as
-            | { error?: string; duplicate?: boolean }
-            | null;
-          if (!placed.ok) throw new Error(body?.error ?? `that was refused (${placed.status})`);
-          onTurn({
-            question: "✓ confirmed",
-            answer: body?.duplicate
-              ? `${out.say} I already had that one queued, so I have not placed it twice.`
-              : `${out.say} Placed, not filled — my key's limits still decide, and however it ends it lands on your trades.`,
-          });
-          setPending(null);
+          // FOLLOWED LIKE ANY ORDER. This placed an order and then said
+          // "however it ends it lands on your trades" — false for every refusal
+          // that returns before an intent is built, which writes no trade row —
+          // and never asked how it ended. It is the same order as a typed buy,
+          // so it gets the same follow, the same receipt, and the same care
+          // when its answer is lost.
+          const said = out.say;
+          await placeOrder(on, { side: "buy", symbol: out.target.symbol, usdgAmount: out.usdgAmount }, (duplicate) =>
+            duplicate
+              ? `${said} I already had that one queued, so I have not placed it twice.`
+              : `${said} Placed, not filled — my key's limits still decide, and I will tell you which.`,
+          );
           return;
         }
-        onTurn({ question: "✓ confirmed", answer: out?.say ?? "I could not tell how that went." });
-        setPending(null);
+        on.say({ role: "owner", text: "✓ Confirmed" });
+        on.say({ role: "agent", text: out?.say ?? "I could not tell how that went." });
+        on.setProposal(null);
         return;
       }
       if (cmd.via === "order") {
@@ -418,15 +462,7 @@ export function Agent({
         // past tense of the ASKING rather than of the trading: "I've placed it"
         // is true the moment the row exists; "bought TSLA" would be a claim
         // about somebody's money made by a browser, ahead of any evidence.
-        const placed = await fetch("/api/orders", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(commandPayload(cmd, pending!.args)),
-        });
-        const body = (await placed.json().catch(() => null)) as
-          | { error?: string; id?: string; duplicate?: boolean }
-          | null;
-        if (!placed.ok) throw new Error(body?.error ?? `that was refused (${placed.status})`);
+        //
         // "IT LANDS ON YOUR TRADES EITHER WAY" WAS FALSE. Only a trade row
         // reaches the tape, and every refusal that returns before an intent is
         // built — paused, expired, over the ceiling, a symbol I do not watch,
@@ -435,41 +471,53 @@ export function Agent({
         // PERSISTED to this browser, so the false promise outlives the order.
         //
         // What is true the moment the row exists is only that it was placed. So
-        // that is what this says, and the outcome is fetched below and said in
-        // its own turn — from the worker's own words, not from a guess here.
-        onTurn({
-          question: "✓ confirmed",
-          answer: body?.duplicate
+        // that is what this says, and the outcome is followed and said in its
+        // own turn — from the worker's own words, not from a guess here.
+        await placeOrder(on, commandPayload(cmd, proposal.args), (duplicate) =>
+          duplicate
             ? `That exact order is already queued — I have not placed a second one.`
-            : `Placed it — ${cmd.say(pending!.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
-        });
-        setPending(null);
-        if (body?.id) void followOrder(body.id);
+            : `Placed it — ${cmd.say(proposal.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
+        );
         return;
       }
       // READ-MODIFY-WRITE at click time, and ONLY the declared keys.
       // `commandPayload` drops everything the command did not declare, and
       // /api/settings strips every house-owned field again on the server — two
-      // independent gates, neither relying on the other.
-      const put = await fetch("/api/settings", {
+      // independent gates, neither relying on the other. And naming the owner
+      // who tapped, like an order: another tab can sign a different wallet in
+      // without this one knowing, and the route refuses that session.
+      const put = await routeAnswer<{ errors?: string[] }>("/api/settings", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(commandPayload(cmd, pending!.args)),
+        body: JSON.stringify(ownedBy(on, commandPayload(cmd, proposal.args))),
       });
-      if (!put.ok) {
-        const j = (await put.json().catch(() => null)) as { errors?: string[] } | null;
-        throw new Error(j?.errors?.join(" ") ?? `that was refused (${put.status})`);
+      // THE WRITE MAY HAVE LANDED. Said as unknown, and the settings are read
+      // again so what the model is told catches up whichever it was. A setting
+      // is one value, so asking again is safe, and the card stays for that.
+      if (!put) {
+        on.say({
+          role: "agent",
+          text: "I couldn't tell whether that change was saved — the connection dropped before I heard back. Asking again is safe: it only sets the same value.",
+        });
+        on.refreshSettings();
+        return;
       }
+      if (!put.ok) throw new Error(put.body?.errors?.join(" ") ?? `that was refused (${put.status})`);
       // SAID BACK IN THE CONVERSATION, not as a toast that vanishes. What an
       // agent did on your instruction belongs in the record of what you asked.
-      onTurn({ question: "✓ confirmed", answer: `Done — ${cmd.say(pending!.args)}` });
-      setPending(null);
+      on.say({ role: "owner", text: "✓ Confirmed" });
+      on.say({ role: "agent", text: `Done — ${cmd.say(proposal.args)}` });
+      on.setProposal(null);
+      // What the model is told about the settings has just changed.
+      on.refreshSettings();
     } catch (e) {
-      setChatError(e instanceof Error ? e.message : "That did not go through.");
-    } finally {
-      setRunning(false);
+      // NEVER A SILENT REFUSAL, and said in the thread where the owner is
+      // looking, with the route's own reason — only a body the route wrote
+      // reaches here (routeAnswer). The card stays, so asking again is one
+      // tap — and never automatic, because this may be an order.
+      on.say({ role: "agent", text: `That didn't go through: ${e instanceof Error ? e.message : "I could not tell why."}` });
     }
-  };
+  });
 
   const blocked = blockerAdvice(liveBlocker);
   /**
@@ -544,6 +592,9 @@ export function Agent({
         <div>
           <h1>{mine.name}</h1>
           <p>{strategyName(mine.glance.id)}</p>
+          {/* An unnamed agent is one of many "Robin"s; this is where its owner
+              finds out, and names it in one tap. Renders nothing otherwise. */}
+          <NameChip name={mine.name} nameSource={mine.nameSource ?? null} slug={mine.slug} onSettings={onSettings} />
         </div>
         <span className={`desk-status ${stopped ? "paused" : ""}`}>
           <i />
@@ -634,7 +685,11 @@ export function Agent({
                 aria-pressed={view === "trades"}
                 onClick={() => setView("trades")}
               >
-                Trades · {trades.length}
+                {/* FILLS AND ORDERS ON THEIR WAY, not refusals — those fold into
+                    one line in the list below, and counting them here called
+                    thirty ops-cap refusals "Trades · 30". "+" when the tape
+                    came back full: there may be more past its end. */}
+                Trades · {swapRowsOfDesk(mine.moves).filter(isTrade).length}{mine.moves.length >= DESK_TAPE_ROWS ? "+" : ""}
               </button>
             </div>
             {view === "positions" ? (
@@ -646,6 +701,10 @@ export function Agent({
                   const token = tokens.find(
                     (t) => t.symbol.toUpperCase() === p.symbol.toUpperCase(),
                   );
+                  // The value AND the %, never one standing in for the other:
+                  // the small line prints the coin's name when it is listed, so
+                  // this is the only place on the row the money figure can be.
+                  const f = positionFigures(p);
                   return (
                     <button
                       type="button"
@@ -657,14 +716,13 @@ export function Agent({
                       <Coin symbol={p.symbol} logo={token?.logo ?? ""} />
                       <span>
                         <strong>{p.symbol}</strong>
-                        <small>{token?.name ?? p.detail}</small>
+                        {/* The coin's name when it is listed. Not the detail: that is
+                            printed on the right now, and would read twice. */}
+                        {token?.name ? <small>{token.name}</small> : null}
                       </span>
-                      <span
-                        className={
-                          p.pnl == null ? "" : p.pnl < 0 ? "down" : "up"
-                        }
-                      >
-                        {p.pnl == null ? p.detail : pctPts(p.pnl)}
+                      <span>
+                        {f.value}
+                        {f.pct !== null && <> · <span className={f.tone}>{f.pct}</span></>}
                       </span>
                     </button>
                   );
@@ -682,24 +740,18 @@ export function Agent({
               </>
             ) : (
               <div className="desk-trades">
-                {trades.length === 0 && (
-                  <Empty compact title="No trades yet."/>
-                )}
-                {trades.map((t, i) => (
-                  <article className="desk-trade" key={`${t.at}-${i}`}>
-                    <div>
-                      <strong>
-                        {t.action === "buy" ? "Buy" : "Sell"} {t.symbol}
-                      </strong>
-                      <strong>{money(t.sizeUsdg)}</strong>
-                    </div>
-                    <p>{t.reason ?? "No explanation available."}</p>
-                    <small>
-                      {ageOf(t)} ago · {t.outcome ?? "Recorded"}
-                      {t.paper ? " · Paper trade" : ""}
-                    </small>
-                  </article>
-                ))}
+                {/* THE SWAPS TABLE THE PUBLIC PROFILE USES (rules in swaps.ts),
+                    with the owner's own dollars. Every refusal is still here
+                    and still says why — folded into one line per reason, so
+                    thirty ops-cap refusals no longer push the fills away. */}
+                <SwapsTable
+                  rows={swapRowsOfDesk(mine.moves)}
+                  tokens={tokens}
+                  showMoney
+                  tapeFull={mine.moves.length >= DESK_TAPE_ROWS}
+                  emptyTitle="No trades yet."
+                  onToken={onToken}
+                />
               </div>
             )}
             <button
@@ -709,7 +761,7 @@ export function Agent({
             >
               Trading limits{" "}
               <span>
-                {money(Number(perTrade))} / trade{" "}
+                {money(perTrade)} / trade{" "}
                 <ArrowUpRight size={14} aria-hidden="true" />
               </span>
             </button>
@@ -730,6 +782,7 @@ export function Agent({
           setAway(isAway);
         }}
       >
+        <TrencherAnnouncement hasAgent={!!mine} />
         {/* ANNOUNCEMENTS SCROLL WITH THE CHAT, rather than standing on top of it.
             Pinned above the conversation, these came straight out of the only
             flexible row on a fixed-height screen: measured at 375px, the
@@ -756,22 +809,54 @@ export function Agent({
         {circleLocked && (
           <section className="desk-circle-locked" role="status">
             <strong>
-              {strategyName(mine.glance.id)} is a Merry Circle strategy — it isn&apos;t running.
+              {strategyName(mine.glance.id)} is a Merry Circle strategy — it opens nothing new right now.
             </strong>
+            {/* THE REMEDIES, NONE OF THEM "ADD FUNDS". This used to tell the
+                owner that money was not the fix, which stopped being true the
+                day an agent could turn USDG into its own $MERRYMEN — and a
+                funded owner told otherwise is exactly who needs to hear that it
+                can be. The count is the COMBINED one, the owner's wallet and this
+                account together, and an unread one is said to be unread: never
+                `?? 0`, which rendered "you hold 0" for a balance nobody read. */}
             <p>
               {tier?.why === "unreadable"
                 ? "We couldn't read your $MERRYMEN balance just now, so this may clear on its own. That's our read failing, not your wallet."
-                : `Your agent is armed and watching, but this strategy only runs while you hold ${(
-                    tier?.needTokens ?? 100_000
-                  ).toLocaleString("en-US")} $MERRYMEN — you hold ${(
-                    tier?.tokens ?? 0
-                  ).toLocaleString("en-US")}. Adding funds won't change it. Switch to Steady basket or Strategist, which run for everyone, or hold the token.`}
+                : `Your agent is armed and watching, but this strategy only opens new trades while your wallet and my account hold ${count(
+                    tier?.needTokens ?? null,
+                  )} $MERRYMEN between them — right now ${
+                    tier?.tokens == null ? "I couldn't read how many" : count(tier.tokens)
+                  }. Until then it leaves its basket as it is; positions in a class vault are still closed by their own exit rules. Switch to Steady basket or Strategist, which run for everyone, or top up: ${
+                    remedies.sendToAgent
+                      ? `send $MERRYMEN on Robinhood Chain to my account${
+                          remedies.usdg === "ready" ? ", or send USDG there and ask me to get my $MERRYMEN" : ""
+                        }`
+                      : "keep $MERRYMEN on Robinhood Chain in your own wallet"
+                  }.`}
             </p>
+            {tier?.why !== "unreadable" && remedies.sendToAgent && (
+              <button type="button" onClick={onDeposit}>
+                Show my account address →
+              </button>
+            )}
           </section>
         )}
-        {!blocked && !circleLocked && mine.notice && (
+        {/* ENERGY, BELOW THE HARDER STOP. A Circle block outranks it — one
+            number, the same 100,000, lifts both, and the banner above already
+            names the same remedies — so the two never stack. */}
+        {!circleLocked && (
+          <EnergyNote
+            view={energyNow}
+            remedies={remedies}
+            account={account ?? null}
+            estimateUsdg={energy?.estimateUsdg ?? null}
+            onDeposit={onDeposit}
+            onAsk={() => setAsk("Get your $MERRYMEN")}
+            onResign={onResign}
+          />
+        )}
+        {!blocked && !circleLocked && notice && (
           <section className="desk-notice" role="status">
-            <p>{mine.notice.message}</p>
+            <p>{notice.message}</p>
           </section>
         )}
         <Proposals onResign={onResign} />
@@ -841,30 +926,39 @@ export function Agent({
           aria-live="polite"
           aria-relevant="additions"
         >
-          {turns.map((turn, i) => (
-            <div className="desk-turn" key={i}>
-              <div className="desk-question">{turn.question}</div>
-              <div className="desk-reply">
+          {chat.messages.map((m) => (
+            <ChatLine
+              key={m.id}
+              m={m}
+              name={mine.name}
+              slug={mine.slug}
+              tokens={tokens}
+              onToken={onToken}
+              onRetry={chat.sending ? undefined : () => void chat.retry(m.id, context)}
+            />
+          ))}
+          {/* THE TYPING BUBBLE, IN THE THREAD, the moment the owner sends — and
+              the reply grows inside it as it streams. It used to be a
+              "thinking…" line under the composer, and nothing in the thread
+              moved until the whole reply was back. Only what chat-stream.ts
+              lets through is ever in `streaming`: nothing of a marker. */}
+          {chat.sending && (
+            <div className="chat-msg chat-msg-agent">
+              <div className="desk-reply chat-typing">
                 <Face name={mine.name} slug={mine.slug} small />
                 <div>
                   <strong>{mine.name}</strong>
-                  {turn.trade && (
-                    <TradeTokenCard
-                      trade={turn.trade}
-                      token={tokens.find(
-                        (t) =>
-                          t.symbol.toUpperCase() ===
-                          turn.trade?.symbol?.toUpperCase(),
-                      )}
-                      onToken={onToken}
-                    />
+                  {chat.streaming ? (
+                    <p>{chat.streaming}</p>
+                  ) : (
+                    <p className="chat-typing-dots" role="status" aria-label={`${mine.name} is typing`}>
+                      <i /><i /><i />
+                    </p>
                   )}
-                  <p>{turn.answer}</p>
-                  <CopyReply text={turn.answer} />
                 </div>
               </div>
             </div>
-          ))}
+          )}
         </div>
       </section>
       <div className="desk-chat-bottom">
@@ -899,17 +993,27 @@ export function Agent({
             </div>
           </section>
         )}
-        {sending && <p role="status">{mine.name} is thinking…</p>}
-        {chatError && <p role="alert" className="flow-error">{chatError} {chatError.includes("Settings") && <a href="/settings">Open Settings</a>}</p>}
         {away && (
           <button type="button" className="chat-jump" onClick={scrollLatest}>
             <ArrowDown size={14} aria-hidden="true" /> Latest message
           </button>
         )}
-        {turns.length === 0 && (
+        {/* WHAT TO ASK NEXT, about THIS agent — not the same three on an empty
+            chat only. Sizes appear when the agent has just asked "how much?",
+            each inside the smaller of the sealed per-trade cap and the chat
+            ceiling. A chip only sends a message; a trade still needs the card. */}
+        {!chat.sending && !pending && (
           <div className="desk-prompts">
-            {ASKS.map((q) => (
-              <button type="button" key={q.label} disabled={sending} onClick={() => send(q.question)}>
+            {chatChips({
+              liveBlocker,
+              stopped,
+              latestSymbol: latest?.symbol ?? null,
+              holding: positions.map((p) => p.symbol),
+              lastAgent: [...chat.messages].reverse().find((m) => m.role === "agent" && !m.failed)?.text ?? null,
+              perTrade,
+              ceiling: chat.ceiling,
+            }).map((q) => (
+              <button type="button" key={q.label} onClick={() => send(q.message)}>
                 {q.label}
               </button>
             ))}
@@ -923,6 +1027,7 @@ export function Agent({
           }}
         >
           <textarea
+            data-tour="chat-input"
             ref={input}
             rows={1}
             onKeyDown={(e) => {
@@ -944,12 +1049,98 @@ export function Agent({
           />
           <button
             type="submit"
-            disabled={!ask.trim() || sending}
+            disabled={!ask.trim() || chat.sending}
             aria-label="Send message"
           >
             <ArrowUp size={19} strokeWidth={1.8} aria-hidden="true" />
           </button>
         </form>
+      </div>
+    </div>
+  );
+}
+
+/** A receipt's pill and line — templated from the worker's ledger facts, never written. */
+function ReceiptRow({ side, line }: { side: "Buy" | "Sell" | null; line: string }) {
+  return (
+    <p className="chat-receipt">
+      {side && <span className={`chat-pill ${side === "Buy" ? "is-buy" : "is-sell"}`}>{side}</span>}
+      <span>{line}</span>
+    </p>
+  );
+}
+
+/** One line of the thread, by who said it. */
+function ChatLine({
+  m,
+  name,
+  slug,
+  tokens,
+  onToken,
+  onRetry,
+}: {
+  m: ChatMessage;
+  name: string;
+  slug: string | null;
+  tokens: LiveToken[];
+  onToken: (id: string) => void;
+  onRetry?: () => void;
+}) {
+  const receipt: OrderReceipt | null | undefined = m.order?.receipt;
+  // ONE LINE, ONE FIGURE. A receipt joined to its fill shows the worker's
+  // figure on the card too: for a sell the tape's size is the order's, and the
+  // receipt's is what the fill returned.
+  const trade = m.trade && receipt && receipt.usdgActual !== null ? { ...m.trade, sizeUsdg: receipt.usdgActual } : m.trade;
+  const card = trade ? (
+    <TradeTokenCard
+      trade={trade}
+      token={tokens.find((t) => t.symbol.toUpperCase() === trade.symbol?.toUpperCase())}
+      onToken={onToken}
+    />
+  ) : null;
+  if (m.role === "owner") {
+    return (
+      <div className="chat-msg chat-msg-owner">
+        <div className="desk-question">{m.text}</div>
+      </div>
+    );
+  }
+  if (m.role === "event") {
+    // Something that HAPPENED — one of the agent's own fills, off the tape.
+    // Templated from its row, so the same words the receipt would use.
+    const parts = m.trade ? fillParts(m.trade) : null;
+    const side = parts ? parts.side : (m.side ?? null);
+    return (
+      <div className="chat-msg chat-msg-event">
+        <div className="chat-event">
+          <ReceiptRow side={side === "buy" ? "Buy" : side === "sell" ? "Sell" : null} line={parts?.line ?? m.text} />
+          {card}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="chat-msg chat-msg-agent">
+      <div className="desk-reply">
+        <Face name={name} slug={slug} small />
+        <div>
+          <strong>{name}</strong>
+          {receipt && <ReceiptRow {...receiptParts(receipt)} />}
+          {card}
+          <p>{m.text}</p>
+          {m.failed ? (
+            <div className="chat-failed-actions">
+              {m.retry && onRetry && (
+                <button type="button" className="chat-retry" onClick={onRetry}>
+                  Retry
+                </button>
+              )}
+              {m.failed === "no-llm" && <a href="/settings">Open Settings</a>}
+            </div>
+          ) : (
+            <CopyReply text={m.text} />
+          )}
+        </div>
       </div>
     </div>
   );

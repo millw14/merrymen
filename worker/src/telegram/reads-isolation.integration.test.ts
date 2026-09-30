@@ -23,7 +23,7 @@ const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-iso-"));
 process.env.MERRYMEN_HOME = HOME;
 process.env.MERRYMEN_HOSTED = "1";
 
-const { initStore, addTrade, addEvent, addEquity, setPositions, addDecision, newDecisionId } =
+const { closeStoreForTest, initStore, addTrade, addEvent, addEquity, setPositions, addDecision, newDecisionId } =
   await import("../store");
 const { readTrades, readPositions, readRecentEvents, readWhyEvidence, readStatus, readReport } =
   await import("./reads");
@@ -32,11 +32,8 @@ const ALICE = "0x00000000000000000000000000000000000a11ce" as const;
 const BOB = "0x0000000000000000000000000000000000000b0b" as const;
 
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* windows temp lock; disposable */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const ctx = (agentId: string | null) => ({
@@ -74,7 +71,7 @@ describe("telegram reads — one tenant never sees another's ledger", () => {
   it("every scoped read shows Alice's rows and never Bob's", async () => {
     await seed();
 
-    const trades = readTrades(ALICE);
+    const trades = await readTrades(ALICE);
     assert.match(trades, /11\.11/, "Alice's trade");
     assert.doesNotMatch(trades, /22\.22/, "…never Bob's");
 
@@ -102,7 +99,7 @@ describe("telegram reads — one tenant never sees another's ledger", () => {
   });
 
   it("and the mirror image holds for Bob", async () => {
-    const trades = readTrades(BOB);
+    const trades = await readTrades(BOB);
     assert.match(trades, /22\.22/);
     assert.doesNotMatch(trades, /11\.11/);
     const why = readWhyEvidence(BOB);
@@ -110,10 +107,10 @@ describe("telegram reads — one tenant never sees another's ledger", () => {
     assert.doesNotMatch(why.text, /ALICE_REASONING_gap_open/);
   });
 
-  it("HOSTED: a read with no agent refuses — never the global guess", () => {
+  it("HOSTED: a read with no agent refuses — never the global guess", async () => {
     // Null agent in hosted mode must NOT fall back to currentAgentId (which
     // would return whichever agent traded last across the fleet — a leak).
-    const trades = readTrades(null);
+    const trades = await readTrades(null);
     assert.doesNotMatch(trades, /11\.11/);
     assert.doesNotMatch(trades, /22\.22/);
 

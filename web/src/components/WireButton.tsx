@@ -22,7 +22,7 @@ import { useWired } from "@/components/WiredProvider";
  * before they click, not after.
  */
 export function WireButton({ slug, name }: { slug: string; name: string }) {
-  const { wired, max, known, toggle } = useWired();
+  const { wired, max, known, toggle, busy, error } = useWired();
   const on = wired.includes(slug);
   const full = !on && wired.length >= max;
 
@@ -50,7 +50,7 @@ export function WireButton({ slug, name }: { slug: string; name: string }) {
           type="button"
           className={`mm-btn${on ? " on" : ""}`}
           onClick={() => void toggle(slug, !on)}
-          disabled={full}
+          disabled={full || busy}
           aria-pressed={on}
         >
           {on ? "wired" : "wire in"}
@@ -77,6 +77,7 @@ export function WireButton({ slug, name }: { slug: string; name: string }) {
           </>
         )}
       </p>
+      {error && <p role="alert" className="mm-note">{error}</p>}
       <p className="mm-note quiet">Takes effect the next time your agent arms.</p>
     </div>
   );

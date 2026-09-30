@@ -190,11 +190,52 @@ describe("Pons adapter reverts", () => {
       "0x5048bd62", // IdenticalAssets
       "0x1f2a2005", // ZeroAmount
       "0xed3ba6a6", // Reentrant
+      "0xe6208274", // TokenDoesNotMatchCurve — the vault's, raised since v1 shipped
     ]) {
       const v = classifyRevert(revertData(sel));
       assert.equal(v.rule, "curve-unsupported", sel);
       assert.equal(v.retryable, false, sel);
     }
+  });
+
+  it("a v2 spend cap is the SAME verdict as a v1 one, through a different selector", () => {
+    // THE REGRESSION THIS TEST EXISTS TO CATCH. PonsClassVaultV2 keys its ceiling
+    // by the asset the trade was funded in, so the error names that asset —
+    // SpendCapExceeded(address,uint256,uint256) rather than (uint256,uint256) —
+    // and a wider signature is a different four bytes. Versioning the contract
+    // would otherwise have dropped v2 reverts into `unclassified`, which is
+    // retryable, against a window that is a DAY: up to a thousand reverted
+    // UserOperations paying gas to be told the same thing. That is the exact
+    // loop this file was written to stop, reintroduced by a contract upgrade.
+    const v1 = classifyRevert(revertData("0x605cd727"));
+    const v2 = classifyRevert(revertData("0xa6dfc94a"));
+    assert.equal(v1.rule, "spend-cap");
+    assert.equal(v2.rule, "spend-cap", "a v2 spend cap must not fall through to unclassified");
+    assert.equal(v2.retryable, false);
+    assert.equal(v1.detail, v2.detail, "same remedy, so the owner reads the same sentence");
+  });
+
+  it("BOTH spend-cap selectors stay, because v1 is deployed and may still be traded", () => {
+    // Not a redundant restatement of the test above: that one asserts v2 is
+    // recognised, this one asserts v1 was not REPLACED. A version bump that
+    // swapped the selector instead of adding to it would pass the first test and
+    // silently un-classify every trade on the live v1 vault.
+    assert.ok(PONS_ERROR_SELECTORS.includes("0x605cd727"), "v1 SpendCapExceeded");
+    assert.ok(PONS_ERROR_SELECTORS.includes("0xa6dfc94a"), "v2 SpendCapExceeded");
+  });
+
+  it("QuoteNotApproved is its own answer, because waiting is the wrong one", () => {
+    // Both are non-retryable, so collapsing them into one class would have been
+    // mechanically correct and practically useless. A spend cap clears when the
+    // window rolls. This never clears on its own: in v2 a cap of zero IS how an
+    // asset is refused, and only the owner's key can seal one. The only thing
+    // anyone does with this class is read the sentence and act.
+    const v = classifyRevert(revertData("0xae9665be"));
+    assert.equal(v.rule, "quote-not-approved");
+    assert.equal(v.retryable, false);
+    assert.notEqual(v.rule, "spend-cap", "the whole point is that these are different instructions");
+    assert.match(v.detail, /seal a cap/, "it has to say what to DO about it");
+    assert.doesNotMatch(v.detail, /window/, "and must not tell the owner to wait for a window");
   });
 
   it("InsufficientOutput is slippage and IS worth retrying", () => {
@@ -230,6 +271,23 @@ describe("Pons adapter reverts", () => {
     assert.equal(classifyRevert(revertData("0x71c4efed")).retryable, true);
   });
 
+  it("a spend cap is refused for THIS arm, not retried a thousand times until the window rolls", async () => {
+    // The one class whose cause changes on its own — the window is a day — and
+    // still not retryable. A retry every tick is up to a thousand reverted
+    // UserOperations paying gas to be told the same thing, which is the loop
+    // this file's header exists to have stopped. The suppression map is cleared
+    // at every arm (worker/src/index.ts), so this self-heals rather than
+    // lasting for ever, and the owner's own key can raise the cap meanwhile.
+    const { toFunctionSelector } = await import("viem");
+    const sel = toFunctionSelector("function SpendCapExceeded(uint256,uint256)");
+    const v = classifyRevert(revertData(sel));
+    assert.equal(v.rule, "spend-cap");
+    assert.equal(v.retryable, false);
+    assert.match(v.detail, /clears when the window rolls/);
+    // Derived, not remembered: the table's entry must be this selector.
+    assert.ok(PONS_ERROR_SELECTORS.includes(sel), `${sel} is not in the table`);
+  });
+
   it("the selectors are four bytes and all distinct", () => {
     // Cheap guard against a paste error turning two errors into one bucket.
     for (const s of PONS_ERROR_SELECTORS) assert.match(s, /^0x[0-9a-f]{8}$/);
@@ -244,14 +302,7 @@ describe("Pons adapter reverts", () => {
       new URL("../../contracts/contracts/PonsSelfTrade.sol", import.meta.url),
       "utf8",
     );
-    const declared = [...sol.matchAll(/^\s*error\s+(\w+)\s*\(([^)]*)\)\s*;/gm)].map((m) => {
-      const args = (m[2] ?? "")
-        .split(",")
-        .map((a) => a.trim().split(/\s+/)[0])
-        .filter(Boolean)
-        .join(",");
-      return `${m[1]}(${args})`;
-    });
+    const declared = errorsIn(sol);
     assert.ok(declared.length >= 12, `expected the .sol to declare errors, found ${declared.length}`);
     for (const sig of declared) {
       const sel = toFunctionSelector(`function ${sig}`);
@@ -262,7 +313,85 @@ describe("Pons adapter reverts", () => {
       );
     }
   });
+
+  it("EVERY error a session key can reach in PonsClassVaultV2.sol is classified", () => {
+    /**
+     * THE GUARD THAT WOULD HAVE CAUGHT THE DEFECT ABOVE.
+     *
+     * v2 widened SpendCapExceeded by one argument, which changes the selector.
+     * A scan of the .sol is the only check of the right shape: the signature
+     * lives in one file and the classification in another, and nothing else
+     * connects them.
+     *
+     * SCOPED TO WHAT A SESSION KEY CAN REACH, and the exclusions are the point
+     * rather than a convenience. The setter and constructor errors are raised
+     * only by an OWNER transaction — the wall does not name `setQuoteCaps`, and
+     * a constructor runs once inside a batch that reverts whole — so a session
+     * key cannot produce them. Classifying an error for a path the worker cannot
+     * take would be a guess wearing a citation, which is exactly what this
+     * file's header forbids.
+     */
+    const sol = readFileSync(
+      new URL("../../contracts/contracts/PonsClassVaultV2.sol", import.meta.url),
+      "utf8",
+    );
+    const OWNER_ONLY = new Set([
+      "CapTooLarge", // setQuoteCaps, owner tx
+      "ZeroCap", // constructor
+      "DuplicateQuote", // constructor
+      "ZeroQuote", // setQuoteCaps / constructor
+      "EmptySeed", // constructor and factory constructor
+      "TooManyQuotes", // setQuoteCaps
+      "LengthMismatch", // setQuoteCaps and factory constructor
+      "TooManySeedQuotes", // factory constructor
+      "DuplicateSeedQuote", // factory constructor
+      "SeedCapTooLarge", // factory constructor
+      "ZeroSeedQuote", // factory constructor
+      "ZeroSeedCap", // factory constructor
+      "ZeroOwner", // constructor
+      "NotOwner", // a wrong caller, which is a wiring fault and not a trade outcome
+    ]);
+    const declared = errorsIn(sol).filter((sig) => !OWNER_ONLY.has(sig.slice(0, sig.indexOf("("))));
+    assert.ok(declared.length >= 8, `expected reachable errors, found ${declared.length}: ${declared}`);
+    for (const sig of declared) {
+      const sel = toFunctionSelector(`function ${sig}`);
+      assert.notEqual(
+        classifyRevert(`execution reverted: ${sel}`).rule,
+        "unclassified",
+        `${sig} (${sel}) is declared in PonsClassVaultV2.sol and a session key can reach it, but it ` +
+          `classifies as unclassified — which this file treats as RETRYABLE`,
+      );
+    }
+  });
+
+  it("and the v1 vault's reachable errors stay classified — it is still deployed", () => {
+    const sol = readFileSync(
+      new URL("../../contracts/contracts/PonsClassVault.sol", import.meta.url),
+      "utf8",
+    );
+    const OWNER_ONLY = new Set(["ZeroOwner", "NotOwner"]);
+    for (const sig of errorsIn(sol).filter((s) => !OWNER_ONLY.has(s.slice(0, s.indexOf("("))))) {
+      const sel = toFunctionSelector(`function ${sig}`);
+      assert.notEqual(
+        classifyRevert(`execution reverted: ${sel}`).rule,
+        "unclassified",
+        `${sig} (${sel}) is declared in the DEPLOYED v1 vault but classifies as unclassified`,
+      );
+    }
+  });
 });
+
+/** Every `error Name(args);` a .sol declares, as a canonical signature. */
+function errorsIn(sol: string): string[] {
+  return [...sol.matchAll(/^\s*error\s+(\w+)\s*\(([^)]*)\)\s*;/gm)].map((m) => {
+    const args = (m[2] ?? "")
+      .split(",")
+      .map((a) => a.trim().split(/\s+/)[0])
+      .filter(Boolean)
+      .join(",");
+    return `${m[1]}(${args})`;
+  });
+}
 
 /**
  * THE KEY THE WRITER STORES MUST BE THE KEY THE READER LOOKS UP.
@@ -289,6 +418,7 @@ describe("suppression survives the round trip, for every kind that has legs", ()
     { kind: "curve-trade", assetIn: A, assetOut: B, curve: A, target: B },
     { kind: "vault-deposit", target: A },
     { kind: "transfer", target: A, recipient: B },
+    { kind: "energy-buy", target: B, sellToken: A, buyToken: B },
   ] as const;
 
   for (const intent of intents) {
@@ -322,6 +452,16 @@ describe("suppression survives the round trip, for every kind that has legs", ()
 
   it("a kind with no legs still gets a stable key rather than throwing", () => {
     assert.equal(suppressionKey("vault-deposit", ...suppressionLegs(intents[2])), "vault-deposit:->");
+  });
+
+  it("THE ENERGY BUY NAMES ITS LEGS, and its key never collides with a swap over the same tokens", () => {
+    // Legs, not `energy-buy:->`: a suppression is scoped to its pair like every
+    // other kind that has one. And the kind is in the key, so a non-retryable
+    // energy revert never silences an ordinary swap of the same pair.
+    const energy = suppressionKey("energy-buy", ...suppressionLegs(intents[4]));
+    assert.notEqual(energy, "energy-buy:->");
+    assert.notEqual(energy, suppressionKey("swap", ...suppressionLegs(intents[0])));
+    assert.deepEqual(suppressionLegs(intents[4]), [A, B]);
   });
 });
 

@@ -28,18 +28,22 @@
  *      worker, which is the only process that resolves it.
  */
 
-/** The balance shape the status route returns — wei/6dp as decimal strings. */
+/**
+ * The balance shape the status route returns — wei/6dp as decimal strings, and
+ * null for a read that failed. Null is falsy below, so an unread balance is
+ * never gas and never capital: "can start" stays closed until the chain says so.
+ */
 export interface StartBalances {
-  ethWei?: string;
-  cashUsdg?: string;
-  vaultUsdg?: string;
+  ethWei?: string | null;
+  cashUsdg?: string | null;
+  vaultUsdg?: string | null;
 }
 
 /**
  * Any gas at all. Kept byte-identical to the predicate both components already
  * used, including its lenient fallback, so the unsponsored path cannot shift.
  */
-export function hasGas(wei?: string): boolean {
+export function hasGas(wei?: string | null): boolean {
   if (!wei) return false;
   try {
     return BigInt(wei) > 0n;
@@ -61,7 +65,7 @@ export function hasGas(wei?: string): boolean {
  * a funding step they still need.
  */
 export function hasCapital(b?: StartBalances): boolean {
-  const read = (v?: string): bigint => {
+  const read = (v?: string | null): bigint => {
     if (!v) return 0n;
     try {
       return BigInt(v);
@@ -87,4 +91,31 @@ export function canStart(status?: {
 }): boolean {
   if (hasGas(status?.balances?.ethWei)) return true;
   return !!status?.gasSponsored && hasCapital(status?.balances);
+}
+
+/**
+ * WHICH SETUP STEP AN ACCOUNT IS ON, for the Settings checklist.
+ *
+ * canStart reads an unread balance as "cannot start", which is right for a
+ * readiness signal and wrong as an instruction: the checklist drew "Add
+ * trading funds" and an Add funds button from that same false, so a funded
+ * owner whose chain read failed was told to fund an account that was already
+ * funded. So the checklist asks this instead, and "unread" is its own answer:
+ * whenever a balance canStart depends on was not read — the ETH always, and
+ * the cash and vault too when gas is sponsored — nobody can say the step is
+ * undone. A balance read as zero still asks for funds.
+ */
+export type SetupStep = "done" | "create" | "fund" | "unread";
+
+export function setupStep(
+  status: { exists?: boolean; balances?: StartBalances; gasSponsored?: boolean | null },
+  paper: boolean,
+): SetupStep {
+  if (!status.exists) return "create";
+  if (paper || canStart(status)) return "done";
+  const unread = (v?: string | null) => v === null || v === undefined;
+  const b = status.balances;
+  if (unread(b?.ethWei)) return "unread";
+  if (status.gasSponsored && (unread(b?.cashUsdg) || unread(b?.vaultUsdg))) return "unread";
+  return "fund";
 }

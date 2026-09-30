@@ -2,28 +2,28 @@
    Fonts: Bricolage Grotesque (display) · Inter (text) · JetBrains Mono (code), all OFL. */
 
 :root {
-  --bg: #070a08;
-  --bg-1: #0b0f0c;
-  --bg-2: #10160f; /* card */
-  --bg-3: #182018;
-  --border: #202a22;
-  --border-soft: #19211b;
-  --line: #2a352c;
+  --bg: #070806;
+  --bg-1: #0c0d0a;
+  --bg-2: #12130f;
+  --bg-3: #1a1b16;
+  --border: #24261e;
+  --border-soft: #24261e;
+  --line: #24261e;
 
-  --text: #edf2ec;
-  --text-2: #c3cec4;
-  --text-dim: #8b9a8e;
-  --text-faint: #566258;
+  --text: #ecece4;
+  --text-2: #abada1;
+  --text-dim: #abada1;
+  --text-faint: #898c80;
 
-  --lime: #b6e226;
-  --lime-2: #cbf24a;
-  --green: #3ad884;
+  --lime: #a5ce1f;
+  --lime-2: #b9df42;
+  --green: #3dd68c;
   --gold: #eab308;
-  --red: #ef5a5a;
+  --red: #ff5c71;
 
   --maxw: 1200px;
-  --radius: 14px;
-  /* next/font sets --font-sans (Hanken Grotesk, with its own fallback) on <html>.
+  --radius: 16px;
+  /* next/font sets --font-sans (DM Sans, with its own fallback) on <html>.
      One refined family for everything, headings included. */
   --font-display: var(--font-sans);
   --font-mono: var(--font-mono-jb), ui-monospace, "SF Mono", Menlo, monospace;
@@ -562,7 +562,7 @@ footer.foot { border-top: 1px solid var(--border-soft); padding: 64px 0 44px; ma
   font-size: 15px;
 }
 .beta-input::placeholder { color: #7f958b; }
-.beta-input:focus-visible { outline: 2px solid #34d399; outline-offset: 2px; border-color: transparent; }
+.beta-input:focus-visible { outline: 2px solid #34d399; outline-offset: -2px; border-color: transparent; }
 .beta-input[aria-invalid="true"] { border-color: rgba(251, 113, 133, 0.55); }
 
 /* The honeypot. Positioned off-screen rather than display:none — some bots skip

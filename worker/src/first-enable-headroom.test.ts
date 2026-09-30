@@ -221,12 +221,41 @@ describe("what must not regress", () => {
     // The half that did not exist before. Judging the enable against the wall
     // would otherwise leave the call gas of a first enable bounded by nothing
     // narrower than 14,000,000.
+    //
+    // RECALIBRATED to a raw estimate, because the ceiling is now asked of the
+    // ESTIMATE rather than of our own 2x padding (see boundGas). This fixture
+    // used to be 1,600,000 raw, which is a perfectly ordinary call that only
+    // crossed the line once doubled — the case the change deliberately stops
+    // refusing. 3,500,000 is an operation that is genuinely too big, which is
+    // what this test is named for.
     const env = firstEnableEnvelope(SHOGUN_WALL);
-    const fat: UserOpGas = { ...SHOGUN[0]!, callGasLimit: 1_600_000n };
+    const fat: UserOpGas = { ...SHOGUN[0]!, callGasLimit: 3_500_000n };
     const v = bound(fat, firstEnableBounds(env.allowedMaxBounded));
-    assert.equal(v.ok, false, "3,200,000 of call gas is past the ordinary ceiling");
+    assert.equal(v.ok, false, "3,500,000 of estimated call gas is past the ordinary ceiling");
     assert.equal(v.ok === false ? v.rule : null, "gas-absurd");
     assert.match(v.ok === false ? v.detail : "", /riding along/);
+  });
+
+  it("A ONE-TIME VAULT DEPLOYMENT IS NOT ABSURD JUST BECAUSE IT IS DOUBLED", () => {
+    // THE PRODUCTION CASE, measured 2026-09-20 on this same canary. Shogun's
+    // first autonomous Trencher buy is deploy + approve + buy and estimated
+    // 2,128,793 raw call gas TWICE, identically — a CREATE2 of fixed bytecode
+    // is deterministic, which is not the variance the 2x was sized for.
+    //
+    // Raw sits 871,207 UNDER the ordinary ceiling; doubled it sits 1,257,586
+    // over it. Judging the padding refused every first Trencher buy for a
+    // number this file invented rather than for the operation.
+    const env = firstEnableEnvelope(SHOGUN_WALL);
+    const real: UserOpGas = {
+      callGasLimit: 2_128_793n,
+      verificationGasLimit: 7_381_983n,
+      preVerificationGas: 241_476n,
+    };
+    const v = bound(real, firstEnableBounds(env.allowedMaxBounded));
+    assert.equal(v.ok, true, v.ok === false ? v.detail : "");
+    // And the SIGNED call limit still carries the full 2x — the change moved
+    // which number the question is asked of, not what the operation gets.
+    assert.equal(v.ok === true ? v.gas.callGasLimit : 0n, 2_128_793n * 2n);
   });
 
   it("AN ENVELOPE THAT GENUINELY EXCEEDS 14,000,000 IS STILL REFUSED", () => {

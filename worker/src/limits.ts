@@ -4,7 +4,9 @@ import {
   RIALTO,
   STOCK_TOKENS,
   UNISWAP,
+  grantEnergyRoute,
   grantHasTransfer,
+  grantTrencher,
   grantHasV4,
   grantV4Adapter,
   grantPonsAdapter,
@@ -55,6 +57,7 @@ export function limitsFromGrant(
       UNISWAP.swapRouter02 as `0x${string}`,
       MORPHO.steakhouseUsdgVault as `0x${string}`,
       CASH.USDG as `0x${string}`,
+      ...(grantTrencher(grant) ? [grantTrencher(grant)!.vault] : []),
       ...(grantHasV4(grant)
         ? [UNISWAP.permit2 as `0x${string}`, UNISWAP.universalRouter as `0x${string}`]
         : []),
@@ -103,6 +106,7 @@ export function limitsFromGrant(
     // this is the set of tokens a curve trade could be buying INTO.
     quoteAssets: [...builtinGrantTargets(grant)],
     knownCurves,
+    ...(grantTrencher(grant) ? {trencherVault:grantTrencher(grant)!.vault,knownTrencherAssets:[]} : {}),
     // THE CLASS FLAG. Same accessor as the target entry above, deliberately —
     // one source, so the address checkPolicy calls a class trade and the address
     // it will permit as a target can never be two different things.
@@ -127,6 +131,18 @@ export function limitsFromGrant(
     // transfer intent rather than just the Telegram command — and it turns an
     // opaque on-chain revert into the sentence checkPolicy already writes.
     ...(grantHasTransfer(grant) ? {} : { withdrawalAddresses: [] as string[] }),
+    // THE ENERGY BUY, MIRRORED — from the GRANT, and NOT into allowedTargets.
+    //
+    // grantEnergyRoute answers only for the GRANT_ENERGY marker on chain 4663,
+    // which is exactly when the wall sealed the v2 swap permission (both signers
+    // mint the marker from the same boolean that built it). The router is kept
+    // OUT of allowedTargets on purpose: there it would let any `swap` intent
+    // name it, and the swap builder would route that through a v3 router it
+    // never quoted. Only an `energy-buy` is judged against this (policy.ts).
+    ...((): { energy?: { router: string; token: string } } => {
+      const route = grantEnergyRoute(grant);
+      return route ? { energy: { router: route.router, token: route.path[route.path.length - 1]! } } : {};
+    })(),
     // So the breaker can tell a de-risking sell (swap INTO cash) from a buy.
     cashToken: CASH.USDG as string,
     maxDrawdownBps: grant.caps.maxDrawdownPct * 100,

@@ -9,15 +9,24 @@
  * tenant boundary that isn't there.
  */
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 // Set BEFORE the auth functions are called (they read the secret at call time,
 // not at import), so a static import is safe and the CJS test target is happy.
 process.env.MERRYMEN_SESSION_SECRET = "test-secret-at-least-thirty-two-characters-long";
+const testHome = mkdtempSync(join(tmpdir(), "merrymen-auth-"));
+process.env.MERRYMEN_HOME = testHome;
+delete process.env.DATABASE_URL;
+delete process.env.MERRYMEN_HOSTED;
+after(() => rmSync(testHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
 
 import {
   challengeMessage,
+  consumeChallengeNonce,
   issueChallengeNonce,
   mintSession,
   readSession,
@@ -46,6 +55,54 @@ test("a nonce is SINGLE-USE — a captured challenge cannot be replayed", async 
   const replay = await verifySignedChallenge({ origin: ORIGIN, nonce, signature });
   assert.equal(replay.ok, false);
   assert.equal(replay.ok === false && replay.why, "nonce already used");
+});
+
+test("concurrent replays accept exactly one signature", async () => {
+  const args = { origin: ORIGIN, ...await signIn() };
+  const results = await Promise.all(Array.from({ length: 8 }, () => verifySignedChallenge(args)));
+  assert.equal(results.filter((result) => result.ok).length, 1);
+  for (const result of results.filter((result) => !result.ok)) {
+    assert.equal(result.why, "nonce already used");
+  }
+});
+
+test("direct nonce consumers share the same atomic boundary", async () => {
+  const nonce = issueChallengeNonce(ORIGIN);
+  const results = await Promise.all(Array.from({ length: 8 }, () => consumeChallengeNonce(nonce, ORIGIN)));
+  assert.equal(results.filter((result) => result.ok).length, 1);
+});
+
+test("a nonce expires at its exact deadline", async () => {
+  const now = Date.now();
+  const nonce = issueChallengeNonce(ORIGIN, now - 5 * 60_000);
+  assert.deepEqual(await consumeChallengeNonce(nonce, ORIGIN, now), { ok: false, why: "nonce expired" });
+});
+
+test("unreadable nonce storage fails closed and can recover", async () => {
+  const args = { origin: ORIGIN, ...await signIn() };
+  const blockedHome = join(testHome, "not-a-directory");
+  writeFileSync(blockedHome, "test fixture");
+  process.env.MERRYMEN_HOME = blockedHome;
+  try {
+    assert.deepEqual(await verifySignedChallenge(args), {
+      ok: false, why: "challenge store unavailable — please try again",
+    });
+  } finally {
+    process.env.MERRYMEN_HOME = testHome;
+  }
+  assert.equal((await verifySignedChallenge(args)).ok, true);
+});
+
+test("hosted verification never falls back to instance-local storage", async () => {
+  const args = { origin: ORIGIN, ...await signIn() };
+  process.env.MERRYMEN_HOSTED = "1";
+  try {
+    assert.deepEqual(await verifySignedChallenge(args), {
+      ok: false, why: "challenge store unavailable — please try again",
+    });
+  } finally {
+    delete process.env.MERRYMEN_HOSTED;
+  }
 });
 
 test("a signature for one origin does not verify at another", async () => {

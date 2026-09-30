@@ -1,11 +1,11 @@
 import { Board } from "./Board";
 import { PerformanceChart } from "../DitherChart";
 import { useState } from "react";
-import { Search } from "lucide-react";
+import { MessagesSquare, Search } from "lucide-react";
+import { useGroupChatSupported } from "../groupchat";
 import {
   coinPrice,
   quoteTitle,
-  money,
   pctBps,
   pctPts,
   type LiveAgent,
@@ -15,7 +15,9 @@ import {
   type TokenTab,
   deltaClass,
 } from "../live";
-import { Coin, Face, NameBlock, Pill } from "../ui";
+import { Coin, Face, MovingFigure, NameBlock, Pill } from "../ui";
+import { AgentStrip } from "../AgentStrip";
+import { usd, usdParts } from "@/lib/format";
 
 export function Home({
   tokens,
@@ -29,7 +31,10 @@ export function Home({
   onDeposit,
   onSearch,
   onDesk,
+  onGroupChat,
+  hasAgent,
   read,
+  retired = null,
 }: {
   tokens: LiveToken[];
   agents: LiveAgent[];
@@ -42,13 +47,33 @@ export function Home({
   onDeposit: () => void;
   onSearch: () => void;
   onDesk: () => void;
+  /**
+   * Opens the group chat. A CALLBACK, like every other way off this screen,
+   * and not a next/link: Home renders in node tests, where a Link falls back to
+   * requestIdleCallback on a global only a browser has (`self`). Optional, so a
+   * caller with no room — and every existing test — is unaffected.
+   */
+  onGroupChat?: () => void;
+  /**
+   * Has the SERVER said this owner has an agent?
+   *
+   * Deliberately NOT `!!mine`. `mine` is falsy while the account is still
+   * loading as well as when there is genuinely no agent, so a card gated on
+   * it appears late, on top of whatever the reader had already started.
+   */
+  hasAgent: boolean;
   /** Whether the leaderboard READ landed — quiet and unreadable are different. */
   read: import("../live").ReadState;
+  /** Accounts the board folded into a count. See Board. */
+  retired?: number | null;
 }) {
   // A count we do not have sorts last and filters out — it is not a zero, but
   // it is also not evidence that anybody bought anything, so an unread row does
   // not get to sit at the top of "most bought".
   const [showAll, setShowAll] = useState(false);
+  // The phone's way into the group chat. Hidden only on an install that said
+  // it has no room (self-hosted answers 404), never merely while unknown.
+  const room = useGroupChatSupported();
   const count = (n: number | null) => n ?? 0;
   /**
    * COINS ABOVE STOCKS, everywhere this screen ranks anything.
@@ -98,12 +123,18 @@ export function Home({
   const visibleTokens = showAll ? shown : shown.slice(0, 8);
   const eq = mine?.equity ?? null;
   const chg = mine?.chg24 ?? null;
-  const [whole, frac] = money(eq).replace("$", "").split(".");
+  // WAS `money(eq).replace("$", "").split(".")`, and both halves of that were
+  // English-shaped. The symbol is a SUFFIX in Spanish, Vietnamese, Russian and
+  // Indonesian so the replace missed it, and the decimal mark is a COMMA in
+  // most of the shipped languages so the split returned the whole figure as
+  // `whole` and nothing as `frac` — a balance with its cents silently dropped
+  // and a stray symbol left in front of it.
+  const { lead, fraction, trail } = usdParts(eq);
 
   return (
     <div className="home-page">
       <header className="top home-overview">
-        <div className="home-heading"><h1 className="top-title">Home</h1></div>
+        <div className="home-heading"><h1 className="top-title">Home</h1>{room && onGroupChat && <button type="button" className="icon-btn" aria-label="Group chat" title="Group chat" onClick={onGroupChat}><MessagesSquare size={22} strokeWidth={1.8} aria-hidden="true"/></button>}</div>
 
         {mine ? (
           <button type="button" className="hero" onClick={onDesk}>
@@ -113,12 +144,17 @@ export function Home({
             </div>
             <span className="home-balance-label">Portfolio balance</span>
               <div className="balance">
-                {eq === null ? "—" : `$${whole}`}
-                {frac !== undefined && <sup>.{frac}</sup>}
+                {lead}
+                {fraction !== null && <sup>{fraction}</sup>}
+                {trail}
               </div>
             {chg !== null && (
               <p className={`chg-24 ${chg < 0 ? "down" : "up"}`}>
-                {chg < 0 ? "−" : "+"}${Math.abs(chg).toFixed(2)} today
+                {/* The sign is this product's own — U+2212, not a hyphen, so
+                    it reads as a minus in the monospace column. The figure and
+                    its symbol are the locale's. */}
+                {chg < 0 ? "−" : "+"}
+                {usd(Math.abs(chg))} today
               </p>
             )}
           </button>
@@ -135,6 +171,19 @@ export function Home({
           />
         )}
       </header>
+
+      {/* WHAT IS CONNECTED, AND WHAT IS NOT.
+
+          Telegram and Trencher both live behind collapsed drawers in a
+          1854-line settings form reachable from one row at the bottom of the
+          profile screen, and both produced stuck testers rather than mere
+          inconvenience — the Telegram link code is in a DIFFERENT closed
+          drawer from the instruction that needs it.
+
+          A reading, not a second set of controls: it says what the settings
+          say and links to them. It renders nothing for a visitor with no
+          agent, who has no bot to connect and no strategy to run. */}
+      <AgentStrip hasAgent={hasAgent} />
 
       {/*
         THE LEADERBOARD, NOT A SECOND COPY OF IT.
@@ -153,6 +202,7 @@ export function Home({
       <Board
         preview
         read={read}
+        retired={retired}
         agents={agents}
         theses={theses}
         mine={mine}
@@ -201,7 +251,10 @@ export function Home({
                       {t.cast.slice(0, 3).map((a) => (
                         <button key={a.slug} onClick={() => onAgent(a.slug)}>
                           <Face name={a.name} slug={a.slug} small />
-                          <span>{a.handle ?? a.name}</span>
+                          {/* The AGENT heads the row. `handle` is the owner's typed X
+                              handle, unverified on this path (AgentRef carries no
+                              proof), so it never stands in for the agent's name. */}
+                          <span>{a.name}</span>
                         </button>
                       ))}
                     </div>
@@ -209,7 +262,7 @@ export function Home({
                   {/* "—" until the ledger answers. Zero agents and an unread
                       ledger are different facts about a listed instrument. */}
                   <td>{t.agents ?? "—"}</td>
-                  <td title={quoteTitle(t)}>{coinPrice(t.priceUsd)}</td>
+                  <td title={quoteTitle(t)}><MovingFigure value={t.priceUsd} text={coinPrice(t.priceUsd)} /></td>
                   <td className={deltaClass(t.change24hPct)}>
                     {pctPts(t.change24hPct)}
                   </td>
@@ -244,7 +297,7 @@ export function Home({
                           />
                         ))}
                       </span>
-                      {who.map((a) => a.handle ?? a.name).join(", ")}
+                      {who.map((a) => a.name).join(", ")}
                       {t.cast.length > who.length
                         ? ` +${t.cast.length - who.length}`
                         : ""}
@@ -254,7 +307,7 @@ export function Home({
                   )}
                 </div>
                 <div className="px">
-                  {coinPrice(t.priceUsd)}
+                  <MovingFigure value={t.priceUsd} text={coinPrice(t.priceUsd)} />
                   {chgPct != null && (
                     <small className={chgPct >= 0 ? "up" : "down"}>
                       {pctPts(chgPct)}

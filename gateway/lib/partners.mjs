@@ -58,6 +58,8 @@ export const SCOPES = Object.freeze([
   "read:book",
   /** Trade history — consent-gated per agent on top of this. */
   "read:trades",
+  "write:agents",
+  "chat:agents",
 ]);
 
 /** What a new key gets unless asked otherwise: everything that is already public. */
@@ -115,6 +117,9 @@ function normalize(rec) {
   const scopes = Array.isArray(rec.scopes) ? rec.scopes.filter((s) => SCOPES.includes(s)) : [];
   return {
     keyId,
+    // Stable across key rotation. Old registry rows retain their original id.
+    appId: typeof rec.appId === "string" && /^[a-zA-Z0-9_-]{12,64}$/.test(rec.appId) ? rec.appId : keyId,
+    owner: typeof rec.owner === "string" && /^0x[0-9a-fA-F]{40}$/.test(rec.owner) ? rec.owner.toLowerCase() : null,
     name: typeof rec.name === "string" ? rec.name.slice(0, 64) : keyId,
     hash: typeof rec.hash === "string" ? rec.hash : "",
     scopes,
@@ -239,7 +244,7 @@ export function createPartners({ secret, ttlMs = REGISTRY_TTL_MS, now = () => Da
       if (!rec.hash || !sameHash(rec.hash, hashSecret(secret, parsed.secret))) {
         return { ok: false, status: 401, code: "unauthorized" };
       }
-      return { ok: true, key: { keyId: rec.keyId, name: rec.name, scopes: rec.scopes, rpm: rec.rpm } };
+      return { ok: true, key: { keyId: rec.keyId, appId: rec.appId, name: rec.name, scopes: rec.scopes, rpm: rec.rpm } };
     },
 
     /** Does this verified key carry `scope`? */

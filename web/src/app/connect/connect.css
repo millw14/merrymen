@@ -1,0 +1,101 @@
+.terminal-host.partner-connect {
+  min-height: 100svh;
+  padding: 0 max(24px, env(safe-area-inset-left));
+  background: #080905;
+}
+.partner-connect .connect-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 1080px;
+  min-height: 100px;
+  margin: 0 auto;
+  border-bottom: 1px solid var(--line);
+}
+.partner-connect .connect-brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--tx);
+  font-size: 25px;
+  font-weight: 600;
+  letter-spacing: -.055em;
+}
+.partner-connect .connect-brand span { color: #c8ff00; font-size: 23px; }
+.partner-connect .connect-header-label { display: flex; align-items: center; gap: 7px; color: var(--tx-2); font-size: 12px; }
+.partner-connect .connect-main { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 76px; align-items: start; max-width: 1080px; margin: 88px auto 64px; }
+.partner-connect .connect-context { padding-top: 12px; }
+.partner-connect .connect-eyebrow { color: #c8ff00; font-size: 10px; letter-spacing: .15em; font-weight: 500; }
+.partner-connect .connect-context h1 { margin: 24px 0 22px; font-size: clamp(42px, 4.9vw, 62px); font-weight: 500; letter-spacing: -.065em; line-height: 1.04; }
+.partner-connect .connect-context > p { color: var(--tx-2); font-size: 16px; line-height: 1.75; max-width: 370px; }
+.partner-connect .connect-progress { display: flex; gap: 18px; list-style: none; padding: 0; margin: 34px 0; }
+.partner-connect .connect-progress li { display: flex; align-items: center; gap: 7px; color: var(--faint); font-size: 11px; }
+.partner-connect .connect-progress li.active { color: var(--tx); }
+.partner-connect .connect-progress li > span { display: grid; place-items: center; width: 23px; height: 23px; border: 1px solid var(--line); border-radius: 50%; font-size: 10px; }
+.partner-connect .connect-progress li.active > span { color: #c8ff00; border-color: #c8ff0050; }
+.partner-connect .connect-app { display: flex; align-items: center; gap: 13px; padding-top: 28px; border-top: 1px solid var(--line); max-width: 370px; }
+.partner-connect .connect-app-icon { width: 46px; height: 46px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 14px; flex-shrink: 0; background: var(--card); }
+.partner-connect .connect-app > div { min-width: 0; }
+.partner-connect .connect-app strong { display: block; font-size: 15px; font-weight: 500; overflow-wrap: anywhere; }
+.partner-connect .connect-app div > span { display: block; margin-top: 5px; font-size: 12px; color: var(--tx-2); overflow-wrap: anywhere; }
+.partner-connect .connect-panel { border: 1px solid var(--line); border-radius: 22px; background: #10110c; padding: 34px; min-width: 0; box-shadow: 0 18px 80px #0002; }
+.partner-connect .connect-panel h2 { font-size: 26px; font-weight: 500; line-height: 1.2; letter-spacing: -.04em; margin: 15px 0; overflow-wrap: anywhere; }
+.partner-connect .connect-panel > p { font-size: 14px; line-height: 1.75; color: var(--tx-2); margin: 0 0 22px; }
+.partner-connect .connect-step-label { color: var(--tx-2); font-size: 10px; letter-spacing: .11em; }
+.partner-connect .connect-panel .flow-primary { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; min-height: 49px; font-size: 14px; text-align: center; overflow-wrap: anywhere; }
+.partner-connect .connect-permissions { list-style: none; padding: 0; margin: 28px 0; }
+.partner-connect .connect-permissions li { display: flex; gap: 12px; padding: 15px 0; border-top: 1px solid var(--line); }
+.partner-connect .connect-permissions svg { color: #c8ff00; flex-shrink: 0; margin-top: 2px; }
+.partner-connect .connect-permissions strong { display: block; font-size: 14px; font-weight: 500; }
+.partner-connect .connect-permissions span { display: block; color: var(--tx-2); margin-top: 5px; font-size: 12px; line-height: 1.65; }
+.partner-connect .connect-boundary { display: flex; gap: 12px; background: #ffffff04; border: 1px solid var(--line); padding: 16px; border-radius: 12px; margin: 0 0 25px; }
+.partner-connect .connect-boundary svg { flex-shrink: 0; color: var(--tx-2); margin-top: 3px; }
+.partner-connect .connect-boundary p { font-size: 12px; line-height: 1.75; color: var(--tx-2); margin: 0; }
+.partner-connect .connect-cancel { display: flex; justify-content: center; align-items: center; gap: 7px; min-height: 44px; margin: 10px auto 0; color: var(--tx-2); font-size: 12px; text-decoration: none; }
+.partner-connect .connect-cancel:hover { color: var(--tx); }
+.partner-connect .connect-success-icon { display: grid; place-items: center; color: #c8ff00; width: 56px; height: 56px; border-radius: 50%; background: #c8ff0010; border: 1px solid #c8ff0030; margin-bottom: 25px; }
+.partner-connect .connect-panel > .connect-subtle { font-size: 12px; }
+.partner-connect .connect-disconnect { border-top: 1px solid var(--line); margin-top: 26px; padding-top: 12px; }
+.partner-connect .connect-disconnect p { color: var(--tx-2); font-size: 12px; line-height: 1.65; margin: 8px 0 14px; }
+.partner-connect .connect-disconnect > div { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.partner-connect .connect-disconnect .connect-cancel { margin: 0; }
+.partner-connect .connect-danger { min-height: 44px; padding: 9px 14px; border: 1px solid #f17b7b50; border-radius: 10px; color: #f9a0a0; font-size: 12px; }
+.partner-connect .connect-revoked-icon { color: var(--tx-2); margin-bottom: 10px; }
+.partner-connect .connect-error { margin-top: 20px; padding: 14px; border: 1px solid #f17b7b40; border-radius: 12px; }
+.partner-connect .connect-error p { color: #f9a0a0; font-size: 13px; line-height: 1.65; margin: 0; overflow-wrap: anywhere; }
+.partner-connect .connect-error button { min-height: 40px; margin-top: 5px; text-decoration: underline; text-underline-offset: 4px; font-size: 12px; }
+.partner-connect .connect-wait { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 180px; color: var(--tx-2); font-size: 14px; }
+.partner-connect .connect-spinner { width: 17px; height: 17px; border: 2px solid var(--line); border-top-color: #c8ff00; border-radius: 50%; animation: connect-spin 1s linear infinite; }
+.partner-connect .connect-setup-note { font-size: 12px; color: var(--tx-2); line-height: 1.65; padding-bottom: 20px; margin-bottom: 20px; border-bottom: 1px solid var(--line); }
+.partner-connect .connect-panel-setup { padding: 24px; }
+.partner-connect .connect-panel-setup .create-agent { padding-bottom: 0; }
+.partner-connect .connect-panel-setup .create-agent .create-intro h1 { font-size: 29px; }
+.partner-connect .connect-panel-setup .create-mode { flex-wrap: wrap; }
+.partner-connect .connect-panel-setup .create-steps { gap: 5px; }
+.partner-connect .connect-panel-setup .create-steps li { font-size: 9px; gap: 4px; }
+.partner-connect .connect-panel-setup .create-example { margin: 18px 0; padding: 15px; border: 1px solid var(--line); border-radius: 12px; }
+.partner-connect .connect-panel-setup .create-example > span { color: var(--tx-2); font-size: 11px; }
+.partner-connect .connect-panel-setup .create-example p { margin-top: 6px; color: var(--tx-2); font-size: 12px; line-height: 1.7; }
+.partner-connect .connect-footer { max-width: 1080px; margin: 0 auto; padding: 24px 0 max(28px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); color: var(--faint); font-size: 11px; }
+.partner-connect button:disabled { cursor: not-allowed; opacity: .5; }
+.partner-connect button:focus-visible, .partner-connect a:focus-visible { outline: 2px solid #c8ff00; outline-offset: 4px; }
+@keyframes connect-spin { to { transform: rotate(360deg); } }
+@media (max-width: 850px) {
+  .partner-connect .connect-main { grid-template-columns: minmax(0, 1fr); max-width: 540px; gap: 32px; margin: 42px auto; }
+  .partner-connect .connect-context { padding-top: 0; }
+  .partner-connect .connect-context h1 { font-size: 44px; margin: 18px 0; }
+  .partner-connect .connect-context > p, .partner-connect .connect-app { max-width: none; }
+  .partner-connect .connect-context > p { font-size: 14px; }
+  .partner-connect .connect-progress { margin: 24px 0; }
+  .partner-connect .connect-app { padding-top: 20px; }
+  .partner-connect .connect-header { min-height: 80px; }
+}
+@media (max-width: 450px) {
+  .terminal-host.partner-connect { padding-inline: 18px; }
+  .partner-connect .connect-header-label { font-size: 10px; }
+  .partner-connect .connect-brand { font-size: 22px; }
+  .partner-connect .connect-panel { padding: 23px; border-radius: 18px; }
+  .partner-connect .connect-panel-setup { padding: 18px; }
+  .partner-connect .connect-progress { gap: 13px; }
+}
+@media (prefers-reduced-motion: reduce) { .partner-connect .connect-spinner { animation: none; } }

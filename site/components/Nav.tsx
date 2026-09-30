@@ -1,53 +1,36 @@
+"use client";
+
 import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import { Logo } from "./Logo";
 import { Icon } from "./Icon";
 
-const GITHUB = "https://github.com/millw14/merrymen";
-const HOSTED_APP = "https://app.merrymen.dev";
-const X_URL = "https://x.com/MerrymenAI";
-
-function XMark({ size = 15 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
-    </svg>
-  );
-}
-
+const links = [
+  ["/#features", "Features"], ["/memescope", "Markets"], ["/dashboard", "Agents"],
+  ["/watch", "Activity"], ["/claude", "Claude & MCP"], ["/api", "Developers"], ["/docs", "Docs"],
+];
 export function Nav() {
-  return (
-    <header className="nav">
-      <div className="wrap nav-inner">
-        <Link href="/" className="brand">
-          <Logo size={22} />
-          <span>merrymen</span>
-        </Link>
-        <nav className="nav-links">
-          <Link href="/#features" data-text="Features"><span>Features</span></Link>
-          <Link href="/memescope" data-text="Memescope"><span>Memescope</span></Link>
-          <Link href="/dashboard" data-text="Dashboard"><span>Dashboard</span></Link>
-          <Link href="/watch" data-text="Watch"><span>Watch</span></Link>
-          <Link href="/app" data-text="App"><span>App</span></Link>
-          <Link href="/#telegram" data-text="Telegram"><span>Telegram</span></Link>
-          <Link href="/token" data-text="Token"><span>Token</span></Link>
-          <Link href="/docs" data-text="Docs"><span>Docs</span></Link>
-        </nav>
-        <div className="nav-right">
-          <a href={X_URL} target="_blank" rel="noreferrer" className="nav-ghost nav-social" aria-label="merrymen on X">
-            <XMark />
-          </a>
-          <a href={GITHUB} target="_blank" rel="noreferrer" className="nav-ghost">
-            GitHub
-          </a>
-          {/* Points where the hero's primary button points. Two primaries
-              disagreeing about where to start is worse than either choice. */}
-          <span className="mag" data-magnetic>
-            <a href={HOSTED_APP} className="btn btn-primary has-box">
-              Start trading <span className="box"><Icon name="arrow" size={15} /></span>
-            </a>
-          </span>
-        </div>
-      </div>
-    </header>
-  );
+  const [open, setOpen] = useState(false);
+  const pathname = usePathname();
+  const toggle = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") { setOpen(false); toggle.current?.focus(); } };
+    document.addEventListener("keydown", close);
+    return () => document.removeEventListener("keydown", close);
+  }, [open]);
+  return <header className="nav">
+    <a className="skip-link" href="#main-content">Skip to content</a>
+    <div className="wrap nav-inner">
+      <Link href="/" className="brand" aria-label="Merrymen home" onClick={() => setOpen(false)}><Logo size={25} /><span>merrymen</span></Link>
+      <nav className="nav-links" aria-label="Main navigation">
+        {links.map(([href, title]) => <Link key={href} href={href} aria-current={pathname === href ? "page" : undefined}>{title}</Link>)}
+      </nav>
+      <div className="nav-right"><a href="https://app.merrymen.dev" className="btn btn-primary">Open app <Icon name="arrow" size={16} /></a><button ref={toggle} className="nav-menu-toggle" aria-expanded={open} aria-controls="mobile-navigation" aria-label={open ? "Close menu" : "Open menu"} onClick={() => setOpen(!open)}>{open ? "✕" : <span aria-hidden>☰</span>}</button></div>
+    </div>
+    <nav className="mobile-navigation" id="mobile-navigation" aria-label="Mobile navigation" hidden={!open}>
+      {[...links, ["/app", "Mobile app"], ["/token", "$MERRYMEN"], ["/#telegram", "Telegram"]].map(([href, title]) => <Link key={href} href={href} onClick={() => setOpen(false)} aria-current={pathname === href ? "page" : undefined}>{title}<span aria-hidden>↗</span></Link>)}
+    </nav>
+  </header>;
 }

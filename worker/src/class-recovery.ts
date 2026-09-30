@@ -38,6 +38,7 @@
 import { erc20Abi, type PublicClient } from "viem";
 import {
   PONS_CLASS_VAULT_FACTORY,
+  PONS_CLASS_VAULT_FACTORY_V2,
   PONS_CLASS_VAULT_FACTORY_ABI,
   grantPonsClassVault,
   grantPonsClassVaultFactory,
@@ -131,6 +132,122 @@ export async function findClassVault(args: {
   };
 }
 
+/** One vault this account could have, and where the idea of it came from. */
+export interface VaultCandidate {
+  vault: `0x${string}`;
+  /** The factory that derived it, or the grant that sealed it. */
+  factory: `0x${string}` | null;
+  source: VaultSource;
+  /**
+   * Which vault family the factory belongs to, when it is one of the two this
+   * chain pins. `null` for a vault that came from a grant with no factory, or
+   * from a factory in neither table — we know the address, not the family.
+   */
+  version: 1 | 2 | null;
+}
+
+/**
+ * EVERY vault this account could have, not the best one.
+ *
+ * WHY PLURAL IS NOT A REFINEMENT. `findClassVault` answers with ONE address,
+ * grant first, and that is right for signing and for the executor: there is one
+ * sealed vault and one wall. Recovery is the opposite problem. It runs from a
+ * pasted owner key with NO GRANT AT ALL, and the moment two factory versions
+ * exist, one address is a guess. After an owner re-signs onto v2, their v1
+ * vault stops being reachable by the session key — recovery is the only way
+ * left to it, and a recovery that looks in one place reports "nothing found"
+ * over a real balance.
+ *
+ * THE FAILURE THAT MATTERS HERE IS THE FALSE NEGATIVE. A candidate that turns
+ * out to be empty costs one read. A vault that is never asked about is a
+ * position the owner is told they do not have.
+ *
+ * So this returns what it found and never chooses. Unreadable is reported per
+ * factory rather than for the whole lookup: one factory refusing a read says
+ * nothing about the other, and collapsing them would turn a partial answer into
+ * no answer.
+ */
+export async function findClassVaults(args: {
+  client: Pick<PublicClient, "readContract">;
+  chainId: number;
+  smartAccount: `0x${string}`;
+  grant?: Pick<StoredGrant, "grantFeatures" | "ponsClassVaultAddress" | "ponsClassVaultFactoryAddress"> | null;
+}): Promise<{ candidates: VaultCandidate[]; unreadable: { factory: `0x${string}`; why: string }[] }> {
+  const candidates: VaultCandidate[] = [];
+  const unreadable: { factory: `0x${string}`; why: string }[] = [];
+  const seen = new Set<string>();
+
+  const push = (c: VaultCandidate) => {
+    const key = c.vault.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push({ ...c, vault: key as `0x${string}` });
+  };
+
+  // The grant's own sealed vault comes first and is never derived away: it is
+  // the address the wall actually pinned, and the only one with a signature
+  // behind it.
+  const sealed = grantPonsClassVault(args.grant);
+  const grantFactory = grantPonsClassVaultFactory(args.grant);
+  if (sealed) {
+    push({
+      vault: sealed,
+      factory: (grantFactory as `0x${string}` | null) ?? null,
+      source: "grant",
+      version: versionOfFactory(grantFactory, args.chainId),
+    });
+  }
+
+  // Then every factory this chain pins. V2 FIRST because a fresh grant is the
+  // likelier one to want it, but both are asked — the order is presentation,
+  // not precedence, and nothing here chooses between them.
+  const factories = [
+    grantFactory as `0x${string}` | null,
+    PONS_CLASS_VAULT_FACTORY_V2[args.chainId] as `0x${string}` | null | undefined,
+    PONS_CLASS_VAULT_FACTORY[args.chainId] as `0x${string}` | null | undefined,
+  ].filter((f): f is `0x${string}` => typeof f === "string" && /^0x[0-9a-fA-F]{40}$/.test(f));
+
+  const asked = new Set<string>();
+  for (const factory of factories) {
+    if (asked.has(factory.toLowerCase())) continue;
+    asked.add(factory.toLowerCase());
+    try {
+      const answer = (await args.client.readContract({
+        address: factory,
+        abi: PONS_CLASS_VAULT_FACTORY_ABI,
+        functionName: "vaultFor",
+        args: [args.smartAccount],
+      })) as `0x${string}`;
+      // The zero address is what a call to a contract that isn't there decodes
+      // to on some transports. Treating it as an address would send a sweep at
+      // nothing and report success.
+      if (/^0x0{40}$/i.test(answer)) continue;
+      push({
+        vault: answer.toLowerCase() as `0x${string}`,
+        factory,
+        source: "derived",
+        version: versionOfFactory(factory, args.chainId),
+      });
+    } catch (e) {
+      // PER FACTORY, not for the lookup. One factory refusing a read says
+      // nothing about the other, and an owner whose v1 read blinked must still
+      // be shown their v2 vault.
+      unreadable.push({ factory, why: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  return { candidates, unreadable };
+}
+
+/** Which family a factory belongs to, when this chain pins it. Never guessed. */
+function versionOfFactory(factory: string | null | undefined, chainId: number): 1 | 2 | null {
+  if (!factory) return null;
+  const f = factory.toLowerCase();
+  if ((PONS_CLASS_VAULT_FACTORY_V2[chainId] ?? "").toLowerCase() === f) return 2;
+  if ((PONS_CLASS_VAULT_FACTORY[chainId] ?? "").toLowerCase() === f) return 1;
+  return null;
+}
+
 export interface ClassHolding {
   token: `0x${string}`;
   symbol: string;
@@ -182,8 +299,40 @@ export type ClassContents =
  * is then shown, and what the sweep then moves.
  *
  * Measured: Shogun's vault holds 1,063,408.141815 DOGGOS and 5.785344 USDG. The
- * DOGGOS came from a ClassBuy; the USDG from a refund leg that did not land.
- * Only the first was ever disclosed.
+ * DOGGOS came from a ClassBuy. Only the first was ever disclosed.
+ *
+ * WHERE THE QUOTE ACTUALLY COMES FROM — read off the chain 2026-09-22, because
+ * this comment used to say "a refund leg that did not land" and that is not what
+ * happened. The multi-quote design then carried the claim forward as an open
+ * probe blocking a whole route, so the wrong explanation cost more than the
+ * money it described.
+ *
+ * The vault's own refunds land. `buy` sweeps its WHOLE quote balance to the
+ * owner before returning (PonsClassVault.sol:278-279) and `_push` reverts on
+ * failure, so a buy cannot end with quote inside. What the chain shows instead
+ * is UNSOLICITED inbound transfers between buys, from a 291-byte companion
+ * contract per class token (`token()` equal to the curve's), paying the vault
+ * as the holder of record:
+ *
+ *   b64070702  in  5.000000 from the account      (the _pull)
+ *              out 5.000000 to the curve          (the buy)
+ *              out 9.268223 to the account        (residue sweep, whole balance)
+ *   b64087466  in  0.321146 from 0x09a5D0Cf…      (companion of curve 0xc7C859…)
+ *   b64117829  in  0.825926 from 0x09a5D0Cf…
+ *   b64184218  in  5.000000 from the account      (second buy)
+ *              out 1.147072 to the account        = 0.321146 + 0.825926, exactly
+ *   b64200310  in  0.951487 from 0x29475C29…      (companion of curve 0x332F63E1…)
+ *
+ * So the sweep is not merely working, it is the mechanism that returns these:
+ * pushing the WHOLE balance means whatever arrived since the last buy goes home
+ * with the next one. The 0.951487 sitting there today is simply waiting for a
+ * buy that has not happened — and `sweep(token)` moves it on demand meanwhile.
+ *
+ * IT IS STILL OUTSIDE EQUITY. `equity.ts`'s `vaultUsdg` is the savings vault,
+ * not this one, so quote parked here is the agent's money in no total it
+ * reports — and it reappears as an unattributed credit whenever the next buy
+ * sweeps it. Small today; the reason to write it down is that it is income the
+ * ledger does not source.
  *
  * The registry list is the same one the ACCOUNT sweep enumerates, which is right
  * twice over: it certainly contains the quote asset, and "the assets we already

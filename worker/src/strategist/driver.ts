@@ -127,7 +127,7 @@ const PROPOSE_TOOL = {
               // action ("buy NVDA") or nothing. Same wording as the desk's
               // thesis field so the two rails sound like one agent.
               description:
-                "One sentence for THIS action, in your own voice, citing the figures that decided " +
+                "One sentence for THIS action, under 200 characters, in your own voice, citing the figures that decided " +
                 "it. This is published — write it for a reader who was not here. Grounded only in " +
                 "what you were shown; no invented numbers and no predictions you cannot support.",
             },

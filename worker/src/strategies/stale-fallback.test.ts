@@ -81,6 +81,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     vaultUsdg: 0n,
     staleFeeds: new Set(["TSLA", "NVDA"]),
     pausedTokens: new Set<string>(),
+    perTradeCapUsdg: 1_000_000_000n,
     spendHeadroomUsdg: 1_000_000_000n,
     holdings: new Map(),
     ...over,

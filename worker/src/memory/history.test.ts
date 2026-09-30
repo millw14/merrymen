@@ -13,17 +13,14 @@ import path from "node:path";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "mm-hist-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, appendChatTurn, recentChatTurns, clearChatTurns } = await import("../store");
+const { closeStoreForTest, initStore, appendChatTurn, recentChatTurns, clearChatTurns } = await import("../store");
 
 const CHAT = 4242;
 const OTHER = 9999;
 
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* best effort */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("chat history survives a restart", () => {

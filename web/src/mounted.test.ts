@@ -185,3 +185,76 @@ describe("a source-reading test reads a file that ships", () => {
     }
   });
 });
+
+/**
+ * THE WIRE FEATURE IS ON A SCREEN — the same guard, pointed at a control.
+ *
+ * This belongs beside the one above rather than in its own file because it is
+ * the same property and must use the same walker. A second implementation of
+ * "what does Next actually load" is how the two answers drift, and the drift
+ * would be invisible in exactly the direction that already burned us once.
+ *
+ * WHAT WAS WRONG, stated so this reads as a regression test rather than a
+ * formality. `WiredProvider` was written into `components/shell/AppShell.tsx`,
+ * a file this walker does not reach — nothing imports it. The live shell is
+ * `app/(app)/layout.tsx` -> `terminal/Providers.tsx` -> `terminal/App.tsx`.
+ * So the whole follow feature — store, route, orchestrator transport, desk tool
+ * and a finished button — was reachable only by curl, and any button mounted on
+ * a screen would have read the DEFAULT context, where `known` is false: it
+ * would have told every signed-in owner to go and deploy an agent they already
+ * had.
+ *
+ * The provider assertion is the load-bearing one. A button inside no provider
+ * does not throw and does not blank; it renders a confident wrong answer, which
+ * is why "it compiles and the page looks fine" was never evidence here.
+ */
+describe("the wire control is reachable from a route", () => {
+  const live = mounted();
+
+  it("WiredProvider is in the live import graph", () => {
+    assert.ok(
+      live.has("components/WiredProvider.tsx"),
+      "WiredProvider is mounted by no route — every useWired() reads the default " +
+        "context, where known=false and toggle is a no-op",
+    );
+  });
+
+  it("WireButton is in the live import graph", () => {
+    assert.ok(
+      live.has("components/WireButton.tsx"),
+      "WireButton ships in the tree but no screen renders it — the follow graph " +
+        "is reachable only by curl",
+    );
+  });
+
+  it("the button is never mounted without the provider", () => {
+    // The ordering property, not two separate facts. A future refactor that
+    // moves the provider back out of Providers.tsx while leaving the button on
+    // Profile.tsx passes both assertions above taken singly.
+    if (live.has("components/WireButton.tsx")) {
+      assert.ok(
+        live.has("components/WiredProvider.tsx"),
+        "WireButton is mounted but WiredProvider is not — the control would " +
+          "render the signed-out copy to everyone, forever",
+      );
+    }
+  });
+
+  it("the ring lives on the face the live screens actually render", () => {
+    // NOT AgentAvatar.tsx. That component carries the ring claim in its own
+    // comment — "it appears everywhere that agent appears" — and belongs to the
+    // pre-terminal shell, which this walker correctly reports as unreachable.
+    // The claim was false everywhere it was written. The terminal renders
+    // "Face" from terminal/ui.tsx, so that is where the property has to hold,
+    // and wire-ring.test.ts proves the class actually appears.
+    assert.ok(
+      live.has("terminal/ui.tsx"),
+      "terminal/ui.tsx is unmounted — Face is where the wire ring renders",
+    );
+    assert.ok(
+      !live.has("components/AgentAvatar.tsx"),
+      "AgentAvatar is mounted again — then it needs the ring too, or two faces " +
+        "disagree about who the viewer reads",
+    );
+  });
+});

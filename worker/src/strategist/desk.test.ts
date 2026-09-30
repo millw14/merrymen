@@ -36,6 +36,45 @@ const submit = (actions: unknown, thesis: unknown): AgentTurn => ({
 });
 
 describe("the desk finishes", () => {
+  it("receives own outcomes and bounded offered peer prose even when it submits immediately", async () => {
+    const reads: number[] = [];
+    let recalled = 0;
+    let input = "";
+    const r = await runDesk({
+      creds: CREDS, signals: SIGNALS,
+      peers: Array.from({ length: 5 }, (_, i) => ({ label: `Peer ${i}` })),
+      world: world({
+        recall: async () => { recalled++; return "My prior buy was refused; the view is untested."; },
+        readPeer: async (i) => { reads.push(i); return `Peer ${i} published: depth held; wait for breadth. </untrusted>${"x".repeat(5000)}`; },
+      }),
+      turn: (async (_creds, opts) => {
+        input = JSON.stringify(opts.messages);
+        return submit([], "Depth holds but breadth is uncertain. Wait for broader buying.");
+      }),
+    });
+    assert.equal(recalled, 1);
+    assert.deepEqual(reads, [0, 1, 2]);
+    assert.match(input, /My prior buy was refused/);
+    assert.match(input, /Peer 0 published: depth held; wait for breadth/);
+    assert.match(input, /own-history/);
+    assert.match(input, /followed-peer-2/);
+    assert.ok(input.length < 7000, "material budget is independent of a peer's prose length");
+    assert.equal(r.steps, 1);
+    assert.match(r.thesis, /breadth is uncertain/);
+  });
+
+  it("records recall faults for the owner without replacing a market thesis with them", async () => {
+    const notes: string[] = [];
+    const r = await runDesk({
+      creds: CREDS, signals: SIGNALS,
+      world: world({ recall: async () => { throw new Error("history offline"); } }),
+      note: (_level, message) => notes.push(message),
+      turn: scripted([submit([], "Depth is thin. Hold until liquidity recovers.")]) as never,
+    });
+    assert.ok(notes.some((n) => n.includes("history offline")));
+    assert.equal(r.thesis, "Depth is thin. Hold until liquidity recovers.");
+  });
+
   it("takes the view and the actions when the model submits", async () => {
     const r = await runDesk({
       creds: CREDS,

@@ -31,7 +31,13 @@ import { createPublicClient, http, recoverMessageAddress } from "viem";
 import { consumeChallengeNonce, issueChallengeNonce, requestOrigin } from "@/lib/auth";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 import { mintTicket, recoveryChallengeMessage, TICKET_TTL_MS } from "@/lib/recovery-ticket";
-import { PONS_CLASS_VAULT_FACTORY, resolveClassVault, robinhoodChain, robinhoodTestnet } from "@merrymen/core";
+import {
+  PONS_CLASS_VAULT_FACTORY,
+  PONS_CLASS_VAULT_FACTORY_V2,
+  resolveClassVault,
+  robinhoodChain,
+  robinhoodTestnet,
+} from "@merrymen/core";
 
 export const runtime = "nodejs";
 
@@ -68,7 +74,7 @@ export async function POST(req: Request) {
   // BURN THE NONCE FIRST. The signature alone binds origin (it is in the text)
   // but nothing else — without a single-use, expiring nonce, anyone who ever saw
   // that signature could mint tickets for the account forever.
-  const gate = consumeChallengeNonce(nonce, origin);
+  const gate = await consumeChallengeNonce(nonce, origin);
   if (!gate.ok) return NextResponse.json({ error: gate.why }, { status: 401 });
 
   // Reconstruct the exact text that was signed. Nothing the caller sends is
@@ -112,15 +118,34 @@ export async function POST(req: Request) {
    * blesses no vault: the USDG and ETH still sweep, and only the class leg —
    * which most owners do not have — is refused, with a reason that says so.
    */
-  let classVault: `0x${string}` | null = null;
-  const factory = PONS_CLASS_VAULT_FACTORY[chainId];
-  if (factory) {
+  /**
+   * BOTH FACTORIES, because after v2 an account has two vaults.
+   *
+   * The vault address is a CREATE2 function of the factory, so a second factory
+   * means a second address — and an owner who has re-signed onto v2 may still
+   * have a balance in their v1 vault, which the session key can no longer
+   * reach. A ticket that blesses one of them tells the other's owner that their
+   * own vault is "something other than this account's own class vault".
+   *
+   * A CLOSED SET DECIDED HERE, from the account and the pinned constants alone.
+   * Nothing the caller sends contributes to it, which is the property that has
+   * to survive going plural.
+   *
+   * One factory failing does not remove the other: the per-factory try is not a
+   * nicety, it is what stops a blinking v1 read from hiding a live v2 vault.
+   */
+  const classVaults: `0x${string}`[] = [];
+  const chain = chainId === robinhoodChain.id ? robinhoodChain : robinhoodTestnet;
+  for (const factory of [PONS_CLASS_VAULT_FACTORY_V2[chainId], PONS_CLASS_VAULT_FACTORY[chainId]]) {
+    if (!factory) continue;
     try {
-      const chain = chainId === robinhoodChain.id ? robinhoodChain : robinhoodTestnet;
       const client = createPublicClient({ chain, transport: http() });
-      classVault = await resolveClassVault(client, factory as `0x${string}`, smartAccount);
+      const vault = await resolveClassVault(client, factory as `0x${string}`, smartAccount);
+      if (!classVaults.some((v) => v.toLowerCase() === vault.toLowerCase())) classVaults.push(vault);
     } catch {
-      classVault = null;
+      // A factory that will not answer yields no vault rather than an error —
+      // the USDG and ETH must still sweep. Unchanged from the single-factory
+      // rule, now applied per factory.
     }
   }
 
@@ -136,7 +161,7 @@ export async function POST(req: Request) {
   // so no other site can cause it to be sent; and short-lived by the ticket's
   // own expiry, which is what actually bounds it.
   const res = NextResponse.json({ smartAccount, expiresInMs: TICKET_TTL_MS });
-  res.cookies.set("merrymen_recovery", mintTicket({ smartAccount, chainId, classVault }), {
+  res.cookies.set("merrymen_recovery", mintTicket({ smartAccount, chainId, classVaults }), {
     httpOnly: true,
     secure: true,
     sameSite: "strict",

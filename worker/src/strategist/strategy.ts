@@ -9,9 +9,9 @@
 
 import { randomUUID } from "node:crypto";
 import type { TradeIntent } from "../policy";
-import type { Snapshot, Strategy, Tick } from "../strategies/types";
+import { breakerIdle, energyEntriesSpent, type Snapshot, type Strategy, type Tick } from "../strategies/types";
 import type { Why } from "../strategies/reasons";
-import { parseProposals, proposalsToIntents, type StrategistUniverse } from "./proposals";
+import { parseProposals, proposalsToIntents, type ProposedAction, type StrategistUniverse, type ValidationResult } from "./proposals";
 import type { ProposalDriver, Signals } from "./driver";
 import { runDesk, type DeskLink, type DeskPeer, type DeskWorld } from "./desk";
 import type { LlmCreds } from "../llm";
@@ -80,6 +80,17 @@ export interface LlmStrategistConfig {
   takeProfitBps?: number;
   /** Minimum ms between model calls — decisions are windows, ticks are not. */
   decisionIntervalMs: number;
+  /**
+   * MAY THIS WINDOW'S MODEL CALL BE PAID FOR? Asked once a window is due and
+   * before it is stamped. False means the window is not taken: no model call,
+   * no stamp, and the next tick asks again — which is cheap, because the
+   * energy allowance it is bound to (index.ts) is a counter, not a model.
+   *
+   * The floor and the ceiling above the window never ask: they are exits.
+   * Absent means always yes (backtests, fixtures, the null driver — registry.ts
+   * forwards it only when there is a real model to pay for).
+   */
+  claimWindow?: () => Promise<boolean>;
   /** Injectable clock for tests. */
   now?: () => number;
   /** Where dropped proposals and reasons get reported (worker event log). */
@@ -201,6 +212,49 @@ function buildSignals(snap: Snapshot, universe: StrategistUniverse, at: Date, st
       return rows.length > 0 ? { depth: rows } : {};
     })(),
   };
+}
+
+/**
+ * AT MOST TODAY'S NEW TRADES, IN THE MODEL'S ORDER, COUNTED AFTER VALIDATION.
+ *
+ * With a PARTIAL allowance left (Snapshot.energy.entriesLeft = 1 or 2 — every
+ * low morning starts at 2, and maxActionsPerTick is 4), only the spent case was
+ * filtered. Every buy the model proposed was journaled — a public decision row
+ * each — and announced to the owner, and index.ts's hard filter then withheld
+ * the extras with no row at all: a published buy that never happens.
+ *
+ * AFTER proposalsToIntents, never before it: a cap on the raw proposals could
+ * keep a buy validation then drops (unknown symbol, over the ceiling, short of
+ * cash) and withhold the valid one behind it. The extras are removed from the
+ * PROPOSALS and validation is run again rather than the output being trimmed,
+ * because a withheld buy must not keep what it reserved — the cash later buys
+ * are checked against, and the per-tick action slot a later SELL needs. A
+ * re-run can admit a buy the first run refused for cash; that one is past the
+ * cap too, so it goes the same way, and the loop ends because the list only
+ * shrinks. Sells, holds and everything before the cap are untouched.
+ *
+ * Absent, null or a non-finite figure means NOT LIMITED (energyEntriesSpent's
+ * rule), and validation runs exactly once, as it always has.
+ */
+export function capEntries(
+  proposals: readonly ProposedAction[],
+  universe: StrategistUniverse,
+  snap: Snapshot,
+): ValidationResult & { kept: readonly ProposedAction[]; withheld: number } {
+  const left = snap.energy?.entriesLeft;
+  const cap = typeof left === "number" && Number.isFinite(left) ? Math.max(0, Math.floor(left)) : null;
+  let kept = proposals;
+  let withheld = 0;
+  for (;;) {
+    const v = proposalsToIntents(kept, universe, snap);
+    if (cap === null) return { ...v, kept, withheld };
+    // accepted[i] IS the proposal object that produced intents[i], so identity
+    // names exactly the extras and nothing else.
+    const extra = new Set(v.accepted.filter((a) => a.action === "buy").slice(cap));
+    if (extra.size === 0) return { ...v, kept, withheld };
+    kept = kept.filter((a) => !extra.has(a));
+    withheld += extra.size;
+  }
 }
 
 export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
@@ -341,7 +395,44 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       // so the latch is released and the floor can arm again if it returns.
       for (const s of [...floorFired]) if (!snap.holdings.has(s)) floorFired.delete(s);
 
-      if (lastDecisionAt !== null && t - lastDecisionAt < cfg.decisionIntervalMs) return [];
+      // ── NO BUYS WHILE THE DRAWDOWN BREAKER IS TRIPPED ─────────────────
+      //
+      // The wall refuses every buy once the book sits at or past the loss
+      // limit sealed into the key, so a buy proposed now is a refusal a tick
+      // and a paid model call behind it. Every other builtin already reads
+      // this from the snapshot; this is the one that thinks, and it went on
+      // asking. BELOW the floor and the ceiling on purpose: those are exits,
+      // and the breaker is a brake on taking risk, never a lock on the doors.
+      //
+      // FLAT, the model could only answer with a buy, so it is not asked and
+      // not billed. Returned before the window is stamped, so the model is
+      // asked on the first tick after the breaker clears rather than up to a
+      // window later.
+      //
+      // BETWEEN WINDOWS the same reason is returned rather than a bare [],
+      // because the idle channel says a reason once per CHANGE: a quiet tick
+      // with no reason reads as a change, and the owner would be told again at
+      // every window for as long as the breaker stays tripped.
+      const brake = breakerIdle(snap);
+      const braked: Tick | null = brake ? { intents: [], why: [], idle: brake } : null;
+      if (braked && snap.holdings.size === 0) return braked;
+
+      if (lastDecisionAt !== null && t - lastDecisionAt < cfg.decisionIntervalMs) return braked ?? [];
+
+      // ── TODAY'S ENERGY ────────────────────────────────────────────────
+      //
+      // FLAT WITH TODAY'S NEW TRADES USED UP, the model could only answer with
+      // a buy that index.ts would withhold, so it is not asked and not billed —
+      // the breaker's rule above, for the energy allowance. Not stamped, so the
+      // window is taken the first tick after midnight rather than up to a
+      // window later.
+      //
+      // THEN THE PAID CALL IS CLAIMED against the day's AI reviews. Refused,
+      // nothing is stamped and the next tick asks again; the claim is a counter
+      // read, so asking is free. Below the floor and the ceiling on purpose:
+      // those are exits and never wait on an allowance.
+      if (energyEntriesSpent(snap) && snap.holdings.size === 0) return braked ?? [];
+      if (cfg.claimWindow && !(await cfg.claimWindow())) return braked ?? [];
       lastDecisionAt = t;
 
       // ── THE UNIVERSE THIS WINDOW ACTUALLY HAS ───────────────────────
@@ -453,7 +544,24 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
         if (malformed > 0) note("warn", `strategist emitted ${malformed} malformed action(s) — dropped`);
       }
 
-      const { intents, accepted, rejected } = proposalsToIntents(actions, universeNow, snap);
+      // HOLDING UNDER THE BREAKER, the model was asked because it may want to
+      // sell — and any buy it answered with is withheld HERE, before it can
+      // become an intent the wall is certain to refuse. Not journaled as a
+      // drop: a drop row publishes, and a tripped breaker is account state the
+      // public feed leaves out. The owner's log says it, below.
+      //
+      // AND THE SAME FOR TODAY'S ENERGY: holding, with no new trades left
+      // today, the model was asked because it may want to sell, and a buy it
+      // answered with would only be withheld by index.ts after this journaled
+      // it — a public decision for a trade that could never happen.
+      //
+      // AND WITH SOME LEFT, no more buys than are left (capEntries): the rest
+      // are withheld here, counted in the same note, never journaled.
+      const energySpent = energyEntriesSpent(snap);
+      const allowed = brake || energySpent ? actions.filter((a) => a.action !== "buy") : actions;
+      const capped = capEntries(allowed, universeNow, snap);
+      const withheld = actions.length - allowed.length + capped.withheld;
+      const { intents, accepted, rejected } = capped;
 
       // Journal the decision BEFORE the intent leaves for the policy wall: every
       // survivor gets a decisionId stamped onto its intent (so the resulting trade
@@ -487,8 +595,17 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       }
 
       if (thesis) note("ok", `strategist: ${thesis}`);
+      if (withheld > 0) {
+        note(
+          "ok",
+          brake
+            ? `strategist: ${withheld} buy proposal(s) withheld — the drawdown breaker is tripped; sells still run`
+            : `strategist: ${withheld} buy proposal(s) withheld — today's energy for new trades is used up; sells still run`,
+        );
+      }
       for (const r of rejected) note("warn", `strategist proposal dropped: ${r}`);
-      for (const a of actions) {
+      // What was KEPT — a withheld buy is announced only as a count, above.
+      for (const a of capped.kept) {
         if (a.action !== "hold" && a.reason) {
           note("ok", `strategist: ${a.action} ${a.sizeUsdg} USDG ${a.symbol} — ${a.reason}`);
         }
@@ -512,11 +629,17 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       // Not reported when a `thesis` was written: that row IS the agent saying
       // what it decided, and two rows for one silence is the duplication the
       // de-duplication upstream exists to avoid.
+      //
+      // UNDER THE BREAKER the reason is the breaker, thesis or not: that is why
+      // nothing went out, and it is the owner's sentence only (publishesIdle),
+      // so it cannot be the second public row for one silence.
       const held = actions.filter((a) => a.action === "hold").length;
       const idle: Why | undefined =
-        intents.length === 0 && !thesis && (actions.length > 0 || rejected.length > 0)
-          ? { code: "model-held", held, considered: actions.length, dropped: rejected.length }
-          : undefined;
+        intents.length === 0 && brake
+          ? brake
+          : intents.length === 0 && !thesis && (actions.length > 0 || rejected.length > 0)
+            ? { code: "model-held", held, considered: actions.length, dropped: rejected.length }
+            : undefined;
       return idle ? { intents, why: intents.map(() => null), idle } : intents;
     },
   };

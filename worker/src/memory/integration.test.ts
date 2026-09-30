@@ -65,7 +65,7 @@ describe("eviction demotes to the archive — it never destroys", () => {
     } finally {
       if (prev === undefined) delete process.env.MERRYMEN_HOME;
       else process.env.MERRYMEN_HOME = prev;
-      rmSync(home2, { recursive: true, force: true });
+      rmSync(home2, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 });

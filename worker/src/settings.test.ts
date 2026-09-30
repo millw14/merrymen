@@ -1,9 +1,23 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { connectionKey, mergeSettings, strategyKey, telegramKey } from "./settings";
-import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
+import { HOSTED_FORBIDDEN_SETTING_FIELDS, SECRET_SETTING_KEYS, SETTINGS_DEFAULTS, TELEGRAM_GROUPS_CHATTINESS } from "../../packages/core/src/index";
 
 describe("mergeSettings — file > env > default", () => {
+  it("fast Trencher is opt-in and rebuilds the strategy without enabling live trades", () => {
+    const standard = mergeSettings({}, {});
+    const fast = mergeSettings({ trencherFastEnabled: true }, {});
+    assert.equal(standard.trencherFastEnabled, false);
+    assert.equal(fast.trencherFastEnabled, true);
+    assert.equal(fast.trencherLiveEnabled, false);
+    assert.equal(fast.liveTradingEnabled, standard.liveTradingEnabled);
+    assert.notEqual(strategyKey(standard), strategyKey(fast));
+  });
+  it("does not let an old slow tick setting silence decisions for more than five minutes", () => {
+    assert.equal(mergeSettings({ tickSeconds: 300 }, {}).tickSeconds, 300);
+    assert.ok(mergeSettings({ tickSeconds: 3600 }, {}).tickSeconds <= 300);
+    assert.ok(mergeSettings({}, { MERRYMEN_TICK_SECONDS: "3600" }).tickSeconds <= 300);
+  });
   it("defaults hold with nothing set", () => {
     const c = mergeSettings({}, {});
     assert.equal(c.strategy, "steady-basket");
@@ -176,6 +190,18 @@ describe("change fingerprints", () => {
     assert.notEqual(strategyKey(a), strategyKey(k1)); // gaining a key = rebuild
   });
 
+  it("strategy key moves on the four fields makeStrategy bakes in, so a change applies without a restart", () => {
+    const a = mergeSettings({}, {});
+    for (const patch of [
+      { takeProfitBps: 2_500 },
+      { strategistStopLossBps: 500 },
+      { deskEnabled: true },
+      { deskMaxSteps: 7 },
+    ]) {
+      assert.notEqual(strategyKey(a), strategyKey(mergeSettings(patch, {})), JSON.stringify(patch));
+    }
+  });
+
   it("telegram key moves on token, enable, allowlist — not on unrelated fields", () => {
     const a = mergeSettings({ telegramBotToken: "t", telegramEnabled: true, telegramAllowlist: [1] }, {});
     const tokenChanged = mergeSettings({ telegramBotToken: "t2", telegramEnabled: true, telegramAllowlist: [1] }, {});
@@ -249,5 +275,153 @@ describe("the trading profile resolves like every other setting — file > env >
     assert.equal(c.profileResearchTopN, 3, "9 is over the ceiling of 5 — each researched candidate is a paid run");
     assert.equal(c.profileHold, "ride", "a word outside the enum cannot reach a prompt");
     assert.equal(c.profileRiskAppetite, "aggressive", "env fills what the file left out");
+  });
+});
+
+/**
+ * THE ENERGY GATE IS THE OPERATOR'S SWITCH, AND ONLY ON THE HOSTED SERVICE.
+ *
+ * A tenant must not be able to switch off the throttle they are under, so the
+ * file is never read for it; and self-hosted it is always off, whatever the
+ * environment says — the owner there pays their own model and runs open code.
+ */
+describe("energyGate — env only, hosted only", () => {
+  const withHosted = <T>(on: boolean, fn: () => T): T => {
+    const before = process.env.MERRYMEN_HOSTED;
+    if (on) process.env.MERRYMEN_HOSTED = "1";
+    else delete process.env.MERRYMEN_HOSTED;
+    try {
+      return fn();
+    } finally {
+      if (before === undefined) delete process.env.MERRYMEN_HOSTED;
+      else process.env.MERRYMEN_HOSTED = before;
+    }
+  };
+
+  it("SELF-HOSTED IS OFF even with MERRYMEN_ENERGY_GATE=1", () => {
+    withHosted(false, () => {
+      assert.equal(mergeSettings({}, { MERRYMEN_ENERGY_GATE: "1" }).energyGate, "off");
+      assert.equal(mergeSettings({}, { MERRYMEN_ENERGY_GATE: "enforce" }).energyGate, "off");
+    });
+  });
+
+  it("hosted: unset is off; 'observe' and '1' parse", () => {
+    withHosted(true, () => {
+      assert.equal(mergeSettings({}, {}).energyGate, "off", "default off in code — the operator flips it");
+      assert.equal(mergeSettings({}, { MERRYMEN_ENERGY_GATE: "observe" }).energyGate, "observe");
+      assert.equal(mergeSettings({}, { MERRYMEN_ENERGY_GATE: "1" }).energyGate, "enforce");
+      assert.equal(mergeSettings({}, { MERRYMEN_ENERGY_GATE: "0" }).energyGate, "off");
+    });
+  });
+
+  it("A FILE KEY IS IGNORED — the throttled party cannot set their own switch", () => {
+    withHosted(true, () => {
+      const file = { energyGate: "off", MERRYMEN_ENERGY_GATE: "0" } as unknown as Parameters<typeof mergeSettings>[0];
+      assert.equal(mergeSettings(file, { MERRYMEN_ENERGY_GATE: "1" }).energyGate, "enforce");
+      const upgrade = { energyGate: "enforce" } as unknown as Parameters<typeof mergeSettings>[0];
+      assert.equal(mergeSettings(upgrade, {}).energyGate, "off", "nor switch one on for somebody else to be billed");
+    });
+  });
+});
+
+describe("mergeSettings — Telegram groups (docs/tg-groups.md \"Settings\")", () => {
+  const withHosted = (on: boolean, run: () => void) => {
+    const before = process.env.MERRYMEN_HOSTED;
+    if (on) process.env.MERRYMEN_HOSTED = "1";
+    else delete process.env.MERRYMEN_HOSTED;
+    try {
+      run();
+    } finally {
+      if (before === undefined) delete process.env.MERRYMEN_HOSTED;
+      else process.env.MERRYMEN_HOSTED = before;
+    }
+  };
+
+  it("defaults: on, coins on, normal — and the defaults are core's, not a second copy", () => {
+    const c = mergeSettings({}, {});
+    assert.equal(c.telegramGroupsEnabled, true);
+    assert.equal(c.telegramGroupCoinsEnabled, true);
+    assert.equal(c.telegramGroupsChattiness, "normal");
+    assert.equal(SETTINGS_DEFAULTS.telegramGroupsEnabled, true);
+    assert.equal(SETTINGS_DEFAULTS.telegramGroupCoinsEnabled, true);
+    assert.equal(SETTINGS_DEFAULTS.telegramGroupsChattiness, "normal");
+    assert.deepEqual([...TELEGRAM_GROUPS_CHATTINESS], ["quiet", "normal", "chatty"]);
+  });
+
+  it("env fills what the file leaves empty", () => {
+    const c = mergeSettings({}, {
+      MERRYMEN_TELEGRAM_GROUPS: "0",
+      MERRYMEN_TELEGRAM_GROUP_COINS: "false",
+      MERRYMEN_TELEGRAM_GROUPS_CHATTINESS: "quiet",
+    });
+    assert.equal(c.telegramGroupsEnabled, false);
+    assert.equal(c.telegramGroupCoinsEnabled, false);
+    assert.equal(c.telegramGroupsChattiness, "quiet");
+    const on = mergeSettings({}, { MERRYMEN_TELEGRAM_GROUPS: "true", MERRYMEN_TELEGRAM_GROUP_COINS: "1", MERRYMEN_TELEGRAM_GROUPS_CHATTINESS: "chatty" });
+    assert.equal(on.telegramGroupsEnabled, true);
+    assert.equal(on.telegramGroupCoinsEnabled, true);
+    assert.equal(on.telegramGroupsChattiness, "chatty");
+  });
+
+  it("the settings file (the dashboard) beats env, in both directions", () => {
+    const env = { MERRYMEN_TELEGRAM_GROUPS: "0", MERRYMEN_TELEGRAM_GROUP_COINS: "0", MERRYMEN_TELEGRAM_GROUPS_CHATTINESS: "quiet" };
+    const c = mergeSettings({ telegramGroupsEnabled: true, telegramGroupCoinsEnabled: true, telegramGroupsChattiness: "chatty" }, env);
+    assert.equal(c.telegramGroupsEnabled, true);
+    assert.equal(c.telegramGroupCoinsEnabled, true);
+    assert.equal(c.telegramGroupsChattiness, "chatty");
+    const off = mergeSettings(
+      { telegramGroupsEnabled: false, telegramGroupCoinsEnabled: false, telegramGroupsChattiness: "quiet" },
+      { MERRYMEN_TELEGRAM_GROUPS: "1", MERRYMEN_TELEGRAM_GROUP_COINS: "1", MERRYMEN_TELEGRAM_GROUPS_CHATTINESS: "chatty" },
+    );
+    assert.equal(off.telegramGroupsEnabled, false, "an owner's off is not overridden by the house turning it on");
+    assert.equal(off.telegramGroupCoinsEnabled, false);
+    assert.equal(off.telegramGroupsChattiness, "quiet");
+  });
+
+  it("a chattiness it does not know falls back — to env if env is valid, else to normal, never to anything louder", () => {
+    for (const bad of ["loud", "CHATTY", "Quiet", "", " normal", 3, true, null]) {
+      const file = { telegramGroupsChattiness: bad } as unknown as Parameters<typeof mergeSettings>[0];
+      assert.equal(mergeSettings(file, {}).telegramGroupsChattiness, "normal", `file ${JSON.stringify(bad)}`);
+      assert.equal(mergeSettings(file, { MERRYMEN_TELEGRAM_GROUPS_CHATTINESS: "quiet" }).telegramGroupsChattiness, "quiet", `file ${JSON.stringify(bad)} with env`);
+    }
+    assert.equal(mergeSettings({}, { MERRYMEN_TELEGRAM_GROUPS_CHATTINESS: "rowdy" }).telegramGroupsChattiness, "normal");
+  });
+
+  it("a non-boolean switch in the file is not read as one — env or the default decides", () => {
+    // `bool()` takes only a real boolean from the file: the string "false" is
+    // truthy to any reader that forgets `=== true`.
+    const file = { telegramGroupsEnabled: "false", telegramGroupCoinsEnabled: 0 } as unknown as Parameters<typeof mergeSettings>[0];
+    const c = mergeSettings(file, {});
+    assert.equal(c.telegramGroupsEnabled, true);
+    assert.equal(c.telegramGroupCoinsEnabled, true);
+    assert.equal(mergeSettings(file, { MERRYMEN_TELEGRAM_GROUP_COINS: "0" }).telegramGroupCoinsEnabled, false);
+  });
+
+  it("HOSTED, a tenant's own choices stand — these are not house keys and not remote execution", () => {
+    withHosted(true, () => {
+      const c = mergeSettings(
+        { telegramGroupsEnabled: false, telegramGroupCoinsEnabled: false, telegramGroupsChattiness: "quiet" },
+        { MERRYMEN_TELEGRAM_GROUPS: "1", MERRYMEN_TELEGRAM_GROUP_COINS: "1", MERRYMEN_TELEGRAM_GROUPS_CHATTINESS: "chatty" },
+      );
+      assert.equal(c.telegramGroupsEnabled, false);
+      assert.equal(c.telegramGroupCoinsEnabled, false);
+      assert.equal(c.telegramGroupsChattiness, "quiet");
+      const d = mergeSettings({}, {});
+      assert.equal(d.telegramGroupsEnabled, true);
+      assert.equal(d.telegramGroupsChattiness, "normal");
+    });
+    for (const k of ["telegramGroupsEnabled", "telegramGroupCoinsEnabled", "telegramGroupsChattiness"]) {
+      assert.ok(!(HOSTED_FORBIDDEN_SETTING_FIELDS as readonly string[]).includes(k), `${k} is hosted-forbidden`);
+      assert.ok(!(SECRET_SETTING_KEYS as readonly string[]).includes(k), `${k} is masked as a secret`);
+    }
+  });
+
+  it("the switches do not rebuild the strategy or re-arm the executor", () => {
+    // Group behaviour is read live by the Telegram poller on every poll; it is
+    // not a trading field, so flipping it must not look like a strategy change.
+    const a = mergeSettings({}, {});
+    const b = mergeSettings({ telegramGroupsEnabled: false, telegramGroupCoinsEnabled: false, telegramGroupsChattiness: "chatty" }, {});
+    assert.equal(strategyKey(a), strategyKey(b));
+    assert.equal(connectionKey(a), connectionKey(b));
   });
 });

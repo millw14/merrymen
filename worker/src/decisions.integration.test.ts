@@ -16,7 +16,7 @@ import path from "node:path";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-dec-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, addDecision, addTrade, newDecisionId, getBasis, setBasis, getRealizedPnlUsdg } =
+const { closeStoreForTest, initStore, addDecision, addTrade, newDecisionId, getBasis, setBasis, getRealizedPnlUsdg } =
   await import("./store");
 const { readWhyEvidence, readPnl } = await import("./telegram/reads");
 const { applyFill } = await import("./basis");
@@ -24,11 +24,8 @@ const { applyFill } = await import("./basis");
 const AGENT = "0x000000000000000000000000000000000000a9e7";
 
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* temp dir cleanup is best-effort */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("decisions substrate — /why joins the trade to its own decision", () => {

@@ -1,0 +1,14 @@
+{
+  "chainId": 4663,
+  "factory": "0x32a2a19a9a0ff54ffcaeb40955fd710e77cbbbf7",
+  "codeHash": "0xd450d4761ccb39e8b8f623e84884f1424c7b580f91a62822a5f3c024b7b3a1a4",
+  "infrastructure": [
+    "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
+    "0xcaf681a66d020601342297493863e78c959e5cb2",
+    "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+  ],
+  "compiler": "0.8.28",
+  "perBuyUsdg": 5,
+  "dailyBuysUsdg": 25
+}

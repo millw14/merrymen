@@ -8,6 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { readFileSync } from "node:fs";
 
 import { CANARY, describeCanaryChange, mergeCanary, MUST_PRESERVE, HALT_ENTRIES, HALT_MUST_PRESERVE, mergeHaltEntries, RESUME_ENTRIES, mergeResumeEntries, DAVE_CLASS, classEnableBlockers } from "./enable-class";
 
@@ -306,5 +307,67 @@ describe("enabling the class route sets the asset mode that permits it", () => {
     // shortened to make a proof finish sooner.
     assert.equal(DAVE_CLASS.classMaxHoldSec, 21_600);
     assert.equal(DAVE_CLASS.classExitAtGraduationPct, 85);
+  });
+});
+
+/**
+ * THE DERIVATION THAT FEEDS THE BLOCKER, not the blocker itself.
+ *
+ * `classEnableBlockers` compares a sealed vault against a derived one and
+ * refuses when they differ. That rule is correct and must not be relaxed — a
+ * genuine mismatch is a wall pinning a vault the executor never uses.
+ *
+ * What was wrong is the address it was handed. The orchestrator derived its
+ * comparison vault from the v1 factory constant alone, so for a grant sealed
+ * against a v2 factory the mismatch was the CORRECT state and the refusal was a
+ * false blocker wearing a real safety refusal's clothes. That is why a correctly
+ * signed v2 grant could not be put into service at all.
+ *
+ * Source-scanned rather than executed, which is the idiom this repo already uses
+ * for a claim about how a call site is wired (see revert.test.ts's .sol scan).
+ * The alternative is standing up a fake RPC to prove which constant was read.
+ */
+describe("enable-class derives its comparison vault from the factory that was SEALED", () => {
+  const ORCH = readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8");
+
+  it("reads the grant's own factory before falling back to either constant", () => {
+    assert.match(
+      ORCH,
+      /grantPonsClassVaultFactory\(g as never\)/,
+      "the signature is the authority — it is what the wall was built from",
+    );
+    assert.ok(
+      ORCH.includes("PONS_CLASS_VAULT_FACTORY_V2"),
+      "and a v2 grant must have a constant to fall back to as well",
+    );
+  });
+
+  it("NO INLINE vaultFor ABI, because two copies of one selector drift apart", () => {
+    // The orchestrator carried its own literal copy of the vaultFor ABI while
+    // packages/core exported the constant the wall and the signer both use.
+    // A pinned call and an encoded call disagreeing is the failure this repo
+    // has already paid for once.
+    const inlineVaultFor = /name:\s*"vaultFor"/.exec(ORCH);
+    assert.equal(
+      inlineVaultFor,
+      null,
+      "orchestrator.ts must read vaultFor through PONS_CLASS_VAULT_FACTORY_ABI, not a local literal",
+    );
+    assert.ok(ORCH.includes("PONS_CLASS_VAULT_FACTORY_ABI"), "and it must import the shared one");
+  });
+
+  it("the blocker rule itself is UNCHANGED — a real mismatch still refuses", () => {
+    // Guarding against the fix that would have been easier and wrong: relaxing
+    // the comparison instead of correcting the address handed to it.
+    const differ = classEnableBlockers({
+      sealedVault: "0x1111111111111111111111111111111111111111",
+      derivedVault: "0x2222222222222222222222222222222222222222",
+    });
+    assert.ok(differ.length > 0, "a wall pinning a vault the executor never uses must still be refused");
+    const agree = classEnableBlockers({
+      sealedVault: "0x1111111111111111111111111111111111111111",
+      derivedVault: "0x1111111111111111111111111111111111111111",
+    });
+    assert.deepEqual(agree, [], "and agreement is not a blocker, whichever factory produced it");
   });
 });

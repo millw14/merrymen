@@ -1,26 +1,14 @@
 import { MessageSquare, Trophy, Search, UserRound, Layers, Activity, Wallet, type LucideIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { faceSrc } from "./live";
+import { useAgentImageSrc } from "./agent-image-state";
+import { useWired } from "@/components/WiredProvider";
 import { shortAddress, xProfileUrl } from "@/lib/x-handle";
 import { ownerTag } from "./strategy";
-
-function hueOf(seed: string): number {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 360;
-  return h;
-}
-
-function initialsOf(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0) return "??";
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return (words[0][0] + words[1][0]).toUpperCase();
-}
-
-function gradient(seed: string): string {
-  const h = hueOf(seed);
-  return `linear-gradient(145deg, hsl(${h} 62% 62%), hsl(${(h + 42) % 360} 58% 44%))`;
-}
+import { useTrend, type Trend } from "./motion";
+// The one face recipe. This file used to carry its own copy of these, so the
+// terminal's faces and components/AgentAvatar's could drift with nothing to
+// notice — and changing the seed would have meant changing both.
+import { avatarGradient, faceSeed, initialsOf } from "@/lib/agent-avatar";
 
 export function Face({
   name,
@@ -36,11 +24,37 @@ export function Face({
   pin?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
-  const src = faceSrc(slug ?? null);
+  const src = useAgentImageSrc(slug ?? null, "avatar");
   useEffect(()=>setFailed(false),[src]);
-  const cls = large ? "face lg" : pin ? "face pin" : small ? "face sm" : "face";
+  /**
+   * THE WIRE RING, AND WHY IT IS READ HERE RATHER THAN PASSED IN.
+   *
+   * Which agents you read is a fact about the VIEWER, and the screens above are
+   * server-rendered and cached — `read-theses.ts` records that its response is
+   * byte-identical for every visitor BY CONSTRUCTION, and that a session read
+   * in that path turns the caching into a leak. So the pages stay cacheable and
+   * the ring is applied in this leaf, after paint, from a route that is already
+   * per-caller and already `force-dynamic`.
+   *
+   * This is the same argument `components/AgentAvatar.tsx` makes, and it is
+   * here because that file is not on any screen — the terminal renders `Face`.
+   * The ring claim ("it appears everywhere that agent appears") was written
+   * there and was false everywhere until this.
+   *
+   * A signed-out viewer has an empty set and sees no rings, which is correct:
+   * they have no agent to wire with. `known` is not consulted, deliberately —
+   * an unknown answer and an empty one both mean "draw no ring", and the only
+   * difference between them is a claim this element does not make.
+   */
+  const { wired } = useWired();
+  const on = slug != null && wired.includes(slug);
+  const cls = `${large ? "face lg" : pin ? "face pin" : small ? "face sm" : "face"}${on ? " wired" : ""}`;
   return (
-    <span className={cls} style={{ background: gradient(name) }} aria-hidden>
+    // THE GRADIENT FOLLOWS THE SLUG, THE INITIALS FOLLOW THE NAME. Seeded on the
+    // name, every "Robin" was one colour with one "RO", and a feed of different
+    // agents read as one agent talking to itself. The slug is minted once and
+    // never changes, so a rename keeps the face too.
+    <span className={cls} style={{ background: avatarGradient(faceSeed(name, slug)) }} aria-hidden>
       {initialsOf(name)}
       {src && !failed && <img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} />}
     </span>
@@ -123,14 +137,35 @@ export function Delta({ value, suffix = "", size = 13 }: { value: number | null;
   );
 }
 
-/** Replays on every text change, so a figure reads as having just moved. */
-export function Flip({ text, dir = "up" }: { text: string; dir?: "up" | "down" }) {
+/**
+ * Replays when its text changes, so a figure reads as having just moved — in
+ * the direction it moved, and not at all when `dir` is null.
+ *
+ * NULL IS THE FIRST DRAW. A remount replays a keyed animation, so a Flip with a
+ * fixed direction flipped every price on the screen each time the screen was
+ * drawn, as if the whole market had just ticked up. `data-trend` carries the
+ * direction for the colour the stylesheet gives a move (live-motion.css).
+ */
+export function Flip({ text, dir = null, children }: { text: string; dir?: Trend; children?: ReactNode }) {
   return (
-    <span className="flip-slot">
-      <span key={text} className={dir === "up" ? "flip" : "flip rev"}>
-        {text}
+    <span className="flip-slot" data-trend={dir ?? undefined}>
+      <span key={text} className={dir === null ? "flip-still" : dir === "up" ? "flip" : "flip rev"}>
+        {children ?? text}
       </span>
     </span>
+  );
+}
+
+/**
+ * A figure that flips when its value moves between two readings AND the move
+ * reaches the text on screen — see motion.ts.
+ */
+export function MovingFigure({ value, text, children }: { value: number | null; text: string; children?: ReactNode }) {
+  const dir = useTrend(value, text);
+  return (
+    <Flip text={text} dir={dir}>
+      {children}
+    </Flip>
   );
 }
 
@@ -261,7 +296,7 @@ export function Coin({ symbol, logo }: { symbol: string; logo: string }) {
   const initials =
     symbol.replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase() || "?";
   return (
-    <span className="coin" style={!logo || failed ? { background: gradient(symbol) } : undefined}>
+    <span className="coin" style={!logo || failed ? { background: avatarGradient(symbol) } : undefined}>
       {!logo || failed ? (
         initials
       ) : (

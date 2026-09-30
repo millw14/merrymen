@@ -89,6 +89,11 @@ export interface BrainOrder {
   usdgAmount: number;
 }
 
+/** A paper fill changes the book too, even though no real money moved. */
+export function tradeConsumesSnapshot(status: string | null | undefined): boolean {
+  return status === "landed" || status === "submitted" || status === "paper";
+}
+
 export type BrainOrderVerdict = { ok: true; order: BrainOrder } | { ok: false; why: string };
 
 /**
@@ -112,6 +117,9 @@ export function orderFromDecision(
   limits: { maxUsdg: number; minUsdg?: number },
 ): BrainOrderVerdict {
   if (d.action === "hold") return { ok: false, why: "held" };
+  if (d.gate_verdict === "refuse" || d.gate_verdict === "downgrade-to-hold") {
+    return { ok: false, why: "the portfolio gate did not permit an order" };
+  }
   if (d.action !== "buy" && d.action !== "sell") return { ok: false, why: `unknown action ${String(d.action)}` };
 
   const micro = d.suggested_delta_usdg;
@@ -124,6 +132,9 @@ export function orderFromDecision(
   // this chain at 0.38-0.78 USDG a swap, so anything under a couple of dollars
   // is the owner paying the chain for the privilege of a rounding error.
   const floor = limits.minUsdg ?? 0;
+  if (!Number.isFinite(limits.maxUsdg) || !Number.isFinite(floor) || floor < 0) {
+    return { ok: false, why: "the order limits are not finite valid amounts" };
+  }
   if (usdgAmount <= 0) return { ok: false, why: "size rounds to nothing" };
   if (usdgAmount < floor) {
     return { ok: false, why: `${usdgAmount.toFixed(2)} USDG is under the ${floor} USDG floor for a trade worth making` };
@@ -134,8 +145,10 @@ export function orderFromDecision(
   // than it may have should get what it may have, not nothing: refusing would
   // turn one over-ask into a permanent hold, and the wall's own cap is the
   // number that actually binds either way.
-  const usdgClamped = Math.min(usdgAmount, limits.maxUsdg);
+  // Round down: nearest-cent rounding can exceed a signed fractional cap.
+  const usdgClamped = Math.floor(Math.min(usdgAmount, limits.maxUsdg) * 100) / 100;
   if (!(usdgClamped > 0)) return { ok: false, why: "the ceiling for this agent is zero" };
+  if (usdgClamped < floor) return { ok: false, why: "the permitted size is below the trade floor" };
 
   const symbol = String(d.symbol ?? "").trim().toUpperCase();
   // A ticker, not a sentence and not an address. `instrument_id` is
@@ -144,5 +157,5 @@ export function orderFromDecision(
   // to a token lookup.
   if (!/^[A-Z0-9]{1,12}$/.test(symbol)) return { ok: false, why: `'${String(d.symbol)}' is not a symbol I can look up` };
 
-  return { ok: true, order: { side: d.action, symbol, usdgAmount: Math.round(usdgClamped * 100) / 100 } };
+  return { ok: true, order: { side: d.action, symbol, usdgAmount: usdgClamped } };
 }

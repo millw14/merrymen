@@ -447,12 +447,37 @@ export function boundGas(
       };
     }
   }
-  if (bounds.callMax !== undefined && gas.callGasLimit > bounds.callMax) {
+  // ── JUDGED ON THE ESTIMATE, NOT ON OUR OWN PADDING ──────────────────────
+  //
+  // `first.callGasLimit`, not `gas.callGasLimit`. The headroom exists to make
+  // the SIGNED limit safe to include at — the call is the one field that fails
+  // silently and charges when it is too low (see GAS_BOUNDS) — and it is
+  // deliberately generous at 2x because pool state moves between estimate and
+  // inclusion. It is not a claim about how big the operation IS, so it has no
+  // business in a test asking whether the operation is absurd.
+  //
+  // This file has already paid for that distinction once, in the comment above
+  // `callHeadroomBps`: a first operation estimating 50,180 call gas was refused
+  // at a signed 15,423,308 "while the RAW total clears the ceiling it was
+  // refused by — the doubling was the whole refusal."
+  //
+  // MEASURED AGAIN, 2026-09-20, the same canary: Shogun's first autonomous
+  // Trencher buy is deploy + approve + buy, and estimated at 2,128,793 raw call
+  // gas TWICE, identically — a CREATE2 of fixed bytecode is deterministic, and
+  // is exactly the kind of cost the 2x was not sized for. Raw sits 871,207
+  // under the ceiling; doubled it sits 1,257,586 over it. Every first Trencher
+  // buy was refused for the padding rather than for the operation.
+  //
+  // The signed number is unchanged: `gas.callGasLimit` still carries the full
+  // 2x into the operation. What changed is which number the question is asked
+  // of. The total below still holds the padded figure against the hard maximum,
+  // so nothing signs for more than this file already allowed.
+  if (bounds.callMax !== undefined && first.callGasLimit > bounds.callMax) {
     return {
       ok: false,
       rule: "gas-absurd",
       detail:
-        `the operation riding along with this enable wants ${gas.callGasLimit} call gas, past the ` +
+        `the operation riding along with this enable estimates ${first.callGasLimit} call gas, past the ` +
         `${bounds.callMax} an ordinary operation is allowed. A first enable may not carry a call this ` +
         "account could not make on any other day. Refused before signing — nothing was spent.",
     };

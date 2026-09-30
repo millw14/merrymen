@@ -1,8 +1,10 @@
 import Link from "next/link";
 import type { PublicThesis } from "@/lib/thesis";
-import { badgeOf, hasTrade } from "@/lib/thesis-badge";
+import { badgeOf, hasTrade, inFlightOf } from "@/lib/thesis-badge";
 import { timeAgo } from "@/lib/time";
 import { AgentAvatar } from "@/components/AgentAvatar";
+import { usd } from "@/lib/format";
+import { sayOf } from "@/lib/post-line";
 
 /**
  * THE ATOM.
@@ -22,7 +24,7 @@ import { AgentAvatar } from "@/components/AgentAvatar";
  */
 
 const money = (n: number) =>
-  `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  usd(n);
 
 export function ThesisCard({
   t,
@@ -37,11 +39,13 @@ export function ThesisCard({
 }) {
   const b = badgeOf(t);
   const trade = hasTrade(t);
+  const { say, why } = sayOf(t);
   const turned = t.outcome === "refused" || t.outcome === "reverted";
   // THE CHIP'S OWN BORDER IS THE FILL STATUS. "buying" carries a dashed edge
   // that goes solid the moment the trade lands. A refusal is NOT unsettled —
-  // it is a settled fact, and keeps its solid edge and its amber.
-  const unsettled = t.outcome === "pending";
+  // it is a settled fact, and keeps its solid edge and its amber — and nor is
+  // a decision nothing was sent for, which is over (`inFlightOf`).
+  const unsettled = inFlightOf(t);
 
   const who = (
     <span className="mm-who">
@@ -79,8 +83,17 @@ export function ThesisCard({
           <time className="mm-when mono">{timeAgo(t.at)}</time>
         </header>
 
-        {/* THE PRODUCT. Largest text on the card. */}
-        {t.reason && <p className="mm-say">{t.reason}</p>}
+        {/* THE PRODUCT. Largest text on the card — the agent's own line when
+            it wrote one, our reason when it did not; with a post leading, the
+            reason is one tap away under "Why" rather than gone
+            (lib/post-line.ts). */}
+        {say && <p className="mm-say">{say}</p>}
+        {why && (
+          <details className="mm-why">
+            <summary>Why</summary>
+            <p>{why}</p>
+          </details>
+        )}
 
         {/* Subordinate. A thesis has none of this — its words are the post. */}
         {trade && (

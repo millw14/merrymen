@@ -118,7 +118,7 @@ describe("soul files are re-sanitized on READ, not just on write", () => {
     } finally {
       if (prev === undefined) delete process.env.MERRYMEN_HOME;
       else process.env.MERRYMEN_HOME = prev;
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   };
 
@@ -194,7 +194,7 @@ describe("ageDays — the merryman's real age from its born date", () => {
     } finally {
       if (prev === undefined) delete process.env.MERRYMEN_HOME;
       else process.env.MERRYMEN_HOME = prev;
-      rmSync(home, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 });

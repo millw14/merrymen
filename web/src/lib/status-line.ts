@@ -27,6 +27,8 @@
  * Pure, so the wording is testable without a browser, a chain, or a ledger.
  */
 
+import { usdAdaptive } from "@/lib/format";
+
 export interface AgentSnapshot {
   name: string;
   /** What the worker reports it is doing. `idle` means it is not running. */
@@ -73,7 +75,7 @@ export interface StatusLine {
 
 /** `$1,234` — money the way a person writes it, never `1234.00 USDG`. */
 function money(n: number): string {
-  return `$${n.toLocaleString("en-US", { maximumFractionDigits: n < 100 ? 2 : 0 })}`;
+  return usdAdaptive(n);
 }
 
 /**

@@ -34,15 +34,22 @@ export async function GET(req: Request) {
   const agent = await hostedAgentFor(req);
   if (!agent) return new NextResponse("not found", { status: 404 });
 
+  type Row = ClosedFillRow & { coin_symbol?: string | null };
   const row = await withReadDb(async (db) => {
     if (!db) return null;
     try {
+      // THE COIN'S NAME, from the same place the feed and the profile take it
+      // (`COALESCE(t.fill_symbol, d.symbol)`). `target` is the router or the
+      // vault on every on-chain row, so the card must never be drawn from it —
+      // it once showed an owner their own vault's address as the coin.
       const rows = (await db
         .prepare(
-          `SELECT target, fill_side, fill_cash_usdg, realized_pnl_usdg, status
-           FROM trades WHERE id = ? AND agent_id = ?`,
+          `SELECT t.target, t.fill_side, t.fill_cash_usdg, t.realized_pnl_usdg, t.status,
+                  COALESCE(t.fill_symbol, d.symbol) AS coin_symbol
+             FROM trades t LEFT JOIN decisions d ON d.id = t.decision_id AND d.agent_id = t.agent_id
+            WHERE t.id = ? AND t.agent_id = ?`,
         )
-        .all(id, agent)) as unknown as ClosedFillRow[];
+        .all(id, agent)) as unknown as Row[];
       return rows[0] ?? null;
     } catch {
       // Ledger not created yet, or a schema without the fill columns.
@@ -51,11 +58,20 @@ export async function GET(req: Request) {
   });
   if (!row) return new NextResponse("not found", { status: 404 });
 
+  // A Trencher id (`T` + 11 hex) or an address is an identifier, not a name.
+  const coin = (row.coin_symbol ?? "").trim();
+  const named = coin && !/^0x/i.test(coin) && !/^T[0-9A-F]{11}$/.test(coin) ? coin : null;
+
   // A buy, a refusal, or a sale with no cost basis has no card to draw. That is
   // a 409 and not a 500: the trade is real, it simply has no P&L to state.
-  const card = pnlCardFromFill(row);
+  const card = pnlCardFromFill(row, named);
   if (!card) {
-    return new NextResponse("that trade did not close a position at a knowable P&L", { status: 409 });
+    return new NextResponse(
+      row.fill_side === "sell" && row.realized_pnl_usdg != null && !named
+        ? "we don't know that coin's name, so there is no card to draw"
+        : "that trade did not close a position at a knowable P&L",
+      { status: 409 },
+    );
   }
 
   let png: Buffer;

@@ -34,6 +34,15 @@ export interface TenantFacts {
   /** `vaultFor(smartAccount)` — deterministic, whether or not it was sealed. */
   derivedClassVault: string | null;
   /**
+   * The factory the derivation came from, so a reader can tell WHICH one.
+   *
+   * A diagnostic printing one derived address while the grant seals another
+   * sends an operator looking for a bug that is not there — and after v2 the two
+   * factories produce different addresses for the same account, so the address
+   * alone cannot say which was asked. Null when nothing was derived.
+   */
+  derivedFromFactory?: string | null;
+  /**
    * Has the vault contract been created?
    *
    * Null when the chain would not answer. Not false — an unread code check and
@@ -126,7 +135,9 @@ export function describeTenant(f: TenantFacts): string[] {
     `tenant                        ${f.tenant}`,
     `smartAccount                  ${f.smartAccount ?? "UNKNOWN"}`,
     `grantPonsClassVault(grant)    ${f.grantClassVault ?? "null"}`,
-    `derived vaultFor(account)     ${f.derivedClassVault ?? "UNKNOWN"}`,
+    `derived vaultFor(account)     ${f.derivedClassVault ?? "UNKNOWN"}${
+      f.derivedFromFactory ? `   (via factory ${f.derivedFromFactory})` : ""
+    }`,
     ``,
     `class vault sealed in grant:  ${yesNo(f.grantClassVault === null ? false : true)}`,
     `class vault deployed on-chain: ${yesNo(f.vaultDeployed)}`,

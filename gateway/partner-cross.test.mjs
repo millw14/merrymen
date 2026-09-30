@@ -21,7 +21,7 @@ const dir = await mkdtemp(path.join(tmpdir(), "merrymen-cross-"));
 process.env.MERRYMEN_DATA_DIR = dir;
 delete process.env.MERRYMEN_PARTNER_KEYS;
 
-const { createPartners, hashSecret, makeKey, writeRecord } = await import("./lib/partners.mjs");
+const { createPartners, hashSecret, makeKey, parseKey, writeRecord } = await import("./lib/partners.mjs");
 const { createPartnerApi } = await import("./lib/partner-api.mjs");
 const { createGateway } = await import("./lib/core.mjs");
 
@@ -138,7 +138,29 @@ test("a valid partner key gets its own metadata, and scope is enforced", async (
   assert.equal(meta.status, 200);
   assert.deepEqual(meta.json.scopes, ["read:agents"]);
   // The secret must never come back out of any response.
-  assert.equal(JSON.stringify(meta.json).includes(key.split("_")[2]), false);
+  //
+  // SPLIT BY THE PARSER, NOT BY `_`. This read the secret as
+  // `key.split("_")[2]`, and a partner secret is base64url — an alphabet that
+  // CONTAINS the underscore (`KEY_RE` at partners.mjs:71 spells it out:
+  // `[A-Za-z0-9_-]{16,128}`). So that expression did not return the secret. It
+  // returned whatever preceded the secret's first underscore, which over 20k
+  // sampled keys was the whole secret only 51.6% of the time.
+  //
+  // Both halves of that are bugs, and the quiet half is the worse one:
+  //
+  //   - 1.6% of secrets START with an underscore, making the fragment EMPTY —
+  //     and `String.includes("")` is always true, so the assertion failed on a
+  //     response that leaked nothing. That is what reddened main today, twice,
+  //     on a comment-only commit, while this suite passed 40/40 locally.
+  //   - the other ~48% passed while checking a TRUNCATED fragment. A 2-char
+  //     needle proves nothing about whether a 43-char secret leaked, so the
+  //     assertion was weakest exactly when it was green.
+  //
+  // `parseKey` is the same function the gateway authenticates with, so the test
+  // now reads the key the way production does instead of guessing at its shape.
+  const secret = parseKey(key)?.secret;
+  assert.ok(secret, "the minted key must parse — otherwise this asserts nothing");
+  assert.equal(JSON.stringify(meta.json).includes(secret), false);
   assert.ok(store.hits.some((h) => h.startsWith("p:")), "an authenticated call should meter");
 });
 

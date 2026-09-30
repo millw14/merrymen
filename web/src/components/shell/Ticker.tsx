@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import type { MarketData } from "@/lib/market";
+import { compactUsd, count, subCentUsd, usdFixed } from "@/lib/format";
+import { MovingFigure } from "@/terminal/ui";
 
 /**
  * THE TAPE ALONG THE BOTTOM.
@@ -12,28 +14,127 @@ import type { MarketData } from "@/lib/market";
  * agents; with it, it reads as somewhere trading happens — which is the honest
  * framing, because it is.
  *
- * Cheap by construction: one fetch of /api/market, which is already cached for
- * thirty seconds and already read by /tokens, so a visitor moving between pages
- * pays nothing extra. No animation, no marquee — it SCROLLS if it overflows,
- * because a moving strip of prices is unreadable and this one is meant to be
- * read.
+ * No marquee — it SCROLLS if it overflows, because a moving strip of prices is
+ * unreadable and this one is meant to be read. A price that changes flips in
+ * place (MovingFigure), which says it moved without making it move past you.
+ *
+ * TWO FEEDERS, ONE STRIP. `TickerStrip` draws whatever rows it is handed. The
+ * terminal hands it the market it already reads every thirty seconds (see
+ * terminal/ticker.ts), so its tape costs no request of its own; `Ticker` below
+ * is the old self-fetching tape for the AppShell, which nothing mounts today.
  */
 
 const money = (n: number | null): string => {
   if (n === null || !Number.isFinite(n)) return "—";
-  if (n >= 1000) return `$${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
-  if (n >= 1) return `$${n.toFixed(2)}`;
-  return `$${n.toPrecision(3)}`;
+  if (n >= 1000) return usdFixed(n, 0);
+  if (n >= 1) return usdFixed(n, 2);
+  return subCentUsd(n);
 };
 
-const compact = (n: number | null): string => {
-  if (n === null || !Number.isFinite(n)) return "—";
-  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
-  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `$${Math.round(n / 1e3)}k`;
-  return `$${Math.round(n)}`;
-};
+/**
+ * WAS A HAND-ROLLED SCALE, and it is the exact case the seam exists for.
+ * "$1.2B" read on the long scale — Spanish, Italian, Dutch, European
+ * Portuguese — is 10^12, a thousandfold overstatement with nothing on screen
+ * to notice; and no k/M/B table can express Chinese, Japanese or Korean, which
+ * regroup at 10^8.
+ */
+const compact = compactUsd;
 
+export interface TickerItem {
+  key: string;
+  href: string;
+  symbol: string;
+  priceUsd: number | null;
+  volume24hUsd: number | null;
+  /** Only ever true when the chain said so. */
+  halted: boolean;
+  /** Only ever true when the price's own clock is over an hour old. */
+  stale: boolean;
+}
+
+export function TickerStrip({
+  items,
+  wall = null,
+  className,
+  children,
+}: {
+  items: readonly TickerItem[];
+  wall?: { turned: number; through: number } | null;
+  className?: string;
+  /** Controls that belong on the tape — the terminal's sound toggle. */
+  children?: ReactNode;
+}) {
+  if (!items.length && !wall) return null;
+  return (
+    <aside className={className ? `mm-ticker ${className}` : "mm-ticker"} aria-label="Market">
+      <div className="mm-ticker-scroll">
+        {/* THE FLEET'S OWN NUMBER FIRST. Every other tape on the internet opens
+            with BTC; this product's headline fact is the boundary, so it opens
+            with how many intents the wall turned back today. */}
+        {wall && (
+          <Link href="/" className="mm-tick fleet">
+            <span className="k">wall</span>
+            <b className="mono warn">{count(wall.turned)}</b>
+            <span className="mono dim">turned</span>
+            <b className="mono up">{count(wall.through)}</b>
+            <span className="mono dim">through</span>
+          </Link>
+        )}
+
+        {items.map((t) => (
+          // PREFETCH IS BACK ON, and the reason it was off has gone.
+          //
+          // It was disabled because fourteen of these sit in the viewport on
+          // every page and /t/[token] is force-dynamic, so the default would
+          // have warmed fourteen full server renders. That is only true
+          // without a loading boundary: with one, the router prefetches the
+          // route up to its loading.tsx and no further — a static skeleton,
+          // not a ledger read. So the click is instant and costs nothing.
+          <Link key={t.key} href={t.href} className="mm-tick">
+            <span className="k">{t.symbol}</span>
+            <b className="mono">
+              <MovingFigure value={t.priceUsd} text={money(t.priceUsd)} />
+            </b>
+            {t.volume24hUsd !== null && <span className="mono dim">{compact(t.volume24hUsd)}</span>}
+            {/* A stale feed is said, not hidden. A price nobody has updated in
+                an hour is not a current price, and a tape that implies it is
+                is worse than one that admits it. */}
+            {t.halted ? (
+              <span className="mono halted">halted</span>
+            ) : t.stale ? (
+              <span className="mono stale" title="This feed has not updated in over an hour">
+                stale
+              </span>
+            ) : null}
+          </Link>
+        ))}
+      </div>
+      {children}
+    </aside>
+  );
+}
+
+/** The market read as tape rows — for the self-fetching tape below. */
+export function marketItems(market: MarketData | null, nowSec: number): TickerItem[] {
+  return (market?.tokens ?? [])
+    .filter((t) => t.priceUsd !== null)
+    .slice(0, 14)
+    .map((t) => ({
+      key: t.address,
+      href: `/t/${t.address}`,
+      symbol: t.symbol,
+      priceUsd: t.priceUsd,
+      volume24hUsd: t.volume24hUsd,
+      halted: t.paused === true,
+      stale: t.priceUpdatedAt !== null && nowSec - t.priceUpdatedAt > 3600,
+    }));
+}
+
+/**
+ * The self-fetching tape: one fetch of /api/market, which is already cached
+ * for thirty seconds and already read by /tokens, so a visitor moving between
+ * pages pays nothing extra.
+ */
 export function Ticker() {
   const [market, setMarket] = useState<MarketData | null>(null);
   const [wall, setWall] = useState<{ turned: number; through: number } | null>(null);
@@ -66,59 +167,5 @@ export function Ticker() {
     };
   }, []);
 
-  const tokens = (market?.tokens ?? [])
-    .filter((t) => t.priceUsd !== null)
-    .slice(0, 14);
-
-  if (!tokens.length && !wall) return null;
-
-  return (
-    <aside className="mm-ticker" aria-label="Market">
-      <div className="mm-ticker-scroll">
-        {/* THE FLEET'S OWN NUMBER FIRST. Every other tape on the internet opens
-            with BTC; this product's headline fact is the boundary, so it opens
-            with how many intents the wall turned back today. */}
-        {wall && (
-          <Link href="/" className="mm-tick fleet">
-            <span className="k">wall</span>
-            <b className="mono warn">{wall.turned.toLocaleString("en-US")}</b>
-            <span className="mono dim">turned</span>
-            <b className="mono up">{wall.through.toLocaleString("en-US")}</b>
-            <span className="mono dim">through</span>
-          </Link>
-        )}
-
-        {tokens.map((t) => {
-          const stale = t.priceUpdatedAt !== null && Date.now() / 1000 - t.priceUpdatedAt > 3600;
-          return (
-            // PREFETCH IS BACK ON, and the reason it was off has gone.
-            //
-            // It was disabled because fourteen of these sit in the viewport on
-            // every page and /t/[token] is force-dynamic, so the default would
-            // have warmed fourteen full server renders. That is only true
-            // without a loading boundary: with one, the router prefetches the
-            // route up to its loading.tsx and no further — a static skeleton,
-            // not a ledger read. So the click is instant and costs nothing.
-            <Link key={t.address} href={`/t/${t.address}`} className="mm-tick">
-              <span className="k">{t.symbol}</span>
-              <b className="mono">{money(t.priceUsd)}</b>
-              {t.volume24hUsd !== null && (
-                <span className="mono dim">{compact(t.volume24hUsd)}</span>
-              )}
-              {/* A stale feed is said, not hidden. A price nobody has updated in
-                  an hour is not a current price, and a tape that implies it is
-                  is worse than one that admits it. */}
-              {t.paused === true ? (
-                <span className="mono halted">halted</span>
-              ) : stale ? (
-                <span className="mono stale" title="This feed has not updated in over an hour">
-                  stale
-                </span>
-              ) : null}
-            </Link>
-          );
-        })}
-      </div>
-    </aside>
-  );
+  return <TickerStrip items={marketItems(market, Date.now() / 1000)} wall={wall} />;
 }

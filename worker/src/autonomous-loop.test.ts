@@ -20,6 +20,16 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
+/**
+ * Source with LF endings whatever the checkout did to them. Git on Windows
+ * defaults to core.autocrlf=true, so the working tree holds CRLF, and a literal
+ * \n written into an assertion below misses by one invisible character. codeOf()
+ * already normalises as it splits; the read that skips it — the prompt, kept
+ * whole because the assertions are about its prose — has to say so itself.
+ */
+const srcOf = (rel: string) =>
+  readFileSync(new URL(rel, import.meta.url), "utf8").replace(/\r\n/g, "\n");
+
 const codeOf = (src: string) =>
   src
     .replace(/\/\*[\s\S]*?\*\//g, " ")
@@ -27,12 +37,12 @@ const codeOf = (src: string) =>
     .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
     .join("\n");
 
-const INDEX = codeOf(readFileSync(new URL("./index.ts", import.meta.url), "utf8"));
-const STRATEGY = codeOf(readFileSync(new URL("./strategist/strategy.ts", import.meta.url), "utf8"));
-const DRIVER = readFileSync(new URL("./strategist/driver.ts", import.meta.url), "utf8");
-const TYPES = codeOf(readFileSync(new URL("./strategies/types.ts", import.meta.url), "utf8"));
-const NEWS = codeOf(readFileSync(new URL("./research/news.ts", import.meta.url), "utf8"));
-const ORCH = codeOf(readFileSync(new URL("./orchestrator.ts", import.meta.url), "utf8"));
+const INDEX = codeOf(srcOf("./index.ts"));
+const STRATEGY = codeOf(srcOf("./strategist/strategy.ts"));
+const DRIVER = srcOf("./strategist/driver.ts");
+const TYPES = codeOf(srcOf("./strategies/types.ts"));
+const NEWS = codeOf(srcOf("./research/news.ts"));
+const ORCH = codeOf(srcOf("./orchestrator.ts"));
 
 describe("am I happy with my profit", () => {
   it("A HOLDING CARRIES WHAT IT COST, not only what it is worth", () => {

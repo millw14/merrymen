@@ -16,7 +16,11 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { badgeOf, hasTrade } from "./thesis-badge";
+import * as React from "react";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { IN_FLIGHT_TEXT, outcomeOf } from "../../../worker/src/thesis-policy";
+import { badgeOf, hasTrade, inFlightOf } from "./thesis-badge";
 import type { PublicThesis } from "./thesis";
 
 const post = (over: Partial<PublicThesis> = {}): PublicThesis => ({
@@ -29,9 +33,12 @@ const post = (over: Partial<PublicThesis> = {}): PublicThesis => ({
   sizeUsdg: 5,
   paper: false,
   outcome: "pending",
-  outcomeText: "no trade came of it",
+  // An order in flight: the publisher's own sentence for a submitted trade.
+  outcomeText: "sent, waiting on the chain",
   shadow: false,
   reason: "momentum is intact",
+
+  post: null,
   said: 1,
   at: 1_700_000_000,
   firstAt: 1_700_000_000,
@@ -98,5 +105,56 @@ describe("a shadow post never claims a trade", () => {
       label: "thesis",
       kind: "thesis",
     });
+  });
+});
+
+(globalThis as unknown as { React: typeof React }).React = React;
+
+/**
+ * "BUYING" IS A CLAIM THAT AN ORDER IS ON ITS WAY (FE7).
+ *
+ * The publisher files two facts under "pending": a submitted trade ("sent,
+ * waiting on the chain") and a buy or sell decision nothing was ever sent for
+ * ("no trade came of it"). The feed rows tell them apart; the card and the rail
+ * read this badge, which said "buying" in the money colour, with the unsettled
+ * edge, about an order that never left.
+ */
+describe("a decision nothing came of is not buying", () => {
+  const nothing = post({ outcomeText: outcomeOf(null, null).text });
+  const sent = post({ outcomeText: outcomeOf("submitted", null).text });
+
+  it("says it tried, muted, and is over", () => {
+    assert.equal(nothing.outcomeText, "no trade came of it");
+    assert.deepEqual(badgeOf(nothing), { label: "tried to buy", kind: "quiet" });
+    assert.deepEqual(badgeOf({ ...nothing, action: "sell" }), { label: "tried to sell", kind: "quiet" });
+    assert.equal(inFlightOf(nothing), false);
+  });
+
+  it("an order really in flight is still buying, and unsettled", () => {
+    assert.equal(sent.outcomeText, IN_FLIGHT_TEXT);
+    assert.deepEqual(badgeOf(sent), { label: "buying", kind: "bought" });
+    assert.deepEqual(badgeOf({ ...sent, action: "sell" }), { label: "selling", kind: "sold" });
+    assert.equal(inFlightOf(sent), true);
+  });
+
+  it("the owner's desk tape, whose rows are all trades and carry no sentence, keeps its word", () => {
+    assert.deepEqual(badgeOf({ action: "buy", outcome: "pending", outcomeText: null }), { label: "buying", kind: "bought" });
+    assert.deepEqual(badgeOf({ action: "buy", outcome: "pending" }), { label: "buying", kind: "bought" });
+  });
+
+  it("keeps its strip, which is where it says what happened", () => {
+    assert.equal(hasTrade(nothing), true);
+  });
+
+  it("THE CARD AND THE RAIL: no 'buying', and no unsettled edge, for an order that was never sent", async () => {
+    const { ThesisCard } = await import("../components/ThesisCard");
+    const { AlertRow } = await import("../components/shell/RailAlerts");
+    for (const Row of [ThesisCard, AlertRow] as const) {
+      const never = renderToStaticMarkup(createElement(Row as never, { t: nothing }));
+      assert.match(never, />tried to buy</);
+      assert.doesNotMatch(never, /buying|unsettled/);
+      const inFlight = renderToStaticMarkup(createElement(Row as never, { t: sent }));
+      assert.match(inFlight, /class="mm-chip up unsettled">buying</);
+    }
   });
 });

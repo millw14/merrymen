@@ -27,6 +27,7 @@ const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-epoch-"));
 process.env.MERRYMEN_HOME = HOME;
 
 const {
+  closeStoreForTest,
   initStore,
   ACCOUNTING_FIXED_AT,
   addEquity,
@@ -50,11 +51,8 @@ after(() => {
   } catch {
     /* already closed */
   }
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* Windows keeps the sqlite handle a moment longer; the temp dir is disposable */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const grant = (account: string) =>

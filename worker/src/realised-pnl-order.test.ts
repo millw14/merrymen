@@ -38,14 +38,11 @@ import { PendingBasis, realisedForFill } from "./basis-order";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-pnl-order-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, getBasis, setBasis } = await import("./store");
+const { closeStoreForTest, initStore, getBasis, setBasis } = await import("./store");
 await initStore();
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* Windows holds the sqlite handle a moment longer; the dir is disposable */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const AGENT = "0xa96bf429888e1aab4255762d17d29c53f6a0370d";

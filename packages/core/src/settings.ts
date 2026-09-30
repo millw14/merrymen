@@ -81,6 +81,19 @@ export interface MerrymenSettings {
   rialtoApiKeyHeader?: string;
 
   // ── contracts ──────────────────────────────────────────────────────────
+  /**
+   * Unix seconds of the last settings change made FROM TELEGRAM that the
+   * orchestrator has already promoted into this tenant's stored settings.
+   *
+   * NOT A USER SETTING — bookkeeping, and the only durable place to keep it.
+   * A child cannot write the tenant store (CHILD_SECRET_STRIP removes
+   * DATABASE_URL), so a chat-originated change reaches the store only by the
+   * parent promoting it; and the parent's own memory does not survive a
+   * redeploy, so without a stored marker every restart would re-apply the
+   * last chat change over whatever the dashboard has saved since.
+   */
+  telegramSettingsAt?: number;
+
   /** Deployed BreakerRegistry; a tripped breaker halts all intents. */
   breakerAddress?: string;
   /**
@@ -120,6 +133,24 @@ export interface MerrymenSettings {
    * changes — plain text, as before.
    */
   xHandle?: string;
+  /**
+   * PUBLISH THE BOOK: trade sizes and dollar P&L (on the agent's public page
+   * and the feed), what it holds and how much (its page), and its name as a
+   * holder on the page of each token it holds (read-token.ts). OFF until the
+   * owner turns it on, from their own profile — and the switch there names all
+   * of it, because it is the consent. A new reader of this flag is a new thing
+   * it publishes, and belongs in that sentence (screens/Profile.tsx BookSwitch).
+   *
+   * Returns and per-trade percentages are the public default and stay public
+   * either way. A public URL listing what an agent holds and how big each
+   * fill was is the disclosure /api/scoreboard refuses when hosted, so it is the
+   * owner's call and nobody else's — never a default, never inferred.
+   *
+   * Read as `=== true` everywhere (read-agent.ts, and the feed through C4), so
+   * a missing or malformed value is private. The settings route accepts only a
+   * real boolean for the same reason: the string "false" is truthy.
+   */
+  publicBook?: boolean;
   v4AdapterAddress?: string;
   /**
    * The deployed PonsSelfTrade adapter for this chain, or absent.
@@ -416,6 +447,8 @@ export interface MerrymenSettings {
    * the per-trade cap and the wall.
    */
   trencherLiveEnabled?: boolean;
+  /** Opt-in shorter exits for volatile memecoin positions; does not enable live trading. */
+  trencherFastEnabled?: boolean;
   /**
    * Pay this agent's gas from a sponsor, so the owner funds USDG only.
    *
@@ -611,6 +644,38 @@ export interface MerrymenSettings {
   /** Local hour (0-23) after which the daily campfire report is sent. */
   telegramDigestHour?: number;
 
+  // ── Telegram groups (docs/tg-groups.md) ────────────────────────────────
+  //
+  // "Telegram groups", never the web room's name: that one is the public room
+  // (docs/groupchat.md) and a worker file spelling it fails the room's
+  // boundary test. All three are DASHBOARD-ONLY — a group is reached by anyone
+  // in it, so none of them is chat-settable (setting-spec.ts
+  // DASHBOARD_ONLY.telegramGroups) — and none is secret, house-owned or
+  // hosted-forbidden: how the owner's own bot behaves in the owner's own
+  // groups is the owner's decision.
+  /**
+   * Hang out in the Telegram groups its bot is in: answer when called, now and
+   * then join in, remember each chat. Off = silent in every group; it still
+   * records being added and removed, so turning it back on works.
+   *
+   * ON by default, because the bot is only ever in a group someone added it
+   * to, and one the owner did not add it to stays silent until the owner
+   * answers Stay / Leave. An owner who added their bot to a group expects it to
+   * speak there.
+   */
+  telegramGroupsEnabled?: boolean;
+  /**
+   * Look at coins people post in its Telegram groups. Only in trencher mode.
+   * A posted address is a NOMINATION, never an order: the Brain decides, the
+   * trencher entry path sizes, and every trencher limit plus the group
+   * nomination caps still apply (docs/tg-groups.md rule 1). Off = it never
+   * looks, and says nothing about coins.
+   */
+  telegramGroupCoinsEnabled?: boolean;
+  /** How often it joins a Telegram group conversation unprompted. Being called
+   * (a mention, a reply, its name) is answered whatever this says. */
+  telegramGroupsChattiness?: TelegramGroupsChattiness;
+
   // ── remote control · your PC (OpenClaw-style — all OFF by default) ──────
   /** MASTER switch for PC control. Off = no screenshot/app/file/shell command runs. */
   telegramPcControlEnabled?: boolean;
@@ -641,6 +706,15 @@ export interface MerrymenSettings {
   /** Max model↔tool steps per /agent task (runaway brake). */
   telegramAgentMaxSteps?: number;
 }
+
+/**
+ * How much a Merryman joins in unprompted in its Telegram groups, quietest
+ * first. One list for every reader — the worker's resolver, the settings
+ * route's validation and the dashboard's select — so a fourth level cannot be
+ * accepted by one and silently resolved to the default by another.
+ */
+export const TELEGRAM_GROUPS_CHATTINESS = ["quiet", "normal", "chatty"] as const;
+export type TelegramGroupsChattiness = (typeof TELEGRAM_GROUPS_CHATTINESS)[number];
 
 /** Keys whose values must never be echoed back to a browser. */
 export const SECRET_SETTING_KEYS = [
@@ -826,6 +900,9 @@ export const SETTINGS_DEFAULTS = {
    * writes the flag explicitly for anyone already live BEFORE enforcement lands.
    */
   liveTradingEnabled: false,
+  // PRIVATE. The book is published only when its owner says so — see
+  // MerrymenSettings.publicBook.
+  publicBook: false,
   rialtoApiKeyHeader: "x-api-key",
   strategy: "steady-basket" as const,
   swapVenue: "uniswap" as const,
@@ -856,6 +933,7 @@ export const SETTINGS_DEFAULTS = {
   discoveryEnabled: true,
   discoveryIntervalMin: 10,
   trencherLiveEnabled: false,
+  trencherFastEnabled: false,
   // Off by default like every other switch that spends money.
   sponsorGasEnabled: false,
   // Off by default because it changes how contributions are counted, and a
@@ -924,6 +1002,13 @@ export const SETTINGS_DEFAULTS = {
   telegramNotifyEnabled: true,
   telegramNotifyEveryMin: 0,
   telegramDigestHour: 18,
+  // Telegram groups: on, on, normal (docs/tg-groups.md "Settings"). Neither
+  // switch moves money by itself — a coin posted in a group reaches trading
+  // only in trencher mode, and only as a nomination the Brain and every
+  // existing trencher limit still judge.
+  telegramGroupsEnabled: true,
+  telegramGroupCoinsEnabled: true,
+  telegramGroupsChattiness: "normal" as TelegramGroupsChattiness,
   telegramPcControlEnabled: false,
   telegramCapabilities: [] as string[],
   telegramFilesRoot: "",

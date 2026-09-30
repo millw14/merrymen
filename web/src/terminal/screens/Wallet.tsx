@@ -1,15 +1,21 @@
 "use client";
 
 import Link from "next/link";
+import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
 import { verifiedAdapter } from "@/lib/verified-adapter";
-import { isWallTooWide } from "@merrymen/core";
-import { useCallback, useEffect, useState } from "react";
-import { createPublicClient, formatEther, http } from "viem";
+import { MAX_USDG_UI, isWallTooWide } from "@merrymen/core";
+import { parseAmount, type AmountField } from "@/lib/parse-amount";
+import { fullDateTime } from "@/lib/format";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createPublicClient, erc20Abi, formatEther, http } from "viem";
 import { Info } from "@/components/Info";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import {
   explorerFor,
   grantHasV4,
+  grantTrencher,
+  TRENCHER_VAULT_ABI,
+  CASH,
   grantPonsAdapter,
   grantPonsClassVault,
   isValidCustomToken,
@@ -42,6 +48,7 @@ import { SignOut } from "../SignOut";
 import { conceptTooltip } from "@merrymen/core";
 import { canStart } from "@/lib/can-start";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
+import { RESIGN_ANCHOR, SIGNED_IN_EVENT, SIGNED_IN_RELOAD_KEY, shouldJumpToResign, shouldReloadAfterSignIn } from "@/lib/resign-anchor";
 // QUARANTINED, not fixed. This page moves real money, holds owner private keys
 // and is 1,750 lines of signature and recovery logic — the last place to
 // restyle during a redesign. It keeps the sheets it was written against, and
@@ -75,15 +82,32 @@ const CAP_FLOOR: Record<keyof GrantCaps, number> = {
   maxOpsPerDay: 1,
 };
 
-/** A typed cap value, floored. An empty or unreadable field falls to the floor. */
-function clampCap(k: keyof GrantCaps, raw: string): number {
-  const n = Number(raw);
-  const floor = CAP_FLOOR[k];
-  if (!Number.isFinite(n)) return floor;
-  // expiryDays is also bounded above by the signer itself; the rest are not.
-  const capped = k === "expiryDays" ? Math.min(n, 90) : n;
-  return Math.max(floor, Math.floor(capped));
-}
+/**
+ * THE SHAPE OF EACH CAP AS A TYPED FIELD: precision, floor, ceiling.
+ *
+ * This replaces `clampCap`, which did `Number(raw)` and fell back to the
+ * floor on anything unreadable. Two things were wrong with that, and both cost
+ * money rather than convenience:
+ *
+ *   `Number("")` is 0, and 0 IS finite — so the `!Number.isFinite` guard never
+ *   fired on an empty field. `Math.max(1, Math.floor(0))` then sealed a cap of
+ *   ONE USDG into a signature that cannot be edited for the life of the grant,
+ *   with no error and nothing on screen to notice.
+ *
+ *   `Math.floor` applied to every cap, so a 10.50 per-trade limit was signed
+ *   as 10 — an edit to a number the owner was in the middle of reading.
+ *
+ * Money keeps its cents; days, trades and percent are whole by construction.
+ * The expiry ceiling is the signer's own, so a value that parses here cannot be
+ * refused later by the thing being signed.
+ */
+const CAP_FIELDS: Record<keyof GrantCaps, AmountField> = {
+  perTradeUsdg: { maxDecimals: 2, min: CAP_FLOOR.perTradeUsdg, max: MAX_USDG_UI },
+  dailyUsdg: { maxDecimals: 2, min: CAP_FLOOR.dailyUsdg, max: MAX_USDG_UI },
+  expiryDays: { maxDecimals: 0, min: CAP_FLOOR.expiryDays, max: 90 },
+  maxDrawdownPct: { maxDecimals: 0, min: CAP_FLOOR.maxDrawdownPct, max: 50 },
+  maxOpsPerDay: { maxDecimals: 0, min: CAP_FLOOR.maxOpsPerDay, max: 10_000 },
+};
 
 /** One-click cap presets — pick a temperament, tweak if you like, ride. */
 const PRESETS: { id: string; icon: string; label: string; blurb: string; caps: GrantCaps }[] = [
@@ -415,6 +439,8 @@ export default function GrantPage() {
   const [ponsAdapter, setPonsAdapter] = useState<`0x${string}` | undefined>(undefined);
   /** The class-vault FACTORY. Each account’s own vault is derived from it at sign time. */
   const [classFactory, setClassFactory] = useState<`0x${string}` | undefined>(undefined);
+  const [autonomousTrencher, setAutonomousTrencher] = useState(false);
+  useEffect(() => { setAutonomousTrencher(!!grantTrencher(grant)); }, [grant]);
   // The basket matters here for the same reason: /settings offers every registry
   // symbol, but only the ones sealed into the signature can be sold.
   const [basketSymbols, setBasketSymbols] = useState<string[]>([]);
@@ -433,6 +459,7 @@ export default function GrantPage() {
     if (stored) {
       setChainId(requestedChain() ?? stored.chainId);
       setCaps(stored.caps);
+      setCapText({});
     }
     setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
     fetch("/api/grants")
@@ -505,6 +532,7 @@ export default function GrantPage() {
             // re-sign any other way.
             setChainId(requestedChain() ?? s.grant.chainId);
             setCaps(s.grant.caps);
+            setCapText({});
             // NOTHING TO WRITE DOWN *HERE*, which is not the same as backed
             // up. A Privy agent has no owner key in any browser; a legacy one
             // has it in the browser that minted it and not in this one. Either
@@ -641,8 +669,41 @@ export default function GrantPage() {
    * the agent unusable; it cannot widen one, because every bound below is the
    * floor, never the ceiling.
    */
-  const set = (k: keyof GrantCaps) => (e: React.ChangeEvent<HTMLInputElement>) =>
-    setCaps((c) => ({ ...c, [k]: clampCap(k, e.target.value) }));
+  /**
+   * WHAT THE OWNER TYPED, HELD AS TEXT UNTIL IT READS AS A NUMBER.
+   *
+   * The inputs below are `type="text"` and not `type="number"`, and that is
+   * the load-bearing part. A number input hands JavaScript an EMPTY STRING for
+   * anything its own locale cannot parse, so a comma keystroke arrived here
+   * indistinguishable from a cleared field — and the old handler turned both
+   * into the floor. The raw text has to survive long enough to be read.
+   *
+   * `caps` only moves on a clean read, so a half-typed value never becomes the
+   * number that would be signed, and the summary underneath keeps showing the
+   * last figure the owner actually chose.
+   */
+  const [capText, setCapText] = useState<Partial<Record<keyof GrantCaps, string>>>({});
+  const [capError, setCapError] = useState("");
+  const capShown = (k: keyof GrantCaps) => capText[k] ?? String(caps[k]);
+  const set = (k: keyof GrantCaps) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = e.target.value;
+    setCapText((t) => ({ ...t, [k]: raw }));
+    const r = parseAmount(raw, CAP_FIELDS[k]);
+    if (r.ok) {
+      setCaps((c) => ({ ...c, [k]: r.value }));
+      setCapError("");
+      return;
+    }
+    setCapError(
+      r.reason === "ambiguous"
+        ? `That reads as either ${r.readings.join(" or ")} — which did you mean?`
+        : r.reason === "out-of-range"
+          ? `Enter a number between ${r.min} and ${r.max}.`
+          : r.reason === "empty"
+            ? "This limit needs a number."
+            : "That is not a number I can read.",
+    );
+  };
 
   // Tokens listed in settings that THIS signature doesn't actually cover.
   // Settings can't reach into an already-signed key, so the gap is real: without
@@ -744,6 +805,7 @@ export default function GrantPage() {
   /** Re-arm the funded account with a fresh session key under the caps above. */
   async function onRestore() {
     setError(null);
+    setRenewed(false);
     setStatus("starting…");
     try {
       const { local: g, handoff } = await restoreAgentWallet(restoreKey.trim() as `0x${string}`, {
@@ -787,6 +849,7 @@ export default function GrantPage() {
    * sealed into the signed key, so the current `customTokens` are baked in here.
    */
   const [renewing, setRenewing] = useState(false);
+  const [renewed, setRenewed] = useState(false);
   const privyOwner = usePrivyOwner();
   /**
    * CAN THIS BROWSER RE-SIGN THIS AGENT, and by which owner.
@@ -813,8 +876,23 @@ export default function GrantPage() {
   async function renewKey() {
     if (!grant || !resignBy) return;
     setError(null);
+    setRenewed(false);
+    setStatus("checking your permission…");
     setRenewing(true);
     try {
+      const priorTrencher = grantTrencher(grant);
+      if (priorTrencher && (!autonomousTrencher || chainId !== grant.chainId || (TRENCHER_FACTORY && TRENCHER_FACTORY.toLowerCase() !== priorTrencher.factory))) {
+        const client = createPublicClient({chain: grant.chainId === MAINNET ? robinhoodChain : robinhoodTestnet, transport: http()});
+        const code = await client.getCode({address:priorTrencher.vault});
+        if (code && code !== "0x") {
+          const [held,cash] = await Promise.all([
+            client.readContract({address:priorTrencher.vault,abi:TRENCHER_VAULT_ABI,functionName:"tokens"}),
+            client.readContract({address:CASH.USDG,abi:erc20Abi,functionName:"balanceOf",args:[priorTrencher.vault]}),
+          ]);
+          if (held.length || cash > 0n) throw new Error("Close or recover your Trencher vault positions and cash before removing or changing this permission. Your current key has not been replaced.");
+        }
+      }
+      if (autonomousTrencher && !TRENCHER_FACTORY) throw new Error("The verified Trencher deployment is unavailable; your existing permission has not been replaced.");
       // FETCH SETTINGS AT CLICK TIME, not from mount state. This is the exact
       // button an owner presses right after saving a new token or the adapter
       // address in /settings — and the mount-time fetch predates that save, so
@@ -864,6 +942,7 @@ export default function GrantPage() {
         v4AdapterAddress: freshAdapter,
         ponsAdapterAddress: await verifiedAdapter(freshPons, chainId, setStatus),
         ponsClassVaultFactory: freshClassFactory,
+        trencherFactory: autonomousTrencher && TRENCHER_FACTORY && /^0x[0-9a-fA-F]{40}$/.test(TRENCHER_FACTORY) ? TRENCHER_FACTORY as `0x${string}` : undefined,
         hostedAs: session?.hosted ? (session.address ?? undefined) : undefined,
         /**
          * THE ACCOUNT WE ARE RE-SIGNING, stated so the signer can refuse.
@@ -890,10 +969,13 @@ export default function GrantPage() {
       // renewed key that the server refused doesn't read as a renewed agent.
       setServerArmed(handoff.ok);
       if (!handoff.ok) setError(handoff.error ?? "the server refused the renewed grant");
+      setRenewed(handoff.ok);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStatus(null);
+      setRenewing(false);
     }
-    setRenewing(false);
   }
 
   function confirmBackup() {
@@ -937,13 +1019,14 @@ export default function GrantPage() {
      * child is undone within a minute — which is why this said so BEFORE the
      * click rather than letting somebody conclude the reset silently failed.
      *
-     * IT NOW ASKS THE WORKER TO DO IT. /api/paper-reset queues the one command
-     * the child can act on, and the child REFUSES IT ON THE LIVE RAIL: real
-     * positions and trades are never deleted by anything here. On paper it puts
-     * the paper cash back, drops the simulated positions, and closes the old
-     * fills into a new accounting epoch — kept on disk for forensics, counted
-     * toward nothing. Queued unconditionally because only the worker knows which
-     * rail it is on; this screen would be guessing.
+     * IT NOW ASKS THE WORKER TO DO IT. The practice reset, queued with the
+     * discard below, is the one command the child can act on, and the child
+     * REFUSES IT ON THE LIVE RAIL: real positions and trades are never deleted
+     * by anything here. On paper it puts the paper cash back, drops the
+     * simulated positions, and closes the old fills into a new accounting
+     * epoch — kept on disk for forensics, counted toward nothing. Queued
+     * unconditionally because only the worker knows which rail it is on; this
+     * screen would be guessing.
      */
     if (grant && !grant.demoOwnerPrivateKey) {
       const okToKeepHistory = window.confirm(
@@ -958,13 +1041,25 @@ export default function GrantPage() {
       if (!okToKeepHistory) return;
     }
     clearGrant();
-    // Also destroy the worker-side handoff — otherwise the "discarded" grant
-    // stays armed and the worker keeps trading on it (kill-switch semantics).
-    void fetch("/api/grants", { method: "DELETE" }).catch(() => {});
-    // Ask the child to restart the paper book. Best-effort and
-    // unconditional: only the worker knows which rail it is on, and it refuses
-    // this outright when the agent is live, so nothing real can be cleared.
-    void fetch("/api/paper-reset", { method: "POST" }).catch(() => {});
+    setRenewed(false);
+    // Destroy the worker-side handoff — otherwise the "discarded" grant stays
+    // armed and the worker keeps trading on it (kill-switch semantics) — AND
+    // ask for the paper book to be restarted. The reset is best-effort and
+    // unconditional: only the worker knows which rail it is on (or, while its
+    // book is held, the orchestrator, which asks the ledger), and each refuses
+    // a live agent outright, so nothing real can be cleared.
+    //
+    // ONE REQUEST, SENT NOW, WITH keepalive. The reset finds its agent through
+    // the grant this discards, so the two cannot simply be fired side by side
+    // (the DELETE won that race in production and the reset answered 401,
+    // 2026-09-21T16:24:24Z), and a DELETE held back until the reset answered
+    // was never sent at all by a tab closed in the meantime, with this page
+    // already forgetting the grant it would need to try again. The server
+    // orders the two instead (/api/grants/discard, lib/start-over.ts): the
+    // account is read, the grant removed as DELETE /api/grants removes it,
+    // then the reset queued. keepalive, so closing the tab straight after
+    // pressing this still delivers the kill.
+    void fetch("/api/grants/discard", { method: "POST", keepalive: true }).catch(() => {});
     localStorage.removeItem(BACKUP_KEY);
     setGrant(null);
     setBackedUp(false);
@@ -987,6 +1082,7 @@ export default function GrantPage() {
     // one. Both go back to the same defaults a first-time owner gets.
     setChainId(MAINNET);
     setCaps(PRESETS[0]!.caps);
+    setCapText({});
   }
 
   /**
@@ -1048,6 +1144,49 @@ export default function GrantPage() {
   // phases below — presentation only, no logic changed. -1 = the desync recovery
   // panel (its own screen, off the numbered track).
   const wizStep = desynced ? -1 : !grant || switching ? 0 : !backedUp ? 1 : 2;
+
+  // ARRIVING AT /grant#resign — from the Telegram "Sign now" button or a
+  // dashboard banner. The section below renders only once the grant has
+  // loaded, long after the browser's own jump to the anchor gave up, so the
+  // owner landed at the top of the page. Scroll there ourselves, once, the
+  // first time it exists (resign-anchor.ts says why only once).
+  const resignJumped = useRef(false);
+  useEffect(() => {
+    const present = document.getElementById(RESIGN_ANCHOR) !== null;
+    if (!shouldJumpToResign(window.location.hash, resignJumped.current, present)) return;
+    resignJumped.current = true;
+    // Instant, like a real anchor jump: a smooth scroll is driven by animation
+    // frames, which a hidden tab or an in-app browser may never deliver.
+    document.getElementById(RESIGN_ANCHOR)?.scrollIntoView({ block: "start" });
+  }, [wizStep, grant, serverArmed]);
+
+  // SIGNED IN ON THIS SCREEN. It loads the grant once, on mount, as whoever
+  // was signed in then — so an owner who opened a "Sign now" link signed out
+  // (Telegram's in-app browser usually is), then signed in here, kept seeing
+  // the restore form. Load again as them; the hash survives the reload, so the
+  // jump above then lands on the section they came for.
+  // Guarded against a reload loop — resign-anchor.ts `shouldReloadAfterSignIn`.
+  const hasGrantRef = useRef(false);
+  hasGrantRef.current = grant !== null;
+  useEffect(() => {
+    const again = () => {
+      let lastAt: number | null = null;
+      try {
+        lastAt = Number(sessionStorage.getItem(SIGNED_IN_RELOAD_KEY) ?? 0);
+      } catch {
+        lastAt = null;
+      }
+      if (!shouldReloadAfterSignIn(hasGrantRef.current, lastAt, Date.now())) return;
+      try {
+        sessionStorage.setItem(SIGNED_IN_RELOAD_KEY, String(Date.now()));
+      } catch {
+        return; // cannot remember that we reloaded, so do not
+      }
+      window.location.reload();
+    };
+    window.addEventListener(SIGNED_IN_EVENT, again);
+    return () => window.removeEventListener(SIGNED_IN_EVENT, again);
+  }, []);
   const RAIL = ["Wallet", "Backup", "Funds", "Ready"] as const;
   const KICKS = ["Step one · set the wall", "Step two · back up the key", "Step three · fund the account"];
 
@@ -1326,7 +1465,7 @@ export default function GrantPage() {
                   key={p.id}
                   type="button"
                   className={`preset-card ${sameCaps(caps, p.caps) ? "selected" : ""}`}
-                  onClick={() => setCaps(p.caps)}
+                  onClick={() => { setCaps(p.caps); setCapText({}); setCapError(""); }}
                 >
                   <span className="preset-label"><GI d={p.icon} size={14} /> {p.label}</span>
                   <span className="preset-blurb">{p.blurb}</span>
@@ -1343,14 +1482,14 @@ export default function GrantPage() {
               <label className="field">
                 <span className="field-label">most it can spend on one trade</span>
                 <span className="field-input">
-                  <input type="number" min={1} value={caps.perTradeUsdg} onChange={set("perTradeUsdg")} />
+                  <input type="text" inputMode="decimal" value={capShown("perTradeUsdg")} onChange={set("perTradeUsdg")} />
                   <span className="field-unit">USDG</span>
                 </span>
               </label>
               <label className="field">
                 <span className="field-label">most it can spend in a day</span>
                 <span className="field-input">
-                  <input type="number" min={1} value={caps.dailyUsdg} onChange={set("dailyUsdg")} />
+                  <input type="text" inputMode="decimal" value={capShown("dailyUsdg")} onChange={set("dailyUsdg")} />
                   <span className="field-unit">USDG</span>
                 </span>
               </label>
@@ -1360,14 +1499,14 @@ export default function GrantPage() {
                   <Info>A safety timer. After this many days the agent&apos;s key stops working on its own — so a forgotten agent can&apos;t trade forever.</Info>
                 </span>
                 <span className="field-input">
-                  <input type="number" min={1} max={90} value={caps.expiryDays} onChange={set("expiryDays")} />
+                  <input type="text" inputMode="numeric" value={capShown("expiryDays")} onChange={set("expiryDays")} />
                   <span className="field-unit">days</span>
                 </span>
               </label>
               <label className="field">
                 <span className="field-label">most trades per day</span>
                 <span className="field-input">
-                  <input type="number" min={1} value={caps.maxOpsPerDay} onChange={set("maxOpsPerDay")} />
+                  <input type="text" inputMode="numeric" value={capShown("maxOpsPerDay")} onChange={set("maxOpsPerDay")} />
                   <span className="field-unit">trades</span>
                 </span>
               </label>
@@ -1377,11 +1516,16 @@ export default function GrantPage() {
                   <Info>A circuit breaker. If the account drops this far from its best value, the agent stops trading automatically to stem the bleeding.</Info>
                 </span>
                 <span className="field-input">
-                  <input type="number" min={1} max={50} value={caps.maxDrawdownPct} onChange={set("maxDrawdownPct")} />
+                  <input type="text" inputMode="numeric" value={capShown("maxDrawdownPct")} onChange={set("maxDrawdownPct")} />
                   <span className="field-unit">%</span>
                 </span>
               </label>
             </div>
+            {capError && (
+              <p className="grant-cap-error" role="alert">
+                {capError}
+              </p>
+            )}
 
             <div className="grant-summary">
               On {isMainnet ? "Robinhood Chain" : "the testnet"}, this agent can trade
@@ -1783,7 +1927,7 @@ export default function GrantPage() {
               </div>
               <div>
                 <span className="rk">expires</span>
-                <span className="rv">{new Date(grant.expiresAt * 1000).toLocaleString()}</span>
+                <span className="rv">{fullDateTime(grant.expiresAt * 1000)}</span>
               </div>
             </div>
 
@@ -1920,30 +2064,42 @@ export default function GrantPage() {
                 <>
                   <div className="grant-fields" style={{ marginTop: 12 }}>
                     <label className="field">
+                      <span className="field-label">Autonomous Trencher permission</span>
+                      <span>
+                        <input type="checkbox" checked={autonomousTrencher} disabled={!TRENCHER_FACTORY}
+                          onChange={e=>setAutonomousTrencher(e.target.checked)} />
+                        Allow my agent to discover and trade new pool tokens without adding each contract.
+                      </span>
+                      <small>
+                        Tokens stay in your trading vault and sale proceeds return to your account. The vault limits buys to $5 each and $25 per 24-hour window; your lower signed limits still apply. A discovered token can lose all its value or become unsellable. This permission does not turn live trading on.
+                        {!TRENCHER_FACTORY && " The new vault deployment is not configured yet; this permission is unavailable."}
+                      </small>
+                    </label>
+                    <label className="field">
                       <span className="field-label">most it can spend on one trade</span>
                       <span className="field-input">
-                        <input type="number" min={1} value={caps.perTradeUsdg} onChange={set("perTradeUsdg")} />
+                        <input type="text" inputMode="decimal" value={capShown("perTradeUsdg")} onChange={set("perTradeUsdg")} />
                         <span className="field-unit">USDG</span>
                       </span>
                     </label>
                     <label className="field">
                       <span className="field-label">most it can spend in a day</span>
                       <span className="field-input">
-                        <input type="number" min={1} value={caps.dailyUsdg} onChange={set("dailyUsdg")} />
+                        <input type="text" inputMode="decimal" value={capShown("dailyUsdg")} onChange={set("dailyUsdg")} />
                         <span className="field-unit">USDG</span>
                       </span>
                     </label>
                     <label className="field">
                       <span className="field-label">most trades per day</span>
                       <span className="field-input">
-                        <input type="number" min={1} value={caps.maxOpsPerDay} onChange={set("maxOpsPerDay")} />
+                        <input type="text" inputMode="numeric" value={capShown("maxOpsPerDay")} onChange={set("maxOpsPerDay")} />
                         <span className="field-unit">trades</span>
                       </span>
                     </label>
                     <label className="field">
                       <span className="field-label">auto-expire the agent after</span>
                       <span className="field-input">
-                        <input type="number" min={1} max={90} value={caps.expiryDays} onChange={set("expiryDays")} />
+                        <input type="text" inputMode="numeric" value={capShown("expiryDays")} onChange={set("expiryDays")} />
                         <span className="field-unit">days</span>
                       </span>
                     </label>
@@ -2043,6 +2199,26 @@ export default function GrantPage() {
                           : "move to the testnet & re-sign"
                         : "re-sign this key (free)"}
                   </button>
+                  {renewing && <p className="field-lead" role="status">{status ?? "re-signing…"}</p>}
+                  {/* A pre-signing refusal leaves this active grant intact, so
+                      neither the create nor desync error panel is visible. */}
+                  {error && (
+                    <div className="grant-error mono" role="alert">
+                      {error}
+                      {isWallTooWide(error) && (
+                        <p>
+                          Lower spending limits do not shrink the permission list. {" "}
+                          <a href="/settings">Review custom tokens</a> and follow the changes described above.
+                          If it is too large even without custom tokens, contact support with this error.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  {renewed && !renewing && !error && (
+                    <p className="field-lead" role="status">
+                      Permission renewed. Your agent will check the new key shortly.
+                    </p>
+                  )}
                 </>
               ) : (
                 <p className="field-lead" style={{ marginTop: 12 }}>
@@ -2079,6 +2255,7 @@ export default function GrantPage() {
                 className="copy-btn"
                 style={{ padding: "10px 16px" }}
                 onClick={() => {
+                  setRenewed(false);
                   setSwitching(true);
                   setMode("restore");
                   setError(null);

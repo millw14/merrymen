@@ -132,7 +132,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "paste the link to your post, or its id" }, { status: 400 });
   }
   // SPENT BEFORE THE FETCH, so one nonce cannot be replayed against a race.
-  if (!consumeChallengeNonce(nonce, requestOrigin(req))) {
+  const gate = await consumeChallengeNonce(nonce, requestOrigin(req));
+  if (!gate.ok) {
     return NextResponse.json(
       { error: "that code has expired or was already used — start again" },
       { status: 401 },

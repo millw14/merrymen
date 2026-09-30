@@ -1,0 +1,293 @@
+# Merrymen MCP: OAuth and developer integration
+
+The Merrymen MCP server is an OAuth 2.1 **protected resource** with its own
+**authorization server**. Any MCP client that follows the MCP authorization
+spec (Claude, Claude Code, Codex, ChatGPT, the MCP Inspector, the official
+TypeScript and Python SDK clients) can connect without a pre-shared secret.
+
+| | URL (production defaults) |
+|---|---|
+| MCP endpoint (resource) | `https://mcp.merrymen.dev/mcp` |
+| Protected-resource metadata (RFC 9728) | `https://mcp.merrymen.dev/.well-known/oauth-protected-resource/mcp` (also at the root well-known path) |
+| Directory profile: a second, limited resource ([below](#the-directory-profile-mcpdirectory)) | `https://mcp.merrymen.dev/mcp/directory`, metadata at `https://mcp.merrymen.dev/.well-known/oauth-protected-resource/mcp/directory` |
+| Authorization-server metadata (RFC 8414) | `https://app.merrymen.dev/.well-known/oauth-authorization-server` |
+| Authorization endpoint | `https://app.merrymen.dev/oauth/authorize` |
+| Token endpoint | `https://app.merrymen.dev/oauth/token` |
+| Dynamic client registration (RFC 7591) | `https://app.merrymen.dev/oauth/register` |
+| Revocation (RFC 7009) | `https://app.merrymen.dev/oauth/revoke` |
+| Consent screen | `https://app.merrymen.dev/connect/app` |
+| Connected apps (owners) | `https://app.merrymen.dev/connect/apps` |
+| Readiness | `https://app.merrymen.dev/api/mcp/health` |
+
+The issuer and resource URLs come from configuration (`MERRYMEN_PUBLIC_ORIGIN`,
+optionally `MERRYMEN_OAUTH_ISSUER` / `MERRYMEN_MCP_RESOURCE_URL`), never from a
+request's `Host` header, because tokens are bound to them.
+
+## Who is who
+
+| Principal | What it is | What proves it |
+|---|---|---|
+| **Client application** | Claude, Codex, your app | Its `client_id`: a Client ID Metadata Document URL, or an id from dynamic registration. A client id is *not* authority over any owner. |
+| **Owner (end user)** | A Merrymen account holder | Their own Merrymen sign-in (wallet or Privy), on the consent page. |
+| **Agent** | An owner's Merryman | Owned by the signed-in tenant according to the identity store at the moment of each call. |
+| **Connection** | One owner's consent for one client on one resource (`/mcp` or `/mcp/directory`) | A row the owner can see and revoke on **Connected apps**. Tokens belong to a connection. |
+
+There is **no application-level key that reaches every owner**. Every token is
+issued to one connection, i.e. to one owner's explicit consent for one client,
+limited to the agents and scopes that owner chose.
+
+## The flow
+
+1. The client calls `/mcp` with no token and receives `401` with
+   `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/mcp", scope="…"`.
+   The challenge's `scope` lists every scope a client can be granted (the
+   same list as `scopes_supported`; never the staff scope). MCP clients
+   request exactly that scope, and the consent page can only offer what was
+   requested, so a narrower challenge would put the write and sensitive
+   scopes out of reach of every OAuth client. Asking grants nothing by itself:
+   the owner ticks what the app gets, and the sensitive scopes start unticked
+   unless the owner's still-active connection with the same client already
+   has them (a decision that names no scopes gets only the default scopes).
+   An `/oauth/authorize` request with no `scope` at all is treated as asking
+   for read access plus chat.
+2. It reads the protected-resource metadata (which names the authorization
+   server) and the authorization-server metadata.
+3. **Client identification**, in the order the MCP spec prefers:
+   - **Client ID Metadata Documents** (advertised with
+     `client_id_metadata_document_supported: true` and `none` in
+     `token_endpoint_auth_methods_supported`). The `client_id` is an https URL
+     that must be written in canonical form with a path and **no query
+     string, fragment, credentials or dot segments** (`.`, `..`, `%2e`), and
+     whose host is **not one of Merrymen's own hosts** (the issuer, the MCP
+     resource, or any host the MCP endpoints answer on): the consent page says
+     "Verified at *host*", and a document served through one of our own routes
+     would borrow our name. Merrymen fetches it through an SSRF-guarded
+     transport (public addresses only, pinned DNS, https, no redirects, 64 KB,
+     5 s), accepts only a `200` answer with an `application/json` (or
+     `application/*+json`) `Content-Type`, requires the document's
+     `client_id` to equal the URL exactly, accepts only public clients, and
+     validates every redirect URI: at most 10, kept in canonical form
+     (`URL.href`: ASCII, percent-encoded, IDNA host), and at most 2 KB
+     together, counted in UTF-8 bytes as stored. The document's own spelling
+     of a redirect still matches at `/oauth/authorize`, because the canonical
+     form is exactly where the code is sent. The steps that start or complete
+     a consent (`/oauth/authorize` and the consent page) cache a document, for
+     up to 24 h. `/oauth/token` and `/oauth/revoke` use a fetched document for
+     that one request, refresh a copy that is already cached, and **restore
+     the cached copy of a client that some owner has an active connection
+     with** (retention may have dropped it, and without it one failed fetch at
+     the next refresh would disconnect the app). They never store a row for a
+     client no owner is connected to, so a caller with no code or token can
+     make Merrymen store at most one bounded row per client an owner already
+     connected. The cache keeps only the name (up to 100 characters) and the
+     redirect URIs, each once, never the fetched body: at most about 3 KB per
+     client including its URL.
+
+     When the client's host cannot answer (a network failure, a `5xx`, `408`
+     or `429`, or any other non-`200` answer that is not JSON, such as a CDN
+     challenge page — `404` and `410` excepted), a copy verified within the
+     last 24 h is used; without
+     one the answer is the retryable `temporarily_unavailable` (HTTP 503 at
+     `/oauth/token` and `/oauth/revoke`, a 503 page at `/oauth/authorize`),
+     never `invalid_client`, which clients treat as fatal. A `404` or `410`
+     (whatever its content type), any other JSON `4xx`, or a `200` that is
+     not a valid JSON document is the host's definite answer and stays
+     `invalid_client`.
+   - **Dynamic Client Registration** (`POST /oauth/register`), for clients that
+     do not use CIMD. Open but rate limited per IP. Public (`none`) or
+     confidential (`client_secret_basic` / `client_secret_post`) clients.
+4. The client sends the browser to `/oauth/authorize` with
+   `response_type=code`, `code_challenge` + `code_challenge_method=S256`
+   (required; `plain` is refused), `redirect_uri` (must match a registered one
+   exactly; loopback redirects may use any port per RFC 8252), `state`,
+   `scope`, and `resource=https://mcp.merrymen.dev/mcp` (RFC 8707). The only
+   other resource accepted is the directory profile's
+   (`https://mcp.merrymen.dev/mcp/directory`); any other is refused with
+   `invalid_target`, and a request with no `resource` means the canonical one.
+
+   **Errors before consent are shown on a Merrymen page, not redirected.**
+   Registration is open, so a registered https redirect proves nothing, and
+   bouncing errors to it would make every Merrymen authorize link an open
+   redirector (RFC 9700 §4.11.2). The one exception: a CIMD client whose
+   `redirect_uri` is loopback (a program on the owner's own computer, such as
+   Claude Code or Codex CLI, waiting on that port) receives the error
+   (`error`, `error_description`, `state`, `iss`) at its redirect. An unknown
+   client, an unregistered `redirect_uri`, or a `state` containing a control
+   character (which is never stored or echoed) is always a page.
+5. Merrymen parks the request and sends the browser to the consent page. The
+   request handle travels in the URL **fragment**, so it never reaches a
+   server log or a `Referer`.
+6. The owner signs in to Merrymen (their normal sign-in), sees who is asking
+   (a verified CIMD host; or, for a dynamically registered client, "not
+   verified by Merrymen" and the host of the redirect the code will actually
+   go to, which is also what **Connected apps** records for the connection),
+   reads a plain summary of what it could see and do, and approves or
+   declines; the full scope list (and whether to share each agent) is one
+   click away. The page starts from the defaults (sensitive scopes unticked),
+   or, when the owner's connection with this same client is still active,
+   from what that connection holds (cut down to what this request offers), so
+   a reconnect never silently drops a scope the owner granted. The decision
+   is a same-origin POST that requires the owner's session; the page cannot be
+   framed.
+7. Only now does the browser go back to the client's `redirect_uri`: with
+   `code`, `state` and `iss` (RFC 9207) on approval, or with
+   `error=access_denied` on decline.
+8. The client exchanges the code at `/oauth/token` (form-encoded) with its
+   `code_verifier`. Codes are single use, expire after 5 minutes, and are bound
+   to the client, redirect URI, PKCE challenge and resource. **Replaying a code
+   revokes every token issued from it.**
+
+## Tokens
+
+- **Access tokens** (`mcp_at_…`): opaque 256-bit random values, valid 1 hour,
+  audience-bound to the resource URL they were issued for (`/mcp` or
+  `/mcp/directory`; each endpoint refuses the other's tokens). Stored only as SHA-256 hashes and
+  looked up on every request, so revocation is immediate. There is no signing
+  key that could be stolen or confused with the dashboard's session secret.
+- **Refresh tokens** (`mcp_rt_…`) are **always issued** with every code
+  exchange, whether or not the client asked for `offline_access`, because MCP
+  clients depend on them. They are **rotated on every use**, expire after 30
+  days without use, and a token family cannot outlive 90 days from consent;
+  after that the owner approves again. A refresh token that is presented again
+  after rotation is treated as stolen: the whole token family (and every
+  access token in it) is revoked and the client must reconnect.
+- **`offline_access`** is accepted for compatibility and echoed in the granted
+  `scope` when the client asked for it, but it **grants nothing extra** and is
+  never shown to the owner as a choice: leaving it out does not make a
+  connection shorter-lived. What ends a connection is the owner pressing
+  **Disconnect** on Connected apps (every access and refresh token under it
+  stops working on the next request), the client revoking its refresh token,
+  or the idle / family limits above.
+- Rotation and family revocation are safe under concurrency: every
+  transaction that mints into a family (code exchange, rotation) or revokes
+  one (refresh reuse, code replay, client revocation) first locks the
+  connection row (`SELECT … FOR UPDATE`) and only then reads the token state
+  it decides on, so on Postgres (READ COMMITTED) a revocation can never miss a
+  pair minted by a rotation running at the same moment.
+- A refresh can narrow scope, never widen it; the effective scopes of any token
+  are always intersected with the owner's **current** consent.
+- Tokens are accepted **only** in the `Authorization: Bearer` header, never in a
+  query string. The MCP server never forwards a token anywhere.
+- The public endpoints read request bodies with a hard bound (16 KB for
+  `/oauth/token`, `/oauth/revoke` and `/oauth/register`, 8 KB for the consent
+  and Connected apps APIs): a declared `Content-Length` over the bound is
+  refused unread, and a chunked body is cancelled as soon as it passes the
+  bound.
+
+## Revocation
+
+- **Client-initiated**: `POST /oauth/revoke` (RFC 7009). Revoking a refresh
+  token revokes its whole family. A client cannot revoke another client's
+  tokens (the call succeeds silently, as the RFC requires, and does nothing).
+- **Owner-initiated**: **Connected apps** (`/connect/apps`) → Disconnect. The
+  connection and every token under it (access and refresh, every family) stop
+  working on the next request.
+- **Server-wide emergency**: see [operations.md](operations.md#emergency-revoke-everything).
+
+## Personal access tokens
+
+For clients that cannot run a browser OAuth flow (for example a headless Codex
+setup using `bearer_token_env_var`), an owner can create a **personal access
+token** (`mcp_pat_…`) on Connected apps: named, limited to the scopes they tick
+and their own agents, expiring in 7, 30 or 90 days, shown once, stored hashed,
+revocable like any connection. It is still one owner's delegation, never an
+application-level key.
+
+## Scopes
+
+See [tools.md](tools.md) for the full list and which tool needs which scope.
+No scope can move funds, sign transactions or change trading permissions.
+`trade:propose`, `drafts:write` and `social:write` only create **proposals**
+that the owner approves on a Merrymen page with their own sign-in.
+
+A tool whose scope a connection does not hold is not listed, and calling it by
+name gets JSON-RPC error `-32602` ("Tool … not found"). To add a permission
+later, the owner disconnects the app on **Connected apps** and connects it
+again (its next sign-in asks for every scope), ticking that permission on the
+consent page; or uses a personal access token that includes it.
+
+## The directory profile (`/mcp/directory`)
+
+A second address for the same server, made for Anthropic's connector
+directory: `https://mcp.merrymen.dev/mcp/directory`. The canonical `/mcp` is
+unchanged and stays what owners add as a custom connector.
+
+**What it excludes, and why.** A directory connection can never hold
+`trade:propose`, `drafts:write` or `social:write`, nor the staff scope. Those
+are the scopes that let an assistant *prepare* something with consequences (a
+trade, a setting change, an agent draft, a follow, a post), even though each
+still waits for the owner's approval in Merrymen. A listing anyone can add in
+one click is kept to research, reading, chat, the watchlist, alerts, reports
+and backtests; an owner who wants proposals adds the full server as a custom
+connector. The limit is by scope level (`read` and `write` only:
+`DIRECTORY_SCOPES` in `web/src/mcp/scopes.ts`), so a sensitive scope added
+later stays outside the directory until someone decides otherwise. Tools that
+exist only on the full server: `quote_trade`, `propose_trade`,
+`propose_settings_change`, `create_agent_draft`, `draft_post`,
+`follow_agent`, `unfollow_agent`, `get_proposal`, `list_proposals`,
+`cancel_proposal`, and the staff tools.
+
+**Its own resource.** `/.well-known/oauth-protected-resource/mcp/directory`
+names `resource: https://mcp.merrymen.dev/mcp/directory` and lists only the
+scopes above as `scopes_supported`; the 401 challenge on `/mcp/directory`
+points `resource_metadata` at that document and asks for only those scopes.
+The root and `/mcp` documents, the canonical challenge and the
+authorization-server metadata are unchanged.
+
+**Enforced at every step, each check independent of the others:**
+
+1. `/oauth/authorize` with `resource=…/mcp/directory` intersects the
+   requested scopes with the directory list **before** the request is parked,
+   so the consent screen can never offer a sensitive scope (a request that
+   asks only for excluded scopes is `invalid_scope`).
+2. The consent screen and the decision filter the parked request again, and
+   an explicit choice of an excluded scope is refused (`invalid_scope`), never
+   quietly granted.
+3. The code exchange and every refresh drop an excluded scope from whatever
+   the code or token row says, and a code mints only for a connection on its
+   own address.
+4. Verification drops them from the principal; the server built for
+   `/mcp/directory` registers no tool, resource or prompt that needs one; and
+   the policy check on every call refuses them whatever the token holds.
+
+**Audience separation.** A token is bound to the resource it was issued for:
+`/mcp/directory` accepts only directory tokens and `/mcp` only canonical ones.
+A refresh keeps a token on its own resource (a `resource` parameter naming
+the other address is `invalid_target`), and the moved-endpoint rule applies to
+both: a token for an address this server no longer serves gets
+`invalid_grant` at refresh, so the client signs in again. Personal access
+tokens are canonical only.
+
+**One connection per address.** claude.ai uses the same `client_id` (its
+metadata document) for a custom connector and a directory connector, and an
+owner may have both. So a connection is one owner's consent for one client
+**on one resource**: `mcp_connections.resource` holds the directory URL for a
+directory connection and is NULL for the canonical one (as is every row
+written before the column existed), and there is at most one active OAuth
+connection per (owner, client, resource). Connecting, reconnecting or
+disconnecting either never changes or revokes the other, and the consent
+screen's starting point ("what you granted before") is read from the
+connection on the same address only. **Connected apps** marks a directory
+connection "Via the Claude directory listing".
+
+**Switching it off.** `MERRYMEN_MCP_DIRECTORY=0` on web: `/mcp/directory` and
+its metadata answer 404, `/oauth/authorize` refuses the address
+(`invalid_target`), and directory tokens stop verifying and refreshing
+(`invalid_grant`); `/mcp` is untouched. `MERRYMEN_MCP_DIRECTORY_RESOURCE_URL`
+can move the address to another origin (https), never to another path: the
+route is always `/mcp/directory`, and an override naming any other path (or
+the canonical one) switches the profile off rather than advertise an address
+that answers 404. `/api/mcp/health` says which.
+
+## The partner API
+
+The older partner API (`gateway/PARTNER-API.md`) is a separate, server-to-server
+integration for apps that onboard their own users. MCP does not accept partner
+keys (no token passthrough), and partner keys cannot reach MCP. Both paths
+require the owner's explicit consent per app.
+
+## Standards implemented
+
+OAuth 2.1 (authorization code + PKCE S256), RFC 8414, RFC 9728, RFC 8707,
+RFC 7591, RFC 7009, RFC 9207 (`iss`), RFC 8252 (loopback redirects), Client ID
+Metadata Documents (MCP authorization spec 2025-11-25 / 2026-07-28).

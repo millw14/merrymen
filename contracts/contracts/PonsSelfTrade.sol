@@ -151,8 +151,97 @@ contract PonsSelfTrade {
         uint256 amountOut
     );
 
+    /**
+     * @notice The most quote asset ONE CALLER may spend here in a rolling window.
+     *
+     * ─────────────────────────────────────────────────────────────────────────
+     * THE SAME HOLE THE CLASS VAULT HAD, AND THE SAME BOUND
+     *
+     * `_direction` interrogates the curve about ITSELF, and the launchpad mints
+     * ~475 curve addresses an hour, so no call policy can enumerate the
+     * legitimate ones. The Pons factory exposes no registry to verify against —
+     * eighteen candidate view signatures probed on mainnet 4663, none answers.
+     * Provenance is not available on chain.
+     *
+     * So a compromised session key names a contract it controls as the curve.
+     * It answers correctly, takes the approved input, and pays one wei back to
+     * the account so the `amountOut == 0` floor does not trip — `minAmountOut`
+     * being supplied by the same attacker.
+     *
+     * The wall bounds that PER CALL. Nothing bounded the repetition:
+     * `RateLimitPolicy` has zero bytecode on this chain, so `maxOpsPerDay` is
+     * enforced only by the worker, which is the party a compromise owns.
+     *
+     * ─────────────────────────────────────────────────────────────────────────
+     * PER CALLER, NOT GLOBAL — the difference from PonsClassVault
+     *
+     * That vault belongs to one account. This adapter is a SHARED singleton
+     * every account calls, so a single ceiling across all of them would let one
+     * compromised account spend the whole allowance and refuse everybody else's
+     * trades for the rest of the window. The ceiling is therefore keyed by
+     * `msg.sender`, and one account's drain cannot reach another's.
+     *
+     * A caller raises or lowers their own, and cannot touch anyone else's. The
+     * wall grants the session key exactly `tradeExactIn` on this target, so the
+     * key being bounded cannot reach `setSpendCap`; the owner's sudo key can.
+     *
+     * ONLY BUYS ARE CHARGED. A sell brings quote back in, and a ceiling that
+     * could refuse an exit would be a no-exit trap.
+     */
+    mapping(address => uint256) private capFor;
+    mapping(address => bool) public capConfigured;
+
+    /// @notice Quote units. 250 USDG at 6dp, for a caller that never sets one.
+    uint256 public constant DEFAULT_SPEND_CAP = 250_000_000;
+
+    /// @notice The window the cap is measured over.
+    uint256 public constant SPEND_WINDOW = 1 days;
+
+    mapping(address => uint256) private windowStart;
+    mapping(address => uint256) private spentInWindow;
+
+    event SpendCapSet(address indexed account, uint256 cap);
+
+    /// @notice This caller's ceiling — their own setting, or the default.
+    function spendCapOf(address account) public view returns (uint256) {
+        return capConfigured[account] ? capFor[account] : DEFAULT_SPEND_CAP;
+    }
+
+    /**
+     * @notice Set YOUR OWN ceiling. Cannot touch another account's.
+     * @dev Zero disables buying for this caller and still leaves selling open.
+     * `capConfigured` is what makes a deliberate zero distinguishable from
+     * "never set" — without it, zero would silently mean the default.
+     */
+    function setSpendCap(uint256 cap) external {
+        capFor[msg.sender] = cap;
+        capConfigured[msg.sender] = true;
+        emit SpendCapSet(msg.sender, cap);
+    }
+
+    /// @notice What this caller may still spend in the current window.
+    function spendRemaining(address account) external view returns (uint256) {
+        uint256 cap = spendCapOf(account);
+        if (block.timestamp >= windowStart[account] + SPEND_WINDOW) return cap;
+        uint256 spent = spentInWindow[account];
+        return spent >= cap ? 0 : cap - spent;
+    }
+
+    /// @dev Charge a buy against this caller's window, rolling it when it passes.
+    function _chargeSpend(address account, uint256 amountIn) private {
+        if (block.timestamp >= windowStart[account] + SPEND_WINDOW) {
+            windowStart[account] = block.timestamp;
+            spentInWindow[account] = 0;
+        }
+        uint256 cap = spendCapOf(account);
+        uint256 spent = spentInWindow[account] + amountIn;
+        if (spent > cap) revert SpendCapExceeded(amountIn, cap - spentInWindow[account]);
+        spentInWindow[account] = spent;
+    }
+
     error Expired();
     error ZeroAmount();
+    error SpendCapExceeded(uint256 wanted, uint256 remaining);
     error NotAContract();
     error Reentrant();
     error NativeQuoteNotSupported();
@@ -212,6 +301,12 @@ contract PonsSelfTrade {
         }
 
         bool isBuy = _direction(curve, assetIn, assetOut);
+
+        // CHARGED BEFORE THE PULL AND THE APPROVE, so a refusal moves nothing
+        // and the untrusted curve never receives an allowance it could spend.
+        // Buys only: a sell returns quote to the account, and a ceiling that
+        // could block one would be a no-exit trap.
+        if (isBuy) _chargeSpend(msg.sender, amountIn);
 
         // The balance the guarantee is measured against. Read BEFORE the pull,
         // and on `msg.sender`, because the curve pays the account directly and

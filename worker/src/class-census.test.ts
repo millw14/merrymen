@@ -28,16 +28,13 @@ import { after, describe, it } from "node:test";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-census-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, classCandidateCensus, recentCandidates, recordCandidate } = await import("./store");
+const { closeStoreForTest, initStore, classCandidateCensus, recentCandidates, recordCandidate } = await import("./store");
 const { CASH } = await import("../../packages/core/src/index");
 
 await initStore();
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* Windows holds the sqlite handle a moment longer; the dir is disposable */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const STORE = readFileSync(new URL("./store.ts", import.meta.url), "utf8");

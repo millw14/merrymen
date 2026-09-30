@@ -18,7 +18,10 @@
  * same way production does.
  */
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { bindingMessage } from "@merrymen/core";
 
@@ -26,6 +29,11 @@ import { bindingMessage } from "@merrymen/core";
 // not at import — so a static import is safe and the CJS test target is happy.
 // Same arrangement as auth.test.ts.
 process.env.MERRYMEN_SESSION_SECRET = "test-secret-at-least-thirty-two-characters-long";
+const testHome = mkdtempSync(join(tmpdir(), "merrymen-binding-"));
+process.env.MERRYMEN_HOME = testHome;
+delete process.env.DATABASE_URL;
+delete process.env.MERRYMEN_HOSTED;
+after(() => rmSync(testHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
 
 import { challengeMessage, issueChallengeNonce, verifyGrantBinding } from "./auth";
 
@@ -145,7 +153,8 @@ test("a nonce cannot be spent twice", async () => {
     walletSignature: await wallet.signMessage({ message }),
     ownerSignature: await owner.signMessage({ message }),
   };
-  assert.equal((await verifyGrantBinding(args)).ok, true);
+  const results = await Promise.all([verifyGrantBinding(args), verifyGrantBinding(args)]);
+  assert.equal(results.filter((result) => result.ok).length, 1, "concurrent claims have one winner");
   assert.equal((await verifyGrantBinding(args)).ok, false, "replay must fail");
 });
 

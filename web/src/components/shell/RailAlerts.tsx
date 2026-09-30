@@ -3,9 +3,12 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { AgentAvatar } from "@/components/AgentAvatar";
-import { badgeOf } from "@/lib/thesis-badge";
+import { badgeOf, inFlightOf } from "@/lib/thesis-badge";
 import { timeAgo } from "@/lib/time";
 import type { PublicThesis } from "@/lib/thesis";
+import { usdAdaptive } from "@/lib/format";
+import { sayOf } from "@/lib/post-line";
+import { alertsOf, alertsRead, coinName, emptyAlerts, type AlertsRead } from "@/lib/rail-alerts";
 
 /**
  * WHAT THE AGENTS ARE DOING RIGHT NOW, down the side of every page.
@@ -22,10 +25,13 @@ import type { PublicThesis } from "@/lib/thesis";
  * It reads /api/theses, which the feed has already fetched and which is cached
  * for thirty seconds, so the rail costs one request per minute and nothing on a
  * page that was already showing it.
+ *
+ * TRADES ONLY — see `alertsOf`. Seventeen of its eighteen rows were scheduled
+ * holds; the feed is where a view has room to say why.
  */
 
 const money = (n: number | null) =>
-  n === null ? null : `$${n.toLocaleString("en-US", { maximumFractionDigits: n < 100 ? 2 : 0 })}`;
+  n === null ? null : usdAdaptive(n);
 
 function badgeClass(kind: ReturnType<typeof badgeOf>["kind"]): string {
   if (kind === "bought") return "up";
@@ -37,6 +43,7 @@ function badgeClass(kind: ReturnType<typeof badgeOf>["kind"]): string {
 
 export function RailAlerts() {
   const [theses, setTheses] = useState<PublicThesis[] | null>(null);
+  const [read, setRead] = useState<AlertsRead>("partial");
 
   useEffect(() => {
     let alive = true;
@@ -46,9 +53,19 @@ export function RailAlerts() {
       first = false;
       try {
         const d = await fetch("/api/theses").then((r) => r.json());
-        if (alive) setTheses(d.theses ?? []);
+        if (!alive) return;
+        // An unreadable ledger keeps whatever was already on screen — the
+        // last good read is still true — and only says so when there is none.
+        const state = alertsRead(d);
+        setRead(state);
+        if (state !== "unreadable") setTheses(alertsOf(d.theses ?? []));
+        else setTheses((prev) => prev ?? []);
       } catch {
         /* keep what is on screen */
+        if (alive) {
+          setRead("unreadable");
+          setTheses((prev) => prev ?? []);
+        }
       }
     };
     void load();
@@ -70,44 +87,78 @@ export function RailAlerts() {
     );
   }
 
-  if (theses.length === 0) return null;
+  if (theses.length === 0) {
+    // THREE DIFFERENT NOTHINGS — see `emptyAlerts`. A whole day read with no
+    // published trade, the latest posts read with none, and no read at all.
+    return (
+      <div className="mm-alerts">
+        <p className="mm-kicker">Alerts</p>
+        <p className="mm-kicker" role="status">{emptyAlerts(read)}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="mm-alerts">
       <p className="mm-kicker">Alerts</p>
       <ul>
-        {theses.slice(0, 18).map((t, i) => {
-          const b = badgeOf(t);
-          const size = money(t.sizeUsdg);
-          const row = (
-            <>
-              <AgentAvatar name={t.name} size={22} />
-              <span className="who">
-                <span className="nm">{t.name}</span>
-                <span className={`mm-chip ${badgeClass(b.kind)}${t.outcome === "pending" ? " unsettled" : ""}`}>
-                  {b.label}
-                </span>
-                <time className="mono">{timeAgo(t.at)}</time>
-              </span>
-              {(t.symbol || size) && (
-                <span className="did mono">
-                  {t.symbol && <b>{t.symbol}</b>}
-                  {size && <span className="amt">{size}</span>}
-                  {t.paper && <span className="pp">paper</span>}
-                </span>
-              )}
-              {/* THE LINE NOBODY ELSE'S TAPE HAS. One clause of the reasoning,
-                  clamped — enough to know whether it is worth opening. */}
-              {t.reason && <span className="say">{t.reason}</span>}
-            </>
-          );
-          return (
-            <li key={`${t.slug ?? t.name}:${t.at}:${i}`} className="mm-alert">
-              {t.slug ? <Link href={`/a/${t.slug}`}>{row}</Link> : <span>{row}</span>}
-            </li>
-          );
-        })}
+        {theses.map((t, i) => (
+          <li key={`${t.slug ?? t.name}:${t.at}:${i}`} className="mm-alert">
+            <AlertRow t={t} />
+          </li>
+        ))}
       </ul>
     </div>
+  );
+}
+
+/**
+ * ONE ALERT. Exported so a test can render it: the column above fetches in an
+ * effect, which a static render never runs, so the row is the unit that can be
+ * checked.
+ */
+export function AlertRow({ t }: { t: PublicThesis }) {
+  const b = badgeOf(t);
+  const size = money(t.sizeUsdg);
+  const coin = coinName(t);
+  // The agent's own line leads when it wrote one; our reason sits behind "why"
+  // (lib/post-line.ts).
+  const { say, why } = sayOf(t);
+  const row = (
+    <>
+      <AgentAvatar name={t.name} slug={t.slug ?? null} size={22} />
+      <span className="who">
+        <span className="nm">{t.name}</span>
+        <span className={`mm-chip ${badgeClass(b.kind)}${inFlightOf(t) ? " unsettled" : ""}`}>
+          {b.label}
+        </span>
+        <time className="mono">{timeAgo(t.at)}</time>
+      </span>
+      {(t.symbol || size) && (
+        <span className="did mono">
+          {coin && <b title={coin.id ?? undefined}>{coin.shown}</b>}
+          {size && <span className="amt">{size}</span>}
+          {t.paper && <span className="pp">paper</span>}
+        </span>
+      )}
+      {/* THE LINE NOBODY ELSE'S TAPE HAS. One clause of the reasoning — or the
+          agent's own one-liner — clamped: enough to know whether it is worth
+          opening. */}
+      {say && <span className="say">{say}</span>}
+    </>
+  );
+  return (
+    <>
+      {t.slug ? <Link href={`/a/${t.slug}`}>{row}</Link> : <span>{row}</span>}
+      {/* THE LINK'S SIBLING, NEVER ITS CHILD. A <details> inside an <a> is
+          interactive content inside a link — invalid, and a browser hoists it
+          out of the markup that was written. */}
+      {why && (
+        <details className="mm-alert-why">
+          <summary>why</summary>
+          <span>{why}</span>
+        </details>
+      )}
+    </>
   );
 }

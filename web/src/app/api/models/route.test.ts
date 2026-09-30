@@ -105,4 +105,26 @@ describe("POST /api/models error classification", () => {
     const j = (await res.json()) as Record<string, unknown>;
     assert.deepEqual(j.models, ["apple", "zebra"]);
   });
+  it("clearing an override previews the shared key instead of retrying the saved key", async () => {
+    useTempHome({ groqApiKey: "refused-override" });
+    process.env.GROQ_API_KEY = "shared-working-key";
+    let authorization: unknown;
+    globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+      authorization = (init.headers as Record<string,string>).Authorization;
+      return new Response(JSON.stringify({ data: [{ id: "model" }] }));
+    }) as typeof fetch;
+    const res = await POST(req({ provider: "groq", useSavedKey: false }));
+    assert.equal(res.status, 200);
+    assert.equal(authorization, "Bearer shared-working-key");
+    await POST(req({ provider: "groq" }));
+    assert.equal(authorization, "Bearer refused-override", "preview must not persist the clearing");
+  });
+  it("trims pasted keys before contacting the provider", async () => {
+    useTempHome({});
+    globalThis.fetch = (async (_url: unknown, init: RequestInit) => {
+      assert.equal((init.headers as Record<string,string>).Authorization, "Bearer pasted-key");
+      return new Response(JSON.stringify({ data: [] }));
+    }) as typeof fetch;
+    assert.equal((await POST(req({ provider: "groq", apiKey: " pasted-key\n" }))).status, 200);
+  });
 });

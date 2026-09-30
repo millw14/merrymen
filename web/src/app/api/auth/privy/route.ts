@@ -45,7 +45,7 @@ const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x
 /** The same nonce discipline as the wallet login. One definition, in lib/auth. */
 export async function GET(req: Request) {
   if (!privyConfigured()) {
-    return NextResponse.json({ error: "privy login is not configured here" }, { status: 501 });
+    return NextResponse.json({ error: "privy login is not configured here", ownerFacing: true }, { status: 501 });
   }
   const origin = requestOrigin(req);
   const nonce = issueChallengeNonce(origin);
@@ -63,7 +63,7 @@ function providerOf(v: unknown): IdentityProvider {
 
 export async function POST(req: Request) {
   if (!privyConfigured()) {
-    return NextResponse.json({ error: "privy login is not configured here" }, { status: 501 });
+    return NextResponse.json({ error: "privy login is not configured here", ownerFacing: true }, { status: 501 });
   }
   const origin = requestOrigin(req);
 
@@ -92,7 +92,7 @@ export async function POST(req: Request) {
   // `body.address` is never trusted. It is not even read: the address is the
   // one the signature recovers to, so a request naming somebody else's wallet
   // proves nothing and gets nowhere.
-  const gate = consumeChallengeNonce(nonce, origin);
+  const gate = await consumeChallengeNonce(nonce, origin);
   if (!gate.ok) return NextResponse.json({ error: gate.why }, { status: 401 });
 
   let wallet: `0x${string}`;

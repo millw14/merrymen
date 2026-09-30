@@ -45,8 +45,13 @@ describe("the token page says how much of the book it is showing", () => {
     // the whole one, which understates who is in a token and overstates how
     // much of it we can see.
     assert.match(PAGE, /\{holderCoverage\.published\} of \{holderCoverage\.total\}/);
-    assert.match(PAGE, /published:data\.ledger\.holders\.length,total:data\.ledger\.holders\.length\+data\.ledger\.privateHolders/);
     assert.match(PAGE, /publish their positions/);
+  });
+
+  it("and the total counts the agents who did not opt in", async () => {
+    // Run, not read: the figures come from coverageOf, which the page calls.
+    const { coverageOf } = await import("../../terminal/token-holders");
+    assert.deepEqual(coverageOf({ holders: [{}, {}], privateHolders: 3 }), { published: 2, total: 5 });
   });
 });
 

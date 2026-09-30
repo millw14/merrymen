@@ -56,6 +56,15 @@ async function setup() {
   // already-granted quote approve — never a per-token one.
   await quote.write.approve([vault.address, 1_000n * ONE]);
 
+  // THE SPEND CAP, RAISED FOR THESE FIXTURES ONLY.
+  //
+  // The shipped default is 250 USDG at 6dp, which is correct for production —
+  // the wall pins the quote asset to USDG. These mocks are 18dp, so the
+  // default would refuse every fixture buy. Raised here so the pre-existing
+  // cases still exercise what they were written for; the cap's own tests set
+  // their own, and the default is asserted on a fresh vault.
+  await vault.write.setSpendCap([1_000_000n * ONE]);
+
   return { owner, stranger, strangerWallet, publicClient, quote, token, curve, vault };
 }
 
@@ -238,5 +247,128 @@ describe("PonsClassVaultFactory", () => {
     } catch {
       // CREATE2 with the owner as salt: the collision IS the uniqueness guarantee.
     }
+  });
+});
+
+/**
+ * THE DRAIN THE WALL COULD NOT BOUND.
+ *
+ * `_checkCurve` interrogates the curve about ITSELF, and every answer comes
+ * from the contract being checked. The launchpad mints ~475 curve addresses an
+ * hour so no call policy can enumerate them, and the Pons factory exposes no
+ * registry to verify against — eighteen candidate view signatures probed on
+ * mainnet 4663, none answers. Provenance is not available on chain.
+ *
+ * So a compromised session key names a contract it controls as the curve. It
+ * answers the three questions correctly, takes the approved quote, and pays ONE
+ * WEI — which clears the `tokensOut == 0` floor, `minTokensOut` being supplied
+ * by the same attacker.
+ *
+ * The wall capped that per call. Nothing capped the repetition: RateLimitPolicy
+ * has zero bytecode on 4663, so `maxOpsPerDay` is enforced by the worker — the
+ * party a compromise owns. These tests pin the ceiling that replaces it.
+ */
+describe("PonsClassVault spend cap", () => {
+  /** A curve that pays one wei: takes everything, clears every existing check. */
+  async function hostilePayingDust() {
+    const s = await setup();
+    const token = await hre.viem.deployContract("PonsMockERC20");
+    const hostile = await hre.viem.deployContract("MockHostileCurve", [token.address, s.quote.address]);
+    await token.write.mint([hostile.address, 1_000_000n * ONE]);
+    await hostile.write.setPayBps([1n]); // 0.01% — non-zero, so NoOutput never trips
+    return { ...s, hostile, hostileToken: token };
+  }
+
+  it("THE ATTACK, BOUNDED: a one-wei curve cannot take more than the cap", async () => {
+    const { quote, vault, hostile, owner } = await hostilePayingDust();
+    // A cap of 25 quote units against 10-unit buys: two land, the third does not.
+    await vault.write.setSpendCap([25n * ONE]);
+
+    const before = await quote.read.balanceOf([owner]);
+    await vault.write.buy([hostile.address, quote.address, 10n * ONE, 0n, FOREVER]);
+    await vault.write.buy([hostile.address, quote.address, 10n * ONE, 0n, FOREVER]);
+
+    try {
+      await vault.write.buy([hostile.address, quote.address, 10n * ONE, 0n, FOREVER]);
+      expect.fail("the drain continued past the cap");
+    } catch (e) {
+      expect(errorNameOf(e)).to.equal("SpendCapExceeded");
+    }
+
+    // The loss is the ceiling, not the balance. THAT is the whole fix.
+    const lost = before - (await quote.read.balanceOf([owner]));
+    expect(lost).to.equal(20n * ONE);
+    expect(lost < before).to.equal(true, "the ceiling must be less than the balance");
+  });
+
+  it("and the ceiling binds BEFORE anything leaves the account", async () => {
+    const { quote, vault, hostile, owner } = await hostilePayingDust();
+    await vault.write.setSpendCap([5n * ONE]);
+    const before = await quote.read.balanceOf([owner]);
+    try {
+      await vault.write.buy([hostile.address, quote.address, 10n * ONE, 0n, FOREVER]);
+      expect.fail("a buy over the cap was accepted");
+    } catch (e) {
+      expect(errorNameOf(e)).to.equal("SpendCapExceeded");
+    }
+    // Not a single unit moved — the charge precedes the pull and the approve.
+    expect(await quote.read.balanceOf([owner])).to.equal(before);
+    expect(await quote.read.allowance([vault.address, hostile.address])).to.equal(0n);
+  });
+
+  it("A SELL IS NEVER CAPPED — a ceiling that blocks an exit rebuilds the trap", async () => {
+    const { quote, token, curve, vault } = await setup();
+    await vault.write.buy([curve.address, quote.address, 10n * ONE, 0n, FOREVER]);
+    // Nothing may be spent from here on.
+    await vault.write.setSpendCap([0n]);
+
+    const held = await token.read.balanceOf([vault.address]);
+    await vault.write.sell([curve.address, held, 0n, FOREVER]);
+    expect(await token.read.balanceOf([vault.address])).to.equal(0n);
+  });
+
+  it("the cap is owner-only — the thing it bounds cannot raise it", async () => {
+    // The wall grants the session key `buy` and `sell` on this target and
+    // nothing else, so this selector is out of its reach. Pinned here as well
+    // because the contract must stand on its own, not on the wall being right.
+    const { vault, strangerWallet } = await setup();
+    try {
+      await vault.write.setSpendCap([10n ** 30n], { account: strangerWallet!.account });
+      expect.fail("a stranger raised the ceiling that bounds them");
+    } catch (e) {
+      expect(errorNameOf(e)).to.equal("NotOwner");
+    }
+  });
+
+  it("the window rolls, so a cap is a rate and not a lifetime allowance", async () => {
+    const { quote, vault, hostile } = await hostilePayingDust();
+    await vault.write.setSpendCap([10n * ONE]);
+    await vault.write.buy([hostile.address, quote.address, 10n * ONE, 0n, FOREVER]);
+    expect(await vault.read.spendRemaining()).to.equal(0n);
+
+    const day = Number(await vault.read.SPEND_WINDOW());
+    await hre.network.provider.send("evm_increaseTime", [day + 1]);
+    await hre.network.provider.send("evm_mine", []);
+
+    expect(await vault.read.spendRemaining()).to.equal(10n * ONE);
+    await vault.write.buy([hostile.address, quote.address, 10n * ONE, 0n, FOREVER]);
+  });
+
+  it("and it reports what is left rather than making the owner infer it", async () => {
+    const { quote, vault, curve } = await setup();
+    await vault.write.setSpendCap([30n * ONE]);
+    expect(await vault.read.spendRemaining()).to.equal(30n * ONE);
+    await vault.write.buy([curve.address, quote.address, 10n * ONE, 0n, FOREVER]);
+    expect(await vault.read.spendRemaining()).to.equal(20n * ONE);
+  });
+
+  it("ships with a conservative default rather than unlimited", async () => {
+    // A FRESH vault: setup() raises the cap for the 18dp fixtures.
+    const [w] = await hre.viem.getWalletClients();
+    const vault = await hre.viem.deployContract("PonsClassVault", [w!.account.address]);
+    // 250 USDG at 6dp. An owner who wants more sets it; an owner who never
+    // looks is bounded anyway, which is the direction a default must fail.
+    expect(await vault.read.DEFAULT_SPEND_CAP()).to.equal(250_000_000n);
+    expect(await vault.read.spendCapPerWindow()).to.equal(250_000_000n);
   });
 });

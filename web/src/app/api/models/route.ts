@@ -11,6 +11,7 @@ interface FetchModelsBody {
   provider?: string;
   apiKey?: string;
   baseUrl?: string;
+  useSavedKey?: boolean;
 }
 
 /**
@@ -59,7 +60,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
   }
 
-  const saved = await readSavedSettings(req);
+  const saved = { ...await readSavedSettings(req) };
   const providerId = body.provider || saved.llmProvider;
   if (!providerId) {
     return NextResponse.json({ error: "no provider specified and none saved" }, { status: 400 });
@@ -68,6 +69,17 @@ export async function POST(req: Request) {
   const prov = llmProviderById(providerId);
   if (!prov) {
     return NextResponse.json({ error: `unknown provider: ${providerId}` }, { status: 400 });
+  }
+  if (body.apiKey !== undefined && typeof body.apiKey !== "string") {
+    return NextResponse.json({ error: "API key must be text" }, { status: 400 });
+  }
+  body.apiKey = body.apiKey?.trim();
+  // Preview an explicitly cleared override without silently retrying that saved key.
+  // The actual setting changes only when the owner presses Save.
+  if (body.useSavedKey === false) {
+    if (prov.id === "groq") delete saved.groqApiKey;
+    else if (prov.id === "anthropic") delete saved.anthropicApiKey;
+    else delete saved.llmApiKey;
   }
 
   /**

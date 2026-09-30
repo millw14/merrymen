@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 
 export const metadata: Metadata = {
   title: "Docs",
@@ -6,8 +7,8 @@ export const metadata: Metadata = {
 };
 
 const TOC = [
-  ["Getting started", [["install", "Install"], ["wallet", "Create & fund a wallet"], ["run", "Run it"]]],
-  ["Telegram", [["telegram", "Set up Telegram"], ["commands", "Commands"], ["transfers", "Transfers"], ["pc-control", "PC remote control"], ["voice", "Voice & vision"], ["soul", "The soul"]]],
+  ["Getting started", [["install", "Install"], ["wallet", "Create & fund a wallet"], ["run", "Run it"], ["claude", "Use it from Claude"]]],
+  ["Telegram", [["telegram", "Set up Telegram"], ["tg-groups", "Telegram groups"], ["commands", "Commands"], ["transfers", "Transfers"], ["pc-control", "PC remote control"], ["voice", "Voice & vision"], ["soul", "The soul"]]],
   ["Trading", [["strategies", "Strategies"], ["custom", "Write your own bot"], ["virtuals", "Stream to Virtuals"]]],
   ["Reference", [["safety", "Safety model"], ["config", "Configuration"], ["troubleshooting", "Troubleshooting"], ["faq", "FAQ"]]],
 ] as const;
@@ -137,6 +138,19 @@ merrymen kill       # kill switch — destroys the grant`}
           so dashboard changes apply within one tick — no restart.
         </p>
 
+        {/* ── claude ── */}
+        <h2 id="claude">Use it from Claude (MCP)</h2>
+        <p>
+          Connect Claude to your agent and it can check on it, explain why it has or hasn&apos;t
+          traded, and, if you allow it, suggest trades or setting changes that only happen once you
+          approve them in Merrymen. The quickest way: tell Claude “set up merrymen mcp”, or add it
+          in one click from <Link className="link" href="/claude">Set up Merrymen in Claude</Link>.
+        </p>
+        <div className="callout">
+          The MCP server is for hosted Merrymen (app.merrymen.dev); the rest of this guide covers the
+          self-hosted install.
+        </div>
+
         {/* ── telegram ── */}
         <h2 id="telegram">Set up Telegram</h2>
         <ol>
@@ -150,6 +164,31 @@ merrymen kill       # kill switch — destroys the grant`}
           everything”, “why did you buy that?”.
         </p>
 
+        {/* ── telegram groups ── */}
+        <h2 id="tg-groups">Telegram groups</h2>
+        <p>
+          Your merryman can hang out in a Telegram group like one more person: it answers when
+          it&apos;s called, now and then joins in, remembers the chat, and when someone posts a
+          Robinhood Chain coin it takes a look, tags them, and says whether it&apos;s in or passing.
+          Coins from other chains (Ethereum, Solana, BNB and the rest) it leaves alone. In trencher
+          mode its Brain decides and every limit still applies — a group message can put a coin in
+          front of it, never order a trade. It never posts alerts, sizes, prices or P&amp;L, or
+          anything private.
+        </p>
+        <ol>
+          <li>Add your bot to a group. It only talks in groups you added it to or approved — if someone else adds it, it stays silent and DMs you <strong>Stay</strong> / <strong>Leave</strong>.</li>
+          <li>To let it follow the chat: message <strong>@BotFather</strong> → <code className="inline">/setprivacy</code> → your bot → <strong>Disable</strong>, then remove the bot from the group and add it back. Until then it only hears commands and replies to its own messages.</li>
+          <li>Send <code className="inline">/groups</code> in your DM with the bot to see every group it knows, with <strong>Stay</strong>, <strong>Leave</strong> and <strong>Forget</strong>.</li>
+        </ol>
+        <p>
+          Turn it off, turn off <strong>Look at coins people post</strong>, or pick how chatty it is
+          under <strong>Settings → Telegram → Telegram groups</strong>. In a group,{" "}
+          <code className="inline">/forget</code> (you) wipes what it remembers of that group and{" "}
+          <code className="inline">/forgetme</code> (anyone) removes what it remembers of them. Never
+          joins in, or doesn&apos;t notice coins people post? Check privacy mode (step 2, including
+          the re-add) and that Telegram groups is on.
+        </p>
+
         {/* ── commands ── */}
         <h2 id="commands">Commands</h2>
         <table>
@@ -157,10 +196,11 @@ merrymen kill       # kill switch — destroys the grant`}
             <tr><td><code className="inline">/status /positions /pnl /trades</code></td><td>read the live book</td></tr>
             <tr><td><code className="inline">/report · /brag · /why</code></td><td>daily report · shareable scorecard · explain the last trade</td></tr>
             <tr><td><code className="inline">/buy &lt;SYM&gt; &lt;usdg&gt; · /sell …</code></td><td>trade (passes the policy wall)</td></tr>
-            <tr><td><code className="inline">/transfer &lt;0x…&gt; &lt;usdg&gt;</code></td><td>send USDG out — always asks to /confirm</td></tr>
+            <tr><td><code className="inline">/transfer &lt;0x…&gt; &lt;usdg&gt;</code></td><td>send USDG out — refused on any wallet signed at or after 2 Aug 2026 00:35:24 UTC (see <a href="#transfers">Transfers</a>)</td></tr>
             <tr><td><code className="inline">/alert &lt;SYM&gt; &gt; &lt;price&gt;</code></td><td>one-shot price alerts · /alerts · /unalert</td></tr>
             <tr><td><code className="inline">/pause /resume · /strategy · /cap</code></td><td>steer the worker (cap only tightens)</td></tr>
             <tr><td><code className="inline">/name · /soul · /remember</code></td><td>name it, see who it is, teach it about you</td></tr>
+            <tr><td><code className="inline">/groups · /forget · /forgetme</code></td><td>your <a href="#tg-groups">Telegram groups</a> (Stay / Leave / Forget) · in a group: wipe its memory of that group · anyone in a group: drop what it remembers of them</td></tr>
             <tr><td><code className="inline">/kill</code></td><td>destroy the grant, stand the band down</td></tr>
           </tbody>
         </table>
@@ -172,17 +212,32 @@ merrymen kill       # kill switch — destroys the grant`}
 
         {/* ── transfers ── */}
         <h2 id="transfers">Transfers</h2>
-        <p>Sending USDG out of the account is triple-guarded:</p>
-        <ul>
-          <li><strong>Off by default</strong> — enable “allow transfers” in settings.</li>
-          <li><strong>Amount-capped on-chain</strong> — the grant&apos;s call policy caps the per-transfer amount.</li>
-          <li><strong>Always confirmed</strong> — every transfer echoes the full recipient address and waits for an explicit <code className="inline">/confirm</code> (90s), plus a daily transfer budget.</li>
-        </ul>
         <p>
-          A prompt-injected “send everything to 0xevil” can at worst produce a confirmation card you
-          will see and <code className="inline">/cancel</code>. Transfers need a wallet created with the transfer
-          permission; a pre-transfer grant gets a “re-create your wallet” reply instead.
+          Sending USDG out through chat is <strong>refused</strong> for any wallet signed at or
+          after 00:35:24 UTC on 2 August 2026, when the withdrawal allowlist landed. The wall only
+          grants a USDG transfer to withdrawal addresses registered when the grant is signed, and no
+          signer registers one — so the call policy carries no transfer
+          permission at all, and <code className="inline">/transfer</code> is turned back before
+          anything is built. With “allow transfers” off, the reply says transfers from chat are off;
+          with it on, the reply is “this wall carries no transfer permission — no withdrawal address
+          was registered when it was signed”. Re-creating the wallet doesn&apos;t change that: a
+          wallet signed today registers no withdrawal address either.
         </p>
+        <p>Money leaves through the <strong>owner key</strong>, which no wall can block:</p>
+        <ul>
+          <li><strong>Hosted</strong> — <strong>Withdraw</strong> in your profile on app.merrymen.dev.</li>
+          <li><strong>Self-hosted</strong> — <code className="inline">merrymen recover</code> sweeps the smart account to a wallet you control.</li>
+        </ul>
+        <div className="callout">
+          <strong>Wallets signed before 00:35:24 UTC on 2 August 2026</strong>, if their key hasn&apos;t expired,
+          still carry the older transfer permission: any recipient, amount-capped on-chain at the
+          per-trade size. For those,{" "}
+          <code className="inline">/transfer</code> still works behind “allow transfers” (off by
+          default), a daily transfer budget, and an explicit <code className="inline">/confirm</code>{" "}
+          (90s) after the full recipient address is echoed back — so a prompt-injected “send
+          everything to 0xevil” can at worst produce a confirmation card you will see and{" "}
+          <code className="inline">/cancel</code>.
+        </div>
 
         {/* ── pc control ── */}
         <h2 id="pc-control">PC remote control</h2>
@@ -298,7 +353,7 @@ merrymen kill       # kill switch — destroys the grant`}
         </p>
         <ul>
           <li><strong>Trades</strong> pass caps enforced by the account contract; every swap is simulated first.</li>
-          <li><strong>Transfers</strong> are amount-capped on-chain, off by default, and confirm-gated.</li>
+          <li><strong>Transfers</strong> out through chat are refused: no wallet signed at or after 00:35:24 UTC on 2 August 2026 carries a transfer permission. Money leaves with your owner key.</li>
           <li><strong>PC actions</strong> are off by default, per-capability, allowlisted, and the sharp ones are confirmed.</li>
           <li><strong>Secrets</strong> live only in <code className="inline">~/.merrymen</code> and are masked before they ever reach the browser.</li>
           <li><strong>The kill switch</strong> destroys the grant; hard on-chain key expiry is the backstop.</li>

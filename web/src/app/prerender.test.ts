@@ -37,8 +37,17 @@ function routeFiles(dir: string, out: string[] = []): string[] {
   return out;
 }
 
+/**
+ * The group chat's routes reach the database through a sibling helper
+ * (api/groupchat/room.ts, imported as ./room or ../room) and name none of the
+ * readers below themselves.
+ */
+const READS_THROUGH_THE_ROOM = /from\s+["']\.\.?\/room["']/;
+
 /** Everything that can reach the ledger, directly or through a reader. */
-const READS_THE_LEDGER = /withReadDb|read-theses|read-leaderboard|read-wall-tape|read-agent|@\/lib\/ledger/;
+const READS_THE_LEDGER = new RegExp(
+  /withReadDb|read-theses|read-leaderboard|read-wall-tape|read-agent|@\/lib\/ledger/.source + "|" + READS_THROUGH_THE_ROOM.source,
+);
 
 describe("build-time prerendering never covers a database read", () => {
   const files = routeFiles(APP);
@@ -82,6 +91,24 @@ describe("build-time prerendering never covers a database read", () => {
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/(^|[^:])\/\/.*$/gm, "$1");
       assert.match(code, /export\s+const\s+dynamic\s*=\s*"force-dynamic"/, `${rel} must be dynamic`);
+    }
+  });
+
+  it("every route that reads through the group chat's room helper is dynamic", () => {
+    const seen: string[] = [];
+    for (const f of files) {
+      const code = readFileSync(f, "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/(^|[^:])\/\/.*$/gm, "$1");
+      // Recognised by the sweep's own detection, so a detection that drops the
+      // room fails here too, not only a route that drops the directive.
+      if (!READS_THE_LEDGER.test(code) || !READS_THROUGH_THE_ROOM.test(code)) continue;
+      seen.push(path.relative(APP, f));
+      assert.match(code, /export\s+const\s+dynamic\s*=\s*"force-dynamic"/, `${path.relative(APP, f)} must be dynamic`);
+    }
+    // Both group chat routes, so a detection that stopped matching cannot pass vacuously.
+    for (const rel of [path.join("api", "groupchat", "route.ts"), path.join("api", "groupchat", "me", "route.ts")]) {
+      assert.ok(seen.includes(rel), `${rel} was not recognised as reading the database`);
     }
   });
 });

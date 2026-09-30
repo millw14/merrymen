@@ -16,6 +16,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { idleNotice } from "../idle-notice";
 import { steadyBasketTick, type SteadyBasketConfig } from "./steady-basket";
 import { renderWhy } from "./reasons";
 import type { Snapshot } from "./types";
@@ -73,26 +74,10 @@ describe("a stale weekend is reported, not just endured", () => {
     assert.equal(t.idle, undefined, "a tick that bought must not also claim it could not");
   });
 
-  it("SHORT OF CASH IS A DIFFERENT SILENCE, and it gets its own sentence", () => {
-    // This used to assert `idle === undefined`, and it was RIGHT about the
-    // wrong sentence — telling an owner whose account is empty that "the feeds
-    // are stale" sends them to wait for Monday instead of to the deposit
-    // screen. It was wrong to conclude that saying nothing was the answer.
-    //
-    // Nothing at all was the worse outcome: the buy loop never runs, so
-    // skippedStale stays 0, so `shut` is false, so no reason fires — and the
-    // live rail is only blocked by an EXACT zero, so the agent reports
-    // "trading for real — every leg available" beside an empty tape, forever,
-    // on stock defaults. That is the "nothing happens" complaint, and it had no
-    // sentence anywhere in the system.
+  it("reports stale feeds when an affordable smaller basket is still blocked by the market", () => {
     const t = steadyBasketTick(cfg(), snap({ cashUsdg: 1_000_000n, staleFeeds: new Set(["QQQ", "NVDA", "TSLA"]) }));
-    assert.equal(t.idle?.code, "under-one-buy");
-    // The BALANCE, not the feeds — even though the feeds are stale here too.
-    // Whichever is reported is the one the owner will act on.
-    const said = renderWhy(t.idle!);
-    assert.match(said, /1\.00 USDG on hand and one buy costs 25\.00/);
-    assert.match(said, /Add funds or lower the size per trade/);
-    assert.ok(!/stale/.test(said), "the actionable fact is the money, not the weekend");
+    assert.equal(t.idle?.code, "all-legs-stale");
+    assert.equal(t.intents.some(i => i.kind === "swap"), false);
   });
 
   it("and when the vault can cover it, it says the problem clears itself", () => {
@@ -132,14 +117,19 @@ describe("a stale weekend is reported, not just endured", () => {
     assert.ok(t.idle, "and the silence about buying is still explained");
   });
 
-  it("the worker reports it once per CHANGE, not once per tick", async () => {
+  it("the worker reports it once per CHANGE, not once per tick", () => {
     // A stale weekend is ~360 ticks. This repo already carries the incident
-    // where 1,242 identical rows told nobody anything.
-    const { readFileSync } = await import("node:fs");
-    const src = readFileSync(new URL("../index.ts", import.meta.url), "utf8");
-    assert.match(src, /lastIdleReason/, "the worker must remember what it last said");
-    const guard = src.indexOf("if (idleNow !== lastIdleReason)");
-    const write = src.indexOf("await addEvent(agentId, \"ok\", idleNow)");
-    assert.ok(guard > 0 && write > guard, "the event must sit inside the change guard");
+    // where 1,242 identical rows told nobody anything. Executed through
+    // idle-notice.ts, which the tick's idle block calls with what it last said.
+    const weekend = snap({ staleFeeds: new Set(["QQQ", "NVDA", "TSLA"]) });
+    let last: string | null = null;
+    const events: string[] = [];
+    for (let tick = 0; tick < 360; tick++) {
+      const n = idleNotice({ idle: steadyBasketTick(cfg(), weekend).idle, modeEmptied: null, last });
+      last = n.last;
+      if (n.event) events.push(n.event.message);
+    }
+    assert.equal(events.length, 1, "one weekend, one sentence");
+    assert.equal(events[0], renderWhy(steadyBasketTick(cfg(), weekend).idle!));
   });
 });

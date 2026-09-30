@@ -9,6 +9,20 @@
       "address": "0x48a560371230ece659b2ba40fb19e8335866ab3d",
       "deployedAt": "2026-09-11T08:24:09.654Z",
       "codeBytes": 5248
+    },
+    "PonsClassVaultFactoryV2": {
+      "address": "0xcdaf6bbd4947c00d8396c55f0ad53e6d345f4bf0",
+      "deployedAt": "2026-09-16T21:28:12.559Z",
+      "codeBytes": 10344,
+      "seed": [
+        {
+          "symbol": "USDG",
+          "usd": 250,
+          "address": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+          "capRaw": "250000000"
+        }
+      ],
+      "vaultInitCodeHash": "0xd2400cf02926bb782633b677ea2bf445d354652c1d03a05e6006014b47afdd52"
     }
   }
 }

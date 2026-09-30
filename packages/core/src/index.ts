@@ -3,6 +3,9 @@ export * from "./settings";
 export * from "./llm-providers";
 export * from "./tokens";
 export * from "./token";
+// ENERGY — what $MERRYMEN is for on the hosted service: the thresholds, the
+// report the worker publishes, and the one route an agent may buy it through.
+export * from "./energy";
 export * from "./protocols";
 export * from "./official-coins";
 export * from "./abis";
@@ -10,6 +13,9 @@ export * from "./grant";
 export * from "./holder-proof";
 export * from "./derivation";
 export * from "./explain";
+// A NAME FOR AN AGENT NOBODY NAMED, seeded on the slug so the grants route and
+// the Agent screen offer the same one without a round trip.
+export * from "./agent-name";
 export * from "./hosted";
 export * from "./wall";
 // The per-account vault address the wall pins, resolved from the factory at
@@ -56,3 +62,9 @@ export * from "./risk-level";
 // WHO ACTUALLY HOLDS THIS COIN — ChainMind's holder, transfer and swap
 // forensics, ported as the pure analysis behind the `onchain` lens.
 export * from "./onchain-forensics";
+export * from "./trencher-vault";
+export * from "./grant-installable";
+
+// WAS THIS GRANT SIGNED AGAINST AN OLDER WALL? A release date, enforced by a
+// fingerprint test, because `serialized` never leaves the browser that minted it.
+export * from "./wall-release";

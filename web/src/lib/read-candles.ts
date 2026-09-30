@@ -1,3 +1,4 @@
+import { geckoSource } from "../../../worker/src/venues/geckoterminal";
 /**
  * CANDLES, FROM THE INDEX THAT ALREADY DESCRIBES THESE POOLS.
  *
@@ -274,8 +275,9 @@ async function fetchCandles(
   window: CandleWindow,
 ): Promise<CandleRead> {
   const { timeframe, aggregate, seconds, label } = SPEC[window];
+  const source = geckoSource();
   const url =
-    `https://api.geckoterminal.com/api/v2/networks/robinhood/pools/${poolId}/ohlcv/${timeframe}` +
+    `${source.base}/networks/robinhood/pools/${poolId}/ohlcv/${timeframe}` +
     // `token` is sent as well as checked below. A mis-resolved address comes
     // back as a 400 enumerating the allowed values, which is a far better
     // failure than a plausible chart of the wrong asset.
@@ -283,7 +285,9 @@ async function fetchCandles(
 
   try {
     const res = await fetch(url, {
-      headers: { accept: "application/json" },
+      headers: source.headers,
+      redirect: "error",
+      signal: AbortSignal.timeout(8000),
       next: { revalidate: 60 },
     });
     // 429 is the common one, and it is the only refusal that is EVIDENCE about

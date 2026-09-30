@@ -98,3 +98,9 @@
   .terminal-form-page .mm-labelrow { flex-wrap:wrap; }
   .terminal-form-page .mm-row { flex-wrap:wrap; }
 }
+
+/* A cap that could not be read. Beside the fields rather than at the foot of
+   the form, because the number it refers to is the one being looked at — and
+   the summary below keeps showing the last figure that DID read, so the two
+   together say "this is still what you would sign". */
+.terminal-form-page .grant-cap-error { margin:10px 0 0; font-size:13px; line-height:1.55; color:var(--down); }

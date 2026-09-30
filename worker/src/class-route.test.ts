@@ -191,7 +191,7 @@ describe("three layers must hold before an agent reaches for a class token", () 
   it("the SETTINGS switch is checked, not just the signature", () => {
     // The assertion that stops "the wall allows it" being read as "the owner
     // asked for it".
-    assert.match(PRODUCER, /if \(!cfg\.classSnipeEnabled\) return \[\]/);
+    assert.match(PRODUCER, /if \(!cfg\.classSnipeEnabled\) return NO_CLASS/);
   });
 
   it("a zero size proposes nothing", () => {
@@ -208,13 +208,13 @@ describe("three layers must hold before an agent reaches for a class token", () 
     // A simulated class fill needs a price for a token with no oracle and no
     // pool — necessarily the curve's own reserves, which curve-prices.ts says
     // are good enough to VALUE something held and not to AUTHORISE a buy.
-    assert.match(PRODUCER, /if \(paperActive\(\)\) return \[\]/);
+    assert.match(PRODUCER, /if \(paperActive\(\)\) return NO_CLASS/);
   });
 
   it("an unreadable position count proposes nothing", () => {
     // Null must not read as zero, or the position ceiling frees itself exactly
     // when the book is unknown.
-    assert.match(PRODUCER, /if \(held === null\) return \[\]/);
+    assert.match(PRODUCER, /if \(held === null\) return NO_CLASS/);
   });
 
   it("candidates come from the factory-filtered launch feed and nowhere else", () => {
@@ -300,8 +300,8 @@ describe("three layers must hold before an agent reaches for a class token", () 
      * come AFTER the scan and its report.
      */
     const scan = PRODUCER.indexOf("reportClassScan(");
-    const snipe = PRODUCER.indexOf("if (!cfg.classSnipeEnabled) return [];");
-    const size = PRODUCER.indexOf("if (cfg.classPerEntryUsdg <= 0) return [];");
+    const snipe = PRODUCER.indexOf("if (!cfg.classSnipeEnabled) return NO_CLASS;");
+    const size = PRODUCER.indexOf("if (cfg.classPerEntryUsdg <= 0) return NO_CLASS;");
     // The ceiling moved behind `ceilingBlocks`, which is the point: the
     // comparison used to be inline here and compared `held.length` — every row
     // the ledger had ever carried — so a completed round trip consumed a slot

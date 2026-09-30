@@ -1,5 +1,8 @@
 "use client";
 
+import { resolveTrencherPermission } from "./trencher-permission";
+import { GRANT_TRENCHER } from "@merrymen/core";
+
 /**
  * The permission wall — creating an agent account and granting it a scoped key.
  *
@@ -76,10 +79,14 @@ import {
   buildCallPermissions,
   wallShape,
   wallSignable,
+  energyBuyFits,
+  GRANT_ENERGY,
+  ENERGY_ROUTE_V1,
   chainForId,
   officialCoinTokens,
   ponsAdapterForSigning,
   PONS_CLASS_VAULT_FACTORY,
+  PONS_CLASS_VAULT_FACTORY_V2,
   robinhoodChain,
   
   GRANT_V4,
@@ -87,6 +94,7 @@ import {
   GRANT_PONS_ADAPTER,
   GRANT_PONS_CLASS,
   resolveClassVault,
+  probeClassFactory,
   bindingMessage,
   TRADEABLE_V2,
   USDG_DECIMALS,
@@ -221,8 +229,8 @@ export type OwnerSigner =
       did: string;
     };
 
-async function mintGrant(
-  ownerSigner: OwnerSigner,
+async function prepareGrantCore(
+  ownerSigner: OwnerSigner | { account: LocalAccount; binding: "external-owner" },
   caps: GrantCaps,
   onStatus: (status: string) => void,
   chainId: number,
@@ -286,7 +294,8 @@ async function mintGrant(
    * inserting an optional address in the middle of this list cost last time.
    */
   ponsClassVaultFactory?: `0x${string}`,
-): Promise<MintedGrant> {
+  trencherFactory?: `0x${string}`,
+): Promise<Grant> {
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
   // below (UNISWAP/RIALTO/MORPHO/USDG) are MAINNET deployments — the wall is
@@ -457,15 +466,113 @@ async function mintGrant(
 
   let ponsClassVaultAddress: `0x${string}` | undefined;
   if (sealedClassFactory) {
+    /**
+     * ── WHICH VAULT FAMILY IS THIS, AND DOES IT MATCH WHAT WAS ASKED FOR ────
+     *
+     * NOTHING ELSE CAN TELL. `vaultFor`, `deploy`, `buy`, `sell` and `sweep` are
+     * signature-identical across the two versions, so the wall this signature
+     * seals is BYTE-IDENTICAL either way. A v1 address answers `vaultFor`
+     * plausibly, returns a real deployed vault, mints the marker, pins a real
+     * target, and reports a successful re-sign — while the chain quietly
+     * enforces v1's single global ceiling in raw units, which is ~250 for USDG
+     * and eight orders of magnitude wrong for anything else.
+     *
+     * The factory address is free text in /settings and that setting takes
+     * PRECEDENCE over the constant, so this is not a hypothetical paste.
+     *
+     * CHECKED AGAINST BOTH CONSTANTS RATHER THAN AGAINST PROVENANCE. An address
+     * that equals a pinned constant must be the version that constant is for;
+     * anything else is the owner's own and is reported rather than refused. A
+     * provenance rule ("it came from the constant, so it is v1") would quietly
+     * stop being true the day the default is repointed.
+     */
+    onStatus("checking the class vault factory…");
+    const probe = await probeClassFactory(publicClient, sealedClassFactory);
+    const lower = sealedClassFactory.toLowerCase();
+    const pinnedV1 = (PONS_CLASS_VAULT_FACTORY[chainId] ?? "").toLowerCase();
+    const pinnedV2 = (PONS_CLASS_VAULT_FACTORY_V2[chainId] ?? "").toLowerCase();
+    if (pinnedV1 && lower === pinnedV1 && probe.version !== 1) {
+      throw new Error(
+        `refusing to seal a class permission: ${sealedClassFactory} is pinned as this chain's v1 class ` +
+          `vault factory, but it answers version ${probe.version}. One of the two is wrong, and signing ` +
+          `would seal a vault nobody meant.`,
+      );
+    }
+    if (pinnedV2 && lower === pinnedV2 && probe.version !== 2) {
+      throw new Error(
+        `refusing to seal a class permission: ${sealedClassFactory} is pinned as this chain's v2 class ` +
+          `vault factory, but it does not answer FACTORY_VERSION — which is what a v1 factory looks ` +
+          `like. A v1 vault charges every buy against one global ceiling whatever asset funded it.`,
+      );
+    }
+
+    if (probe.version === 2) {
+      /**
+       * A V2 VAULT IS BORN WITH ITS FACTORY'S SEED CAPS, AND THERE IS NO SECOND
+       * TRANSACTION TO FIX THEM IN. The vault is created inside the same
+       * operation as its first class buy and that batch reverts whole, so a
+       * seed without USDG means every buy the wall permits reverts
+       * `QuoteNotApproved` AFTER the USDG approve leg has already landed — a
+       * grant that looks complete, burns gas every tick, and can never trade.
+       *
+       * SUBSET, NOT EQUALITY. The wall pins the class buy's quote word to USDG
+       * alone, and a multi-quote factory's seed is legitimately wider. What has
+       * to hold is that everything the wall permits, the vault will accept.
+       */
+      const usdg = CASH.USDG.toLowerCase();
+      const i = probe.seedQuotes.findIndex((q) => q.toLowerCase() === usdg);
+      if (i < 0) {
+        throw new Error(
+          `refusing to seal a class permission: the v2 factory at ${sealedClassFactory} seeds no USDG ` +
+            `cap, and the wall only ever permits a class buy funded in USDG. Every buy would revert ` +
+            `after the approve had landed.`,
+        );
+      }
+      if (probe.seedCaps[i] === 0n) {
+        throw new Error(
+          `refusing to seal a class permission: the v2 factory at ${sealedClassFactory} seeds USDG at a ` +
+            `cap of zero, and in this vault a cap of zero is how an asset is refused.`,
+        );
+      }
+    }
+
     onStatus("locating your class vault…");
     ponsClassVaultAddress = await resolveClassVault(
       publicClient,
       sealedClassFactory,
       sudoOnlyAccount.address,
     );
+    onStatus(`class vault v${probe.version} at ${ponsClassVaultAddress.slice(0, 10)}…`);
+  }
+
+  const trenchScope = trencherFactory ? await resolveTrencherPermission(publicClient, trencherFactory, sudoOnlyAccount.address) : {};
+
+  // ── IS THIS A FIRST INSTALL, OR A RE-SIGN ONTO AN ACCOUNT THAT EXISTS? ────
+  //
+  // A fact about the account, read from the chain, not a constant. It used to be
+  // hardcoded `true` inside `wallSignable`, which charged every renewal for a
+  // CREATE2 and an initCode it will never pay — 316,250 bounded gas — and at
+  // this ceiling that is the difference between signable and refused. A beta
+  // owner was told to delete a fifth token when four was the true answer.
+  //
+  // AN UNREADABLE ACCOUNT COUNTS AS UNDEPLOYED. Over-charging refuses a wall
+  // that would have fitted, which the owner can retry; under-charging mints one
+  // whose first operation the executor then refuses forever, which they cannot.
+  // Only one of those is recoverable, so the RPC failing picks that one.
+  //
+  // READ BEFORE THE WALL OPTIONS, because one of them now depends on it: the
+  // energy buy is sealed only when the wall still fits, and whether it fits
+  // depends on whether this signature also pays for the account's deployment.
+  let alreadyDeployed = false;
+  try {
+    const code = await publicClient.getBytecode({ address: sudoOnlyAccount.address });
+    alreadyDeployed = code !== undefined && code !== "0x";
+  } catch {
+    alreadyDeployed = false;
   }
 
   const wallOpts = {
+    ...trenchScope,
     extraTokens: sealedTokens,
     allowUniswapV4,
     v4AdapterAddress,
@@ -475,7 +582,26 @@ async function mintGrant(
     // without one — two of three class permissions is a key that can reach a
     // vault it can never create.
     ponsClassVaultFactoryAddress: sealedClassFactory,
+    // Decided just below, by energyBuyFits, and nowhere else.
+    energyBuy: false as boolean,
   };
+  // ── THE ENERGY BUY: SEALED ONLY WHERE IT EXISTS AND ONLY WHEN IT FITS ─────
+  //
+  // USDG into $MERRYMEN over the frozen v2 route, into this account, and
+  // nothing else (packages/core/src/wall.ts). Mainnet only — elsewhere the
+  // router is codeless and a buy would land having bought nothing — and only
+  // when this wall still fits the first-enable ceiling WITH it: sealing it
+  // unconditionally would turn a full basket's re-sign into a refusal. An owner
+  // without room signs exactly the wall they would have signed anyway, and
+  // their agent's energy arrives as $MERRYMEN sent to it directly.
+  //
+  // ONE BOOLEAN decides the permission (through wallOpts, below) AND the
+  // GRANT_ENERGY marker (in grantFeatures) — marker and permission move
+  // together, which signer-lockstep.test.ts pins in both signers.
+  wallOpts.energyBuy = energyBuyFits(caps, sudoOnlyAccount.address, chain.id, !alreadyDeployed, wallOpts);
+  if (!wallOpts.energyBuy && chain.id === ENERGY_ROUTE_V1.chainId) {
+    onStatus("no room in this permission for the agent to buy its own energy — $MERRYMEN can still be sent to it directly");
+  }
 
   // ── CAN THIS WALL EVER BE INSTALLED? ASKED BEFORE A SIGNATURE EXISTS ──────
   //
@@ -491,27 +617,8 @@ async function mintGrant(
   // signature is about to be made over — not the same arithmetic reproduced
   // here. Two implementations of one policy is exactly how the two sides came
   // to disagree, and `wall-policy-lockstep.test.ts` fails if either grows its
-  // own.
-  // ── IS THIS A FIRST INSTALL, OR A RE-SIGN ONTO AN ACCOUNT THAT EXISTS? ────
-  //
-  // A fact about the account, read from the chain, not a constant. It used to be
-  // hardcoded `true` inside `wallSignable`, which charged every renewal for a
-  // CREATE2 and an initCode it will never pay — 316,250 bounded gas — and at
-  // this ceiling that is the difference between signable and refused. A beta
-  // owner was told to delete a fifth token when four was the true answer.
-  //
-  // AN UNREADABLE ACCOUNT COUNTS AS UNDEPLOYED. Over-charging refuses a wall
-  // that would have fitted, which the owner can retry; under-charging mints one
-  // whose first operation the executor then refuses forever, which they cannot.
-  // Only one of those is recoverable, so the RPC failing picks that one.
-  let alreadyDeployed = false;
-  try {
-    const code = await publicClient.getBytecode({ address: sudoOnlyAccount.address });
-    alreadyDeployed = code !== undefined && code !== "0x";
-  } catch {
-    alreadyDeployed = false;
-  }
-
+  // own. `wallOpts` already carries the energy decision, so this asks about the
+  // wall that will actually be signed.
   const signable = wallSignable(
     wallShape(buildCallPermissions(caps, sudoOnlyAccount.address, wallOpts)),
     {
@@ -610,7 +717,9 @@ async function mintGrant(
     // GRANT_V4_ADAPTER is minted ONLY when the permission was — marker and
     // wall move together, the same lockstep rule as GRANT_V4 above. The sealed
     // address rides with it because the marker alone is a claim, not evidence.
+    ...trenchScope,
     grantFeatures: [
+      ...(trencherFactory ? [GRANT_TRENCHER] : []),
       TRADEABLE_V2,
       ...(allowUniswapV4 ? [GRANT_V4] : []),
       ...(v4AdapterAddress ? [GRANT_V4_ADAPTER] : []),
@@ -622,6 +731,10 @@ async function mintGrant(
       // that could not be read — and that case never gets here, because
       // resolveClassVault throws instead of returning undefined.
       ...(ponsClassVaultAddress ? [GRANT_PONS_CLASS] : []),
+      // From the SAME boolean that put the router permission into the wall
+      // above — never from the chain id or a setting. A marker the wall does
+      // not back sends the worker building an energy buy the chain refuses.
+      ...(wallOpts.energyBuy ? [GRANT_ENERGY] : []),
     ],
     ...(v4AdapterAddress ? { v4AdapterAddress: v4AdapterAddress.toLowerCase() } : {}),
     ...(sealedPonsAdapter ? { ponsAdapterAddress: sealedPonsAdapter.toLowerCase() } : {}),
@@ -654,6 +767,28 @@ async function mintGrant(
       : { demoOwnerPrivateKey: ownerSigner.privateKey }),
   };
 
+  return grant;
+}
+
+/** Preserve the dashboard's binding, archive, storage and handoff behavior. */
+async function mintGrant(
+  ownerSigner: OwnerSigner,
+  caps: GrantCaps,
+  onStatus: (status: string) => void,
+  chainId: number,
+  extraTokens: readonly CustomToken[] = [],
+  v4AdapterAddress?: `0x${string}`,
+  ponsAdapterAddress?: `0x${string}`,
+  hostedAs?: Address,
+  expectAccount?: Address,
+  ponsClassVaultFactory?: `0x${string}`,
+  trencherFactory?: `0x${string}`,
+): Promise<MintedGrant> {
+  const grant = await prepareGrantCore(
+    ownerSigner, caps, onStatus, chainId, extraTokens, v4AdapterAddress,
+    ponsAdapterAddress, hostedAs, expectAccount, ponsClassVaultFactory, trencherFactory,
+  );
+
   // HOSTED: prove this account belongs to the signed-in wallet before offering
   // it. The owner key was generated right here, so `owner` can never equal the
   // tenant and the server cannot authorize on it — two signatures over one
@@ -661,8 +796,8 @@ async function mintGrant(
   if (hostedAs) {
     onStatus("linking this wallet to your account…");
     const binding = await signBinding({
-      owner,
-      smartAccount: account.address,
+      owner: grant.owner,
+      smartAccount: grant.smartAccount,
       chainId,
       ownerSigner,
       tenant: hostedAs,
@@ -1026,6 +1161,34 @@ export interface MintOptions {
    * on mintGrant.
    */
   ponsClassVaultFactory?: `0x${string}`;
+  trencherFactory?: `0x${string}`;
+}
+
+/**
+ * Prepare a permission grant entirely under an external/embedded wallet signer.
+ * Reads the chain and requests the owner's signing approval, but does not read
+ * or write browser storage, fetch app authentication, or submit to a worker.
+ * The caller owns delivery and must obtain the separate partner authorization.
+ */
+export type PrepareAgentOptions = Omit<MintOptions, "hostedAs">;
+
+export async function prepareAgentGrant(owner: LocalAccount, o: PrepareAgentOptions): Promise<StoredGrant> {
+  if (!owner || !/^0x[0-9a-fA-F]{40}$/.test(owner.address) || typeof owner.signMessage !== "function") {
+    throw new Error("An explicit wallet signer is required to prepare a Merryman.");
+  }
+  return prepareGrantCore(
+    { account: owner, binding: "external-owner" },
+    o.caps,
+    o.onStatus,
+    o.chainId ?? robinhoodChain.id,
+    o.extraTokens ?? [],
+    o.v4AdapterAddress,
+    o.ponsAdapterAddress,
+    undefined,
+    o.expectAccount,
+    o.ponsClassVaultFactory,
+    o.trencherFactory,
+  );
 }
 
 export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
@@ -1042,6 +1205,7 @@ export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {
     o.hostedAs,
     o.expectAccount,
     o.ponsClassVaultFactory,
+    o.trencherFactory,
   );
 }
 
@@ -1079,6 +1243,7 @@ export async function createPrivyOwnedWallet(
     o.hostedAs,
     o.expectAccount,
     o.ponsClassVaultFactory,
+    o.trencherFactory,
   );
 }
 
@@ -1113,6 +1278,7 @@ export async function restoreAgentWallet(
     o.hostedAs,
     o.expectAccount,
     o.ponsClassVaultFactory,
+    o.trencherFactory,
   );
 }
 

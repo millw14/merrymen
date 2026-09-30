@@ -98,6 +98,7 @@
  *                                pinned dead by accounting-truth.test.ts
  */
 
+import { validRiskPeriod, type RiskPeriod } from "./risk-period";
 import { readFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
 
@@ -220,7 +221,9 @@ export type BootstrapAccounting =
  * Deliberately extensible: this is the channel for anything the parent knows
  * and the child structurally cannot, and there will be more of it.
  */
+
 export interface TenantBootstrapState {
+  riskPeriod?: RiskPeriod;
   schemaVersion: number;
   /**
    * THE SMART ACCOUNT. Named `tenantId` for the file's shape, but the value is
@@ -365,6 +368,9 @@ export function classifyAnchor(
   const generatedAt = typeof o.generatedAt === "number" && Number.isFinite(o.generatedAt) ? o.generatedAt : null;
   if (generatedAt === null) return { kind: "malformed", why: "no usable generatedAt" };
 
+  if (o.riskPeriod !== undefined && !validRiskPeriod(o.riskPeriod, tenantId)) {
+    return { kind: "malformed", why: "invalid risk period" };
+  }
   const accounting = validAccounting(o.accounting);
   if (!accounting) return { kind: "malformed", why: "accounting block missing or incomplete" };
 
@@ -392,6 +398,7 @@ export function classifyAnchor(
       tenantId,
       generatedAt,
       accounting,
+      ...(o.riskPeriod ? { riskPeriod: o.riskPeriod as RiskPeriod } : {}),
       ...(Array.isArray(o.outstandingOps) ? { outstandingOps: o.outstandingOps as readonly string[] } : {}),
     },
     accounting,

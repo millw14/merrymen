@@ -7,72 +7,47 @@
  */
 
 import { webChainRead } from "@/lib/chain-read";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { readGrantBalancesFrom, type GrantBalances } from "@/lib/grant-balances";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import { homePaths, merrymenHome } from "@merrymen/home";
-import { createPublicClient, parseAbi } from "viem";
+import { createPublicClient } from "viem";
 import {
-  CASH,
-  MORPHO,
   accountsMatch,
   carriesOwnerKey,
   chainForId,
   derivationUnreachable,
+  duplicateWallPermissions,
   isHostedMode,
   type Derivation,
+  type EnergyStatus,
   type StoredGrant,
 } from "@merrymen/core";
 import { requestOrigin, tenantOf, verifyGrantBinding } from "@/lib/auth";
+import { checkCanonicalWall } from "@/lib/canonical-wall";
 import { privyTokenOf, verifyPrivyToken } from "@/lib/privy";
 import { withReadDb } from "@/lib/ledger";
+import { readAgentEnergy } from "@/lib/agent-energy";
 import { getGrantStore } from "@merrymen/grant-store";
 import { getIdentityStore } from "@merrymen/identity-store";
+import { getSettingsStore } from "@merrymen/settings-store";
+import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
+import { archiveCurrentGrant, removeSelfHostedGrant } from "@/lib/grant-archive";
 
 const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
 const HEARTBEAT_FILE = homePaths.heartbeat();
-const ARCHIVE_DIR = homePaths.grantsArchive();
 
-const BALANCE_ABI = parseAbi(["function balanceOf(address) view returns (uint256)"]);
-
-/** A well-formed 0x EVM address — the ONLY thing we ever build an archive filename
- * from. Rejecting anything else keeps `smartAccount` from smuggling path separators
- * (../, absolute paths) into archiveCurrentGrant's `${addr}.json`. */
+/** A well-formed 0x EVM address. The archive (lib/grant-archive.ts) keeps its own
+ * copy of this check, since it builds a filename from the address. */
 const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
-
-/**
- * Copy whatever grant.json currently holds into the archive, keyed by its smart
- * account, BEFORE we overwrite or delete it.
- *
- * grant.json is a single slot: creating a second wallet (or hitting the kill
- * switch) used to destroy the previous grant — and with it the ONLY on-disk copy
- * of that wallet's owner key, permanently stranding any funds still in it. This
- * is the safety net. Best-effort: archiving must never block arming a grant.
- */
-async function archiveCurrentGrant(): Promise<void> {
-  try {
-    const raw = await readFile(GRANT_FILE, "utf8");
-    const prev = JSON.parse(raw) as StoredGrant;
-    if (!isAddr(prev?.smartAccount)) return; // never derive a path from a malformed address
-    await mkdir(ARCHIVE_DIR, { recursive: true, mode: 0o700 });
-    // One file per wallet, named by its address. Re-arming the same wallet just
-    // refreshes its archive copy; a different wallet gets its own file.
-    const dst = path.join(ARCHIVE_DIR, `${prev.smartAccount.toLowerCase()}.json`);
-    await writeFile(dst, raw, { encoding: "utf8", mode: 0o600 });
-    // This file holds a plaintext OWNER KEY — keep it owner-only (0600), not the
-    // default world-readable 0644. chmod covers the file-already-existed case.
-    await chmod(dst, 0o600).catch(() => {});
-  } catch {
-    // no grant.json yet, or it's unreadable — nothing worth keeping
-  }
-}
 
 export interface AgentStatus {
   exists: boolean;
   grant?: Omit<StoredGrant, "serialized" | "demoSessionPrivateKey" | "demoOwnerPrivateKey">;
-  balances?: { ethWei: string; cashUsdg: string; vaultUsdg: string };
+  /** Decimal strings as read from the chain; null for any read that failed. */
+  balances?: GrantBalances;
   workerAliveAt?: number | null;
   /** "paper" (simulated fills), "live" (signing), or "idle" — from the heartbeat. */
   mode?: "paper" | "live" | "idle" | null;
@@ -107,12 +82,58 @@ export interface AgentStatus {
    * `workerAliveAt` are what separate those.
    */
   liveBlocker?: string | null;
+  /**
+   * THIS AGENT'S ENERGY — how much it may start on its own today, and why.
+   *
+   * REPORTED BY THE WORKER, never computed here: the process that throttles is
+   * the only one that knows its own counters and whether it could read the
+   * $MERRYMEN balances it throttles on (packages/core/src/energy.ts).
+   *
+   * NULL IS "NOT SAID YET", NEVER ZERO. No report, an old ledger without the
+   * column, or a value that is not the v1 shape are all null, and a screen
+   * renders that as "I can't see my energy" — never as an empty allowance, and
+   * never as a balance of 0 that sends somebody to buy what they already hold.
+   */
+  energy?: EnergyStatus | null;
 }
 
 export async function POST(req: Request) {
   const grant = (await req.json()) as StoredGrant;
   if (!grant?.serialized || !isAddr(grant?.smartAccount)) {
     return NextResponse.json({ error: "not a grant" }, { status: 400 });
+  }
+
+  // ── A GRANT THAT CAN NEVER BE INSTALLED ──────────────────────────────────
+  //
+  // Checked BEFORE anything else, and for every mode, because it is the one
+  // defect that makes an agent look perfectly healthy while being unable to
+  // execute a single operation. Kernel's CallPolicy refuses a repeated
+  // (callType, target, selector), so such a grant reverts at validation —
+  // `AA23 duplicate permissionHash` — before any policy is consulted, with
+  // nothing in the message naming the wall or the trade.
+  //
+  // THE CASE THIS IS WRITTEN AGAINST is not a malicious payload. The wall is
+  // built in the signing client, so an owner with a tab open from before a
+  // deploy seals the OLD wall; the server stored it happily and the agent
+  // spent hours refusing every trade. Three re-signs were spent before the
+  // client, rather than the chain, was suspected. One check here turns that
+  // into one sentence at signing time.
+  //
+  // REFUSED, NOT REPAIRED: the permissions sit inside the signed payload, so
+  // de-duplicating them would store something the owner never signed — the
+  // same reasoning as the zero-cap refusal below.
+  const duplicates = duplicateWallPermissions(grant.serialized);
+  if (duplicates.length > 0) {
+    return NextResponse.json(
+      {
+        error:
+          "this permission lists the same contract and function twice, and the account contract refuses to " +
+          "install it — the agent would be unable to make any trade at all. It usually means the page was " +
+          "open from before an update: reload and sign again.",
+        duplicates,
+      },
+      { status: 400 },
+    );
   }
 
   if (isHostedMode()) {
@@ -173,6 +194,50 @@ export async function POST(req: Request) {
         { status: 400 },
       );
     }
+
+    // ── THE SERVER STORES THE MERRYMEN WALL, OR NOTHING ──────────────────
+    //
+    // Every check above is about WHO is asking and whether the caps are
+    // usable. None of them looked at what the permission actually permits —
+    // and the worker trusts this payload's metadata about exactly that:
+    // `grantFeatures` opens routes in its mirror (limitsFromGrant), a
+    // `transfer` marker dated before the withdrawal allowlist is read as a
+    // free-form-recipient transfer (grantHasTransfer), and `grantTokens` and
+    // the sealed adapters say what it may sell and call. A tenant could post a
+    // hand-built permission carrying a USDG `transfer`, the Rialto target or
+    // the v4 UniversalRouter, and it was stored as-is. The site's terms say the
+    // session key has no transfer permission; this is what makes that true of
+    // everything this route accepts, not only of what our signers produce.
+    //
+    // The same rebuild-and-compare partner enrollment has always done
+    // (canonical-wall.ts): the canonical wall is rebuilt from this grant's own
+    // caps, times, tokens and sealed addresses and compared byte for byte with
+    // what the worker would install, and any marker the wall does not mint is
+    // refused.
+    //
+    // BEFORE THE BINDING, because it is pure: a refusal here costs no RPC and
+    // burns no single-use nonce.
+    //
+    // A STALE CLIENT IS REFUSED TOO, deliberately. The wall is built in the
+    // signing client, so a tab open from before a deploy that changed wall.ts
+    // seals the OLD wall — which is no longer what this server, or the worker's
+    // mirror, believes a grant permits. Everything per-owner (tokens, adapters,
+    // vaults, Trencher scope) is read from the grant itself, so only a change
+    // to wall.ts can cause this, and the remedy is the one the duplicate
+    // refusal above already gives: reload and sign again.
+    const wall = checkCanonicalWall(grant as unknown as Record<string, unknown>);
+    if (!wall.ok) {
+      return NextResponse.json(
+        {
+          error:
+            `${wall.why}. This service only accepts the Merrymen permission wall. If this page was open ` +
+            `from before an update, reload it and sign again.`,
+          code: wall.code,
+        },
+        { status: wall.status },
+      );
+    }
+
     const binding = grant.binding;
     // Version-agnostic presence check. WHICH signatures a claim needs is the
     // validator's decision, not this route's — demanding a walletSignature here
@@ -252,7 +317,9 @@ export async function POST(req: Request) {
       }
     } catch {
       return NextResponse.json(
-        { error: "couldn't check this account's ownership — please try again" },
+        // Written for the owner, so it is marked as such: a 5xx body is not
+        // shown to them otherwise (terminal/request-json.ts).
+        { error: "couldn't check this account's ownership — please try again", ownerFacing: true },
         { status: 503 },
       );
     }
@@ -318,11 +385,20 @@ export async function POST(req: Request) {
     // to claim and which was never built. It could not be a read: the public
     // routes are cached and unauthenticated, and an anonymous GET that mints
     // identities is a write nobody asked for.
-    try {
-      await getIdentityStore().ensure(tenant, grant.smartAccount as `0x${string}`);
-    } catch (e) {
-      console.error("[grants] could not mint a public id:", e instanceof Error ? e.message : e);
-    }
+    //
+    // THE IDENTITY IS READ BEFORE IT IS ENSURED, and a new agent with no name
+    // gets its slug's name — see mintAndNameAgent, which a test runs with a
+    // fake identity store. Best effort: it never throws.
+    await mintAndNameAgent({
+      tenant,
+      account: grant.smartAccount,
+      identities: () => getIdentityStore(),
+      settings: {
+        get: () => getSettingsStore().get(tenant),
+        put: (s) => getSettingsStore().put(tenant, s),
+      },
+      ledgerHasAgent: (account) => ledgerHasAgent(withReadDb, account),
+    });
     return NextResponse.json({ ok: true });
   }
 
@@ -346,10 +422,9 @@ export async function DELETE(req: Request) {
     await getGrantStore().remove(tenant);
     return NextResponse.json({ ok: true });
   }
-  // The kill switch destroys the session key, NOT the wallet — archive it so the
-  // owner key survives and the funds stay reachable.
-  await archiveCurrentGrant();
-  await rm(GRANT_FILE, { force: true });
+  // The kill switch destroys the session key, NOT the wallet — archived first.
+  // The web's Start over removes it the same way, from /api/grants/discard.
+  await removeSelfHostedGrant();
   return NextResponse.json({ ok: true });
 }
 
@@ -372,17 +447,11 @@ export async function GET(req: Request) {
   const chain = chainForId(grant.chainId);
   const client = createPublicClient({ chain, transport: webChainRead() });
 
-  const [ethWei, tokenReads] = await Promise.all([
-    client.getBalance({ address: grant.smartAccount }).catch(() => 0n),
-    client
-      .multicall({
-        contracts: [
-          { address: CASH.USDG as `0x${string}`, abi: BALANCE_ABI, functionName: "balanceOf", args: [grant.smartAccount] },
-          { address: MORPHO.steakhouseUsdgVault as `0x${string}`, abi: BALANCE_ABI, functionName: "balanceOf", args: [grant.smartAccount] },
-        ],
-      })
-      .catch(() => null),
-  ]);
+  // A READ THAT FAILED IS NULL, NOT ZERO — see grant-balances.ts. Zero here
+  // is what told funded owners to "Add funds" whenever the node was slow. The
+  // calls themselves live there too, where a test runs them against a client
+  // that refuses.
+  const balances = await readGrantBalancesFrom(client, grant.smartAccount);
 
   let workerAliveAt: number | null = null;
   let mode: AgentStatus["mode"] = null;
@@ -440,6 +509,13 @@ export async function GET(req: Request) {
     }
   }
 
+  // ENERGY IS READ ON ITS OWN, OUTSIDE THE BRANCH ABOVE. That branch runs only
+  // when there is no heartbeat file, and self-hosted there always is one — so a
+  // column read inside it would never reach a self-hosted owner at all. The
+  // report is the child's own and lives only on the agents row, on both
+  // deployments. Best effort: an unreadable report is null, never an error.
+  const energy = await readAgentEnergy(grant.smartAccount);
+
   // Never echo key material to the browser: the serialized session account, the
   // session key, AND the generated owner key (which custodies the funds).
   const { serialized: _s, demoSessionPrivateKey: _k, demoOwnerPrivateKey: _o, ...publicGrant } = grant;
@@ -447,15 +523,12 @@ export async function GET(req: Request) {
   const status: AgentStatus = {
     exists: true,
     grant: publicGrant,
-    balances: {
-      ethWei: ethWei.toString(),
-      cashUsdg: (tokenReads?.[0]?.status === "success" ? (tokenReads[0].result as bigint) : 0n).toString(),
-      vaultUsdg: (tokenReads?.[1]?.status === "success" ? (tokenReads[1].result as bigint) : 0n).toString(),
-    },
+    balances,
     workerAliveAt,
     mode,
     gasSponsored,
     liveBlocker,
+    energy,
   };
   return NextResponse.json(status);
 }

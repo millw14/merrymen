@@ -115,6 +115,25 @@ export async function GET() {
       ownerAddress: plan.ownerAddress,
       gasWei: plan.gasWei.toString(),
       balances: plan.balances.map((b) => ({ symbol: b.symbol, amount: b.amount, note: b.note })),
+      // THE CLASS BOOK. Both of these existed on the plan and neither was
+      // returned, so in local mode the panel showed no vault at all while the
+      // sweep still emptied it best-effort — the same "confirmation understates
+      // what it moves" defect the CLI already fixed, on the other surface.
+      classVault: plan.classVault,
+      classNote: plan.classNote,
+      classHoldings: plan.classHoldings.map((h) => ({
+        token: h.token,
+        symbol: h.symbol,
+        amount: h.amount,
+      })),
+      // Every vault, because after v2 an account has two and one approval
+      // covers one of them.
+      classVaults: plan.classVaults.map((v) => ({
+        vault: v.vault,
+        version: v.version,
+        note: v.note,
+        holdings: v.holdings.map((h) => ({ token: h.token, symbol: h.symbol, amount: h.amount })),
+      })),
       // Without this the panel prints "This account is empty" when every
       // balance read FAILED — which is how somebody concludes their money is
       // gone because an RPC blinked. The CLI already branches on it.
@@ -171,6 +190,25 @@ export async function POST(req: Request) {
         explorer: explorerFor(chainId),
         chainId,
         balances: plan.balances.map((b) => ({ symbol: b.symbol, amount: b.amount, note: b.note })),
+        // THE CLASS BOOK. Both of these existed on the plan and neither was
+        // returned, so in local mode the panel showed no vault at all while the
+        // sweep still emptied it best-effort — the same "confirmation understates
+        // what it moves" defect the CLI already fixed, on the other surface.
+        classVault: plan.classVault,
+        classNote: plan.classNote,
+        classHoldings: plan.classHoldings.map((h) => ({
+          token: h.token,
+          symbol: h.symbol,
+          amount: h.amount,
+        })),
+        // Every vault, because after v2 an account has two and one approval
+        // covers one of them.
+        classVaults: plan.classVaults.map((v) => ({
+          vault: v.vault,
+          version: v.version,
+          note: v.note,
+          holdings: v.holdings.map((h) => ({ token: h.token, symbol: h.symbol, amount: h.amount })),
+        })),
         // Absence and ignorance are different facts — the UI must be able to say so.
         unreadable: plan.unreadable,
       });

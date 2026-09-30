@@ -147,9 +147,11 @@ describe("steadyBasketTick", () => {
     assert.equal(swaps[0]!.kind === "swap" && swaps[0]!.buyToken, AAPL);
   });
 
-  it("does not buy when cash is below the tick budget", () => {
+  it("shrinks the weighted basket to available cash", () => {
     const intents = sbTick(cfg(), snap({ cashUsdg: 19_000_000n }));
-    assert.equal(intents.filter((i) => i.kind === "swap").length, 0);
+    const buys = intents.filter(i => i.kind === "swap");
+    assert.equal(buys.length, 2);
+    assert.deepEqual(buys.map(i => i.sellAmountRaw), [9_500_000n, 9_500_000n]);
   });
 
   it("sweeps idle cash above the floor into the vault", () => {
@@ -192,7 +194,19 @@ describe("steadyBasketTick", () => {
 
   it("does not withdraw when the vault is empty", () => {
     const intents = sbTick(cfg(), snap({ cashUsdg: 5_000_000n, vaultUsdg: 0n }));
-    assert.deepEqual(intents, []);
+    assert.equal(intents.some(i => i.kind === "vault-withdraw"), false);
+    assert.equal(intents.filter(i => i.kind === "swap").reduce((sum,i) => sum + i.sellAmountRaw,0n), 5_000_000n);
+  });
+
+  it("respects per-trade and daily caps while shrinking a Shogun-sized ticket", () => {
+    const intents = sbTick(cfg({ buyPerTickUsdg: 25_000_000n }), snap({ cashUsdg: 23_669_414n, perTradeCapUsdg: 5_000_000n, spendHeadroomUsdg: 7_000_000n }));
+    assert.deepEqual(intents.filter(i => i.kind === "swap").map(i => i.sellAmountRaw), [5_000_000n, 2_000_000n]);
+  });
+
+  it("does not spend cash or create zero orders when cash or the cap is zero", () => {
+    for (const s of [snap({ cashUsdg: 0n }), snap({ perTradeCapUsdg: 0n })]) {
+      assert.equal(sbTick(cfg(), s).some(i => i.kind === "swap"), false);
+    }
   });
 });
 
@@ -266,5 +280,32 @@ describe("the daily budget binds the buy loop", () => {
     assert.equal(swaps.length, 2);
     const spent = swaps.reduce((sum, i) => sum + (i.kind === "swap" ? i.notionalUsdg : 0n), 0n);
     assert.equal(spent, 20_000_000n, "the full per-tick size still goes out");
+  });
+});
+
+/**
+ * A PARK THE OWNER WOULD READ AS "0.00 USDG" IS NOT PROPOSED.
+ *
+ * Live on the feed, 2026-09-17: "vault-deposit 0.00 USDG — 0.00 USDG idle above
+ * the 50.00 floor — parking it in the vault until the next buy", with the
+ * wall's refusal badge on it. The excess above the floor was a fraction of a
+ * cent; the guard was `> 0n`, so it became a real intent, the wall turned it
+ * back, and the refusal was published. MIN_PARK_RAW is the smallest amount
+ * usdg() prints as non-zero. It is a rendering floor, not a risk setting.
+ */
+describe("steadyBasketTick — no sub-cent parks", () => {
+  it("proposes nothing for an excess below one cent", () => {
+    // The tick buys its 20 USDG first and parks what is idle AFTER that, so
+    // the fixture carries floor + one buy + the excess: 50 + 20 + 0.005.
+    const intents = sbTick(cfg(), snap({ cashUsdg: 70_005_000n }));
+    assert.ok(intents.some((i) => i.kind === "swap"), "the buy still happens — only the dust park is gone");
+    assert.equal(intents.some((i) => i.kind === "vault-deposit"), false, "a park that renders as 0.00 must not be proposed");
+  });
+
+  it("still parks exactly one cent", () => {
+    const intents = sbTick(cfg(), snap({ cashUsdg: 70_010_000n }));
+    const deposit = intents.find((i) => i.kind === "vault-deposit");
+    assert.ok(deposit, "one cent is the smallest visible park");
+    assert.equal(deposit!.kind === "vault-deposit" && deposit!.amountUsdg, 10_000n);
   });
 });

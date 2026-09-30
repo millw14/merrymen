@@ -27,10 +27,16 @@ jobs:
         with:
           node-version: "22"
 
-      # Root install runs the `prepare` hook, which builds the dashboard (web/.next).
-      - name: Install root deps + build dashboard
+      - name: Install root dependencies
         shell: bash
-        run: npm install
+        run: npm ci
+        env:
+          MERRYMEN_SKIP_BUILD: "1"
+
+      # npm pack does not run prepublishOnly; require the strict clean-build
+      # gate explicitly so an install hook cannot hide a broken dashboard.
+      - name: Validate production package
+        run: npm run typecheck && node cli/prepublish.mjs
 
       # Pack merrymen into a tarball (with the prebuilt dashboard + worker) so the
       # desktop app installs a REAL COPY of it — not a `file:` symlink, which a
@@ -45,6 +51,10 @@ jobs:
         run: |
           npm install                      # electron + electron-builder + deps
           npm install ../merrymen-*.tgz    # replace file:.. with the packed copy
+
+      - name: Check bundled Node runtime
+        working-directory: desktop
+        run: npm run check:runtime
 
       - name: Build the installer for this OS
         shell: bash

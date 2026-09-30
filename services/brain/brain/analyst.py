@@ -207,3 +207,70 @@ nothing usable — that is a useful answer and far better than a guess.
 `evidence_strength` is how much you had to work with; `confidence` is how sure
 you are of your read of it. They are different numbers and a thin-but-clear
 signal should say so."""
+
+#: What the four arms MEAN for a lens whose evidence carries no time dimension.
+#:
+#: ── WHY THIS EXISTS ──────────────────────────────────────────────────────
+#:
+#: The suffix above asks every lens for a direction, and "buy" implicitly means
+#: "I expect the price to go up". A liquidity lens is handed reserve, route
+#: depth, FDV and a maximum entry size — levels, with no price, no change, no
+#: volume and no flow. It cannot form that claim, `no-data` is false when the
+#: depth is plainly readable, and the Trencher persona closes `sell` outright
+#: ("a bearish view means HOLD, not SELL"). `hold` is the only arm left.
+#:
+#: Measured on the fleet, 2026-09-20: the liquidity lens returned `hold` on 173
+#: of 173 observations while technical and social — handed the same suffix, in
+#: the same runs, but with m5/h1/h6/h24 windows — each voted buy about a fifth
+#: of the time. That is not caution and not a malfunction. It is the only
+#: truthful answer to a question the lens cannot be asked.
+#:
+#: ── AND WHY THIS MAKES THE DESK STRICTER, NOT LOOSER ─────────────────────
+#:
+#: The cost was never the missing buys — `direction` gates nothing. It is that
+#: a pool with $8M of depth and a pool about to be drained both printed `hold`,
+#: so the lens had no way to object to either. Giving the arms a meaning it can
+#: evaluate creates a liquidity veto that did not previously exist.
+#:
+#: `no-data` keeps its meaning exactly: depth we could not read. It must never
+#: be used for depth we read and disliked, or an unavailable metric starts
+#: arriving as a bearish one.
+LENS_DIRECTION_SEMANTICS: dict[str, str] = {
+    "liquidity": (
+        "\n\nFor YOUR lens the arms mean this, and nothing about price:\n"
+        '  "buy"     — the depth you can see supports entering AND leaving at this size.\n'
+        '  "sell"    — it does not: too thin, too concentrated, or costly to exit.\n'
+        '  "hold"    — borderline, or adequate but with a reservation worth naming.\n'
+        '  "no-data" — depth could not be read. Never use this for depth you dislike.\n'
+        "Judge the size actually proposed against the depth actually reported. An\n"
+        "entry limit is a portfolio constraint, not a fact about the pool, and a\n"
+        "small entry into a deep pool is a reason to say so plainly."
+    ),
+    #: THE SAME PROBLEM, CAUGHT BEFORE IT COST 173 OBSERVATIONS.
+    #:
+    #: The liquidity entry above was written after measuring a lens that had no
+    #: truthful arm available to it. This one is handed the identical shape of
+    #: evidence — a level with no time dimension, no price and no flow — and
+    #: would reach the identical dead end: it cannot claim the price will rise
+    #: because a team ships, `no-data` is false when the record is plainly
+    #: readable, and the Trencher persona closes `sell`. So the arms are given
+    #: a meaning this lens can actually evaluate, from the start.
+    #:
+    #: AND THE `no-data` LINE IS THE LOAD-BEARING ONE. This lens is only ever
+    #: given material when a directory HAS a page; when it has none, no block
+    #: is supplied at all and the analyst is told NO DATA AVAILABLE by the
+    #: graph. So an analyst that sees material and dislikes it must say so with
+    #: `sell`, never with `no-data` — otherwise an unlisted coin and a coin
+    #: with a dead team become the same answer, which is the one confusion this
+    #: whole lens was built to prevent.
+    "builder": (
+        "\n\nFor YOUR lens the arms mean this, and nothing about price:\n"
+        '  "buy"     — there is credible, current evidence somebody is still building this.\n'
+        '  "sell"    — the record you were shown is weak, stale or contradicts the pitch.\n'
+        '  "hold"    — real but thin, or adequate with a reservation worth naming.\n'
+        '  "no-data" — you were shown no record. Never use this for a record you dislike.\n'
+        "Shipping is not safety and you must not treat it as such: a diligent rug also\n"
+        "commits. Judge only whether somebody is building, and say plainly when a strong\n"
+        "record still tells you nothing about whether this token is worth owning."
+    ),
+}

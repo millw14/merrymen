@@ -19,6 +19,7 @@
  */
 import { NextResponse } from "next/server";
 import { readTheses, type FeedThesis } from "@/lib/read-theses";
+import { THESES_CACHE_CONTROL, thesesMemo } from "@/lib/theses-memo";
 
 /** Cacheable because the answer does not depend on who is asking. */
 /**
@@ -54,9 +55,18 @@ export interface ThesesResponse {
   theses: FeedThesis[];
 }
 
+/**
+ * ONE READ SHARED BY EVERY CALLER FOR A FEW SECONDS — see theses-memo.ts.
+ *
+ * The terminal asks for this every ten seconds from every open tab now, where
+ * it used to ask once a minute. Sharing the read is safe for exactly the reason
+ * the caching above is: the answer has no caller in it.
+ */
+const theses = thesesMemo(() => readTheses());
+
 export async function GET() {
-  const r = await readTheses();
+  const r = await theses.get();
   return NextResponse.json(r satisfies ThesesResponse, {
-    headers: { "Cache-Control": "public, max-age=15, s-maxage=30, stale-while-revalidate=60" },
+    headers: { "Cache-Control": THESES_CACHE_CONTROL },
   });
 }

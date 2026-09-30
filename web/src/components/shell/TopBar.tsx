@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { SearchHit } from "@/app/api/search/route";
+import { usd } from "@/lib/format";
 
 /**
  * THE BAR ACROSS THE TOP: find something, and see where you stand.
@@ -25,7 +26,7 @@ import type { SearchHit } from "@/app/api/search/route";
  */
 
 const money = (n: number) =>
-  `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  usd(n);
 
 interface Mine {
   hasAgent: boolean;

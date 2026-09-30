@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Issue, revoke and list partner keys. LOCAL ONLY — run on the box, never HTTP.
+ * Operator CLI to issue, revoke and list partner keys.
+ * The separate developer portal supports wallet-authenticated self-service keys.
  *
  * There is no key-minting endpoint and there should never be one. A route that
  * mints credentials is the single most valuable thing on this host to
@@ -48,8 +49,11 @@ async function issue(argv) {
   if (rpmRaw && !(Number.isFinite(rpm) && rpm > 0)) die("--rpm must be a positive number");
 
   const { key, keyId, secret } = makeKey();
+  const appId = flag(argv, "app-id") ?? keyId;
+  if (!/^[a-zA-Z0-9_-]{12,64}$/.test(appId)) die("--app-id must contain 12–64 letters, digits, underscores or hyphens");
   await writeRecord({
     keyId,
+    appId,
     name,
     hash: hashSecret(SECRET, secret),
     scopes,
@@ -60,6 +64,7 @@ async function issue(argv) {
 
   console.log(`\n  partner   ${name}`);
   console.log(`  key id    ${keyId}`);
+  console.log(`  app id    ${appId} (reuse --app-id when rotating this app's key)`);
   console.log(`  scopes    ${scopes.join(", ")}`);
   console.log(`\n  KEY (shown once — store it now, it is not recoverable):\n\n    ${key}\n`);
 }
@@ -97,6 +102,6 @@ switch (argv[0]) {
     await list();
     break;
   default:
-    console.log("usage: partners-cli.mjs issue --name <p> [--scopes a,b] [--rpm N] | revoke <keyId> | list");
+    console.log("usage: partners-cli.mjs issue --name <p> [--app-id stableAppId] [--scopes a,b] [--rpm N] | revoke <keyId> | list");
     process.exit(argv[0] ? 1 : 0);
 }

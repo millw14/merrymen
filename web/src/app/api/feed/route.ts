@@ -6,35 +6,33 @@
 import { readFileSync } from "node:fs";
 import { NextResponse } from "next/server";
 import { homePaths } from "@merrymen/home";
-import { SETTINGS_DEFAULTS, isHostedMode, sameBookAsLatest, type MerrymenSettings } from "@merrymen/core";
+import { isHostedMode, sameBookAsLatest } from "@merrymen/core";
 import { getSettingsStore } from "@merrymen/settings-store";
+import { getIdentityStore } from "@merrymen/identity-store";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb, fmtEpoch } from "@/lib/ledger";
-import { basisUsdg } from "@/lib/basis-usdg";
-import { getIdentityStore } from "@merrymen/identity-store";
+import { readDeskPositions } from "@/lib/desk-positions";
+import { readOwnerTape, readRunEpoch } from "@/lib/desk-trades";
 import { hostedAgentFor } from "@/lib/agent-for";
-
-// The basket the WORKER actually defaults to when none is configured.
-// TRADEABLE_SYMBOLS (14) was the registry of what CAN be traded, not the
-// default holding — so a tenant on defaults was shown 14 symbols while their
-// agent traded three.
-const DEFAULT_BASKET = [...SETTINGS_DEFAULTS.basketSymbols];
+import { identityOf as identityFrom, type FeedIdentity, type IdentitySources } from "@/lib/feed-identity";
+import { readMeasuredMark } from "@/lib/held-marks";
+import type { FeedMeasured } from "@/lib/feed-pnl";
 
 /**
- * HOW FAR BACK THE TAPE REACHES.
- *
- * The trades select was `LIMIT 30` with no window at all, so for an agent that
- * has done nothing lately the newest thirty rows are simply its last thirty
- * refusals — however old. The chat sends this tape to a model, the system
- * prompt tells the model to ground itself in it, and the rows carry no
- * timestamp the model can reason about. A tester's agent therefore narrated
- * months-old `no-gas` and `per-trade-cap` refusals in the present tense, and
- * was believed, because it was reading its own ledger faithfully.
- *
- * The window bounds RECENCY and the limit bounds SIZE. Neither substitutes for
- * the other, so both stay.
+ * Where identity is read from on this deploy — see lib/feed-identity.ts for
+ * what is read and why. Hosted, a tenant's settings live in the sealed
+ * per-tenant store and never in this container's file.
  */
-const TAPE_WINDOW_SEC = 7 * 24 * 3600;
+const IDENTITY_SOURCES: IdentitySources = {
+  hosted: isHostedMode,
+  settingsOf: (tenant) => getSettingsStore().get(tenant),
+  settingsFile: () => readFileSync(homePaths.settings(), "utf8"),
+  slugOf: async (tenant) => (await getIdentityStore().get(tenant))?.slug ?? null,
+};
+
+/** Name (and where it came from) + slug + strategy + basket, for this tenant. */
+const identityOf = (fromLedger: string | null, tenant: `0x${string}` | null) =>
+  identityFrom(fromLedger, tenant, IDENTITY_SOURCES);
 
 export const dynamic = "force-dynamic";
 
@@ -78,6 +76,13 @@ export interface PositionRow {
    */
   cost_usdg?: number | null;
   /**
+   * Whether a fill booked from the pre-trade quote, not its receipt, may still
+   * be in `cost_usdg`. False only when the fills were replayed and said so; null
+   * when they could not be (see lib/desk-positions.ts). The desk shows no % on
+   * a cost it cannot vouch for.
+   */
+  cost_from_quote?: boolean | null;
+  /**
    * THIS POSITION'S OWN STOP, in bps below cost, graded when it was opened.
    *
    * NULL for a holding that carries no grade — one opened before grading
@@ -103,19 +108,22 @@ export interface TradeRecord {
   sim_fee_tier: number | null;
   sim_gas: string | null;
   created_at: string;
+  /** What the ledger knows the trade WAS — see lib/desk-trades.ts. Absent on an older ledger. */
+  fill_side?: string | null;
+  symbol?: string | null;
+  display_name?: string | null;
+  action?: string | null;
+  reason?: string | null;
+  realized_pnl_usdg?: number | null;
 }
 export interface AgentFinancials {
   hwm_usdg: number;
   accrued_fee_usdg: number;
 }
 /** Live identity: the user-given name (soul, mirrored into the agents table by
- * the worker) + the strategy/basket actually configured in settings.json. */
-export interface AgentIdentity {
-  slug?: string | null;
-  name: string;
-  strategy: string;
-  basket: string[];
-}
+ * the worker) + the strategy/basket actually configured in settings.json, and
+ * where the name was read from. See lib/feed-identity.ts. */
+export type AgentIdentity = FeedIdentity;
 export interface FeedResponse {
   source: "sqlite" | "none";
   events: FeedEvent[];
@@ -135,6 +143,16 @@ export interface FeedResponse {
    */
   netContributionsUsdg: number | null;
   /**
+   * WHAT A RETURN IS MEASURED AT (lib/feed-pnl.ts): the newest mark of the
+   * `equity` book NOT taken while flow inference was held, and the net
+   * contributions booked at or before it. `equity` keeps held marks — they are
+   * the book's value — but one can carry a top-up or withdrawal the flows
+   * table has not booked yet, and a return over it calls the owner's own cash
+   * profit or loss for as long as the hold lasts. Null when that book has no
+   * measured mark yet.
+   */
+  measured: FeedMeasured | null;
+  /**
    * Gas paid in USDG, and how many landed trades' gas could NOT be priced.
    * P&L is equity − contributions − gas; the count is what says whether that is
    * the full gas cost or only the priceable part.
@@ -145,78 +163,6 @@ export interface FeedResponse {
   landed: number;
   /** The worker's verdict on the denominator: true, false, or null for never assessed. */
   contributionsKnown: boolean | null;
-}
-
-type Identity = { strategy: string; basket: string[]; agentName: string | null };
-
-const IDENTITY_FALLBACK: Identity = { strategy: "steady-basket", basket: DEFAULT_BASKET, agentName: null };
-
-/** The three identity fields out of a settings blob, whatever store it came from. */
-function pickIdentity(s: MerrymenSettings): Identity {
-  return {
-    strategy: typeof s.strategy === "string" && s.strategy ? s.strategy : "steady-basket",
-    basket: Array.isArray(s.basketSymbols) && s.basketSymbols.length ? s.basketSymbols : DEFAULT_BASKET,
-    agentName: typeof s.agentName === "string" && s.agentName ? s.agentName : null,
-  };
-}
-
-/**
- * The configured strategy, basket and name — from WHERE THIS TENANT'S SETTINGS
- * ACTUALLY LIVE.
- *
- * THE BUG THIS EXISTS TO FIX, because it made a working feature look broken.
- * Hosted, a tenant's settings are written to the per-tenant sealed store
- * (`getSettingsStore().put(tenant, …)` in api/settings), and NOTHING ever writes
- * the web container's own `~/.merrymen/settings.json`. This function used to
- * read that file unconditionally, so on the hosted deploy the read always threw
- * and every tenant got the fallback below: name null → the console fell back to
- * the ledger's "Robin", and strategy/basket were the defaults no matter what
- * they had configured. An owner could rename their agent, watch the save
- * succeed, reload, and be asked to name it again — four times over, in the
- * report that found this. The write was never the problem; nobody read it back.
- *
- * Self-hosted the file IS the store, which is why this passed local testing.
- * The `!tenant` early return is load-bearing: it must not fall through to the
- * file read, or a signed-out caller would be shown container-global config.
- */
-async function readIdentitySettings(tenant: `0x${string}` | null): Promise<Identity> {
-  if (isHostedMode()) {
-    if (!tenant) return IDENTITY_FALLBACK;
-    try {
-      return pickIdentity((await getSettingsStore().get(tenant)) ?? {});
-    } catch {
-      return IDENTITY_FALLBACK;
-    }
-  }
-  try {
-    // BOM-strip: hand-edited or PowerShell-written files may carry a UTF-8 BOM.
-    const raw = readFileSync(homePaths.settings(), "utf8").replace(/^﻿/, "");
-    return pickIdentity(JSON.parse(raw) as MerrymenSettings);
-  } catch {
-    return IDENTITY_FALLBACK;
-  }
-}
-
-/**
- * The agent's name: what the owner CONFIGURED, else what the ledger recorded.
- *
- * The two can disagree for a while, and the settings value has to win. The
- * worker reconciles a configured name into the soul at arm time, so between
- * saving one and the worker's next arm the ledger still holds the old name —
- * and preferring the ledger there makes a rename that genuinely succeeded
- * revert to "Robin" on the next page load, which reads exactly like a failed
- * save. Settings is where the owner's intent lives; the soul is the runtime
- * seat that catches up to it.
- */
-function resolveAgentName(configured: string | null, fromLedger: string): string {
-  return configured || fromLedger;
-}
-
-/** Name + strategy + basket, with the configured name preferred. */
-async function identityOf(fromLedger: string, tenant: `0x${string}` | null): Promise<AgentIdentity> {
-  const { agentName, ...rest } = await readIdentitySettings(tenant);
-  const identity = tenant ? await getIdentityStore().get(tenant).catch(()=>null) : null;
-  return { name: resolveAgentName(agentName, fromLedger), slug: identity?.slug ?? null, ...rest };
 }
 
 /**
@@ -234,9 +180,11 @@ async function emptyFeed(tenant: `0x${string}` | null = null): Promise<FeedRespo
     positions: [],
     trades: [],
     financials: null,
-    // Identity still resolves live from settings + default name.
-    agent: await identityOf("Robin", tenant),
+    // Identity still resolves live from settings. No ledger name was read, so
+    // an unconfigured name here is a fallback and says so.
+    agent: await identityOf(null, tenant),
     netContributionsUsdg: null,
+    measured: null,
     gasUsdg: 0,
     gasUnpricedTrades: 0,
     landed: 0,
@@ -278,8 +226,10 @@ export async function GET(req: Request) {
     let positions: PositionRow[] = [];
     let trades: TradeRecord[] = [];
     let financials: AgentFinancials | null = null;
-    let name = "Robin";
+    // The ledger's name, or null until it is read — see resolveAgentName.
+    let name: string | null = null;
     let netContributionsUsdg: number | null = null;
+    let measured: FeedMeasured | null = null;
     let gasUsdg = 0;
     let gasUnpricedTrades = 0;
     // WHOSE numbers these are. Re-granting mints a new smart account and leaves
@@ -326,17 +276,9 @@ export async function GET(req: Request) {
     // column throws at query time, and the surrounding catch would blank the
     // whole panel — strictly worse than showing a pre-epoch ledger unfiltered,
     // since every row in one is epoch 1 by definition.
-    let epochWhere = "";
-    let epochArg: number[] = [];
-    try {
-      const erow = (await db
-        .prepare("SELECT epoch FROM agents WHERE smart_account = ?")
-        .get(scope)) as { epoch: number } | undefined;
-      epochWhere = " AND epoch = ?";
-      epochArg = [erow?.epoch ?? 1];
-    } catch {
-      /* epoch arrives with a worker migration — leave every row visible */
-    }
+    const epoch = await readRunEpoch(db, scope);
+    const epochWhere = epoch === null ? "" : " AND epoch = ?";
+    const epochArg: number[] = epoch === null ? [] : [epoch];
     // `events` and `positions` are deliberately NOT epoch-filtered below:
     // neither table has the column, so agent scoping is all they support.
     try {
@@ -399,72 +341,21 @@ export async function GET(req: Request) {
       /* table not created yet */
     }
     try {
-      // WHAT EACH HOLDING COST, joined here because the owner's own agent could
-      // not answer for it. Asked "what did NVDA cost you and when will you
-      // sell", it replied that it held nothing but cash — while the panel beside
-      // the chat listed NVDA and QQQ. The chat sends this payload, and a
-      // position with no basis on it cannot answer either half of that question.
-      //
-      // LEFT JOIN and NULL-tolerant: a holding with no basis on record is a fact
-      // ("I do not know what this cost"), and 0 would say it was free.
-      // `cost_basis` is keyed by BOOK — a paper cost must never price a funded
-      // position — so the mode comes from the newest equity mark, which is the
-      // book the worker actually ran.
-      positions = (await db
-        .prepare(
-          `SELECT p.symbol AS symbol, p.raw_balance AS raw_balance, p.ui_multiplier AS ui_multiplier,
-                  p.price_usd AS price_usd, p.price_stale AS price_stale,
-                  p.price_source AS price_source, p.value_usdg AS value_usdg,
-                  b.cost_usdg AS cost_usdg,
-                  f.stop_bps AS stop_floor_bps, f.why AS stop_floor_why
-             FROM positions p
-             LEFT JOIN cost_basis b
-               ON b.agent_id = p.agent_id AND b.symbol = p.symbol AND b.mode = ?
-             LEFT JOIN position_floors f
-               ON f.agent_id = p.agent_id AND f.symbol = p.symbol AND f.mode = ?
-            WHERE p.agent_id = ? ORDER BY p.value_usdg DESC`,
-        )
-        .all(
-          bookMode === "paper" ? "paper" : "live",
-          bookMode === "paper" ? "paper" : "live",
-          scope,
-        )) as unknown as PositionRow[];
-      // MICRO-USDG → USDG at the boundary, so no browser has to know the column
-      // keeps a different unit from every other money field on this response.
-      positions = positions.map((p) => ({ ...p, cost_usdg: basisUsdg((p as { cost_usdg?: unknown }).cost_usdg) }));
-    } catch {
-      // price_source arrives with a worker migration. The dashboard can be
-      // running against a database the upgraded worker hasn't opened yet, and
-      // losing the whole positions panel over a label would be a worse bug than
-      // the missing label — so fall back to the shape that always existed.
-      try {
-        const legacy = (await db
-          .prepare(
-            `SELECT symbol, raw_balance, ui_multiplier, price_usd, price_stale, value_usdg
-             FROM positions WHERE agent_id = ? ORDER BY value_usdg DESC`,
-          )
-          .all(scope)) as unknown as Omit<PositionRow, "price_source">[];
-        positions = legacy.map((p) => ({ ...p, price_source: "chainlink" }));
-      } catch {
-        /* table not created yet */
-      }
-    }
-    try {
-      const rows = (await db
-        .prepare(
-          `SELECT kind, sell_token, buy_token, amount_usdg, tx_hash, status, reject_rule,
-                  sim_quote_out, sim_min_out, sim_fee_tier, sim_gas, created_at
-           FROM trades WHERE agent_id = ?${epochWhere} AND created_at > ?
-           ORDER BY created_at DESC, id DESC LIMIT 30`,
-        )
-        .all(scope, ...epochArg, Math.floor(Date.now() / 1000) - TAPE_WINDOW_SEC)) as (Omit<
-        TradeRecord,
-        "created_at"
-      > & { created_at: number })[];
-      trades = rows.map((r) => ({ ...r, created_at: fmtEpoch(r.created_at) }));
+      // What each holding is worth, what it cost, the stop it was graded and
+      // whether that cost can be vouched for — see lib/desk-positions.ts.
+      positions = await readDeskPositions(db, scope, bookMode === "paper" ? "paper" : "live");
     } catch {
       /* table not created yet */
     }
+    // One row per operation, with the side, the coin and the decision's
+    // reason, inside a window as well as a limit — and beside it the count of
+    // what landed. See lib/desk-trades.ts.
+    const tape = await readOwnerTape(db, scope, epoch, Math.floor(Date.now() / 1000));
+    trades = (tape.trades ?? []).map((r) => ({
+      ...r,
+      status: r.status as TradeRecord["status"],
+      created_at: fmtEpoch(r.created_at),
+    }));
     try {
       const row = (await db
         .prepare(
@@ -497,6 +388,24 @@ export async function GET(req: Request) {
       /* flows arrives with a worker migration — null, never zero */
     }
     try {
+      // The return's pair: the newest measured mark and what was booked by it.
+      // Read on its own, not off the tail of `equity`: a dropped op holds for
+      // 26 hours, and 900 rows is not always that far back.
+      const m = await readMeasuredMark(db, scope, epoch);
+      if (m) {
+        const row = (await db
+          .prepare(
+            `SELECT COUNT(*) AS n,
+                    COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
+               FROM flows WHERE agent_id = ?${epochWhere} AND at <= ?`,
+          )
+          .get(scope, ...epochArg, m.at)) as { n: number; net: number } | undefined;
+        measured = { equityUsdg: m.equity, at: fmtEpoch(m.at), netContributionsUsdg: !row || row.n === 0 ? null : row.net };
+      }
+    } catch {
+      /* no equity or flows table yet: nothing measured, and the page says so */
+    }
+    try {
       const row = (await db
         .prepare(
           `SELECT COALESCE(SUM(gas_usdg), 0) AS usdg,
@@ -514,19 +423,10 @@ export async function GET(req: Request) {
     // The /you dashboard computed its own P&L inline with no landed-trade guard
     // and no quality term — a fifth independent copy of the formula. It needs
     // both of these to route through the shared gate instead.
-    let landed = 0;
+    // An older ledger that cannot count it reads 0, which the gate treats as
+    // nothing to measure.
+    const landed = tape.landed ?? 0;
     let contributionsKnown: boolean | null = null;
-    try {
-      const row = (await db
-        .prepare(
-          `SELECT SUM(CASE WHEN status = 'landed' THEN 1 ELSE 0 END) AS landed
-             FROM trades WHERE agent_id = ?${epochWhere}`,
-        )
-        .get(scope, ...epochArg)) as { landed: number | null } | undefined;
-      landed = Number(row?.landed ?? 0);
-    } catch {
-      /* older ledger */
-    }
     try {
       const row = (await db
         .prepare("SELECT contributions_known FROM agents WHERE smart_account = ?")
@@ -547,6 +447,7 @@ export async function GET(req: Request) {
       financials,
       agent: await identityOf(name, tenant),
       netContributionsUsdg,
+      measured,
       gasUsdg,
       gasUnpricedTrades,
       landed,

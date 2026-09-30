@@ -30,6 +30,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { EN } from "@/lib/messages/en";
 
 const SRC = readFileSync(new URL("./screens/Wallet.tsx", import.meta.url), "utf8");
 const CREATE = readFileSync(new URL("./screens/CreateAgent.tsx", import.meta.url), "utf8");
@@ -128,8 +129,18 @@ describe("the chain a hosted owner cannot use says so before they pick it", () =
 
 describe("and the wizard stops reading like a network choice", () => {
   it("PAPER MODE SAYS IT IS A SETTING, NOT A CHAIN", () => {
-    assert.match(CREATE, /This is a setting, not a different network/);
-    assert.match(CREATE, /stays on Robinhood Chain either way/);
+    // READ FROM THE CATALOGUE, because that is where the product's words are
+    // now. The claim is unchanged — an owner asking for practice must not be
+    // sent looking for a different network — but the sentence moved into
+    // `en.ts` when the wizard became translatable, and asserting against the
+    // component would now pass only while nobody translated it.
+    //
+    // This is also the sentence every translation reviewer was asked about by
+    // name, for the same reason: a reader who thinks they must migrate
+    // somewhere will not switch at all.
+    assert.match(EN["mode.paperNote"], /This is a setting, not a different network/);
+    assert.match(EN["mode.paperNote"], /stays on Robinhood Chain either way/);
+    assert.match(CREATE, /t\("mode\.paperNote"\)/, "and the wizard must actually render it");
   });
 
   it("and the wizard still mints on the one chain it always did", () => {

@@ -8,15 +8,38 @@
  * network neighbours — so the guard moved here rather than being written twice.
  * Two copies of a security check are one copy and one liability.
  *
- * WHAT IT IS NOT. This is a guard, not a proof. A hostname that RESOLVES to a
- * private address is not caught: that needs the resolved IP before connect, and
- * `fetch` does not expose it. The other half of the answer is architectural —
- * the browser runs in its own service with nothing worth reaching, requests are
- * time- and size-capped, and nothing it returns is ever treated as instructions.
+ * This module is client-safe URL screening, not a transport. Server callers
+ * additionally resolve and pin a public address using server/public-network.ts.
  */
 
-/** Hosts that would make an outbound fetch a probe of our own infrastructure. */
-const PRIVATE_V4 = /^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
+/** Only globally routable addresses are acceptable outbound destinations. */
+export function isPublicAddress(raw: string): boolean {
+  const address = raw.toLowerCase().replace(/^\[|\]$/g, "");
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(address)) {
+    const octets = address.split(".").map(Number);
+    if (octets.some((n) => n > 255)) return false;
+    const [a = 0, b = 0, c = 0] = octets;
+    return !(a === 0 || a === 10 || a === 127 || a >= 224 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && (b === 168 || (b === 0 && (c === 0 || c === 2)) || (b === 88 && c === 99))) ||
+      (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) ||
+      (a === 203 && b === 0 && c === 113));
+  }
+  if (!address.includes(":")) return false;
+  // Canonicalization rejects malformed IPv6 and converts embedded IPv4. Permit
+  // global unicast only: mapped IPv4, NAT64, local and transition ranges stay
+  // refused regardless of how the operating system would route them.
+  let normalized: string;
+  try { normalized = new URL(`https://[${address}]/`).hostname.slice(1, -1); }
+  catch { return false; }
+  const [first = "", second = ""] = normalized.split(":");
+  const a = Number.parseInt(first, 16);
+  const b = Number.parseInt(second || "0", 16);
+  return a >= 0x2000 && a <= 0x3fff &&
+    !(a === 0x2001 && (b <= 0x1ff || b === 0xdb8)) &&
+    a !== 0x2002 && !(a === 0x3fff && b <= 0x0fff);
+}
 
 /**
  * Cloud metadata endpoints, by address rather than by name.
@@ -31,16 +54,13 @@ export const METADATA_HOSTS = ["169.254.169.254", "metadata.google.internal", "m
 export function isPrivateHost(hostname: string): boolean {
   const h = hostname.toLowerCase().replace(/\.$/, "");
   if (!h) return true;
-  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (h.includes(":") || /^[\d.]+$/.test(h)) return !isPublicAddress(h);
+  if (!h.includes(".") || h === "localhost" || h.endsWith(".localhost")) return true;
   // Railway puts every service on `*.railway.internal`, so this is not
   // hypothetical here: the orchestrator, the database and the web service are
   // all reachable by name from the same network the browser sits on.
   if (h.endsWith(".internal") || h.endsWith(".local")) return true;
   if ((METADATA_HOSTS as readonly string[]).includes(h)) return true;
-  if (PRIVATE_V4.test(h)) return true;
-  // IPv6 loopback and the unique-local range, with or without brackets.
-  const v6 = h.startsWith("[") && h.endsWith("]") ? h.slice(1, -1) : h;
-  if (v6 === "::1" || v6.startsWith("fc") || v6.startsWith("fd")) return true;
   return false;
 }
 

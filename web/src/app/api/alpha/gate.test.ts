@@ -260,7 +260,11 @@ describe("the locked screen says how much is behind the lock", () => {
   });
 
   it("and the price of entry, from the tier rather than typed", () => {
-    assert.match(SCREEN, /wire\.need\.tokens\.toLocaleString\(\)/);
+    // WHAT MATTERS IS THE SOURCE, not the formatter. The threshold has to come
+    // off the wire — a number typed into the copy goes stale the day the tier
+    // moves, and this screen is asking somebody to buy against it.
+    assert.match(SCREEN, /\{count\(wire\.need\.tokens\)\}/);
+    assert.ok(!/>\s*100[,.]?000\s*</.test(SCREEN), "the threshold must not be written into the copy");
   });
 
   it("AND SHOWS NOTHING RATHER THAN ADVERTISING AN EMPTY DESK", () => {

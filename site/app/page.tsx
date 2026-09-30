@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { AgentPreview } from "@/components/AgentPreview";
 import { Icon, type IconName } from "@/components/Icon";
 import { Parallax } from "@/components/Parallax";
 import { Marquee } from "@/components/Marquee";
@@ -22,6 +23,8 @@ const GITHUB = "https://github.com/millw14/merrymen";
  * hosted", offering exactly one of those.
  */
 const HOSTED_APP = "https://app.merrymen.dev";
+/** The MCP server address, as public/llms.txt and /claude give it. */
+const MCP_SERVER = "https://mcp.merrymen.dev/mcp";
 
 /**
  * The beta testers' room — an open Telegram invite. Anyone with the link joins,
@@ -131,91 +134,41 @@ const STEPS: [string, string, string][] = [
 export default function Home() {
   return (
     <>
-      {/* ── hero ─────────────────────────────────────────────────────────── */}
-      <section className="hero">
-        <div className="wrap">
-          <div className="hero-motif" data-reveal="fade">
-            <Icon name="globe" size={46} />
-          </div>
-          <h1 className="hero-statement" data-reveal="mask">
-            Trading agents you never have to trust.
-          </h1>
-          <p className="hero-sub" data-reveal="up" style={{ ["--d" as string]: "90ms" }}>
-            merrymen is a trading bot you own — self-host it or run it hosted. It works the market for
-            you on Robinhood Chain, but your owner key never leaves you, and the size of every trade,
-            how often it may trade, how long its key lives and where value can land are enforced by the
-            blockchain itself, not by the bot behaving. Name it, chat with it, and steer it from Telegram.
-          </p>
-          <div className="hero-cta" data-reveal="up" style={{ ["--d" as string]: "170ms" }}>
-            {/* Hosted is the primary path because it is the one with no
-                prerequisites: no install, no node, no machine left running.
-                Docs stay one button away for the people who want to self-host,
-                which the hero copy promises and which is genuinely the better
-                answer for anyone who would rather not trust our frontend. */}
-            <span className="mag" data-magnetic>
-              <a href={HOSTED_APP} className="btn btn-primary btn-lg has-box">
-                Start trading <span className="box"><Icon name="arrow" size={16} /></span>
-              </a>
-            </span>
-            <Link href="/docs" className="btn btn-ghost btn-lg">
-              <Icon name="arrow" size={15} /> Self-host it instead
-            </Link>
-            {/* Deep-links the CURRENT installer, not the releases page, so a
-                wrong or stale build is never one click away. See the note on
-                WINDOWS_DOWNLOAD above. */}
-            <a href={WINDOWS_DOWNLOAD} className="btn btn-ghost btn-lg">
-              <Icon name="arrow" size={15} /> Download for Windows
-            </a>
-            {/* The button says "beta". That word implies an early build of a
-                working thing, and this one shows invented numbers and will not
-                sign a wall — so the qualifier the button no longer carries has
-                to be unmissable in the line directly beneath it, not buried in
-                the small print with the file size. */}
-            <a href={ANDROID_DOWNLOAD} className="btn btn-ghost btn-lg">
-              <Icon name="arrow" size={15} /> Download mobile beta
-            </a>
-            <a href={GITHUB} target="_blank" rel="noreferrer" className="btn btn-ghost btn-lg">
-              View on GitHub
-            </a>
-          </div>
-          <div className="hero-meta" data-reveal="up" style={{ ["--d" as string]: "240ms" }}>
-            MIT-licensed · self-host it or run it hosted · your owner key never leaves you
-            <br />
-            <span style={{ opacity: 0.75 }}>
-              Windows {DESKTOP_VERSION} · {DESKTOP_SIZE} · macOS and Linux via{" "}
-              <a className="link" href="#install">the one-line install</a>
-              <br />
-              Android {ANDROID_VERSION} · {ANDROID_SIZE}
-            </span>
-            <br />
-            {/* Full opacity, on its own line, and it leads with what the build
-                CANNOT do. This sentence is now the only thing standing between
-                "beta" and someone expecting to see their own money in it. */}
-            <span>
-              The mobile beta doesn&apos;t trade yet — it shows generated data, and it won&apos;t sign a
-              permission wall.
-            </span>
-          </div>
-
-          {/* iOS has no build at all — not a smaller one, none. So this is a
-              waiting list and says so; it does not sit beside the Android button
-              implying parity. */}
-          <div className="beta-block" data-reveal="up" style={{ ["--d" as string]: "300ms" }}>
-            <h2 className="beta-head">On iPhone?</h2>
-            <p className="beta-lede">
-              There&apos;s no iOS build yet. Leave your email and you&apos;ll get one message when
-              there is something to install — no newsletter, no drip campaign.
+      <section className="hero home-hero">
+        <div className="wrap hero-layout">
+          <div className="hero-copy">
+            <div className="hero-eyebrow"><span /> THE AGENT IS YOURS.</div>
+            <h1 className="hero-statement">Your agent.<br /><span className="accent">Your rules.</span></h1>
+            <p className="hero-sub">Meet your Merryman. A trading agent you can name, chat with, and put to work — with limits enforced on-chain and an owner key that stays yours.</p>
+            <div className="hero-cta">
+              <a href={HOSTED_APP} className="btn btn-primary btn-lg">Meet your agent <Icon name="arrow" size={18}/></a>
+              <Link href="/api" className="btn btn-ghost btn-lg">Build with Merrymen <Icon name="arrow" size={16}/></Link>
+            </div>
+            <p className="hero-meta">RUN IT HOSTED. SELF-HOST IT. MAKE IT YOURS.</p>
+            <div className="hero-bottom-links" style={{ flexWrap: "wrap", rowGap: 10 }}><Link href="/docs">Read the docs ↗</Link><Link href="/claude">Use it in Claude ↗</Link><a href={GITHUB}>Explore the source ↗</a></div>
+            {/* Plain words on purpose: an assistant asked to "connect merrymen mcp" reads this page first, and a link title alone did not tell it there is an MCP server. */}
+            <p className="hero-mcp">
+              <strong>Merrymen MCP server:</strong> connect Claude, Claude Code, ChatGPT, Cursor and other AI assistants to your agent at <code>{MCP_SERVER}</code>. <Link href="/claude">Set it up in one click</Link> · <a href="/llms.txt">instructions for AI assistants</a>
             </p>
-            <IosBetaForm />
           </div>
+          <AgentPreview />
         </div>
-        <Wordmark />
+        <div className="wrap">
+          <details className="download-panel">
+            <summary>More ways to use Merrymen <span>Desktop & mobile beta</span></summary>
+            <div className="download-options">
+              <div><h3>On your desktop</h3><a href={WINDOWS_DOWNLOAD} className="btn btn-ghost">Download for Windows <Icon name="arrow" size={15}/></a><p>Windows {DESKTOP_VERSION} · {DESKTOP_SIZE}<br/>macOS and Linux: <a className="link" href="#install">the one-line install</a></p></div>
+              <div><h3>Explore the Android demo</h3><a href={ANDROID_DOWNLOAD} className="btn btn-ghost">Download Android demo <Icon name="arrow" size={15}/></a><p>Android {ANDROID_VERSION} · {ANDROID_SIZE}<br/>The mobile beta doesn&apos;t trade yet — it shows generated data, and it won&apos;t sign a permission wall.</p></div>
+              <div><h3>On iPhone?</h3><p>There&apos;s no iOS build yet. Leave your email for one message when there is something to install.</p><IosBetaForm/></div>
+            </div>
+          </details>
+        </div>
       </section>
 
       {/* ── promises ─────────────────────────────────────────────────────── */}
       <section style={{ paddingTop: 44, paddingBottom: 44 }}>
         <div className="wrap">
-          <div className="grid" style={{ gridTemplateColumns: "repeat(5, 1fr)" }}>
+          <div className="grid promises-grid" style={{ gridTemplateColumns: "repeat(5, 1fr)" }}>
             {PROMISES.map(([, label], i) => (
               <div key={label} className="cell promise" data-reveal="up" style={{ ["--d" as string]: `${i * 70}ms` }}>
                 <span className="promise-n">{String(i + 1).padStart(2, "0")}</span>
@@ -250,10 +203,11 @@ export default function Home() {
             <p>
               No strategist, Telegram message, or voice note ever constructs calldata, moves funds,
               or touches your PC without passing a closed, typed command set and — for money — the
-              on-chain policy wall. Trades pass caps enforced by the account contract. Transfers are
-              amount-capped and confirm-gated. PC actions are off by default, allowlisted, and
-              confirmed. A prompt-injected “send everything to 0xevil” can at worst produce a
-              confirmation card you will see and cancel.
+              on-chain policy wall. Trades pass caps enforced by the account contract. Transfers out
+              through chat are refused — a wallet signed today carries no transfer permission, so a
+              prompt-injected “send everything to 0xevil” is turned back and nothing moves. Money
+              comes home with your owner key. PC actions are off by default, allowlisted, and
+              confirmed.
             </p>
             <p>
               And you don&apos;t take our word for it: your dashboard shows the account contract,
@@ -337,11 +291,11 @@ export default function Home() {
               <h3>Run the whole band from your phone.</h3>
               <p>
                 Link a bot and chat with your merryman in plain English or slash commands. Check the
-                book, trade, transfer with a confirm, set price alerts, get a daily report — all
+                book, trade, set price alerts, get a daily report — all
                 inside the same permission walls. It even speaks first.
               </p>
               <ul className="feature-list">
-                {["“how are we doing?” · “pause everything”", "Trade pings, drawdown & gas warnings, daily digest", "Transfers are triple-guarded and always confirmed", "Voice notes work too"].map((t) => (
+                {["“how are we doing?” · “pause everything”", "Trade pings, drawdown & gas warnings, daily digest", "No sending money out from chat — that’s your owner key’s job", "Voice notes work too"].map((t) => (
                   <li key={t}>{t}</li>
                 ))}
               </ul>

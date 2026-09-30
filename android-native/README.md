@@ -9,7 +9,7 @@ Jetpack Compose, Material 3, Kotlin 2.2. A native client for the merrymen API.
 > (`jbr`, OpenJDK 25) and a full SDK were both installed, just not on `PATH`.
 > The version matrix guessed at the time — AGP 8.7.3 with Kotlin 2.0.21 — could
 > not have worked on Gradle 9.3.1 or JDK 25; it is now AGP 8.13.1 with Kotlin
-> 2.2.20 and `compileSdk` 36.
+> 2.2.20 and `compileSdk` 35.
 >
 > This file also had the OkHttp guidance **backwards**. It said 4.x uses
 > methods rather than properties; that describes 3.x. In 4.x those became
@@ -17,15 +17,75 @@ Jetpack Compose, Material 3, Kotlin 2.2. A native client for the merrymen API.
 > is a compile error, not a warning. Eight call sites had to move to property
 > form.
 
+## Building and testing
+
+The JDK and SDK are Android Studio’s own, and neither is on `PATH`, so set
+both first. `local.properties` is gitignored and not needed when
+`ANDROID_HOME` is set, which also means a fresh worktree builds without
+copying one in.
+
 ```bash
-# from android-native/
-./gradlew assembleDebug
-./gradlew installDebug
+# Git Bash, from android-native/
+export JAVA_HOME="/c/Program Files/Android/Android Studio/jbr"
+export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"
+./gradlew --no-daemon --max-workers=2 assembleDebug testDebugUnitTest
 # point it somewhere else at build time:
-./gradlew assembleDebug -Pmerrymen.origin=http://10.0.2.2:3100
+./gradlew --no-daemon --max-workers=2 assembleDebug -Pmerrymen.origin=http://10.0.2.2:3100
 ```
 
-`minSdk 26`, `targetSdk 35`.
+`--no-daemon --max-workers=2` because this machine is shared: several Gradle
+daemons building in parallel worktrees ran it out of memory once. It costs
+about a minute a build.
+
+`minSdk 26`, `targetSdk 35`, `compileSdk 35`, version 0.2.0 (the user-agent
+says `merrymen-android/0.2.0`).
+
+**Tests are JVM unit tests** under `app/src/test/`, run by
+`testDebugUnitTest`. They drive the real `MerrymenApi` against a
+`MockWebServer` (`apiFor(server)` in `net/TestKit.kt`) and decode production
+answers captured on 2026-09-24 and 25 (`src/test/resources/fixtures/probe-*.json`,
+read with `Fixtures.text(name)`). `DecodeFixturesTest` refuses a fixture that
+has no route, so a new capture has to be decoded somewhere. The wiring that
+decides whose state is held — sign-out, a wallet switch, a Server change, the
+retired password at start — runs against the real `Repository` and cookie jar
+with `MemoryStore` and `MemoryCookies` (also in `TestKit.kt`) standing in for
+DataStore and the WebView's `CookieManager`. CI does not build this app yet,
+so run them before you push.
+
+**Adding an endpoint** does not touch `MerrymenApi.kt`: write it as an
+extension in your own `net/<Area>Wire.kt` over the shared plumbing,
+`suspend fun MerrymenApi.ceiling(): ApiResult<Ceiling> = getJson("/api/orders/ceiling")`,
+and it gets the same three-state result, refusal wording and decode-failure
+handling as everything else. A raw body or an extra header goes through
+`callAt(path) { … }`, never `Request.Builder().url(String)`, which throws on
+an address it cannot parse.
+
+**A write is sent once.** Every non-GET goes through `sendJson`, `callAt` or
+`call` (which put it on `api.writeHttp`) or, built by hand, on
+`api.writeHttp.newCall(…)` — never `http.newCall` for a non-GET. A lost answer
+to a write comes back `Unreachable`: the outcome is UNKNOWN and is looked up,
+never sent again. The shared client (`Http.client`) has OkHttp's
+`retryOnConnectionFailure` off, and its `SendWritesOnce` interceptor makes
+every write's body one-shot, so even a stray `http.newCall(POST)` or a 503
+saying `Retry-After: 0` is not re-sent behind the owner's back
+(`WriteOnceTest`). The app's reads through the API still recover from a stale
+pooled connection (`AppGraph` builds it with `recoverReads = true`); an API
+built over any other client reads exactly as that client does.
+
+**The Server field** (Settings) takes `https://…`, or plain `http://` only for
+`localhost` and `10.0.2.2` — the hosts `network_security_config.xml` allows in
+the clear — and only the server's address: a page such as `/home`, a query, a
+fragment or a user name is refused. Anything else is refused with a sentence
+and not saved. An address 0.1.0 already stored with a page after it (a pasted
+`https://app.merrymen.dev/home`) is read as the server it names, because every
+merrymen route lives at the root of its origin; one it stored with no scheme
+says so on every screen ("fix it there") and sends nothing. Moving to another
+host ends the wallet's turn: per-wallet state is forgotten, and the session
+cookie stays with the host that set it. One exception, because nothing
+recorded that host: a session 0.1.0 kept beside a Server saved with no scheme
+is kept for the build's default origin (the hosted service) and sent to no
+other host, so fixing the field to that server keeps the owner signed in, and
+typing any other server sends it nothing.
 
 ---
 
@@ -54,8 +114,8 @@ and the only thing that crosses back out is the cookie.
 
 `WebAuth.harvest()` is the whole trick — a WebView's cookie jar and OkHttp's are
 separate stores, so a cookie set in the page is invisible to the API layer until
-it is copied across. `mm_session` and `mm_gate` are both `httpOnly`, so no page
-script could read them; `CookieManager`, being the platform's own store, can.
+it is copied across. `mm_session` is `httpOnly`, so no page script could read
+it; `CookieManager`, being the platform’s own store, can.
 That is why the bridge is native code and not injected JavaScript.
 
 **What this costs, stated rather than discovered:** arming or re-signing a
@@ -69,26 +129,27 @@ ceremonies. They belong where the key is.
 
 | Screen | Endpoints |
 |---|---|
-| Home — portfolio, positions, agent warning, Circle lock banner | `/api/feed`, `/api/tier` |
-| Feed — filters, most-liked sort, hearts | `/api/theses`, `/api/likes`, `/api/like-counts` |
-| Chat — full conversation, plus the propose/confirm card | `/api/chat`, and whatever the confirmed command writes |
-| Alpha — three-state lock | `/api/alpha` |
-| You — identity, controls, handoffs, sign out | `/api/feed`, `/api/auth/session` |
-| Markets | `/api/market` |
-| Token — chart over six spans, holders, star, share, copy | `/api/tokens/{address}`, `/api/venue?desk=chart` |
-| Search | `/api/search` |
-| Leaderboard | `/api/leaderboard` |
-| Agent desk — owner line, **wire in** with its budget, likes | `/api/theses`, `/api/follow` |
-| Coins to consider — approve into basket and watchlist | `/api/proposals`, `/api/settings` |
-| Trade — buy, sell, snipe, with the order followed after it is placed | `/api/orders`, `/api/snipe` |
-| How much risk — one word into six settings | `/api/settings` |
+| Home — the owner's book (mode chip, liveBlocker and its fix, positions, honest P&L, own tape), the Telegram/Trencher strip, Circle banner, group chat door | `/api/feed`, `/api/grants`, `/api/telegram`, `/api/settings`, `/api/tier`; `/api/auth/session` when a read answers for nobody |
+| Feed — trades vs views, the agent's own take, per-call figures, ×N since, Real money toggle, hearts, the wire ring | `/api/theses`, `/api/market`, `/api/discoveries`, `/api/likes`, `/api/like-counts`, `/api/follow` |
+| Chat — streamed replies, the persisted thread with receipts and the unread dot, confirm cards bound to the owner, fills landing in the thread | `/api/chat` (streamed), `/api/feed`, `/api/grants`, `/api/settings`, `/api/orders/ceiling`, `GET /api/orders?id=` |
+| Trade, Coins to consider, How much risk — confirm card inside the ceiling and the sealed cap, orders followed to their own window | `POST /api/orders`, `POST /api/snipe`, `GET /api/orders`, `/api/orders/ceiling`, `/api/proposals` (and `/api/discoveries` when it answers "nothing-vetted"), `/api/settings`, `/api/grants`, `/api/feed` |
+| Alpha — locked gate with its perks, "could not look" vs "nothing vetted", tier badge | `/api/alpha` |
+| You — the owner's book, account controls, pictures and name, stop, sign out | `/api/feed`, `/api/grants`, `DELETE /api/grants`, `PUT/DELETE /api/agent-image/me/{kind}`, `PUT /api/settings` (name), `/api/auth/session`, `/api/auth/logout` |
+| Markets — stocks, then launchpad coins; no 24h figure on a new pool | `/api/market`, `/api/discoveries` |
+| Token — chart over six spans with stale bars captioned, market activity, holders, star, share | `/api/tokens/{address}` (`&activity=1` once per visit), `/api/venue?desk=chart` |
+| Search — debounced, cancelled, retried; launchpad coins matched here, as the web matches them, since the route never returns one | `/api/search`, `/api/discoveries` |
+| Leaderboard — every agent, paper returns stamped Paper, the retired count | `/api/leaderboard`, `/api/feed` (which row is yours), `/api/follow` |
+| Agent profile — stats, top trades, fills, growth, the public book, the owner's own dollars, wire in | `/api/agents/{slug}`, `/api/agents/{slug}/own`, `/api/feed`, `/api/follow` |
+| Group chat — read, post, reply, take back, mute, time zone | `/api/groupchat` (GET, POST, DELETE), `/api/groupchat/me` (GET, POST) |
 | The Merry Circle | `/api/circle` |
-| Telegram — connection, **link code**, owner chat | `/api/telegram` |
-| Settings — a real editor, plus server, site gate, practice reset | `/api/settings`, `/api/gate`, `/api/paper-reset` |
+| Telegram — connection, link code, test the bot | `/api/telegram` (GET, POST) |
+| Settings — Live trading switch with its consent, the web's form bound to its owner, server origin, practice reset | `/api/settings` (GET, PUT), `/api/paper-reset`, `/api/telegram`, `/api/auth/session` |
+| Every agent face and banner | `/api/agent-image/{slug}/avatar` and `/banner` (ETag, `?v=` after an upload) |
 
-`MerrymenApi` covers the wider surface too — selftest, models, holder
-link/unlink, grant revoke (the kill switch), wall, wall-tape, discoveries,
-agents, scoreboard.
+Nothing calls `/api/auth/challenge`, `/api/auth/verify`, `/api/holder`,
+`/api/selftest`, `/api/models`, `/api/scoreboard`, `/api/wall` or
+`/api/wall-tape`: sign-in and holder proof are the WebView's, and the rest
+have no screen here, so `MerrymenApi` no longer declares them.
 
 ## Three rules carried across from the server
 
@@ -100,9 +161,9 @@ agents, scoreboard.
    said no* (with its status, so 401 and 503 stay apart) and *we never reached
    it* distinct all the way to the pixel. `LoadedBlock` renders each with its
    own next action.
-3. **A refused trade is not a purchase.** `verbOf()` gives past tense only to
-   `landed`; a refused buy reads "tried to buy", and `toneOf()` refuses it the
-   green that means money moved.
+3. **A refused trade is not a purchase.** The feed's `verbOf()`
+   (`ui/feed/Beat.kt`) gives past tense only to a landed trade; a refused buy
+   never reads "bought", and a view is never a trade.
 
 ## Headers: what a non-browser must not send
 
@@ -115,8 +176,6 @@ active, so the `Host` must be loopback or private-LAN.
 ## Known gaps
 
 - No offline cache, no push, no widgets.
-- `AgentDetailScreen` filters the public thesis window client-side rather than
-  reading a per-agent endpoint.
 - The **watchlist is device-local**, in DataStore, the way the web's is
   device-local in `localStorage`. Starring here does not star on the web. There
   is no server route for it and inventing one would put a per-caller read in
@@ -181,8 +240,6 @@ the watchlist, sharing and the holders table are all here now. What is not:
 - **No X-handle proof flow.** The app renders a proven handle as a link and an
   unproven one as plain text, but the proof itself (post a nonce, verify it) is
   web-only.
-- No per-agent endpoint, so a desk's history is the public window filtered
-  client-side.
 
 ## Running it on an emulator
 
@@ -251,17 +308,34 @@ API 35 `google_apis` matches the app exactly (`compileSdk`/`targetSdk` 35,
 ### Boot, install, drive
 
 ```bash
+export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"
+ADB="$ANDROID_HOME/platform-tools/adb.exe"
 "$ANDROID_HOME/emulator/emulator.exe" -avd merrymen35 \
   -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect &
-adb wait-for-device
-adb shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done'
-adb install -r -t app/build/outputs/apk/debug/app-debug.apk
-adb shell am start -n 'dev.merrymen.app.debug/dev.merrymen.app.MainActivity'
+"$ADB" wait-for-device
+"$ADB" shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 2; done'
+"$ADB" install -r -t app/build/outputs/apk/debug/app-debug.apk
+MSYS2_ARG_CONV_EXCL='*' "$ADB" shell am start -n 'dev.merrymen.app.debug/dev.merrymen.app.MainActivity'
 ```
 
-Then put the **site password** into Settings — every route answers
-`401 {"error":"gated"}` until you do, and that is a different 401 from being
-signed out. The app says which; see `LoadedBlock`.
+One AVD and one `.debug` package serve every branch, so install one build at a
+time and say which one is on the device.
+
+There is no site password to enter any more: the server removed it on
+2026-09-16 (46c852d1), so a fresh install reads the public screens straight
+away and only the owner’s own screens ask for a sign-in. Signing in happens in
+the WebView and is the owner’s to do; nothing automated types credentials or
+signs anything.
+
+**Which calls were made.** A debug build logs each request line and its status
+(OkHttp `BASIC`, cookie headers redacted, never in a release build), so a run
+can prove a call happened, or did not:
+
+```bash
+"$ADB" logcat -c && "$ADB" logcat -s OkHttp
+# --> GET https://app.merrymen.dev/api/version
+# <-- 200 https://app.merrymen.dev/api/version (212ms, 20-byte body)
+```
 
 Driving it blind by pixel coordinates drifts. Read the real ones:
 

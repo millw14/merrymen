@@ -1,23 +1,347 @@
-.terminal-host .first-visit {flex-shrink:0; border:1px solid var(--line);border-radius:16px;padding:18px 20px;margin-bottom:20px;background:var(--card);width:100%;box-sizing:border-box;}
-.terminal-host .first-visit header {display:flex;align-items:center;justify-content:space-between;gap:12px;}
-.terminal-host .guide-heading {display:flex;align-items:center;gap:9px;font-size:13px;color:var(--tx-2);}
-.terminal-host .guide-heading small {font-size:11px;margin-left:8px;}
-.terminal-host .guide-close {display:grid;place-items:center;width:28px;height:28px;color:var(--tx-2);}
-.terminal-host .first-visit h2 {font-size:22px;letter-spacing:-.035em;font-weight:600;margin:14px 0 8px;}
-.terminal-host .first-visit p {font-size:14px;line-height:1.6;color:var(--tx-2);max-width:650px;margin:0;}
-.terminal-host .guide-actions {display:flex;align-items:center;flex-wrap:wrap;gap:10px 18px;margin-top:16px;}
-.terminal-host .guide-actions button {font-size:13px;min-height:38px;}
-.terminal-host .guide-actions .guide-primary {display:flex;align-items:center;gap:12px;padding:9px 14px;border-radius:10px;background:var(--tx);color:var(--ink);font-weight:600;}
-.terminal-host .guide-back {margin-left:auto;color:var(--tx-2);}
-.terminal-host .guide-wait {font-size:13px;color:var(--tx-2);}
-.terminal-host .first-visit .guide-status {margin-top:10px; border-left:2px solid var(--line);padding-left:12px;font-size:12px;}
-.terminal-host .guide-launch {display:flex;justify-content:flex-end;flex-shrink:0;margin-bottom:10px;}
-.terminal-host .create-example {border-left:2px solid var(--line);padding:0 0 0 16px;margin:0 0 24px;}
-.terminal-host .create-example > span {font-size:12px;color:var(--tx-2);}
-.terminal-host .create-example p {font-size:14px;line-height:1.6;margin:7px 0;color:var(--tx);}
-.terminal-host .guide-launch button {display:flex;align-items:center;gap:7px;font-size:12px;color:var(--tx-2);min-height:28px;}
-.terminal-host .first-visit button:focus-visible,.terminal-host .guide-launch button:focus-visible {outline:2px solid var(--tx-2);outline-offset:4px;}
-.terminal-host .body:has(> .desk-page) {display:flex;flex-direction:column;}
-.terminal-host .body:has(> .desk-page) > .desk-page {flex:1; height:auto;min-height:0;}
-.terminal-host .body:has(> .desk-page) > .first-visit {max-height:35dvh;overflow:auto;}
-@media(max-width:650px){.terminal-host .first-visit{padding:12px 14px;margin-bottom:14px;}.terminal-host .first-visit h2{font-size:20px;}.terminal-host .first-visit p{font-size:13px;}.terminal-host .guide-actions{gap:6px 14px;}.terminal-host .first-visit.folded{padding-block:8px;}}
+/*
+ * THE GUIDED FIRST VISIT.
+ *
+ * The form is the ordinary product-tour card: a step counter and a way out on
+ * the top row, a title and a line or two of copy, then dots on the left and
+ * Back/Next on the right. The page behind it dims and the control being
+ * described stays lit.
+ *
+ * THE COLOUR IS NOT COPIED. The reference this was modelled on accents in green,
+ * and merrymen already has an accent — `--lime`, used in fifty-seven places for
+ * exactly this job. `--up` is also green and would have looked the part, but it
+ * means "the price went up"; borrowing it for a Next button would make the one
+ * colour in this product that carries a fact start carrying a decoration too.
+ */
+
+/* ── the overlay ─────────────────────────────────────────────────────────── */
+
+.terminal-host .tour-root {
+  position: fixed;
+  inset: 0;
+  z-index: 1000; /* above the chat dock (60) and account menu (100) */
+  pointer-events: auto; /* Block clicks on the dimmed page, including the hole. */
+  touch-action: none;
+}
+
+/*
+ * THE HOLE IS A SHADOW, not a mask. A 100vmax spread paints everything outside
+ * this rectangle and nothing inside it, in one compositor-friendly layer — no
+ * SVG, no four-element frame to keep in sync, and it follows the element when it
+ * moves because only the box has to be positioned.
+ */
+.terminal-host .tour-spot {
+  position: fixed;
+  border-radius: 14px;
+  box-shadow: 0 0 0 100vmax rgb(0 0 0 / 0.72);
+  outline: 2px solid var(--lime);
+  outline-offset: 0;
+  pointer-events: none;
+}
+
+/* A stop with nothing to point at dims the whole page instead. */
+.terminal-host .tour-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 0.72);
+}
+
+/* ── the card ────────────────────────────────────────────────────────────── */
+
+.terminal-host .tour-card {
+  position: fixed;
+  pointer-events: auto;
+  width: 380px;
+  max-width: calc(100vw - 24px);
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  padding: 18px 20px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--card);
+  box-shadow: 0 24px 60px rgb(0 0 0 / 0.55);
+}
+
+.terminal-host .tour-card header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.terminal-host .tour-count {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+}
+
+.terminal-host .tour-skip {
+  font-size: 12px;
+  color: var(--tx-2);
+  min-height: 24px;
+}
+.terminal-host .tour-skip:hover {
+  color: var(--tx);
+}
+
+.terminal-host .tour-card h2 {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0 0 6px;
+  color: var(--tx);
+}
+
+.terminal-host .tour-card p {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--tx-2);
+  margin: 0;
+}
+
+/* ── dots, and the two buttons ───────────────────────────────────────────── */
+
+.terminal-host .tour-card footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.terminal-host .tour-dots {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.terminal-host .tour-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--line);
+  transition:
+    width 0.18s var(--ease),
+    background 0.18s var(--ease);
+}
+/* The current stop is a pill rather than a brighter dot, so the position is
+   readable at a glance and without relying on colour alone. */
+.terminal-host .tour-dots i.on {
+  width: 16px;
+  background: var(--lime);
+}
+
+.terminal-host .tour-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.terminal-host .tour-back,
+.terminal-host .tour-next {
+  font-size: 13px;
+  font-weight: 500;
+  min-height: 34px;
+  padding: 0 16px;
+  border-radius: 999px;
+}
+
+.terminal-host .tour-back {
+  border: 1px solid var(--line);
+  color: var(--tx-2);
+  background: transparent;
+}
+.terminal-host .tour-back:hover:not(:disabled) {
+  color: var(--tx);
+  border-color: var(--tx-2);
+}
+/* Disabled on the first stop rather than hidden: a control that disappears
+   moves the one beside it, and Next is the button people aim for. */
+.terminal-host .tour-back:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.terminal-host .tour-next {
+  background: var(--lime);
+  color: var(--ink);
+  font-weight: 600;
+}
+.terminal-host .tour-next:hover {
+  filter: brightness(1.08);
+}
+
+.terminal-host .tour-card button:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 3px;
+}
+
+/* ── the way back in ─────────────────────────────────────────────────────── */
+
+.terminal-host .tour-relaunch {
+  display: flex;
+  justify-content: flex-end;
+  flex-shrink: 0;
+  margin-bottom: 10px;
+}
+.terminal-host .tour-relaunch button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--tx-2);
+  min-height: 28px;
+}
+.terminal-host .tour-relaunch button:hover {
+  color: var(--tx);
+}
+.terminal-host .tour-relaunch button:focus-visible {
+  outline: 2px solid var(--tx-2);
+  outline-offset: 4px;
+}
+
+/* Kept from the panel this replaced: the example block on the create screen is
+   unrelated to the tour but has always lived in this file. */
+.terminal-host .create-example {
+  border-left: 2px solid var(--line);
+  padding: 0 0 0 16px;
+  margin: 0 0 24px;
+}
+.terminal-host .create-example > span {
+  font-size: 12px;
+  color: var(--tx-2);
+}
+.terminal-host .create-example p {
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 7px 0;
+  color: var(--tx);
+}
+
+/* ── phones ──────────────────────────────────────────────────────────────── */
+.terminal-host .tour-topics {
+  display: grid;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+  margin-top: 10px;
+}
+.terminal-host .tour-topics button {
+  text-align: left;
+  padding: 8px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.terminal-host .tour-topics button[aria-current="step"],
+.terminal-host .tour-topics button:hover {
+  background: var(--card);
+  color: var(--tx);
+}
+
+/* Position is measured at every size; mobile styles must not override it. */
+@media (max-width: 650px) {
+  .terminal-host .tour-card h2 {
+    font-size: 17px;
+  }
+  .terminal-host .tour-card p {
+    font-size: 13px;
+  }
+}
+
+/* Somebody who asked for less movement gets the card, not the slide. */
+@media (prefers-reduced-motion: reduce) {
+  .terminal-host .tour-card {
+    animation: none;
+  }
+  .terminal-host .tour-spot,
+  .terminal-host .tour-dots i {
+    transition: none;
+  }
+}
+
+/* ── choosing a language ─────────────────────────────────────────────────── */
+
+/*
+ * An ICON and the reader's own language name, never the word "Language". The
+ * person who needs this control cannot read the interface it sits in, so
+ * nothing about finding it may depend on English.
+ */
+.terminal-host .lang-picker {
+  position: relative;
+  margin-right: auto;
+}
+.terminal-host .lang-trigger {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--tx-2);
+  min-height: 28px;
+}
+.terminal-host .lang-trigger:hover {
+  color: var(--tx);
+}
+.terminal-host .lang-trigger:focus-visible,
+.terminal-host .lang-menu button:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 3px;
+}
+
+.terminal-host .lang-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 61; /* above the tour overlay's own layer */
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  min-width: 210px;
+  max-height: 60vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--card);
+  box-shadow: 0 18px 44px rgb(0 0 0 / 0.55);
+}
+.terminal-host .lang-menu button {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 9px;
+  text-align: left;
+  min-height: 34px;
+}
+.terminal-host .lang-menu button:hover {
+  background: var(--raised);
+}
+.terminal-host .lang-menu button.on {
+  color: var(--lime);
+}
+.terminal-host .lang-endonym {
+  font-size: 14px;
+}
+/* The English name is a hint for somebody helping, not the label. */
+.terminal-host .lang-english {
+  font-size: 11px;
+  color: var(--faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-host .lang-menu {
+    transition: none;
+  }
+}
+
+/* Inside the tour card the picker leads the header row, so the step counter
+   and the way out keep their places on the right. */
+.terminal-host .tour-card header .lang-picker {
+  margin-right: auto;
+}
+.terminal-host .tour-card header .lang-menu {
+  bottom: auto;
+  top: calc(100% + 6px);
+}

@@ -1,41 +1,13 @@
-/**
- * AN AGENT THAT DECIDES NOT TO TRADE WAS TALKING TO A TABLE NOBODY READS.
- *
- * A tick that proposes nothing writes its reason to `events` and nothing else,
- * and only `decisions` can become a post. So an agent that looked at the market
- * and concluded "not today, and here is why" produced an empty feed — while its
- * owner watched a screen that said nothing and reported "no trading is being
- * done" and "the agents need to be social, talk a lot".
- *
- * That is not a cadence problem, and raising the tick rate cannot fix it:
- * `read-theses` groups by twelve columns including `reason` and `size_usdg`,
- * both byte-identical tick after tick for a deterministic strategy, so a faster
- * tick only raises `said` on a post that already exists. The missing posts were
- * never being written.
- *
- * A decision with no action is a `view` — a shape this product already carries
- * end to end: thesis-policy classifies it, `outcome: "view"` exists for exactly
- * "a decision the agent made, not a trade that failed to happen", and the feed
- * grew a `view` arm that renders it from the publisher's own words.
- *
- * THIS FILE PROVES THE ROW SURVIVES THE GATE. Writing it is worthless if
- * `publishableThesis` drops it, and the gate fails closed by design — so the
- * question is answered here rather than assumed.
- */
+/** Operational idle notices stay in the owner's record; observed market views
+ * reach the feed. Both may describe a tick with no trade, but only one offers
+ * reasoning a peer can compare with its own evidence. */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
-import { publishableThesis, PUBLISHABLE_SOURCES } from "./thesis-policy";
-
-const codeOf = (src: string) =>
-  src
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .split(/\r?\n/)
-    .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
-    .join("\n");
-
-const INDEX = codeOf(readFileSync(new URL("./index.ts", import.meta.url), "utf8"));
+import { publicationSourceFor, publishableThesis, PUBLISHABLE_SOURCES } from "./thesis-policy";
+import { marketReview } from "./market-review";
+import { idleNotice, idleViewRow } from "./idle-notice";
+import { renderWhy, type Why } from "./strategies/reasons";
 
 /** The row the worker now writes when a deterministic strategy sits a tick out. */
 const idleRow = (over: Record<string, unknown> = {}) => ({
@@ -60,38 +32,44 @@ const idleRow = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-describe("the idle row reaches the feed", () => {
-  it("THE GATE ADMITS IT — writing it would be worthless otherwise", () => {
-    const post = publishableThesis(idleRow());
-    assert.ok(post, "a deterministic strategy's idle reason must be publishable");
-    assert.equal(post.reason?.startsWith("nothing bought"), true, "the words survive intact");
+const reviewRow = () => idleRow({
+  source: "market-review",
+  ...marketReview({ symbol: "NVDA", priceUsd: 100, stale: false, at: 1_788_800_000 }, null, [{at: 1_788_796_400, priceUsd: 99}, {at: 1_788_798_200, priceUsd: 101}, {at: 1_788_799_900, priceUsd: 100}])!,
+});
+
+describe("a public view needs market reasoning, not an idle notice", () => {
+  it("keeps the idle notice out of the feed without changing the owner's record", () => {
+    const row = idleRow();
+    const before = { ...row };
+    assert.equal(publishableThesis(row), null);
+    assert.deepEqual(row, before);
+    assert.match(row.reason, /all 3 legs' price feeds are stale/);
   });
 
-  it("and it lands as a VIEW, not as a trade that failed", () => {
-    // "view" is a DECISION THE AGENT MADE. Every other outcome would render it
-    // as something that went wrong, on the one tick where nothing did.
-    const post = publishableThesis(idleRow())!;
+  it("publishes a grounded quiet-market review as a view, in one observed line", () => {
+    // Filed under `market-review`, which quietReview does only when the review
+    // CHANGED (see market-review.test.ts); an unchanged one goes to an
+    // unclassified source and never reaches this gate as publishable.
+    const post = publishableThesis(reviewRow())!;
+    assert.ok(post);
     assert.equal(post.outcome, "view");
-    assert.equal(post.action, null);
-    assert.equal(post.symbol, null);
+    assert.equal(post.action, "hold");
+    assert.equal(post.symbol, "NVDA");
     assert.equal(post.shadow, false, "a real agent really decided this");
+    assert.equal(post.reason, "NVDA +1.0% over 1h, at its mean.");
   });
 
-  it("its source is one the policy already classifies", () => {
-    // A source nobody has classified publishes NOTHING — not a redacted
-    // version, nothing — and that is how a feed goes silent for a week with no
-    // error. This reuses the deterministic strategy's own source rather than
-    // inventing one.
-    assert.ok(
-      (PUBLISHABLE_SOURCES as readonly string[]).includes("strategy:steady-basket"),
-      "strategy:steady-basket must be a classified source",
-    );
+  it("classifies both strategy reasoning and deterministic market reviews", () => {
+    for (const source of ["strategy:steady-basket", "market-review"]) {
+      assert.ok((PUBLISHABLE_SOURCES as readonly string[]).includes(source), `${source} must be classified`);
+    }
   });
 
-  it("EVERY DETERMINISTIC STRATEGY'S IDLE REASON IS COVERED, not just the basket's", () => {
+  it("applies the content boundary to every deterministic strategy", () => {
     for (const name of ["steady-basket", "weekend-gap", "even-keel", "dip-hunter", "trencher"]) {
-      const post = publishableThesis(idleRow({ source: `strategy:${name}` }));
-      assert.ok(post, `strategy:${name} idle reasons must publish`);
+      assert.equal(publishableThesis(idleRow({ source: `strategy:${name}` })), null, `${name}: operational notice must stay private`);
+      const post = publishableThesis(idleRow({ source: `strategy:${name}`, reason: "Depth remains thin; I am holding until liquidity recovers." }));
+      assert.ok(post, `${name}: an actual market view still publishes`);
       assert.equal(post.outcome, "view");
     }
   });
@@ -99,52 +77,60 @@ describe("the idle row reaches the feed", () => {
   it("but an UNCLASSIFIED source still publishes nothing", () => {
     // The gate is a whitelist and fails closed. This change must not have
     // widened it.
-    assert.equal(publishableThesis(idleRow({ source: "strategy:something-new" })), null);
-    assert.equal(publishableThesis(idleRow({ source: "chat" })), null);
+    assert.equal(publishableThesis({ ...reviewRow(), source: "strategy:something-new" }), null);
+    assert.equal(publishableThesis({ ...reviewRow(), source: "chat" }), null);
   });
 
   it("and an unslugged agent still gets a post, just an unlinked one", () => {
     // A missing link is a smaller loss than a missing thesis — thesis-policy
     // says so — and it is also what makes the post unlikeable, which is right.
-    const post = publishableThesis(idleRow({ slug: null }));
+    assert.equal(publishableThesis(idleRow({ slug: null })), null);
+    const post = publishableThesis({ ...reviewRow(), slug: null });
     assert.ok(post);
     assert.equal(post.slug, null);
   });
 });
 
 describe("how often it is written", () => {
-  it("ONCE PER CHANGE, NOT ONCE PER TICK", () => {
+  // Executed through idle-notice.ts, which decides what the tick's idle block
+  // writes. These were source greps over index.ts; they pinned the same rules.
+  const underOne: Why = { code: "under-one-buy", cashRaw: 1_000_000n, needRaw: 5_000_000n, vaultRaw: 0n };
+
+  it("ONCE PER CHANGE, NOT ONCE PER TICK — the view and the event together", () => {
     // renderWhy is deterministic, so an unchanged reason would write an
     // identical row every 240 seconds. read-theses would still group them into
     // ONE post — `reason` is part of its key — but the ledger would carry
     // ~12,000 rows a day saying the same sentence, and this repo already has
     // the incident where 1,242 identical rows told nobody anything.
-    const at = INDEX.indexOf("if (idleNow !== lastIdleReason) {");
-    assert.ok(at > 0, "the de-duplication must still gate it");
-    const block = INDEX.slice(at, INDEX.indexOf("\n    }", at));
-    assert.match(block, /await addDecision\(\{/, "the row is written inside the change gate");
-    assert.match(block, /await addEvent\(agentId, "ok", idleNow\)/, "beside the event, not instead of it");
+    const first = idleNotice({ idle: underOne, modeEmptied: null, last: null });
+    assert.ok(first.event, "the owner is told");
+    assert.ok(first.view, "beside the event, not instead of it");
+    const again = idleNotice({ idle: underOne, modeEmptied: null, last: first.last });
+    assert.equal(again.event, null);
+    assert.equal(again.view, null, "the row is written only on a change");
   });
 
   it("and it carries the strategy's own source and words", () => {
-    // Scoped to the IDLE block. `ensureDecision` also calls addDecision — with
-    // an action, a symbol and a size, which is correct there and is exactly
-    // what this test asserts is absent here, so searching the whole file finds
-    // the wrong call and fails on the right code.
-    const block = INDEX.indexOf("if (idleNow !== lastIdleReason) {");
-    const at = INDEX.indexOf("await addDecision({", block);
-    const call = INDEX.slice(at, INDEX.indexOf("});", at) + 3);
+    const n = idleNotice({ idle: underOne, modeEmptied: null, last: null });
+    // THE PUBLIC REGISTER of the same Why. Still the strategy's own words —
+    // renderWhy(idle, "public") — minus the remedy clause, which is advice for
+    // the owner and was going out on a public feed ("Add funds or lower the
+    // size per trade" was live for weeks). The event keeps the owner's copy.
+    assert.equal(n.view, renderWhy(underOne, "public"));
+    assert.match(n.event!.message, /Add funds or lower the size per trade/);
+    assert.doesNotMatch(n.view!, /Add funds/);
+    const row = idleViewRow({ id: "d1", agentId: "0xagent", strategyName: "llm-strategist(anthropic:claude-opus-4)", reason: n.view! });
     // Through the helper, not the template. The template spelled the source
     // `strategy:llm-strategist(anthropic:claude-opus-4)` for the strategist —
     // a key SOURCE_POLICY has never contained — so this very sentence, the one
     // written to prove the agent was thinking rather than idle, published
     // nothing at all. See strategist-publish.test.ts.
-    assert.match(call, /source: publicationSourceFor\(strategy\.name\)/);
-    assert.match(call, /reason: idleNow/);
+    assert.equal(row.source, publicationSourceFor("llm-strategist(anthropic:claude-opus-4)"));
+    assert.equal(row.source, "strategy:llm-strategist", "the engine suffix never reaches the key");
+    const basket = idleViewRow({ id: "d2", agentId: "0xagent", strategyName: "steady-basket", reason: "x" });
+    assert.ok((PUBLISHABLE_SOURCES as readonly string[]).includes(basket.source), basket.source);
     // No action, no symbol, no size — that absence is what makes it a view,
     // and `outcomeOf` is what turns the absence into the word.
-    assert.ok(!/\baction:/.test(call), "an idle decision has no action");
-    assert.ok(!/\bsymbol:/.test(call), "and names no instrument");
-    assert.ok(!/\bsize_usdg:/.test(call), "and no size");
+    assert.deepEqual(Object.keys(row).sort(), ["agent_id", "id", "reason", "source"]);
   });
 });

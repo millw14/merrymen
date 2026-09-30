@@ -67,6 +67,22 @@ describe("no line is ever invented", () => {
     assert.ok(out.endsWith("…"), "and the truncation is shown rather than hidden");
   });
 
+  it("a long take is cut at a word, never through one", () => {
+    // The market review's old paragraph, as it was published: ~500 characters
+    // of `strategy` trust, which the gate does not clip, so this function was
+    // the only cutter it met — and it sliced at a fixed index, mid-word.
+    const long =
+      "TSLA at $102.00 is up 2.00% over the observed 20.3h window (1430 oracle rounds; range $100.00–$103.00). " +
+      "My technical bias is upward relative to the sampled mean of $101.33. I hold while testing this range over " +
+      "the next hour: two fresh oracle rounds above $103.00 would support a bullish follow-up; two below $100.00 " +
+      "would support a bearish follow-up.";
+    const out = takeFor(long, null);
+    assert.ok(out.length <= 220 && out.endsWith("…"));
+    const kept = out.slice(0, -1);
+    assert.ok(long.startsWith(kept), "the kept part is the start of the take");
+    assert.match(long.slice(kept.length), /^[\s.,;:]/, `cut through a word: "${kept.slice(-20)}|${long.slice(kept.length, kept.length + 10)}"`);
+  });
+
   it("AND THE RAIL NO LONGER CLIPS TIGHTER THAN PUBLICATION DOES", () => {
     // It used to cap at 90 while publication allows 220 and the card beside it
     // renders the full 220 — so a two-clause view died mid-thought in the rail

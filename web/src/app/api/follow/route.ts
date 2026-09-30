@@ -28,7 +28,8 @@
  */
 import { NextResponse } from "next/server";
 import { isHostedMode } from "@merrymen/core";
-import { getFollowStore, MAX_FOLLOWS, SLUG_SHAPE } from "@merrymen/follow-store";
+import { getFollowStore, isSelfFollow, MAX_FOLLOWS, SLUG_SHAPE } from "@merrymen/follow-store";
+import { getIdentityStore } from "@merrymen/identity-store";
 import { tenantOf } from "@/lib/auth";
 
 /** A follow is per-caller state; it must never be cached or shared. */
@@ -40,7 +41,7 @@ export interface FollowResponse {
   /** The cap, so the UI can render a budget rather than a count. */
   max: number;
   /** Present when the write was refused for a stated reason. */
-  refused?: "at-capacity";
+  refused?: "at-capacity" | "self";
 }
 
 function body(wired: string[], refused?: FollowResponse["refused"]): NextResponse {
@@ -83,9 +84,38 @@ export async function POST(req: Request) {
   // `on: false` is an unfollow. One route rather than two because the button is
   // one toggle, and a client that lost track of its own state should be able to
   // say what it wants rather than which verb it thinks applies.
+  //
+  // UNFOLLOW IS NOT SELF-CHECKED, deliberately, and it is checked BEFORE the
+  // self rule below. An edge written before that rule existed must stay
+  // removable; a guard that refused to undo its own past writes would strand
+  // them permanently.
   if (input.on === false) {
     await store.unfollow(t, target);
     return body((await store.following(t)).map((e) => e.target));
+  }
+
+  /**
+   * AN AGENT MAY NOT WIRE ITSELF IN.
+   *
+   * Not a tidiness rule. An agent ALREADY reads its own published theses: the
+   * orchestrator materialises them into `peers.json` as `own`
+   * (peer-files.ts:41-55), specifically so an agent's memory survives the
+   * redeploy that wipes its sqlite. A self-edge would spend one of MAX_FOLLOWS
+   * prompt slots re-delivering what is already in the prompt, and the cap
+   * exists because a prompt has a context window (follow-store.ts:53-58).
+   *
+   * Refused rather than silently dropped, because "your agent now reads itself"
+   * and "nothing happened" look identical in a toggle and only one of them is
+   * true. The UI hides the control on your own profile; this is what makes it a
+   * rule rather than a courtesy, and it is the half that survives a curl.
+   *
+   * A tenant with no identity yet CANNOT be refused by this check and must not
+   * be: `get` returns null before an agent is minted, and there is no slug to
+   * collide with. Absent is not a match.
+   */
+  const me = await getIdentityStore().get(t);
+  if (isSelfFollow(me?.slug, target)) {
+    return body((await store.following(t)).map((e) => e.target), "self");
   }
 
   const ok = await store.follow(t, target);

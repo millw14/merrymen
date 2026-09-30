@@ -12,7 +12,7 @@
     "url": "https://github.com/millw14/merrymen/issues"
   },
   "engines": {
-    "node": ">=22.12"
+    "node": "^22.13.0 || >=23.4.0"
   },
   "bin": {
     "merrymen": "cli/bin.mjs"
@@ -22,6 +22,7 @@
     "web",
     "worker",
     "packages/core",
+    "sdk",
     "strategies",
     "tsconfig.json",
     "README.md",
@@ -38,19 +39,21 @@
     "status": "node cli/bin.mjs status",
     "export": "node cli/bin.mjs export",
     "verify": "node cli/bin.mjs verify",
-    "build": "cd web && next build",
+    "build": "node sdk/build.mjs && cd web && next build",
+    "build:sdk": "node sdk/build.mjs",
     "start:web": "cd web && next start -H 0.0.0.0 -p ${PORT:-3100}",
     "start:orchestrator": "node --import tsx worker/src/orchestrator.ts",
     "prepare": "node cli/build.mjs",
-    "prepublishOnly": "node cli/prepublish.mjs",
+    "prepublishOnly": "node sdk/build.mjs && node cli/prepublish.mjs",
     "dev:web": "cd web && next dev -p 3100 -H 127.0.0.1",
     "dev:worker": "tsx worker/src/index.ts",
-    "test": "tsx --test \"worker/src/**/*.test.ts\" \"web/src/**/*.test.ts\" \"packages/*/src/**/*.test.ts\"",
+    "test": "tsx --test \"worker/src/**/*.test.ts\" \"web/src/**/*.test.ts\" \"packages/*/src/**/*.test.ts\" \"sdk/*.test.ts\"",
     "test:contracts": "cd contracts && npm test",
-    "typecheck": "tsc --noEmit -p worker && tsc --noEmit -p web && tsc --noEmit -p browser"
+    "typecheck": "tsc --noEmit -p worker && tsc --noEmit -p web && tsc --noEmit -p browser && tsc --noEmit -p sdk"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.110.0",
+    "@modelcontextprotocol/server": "^2.1.0",
     "@noble/hashes": "^1.8.0",
     "@privy-io/node": "^0.34.0",
     "@privy-io/react-auth": "^3.40.0",
@@ -67,7 +70,8 @@
     "sharp": "^0.34.5",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
-    "viem": "^2.28.0"
+    "viem": "^2.28.0",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/jsdom": "^30.0.0",

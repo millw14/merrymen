@@ -47,7 +47,7 @@ export const PARTNER_PREFIX = "/partner/v1";
  * @param partners  from createPartners() in partners.mjs
  * @param store     the shared rate-limit store (same one the holder routes use)
  */
-export function createPartnerApi({ partners, store, tunables = {}, version = "2026-09-16" }) {
+export function createPartnerApi({ partners, store, forward, tunables = {}, version = "2026-09-18" }) {
   const T = { ...PARTNER_TUNABLES, ...tunables };
 
   /**
@@ -101,26 +101,38 @@ export function createPartnerApi({ partners, store, tunables = {}, version = "20
      * Returns `{status, json}`, or null when the path is not a partner path.
      * Never throws — the server's catch-all is a backstop, not the design.
      */
-    async handle({ method, pathname, authorization, ip }) {
+    async handle({ method, pathname, authorization, ip, body = "" }) {
       if (!this.owns(pathname)) return null;
       const route = pathname.slice(PARTNER_PREFIX.length) || "/";
 
-      if (method !== "GET") return partnerError(405, "bad_request", "only GET is supported");
+      if (method === "GET" && route === "/") {
+        return { status: 200, json: {
+          service: "merrymen-partner-api", api_version: version,
+          description: "Create a Merryman with its owner's permission, follow its worker status, and chat from your app.",
+          authentication: "Server-side Authorization: Bearer <partner key>",
+          endpoints: { health: "GET /health", meta: "GET /meta", create_agent: "POST /agents",
+            authorization_challenge: "POST /agents/{id}/challenge", activate_agent: "POST /agents/{id}/activate",
+            agents: "GET /agents", agent: "GET /agents/{id}", chat: "POST /agents/{id}/messages",
+            history: "GET /agents/{id}/messages", disconnect: "DELETE /agents/{id}/connection" },
+          onboarding: "Keep setup in your app: prepare capped wallet permissions with the browser SDK, request a challenge through your backend, ask the owner to sign it, then activate the agent. A hosted onboarding_url is optional.",
+        } };
+      }
 
       // Liveness, unauthenticated. Distinct from /healthz, which describes the
       // holder gateway — a partner checking the wrong one learns nothing useful.
-      if (route === "/health") {
+      if (method === "GET" && route === "/health") {
         return { status: 200, json: { ok: true, service: "merrymen-partner-api", api_version: version } };
       }
 
       // The first call a partner makes: does my key work, and what does it carry?
-      if (route === "/meta") {
+      if (method === "GET" && route === "/meta") {
         const g = await gate(authorization, ip, null);
         if (g.fail) return g.fail;
         return {
           status: 200,
           json: {
             key_id: g.key.keyId,
+            app_id: g.key.appId ?? g.key.keyId,
             name: g.key.name,
             scopes: g.key.scopes,
             rate_per_min: g.key.rpm ?? T.RATE_PER_MIN,
@@ -129,10 +141,29 @@ export function createPartnerApi({ partners, store, tunables = {}, version = "20
         };
       }
 
+      const scope = route === "/agents" ? (method === "POST" ? "write:agents" : method === "GET" ? "read:agents" : null)
+        : /^\/agents\/[a-zA-Z0-9_-]+\/(challenge|activate)$/.test(route) && method === "POST" ? "write:agents"
+        : /^\/agents\/[a-zA-Z0-9_-]+\/messages$/.test(route) && ["GET", "POST"].includes(method) ? "chat:agents"
+        : /^\/agents\/[a-zA-Z0-9_-]+\/connection$/.test(route) && method === "DELETE" ? "write:agents"
+        : /^\/agents\/[a-zA-Z0-9_-]+$/.test(route) && method === "GET" ? "read:agents" : null;
+      if (scope) {
+        const g = await gate(authorization, ip, scope);
+        if (g.fail) return g.fail;
+        if (!forward) return partnerError(503, "upstream_unavailable", "Agent runtime is not configured", g.rid);
+        try {
+          const result = await forward({ key: g.key, method, path: route, body });
+          if (result.json?.error) result.json.error.request_id = g.rid;
+          return result;
+        } catch {
+          return partnerError(503, "upstream_unavailable", "Agent runtime is temporarily unavailable", g.rid);
+        }
+      }
+
       // An unknown partner route still authenticates first, so the 404 set is not
       // enumerable by an unauthenticated caller.
       const g = await gate(authorization, ip, null);
       if (g.fail) return g.fail;
+      if (method !== "GET") return partnerError(405, "bad_request", "method not supported for this endpoint", g.rid);
       return partnerError(404, "not_found", `no such endpoint: ${route}`, g.rid);
     },
   };

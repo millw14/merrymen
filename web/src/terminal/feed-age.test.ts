@@ -90,10 +90,9 @@ describe("the feed rail and the agent screen agree about one row's age", () => {
       assert.ok(beat);
       const rail = whenOf(beat.atMs, NOW_MS);
       const screen = ageOf(row, NOW_MS);
-      // `whenOf` says "now" under a minute where `ageOf` gives the seconds;
-      // everywhere else they must be the same words.
-      if (agoSec >= 60) assert.equal(rail, screen, `${agoSec}s ago`);
-      else assert.equal(rail, "now");
+      // Under a minute too: the rail said "now" there until the feed began
+      // reading every ten seconds, and now both print the seconds.
+      assert.equal(rail, screen, `${agoSec}s ago`);
     }
   });
 

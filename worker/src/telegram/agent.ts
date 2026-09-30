@@ -33,6 +33,7 @@ import * as pcp from "../pc/platform";
 import { sendDocument, sendPhoto, type TelegramOpts } from "./api";
 import { resolveInRoot, shellAllowed } from "./pc";
 import { getName } from "../soul";
+import { describeLlmFailure, isLlmProviderFailure } from "../llm-failure";
 
 // ── pure guards (unit-tested directly) ───────────────────────────────────────
 
@@ -572,6 +573,10 @@ export async function runAgentTask(task: string, deps: AgentRunDeps): Promise<vo
   } catch (e) {
     const m = e instanceof Error ? e.message : String(e);
     deps.note("warn", `Telegram agent: failed — ${m.slice(0, 200)}`);
-    await deps.send(`🚫 agent task failed: ${m.slice(0, 200)}`);
+    // The agent loop IS model calls, so a provider refusal is the common
+    // failure here. Same rule as the interpreter and the command path.
+    await deps.send(
+      isLlmProviderFailure(m) ? `🚫 agent task failed — ${describeLlmFailure(m).text}` : `🚫 agent task failed: ${m.slice(0, 200)}`,
+    );
   }
 }

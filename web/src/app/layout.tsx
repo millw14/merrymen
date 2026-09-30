@@ -7,7 +7,9 @@ import "@/terminal/terminal.css";
 import "@/terminal/forms.css";
 import "@/terminal/polish.css";
 import "@/terminal/root.css";
+import "@/terminal/groupchat.css";
 import { RegisterSW } from "@/components/RegisterSW";
+import { localeBootScript } from "@/lib/locale";
 
 /**
  * THE PRODUCT'S FACES.
@@ -105,8 +107,31 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html
       lang="en"
+      /**
+       * The language is corrected before the first paint by the script below,
+       * so the attribute React rendered and the attribute in the DOM differ by
+       * the time hydration compares them. That difference is the feature.
+       */
+      suppressHydrationWarning
       className={`${geist.variable} ${geistMono.variable} ${geistPixel.variable}`}
     >
+      <head>
+        {/*
+          WHY A BLOCKING INLINE SCRIPT, AND NOT `cookies()` IN THIS COMPONENT.
+          Reading the cookie here would make this layout dynamic, and every
+          statically-rendered page beneath it would become a per-request render
+          — to set one attribute that is otherwise identical for everybody.
+
+          It has to run before the first paint rather than after hydration
+          because the font stacks in terminal.css are keyed on `html[lang]`. A
+          language learned late means a Russian or Thai reader watches the page
+          render in the wrong typeface and then reflow.
+
+          `lang="en"` above is the honest default for the HTML as served: a
+          crawler, or a reader with script off, gets English and a working page.
+        */}
+        <script dangerouslySetInnerHTML={{ __html: localeBootScript() }} />
+      </head>
       <body style={{margin:0}}>
         {children}
         <RegisterSW />

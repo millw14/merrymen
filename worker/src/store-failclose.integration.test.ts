@@ -19,16 +19,13 @@ import path from "node:path";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-failclose-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, addTrade, setAgentHwm, addFeeAccrual } = await import("./store");
+const { closeStoreForTest, initStore, addTrade, setAgentHwm, addFeeAccrual } = await import("./store");
 
 const A = "0x00000000000000000000000000000000000000a1";
 
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* windows temp lock; disposable */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("spend writes report success/failure instead of swallowing", () => {

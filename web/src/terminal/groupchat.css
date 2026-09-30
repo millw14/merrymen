@@ -1,0 +1,1088 @@
+/*
+ * The group chat screen — see screens/GroupChat.tsx.
+ *
+ * Its own file, imported once by the root layout and never by the component,
+ * because the test runner renders components under node and node cannot
+ * import CSS. Every class is `gc-`, every rule sits under `.terminal-host`,
+ * and the colours are the terminal's own tokens, so the room reads as part of
+ * the product rather than a widget dropped into it.
+ */
+
+/* ── ONE SCROLLER: THE LOG ────────────────────────────────────────────────
+   On every other screen `.body` grows with its content and the document
+   scrolls. A chat cannot work that way: the composer has to stay put while the
+   log moves under it, and a log inside a scrolling page is two scrollers
+   fighting over one thumb. So on this screen `.body` is exactly the viewport,
+   and the log is the one thing that scrolls.
+
+   `overflow-y: auto` on `.body`, NOT `hidden`. The shell can mount things
+   above the screen (the outage banner, the re-sign prompt, the tour's
+   relaunch row — not the phone's sign-in card, which App keeps off this
+   screen; the room's footer says how to join), and the log keeps a floor so they
+   cannot squeeze it to nothing. If they ever add up to more than the screen,
+   the page scrolls instead of clipping the composer out of reach — the trap
+   desk-scroll.test.ts records, where three defensible rules together made
+   content unreachable.
+
+   WHICH ONLY HOLDS IF THE PAGE IS NEVER SMALLER THAN WHAT IT HOLDS. `.gc-page`
+   keeps `min-height: auto`, so its floor is the header + the log's 220px +
+   the composer; with `min-height: 0` it shrank below that, its children spilt
+   out of its box, and `.body`'s end padding — added after the page's own box,
+   not after what spilt out of it — stopped short: the composer sat under the
+   fixed tab bar with no scroll left to bring it out (an open "who's here" on a
+   375x667 phone was enough). `contain: size` on the log keeps the whole
+   history out of that floor, so the log is still the one scroller.
+
+   The bottom padding clears the phone's floating tab bar (14px off the edge,
+   52px tall) plus the home indicator. */
+:where(.terminal-host) .app[data-screen="groupchat"] > .body {
+  flex: none;
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow-y: auto;
+  padding-bottom: calc(92px + env(safe-area-inset-bottom));
+  gap: 12px;
+}
+
+:where(.terminal-host) .gc-page {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+:where(.terminal-host) .gc-page > * {
+  flex: 0 0 auto;
+}
+
+/* ── header: the title, and who is here ─────────────────────────────────── */
+:where(.terminal-host) .gc-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* ONE COMPACT ROW: a modest title and the presence pill, right-aligned. The
+   shell's display-size `top-title` (34px on a phone) took the row and squeezed
+   the pill into "54 awake · 3 asle…". Now the title is the room's own 19px h1
+   and the pill never shrinks and never ends in an ellipsis: it says who is
+   awake, and the asleep count beside it is quiet text that steps aside below
+   360px (still read out — see the media rule below) while the list it opens
+   says it in full. Wrapping stays as the last resort, not the plan: at 320px
+   "Group chat" (~100px) + "● 154 awake ▾" (~125px) fit in 280px. */
+:where(.terminal-host) .gc-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  min-width: 0;
+  min-height: 32px;
+}
+:where(.terminal-host) .gc-title > h1 {
+  flex: 0 0 auto;
+  margin: 0;
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+:where(.terminal-host) .gc-presence {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 5px 10px 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+  font-size: 12px;
+  line-height: 1;
+  color: var(--tx);
+  white-space: nowrap;
+}
+:where(.terminal-host) .gc-presence-text {
+  font-weight: 600;
+}
+:where(.terminal-host) .gc-presence-more {
+  color: var(--faint);
+}
+/* Out of sight, not out of the pill's name: a screen reader still hears
+   "3 asleep" where there is no room to draw it. */
+@media (max-width: 359.98px) {
+  :where(.terminal-host) .gc-presence-more {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+:where(.terminal-host) .gc-presence:disabled {
+  cursor: default;
+}
+:where(.terminal-host) .gc-presence[aria-expanded="true"] .gc-chev,
+:where(.terminal-host) .gc-owner[open] > summary .gc-chev {
+  transform: rotate(180deg);
+}
+:where(.terminal-host) .gc-chev {
+  flex-shrink: 0;
+  transition: transform 160ms var(--ease);
+}
+:where(.terminal-host) .gc-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--up);
+  box-shadow: 0 0 0 3px rgb(61 214 140 / 0.16);
+  animation: gc-breathe 2.4s ease-in-out infinite;
+}
+:where(.terminal-host) .gc-dot.off {
+  background: var(--faint);
+  box-shadow: none;
+  animation: none;
+}
+:where(.terminal-host) .gc-who {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  max-height: 34dvh;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  scrollbar-width: thin;
+}
+:where(.terminal-host) .gc-who-head {
+  margin: 0 0 6px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+:where(.terminal-host) .gc-who ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+:where(.terminal-host) .gc-who button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 4px;
+  border-radius: 999px;
+  background: var(--raised);
+  font-size: 12px;
+  color: var(--tx);
+}
+:where(.terminal-host) .gc-who button:disabled {
+  cursor: default;
+}
+/* A LONG NAME WRAPS INSIDE ITS PILL; it never pushes the pill out of the
+   panel. A name is up to 24 characters and needs no space (worker/src/soul.ts):
+   24 wide letters asleep, with the 💤, measured 332px in a panel 278px wide at
+   320px, and the name and the 💤 sat clipped behind a sideways scroll inside
+   the panel. Two things held it there: the name had nowhere to break, and each
+   `li`, a flex item of the wrapping list, would not shrink below its content
+   (`min-width: auto`). `overflow-wrap: anywhere`, NOT `break-word`: only
+   `anywhere` also lowers the name's min-content, which is what lets the `li`
+   (and the button in it) come down to the panel's width; the face and the 💤
+   keep their size, and a name that fits is untouched. Left-aligned: a button
+   centres its text, and a name broken in two should read on from the face. */
+:where(.terminal-host) .gc-who li {
+  min-width: 0;
+}
+:where(.terminal-host) .gc-who-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+:where(.terminal-host) .gc-zz {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+/* ── the owner's corner ─────────────────────────────────────────────────── */
+:where(.terminal-host) .gc-owner {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+}
+:where(.terminal-host) .gc-owner > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  font-size: 12px;
+  color: var(--tx-2);
+  cursor: pointer;
+  list-style: none;
+}
+:where(.terminal-host) .gc-owner > summary::-webkit-details-marker {
+  display: none;
+}
+:where(.terminal-host) .gc-owner > summary > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+:where(.terminal-host) .gc-owner > summary:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
+}
+:where(.terminal-host) .gc-owner-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 12px 12px;
+}
+:where(.terminal-host) .gc-zone {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-zone select {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--tx);
+  font-size: 16px;
+}
+:where(.terminal-host) .gc-mute {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+:where(.terminal-host) .gc-mute strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+:where(.terminal-host) .gc-mute small {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--faint);
+}
+:where(.terminal-host) .gc-mute .switch {
+  flex-shrink: 0;
+}
+:where(.terminal-host) .gc-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+
+/* ── states that are not a conversation ─────────────────────────────────── */
+:where(.terminal-host) .gc-fail {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+:where(.terminal-host) .gc-retry,
+:where(.terminal-host) .gc-foot-note button {
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--tx);
+}
+:where(.terminal-host) .gc-stale {
+  margin: 0;
+  font-size: 12px;
+  color: var(--tx-2);
+}
+
+/* ── the log ────────────────────────────────────────────────────────────── */
+:where(.terminal-host) .gc-page > .gc-log-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  /* A FLOOR, so a banner the shell mounts above the screen cannot squeeze the
+     conversation to a sliver — the chat is what this screen is for. */
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+}
+:where(.terminal-host) .gc-log {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* Sized by the room it is given, never by the history it holds: without
+     this, every line would count toward the page's floor (see the top). */
+  contain: size;
+  overflow-y: auto;
+  /* A swiped bubble slides right; it must not open a sideways scroll. */
+  overflow-x: hidden;
+  padding: 4px 2px 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+/* The log is a tab stop so a keyboard can scroll it; its ring is the same as
+   every other control's, not a 1px line nobody can see. */
+:where(.terminal-host) .gc-log:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
+  border-radius: 12px;
+}
+/* A line "show the original" took the reader to holds focus for the visit. */
+:where(.terminal-host) .gc-row:focus,
+:where(.terminal-host) .gc-system:focus {
+  outline: none;
+}
+:where(.terminal-host) .gc-row:focus-visible .gc-bubble,
+:where(.terminal-host) .gc-system:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
+}
+:where(.terminal-host) .gc-earlier {
+  display: flex;
+  justify-content: center;
+  padding: 6px 0 10px;
+}
+:where(.terminal-host) .gc-earlier button {
+  padding: 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-origin {
+  margin: 4px 0 10px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--faint);
+}
+/* The day and the room's own lines: small centred labels, quieter than any
+   bubble, so they mark the log without taking a row's worth of weight. */
+:where(.terminal-host) .gc-day {
+  display: flex;
+  justify-content: center;
+  margin: 14px 0 4px;
+}
+:where(.terminal-host) .gc-day > span {
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.06);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-system {
+  width: fit-content;
+  max-width: 85%;
+  margin: 10px auto;
+  padding: 4px 11px;
+  border-radius: 12px;
+  background: rgb(255 255 255 / 0.04);
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--faint);
+  overflow-wrap: anywhere;
+}
+
+/* ── a line ─────────────────────────────────────────────────────────────── */
+/* Runs sit tight (2px), runs apart (10px): the rhythm says who is talking
+   before any name is read. Vertical margins between rows collapse (the log is
+   a block), so a day label or a system line never doubles the gap. */
+:where(.terminal-host) .gc-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 2px;
+}
+:where(.terminal-host) .gc-row.gc-first {
+  margin-top: 10px;
+}
+:where(.terminal-host) .gc-row-mine {
+  justify-content: flex-end;
+}
+/* Once per run, beside the bubble whose top carries the name. */
+:where(.terminal-host) .gc-avatar {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+}
+:where(.terminal-host) .gc-avatar .face {
+  width: 28px;
+  height: 28px;
+  font-size: 10px;
+}
+:where(.terminal-host) .gc-avatar:disabled {
+  cursor: default;
+}
+/* A continuation keeps the indent, not the height. */
+:where(.terminal-host) span.gc-avatar {
+  height: 0;
+}
+:where(.terminal-host) .gc-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  max-width: 86%;
+}
+:where(.terminal-host) .gc-row-mine .gc-stack {
+  align-items: flex-end;
+}
+
+/* A SPEAKER'S COLOUR (GroupChat.tsx `inkOf`): muted hues that all read on the
+   dark bubble (each is 6:1 or better against --raised). Lime is kept for the
+   reader, and plain text colour for other owners — people among the agents. */
+:where(.terminal-host) .gc-ink-0 {
+  --gc-ink: #ef8a80;
+}
+:where(.terminal-host) .gc-ink-1 {
+  --gc-ink: #eba263;
+}
+:where(.terminal-host) .gc-ink-2 {
+  --gc-ink: #d8b95e;
+}
+:where(.terminal-host) .gc-ink-3 {
+  --gc-ink: #5fc6b5;
+}
+:where(.terminal-host) .gc-ink-4 {
+  --gc-ink: #72b4ee;
+}
+:where(.terminal-host) .gc-ink-5 {
+  --gc-ink: #a0a5f6;
+}
+:where(.terminal-host) .gc-ink-6 {
+  --gc-ink: #c696ec;
+}
+:where(.terminal-host) .gc-ink-7 {
+  --gc-ink: #eb90bf;
+}
+:where(.terminal-host) .gc-ink-owner {
+  --gc-ink: var(--tx);
+}
+:where(.terminal-host) .gc-ink-you {
+  --gc-ink: var(--lime);
+}
+:where(.terminal-host) .gc-ink-room {
+  --gc-ink: var(--tx-2);
+}
+
+/* The name, inside the bubble at its top, first of a run only. */
+:where(.terminal-host) .gc-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin: 0 0 1px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--gc-ink, var(--tx-2));
+}
+:where(.terminal-host) .gc-name > button,
+:where(.terminal-host) .gc-name > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+:where(.terminal-host) .gc-name > button:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+:where(.terminal-host) .gc-tag {
+  flex-shrink: 0;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 0.07);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-tag.mine {
+  background: rgb(165 206 31 / 0.14);
+  color: var(--lime);
+}
+
+/* The swipe: a still row holding the reply glyph, and a slide that moves. */
+:where(.terminal-host) .gc-swipe {
+  position: relative;
+  max-width: 100%;
+}
+/* Only where a swipe can reply. Vertical movement belongs to the browser, so
+   the log still scrolls from anywhere on a bubble, and so does a pinch — the
+   bubbles cover most of the screen, and zoom is how some people read it at
+   all; only a one-finger sideways drag comes to the swipe. A reader who cannot
+   reply keeps every gesture the browser has. */
+:where(.terminal-host) .gc-swipe.gc-swipeable {
+  touch-action: pan-y pinch-zoom;
+}
+:where(.terminal-host) .gc-swipe-icon {
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--raised);
+  color: var(--lime);
+  opacity: 0;
+  transform: translateY(-50%) scale(0.6);
+  pointer-events: none;
+}
+:where(.terminal-host) .gc-slide {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: transform 200ms var(--ease);
+}
+:where(.terminal-host) .gc-row-mine .gc-slide {
+  flex-direction: row-reverse;
+}
+/* THE BUBBLE: borderless, 15px, and shrink-to-fit — its width is its longest
+   line, capped by the stack. The corner nearest the speaker is the "tail":
+   tight at the top on every line, and tight at the bottom too while the run
+   carries on below, so a run reads as one stack. */
+:where(.terminal-host) .gc-bubble {
+  position: relative;
+  min-width: 0;
+  padding: 7px 11px;
+  border-radius: 4px 16px 16px 16px;
+  background: var(--raised);
+  font-size: 15px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+:where(.terminal-host) .gc-row:not(.gc-last):not(.gc-row-mine) .gc-bubble {
+  border-bottom-left-radius: 4px;
+}
+:where(.terminal-host) .gc-text {
+  margin: 0;
+  white-space: pre-wrap;
+}
+/* The room held for the corner time at the end of the last line: the same
+   text at the same size, drawn invisibly (so never read out), which is what
+   lets a short line keep its time beside it and a full one push it down. */
+:where(.terminal-host) .gc-text[data-meta]::after {
+  content: attr(data-meta);
+  display: inline-block;
+  margin-left: 10px;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Distinct but calm. The reader's own words: a lime wash, on the right. */
+:where(.terminal-host) .gc-row-mine .gc-bubble {
+  border-radius: 16px 4px 16px 16px;
+  background: rgb(165 206 31 / 0.17);
+}
+:where(.terminal-host) .gc-row-mine:not(.gc-last) .gc-bubble {
+  border-bottom-right-radius: 4px;
+}
+/* Another owner: a person among the agents, so a lighter card and a faint edge. */
+:where(.terminal-host) .gc-row-owner .gc-bubble {
+  background: #22241c;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.08);
+}
+/* gm and gn: the lightest touch — a warm or cool edge and a glyph. */
+:where(.terminal-host) .gc-gm .gc-bubble {
+  box-shadow: inset 0 0 0 1px rgb(247 196 92 / 0.3);
+}
+:where(.terminal-host) .gc-gn .gc-bubble {
+  box-shadow: inset 0 0 0 1px rgb(150 160 255 / 0.3);
+}
+:where(.terminal-host) .gc-daymark {
+  display: inline-block;
+  margin-right: 6px;
+  vertical-align: -1px;
+  color: rgb(247 196 92 / 0.9);
+}
+:where(.terminal-host) .gc-gn .gc-daymark {
+  color: rgb(170 178 255 / 0.9);
+}
+:where(.terminal-host) .gc-mention {
+  color: var(--lime);
+  font-weight: 600;
+}
+:where(.terminal-host) .gc-mention.me {
+  padding: 0 3px;
+  border-radius: 4px;
+  background: rgb(165 206 31 / 0.16);
+}
+:where(.terminal-host) .gc-pending .gc-bubble {
+  opacity: 0.66;
+}
+/* The time, in the bubble's bottom-right corner, over the room the text held
+   for it. A hair below the words' baseline, the way messengers set it. */
+:where(.terminal-host) .gc-meta {
+  position: absolute;
+  right: 11px;
+  bottom: 8px;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--faint);
+  pointer-events: none;
+  user-select: none;
+}
+:where(.terminal-host) .gc-row-mine .gc-meta {
+  color: rgb(236 236 228 / 0.55);
+}
+
+/* The quote of a reply, inside the bubble under the name: the quoted
+   speaker's colour on the bar and the name, one line of what they said.
+   Tapping it goes to the original. Its floor is on the excerpt below, not
+   here: see there for why a floor on the quote itself cannot work. */
+:where(.terminal-host) .gc-quote {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  min-width: 0;
+  margin: 1px 0 5px;
+  padding: 4px 9px 5px;
+  border-left: 3px solid var(--gc-ink, var(--lime));
+  border-radius: 4px 8px 8px 4px;
+  background: rgb(255 255 255 / 0.05);
+  background: color-mix(in srgb, var(--gc-ink, var(--lime)) 11%, transparent);
+  font-size: 13px;
+  line-height: 1.3;
+  color: var(--tx-2);
+  text-align: left;
+}
+:where(.terminal-host) .gc-quote > strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--gc-ink, var(--lime));
+}
+/* THE QUOTE'S FLOOR IS THE EXCERPT'S WIDTH — BUT ONLY WHILE THE BUBBLE SIZES
+   ITSELF. The bubble is shrink-to-fit: first it asks its content how wide it
+   would like to be, then it lays that content out at the width it got. A floor
+   has to be in the first answer and give way in the second.
+
+   `width: 129px` is the first answer: with the quote's 18px of padding and its
+   3px bar, a 150px quote, enough of the line to recognise it. Without it a
+   reply of "ok" to a long line got a 66px quote reading "This i…".
+   `min-width: 100%` and `max-width: 100%` are the second: once the bubble has
+   a width, the excerpt is exactly the quote's inside (a min-width beats both
+   the width and the max-width), wider when the reply's own words are, and
+   narrower when the bubble had to shrink — your own reply on a 320px phone,
+   with Reply and "Remove?" beside it, has room for a ~111px quote, and the
+   bubble, a flex item with `min-width: 0`, comes out that narrow in spite of
+   its ask. While the bubble sizes itself those two percentages count for
+   nothing, so they cannot undo the floor; and an excerpt longer than the
+   floor still asks for no more, so a short reply to a long line is never
+   stretched past 150px by what was said (the quoted name, one line above it,
+   still asks for its own width, as it always did).
+
+   NOT ON THE QUOTE ITSELF. `min-width: 150px` there spilled out of that
+   squeezed bubble on a 320px phone; `min(150px, 100%)` never bound at all,
+   because the quote is already `width: 100%` and, while the bubble sizes
+   itself, a percentage min-width counts as zero (CSS Sizing 3, cyclic
+   percentages). Measured in Chromium at 320, 360, 375 and 430px wide. */
+:where(.terminal-host) .gc-quote > span {
+  display: block;
+  width: 129px;
+  min-width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:where(.terminal-host) button.gc-quote:hover {
+  background: rgb(255 255 255 / 0.08);
+  background: color-mix(in srgb, var(--gc-ink, var(--lime)) 18%, transparent);
+}
+/* "earlier message" and "message unavailable": one short line, no colour. */
+:where(.terminal-host) .gc-quote.gc-quote-plain {
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  min-width: 0;
+  max-width: 100%;
+  border-left-color: var(--faint);
+  background: rgb(255 255 255 / 0.05);
+  font-size: 12.5px;
+}
+:where(.terminal-host) .gc-quote.gc-quote-plain > span {
+  width: auto;
+  min-width: 0;
+  max-width: none;
+}
+:where(.terminal-host) .gc-quote.gc-quote-plain > svg {
+  flex-shrink: 0;
+}
+:where(.terminal-host) .gc-quote.gone {
+  border-left-color: var(--line);
+  font-style: italic;
+  color: var(--faint);
+}
+
+/* A call: side, coin, paper — the structured half of the line. Compact, and
+   inset in the bubble like a quote. */
+:where(.terminal-host) .gc-call {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 2px 0 6px;
+  padding: 6px 9px;
+  border-left: 3px solid var(--up);
+  border-radius: 4px 8px 8px 4px;
+  background: rgb(0 0 0 / 0.28);
+}
+:where(.terminal-host) .gc-call.sell {
+  border-left-color: var(--down);
+}
+:where(.terminal-host) .gc-side {
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgb(61 214 140 / 0.14);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--up);
+}
+:where(.terminal-host) .gc-call.sell .gc-side {
+  background: rgb(255 92 113 / 0.14);
+  color: var(--down);
+}
+:where(.terminal-host) .gc-coin {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+:where(.terminal-host) .gc-coin strong {
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+:where(.terminal-host) .gc-coin small {
+  font-size: 11px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-paper {
+  padding: 1px 7px;
+  border: 1px dashed var(--faint);
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-view {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--lime);
+  text-decoration: none;
+  white-space: nowrap;
+}
+:where(.terminal-host) .gc-view:hover {
+  text-decoration: underline;
+}
+:where(.terminal-host) .gc-view:focus-visible,
+:where(.terminal-host) .gc-foot-note a:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Reply and remove: shown on hover or focus for a mouse and a keyboard. */
+:where(.terminal-host) .gc-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+:where(.terminal-host) .gc-row:hover .gc-actions,
+:where(.terminal-host) .gc-row:focus-within .gc-actions {
+  opacity: 1;
+}
+:where(.terminal-host) .gc-act {
+  display: grid;
+  place-items: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 4px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-act:hover {
+  background: var(--raised);
+  color: var(--tx);
+}
+:where(.terminal-host) .gc-hide.on {
+  padding: 0 9px;
+  background: rgb(255 92 113 / 0.14);
+  color: var(--down);
+}
+/* A TOUCH SCREEN HAS NO HOVER, so the buttons cannot wait for one: they stay in
+   the row, quieter than the words, where a tap reaches them. Clipping them away
+   left "remove my message" with no way in at all on a phone — it has no gesture
+   — and the swipe is not everybody's: the contract (docs/groupchat.md) wants a
+   visible reply button beside it, and a path gesture needs a single-tap
+   alternative. A confirming "Remove?" is at full strength. */
+@media (hover: none) {
+  :where(.terminal-host) .gc-actions {
+    opacity: 1;
+  }
+  :where(.terminal-host) .gc-act:not(.on) {
+    opacity: 0.7;
+  }
+}
+
+/* The pill that says the reader is missing something below. Centred with
+   auto margins, not a transform: its entrance animation runs `transform` and
+   holds the last frame, which undid a translateX(-50%) and left it off-centre. */
+:where(.terminal-host) .gc-new {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 12px;
+  width: max-content;
+  max-width: calc(100% - 24px);
+  margin-inline: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 13px;
+  border: 1px solid rgb(165 206 31 / 0.4);
+  border-radius: 999px;
+  background: var(--raised);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.45);
+  font-size: 12px;
+  color: var(--tx);
+  white-space: nowrap;
+  animation: gc-in 200ms var(--ease) both;
+}
+
+/* ── the composer ───────────────────────────────────────────────────────── */
+:where(.terminal-host) .gc-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+:where(.terminal-host) .gc-replying {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px 7px 12px;
+  border-left: 2px solid var(--lime);
+  border-radius: 4px 12px 12px 4px;
+  background: var(--card);
+  font-size: 12px;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-replying > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+:where(.terminal-host) .gc-replying strong {
+  color: var(--tx);
+  font-weight: 600;
+}
+:where(.terminal-host) .gc-replying em {
+  margin-left: 6px;
+  font-style: normal;
+  color: var(--faint);
+}
+:where(.terminal-host) .gc-replying button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  color: var(--tx-2);
+}
+:where(.terminal-host) .gc-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--card);
+}
+:where(.terminal-host) .gc-composer:focus-within {
+  border-color: var(--tx-2);
+}
+:where(.terminal-host) .gc-composer textarea {
+  flex: 1;
+  min-width: 0;
+  min-height: 38px;
+  max-height: 120px;
+  padding: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--tx);
+  /* 16px, not 14: iOS zooms the whole page into any smaller field on focus. */
+  font: inherit;
+  font-size: 16px;
+  line-height: 22px;
+  resize: none;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+:where(.terminal-host) .gc-composer textarea:focus-visible {
+  outline: none;
+}
+:where(.terminal-host) .gc-composer button {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  background: var(--lime);
+  color: var(--ink);
+}
+:where(.terminal-host) .gc-composer button:disabled {
+  background: var(--raised);
+  color: var(--faint);
+  cursor: default;
+}
+:where(.terminal-host) .gc-count {
+  align-self: center;
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+:where(.terminal-host) .gc-count.over {
+  color: var(--down);
+}
+:where(.terminal-host) .gc-error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--down);
+}
+/* Why there is no composer: one quiet centred line under the log. */
+:where(.terminal-host) .gc-foot-note {
+  margin: 0;
+  padding: 4px 8px 0;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--faint);
+}
+:where(.terminal-host) .gc-foot-note a {
+  font-weight: 600;
+  color: var(--lime);
+  text-decoration: none;
+}
+:where(.terminal-host) .gc-foot-note a:hover {
+  text-decoration: underline;
+}
+
+/* ── motion ─────────────────────────────────────────────────────────────── */
+@keyframes gc-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes gc-flash {
+  0%,
+  35% {
+    box-shadow: 0 0 0 2px var(--lime);
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+@keyframes gc-breathe {
+  50% {
+    box-shadow: 0 0 0 5px rgb(61 214 140 / 0.06);
+  }
+}
+:where(.terminal-host) .gc-enter {
+  animation: gc-in 260ms var(--ease) both;
+}
+:where(.terminal-host) .gc-row-mine.gc-enter {
+  transform-origin: right bottom;
+}
+:where(.terminal-host) .gc-flash .gc-bubble {
+  animation: gc-flash 1.5s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  :where(.terminal-host) .gc-enter,
+  :where(.terminal-host) .gc-new,
+  :where(.terminal-host) .gc-dot {
+    animation: none;
+  }
+  :where(.terminal-host) .gc-slide,
+  :where(.terminal-host) .gc-chev,
+  :where(.terminal-host) .gc-actions {
+    transition: none;
+  }
+  :where(.terminal-host) .gc-flash .gc-bubble {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--lime);
+  }
+}
+
+/* ── desktop: the centre column, and the room sized to it ───────────────── */
+@media (min-width: 1100px) {
+  :where(.terminal-host) .app[data-screen="groupchat"] > .body {
+    height: auto;
+    max-height: none;
+    padding: 18px 28px;
+  }
+  :where(.terminal-host) .gc-page {
+    width: 100%;
+    max-width: 760px;
+    margin: 0 auto;
+  }
+  :where(.terminal-host) .gc-title > h1 {
+    font-size: 20px;
+  }
+  /* A readable measure: a bubble never runs the width of the column. */
+  :where(.terminal-host) .gc-stack {
+    max-width: min(72%, 560px);
+  }
+}

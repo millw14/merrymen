@@ -30,12 +30,22 @@ import { PrivyProvider } from "@privy-io/react-auth";
 import { robinhoodChain } from "@merrymen/core";
 import type { ReactNode } from "react";
 import { PRIVY_APP_ID, privyEnabled } from "@/lib/privy-client";
-
-export function Providers({ children }: { children: ReactNode }) {
+import { LocaleProvider } from "@/lib/i18n";
+import type { LocaleTag } from "@/lib/locale";
+import { OwnerClock } from "./OwnerClock";
+export function Providers({ locale, children }: { locale: LocaleTag; children: ReactNode }) {
+  // THE LOCALE WRAPS EVERYTHING, including the no-Privy path. It comes from the
+  // server so that the copy the server renders and the copy the client hydrates
+  // are the same words — see i18n.tsx for why reading the DOM is not enough for
+  // text the way it is for figures.
+  //
   // A deployment with no Privy — or a malformed app id — renders the terminal
   // with no provider at all rather than crashing the prerender. The legacy
   // wallet login still works, which is what makes this flag-able.
-  if (!privyEnabled()) return <>{children}</>;
+  //
+  // OwnerClock rides in BOTH branches: an owner's time zone decides when their
+  // agent sleeps in the group chat, whichever login they came in through.
+  if (!privyEnabled()) return <LocaleProvider locale={locale}><OwnerClock />{children}</LocaleProvider>;
   return (
     <PrivyProvider
       appId={PRIVY_APP_ID}
@@ -81,7 +91,7 @@ export function Providers({ children }: { children: ReactNode }) {
         },
       }}
     >
-      {children}
+      <LocaleProvider locale={locale}><OwnerClock />{children}</LocaleProvider>
     </PrivyProvider>
   );
 }

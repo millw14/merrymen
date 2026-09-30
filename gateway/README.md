@@ -40,7 +40,7 @@ knob here, because the expensive part *is* the query.
 So the client sends a **name**, not a query:
 
 ```bash
-curl -s https://merrymen-gateway-production.up.railway.app/bitquery \
+curl -s https://ai.merrymen.dev/bitquery \
   -H "authorization: Bearer mmk_…" \
   -H 'content-type: application/json' -d '{"query":"recentPools","variables":{"sinceMinutes":60,"limit":25}}'
 ```
@@ -61,48 +61,32 @@ hostile queries (including `__proto__`, `constructor`) rejected by name lookup,
 
 ## Which host is live right now
 
-**`https://merrymen-gateway-production.up.railway.app`** — this is what the client
-and the website actually call, and the only host with a working certificate.
+**`https://ai.merrymen.dev`** serves the Railway gateway. TLS and
+`GET /healthz` were verified on 2026-09-18; Railway reports the existing custom
+domain verified with a valid certificate. The alternate
+`https://merrymen-gateway-production.up.railway.app` hostname also remains usable.
 
-`ai.merrymen.dev` is registered on the Railway service (domain `84ba7858`, edge
-`edge-500b32d4`, targetPort 8080 — all correct), but **TLS fails, and this file
-used to be wrong about why**. It said the DNS was correct and blamed an
-unexplained Let’s Encrypt stall. The actual cause, from Railway’s own API:
+The partner API is at **`https://ai.merrymen.dev/partner/v1`**. It uses separate
+server-only partner keys and supports agent authorization, status and chat; see
+[the integration guide](PARTNER-API.md). The browser SDK is served by hosted web
+at `https://app.merrymen.dev/sdk/merrymen-browser.js` after this revision is deployed.
 
-```
-status.verified    = false
-certificateStatus  = CERTIFICATE_STATUS_TYPE_ISSUING   # since 2026-08-02, never advanced
-verificationDnsHost = _railway-verify.ai               # _railway-verify.ai.merrymen.dev
-```
-
-**No certificate was ever issued, because ownership was never verified.** Railway
-is waiting on a TXT record that does not exist — `_railway-verify.ai.merrymen.dev`
-returns NXDOMAIN, authoritatively, from `ns1.vercel-dns.com`. With no per-domain
-cert the edge falls back to `*.up.railway.app` for that SNI and every client
-rejects the principal. Plain HTTP 301s, which is what made this look like a
-routing success and a certificate mystery.
-
-The sibling `app.merrymen.dev` is the control: same edge, same targetPort, and it
-HAS `_railway-verify.app.merrymen.dev` — verified true, certificate VALID. The TXT
-is the only difference.
-
-**The fix is one DNS record, in Vercel (owner-only — nothing to change on
-Railway):**
+DNS is managed in Vercel, while the application and certificate are served by
+Railway. The domain uses the existing gateway service, target port 8080:
 
 | name | type | value |
 | --- | --- | --- |
-| `_railway-verify.ai` | TXT | the `verificationToken` from Railway’s domain API |
+| `ai` | CNAME | `aqeqwooj.up.railway.app` |
+| `_railway-verify.ai` | TXT | the current verification token shown by Railway for this domain |
 
-Secondary, hygiene only: the `ai` CNAME points at `cslvpezy.up.railway.app` where
-Railway now wants `aqeqwooj.up.railway.app`. Railway still reports that record
-PROPAGATED and the dashboard shows it green, which is why it was never spotted —
-and cert selection is edge-IP-independent, so aligning it does **not** fix TLS on
-its own.
+The previous TLS failure was repaired by adding the missing ownership TXT,
+aligning the CNAME and requesting certificate issuance on the existing domain.
+Do not delete/recreate a working domain to refresh it. After DNS or service
+changes, check Railway's verification/certificate status and confirm
+`curl https://ai.merrymen.dev/healthz` returns `{"ok":true}` with ordinary TLS
+validation.
 
-Don’t point anything at it until `curl https://ai.merrymen.dev/healthz` returns
-`{"ok":true}`.
-
-When it does land, three hand-written copies of the host have to move together:
+Three hand-written client origins must agree when changing their preferred host:
 
 | where | constant |
 | --- | --- |
@@ -117,9 +101,10 @@ run `npm test` after changing any of them.
 
 ## Two ways to run it
 
-The security logic lives once in `lib/core.mjs`; two thin runtimes wrap it:
-`server.mjs` (a long-lived process) and `api/*.js` (Vercel serverless functions).
-Point the client's host at whichever you pick.
+The holder gateway security logic lives once in `lib/core.mjs`; two thin runtimes
+wrap it: `server.mjs` (a long-lived process) and `api/*.js` (Vercel serverless
+functions). The partner routes run in `server.mjs`; use that runtime for the full
+API. Production uses Railway.
 
 ### A) Persistent process (Railway / Fly / Render / VPS / Docker) — RECOMMENDED
 
@@ -171,7 +156,11 @@ A `Dockerfile` (universal) and `render.yaml` (Render Blueprint) are included for
 connect-the-repo deploy. In-memory state is fine here (one process); set
 `KV_REST_API_URL`/`KV_REST_API_TOKEN` only if you run multiple instances.
 
-### B) Vercel serverless (the `ai.merrymen.dev` domain already points at Vercel)
+### B) Vercel serverless (optional holder gateway runtime)
+
+This option serves the holder claim/inference endpoints. The `api/*.js`
+functions do not implement `/partner/v1`. Production `ai.merrymen.dev` uses
+Railway; managing its DNS in Vercel does not make it a Vercel deployment.
 
 Serverless isolates don't share memory, so the nonce/rate-limit/balance state MUST
 live in a KV store — this is a hard requirement (the functions refuse to start
@@ -185,9 +174,9 @@ functions in `api/`.
    `MERRYMEN_GATEWAY_SECRET` (≥32 bytes), `MERRYMEN_GATEWAY_RPC` (+ optional
    `MERRYMEN_GATEWAY_DOMAIN=ai.merrymen.dev`).
 4. **Deploy.** Confirm against the host Vercel gives you:
-   `curl https://<your-deployment>/healthz` → `{"ok":true}`. Only add
-   `ai.merrymen.dev` once its certificate actually issues — see the status note
-   above; today that domain fails TLS and would take the gateway down with it.
+   `curl https://<your-deployment>/healthz` → `{"ok":true}`. Configure a separate
+   custom hostname if needed. Moving the production hostname away from Railway
+   would also require migrating the partner runtime.
 
 ### Endpoints
 - `GET /` or `/claim` — the claim page (holder connects wallet, signs, gets a token).

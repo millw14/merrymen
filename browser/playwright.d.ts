@@ -19,6 +19,13 @@ declare module "playwright" {
     screenshot(opts?: { type?: "jpeg" | "png"; quality?: number; fullPage?: boolean }): Promise<Buffer>;
   }
   export interface BrowserContext {
+    route(pattern: string, handler: (route: {
+      request(): { url(): string };
+      continue(): Promise<void>;
+      abort(): Promise<void>;
+    }) => Promise<void>): Promise<void>;
+    routeWebSocket(pattern: string, handler: (socket: { close(): Promise<void> }) => Promise<void>): Promise<void>;
+    addInitScript(script: () => void): Promise<void>;
     newPage(): Promise<Page>;
     close(): Promise<void>;
   }
@@ -26,5 +33,5 @@ declare module "playwright" {
     isConnected(): boolean;
     newContext(opts?: Record<string, unknown>): Promise<BrowserContext>;
   }
-  export const chromium: { launch(opts?: { args?: string[] }): Promise<Browser> };
+  export const chromium: { launch(opts?: { args?: string[]; proxy?: { server: string; bypass?: string } }): Promise<Browser> };
 }

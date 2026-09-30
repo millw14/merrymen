@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { GATE_COOKIE, GATE_PATH, gatePassword, isGatedPath, sameSecret } from "@/lib/site-gate";
+import { dedicatedMcpHost, mcpHostLanding } from "@/mcp/landing";
 
 /**
  * The dashboard has NO login and can move real funds (/api/recover sweeps to any
@@ -69,15 +69,30 @@ function hostAllowed(hostHeader: string | null): boolean {
  */
 const HOSTED = ["1", "true", "yes"].includes((process.env.MERRYMEN_HOSTED ?? "").trim().toLowerCase());
 
+/**
+ * The dedicated MCP domain (mcp.merrymen.dev), when there is one. It is the
+ * same web service as the app, so without a word from here a browser that
+ * opens it gets the whole terminal, signed out, and a client given the bare
+ * domain gets HTML (mcp/landing.ts has the full story). Derived from
+ * configuration once, the way HOSTED is and as config.ts derives it, never
+ * from the Host header. Null when hosted MCP has no second domain, which is
+ * every self-hosted install: then nothing below touches a page.
+ */
+const MCP_HOST = dedicatedMcpHost({
+  MERRYMEN_OAUTH_ISSUER: process.env.MERRYMEN_OAUTH_ISSUER,
+  MERRYMEN_PUBLIC_ORIGIN: process.env.MERRYMEN_PUBLIC_ORIGIN,
+  MERRYMEN_MCP_RESOURCE_URL: process.env.MERRYMEN_MCP_RESOURCE_URL,
+}, HOSTED);
+
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   // ── the two API guards, unchanged and still API-only ────────────────────
   //
-  // The matcher below now sees pages as well, so these are scoped explicitly.
-  // Applying the host allowlist to a PAGE would newly refuse a self-hosted
-  // install reached over a LAN or a domain — a behaviour change nobody asked
-  // for, hidden inside a change about a holding page.
+  // Scoped explicitly, and the scoping is the load-bearing part (the matcher
+  // now reaches pages too, for the MCP domain below): applying the host
+  // allowlist to a PAGE would newly refuse a self-hosted install reached over
+  // a LAN or a domain.
   const isApi = pathname.startsWith("/api/");
   if (isApi) {
     if (!HOSTED && !hostAllowed(req.headers.get("host"))) {
@@ -87,69 +102,47 @@ export function middleware(req: NextRequest) {
     if (site && site !== "same-origin" && site !== "none") {
       return new NextResponse("blocked: cross-site request to the local API", { status: 403 });
     }
-    // Falls through to the gate rather than returning. The API used to be
-    // exempt, which left every agent's name and forty posts of reasoning
-    // readable by anyone who knew the URLs while the pages showing them were
-    // behind a password.
+    return NextResponse.next();
   }
 
-  // ── the holding page ────────────────────────────────────────────────────
+  // ── pages on the dedicated MCP domain, and nowhere else ────────────────
   //
-  // OFF UNLESS A PASSWORD IS SET, which is what keeps every local and
-  // self-hosted install exactly as it was. It is a notice with a doorknob,
-  // not authentication: one password for everyone, no session, and the
-  // things here that actually move money are guarded by the signed-session
-  // checks inside each route handler, which this neither replaces nor
-  // strengthens.
-  const expected = gatePassword();
-  if (!expected || !isGatedPath(pathname)) return NextResponse.next();
-
-  const held = req.cookies.get(GATE_COOKIE)?.value ?? "";
-  if (sameSecret(held, expected)) return NextResponse.next();
-
-  // AN API REQUEST GETS A STATUS, NOT A PAGE. Rewriting it to the notice would
-  // hand a caller expecting JSON a lump of HTML with status 200, which is a
-  // worse answer than a refusal — the browser code reading it would parse the
-  // failure as data. 401 says what happened, and a visitor through the door
-  // never sees it: their cookie rides along on same-origin requests.
-  if (isApi) {
-    return NextResponse.json(
-      { error: "gated", detail: "This deployment is behind a password while it is being worked on." },
-      { status: 401 },
-    );
+  // One header read and one string comparison on any other host, and nothing
+  // at all self-hosted: that is what keeps matching every page affordable.
+  // The query is as Next hands it to middleware (its URL parser rewrites a
+  // 127.0.0.1 anywhere in it to localhost; see mcp/oauth/deps.ts). Harmless
+  // for a page; /oauth/*, where it would matter, is never redirected.
+  if (MCP_HOST) {
+    const landing = mcpHostLanding(MCP_HOST, { method: req.method, headers: req.headers, pathname, search: req.nextUrl.search });
+    if (landing) {
+      const res = NextResponse.redirect(landing.location, landing.status);
+      // The answer depends on request headers (a page load or a client), so
+      // no cache may hand one caller's redirect to the other; a 308 is
+      // otherwise cacheable by default.
+      res.headers.set("Cache-Control", "no-store");
+      return res;
+    }
   }
 
-  // A REWRITE, NOT A REDIRECT, and the difference is load-bearing here.
-  //
-  // This service runs behind a proxy with `next start -H 0.0.0.0`, so the
-  // origin the server sees is the internal listen address. A redirect built
-  // from it would send the visitor to 0.0.0.0:8080 — which is exactly the bug
-  // the POST handler had, found by asking the deployed site for it.
-  //
-  // A rewrite is resolved server-side and never reaches the browser, so an
-  // internal host cannot leak into one. It also leaves the visitor's own URL
-  // alone, which means that once they are through they are already where they
-  // were trying to go.
-  const to = req.nextUrl.clone();
-  to.pathname = GATE_PATH;
-  to.search = "";
-  return NextResponse.rewrite(to);
+  return NextResponse.next();
 }
 
 /**
- * Pages and the API, but never the framework's own assets.
+ * The API, plus pages for the dedicated MCP domain.
  *
- * Gate /_next and the holding page renders unstyled; gate the API and a live
- * fleet stops — Telegram posts webhooks to it and the browser calls it after
- * every page load. isGatedPath() draws the same line again for the paths this
- * pattern cannot express.
+ * This file guards /api/* against DNS rebinding and cross-site POSTs. It once
+ * also rendered a password holding page, which is why the matcher reached
+ * pages at all; that is gone. Pages are matched again for one reason only:
+ * a browser (or a client given the bare domain) on the MCP host is sent where
+ * it can do something (mcp/landing.ts). Matching is by path because a matcher
+ * cannot read runtime configuration; the host check is in the function.
  */
 export const config = {
-  // THE APP ICONS ARE EXEMPT, and they have to be. The Privy login modal runs
-  // in an auth.privy.io iframe and loads our logo cross-origin; the gate cookie
-  // is SameSite, so that request arrives unauthenticated and the gate answered
-  // it with the password page — which the browser rendered as a broken image at
-  // the top of the sign-in dialog. An icon is not a secret; the gate exists to
-  // keep people out of the app, not out of a PNG.
-  matcher: ["/api/:path*", "/((?!_next/static|_next/image|favicon.ico|icon-|apple-touch-icon|logo\.svg|merrymenlogo).*)"],
+  // The two guards are and always were API-only (the isApi check above, not
+  // this list, is what scopes them): running the Host allowlist over ordinary
+  // navigation would newly refuse a self-hosted install reached over a LAN.
+  // The page pattern skips what the MCP host must serve untouched anyway, so
+  // assets and the MCP endpoints never pay for a middleware call: Next's
+  // files, the endpoint, OAuth, discovery and anything with a file extension.
+  matcher: ["/api/:path*", "/((?!api/|_next/|mcp(?:/|$)|oauth/|\\.well-known/|.*\\.[A-Za-z0-9]+$).*)"],
 };

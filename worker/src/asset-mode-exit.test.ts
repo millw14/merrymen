@@ -32,8 +32,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
-import { STOCK_TOKENS, assetModeAllows } from "../../packages/core/src/index";
-import { watchTokensFor } from "./strategies/registry";
+import { STOCK_TOKENS, assetModeAllows, type AssetMode } from "../../packages/core/src/index";
+import { idleNotice, MODE_EMPTIED_REMEDY, modeEmptiedFact } from "./idle-notice";
+import { legsForUniverse, watchTokensFor } from "./strategies/registry";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const read = (f: string) => readFileSync(path.join(__dirname, f), "utf8");
@@ -102,7 +103,7 @@ describe("the routes that are crypto by construction are gated, and say so", () 
   const index = read("index.ts");
 
   it("THE CLASS ROUTE RETURNS NOTHING under stocks only", () => {
-    assert.match(index, /if \(cfg\.assetMode === "stocks"\) return \[\];/);
+    assert.match(index, /if \(cfg\.assetMode === "stocks"\) return NO_CLASS;/);
   });
 
   it("AND THE TRENCHER SAYS SO RATHER THAN GOING QUIET", () => {
@@ -143,7 +144,10 @@ describe("the setting actually reaches the strategy", () => {
 });
 
 describe("a mode that empties the basket does not go quiet", () => {
-  const index = read("index.ts");
+  // Executed through idle-notice.ts, which the tick's idle block calls with
+  // legsForUniverse as the counter. These were source greps over index.ts.
+  const equities = ["NVDA", "TSLA"];
+  const legsIn = (basket: string[]) => (mode: AssetMode) => legsForUniverse(basket, STOCK_TOKENS, [], mode).length;
 
   it("SAYS SO, through the once-per-change idle channel", () => {
     // The one way this feature could be worse than not shipping it: an owner
@@ -152,26 +156,40 @@ describe("a mode that empties the basket does not go quiet", () => {
     // dropdown they just moved. Exactly the trencher incident this file already
     // carries — "it didn't take any trades yet", then "I think I'm stuck in
     // paper mode".
-    assert.match(index, /modeEmptied/);
-    assert.match(index, /there is nothing to trade/);
-    assert.match(index, /Change the mode in Settings/, "and what to do about it");
+    const fact = modeEmptiedFact("crypto", legsIn(equities));
+    assert.match(fact ?? "", /there is nothing to trade/);
+    assert.match(fact ?? "", /Crypto only/);
+    const n = idleNotice({ idle: null, modeEmptied: fact, last: null });
+    assert.match(n.event?.message ?? "", /Change the mode in Settings/, "and what to do about it");
   });
 
   it("ONLY when the mode is what emptied it", () => {
     // An empty basket is an empty basket; blaming the mode for one would be a
-    // different wrong sentence. The second `legsForUniverse` call — unfiltered —
-    // is what tells those two apart.
-    const at = index.indexOf("const modeEmptied");
-    const clause = index.slice(at, index.indexOf("const idleNow", at));
-    assert.match(clause, /cfg\.assetMode !== "all"/, "not reported when nothing is being filtered");
+    // different wrong sentence. The unfiltered count is what tells those two
+    // apart.
+    assert.equal(modeEmptiedFact("all", legsIn(equities)), null, "not reported when nothing is being filtered");
     assert.equal(
-      (clause.match(/legsForUniverse\(/g) ?? []).length,
-      2,
-      "filtered AND unfiltered — the difference is the claim",
+      modeEmptiedFact("all", () => {
+        throw new Error("counted legs for a mode that filters nothing");
+      }),
+      null,
+      "and nothing is counted for it — most tenants run 'all', every tick",
     );
+    assert.equal(modeEmptiedFact("stocks", legsIn(equities)), null, "the mode leaves the basket intact");
+    assert.equal(modeEmptiedFact("crypto", legsIn([])), null, "an empty basket is not the mode's doing");
+    assert.equal(modeEmptiedFact("crypto", legsIn(["NOT-A-SYMBOL"])), null, "nor is one that names nothing");
   });
 
   it("and rides the existing channel rather than inventing a second one", () => {
-    assert.match(index, /const idleNow = idle \? renderWhy\(idle\) : modeEmptied;/);
+    // TWO REGISTERS, ONE CHANNEL. The owner's copy (with the remedy) is what the
+    // once-per-change gate keys on and what the event log gets; the public copy
+    // (the fact alone) is what becomes the post. Both derive from the same
+    // modeEmptied, so the dedup still fires on the fact and a mode change is
+    // still said exactly once — the pin is on the channel, not on one string.
+    const fact = modeEmptiedFact("crypto", legsIn(equities))!;
+    const first = idleNotice({ idle: null, modeEmptied: fact, last: null });
+    assert.equal(first.event?.message, `${fact}. ${MODE_EMPTIED_REMEDY}`, "the remedy is appended to the fact, never a second fact");
+    assert.equal(first.view, fact);
+    assert.deepEqual(idleNotice({ idle: null, modeEmptied: fact, last: first.last }), { last: first.last, event: null, view: null });
   });
 });

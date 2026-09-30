@@ -122,8 +122,10 @@ describe("a decision nothing came of is not a trade", () => {
 
   it("AND ONE STILL IN FLIGHT IS NEITHER TENSE", () => {
     // A submitted operation is genuinely undecided: claiming it landed is the
-    // older bug, and claiming it failed would be the mirror of it.
-    const pending = beatsOf([t({ at: 1, outcome: "pending" })], [agent()]);
+    // older bug, and claiming it failed would be the mirror of it. "Submitted"
+    // is the publisher's "sent, waiting on the chain"; its other "pending" —
+    // no trade came of it — is not in flight (feed-row-shape.test.ts).
+    const pending = beatsOf([t({ at: 1, outcome: "pending", outcomeText: "sent, waiting on the chain" })], [agent()]);
     assert.equal(verbOf(asTrade(pending[0])), "is buying");
   });
 
@@ -382,10 +384,10 @@ describe("must-have before a public UI", () => {
     // simulated fills. read-agent.ts keeps the counters apart on purpose —
     // folding them would re-arm the +2643.3% incident — so both must show.
     const src = at("./screens/Profile.tsx");
-    const landed = src.indexOf("Completed trades");
+    const landed = src.indexOf("Completed operations");
     const paper = src.indexOf("filledPaper");
     assert.ok(landed > 0 && paper > 0, "both counters must be rendered");
-    assert.match(src, /simulated, not real money/, "and the paper one says what it is");
+    assert.match(src, /paper trades/, "and the paper one says what it is");
   });
 
   it("INVARIANT: the price axis cannot render a real price as $0.00", () => {

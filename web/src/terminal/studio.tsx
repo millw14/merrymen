@@ -1,12 +1,21 @@
 import { money } from "./live";
 import type { BasketLeg } from "./strategy";
+import { MovingFigure } from "./ui";
 
+/**
+ * The balance, which flips when it changes between two readings — the one
+ * number on the desk that should look alive when a fill lands. Never on the
+ * first draw, and never into or out of "—": see motion.ts.
+ */
 export function BalanceFigure({ value }: { value: number | null }) {
-  const [whole, decimals] = money(value).split(".");
+  const text = money(value);
+  const [whole, decimals] = text.split(".");
   return (
     <span className="balance-figure">
-      {whole}
-      {decimals && <span className="figure-decimals">.{decimals}</span>}
+      <MovingFigure value={value} text={text}>
+        {whole}
+        {decimals && <span className="figure-decimals">.{decimals}</span>}
+      </MovingFigure>
     </span>
   );
 }

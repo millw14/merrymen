@@ -1,21 +1,24 @@
-/** The merrymen mark — a feather that is also an arrow, loosed into a lime head.
- * Original brand mark, reused across the product and this site. */
+/** Exact mark used by the trading app's LogoMark component. */
 export function Logo({ size = 22 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
-      <g transform="rotate(45 50 50)">
-        <rect x="35" y="0" width="30" height="36" rx="15" fill="#a5ce1f" />
-        <path
-          d="M50 20 C67 28 71 52 62 69 C58 77 54 85 50 96 C46 85 42 77 38 69 C29 52 33 28 50 20 Z"
-          fill="#e9efe9"
-          stroke="#0a0d0b"
-          strokeWidth="4"
-        />
-        <path d="M50 92 L50 26" stroke="#0a0d0b" strokeWidth="4.5" strokeLinecap="round" />
-        <path d="M50 3 L59 19 L50 14 L41 19 Z" fill="#e9efe9" />
-        <path d="M50 83 L61 72" stroke="#0a0d0b" strokeWidth="3.5" strokeLinecap="round" />
-        <path d="M50 74 L60 64" stroke="#0a0d0b" strokeWidth="3.5" strokeLinecap="round" />
-      </g>
-    </svg>
-  );
+  return <svg width={Math.round(size * 940 / 630)} height={size} viewBox="0 0 940 630" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+      <rect x="280" y="1" width="324" height="47" rx="23.5" />
+      <rect x="403" y="72" width="258" height="49" rx="24.5" />
+      <rect x="138" y="137" width="51" height="54" rx="25.5" />
+      <rect x="473" y="137" width="227" height="54" rx="27" />
+      <rect x="742" y="137" width="50" height="54" rx="25" />
+      <rect x="64" y="212" width="199" height="48" rx="24" />
+      <rect x="516" y="212" width="204" height="48" rx="24" />
+      <rect x="766" y="212" width="109" height="48" rx="24" />
+      <rect x="0" y="288" width="126" height="48" rx="24" />
+      <rect x="161" y="288" width="582" height="48" rx="24" />
+      <rect x="812" y="288" width="128" height="48" rx="24" />
+      <rect x="64" y="366" width="199" height="47" rx="23.5" />
+      <rect x="518" y="366" width="202" height="47" rx="23.5" />
+      <rect x="766" y="366" width="109" height="47" rx="23.5" />
+      <rect x="138" y="436" width="51" height="48" rx="24" />
+      <rect x="473" y="436" width="227" height="48" rx="24" />
+      <rect x="742" y="436" width="51" height="48" rx="24" />
+      <rect x="403" y="510" width="259" height="48" rx="24" />
+      <rect x="280" y="582" width="324" height="47" rx="23.5" />
+  </svg>;
 }

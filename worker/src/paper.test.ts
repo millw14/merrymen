@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { applyPaperIntent, paperEquityUsdg, type PaperBook, type PaperPosition } from "./paper";
 import type { TradeIntent } from "./policy";
+import { applyFill, ZERO_BASIS } from "./basis";
 
 const USDG = "0x0000000000000000000000000000000000000001" as `0x${string}`;
 const QQQ = "0x0000000000000000000000000000000000000002" as `0x${string}`;
@@ -17,6 +18,32 @@ const buy = (n: number): TradeIntent => ({
 const book = (): PaperBook => ({ cashUsdg: 1000, vaultUsdg: 0, hwmUsdg: 0 });
 
 describe("paper fills — the loop with zero funds", () => {
+  it("a priced memecoin round trip realizes the same gain or loss as its cash ledger", () => {
+    for (const exitPrice of [0.012, 0.008]) {
+      const bought = applyPaperIntent(buy(10), book(), [], {
+        ...OPTS, notionalUsdg: 10, symbolOf: () => "MEME",
+        priceUsdOf: () => ({ priceUsd: 0.01, stale: false }),
+      });
+      assert.equal(bought.ok, true);
+      const purchase = applyFill(ZERO_BASIS, {
+        side: "buy", qtyRaw: BigInt(Math.round(bought.fill!.rawShares * 1e18)), cashUsdg: 10_000_000n,
+      });
+      const sold = applyPaperIntent({ ...buy(100), sellToken: QQQ, buyToken: USDG } as TradeIntent, bought.book, bought.positions, {
+        ...OPTS, notionalUsdg: 100, symbolOf: () => "MEME",
+        priceUsdOf: () => ({ priceUsd: exitPrice, stale: false }),
+      });
+      assert.equal(sold.ok, true);
+      const sale = applyFill(purchase.basis, {
+        side: "sell", qtyRaw: BigInt(Math.round(sold.fill!.rawShares * 1e18)),
+        cashUsdg: BigInt(Math.round(sold.fill!.cashUsdg * 1e6)),
+      });
+      assert.equal(sale.basisUnknown, false);
+      assert.equal(sale.basis.qtyRaw, 0n);
+      assert.equal(sold.positions.length, 0);
+      assert.equal(Math.round((sold.book.cashUsdg - book().cashUsdg) * 1e6), Number(sale.realizedUsdg));
+      assert.equal(sale.realizedUsdg > 0n, exitPrice > 0.01);
+    }
+  });
   it("buys at the live price with slippage friction, debits cash", () => {
     const r = applyPaperIntent(buy(100), book(), [], { ...OPTS, notionalUsdg: 100 });
     assert.equal(r.ok, true);
@@ -143,6 +170,7 @@ describe("paper fills — ERC-8056 splits", () => {
     // proceeds = 0.396 × 250 × 0.99 = 98.01
     assert.ok(Math.abs(r.book.cashUsdg - (1000 + 98.01)) < 1e-6, `got ${r.book.cashUsdg}`);
     assert.equal(r.fill!.shares.toFixed(4), "0.3960", "the fill reports tradeable shares");
+    assert.equal(r.fill!.rawShares.toFixed(4), "0.1980", "basis closes the actual invariant quantity");
   });
 
   it("refuses the fill when the multiplier can't be read, rather than assuming 1.0", () => {
@@ -161,5 +189,31 @@ describe("paper fills — ERC-8056 splits", () => {
       });
       assert.equal(r.ok, false, `multiplier ${bad} must be refused`);
     }
+  });
+});
+
+describe("the energy buy is never simulated", () => {
+  it("applyPaperIntent refuses kind energy-buy and leaves the book exactly as it was", () => {
+    // SECOND LINE OF DEFENCE. processIntentLocked refuses an energy buy with
+    // `energy-needs-live` before the paper fork is ever reached — a practice
+    // book has no reserve to fill, and simulating one would put a purchase on
+    // the tape that no chain ever saw. If that refusal were ever lost, this
+    // is what stands behind it.
+    const b = book();
+    const held: PaperPosition[] = [{ symbol: "QQQ", token: QQQ, shares: 0.1 }];
+    const energy: TradeIntent = {
+      kind: "energy-buy",
+      target: ROUTER,
+      sellToken: USDG,
+      buyToken: QQQ,
+      sellAmountRaw: 10_000_000n,
+      notionalUsdg: 10_000_000n,
+    };
+    const r = applyPaperIntent(energy, b, held, { ...OPTS, notionalUsdg: 10 });
+    assert.equal(r.ok, false);
+    assert.match(r.reason ?? "", /unsupported paper intent energy-buy/);
+    assert.deepEqual(r.book, book());
+    assert.deepEqual(r.positions, held);
+    assert.equal(r.fill, undefined);
   });
 });

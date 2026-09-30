@@ -527,32 +527,23 @@ export interface Payload {
  * two heavy log sweeps plus three enrichment reads into a keyless RPC — which is
  * precisely the burst that makes the enrichment fail in the first place.
  *
+ * AND NOBODY WAITS FOR A REBUILD THERE IS AN ANSWER FOR. Once the life ran out,
+ * the next caller used to wait for the whole of `build()` — measured at
+ * 10.6-12.4s cold in production — and the terminal's feed waited behind it,
+ * because the shell loaded every read in one Promise.all. An expired answer is
+ * now served at once while exactly one rebuild runs (see payloadMemo), up to
+ * STALE_MS old; past that the caller waits, because a coin price from an idle
+ * hour ago is not a late answer but a different one. The payload carries
+ * `fetchedAt`, so a stale answer is dated, not disguised.
+ *
  * A per-process memo is enough while `web` runs one replica (railway.json sets
  * no replica count). Scale it and each replica keeps its own — still correct,
  * just N times the upstream traffic.
  */
-let inFlight: Promise<Shared> | null = null;
-let last: { at: number; shared: Shared } | null = null;
 const WHOLE_MS = 120_000;
 const DEGRADED_MS = 10_000;
-/**
- * How many degraded reads in a row. Resets on the first whole one.
- *
- * THE SHORT TTL WAS AN AMPLIFIER THAT ARMED ITSELF DURING THE OUTAGE. Ten
- * seconds against a hundred and twenty is a twelvefold increase in how often
- * `build()` runs, and `build()` is eleven unbatched requests at the same keyless
- * endpoint the worker fleet reads. `degraded` is true precisely when the chain
- * enrichment failed — so the moment the endpoint began refusing, this cache
- * went from ~5.5 requests a minute to ~66, into the refusals.
- *
- * That is the same shape as the retry storm found in the worker: a failure
- * causing more requests to the thing that failed. It is worth naming as one,
- * because the fix is not to remove the fast retry — the reasoning for it above
- * is sound, an enrichment wave really does recover in seconds and a stale
- * degraded render really did claim for two and a half minutes that coins had
- * published nothing. The fix is that the fast retry may happen ONCE.
- */
-let degradedRuns = 0;
+/** How old an answer may be and still be served while its rebuild runs. */
+const STALE_MS = 10 * 60_000;
 
 /**
  * How long to keep the current answer.
@@ -572,22 +563,87 @@ function degradedTtl(runs: number): number {
   return runs <= 1 ? DEGRADED_MS : Math.round(window * (0.75 + Math.random() * 0.5));
 }
 
+/**
+ * The payload memo's rules, around any build — exported so they can be run
+ * against a build that resolves on command instead of against the network.
+ *
+ * Three states, and the memo is keeping them apart:
+ *
+ *   fresh    inside the life it was given — served as it is.
+ *   stale    past its life, under STALE_MS old — served NOW, and the one
+ *            rebuild starts if none is running. Every caller meanwhile gets
+ *            the same stale answer; nobody starts a second rebuild.
+ *   too old  past STALE_MS, or nothing yet — the caller waits for the build.
+ *
+ * THE LIFE IS FIXED WHEN THE ANSWER IS STORED. degradedTtl is jittered, and it
+ * used to be drawn afresh on every call, so a busy memo's expiry was a moving
+ * target it would hit early. A FAILED REBUILD KEEPS THE LAST ANSWER: a caller
+ * that waited is handed the failure, as before; one served stale never sees
+ * it, and the next call past the life tries again — one rebuild at a time.
+ */
+export function payloadMemo<S extends { payload: { degraded: boolean } }>(
+  buildOnce: () => Promise<S>,
+  now: () => number = () => Date.now(),
+): { get(): Promise<S>; rebuilding(): boolean } {
+  /**
+   * How many degraded reads in a row. Resets on the first whole one.
+   *
+   * THE SHORT TTL WAS AN AMPLIFIER THAT ARMED ITSELF DURING THE OUTAGE. Ten
+   * seconds against a hundred and twenty is a twelvefold increase in how often
+   * `build()` runs, and `build()` is eleven unbatched requests at the same
+   * keyless endpoint the worker fleet reads. `degraded` is true precisely when
+   * the chain enrichment failed — so the moment the endpoint began refusing,
+   * this cache went from ~5.5 requests a minute to ~66, into the refusals.
+   *
+   * That is the same shape as the retry storm found in the worker: a failure
+   * causing more requests to the thing that failed. It is worth naming as one,
+   * because the fix is not to remove the fast retry — the reasoning for it
+   * above is sound, an enrichment wave really does recover in seconds and a
+   * stale degraded render really did claim for two and a half minutes that
+   * coins had published nothing. The fix is that the fast retry may happen
+   * ONCE.
+   */
+  let degradedRuns = 0;
+  let inFlight: Promise<S> | null = null;
+  let last: { shared: S; at: number; freshUntil: number } | null = null;
+
+  const rebuild = (): Promise<S> => {
+    if (inFlight) return inFlight;
+    inFlight = buildOnce()
+      .then((p) => {
+        // One whole read clears the ladder completely. A run of bad minutes
+        // must not leave the cache backing off into a healthy endpoint.
+        degradedRuns = p.payload.degraded ? degradedRuns + 1 : 0;
+        const at = now();
+        last = { shared: p, at, freshUntil: at + (p.payload.degraded ? degradedTtl(degradedRuns) : WHOLE_MS) };
+        return p;
+      })
+      .finally(() => {
+        inFlight = null;
+      });
+    return inFlight;
+  };
+
+  return {
+    get() {
+      const t = now();
+      if (last && t < last.freshUntil) return Promise.resolve(last.shared);
+      if (last && t - last.at < STALE_MS) {
+        // Served stale: the rebuild is for the NEXT caller, and its failure is
+        // nobody's to handle here — the last answer simply stays.
+        rebuild().catch(() => {});
+        return Promise.resolve(last.shared);
+      }
+      return rebuild();
+    },
+    rebuilding: () => inFlight !== null,
+  };
+}
+
+const shared = payloadMemo(() => build());
+
 function sharedReadFull(): Promise<Shared> {
-  const ttl = last?.shared.payload.degraded ? degradedTtl(degradedRuns) : WHOLE_MS;
-  if (last && Date.now() - last.at < ttl) return Promise.resolve(last.shared);
-  if (inFlight) return inFlight;
-  inFlight = build()
-    .then((p) => {
-      // One whole read clears the ladder completely. A run of bad minutes must
-      // not leave the cache backing off into a healthy endpoint.
-      degradedRuns = p.payload.degraded ? degradedRuns + 1 : 0;
-      last = { at: Date.now(), shared: p };
-      return p;
-    })
-    .finally(() => {
-      inFlight = null;
-    });
-  return inFlight;
+  return shared.get();
 }
 
 export function sharedRead(): Promise<Payload> {

@@ -35,8 +35,13 @@
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { existsSync } from "node:fs";
+import { getAddress, isAddress } from "viem";
 import type { Db } from "./db";
+import { mergeRiskPeriod, type RiskPeriod } from "./risk-period";
 import { wrapSqlite } from "./db";
+import { mirrorPaperCheckpoints } from "./paper-checkpoint";
+import { mergeEnergyDayRow } from "./energy-days";
+import { energyDayRowOf, utcDay } from "./energy";
 
 /** Rows per table per pass. Bounded so one busy tenant cannot starve the rest. */
 export const MIRROR_BATCH = 500;
@@ -44,6 +49,10 @@ export const MIRROR_BATCH = 500;
 /** The append-only tables, and the column their watermark is measured in. */
 const LOG_TABLES = [
   { table: "events", probe: true, stamp: "created_at", cols: ["agent_id", "level", "message", "created_at"] },
+  // WHAT AN AGENT SAID, carried the ordinary cursored way. A post is written
+  // once and never updated, which is what makes it safe here — see the note on
+  // the decisions block below about what a late-filled column costs.
+  { table: "posts", probe: true, stamp: "created_at", cols: ["agent_id", "decision_id", "body", "created_at"] },
   {
     table: "trades", probe: true, stamp: "created_at",
     cols: [
@@ -64,6 +73,10 @@ const LOG_TABLES = [
       // only where nobody can see it is not a proof.
       "decision_id",
       "fill_side",
+      // The coin's name, written with the fill (store.ts fillSymbolOfRow).
+      // Without it the dashboard names a coin only through its decision row,
+      // and a redeploy leaves the chat nothing to name it from at all.
+      "fill_symbol",
       "fill_qty_raw",
       "fill_price_usd",
       "realized_pnl_usdg",
@@ -101,9 +114,16 @@ const LOG_TABLES = [
   // anybody can see it — and the daily change, the chart, the growth index and
   // the published drawdown would all go on measuring the step between two books
   // as performance.
+  //
+  // AND `flows_held`, for the same reason one step further on: the hosted
+  // anchor (bootstrap-source.ts) takes the downtime cash baseline from the
+  // newest SHARED row and must skip a mark taken while flow inference was held.
+  // Left behind in the child, every mirrored held mark would land here as an
+  // ordinary one and become the anchor. And `cash_read_at`, when that cash was
+  // read, which is the anchor's `since` for the hosted resume.
   {
     table: "equity", probe: true, stamp: "at",
-    cols: ["agent_id", "eth_wei", "cash_usdg", "vault_usdg", "positions_usdg", "equity_usdg", "epoch", "mode", "at"],
+    cols: ["agent_id", "eth_wei", "cash_usdg", "vault_usdg", "positions_usdg", "equity_usdg", "epoch", "mode", "flows_held", "cash_read_at", "at"],
   },
   // THE FLOW TERM. Without it equity is a bare balance reading and a deposit is
   // arithmetically indistinguishable from a gain — the bug that once reported
@@ -202,6 +222,9 @@ export interface MirrorReport {
    * An append-only table records its ZERO rather than being absent — leaving it
    * out is what made a stalled cursor look exactly like a quiet table. A
    * snapshot table is absent only when the tenant has no agent row at all.
+   *
+   * `trades_already_mirrored` counts rows read and deliberately NOT inserted:
+   * an operation whose hash the shared ledger already holds. See the insert.
    */
   copied: Record<string, number>;
   /**
@@ -234,6 +257,64 @@ export interface MirrorReport {
   skipped?: string;
 }
 
+/** The `copied` keys that count rows read and deliberately NOT inserted. */
+const NOT_COPIED = "_already_mirrored";
+
+/**
+ * An account id as EIP-55 spells it, or the lowercase id back when it is not
+ * an address at all — the duplicate-op probe asks for it beside the other two
+ * spellings, and a repeated value in an IN list is harmless.
+ */
+function checksummed(lower: string): string {
+  return isAddress(lower, { strict: false }) ? getAddress(lower) : lower;
+}
+
+/**
+ * The five binds for `agent_id IN (?, ?, ?) AND user_op_hash IN (?, ?)`: the
+ * account as written, lowercase and EIP-55, the hash as written and
+ * lowercase. Every pair is a key of trades_agent_userop, so the lookup stays
+ * an index seek on both backends.
+ */
+function spellingsOf(r: Record<string, unknown>): string[] {
+  const account = String(r.agent_id ?? "");
+  const hash = String(r.user_op_hash ?? "");
+  const lower = account.toLowerCase();
+  return [account, lower, checksummed(lower), hash, hash.toLowerCase()];
+}
+
+/**
+ * THE ORCHESTRATOR'S LINE FOR ONE PASS: the rows that arrived, and beside them,
+ * never inside them, the copies that were refused.
+ *
+ * It summed every key in `copied`, and `trades_already_mirrored` is a key, so a
+ * pass that skipped five re-recorded ops and inserted nothing printed "+5 rows"
+ * where it used to print "idle": the skip read as five rows that came in. The
+ * skip is still printed, because it is what makes a redeploy's re-recorded ops
+ * visible as what they are, but in its own clause.
+ *
+ * Null when there is nothing to say beyond the failure: the caller prints the
+ * STALLED line itself, and "idle" beside it would be false.
+ */
+export function mirrorCountsLine(tenant: string, r: Pick<MirrorReport, "copied" | "failed">): string | null {
+  const entries = Object.entries(r.copied);
+  const arrived = entries.filter(([k]) => !k.endsWith(NOT_COPIED));
+  const refused = entries.filter(([k]) => k.endsWith(NOT_COPIED));
+  const n = arrived.reduce((a, [, v]) => a + v, 0);
+  const s = refused.reduce((a, [, v]) => a + v, 0);
+  const skip =
+    s > 0
+      ? `skipped ${s} already mirrored (${refused.map(([k, v]) => `${k.slice(0, -NOT_COPIED.length)} ${v}`).join(", ")})`
+      : null;
+  if (n > 0) {
+    const detail = arrived.map(([k, v]) => `${k} ${v}`).join(", ");
+    return `ledger mirror: ${tenant} +${n} rows (${detail})${skip ? ` · ${skip}` : ""}`;
+  }
+  if (skip) return `ledger mirror: ${tenant} no new rows · ${skip}`;
+  // Says "read, nothing new" rather than saying nothing at all, so the absence
+  // of this line means the pass itself did not run.
+  return r.failed ? null : `ledger mirror: ${tenant} idle`;
+}
+
 /**
  * Open a child's ledger READ-ONLY. Its worker is running and writing to it.
  *
@@ -264,6 +345,28 @@ export function openChildLedger(home: string): { db: Db; close: () => void } | n
   } catch {
     return null;
   }
+}
+
+/**
+ * IS THIS THE ERROR A LEDGER WITHOUT `mark_usd`/`mcap_usd` GIVES — AND ONLY THAT?
+ *
+ * The decisions copy falls back to a SELECT without the mark columns for a
+ * child ledger that predates them. That fallback is permanent for every row it
+ * copies: a decision reaches the shared ledger once, exactly as first written
+ * (see the ON CONFLICT note below). So it may only ever answer the one question
+ * it exists for. A locked file, a timeout or any other column's absence is a
+ * failed pass, which the next pass retries WITH the marks; swallowing it here
+ * would publish up to a batch of posts that can never say "since posted".
+ *
+ * SQLite says `no such column: mark_usd`; Postgres says undefined_column (42703)
+ * and names the column. The column name is required in both, so the absence of
+ * some OTHER column is still a failure and still visible.
+ */
+export function missingMarkColumn(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  const names = /\b(mark_usd|mcap_usd)\b/.test(e.message);
+  if (!names) return false;
+  return /no such column/i.test(e.message) || (e as { code?: unknown }).code === "42703";
 }
 
 /**
@@ -419,6 +522,7 @@ export async function mirrorTenant(args: {
       }
 
       const highest = Number(rows[rows.length - 1]!.id);
+      let alreadyHeld = 0;
       // One transaction: the rows and the watermark that says they arrived.
       // Split them and a crash between the two duplicates the tape forever.
       await shared.tx(async (db) => {
@@ -446,7 +550,99 @@ export async function mirrorTenant(args: {
           `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})
            ON CONFLICT DO NOTHING`,
         );
-        for (const r of rows) await ins.run(...cols.map((c) => r[c] ?? null));
+        // ONE OPERATION, ONE ROW — and the rewind above is exactly what breaks
+        // that for `trades`. A rebuilt child is not only a restart of ids: at
+        // its first arm the in-flight reconciler finds every successful op of
+        // the last 26 hours missing from the empty ledger and writes each one
+        // AGAIN, as a bare 'swap' with no decision and no fill side, stamped at
+        // the restart. Rewound onto that ledger, this loop carried every one of
+        // them up beside the evidenced original, and nothing stopped it: the
+        // shared `trades` has no unique key on user_op_hash, on purpose (see
+        // trades_agent_userop in store.ts). So every profile's newest fills
+        // were the copies, and every count of operations read each one twice.
+        //
+        // So a hash this account already holds here is not inserted again. The
+        // row that is already here is the one to keep — it was copied from the
+        // incarnation that executed the op and carries its evidence — and the
+        // copy's only new fact, the outcome of an op still marked 'submitted'
+        // here, reaches that row through the resolution pass below, which
+        // updates by hash rather than inserting.
+        //
+        // WHY THIS IS NOT A SPEND ISSUE: the child's own row is untouched, and
+        // that is the row its daily cap is seeded from. Nothing is summed
+        // against a cap from the shared ledger.
+        //
+        // ASKED OF THE INDEX, IN EVERY SPELLING A WRITER HERE USES.
+        // `(agent_id, user_op_hash)` is exactly trades_agent_userop, and every
+        // new live fill asks this, inside this transaction, on a fifteen-second
+        // clock. The first version read `lower(agent_id)`, which no index
+        // serves, and so scanned the whole fleet's tape on every one of those
+        // passes.
+        //
+        // A COPY IS SPELT ITS OWN WAY, AND IT CAN ARRIVE ON ANY PASS. The
+        // in-flight reconciler lowercases every hash it writes, and an account
+        // arrives EIP-55 from one incarnation and lowercase from the next. It
+        // used to be only the rewind pass that looked past the exact spelling,
+        // on the theory that copies arrive there — but a rebuilt child whose
+        // first row is a tick's refusal is rewound onto BEFORE the arm's
+        // reconciler has written anything, and its copies then come up on
+        // ordinary passes, where the exact seek missed them and the shared
+        // tape took both rows. So every pass asks for the account as written,
+        // lowercase and checksummed, and the hash as written and lowercase.
+        // Each pair is a key of the same index, so the question is still a
+        // handful of seeks. No index is added for it and none may be: a CREATE
+        // INDEX on the shared trades table takes a write lock on every tenant's
+        // mirror at once.
+        //
+        // THE lower() SCAN STAYS ON THE REWIND PASS, and only when the seek
+        // missed. It is the one net for a spelling no writer here produces —
+        // mixed case that is not EIP-55 — and it costs one read per account per
+        // rebuild rather than one per fill. On that pass the account's held
+        // hashes are read once per batch, lowercased on both sides, as a set.
+        // And never INSERT … WHERE NOT EXISTS: the insert stays the statement
+        // Postgres already runs.
+        //
+        // Hashes inserted in this batch are remembered, lowercased, so a child
+        // holding one op twice does not put it here twice either. A row with
+        // no hash — a refusal, a paper fill — is always inserted.
+        const rewound = restarted[table] !== undefined;
+        const seek = db.prepare(
+          `SELECT 1 AS ok FROM trades WHERE agent_id IN (?, ?, ?) AND user_op_hash IN (?, ?) LIMIT 1`,
+        );
+        const heldBy = new Map<string, Set<string>>();
+        const heldAnyCase = async (account: string): Promise<Set<string>> => {
+          let set = heldBy.get(account);
+          if (!set) {
+            const got = (await db
+              .prepare(
+                `SELECT lower(user_op_hash) AS h FROM trades
+                  WHERE lower(agent_id) = ? AND user_op_hash IS NOT NULL`,
+              )
+              .all(account)) as { h: string }[];
+            set = new Set(got.map((g) => String(g.h)));
+            heldBy.set(account, set);
+          }
+          return set;
+        };
+        const thisBatch = new Set<string>();
+        for (const r of rows) {
+          const raw = typeof r.user_op_hash === "string" ? r.user_op_hash : "";
+          if (table === "trades" && raw !== "") {
+            const account = String(r.agent_id ?? "").toLowerCase();
+            const hash = raw.toLowerCase();
+            const key = `${account} ${hash}`;
+            const held =
+              thisBatch.has(key) ||
+              (await seek.get(r.agent_id ?? null, account, checksummed(account), raw, hash)) !== undefined ||
+              (rewound && (await heldAnyCase(account)).has(hash));
+            if (held) {
+              alreadyHeld++;
+              continue;
+            }
+            thisBatch.add(key);
+          }
+          await ins.run(...cols.map((c) => r[c] ?? null));
+        }
         // THE WITNESS MOVES WITH THE WATERMARK, in the same transaction and for
         // the same reason: a cursor whose stamp belongs to a different row is
         // exactly the state this column exists to make impossible.
@@ -459,7 +655,11 @@ export async function mirrorTenant(args: {
           )
           .run(tenant, table, highest, rows[rows.length - 1]![stamp] ?? null, nowSec);
       });
-      copied[table] = rows.length;
+      // Rows that ARRIVED, and beside them the ones deliberately not copied —
+      // printed by the orchestrator like every other key here, so a redeploy's
+      // re-recorded ops show up as what they are rather than as a quiet pass.
+      copied[table] = rows.length - alreadyHeld;
+      if (alreadyHeld > 0) copied[`${table}_already_mirrored`] = alreadyHeld;
     } catch (e) {
       // One table failing is one table's worth of lag, not a reason to abandon
       // the others — and the watermark did not move, so the next pass retries.
@@ -490,12 +690,27 @@ export async function mirrorTenant(args: {
   // It also makes the pass idempotent for free: once a row is resolved the
   // UPDATE matches nothing, so re-reading the same window costs one bounded
   // SELECT and N no-op updates.
+  //
+  // THE SAME SPELLINGS AS THE DUPLICATE SEEK ABOVE. That seek now refuses a
+  // copy spelt the other way on every pass, so this UPDATE is the only road
+  // the copy's outcome has to the original. Matched on the exact spelling it
+  // found nothing, and an original left `submitted` by a child killed while
+  // waiting on the receipt stayed "sent, waiting on the chain" for good —
+  // worse than the duplicate it replaced, which at least showed the landing.
+  //
+  // AND IT MAY ONLY ADD EVIDENCE, NEVER ERASE IT. The row it now reaches is
+  // often the reconciler's copy: kind 'swap', no decision, no fill side, no
+  // gas. Bound as written, it overwrote the original's decision_id and
+  // fill_side with NULL — the row that proved WHY the agent traded would
+  // settle as an anonymous swap. Each evidence column keeps its value when
+  // the child has none (COALESCE); status and the outcome itself still move,
+  // and only ever from `submitted`.
   try {
     const resolved = (await child
       .prepare(
         `SELECT agent_id, user_op_hash, tx_hash, status, reject_rule, decision_id,
                 fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
-                gas_wei, sponsored_gas_wei, gas_usdg, gas_units, fill_cash_usdg
+                gas_wei, sponsored_gas_wei, gas_usdg, gas_units, fill_cash_usdg, fill_symbol
            FROM trades
           WHERE user_op_hash IS NOT NULL AND status <> 'submitted' AND created_at > ?
           ORDER BY id DESC LIMIT ?`,
@@ -505,11 +720,17 @@ export async function mirrorTenant(args: {
       let n = 0;
       await shared.tx(async (db) => {
         const upd = db.prepare(
-          `UPDATE trades SET tx_hash = ?, status = ?, reject_rule = ?, decision_id = ?,
-                             fill_side = ?, fill_qty_raw = ?, fill_price_usd = ?,
-                             realized_pnl_usdg = ?, basis_source = ?, gas_wei = ?,
-                             sponsored_gas_wei = ?, gas_usdg = ?, gas_units = ?, fill_cash_usdg = ?
-            WHERE agent_id = ? AND user_op_hash = ? AND status = 'submitted'`,
+          `UPDATE trades SET tx_hash = COALESCE(?, tx_hash), status = ?,
+                             reject_rule = COALESCE(?, reject_rule), decision_id = COALESCE(?, decision_id),
+                             fill_side = COALESCE(?, fill_side), fill_qty_raw = COALESCE(?, fill_qty_raw),
+                             fill_price_usd = COALESCE(?, fill_price_usd),
+                             realized_pnl_usdg = COALESCE(?, realized_pnl_usdg),
+                             basis_source = COALESCE(?, basis_source), gas_wei = COALESCE(?, gas_wei),
+                             sponsored_gas_wei = COALESCE(?, sponsored_gas_wei),
+                             gas_usdg = COALESCE(?, gas_usdg), gas_units = COALESCE(?, gas_units),
+                             fill_cash_usdg = COALESCE(?, fill_cash_usdg),
+                             fill_symbol = COALESCE(?, fill_symbol)
+            WHERE agent_id IN (?, ?, ?) AND user_op_hash IN (?, ?) AND status = 'submitted'`,
         );
         for (const r of resolved) {
           const res = await upd.run(
@@ -517,7 +738,8 @@ export async function mirrorTenant(args: {
             r.fill_side ?? null, r.fill_qty_raw ?? null, r.fill_price_usd ?? null,
             r.realized_pnl_usdg ?? null, r.basis_source ?? null, r.gas_wei ?? null,
             r.sponsored_gas_wei ?? null, r.gas_usdg ?? null, r.gas_units ?? null, r.fill_cash_usdg ?? null,
-            r.agent_id, r.user_op_hash,
+            r.fill_symbol ?? null,
+            ...spellingsOf(r),
           );
           // RunResult.changes is part of the Db contract — node:sqlite reports
           // it directly and the Postgres driver maps rowCount — so this counts
@@ -556,26 +778,61 @@ export async function mirrorTenant(args: {
       .prepare(`SELECT last_id FROM mirror_state WHERE tenant = ? AND table_name = ?`)
       .get(tenant, "decisions")) as { last_id: number } | undefined;
     const since = Math.max(0, (dmark?.last_id ?? 0) - DECISION_LOOKBACK_SEC);
-    const rows = (await child
-      .prepare(
-        `SELECT id, agent_id, source, strategy, provider, model, symbol, action, size_usdg,
-                reason, dropped_rule, signals_json, hold_kind, at
-         FROM decisions WHERE at >= ? ORDER BY at ASC LIMIT ?`,
-      )
-      .all(since, batch)) as Record<string, unknown>[];
+    // THE MARK COLUMNS ARE READ WHEN THE CHILD HAS THEM. This handle is
+    // read-only, so the mirror cannot migrate a child ledger; one opened
+    // before its own worker has run the ALTER would fail a SELECT naming
+    // `mark_usd`, and the whole decisions copy would stall behind it —
+    // silently, since a stalled table and an idle one print the same line.
+    // So the row is copied without them instead: a post with no mark claims
+    // nothing, and a post that never arrives says nothing at all.
+    //
+    // ONLY for that. Any other failure of the first read throws to the catch
+    // below and the pass retries with the marks — see missingMarkColumn.
+    const read = (marks: boolean) =>
+      child
+        .prepare(
+          `SELECT id, agent_id, source, strategy, provider, model, symbol, action, size_usdg,
+                  reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name,
+                  ${marks ? "mark_usd, mcap_usd," : ""} at
+           FROM decisions WHERE at >= ? ORDER BY at ASC LIMIT ?`,
+        )
+        .all(since, batch) as Promise<Record<string, unknown>[]>;
+    const rows = await read(true).catch((e: unknown) => {
+      if (missingMarkColumn(e)) return read(false);
+      throw e;
+    });
     if (rows.length) {
       await shared.tx(async (db) => {
         const ins = db.prepare(
+          // ON CONFLICT (id) DO NOTHING IS LOAD-BEARING AND IT CONSTRAINS WHAT
+          // MAY BE ADDED HERE. Every other table in this file upserts; this one
+          // deliberately does not, so a decision row reaches shared storage
+          // EXACTLY AS IT WAS FIRST WRITTEN and never again. Anything written to
+          // a decision after its first mirror pass is therefore unreachable from
+          // the hosted feed, silently — the row is already there and the second
+          // copy is dropped on the floor.
+          //
+          // `evidence_json` is safe here only because it is written in the same
+          // INSERT as the row it belongs to, at intent time, from measurements
+          // that were already in hand. A column filled in later — a post written
+          // after the fill lands, say — must NOT be added to this statement; it
+          // needs its own append-only table, inserted once, or it will pass
+          // every test against a child sqlite and publish nothing in production.
+          //
+          // `mark_usd` and `mcap_usd` are safe here for the same reason: the
+          // writer puts them in the row's own INSERT, at decision time.
           `INSERT INTO decisions (id, agent_id, source, strategy, provider, model, symbol, action,
-                                  size_usdg, reason, dropped_rule, signals_json, hold_kind, at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  size_usdg, reason, dropped_rule, signals_json, hold_kind, evidence_json, provenance, display_name,
+                                  mark_usd, mcap_usd, at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO NOTHING`,
         );
         for (const r of rows) {
           await ins.run(
             r.id, r.agent_id, r.source, r.strategy ?? null, r.provider ?? null, r.model ?? null,
             r.symbol ?? null, r.action ?? null, r.size_usdg ?? null, r.reason ?? null,
-            r.dropped_rule ?? null, r.signals_json ?? null, r.hold_kind ?? null, r.at,
+            r.dropped_rule ?? null, r.signals_json ?? null, r.hold_kind ?? null, r.evidence_json ?? null,
+            r.provenance ?? null, r.display_name ?? null, r.mark_usd ?? null, r.mcap_usd ?? null, r.at,
           );
         }
         // Same transaction as the rows, for the same reason the log tables do
@@ -619,7 +876,7 @@ export async function mirrorTenant(args: {
         `SELECT smart_account, name, owner_address, session_key_address, chain_id, caps,
                 granted_at, expires_at, status, created_at, mode, beat_at, sponsor_gas, live_blocker, x_handle, x_verified,
                 epoch, hwm_usdg, hwm_withdrawn_usdg, accrued_fee_usdg,
-                contributions_known, contributions_why, gas_accounting, quality_at FROM agents`,
+                contributions_known, contributions_why, gas_accounting, quality_at, energy FROM agents`,
       )
       .all()) as Record<string, unknown>[];
     if (agents.length) {
@@ -629,12 +886,19 @@ export async function mirrorTenant(args: {
                                caps, granted_at, expires_at, status, created_at, mode, beat_at,
                                sponsor_gas, live_blocker, x_handle, x_verified, epoch, hwm_usdg,
                                hwm_withdrawn_usdg, accrued_fee_usdg,
-                               contributions_known, contributions_why, gas_accounting, quality_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               contributions_known, contributions_why, gas_accounting, quality_at, energy)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (smart_account) DO UPDATE SET
              name = excluded.name, status = excluded.status, caps = excluded.caps,
-             expires_at = excluded.expires_at, mode = excluded.mode,
-             beat_at = excluded.beat_at, sponsor_gas = excluded.sponsor_gas,
+             expires_at = excluded.expires_at,
+             -- NULL IS "NOT YET", NOT "NEVER". A redeploy rebuilds the child's
+             -- agents row with no heartbeat and no mode, and the first pass after
+             -- the respawn copied those NULLs over the last known ones, so the
+             -- fleet report read "last heartbeat never — nothing would run" for
+             -- ~45 agents that were ticking (2026-09-27 00:36: Seafish201 among
+             -- them, beating again at 00:38). A later beat still replaces it.
+             mode = COALESCE(excluded.mode, agents.mode),
+             beat_at = COALESCE(excluded.beat_at, agents.beat_at), sponsor_gas = excluded.sponsor_gas,
              live_blocker = excluded.live_blocker,
              x_handle = excluded.x_handle,
              -- NOT a ratchet: a handle that loses its proof (renamed, or
@@ -689,7 +953,13 @@ export async function mirrorTenant(args: {
              contributions_known = excluded.contributions_known,
              contributions_why = excluded.contributions_why,
              gas_accounting = excluded.gas_accounting,
-             quality_at = excluded.quality_at`,
+             quality_at = excluded.quality_at,
+             -- THE WORKER'S ENERGY REPORT: the last one said stands until a
+             -- newer one replaces it. A rebuilt child has not reported yet and
+             -- carries NULL, which is "not yet", never "no energy" — the same
+             -- rule as mode and beat_at above. The worker reports every tick
+             -- whatever the gate's mode, so a stale report is always replaced.
+             energy = COALESCE(excluded.energy, agents.energy)`,
         );
         for (const a of agents) {
           await ins.run(
@@ -715,10 +985,60 @@ export async function mirrorTenant(args: {
             // pick an answer on its behalf.
             a.contributions_known ?? null, a.contributions_why ?? null,
             a.gas_accounting ?? null, a.quality_at ?? null,
+            // Null until this child has reported its energy.
+            a.energy ?? null,
           );
         }
       });
+      // Period IDs remain separate: mirroring a stale child cannot reset a new budget.
+      // A rolling deploy can still be mirroring a child from before this schema.
+      const hasPeriods = await child.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'risk_periods'").get();
+      const periods = hasPeriods ? await child.prepare("SELECT * FROM risk_periods").all() as RiskPeriod[] : [];
+      for (const period of periods) await mergeRiskPeriod(shared, period);
       copied.agents = agents.length;
+
+      // ── TODAY'S ENERGY COUNTERS, carried up so a redeploy cannot reset them ──
+      //
+      // The child's sqlite is emptied by every redeploy, and a daily allowance
+      // kept only there would be handed out afresh by each deploy. So today's
+      // and yesterday's rows travel up here, and the orchestrator seeds them
+      // back into a rebuilt child before it arms (seedEnergyForChild). The
+      // merge is energy-days.ts's one statement: counters only ever go UP
+      // through a copy, the first notice stamp stands, the newer balance read
+      // wins — so a rebuilt child's zeros can never lower what shared holds.
+      // A refund travels as its own rising counter (entries_refunded), which
+      // is how a claim mirrored before its trade was refused comes back down.
+      //
+      // ITS OWN try: energy is not money, and a failure here must not stop
+      // the positions and cost basis below from copying. A child from before
+      // this table existed has nothing to send and is skipped, not failed.
+      try {
+        const hasEnergy = await child
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'energy_days'")
+          .get();
+        if (hasEnergy) {
+          const since = utcDay(nowSec - 86_400);
+          // Every column, by name through energyDayRowOf: a child's table
+          // from before the refund counter has no entries_refunded, and its
+          // rows still copy (their `entries` already net of refunds).
+          const days = (await child
+            .prepare(`SELECT * FROM energy_days WHERE day >= ?`)
+            .all(since)) as Record<string, unknown>[];
+          let n = 0;
+          await shared.tx(async (db) => {
+            for (const d of days) {
+              const row = energyDayRowOf(d);
+              if (!row || typeof d.agent_id !== "string") continue;
+              await mergeEnergyDayRow(db, d.agent_id, row);
+              n++;
+            }
+          });
+          copied.energy_days = n;
+        }
+      } catch (e) {
+        failed.energy_days = e instanceof Error ? e.message : String(e);
+      }
+      copied.paper_checkpoints = await mirrorPaperCheckpoints(child, shared);
 
       const positions = (await child
         .prepare(

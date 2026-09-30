@@ -17,7 +17,7 @@
  */
 
 import type { TradeIntent } from "../policy";
-import type { Snapshot, Tick } from "./types";
+import { breakerIdle, type Snapshot, type Tick } from "./types";
 import type { Why } from "./reasons";
 
 export interface GapLeg {
@@ -39,6 +39,11 @@ export function weekendGapTick(cfg: WeekendGapConfig, snap: Snapshot): Tick {
 
   const intents: TradeIntent[] = [];
   const why: (Why | null)[] = [];
+  // Tripped, the wall refuses every entry at the close; the exit at the open
+  // is a sell into cash and still goes. `withheld` is what lets a tick that
+  // did nothing BECAUSE of it say so.
+  const brake = breakerIdle(snap);
+  let withheld = false;
 
   for (const leg of cfg.legs) {
     if (snap.pausedTokens.has(leg.token.toLowerCase())) continue;
@@ -50,6 +55,10 @@ export function weekendGapTick(cfg: WeekendGapConfig, snap: Snapshot): Tick {
       // the full slice means we skip the leg rather than size down silently.
       const slice = (cfg.enterBudgetUsdg * BigInt(leg.weightBps)) / 10_000n;
       if (slice === 0n || snap.cashUsdg < slice) continue;
+      if (brake) {
+        withheld = true;
+        continue;
+      }
       intents.push({
         kind: "swap",
         target: cfg.swapRouter,
@@ -73,5 +82,5 @@ export function weekendGapTick(cfg: WeekendGapConfig, snap: Snapshot): Tick {
     }
   }
 
-  return { intents, why };
+  return brake && withheld && intents.length === 0 ? { intents, why, idle: brake } : { intents, why };
 }

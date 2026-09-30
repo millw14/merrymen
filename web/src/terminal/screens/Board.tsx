@@ -35,11 +35,17 @@ export function Board({
   onProfile,
   onDesk,
   read = "ok",
+  retired = null,
 }: {
   compact?: boolean;
   preview?: boolean;
   /** Whether the leaderboard read happened at all — see ReadEmpty. */
   read?: ReadState;
+  /**
+   * Accounts the leaderboard folded into a count instead of a row. Null when it
+   * could not tell, and then nothing was folded and nothing is said.
+   */
+  retired?: number | null;
   agents: LiveAgent[];
   theses: Thesis[];
   mine: LiveMine | null;
@@ -54,12 +60,13 @@ export function Board({
   );
 
   const mineSlug = mine?.slug;
+  const folded = typeof retired === "number" && Number.isFinite(retired) ? retired : 0;
 
   return (
     <div className={`page board-page${preview ? " board-preview" : ""}`}>
       <header className="board-head">
         {preview ? <h2>Leaderboard</h2> : compact ? <h2>Return</h2> : <h1 className="top-title">Leaderboard</h1>}
-        {preview && rows.length > 5 && <button onClick={()=>setShowAll(value=>!value)}>{showAll ? "Show fewer" : "View all"}</button>}
+        {preview && rows.length > 5 && <button onClick={()=>setShowAll(value=>!value)}>{showAll ? "Show fewer" : `View all ${rows.length}`}</button>}
         {!preview && rows.length > 0 && (
           <div className="wins">
             {WINDOWS.map((w) => (
@@ -83,14 +90,16 @@ export function Board({
       {!preview && (
         // ONE LINE ON PURPOSE: captions.test.ts reads this file as text, so a
         // wrapped sentence breaks a guard that is about the words being present.
-        <details className="ranking-help"><summary>How returns are measured</summary><p>No deposit means no capital to measure a return against. No completed trades means no return to measure. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
+        <details className="ranking-help"><summary>How returns are measured</summary><p>All agents are listed; only eligible live returns are ranked. Paper returns measure the change since the first recorded valuation of the current paper period and remain outside live rankings. Inactive agents remain unranked. No deposit means no capital to measure a return against. No completed trades means no return to measure. Dividing a pretend book by a real deposit publishes a number that never happened, so returns without evidenced capital stay unranked.</p></details>
       )}
 
       {rows.length === 0 ? (
         <ReadEmpty
           kind="board" compact={preview}
           state={read}
-          title="Nobody has traded yet."
+          // Not "nobody" when accounts were folded away: they ran, and the line
+          // below counts them.
+          title={folded > 0 ? "No agent is running right now." : "Nobody has traded yet."}
           action={preview ? undefined : { label: "Fund an agent", onClick: onDesk }}
         />
       ) : (
@@ -112,6 +121,19 @@ export function Board({
           ))}
         </div>
       )}
+      {/* THE ROWS THIS BOARD DOES NOT SHOW, counted. Killed, lapsed and
+          unlinked accounts nothing is running are folded out of the list, and
+          hiding them without a word would misstate how many there have been.
+          Only a number is printed: null means the server could not tell, and
+          then it folded nothing. Zero folded nothing either. */}
+      {folded > 0 && (
+        <p
+          className="board-retired"
+          title="Accounts nothing is running any more: killed, expired, or never linked to a named agent. One agent re-granted can leave more than one."
+        >
+          Retired accounts ({folded})
+        </p>
+      )}
     </div>
   );
 }
@@ -126,6 +148,7 @@ function Rank({
   onProfile: (slug: string) => void;
 }) {
   const a = row.agent;
+  const displayedReturn = a.mode === "paper" ? a.paperPnlBps ?? null : row.ret;
   const cls = ["rank", you ? "you" : ""].filter(Boolean).join(" ");
 
   return (
@@ -133,6 +156,7 @@ function Rank({
       <button
         type="button"
         className="rank-hit"
+        disabled={a.profileAvailable === false}
         onClick={() => onProfile(a.slug)}
       >
         <span className="n">{row.ret == null ? "—" : row.rank}</span>
@@ -145,6 +169,7 @@ function Rank({
           <div className="rank-meta">
             {a.glance.known === false ? null : <Stamp>{strategyName(a.glance.id)}</Stamp>}
             <span className="rank-trades">{tradeLine(a)}</span>
+            {a.mode && a.mode !== "live" && <Stamp>{a.mode === "paper" ? "Paper" : "Inactive"}</Stamp>}
           </div>
         </div>
         <div className="rank-nums">
@@ -155,8 +180,8 @@ function Rank({
             amount of waiting would have filled them. A column that cannot be
             filled is not an empty column, it is a promise the page cannot keep.
           */}
-          <span title={a.unrankedWhy ? unrankedLabel(a.unrankedWhy) : undefined} className={`chg ${row.ret == null ? "" : row.ret >= 0 ? "up" : "down"}`}>
-            {row.ret == null ? a.unrankedWhy ? unrankedShort(a.unrankedWhy) : "Unranked" : pctBps(row.ret)}
+          <span title={a.unrankedWhy ? unrankedLabel(a.unrankedWhy) : undefined} className={`chg ${displayedReturn == null ? "" : displayedReturn >= 0 ? "up" : "down"}`}>
+            {displayedReturn == null ? a.unrankedWhy ? unrankedShort(a.unrankedWhy) : "Unranked" : pctBps(displayedReturn)}
           </span>
         </div>
       </button>
@@ -180,6 +205,7 @@ function Rank({
  * done, and it is not a trade.
  */
 export function tradeLine(agent: LiveAgent): string {
+  if (agent.mode === "paper") return `${agent.filledPaper ?? 0} paper trades`;
   const landed = agent.landed ?? 0;
   if (landed > 0) return `${landed} trade${landed === 1 ? "" : "s"}`;
   const paper = agent.filledPaper ?? 0;

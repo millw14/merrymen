@@ -57,7 +57,7 @@ export function Search({
             <NameBlock title={a.name} owner={a.owner} verified={a.ownerVerified === true} />
             {a.last && <p className="meta">{lastLine(a.last)}</p>}
           </div>
-          <span className={`px ${a.pnlBps == null ? "" : a.pnlBps >= 0 ? "up" : "down"}`}>{pctBps(a.pnlBps)}</span>
+          <span className={`px ${(a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps) == null ? "" : (a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps)! >= 0 ? "up" : "down"}`}>{pctBps((a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps))}</span>
         </button>
       ))}
       {toks.map((t) => (

@@ -1,23 +1,37 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CircleHelp } from "lucide-react";
 import { HolderLink } from "../HolderLink";
+import { XPosting } from "../XPosting";
+import { AgentImageField } from "../AgentImageField";
 import { basketAfterAdd, basketNow } from "../basket";
 import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
-import { MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant } from "@merrymen/core";
+import { ENERGY, MERRYMEN_GATEWAY_ORIGIN, SLIPPAGE_BPS_MAX, TELEGRAM_GROUPS_CHATTINESS, isEnergyReserveToken, isValidCustomToken, uncoveredBasketSymbols, type CustomToken, type StoredGrant, type TelegramGroupsChattiness } from "@merrymen/core";
 import type { SettingsView } from "@/app/api/settings/route";
 import type { TelegramStatus } from "@/app/api/telegram/route";
+import { telegramLabel, telegramRow, type TelegramRow } from "../agent-status";
 import SetupChecklist from "../SetupChecklist";
+import { count, shortDateTime } from "@/lib/format";
+import { unreadableSetting } from "@/lib/parse-amount";
+import { providerChange, providerModelChange, providerModelValue } from "@/lib/settings-llm-model";
+import { useT } from "@/lib/i18n";
 // QUARANTINED alongside /grant. A settings form is not a surface anybody shares
 // from a phone, and its ~30 fields are styled against the old sheet — so it
 // keeps it, and the sheet no longer reaches anything else.
 
 type Draft = Record<string, string>;
+
+/** What each Telegram groups level is called on the page, in core's order. */
+const CHATTINESS_LABEL = {
+  quiet: "settings.text.chattinessQuiet",
+  normal: "settings.text.chattinessNormal",
+  chatty: "settings.text.chattinessChatty",
+} as const satisfies Record<TelegramGroupsChattiness, string>;
 
 function Field(props: {
   label: string;
@@ -44,14 +58,62 @@ function Field(props: {
   );
 }
 
-export default function SettingsPage({onFund}:{onFund:()=>void}) {
+/**
+ * WHAT THE PROCESS POLLING THE BOT MEASURED, beside the code it is about.
+ *
+ * The code is what an owner sends into the bot, so this is where they must
+ * learn that nothing is reading it. In the incident behind these states the
+ * page said "the bot is listening" and showed a code for days in which
+ * nothing polled the bot; the owner sent that code five times and was locked
+ * out. Nothing is rendered for a bot being heard, or one we cannot tell about.
+ */
+function TelegramListeningNote({ row }: { row: TelegramRow }) {
+  const t = useT();
+  let text: string | null = null;
+  if (row.kind === "held") text = t("settings.tg.held", { reason: row.reason ?? "restore error" });
+  else if (row.kind === "not-listening") {
+    text =
+      row.why === "revoked"
+        ? t("settings.tg.revoked")
+        : row.why === "conflict"
+          ? t("settings.tg.conflict")
+          : row.lastOkAt !== null
+            ? t("settings.tg.notListeningSince", { when: shortDateTime(row.lastOkAt * 1000) })
+            : t("settings.tg.notListeningNever");
+  }
+  if (!text) return null;
+  // The code stays on screen below, and says when it will work.
+  const codeShown = (row.kind === "held" || row.kind === "not-listening") && row.linkCode !== null;
+  return (
+    <div className="mm-danger" role="status">
+      {text}
+      {row.kind === "not-listening" && codeShown ? <> {t("settings.tg.codeWhenBack")}</> : null}
+    </div>
+  );
+}
+
+/** `onSaved`: after a save the server accepted — App hands it the chat's re-read, so the chips already on screen offer the ceiling just set. */
+export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; slug: string | null; onSaved?: () => void}) {
+  const t = useT();
   const [view, setView] = useState<SettingsView | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [draft, setDraft] = useState<Draft>({});
   const [symbols, setSymbols] = useState<string[] | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  // The "saved" note clears itself after a few seconds; the timer is dropped
+  // when the screen goes away, so it never fires into an unmounted form.
+  const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (statusTimer.current) clearTimeout(statusTimer.current); }, []);
   const [errors, setErrors] = useState<string[]>([]);
+  /**
+   * THE BOT IS CLAIMED BY ANOTHER AGENT: what the server said, while the owner
+   * decides whether to move it here. Null when there is nothing to decide.
+   * The draft is kept as it was, so "Move it here" re-sends the same save.
+   */
+  const [botClaimed, setBotClaimed] = useState<string | null>(null);
+  /** The last save moved the bot here: nobody is linked to it here yet, so say so until the next save. */
+  const [botMoved, setBotMoved] = useState(false);
   // Telegram: booleans/allowlist can't ride the string `draft`, so track separately.
   /**
    * Is this the hosted service?
@@ -75,6 +137,12 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const [tgControl, setTgControl] = useState<boolean | null>(null);
   const [tgTransfer, setTgTransfer] = useState<boolean | null>(null);
   const [tgNotify, setTgNotify] = useState<boolean | null>(null);
+  // Telegram groups (docs/tg-groups.md "Settings"): two switches that default
+  // ON and a level. Dashboard-only — the chat refuses all three — so this form
+  // is where an owner changes them. Null = untouched this session.
+  const [tgGroups, setTgGroups] = useState<boolean | null>(null);
+  const [tgGroupCoins, setTgGroupCoins] = useState<boolean | null>(null);
+  const [tgChattiness, setTgChattiness] = useState<TelegramGroupsChattiness | null>(null);
   const [virtualsEnabled, setVirtualsEnabled] = useState<boolean | null>(null);
   // Scout mode is a boolean, so it can't ride the string `draft`.
   const [deskEnabled, setDeskEnabled] = useState<boolean | null>(null);
@@ -86,6 +154,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const [assetMode, setAssetMode] = useState<"all" | "stocks" | "crypto" | null>(null);
   const [discoveryEnabled, setDiscoveryEnabled] = useState<boolean | null>(null);
   const [trencherLive, setTrencherLive] = useState<boolean | null>(null);
+  const [trencherFast, setTrencherFast] = useState<boolean | null>(null);
   const [officialCoins, setOfficialCoins] = useState<boolean | null>(null);
   const [allowlist, setAllowlist] = useState<number[] | null>(null);
   const [tgTest, setTgTest] = useState<string | null>(null);
@@ -197,12 +266,14 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
     setModelsLoading(true);
     setModelsError(null);
 
+    const controller = new AbortController();
     const timer = setTimeout(async () => {
       try {
-        const body: Record<string, string> = { provider: prov.id };
+        const body: Record<string, string | boolean> = { provider: prov.id };
         const kf = prov.id === "groq" ? "groqApiKey" : prov.id === "anthropic" ? "anthropicApiKey" : "llmApiKey";
         const keyInDraft = draft[kf]?.trim();
         if (keyInDraft) body.apiKey = keyInDraft;
+        else if (draft[kf] !== undefined) body.useSavedKey = false;
         if (prov.id === "custom") {
           const bu = draft.llmBaseUrl?.trim() || (view.values.llmBaseUrl as string | undefined) || "";
           if (bu) body.baseUrl = bu;
@@ -211,8 +282,10 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
+          signal: controller.signal,
         });
         const j = (await res.json()) as { models?: string[]; error?: string; code?: string; keySource?: string };
+        if (controller.signal.aborted) return;
         if (res.ok && j.models) {
           setAvailableModels(j.models);
           setModelsError(null);
@@ -222,18 +295,52 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
           setModelsError(code === "missing_key" ? code : modelsErrorMessage(code, j.keySource ?? null, prov));
         }
       } catch {
+        if (controller.signal.aborted) return;
         setAvailableModels([]);
         setModelsError(modelsErrorMessage("provider_error", null, prov));
       } finally {
-        setModelsLoading(false);
+        if (!controller.signal.aborted) setModelsLoading(false);
       }
     }, 500);
 
-    return () => clearTimeout(timer);
+    return () => { clearTimeout(timer); controller.abort(); };
   }, [view, draft.llmProvider, draft.groqApiKey, draft.anthropicApiKey, draft.llmApiKey, draft.llmBaseUrl]);
 
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setDraft((d) => ({ ...d, [k]: e.target.value }));
+
+  /**
+   * A NUMERIC SETTING, HELD AS TEXT.
+   *
+   * These fields were `<input type="number">`, and that control hands
+   * JavaScript an EMPTY STRING for anything its own locale cannot parse. Empty
+   * means "clear to default" at the server, so a German owner typing 25,50 did
+   * not get an error — they silently reset the setting, and the screen said
+   * "Changes saved".
+   *
+   * It is also the reason `<html lang>` could not become dynamic while these
+   * existed: Firefox resolves a number input's decimal separator from the page
+   * language, so translating the UI would have changed which strings these
+   * fields accept and which collapsed to "".
+   *
+   * THE SHAPE IS CHECKED HERE AND THE BOUNDS ARE NOT. Mirroring the server's
+   * thirty min/max pairs into the browser is the duplication route.ts's own
+   * comments warn about three times over. "I cannot read that" and "that is
+   * too large" are different questions, and only the first is the screen's.
+   */
+  const [numError, setNumError] = useState<Record<string, string>>({});
+  const setNum = (k: string) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = e.target.value;
+    setDraft((d) => ({ ...d, [k]: raw }));
+    setNumError((n) => {
+      const why = unreadableSetting(k, raw);
+      if (why === (n[k] ?? null)) return n;
+      const next = { ...n };
+      if (why) next[k] = why;
+      else delete next[k];
+      return next;
+    });
+  };
 
   const v = (k: keyof SettingsView["values"]): string => {
     if (k in draft) return draft[k as string]!;
@@ -267,6 +374,16 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
       setTokenError("needs a short symbol, a full 0x… address (42 chars) and whole-number decimals");
       return;
     }
+    // $MERRYMEN IS ENERGY, NOT A COIN TO TRADE. Every signer drops it from the
+    // sealed tokens and the worker never watches it, so adding it here would
+    // only produce a token that can never be covered, whatever gets re-signed.
+    if (isEnergyReserveToken(candidate.address)) {
+      setTokenError(
+        "that's $MERRYMEN — your agent's energy, not a coin it trades, so it isn't added here. " +
+          "Ask your agent in chat to get its $MERRYMEN, or send it to the agent's account on Robinhood Chain.",
+      );
+      return;
+    }
     const current = tokens ?? (view?.values.customTokens as CustomToken[] | undefined) ?? [];
     if (current.some((t) => t.address.toLowerCase() === candidate.address.toLowerCase())) {
       setTokenError(`${candidate.address.slice(0, 10)}… is already in the list`);
@@ -296,9 +413,20 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
     setTokens(current.filter((t) => t.address.toLowerCase() !== address.toLowerCase()));
   }
 
-  async function save() {
+  /** `moveBot`: the owner answered "Move it here" to a bot another agent holds. */
+  async function save(opts: { moveBot?: boolean } = {}) {
     setStatus("saving…");
     setErrors([]);
+    setBotClaimed(null);
+    setBotMoved(false);
+    // An unreadable field would be sent as typed and rejected, or — worse, if
+    // it were ever blanked first — sent as "" and read as "clear to default".
+    const unreadable = Object.entries(numError);
+    if (unreadable.length > 0) {
+      setStatus("");
+      setErrors(unreadable.map(([k, why]) => `${k}: ${why}`));
+      return;
+    }
     const body: Record<string, unknown> = { ...draft };
     if (symbols !== null) body.basketSymbols = symbols;
     if (tokens !== null) body.customTokens = tokens;
@@ -306,6 +434,12 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
     if (tgControl !== null) body.telegramControlEnabled = tgControl;
     if (tgTransfer !== null) body.telegramTransferEnabled = tgTransfer;
     if (tgNotify !== null) body.telegramNotifyEnabled = tgNotify;
+    // Guarded like every toggle here, and it matters more for these two than
+    // for most: both default ON, so an unguarded send would write whatever the
+    // form happened to hold for every owner who saved anything at all.
+    if (tgGroups !== null) body.telegramGroupsEnabled = tgGroups;
+    if (tgGroupCoins !== null) body.telegramGroupCoinsEnabled = tgGroupCoins;
+    if (tgChattiness !== null) body.telegramGroupsChattiness = tgChattiness;
     if (virtualsEnabled !== null) body.virtualsEnabled = virtualsEnabled;
     if (deskEnabled !== null) body.deskEnabled = deskEnabled;
     if (scoutEnabled !== null) body.scoutEnabled = scoutEnabled;
@@ -314,6 +448,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
     if (assetMode !== null) body.assetMode = assetMode;
     if (discoveryEnabled !== null) body.discoveryEnabled = discoveryEnabled;
     if (trencherLive !== null) body.trencherLiveEnabled = trencherLive;
+    if (trencherFast !== null) body.trencherFastEnabled = trencherFast;
     if (officialCoins !== null) body.officialCoinsEnabled = officialCoins;
     if (allowlist !== null) body.telegramAllowlist = allowlist;
     if (pcEnabled !== null) body.telegramPcControlEnabled = pcEnabled;
@@ -322,26 +457,47 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
     if (appList !== null) body.telegramAppAllowlist = appList;
     if (agentEnabled !== null) body.telegramAgentEnabled = agentEnabled;
     if (agentAutoShell !== null) body.telegramAgentAutoShell = agentAutoShell;
+    if (opts.moveBot) body.moveBot = true;
     // Secrets: only send when the user typed something or hit clear ("").
     try {
       const res = await fetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        // FOR THE WALLET THESE VALUES WERE READ FOR (SettingsView.owner): a
+        // different wallet signed in by another tab since is refused by the
+        // route, not written to. Sent whenever the view names one — "" too,
+        // a form read signed out, which no session is.
+        body: JSON.stringify(view && view.owner !== null ? { ...body, owner: view.owner } : body),
       });
-      const json = (await res.json()) as { ok?: boolean; errors?: string[] };
+      const json = (await res.json()) as { ok?: boolean; errors?: string[]; error?: string; botMoved?: boolean };
+      // ANOTHER AGENT HOLDS THIS BOT. Not an error in the form: a question for
+      // the owner, asked beside the button they pressed. Nothing was saved.
+      if (res.status === 409 && json.error === "bot_claimed") {
+        setBotClaimed(json.errors?.[0] ?? "This bot is already connected to another Merrymen agent.");
+        setStatus(null);
+        return;
+      }
       if (!res.ok) {
         setErrors(json.errors ?? ["save failed"]);
         setStatus(null);
         return;
       }
       setStatus("Changes saved");
+      // A moved bot answers here now, but nobody is linked to it here yet.
+      setBotMoved(json.botMoved === true);
+      onSaved?.();
       setDraft({});
       setSymbols(null);
       setTgEnabled(null);
       setTgControl(null);
       setTgTransfer(null);
       setTgNotify(null);
+      // Cleared with the rest, so after a save the screen shows the SERVER's
+      // Telegram groups values — not "THE SEVEN THAT WERE LEFT BEHIND" below
+      // over again.
+      setTgGroups(null);
+      setTgGroupCoins(null);
+      setTgChattiness(null);
       setVirtualsEnabled(null);
       setScoutEnabled(null);
       setDiscoveryEnabled(null);
@@ -353,10 +509,28 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
       setAgentEnabled(null);
       setAgentAutoShell(null);
       setTokens(null);
+      // THE SEVEN THAT WERE LEFT BEHIND.
+      //
+      // Everything above is cleared so the refetch below is what the screen
+      // shows. These were not, so after a save they kept displaying the LOCAL
+      // value while `view` held the server's — and the two differ exactly when
+      // a write did not land. A hosted tenant toggling a field the API strips
+      // reads "Changes saved" and goes on seeing their own toggle until a
+      // reload; the strip is deliberate (route.ts deletes the RCE fields before
+      // any handler sees them) but the screen then disagrees with the server
+      // about whether an agent may spend real money, which this form may not do.
+      setTrencherLive(null);
+      setTrencherFast(null);
+      setLiveTrading(null);
+      setAssetMode(null);
+      setDeskEnabled(null);
+      setClassSnipe(null);
+      setOfficialCoins(null);
       const fresh = await fetch("/api/settings");
       if (fresh.ok) setView((await fresh.json()) as SettingsView);
       void loadTelegram();
-      setTimeout(() => setStatus(null), 4000);
+      if (statusTimer.current) clearTimeout(statusTimer.current);
+      statusTimer.current = setTimeout(() => setStatus(null), 4000);
     } catch {
       setErrors(["could not reach the settings API"]);
       setStatus(null);
@@ -411,13 +585,21 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
   const prov = providers.find((p) => p.id === llmProviderVal) ?? providers[0]!;
   const providerKeyField = prov.id === "groq" ? "groqApiKey" : prov.id === "anthropic" ? "anthropicApiKey" : "llmApiKey";
   const providerKeyView = prov.id === "groq" ? view.groqApiKey : prov.id === "anthropic" ? view.anthropicApiKey : view.llmApiKey;
-  const providerModelField = prov.id === "groq" ? "groqModel" : prov.id === "anthropic" ? "llmModel" : "llmProviderModel";
+  const providerModelVal = providerModelValue({ ...view.values, ...draft }, prov.id);
+  const setProviderModel = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+    setDraft((d) => ({ ...d, ...providerModelChange(prov.id, e.target.value) }));
   const providerNeedsKey = prov.needsKey !== false;
 
   const tgEnabledVal = tgEnabled ?? view.values.telegramEnabled ?? d.telegramEnabled;
   const tgControlVal = tgControl ?? view.values.telegramControlEnabled ?? d.telegramControlEnabled;
   const tgTransferVal = tgTransfer ?? view.values.telegramTransferEnabled ?? d.telegramTransferEnabled;
   const tgNotifyVal = tgNotify ?? view.values.telegramNotifyEnabled ?? d.telegramNotifyEnabled;
+  // `?? d.…` doing real work, as for officialCoinsEnabled: both switches
+  // default ON, so an owner who never saved them has no stored value, and
+  // falling through to `false` would show them off while the bot talked.
+  const tgGroupsVal = tgGroups ?? view.values.telegramGroupsEnabled ?? d.telegramGroupsEnabled;
+  const tgGroupCoinsVal = tgGroupCoins ?? view.values.telegramGroupCoinsEnabled ?? d.telegramGroupCoinsEnabled;
+  const tgChattinessVal = tgChattiness ?? view.values.telegramGroupsChattiness ?? d.telegramGroupsChattiness;
   const virtualsEnabledVal = virtualsEnabled ?? view.values.virtualsEnabled ?? d.virtualsEnabled;
   const deskEnabledVal = deskEnabled ?? view.values.deskEnabled ?? d.deskEnabled;
   const scoutEnabledVal = scoutEnabled ?? view.values.scoutEnabled ?? d.scoutEnabled;
@@ -502,10 +684,10 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               FIRST ON THE PAGE because it outranks everything below it. A
               strategy, a cap or a venue only matters once you know whether the
               money is real. */}
-          <div className="mm-section">Trading mode</div>
+          <div className="mm-section">{t("settings.section.tradingMode")}</div>
           <div className="mm-grid">
             <label className="mm-field">
-              <span className="mm-label">live trading</span>
+              <span className="mm-label">{t("settings.label.liveTrading")}</span>
               <span className="mm-input">
                 <input
                   type="checkbox"
@@ -571,10 +753,70 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               class you switch off stays priced, valued and sellable — see
               assetModeAllows in core for why the other way round would brick a
               live account. */}
-          <div className="mm-section">What it trades</div>
+          <div className="mm-section">{t("settings.section.whatItTrades")}</div>
+          <div className="mm-hint">
+            <b id="trencher-mode">Trencher mode · fast memecoin setup</b>
+            <p>Your Merryman tracks active memecoin pools with at least $100,000 in daily volume, 20 distinct buyers, recent activity and both buys and sells.
+              Brain reviews eligible coins in the background about once a minute; execution and exit checks run every 15 seconds.
+              New buys need a fresh Brain approval. Brain can also sell early. The fast profile attempts exits at −10%, +20%, or after 30 minutes, even while Brain is unavailable. Liquidity loss can trigger an earlier exit.</p>
+            <p>Entries remain $5, subject to your budget and signed limits. Only discovered, priced pools that pass the liquidity, age and valuation checks qualify.
+              With Autonomous Trencher permission, it finds verified pool tokens itself; no custom-token list is required. Existing positions remain monitored for exits.</p>
+            <button type="button" className="mm-btn" onClick={() => {
+              setAssetMode("crypto");
+              setOfficialCoins(true);
+              setDiscoveryEnabled(true);
+              setSymbols([...new Set([...activeSymbols, ...activeTokens.map(token => token.symbol)])]);
+              setTrencherFast(true);
+              setDraft(previous => ({ ...previous, strategy: "trencher", tickSeconds: "15" }));
+            }}>Prepare Trencher mode</button>
+            <label className="mm-field">
+              <span className="mm-input"><input type="checkbox" style={{ width: "auto" }}
+                checked={trencherFast ?? view.values.trencherFastEnabled ?? d.trencherFastEnabled}
+                onChange={event => setTrencherFast(event.target.checked)} />Use fast Trencher exits</span>
+              <span className="mm-hint">{t("settings.hint.appliesWhenTheStrategy")}</span>
+            {/* THE FLAG THAT MADE TRENCHER LOOK BROKEN, NOW BESIDE ITS OWN EXPLANATION.
+
+                It has had an API branch and no control, so an owner who picked
+                trencher and went live got a candidate feed that returned nothing,
+                forever, with nothing said. index.ts says the surprise out loud
+                -- “the strategy stopped seeing anything at the exact moment it
+                became able to act” -- and then left the only remedy unreachable.
+
+                Giving it a control fixed the first half of that and left the
+                second: the checkbox lived ~445 lines below this card, inside a
+                COLLAPSED "Custom tokens & discovery" drawer, while the prose
+                explaining Trencher sat up here. Every route into this feature —
+                the release notice, the home strip, the chat — deep-links to
+                #trencher-mode, which is this card, which did not contain the one
+                switch that decides whether any of it spends money.
+
+                It is still OFF by default and still bounded by the signed wall;
+                this moves where it is read, not what it permits. */}
+            <label className="mm-field">
+              <span className="mm-label">{t("settings.label.letTrencherTradeFor")}</span>
+              <span className="mm-input">
+                <input
+                  type="checkbox"
+                  checked={trencherLiveVal}
+                  onChange={(e) => setTrencherLive(e.target.checked)}
+                  style={{ width: "auto" }}
+                />
+                <span className="mm-unit">
+                  {trencherLiveVal ? "trencher can open real positions" : "paper only"}
+                </span>
+              </span>
+              <span className="mm-hint">{t("settings.hint.allowsLiveTrencherTrades")}</span>
+            </label>
+            </label>
+            {activeTokens.length === 0 && (view.officialCoins?.length ?? 0) === 0 && <p>
+              You do not need to enter token contracts for Autonomous Trencher. Enable its permission when renewing your key. The new route supports verified Uniswap v3 pools; ungraduated bonding curves use a separate route.
+            </p>}
+            <p>Save changes below, then <Link href="/grant">update trading permission</Link> and select Autonomous Trencher. It is available only after the verified vault deployment is configured. Without that permission, the existing route can trade only individually authorized tokens.
+              Brain must be connected and the recorded portfolio must pass its accounting checks. For real trades, enable live trading and “let trencher trade for real” explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not guaranteed.</p>
+          </div>
           <div className="mm-grid">
             <label className="mm-field">
-              <span className="mm-label">asset mode</span>
+              <span className="mm-label">{t("settings.label.assetMode")}</span>
               <span className="mm-input">
                 <select
                   value={assetModeVal}
@@ -606,7 +848,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
           )}
 
           {/* ── ESSENTIALS ─────────────────────────────────────────────── */}
-          <div className="mm-section">Agent settings</div>
+          <div className="mm-section">{t("settings.section.agentSettings")}</div>
           <div className="mm-grid">
             {/* THE BRAIN IS BRING-YOUR-OWN IN BOTH MODES.
                 This block used to be self-hosted only, on the reasoning that the
@@ -620,11 +862,11 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               <>
             {/* ── AI provider · bring any key ──────────────────────────── */}
               <Field
-                label="AI provider"
+                label={t("settings.label.aiProvider")}
                 action={prov.keyUrl ? { href: prov.keyUrl, label: providerNeedsKey ? "get a key" : "install" } : undefined}
                 hint={hosted ? "Optional. Add your own provider for chat and the Strategist." : "Required for chat and the Strategist."}
               >
-                <select value={llmProviderVal} onChange={set("llmProvider")}>
+                <select value={llmProviderVal} onChange={(e) => setDraft((d) => ({ ...d, ...providerChange(e.target.value) }))}>
                   {providers.map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.label}
@@ -643,13 +885,14 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 >
                   <input
                     type="password"
+                    autoComplete="new-password"
                     placeholder={secretPlaceholder(providerKeyView)}
                     value={draft[providerKeyField] ?? ""}
                     onChange={set(providerKeyField)}
                   />
-                  {providerKeyView.set && (
+                  {(providerKeyView.set || !!draft[providerKeyField]) && (
                     <button type="button" className="mm-btn danger sm" onClick={() => setDraft((x) => ({ ...x, [providerKeyField]: "" }))}>
-                      clear
+                      {hosted ? "Use shared key" : "Clear key"}
                     </button>
                   )}
                 </Field>
@@ -657,22 +900,25 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               {/* SELF-HOSTED ONLY, and deliberately. See the providers filter above:
                   the key is the tenant's money, the URL is our egress. */}
               {hosted === false && prov.id === "custom" && (
-                <Field label="base URL" hint="Any OpenAI-compatible endpoint, e.g. https://your-host/v1">
+                <Field label={t("settings.label.baseUrl")} hint={t("settings.hint.anyOpenaiCompatibleEndpoint")}>
                   <input type="text" placeholder="https://…/v1" value={v("llmBaseUrl")} onChange={set("llmBaseUrl")} />
                 </Field>
               )}
               <Field
-                label="model"
+                label={t("settings.label.model")}
                 hint={`Leave blank to use the provider default${prov.defaultModel ? ` (${prov.defaultModel})` : ""}.`}
               >
                 {modelsLoading ? (
                   <span className="mm-loading">listing models…</span>
                 ) : availableModels.length > 0 ? (
                   <select
-                    value={v(providerModelField as keyof SettingsView["values"])}
-                    onChange={set(providerModelField)}
+                    value={providerModelVal}
+                    onChange={setProviderModel}
                   >
                     <option value="">default{prov.defaultModel ? ` (${prov.defaultModel})` : ""}</option>
+                    {providerModelVal && !availableModels.includes(providerModelVal) && (
+                      <option value={providerModelVal}>{providerModelVal} (saved; not in this provider's list)</option>
+                    )}
                     {availableModels.map((m) => (
                       <option key={m} value={m}>{m}</option>
                     ))}
@@ -681,8 +927,8 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                   <input
                     type="text"
                     placeholder={prov.defaultModel || "model id"}
-                    value={v(providerModelField as keyof SettingsView["values"])}
-                    onChange={set(providerModelField)}
+                    value={providerModelVal}
+                    onChange={setProviderModel}
                   />
                 )}
               </Field>
@@ -692,9 +938,9 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             {hosted === false && (
               <>
             <Field
-                label="Pimlico API key"
+                label={t("settings.label.pimlicoApiKey")}
                 action={{ href: "https://dashboard.pimlico.io", label: "Get a free key" }}
-                hint="Required for real trading on Robinhood Chain. Not needed for Paper, or on the testnet."
+                hint={t("settings.hint.requiredForRealTrading")}
               >
                 <input
                   type="password"
@@ -714,8 +960,8 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 the only way was a Telegram command -- which is why every hosted
                 agent is called Robin. */}
             <Field
-              label="Agent name"
-              hint="Up to 24 letters, numbers, or spaces."
+              label={t("settings.label.agentName")}
+              hint={t("settings.hint.upTo24Letters")}
             >
               <input
                 type="text"
@@ -725,8 +971,20 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 onChange={set("agentName")}
               />
             </Field>
+            <AgentImageField
+              kind="avatar"
+              slug={slug}
+              label={t("settings.label.profilePicture")}
+              hint={t("settings.hint.pngJpegOrWebp")}
+            />
+            <AgentImageField
+              kind="banner"
+              slug={slug}
+              label={t("settings.label.banner")}
+              hint={t("settings.hint.pngJpegOrWebp2")}
+            />
             <Field
-              label="Strategy"
+              label={t("settings.label.strategy")}
             >
               <select value={v("strategy") || d.strategy} onChange={set("strategy")}>
                 {view.strategies.builtin.map((s) => (
@@ -766,10 +1024,14 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                       whether it will run. That&apos;s our read failing, not your wallet.
                     </p>
                   ) : (
+                    /* THE COMBINED FIGURE, the one the worker counts — the
+                       owner's wallet and this agent's account together — and
+                       a dash for a count nobody read, never `?? 0`. */
                     <p>
-                      You hold {(tier.tokens ?? 0).toLocaleString("en-US")} $MERRYMEN and it needs{" "}
-                      {tier.needTokens.toLocaleString("en-US")}. Your agent will keep running and
-                      stay idle until you hold enough — saving this won&apos;t change that.
+                      Your wallet and your agent&apos;s account hold {count(tier.tokens)} $MERRYMEN and it
+                      needs {count(tier.needTokens)}. Until you hold enough it opens nothing new and leaves
+                      its basket as it is; positions in a class vault are still closed by their own exit
+                      rules. Saving this won&apos;t change that.
                     </p>
                   )}
                 </div>
@@ -791,7 +1053,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               You can still type a model name below and save; the list is a convenience, not a requirement.
             </p>
           )}
-          <div className="mm-section">Trading basket</div>
+          <div className="mm-section">{t("settings.section.tradingBasket")}</div>
           {/* GROUPED, because one undifferentiated run of chips is what an owner
               meant by "trading basket in settings is full of all stocks". It was
               twenty-five registry symbols with his own coin unselected at the
@@ -811,9 +1073,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 /* An empty group rendered as nothing is how an owner concludes
                    the feature does not exist. Say it is empty and where to
                    start. */
-                <div className="mm-hint">
-                  None yet — add one below, or take a suggestion from your agent.
-                </div>
+                <div className="mm-hint">{t("settings.hint.noneYetAddOne")}</div>
               ) : (
                 <div className="mm-chips">
                   {syms.map((sym) => (
@@ -868,21 +1128,21 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </div>
           )}
           <div className="mm-grid">
-            <Field label="symbol">
+            <Field label={t("settings.label.symbol")}>
               <input
                 value={newToken.symbol}
                 placeholder="CATE"
                 onChange={(e) => setNewToken((n) => ({ ...n, symbol: e.target.value }))}
               />
             </Field>
-            <Field label="contract address">
+            <Field label={t("settings.label.contractAddress")}>
               <input
                 value={newToken.address}
                 placeholder="0x…"
                 onChange={(e) => setNewToken((n) => ({ ...n, address: e.target.value }))}
               />
             </Field>
-            <Field label="decimals" hint="18 for most tokens — check the contract if unsure">
+            <Field label={t("settings.label.decimals")} hint={t("settings.hint.18ForMostTokens")}>
               <input
                 value={newToken.decimals}
                 inputMode="numeric"
@@ -915,25 +1175,25 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               owner who can't find the dial can't act on that. */}
           <div className="mm-grid" style={{ marginTop: 12 }}>
             <Field
-              label="minimum pool depth (USD)"
-              hint="Minimum liquidity required to use a token’s price. Lower values accept more price-manipulation risk."
+              label={t("settings.label.minimumPoolDepthUsd")}
+              hint={t("settings.hint.minimumLiquidityRequiredTo")}
             >
               <input
                 value={v("minPoolLiquidityUsdg")}
                 inputMode="numeric"
                 placeholder={String(d.minPoolLiquidityUsdg)}
-                onChange={set("minPoolLiquidityUsdg")}
+                onChange={setNum("minPoolLiquidityUsdg")} aria-invalid={!!numError.minPoolLiquidityUsdg}
               />
             </Field>
             <Field
-              label="max spot-vs-average gap (bps)"
-              hint="Maximum difference between the current and average pool price. 100 bps = 1%."
+              label={t("settings.label.maxSpotVsAverage")}
+              hint={t("settings.hint.maximumDifferenceBetweenThe")}
             >
               <input
                 value={v("maxPriceDivergenceBps")}
                 inputMode="numeric"
                 placeholder={String(d.maxPriceDivergenceBps)}
-                onChange={set("maxPriceDivergenceBps")}
+                onChange={setNum("maxPriceDivergenceBps")} aria-invalid={!!numError.maxPriceDivergenceBps}
               />
             </Field>
           </div>
@@ -941,9 +1201,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               up doing everything he was told and getting nowhere. This said
               "save your tokens, then update trading permissions" and omitted
               the basket entirely — the one gate that was invisible. */}
-          <div className="mm-hint">
-            Three things have to be true before your agent buys a token you added:
-            it&apos;s <b>in your trading basket</b> above (the checkbox does that when you
+          <div className="mm-hint">{t("settings.hint.threeThingsHaveTo")}<b>in your trading basket</b> above (the checkbox does that when you
             add it), you&apos;ve <b>saved</b>, and your{" "}
             <Link href="/grant">trading permission</Link> covers it — re-sign after
             saving, and it will. Adding a token on its own only means &ldquo;watch this&rdquo;.
@@ -955,7 +1213,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
           <div className="mm-subtle mono">discovery · new pairs as they launch</div>
           <div className="mm-grid">
             <label className="mm-field">
-              <span className="mm-label">watch for new pairs</span>
+              <span className="mm-label">{t("settings.label.watchForNewPairs")}</span>
               <span className="mm-input">
                 <input
                   type="checkbox"
@@ -967,32 +1225,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                   {discoveryEnabledVal ? "tells you when something launches" : "off"}
                 </span>
               </span>
-              <span className="mm-hint">
-                Requires a Bitquery key or Merry Circle token in Connections.
-              </span>
-            </label>
-            {/* THE FLAG THAT MADE TRENCHER LOOK BROKEN.
-                It has had an API branch and no control, so an owner who picked
-                trencher and went live got a candidate feed that returned nothing,
-                forever, with nothing said. index.ts says the surprise out loud
-                -- “the strategy stopped seeing anything at the exact moment it
-                became able to act” -- and then left the only remedy unreachable. */}
-            <label className="mm-field">
-              <span className="mm-label">let trencher trade for real</span>
-              <span className="mm-input">
-                <input
-                  type="checkbox"
-                  checked={trencherLiveVal}
-                  onChange={(e) => setTrencherLive(e.target.checked)}
-                  style={{ width: "auto" }}
-                />
-                <span className="mm-unit">
-                  {trencherLiveVal ? "trencher can open real positions" : "paper only"}
-                </span>
-              </span>
-              <span className="mm-hint">
-                Allows live Trencher trades in tokens covered by your trading permissions.
-              </span>
+              <span className="mm-hint">{t("settings.hint.requiresABitqueryKey")}</span>
             </label>
             {/* THE ONE TOGGLE ON THIS SCREEN THAT STARTS ON.
                 Everything around it opts INTO something discovered; this opts OUT
@@ -1001,7 +1234,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 control, "off" is unreachable and the checkbox is the only place
                 an owner learns the list exists at all. */}
             <label className="mm-field">
-              <span className="mm-label">trade the platform coin list</span>
+              <span className="mm-label">{t("settings.label.tradeThePlatformCoin")}</span>
               <span className="mm-input">
                 <input
                   type="checkbox"
@@ -1034,18 +1267,17 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               </span>
             </label>
             <Field
-              label="check every (minutes)"
+              label={t("settings.label.checkEveryMinutes")}
             >
               <input
                 value={v("discoveryIntervalMin")}
                 inputMode="numeric"
                 placeholder={String(d.discoveryIntervalMin)}
-                onChange={set("discoveryIntervalMin")}
+                onChange={setNum("discoveryIntervalMin")} aria-invalid={!!numError.discoveryIntervalMin}
               />
             </Field>
           </div>
-          <div className="mm-hint">
-            Discovery sends alerts. To trade a discovered token, add it above and update your <Link href="/grant">trading permissions</Link>.
+          <div className="mm-hint">{t("settings.hint.discoverySendsAlertsAutonomous")}<Link href="/grant">trading permission</Link>. The individual-token route still requires adding and authorizing each token.
           </div>
 
           {/* ── SCOUT MODE ─────────────────────────────────────────────────
@@ -1058,7 +1290,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
           </p>
           <div className="mm-grid">
             <label className="mm-field">
-              <span className="mm-label">research before deciding</span>
+              <span className="mm-label">{t("settings.label.researchBeforeDeciding")}</span>
               <span className="mm-input">
                 <input
                   type="checkbox"
@@ -1072,15 +1304,10 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                     : "off — one shot from a fixed set of numbers"}
                 </span>
               </span>
-              <span className="mm-hint">
-                llm-strategist only. On, a decision becomes a short research loop: it can pull
-                depth, check what a position cost, and read back its own past decisions before it
-                acts — and it writes what it concluded, in its own words, to your feed. Off by
-                default because it costs up to a few model calls per window instead of one.
-              </span>
+              <span className="mm-hint">{t("settings.hint.llmStrategistOnlyOn")}</span>
             </label>
             <label className="mm-field">
-              <span className="mm-label">scout mode</span>
+              <span className="mm-label">{t("settings.label.scoutMode")}</span>
               <span className="mm-input">
                 <input
                   type="checkbox"
@@ -1094,25 +1321,25 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               </span>
             </label>
             <Field
-              label="scout budget (USDG)"
-              hint="Maximum purchase cost of all open scout positions. Selling restores the available budget."
+              label={t("settings.label.scoutBudgetUsdg")}
+              hint={t("settings.hint.maximumPurchaseCostOf")}
             >
               <input
                 value={v("scoutBudgetUsdg")}
                 inputMode="numeric"
                 placeholder={String(d.scoutBudgetUsdg)}
-                onChange={set("scoutBudgetUsdg")}
+                onChange={setNum("scoutBudgetUsdg")} aria-invalid={!!numError.scoutBudgetUsdg}
               />
             </Field>
             <Field
-              label="max per token (USDG)"
-              hint="Maximum total purchase cost per scout token, including additional buys."
+              label={t("settings.label.maxPerTokenUsdg")}
+              hint={t("settings.hint.maximumTotalPurchaseCost")}
             >
               <input
                 value={v("scoutPerTokenUsdg")}
                 inputMode="numeric"
                 placeholder={String(d.scoutPerTokenUsdg)}
-                onChange={set("scoutPerTokenUsdg")}
+                onChange={setNum("scoutPerTokenUsdg")} aria-invalid={!!numError.scoutPerTokenUsdg}
               />
             </Field>
           </div>
@@ -1150,7 +1377,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
           </p>
           <div className="mm-grid">
             <label className="mm-field">
-              <span className="mm-label">class route</span>
+              <span className="mm-label">{t("settings.label.classRoute")}</span>
               <span className="mm-input">
                 <input
                   type="checkbox"
@@ -1162,42 +1389,42 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                   {classSnipeVal ? "may buy newly launched coins" : "off — no coin is bought unless you listed it"}
                 </span>
               </span>
-              <span className="mm-hint">
-                Separate from sealing a vault at /grant. That says this key COULD reach one; this
-                says go and do it.
-              </span>
+              <span className="mm-hint">{t("settings.hint.separateFromSealingA")}</span>
             </label>
             <Field
-              label="per entry (USDG)"
-              hint="Spent on a single class entry. 0 means nothing is bought, whatever the switch says."
+              label={t("settings.label.perEntryUsdg")}
+              hint={t("settings.hint.spentOnASingle")}
             >
               <input
                 value={v("classPerEntryUsdg")}
                 inputMode="numeric"
                 placeholder={String(d.classPerEntryUsdg)}
-                onChange={set("classPerEntryUsdg")}
+                onChange={setNum("classPerEntryUsdg")} aria-invalid={!!numError.classPerEntryUsdg}
               />
             </Field>
             <Field
-              label="max open positions"
-              hint="How many class positions may be held at once. 0 = no limit beyond the scout budget."
+              label={t("settings.label.maxOpenPositions")}
+              hint={t("settings.hint.howManyClassPositions")}
             >
               <input
                 value={v("classMaxPositions")}
                 inputMode="numeric"
                 placeholder={String(d.classMaxPositions)}
-                onChange={set("classMaxPositions")}
+                onChange={setNum("classMaxPositions")} aria-invalid={!!numError.classMaxPositions}
               />
             </Field>
+            <Field label={t("settings.label.maximumHoldingTimeSeconds")} hint={t("settings.hint.forBondingCurvePositions")}>
+              <input type="text" inputMode="numeric" value={v("classMaxHoldSec")} placeholder={String(d.classMaxHoldSec)} onChange={setNum("classMaxHoldSec")} aria-invalid={!!numError.classMaxHoldSec} />
+            </Field>
             <Field
-              label="minimum curve depth (USDG)"
-              hint="Real money raised into the curve, excluding the virtual seed it opens with. Below this, an entry is refused."
+              label={t("settings.label.minimumCurveDepthUsdg")}
+              hint={t("settings.hint.realMoneyRaisedInto")}
             >
               <input
                 value={v("classMinDepthUsdg")}
                 inputMode="numeric"
                 placeholder={String(d.classMinDepthUsdg)}
-                onChange={set("classMinDepthUsdg")}
+                onChange={setNum("classMinDepthUsdg")} aria-invalid={!!numError.classMinDepthUsdg}
               />
             </Field>
           </div>
@@ -1211,13 +1438,52 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
 
           </details>
           <details className="settings-group" id="telegram"><summary>Telegram</summary>
+          {/* THE CODE, BESIDE THE INSTRUCTION THAT NEEDS IT.
+
+              These were in two different collapsed drawers: this sentence
+              here, and the actual link code far below inside "Advanced
+              settings". Two beta testers stopped exactly there — "I'm stuck
+              at this point, no code from /link" — and the incident is written
+              up at length in the API route. The placeholder made it worse by
+              rendering "……" as though a code existed and was merely hidden.
+
+              A missing code is a WAIT, not an absence: the agent mints one on
+              its next pass after a token is saved, so the copy says that
+              rather than claiming there is no code. */}
           <p className="mm-hint" style={{ marginTop: 0 }}>
-            Create a bot with @BotFather, add its token, then send <code>/link {tg?.linkCode ?? "……"}</code> to connect it.
+            Create a bot with @BotFather and add its token below.
           </p>
+          <TelegramListeningNote row={telegramRow(tg)} />
+          {tg?.linkCode ? (
+            <p className="mm-hint">{t("settings.hint.thenSend")}<code>/link {tg.linkCode}</code> to your bot to connect it.{" "}
+              {tg.botUsername ? (
+                <a href={`https://t.me/${tg.botUsername}?start=${tg.linkCode}`} target="_blank" rel="noreferrer">Open Telegram →</a>
+              ) : null}
+              <br />
+              {/* A BEARER CREDENTIAL. `/link <code>` is accepted from ANY chat,
+                  first come, and grants control of this agent. */}
+              Anyone who has this code can control your agent — do not share or screenshot it.
+            </p>
+          ) : (
+            <p className="mm-hint">
+              {/* NO CODE BECAUSE ANOTHER AGENT HAS THIS BOT, which this one
+                  will never pick up; or because the agent has not picked
+                  it up YET: the code on file was minted for the bot saved
+                  before, and would not link this one
+                  (lib/telegram-listening.ts). Neither is "check back". */}
+              {tg?.botElsewhere
+                ? t("settings.tg.elsewhere")
+                : tg?.linkPending && tg.enabled
+                ? t("settings.tg.pickingUp")
+                : view.telegramBotToken.set
+                  ? "No link code yet. Your agent mints one on its next pass with this token set — check back shortly."
+                  : "Your link code appears here once a token is saved."}
+            </p>
+          )}
           <div className="mm-grid">
             <Field
-              label="bot token"
-              hint="Get your bot token from @BotFather."
+              label={t("settings.label.botToken")}
+              hint={t("settings.hint.getYourBotToken")}
             >
               <input
                 type="password"
@@ -1231,81 +1497,150 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 </button>
               )}
             </Field>
-            <Field label="connection">
+            <Field label={t("settings.label.connection")}>
               <button type="button" className="mm-tag" style={{ cursor: "pointer" }} onClick={() => void testTelegram()}>
                 test connection
               </button>
-              <span className="mm-unit">
-                {tgTest ?? (tg?.connected ? `✓ @${tg.botUsername}` : tg?.hasToken ? "not verified" : "no token")}
-              </span>
+              {/* AN UNREAD BRIDGE IS NOT A MISSING TOKEN.
+
+                  `loadTelegram` only calls `setTg` on a truthy response, so a
+                  failed or non-ok /api/telegram leaves `tg` null — and the
+                  ternary that used to be here fell through to the literal
+                  "no token", telling an owner whose network hiccupped that
+                  they had never saved the token they were looking at. The
+                  reading now lives in agent-status.ts, where a test executes
+                  it and the home strip shares the same words. */}
+              <span className="mm-unit">{tgTest ?? telegramLabel(telegramRow(tg))}</span>
             </Field>
             <label className="mm-field">
-              <span className="mm-label">enable telegram</span>
+              <span className="mm-label">{t("settings.label.enableTelegram")}</span>
               <span className="mm-input">
                 <input type="checkbox" checked={tgEnabledVal} onChange={(e) => setTgEnabled(e.target.checked)} style={{ width: "auto" }} />
-                <span className="mm-unit">{tgEnabledVal ? "the bot is listening" : "off"}</span>
+                {/* WHAT THE SWITCH SAYS, NOT WHAT WAS HEARD. "the bot is
+                    listening" was printed here for a bot nothing had polled in
+                    days; whether it is heard is the connection field above. */}
+                <span className="mm-unit">{tgEnabledVal ? "on" : "off"}</span>
               </span>
             </label>
           </div>
 
+          {/* TELEGRAM GROUPS (docs/tg-groups.md). Never the web room's name —
+              that belongs to the public room — and dashboard-only: the chat
+              answers "groups off" with a button to here, because a group is a
+              chat anyone in it can type into. Saved by "Save changes" like the
+              toggles above, and reset after it. */}
+          <div className="mm-section" id="telegram-groups">{t("settings.section.telegramGroups")}</div>
+          <div className="mm-grid">
+            <label className="mm-field">
+              <span className="mm-label">{t("settings.label.hangOutInTelegramGroups")}</span>
+              <span className="mm-input">
+                <input type="checkbox" checked={tgGroupsVal} onChange={(e) => setTgGroups(e.target.checked)} style={{ width: "auto" }} />
+                <span className="mm-unit">{tgGroupsVal ? "answers when called, joins in now and then" : "silent in every group"}</span>
+              </span>
+              <span className="mm-hint">{t("settings.hint.hangOutInTelegramGroups")}</span>
+            </label>
+            <label className="mm-field">
+              <span className="mm-label">{t("settings.label.lookAtCoinsPeoplePost")}</span>
+              <span className="mm-input">
+                <input type="checkbox" checked={tgGroupCoinsVal} onChange={(e) => setTgGroupCoins(e.target.checked)} style={{ width: "auto" }} />
+                <span className="mm-unit">{tgGroupCoinsVal ? "looks, then its Brain decides" : "leaves coins alone"}</span>
+              </span>
+              <span className="mm-hint">{t("settings.hint.lookAtCoinsPeoplePost")}</span>
+            </label>
+            <Field label={t("settings.label.howChattyInGroups")} hint={t("settings.hint.howChattyInGroups")}>
+              <select value={tgChattinessVal} onChange={(e) => setTgChattiness(e.target.value as TelegramGroupsChattiness)}>
+                {TELEGRAM_GROUPS_CHATTINESS.map((level) => (
+                  <option key={level} value={level}>{t(CHATTINESS_LABEL[level])}</option>
+                ))}
+              </select>
+            </Field>
+          </div>
+          {/* WHAT IT CAN HEAR, from the getMe /api/telegram already makes.
+
+              Three states, not two. `false` is BotFather's privacy mode ON —
+              the default — and then a group bot hears only commands and
+              replies to itself, so it cannot join in, remember the chat or
+              see a posted coin. `true` is off. Anything else (no token, getMe
+              failed, an older server) is UNKNOWN, and gets the steps with no
+              verdict: telling an owner privacy is on when nobody knows sends
+              them to BotFather for nothing. The flag reports the BotFather
+              setting only — a bot added before it changed still has to be
+              removed and added back — so even "off" says so. */}
+          <p className="mm-hint" id="telegram-privacy-mode">
+            {tg?.canReadAllGroupMessages === true ? (
+              t("settings.text.privacyModeOff")
+            ) : (
+              <>
+                {tg?.canReadAllGroupMessages === false ? t("settings.text.privacyModeOn") : t("settings.text.privacyModeUnknown")}{" "}
+                {t("settings.text.privacyModeSteps")}
+              </>
+            )}
+            {tg?.canJoinGroups === false && <><br />{t("settings.text.joinGroupsOff")}</>}
+          </p>
+
           </details>
+          {/* POSTING ON X — hosted only, and only on a RESOLVED `hosted`, so a
+              self-hosted page never flashes a section it cannot use. The whole
+              section is its own component (terminal/XPosting.tsx): it reads
+              and writes /api/x/*, never this form's `draft`, and nothing here
+              is saved by "Save changes". The owner it sends is the one this
+              form was read for (SettingsView.owner). */}
+          {hosted === true && (
+            <details className="settings-group" id="x-posting"><summary>Posting on X</summary>
+              <XPosting owner={view.owner} hosted={hosted} />
+            </details>
+          )}
 
           {/* ── ADVANCED (collapsed by default) ────────────────────────── */}
           <details className="mm-advanced">
             <summary>Advanced settings</summary>
 
-            <div className="mm-section">Telegram controls</div>
+            <div className="mm-section">{t("settings.section.telegramControls")}</div>
             <div className="mm-grid">
             <label className="mm-field">
-              <span className="mm-label">allow control commands</span>
+              <span className="mm-label">{t("settings.label.allowControlCommands")}</span>
               <span className="mm-input">
                 <input type="checkbox" checked={tgControlVal} onChange={(e) => setTgControl(e.target.checked)} style={{ width: "auto" }} />
                 <span className="mm-unit">{tgControlVal ? "pause/strategy/trade/kill" : "read + chat only"}</span>
               </span>
-              <span className="mm-hint">Off = the bot can answer questions but not change state.</span>
+              <span className="mm-hint">{t("settings.hint.offTheBotCan")}</span>
             </label>
-            <Field label="chat trade ceiling" hint="Max USDG per chat-triggered trade — beneath your grant caps.">
+            <Field label={t("settings.label.chatTradeCeiling")} hint={t("settings.hint.maxUsdgPerChat")}>
               <input
-                type="number"
-                min={1}
+                type="text" inputMode="decimal"
                 placeholder={String(d.telegramMaxActionUsdg)}
                 value={v("telegramMaxActionUsdg")}
-                onChange={set("telegramMaxActionUsdg")}
-              />
-              <span className="mm-unit">USDG</span>
+                onChange={setNum("telegramMaxActionUsdg")} aria-invalid={!!numError.telegramMaxActionUsdg} />
+              <span className="mm-unit">{t("settings.unit.usdg")}</span>
             </Field>
             <label className="mm-field">
-              <span className="mm-label">allow transfers</span>
+              <span className="mm-label">{t("settings.label.allowTransfers")}</span>
               <span className="mm-input">
                 <input type="checkbox" checked={tgTransferVal} onChange={(e) => setTgTransfer(e.target.checked)} style={{ width: "auto" }} />
                 <span className="mm-unit">{tgTransferVal ? "/transfer with /confirm" : "off"}</span>
               </span>
-              <span className="mm-hint">
-                Requires existing transfer permission. Otherwise, use Withdraw in Profile.
-              </span>
+              <span className="mm-hint">{t("settings.hint.requiresExistingTransferPermission")}</span>
             </label>
-            <Field label="daily transfer budget" hint="Max USDG chat transfers may send per day — on top of the grant caps.">
+            <Field label={t("settings.label.dailyTransferBudget")} hint={t("settings.hint.maxUsdgChatTransfers")}>
               <input
-                type="number"
-                min={1}
+                type="text" inputMode="decimal"
                 placeholder={String(d.telegramTransferDailyUsdg)}
                 value={v("telegramTransferDailyUsdg")}
-                onChange={set("telegramTransferDailyUsdg")}
-              />
-              <span className="mm-unit">USDG</span>
+                onChange={setNum("telegramTransferDailyUsdg")} aria-invalid={!!numError.telegramTransferDailyUsdg} />
+              <span className="mm-unit">{t("settings.unit.usdg")}</span>
             </Field>
             <label className="mm-field">
-              <span className="mm-label">proactive pings</span>
+              <span className="mm-label">{t("settings.label.proactivePings")}</span>
               <span className="mm-input">
                 <input type="checkbox" checked={tgNotifyVal} onChange={(e) => setTgNotify(e.target.checked)} style={{ width: "auto" }} />
                 <span className="mm-unit">{tgNotifyVal ? "trade pings + warnings + daily report" : "quiet"}</span>
               </span>
-              <span className="mm-hint">The bot messages you first: trades landing, drawdown/gas/expiry warnings, price alerts, and the daily campfire report.</span>
+              <span className="mm-hint">{t("settings.hint.theBotMessagesYou")}</span>
             </label>
             {tgNotifyVal && (
               <Field
-                label="trade pings — how often"
-                hint="Batch the routine trade notifications so you're not pinged every fill. Warnings, price alerts, reminders and the daily report always come through right away."
+                label={t("settings.label.tradePingsHowOften")}
+                hint={t("settings.hint.batchTheRoutineTrade")}
               >
                 <select value={v("telegramNotifyEveryMin") || "0"} onChange={set("telegramNotifyEveryMin")}>
                   <option value="0">Every trade</option>
@@ -1316,16 +1651,13 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 </select>
               </Field>
             )}
-            <Field label="daily report hour" hint="Local hour (0–23) after which the campfire report is sent.">
+            <Field label={t("settings.label.dailyReportHour")} hint={t("settings.hint.localHour023")}>
               <input
-                type="number"
-                min={0}
-                max={23}
+                type="text" inputMode="numeric"
                 placeholder={String(d.telegramDigestHour)}
                 value={v("telegramDigestHour")}
-                onChange={set("telegramDigestHour")}
-              />
-              <span className="mm-unit">h</span>
+                onChange={setNum("telegramDigestHour")} aria-invalid={!!numError.telegramDigestHour} />
+              <span className="mm-unit">{t("settings.unit.h")}</span>
             </Field>
           </div>
           <div className="mm-hint" style={{ marginTop: 4 }}>
@@ -1333,10 +1665,17 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               <>
                 link code: <b className="mono">{tg.linkCode}</b> — send <code>/link {tg.linkCode}</code> from Telegram
               </>
+            ) : tg?.botElsewhere ? (
+              t("settings.tg.elsewhereShort")
+            ) : tg?.linkPending && tg.enabled ? (
+              t("settings.tg.pickingUp")
             ) : (
               "save a token to generate your link code"
             )}
           </div>
+          {/* The same warning where the code is repeated: this one is read on
+              its own, far from the first. */}
+          <TelegramListeningNote row={telegramRow(tg)} />
           <div className="mm-chips" style={{ marginTop: 6 }}>
             {allowlistVal.length === 0 && <span className="dim mono">no linked chats yet</span>}
             {allowlistVal.map((id) => (
@@ -1369,7 +1708,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
           </div>
 
           {/* ── remote control · your PC (OpenClaw-style) ─────────────────── */}
-          <div className="mm-section">Computer access</div>
+          <div className="mm-section">{t("settings.section.computerAccess")}</div>
           <div className="mm-danger" style={{ marginBottom: 12 }}>
             <b>This lets Telegram touch this computer.</b> With it on, an allowlisted chat can take
             screenshots, open apps, browse a folder you pick, and — if you enable them — run
@@ -1378,16 +1717,16 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             always ask you to <code>/confirm</code> first. Only turn on what you want.
           </div>
           <label className="mm-field">
-            <span className="mm-label">enable remote control</span>
+            <span className="mm-label">{t("settings.label.enableRemoteControl")}</span>
             <span className="mm-input">
               <input type="checkbox" checked={pcEnabledVal} onChange={(e) => setPcEnabled(e.target.checked)} style={{ width: "auto" }} />
               <span className="mm-unit">{pcEnabledVal ? "ON — capabilities below apply" : "off — no PC command runs"}</span>
             </span>
-            <span className="mm-hint">The master switch. Off = every PC command is refused, regardless of the toggles below.</span>
+            <span className="mm-hint">{t("settings.hint.theMasterSwitchOff")}</span>
           </label>
 
           <div className="mm-field">
-            <span className="mm-label">capabilities</span>
+            <span className="mm-label">{t("settings.label.capabilities")}</span>
             <div className="caps" style={{ marginTop: 4 }}>
               {PC_CAPS.map((c) => (
                 /*
@@ -1415,7 +1754,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 </button>
               ))}
             </div>
-            <span className="mm-hint">Click to toggle. Only enabled groups work; the rest are refused. “vision” and “voice” need extra keys below.</span>
+            <span className="mm-hint">{t("settings.hint.clickToToggleOnly")}</span>
           </div>
 
           {pcEnabledVal && (capsVal.includes("shell") || capsVal.includes("keyboard")) && (
@@ -1431,7 +1770,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
 
           {/* ── agent mode · /agent <task> ─────────────────────────────── */}
           <label className="mm-field">
-            <span className="mm-label">🤖 agent mode · /agent</span>
+            <span className="mm-label">{t("settings.label.agentModeAgent")}</span>
             <span className="mm-input">
               <input
                 type="checkbox"
@@ -1444,14 +1783,13 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 {!pcEnabledVal ? "needs remote control ON" : agentEnabledVal ? "ON — /agent works multi-step tasks" : "off"}
               </span>
             </span>
-            <span className="mm-hint">
-              Send a task with <code>/agent</code>. It uses your enabled capabilities. Send <b>stop</b> to halt it.
+            <span className="mm-hint">{t("settings.hint.sendATaskWith")}<code>/agent</code>. It uses your enabled capabilities. Send <b>stop</b> to halt it.
             </span>
           </label>
           {agentEnabledVal && pcEnabledVal && (
             <>
               <label className="mm-field">
-                <span className="mm-label">free-form shell for /agent</span>
+                <span className="mm-label">{t("settings.label.freeFormShellFor")}</span>
                 <span className="mm-input">
                   <input
                     type="checkbox"
@@ -1461,11 +1799,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                   />
                   <span className="mm-unit">{agentAutoShellVal ? "ON — beyond the allowlist, no per-command confirm" : "off — allowlist only"}</span>
                 </span>
-                <span className="mm-hint">
-                  Off: /agent may only run your allowlisted commands. On: it may compose its own
-                  commands (installs, builds, git) — destructive commands and secrets paths are
-                  refused always.
-                </span>
+                <span className="mm-hint">{t("settings.hint.offAgentMayOnly")}</span>
               </label>
               {agentAutoShellVal && (
                 <div className="mm-danger">
@@ -1477,9 +1811,9 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 </div>
               )}
               <div className="mm-grid">
-                <Field label="step budget" hint="Maximum steps per task.">
-                  <input type="number" min={1} max={60} placeholder={String(d.telegramAgentMaxSteps)} value={v("telegramAgentMaxSteps")} onChange={set("telegramAgentMaxSteps")} />
-                  <span className="mm-unit">steps</span>
+                <Field label={t("settings.label.stepBudget")} hint={t("settings.hint.maximumStepsPerTask")}>
+                  <input type="text" inputMode="numeric" placeholder={String(d.telegramAgentMaxSteps)} value={v("telegramAgentMaxSteps")} onChange={setNum("telegramAgentMaxSteps")} aria-invalid={!!numError.telegramAgentMaxSteps} />
+                  <span className="mm-unit">{t("settings.unit.steps")}</span>
                 </Field>
               </div>
             </>
@@ -1487,14 +1821,14 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
 
           <div className="mm-grid">
             <Field
-              label="files root"
-              hint="Folder available to /ls and /get. Use an absolute path. Leave blank to disable file access."
+              label={t("settings.label.filesRoot")}
+              hint={t("settings.hint.folderAvailableToLs")}
             >
               <input type="text" placeholder="C:\\Users\\you\\Documents\\shared" value={v("telegramFilesRoot")} onChange={set("telegramFilesRoot")} />
             </Field>
             <Field
-              label="transcription key (voice)"
-              hint="Transcription API key for voice notes. Leave blank to disable voice."
+              label={t("settings.label.transcriptionKeyVoice")}
+              hint={t("settings.hint.transcriptionApiKeyFor")}
             >
               <input
                 type="password"
@@ -1506,7 +1840,7 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
           </div>
 
           <div className="mm-field">
-            <span className="mm-label">shell allowlist</span>
+            <span className="mm-label">{t("settings.label.shellAllowlist")}</span>
             <div className="mm-chips">
               {shellListVal.map((cmd) => (
                 <span key={cmd} className="mm-toggle on">
@@ -1528,11 +1862,11 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 }}
               />
             </div>
-            <span className="mm-hint">Only these exact commands (or command + args) may run via /run — and each still needs /confirm. Chaining/redirects are always refused.</span>
+            <span className="mm-hint">{t("settings.hint.onlyTheseExactCommands")}</span>
           </div>
 
           <div className="mm-field">
-            <span className="mm-label">app allowlist</span>
+            <span className="mm-label">{t("settings.label.appAllowlist")}</span>
             <div className="mm-chips">
               {appListVal.map((app) => (
                 <span key={app} className="mm-toggle on">
@@ -1554,53 +1888,68 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 }}
               />
             </div>
-            <span className="mm-hint">Names /open may launch. Full https:// URLs open without an allowlist.</span>
+            <span className="mm-hint">{t("settings.hint.namesOpenMayLaunch")}</span>
           </div>
 
-          <div className="mm-section">Merry Circle</div>
+          <div className="mm-section">{t("settings.section.merryCircle")}</div>
           {/* The tier reads a $MERRYMEN balance. By default that is the wallet you
               sign in with, which is the only address the server can verify without
               being told. Holding the token elsewhere is a real case and needs a
               proof, not a text box — see /api/holder. */}
           <HolderLink />
-          <div className="mm-section">Connections</div>
+          {/* WHAT THE TOKEN IS FOR, said where it is linked. Text only — this
+              section's controls are HolderLink's, and the census in
+              app/settings/honesty.test.ts counts every one. ONLY WHILE THE
+              DEPLOYMENT GATES ENERGY (tier.energyGate, as CreateAgent asks):
+              the gate is off until an operator turns it on, and a throttle
+              described while nothing is limited is a false reason to buy. */}
+          {tier?.energyGate && (
+            <p className="mm-hint">
+              On the hosted service your agent runs at full energy while your wallet and its account hold{" "}
+              {count(ENERGY.fullTokens)} $MERRYMEN between them; below that it gets about a tenth of a standard day&apos;s AI reviews and
+              new trades. Stop-losses, take-profits and your own orders are never limited; its own AI
+              reviews — including of its open positions — are paced along with the rest. $MERRYMEN buys
+              capacity, nothing else — we make no promise about its price.
+            </p>
+          )}
+          <div className="mm-section">{t("settings.section.connections")}</div>
           <div className="mm-grid">
             <Field
-              label="mainnet RPC override"
-              hint="Optional custom connection to Robinhood Chain mainnet."
+              label={t("settings.label.mainnetRpcOverride")}
+              hint={t("settings.hint.optionalCustomConnectionTo")}
             >
               <input type="url" placeholder={urlPlaceholder("rpcMainnet", "default: rpc.mainnet.chain.robinhood.com")} value={draft.rpcMainnet ?? ""} onChange={set("rpcMainnet")} />
             </Field>
-            <Field label="testnet RPC override" hint="Optional.">
+            <Field label={t("settings.label.testnetRpcOverride")} hint={t("settings.hint.optional")}>
               <input type="url" placeholder={urlPlaceholder("rpcTestnet", "default: rpc.testnet.chain.robinhood.com")} value={draft.rpcTestnet ?? ""} onChange={set("rpcTestnet")} />
             </Field>
             <Field
-              label="bundler URL override"
-              hint="Overrides the Pimlico connection. Must support your wallet’s network."
+              label={t("settings.label.bundlerUrlOverride")}
+              hint={t("settings.hint.overridesThePimlicoConnection")}
             >
               <input type="url" placeholder={urlPlaceholder("bundlerUrl", "https://…/rpc?apikey=…")} value={draft.bundlerUrl ?? ""} onChange={set("bundlerUrl")} />
             </Field>
             <Field
-              label="breaker contract"
-              hint="BreakerRegistry contract on your wallet’s network."
+              label={t("settings.label.breakerContract")}
+              hint={t("settings.hint.breakerregistryContractOnYour")}
             >
               <input type="text" placeholder="0x…" value={v("breakerAddress")} onChange={set("breakerAddress")} />
             </Field>
             <Field
-              label="v4 adapter contract"
-              hint="V4SelfSwap contract on your wallet’s network. Update trading permissions after saving."
+              label={t("settings.label.v4AdapterContract")}
+              hint={t("settings.hint.v4selfswapContractOnYour")}
             >
               <input type="text" placeholder="0x…" value={v("v4AdapterAddress")} onChange={set("v4AdapterAddress")} />
             </Field>
             <Field
-              label="Pons curve adapter contract"
-              hint="PonsSelfTrade contract on your wallet’s network. Updating trading permissions authorizes this contract to spend your permitted tokens."
+              label={t("settings.label.ponsCurveAdapterContract")}
+              hint={t("settings.hint.ponsselftradeContractOnYour")}
             >
               <input type="text" placeholder="0x…" value={v("ponsAdapterAddress")} onChange={set("ponsAdapterAddress")} />
             </Field>
             <Field
-              label="Class vault factory contract"
-              hint="PonsClassVaultFactory on your wallet’s network. This lets your agent buy tokens that did not exist when you signed — they are held in a vault of your own, because a token your account holds directly cannot be sold. Setting this alone changes nothing: it has to be sealed by updating trading permissions, and buying only starts when you also turn on the class route, which is in “Custom tokens & discovery” above — not here."
+              label={t("settings.label.classVaultFactoryContract")}
+              hint={t("settings.hint.ponsclassvaultfactoryOnYourWallet")}
             >
               <input
                 type="text"
@@ -1610,8 +1959,8 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               />
             </Field>
             <Field
-              label="Rialto integrator key"
-              hint="Required to trade through Rialto."
+              label={t("settings.label.rialtoIntegratorKey")}
+              hint={t("settings.hint.requiredToTradeThrough")}
             >
               <input
                 type="password"
@@ -1625,28 +1974,26 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
                 </button>
               )}
             </Field>
-            <Field label="Rialto key header" hint={`Header name their API expects (default ${d.rialtoApiKeyHeader}).`}>
+            <Field label={t("settings.label.rialtoKeyHeader")} hint={`Header name their API expects (default ${d.rialtoApiKeyHeader}).`}>
               <input type="text" placeholder={d.rialtoApiKeyHeader} value={v("rialtoApiKeyHeader")} onChange={set("rialtoApiKeyHeader")} />
             </Field>
           </div>
 
-          <div className="mm-section">Virtuals</div>
+          <div className="mm-section">{t("settings.section.virtuals")}</div>
           <div className="mm-grid">
             <label className="mm-field">
-              <span className="mm-label">stream to Virtuals</span>
+              <span className="mm-label">{t("settings.label.streamToVirtuals")}</span>
               <span className="mm-input">
                 <input type="checkbox" checked={virtualsEnabledVal} onChange={(e) => setVirtualsEnabled(e.target.checked)} style={{ width: "auto" }} />
                 <span className="mm-unit">{virtualsEnabledVal ? "live activity → your $MERRYMEN agent page" : "off"}</span>
               </span>
-              <span className="mm-hint">
-                Publishes landed trades and the daily report to your agent&apos;s public page on
-                app.virtuals.io. <b>Outbound &amp; public</b> — off by default; nothing streams until
+              <span className="mm-hint">{t("settings.hint.publishesLandedTradesAnd")}<b>Outbound &amp; public</b> — off by default; nothing streams until
                 you turn this on and add a key.
               </span>
             </label>
             <Field
-              label="Virtuals API key"
-              hint="Get this from your agent’s page on app.virtuals.io."
+              label={t("settings.label.virtualsApiKey")}
+              hint={t("settings.hint.getThisFromYour")}
             >
               <input
                 type="password"
@@ -1661,9 +2008,9 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               )}
             </Field>
             <Field
-              label="bitquery api key"
+              label={t("settings.label.bitqueryApiKey")}
               action={{ href: "https://account.bitquery.io/", label: "get a key" }}
-              hint="Required for token discovery unless you use a Merry Circle token."
+              hint={t("settings.hint.requiredForTokenDiscovery")}
             >
               <input
                 type="password"
@@ -1678,9 +2025,9 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
               )}
             </Field>
             <Field
-              label="merry circle token"
+              label={t("settings.label.merryCircleToken")}
               action={{ href: `${MERRYMEN_GATEWAY_ORIGIN}/claim`, label: "claim one" }}
-              hint="Claim with your $MERRYMEN wallet for AI and token discovery access. A saved Bitquery key takes priority for discovery."
+              hint={t("settings.hint.claimWithYourMerrymen")}
             >
               <input
                 type="password"
@@ -1696,55 +2043,55 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
             </Field>
           </div>
 
-          <div className="mm-section">Trading preferences</div>
+          <div className="mm-section">{t("settings.section.tradingPreferences")}</div>
           <div className="mm-grid">
-            <Field label="swap venue" hint="Rialto requires an integrator key.">
+            <Field label={t("settings.label.swapVenue")} hint={t("settings.hint.rialtoRequiresAnIntegrator")}>
               <select value={v("swapVenue") || d.swapVenue} onChange={set("swapVenue")}>
                 <option value="uniswap">uniswap</option>
                 <option value="rialto">rialto</option>
               </select>
             </Field>
-            <Field label="max slippage" hint="vs the pre-trade quote.">
-              <input type="number" min={1} max={SLIPPAGE_BPS_MAX} placeholder={String(d.slippageBps)} value={v("slippageBps")} onChange={set("slippageBps")} />
-              <span className="mm-unit">bps</span>
+            <Field label={t("settings.label.maxSlippage")} hint={t("settings.hint.vsThePreTrade")}>
+              <input type="text" inputMode="numeric" placeholder={String(d.slippageBps)} value={v("slippageBps")} onChange={setNum("slippageBps")} aria-invalid={!!numError.slippageBps} />
+              <span className="mm-unit">{t("settings.unit.bps")}</span>
             </Field>
-            <Field label="performance fee" hint="Calculated on new peak profits. Fees are recorded but not collected.">
-              <input type="number" min={0} max={5000} placeholder={String(d.perfFeeBps)} value={v("perfFeeBps")} onChange={set("perfFeeBps")} />
-              <span className="mm-unit">bps</span>
+            <Field label={t("settings.label.performanceFee")} hint={t("settings.hint.calculatedOnNewPeak")}>
+              <input type="text" inputMode="numeric" placeholder={String(d.perfFeeBps)} value={v("perfFeeBps")} onChange={setNum("perfFeeBps")} aria-invalid={!!numError.perfFeeBps} />
+              <span className="mm-unit">{t("settings.unit.bps")}</span>
             </Field>
-            <Field label="Market check interval">
-              <input type="number" min={15} max={3600} placeholder={String(d.tickSeconds)} value={v("tickSeconds")} onChange={set("tickSeconds")} />
-              <span className="mm-unit">sec</span>
+            <Field label={t("settings.label.marketCheckInterval")} hint={t("settings.hint.anActiveBookIs")}>
+              <input type="text" inputMode="numeric" placeholder={String(d.tickSeconds)} value={v("tickSeconds")} onChange={setNum("tickSeconds")} aria-invalid={!!numError.tickSeconds} />
+              <span className="mm-unit">{t("settings.unit.sec")}</span>
             </Field>
-            <Field label="Buy amount per check" hint="Amount spread across the Steady Basket.">
-              <input type="number" min={1} placeholder={String(d.buyPerTickUsdg)} value={v("buyPerTickUsdg")} onChange={set("buyPerTickUsdg")} />
-              <span className="mm-unit">USDG</span>
+            <Field label={t("settings.label.buyAmountPerCheck")} hint={t("settings.hint.amountSpreadAcrossThe")}>
+              <input type="text" inputMode="decimal" placeholder={String(d.buyPerTickUsdg)} value={v("buyPerTickUsdg")} onChange={setNum("buyPerTickUsdg")} aria-invalid={!!numError.buyPerTickUsdg} />
+              <span className="mm-unit">{t("settings.unit.usdg")}</span>
             </Field>
             <Field
-              label="take profit"
-              hint="steady-basket: sell a leg once it is this far ahead of what it cost. 0 never sells — and this is the only exit this strategy has, so at 0 it only ever buys."
+              label={t("settings.label.takeProfit")}
+              hint={t("settings.hint.steadyBasketSellA")}
             >
-              <input type="number" min={0} placeholder={String(d.takeProfitBps)} value={v("takeProfitBps")} onChange={set("takeProfitBps")} />
-              <span className="mm-unit">bps</span>
+              <input type="text" inputMode="numeric" placeholder={String(d.takeProfitBps)} value={v("takeProfitBps")} onChange={setNum("takeProfitBps")} aria-invalid={!!numError.takeProfitBps} />
+              <span className="mm-unit">{t("settings.unit.bps")}</span>
             </Field>
-            <Field label="idle cash floor" hint="steady-basket: cash kept liquid; the excess sweeps to the Morpho vault.">
-              <input type="number" min={0} placeholder={String(d.idleFloorUsdg)} value={v("idleFloorUsdg")} onChange={set("idleFloorUsdg")} />
-              <span className="mm-unit">USDG</span>
+            <Field label={t("settings.label.idleCashFloor")} hint={t("settings.hint.steadyBasketCashKept")}>
+              <input type="text" inputMode="decimal" placeholder={String(d.idleFloorUsdg)} value={v("idleFloorUsdg")} onChange={setNum("idleFloorUsdg")} aria-invalid={!!numError.idleFloorUsdg} />
+              <span className="mm-unit">{t("settings.unit.usdg")}</span>
             </Field>
-            <Field label="gap budget" hint="weekend-gap: total USDG deployed per gap window.">
-              <input type="number" min={1} placeholder={String(d.gapEnterBudgetUsdg)} value={v("gapEnterBudgetUsdg")} onChange={set("gapEnterBudgetUsdg")} />
-              <span className="mm-unit">USDG</span>
+            <Field label={t("settings.label.gapBudget")} hint={t("settings.hint.weekendGapTotalUsdg")}>
+              <input type="text" inputMode="decimal" placeholder={String(d.gapEnterBudgetUsdg)} value={v("gapEnterBudgetUsdg")} onChange={setNum("gapEnterBudgetUsdg")} aria-invalid={!!numError.gapEnterBudgetUsdg} />
+              <span className="mm-unit">{t("settings.unit.usdg")}</span>
             </Field>
-            <Field label="Claude / vision model" hint="Model for Anthropic and screen analysis.">
-              <input type="text" placeholder={d.llmModel} value={v("llmModel")} onChange={set("llmModel")} />
+            <Field label={t("settings.label.claudeVisionModel")} hint={t("settings.hint.modelForAnthropicAnd")}>
+              <input type="text" placeholder={d.llmModel} value={llmProviderVal === "anthropic" ? providerModelVal : v("llmModel")} onChange={llmProviderVal === "anthropic" ? setProviderModel : set("llmModel")} />
             </Field>
-            <Field label="Strategist decision interval">
-              <input type="number" min={1} max={1440} placeholder={String(d.llmIntervalMin)} value={v("llmIntervalMin")} onChange={set("llmIntervalMin")} />
-              <span className="mm-unit">min</span>
+            <Field label={t("settings.label.strategistDecisionInterval")}>
+              <input type="text" inputMode="numeric" placeholder={String(d.llmIntervalMin)} value={v("llmIntervalMin")} onChange={setNum("llmIntervalMin")} aria-invalid={!!numError.llmIntervalMin} />
+              <span className="mm-unit">{t("settings.unit.min")}</span>
             </Field>
-            <Field label="LLM max per action" hint="Hard strategist ceiling per proposed trade — beneath the grant caps.">
-              <input type="number" min={1} placeholder={String(d.llmMaxActionUsdg)} value={v("llmMaxActionUsdg")} onChange={set("llmMaxActionUsdg")} />
-              <span className="mm-unit">USDG</span>
+            <Field label={t("settings.label.llmMaxPerAction")} hint={t("settings.hint.hardStrategistCeilingPer")}>
+              <input type="text" inputMode="decimal" placeholder={String(d.llmMaxActionUsdg)} value={v("llmMaxActionUsdg")} onChange={setNum("llmMaxActionUsdg")} aria-invalid={!!numError.llmMaxActionUsdg} />
+              <span className="mm-unit">{t("settings.unit.usdg")}</span>
             </Field>
           </div>
 
@@ -1753,6 +2100,34 @@ export default function SettingsPage({onFund}:{onFund:()=>void}) {
           <button className="mm-btn primary" onClick={() => void save()} disabled={status === "saving…"}>
             {status ?? "Save changes"}
           </button>
+          {botClaimed && (
+            <div className="mm-note" role="alert">
+              <p style={{ marginTop: 0 }}>{botClaimed}</p>
+              <p className="mm-hint">Nothing has been saved yet.</p>
+              <button className="mm-btn danger sm" onClick={() => void save({ moveBot: true })} disabled={status === "saving…"}>
+                Move it here
+              </button>{" "}
+              {/* KEEPING IT THERE TAKES THE TOKEN OUT OF THE FORM. Left in the
+                  draft, it rode along with every later save, each one was
+                  refused the same way, and whatever else the owner changed
+                  was never saved. The rest of the draft stays for the next Save. */}
+              <button
+                className="mm-btn sm"
+                onClick={() => {
+                  setDraft(({ telegramBotToken: _kept, ...rest }) => rest);
+                  setBotClaimed(null);
+                }}
+              >
+                Keep it there
+              </button>
+            </div>
+          )}
+          {botMoved && (
+            <p className="mm-note" role="status">
+              The bot answers this agent now, and has stopped answering the other one. Link your chat to it here: send it
+              /link with the code shown under Telegram once it appears.
+            </p>
+          )}
           {errors.length > 0 && (
             <div className="mm-danger mono">
               {errors.map((e, i) => (

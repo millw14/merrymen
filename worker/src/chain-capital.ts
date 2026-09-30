@@ -153,6 +153,18 @@ export async function scanFleetCapital(
      * which is every grant today.
      */
     custodyAddressesFor?: (account: string) => readonly string[] | undefined;
+    /**
+     * The energy reserve tokens on this chain — energyReserveTokens(chainId).
+     *
+     * Named, an agent's energy purchase classifies `reserve-out`: capital that
+     * left the trading book, which the worker books as an 'energy-buy' flow and
+     * lowers the peak for. The fleet tools (hwm-repair, reconstruction) must
+     * see it the same way or they disagree with the ledger — un-named it is a
+     * `trade-out`, the derived peak comes out too high by every purchase, and
+     * "never raise a peak" turns every repair into a no-op. Absent is
+     * byte-identical to before.
+     */
+    reserveTokens?: readonly string[];
     log?: (m: string) => void;
   },
 ): Promise<Map<string, AccountCapital>> {
@@ -320,6 +332,7 @@ export async function scanFleetCapital(
               // every agent at once, which is the fleet-scale version of the
               // same bug deposit-log carries per agent.
               custodyAddresses: args.custodyAddressesFor?.(account),
+              reserveTokens: args.reserveTokens,
             })
           : {
               kind: "ambiguous",

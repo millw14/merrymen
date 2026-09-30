@@ -72,7 +72,21 @@ describe("identity is pinned; the amount is re-read", () => {
     // destination, derived vault, and the vault's owner — each one says the
     // operation about to be signed is not the one that was shown.
     assert.match(sweepFn, /approved\.destination\.toLowerCase\(\) !== opts\.to\.toLowerCase\(\)/);
-    assert.match(sweepFn, /plan\.classVault\.toLowerCase\(\) !== approved\.vault\.toLowerCase\(\)/);
+    // MEMBERSHIP RATHER THAN EQUALITY, because the plan now names every vault
+    // this account could have. An approval of the v1 vault is legitimate while
+    // the primary one reported is v2. Still a CLOSED SET derived on this side
+    // from the account — nothing the caller supplies can add to it — so an
+    // approval naming a vault this account does not derive is refused exactly
+    // as before. That is the one rule here that loosened, and it is pinned so
+    // it cannot loosen further into accepting a caller-supplied address.
+    assert.ok(
+      sweepFn.includes("const derivable = plan.classVaults.map((v) => v.vault.toLowerCase())"),
+      "the candidate set is built from the plan, not from the approval",
+    );
+    assert.ok(
+      sweepFn.includes("!derivable.includes(approved.vault.toLowerCase())"),
+      "and an approved vault outside that set is still refused",
+    );
     assert.match(sweepFn, /functionName: "owner"/, "the vault must be asked who owns it");
     assert.match(sweepFn, /vaultOwner!\.toLowerCase\(\) !== account\.address\.toLowerCase\(\)/);
   });

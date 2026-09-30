@@ -43,23 +43,26 @@ describe("what may be published", () => {
     const t = publishableThesis(ok())!;
     assert.equal(t.name, "Much");
     assert.equal(t.handle, "much_miller");
-    assert.equal(t.head, "buy NVDA 16.66 USDG");
+    // No size in public unless the owner opened the book — private-book.test.ts.
+    assert.equal(t.head, "buy NVDA");
+    assert.equal(publishableThesis(ok({ public_book: true }))!.head, "buy NVDA 16.66 USDG");
     assert.equal(t.outcome, "landed");
     assert.equal(t.said, 38);
     assert.match(t.reason!, /the schedule says buy/);
   });
 
   it("publishes the model's words, capped", () => {
+    // A run of x has no boundary to cut at, so this is the pure length case.
+    // The boundary behaviour — cut on a word, add an ellipsis — is pinned in
+    // worker/src/feed-errors.test.ts, where the live 220-character failure is.
     const long = "x".repeat(400);
     const t = publishableThesis(ok({ source: "strategist", reason: long }))!;
-    assert.equal(t.reason!.length, 220, "the /why truncation point");
+    assert.ok(t.reason!.length <= 220, "the /why truncation point is a ceiling");
+    assert.ok(t.reason!.endsWith("…"), "and a cut says that it cut");
   });
 
-  it("an empty model reason is a post with no reasoning line, not the string 'undefined'", () => {
-    // The model omits the field routinely; it arrives as "" rather than null.
-    const t = publishableThesis(ok({ source: "strategist", reason: "" }))!;
-    assert.equal(t.reason, null);
-    assert.equal(t.head, "buy NVDA 16.66 USDG");
+  it("an empty model reason without a post has no thesis to publish", () => {
+    assert.equal(publishableThesis(ok({ source: "strategist", reason: "" })), null);
   });
 });
 
@@ -190,10 +193,8 @@ describe("refusals are classified, never quoted", () => {
     // dropped_rule is `#N <symbol>: <clause>` and <symbol> is model-supplied,
     // validated only as a string — no length cap, no charset.
     const nasty = "#0 <script>alert(1)</script>: nothing held to sell";
-    const t = publishableThesis(ok({ source: "strategist", reason: null, dropped_rule: nasty, status: null }))!;
-    assert.doesNotMatch(t.reason!, /script|alert/);
-    assert.equal(t.reason, "there was nothing held to sell");
-    assert.equal(t.outcome, "dropped");
+    assert.equal(publishableThesis(ok({ source: "strategist", reason: null, dropped_rule: nasty, status: null })), null);
+    assert.equal(classifyDrop(nasty), "there was nothing held to sell");
   });
 
   it("does not echo the FIGURE in a cash refusal", () => {
@@ -219,7 +220,10 @@ describe("refusals are classified, never quoted", () => {
   });
 
   it("a known rule reads as a sentence", () => {
-    const t = publishableThesis(ok({ status: "rejected", reject_rule: "daily-cap" }))!;
+    // On a MODEL source: a deterministic strategy's refusal on an account-wide
+    // rule is the owner's fact and no longer a post (account-refusals.test.ts),
+    // while a model's refused thesis still publishes with the rule in words.
+    const t = publishableThesis(ok({ source: "strategist", status: "rejected", reject_rule: "daily-cap" }))!;
     assert.equal(t.outcomeText, "past today's spending cap");
   });
 });
@@ -301,7 +305,7 @@ describe("shadow decisions say the conditional out loud", () => {
     const t = publishableThesis(shadow())!;
     assert.equal(t.shadow, true);
     assert.equal(t.outcome, "shadow");
-    assert.equal(t.head, "would buy TSLA 5.00 USDG");
+    assert.equal(t.head, "would buy TSLA");
     assert.match(t.outcomeText, /not traded/);
     // The three outcomes that assert something reached the chain, and the one
     // that asserts it is on its way. A shadow decision is none of them.
@@ -310,14 +314,17 @@ describe("shadow decisions say the conditional out loud", () => {
 
   it("says 'would sell' rather than 'sell'", () => {
     const t = publishableThesis(shadow({ action: "sell" }))!;
-    assert.equal(t.head, "would sell TSLA 5.00 USDG");
+    assert.equal(t.head, "would sell TSLA");
+    // The conditional survives the size coming back on a public book.
+    assert.equal(publishableThesis(shadow({ action: "sell", public_book: true }))!.head, "would sell TSLA 5.00 USDG");
   });
 
   it("leaves a hold alone — there is nothing to disclaim", () => {
     // "would hold" is not English an agent would speak, and a hold in shadow and
     // a hold in production are the same event: nothing happened, on purpose.
     const t = publishableThesis(shadow({ action: "hold", size_usdg: 0 }))!;
-    assert.equal(t.head, "hold TSLA 0.00 USDG");
+    // No size on a hold: "0.00 USDG" was a Brain-forced delta rendered as a figure.
+    assert.equal(t.head, "hold TSLA");
     assert.equal(t.outcome, "shadow");
     assert.match(t.outcomeText, /by choice/);
   });

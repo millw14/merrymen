@@ -97,11 +97,43 @@ function stableIndex(agentId: string, n: number): number {
 }
 
 /**
+ * A RAIL WHOSE EXITS DO NOT DEPEND ON THIS CHOICE MAY LOOK ELSEWHERE.
+ *
+ * Set only by the Trencher rail. There, `trencher.ts` runs "exits first,
+ * always" off the trading tick: `shouldExit` is mechanical — price, liquidity,
+ * elapsed time — and the Brain is consulted as an ADDITIONAL exit trigger
+ * (`!verdict.exit && brain?.side !== "sell"`), never as a requirement. Skipping
+ * a held position's review therefore cannot delay a stop, a take-profit, a
+ * drain exit or the max-hold exit, which is what made the outright rule
+ * necessary everywhere else.
+ *
+ * Every field carries its unit in its name. This file already reasons about
+ * two clocks and the product has paid for a seconds-into-a-milliseconds
+ * formatter before.
+ */
+export interface FocusAlternation {
+  /** When each held symbol was last ACTUALLY reviewed. Absent means never. */
+  lastReviewedAtMs: ReadonlyMap<string, number>;
+  nowMs: number;
+  /** A held position may not go longer than this unreviewed. */
+  maxGapMs: number;
+}
+
+/**
  * Pick the instrument this run is about. PURE.
  *
  * Held positions win outright: an existing exposure is a live risk and a
  * hypothetical opening is not, so nothing about an empty-book candidate should
  * ever displace a real one.
+ *
+ * THE ONE EXCEPTION IS OPT-IN AND BOUNDED — see `FocusAlternation`. Without it
+ * nothing below changes. With it, a candidate may take a slot while a position
+ * is open, but only while every held position is inside its review gap: an
+ * overdue one, or one never reviewed at all, still wins outright. Measured on
+ * the live fleet 2026-09-21, the unconditional rule meant an agent holding one
+ * memecoin reviewed only that coin, so it could never open a second position
+ * and the gap between trades was the hold duration rather than the review
+ * interval.
  */
 export function chooseFocus(args: {
   /** Stable seed for the tiebreak. Different agents, different questions. */
@@ -110,20 +142,56 @@ export function chooseFocus(args: {
   universe: readonly UniverseToken[];
   prices: ReadonlyMap<string, QuotedPrice>;
   paused: ReadonlySet<string>;
+  /** Opt-in. Absent = a held position wins outright, as it always has. */
+  alternate?: FocusAlternation;
 }): BrainFocus | null {
-  const held = [...args.positions]
+  // Biggest first, and the symbol breaks a tie so two equal positions cannot
+  // swap the focus between otherwise identical ticks.
+  const open = [...args.positions]
     .filter((p) => p.valueUsdg > 0)
-    .sort((a, b) => b.valueUsdg - a.valueUsdg)[0];
+    .sort((x, y) => y.valueUsdg - x.valueUsdg || x.symbol.localeCompare(y.symbol));
+  const held = open[0];
+  const heldFocus = (p: HeldPosition): BrainFocus => ({
+    symbol: p.symbol,
+    token: p.token,
+    price8: p.price8,
+    priceStale: p.priceStale,
+    priceSource: p.priceSource,
+    heldUsdg: p.valueUsdg,
+    held: true,
+  });
   if (held) {
-    return {
-      symbol: held.symbol,
-      token: held.token,
-      price8: held.price8,
-      priceStale: held.priceStale,
-      priceSource: held.priceSource,
-      heldUsdg: held.valueUsdg,
-      held: true,
-    };
+    if (!args.alternate) return heldFocus(held);
+    const alt = args.alternate;
+    const at = (p: HeldPosition) => alt.lastReviewedAtMs.get(p.symbol);
+    // ABSENT IS NOT RECENT. A position opened this tick has no entry in the
+    // map, and reading that as "reviewed just now" would let a brand new
+    // exposure go unexamined for a whole gap — the reading a `?? nowMs` would
+    // silently get wrong.
+    const due = open.filter((p) => {
+      const t = at(p);
+      return t === undefined || alt.nowMs - t >= alt.maxGapMs;
+    });
+    // THE LONGEST UNREVIEWED, NOT THE BIGGEST.
+    //
+    // The rule outside this branch picks the biggest holding, and reusing it
+    // here would starve every smaller one: an overdue small position would
+    // block entries (it is due) while the slot went to the big one (it is
+    // first), so the thing the gap exists to protect would never be looked at
+    // and the alternation would stall permanently. Never-reviewed outranks any
+    // timestamp, and `open`'s order breaks the remaining ties so the choice
+    // stays deterministic across identical ticks.
+    if (due.length > 0) {
+      return heldFocus(
+        due.reduce((best, p) => {
+          const tb = at(best);
+          if (tb === undefined) return best;
+          const tp = at(p);
+          if (tp === undefined) return p;
+          return tp < tb ? p : best;
+        }, due[0]!),
+      );
+    }
   }
 
   const eligible = args.universe
@@ -133,7 +201,10 @@ export function chooseFocus(args: {
       if (args.paused.has(x.t.symbol)) return false;
       return !CANNOT_OPEN_ON.has(x.q.source);
     });
-  if (eligible.length === 0) return null;
+  // NOTHING TO ENTER IS NOT A REASON TO REVIEW NOTHING. Reached only when a
+  // held position yielded its slot, so falling through to null here would skip
+  // the tick entirely and leave the position unexamined for no gain.
+  if (eligible.length === 0) return held ? heldFocus(held) : null;
 
   // ORDERED, NOT RANDOM. A focus that changed between two otherwise identical
   // ticks would make the decision tape impossible to read: two runs would

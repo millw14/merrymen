@@ -30,6 +30,7 @@ import {
   totalGas,
   type UserOpGas,
 } from "./gas-limits";
+import { classifyRevert } from "./revert";
 
 export interface Call {
   to: `0x${string}`;
@@ -49,8 +50,20 @@ export interface ExecutionResult {
   txHash: `0x${string}`;
   /** OUR operation. The only id that identifies this trade on a 4337 explorer. */
   userOpHash: `0x${string}`;
-  /** Emitted logs — the real swap amounts live here (see fills.ts). */
-  logs: readonly { address: string; topics: readonly string[]; data: string }[];
+  /**
+   * Emitted logs — the real swap amounts live here (see fills.ts). viem hands
+   * back each log's position too; typed optional, as in fills.ts ReceiptLog,
+   * so the energy booking can key a flow on tx#logIndex from the receipt it
+   * already has instead of re-reading it.
+   */
+  logs: readonly {
+    address: string;
+    topics: readonly string[];
+    data: string;
+    logIndex?: number | string | bigint | null;
+    blockNumber?: bigint | number | string | null;
+    transactionHash?: string | null;
+  }[];
   /**
    * Gas actually paid, in wei. The account self-pays with no paymaster, so this
    * is a real cost of the trade and it was invisible to P&L: `equity_usdg` is
@@ -353,8 +366,14 @@ export interface ExecuteHooks {
    * whose row could not be written is an operation nothing can ever reconcile,
    * so not sending it is strictly better than sending it blind. Nothing has been
    * signed to the network at that point and nothing is spent.
+   *
+   * `op.nonce` is the nonce the operation was SIGNED with — the full ERC-4337
+   * uint256 the hash commits to. The row keeps it because a nonce is spent
+   * once: if this op is dropped and the next one, signed with the same nonce,
+   * executes, this one can never land, and only the recorded nonce lets the
+   * resolver prove it (inflight-reconcile.ts findDroppedOps).
    */
-  onSubmitted?(userOpHash: `0x${string}`): Promise<void>;
+  onSubmitted?(userOpHash: `0x${string}`, op: { nonce: bigint | null }): Promise<void>;
 }
 
 export interface AgentExecutor {
@@ -696,13 +715,45 @@ export async function createAgentExecutor(opts: {
           `${bounded.ok ? "" : ` (${bounded.rule})`}`,
       );
       if (!bounded.ok) {
+        // ── WHY THE BUNDLER'S ERROR IS CLASSIFIED, NOT JUST QUOTED ────────
+        //
+        // `boundGas` can only ever answer `gas-unreadable` here, because all it
+        // saw was two nulls. But the reason it saw nulls is sitting in
+        // `estimateError`, and it is frequently not about gas at all: when
+        // validation reverts, the bundler declines to estimate and reports the
+        // revert. Filing that as `gas-unreadable` is a misattribution with a
+        // cost — `reject_rule` is what the ledger, the feed vocabulary and the
+        // owner's remedy all key on, and `gas-unreadable` reads as a transient
+        // bundler hiccup worth retrying.
+        //
+        // Measured on 4663, 2026-09-20: 20 consecutive refusals of agent
+        // 0x8e93ba's Trencher entries were `AA23 reverted duplicate
+        // permissionHash` — a permanent, account-level condition needing a
+        // re-signed grant — every one filed as `gas-unreadable` and retried
+        // every few minutes, indefinitely.
+        //
+        // ONLY A NON-RETRYABLE CLASS IS ALLOWED TO RENAME THE REFUSAL. An
+        // unfamiliar message stays `gas-unreadable`, which is the honest answer
+        // when we genuinely do not know why the estimate failed, and a
+        // retryable class stays that way too: those really may be transient, and
+        // relabelling one would suppress a trade that deserves another tick.
+        //
+        // NOTHING ABOUT THE MONEY CHANGES. The operation is refused before
+        // signing either way; only the name on the refusal and the sentence
+        // under it differ.
+        const diagnosed = estimateError ? classifyRevert(estimateError) : null;
+        const renamed = diagnosed && !diagnosed.retryable && diagnosed.rule !== "unclassified" ? diagnosed : null;
         // BEFORE the send, so nothing is spent and no 'submitted' row exists.
         // This is a pre-broadcast rejection in the same shape as a policy one.
         throw new GasRefused(
-          bounded.rule,
+          renamed ? renamed.rule : bounded.rule,
           // The bundler's own words first when we have them — they are the
           // diagnosis; ours is the policy.
-          estimateError ? `${estimateError} — ${bounded.detail}` : bounded.detail,
+          renamed
+            ? `${estimateError} — ${renamed.detail}`
+            : estimateError
+              ? `${estimateError} — ${bounded.detail}`
+              : bounded.detail,
         );
       }
 
@@ -805,7 +856,7 @@ export async function createAgentExecutor(opts: {
 
       // DURABLE BEFORE BROADCAST. From here on, every outcome — accepted,
       // refused, or never answered — has a row to attach itself to.
-      if (hooks?.onSubmitted) await hooks.onSubmitted(userOpHash);
+      if (hooks?.onSubmitted) await hooks.onSubmitted(userOpHash, { nonce: typeof prepared.nonce === "bigint" ? prepared.nonce : null });
 
       let accepted: `0x${string}`;
       try {

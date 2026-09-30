@@ -34,6 +34,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { NewsItem } from "./research/news";
+import { isBuilderRecord, type BuilderRecord } from "./research/builder";
 
 const FILE = "research.json";
 
@@ -57,6 +58,22 @@ export interface ResearchFile {
     failure: string | null;
     items: NewsItem[];
   };
+  /**
+   * What a builder directory said about the coins in THIS tenant's universe.
+   *
+   * NO `asked` FIELD, AND THAT IS NOT AN OVERSIGHT — it is the difference
+   * between this desk and the news one. `asked` exists above because a symbol
+   * with no stories and a symbol nobody queried are the same empty list and
+   * have to be told apart. Here they cannot be confused: a contract that was
+   * asked about produces a record whatever the answer was, including the
+   * answer "we hold no page for this", so a missing record means exactly one
+   * thing — nobody has asked yet. The absence IS the honesty field.
+   *
+   * A FAILED LOOKUP IS ALSO A MISSING RECORD, on purpose, and the desk treats
+   * it the same way: no lens. See builder-pass.ts on why an outage must not be
+   * stored as an empty result.
+   */
+  builders: BuilderRecord[];
 }
 
 export function researchFilePath(home: string): string {
@@ -66,6 +83,7 @@ export function researchFilePath(home: string): string {
 export const EMPTY_RESEARCH: ResearchFile = {
   at: 0,
   news: { asked: [], fetchedAt: 0, failure: null, items: [] },
+  builders: [],
 };
 
 /**
@@ -108,6 +126,11 @@ export function readResearch(home: string): ResearchFile {
         failure: typeof news.failure === "string" && news.failure ? news.failure : null,
         items: Array.isArray(news.items) ? news.items.filter(isNewsItem) : [],
       },
+      // ABSENT IS EMPTY, NOT INVALID. A file written by an orchestrator that
+      // predates the builder desk has no `builders` key at all, and a reader
+      // that treated a missing key as a malformed file would throw away a
+      // perfectly good news desk during every rollout.
+      builders: Array.isArray(f.builders) ? f.builders.filter(isBuilderRecord) : [],
     };
   } catch {
     return EMPTY_RESEARCH;

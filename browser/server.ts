@@ -24,6 +24,7 @@
 import { createServer } from "node:http";
 import { chromium } from "playwright";
 import { safeFetchUrl } from "../packages/core/src/safe-url";
+import { createPublicProxy } from "../packages/core/src/server/public-proxy";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const TOKEN = process.env.MERRYMEN_BROWSER_TOKEN ?? "";
@@ -35,13 +36,29 @@ const MAX_LINKS = 40;
 const VIEWPORT = { width: 1280, height: 900 };
 
 let browser: import("playwright").Browser | null = null;
+let outboundProxy: Awaited<ReturnType<typeof createPublicProxy>> | null = null;
 let busy = false;
 
 async function getBrowser() {
   if (browser?.isConnected()) return browser;
-  browser = await chromium.launch({
-    args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-  });
+  await outboundProxy?.close();
+  outboundProxy = await createPublicProxy();
+  try {
+    browser = await chromium.launch({
+      proxy: { server: outboundProxy.url, bypass: "<-loopback>" },
+      args: [
+        "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+        // All TCP destinations, including redirects and worker/subresource
+        // requests, must pass the proxy's DNS validation and pinned dial.
+        "--proxy-bypass-list=<-loopback>", "--disable-quic",
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+      ],
+    });
+  } catch (error) {
+    await outboundProxy.close();
+    outboundProxy = null;
+    throw error;
+  }
   return browser;
 }
 
@@ -60,9 +77,22 @@ async function read(url: URL) {
     // are telling us something, and we should hear it rather than evade it.
     javaScriptEnabled: true,
     ignoreHTTPSErrors: false,
+    serviceWorkers: "block",
+    acceptDownloads: false,
   });
-  const page = await ctx.newPage();
   try {
+    // Routing is a second gate, not the transport boundary: Chromium can
+    // follow a redirect without invoking the same route handler again.
+    await ctx.route("**/*", (route) => safeFetchUrl(route.request().url()) ? route.continue() : route.abort());
+    await ctx.routeWebSocket("**/*", (socket) => socket.close());
+    await ctx.addInitScript(() => {
+      // Research needs no peer-to-peer sockets. Disabling the API also covers
+      // same-origin frames; the launch policy blocks non-proxied UDP beneath it.
+      for (const name of ["RTCPeerConnection", "webkitRTCPeerConnection"]) {
+        Object.defineProperty(globalThis, name, { value: undefined, configurable: false, writable: false });
+      }
+    });
+    const page = await ctx.newPage();
     page.setDefaultTimeout(NAV_TIMEOUT_MS);
     const res = await page.goto(url.toString(), { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS });
     // Give a single-page app a beat to render, but never more than a beat.

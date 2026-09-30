@@ -9,10 +9,12 @@ import { ThesisCard } from "@/components/ThesisCard";
 import { KillSwitch } from "@/components/KillSwitch";
 import { railNotices } from "@/lib/rail-notices";
 import { rankPnl, unrankedLabel } from "@/lib/rank-pnl";
+import { pnlBasisOf, type FeedMeasured } from "@/lib/feed-pnl";
 import { statusLine, type AgentSnapshot } from "@/lib/status-line";
 import { rejectRuleLabel } from "@merrymen/thesis";
 import { timeAgo } from "@/lib/time";
 import type { PublicThesis } from "@/lib/thesis";
+import { usd } from "@/lib/format";
 
 /**
  * YOUR agent. One tab in a social product, not a control room.
@@ -51,8 +53,10 @@ interface FeedResponse {
   equity?: { equity_usdg: number }[];
   positions?: FeedPosition[];
   trades?: FeedTrade[];
-  agent?: { name?: string; strategy?: string; basket?: string[] } | null;
+  agent?: { name?: string; slug?: string | null; strategy?: string; basket?: string[] } | null;
   netContributionsUsdg?: number | null;
+  /** The mark a return is measured at, and what was booked by it — see lib/feed-pnl.ts. */
+  measured?: FeedMeasured | null;
   gasUsdg?: number;
   /** Landed fills whose gas could not be priced. Non-zero means GROSS of gas. */
   gasUnpricedTrades?: number;
@@ -73,7 +77,7 @@ interface GrantsResponse {
 }
 
 const money = (n: number) =>
-  `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  usd(n);
 
 export function YouClient() {
   const [feed, setFeed] = useState<FeedResponse | null>(null);
@@ -183,8 +187,14 @@ export function YouClient() {
   // deposit and no equity rows rendered "-100.0% all time". A fabricated number
   // out of an absence, on the owner's own dashboard.
   const latest = curve.length ? curve[curve.length - 1]! : null;
-  const contributed = feed?.netContributionsUsdg ?? null;
   const gas = feed?.gasUsdg ?? 0;
+  // THE RETURN'S PAIR, NOT THE HEADLINE'S VALUE. `latest` above is what the
+  // book is worth now, a held mark included; a return subtracts the booked
+  // contributions, so it is measured on the newest measured mark and the
+  // flows booked by it (lib/feed-pnl.ts), or a top-up made during a hold
+  // reads as profit until the hold ends.
+  const basis = pnlBasisOf(feed);
+  const contributed = basis.contributed;
 
   // THROUGH THE SHARED GATE, not a fifth copy of the formula.
   //
@@ -195,13 +205,13 @@ export function YouClient() {
   // percentage over an unevidenced denominator.
   const rank = rankPnl({
     contributed,
-    latest,
+    latest: basis.latest,
     gasUsdg: gas,
     landed: feed?.landed ?? 0,
     contributionsKnown: feed?.contributionsKnown ?? null,
   });
   const pnlPct = rank.pnlBps === null ? null : rank.pnlBps / 100;
-  const pnl = rank.pnlBps === null || contributed === null || latest === null ? null : latest - contributed - gas;
+  const pnl = rank.pnlBps === null || contributed === null || basis.latest === null ? null : basis.latest - contributed - gas;
 
   const positions = feed?.positions ?? [];
   const trades = (feed?.trades ?? []).slice(0, 7);
@@ -287,7 +297,7 @@ export function YouClient() {
 
         <section className="mm-hero">
           <div className="mm-hero-top">
-            <AgentAvatar name={name} size={44} />
+            <AgentAvatar name={name} slug={feed?.agent?.slug ?? null} size={44} />
             <div>
               <p className="mm-kicker">everything it holds</p>
               <p className="big mono">{money(latest || cash + vault + positionsUsdg)}</p>

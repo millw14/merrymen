@@ -49,7 +49,13 @@ describe("recovery reaches the class vault at all", () => {
       /if \(plan\.balances\.length === 0 && nativeSweptWei === 0n && plan\.classHoldings\.length === 0\)/,
       "the early return must consider the vault before claiming nothing to recover",
     );
-    assert.match(CLI, /plan\.classHoldings\.length/, "and the CLI must say so too");
+    // ACROSS EVERY VAULT, now that an account can have two. Counting only the
+    // primary one would print "this account is empty" over a full second vault
+    // — the same defect this test was written for, with a different cause.
+    assert.ok(
+      CLI.includes("plan.classVaults.reduce((n, v) => n + v.holdings.length, 0)"),
+      "the CLI must count holdings across every vault before claiming nothing",
+    );
   });
 });
 
@@ -67,12 +73,50 @@ describe("it depends on the owner key and an RPC, and nothing else", () => {
 
   it("derives the vault with NO grant, because recovery may have none", () => {
     // `merrymen recover` accepts a pasted owner key with nothing else, and can
-    // run against an archived grant. The factory constant is what makes the
-    // vault derivable from the owner key alone — which is exactly why it is a
+    // run against an archived grant. The factory constants are what make the
+    // vault derivable from the owner key alone — which is exactly why they are a
     // deploy fact rather than a setting anyone can edit.
-    const call = RECOVER.slice(RECOVER.indexOf("findClassVault({"));
-    assert.match(call.slice(0, 500), /grant: null/, "recovery derives rather than reads a grant");
+    const call = RECOVER.slice(RECOVER.indexOf("findClassVaults({"));
+    assert.ok(call.length > 0, "recovery must enumerate vaults, not pick one");
+    assert.match(call.slice(0, 600), /grant: null/, "recovery derives rather than reads a grant");
     assert.ok(PONS_CLASS_VAULT_FACTORY[4663], "and a deployed factory makes that possible on mainnet");
+  });
+
+  it("ASKS BOTH FACTORIES, because after v2 one address is a guess", () => {
+    // The timing is what makes this urgent rather than tidy. When an owner
+    // re-signs onto a v2 factory, their v1 vault stops being reachable by the
+    // session key — recovery becomes the only way left to whatever is still
+    // sitting in it. A recovery that looks in one place reports "nothing found"
+    // over a real balance, and that false negative is the failure this module
+    // exists to prevent.
+    const src = readFileSync(
+      path.join(__dirname, "class-recovery.ts"),
+      "utf8",
+    );
+    assert.ok(src.includes("PONS_CLASS_VAULT_FACTORY_V2[args.chainId]"), "v2 must be asked");
+    assert.ok(src.includes("PONS_CLASS_VAULT_FACTORY[args.chainId]"), "and v1 must still be asked");
+    // Per factory, never for the lookup: one refusing a read says nothing about
+    // the other, and collapsing them turns a partial answer into no answer.
+    assert.ok(src.includes("unreadable.push({ factory"), "a failed read is named, not collapsed");
+  });
+  it("ONE OPERATION PER VAULT, because the batch is atomic", () => {
+    // sweep(token) is a call ON a vault, so the target travels with the holding.
+    // Two vaults in one operation means a dead one takes the live one down and
+    // `skipped` cannot say which failed.
+    assert.ok(
+      RECOVER.includes("for (const target of vaultsToSweep)"),
+      "the sweep loops over vaults rather than naming one",
+    );
+    assert.ok(
+      RECOVER.includes("async function sweepOneVault("),
+      "and each vault gets its own operation rather than sharing a batch",
+    );
+    // The refusal names the address, because with two vaults "the class vault
+    // sweep failed" is a question the owner cannot answer.
+    assert.ok(
+      RECOVER.includes("class vault ${classVault}"),
+      "a skipped sweep names which vault still holds the tokens",
+    );
   });
 
   it("uses the SUDO validator, never the session key", () => {
@@ -103,13 +147,36 @@ describe("a vault sweep is two operations, and fails safely", () => {
     assert.equal(kept[0]!.symbol, "A");
   });
 
+  /**
+   * The class-sweep section of recover.ts, bounded by its own STRUCTURE.
+   *
+   * These assertions used to slice a fixed 9,000 characters after the "OP 1"
+   * marker, and that number is a proxy for "the class sweep section" that stops
+   * being true the moment the section grows. It did: going one-operation-per-vault
+   * pushed `skipped.push` to 9,045 characters past the marker.
+   *
+   * WORSE, IT FAILED ONLY ON SOME CHECKOUTS. CRLF costs one byte a line, so a
+   * Windows working tree crossed the boundary while Linux CI stayed 250 bytes
+   * inside it and reported green. A test that depends on line endings is a test
+   * that tells different people different things about the same commit.
+   *
+   * The account sweep begins at `const movable`, which is a real boundary and
+   * cannot drift.
+   */
+  const CLASS_ARM = (() => {
+    const from = RECOVER.indexOf("OP 1: EMPTY THE CLASS VAULT");
+    const to = RECOVER.indexOf("const movable: TokenBalance[]", from);
+    assert.ok(from > -1, "the class sweep section must be findable by its own heading");
+    assert.ok(to > from, "and it must end where the account sweep begins");
+    return RECOVER.slice(from, to);
+  })();
+
   it("re-reads the account balance after the sweep rather than predicting it", () => {
     // A Kernel batch cannot thread call N's return into call N+1's arguments,
     // and a curve token is exactly the asset that moves between a pre-read and
     // a send. An oversized transfer reverts, and the batch is atomic — it would
     // take the USDG and the ETH with it.
-    const arm = RECOVER.slice(RECOVER.indexOf("OP 1: EMPTY THE CLASS VAULT"));
-    assert.match(arm.slice(0, 9000), /functionName: "balanceOf"/, "op 2 must size from a fresh read");
+    assert.match(CLASS_ARM, /functionName: "balanceOf"/, "op 2 must size from a fresh read");
   });
 
   it("a failed vault sweep does not stop the rest of the recovery — WHEN IT WAS NOT APPROVED", () => {
@@ -119,9 +186,8 @@ describe("a vault sweep is two operations, and fails safely", () => {
     // caller who approved no class leg, and wrong for one who did.
     // A vault that will not give up its tokens must not strand the USDG and ETH
     // an owner can see. Reported in `skipped`, never silent.
-    const arm = RECOVER.slice(RECOVER.indexOf("OP 1: EMPTY THE CLASS VAULT"));
-    assert.match(arm.slice(0, 9000), /skipped\.push/, "the failure is reported and survived");
-    assert.match(arm.slice(0, 9000), /still in the vault/, "and the owner is told what to do");
+    assert.match(CLASS_ARM, /skipped\.push/, "the failure is reported and survived");
+    assert.match(CLASS_ARM, /still in (the|that) vault/, "and the owner is told what to do");
   });
 
   it("an unreadable vault is NOT reported as an empty one", () => {
@@ -156,12 +222,17 @@ describe("the exit and the recovery path meet at graduation", () => {
     // PonsClassVault._checkCurve reverts CurveGraduated by name, because
     // graduation resets the reserves. The exit does not get worse — it
     // disappears — which is why the cliff fires before it, not after.
-    const sol = readFileSync(
-      path.join(__dirname, "..", "..", "contracts", "contracts", "PonsClassVault.sol"),
-      "utf8",
-    );
-    assert.match(sol, /revert CurveGraduated\(\)/, "the contract refuses a graduated curve outright");
-    assert.match(sol, /function sweep\(address token\) external only/, "but sweep stays available");
+    // BOTH VERSIONS. v1 is deployed and may hold a position; v2 is what new
+    // grants will point at. A property asserted of one and not the other is a
+    // property that silently stops holding the day the fleet moves.
+    for (const name of ["PonsClassVault.sol", "PonsClassVaultV2.sol"]) {
+      const sol = readFileSync(
+        path.join(__dirname, "..", "..", "contracts", "contracts", name),
+        "utf8",
+      );
+      assert.match(sol, /revert CurveGraduated\(\)/, `${name} refuses a graduated curve outright`);
+      assert.match(sol, /function sweep\(address token\) external only/, `${name} keeps sweep available`);
+    }
   });
 
   it("and sweep is deliberately NOT granted to the session key", () => {
@@ -180,7 +251,17 @@ describe("the exit and the recovery path meet at graduation", () => {
     // position that most needs to close. But a floor, always: an exit with no
     // floor into a curve nobody can read is how a position leaves for nothing.
     assert.match(EXIT, /curveMinOut\(quoted, cfg\.slippageBps\)/);
-    assert.match(EXIT, /if \(floor === null \|\| floor <= 0n\) continue;/);
+    // THE GUARD, NOT ITS OLD ONE-LINER. It used to be a bare `continue`, which
+    // also meant a position whose curve would not yield a floor was dropped in
+    // silence every tick, forever — indistinguishable from one that had simply
+    // not aged. It now warns the owner before continuing, so the assertion is
+    // on the refusal rather than on the statement that used to express it.
+    assert.match(EXIT, /if \(floor === null \|\| floor <= 0n\) \{/, "a sell with no floor must be refused");
+    assert.match(
+      EXIT,
+      /if \(floor === null \|\| floor <= 0n\) \{[\s\S]{0,400}?continue;/,
+      "and refusing must mean not selling",
+    );
     assert.ok(!/maxImpactBps/.test(EXIT), "and no impact ceiling that could trap it");
   });
 });

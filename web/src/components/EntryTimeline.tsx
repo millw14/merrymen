@@ -1,4 +1,5 @@
 import { AgentAvatar } from "@/components/AgentAvatar";
+import { fullDateTime } from "@/lib/format";
 
 /**
  * WHO GOT IN, AND WHEN.
@@ -89,7 +90,7 @@ export function EntryTimeline({
               key={`${e.name}:${e.at}:${i}`}
               className={`pin${e.paper ? " unsettled" : ""}`}
               style={{ left: `${x}%`, zIndex: sorted.length - i }}
-              title={`${e.name} — ${new Date(e.at * 1000).toLocaleString()}${
+              title={`${e.name} — ${fullDateTime(e.at * 1000)}${
                 e.paper ? " (paper)" : ""
               }`}
             >

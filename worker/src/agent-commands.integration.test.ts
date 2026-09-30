@@ -26,7 +26,7 @@ import path from "node:path";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-cmd-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, enqueueCommand, claimCommand, finishCommand, latestCommand } = await import("./store");
+const { closeStoreForTest, initStore, enqueueCommand, claimCommand, finishCommand, latestCommand } = await import("./store");
 const { homePaths } = await import("./home");
 const { DatabaseSync } = await import("node:sqlite");
 
@@ -36,11 +36,8 @@ const OTHER = "0xagent0000000000000000000000000000000002";
 const TIED = "0xagent0000000000000000000000000000000003";
 
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* best-effort */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("the agent command queue", () => {
@@ -134,10 +131,16 @@ describe("the agent command queue", () => {
     // A test for tie-breaking has to guarantee the tie, not hope for it.
     const raw = new DatabaseSync(homePaths.db());
     const SAME = 1_800_000_000_000;
-    for (const id of ["tie-c", "tie-a", "tie-b"]) {
-      raw
-        .prepare("INSERT INTO agent_commands (id, agent_id, kind, created_at) VALUES (?, ?, ?, ?)")
-        .run(id, TIED, "selftest", SAME);
+    try {
+      for (const id of ["tie-c", "tie-a", "tie-b"]) {
+        raw
+          .prepare("INSERT INTO agent_commands (id, agent_id, kind, created_at) VALUES (?, ?, ?, ?)")
+          .run(id, TIED, "selftest", SAME);
+      }
+    } finally {
+      // A second handle on the ledger outlives this test unless it is closed, and
+      // Windows will not delete a file that anything still holds.
+      raw.close();
     }
     const drained: string[] = [];
     for (;;) {

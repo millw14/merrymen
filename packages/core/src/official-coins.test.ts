@@ -24,7 +24,7 @@ import {
 } from "./official-coins";
 import { CASH, STOCK_TOKENS } from "./tokens";
 import { builtinGrantTargets, usableExtraTokens } from "./index";
-import { ponsAdapterForSigning, PONS_CLASS_VAULT_FACTORY, PONS_SELF_TRADE } from "./protocols";
+import { ponsAdapterForSigning, PONS_CLASS_VAULT_FACTORY, PONS_CLASS_VAULT_FACTORY_V2, PONS_SELF_TRADE } from "./protocols";
 
 const MAINNET = 4663;
 const TESTNET = 46630;
@@ -257,9 +257,11 @@ describe("ponsAdapterForSigning", () => {
     // by nothing and absent only when nothing has been deployed, so the file's
     // absence has to mean the constants are null rather than "skip the check".
     //
-    // BOTH DEPLOY CONSTANTS, from one table. Written per-contract, the second
-    // one gets added the day it is deployed and forgotten every day after —
-    // which is precisely the drift this test exists to catch.
+    // EVERY DEPLOY CONSTANT, FROM ONE TABLE. Written per-contract, the next one
+    // gets added the day it is deployed and forgotten every day after — which is
+    // precisely the drift this test exists to catch. The class-vault factory is
+    // listed at both versions on purpose: v1 stays pinned because a v1 vault may
+    // still hold a position, and recovery derives that vault from the factory.
     const file = path.join(__dirname, "..", "..", "..", "contracts", "deployments.json");
     let book: Record<string, Record<string, { address?: string }>> = {};
     let present = true;
@@ -271,6 +273,7 @@ describe("ponsAdapterForSigning", () => {
     const PINNED: readonly [string, Readonly<Record<number, string | null>>][] = [
       ["PonsSelfTrade", PONS_SELF_TRADE],
       ["PonsClassVaultFactory", PONS_CLASS_VAULT_FACTORY],
+      ["PonsClassVaultFactoryV2", PONS_CLASS_VAULT_FACTORY_V2],
     ];
     for (const [contract, table] of PINNED) {
       for (const chainId of [MAINNET, TESTNET]) {
@@ -311,6 +314,7 @@ describe("ponsAdapterForSigning", () => {
     const TABLES: Record<string, Readonly<Record<number, string | null>>> = {
       PonsSelfTrade: PONS_SELF_TRADE,
       PonsClassVaultFactory: PONS_CLASS_VAULT_FACTORY,
+      PonsClassVaultFactoryV2: PONS_CLASS_VAULT_FACTORY_V2,
     };
     for (const [chainId, contracts] of Object.entries(book)) {
       for (const [contract, rec] of Object.entries(contracts)) {

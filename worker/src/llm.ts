@@ -145,10 +145,65 @@ function chatUrl(creds: LlmCreds): string {
  */
 const REASONING_MODELS = ["gpt-oss", "deepseek-r1", "qwen3-thinking", "nemotron"] as const;
 
+/**
+ * PROVIDERS THAT HAVE REFUSED THE HINT, so we ask them once and then stop.
+ *
+ * Keyed by base URL rather than by model: the refusal is a property of the
+ * PROVIDER's schema, not of the weights — Groq rejects `reasoning_effort:
+ * "none"` for gpt-oss while other hosts of the same model accept it.
+ *
+ * In-process and deliberately not persisted. It costs one 400 per process to
+ * rediscover, which is the right trade against carrying state that could go
+ * stale when a provider fixes its schema.
+ */
+const REASONING_HINT_REFUSED = new Set<string>();
+
+/**
+ * THE COMMENT ABOVE WAS WRONG IN ONE WORD, AND THE WORD COST EVERY CALL.
+ *
+ * "best-effort by construction: a provider that does not know `reasoning_effort`
+ * ignores it" — true, and beside the point. Groq DOES know the field and
+ * VALIDATES it: it accepts `low`, `medium` and `high`, and answers `"none"` with
+ *
+ *     400 — `reasoning_effort` must be one of `low`, `medium`, or `high`
+ *
+ * So for every tenant on a Groq gpt-oss model — which is what this deployment
+ * runs — every worker-side LLM call failed before it was sent. Not degraded: a
+ * hard 400, on the strategist, the scout and anything else that reaches a model.
+ * It failed the same way each time and looked like a model with nothing to say.
+ *
+ * `services/brain/brain/llm.py` already hit this exact wall and already solved
+ * it: drop the field on a 400 that names it, remember the base URL, retry. This
+ * is that solution on the TypeScript side, which never got it. Same behaviour,
+ * because two clients that disagree about how to talk to the same provider is
+ * the drift this codebase keeps paying for.
+ */
 export function quietReasoning(creds: LlmCreds): Record<string, unknown> {
   const model = creds.model.toLowerCase();
   if (!REASONING_MODELS.some((m) => model.includes(m))) return {};
+  if (REASONING_HINT_REFUSED.has(creds.baseUrl)) return {};
   return { reasoning_effort: "none", include_reasoning: false };
+}
+
+/**
+ * Did this response refuse the hint rather than the request?
+ *
+ * NARROW ON PURPOSE. A 400 that does not name the field is a real error and
+ * must stay one — retrying every 400 without the hint would turn a malformed
+ * prompt into two malformed prompts and hide the cause of both.
+ */
+export function refusedReasoningHint(status: number, message: string): boolean {
+  return status === 400 && /reasoning_effort/i.test(message);
+}
+
+/** Remember a provider's refusal so the next call does not repeat it. */
+export function noteReasoningRefusal(baseUrl: string): void {
+  REASONING_HINT_REFUSED.add(baseUrl);
+}
+
+/** Test seam — the set is process-global and would otherwise leak between cases. */
+export function resetReasoningRefusalsForTest(): void {
+  REASONING_HINT_REFUSED.clear();
 }
 
 export async function llmToolCall(
@@ -166,7 +221,7 @@ export async function llmToolCall(
       tools: [{ name: opts.tool.name, description: opts.tool.description, input_schema: opts.tool.schema } as never],
       tool_choice: { type: "tool", name: opts.tool.name },
       messages: opts.messages,
-    });
+    }).catch((error: unknown) => { throw normalizedAnthropicError(creds, error); });
     const t = res.content.find((b) => b.type === "tool_use");
     return t && t.type === "tool_use" ? (t.input as Record<string, unknown>) : {};
   }
@@ -175,28 +230,40 @@ export async function llmToolCall(
   // Some reasoning models (gpt-oss-120b, deepseek-r1, qwen3-thinking, nemotron) dump chain-of-thought
   // into `content` or `reasoning_content`. We ignore that side-channel and only use tool_calls.
   // Universal: ask reasoning models not to put CoT into content — separate bank.
-  const body: Record<string, unknown> = {
+  const base: Record<string, unknown> = {
     model: creds.model,
     max_tokens: opts.maxTokens ?? 1024,
     temperature: 0.2,
     messages: [{ role: "system", content: opts.system }, ...opts.messages],
     tools: [{ type: "function", function: { name: opts.tool.name, description: opts.tool.description, parameters: opts.tool.schema } }],
     tool_choice: { type: "function", function: { name: opts.tool.name } },
-    // Best-effort disable reasoning in content for openai-compatible reasoning models.
-    // Providers that don't support it ignore the field; providers that do keep reasoning
-    ...quietReasoning(creds),
   };
   // Servers validate tool arguments and the model is nondeterministic — a
   // malformed emission 400s. One retry usually lands; then we throw honestly.
+  //
+  // THE HINT IS RE-RESOLVED ON EVERY ATTEMPT, and that is the fix. The body
+  // used to be built once, above this loop, with `...quietReasoning(creds)`
+  // baked in — so when Groq answered 400 for `reasoning_effort: "none"` the
+  // one retry re-sent the identical body and 400'd again. `llmText` learned
+  // to drop the hint on that answer; this path, which the Telegram
+  // interpreter uses, never did, and the owner's chat stayed dead on Groq
+  // gpt-oss behind a fix that was only half applied.
   let lastErr = "";
   for (let attempt = 0; attempt < 2; attempt++) {
     const r = await fetch(chatUrl(creds), {
       method: "POST",
       headers: openaiHeaders(creds),
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...base, ...quietReasoning(creds) }),
     });
     if (!r.ok) {
-      lastErr = `${creds.provider} ${r.status}: ${(await r.text()).slice(0, 200)}`;
+      // providerError, not a raw body slice: it parses the provider's own
+      // code and message, redacts secrets, and produces the shape every
+      // owner-facing surface classifies on. The old string was the exact
+      // `groq 401: {"error":{...}}` a live owner read in their chat.
+      lastErr = await providerError(creds, r);
+      // A provider that refuses the FIELD has refused the optimisation, not
+      // the work: remember it, and the retry below resolves to no hint.
+      if (refusedReasoningHint(r.status, lastErr)) noteReasoningRefusal(creds.baseUrl);
       if (r.status === 400 && attempt === 0) continue;
       throw new Error(lastErr);
     }
@@ -260,7 +327,7 @@ export async function llmAgentTurn(
       thinking: { type: "disabled" },
       tools: opts.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.schema }) as never),
       messages,
-    });
+    }).catch((error: unknown) => { throw normalizedAnthropicError(creds, error); });
     const text = res.content.filter((b) => b.type === "text").map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
     const toolUses: AgentToolUse[] = res.content
       .filter((b) => b.type === "tool_use")
@@ -293,8 +360,20 @@ export async function llmAgentTurn(
     tools: opts.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.schema } })),
     ...quietReasoning(creds),
   };
-  const r = await fetch(chatUrl(creds), { method: "POST", headers: openaiHeaders(creds), body: JSON.stringify(body) });
-  if (!r.ok) throw new Error(`${creds.provider} ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  let r = await fetch(chatUrl(creds), { method: "POST", headers: openaiHeaders(creds), body: JSON.stringify(body) });
+  if (!r.ok) {
+    // Same rule as llmText and llmToolCall: a 400 that names the reasoning
+    // hint is the provider refusing an optimisation, so retry once without it
+    // and remember. Any other failure is thrown as providerError's sentence.
+    const why = await providerError(creds, r);
+    if (!refusedReasoningHint(r.status, why)) throw new Error(why);
+    noteReasoningRefusal(creds.baseUrl);
+    const bare = { ...body };
+    delete bare.reasoning_effort;
+    delete bare.include_reasoning;
+    r = await fetch(chatUrl(creds), { method: "POST", headers: openaiHeaders(creds), body: JSON.stringify(bare) });
+    if (!r.ok) throw new Error(await providerError(creds, r));
+  }
   const j = (await r.json()) as {
     choices?: { message?: { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[]; reasoning_content?: string; reasoning?: string } }[];
   };
@@ -338,8 +417,37 @@ async function providerError(creds: LlmCreds, r: Response): Promise<string> {
   } catch {
     detail = raw;
   }
+  return providerFailure(creds, r.status, detail);
+}
+
+function providerFailure(creds: LlmCreds, status: number, detail: string): string {
   const safe = redactSecrets(detail, [creds.apiKey].filter(Boolean)).replace(/\s+/g, " ").trim();
-  return `${creds.provider} ${r.status}${safe ? ` — ${safe.slice(0, 300)}` : ""}`;
+  return `${creds.provider} ${status}${safe ? ` — ${safe.slice(0, 300)}` : ""}`;
+}
+
+/**
+ * The SDK throws `404 { ... }`, while fetch errors already name the provider.
+ * Without this boundary an unavailable Anthropic model reached the owner as an
+ * unrecognised failure, even though its status said exactly what to change.
+ * Read SDK fields, redact before logging, and keep local errors/aborts intact.
+ */
+function normalizedAnthropicError(creds: LlmCreds, error: unknown): unknown {
+  if (error instanceof Anthropic.APIUserAbortError) return error;
+  if (error instanceof Anthropic.APIConnectionError) {
+    return new Error(`${creds.provider} network request failed`);
+  }
+  if (!(error instanceof Anthropic.APIError)) return error;
+  const body = error.error as { error?: { type?: unknown; code?: unknown; message?: unknown }; message?: unknown } | undefined;
+  const detail = body?.error;
+  const code = detail?.code ?? detail?.type ?? error.type;
+  const message = detail?.message ?? body?.message;
+  if (typeof error.status === "number") {
+    const text = [code, message].filter((part) => typeof part === "string" && part).join(": ");
+    return new Error(providerFailure(creds, error.status, text));
+  }
+  // SSE errors arrive after HTTP 200, without a failure status. Do not invent
+  // one or let the partially received reply count as a completed answer.
+  return new Error(streamError(creds, { code, message }));
 }
 
 /**
@@ -370,24 +478,36 @@ export async function llmText(
       thinking: { type: "disabled" },
       system: opts.system,
       messages: [{ role: "user", content: opts.prompt }],
-    });
+    }).catch((error: unknown) => { throw normalizedAnthropicError(creds, error); });
     const t = res.content.find((b) => b.type === "text");
     return t && t.type === "text" ? t.text.trim() : "";
   }
 
-  const body: Record<string, unknown> = {
+  const base: Record<string, unknown> = {
     model: creds.model,
     max_tokens: opts.maxTokens ?? 400,
     temperature: 0.6,
     messages: [{ role: "system", content: opts.system }, { role: "user", content: opts.prompt }],
-    ...quietReasoning(creds),
   };
-  const r = await fetch(chatUrl(creds), {
-    method: "POST",
-    headers: openaiHeaders(creds),
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(await providerError(creds, r));
+  const send = (hint: Record<string, unknown>) =>
+    fetch(chatUrl(creds), {
+      method: "POST",
+      headers: openaiHeaders(creds),
+      body: JSON.stringify({ ...base, ...hint }),
+    });
+
+  let r = await send(quietReasoning(creds));
+  if (!r.ok) {
+    const why = await providerError(creds, r);
+    // ONE RETRY, AND ONLY FOR THIS. The hint is an optimisation — it asks a
+    // reasoning model not to spend the completion budget thinking — so a
+    // provider that refuses the FIELD has refused the optimisation, not the
+    // work. Anything else is a real error and is thrown as one.
+    if (!refusedReasoningHint(r.status, why)) throw new Error(why);
+    noteReasoningRefusal(creds.baseUrl);
+    r = await send({});
+    if (!r.ok) throw new Error(await providerError(creds, r));
+  }
   const j = (await r.json()) as {
     choices?: { finish_reason?: string; message?: { content?: string; reasoning_content?: string; reasoning?: string } }[];
     usage?: { completion_tokens_details?: { reasoning_tokens?: number } };
@@ -410,6 +530,193 @@ export async function llmText(
       choice?.finish_reason === "length"
         ? `ran out of tokens before writing a reply${reasoned ? ` (spent ${reasoned} on reasoning)` : ""} — raise maxTokens or pick a model that does not reason`
         : `returned an empty reply (finish_reason: ${choice?.finish_reason ?? "unknown"})`;
+    throw new Error(`${creds.provider} ${creds.model} ${why}`);
+  }
+  return text;
+}
+
+// ── streamed narration ──────────────────────────────────────────────────────
+
+/**
+ * A provider's refusal that arrived INSIDE a stream, after the 200.
+ *
+ * Same redaction as providerError: this sentence reaches a browser, and a
+ * provider that echoed part of the request back would otherwise put it there.
+ */
+function streamError(creds: LlmCreds, e: { message?: unknown; code?: unknown }): string {
+  const detail = [e.code, e.message].filter((v) => typeof v === "string" && v).join(": ");
+  const safe = redactSecrets(detail, [creds.apiKey].filter(Boolean)).replace(/\s+/g, " ").trim();
+  return `${creds.provider} stream failed${safe ? ` — ${safe.slice(0, 300)}` : ""}`;
+}
+
+/**
+ * llmText, A PIECE AT A TIME — for the owner's chat, where waiting for the whole
+ * completion left "thinking…" on screen for as long as the slowest provider took.
+ *
+ * ADDITIVE. llmText is untouched and every other caller keeps it; nothing here
+ * changes what any existing path sends or returns.
+ *
+ * `onText` receives the model's CONTENT as it arrives — raw, and deliberately
+ * so: deciding what of it may be shown (reasoning tags, a command marker still
+ * being written) is the caller's rule, stated once in web/src/lib/chat-stream.ts
+ * for the server and the browser alike. The reasoning SIDE CHANNEL
+ * (`reasoning_content`, `reasoning`) is never passed on at all.
+ *
+ * Returns the whole reply with inline reasoning stripped, exactly as llmText
+ * would have, and fails where llmText fails: an empty completion is an error
+ * rather than an answer, a provider that refuses the reasoning hint is asked
+ * once more without it, and a refusal is thrown in the provider's own words.
+ * An error that arrives mid-stream is thrown too — half a reply is not a reply.
+ */
+export async function llmTextStream(
+  creds: LlmCreds,
+  opts: { system: string; prompt: string; maxTokens?: number; signal?: AbortSignal },
+  onText: (piece: string) => void,
+): Promise<string> {
+  if (creds.transport === "anthropic") {
+    try {
+      const client = new Anthropic({ apiKey: creds.apiKey });
+      const stream = await client.messages.create(
+        {
+          model: creds.model,
+          max_tokens: opts.maxTokens ?? 400,
+          thinking: { type: "disabled" },
+          system: opts.system,
+          messages: [{ role: "user", content: opts.prompt }],
+          stream: true,
+        },
+        { signal: opts.signal },
+      );
+      let raw = "";
+      let stopped = false;
+      for await (const ev of stream) {
+        if (ev.type === "content_block_delta" && ev.delta.type === "text_delta" && ev.delta.text) {
+          raw += ev.delta.text;
+          onText(ev.delta.text);
+        }
+        if (ev.type === "message_stop" || (ev.type === "message_delta" && ev.delta.stop_reason)) stopped = true;
+      }
+      // See the OpenAI branch below: a stream that never said it stopped was cut.
+      if (!stopped) throw new Error(`${creds.provider} ${creds.model} stream ended before the reply was finished`);
+      const text = raw.trim();
+      // llmText answers "" here and leaves the caller to notice; a stream the
+      // owner watched arrive empty is a failure, and is said as one.
+      if (!text) throw new Error(`${creds.provider} ${creds.model} returned an empty reply`);
+      return text;
+    } catch (error) {
+      throw normalizedAnthropicError(creds, error);
+    }
+  }
+
+  const base: Record<string, unknown> = {
+    model: creds.model,
+    max_tokens: opts.maxTokens ?? 400,
+    temperature: 0.6,
+    messages: [{ role: "system", content: opts.system }, { role: "user", content: opts.prompt }],
+    stream: true,
+  };
+  const send = (hint: Record<string, unknown>) =>
+    fetch(chatUrl(creds), {
+      method: "POST",
+      headers: openaiHeaders(creds),
+      body: JSON.stringify({ ...base, ...hint }),
+      signal: opts.signal,
+    });
+
+  let r = await send(quietReasoning(creds));
+  if (!r.ok) {
+    // The same one retry llmText makes, for the same reason and nothing else.
+    const why = await providerError(creds, r);
+    if (!refusedReasoningHint(r.status, why)) throw new Error(why);
+    noteReasoningRefusal(creds.baseUrl);
+    r = await send({});
+    if (!r.ok) throw new Error(await providerError(creds, r));
+  }
+
+  let raw = "";
+  let finish: string | undefined;
+  let reasoned: number | undefined;
+  // A PROVIDER THAT IGNORES `stream` — some OpenAI-compatible hosts and local
+  // runtimes do — answers with one JSON body. Read it as llmText would and
+  // hand it on whole, rather than failing a reply that is sitting right there.
+  if (/application\/json/i.test(r.headers.get("content-type") ?? "") || !r.body) {
+    const j = (await r.json()) as {
+      choices?: { finish_reason?: string; message?: { content?: string } }[];
+      usage?: { completion_tokens_details?: { reasoning_tokens?: number } };
+    };
+    raw = j.choices?.[0]?.message?.content ?? "";
+    finish = j.choices?.[0]?.finish_reason;
+    reasoned = j.usage?.completion_tokens_details?.reasoning_tokens;
+    if (raw) onText(raw);
+  } else {
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let ended = false;
+    const line = (l: string) => {
+      const s = l.replace(/\r$/, "");
+      if (!s.startsWith("data:")) return; // `event:`, `id:`, keep-alive comments
+      const data = s.slice(5).trim();
+      if (!data) return;
+      if (data === "[DONE]") {
+        ended = true;
+        return;
+      }
+      let j: {
+        error?: { message?: unknown; code?: unknown };
+        choices?: { finish_reason?: string | null; delta?: { content?: string | null } }[];
+        usage?: { completion_tokens_details?: { reasoning_tokens?: number } };
+      };
+      try {
+        j = JSON.parse(data);
+      } catch {
+        return;
+      }
+      if (j.error) throw new Error(streamError(creds, j.error));
+      const choice = j.choices?.[0];
+      // `delta.reasoning_content` / `delta.reasoning` are the thinking bank —
+      // read past, never merged into content (the universal exclusion above).
+      const piece = choice?.delta?.content;
+      if (typeof piece === "string" && piece) {
+        raw += piece;
+        onText(piece);
+      }
+      if (choice?.finish_reason) finish = choice.finish_reason;
+      const rt = j.usage?.completion_tokens_details?.reasoning_tokens;
+      if (typeof rt === "number") reasoned = rt;
+    };
+    try {
+      while (!ended) {
+        const { value, done } = await reader.read();
+        if (value) buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const l of lines) {
+          line(l);
+          if (ended) break;
+        }
+        if (done) {
+          if (buffer) line(buffer);
+          break;
+        }
+      }
+    } finally {
+      reader.cancel().catch(() => {});
+    }
+    // A STREAM THAT NEVER SAID IT FINISHED WAS CUT. A connection dropped
+    // mid-reply ends the body exactly like a finished one, and the half that
+    // had arrived was returned as the whole — which the chat then sent as its
+    // final reply. A finished completion always says so: a finish_reason on
+    // its last chunk, or [DONE].
+    if (!ended && !finish) throw new Error(`${creds.provider} ${creds.model} stream ended before the reply was finished`);
+  }
+
+  const text = stripReasoningFromContent(raw).trim();
+  if (!text) {
+    const why =
+      finish === "length"
+        ? `ran out of tokens before writing a reply${reasoned ? ` (spent ${reasoned} on reasoning)` : ""} — raise maxTokens or pick a model that does not reason`
+        : `returned an empty reply (finish_reason: ${finish ?? "unknown"})`;
     throw new Error(`${creds.provider} ${creds.model} ${why}`);
   }
   return text;

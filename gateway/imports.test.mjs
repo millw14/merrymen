@@ -65,7 +65,7 @@ test("the server wires the partner API before its catch-all 404", () => {
   assert.ok(wired < catchAll, "the partner API must be matched before the catch-all");
 });
 
-test("partner keys are minted only by the CLI, never over HTTP", () => {
+test("HTTP plumbing cannot mint keys; issuance stays in the authenticated developer service", () => {
   const src = code(read("server.mjs"));
   assert.ok(!src.includes("makeKey"), "server.mjs can mint a partner key");
   assert.ok(!src.includes("writeRecord"), "server.mjs can write the partner registry");

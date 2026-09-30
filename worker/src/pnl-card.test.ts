@@ -200,6 +200,32 @@ describe("a trade row becomes a card only when it closed something knowable", ()
     assert.equal(pnlCardFromFill({ ...sell, target: "  " }), null);
   });
 
+  it("NEVER prints an address as the coin — the vault's address once did", () => {
+    // `target` is the router or vault on every on-chain row. The real case:
+    // Shogun's Trencher vault 0x2ca2…c96d on a card as if it were a coin.
+    const onChain = { ...sell, target: "0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d" };
+    assert.equal(pnlCardFromFill(onChain), null, "no name, no card — never the address");
+    assert.equal(pnlCardFromFill(onChain, "musebook")?.symbol, "musebook", "the resolved name wins");
+    assert.equal(pnlCardFromFill(sell, "CASHCAT")?.symbol, "CASHCAT", "over a ticker target too");
+  });
+
+  it("sends no card for a leftover worth less than a cent", () => {
+    // The real row: the last 6.06 musebook sold for $0.002131 at the parent
+    // position's −6.4%, drawn as "invested 0.00 · position 0.00 · pnl -0.00".
+    assert.equal(pnlCardFromFill({ ...sell, fill_cash_usdg: 0.002131, realized_pnl_usdg: -0.000146 }, "musebook"), null);
+    assert.ok(pnlCardFromFill({ ...sell, fill_cash_usdg: 0.02, realized_pnl_usdg: 0.005 }, "musebook"), "two cents is a result");
+  });
+
+  it("a near-total loss IS a result, even though it sold for under a cent", () => {
+    const card = pnlCardFromFill({ ...sell, fill_cash_usdg: 0.003, realized_pnl_usdg: -4.997 }, "RUGCOIN");
+    assert.ok(card);
+    assert.equal(card.investedUsdg, 5_000_000n);
+  });
+
+  it("a short address passed as the name still draws nothing", () => {
+    assert.equal(pnlCardFromFill({ ...sell, target: "0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d" }, "0x020b…18b4"), null);
+  });
+
   it("treats a realised zero as a real close, not as absent", () => {
     // Breaking exactly even is a closed trade with a P&L of 0.00, and `0` is
     // falsy — the reason this is checked against null/undefined and not truth.

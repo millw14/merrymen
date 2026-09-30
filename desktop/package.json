@@ -7,19 +7,20 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "stage": "node stage-bundle.mjs",
+    "stage": "npm run check:runtime && node stage-bundle.mjs",
     "unstage": "node stage-bundle.mjs --restore",
     "dist": "npm run stage && electron-builder && npm run unstage",
     "dist:win": "npm run stage && electron-builder --win && npm run unstage",
     "dist:mac": "npm run stage && electron-builder --mac && npm run unstage",
     "dist:linux": "npm run stage && electron-builder --linux && npm run unstage",
-    "check": "node --check main.js && node --check stage-bundle.mjs"
+    "check": "node --check main.js && node --check stage-bundle.mjs && node --check check-runtime.mjs",
+    "check:runtime": "node check-runtime.mjs"
   },
   "dependencies": {
     "merrymen": "file:.."
   },
   "devDependencies": {
-    "electron": "^33.2.0",
+    "electron": "^44.4.2",
     "electron-builder": "^25.1.8"
   }
 }

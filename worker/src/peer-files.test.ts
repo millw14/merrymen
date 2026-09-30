@@ -36,6 +36,8 @@ const thesis = (over: Partial<PublicThesis> = {}): PublicThesis => ({
   outcomeText: "landed",
   shadow: false,
   reason: "Depth cleared the floor on the third pass and the buyer count held.",
+
+  post: null,
   said: 1,
   at: 1_800_000_000,
   firstAt: 1_800_000_000,
@@ -47,7 +49,7 @@ beforeEach(async () => {
   home = await mkdtemp(path.join(tmpdir(), "mm-peers-"));
 });
 afterEach(async () => {
-  await rm(home, { recursive: true, force: true });
+  await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("the peer file", () => {
@@ -120,6 +122,18 @@ describe("the query that fills it", () => {
 });
 
 describe("how a peer is shown to a model", () => {
+  it("shows the actual public post with its failed execution outcome and attribution", () => {
+    const p = thesis({ post: "Depth held; wait for broader buying before adding.", outcome: "refused", outcomeText: "past today's spending cap" });
+    const view = peerView(p);
+    assert.match(view, /their stated decision:/);
+    assert.doesNotMatch(view, /what they did about it:/);
+    assert.match(view, /past today's spending cap/);
+    assert.match(view, /public identity: \/a\/a7k3m9qz2n4vb8xd/);
+    assert.ok(view.indexOf(p.post!) > view.indexOf("--- their words"));
+    assert.ok(view.indexOf(p.post!) < view.indexOf("--- end of quoted desk"));
+    assert.doesNotMatch(view, /Depth cleared the floor/);
+  });
+
   it("PAPER IS SAID FIRST, before the name is finished and before any figure", () => {
     // A model shown a P&L-flavoured claim from a pretend book has to know it is
     // pretend before it reads the number. Afterwards is too late: by then it has

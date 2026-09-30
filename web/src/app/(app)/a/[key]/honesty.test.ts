@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { DatabaseSync } from "node:sqlite";
+import { wrapSqlite } from "../../../../../../worker/src/db";
+import { readEquityCloses } from "@/lib/equity-closes";
 
 /**
  * WHAT AN AGENT'S PROFILE IS ALLOWED TO SAY ABOUT IT.
@@ -119,13 +122,27 @@ describe("a drawdown is not the owner moving money", () => {
 });
 
 describe("the chart and the figure above it measure the same thing", () => {
-  it("always keeps the newest reading", () => {
+  it("always keeps the newest reading", async () => {
     // A plain modulo anchors on index 0, so the last few readings never reached
     // the chart and its right-hand end was not the value the headline divides.
-    // The downsample must admit the final index explicitly, however it is
-    // spelled — a bare modulo anchors on 0 and can only keep the last reading
-    // by luck of the arithmetic.
-    assert.match(READ_CODE, /% step === 0 \|\| .*length - 1/);
+    // The server no longer thins the series at all — it reads one close an hour
+    // (equity-closes.ts) and the page slices windows — so this RUNS that read
+    // on an awkward tape, rather than grepping for the modulo that is gone.
+    const raw = new DatabaseSync(":memory:");
+    try {
+      const db = wrapSqlite(raw);
+      await db.exec("CREATE TABLE equity (id INTEGER PRIMARY KEY, agent_id TEXT, equity_usdg REAL, at INTEGER, epoch INTEGER, mode TEXT)");
+      // 61 readings a minute apart, then one more 7 seconds later: the newest
+      // shares its hour with the one before it and must still be the close.
+      for (let i = 0; i < 61; i++) {
+        await db.prepare("INSERT INTO equity (id, agent_id, equity_usdg, at, epoch, mode) VALUES (?, 'a', ?, ?, 1, 'live')").run(i + 1, 100 + i, 3_600_000 + i * 60);
+      }
+      await db.prepare("INSERT INTO equity (id, agent_id, equity_usdg, at, epoch, mode) VALUES (62, 'a', 999, ?, 1, 'live')").run(3_600_000 + 60 * 60 + 7);
+      const { marks } = await readEquityCloses(db, "a", 1);
+      assert.equal(marks.at(-1)!.equity_usdg, 999, "the chart's right-hand end is the newest reading");
+    } finally {
+      raw.close();
+    }
   });
 });
 

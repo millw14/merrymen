@@ -264,13 +264,31 @@ describe("PonsSelfTrade", () => {
       // function is a "send assets to an address" function, and not having one
       // is the point of the contract.
       const { adapter } = await setup();
-      const names = (adapter.abi as { type: string; name?: string }[])
-        .filter((e) => e.type === "function")
-        .map((e) => e.name);
-      expect(names).to.deep.equal(["tradeExactIn"]);
-      for (const banned of ["owner", "pause", "upgradeTo", "rescue", "sweep", "withdraw"]) {
+      const fns = (adapter.abi as { type: string; name?: string; stateMutability?: string }[]).filter(
+        (e) => e.type === "function",
+      );
+      const names = fns.map((e) => e.name);
+
+      /**
+       * THE PROPERTY, not a fixed list — and it had to stop being a fixed list
+       * when the spend cap landed.
+       *
+       * What this test is actually for is that no caller can reach another
+       * caller's assets or another caller's ability to trade. The cap surface
+       * does not: `setSpendCap` writes `capFor[msg.sender]` and nothing else,
+       * so the worst a caller can do with it is refuse their own buys. It is
+       * still true that there is no owner, no pause, no upgrade and no rescue,
+       * and a rescue function — "send assets to an address" — is the one this
+       * contract exists not to have.
+       */
+      for (const banned of ["owner", "pause", "upgradeTo", "rescue", "sweep", "withdraw", "transferOwnership"]) {
         expect(names).to.not.include(banned);
       }
+      // Exactly two functions may change state, and both are self-scoped.
+      const mutating = fns
+        .filter((e) => e.stateMutability !== "view" && e.stateMutability !== "pure")
+        .map((e) => e.name);
+      expect(mutating.sort()).to.deep.equal(["setSpendCap", "tradeExactIn"]);
     });
 
     it("is NOT payable, which is what lets the wall keep valueLimit at zero", async () => {
@@ -305,5 +323,120 @@ describe("PonsSelfTrade", () => {
       expect(name).to.equal("TransferFailed");
       expect(await quote.read.balanceOf([a!.account.address])).to.equal(10_000n);
     });
+  });
+});
+
+/**
+ * THE SAME UNPINNABLE-CURVE DRAIN THE CLASS VAULT HAD.
+ *
+ * `_direction` asks the curve about ITSELF, the launchpad mints ~475 curve
+ * addresses an hour so no policy can enumerate them, and the Pons factory
+ * exposes no registry to check against (eighteen view signatures probed on
+ * mainnet 4663, none answers). A compromised session key names a contract it
+ * controls, which takes the approved input and pays one wei back — clearing the
+ * `amountOut == 0` floor, since `minAmountOut` comes from the same attacker.
+ *
+ * The wall capped that per call; `RateLimitPolicy` is codeless on this chain so
+ * nothing capped the repetition. These pin the ceiling that replaces it — and,
+ * unlike the vault's, this one is PER CALLER, because the adapter is shared.
+ */
+describe("PonsSelfTrade spend cap", () => {
+  async function hostileDust() {
+    const s = await setup();
+    const token = await hre.viem.deployContract("PonsMockERC20");
+    const hostile = await hre.viem.deployContract("MockHostileCurve", [token.address, s.quote.address]);
+    await token.write.mint([hostile.address, 10_000_000n]);
+    // 1% back. At amountIn 100 a smaller rate rounds to zero and trips NoOutput —
+    // the attacker keeps 99% and the existing floor is still cleared, which is
+    // exactly the shape that made this drain invisible.
+    await hostile.write.setPayBps([100n]);
+    return { ...s, hostile, hostileToken: token };
+  }
+
+  it("THE ATTACK, BOUNDED: a one-wei curve cannot take more than the cap", async () => {
+    const { account, quote, adapter, hostile, hostileToken } = await hostileDust();
+    await adapter.write.setSpendCap([250n]);
+
+    const before = await quote.read.balanceOf([account]);
+    await adapter.write.tradeExactIn([hostile.address, quote.address, hostileToken.address, 100n, 0n, FOREVER]);
+    await adapter.write.tradeExactIn([hostile.address, quote.address, hostileToken.address, 100n, 0n, FOREVER]);
+
+    expect(
+      await revertName(
+        adapter,
+        [hostile.address, quote.address, hostileToken.address, 100n, 0n, FOREVER],
+        account,
+      ),
+    ).to.equal("SpendCapExceeded");
+
+    // The loss is the ceiling, not the balance.
+    expect(before - (await quote.read.balanceOf([account]))).to.equal(200n);
+  });
+
+  it("PER CALLER — one compromised account cannot spend another's allowance", async () => {
+    // The difference from PonsClassVault, and the reason it matters: this
+    // adapter is a shared singleton. A global ceiling would let one drained
+    // account refuse everybody else's trades for the rest of the window.
+    const { account, quote, token, curve, adapter } = await setup();
+    const [, second] = await hre.viem.getWalletClients();
+    const other = second!.account.address;
+
+    await adapter.write.setSpendCap([100n]);
+    expect(await adapter.read.spendCapOf([account])).to.equal(100n);
+    // The other account never set one, so it still has the default.
+    expect(await adapter.read.spendCapOf([other])).to.equal(250_000_000n);
+
+    await adapter.write.tradeExactIn([curve.address, quote.address, token.address, 100n, 0n, FOREVER]);
+    expect(await adapter.read.spendRemaining([account])).to.equal(0n);
+    // Spending everything did not touch anyone else's ceiling.
+    expect(await adapter.read.spendRemaining([other])).to.equal(250_000_000n);
+  });
+
+  it("and setting a cap cannot reach another account's", async () => {
+    const { account, adapter } = await setup();
+    const [, second] = await hre.viem.getWalletClients();
+    const other = second!.account.address;
+    await adapter.write.setSpendCap([1n], { account: second!.account });
+    expect(await adapter.read.spendCapOf([other])).to.equal(1n);
+    expect(await adapter.read.spendCapOf([account])).to.equal(250_000_000n);
+  });
+
+  it("A SELL IS NEVER CAPPED — a ceiling that blocks an exit is a no-exit trap", async () => {
+    const { account, quote, token, curve, adapter } = await setup();
+    await adapter.write.tradeExactIn([curve.address, quote.address, token.address, 100n, 0n, FOREVER]);
+    // Nothing more may be spent.
+    await adapter.write.setSpendCap([0n]);
+    const held = await token.read.balanceOf([account]);
+    expect(held > 0n).to.equal(true);
+    // Selling back still works.
+    await adapter.write.tradeExactIn([curve.address, token.address, quote.address, held, 0n, FOREVER]);
+    expect(await token.read.balanceOf([account])).to.equal(0n);
+  });
+
+  it("a deliberate zero is not the same as never having set one", async () => {
+    // Without `capConfigured`, a zero would silently read as the default and
+    // an owner who asked for "no buying" would get 250 USDG of it.
+    const { account, quote, token, curve, adapter } = await setup();
+    expect(await adapter.read.capConfigured([account])).to.equal(false);
+    await adapter.write.setSpendCap([0n]);
+    expect(await adapter.read.capConfigured([account])).to.equal(true);
+    expect(await adapter.read.spendCapOf([account])).to.equal(0n);
+    expect(
+      await revertName(adapter, [curve.address, quote.address, token.address, 1n, 0n, FOREVER], account),
+    ).to.equal("SpendCapExceeded");
+  });
+
+  it("the window rolls, so a cap is a rate and not a lifetime allowance", async () => {
+    const { account, quote, token, curve, adapter } = await setup();
+    await adapter.write.setSpendCap([100n]);
+    await adapter.write.tradeExactIn([curve.address, quote.address, token.address, 100n, 0n, FOREVER]);
+    expect(await adapter.read.spendRemaining([account])).to.equal(0n);
+
+    const day = Number(await adapter.read.SPEND_WINDOW());
+    await hre.network.provider.send("evm_increaseTime", [day + 1]);
+    await hre.network.provider.send("evm_mine", []);
+
+    expect(await adapter.read.spendRemaining([account])).to.equal(100n);
+    await adapter.write.tradeExactIn([curve.address, quote.address, token.address, 100n, 0n, FOREVER]);
   });
 });

@@ -139,6 +139,40 @@ export type Why =
    */
   | { code: "budget-spent"; capRaw: bigint }
   /**
+   * TODAY'S TRADE COUNT IS GONE — `budget-spent`'s sibling, for the count
+   * rather than the money.
+   *
+   * Before the snapshot carried the count, this was the loudest way for an
+   * agent to do nothing: the strategy proposed the same legs every tick and the
+   * wall refused each one with `ops-cap`, which reached the public feed as
+   * "tried to buy TSLA · past today's number of trades" once a tick until the
+   * window rolled. Now the strategy stops proposing and says this once.
+   *
+   * NO FIGURE, deliberately. The snapshot carries the headroom, which is zero
+   * whenever this fires, and not the ceiling; a sentence that printed "0" would
+   * be a number that says nothing, and inventing the ceiling here would be a
+   * figure nobody read on this tick.
+   */
+  | { code: "ops-spent" }
+  /**
+   * THE DRAWDOWN BREAKER IS TRIPPED — the book sits at or past the loss limit
+   * sealed into the key, so the wall refuses every buy until it recovers.
+   *
+   * Before the snapshot carried the drawdown, this was a refusal a tick: the
+   * strategy proposed, the wall said `drawdown-breaker`, and a Trencher paid a
+   * Brain review for every entry it would never be allowed to make. Now the
+   * strategy stops proposing buys and says this once.
+   *
+   * THE OWNER'S SENTENCE ONLY. The refusal it replaces is account state and
+   * leaves the public feed; the same fact must not walk back in as a view —
+   * see `publishesIdle`.
+   *
+   * ONE FIGURE, AND IT DOES NOT MOVE: the limit sealed into the key. The
+   * drawdown itself changes every tick the book does, and a sentence that
+   * carried it would be news to the once-per-change idle channel every tick.
+   */
+  | { code: "breaker-tripped"; limitBps: number }
+  /**
    * A LEG THAT RAN FAR ENOUGH AHEAD OF WHAT IT COST TO BE WORTH REALISING.
    *
    * The default strategy could only ever buy — every intent it emitted had cash
@@ -235,6 +269,69 @@ export type Why =
       symbol: string;
       cause: "unpriceable" | "drain" | "stop" | "take" | "aged";
       pct?: number;
+    }
+  /**
+   * TAKING A LAUNCH ON THE CLASS ROUTE.
+   *
+   * Every field here was measured in the same pass that chose this curve, and
+   * each is carried rather than re-read: a sentence that re-derives its own
+   * evidence a second later is a sentence about a different market.
+   *
+   * THE NULLS ARE THE POINT. `trades` and `traders` come from a ~15-minute
+   * window of curve events, and index.ts closes the empty-vs-unavailable gap
+   * there explicitly — `classActivity === null ? null : (a ? a.buys + a.sells : 0)`.
+   * A tape we could not read is NOT a quiet tape, and the difference decides
+   * whether "buyers are sticking around" may be said at all.
+   */
+  | {
+      code: "class-enter";
+      symbol: string;
+      usdgRaw: bigint;
+      /** Trades on this curve in the activity window. null = tape unreadable. */
+      trades: number | null;
+      /** Distinct trading addresses in the same window. null = tape unreadable. */
+      traders: number | null;
+      /** Real quote depth with the virtual seed removed, raw USDG 6dp. */
+      depthRaw: bigint;
+      /** One-way price impact of THIS buy, bps. */
+      impactBps: number;
+      /** Round-trip cost at scoring size, bps. null when it could not be priced. */
+      costBps: number | null;
+      /** Progress toward graduation, bps of the threshold. */
+      graduationBps: number;
+      /** How many priced rivals this curve was chosen over. */
+      field: number;
+    }
+  /**
+   * LEAVING ONE.
+   *
+   * `cause` is a CODE and the set is CLOSED AT TWO, because two is how many
+   * reasons the class exit actually has. It is deliberately price-free
+   * (index.ts states it, class-exit.test.ts pins it), so there is no
+   * thesis-invalidated exit; stop-floors and take-profits read the smart
+   * account's balances and the class book is custodied by the vault, so no hard
+   * risk exit can see it; and Brain's orders route to the adapter, never the
+   * vault, so it cannot sell one either.
+   *
+   * Naming a third cause here would be naming an exit that did not happen.
+   *
+   *   clock — held longer than classMaxHoldSec
+   *   cliff — close enough to graduation that the vault would soon be unable to
+   *           sell at all, since PonsClassVault.sell reverts CurveGraduated
+   *
+   * `graduationBps` is NULLABLE and must stay so. The gate coalesces an
+   * unreadable depth fraction to zero, which is the safe direction for deciding
+   * (an unreadable curve never trips the cliff) and a lie for reporting. On a
+   * `cliff` exit it is never null by construction — the cliff is how it fired.
+   */
+  | {
+      code: "class-exit";
+      symbol: string;
+      cause: "clock" | "cliff";
+      heldSec: number;
+      graduationBps: number | null;
+      /** USDG the sell is quoted to return, raw 6dp. */
+      proceedsRaw: bigint;
     };
 
 /**
@@ -248,19 +345,61 @@ export type Why =
  * Deliberately short: reasons.test.ts caps a rendered sentence at 220 chars,
  * and the figure already appears earlier in every sentence that uses this.
  */
-const capClause = (capped?: boolean) =>
-  capped ? " — cut to what your signed key allows; re-sign to raise it" : "";
-export function renderWhy(w: Why): string {
+/**
+ * WHO IS READING.
+ *
+ * The same `Why` goes to two places with two readers. The owner's event log and
+ * Telegram get the OWNER register, which may end in a remedy — "re-sign to raise
+ * it", "add funds or lower the size per trade" — because the owner is the one
+ * person who can act on it. The decision row becomes a PUBLIC post, and the
+ * same sentence there is an instruction addressed to a stranger about somebody
+ * else's account: the live feed carried "Add funds or lower the size per trade"
+ * and "Change the mode in Settings" for weeks, which is the exact texture of a
+ * worker log leaking onto a trading desk.
+ *
+ * `"owner"` is the default so every existing call site is byte-identical. The
+ * public register is opt-in at the two places a sentence becomes a post.
+ *
+ * AND THE PUBLIC REGISTER CARRIES NO FIGURE OF THE BOOK — no size, no cost, no
+ * cash, no floor. A private book publishes no size (thesis-policy.ts
+ * `sizeUsdg`: a size is dollars), and this sentence is written into the row
+ * BEFORE anybody knows whose book will read it back, so it has to be safe for
+ * the book that shows least. It was not: "selling all 4.40 USDG of it against
+ * the 5.00 paid" is the realized P&L outright, "out of X with 6.00 USDG" beside
+ * a published return is the same P&L one division away, "5.00 USDG into TSLA"
+ * beside a published entry price is the holding, and "5.00 USDG idle above the
+ * 50.00 floor" is the cash balance — on steady-basket, the default, so on most
+ * of the feed. Percentages, counts, the coin, and the market's own figures (a
+ * pool's depth and FDV) stay: they are what the public default already shows.
+ * A public book loses nothing it needs, because its head and `sizeUsdg` still
+ * carry the size. The owner's copy keeps every figure.
+ */
+export type WhyAudience = "owner" | "public";
+
+const capClause = (capped: boolean | undefined, audience: WhyAudience) =>
+  !capped ? "" : audience === "owner" ? " — cut to what your signed key allows; re-sign to raise it" : " — cut to what the signed key allows";
+export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
+  // The owner's sentence names the book's figures; the public one never does.
+  const own = audience === "owner";
   switch (w.code) {
     case "dca-leg":
-      return (
-        `the schedule says buy — ${usdg(w.usdgRaw)} USDG into ${w.symbol}, ` +
-        `its ${pctWhole(w.weightBps)}% of a ${w.legs}-leg basket`
-      );
+      return own
+        ? `the schedule says buy — ${usdg(w.usdgRaw)} USDG into ${w.symbol}, ` +
+            `its ${pctWhole(w.weightBps)}% of a ${w.legs}-leg basket`
+        : `the schedule says buy — cash into ${w.symbol}, its ${pctWhole(w.weightBps)}% of a ${w.legs}-leg basket`;
     case "park":
+      // The figure is the amount being parked. In the clamped case that is
+      // LESS than what is idle above the floor, so the old sentence — "X idle
+      // above the floor, parking what the budget allows" — stated the parked
+      // amount as if it were the idle amount. Said the right way round.
+      if (!own) {
+        return w.clamped
+          ? `parking some of the cash idle above the floor — what today's budget still allows`
+          : `cash idle above the floor — parking it in the vault until the next buy`;
+      }
       return w.clamped
-        ? `${usdg(w.usdgRaw)} USDG idle above the ${usdg(w.floorRaw)} floor — ` +
-            `parking what today's budget still allows`
+        ? `parking ${usdg(w.usdgRaw)} USDG of the cash idle above the ${usdg(w.floorRaw)} floor — ` +
+            `what today's budget still allows`
         : `${usdg(w.usdgRaw)} USDG idle above the ${usdg(w.floorRaw)} floor — ` +
             `parking it in the vault until the next buy`;
     case "all-legs-stale":
@@ -281,21 +420,47 @@ export function renderWhy(w: Why): string {
     case "budget-spent":
       return (
         `nothing bought — today's buying budget is spent. That is the daily cap in your ` +
-        `signature doing its job, not a fault: I buy ${usdg(w.capRaw)} USDG a tick, so a small ` +
-        `cap is gone quickly. Lower the size per tick in settings to spread it across the day, ` +
-        `or raise the cap at /grant — that one needs a re-sign. Selling is never blocked by this`
+        `signature doing its job, not a fault` +
+        (own ? `: I buy ${usdg(w.capRaw)} USDG a tick, so a small cap is gone quickly. ` : `. `) +
+        (audience === "owner"
+          ? `Lower the size per tick in settings to spread it across the day, ` +
+            `or raise the cap at /grant — that one needs a re-sign. `
+          : ``) +
+        `Selling is never blocked by this`
+      );
+    case "ops-spent":
+      // "The last 24 hours", not "today": the count is a trailing window, so it
+      // frees up as the oldest trades age out rather than at midnight, and an
+      // owner told "today" would wait for a rollover that is not coming.
+      return (
+        `nothing bought — the number of trades the signed key allows in ` +
+        `24 hours is used up, and it frees up as the oldest ones age out. ` +
+        (audience === "owner" ? `Raise it at /grant — that one needs a re-sign. ` : ``) +
+        `Selling is never blocked by this`
+      );
+    case "breaker-tripped":
+      return (
+        `nothing bought — the book is at least ${pct(w.limitBps)}% below its peak, the drawdown limit ` +
+        `in the signed key, so the breaker refuses buys until it recovers. ` +
+        (audience === "owner" ? `A wider limit needs a re-sign at /grant. ` : ``) +
+        `Selling is never blocked by this`
       );
     case "under-one-buy":
       return (
-        `nothing bought — ${usdg(w.cashRaw)} USDG on hand and one buy costs ${usdg(w.needRaw)}` +
+        (own
+          ? `nothing bought — ${usdg(w.cashRaw)} USDG on hand and one buy costs ${usdg(w.needRaw)}`
+          : `nothing bought — the cash on hand is short of one buy`) +
         (w.vaultRaw > 0n
-          ? `. There is ${usdg(w.vaultRaw)} USDG in the vault I can pull back, so this should clear itself`
-          : `, and the vault is empty. Add funds or lower the size per trade`)
+          ? own
+            ? `. There is ${usdg(w.vaultRaw)} USDG in the vault I can pull back, so this should clear itself`
+            : `. There is cash in the vault I can pull back, so this should clear itself`
+          : `, and the vault is empty` + (audience === "owner" ? `. Add funds or lower the size per trade` : ``))
       );
     case "stop-floor":
       return (
-        `${w.symbol} is ${pct(w.lossBps)}% below what it cost — selling all ${usdg(w.usdgRaw)} USDG of it ` +
-        `against the ${usdg(w.costRaw)} paid. A floor, not a view: the rule fired, I did not change my mind` +
+        `${w.symbol} is ${pct(w.lossBps)}% below what it cost — ` +
+        (own ? `selling all ${usdg(w.usdgRaw)} USDG of it against the ${usdg(w.costRaw)} paid` : `selling all of it`) +
+        `. A floor, not a view: the rule fired, I did not change my mind` +
         // The graded clause, and ONLY when this position carried its own level.
         // An owner who never sees a grade should read exactly the sentence they
         // always read; one whose position was graded wider or tighter than
@@ -309,8 +474,9 @@ export function renderWhy(w: Why): string {
       );
     case "take-profit":
       return (
-        `${w.symbol} is up ${pct(w.gainBps)}% on what it cost — selling all ${usdg(w.usdgRaw)} USDG of it ` +
-        `against the ${usdg(w.costRaw)} paid, and taking the profit rather than watching it`
+        `${w.symbol} is up ${pct(w.gainBps)}% on what it cost — ` +
+        (own ? `selling all ${usdg(w.usdgRaw)} USDG of it against the ${usdg(w.costRaw)} paid` : `selling all of it`) +
+        `, and taking the profit rather than watching it`
       );
     case "model-held":
       // "MORE" WAS WRONG: `dropped` comes out of the same proposal list as
@@ -327,38 +493,41 @@ export function renderWhy(w: Why): string {
             `. A decision, not a quiet tick`;
     case "stale-fallback":
       return (
-        `all ${w.legs} equity feeds are shut, so putting ${usdg(w.usdgRaw)} USDG into ${w.symbol} — ` +
-        `a coin I hold a signed permission for, on a market that does not close`
+        `all ${w.legs} equity feeds are shut, so ` +
+        (own ? `putting ${usdg(w.usdgRaw)} USDG into ${w.symbol}` : `buying ${w.symbol}`) +
+        ` — a coin I hold a signed permission for, on a market that does not close`
       );
     case "unpark":
       return (
-        `cash is under one tick's buy — pulling ${usdg(w.usdgRaw)} USDG back from the vault ` +
+        `cash is under one tick's buy — pulling ${own ? `${usdg(w.usdgRaw)} USDG` : `some`} back from the vault ` +
         `so the next tick can trade`
       );
     case "gap-enter":
       return (
         `${w.symbol}'s feed has gone stale — its market is shut and the token keeps trading, ` +
-        `so ${usdg(w.usdgRaw)} USDG in at the close print`
+        `so ${own ? `${usdg(w.usdgRaw)} USDG` : `buying`} in at the close print`
       );
     case "gap-exit":
       // No P&L claim: the strategy proposes, and never learns what it filled at.
       return `${w.symbol}'s feed is live again — the market reopened, so the whole position goes back to cash`;
     case "keel-seed":
-      return `nothing invested yet — laying down an equal-weight entry, ${usdg(w.usdgRaw)} USDG into each of ${w.legs}${capClause(w.capped)}`;
+      return `nothing invested yet — laying down an equal-weight entry${own ? `, ${usdg(w.usdgRaw)} USDG` : ``} into each of ${w.legs}${capClause(w.capped, audience)}`;
     case "keel-trim":
-      return `${w.symbol} is ${usdg(w.overRaw)} USDG over its equal weight — trimming it back toward the line`;
+      return `${w.symbol} is ${own ? `${usdg(w.overRaw)} USDG ` : ``}over its equal weight — trimming it back toward the line`;
     case "keel-top":
-      return `${w.symbol} is ${usdg(w.underRaw)} USDG under its equal weight — topping it up from cash${capClause(w.capped)}`;
+      return `${w.symbol} is ${own ? `${usdg(w.underRaw)} USDG ` : ``}under its equal weight — topping it up from cash${capClause(w.capped, audience)}`;
     case "dip":
       return (
         `${w.symbol} is ${pct(w.dipBps)}% off its rolling high, the deepest of the ${w.priced} I priced — ` +
-        `${usdg(w.usdgRaw)} USDG in${capClause(w.capped)}`
+        `${own ? `${usdg(w.usdgRaw)} USDG` : `buying`} in${capClause(w.capped, audience)}`
       );
     case "trench-enter":
+      // The depth and the FDV are the POOL's, read off a public tape, and stay;
+      // only the size of this buy is the book's.
       return (
         `${w.symbol}: ${Math.round(w.liqUsd).toLocaleString("en-US")} deep, ` +
         `FDV ${Math.round(w.fdvUsd).toLocaleString("en-US")}, ${Math.round(w.ageSec / 60)}m old — ` +
-        `inside every entry bound, ${usdg(w.usdgRaw)} USDG in`
+        `inside every entry bound, ${own ? `${usdg(w.usdgRaw)} USDG` : `buying`} in`
       );
     case "trench-exit": {
       const pct = w.pct === undefined ? null : Math.abs(Math.round(w.pct));
@@ -369,9 +538,64 @@ export function renderWhy(w: Why): string {
       if (w.cause === "aged") return `leaving ${w.symbol} — held past the window I give a launch`;
       return `leaving ${w.symbol} — it cannot be priced any more, so I am going while there is still a route out`;
     }
+    /**
+     * THE CLASS ROUTE'S TWO SENTENCES, AND WHY THEY CARRY SO FEW FIGURES.
+     *
+     * Every other arm in this file prints its numbers, because every other arm
+     * is the whole of what gets published. These two are not: the class route
+     * has a FACT LAYER underneath (`decisions.evidence_json`), which keeps all
+     * of it — depth, impact, cost, the field it beat — for the drill-down and
+     * for the social writer.
+     *
+     * So the job here changes. This sentence is what a reader sees when there
+     * is no post in the agent's own voice, and a feed of
+     * "15m activity 32, depth 410.22 USDG, graduation 41.3%" is an observability
+     * dashboard wearing a feed's clothes. It names the one fact that decided
+     * the trade and stops. The rest is a click away and has not been lost.
+     */
+    case "class-enter": {
+      // AN UNREADABLE TAPE SAYS NOTHING ABOUT BUYERS. `trades === null` is not
+      // a quiet curve; it is a curve we could not hear. The clause is dropped
+      // rather than softened, because "few buyers" would be a claim we cannot
+      // make and "some buyers" would be one we invented.
+      const busy =
+        w.trades === null
+          ? null
+          : w.traders !== null && w.traders > 1
+            ? `${w.traders} different buyers have been through it`
+            : `${w.trades} trades have gone through it`;
+      const beat = w.field > 1 ? `, and it was the best of ${w.field} I priced` : "";
+      const taking = own ? `taking ${usdg(w.usdgRaw)} USDG of ${w.symbol}` : `buying into ${w.symbol}`;
+      return busy === null ? `${taking} — early on the curve${beat}` : `${taking} — ${busy}${beat}`;
+    }
+    case "class-exit": {
+      // The cliff is the one worth explaining, because the reason is a contract
+      // revert rather than a view about the price: once the curve graduates,
+      // the vault cannot sell at all. An owner reading "sold at 85%" with no
+      // explanation would reasonably think we took a profit target.
+      const out = own ? `out of ${w.symbol} with ${usdg(w.proceedsRaw)} USDG` : `out of ${w.symbol}`;
+      return w.cause === "cliff"
+        ? `${out} — it is close enough to graduating that the vault would soon not be able to sell it at all`
+        : `${out} — ${Math.round(w.heldSec / 3600)}h is as long as I hold one of these`;
+    }
     default: {
       const exhaustive: never = w;
       return exhaustive;
     }
   }
+}
+
+/**
+ * MAY THIS IDLE REASON BECOME A PUBLIC POST?
+ *
+ * The idle channel writes a `view` decision beside the owner's event, and a
+ * view is a post. Almost every reason is a fact about the strategy — stale
+ * feeds, a spent budget, cash short of one buy — and is fine in public. A
+ * tripped breaker is a fact about the ACCOUNT'S LOSSES: the refusal it stands
+ * in for is dropped from the public feed as account state, and publishing the
+ * same fact as a view would walk it straight back in. The owner still hears it,
+ * through the event.
+ */
+export function publishesIdle(w: Why): boolean {
+  return w.code !== "breaker-tripped";
 }

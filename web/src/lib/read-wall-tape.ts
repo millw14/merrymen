@@ -23,6 +23,7 @@ import { withReadDb } from "@/lib/ledger";
 import { WINDOW_SEC } from "@/lib/read-theses";
 import { REJECT_RULES, outcomeOf } from "@/lib/thesis";
 import { getIdentityStore } from "@merrymen/identity-store";
+import { distinctTrades, OP_COPY_REACH_SEC } from "@/lib/distinct-trades";
 
 /**
  * Rows examined. PINNED — never widen this to make the picture denser.
@@ -101,7 +102,7 @@ const EMPTY: WallTape = {
 /** The catch-all lane's label — a word the badge vocabulary already ships. */
 const CATCH_ALL = "turned back";
 
-export async function readWallTape(opts: { agentSlug?: string } = {}): Promise<WallTape> {
+export async function readWallTape(opts: { agentSlug?: string } = {}, readDb = withReadDb): Promise<WallTape> {
   // Scoping to an agent means scoping to every account it has ever held; a
   // re-grant must not split its history into two strangers.
   let only: string[] | null = null;
@@ -115,23 +116,38 @@ export async function readWallTape(opts: { agentSlug?: string } = {}): Promise<W
     if (only.length === 0) return { ...EMPTY, source: "sqlite" };
   }
 
-  return withReadDb(async (db): Promise<WallTape> => {
+  return readDb(async (db): Promise<WallTape> => {
     if (!db) return EMPTY;
 
     const to = Math.floor(Date.now() / 1000);
     const from = to - WINDOW_SEC;
 
-    const where = [
-      "t.created_at > ?",
-      "t.agent_id NOT LIKE 'rh:%'",
-      "a.mode IN ('live','paper')",
-    ];
-    const args: unknown[] = [from];
+    // ONE OPERATION, ONE CELL. A redeploy re-records every op of the last 26
+    // hours, stamped at the restart, and the mirror carried those copies up
+    // beside the originals — so the band drew a day's fills again as one burst
+    // at the moment of the deploy. The collapse reaches OP_COPY_REACH_SEC past
+    // the window so that a copy whose original is just outside the day still
+    // has it to collapse into, rather than standing alone inside the day.
+    //
+    // Only a row WITH a hash can be a copy or have one, so only those reach
+    // back; a refusal from before the day is read for nothing.
+    const inner = ["t.created_at > ?", "(t.user_op_hash IS NOT NULL OR t.created_at > ?)", "t.agent_id NOT LIKE 'rh:%'"];
+    const args: unknown[] = [from - OP_COPY_REACH_SEC, from];
     if (only) {
-      where.push(`LOWER(t.agent_id) IN (${only.map(() => "?").join(", ")})`);
+      inner.push(`LOWER(t.agent_id) IN (${only.map(() => "?").join(", ")})`);
       args.push(...only);
     }
-    args.push(CAP);
+    args.push(from);
+    // THE AGENT IS MATCHED THE WAY THE COLLAPSE MATCHES IT, case-blind. The
+    // collapse keys on lower(agent_id) and this was an exact join, so when the
+    // evidenced original was filed under '0xAbC…' and its copy under the
+    // spelling the agents row holds, the collapse kept the original, the join
+    // dropped it, and the operation vanished from the band. EXISTS rather than
+    // a join, so an account spelt two ways in `agents` cannot count a row twice.
+    const source = `${distinctTrades(inner.join(" AND "))}
+          WHERE t.created_at > ?
+            AND EXISTS (SELECT 1 FROM agents a
+                         WHERE LOWER(a.smart_account) = LOWER(t.agent_id) AND a.mode IN ('live','paper'))`;
 
     // THE COUNT IS OF THE WINDOW, THE SAMPLE IS FOR THE CANVAS. One extra
     // aggregate over the same predicate, served by trades_time.
@@ -143,11 +159,9 @@ export async function readWallTape(opts: { agentSlug?: string } = {}): Promise<W
              SUM(CASE WHEN t.status IN ('rejected','reverted') THEN 1 ELSE 0 END) AS turned,
              SUM(CASE WHEN t.status IN ('landed','paper') THEN 1 ELSE 0 END) AS through,
              SUM(CASE WHEN t.status = 'submitted' THEN 1 ELSE 0 END) AS flight
-           FROM trades t
-           JOIN agents a ON a.smart_account = t.agent_id
-          WHERE ${where.join(" AND ")}`,
+           FROM ${source}`,
         )
-        .get(...args.slice(0, args.length - 1))) as
+        .get(...args)) as
         | { turned: number | null; through: number | null; flight: number | null }
         | undefined;
       total = {
@@ -164,13 +178,11 @@ export async function readWallTape(opts: { agentSlug?: string } = {}): Promise<W
       rows = (await db
         .prepare(
           `SELECT t.created_at AS at, t.status AS status, t.reject_rule AS rule
-             FROM trades t
-             JOIN agents a ON a.smart_account = t.agent_id
-            WHERE ${where.join(" AND ")}
+             FROM ${source}
             ORDER BY t.created_at DESC
             LIMIT ?`,
         )
-        .all(...args)) as typeof rows;
+        .all(...args, CAP)) as typeof rows;
     } catch {
       // An older ledger has no `mode`. An empty band is the honest render of
       // that; it is never a 500 and never a claim that nothing happened.

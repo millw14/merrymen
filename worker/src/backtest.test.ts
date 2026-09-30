@@ -125,7 +125,7 @@ describe("runBacktest — real strategies, real policy, synthetic prices", () =>
     };
     const r = await runBacktest(
       {
-        strategy: { name: "basket", tick: (s) => steadyBasketTick(cfg, s) },
+        strategy: { name: "basket", tick: (s) => steadyBasketTick(cfg, { ...s, perTradeCapUsdg: U(1_000) }) },
         limits: limits(),
         legs: LEGS,
         initialCashUsdg: U(500),
@@ -148,7 +148,7 @@ describe("runBacktest — real strategies, real policy, synthetic prices", () =>
     };
     const r = await runBacktest(
       {
-        strategy: { name: "basket", tick: (s) => steadyBasketTick(cfg, s) },
+        strategy: { name: "basket", tick: (s) => steadyBasketTick(cfg, { ...s, perTradeCapUsdg: U(1_000) }) },
         limits: limits(),
         legs: LEGS,
         initialCashUsdg: U(500),

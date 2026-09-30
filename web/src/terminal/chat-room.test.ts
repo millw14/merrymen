@@ -109,12 +109,12 @@ describe("the desktop chat floats instead of replacing the app", () => {
   });
 
   it("and it renders THE SAME agent screen, not a second chat", () => {
-    // One conversation, one draft, one set of turns however it was opened. A
-    // second implementation is a second place for the agent's words to drift
-    // from what it actually did.
+    // One conversation, one draft, one thread however it was opened — the one
+    // App-level controller, handed to both mounts. A second implementation is
+    // a second place for the agent's words to drift from what it actually did.
     const app = read("./App.tsx");
     const dock = app.slice(app.indexOf("<ChatDock"), app.indexOf("</ChatDock>"));
-    for (const prop of ["turns={turns}", "draft={chatDraft}", "onDraft={setChatDraft}", "mine={mine}"]) {
+    for (const prop of ["chat={chat}", "mine={mine}"]) {
       assert.ok(dock.includes(prop), `the docked chat must share ${prop}`);
     }
   });

@@ -9,7 +9,7 @@
  */
 
 import type { TradeIntent } from "../policy";
-import type { Snapshot, Tick } from "./types";
+import { breakerIdle, opsSpent, type Snapshot, type Tick } from "./types";
 import type { Why } from "./reasons";
 
 export interface EvenKeelLeg {
@@ -100,8 +100,22 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
   const valueOf = (symbol: string) => snap.holdings.get(symbol)?.valueUsdg ?? 0n;
   const invested = tradable.reduce((sum, l) => sum + valueOf(l.symbol), 0n);
 
+  // THE DAY'S TRADE COUNT BINDS THE BUYS, and only the buys. With it used up
+  // the wall refuses every seed leg and every top-up with `ops-cap`, so
+  // proposing them is a refusal a tick. A trim is a sell into cash, which the
+  // count does not bind — the same line `withinCap` draws for the money.
+  const countSpent = opsSpent(snap);
+  const counted: Tick = { intents: [], why: [], idle: { code: "ops-spent" } };
+  // THE DRAWDOWN BREAKER BINDS THE BUYS the same way, and ahead of the count:
+  // tripped, the wall refuses every seed and every top-up. A trim is a sell
+  // into cash — the one move the breaker exists never to block.
+  const brake = breakerIdle(snap);
+  const braked: Tick | null = brake ? { intents: [], why: [], idle: brake } : null;
+
   // Cold start: nothing invested yet → lay down an equal-weight entry from cash.
   if (invested === 0n) {
+    if (braked) return braked;
+    if (countSpent) return counted;
     const budget = clamp(cfg.seedBudgetUsdg, snap.cashUsdg);
     const per = budget / BigInt(tradable.length);
     const want = clamp(per, cfg.maxTradeUsdg);
@@ -184,6 +198,9 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
   const intents: TradeIntent[] = [];
   const why: (Why | null)[] = [];
   let cashLeft = snap.cashUsdg;
+  // A top-up the count withheld, so a tick that did nothing because of it can
+  // say so. A book already on the line wanted nothing and stays quiet.
+  let withheld = false;
 
   for (const l of tradable) {
     const diff = valueOf(l.symbol) - target; // >0 overweight, <0 underweight
@@ -221,6 +238,10 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
       });
       why.push({ code: "keel-trim", symbol: l.symbol, overRaw: sellUsdg });
     } else if (-diff > band && cashLeft > 0n) {
+      if (braked || countSpent) {
+        withheld = true;
+        continue;
+      }
       // Top up the laggard from cash.
       const wantBuy = clamp(clamp(-diff, cfg.maxTradeUsdg), cashLeft);
       const buyUsdg = withinCap(wantBuy, snap);
@@ -238,5 +259,5 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
     }
   }
 
-  return { intents, why };
+  return intents.length === 0 && withheld ? (braked ?? counted) : { intents, why };
 }

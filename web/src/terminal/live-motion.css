@@ -1,0 +1,179 @@
+/* ══ WAVE 2 · LIVE — a figure that moves, the tape, the sound switch ══════════
+   Its own sheet rather than a hunk of terminal.css, which the feed's rows also
+   extend this wave. Every selector here is new, and scoped to the terminal the
+   way terminal.css scopes its own. */
+
+/* A MOVE HAS A COLOUR AS WELL AS A DIRECTION.
+   `Flip` (ui.tsx) replays its slide when its text changes, and carries which
+   way the value went in data-trend; the figure starts in the colour of the
+   move and settles back into its own. A figure drawn for the first time has
+   no trend and does neither — see motion.ts. */
+:where(.terminal-host) .flip-still {
+  display: inline-block;
+}
+
+/* CLIPPED WITHOUT MOVING THE BASELINE. The slot clips the slide with
+   `overflow: hidden` (terminal.css), and an inline-block that is not
+   overflow-visible sits on its BOTTOM EDGE instead of its text's baseline —
+   measured in Chromium, a price in the tape rode 2.4px above the ticker beside
+   it and the row grew. `clip` clips the same box and keeps the baseline; a
+   browser without it keeps `hidden`. `span.` outranks the terminal.css rule
+   whichever sheet loads first. */
+:where(.terminal-host) span.flip-slot {
+  overflow: clip;
+}
+
+:where(.terminal-host) .flip-slot[data-trend="up"] > .flip {
+  animation:
+    flip-up 170ms cubic-bezier(0.4, 0, 0.2, 1),
+    tick-up 900ms ease-out;
+}
+
+:where(.terminal-host) .flip-slot[data-trend="down"] > .flip.rev {
+  animation:
+    flip-down 170ms cubic-bezier(0.4, 0, 0.2, 1),
+    tick-down 900ms ease-out;
+}
+
+@keyframes tick-up {
+  from {
+    color: var(--up);
+  }
+}
+
+@keyframes tick-down {
+  from {
+    color: var(--down);
+  }
+}
+
+/* THE TAPE. Desktop only, and gated in JSX as well (App.tsx): a phone has the
+   tab bar where a tape would go, and display:none does not stop a component
+   running. It takes a row of the desktop grid rather than floating over it,
+   so it never covers the bottom of the portfolio or the rail. */
+@media (min-width: 1100px) {
+  :where(.terminal-host) .app.has-tape {
+    grid-template-rows: 68px minmax(0, 1fr) auto;
+  }
+}
+
+:where(.terminal-host) .terminal-tape {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  height: 30px;
+  margin-top: 8px;
+  border-top: 1px solid var(--line);
+  color: var(--tx-2);
+  font-size: 12px;
+}
+
+:where(.terminal-host) .terminal-tape .mm-ticker-scroll {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  /* SCROLLS, NEVER MARQUEES — the same rule as the shell's tape. */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+:where(.terminal-host) .terminal-tape .mm-ticker-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+:where(.terminal-host) .terminal-tape .mm-tick {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: none;
+  white-space: nowrap;
+  color: inherit;
+  text-decoration: none;
+}
+
+:where(.terminal-host) .terminal-tape .mm-tick .k {
+  color: var(--faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+:where(.terminal-host) .terminal-tape .mm-tick:hover .k {
+  color: var(--lime);
+}
+
+:where(.terminal-host) .terminal-tape .mm-tick b {
+  color: var(--tx);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+:where(.terminal-host) .terminal-tape .dim,
+:where(.terminal-host) .terminal-tape .stale {
+  color: var(--faint);
+}
+
+:where(.terminal-host) .terminal-tape .stale,
+:where(.terminal-host) .terminal-tape .halted {
+  font-size: 11px;
+}
+
+/* A halt is genuinely unusual, so it keeps the boxed treatment; "stale" is the
+   common case outside market hours and stays a quiet word. */
+:where(.terminal-host) .terminal-tape .halted {
+  padding: 0 3px;
+  border: 1px dashed color-mix(in srgb, var(--down) 45%, transparent);
+  border-radius: 4px;
+  color: var(--down);
+}
+
+/* THE SOUND SWITCH, on the tape and on the You screen. */
+:where(.terminal-host) .sound-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding: 4px 9px;
+  border-radius: 999px;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+:where(.terminal-host) .sound-toggle:hover,
+:where(.terminal-host) .sound-toggle[aria-pressed="true"] {
+  color: var(--tx);
+}
+
+:where(.terminal-host) .sound-toggle[aria-pressed="true"] {
+  background: var(--raised);
+}
+
+/* On the You screen it is a control a thumb has to hit, so it takes the same
+   44px the session actions under it do. */
+:where(.terminal-host) .profile-sound {
+  display: flex;
+}
+
+:where(.terminal-host) .profile-sound .sound-toggle {
+  min-height: 44px;
+  padding: 0 14px;
+  font-size: 15px;
+}
+
+/* The slide is what moves; the colour only says which way. Under reduced
+   motion the colour stays and the slide goes — these selectors outrank the
+   `.flip { animation: none }` rule in terminal.css, so they must say it here. */
+@media (prefers-reduced-motion: reduce) {
+  :where(.terminal-host) .flip-slot[data-trend="up"] > .flip {
+    animation: tick-up 900ms ease-out;
+  }
+
+  :where(.terminal-host) .flip-slot[data-trend="down"] > .flip.rev {
+    animation: tick-down 900ms ease-out;
+  }
+}

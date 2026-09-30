@@ -30,6 +30,9 @@
  * 2. ONE ORDER IN FLIGHT AT A TIME. A second is refused while the first is
  *    unanswered. A queue one client can fill faster than a worker drains it is
  *    an account draining over hours with no view of it and no way to stop.
+ *    Judged against each open order's OWN deadline — the one GET and the
+ *    orchestrator's sweep read — and held for a claimed order until it can no
+ *    longer be trading (lib/order-state.ts).
  *
  * 3. IT EXPIRES, enforced at the claim. A settings write is timeless; an order
  *    is not. The child returns early from its drain when it is unarmed,
@@ -38,7 +41,7 @@
  *    and closed the tab gets a fill hours later, at a price they never saw,
  *    into a book they never looked at. The window is TWO TICKS of the tick this
  *    tenant actually runs, not a constant tuned for the default one — see
- *    orderTtlMs.
+ *    orderTtlFor.
  *
  * ── WHAT THIS ROUTE DELIBERATELY DOES NOT DECIDE ─────────────────────────
  *
@@ -54,18 +57,32 @@ import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { merrymenHome } from "@merrymen/home";
 import { isHostedMode } from "@merrymen/core";
-import { hasPendingCommand, readCommandState, writeCommand } from "@merrymen/command-files";
-import { resolveConfig } from "@merrymen/settings";
+// RELATIVE, NOT THE ALIASES, so a test can run this route. `tsx --test`
+// resolves against the root tsconfig, which has no @merrymen/command-files or
+// @merrymen/settings; the build resolves either way (lib/order-ceiling.ts
+// reaches settings the same way). ceiling/route.test.ts runs POST for real.
+import { openCommands, readCommandState, writeCommand } from "../../../../../worker/src/command-files";
+import { resolveConfig } from "../../../../../worker/src/settings";
 import { tenantOf } from "@/lib/auth";
 import { withReadDb } from "@/lib/ledger";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
+import { ceilingFor } from "@/lib/order-ceiling";
+import { OWNER_CHANGED, OWNER_CHANGED_LOOKUP, ownerMismatch } from "@/lib/order-owner";
+import {
+  LEDGER_UNREADABLE,
+  orderTtlMs,
+  placedResponse,
+  placeHostedOrder,
+  placeSelfHostedOrder,
+  readHostedOrder,
+  readOrder,
+  selfHostedOrderReply,
+  type OrderBody,
+} from "@/lib/order-state";
 import { getSettingsStore } from "@merrymen/settings-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-/** The shortest an order window may ever be, whatever the tick. */
-const ORDER_TTL_FLOOR_MS = 5 * 60_000;
 
 /**
  * How long an order stays willing to fill, FOR THIS DEPLOYMENT'S ACTUAL TICK.
@@ -86,7 +103,7 @@ const ORDER_TTL_FLOOR_MS = 5 * 60_000;
  * above it. Hosted, `resolveConfig()` is the house's own settings file and says
  * nothing about this tenant's cadence.
  */
-async function orderTtlMs(req: Request): Promise<number> {
+async function orderTtlFor(req: Request): Promise<number> {
   let tickSeconds = resolveConfig().tickSeconds;
   if (isHostedMode()) {
     const tenant = tenantOf(req);
@@ -97,90 +114,10 @@ async function orderTtlMs(req: Request): Promise<number> {
       /* the container's own tick is the safe fallback */
     }
   }
-  return Math.max(ORDER_TTL_FLOOR_MS, (2 * tickSeconds + 15) * 1000);
-}
-
-/**
- * How long after its expiry a row may still hold the one-at-a-time slot.
- *
- * The expiry is enforced in the CHILD, at the claim, so a row can legitimately
- * be a ferry pass and a tick behind its own deadline while it is genuinely
- * being decided. Past that it either answered or never will, and either way it
- * must stop blocking — an owner locked out of ordering by a row nothing can
- * finish is the worse failure.
- */
-const STALE_GRACE_MS = 2 * 60_000;
-
-/**
- * Was this write refused because the row already exists?
- *
- * SQLSTATE 23505 is Postgres's unique violation; node:sqlite raises
- * SQLITE_CONSTRAINT_PRIMARYKEY. Everything else — a missing column, a dropped
- * connection, a read-only disk — is a failure to write, and the difference
- * matters because one of them is honestly reported to the owner as "already
- * queued" and the other must never be.
- */
-function isDuplicateKey(e: unknown): boolean {
-  const code = String((e as { code?: unknown })?.code ?? "");
-  const msg = e instanceof Error ? e.message : String(e);
-  return code === "23505" || /PRIMARYKEY|UNIQUE constraint|duplicate key/i.test(`${code} ${msg}`);
+  return orderTtlMs(tickSeconds);
 }
 
 const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskAgent());
-
-interface OrderBody {
-  side?: unknown;
-  symbol?: unknown;
-  usdgAmount?: unknown;
-}
-
-/**
- * The order this request is asking for, or the reason it is not one.
- *
- * SHAPE ONLY. Everything here is something the web tier can know for certain:
- * that "buy" is a side, that a symbol looks like a ticker rather than a
- * sentence, that a size is a finite positive number, and that it is inside the
- * ceiling the owner set for a typed order. Nothing here asks whether the trade
- * is a good idea or even a possible one.
- */
-function readOrder(body: OrderBody): { order: { side: "buy" | "sell"; symbol: string; usdgAmount: number } } | { error: string } {
-  const side = body.side === "buy" || body.side === "sell" ? body.side : null;
-  if (!side) return { error: "that is neither a buy nor a sell" };
-  const symbol = typeof body.symbol === "string" ? body.symbol.trim().toUpperCase() : "";
-  if (!/^[A-Z0-9]{1,12}$/.test(symbol)) return { error: "that is not a symbol I can look up" };
-  const usdgAmount = typeof body.usdgAmount === "number" ? body.usdgAmount : Number(body.usdgAmount);
-  // NaN and Infinity die here rather than inside a BigInt conversion, and a
-  // non-positive size dies here AND at the wall — two gates, neither relying
-  // on the other, because a negative size passes every cap below it (they are
-  // all upper bounds) and reduces the day's spend on its way past.
-  if (!Number.isFinite(usdgAmount) || usdgAmount <= 0) return { error: "that is not an amount I can trade" };
-  // Rounded to cents before it is hashed, so "25" and "25.000000001" are the
-  // same order rather than two — the id is the idempotency key.
-  return { order: { side, symbol, usdgAmount: Math.round(usdgAmount * 100) / 100 } };
-}
-
-/**
- * The most this owner allows one typed order to spend.
- *
- * Falls back to the house default when the tenant has stored nothing, and when
- * the store cannot be read — the SAFE direction, because the default is the
- * smaller number and the sealed per-trade cap is the real wall underneath it
- * either way. Enforced again in the worker, which reads the settings.json the
- * orchestrator wrote for that child: two gates, neither relying on the other.
- */
-async function ceilingFor(req: Request): Promise<number> {
-  const fallback = resolveConfig().telegramMaxActionUsdg;
-  if (!isHostedMode()) return fallback;
-  const tenant = tenantOf(req);
-  if (!tenant) return fallback;
-  try {
-    const stored = await getSettingsStore().get(tenant);
-    const own = stored?.telegramMaxActionUsdg;
-    return typeof own === "number" && Number.isFinite(own) && own >= 0 ? own : fallback;
-  } catch {
-    return fallback;
-  }
-}
 
 /**
  * The primary key for this order, in this minute.
@@ -189,10 +126,16 @@ async function ceilingFor(req: Request): Promise<number> {
  * a second, genuinely-intended order impossible: ask for the same thing again
  * next minute and it is a new id, as it should be.
  */
-function orderId(agent: string, o: { side: string; symbol: string; usdgAmount: number }, nowMs: number): string {
+function orderId(agent: string, o: { side: string; symbol: string; usdgAmount: number; purpose?: string }, nowMs: number): string {
   const bucket = Math.floor(nowMs / 60_000);
+  // THE ENERGY MARKER IS PART OF WHAT THE ORDER IS, so it is part of its id: a
+  // get-energy card and a plain buy card with the same numbers in the same
+  // minute are two different orders, and the second must not be answered
+  // "already queued" off the first. Appended only when present, so every other
+  // order keeps the id it always had.
+  const purpose = o.purpose ? `|${o.purpose}` : "";
   return createHash("sha256")
-    .update(`${agent.toLowerCase()}|${o.side}|${o.symbol}|${o.usdgAmount}|${bucket}`)
+    .update(`${agent.toLowerCase()}|${o.side}|${o.symbol}|${o.usdgAmount}|${bucket}${purpose}`)
     .digest("hex")
     .slice(0, 32);
 }
@@ -210,6 +153,13 @@ export async function POST(req: Request) {
   } catch {
     return NextResponse.json({ error: "body is not JSON" }, { status: 400 });
   }
+  // FOR THE OWNER WHO CONFIRMED IT, OR NOT AT ALL. The session is whatever
+  // this browser held when the request left; the chat card names the owner who
+  // tapped, and another wallet signed in since (another tab can do it unseen)
+  // places nothing — before the ceiling, which would be the other wallet's.
+  if (isHostedMode() && ownerMismatch((body as { owner?: unknown }).owner, tenantOf(req))) {
+    return NextResponse.json({ error: OWNER_CHANGED }, { status: 409 });
+  }
   const read = readOrder(body);
   if ("error" in read) return NextResponse.json({ error: read.error }, { status: 400 });
   const order = read.order;
@@ -220,14 +170,13 @@ export async function POST(req: Request) {
   // silently inheriting nothing would let this surface claim more than the
   // owner's configured limit allows. Enforced again in the worker.
   //
-  // RESOLVED FOR THE CALLER, NOT FOR THIS CONTAINER. `resolveConfig()` reads
-  // the WEB process's own ~/.merrymen/settings.json merged with the server env
-  // — hosted, that is the house's file and has nothing to do with this tenant,
-  // whose settings live in the per-tenant store that /api/settings reads. So
-  // every hosted tenant was being held to the house default whatever they had
-  // configured. Self-hosted the two genuinely are one home, and the bare
-  // resolve is right there.
-  const ceiling = await ceilingFor(req);
+  // RESOLVED FOR THE CALLER, NOT FOR THIS CONTAINER — see lib/order-ceiling.ts,
+  // which GET /api/orders/ceiling also calls, so the chat's amount chips offer
+  // exactly the ceiling this refuses at. Falls back to the house's value (the
+  // smaller, SAFE direction) when the tenant stored none or the store cannot be
+  // read. Enforced again in the worker, which reads the settings.json the
+  // orchestrator wrote for that child: two gates, neither relying on the other.
+  const ceiling = await ceilingFor(req, isHostedMode());
   if (ceiling > 0 && order.usdgAmount > ceiling) {
     return NextResponse.json(
       { error: `${order.usdgAmount} USDG is over your ${ceiling} USDG limit for a chat order. Raise it in Settings if you mean it.` },
@@ -236,136 +185,83 @@ export async function POST(req: Request) {
   }
 
   const now = Date.now();
-  const ttlMs = await orderTtlMs(req);
+  const ttlMs = await orderTtlFor(req);
+  // ONE DEADLINE, stamped on the order and handed back to the card, so the
+  // worker that enforces it, the slot that waits on it and the card that
+  // follows it all read the same number.
+  const expiresAt = now + ttlMs;
   const id = orderId(agent, order, now);
   const args = { ...order };
 
-  if (!isHostedMode()) {
-    // The web process and the worker share one MERRYMEN_HOME — no table, no
-    // ferry. `hasPendingCommand` is the self-hosted form of the one-at-a-time
-    // rule; the id collision is handled by the file simply being rewritten,
-    // which for an identical order in the same minute is a no-op.
-    try {
-      if (hasPendingCommand(merrymenHome())) {
-        return NextResponse.json({ error: "you already have an order waiting. Let that one finish first." }, { status: 409 });
-      }
-      writeCommand(merrymenHome(), { id, kind: "trade", at: now, args, expiresAt: now + ttlMs });
-      return NextResponse.json({ id, queued: true });
-    } catch (e) {
-      return NextResponse.json({ error: `couldn't queue it: ${e instanceof Error ? e.message : String(e)}` }, { status: 503 });
-    }
-  }
+  // Both rails run the rules in lib/order-state.ts, where a test drives them
+  // against a real sqlite and real files: ONE AT A TIME, judged row by row
+  // against each open order's own `expiresAt`, and only a key collision is a
+  // duplicate.
+  const result = isHostedMode()
+    ? await withReadDb((db) => placeHostedOrder(db, { agent, id, args, expiresAt, now })).catch(
+        () => ({ ok: false as const, why: "unreachable" as const }),
+      )
+    : // The web process and the worker share one MERRYMEN_HOME — no table, no ferry.
+      placeSelfHostedOrder(
+        { open: () => openCommands(merrymenHome()), write: (cmd) => writeCommand(merrymenHome(), cmd) },
+        { id, args, expiresAt, now },
+      );
 
-  const result = await withReadDb(async (db) => {
-    if (!db) return { ok: false as const, why: "unreachable" as const };
-    // ONE AT A TIME. Checked before the insert rather than relying on the key
-    // collision, because two DIFFERENT orders a second apart are two different
-    // ids and the collision would not catch them.
-    try {
-      const open = (await db
-        .prepare(
-          // BOUNDED BY THE ORDER'S OWN CLOCK. `done_at IS NULL` alone is an
-          // unbounded predicate, and the only writer of `done_at` in production
-          // is the ferry's up-leg, which fires only when the child produced a
-          // result file. So an order whose child was SIGKILLed mid-trade — the
-          // watchdog does that in bulk on this fleet — left a row that could
-          // never be finished and refused every future order from that tenant,
-          // forever. An order past its expiry can no longer legally run, so it
-          // must not go on holding the slot either.
-          "SELECT id FROM agent_commands WHERE agent_id = ? AND kind = 'trade' AND done_at IS NULL AND created_at > ? LIMIT 1",
-        )
-        .get(agent, now - ttlMs - STALE_GRACE_MS)) as { id?: string } | undefined;
-      if (open?.id) return { ok: false as const, why: "in-flight" as const };
-    } catch {
-      return { ok: false as const, why: "unreachable" as const };
-    }
-    // ONLY A KEY COLLISION IS A DUPLICATE. This catch used to swallow EVERY
-    // database error and answer `{queued:true}` — so a missing column, a
-    // dropped connection or a full disk all told the owner their order was
-    // placed when no row existed. The one error that genuinely means "already
-    // queued" is the primary key, and it is the only one reported as success.
-    try {
-      await db
-        .prepare("INSERT INTO agent_commands (id, agent_id, kind, args, created_at) VALUES (?, ?, ?, ?, ?)")
-        // Milliseconds — the column has no default, so forgetting it is a write
-        // error rather than a silently-wrong unit.
-        .run(id, agent, "trade", JSON.stringify({ ...args, expiresAt: now + ttlMs }), now);
-      return { ok: true as const };
-    } catch (e) {
-      if (!isDuplicateKey(e)) return { ok: false as const, why: "unreachable" as const };
-      // The primary key did its job: this exact order, this minute, is already
-      // on the queue. Reported as success — from the owner's side the thing
-      // they asked for IS queued, and telling them it failed would invite the
-      // retry this exists to absorb — but flagged, so the card can say "already
-      // queued" rather than "placed it", which are different sentences.
-      return { ok: true as const, duplicate: true };
-    }
-  });
-
-  if (!result.ok) {
-    return NextResponse.json(
-      {
-        error:
-          result.why === "in-flight"
-            ? "you already have an order waiting. Let that one finish first."
-            : "couldn't queue it — the ledger is unreachable, which usually means this agent's worker has never run",
-      },
-      { status: result.why === "in-flight" ? 409 : 503 },
-    );
-  }
-  return NextResponse.json({ id, queued: true, ...(result.duplicate ? { duplicate: true } : {}) });
+  // THE DEADLINE GOES BACK WITH THE ID — and as a DURATION, so the card waits
+  // out this order's own window on its own clock instead of a constant of its
+  // own, or of the server's epoch read against a browser clock that may be
+  // minutes off. For a duplicate it is this request's figure, at most a minute
+  // past the queued row's (same minute bucket), which can only lengthen the
+  // wait, never cut it.
+  const reply = placedResponse(result, { id, expiresAt, now });
+  return NextResponse.json(reply.body, { status: reply.status });
 }
 
 /**
- * What happened to the most recent order. Polled by the card that placed it.
+ * What happened to an order. Polled by the card that placed it.
  *
- * FOUR STATES, NOT TWO. "queued" and "running" look the same to somebody
+ * FIVE STATES, NOT TWO. "queued" and "running" look the same to somebody
  * watching a spinner and mean different things when it stops changing:
  * queued-forever is a worker that is not draining, running-forever is an order
  * that hung. "none" is neither — it is the honest answer when nothing was ever
  * asked for, and it must never be returned for an order that ran.
+ *
+ * "expired" is the fifth, and the only one that means NOTHING WAS SENT. It used
+ * to be the card's own guess, made on a fixed seven-minute timer that ran
+ * shorter than the order's real window at the hosted tick; now it is said here,
+ * from the order's own `expiresAt`, and only for an order nobody claimed — see
+ * lib/order-state.ts for why a claimed one is never called expired. The slot
+ * is released at that same instant, so "ask again" is never refused.
+ *
+ * BY ID when the card names one, scoped to the caller's agent either way.
+ *
+ * An unreadable ledger is a 503, not "none": a read that failed is not a
+ * record of nothing, and the card treats a failed poll as no answer yet.
+ *
+ * THE RECEIPT RIDES ALONG when the worker wrote one (C3): the side, coin,
+ * size, hash and refusing rule it read off the ledger, shape-checked in
+ * lib/order-state.ts and never composed here. The chat templates its receipt
+ * line from it; an older worker's answer carries none and renders `result`.
  */
 export async function GET(req: Request) {
   const agent = await agentFor(req);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
+  const params = new URL(req.url).searchParams;
+  const id = params.get("id") ?? "";
+  // FOR THE OWNER WHO CONFIRMED, like POST: the chat's lookup after a lost
+  // placement names them, and what is open under another wallet's session
+  // (another tab signed it in) would be followed in their thread as theirs.
+  if (isHostedMode() && ownerMismatch(params.get("owner"), tenantOf(req))) {
+    return NextResponse.json({ error: OWNER_CHANGED_LOOKUP }, { status: 409 });
+  }
 
   if (!isHostedMode()) {
     // Self-hosted the files ARE the record: there is no orchestrator to ferry a
     // result into a table, so reading the table would answer "none" for an
     // order that had already filled.
-    const id = new URL(req.url).searchParams.get("id") ?? "";
-    const st = id ? readCommandState(merrymenHome(), id) : null;
-    if (!st) return NextResponse.json({ state: "none" });
-    return NextResponse.json({
-      id,
-      state: st.state,
-      result: st.result?.line ?? null,
-      ok: st.result?.ok ?? null,
-      at: st.result?.at ?? null,
-    });
+    return NextResponse.json(selfHostedOrderReply(id, id ? readCommandState(merrymenHome(), id) : null, Date.now()));
   }
 
-  const row = await withReadDb(async (db) => {
-    if (!db) return null;
-    try {
-      return ((await db
-        .prepare(
-          `SELECT id, created_at, claimed_at, done_at, result FROM agent_commands
-            WHERE agent_id = ? AND kind = 'trade' ORDER BY created_at DESC, id DESC LIMIT 1`,
-        )
-        .get(agent)) ?? null) as Record<string, unknown> | null;
-    } catch {
-      return null;
-    }
-  });
-
-  if (!row) return NextResponse.json({ state: "none" });
-  const done = row.done_at !== null && row.done_at !== undefined;
-  const claimed = row.claimed_at !== null && row.claimed_at !== undefined;
-  return NextResponse.json({
-    id: String(row.id),
-    state: done ? "done" : claimed ? "running" : "queued",
-    result: row.result === null || row.result === undefined ? null : String(row.result),
-    at: Number(row.created_at),
-  });
+  const reply = await withReadDb((db) => readHostedOrder(db, agent, id, Date.now())).catch(() => LEDGER_UNREADABLE);
+  return NextResponse.json(reply.body, { status: reply.status });
 }

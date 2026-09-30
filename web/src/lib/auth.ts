@@ -13,12 +13,18 @@
  * the address and an expiry — stateless, so it verifies with no database
  * round-trip, and unforgeable without the server secret.
  *
+ * Challenge consumption is stateful: hosted instances share the atomic nonce
+ * table in DATABASE_URL, and verification fails closed if that store is absent
+ * or unavailable. Self-hosted records spent challenges in auth-nonces.sqlite
+ * under MERRYMEN_HOME. No new signing secret is required.
+ *
  * The pure functions here (mint/read/verify) take no Next types so they can be
  * unit-tested against real viem signatures; the request-shaped helpers wrap
  * them for route handlers.
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { recoverMessageAddress } from "viem";
+import { getNonceStore } from "../../../worker/src/auth-nonce-store";
 import {
   DEFAULT_BINDING_VERSION,
   bindingMessage,
@@ -87,8 +93,8 @@ function macEqual(a: string, b: string): boolean {
  * A signed, self-describing challenge nonce.
  *
  * The nonce carries its own expiry and origin, HMAC'd so it cannot be forged
- * or its expiry extended. Single-use is enforced separately (see usedNonces):
- * the signature stops forgery, the used-set stops replay.
+ * or its expiry extended. Single-use is enforced by the durable nonce store:
+ * the signature stops forgery, an atomic unique insert stops replay.
  */
 export function issueChallengeNonce(origin: string, now = Date.now()): string {
   const exp = now + CHALLENGE_TTL_MS;
@@ -100,9 +106,6 @@ export function issueChallengeNonce(origin: string, now = Date.now()): string {
   const body = `${rand}.${exp}.${org}`;
   return `${body}.${hmac(body, secretOrThrow())}`;
 }
-
-/** Nonces already spent, so a captured challenge can't be replayed into a login. */
-const usedNonces = new Set<string>();
 
 /**
  * The human-readable message the wallet signs (EIP-4361 shape, trimmed).
@@ -121,7 +124,7 @@ export function challengeMessage(origin: string, nonce: string): string {
   ].join("\n");
 }
 
-/** A parsed, still-valid, not-yet-spent nonce, or a reason it was rejected. */
+/** Validate authenticity and expiry. Only the atomic store can decide single-use. */
 function checkNonce(nonce: string, origin: string, now: number): { ok: true } | { ok: false; why: string } {
   const parts = nonce.split(".");
   if (parts.length !== 4) return { ok: false, why: "malformed nonce" };
@@ -136,8 +139,7 @@ function checkNonce(nonce: string, origin: string, now: number): { ok: true } | 
   }
   if (decodedOrigin !== origin) return { ok: false, why: "nonce origin mismatch" };
   const exp = Number(expStr);
-  if (!Number.isFinite(exp) || now > exp) return { ok: false, why: "nonce expired" };
-  if (usedNonces.has(nonce)) return { ok: false, why: "nonce already used" };
+  if (!Number.isFinite(exp) || now >= exp) return { ok: false, why: "nonce expired" };
   return { ok: true };
 }
 
@@ -149,17 +151,22 @@ function checkNonce(nonce: string, origin: string, now: number): { ok: true } | 
  * withdrawing, not signing in) but the nonce discipline must be identical, or a
  * captured signature becomes a permanent bearer credential. Exported rather than
  * duplicated so there is exactly ONE definition of what makes a nonce valid —
- * the origin binding, the HMAC, the expiry and the single-use set.
+ * the origin binding, the HMAC, the expiry and durable atomic consumption.
  */
-export function consumeChallengeNonce(
+export async function consumeChallengeNonce(
   nonce: string,
   origin: string,
   now = Date.now(),
-): { ok: true } | { ok: false; why: string } {
+): Promise<{ ok: true } | { ok: false; why: string }> {
   const gate = checkNonce(nonce, origin, now);
   if (!gate.ok) return gate;
-  usedNonces.add(nonce);
-  return { ok: true };
+  try {
+    const consumed = await getNonceStore().consume(nonce, Number(nonce.split(".")[1]), now);
+    return consumed ? { ok: true } : { ok: false, why: "nonce already used" };
+  } catch {
+    // An unavailable store is never evidence that a challenge is unused.
+    return { ok: false, why: "challenge store unavailable — please try again" };
+  }
 }
 
 // ── verify a signed challenge → tenant address ───────────────────────────────
@@ -191,15 +198,8 @@ export async function verifySignedChallenge(args: {
   } catch {
     return { ok: false, why: "signature did not recover" };
   }
-  usedNonces.add(args.nonce);
-  // The used-set is bounded by the TTL — a swept-out entry is one whose nonce
-  // would already fail the expiry check, so forgetting it re-opens nothing.
-  if (usedNonces.size > 10_000) {
-    for (const n of usedNonces) {
-      const exp = Number(n.split(".")[1]);
-      if (!Number.isFinite(exp) || now > exp) usedNonces.delete(n);
-    }
-  }
+  const consumed = await consumeChallengeNonce(args.nonce, args.origin, args.now);
+  if (!consumed.ok) return consumed;
   return { ok: true, address: address.toLowerCase() as `0x${string}` };
 }
 
@@ -349,7 +349,8 @@ export async function verifyGrantBinding(args: {
     if (privyOwner.toLowerCase() !== args.owner.toLowerCase()) {
       return { ok: false, why: "the agent wallet did not sign — its owner key is not held here" };
     }
-    usedNonces.add(args.nonce);
+    const consumed = await consumeChallengeNonce(args.nonce, args.origin, args.now);
+    if (!consumed.ok) return consumed;
     return { ok: true, tenant: args.tenant.toLowerCase() as `0x${string}` };
   }
 
@@ -429,7 +430,8 @@ export async function verifyGrantBinding(args: {
     };
   }
 
-  usedNonces.add(args.nonce);
+  const consumed = await consumeChallengeNonce(args.nonce, args.origin, args.now);
+  if (!consumed.ok) return consumed;
   return { ok: true, tenant: args.tenant.toLowerCase() as `0x${string}` };
 }
 

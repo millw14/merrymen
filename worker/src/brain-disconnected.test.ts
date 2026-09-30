@@ -51,13 +51,27 @@ describe("the shadow path cannot reach execution", () => {
     });
   }
 
+  it("THE ENERGY ALLOWANCE REACHES THE SHADOW PATH AS A CALLBACK, NOT AN IMPORT", () => {
+    // runShadow's `admit` is bound by index.ts. If brain-shadow ever imports the
+    // energy modules or the store's counters itself, the shadow path has grown
+    // a dependency on account state that no longer shows up as one call site.
+    const code = codeOnly("brain-shadow");
+    const modules = [...code.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!);
+    for (const m of modules) {
+      assert.ok(!/(^|\/)energy(-[a-z]+)?$/.test(m), "brain-shadow imports " + m);
+    }
+    assert.doesNotMatch(code, /claimEnergy|getEnergyDay|energyPlan/);
+    assert.match(code, /admit\?: \(\) => Promise<boolean>/);
+  });
+
   it("the tick guards the shadow path and defaults to nobody", () => {
     const raw = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     assert.match(
       raw,
-      /if \(shadowBrainEnabledFor\(agentId\) && cfg\.brainUrl && cfg\.brainToken/,
-      "three guards: the agent is named AND the house configured a Brain",
+      /if \(\(fastTrencher \|\| shadowBrainEnabledFor\(agentId\) \|\| brainLiveEnabledFor\(agentId\)\) && cfg\.brainUrl && cfg\.brainToken && !bookIncomplete/,
+      "Brain requires enrollment or explicit Trencher opt-in, configuration and complete accounting",
     );
+    assert.match(raw, /const fastTrencher = cfg\.strategy === "trencher" && cfg\.trencherFastEnabled/);
   });
 
   it("brain-live carries no execution either — it returns three scalars", () => {
@@ -92,15 +106,15 @@ describe("the shadow path cannot reach execution", () => {
  * can happen" but the four things that make the connection safe, each of which
  * a careless edit could remove without any of the above failing.
  */
-describe("execution is connected in exactly one gated place", () => {
+describe("direct Brain execution remains gated separately from Trencher strategy intents", () => {
   const tick = () => readFileSync(new URL("./index.ts", import.meta.url), "utf8");
 
   it("ONE CALL SITE, AND IT IS GATED ON ITS OWN ALLOWLIST", () => {
     const raw = tick();
     assert.equal(
-      (raw.match(/brainLiveEnabledFor\(agentId\)/g) ?? []).length,
-      2,
-      "the guard on acting, and the one deciding what to file the thinking as — no third",
+      (raw.match(/if \(!fastTrencher && outcome\.ran && outcome\.result\.ok && brainLiveEnabledFor\(agentId\) && !isPaused\(\)\)/g) ?? []).length,
+      1,
+      "one execution guard, with live enrollment and the pause switch both enforced",
     );
     assert.match(raw, /outcome\.ran && outcome\.result\.ok && brainLiveEnabledFor\(agentId\)/);
   });

@@ -30,6 +30,8 @@
  */
 
 export type UnrankedWhy =
+  | "paper"
+  | "inactive"
   | "no-deposit"
   | "never-filled"
   /**
@@ -98,6 +100,8 @@ export interface Rank {
  */
 export function unrankedLabel(why: UnrankedWhy): string {
   switch (why) {
+    case "paper": return "paper trading";
+    case "inactive": return "inactive";
     case "no-deposit":
       return "no deposit on record";
     case "never-filled":
@@ -116,6 +120,8 @@ export function unrankedLabel(why: UnrankedWhy): string {
 /** The same reasons, short enough for a leaderboard cell. */
 export function unrankedShort(why: UnrankedWhy): string {
   switch (why) {
+    case "paper": return "paper trading";
+    case "inactive": return "inactive";
     case "no-deposit":
       return "no deposit";
     case "never-filled":

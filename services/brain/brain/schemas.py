@@ -47,6 +47,12 @@ LENS_KEYS = frozenset(
         "onchain",
         "social",
         "liquidity",
+        # WHO IS STILL SHIPPING THIS. Not a reading of the tape, which is what
+        # makes it worth a separate lens rather than a paragraph inside
+        # `onchain`: that one is the provenance of the FLOAT, this is the
+        # provenance of the TEAM, and an analyst handed them together cannot
+        # weigh one against the other because they answer different questions.
+        "builder",
         "peg",
         "reserve",
     }

@@ -12,37 +12,43 @@
  */
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { homePaths } from "@merrymen/home";
-import { wrapSqlite, makePgDb, type Db } from "@merrymen/db";
-
-let pgDriver: Db | null = null;
+import { homePaths } from "../../../worker/src/home";
+import { wrapSqlite, makePgDb, type Db } from "../../../worker/src/db";
 
 /**
  * Run `fn` against the ledger's read driver, or against `null` when there is no
  * ledger to read (no sqlite file yet, or an unopenable one). Never throws for a
  * missing/locked database — that is an empty dashboard, not an error.
  */
-export async function withReadDb<T>(fn: (db: Db | null) => Promise<T>): Promise<T> {
-  const url = process.env.DATABASE_URL;
-  if (url) {
-    // One pooled Postgres driver for the whole web process. The worker child is
-    // the writer; this side only reads.
-    if (!pgDriver) pgDriver = await makePgDb(url);
-    return fn(pgDriver);
-  }
-  if (!existsSync(homePaths.db())) return fn(null);
-  let raw: DatabaseSync;
-  try {
-    raw = new DatabaseSync(homePaths.db(), { readOnly: true });
-  } catch {
-    return fn(null);
-  }
-  try {
-    return await fn(wrapSqlite(raw));
-  } finally {
-    raw.close();
-  }
+export function createReadDb(openPostgres: (url: string) => Promise<Db> = makePgDb) {
+  let pgDriver: Promise<Db> | null = null;
+  return async function withReadDb<T>(fn: (db: Db | null) => Promise<T>): Promise<T> {
+    const url = process.env.DATABASE_URL;
+    if (url) {
+      // One pooled Postgres driver for the whole web process. The worker child is
+      // the writer; this side only reads.
+      if (!pgDriver) pgDriver = openPostgres(url).catch((error) => {
+        pgDriver = null;
+        throw error;
+      });
+      return fn(await pgDriver);
+    }
+    if (!existsSync(homePaths.db())) return fn(null);
+    let raw: DatabaseSync;
+    try {
+      raw = new DatabaseSync(homePaths.db(), { readOnly: true });
+    } catch {
+      return fn(null);
+    }
+    try {
+      return await fn(wrapSqlite(raw));
+    } finally {
+      raw.close();
+    }
+  };
 }
+
+export const withReadDb = createReadDb();
 
 /**
  * Format unix seconds to the exact string sqlite's `datetime(x,'unixepoch')`

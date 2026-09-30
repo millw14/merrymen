@@ -53,7 +53,19 @@ describe("the exit exists and is driven", () => {
   it("the tick actually calls it — an unreferenced producer is the bug repeated", () => {
     // curveLegsNow spent weeks declared, forwarded and never supplied. The
     // lesson is in curve-wiring.test.ts and applies exactly here.
-    assert.match(INDEX, /for \(const intent of await proposeClassExits\(\)\)/, "exits must be driven from the tick");
+    // ASSERTED AS A PAIR, not as one loop header. The producer used to return a
+    // bare TradeIntent[] and the tick iterated it directly; it now returns a
+    // Tick, so the REASON for a trade can travel with the trade. A matcher
+    // pinned to the old loop shape would have failed on a refactor that
+    // improved the very thing it was guarding, which teaches the next reader to
+    // edit the test until it passes. What has to stay true is that the tick
+    // calls the producer AND acts on what comes back.
+    assert.match(INDEX, /const exits = await proposeClassExits\(\);/, "the tick must call the exit producer");
+    assert.match(
+      INDEX,
+      /for \(const \[at, intent\] of exits\.intents\.entries\(\)\)[\s\S]{0,240}?processIntent\(intent/,
+      "exits must be driven from the tick",
+    );
   });
 
   it("exits run BEFORE entries, because only one of them has a deadline", () => {
@@ -106,7 +118,7 @@ describe("every refusal fails in the safe direction", () => {
   it("an unreadable position list does NOT read as nothing held", () => {
     // null is "could not tell". Treating it as an empty book would skip every
     // exit precisely when the database is unwell.
-    assert.match(EXIT, /if \(held === null\) return \[\];/);
+    assert.match(EXIT, /if \(held === null\) return NO_CLASS;/);
   });
 
   it("refuses to sell blind when the curve cannot be read", () => {

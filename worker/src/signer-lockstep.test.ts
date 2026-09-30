@@ -275,3 +275,70 @@ test("the two adapter opt-ins stay INDEPENDENT in both signers", () => {
     );
   }
 });
+
+test("both signers seal the energy buy and mint its marker from ONE boolean", () => {
+  // The lockstep rule a fifth time, for the one opt-in that is DECIDED rather
+  // than passed in: whether the energy buy is sealed depends on the chain and
+  // on whether the wall still fits (energyBuyFits). So there are two ways to
+  // get it wrong that no behavioural test of one signer would see — mint the
+  // marker off something else (the chain id, a setting), or decide AFTER the
+  // wall was built, so the marker and the sealed wall describe different
+  // decisions. Both are the transfer saga again: a marker the wall does not
+  // back sends the worker building a buy the chain refuses.
+  //
+  // Comments are stripped: this file's prose names these identifiers freely.
+  const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
+  for (const [name, raw] of [
+    ["web/src/lib/session.ts", WEB],
+    ["mobile/src/crypto/signGrant.ts", MOBILE],
+  ] as const) {
+    const src = strip(raw);
+
+    // CLOSED in the literal, so the option exists in exactly one place and
+    // defaults to the closed position like every other wall option.
+    const literal = /const wallOpts = \{([\s\S]*?)\};/.exec(src);
+    assert.ok(literal, `${name} must collect its wall options in one literal`);
+    assert.match(literal[1]!, /energyBuy:\s*false as boolean/, `${name} must start the energy buy CLOSED inside wallOpts`);
+
+    // DECIDED ONCE, by the shared policy, over the real deployment state.
+    assert.match(src, /wallOpts\.energyBuy\s*=\s*energyBuyFits\(/, `${name} must decide the energy buy with energyBuyFits`);
+    assert.equal(
+      (src.match(/wallOpts\.energyBuy\s*=(?!=)/g) ?? []).length,
+      1,
+      `${name} must decide the energy buy exactly once`,
+    );
+    assert.match(
+      src,
+      /energyBuyFits\([^;]*!alreadyDeployed[^;]*wallOpts\)/,
+      `${name} must ask with the account's real deployment state and its own wall options`,
+    );
+
+    // MINTED FROM THAT SAME BOOLEAN, and never unconditionally.
+    assert.match(
+      src,
+      /wallOpts\.energyBuy\s*\?\s*\[GRANT_ENERGY\]\s*:\s*\[\]/,
+      `${name} must mint GRANT_ENERGY only when the permission was sealed`,
+    );
+    const uses = [...src.matchAll(/GRANT_ENERGY/g)].map((m) => m.index!);
+    const guarded = [...src.matchAll(/wallOpts\.energyBuy\s*\?\s*\[GRANT_ENERGY\]/g)].map((m) => m.index! + m[0].indexOf("GRANT_ENERGY"));
+    const importOnly = /import\s*\{[^}]*\bGRANT_ENERGY\b[^}]*\}\s*from\s*"@merrymen\/core"/.exec(src);
+    assert.ok(importOnly, `${name} must import GRANT_ENERGY from core, never define its own`);
+    for (const at of uses) {
+      const inImport = at >= importOnly.index && at < importOnly.index + importOnly[0].length;
+      assert.ok(inImport || guarded.includes(at), `${name} uses GRANT_ENERGY outside the one guarded mint (offset ${at})`);
+    }
+    assert.equal(guarded.length, 1, `${name} must mint GRANT_ENERGY in exactly one place`);
+
+    // ORDER: deployment read, then the decision, then the wall that is checked
+    // and sealed. Deciding after buildWallPolicies would seal one wall and mint
+    // a marker for another.
+    const deployedAt = src.indexOf("alreadyDeployed = code");
+    const decidedAt = src.indexOf("wallOpts.energyBuy =");
+    const signableAt = src.indexOf("wallSignable(");
+    const sealedAt = src.indexOf("buildWallPolicies(");
+    assert.ok(deployedAt >= 0 && decidedAt >= 0 && signableAt >= 0 && sealedAt >= 0, `${name}: the scan must find every site`);
+    assert.ok(deployedAt < decidedAt, `${name} must read the account's deployment state BEFORE deciding the energy buy`);
+    assert.ok(decidedAt < signableAt, `${name} must decide the energy buy before asking whether the wall is signable`);
+    assert.ok(decidedAt < sealedAt, `${name} must decide the energy buy before buildWallPolicies seals the wall`);
+  }
+});

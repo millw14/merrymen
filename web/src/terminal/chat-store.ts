@@ -14,6 +14,14 @@
  * reads their own empty history; clearing it means the previous owner's is not
  * sitting in the browser for them to find.
  *
+ * WHAT IS KEPT, NOW THAT THE CHAT IS A THREAD. The messages; the orders still
+ * being followed, each with the moment to stop asking — so a reload or a
+ * closed dock resumes the wait instead of losing the answer; and the watermark
+ * below which the agent's own fills are history rather than news. NOT kept: a
+ * trade card (only its key — the tape is re-read), a Retry chip (this
+ * session's), and never a proposal — a confirmation card restored from storage
+ * would be an offer to act made by nobody, on a page reopened days later.
+ *
  * WHAT THIS IS NOT. Not a server-side transcript. Nothing here is uploaded,
  * nothing is shared between devices, and the agent's own memory is unaffected —
  * this is one browser remembering what it already displayed. `localStorage` is
@@ -24,23 +32,29 @@
  * (private windows, embedded views, browsers set to block site data) rather
  * than returning null, so a bare read is a crash on a screen that was working.
  */
-import type { ChatTurn } from "./account";
+import { receiptOf } from "@/lib/order-state";
+import type { ChatFailure, ChatMessage, ChatTurn } from "./account";
+import { MAX_MESSAGES, turnsToMessages } from "./chat-thread";
 
 /** Storage may be absent (SSR) or throw on access; both are handled. */
 type Store = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 const PREFIX = "merrymen.chat.";
 
-/**
- * How many turns are kept.
- *
- * `localStorage` is a few megabytes for the WHOLE origin, shared with
- * everything else this app keeps there, and a chat turn carries a model answer
- * that can run to a few kilobytes. Forty is far more than anybody scrolls back
- * through and bounded enough that the quota is never the thing that breaks.
- * Oldest go first, which is also how `fitChatState` trims what the model sees.
- */
-export const MAX_TURNS = 40;
+/** An order still being followed, and when to stop asking — on this browser's clock. */
+export interface KeptOrder {
+  id: string;
+  until: number;
+}
+
+export interface KeptThread {
+  messages: ChatMessage[];
+  orders: KeptOrder[];
+  /** Epoch seconds, the tape's clock; null until the tape has been read once. */
+  since: number | null;
+}
+
+const EMPTY = (): KeptThread => ({ messages: [], orders: [], since: null });
 
 /**
  * Where this reader's conversation lives, or null if it must not be kept.
@@ -68,45 +82,101 @@ function storeOf(explicit?: Store): Store | null {
   }
 }
 
-/** Whatever was kept under this key, or nothing. Never throws. */
-export function loadTurns(key: string | null, explicit?: Store): ChatTurn[] {
+const ROLES = new Set(["owner", "agent", "event"]);
+const FAILURES = new Set<ChatFailure>(["signed-out", "no-llm", "llm-error", "unreadable", "network", "timeout", "cut-off", "server"]);
+/** The shape of an id the orders route issues: a hash, and so a safe URL segment. */
+const ORDER_ID = /^[0-9a-f]{16,64}$/i;
+
+/**
+ * One kept line, SHAPE-CHECKED rather than trusted. It came out of a store any
+ * script on this origin could have written, and it is rendered as the agent's
+ * own words — and a receipt as a fact about somebody's money, so a receipt is
+ * put through the same field-by-field check the route applies.
+ */
+function messageOf(x: unknown): ChatMessage | null {
+  if (!x || typeof x !== "object") return null;
+  const m = x as Record<string, unknown>;
+  if (typeof m.id !== "string" || !m.id || m.id.length > 200) return null;
+  if (typeof m.role !== "string" || !ROLES.has(m.role)) return null;
+  if (typeof m.text !== "string") return null;
+  const out: ChatMessage = {
+    id: m.id,
+    role: m.role as ChatMessage["role"],
+    at: typeof m.at === "number" && Number.isFinite(m.at) ? m.at : null,
+    text: m.text.slice(0, 8_000),
+  };
+  if (m.side === "buy" || m.side === "sell") out.side = m.side;
+  const order = m.order as { id?: unknown; receipt?: unknown; serverPlacedAt?: unknown } | null | undefined;
+  if (order && typeof order === "object" && typeof order.id === "string" && ORDER_ID.test(order.id)) {
+    out.order = { id: order.id, receipt: receiptOf(order.receipt) };
+    // The server's own time for the placement, so a reloaded thread still
+    // reads the order's life on the ledger's clock (chat-thread.ts lifeOf).
+    const at = order.serverPlacedAt;
+    if (typeof at === "number" && Number.isFinite(at) && at > 0) out.order.serverPlacedAt = at;
+  }
+  if (typeof m.tradeKey === "string" && m.tradeKey.length <= 200) out.tradeKey = m.tradeKey;
+  if (typeof m.failed === "string" && FAILURES.has(m.failed as ChatFailure)) out.failed = m.failed as ChatFailure;
+  return out;
+}
+
+function orderOf(x: unknown): KeptOrder | null {
+  if (!x || typeof x !== "object") return null;
+  const o = x as Record<string, unknown>;
+  return typeof o.id === "string" && ORDER_ID.test(o.id) && typeof o.until === "number" && Number.isFinite(o.until)
+    ? { id: o.id, until: o.until }
+    : null;
+}
+
+/** A conversation kept as the old question/answer list, shape-checked the same way. */
+function legacyOf(list: unknown[]): ChatMessage[] {
+  return turnsToMessages(
+    list.filter(
+      (t): t is ChatTurn => !!t && typeof (t as ChatTurn).question === "string" && typeof (t as ChatTurn).answer === "string",
+    ),
+  );
+}
+
+/** Whatever was kept under this key, or an empty thread. Never throws. */
+export function loadThread(key: string | null, explicit?: Store): KeptThread {
   const store = storeOf(explicit);
-  if (!key || !store) return [];
+  if (!key || !store) return EMPTY();
   try {
     const raw = store.getItem(key);
-    if (!raw) return [];
+    if (!raw) return EMPTY();
     const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    // SHAPE-CHECKED, not trusted. This came out of a store any script on this
-    // origin could have written, and it is rendered as the agent's own words.
-    return parsed
-      .filter(
-        (t): t is ChatTurn =>
-          !!t && typeof (t as ChatTurn).question === "string" && typeof (t as ChatTurn).answer === "string",
-      )
-      .slice(-MAX_TURNS);
+    if (Array.isArray(parsed)) return { ...EMPTY(), messages: legacyOf(parsed) };
+    if (!parsed || typeof parsed !== "object") return EMPTY();
+    const p = parsed as { messages?: unknown; orders?: unknown; since?: unknown };
+    if (!Array.isArray(p.messages)) return EMPTY();
+    return {
+      messages: p.messages.map(messageOf).filter((m): m is ChatMessage => m !== null).slice(-MAX_MESSAGES),
+      orders: Array.isArray(p.orders) ? p.orders.map(orderOf).filter((o): o is KeptOrder => o !== null) : [],
+      since: typeof p.since === "number" && Number.isFinite(p.since) ? p.since : null,
+    };
   } catch {
-    return [];
+    return EMPTY();
   }
 }
 
 /** Keep this conversation. A full or unavailable store is not an error. */
-export function saveTurns(key: string | null, turns: ChatTurn[], explicit?: Store): void {
+export function saveThread(key: string | null, thread: KeptThread, explicit?: Store): void {
   const store = storeOf(explicit);
   if (!key || !store) return;
   try {
-    if (!turns.length) {
+    if (!thread.messages.length && !thread.orders.length && thread.since === null) {
       store.removeItem(key);
       return;
     }
-    store.setItem(key, JSON.stringify(turns.slice(-MAX_TURNS)));
+    // The card and the Retry chip stay behind — see the header.
+    const messages = thread.messages.slice(-MAX_MESSAGES).map(({ trade: _trade, retry: _retry, ...kept }) => kept);
+    store.setItem(key, JSON.stringify({ v: 2, messages, orders: thread.orders, since: thread.since }));
   } catch {
     /* quota, private mode, blocked storage — the chat still works in memory */
   }
 }
 
 /** Forget it. Called on sign-out, with the key of the owner signing OUT. */
-export function clearTurns(key: string | null, explicit?: Store): void {
+export function clearThread(key: string | null, explicit?: Store): void {
   const store = storeOf(explicit);
   if (!key || !store) return;
   try {

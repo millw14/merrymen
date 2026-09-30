@@ -16,6 +16,8 @@ pragma solidity ^0.8.28;
  *   is that the keeper can only make the breaker MORE likely to trip (reports
  *   ratchet the HWM up and can trip, never untrip) and the owner can always
  *   trip manually. Untripping (reset) is owner-only.
+ * - arm() binds the CALLER's own account, so a breaker cannot be seized by a
+ *   stranger front-running its owner (see the note on arm itself).
  * - trip() is permissionless but only enforces already-reported numbers, so
  *   anyone can force the halt the data supports; nobody can halt on fantasy.
  * - The breaker fails CLOSED at the policy layer: no registry configured for a
@@ -54,15 +56,46 @@ contract BreakerRegistry {
     }
 
     /**
-     * @notice Bind a breaker to `account`. First-come owner binding: callable
-     * once per account, by the account itself (sudo call during grant setup)
-     * or by the EOA that will own the configuration.
+     * @notice RENAMED FROM arm(), and not only for clarity.
+     *
+     * The fix did not change this function's ABI: it was and still is
+     * arm(address,address,uint16), so the selector is identical and only the
+     * MEANING of the first parameter moved — from the account being armed to
+     * the owner being named. A caller holding the old ABI would keep compiling,
+     * keep succeeding, and quietly arm its own breaker while believing it had
+     * armed somebody else's. A security fix that can be misapplied in
+     * silence is half a fix, so the name changes and stale callers revert.
+     *
+     * @notice Bind a breaker to the CALLER's account, naming who may configure
+     * it. `configOwner` of address(0) means the account owns its own.
+     *
+     * THE ACCOUNT ARMS ITSELF. This took `account` as a parameter and bound
+     * `owner: msg.sender` behind nothing but an AlreadyArmed check — a guard
+     * that protects whoever calls FIRST, not the account being armed. Anyone
+     * could arm anyone: front-run an owner's own arm, take the configuration,
+     * then `halt()` them. Every mutating function after that is
+     * `onlyOwner(account)` keyed on that first caller, so the real owner could
+     * neither `reset` nor re-`arm`, and their agent would be stopped for good
+     * with no recovery path. Reported as #147 by Alex (Yonkoo11), from source
+     * only, before any deployment existed — which is why this costs nothing to
+     * change now and would have been unfixable later.
+     *
+     * Binding to `msg.sender` removes the race rather than policing it: an
+     * attacker can only ever arm their own account. The documented intent that
+     * an EOA own the configuration survives, because the account NAMES that
+     * EOA — consent that a first-come rule could only assume.
+     *
+     * address(0) means self, and that is not only ergonomics: `owner` is the
+     * not-armed sentinel everywhere else in this contract, so a zero owner
+     * would arm a breaker that every other function reads as unarmed.
      */
-    function arm(address account, address keeper, uint16 maxDrawdownBps) external {
+    function armSelf(address configOwner, address keeper, uint16 maxDrawdownBps) external {
+        address account = msg.sender;
         if (breakers[account].owner != address(0)) revert AlreadyArmed();
         if (maxDrawdownBps == 0 || maxDrawdownBps > 10_000) revert BadThreshold();
+        address owner = configOwner == address(0) ? account : configOwner;
         breakers[account] = Breaker({
-            owner: msg.sender,
+            owner: owner,
             keeper: keeper,
             maxDrawdownBps: maxDrawdownBps,
             tripped: false,
@@ -70,7 +103,7 @@ contract BreakerRegistry {
             hwmUsdg: 0,
             lastEquityUsdg: 0
         });
-        emit Armed(account, msg.sender, keeper, maxDrawdownBps);
+        emit Armed(account, owner, keeper, maxDrawdownBps);
     }
 
     function setKeeper(address account, address keeper) external onlyOwner(account) {

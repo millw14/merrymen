@@ -1,3 +1,5 @@
+import { EVIDENCE_BUDGET_MS, readPoolEvidence, summarizeEvidence } from "./venues/pool-evidence";
+import { upsertRefusal, type RefusalRow } from "./venues/refusal-rows";
 /**
  * merrymen worker — the 24/7 loop.
  *
@@ -22,6 +24,9 @@
  */
 
 import { rmSync, writeFileSync } from "node:fs";
+import { grantTrencher, TRENCHER_VAULT_ABI } from "../../packages/core/src/trencher-vault";
+import { discoverTrencherUniverse } from "./trencher-discovery";
+import { buildTrencherCalls, checkTrencherCalls, verifyTrencherCustody } from "./venues/trencher-vault";
 import { chainRead, resetRpcMeters, rpcSummaryLines } from "./rpc-meter";
 import { runShadowComparison, shadowEnabledFor, shadowLine } from "./reconcile-shadow";
 import {
@@ -77,10 +82,10 @@ import {
 } from "../../packages/core/src/index";
 import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
 import { impactBps, judgeImpact, probeAmountIn } from "./impact";
-import { checkV3SwapCalls } from "./final-fence";
+import { checkEnergySwapCalls, checkV3SwapCalls } from "./final-fence";
 import { readPeers } from "./peer-files";
 import { peerLabel, peerView } from "./strategist/peer-view";
-import { SHADOW_SOURCES, publicationSourceFor, rejectRuleLabel, rejectRuleRemedy, type PublicThesis } from "./thesis-policy";
+import { SHADOW_SOURCES, publicationSourceFor, publishableThesis, rejectRuleLabel, rejectRuleRemedy, type PublicThesis } from "./thesis-policy";
 import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import {
   NotRecorded,
@@ -99,15 +104,37 @@ import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
 import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbols } from "./custody";
 import { SponsorRefused } from "./paymaster";
-import { acquiredLegOf, findOrphanOps, findSoleAcquisition, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { findDroppedOps, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { findTransferFlows, resumeFrom } from "./deposit-log";
 import { renderWhy } from "./strategies/reasons";
-import { takeTick } from "./strategies/types";
+import { idleChannelOnStore, modeEmptiedFact } from "./idle-notice";
+import { classRouteLooks, idleAndClassGate } from "./class-entry-gate";
+import type { Why } from "./strategies/reasons";
+import { classEvidenceOf, type BandBounds, type ClassEvidence } from "./class-evidence";
+import { coinDisplayName } from "./coin-name";
+import { admitPost, postableStatus, traitsOf, VOICE_WINDOW, writerPrompt } from "./social-post";
+import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
+import { breakerTripped, drawdownOf, opsHeadroomOf, takeTick } from "./strategies/types";
 import { grantHasDeadRateLimit } from "./session-account";
-import { claimCommandFile, isExpired, markRunning, writeCommandResult, type FileCommand } from "./command-files";
-import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision } from "./brain-live";
+import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
+import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
+import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, livePeaksStale, tickPlan, tickRatchets, writeHeartbeat, type MarkBook } from "./command-wake";
+import { createTickBook, orderAsked, orderReadsOf, placeOrder, type StatedReads } from "./order-gate";
+import { ownerRefusalNotice } from "./owner-refusal";
+import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
+import { provenanceOf, type Provenance } from "./provenance";
+import { recordDecisionRefusal, verifyDecisionOwner, withDecisionOutcome } from "./decision-identity";
 import { bookGaps, composeEquityUsdg } from "./equity";
-import { runShadow, type ShadowInputs } from "./brain-shadow";
+import { publishesAView, reviewRecord, runShadow, type ShadowInputs, type ShadowOutcome } from "./brain-shadow";
+import { TrenchBrainReview, TrenchTapeReader, highVolumePools, trenchBrainPersona, trenchBrainSignals, HELD_REVIEW_MAX_GAP_MS, TRENCH_REVIEW_INTERVAL_MS } from "./trencher-brain";
+import { getPaperBrainCapital } from "./store";
+import { nextTickDelayMs, tickIntervalMs } from "./decision-cadence";
+import { scheduledInterval, DEFAULT_TRIGGERS } from "./brain-trigger";
+import { boundedRead } from "./optional-read-deadline";
+import { recoverReceiptBasis } from "./receipt-basis-recovery";
+import { MarketReviewClock, quietReviewRow } from "./market-review";
+import { ChainCoinNames, makeDecisionNamer, warmHeldNames } from "./decision-name";
+import { intentDecisionRow } from "./decision-row";
 import { memoryLines, positionContext, sentimentLine, technicalLine } from "./brain-material";
 import { readFeedHistory } from "./read-feed-history";
 import { gradeFloor } from "./strategist/floor-grade";
@@ -117,14 +144,18 @@ import { scanToken } from "./research/onchain-reader";
 import { buildTechnical, renderTechnical } from "./research/technical";
 import { newsDesk } from "./research/news";
 import { readResearch } from "./research-files";
+import type { ResearchFile } from "./research-files";
+import { renderBuilder } from "./research/coin-builder";
 import { STEADY_SWAP_GAS_UNITS, expectedTradeGasUsdg } from "./execution-cost";
 import { chooseFocus, focusLabel } from "./brain-focus";
 import { shadowBrainEnabledFor } from "./brain-enabled";
 import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus, readHolderStatusResult } from "./circle";
+import { CIRCLE_SHORT_CLASS_GATE, circleNote, circleNoteStep, circleStanding, circleStrategyTick, type CircleNoted } from "./circle-gate";
 import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
-import { archiveCurrentGrant, grantExpired, grantKey, loadGrantFile } from "./grant";
+import { archiveCurrentGrant, grantExpired, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
+import { hostedKillFromChat } from "./kill-request";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
 import { execModeOf, liveBlockerText, publishedMode, type ExecMode, type RefuseRule } from "./exec-mode";
 import { limitsFromGrant } from "./limits";
@@ -141,9 +172,73 @@ import {
 } from "./bootstrap-state";
 import { ensureHome, homePaths, merrymenHome } from "./home";
 import { startupSlotMs } from "./stagger";
-import { resolveLlm } from "./llm";
-import { applyPaperIntent, type PaperPosition } from "./paper";
+import { llmText, resolveLlm } from "./llm";
+import { applyPaperIntent, paperBookPositions, type PaperPosition } from "./paper";
 import { checkPolicy, type AgentLimits, type AgentState, type ScoutContext, type TradeIntent } from "./policy";
+// ── ENERGY: how much a low-energy agent may still do on its own today ──────
+// The contract is core energy.ts; the pure throttle is energy.ts; the owner's
+// sentence is energy-copy.ts. What is wired here is where the tick asks.
+import { ENERGY, MERRYMEN_TOKEN, grantEnergyRoute, isEnergyReserveToken } from "../../packages/core/src/index";
+import { isExitIntent } from "./policy";
+import {
+  ENERGY_OFF,
+  claimCap,
+  countsAsEntry,
+  energyBuyOf,
+  energyLevel,
+  energyPlan,
+  energyShortfallRaw,
+  energyStatus,
+  enforcedCap,
+  entryAllowance,
+  heldCurveLegs,
+  reviewAllowance,
+  sellsHeldLeg,
+  shouldTellOwner,
+  shouldTellOwnerSpent,
+  usdgCentsUp,
+  utcDay,
+  type BalanceParts,
+  type EnergyLevel,
+  type EnergyPlan,
+  type LastGood,
+} from "./energy";
+import type { EnergyStatus } from "../../packages/core/src/index";
+import { energyNotice } from "./energy-copy";
+import { energyAmountInFor, energyMinOut, quoteEnergyOut, readEnergyTaxBps } from "./venues/uniswap-v2";
+// ── THE ENERGY BUY: the owner's own confirmed order for the agent's $MERRYMEN.
+// The planner and its sentences are energy-buy.ts; the two calls are
+// venues/uniswap-v2-energy.ts; the booking is energy-settle.ts. None of them is
+// the throttle above — the buy never passes through any of its forks.
+import { buildEnergyCalls } from "./venues/uniswap-v2-energy";
+import {
+  ENERGY_NOT_AN_ORDER,
+  ENERGY_NOT_MAINNET,
+  ENERGY_NO_SELL,
+  ENERGY_RESIGN,
+  energyAskFor,
+  energyGrossFor,
+  energyNeedsLiveLine,
+  isEnergySymbol,
+  planEnergyBuy,
+  resolveOrderToken,
+  sayEnergyOutcome,
+  sayEnergyPlan,
+  usdgText,
+} from "./energy-buy";
+import { attributeSettlements, expectedCashUsdg, heldBreakerObservationUsdg, lookAtCash, opsHoldInference, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC, wroteSince, type Settlement } from "./flow-inference";
+import { durableNetContributionsUsdg6 } from "./net-contributions";
+import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, settleTransferLanding, type EnergySettleDeps } from "./energy-settle";
+import { bookCapitalFlow, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
+import {
+  claimEnergy,
+  claimEnergyNotice,
+  getEnergyDay,
+  lastEnergyRead,
+  noteEnergyRead,
+  refundEnergy,
+  setAgentEnergy,
+} from "./store";
 import {
   bundlerChainMismatch,
   connectionKey,
@@ -152,14 +247,20 @@ import {
   type ResolvedConfig,
 } from "./settings";
 import { BUILTIN_STRATEGIES, buildStrategy, isCircleStrategy, legsForUniverse, watchTokensFor } from "./strategies/registry";
-import { TRENCHER_DEFAULTS, type Candidate, type OpenPosition } from "./strategies/trencher";
+import { NOT_WATCHED, TRENCHER_DEFAULTS, buysOntoDust, TRENCHER_FAST, priceability, shouldEnter, type Candidate, type OpenPosition } from "./strategies/trencher";
 import { createPoolPriceReader } from "./venues/pool-prices";
 import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
-import type { Holding, Snapshot, Strategy } from "./strategies/types";
+import type { Holding, Snapshot, Strategy, Tick } from "./strategies/types";
 import { isPaused, startTelegram } from "./telegram/service";
+import { TgGroupsStore } from "./telegram/tg-groups/store";
+import { takeHeldGroupUpdates } from "./telegram/held-groups";
+import { NOMINATE, NominationBook, trencherReadiness } from "./trencher-nominate";
+import { chainTokenProbe, claimGroupEntry, createCoinLook, createTgCoinsPort, groupExitOf, reviewedDecisionOf, type GroupEntryClaim } from "./tg-coin-look";
 import { startNotifier } from "./telegram/notifier";
+import { energyToldDayOf, type EnergyToldHere } from "./telegram/energy-alert";
 import { startVirtualsStreamer } from "./virtuals-streamer";
-import { createStateRef, ensureLinkCode } from "./telegram/state";
+import { createStateRef, ensureLinkCode, retireLegacyCode } from "./telegram/state";
+import { makeChatTally, telegramLog } from "./telegram/poll-rules";
 import { readPositionRaw } from "./telegram/reads";
 import { formatDepth, formatNoDepth } from "./telegram/depth-format";
 import { bestCashPool } from "./venues/pool-price";
@@ -167,12 +268,14 @@ import { readPoolDepth } from "./venues/depth";
 import { readPage, signalsFrom } from "./venues/research";
 import { readTokenMeta } from "./venues/pons-meta";
 import { createDepthReader } from "./venues/depth-cache";
-import { ensureSoul, getName, setName } from "./soul";
+import { getName, nameSeat } from "./soul";
+import { createNameReconciler, mirrorNameOnArm } from "./name-reconcile";
 import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, type Position } from "./positions";
 import { quarantineOf } from "./quarantine";
 import {
   describeDiscovery,
   describeTrending,
+  trendingStatusLine,
   discoverPools,
   discoverPonsLaunches,
   discoverTrending,
@@ -180,7 +283,7 @@ import {
   quoteUsdOf,
   resolveBitquery,
 } from "./discovery";
-import { fetchGeckoPools, type ScreenLimits } from "./venues/geckoterminal";
+import { fetchGeckoPools, readTokenPools, type ScreenLimits, type GeckoPool } from "./venues/geckoterminal";
 import { createMemecoinScout, nullScout } from "./strategist/memecoin-scout";
 import { readCurvePrices } from "./venues/curve-prices";
 import { createV4KeyBook, keysForToken } from "./venues/v4-keys";
@@ -236,6 +339,22 @@ const CURVE_DEADLINE_SEC = 60;
  * on that. Same discipline PONS_MAX_EVALUATE applies to discovery.
  */
 const CLASS_MAX_READS = 8;
+
+/**
+ * A class pass that proposes nothing.
+ *
+ * Both class producers return a `Tick` rather than a bare `TradeIntent[]`, so
+ * that the evidence behind a trade can travel WITH it — the intent itself is
+ * deliberately numbers-only and has nowhere to put a reason. A shared constant
+ * because the two functions between them have eighteen ways of deciding there
+ * is nothing to do, and `{ intents: [], why: [] }` eighteen times invites the
+ * one place somebody writes `{ intents: [], why: [null] }` and pairs a reason
+ * with no trade.
+ *
+ * Frozen: it is returned by reference from every one of those sites.
+ */
+const NO_CLASS: Tick = Object.freeze({ intents: [], why: [] }) as Tick;
+
 /**
  * How much of an immediate round trip may be lost before an entry is refused.
  *
@@ -352,9 +471,16 @@ import { applyFill } from "./basis";
 import {
   addDecision,
   addEquity,
+  displayNameFor,
   addEvent,
   addFeeAccrual,
+  addPost,
   addTrade,
+  decisionAgent,
+  decisionEvidence,
+  lifecycleOf,
+  hasPost,
+  recentPosts,
   basisSymbols,
   classPositionCurves,
   classPositions,
@@ -377,20 +503,23 @@ import {
   recentTradeTxHashes,
   getAgentEpoch,
   getAgentFinancials,
+  getRiskPeriodPeak,
+  restoreRiskPeriod,
   hasChainFlow,
   accountingHistoryAuditable,
   hasEpochOneHistory,
   lastKnownEquityUsdg,
-  lastKnownCashUsdg,
+  lastKnownCashReading,
+  landedOpsBetween,
   openNextEpoch,
   poolKeysFor,
   getOpsToday,
   getPaperBook,
   getSpentTodayUsdg,
   getTransferredTodayUsdg,
-  landedFillsWithoutBasis,
   listOpHashes,
   listSubmittedOps,
+  opsSignedWithNonce,
   initStore,
   setPaperBook,
   resetPaperLedger,
@@ -398,7 +527,7 @@ import {
   setAgentXHandle,
   positionsExplained,
   getGasPaidUsdg,
-  getNetContributionsUsdg,
+  getNetContributionsSince,
   setAgentEpoch,
   restoreAgentHwmParts,
   setAgentHwm,
@@ -611,6 +740,69 @@ async function main() {
    * only a READ zero counts.
    */
   let lastPrices: Map<string, PriceQuote> = new Map();
+  const trenchBrain = new TrenchBrainReview();
+  trenchBrain.onDrop = (why, decisionId) => {
+    console.log(`[trencher] ${why}`);
+    // A ready BUY that will never become an order: if it answered a nominated
+    // coin, the chat hears `skipped` now instead of waiting out the TTL. The
+    // book ignores decisions that were not about a nomination.
+    if (decisionId) tgDeliver(tgBook.onFill(decisionId, "dropped", paperActive()));
+  };
+  let autoTrench: Awaited<ReturnType<typeof discoverTrencherUniverse>> | null = null;
+  let autoTrenchContext = "";
+  let autoTrenchPending = false;
+  let autoTrenchNext = 0;
+  let autoTrenchBalances = new Map<string,bigint>();
+  function refreshAutoTrench() {
+    if (!active || !grantTrencher(active.grant)) return;
+    const context = `${active.agentId}:${active.grant.grantedAt}`;
+    if (context !== autoTrenchContext) { autoTrenchContext=context; autoTrench=null; autoTrenchNext=0; }
+    if (autoTrenchPending || Date.now()<autoTrenchNext) return;
+    autoTrenchPending=true; autoTrenchNext=Date.now()+60_000;
+    const current=active;
+    // Nominated coins (Telegram groups) are verified beyond the top slice by
+    // the same on-chain checks; the set is addresses only (trencher-discovery.ts).
+    void discoverTrencherUniverse(mainnetClient(),current.grant,freshTrenchTape(),{nominated:new Set(tgNominated)}).then(result=>{
+      if (autoTrenchContext===context) autoTrench=result;
+      // The held coins' names are read now, minutes before any exit needs one:
+      // a decision never waits for the chain (decision-name.ts).
+      if (autoTrenchContext===context) warmHeldNames(coinNames, result);
+    }).catch(()=>trenchNotice(current.agentId,"Autonomous discovery could not verify its pool or custody data. Retrying; no new token authorized.")).finally(()=>{autoTrenchPending=false;});
+  }
+  const trenchTapeReader = new TrenchTapeReader();
+  let trenchTapeAt = 0;
+  let trenchTapeRequestedAt = 0;
+  let trenchTapePending = false;
+  let lastTrenchNotice = "";
+  function trenchNotice(agentId: string, message: string) {
+    if (message === lastTrenchNotice) return;
+    lastTrenchNotice = message;
+    if (message) {
+      console.warn(`[trencher] ${message}`);
+      void addEvent(agentId, "warn", `Trencher: ${message}`).catch(() => {});
+    }
+  }
+  function refreshTrenchTape() {
+    if (trenchTapePending || Date.now() - trenchTapeRequestedAt < 60_000) return;
+    trenchTapePending = true;
+    trenchTapeRequestedAt = Date.now();
+    void trenchTapeReader.refresh().then(result => {
+      trenchTapeAt = result.observedAt;
+      if (result.failures.length) console.warn(`[trencher] Market tape pages failed: ${result.failures.join(", ")}; ${result.pools.length} fresh pools retained.`);
+      // Discovery otherwise runs against the preceding tape and then waits a
+      // full minute even though a new tape has just arrived.
+      autoTrenchNext = 0;
+      refreshAutoTrench();
+    }).catch(() => {
+      // No provider URL or response body: those may contain credentials.
+      console.warn("[trencher] Market tape refresh failed; retaining the last tape within its freshness limit.");
+    }).finally(() => { trenchTapePending = false; });
+  }
+  const freshTrenchTape = () => {
+    const snapshot = trenchTapeReader.snapshot();
+    trenchTapeAt = snapshot.observedAt;
+    return snapshot.pools;
+  };
   /**
    * Which rail this agent is on, asked in ONE place.
    *
@@ -624,7 +816,8 @@ async function main() {
       armed: !!active,
       executor: !!active?.executor,
       chainId: active?.grant.chainId ?? 0,
-      cashUsdg: lastCashUsdg,
+      // The reconciler's reading once it exists; before that, the rail's own.
+      cashUsdg: lastCashUsdg ?? railCashUsdg,
       // Read on BOTH rails now — see the note at the assignment. Live-only made
       // this a latch, and a latch on a leg of the rail predicate is an agent
       // that can never come back.
@@ -646,10 +839,253 @@ async function main() {
       enforceLiveIntent: cfg.enforceLiveIntent,
     });
   const paperActive = () => execMode().mode === "paper";
+
+  // ── TELEGRAM GROUPS: THE ONE DOOR FROM A GROUP INTO TRADING ─────────────
+  //
+  // docs/tg-groups.md, "The coin flow", "Trencher readiness", "Nomination
+  // caps". A coin posted in a group can NOMINATE, never order: what crosses is
+  // a validated address plus where it came from (NominationBook), and the only
+  // things it changes on this side are which token page the tape reads, which
+  // pools discovery verifies beyond its top slice, and which eligible coin the
+  // review rotation looks at first. The Brain's input for a nominated coin is
+  // exactly any tape coin's; the entry path sizes it; checkPolicy and the
+  // TrencherVault bound it; and group-sourced entries get an EXTRA cap
+  // (3 per UTC day, claimed before, refunded on no fill) on top of all of it.
+  //
+  // One store per child (the service is handed this one; nothing else opens
+  // the file), and the book lives in memory on purpose — see trencher-nominate.ts:
+  // a restart forgets pending nominations, and the chat side's durable claim
+  // means a forgotten one is dropped, never replayed into a second buy.
+  // Self-hosted there is no ferry, so the store clears its own forget file
+  // (docs/tg-groups.md "Memory"); hosted, the orchestrator must see it first.
+  const tgGroupsStore = TgGroupsStore.open(merrymenHome(), { ownsForgets: !isHostedMode() });
+  const tgBook = new NominationBook(tgGroupsStore);
+  /** Unresolved nominations whose own token page rides on the tape (lowercased). */
+  const tgNominated = new Set<string>();
+  /**
+   * Brain decision id → the nominated coin that review was about. The group
+   * entry claim reads it (tg-coin-look.ts claimGroupEntry) so an entry from a
+   * nominated review is still recognised as group-sourced after the book has
+   * let the nomination go. Pruned after an hour: a ready order lives 60s.
+   */
+  const tgReviewedNominated = new Map<string, { address: string; atMs: number }>();
+  /** Memecoins the book holds now → a display name safe to say, or null. Set by the tick. */
+  let tgHeld = new Map<string, string | null>();
+  /** A sale that would be the exit of a group-bought coin, waiting for its trade row. */
+  const tgExitWatch = new WeakMap<TradeIntent, { address: string; notes: string[] }>();
+  /** `${utcDay}:${address}` of group-entry refusals already logged — once each. */
+  const tgEntryRefusalsLogged = new Set<string>();
+  let tgNominatedTapePending = false;
+  const tgLook = createCoinLook({
+    own: () => (active ? bookAddresses(active.grant, active.grant.smartAccount) : []),
+    held: (a) => (tgHeld.has(a) ? { name: tgHeld.get(a) ?? null } : null),
+    tokenPools: readTokenPools,
+    // Through the governed mainnet client, like every identity read; asked for
+    // FRESH each time because setMainnetRpc can swap it.
+    getCode: (a) => mainnetClient().getCode({ address: a }),
+    probe: (a) => chainTokenProbe(mainnetClient())(a),
+    curveFor: (a) => curveFor(a),
+  });
+  const tgCoins = createTgCoinsPort({
+    // The same `cfg` the tick trades on, read at the moment of asking.
+    readiness: () =>
+      trencherReadiness({
+        strategy: cfg.strategy,
+        assetMode: cfg.assetMode,
+        trencherFastEnabled: cfg.trencherFastEnabled,
+        brainUrl: cfg.brainUrl,
+        brainToken: cfg.brainToken,
+        paper: paperActive(),
+        hasTrencherGrant: !!(active && grantTrencher(active.grant)),
+        trencherLiveEnabled: cfg.trencherLiveEnabled,
+      }),
+    look: tgLook,
+    book: tgBook,
+    onNominated: (address) => {
+      tgNominated.add(address);
+      trenchTapeReader.setNominated(tgNominated);
+      refreshNominatedTape();
+    },
+    heldNames: () => [...tgHeld.values()].filter((n): n is string => typeof n === "string" && n.length > 0),
+    paper: () => paperActive(),
+    log: (line) => console.log(line),
+  });
+  /**
+   * Hand outcomes to the chat side, then let resolved nominations go: their
+   * tape pages are dropped now (a coin kept alive by a chat that has its
+   * answer would be a coin the chat still chooses), and old review links are
+   * pruned. Never throws — the tick calls this between trades.
+   *
+   * DELIVERED ON THE NEXT TURN OF THE EVENT LOOP, not inside the call: this
+   * runs from recordTrade, inside the serialised trade path, and whatever a
+   * chat does with an outcome must not hold a trade (or the next one) up.
+   * The book's own state is already settled by the time this is called.
+   */
+  function tgDeliver(outcomes: Parameters<typeof tgCoins.emit>[0]): void {
+    try {
+      const list = outcomes == null ? [] : Array.isArray(outcomes) ? [...outcomes] : [outcomes];
+      if (list.length > 0) setImmediate(() => tgCoins.emit(list));
+      for (const a of [...tgNominated]) if (!tgBook.nominated(a)) tgNominated.delete(a);
+      trenchTapeReader.setNominated(tgNominated);
+      const now = Date.now();
+      for (const [id, r] of tgReviewedNominated) if (now - r.atMs > 3_600_000) tgReviewedNominated.delete(id);
+    } catch (e) {
+      console.warn(`[tg-groups] outcome delivery failed: ${e instanceof Error ? e.name : "error"}`);
+    }
+  }
+  /**
+   * A NEW NOMINATION'S PAGE, READ NOW. The full tape refreshes at most once a
+   * minute; this reads only the nominated pages (one request each) and then
+   * lets discovery run against them, so the coin can reach verification
+   * without waiting out the tape's own clock.
+   */
+  function refreshNominatedTape(): void {
+    if (tgNominatedTapePending) return;
+    tgNominatedTapePending = true;
+    void trenchTapeReader
+      .refreshNominated()
+      .then((failures) => {
+        if (failures.length) console.warn(`[trencher] ${failures.length} nominated tape page(s) could not be read; retried with the tape.`);
+        autoTrenchNext = 0;
+        refreshAutoTrench();
+      })
+      .catch(() => {})
+      .finally(() => {
+        tgNominatedTapePending = false;
+      });
+  }
+  /**
+   * AFTER A TRENCHER REVIEW IS PERSISTED (runShadow writes the decision before
+   * it returns): tell the book what the Brain decided about that token. The
+   * book ignores tokens nobody nominated. Never throws — a throw here would
+   * reject the review's promise and lose a ready order for everyone.
+   */
+  function tgNoteReview(token: string, outcome: ShadowOutcome): void {
+    try {
+      if (!outcome.ran || !outcome.result.ok) return;
+      const decided = reviewedDecisionOf(outcome.result.decision);
+      const address = token.toLowerCase();
+      if (decided.action === "buy" && decided.decisionId && tgBook.nominated(address)) {
+        tgReviewedNominated.set(decided.decisionId, { address, atMs: Date.now() });
+      }
+      tgDeliver(tgBook.onReviewed(address, decided));
+    } catch (e) {
+      console.warn(`[tg-groups] review note failed: ${e instanceof Error ? e.name : "error"}`);
+    }
+  }
+  /**
+   * THE GROUP-ENTRY CAP at the trencher entry loop (tg-coin-look.ts
+   * claimGroupEntry), asked before the energy claim. A refusal skips that one
+   * entry, is logged once per coin per UTC day — as a fact, with no address
+   * or name — and answers the nomination `skipped`.
+   */
+  function tgClaimGroupEntry(intent: TradeIntent): GroupEntryClaim {
+    let g: GroupEntryClaim;
+    try {
+      g = claimGroupEntry(tgBook, intent, (id) => tgReviewedNominated.get(id)?.address);
+    } catch {
+      // Unanswerable is not "not group-sourced": the entry does not go ahead.
+      return intent.kind === "swap"
+        ? { group: true, address: intent.buyToken.toLowerCase(), ok: false, why: "cap" }
+        : { group: false };
+    }
+    if (g.group && !g.ok) {
+      const day = new Date().toISOString().slice(0, 10);
+      const key = `${day}:${g.address}`;
+      if (!tgEntryRefusalsLogged.has(key)) {
+        if (tgEntryRefusalsLogged.size > 200) tgEntryRefusalsLogged.clear();
+        tgEntryRefusalsLogged.add(key);
+        console.log(
+          `[trencher] skipped a group-sourced entry: ${g.why === "cap" ? "today's group entries are used up" : "its nomination had already resolved"}`,
+        );
+      }
+      // The owner's feed hears the cap once per UTC day, as a count and a
+      // fact: no coin, no chat, no sender.
+      if (g.why === "cap" && active && !tgEntryRefusalsLogged.has(`${day}:event`)) {
+        tgEntryRefusalsLogged.add(`${day}:event`);
+        void addEvent(
+          active.agentId,
+          "ok",
+          `Telegram groups: today's ${NOMINATE.groupEntriesPerDay} buys of coins posted in your groups are used up, so further ones are passed on until the UTC day turns. Every other limit is unchanged.`,
+        ).catch(() => {});
+      }
+      if (intent.decisionId) tgDeliver(tgBook.onFill(intent.decisionId, "group-cap", paperActive()));
+    }
+    return g;
+  }
+  /**
+   * The group-entry claim goes back exactly where the energy claim does —
+   * whenever the entry did not become a trade (landed, submitted or paper) —
+   * and the nomination hears `skipped`, never why.
+   */
+  function tgSettleGroupEntry(g: GroupEntryClaim | null, decisionId: string | undefined, status: string | null | undefined): void {
+    if (!g || !g.group || !g.ok || tradeConsumesSnapshot(status)) return;
+    try {
+      tgBook.refundEntry(g.address);
+      if (decisionId) tgDeliver(tgBook.onFill(decisionId, status ?? "not-sent", paperActive()));
+    } catch {
+      // A refund that did not happen under-spends by one: the safe side.
+    }
+  }
+  /**
+   * A SALE THAT EMPTIES A POSITION, remembered until its trade row lands
+   * (tgNoteTradeRow). Only the book knows whether the coin came from a group;
+   * for any other coin onExit says nothing.
+   */
+  function tgWatchExit(intent: TradeIntent, why: { code: string; cause?: unknown } | null | undefined, held: readonly { token: string; rawBalance: bigint }[]): void {
+    try {
+      if (intent.kind !== "swap") return;
+      const sold = intent.sellToken.toLowerCase();
+      const exit = groupExitOf(intent, why, held.find((p) => p.token.toLowerCase() === sold)?.rawBalance ?? null);
+      if (exit) tgExitWatch.set(intent, exit);
+    } catch {
+      // No exit line is the fallback, never a wrong one.
+    }
+  }
+  /**
+   * A TRADE ROW WAS WRITTEN (recordTrade): a Brain decision's status answers a
+   * nominated coin — `landed`/`paper` is a buy, anything final is `skipped`,
+   * `submitted` is not an answer yet — and a watched exit that landed gets its
+   * one line.
+   */
+  function tgNoteTradeRow(intent: TradeIntent, decisionId: string | undefined, status: string): void {
+    try {
+      if (decisionId) tgDeliver(tgBook.onFill(decisionId, status, paperActive()));
+      if (status !== "landed" && status !== "paper") return;
+      const exit = tgExitWatch.get(intent);
+      if (!exit) return;
+      tgExitWatch.delete(intent);
+      tgDeliver(tgBook.onExit(exit.address, exit.notes));
+    } catch {
+      // Silence is the fallback; the trade itself is already recorded.
+    }
+  }
+  /** What the tick's book read says is held, for the look ("held") and the persona (names only). */
+  function tgNoteHeld(positions: readonly { token: string; symbol: string }[], unpriced: readonly string[]): void {
+    const next = new Map<string, string | null>();
+    const add = (token: string | undefined) => {
+      if (!token) return;
+      const a = token.toLowerCase();
+      if (instrumentClassOf(a) !== "memecoin" || isEnergyReserveToken(a)) return;
+      if (a === CASH.USDG.toLowerCase() || a === CASH.WETH.toLowerCase()) return;
+      next.set(a, coinDisplayName(watchTokens.find((t) => t.address.toLowerCase() === a)) ?? null);
+    };
+    for (const p of positions) add(p.token);
+    // Held but unpriced this tick is still held: absence from `positions` is
+    // "no mark", not "sold".
+    for (const s of unpriced) add(watchTokens.find((t) => t.symbol === s)?.address);
+    tgHeld = next;
+  }
+
   /** The last leg that blocked the live rail, so the event fires on change only. */
   let lastLiveBlocker: RefuseRule | null | undefined;
-  /** The last reason a tick proposed nothing, so THAT fires on change only too. */
-  let lastIdleReason: string | null = null;
+  /**
+   * WHY A TICK PROPOSED NOTHING, told once per change — and a warning that
+   * still stands kept on the owner's notice. The state (`lastIdleReason`, as
+   * it was), both writes and the store they go to live in idle-notice.ts,
+   * where a test runs them on the real store.
+   */
+  const idleChannel = idleChannelOnStore((line) => console.log(line));
   /**
    * The last policy refusal an owner was TOLD about, so it fires on change only.
    *
@@ -672,26 +1108,11 @@ async function main() {
    * The `trades` ROW is still written every time. The tape must stay complete —
    * it is what the wall-tape screen and every audit count — and it is only the
    * human-facing line that benefits from being said once.
+   *
+   * The keying and the rule list live in owner-refusal.ts, so the owner's half
+   * can be executed by a test beside the public gate that drops the same refusal.
    */
   let lastPolicyRefusal: string | null = null;
-  /**
-   * Rules that are about the account's own state, not about an asset.
-   *
-   * Everything not listed here is treated as token-specific, which is the safe
-   * direction: the cost of over-reporting is a repeated line, and the cost of
-   * under-reporting is an owner never hearing about the second broken token.
-   */
-  const ACCOUNT_WIDE_RULES = new Set([
-    "expiry",
-    "ops-cap",
-    "per-trade-cap",
-    "daily-cap",
-    "deposit-cap",
-    "drawdown-breaker",
-    "scout-budget",
-    "transfer-not-permitted",
-    "non-positive",
-  ]);
   /** Which held symbols last lacked a cost basis, so the warning fires on change only. */
   let lastUncoveredBasisKey: string | null = null;
   /**
@@ -725,14 +1146,10 @@ async function main() {
    */
   const BRAIN_GRADE_TTL_SEC = 900;
   /**
-   * Symbols the deep acquisition scan has already been run for in this process.
-   *
-   * It walks two million blocks in spans, so it is hundreds of RPC calls. A tick
-   * that found nothing would pay them again every four minutes, for ever, on the
-   * endpoint this fleet already once saturated. Once is a recovery; every tick
-   * is an outage with a good excuse.
+   * Last recovery attempt per symbol. Retry after an hour rather than permanently
+   * giving up after a transient RPC failure or scanning on every trading tick.
    */
-  const deepBasisTried = new Set<string>();
+  const deepBasisTried = new Map<string, number>();
   /**
    * The `onchain` lens, cached per token, with the same lesson applied.
    *
@@ -982,7 +1399,7 @@ async function main() {
     }
   }
 
-  async function proposeClassEntries(): Promise<TradeIntent[]> {
+  async function proposeClassEntries(): Promise<Tick> {
     // PAPER CANNOT SIMULATE ONE. paper.ts refuses every non-swap intent, and a
     // simulated class fill would need a price for a token with no oracle, no
     // pool and no TWAP — necessarily the curve's own reserves, which
@@ -991,14 +1408,14 @@ async function main() {
     // — the vault holding, delivery, fee-on-transfer, honeypots — is exactly
     // what a simulator cannot model, on the one venue where the tape is written
     // by the adversary.
-    if (paperActive()) return [];
+    if (paperActive()) return NO_CLASS;
     // A class entry is a launchpad coin by construction, so stocks-only excludes
     // the whole route. No symbol set to sift, and therefore no drift surface —
     // this is a gate, not a filter.
-    if (cfg.assetMode === "stocks") return [];
-    if (!active) return [];
+    if (cfg.assetMode === "stocks") return NO_CLASS;
+    if (!active) return NO_CLASS;
     const vault = grantPonsClassVault(active.grant);
-    if (!vault) return [];
+    if (!vault) return NO_CLASS;
 
     /**
      * THE EXECUTION GATES MOVED DOWN, AND THAT IS THE POINT.
@@ -1024,7 +1441,7 @@ async function main() {
     // be read, and an unreadable position count must not read as zero — that
     // would let the ceiling free itself exactly when the book is unknown.
     const held = await classPositions(active.agentId);
-    if (held === null) return [];
+    if (held === null) return NO_CLASS;
     /**
      * TWO SETS FROM ONE READ, AND THEY ARE DELIBERATELY DIFFERENT.
      *
@@ -1124,7 +1541,7 @@ async function main() {
         buying: cfg.classSnipeEnabled && cfg.classPerEntryUsdg > 0,
         activityUnknown: classActivity === null,
       });
-      return [];
+      return NO_CLASS;
     }
 
     const { legs, refused } = await readClassLegs({
@@ -1309,15 +1726,15 @@ async function main() {
       activityUnknown: classActivity === null,
     });
 
-    if (legs.length === 0) return [];
+    if (legs.length === 0) return NO_CLASS;
 
     /**
      * NOW THE EXECUTION GATES. Everything above this line is looking; nothing
      * above it can spend. These three say DO NOT BUY, and they are applied here
      * so that the scan and its report happen first.
      */
-    if (!cfg.classSnipeEnabled) return [];
-    if (cfg.classPerEntryUsdg <= 0) return [];
+    if (!cfg.classSnipeEnabled) return NO_CLASS;
+    if (cfg.classPerEntryUsdg <= 0) return NO_CLASS;
     /**
      * THE CEILING, AGAINST POSITIONS RATHER THAN AGAINST HISTORY.
      *
@@ -1341,14 +1758,14 @@ async function main() {
         lastClassCeilingKey = line;
         console.log(`[class] ${line} — waiting for a position to close`);
       }
-      return [];
+      return NO_CLASS;
     }
 
     // ONE ENTRY PER TICK. The caps would bound a burst anyway, but a single
     // proposal keeps the decision legible: an owner reading the feed sees one
     // considered entry rather than a wall of refusals from a batch that could
     // only ever have filled its first member.
-    if (!choice.pick) return [];
+    if (!choice.pick) return NO_CLASS;
     const leg = scored.find((s) => s.leg.token === choice.pick!.token)!.raw;
 
     // THE LAST FIVE SILENT REFUSALS ON THIS PATH.
@@ -1362,12 +1779,12 @@ async function main() {
     //
     // Logged on CHANGE, like the refusal tally above: the answer is usually the
     // same one and a line per tick is a line nobody reads.
-    const refuse = (why: string): TradeIntent[] => {
+    const refuse = (why: string): Tick => {
       if (why !== lastClassSizingKey) {
         lastClassSizingKey = why;
         console.log(`[class] ${leg.symbol}: ${why}`);
       }
-      return [];
+      return NO_CLASS;
     };
     if (spend <= 0n) return refuse(`nothing to spend — entry size ${cfg.classPerEntryUsdg} against a per-trade cap of ${Number(active.limits.perTradeUsdg) / 1e6}`);
 
@@ -1443,18 +1860,53 @@ async function main() {
       );
     }
 
-    return [
-      {
-        kind: "curve-trade",
-        target: vault,
-        curve: leg.curve,
-        assetIn: leg.quoteToken,
-        assetOut: leg.token,
-        amountInRaw: spend,
-        minAmountOutRaw: floor,
-        notionalUsdg: spend,
-      },
-    ];
+    return {
+      intents: [
+        {
+          kind: "curve-trade",
+          target: vault,
+          curve: leg.curve,
+          assetIn: leg.quoteToken,
+          assetOut: leg.token,
+          amountInRaw: spend,
+          minAmountOutRaw: floor,
+          notionalUsdg: spend,
+        },
+      ],
+      /**
+       * THE EVIDENCE, CARRIED RATHER THAN RE-READ.
+       *
+       * Every figure here was measured in the pass that chose this curve, a few
+       * frames up. Re-reading any of it at publication time would describe a
+       * different market and call it the reason for this trade.
+       *
+       * `recentTrades` and the trader count keep their NULLS. index.ts closes
+       * that gap where the activity map is built — a tape we could not read is
+       * not a quiet tape — and this is the one place downstream that could
+       * quietly undo it with a `?? 0`.
+       */
+      why: [
+        {
+          code: "class-enter",
+          symbol: leg.symbol,
+          usdgRaw: spend,
+          trades: choice.pick.recentTrades,
+          // TRADERS COMES FROM THE SAME MAP AS TRADES, so the two figures are
+          // one tape read rather than two — a breadth ratio built from two
+          // different moments describes neither. Null when the tape is
+          // unreadable, and a measured 0 only when the map HAS the curve.
+          traders: classActivity === null ? null : (classActivity.get(leg.curve.toLowerCase())?.traders ?? 0),
+          depthRaw: choice.pick.realDepthRaw,
+          impactBps: impact,
+          // costBps lives on the scored ENTRY, not the leg: it only exists for a
+          // curve that would quote a buy at this size, which is exactly when a
+          // round-trip cost is a real number rather than an assumption.
+          costBps: scored.find((s) => s.leg.token === choice.pick!.token)?.entry?.costBps ?? null,
+          graduationBps: progressBps,
+          field: scored.length,
+        },
+      ],
+    };
   }
 
   /**
@@ -1702,7 +2154,15 @@ async function main() {
         // reach `bookClassSweepWithdrawal` and tell the owner they had swept
         // their own cash out of the vault, with a cost it "never saw".
         cached: cachedRows.map((r) => r.token).filter((t) => !isCash(t)),
-        logComplete: !scan.failed,
+        // A LOG THIS CODE COULD NOT PARSE IS NOT A COMPLETE HISTORY EITHER.
+        // `failed` means the node refused a window; `unreadable` means the node
+        // answered and the vault said something this build does not understand.
+        // Both leave the tape short, and the whole safety story of
+        // class-reconcile rests on this flag: treating a dialect we cannot read
+        // as "nothing happened" is what closes an open position from silence.
+        // The filter is address-only, so every unreadable log came from this
+        // vault — there is no third-party noise to tolerate here.
+        logComplete: !scan.failed && scan.unreadable === 0,
         balancesComplete: custody.unread.length === 0,
       });
 
@@ -1962,22 +2422,23 @@ async function main() {
    * later, against a curve that is by then thinner, and the whole point is that
    * the position stops existing.
    */
-  async function proposeClassExits(): Promise<TradeIntent[]> {
-    if (paperActive()) return [];
-    if (!active) return [];
+  async function proposeClassExits(): Promise<Tick> {
+    if (paperActive()) return NO_CLASS;
+    if (!active) return NO_CLASS;
     const vault = grantPonsClassVault(active.grant);
-    if (!vault) return [];
+    if (!vault) return NO_CLASS;
 
     // NULL IS NOT EMPTY. An unreadable position list must not read as "nothing
     // held" — that would silently skip every exit at the exact moment the
     // database is unwell, which is when a stuck position is most likely.
     const held = await classPositions(active.agentId);
-    if (held === null) return [];
+    if (held === null) return NO_CLASS;
 
     const now = Math.floor(Date.now() / 1000);
     const maxHold = cfg.classMaxHoldSec;
     const exitAtPct = cfg.classExitAtGraduationPct;
     const out: TradeIntent[] = [];
+    const whys: Why[] = [];
 
     for (const p of held) {
       /**
@@ -2052,15 +2513,54 @@ async function main() {
       }
 
       const heldSec = Math.max(0, now - p.firstSeen);
-      const progressPct = (curveDepthFraction(reserves) ?? 0) * 100;
+      /**
+       * THE COALESCE IS KEPT FOR THE GATE AND REFUSED FOR THE RECORD.
+       *
+       * `curveDepthFraction` returns null when the curve will not say how close
+       * it is. Coalescing that to 0 is the SAFE direction for deciding — an
+       * unreadable curve never trips the cliff, so we never sell on a figure we
+       * do not have. It is a lie for reporting, because 0% and "we could not
+       * read it" are different facts and only one of them is about the curve.
+       *
+       * So the gate keeps the zero and the evidence keeps the null.
+       */
+      const depthFraction = curveDepthFraction(reserves);
+      const progressPct = (depthFraction ?? 0) * 100;
       const aged = heldSec >= maxHold;
       const graduating = progressPct >= exitAtPct;
       if (!aged && !graduating) continue;
 
       const quoted = curveSellOut(reserves, balance);
-      if (quoted === null || quoted <= 0n) continue;
+      // A POSITION THAT CANNOT BE QUOTED IS STUCK, AND THAT IS NEWS.
+      //
+      // Every other refusal in this loop warns the owner; these two `continue`d
+      // in silence, every tick, forever — so a position whose curve will not
+      // quote a sell was indistinguishable from one that simply had not aged.
+      // It matters more now than it did: the feed is about to start narrating
+      // these exits, and an exit that never happens would otherwise be the one
+      // thing the agent never mentions.
+      //
+      // The de-duplication is the owner's event channel, not a new one:
+      // addEvent is already once-per-change for an unchanged string.
+      if (quoted === null || quoted <= 0n) {
+        void addEvent(
+          active.agentId,
+          "warn",
+          `${p.symbol ?? short(p.token)} is ready to leave but its curve will not quote a sell, so nothing was ` +
+            `sent. Retrying each tick; \`merrymen recover\` is the way out if it stays that way.`,
+        );
+        continue;
+      }
       const floor = curveMinOut(quoted, cfg.slippageBps);
-      if (floor === null || floor <= 0n) continue;
+      if (floor === null || floor <= 0n) {
+        void addEvent(
+          active.agentId,
+          "warn",
+          `${p.symbol ?? short(p.token)} is ready to leave but no minimum-output floor could be derived, and a ` +
+            `sell with no floor is how a position leaves for nothing. Retrying each tick.`,
+        );
+        continue;
+      }
 
       console.log(
         `[class] exiting ${p.symbol ?? short(p.token)} — ${
@@ -2080,8 +2580,30 @@ async function main() {
         // count as USDG.
         notionalUsdg: quoted,
       });
+      /**
+       * WHICH OF THE TWO IT WAS.
+       *
+       * `aged` and `graduating` used to be spent entirely on the log line
+       * above: both branches then pushed byte-identical intents, so from here
+       * on a clock exit and a cliff exit were the same bytes and no reader —
+       * owner, feed or peer — could ever tell them apart.
+       *
+       * THE CLIFF WINS A TIE, and the order is the claim. When a position is
+       * both old enough and close enough to graduating, the cliff is the reason
+       * it is leaving NOW: the clock would have tolerated another tick, and the
+       * cliff is a door closing. Reporting the clock there would be true about
+       * the position and wrong about the decision.
+       */
+      whys.push({
+        code: "class-exit",
+        symbol: p.symbol ?? short(p.token),
+        cause: graduating ? "cliff" : "clock",
+        heldSec,
+        graduationBps: depthFraction === null ? null : Math.round(depthFraction * 10_000),
+        proceedsRaw: quoted,
+      });
     }
-    return out;
+    return { intents: out, why: whys };
   }
 
   function curveLegsNow(): {
@@ -2279,6 +2801,38 @@ async function main() {
   }
 
   /**
+   * THE `builder` LENS — who, if anyone, is still shipping this thing.
+   *
+   * The first lens on this desk that is not a reading of the tape. The other
+   * four — technical, liquidity, onchain, social — are price, depth, the float
+   * and what other Merrymen published, and none of them can answer the
+   * question a human asks first.
+   *
+   * COSTS THIS PROCESS NO I/O AND NO CREDENTIAL. The orchestrator did the
+   * lookup, for the four reasons research-files.ts gives; the child reads a
+   * file it was handed, exactly as it does for the news desk. A child holds no
+   * directory token — CHILD_SECRET_STRIP sees to it — and needs none, because
+   * it never asks anybody anything.
+   *
+   * CURVE TOKENS ONLY, for the reason the two lenses above give in full: an
+   * equity token on this chain is a wrapper, and the builder behind Apple is
+   * not a question this directory is being asked.
+   *
+   * ABSENT IS THE COMMON CASE AND IS CORRECT. No record means nobody has
+   * looked up this contract yet, or the lookup failed, or the directory holds
+   * no page for it — and `renderBuilder` refuses to speak on the last of those
+   * as well. Brain answers NO DATA AVAILABLE, which is the truthful input.
+   */
+  function builderLensFor(symbol: string, research: ResearchFile): string | null {
+    if (!lastCurveLegs.has(symbol)) return null;
+    const token = watchTokens.find((t) => t.symbol === symbol)?.address?.toLowerCase();
+    if (!token) return null;
+    const record = research.builders.find((b) => b.address === token);
+    if (!record) return null;
+    return renderBuilder({ symbol, record, now: Math.floor(Date.now() / 1000) });
+  }
+
+  /**
    * GRADE THIS POSITION'S FLOOR AND STAMP IT, once, at the moment it is opened.
    *
    * Assembles the three inputs floor-grade.ts will look at and no others: the
@@ -2356,6 +2910,7 @@ async function main() {
       // filtered against a setting the owner has since changed.
       assetMode: c.assetMode,
       trench: {
+        brainOrder: (symbol, token, price8, held) => trenchBrain.take(symbol, token, price8, Math.min(c.llmMaxActionUsdg, active ? Number(active.limits.perTradeUsdg) / 1e6 : 0), held),
         usdgToken: CASH.USDG as `0x${string}`,
         candidates: trenchCandidates,
         open: trenchOpen,
@@ -2365,6 +2920,7 @@ async function main() {
       usdg6: usdg,
       basketSymbols: c.basketSymbols,
       strategistStopLossBps: c.strategistStopLossBps,
+      trencherFastEnabled: c.trencherFastEnabled,
       takeProfitBps: c.takeProfitBps,
       buyPerTickUsdg: c.buyPerTickUsdg,
       idleFloorUsdg: c.idleFloorUsdg,
@@ -2373,6 +2929,9 @@ async function main() {
         creds: resolveLlm(c),
         intervalMin: c.llmIntervalMin,
         maxActionUsdg: c.llmMaxActionUsdg,
+        // Each paid model window is claimed against today's energy (the
+        // registry forwards this only when there is a real model to pay).
+        claimWindow: claimReview,
         // RESEARCH INSTEAD OF GUESSING. Off unless the owner asked for it —
         // it costs several model calls a window instead of one.
         ...(c.deskEnabled
@@ -2407,7 +2966,9 @@ async function main() {
                           ? "it landed"
                           : d.status === "rejected"
                             ? `the wall turned it back (${d.reject_rule ?? "policy"})`
-                            : d.status
+                            : d.status === "dropped"
+                              ? "it was sent and dropped before it reached the chain — nothing moved"
+                              : d.status
                               ? d.status
                               : "no trade came of it";
                       const said = d.reason ? ` — you said: ${d.reason}` : "";
@@ -2473,8 +3034,13 @@ async function main() {
           : {}),
         // Persist every strategist decision (survivor + drop) against the CURRENT
         // agent — the strategist stamps each survivor's intent with the id it wrote.
-        onDecision: (d) => {
-          if (active) return addDecision({ ...d, agent_id: active.agentId });
+        onDecision: async (d) => {
+          if (!active) return;
+          const agentId = active.agentId;
+          await addDecision({ ...d, agent_id: agentId, provenance: provenanceOf(d.source) });
+          if (verifyDecisionOwner(await decisionAgent(d.id), agentId).ok && publishableThesis({ ...d, name: cfg.agentName || "Merryman" })) {
+            reviewClock(agentId).noteDecision(Math.floor(Date.now() / 1000));
+          }
         },
       },
       onNote: strategyNote,
@@ -2558,7 +3124,7 @@ async function main() {
    */
   const refreshBudget = async (agentId: string): Promise<void> => {
     const rail = budgetRail();
-    settledSpentUsdg = usdg(await getSpentTodayUsdg(agentId, rail));
+    settledSpentUsdg = usdg(await getSpentTodayUsdg(agentId, rail, CASH.USDG as string));
     settledOps = await getOpsToday(agentId, rail);
   };
 
@@ -2645,10 +3211,90 @@ async function main() {
       });
       for (const r of resolved) {
         const row = mine.find((m) => m.userOpHash === r.userOpHash)!;
+        // AN ENERGY PURCHASE THAT LANDED IS BOOKED BEFORE ITS ROW IS SETTLED —
+        // by kind OR by legs, so a row whose kind was ever rewritten is still
+        // found. The order is the crash-safety: a booking whose receipt could
+        // not be read, or whose ledger write threw, leaves the row 'submitted'
+        // (still counted against the caps) and the next pass asks again, which
+        // can never move the peaks twice (bookCapitalFlow is insert-gated).
+        // Settled first and booked after, a crash between the two would leave a
+        // landed purchase no sweep ever books. Only THIS resolver books: the
+        // orphan sweep below never does (energy-settle.ts says why).
+        const energyRow = isEnergyRow(row);
+        // A CAPITAL OP'S SETTLEMENT EXPLAINS ITS CASH ONLY IF ITS BOOKING STOOD
+        // (flow-inference.ts settlementDelta). Null for a trade.
+        let capitalBooked: boolean | null = null;
+        if (energyRow && r.success) {
+          const grant = active?.grant;
+          if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase()) {
+            console.log(`[reconcile] energy purchase ${r.userOpHash.slice(0, 10)}… left submitted — no armed grant for ${smartAccount}`);
+            continue;
+          }
+          // ITS OWN MOVEMENT MUST BE READ BEFORE IT IS BOOKED: a purchase booked
+          // on a re-read this pass could not make would be explained by nothing,
+          // and inference would book it a second time. Left 'submitted' — still
+          // holding inference — for the next pass, like an unreadable booking.
+          if (r.usdgDelta6 === null) {
+            console.log(`[reconcile] energy purchase ${r.userOpHash.slice(0, 10)}… left submitted — its receipt could not be read`);
+            continue;
+          }
+          const settled = await settleEnergyLanding(energySettleDeps(agentId, grant, chain), r.txHash as `0x${string}`);
+          if (!settled.proceed) {
+            console.log(`[reconcile] energy purchase ${r.userOpHash.slice(0, 10)}… left submitted: ${settled.why}`);
+            continue;
+          }
+          if (settled.settled === "booked") capitalPeakDirty = true;
+          capitalBooked = settled.settled === "booked" || settled.settled === "already";
+          // A PURCHASE ONLY THIS RESOLVER SAW LAND still pins the next ask's
+          // balance reads to its landing block, like one the executor saw.
+          noteEnergyLanded(r.blockNumber);
+        } else if (row.kind === "transfer" && r.success) {
+          // A TRANSFER HOME THAT LANDED, booked here as the executor would have
+          // booked it had it heard the receipt (energy-settle.ts
+          // settleTransferLanding) — before the row is settled, and left
+          // 'submitted' when its receipt or the ledger cannot be read, exactly
+          // like a purchase. Nothing booked it before: the peak kept the money
+          // that went home and the breaker read a drawdown.
+          const grant = active?.grant;
+          if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase()) {
+            console.log(`[reconcile] transfer ${r.userOpHash.slice(0, 10)}… left submitted — no armed grant for ${smartAccount}`);
+            continue;
+          }
+          if (r.usdgDelta6 === null) {
+            console.log(`[reconcile] transfer ${r.userOpHash.slice(0, 10)}… left submitted — its receipt could not be read`);
+            continue;
+          }
+          const settled = await settleTransferLanding(energySettleDeps(agentId, grant, chain), r.txHash as `0x${string}`);
+          if (!settled.proceed) {
+            console.log(`[reconcile] transfer ${r.userOpHash.slice(0, 10)}… left submitted: ${settled.why}`);
+            continue;
+          }
+          if (settled.settled === "booked") capitalPeakDirty = true;
+          capitalBooked = settled.settled === "booked" || settled.settled === "already";
+        }
+        // THE SETTLEMENT EXPLAINS ONLY ITS OWN CASH (flow-inference.ts, rule 2).
+        // It used to move `ledgerWrites`, which closed the WHOLE held interval
+        // as explained — a deposit made while the op was stranded was never
+        // booked, a transfer home was never booked, and a REVERTED op, which
+        // moved nothing, masked the interval all the same. Now it queues the
+        // op's own USDG movement, read off its receipt, and the next look folds
+        // that into the baseline so only the residual is inferred. Queued
+        // BEFORE the row is written: a look that reads the ledger mid-settle
+        // sees either the op still 'submitted' (and holds) or its settlement
+        // already queued. Once per op per process: a row write that fails
+        // leaves it 'submitted', and the retry must not shift the baseline twice.
+        const explains = settlementDelta({ success: r.success, receiptUsdgDelta6: r.usdgDelta6, capitalBooked });
+        if (explains.queue && !settlementsQueued.has(r.userOpHash)) {
+          settlementsQueued.add(r.userOpHash);
+          settlementQueue.push({ userOpHash: r.userOpHash, createdAt: row.createdAt, usdgDelta6: explains.usdgDelta6 });
+        }
         await addTrade({
           agent_id: agentId,
           kind: row.kind as TradeRow["kind"],
           target: row.target,
+          // The legs stay on a settled energy row: the in-flight guard and
+          // every leg-keyed reader find a purchase by them.
+          ...(energyRow ? { sell_token: row.sellToken, buy_token: row.buyToken } : {}),
           // The chain's figure when it could be attributed, else the notional
           // the row was written with. Never zero-by-default: a resolved op
           // that moved money must not read as free.
@@ -2668,7 +3314,66 @@ async function main() {
                 `it moved nothing, and its spend is released`,
         );
       }
-      const unresolved = mine.length - resolved.length;
+      // AN OP THE CHAIN CAN NEVER EXECUTE IS WRITTEN OFF — ON PROOF, NEVER ON
+      // SILENCE. A userOp the bundler dropped has no event and never will, so
+      // it used to stay 'submitted' for the resolver's whole window: charging
+      // the live rail, blocking the next energy ask, and holding flow
+      // inference for 26 hours (flow-inference.ts opsHoldInference), in which
+      // a deposit was not booked. Once ANOTHER op of ours, signed with the
+      // same nonce, has executed on-chain, the EntryPoint will refuse this one
+      // for ever (inflight-reconcile.ts findDroppedOps says why that is a
+      // proof and "no event found" is not). It moved nothing and burned no
+      // gas: no settlement is queued, nothing is booked, and the row becomes
+      // 'dropped' — counted by no cap, journaled nowhere, and no longer
+      // 'submitted', so the next look no longer holds on it. Only from
+      // 'submitted' (addTrade's guard), so a row settled meanwhile is kept.
+      // BEST-EFFORT, after everything the chain answered for is settled: a
+      // read that fails here leaves the op 'submitted' — still counted, still
+      // holding — and the next pass asks again.
+      const unsettled = mine.filter((m) => m.nonce !== undefined && !resolved.some((r) => r.userOpHash === m.userOpHash));
+      let dropped: Awaited<ReturnType<typeof findDroppedOps>> = [];
+      try {
+        const suspects: { userOpHash: string; nonce: bigint; rivals: string[] }[] = [];
+        for (const m of unsettled) {
+          const rivals = await opsSignedWithNonce(agentId, m.nonce!, m.userOpHash);
+          if (rivals.length > 0) suspects.push({ userOpHash: m.userOpHash, nonce: m.nonce!, rivals });
+        }
+        dropped = await findDroppedOps({
+          chain,
+          smartAccount,
+          stranded: suspects,
+          lookbackBlocks,
+          log: (m) => console.log(`[reconcile] ${m}`),
+        });
+      } catch (e) {
+        console.log(`[reconcile] dropped-op check skipped, will retry: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      for (const d of dropped) {
+        const row = mine.find((m) => m.userOpHash === d.userOpHash)!;
+        const wrote = await addTrade({
+          agent_id: agentId,
+          kind: row.kind as TradeRow["kind"],
+          target: row.target,
+          // The legs stay, as on any settled row: a reader keyed on them must
+          // still find what this op was — and find it not 'submitted'.
+          ...(row.sellToken ? { sell_token: row.sellToken } : {}),
+          ...(row.buyToken ? { buy_token: row.buyToken } : {}),
+          amount_usdg: row.amountUsdg,
+          user_op_hash: d.userOpHash,
+          status: "dropped",
+          reject_rule: "dropped: a later op used its nonce (resolved)",
+        });
+        // A write that did not land leaves it 'submitted' for the next pass.
+        if (!wrote) continue;
+        await addEvent(
+          agentId,
+          "warn",
+          `resolved an op we lost track of: ${d.userOpHash.slice(0, 10)}… was DROPPED before it reached the chain — ` +
+            `our later op ${d.usedBy.slice(0, 10)}… (${d.txHash.slice(0, 10)}…) used the same nonce, so it can never ` +
+            `land. It moved nothing and cost no gas, and its spend is released`,
+        );
+      }
+      const unresolved = mine.length - resolved.length - dropped.length;
       if (unresolved > 0) {
         // NEVER guessed at. An op the chain has no event for inside the
         // lookback might still be pending, or older than the window. Both
@@ -2900,7 +3605,7 @@ async function main() {
     // hold this account's own assets — without it a class buy pairs with
     // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
     scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
-  ): Promise<void> => {
+  ): Promise<"held" | "settled"> => {
     const record = async (
       deltaUsdg: bigint,
       why: string,
@@ -3067,6 +3772,9 @@ async function main() {
           // the ledger is empty or the row aged out, which is the case this
           // whole module exists to handle.
           custodyAddresses: custodyAddressesOf(s.grant),
+          // WHICH CHAIN'S reserve tokens make an energy purchase `reserve-out`
+          // (never booked here — the worker books it at landing).
+          ...(s.grant ? { chainId: s.grant.chainId } : {}),
           log: (m) => console.log(`[flows] ${m}`),
         });
       } catch (e) {
@@ -3094,7 +3802,31 @@ async function main() {
     // same movement a second time from the balance change it already explains.
     const covered = scan ? await scanChainFlows(scan) : false;
 
-    if (!covered && lastCashUsdg === null) {
+    // THE LEDGER, READ ONCE AND AFTER THE BALANCE — and the settlement queue
+    // only after the ledger. The resolver queues a settlement BEFORE it writes
+    // the op's row, so a look that finds the row settled finds its settlement
+    // queued, and a look that finds it 'submitted' holds. `listedAt` becomes
+    // this look's `since` when it advances the baseline: an op created from
+    // here on was not in the ledger this look read, so its movement is not in
+    // the cash it keeps (flow-inference.ts, WHICH SETTLEMENTS). A read that
+    // throws aborts the pass like any failed write (reconcileFlowsOrRetry).
+    const listedAt = Math.floor(Date.now() / 1000);
+    const opsInFlight = opsHoldInference(await listSubmittedOps(agentId), {
+      epoch: await getAgentEpoch(agentId),
+      nowSec: listedAt,
+    });
+
+    if (covered) {
+      // THE SCAN IS THE TRUTH FOR ITS WINDOW and nothing is inferred beside it:
+      // the baseline moves to this reading (below), which already holds every
+      // settled op's movement — a stranded transfer home included, whose log
+      // the scan has booked itself (the resolver's booking of it then comes
+      // back `already`). So the queue is spent, and an op still in flight here
+      // was created before this look and shifts nothing when it settles
+      // (`since`). The one gap, scan-on only: such an op landing AFTER this
+      // read, followed by a tick the scan does not cover.
+      takeSettlements();
+    } else if (lastCashUsdg === null) {
       // FIRST OBSERVATION OF THIS PROCESS. Everything hard about hosted
       // accounting is in this branch, so it is worth being exact about what
       // changed and why.
@@ -3124,56 +3856,182 @@ async function main() {
       // THE DECISION IS PURE AND LIVES IN bootstrap-state.ts. Only the recording
       // is here, so the rule that decides whether money is a contribution can be
       // tested directly rather than inferred from the shape of this block.
-      const plan = planFirstObservation({
-        licence: accounting.openingBalanceLicence,
-        equityUsdg,
-        cashUsdg,
-        anchorCashUsdg,
-        materialDriftUsdg: MATERIAL_DRIFT_USDG,
-        why: accounting.why,
-      });
-      if (plan.action === "legacy-local") {
-        // SELF-HOSTED KEEPS THE ORIGINAL BEHAVIOUR, unchanged, because the
-        // premise it rests on is true here: the ledger is on a real disk that
-        // outlives the process, so an empty one is a new agent and a persisted
-        // cash reading really is where the account was left. The hosted arms
-        // below exist because that premise is false in a container, not because
-        // the reasoning was ever wrong on its own terms.
-        if (equityUsdg > 0n && highWaterMarkUsdg === 0n) {
-          await record(equityUsdg, "opening balance");
-        } else {
-          const prior = await lastKnownCashUsdg(agentId);
-          if (prior !== null) {
-            await record(cashUsdg - usdg(prior), "changed while the worker was stopped");
-          }
-        }
-      } else if (plan.action === "book-opening-balance") {
-        // THE ONLY PATH THAT BOOKS A CONTRIBUTION HERE, and it runs only when
-        // the orchestrator READ durable state and found none.
-        if (plan.amountUsdg > 0n) await record(plan.amountUsdg, "opening balance");
-      } else if (plan.action === "resume-with-drift") {
-        doubtContributions(`cash moved across the downtime window and nothing could price it`);
-        await addEvent(
-          agentId,
-          "warn",
-          `cash moved ${plan.driftUsdg > 0n ? "+" : ""}${fmt(plan.driftUsdg)} USDG while the worker was stopped and ` +
-            `no chain scan covered the window — this is NOT booked as a contribution, because a balance change ` +
-            `across downtime cannot distinguish a deposit from a withdrawal from a trade that landed. ` +
-            `Contributions and P&L are marked unknown until a deposit scan can price it.`,
-        );
-      } else if (plan.action === "stand-down") {
-        // NO USABLE ANCHOR. The one thing that must not happen here is the old
-        // inference, so nothing is booked and the book says so.
-        doubtContributions(plan.why);
+      //
+      // THE SAME HOLD AS THE STEADY STATE (flow-inference.ts). An op the last
+      // process sent and never heard back about may have moved this cash while
+      // it was down; judged now, a stranded purchase was booked as money
+      // "changed while the worker was stopped" and then AGAIN as energy by the
+      // resolver, and a stranded swap's cash leg as a withdrawal. So nothing is
+      // judged, on any licence, while one is in flight: the baseline stays open
+      // (`lastCashUsdg` null) and this look is simply asked again next tick —
+      // against the same durable reading, because a held tick's equity row is
+      // flagged and lastKnownCashReading skips it, and with every settlement
+      // the resolver has queued since.
+      if (opsInFlight) {
+        console.log(`[flows] first look — an op is still in flight, so nothing is judged until it settles`);
+        return "held";
       }
-      // `resume-clean` is the remaining arm and it does nothing on purpose: a
-      // funded account came back with the cash the anchor said it had.
-    } else if (!covered && lastCashUsdg !== null && ledgerWrites === ledgerWritesAtSnapshot) {
-      await record(cashUsdg - lastCashUsdg, "no trade explains this");
+      // THE DURABLE READS COME BEFORE THE QUEUE IS TAKEN: a read that throws
+      // aborts the pass with every settlement still queued for the retry.
+      const hostedLook = accounting.openingBalanceLicence !== "self-hosted-local";
+      const prior = hostedLook ? null : await lastKnownCashReading(agentId);
+      const earlierLanded = prior === null ? [] : await landedOpsBetween(agentId, prior.at, processStartedSec + 1);
+      const settled = takeSettlements();
+      // A FIRST LOOK THAT THROWS (a flow row that did not land) is asked again
+      // next tick, from the same durable reading — so it must find the same
+      // settlements queued, or the retry would book their movement as drift.
+      try {
+        // THE SAME SHIFT, for the hosted resume: what the arm's resolver settled
+        // explains its own movement across the downtime, so it is not drift.
+        const anchorShift = attributeSettlements(settled, anchorObservedAtSec);
+        const plan = planFirstObservation({
+          licence: accounting.openingBalanceLicence,
+          equityUsdg,
+          cashUsdg,
+          anchorCashUsdg: anchorCashUsdg === null ? null : anchorCashUsdg + anchorShift.shiftUsdg6,
+          materialDriftUsdg: MATERIAL_DRIFT_USDG,
+          why: accounting.why,
+        });
+        if (plan.action === "resume-clean" || plan.action === "resume-with-drift") {
+          await doubtUnreadSettlements(agentId, anchorShift.unread);
+        }
+        if (plan.action === "legacy-local") {
+          // SELF-HOSTED KEEPS THE ORIGINAL BEHAVIOUR, unchanged, because the
+          // premise it rests on is true here: the ledger is on a real disk that
+          // outlives the process, so an empty one is a new agent and a persisted
+          // cash reading really is where the account was left. The hosted arms
+          // below exist because that premise is false in a container, not because
+          // the reasoning was ever wrong on its own terms.
+          if (equityUsdg > 0n && highWaterMarkUsdg === 0n) {
+            await record(equityUsdg, "opening balance");
+          } else if (prior !== null) {
+            // THE STEADY STATE'S OWN LOOK, across the restart, against the last
+            // durable reading: every op the resolver settled since that reading
+            // explains exactly its own movement (it used to bump ledgerWrites and
+            // silently drop the WHOLE downtime delta, a deposit included — even
+            // for a revert); a fill this process recorded, or one an EARLIER
+            // process recorded or settled after that reading, explains the
+            // interval as a write does in the steady state; and only the
+            // residual is booked.
+            const l = lookAtCash({
+              baselineUsdg: usdg(prior.cashUsdg),
+              since: prior.at,
+              unattributed: false,
+              settled,
+              cashUsdg,
+              opsInFlight: false,
+              writesInInterval: ledgerWrites > 0 || wroteSince(earlierLanded, settlementsQueued),
+            });
+            await doubtUnreadSettlements(agentId, l.unread);
+            if (l.verdict.action === "infer") await record(l.verdict.deltaUsdg, "changed while the worker was stopped");
+          }
+        } else if (plan.action === "book-opening-balance") {
+          // THE ONLY PATH THAT BOOKS A CONTRIBUTION HERE, and it runs only when
+          // the orchestrator READ durable state and found none.
+          if (plan.amountUsdg > 0n) await record(plan.amountUsdg, "opening balance");
+        } else if (plan.action === "resume-with-drift") {
+          doubtContributions(`cash moved across the downtime window and nothing could price it`);
+          await addEvent(
+            agentId,
+            "warn",
+            `cash moved ${plan.driftUsdg > 0n ? "+" : ""}${fmt(plan.driftUsdg)} USDG while the worker was stopped and ` +
+              `no chain scan covered the window — this is NOT booked as a contribution, because a balance change ` +
+              `across downtime cannot distinguish a deposit from a withdrawal from a trade that landed. ` +
+              `Contributions and P&L are marked unknown until a deposit scan can price it.`,
+          );
+        } else if (plan.action === "stand-down") {
+          // NO USABLE ANCHOR. The one thing that must not happen here is the old
+          // inference, so nothing is booked and the book says so.
+          doubtContributions(plan.why);
+        }
+        // `resume-clean` is the remaining arm and it does nothing on purpose: a
+        // funded account came back with the cash the anchor said it had.
+      } catch (e) {
+        settlementQueue = [...settled, ...settlementQueue];
+        throw e;
+      }
+    } else {
+      // ONE LOOK, ONE RULE (flow-inference.ts lookAtCash): hold while an op the
+      // resolver may still settle is in flight; fold every settlement's own
+      // movement into the baseline; then a ledger write explains the interval,
+      // or the residual — what no settlement explains — is booked.
+      const l = lookAtCash({
+        baselineUsdg: lastCashUsdg,
+        since: baselineSince,
+        unattributed: baselineUnattributed,
+        settled: takeSettlements(),
+        cashUsdg,
+        opsInFlight,
+        writesInInterval: ledgerWrites !== ledgerWritesAtSnapshot,
+      });
+      // KEPT WHETHER OR NOT THE LOOK HOLDS: a settled op's movement is
+      // explained for good. A throw from record() below leaves it folded, so
+      // the retry sees the same residual, not the op's cash a second time.
+      lastCashUsdg = l.baselineUsdg;
+      baselineUnattributed = l.unattributed;
+      await doubtUnreadSettlements(agentId, l.unread);
+      if (l.verdict.action === "hold") {
+        // THE BASELINE IS KEPT, and so is the write snapshot: the interval
+        // stays open until the op settles. The caller accrues no fee and moves
+        // no lifetime peak on this tick (tickRatchets `held`) — a deposit made
+        // in it is in equity and not yet in the peak — while the breaker keeps
+        // observing a figure that deposit cannot reach (heldCashBaseline).
+        console.log(`[flows] an op is still in flight — not inferring a flow from this cash change; baseline kept`);
+        return "held";
+      }
+      if (l.verdict.action === "infer") await record(l.verdict.deltaUsdg, "no trade explains this");
     }
 
     lastCashUsdg = cashUsdg;
+    baselineSince = listedAt;
+    baselineUnattributed = false;
     ledgerWritesAtSnapshot = ledgerWrites;
+    return opsInFlight ? "held" : "settled";
+  };
+
+  /**
+   * THE CASH A HELD TICK EXPECTS, for the breaker's held observation
+   * (flow-inference.ts heldBreakerObservationUsdg): the baseline the held look
+   * kept, with every settlement still queued folded in by the look's own
+   * `since` rule. A first look still holding has no baseline in memory yet, so
+   * it takes the one that look will judge against — the anchor's cash hosted,
+   * the last durable (never held) reading self-hosted. Null when there is none:
+   * then every dollar of cash is treated as possibly unbooked, which only ever
+   * lowers the observation. Reads the queue without taking it.
+   */
+  const heldCashBaseline = async (agentId: string): Promise<bigint | null> => {
+    if (lastCashUsdg !== null) return expectedCashUsdg({ cashUsdg: lastCashUsdg, since: baselineSince }, settlementQueue);
+    if (accounting.openingBalanceLicence !== "self-hosted-local") {
+      return expectedCashUsdg(anchorCashUsdg === null ? null : { cashUsdg: anchorCashUsdg, since: anchorObservedAtSec }, settlementQueue);
+    }
+    const prior = await lastKnownCashReading(agentId);
+    return expectedCashUsdg(prior === null ? null : { cashUsdg: usdg(prior.cashUsdg), since: prior.at }, settlementQueue);
+  };
+
+  /** The resolver's queue, emptied by the look that folds it (flow-inference.ts rule 2). */
+  const takeSettlements = (): Settlement[] => {
+    const out = settlementQueue;
+    settlementQueue = [];
+    return out;
+  };
+
+  /**
+   * A SETTLED OP MOVED CASH NOBODY COULD READ. Not guessed at: the interval
+   * closes without inference, and contributions are marked unknown — the
+   * performance fee stops for the life of this process — because the residual
+   * of that window cannot be split into capital and trading.
+   */
+  const doubtUnreadSettlements = async (agentId: string, unread: readonly Settlement[]): Promise<void> => {
+    if (unread.length === 0) return;
+    doubtContributions(`a settled op moved cash that could not be read`);
+    await addEvent(
+      agentId,
+      "warn",
+      `settled ${unread.length === 1 ? "an op" : `${unread.length} ops`} the worker had lost track of ` +
+        `(${unread.map((u) => `${u.userOpHash.slice(0, 10)}…`).join(", ")}), but could not read how much USDG ` +
+        `${unread.length === 1 ? "it" : "they"} moved. Nothing from that window is booked as a deposit or a ` +
+        `withdrawal, and contributions are marked unknown, so no performance fee is charged while they are.`,
+    );
   };
 
   /**
@@ -3197,22 +4055,128 @@ async function main() {
     // hold this account's own assets — without it a class buy pairs with
     // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
     scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
-  ): Promise<void> => {
+  ): Promise<"held" | "settled"> => {
     try {
-      await reconcileFlows(agentId, cashUsdg, equityUsdg, scan);
+      return await reconcileFlows(agentId, cashUsdg, equityUsdg, scan);
     } catch (e) {
       console.log(
         `[flows] reconcile aborted (${e instanceof Error ? e.message : String(e)}) — the scan cursor and the ` +
           `cash baseline are left where they were, so the next tick retries the same window`,
       );
+      // HELD, for the ratchets: a pass that could not read the ledger or book a
+      // flow has left a cash change unexplained, and a fee or a peak taken over
+      // it would count a deposit that is not yet in the peak.
+      return "held";
     }
   };
   let highWaterMarkUsdg = 0n;
+  let riskHighWaterMarkUsdg: bigint | null = null;
+  /**
+   * WHICH BOOK `highWaterMarkUsdg` WAS LAST TAKEN FROM. A paper tick puts the
+   * paper book's peak in it, and the first live tick after one re-reads the
+   * live mark before it reads a balance (command-wake.ts livePeaksStale) —
+   * or it charges a fee, and judges the breaker, against the paper book.
+   */
+  let markBook: MarkBook = "live";
+  /**
+   * WHAT HELD LOOKS SAW ABOVE THE LIFETIME MARK — the breaker's, not the fee's.
+   *
+   * With no risk period standing, the live breaker judges against
+   * `highWaterMarkUsdg`, which is also the mark the performance fee ratchets.
+   * A held flow look may not raise that mark (a deposit made in the hold is in
+   * the equity and not yet in the peak), and a dropped userOp holds for 26
+   * hours — so a book that ran 100 → 150 → 110 in the hold was judged at 110
+   * against 100 and the breaker never tripped. The held tick's observation
+   * (flow-inference.ts heldBreakerObservationUsdg, which no unbooked cash can
+   * reach) lifts the BREAKER'S peak instead: `highWaterMarkUsdg + this`.
+   * Relative to the mark, so a capital flow re-read into the mark moves the
+   * breaker's peak with it; absorbed once the mark itself rises past it
+   * (command-wake.ts tickRatchets.breakerLift). Process memory, like the mark
+   * it sits on between persists: a restart forgets it — a risk period, whose
+   * peak observes the same figure in the ledger, does not.
+   */
+  let heldBreakerLiftUsdg = 0n;
+  /** The live breaker's peak when no risk period stands: the lifetime mark plus what held looks saw above it. */
+  const lifetimeBreakerPeak = () => highWaterMarkUsdg + heldBreakerLiftUsdg;
+  const drawdownPeak = () => paperActive() ? highWaterMarkUsdg : (riskHighWaterMarkUsdg ?? lifetimeBreakerPeak());
+  /**
+   * AN ENERGY PURCHASE MOVED THE PERSISTED PEAKS, and the in-memory ones have
+   * not caught up — on purpose.
+   *
+   * The booking (energy-settle.ts, through store.bookCapitalFlow) lowers both
+   * peaks in the ledger in the same transaction as the flow. It deliberately
+   * does NOT assign highWaterMarkUsdg: a booking that lowered the peak under a
+   * tick that had already read equity would accrue a performance fee on
+   * principal against a pre-purchase equity, and setAgentHwm would then
+   * re-ratchet the peak straight back over the withdrawal. So the booking only
+   * raises this flag, and the NEXT tick re-reads the persisted peaks before its
+   * book read (tick(), at livePeaksStale, before the balances are read).
+   */
+  let capitalPeakDirty = false;
+  /**
+   * The block the last energy purchase landed in, from its receipt. The buy's
+   * balance reads are pinned no earlier than this, so a load-balanced node that
+   * has not caught up answers with an error rather than a pre-purchase balance
+   * the next ask would top up a second time.
+   *
+   * THREE WRITERS, ONE RULE (noteEnergyLanded — it only moves forward): the
+   * executor's energy arm after a send that landed; the stranded-op resolver
+   * when it settles an energy row as landed; and the arm, which seeds it from
+   * the LEDGER (energy-settle.ts energyLandedBlockAtArm). It used to be written
+   * by the first alone and said "across a restart the in-flight guard and the
+   * ledger carry the same protection" — they did not: the guard matches only
+   * 'submitted' rows, so after a restart, or a landing only the resolver saw,
+   * a node behind the landing block could hand the planner a pre-purchase
+   * balance and a second chunk would be sized on it.
+   */
+  let lastEnergyLandedBlock: bigint | null = null;
+  const noteEnergyLanded = (block: bigint | null | undefined): void => {
+    if (block === null || block === undefined || block <= 0n) return;
+    if (lastEnergyLandedBlock === null || block > lastEnergyLandedBlock) lastEnergyLandedBlock = block;
+  };
+  /**
+   * What a booking reads and writes, wired to THIS agent's ledger. The breaker's
+   * peak is the persisted risk period's, read without observing — the same
+   * figure checkPolicy judges a live intent against — so a booking made at arm,
+   * before any tick has loaded the in-memory peaks, is not judged against 0.
+   */
+  const energySettleDeps = (agentId: string, grant: StoredGrant, chain: ReconcileChain): EnergySettleDeps => ({
+    // EXACTLY grant.smartAccount: bookCapitalFlow keys the agents row on it.
+    agentId,
+    account: grant.smartAccount,
+    chainId: grant.chainId,
+    paper: paperActive(),
+    receiptLogs: (txHash) => chain.getReceiptLogs(txHash),
+    // DURABLE FIRST: a redeployed hosted child's own table is empty, and a
+    // purchase that already moved money must not be refused for it.
+    netContributionsUsdg: async () => {
+      const net = await durableNetContributions(agentId);
+      return net === null ? null : Number(net) / 1e6;
+    },
+    lifetimePeakUsdg: async () => (await getAgentFinancials(agentId)).hwmUsdg,
+    breakerPeakUsdg: () => getRiskPeriodPeak(agentId),
+    book: (flow) => bookCapitalFlow(flow),
+    event: (level, line) => addEvent(agentId, level, line),
+    flowBookedForTx: (txHash) => hasFlowForTx(agentId, txHash),
+  });
   // Cash as of the last live snapshot, and how many rows the ledger had then.
   // Together they are the whole basis for inferring an external flow: if cash
   // moved and NOTHING was written to the ledger in between, the money came from
   // outside. Deliberately narrow — see reconcileFlows.
   let lastCashUsdg: bigint | null = null;
+  /**
+   * WHICH SETTLEMENTS THAT BASELINE MAY TAKE (flow-inference.ts `since`): the
+   * unix second of the ledger read the baseline was set on. An op created from
+   * then on is not in `lastCashUsdg`, so its settlement shifts it; one created
+   * before is, and shifting by it would book its movement twice.
+   */
+  let baselineSince: number | null = null;
+  /** The open interval holds a settlement nobody could read: it closes uninferred. */
+  let baselineUnattributed = false;
+  /** What the stranded resolver settled since the last look (flow-inference.ts rule 2). */
+  let settlementQueue: Settlement[] = [];
+  /** Every op this process queued a settlement for — a retried row write never shifts twice. */
+  const settlementsQueued = new Set<string>();
   /**
    * WHAT THIS PROCESS IS ENTITLED TO CLAIM ABOUT THE OWNER'S CAPITAL.
    *
@@ -3249,6 +4213,16 @@ async function main() {
   let truth: ContributionTruth = INITIAL_CONTRIBUTION_TRUTH;
   /** Cash at the anchor's newest durable observation. The downtime baseline. */
   let anchorCashUsdg: bigint | null = null;
+  /**
+   * When that observation was made — the hosted resume's `since` (flow-
+   * inference.ts): an op created at or after it is not in `anchorCashUsdg`.
+   * The anchor's time is its NEWEST durable row, flow or equity — the equity
+   * row's by when its cash was READ (`cash_read_at`), not when it was written —
+   * so it can only fall at or after the cash reading: an op in between counts
+   * as already in it, and its settlement shows as drift — which doubts, never
+   * books.
+   */
+  let anchorObservedAtSec: number | null = null;
   /** The peak the anchor says was already reached, restored into the local store. */
   let anchorHwmUsdg: bigint | null = null;
   /** Σ withdrawals the shared row already counts. Null means the anchor read none. */
@@ -3277,6 +4251,7 @@ async function main() {
     anchorHwmUsdg = l.highWaterMarkUsdg;
     anchorHwmWithdrawnUsdg = l.highWaterWithdrawnUsdg;
     anchorCashUsdg = l.lastObservedCashUsdg;
+    anchorObservedAtSec = verdict.kind === "valid" ? verdict.accounting.observedAt : null;
     anchorEpoch = l.accountingEpoch;
     // THE DURABLE CONTRIBUTION FIGURE, kept for anything that has to describe
     // this book to something outside the process.
@@ -3289,6 +4264,9 @@ async function main() {
     // exactly why it exists. The first shadow Brain run refused on
     // "contributions unknown" for a book that knew perfectly well.
     anchorNetContributionsUsdg = l.netContributionsUsdg;
+    // WHEN THE PARENT WROTE IT — the line between flows its figure already
+    // holds and flows this child books after (durableNetContributions).
+    anchorWrittenAtSec = verdict.kind === "valid" ? verdict.state.generatedAt : null;
 
     // DOUBT IS STICKY FOR THE LIFE OF THE PROCESS.
     //
@@ -3319,6 +4297,32 @@ async function main() {
 
   /** Contributed capital as the ORCHESTRATOR read it from durable state. */
   let anchorNetContributionsUsdg: bigint | null = null;
+  /** Unix seconds the anchor file was written (its generatedAt); null with no valid anchor. */
+  let anchorWrittenAtSec: number | null = null;
+
+  /**
+   * NET CONTRIBUTIONS, DURABLE FIRST, raw 6dp — the anchor's figure plus the
+   * flows this child has booked since the anchor was written; the local epoch
+   * sum when there is no anchor figure (self-hosted) or the epoch moved on;
+   * null when neither knows (net-contributions.ts says why each half).
+   *
+   * THE ONE READER for everything that judges or reports this book's capital
+   * from inside the child: the energy buy's pre-trade gate, the energy
+   * booking gate (energySettleDeps), and the Brain's snapshot. The local sum
+   * alone read a redeployed hosted child's empty table as "no record" and
+   * refused every energy buy; the anchor alone never saw a purchase booked
+   * after arm. Throws when the ledger will not answer — never a guess.
+   */
+  async function durableNetContributions(agentId: string): Promise<bigint | null> {
+    const local = await getNetContributionsSince(agentId, anchorWrittenAtSec ?? 0);
+    return durableNetContributionsUsdg6({
+      anchorNetUsdg6: anchorNetContributionsUsdg,
+      anchorEpoch,
+      epoch: local.epoch,
+      localNetUsdg: local.netUsdg,
+      localSinceAnchorUsdg: local.sinceUsdg,
+    });
+  }
 
   /** The anchor verdict, read once. See `anchorOnce`. */
   let anchorVerdict: AnchorVerdict | null = null;
@@ -3368,7 +4372,14 @@ async function main() {
    * the safe one, and the store already enforces it.
    */
   async function restoreAnchoredHighWaterMark(agentId: string): Promise<void> {
-    applyAccountingAnchor(agentId, anchorOnce(agentId));
+    const anchor = anchorOnce(agentId);
+    applyAccountingAnchor(agentId, anchor);
+    if (anchor.kind === "valid" && anchor.state.riskPeriod) {
+      await restoreRiskPeriod(anchor.state.riskPeriod);
+      const peak = await getRiskPeriodPeak(agentId);
+      riskHighWaterMarkUsdg = peak === null ? null : usdg(peak);
+      console.log(`[risk period] ${anchor.state.riskPeriod.id}: peak ${peak} USDG; signed drawdown limit unchanged`);
+    }
 
     // THE EPOCH COMES BACK FIRST, because every row this child is about to write
     // is stamped with it.
@@ -3470,32 +4481,335 @@ async function main() {
       : null;
   let ledgerWrites = 0;
   let ledgerWritesAtSnapshot = 0;
+  /**
+   * When this process started. A trade row created before it was written by an
+   * EARLIER process — the first look's durable stand-in for `ledgerWrites`,
+   * which starts at 0 (store.ts landedOpsBetween).
+   */
+  const processStartedSec = Math.floor(Date.now() / 1000);
   /** The last row recordTrade wrote — see the comment there for why this exists. */
-  let lastTradeOutcome = null as { status: TradeRow["status"]; rejectRule?: string } | null;
+  let lastTradeOutcome = null as LedgerFacts | null;
   // Merry Circle — the holder's $MERRYMEN tier, refreshed each tick; drives the
   // performance-fee discount. Starts as the outsider (no discount) until read.
   let holderTier: CircleTier = CIRCLE_TIERS[0]!;
   let lastTierId = holderTier.id;
-  let circleBlockedNoted = false; // so the "hold to unlock" note isn't spammed each tick
+  /** Which Circle note went out last, so it is said once per change of reason, not each tick (circle-gate.ts). */
+  let circleNoted: CircleNoted = null;
   /** So the bricked-breaker note is said once per change, not once per tick, for ever. */
   let breakerBrickNoted = false;
-  /** Did the last $MERRYMEN read actually answer? A failed read must not be reported as a wallet. */
-  let holderReadOk = true;
+  // ── ENERGY: TODAY'S ALLOWANCE, DECIDED ONCE PER TICK ────────────────────
+  //
+  // Decided right after the $MERRYMEN read (refreshEnergy) and read at every
+  // fork of the tick that starts NEW autonomous work: the Brain wake guard,
+  // each paid review (runShadow's admit, the strategist's window), the Brain
+  // live BUY, and each entry the strategy or the class route proposes. Nothing
+  // else consults it. Exits, stop-losses, owner commands (the app's chat, the
+  // web, Telegram, MCP), the energy buy and the kill switch never pass through
+  // any of those forks — submitChatTrade, submitChatTransfer, runQueuedCommand
+  // and processIntentLocked do not know energy exists (energy-wiring.test.ts).
+  //
+  // ENERGY_OFF until decided: nothing limited, nothing counted.
+  let energyNow: EnergyPlan = ENERGY_OFF;
+  /**
+   * The last reading that decided the level, for WHICH account; undefined until
+   * loaded from the ledger. Keyed, because a re-sign can arm a different smart
+   * account in the same process, and one account's reading is not another's.
+   */
+  let energyLastGood: { agentId: string; good: LastGood | null } | undefined;
+  /** An entry was withheld by energy since the last plan — one of the two moments the owner is told (tellEnergySpent). */
+  let energyWithheld = false;
+  /**
+   * THE WORKER'S OWN REPORT, as published on the agents row this tick. Kept in
+   * scope for the Telegram status line and daily alert (readStatus /
+   * startNotifier's getAlertInputs read it — wired by the Telegram slice).
+   */
+  let energyReport: EnergyStatus | null = null;
+  /**
+   * The notice claim THIS PROCESS won (energy_days.told_at), and for which
+   * agent and day — the one thing the Telegram alert speaks on
+   * (telegram/energy-alert.ts). A rebuilt child finds the stamp the seed put
+   * back, wins nothing, and so does not repeat the alert after a redeploy.
+   */
+  let energyToldHere: EnergyToldHere | null = null;
+  /** The last USDG estimate, the shortfall it priced, and when. At most one re-price per ENERGY.estimateEverySec. */
+  let energyEstimate: { key: string; value: number | null; at: number } | null = null;
+
+  /** A claim made against today's energy: ok = go ahead; day = the row a refund goes back to (null = nothing written). */
+  interface EnergyClaim {
+    ok: boolean;
+    day: string | null;
+    agentId: string | null;
+  }
+
+  /**
+   * CLAIM ONE review or new trade against today's allowance, atomically.
+   *
+   *   not throttled → go ahead, nothing written (a full-energy agent counts
+   *     nothing, so a later unread balance cannot greet it with a spent day);
+   *   observe → counted, NEVER refused — and a line in the log when enforce
+   *     would have refused it, which is what observe is for;
+   *   enforce → refused at the cap (reviews paced across the day, entries
+   *     the day's allowance). A ledger that will not take the write is a
+   *     refusal too: new work fails closed, and exits never come here.
+   *
+   * Claim first, refund on no trade: a crash in between under-spends by one,
+   * never over-spends (store.ts's budgets make the same trade).
+   */
+  async function claimEnergyFor(field: "reviews" | "entries"): Promise<EnergyClaim> {
+    const plan = energyNow;
+    const now = Math.floor(Date.now() / 1000);
+    const cap = claimCap(plan, field, now);
+    if (cap === null || !active) return { ok: true, day: null, agentId: null };
+    const agentId = active.agentId;
+    const day = utcDay(now);
+    const claimed = await claimEnergy(agentId, day, field, cap);
+    if (plan.mode !== "enforce") {
+      if (claimed) {
+        const c = await getEnergyDay(agentId, day);
+        const used = c ? (field === "reviews" ? c.reviews : c.entries) : null;
+        const would = enforcedCap(plan, field, now);
+        if (used !== null && used > would) {
+          console.log(
+            `[${short(agentId)}] [energy] observe: enforce would withhold this ${field === "reviews" ? "AI review" : "new trade"} ` +
+              `(${used} today against ${would})`,
+          );
+        }
+      }
+      return { ok: true, day: claimed ? day : null, agentId };
+    }
+    return { ok: claimed, day: claimed ? day : null, agentId };
+  }
+  /** A paid AI review (Brain run or strategist window). Not refunded: a review that ran was paid for. */
+  async function claimReview(): Promise<boolean> {
+    return (await claimEnergyFor("reviews")).ok;
+  }
+  /** A new trade this agent is about to start on its own. */
+  async function claimEntry(): Promise<EnergyClaim> {
+    return claimEnergyFor("entries");
+  }
+  /** Give back an entry claim that produced no trade. A claim that wrote nothing gives back nothing. */
+  async function refundEntry(claim: EnergyClaim | null | undefined): Promise<void> {
+    if (!claim?.ok || claim.day === null || claim.agentId === null) return;
+    await refundEnergy(claim.agentId, claim.day, "entries");
+  }
+  /**
+   * TELL THE OWNER TODAY'S ENERGY IS SPENT — at most once per UTC day, from
+   * either moment that decides it (withholdEntry, or refreshEnergy seeing the
+   * day's new trades used up). One helper, so the claim and the sentence exist
+   * once.
+   *
+   * The durable told_at claim goes FIRST and the event second, so a crash
+   * between them loses the message rather than sending it twice, and a
+   * redeploy (which seeds told_at back) does not send it again. Never public:
+   * a warn event is the owner's register, and the sentence is worker-written —
+   * the address in it comes from the grant, never a model.
+   */
+  async function tellEnergySpent(agentId: string): Promise<void> {
+    if (!active) return;
+    const now = Math.floor(Date.now() / 1000);
+    const day = energyNow.day;
+    const claimed = await claimEnergyNotice(agentId, day, now);
+    energyNow = { ...energyNow, told: true };
+    if (!claimed) return;
+    // AFTER THE CLAIM, NEVER BEFORE: the Telegram alert rides it, so it goes
+    // once per UTC day however many redeploys the day sees.
+    energyToldHere = { agentId, day };
+    await addEvent(
+      agentId,
+      "warn",
+      energyNotice({
+        day,
+        account: active.grant.smartAccount,
+        chainId: active.grant.chainId,
+        holder: cfg.holderAddress ?? null,
+        holderTokens: energyReport?.holderTokens ?? null,
+        agentTokens: energyReport?.agentTokens ?? null,
+        level: energyNow.level,
+        buy: energyReport?.buy ?? null,
+        estimateUsdg: energyReport?.estimateUsdg ?? null,
+      }),
+    );
+  }
+  /**
+   * AN ENTRY WAS WITHHELD: note it, and tell the owner if today's notice has
+   * not gone — the moment the limit cost them a trade, not a paced review.
+   */
+  async function withholdEntry(agentId: string): Promise<void> {
+    energyWithheld = true;
+    if (!active || !shouldTellOwner(energyNow, energyWithheld)) return;
+    await tellEnergySpent(agentId);
+  }
+
+  /**
+   * WHAT THE BUY WOULD ASK IN USDG RIGHT NOW, or null when unknown.
+   *
+   * Sized EXACTLY as the buy itself is (energy-buy.ts energyGrossFor and
+   * energyAskFor): the $MERRYMEN still missing plus its margin, grossed up for
+   * the token's buy tax read fresh — at the expected rate, since the owner's
+   * slippage tolerance is only the router's floor and never part of the size —
+   * priced by getAmountsIn over the tick's metered mainnet client
+   * (both pools' fees included), rounded UP to the cent and never under the
+   * smallest buy. It once priced the bare shortfall, without the margin, and
+   * so under-stated the ask the owner then confirmed. Unknown whenever any input
+   * is: a half-read balance, an unreadable or out-of-bounds tax, a pool that
+   * will not quote. It is shown as an estimate and nothing is bought on it —
+   * the buy itself re-prices at confirmation.
+   */
+  async function estimateEnergyUsdg(client: PublicClient, parts: BalanceParts): Promise<number | null> {
+    const shortRaw = energyShortfallRaw(parts);
+    if (shortRaw === null || shortRaw <= 0n) return null;
+    const tax = await readEnergyTaxBps(client);
+    if (tax === null || tax > ENERGY.maxTaxBps) return null;
+    const amountIn = await energyAmountInFor(client, energyGrossFor(shortRaw, tax));
+    return amountIn === null ? null : usdgCentsUp(energyAskFor(amountIn));
+  }
+
+  /**
+   * THE $MERRYMEN STANDING THIS TICK — full, low or unread — from the one
+   * read and the durable last-good, IN EVERY MODE.
+   *
+   * Two readers: energy (observe / enforce, refreshEnergy) and the Circle
+   * gate (circle-gate.ts circleStanding), which reads it whatever the energy
+   * switch says — self-hosted is always off, and a hosted fleet starts off —
+   * because a restart whose first read fails must not lock a Merry Man's
+   * Circle strategy any more than it may throttle them. So the last reading
+   * that decided it is loaded once per account from the ledger
+   * (energy_days.read_at/read_full, which a redeploy's seed puts back) and
+   * noted whenever a read decides it, in every mode. It is a reading, never a
+   * counter: nothing here limits, counts or refunds anything.
+   *
+   * Never throws into the tick: the store's reads and notes fail to null and
+   * to nothing, and energyLevel is arithmetic.
+   */
+  async function holderStandingFor(agentId: string, parts: BalanceParts): Promise<{ level: EnergyLevel; decided: boolean | null }> {
+    const now = Math.floor(Date.now() / 1000);
+    if (energyLastGood?.agentId !== agentId) {
+      energyLastGood = { agentId, good: await lastEnergyRead(agentId, now - ENERGY.lastGoodMaxAgeSec) };
+    }
+    const { level, decided } = energyLevel(parts, energyLastGood.good, now);
+    if (decided !== null) {
+      energyLastGood = { agentId, good: { full: decided, at: now } };
+      await noteEnergyRead(agentId, utcDay(now), decided, now);
+    }
+    return { level, decided };
+  }
+
+  /**
+   * DECIDE TODAY'S ENERGY from this tick's $MERRYMEN read, and publish it.
+   *
+   * OFF: nothing is limited and nothing is counted, and the report's level is
+   * this read alone — but a report is still published (gated false), so the
+   * last one on the agents row is always this process's and a stale "spent"
+   * from an enforcing day cannot outlive a switch-off (the mirror keeps the
+   * last non-null report). (The durable reading is still kept, by
+   * holderStandingFor, for the Circle gate.)
+   *
+   * OBSERVE / ENFORCE: the level from the combined read with the durable
+   * last-good standing in for a failed one (`standing`, holderStandingFor),
+   * the house-baseline allowances, today's counters, and — while low on a
+   * Robinhood Chain grant — the USDG estimate, re-priced at most every
+   * ENERGY.estimateEverySec.
+   */
+  async function refreshEnergy(
+    agentId: string,
+    grant: StoredGrant,
+    parts: BalanceParts,
+    standing: { level: EnergyLevel },
+  ): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    energyWithheld = false;
+    const mode = cfg.energyGate;
+    let reviewsAllowed = 0;
+    let estimate: number | null = null;
+    if (mode === "off") {
+      energyNow = energyPlan({
+        mode,
+        level: energyLevel(parts, null, now).level,
+        counters: null,
+        reviewsAllowed: 0,
+        entriesAllowed: 0,
+        nowSec: now,
+      });
+      energyEstimate = null;
+    } else {
+      const { level } = standing;
+      // THE REVIEWERS THAT ARE ACTUALLY RUNNING, each at its HOUSE interval.
+      const brainConfigured = !!cfg.brainUrl && !!cfg.brainToken;
+      const trencherBrain = cfg.strategy === "trencher" && cfg.trencherFastEnabled && brainConfigured;
+      reviewsAllowed = reviewAllowance({
+        brain: !trencherBrain && brainConfigured && (shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)),
+        trencher: trencherBrain,
+        strategistIntervalMin: cfg.strategy === "llm-strategist" && resolveLlm(cfg) ? cfg.llmIntervalMin : null,
+        brainIntervalSec: scheduledInterval(),
+        trencherIntervalSec: TRENCH_REVIEW_INTERVAL_MS / 1000,
+      });
+      energyNow = energyPlan({
+        mode,
+        level,
+        counters: await getEnergyDay(agentId, utcDay(now)),
+        reviewsAllowed,
+        entriesAllowed: entryAllowance(active?.limits.maxOpsPerDay ?? Number.NaN),
+        nowSec: now,
+      });
+      if (grant.chainId === MERRYMEN_TOKEN.chainId && level !== "full" && active) {
+        const key = `${agentId}:${energyShortfallRaw(parts) ?? "unknown"}:${cfg.slippageBps}`;
+        if (energyEstimate && energyEstimate.key === key && now - energyEstimate.at < ENERGY.estimateEverySec) {
+          estimate = energyEstimate.value;
+        } else {
+          const client = active.client;
+          estimate = await boundedRead(() => estimateEnergyUsdg(client, parts), 10_000).catch(() => null);
+          energyEstimate = { key, value: estimate, at: now };
+        }
+      } else {
+        energyEstimate = null;
+      }
+    }
+    energyReport = energyStatus({
+      plan: energyNow,
+      parts,
+      hasReviewer: reviewsAllowed > 0,
+      buy: energyBuyOf({
+        chainId: grant.chainId,
+        live: execMode().mode === "live",
+        hasRoute: grantEnergyRoute(grant) !== null,
+      }),
+      estimateUsdg: estimate,
+      nowSec: now,
+    });
+    void setAgentEnergy(agentId, JSON.stringify(energyReport));
+    // THE DAY'S NEW TRADES ARE USED UP: tell the owner now, not only at a
+    // withheld entry. The Trencher, the Brain, the strategist and the class
+    // route all stop proposing entries once spent, so a withheld one may never
+    // come — and on iOS and Android this dated warn is the only word the owner
+    // gets. After the report, so the notice carries this tick's figures.
+    if (shouldTellOwnerSpent(energyNow)) await tellEnergySpent(agentId);
+  }
   let lastSequencerUp = true;
   // A feedless holding never resolves, so warn ONCE while it's held rather than
   // every tick forever. Resets when the book is valuable again.
   let notedUnpriced = false;
-  let lastEquityUsdg = 0n; // updated each tick; used by chat-triggered trades
+  // THE BOOK AS THE LATEST TICK LEFT IT — what it read and the last equity it
+  // composed — and the one gate every order placed between ticks meets, the
+  // app's and Telegram's alike. Every way a tick ends states its reads here;
+  // see order-gate.ts createTickBook for the two globals this replaced and the
+  // Telegram buy they let through after a tick that could not read.
+  const tickBook = createTickBook();
+  let nextBrainReviewAt: number | null = null;
+  let nextMarketReviewAt: number | null = null;
+  let quietReview: (() => Promise<void>) | null = null;
+  let reviewPreparationMs = 0;
+  const marketReviewClocks = new Map<string, MarketReviewClock>();
+  function reviewClock(agentId: string): MarketReviewClock {
+    let clock = marketReviewClocks.get(agentId);
+    if (!clock) { clock = new MarketReviewClock(); marketReviewClocks.set(agentId, clock); }
+    return clock;
+  }
   // What the tick could NOT price this cycle (lowercased addresses), and the
   // total cost already sitting in such positions. Written from the real price
   // map each tick and read by the scout ceiling — deliberately NOT reachable
   // from an intent, so a strategy can't declare its own target priceable.
   let lastUnpriceable: Set<string> = new Set();
   let lastQuarantinedUsdg = 0n;
-  // Whether that figure is the WHOLE book. False while a held asset can't be
-  // valued — the total is then a partial sum, and judging a drawdown on it would
-  // read the missing asset as a loss and refuse the very sell that clears it.
-  let lastEquityKnown = true;
   // ETH held by the smart account, as of the last tick that could read it.
   //
   // NULL means "not read yet", which is different from zero — and the
@@ -3507,6 +4821,39 @@ async function main() {
   let lastGasWei: bigint | null = null; // feeds the low-gas alert AND the pre-flight refusal
   /** When the paper rail last looked at the account's REAL ETH. See the note at the assignment. */
   let lastRealGasReadAt = 0;
+  /**
+   * The account's USDG as read for the RAIL DECISION only, before the flow
+   * reconciler has made its first observation (`lastCashUsdg`).
+   *
+   * Without it, every restart of an agent with live consent and paper enabled
+   * ran its first tick LIVE — unknown is not unfunded — valued an empty live
+   * book at 0, wrote a `live` equity row, and fell back to paper a tick later.
+   * readPaperReturn restarts the paper period after any non-paper row, so the
+   * paper P&L of such an agent restarted at every redeploy: Seafish201, 16
+   * redeploys in two days, showing exactly 0 (live tick 2026-09-27 00:38:28,
+   * back to paper at 00:42:28). Kept apart from `lastCashUsdg` on purpose —
+   * that variable's first non-null value is how the reconciler books a
+   * first-seen contribution, and nothing here may touch flow accounting.
+   * Still null when the read fails, which keeps today's behaviour: a funded
+   * agent is never pushed to paper by a read that did not happen.
+   */
+  let railCashUsdg: bigint | null = null;
+  let railCashReadAt = 0;
+  const observeRailCash = async (): Promise<void> => {
+    if (!active || lastCashUsdg !== null) return;
+    if (railCashUsdg !== null && Date.now() - railCashReadAt < REAL_GAS_READ_EVERY_MS) return;
+    railCashReadAt = Date.now();
+    try {
+      railCashUsdg = (await active.client.readContract({
+        address: CASH.USDG as `0x${string}`,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [active.grant.smartAccount as `0x${string}`],
+      })) as bigint;
+    } catch {
+      // A refused read is not a zero balance.
+    }
+  };
   /**
    * THIS TICK'S CURVE RESERVES, from the pricing pass that already read them.
    *
@@ -3749,6 +5096,23 @@ async function main() {
           // the most important one — two thirds of graduated pools charge over
           // 50% a trade. Record it so the owner is told the token was seen and
           // turned down, rather than left looking unseen.
+          //
+          // INTO `refused`, NOT STRAIGHT INTO `poolRefusals`. Writing the map
+          // directly is what made this reason unreachable: `poolRefusals` is
+          // rebuilt wholesale from `refused` below, and `refused` still held
+          // this token's ORIGINAL v3 row — so a pool measured and turned down
+          // for an 86% fee was reported to the owner as "no Uniswap v3 pool
+          // against USDG or WETH", and the curve pass could then replace even
+          // that with a sentence about a bonding curve it never consulted.
+          //
+          // Replacing the row also fixes the dedupe key, which is built from
+          // `kind`: `v4-extortionate-fee` and `no-pool` are different facts and
+          // must be able to notify separately.
+          upsertRefusal(refused as unknown as RefusalRow[], {
+            symbol: t.symbol,
+            kind: `v4-${r.usable.kind}`,
+            reason: r.usable.reason,
+          });
           poolRefusals.set(t.symbol, r.usable.reason);
           continue;
         }
@@ -3826,11 +5190,19 @@ async function main() {
       // A curve refusal REPLACES the pool's "no-pool" for that token: the pool
       // pricer's reason would say there is no pool, which is true and unhelpful
       // once we know there is a curve and why it was not good enough.
+      //
+      // ONLY "no-pool", though, which is what that sentence always meant and
+      // not what the code did. It replaced whatever was there — including a v4
+      // verdict recorded moments earlier by a pass that DID find a pool and DID
+      // measure it. Overwriting "this pool charges 86% a trade" with "I know
+      // this token but not where it trades" replaces a measurement with its
+      // opposite. A row that already names a venue keeps it.
       for (const r of curveRes.refused) {
-        const i = refused.findIndex((x) => x.symbol === r.symbol);
-        const row = { symbol: r.symbol, kind: `curve-${r.kind}`, reason: r.reason };
-        if (i >= 0) refused[i] = row as (typeof refused)[number];
-        else refused.push(row as (typeof refused)[number]);
+        upsertRefusal(refused as unknown as RefusalRow[], {
+          symbol: r.symbol,
+          kind: `curve-${r.kind}`,
+          reason: r.reason,
+        });
       }
     }
 
@@ -3905,9 +5277,12 @@ async function main() {
    */
   // Once per arm — a warning repeated every 60 seconds is a log nobody reads.
   let trencherRailAnnounced = false;
+  /** Coins the fast Trencher skipped because the key cannot sell them — said once each. */
+  const noExitAnnounced = new Set<string>();
   /** Same once-per-arm discipline, for the asset-mode arm of the same feed. */
   let trencherStocksAnnounced = false;
   async function trenchCandidates(): Promise<Candidate[]> {
+    if (cfg.trencherFastEnabled) refreshTrenchTape();
     // THE RAIL, MADE EXPLICIT rather than removed.
     //
     // This was `if (!paperActive()) return []`, and `paperActive` is the ABSENCE
@@ -3969,6 +5344,59 @@ async function main() {
     }
     const nowSec = Math.floor(Date.now() / 1000);
     const out: Candidate[] = [];
+    if (cfg.trencherFastEnabled) {
+      let autonomousBudget = true;
+      if (!paperActive() && autoTrench?.custody.deployed && active) {
+        try {
+          const [spent,start] = await Promise.all([
+            active.client.readContract({address:autoTrench.custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"spent"}),
+            active.client.readContract({address:autoTrench.custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"windowStart"}),
+          ]);
+          autonomousBudget = BigInt(nowSec) >= start+86_400n || spent+5_000_000n <= 25_000_000n;
+        } catch { autonomousBudget = false; }
+      }
+      const allowed = new Set(active?.limits.allowedAssets.map(a => a.toLowerCase()) ?? []);
+      // THE SAME `no-exit` LINE THE WALL DRAWS (policy.ts), drawn before the
+      // Brain is paid to review a coin it could never be allowed to buy.
+      // Measured 2026-09-25 → 27 on 0x8249ad: 501+ `no-exit` refusals, CASHCAT
+      // alone ~every 45s, each one after a paid review that said BUY. This
+      // only removes what the wall refuses anyway; the owner is told once per
+      // coin, since the refusal used to be where they learned to re-sign.
+      const sellable = active?.limits.sellableAssets ? new Set(active.limits.sellableAssets.map(a => a.toLowerCase())) : null;
+      // Do not require a historical discovery row: trending records used to
+      // carry firstSeen=0, so that age-window query silently excluded them all.
+      const freshTape = freshTrenchTape();
+      const entryPools = !paperActive() && active && grantTrencher(active.grant)
+        ? highVolumePools(freshTape.filter(p => autoTrench?.qualified.some(q => q.poolAddress === p.poolAddress && q.tokenAddress === p.tokenAddress)))
+        : highVolumePools(freshTape);
+      for (const p of entryPools) {
+        const t = watchTokens.find(t => t.kind === "memecoin" && t.address.toLowerCase() === p.tokenAddress.toLowerCase());
+        const autonomous = !!autoTrench?.qualified.some(q=>q.tokenAddress.toLowerCase()===p.tokenAddress.toLowerCase()) && !!active && !!grantTrencher(active.grant);
+        if (autonomous && !autonomousBudget) continue;
+        if (!t || (!autonomous && !allowed.has(t.address.toLowerCase())) || !p.createdAt || p.createdAt > nowSec || !p.fdvUsd) continue;
+        if (!autonomous && sellable && !sellable.has(t.address.toLowerCase())) {
+          if (!noExitAnnounced.has(t.address.toLowerCase()) && active) {
+            noExitAnnounced.add(t.address.toLowerCase());
+            void addEvent(active.agentId, "warn",
+              `trencher: skipping ${t.symbol} — this key can't approve it for a sell, so a buy would be refused ` +
+                `(no-exit). Re-sign the grant at /grant to cover it.`);
+          }
+          continue;
+        }
+        const quote = lastPrices.get(t.symbol);
+        out.push({ symbol: t.symbol, token: t.address, decimals: t.decimals ?? 18,
+          ...(autonomous ? {custodyVault: autoTrench!.custody.vault} : {}),
+          // Pool-grade evidence REQUIRED to open here, hence `true`: a v4 or
+          // curve mark values a holding and does not authorise a buy, which is
+          // the same line `lastUnpriceable` draws for the scout budget below.
+          // The verdict and its explanation come from one call so they cannot
+          // disagree — they did, and the owner read the disagreement.
+          ...priceability(quote, true),
+          price8: quote?.price8 ?? 0n, liquidityUsd: lastLiquidityUsd.get(t.address.toLowerCase()) ?? 0,
+          fdvUsd: p.fdvUsd, ageSec: nowSec - p.createdAt, volume24hUsd: p.volume24hUsd! });
+      }
+      return out;
+    }
     for (const c of await recentCandidates(TRENCHER_DEFAULTS.maxAgeSec, 25, { poolsOnly: true })) {
       // Look the price up by ADDRESS, not by the symbol alone. `lastPrices` is
       // symbol-keyed and filled only from watchTokens, while a candidate's
@@ -3978,7 +5406,7 @@ async function main() {
       // memecoin depth. The asset allowlist stops the buy, but the strategy
       // still burns its one entry per tick on it, every tick, forever.
       const sameToken = watchTokens.find(
-        (t) => t.symbol === c.symbol && t.address.toLowerCase() === c.address.toLowerCase(),
+        (t) => t.kind === "memecoin" && t.symbol === c.symbol && t.address.toLowerCase() === c.address.toLowerCase(),
       );
       const quote = sameToken ? lastPrices.get(c.symbol) : undefined;
       out.push({
@@ -3987,7 +5415,29 @@ async function main() {
         decimals: c.decimals,
         // Priceable means THIS tick could price it, not that discovery once
         // could — a pool that has since thinned must not still read as fine.
-        priceable: !!quote && quote.price8 > 0n,
+        //
+        // A MISSING `sameToken` IS ITS OWN ANSWER, not a missing quote. Both
+        // arrive here as an undefined `quote`, but one means no pricer
+        // answered and the other means this address was never watched — or
+        // that a coin is wearing a watched token's symbol, which is what the
+        // comment above is about. Telling an owner "no venue answered" about a
+        // token nothing was ever asked to price sends them to the wrong place.
+        //
+        // POOL-GRADE REQUIRED HERE TOO, and this used to be the one place it
+        // was not. This site builds ENTRY candidates exactly like the fast one
+        // does, but it asked only "could anything put a number on this?" —
+        // which `lastUnpriceable` below spends twenty lines explaining is the
+        // wrong question for spending: a v4 or curve mark cleared no oracle,
+        // because there is no oracle to clear.
+        //
+        // It was reachable and it ended in a real swap. With fast mode off and
+        // a v4-only token in the basket, `priceable` was true, `shouldEnter`
+        // passed, and the intent carries no custody on this path — so the v4
+        // gate in `bestRoute` is open, `buildTradeCalls` builds a v4 swap, and
+        // the v3-only calldata fence is skipped. `buildTrencherCalls`, which
+        // refuses v4 outright, never runs, because custody is never set here.
+        // The scout dollar budget was the only thing left holding it.
+        ...(sameToken ? priceability(quote, true) : NOT_WATCHED),
         liquidityUsd: lastLiquidityUsd.get(c.address.toLowerCase()) ?? c.liquidityUsd,
         fdvUsd: c.fdvUsd,
         ageSec: Math.max(0, nowSec - c.firstSeen),
@@ -4004,14 +5454,29 @@ async function main() {
    * ledger already tracks exactly what was paid per raw unit and survives
    * partial fills, so a second copy could only ever disagree with it.
    */
+  /** A basket, custom or official token — never routed through Trencher custody. */
+  function baseTokenAddress(address: string): boolean {
+    const a = address.toLowerCase();
+    return watchTokensFor(cfg.basketSymbols, cfg.customTokens, officialCoins()).some((t) => t.address.toLowerCase() === a);
+  }
+
   async function trenchOpen(): Promise<OpenPosition[]> {
     if (!active) return [];
     const mode: BasisMode = paperActive() ? "paper" : "live";
     const out: OpenPosition[] = [];
     for (const t of watchTokens) {
       const basis = await getBasis(active.agentId, mode, t.symbol);
+      const custodyQty = autoTrenchBalances.get(t.address.toLowerCase());
+      let entry = await getTrenchEntry(active.agentId, mode, t.symbol);
+      if (custodyQty && autoTrench && mode === "live") {
+        const [cost,at] = await Promise.all([
+          active.client.readContract({address:autoTrench.custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"cost",args:[t.address]}),
+          active.client.readContract({address:autoTrench.custody.vault,abi:TRENCHER_VAULT_ABI,functionName:"entryAt",args:[t.address]}),
+        ]);
+        basis.qtyRaw=custodyQty; basis.costUsdg=cost;
+        if (!entry && at>0n) entry={entrySec:Number(at),liquidityUsd:0};
+      }
       if (basis.qtyRaw <= 0n || basis.costUsdg <= 0n) continue;
-      const entry = await getTrenchEntry(active.agentId, mode, t.symbol);
       if (!entry) continue; // not a trench entry — another strategy's position
       // Fill in a baseline that was stamped unknown, now that depth is
       // readable. Only ever upgrades a zero, and never moves a real one: the
@@ -4035,6 +5500,16 @@ async function main() {
         entrySec: entry.entrySec,
         costUsdg: basis.costUsdg,
         qtyRaw: basis.qtyRaw,
+        ...(mode === "live" && autoTrenchBalances.get(t.address.toLowerCase()) ? {custodyVault:autoTrench!.custody.vault,qtyRaw:autoTrenchBalances.get(t.address.toLowerCase())!} : {}),
+        // THE EXIT TAKES THE ROUTE THE ENTRY TOOK. A paper Trencher entry is
+        // autonomous (custody target, checked against knownTrencherAssets), but
+        // its exit was built without the custody target and so hit the router
+        // allowlist, which never lists a discovered coin: lilbot's sells of
+        // T57F813C4571 and TA151B4A9E1B were refused `asset-allowlist` 418 times
+        // in 7 hours (2026-09-26 17:07 → 27 00:00). Sells only — the 5 USDG
+        // entry bound in policy.ts applies to buys and is untouched.
+        ...(mode === "paper" && autoTrench && grantTrencher(active.grant) && !baseTokenAddress(t.address) &&
+          active.limits.knownTrencherAssets?.some(a=>a.toLowerCase()===t.address.toLowerCase()) ? {custodyVault:autoTrench.custody.vault} : {}),
       });
     }
     return out;
@@ -4311,43 +5786,60 @@ async function main() {
    * gas. claimCommand takes the row before anything runs, so a crash mid-probe
    * leaves it claimed rather than replayed. At-most-once, never at-least-once.
    *
-   * ONE COMMAND PER TICK, and only when armed. There is no batch drain and no
-   * catch-up: an operator who queued three probes wants three ticks' worth of
-   * evidence, not three UserOps racing the same nonce.
+   * ONE LIVE COMMAND PER TICK, and only when armed. There is no batch run and
+   * no catch-up: an operator who queued three probes wants three ticks' worth
+   * of evidence, not three UserOps racing the same nonce.
+   *
+   * BUT AN EXPIRED ONE NO LONGER COSTS A TICK. It is answered and the drain
+   * moves on in the same tick, so a fresh order behind a pile of stale ones is
+   * reached while it can still fill. Nothing expired is ever run, and nothing
+   * is drained anywhere but here, on the tick. See runTickCommand.
+   *
+   * "THE TICK" INCLUDES A COMMAND TICK. An order that lands between ticks no
+   * longer waits out the rest of a 240-second cadence: the watcher at the run
+   * loop wakes a tick that re-reads the market and the book and then drains
+   * here, under this same guard (see tick's `plan`). Still one command at a
+   * time, still claimed by the unlink, and refused by name — never filled on
+   * old numbers — when either read fails.
+   *
+   * THE GUARD IS A SLOT THE CLOCK CAN WAIT ON (command-wake.ts
+   * createOrderInFlight). It was a bare boolean; a regular tick now waits for
+   * the command in flight to land before it reads the book, so the flag had to
+   * say when it frees as well as whether it is held.
    */
-  let commandInFlight = false;
-  async function runQueuedCommand(agentId: string, marketUnreadable = false): Promise<void> {
-    if (commandInFlight || !active) return;
-    commandInFlight = true;
-    try {
-      // FROM THIS WORKER'S OWN HOME, not from a shared table.
-      //
-      // Children have DATABASE_URL stripped, so a hosted worker's store is its
-      // private sqlite while the dashboard writes shared Postgres — two
-      // different databases, and nothing would ever have been claimed. The
-      // orchestrator ferries commands in as files, exactly as it already does
-      // for grants and settings. See command-files.ts.
-      const cmd = claimCommandFile(merrymenHome());
-      if (!cmd) return;
-      // CLAIMED IS NOT THE SAME AS ANSWERED, and self-hosted the queue file is
-      // gone from here until the receipt lands. Without this marker an owner
-      // who asked again mid-trade got a second fill.
-      markRunning(merrymenHome(), cmd.id);
-      // The unlink above WAS the claim, so from here the command is ours and
-      // will not be replayed — a lost probe is a button pressed again, a
-      // replayed one is gas nobody asked to spend twice.
-      const outcome = await runCommand(cmd, marketUnreadable);
-      writeCommandResult(merrymenHome(), { id: cmd.id, ok: outcome.ok, line: outcome.line, at: Date.now() });
-      // LABELLED BY WHAT IT WAS. Every result used to be written into the
-      // owner's event feed as `selftest: …` regardless of kind, which for an
-      // order is a wrong claim about what the agent did, in the one log an
-      // operator reads to work out what a fleet is doing.
-      await addEvent(agentId, outcome.ok ? "ok" : "err", `${cmd.kind}: ${outcome.line}`);
-    } catch (e) {
-      console.log(`[command] failed: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      commandInFlight = false;
-    }
+  const commandInFlight = createOrderInFlight();
+  async function runQueuedCommand(agentId: string, reads: StatedReads): Promise<void> {
+    if (!active) return;
+    await commandInFlight.run(async () => {
+      try {
+        // FROM THIS WORKER'S OWN HOME, not from a shared table.
+        //
+        // Children have DATABASE_URL stripped, so a hosted worker's store is its
+        // private sqlite while the dashboard writes shared Postgres — two
+        // different databases, and nothing would ever have been claimed. The
+        // orchestrator ferries commands in as files, exactly as it already does
+        // for grants and settings. See command-files.ts.
+        await runTickCommand(merrymenHome(), {
+          now: Date.now,
+          // The unlink WAS the claim, so a command reaching here is ours and
+          // will not be replayed — a lost probe is a button pressed again, a
+          // replayed one is gas nobody asked to spend twice.
+          run: (cmd) => runCommand(cmd, reads),
+          // LABELLED BY WHAT IT WAS. Every result used to be written into the
+          // owner's event feed as `selftest: …` regardless of kind, which for an
+          // order is a wrong claim about what the agent did, in the one log an
+          // operator reads to work out what a fleet is doing.
+          told: async (cmd, outcome) => {
+            await addEvent(agentId, outcome.ok ? "ok" : "err", `${cmd.kind}: ${outcome.line}`);
+          },
+          // AN ORDER THAT EXPIRED IN THE QUEUE STILL GETS ITS RECEIPT. Only an
+          // order has one; a probe past its window is answered in words alone.
+          expiredReceipt: (cmd) => (cmd.kind === "trade" ? expiredOrderReceipt(cmd.args) : undefined),
+        });
+      } catch (e) {
+        console.log(`[command] failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    });
   }
 
   /**
@@ -4363,7 +5855,7 @@ async function main() {
    * An unknown kind is RECORDED, never run: a typo must not look identical to
    * a queue that is not being drained.
    */
-  async function runCommand(cmd: FileCommand, marketUnreadable = false): Promise<{ ok: boolean; line: string }> {
+  async function runCommand(cmd: FileCommand, reads: StatedReads): Promise<CommandOutcome> {
     // ── an order that waited too long is not the order that was placed ──
     //
     // Checked before anything else, and checked even for a kind that has no
@@ -4376,12 +5868,25 @@ async function main() {
       return {
         ok: false,
         line: `expired — this was placed for a market ${late}s ago and I will not fill it into a different one. Ask again if you still want it.`,
+        ...(cmd.kind === "trade" ? { receipt: expiredOrderReceipt(cmd.args) } : {}),
       };
     }
     if (cmd.kind === "selftest") return runSelftestProbe("dashboard");
     if (cmd.kind === "paper-reset") return runPaperReset();
-    if (cmd.kind === "trade") return runOrderCommand(cmd, marketUnreadable);
+    if (cmd.kind === "trade") return orderOutcome(cmd, await runOrderCommand(cmd, reads));
     return { ok: false, line: `unknown command '${cmd.kind}'` };
+  }
+
+  /**
+   * AN ORDER'S ANSWER, AS THE RESULT FILE CARRIES IT: the sentence and the
+   * verdict exactly as the order path produced them, and beside them a receipt
+   * templated from the ledger facts that came back with the verdict — never
+   * from the sentence, and never from a model. See order-receipt.ts for which
+   * figures it may print and the two states that get none.
+   */
+  function orderOutcome(cmd: FileCommand, reply: OrderReply): CommandOutcome {
+    const receipt = orderReceipt(orderSubject(cmd.args), reply.verdict);
+    return { ok: reply.ok, line: reply.line, ...(receipt ? { receipt } : {}) };
   }
 
   /**
@@ -4421,6 +5926,7 @@ async function main() {
       };
     }
     await resetPaperLedger(id, cfg.paperStartUsdg);
+    if (trenchBrain.reset()) tgDeliver(tgBook.reset());
     const opened = await openNextEpoch(id, cfg.paperStartUsdg);
     await addEvent(
       id,
@@ -4451,72 +5957,64 @@ async function main() {
    * produce. So the gate is per kind, which is why it sits in this function and
    * not in the caller.
    */
-  async function runOrderCommand(cmd: FileCommand, marketUnreadable = false): Promise<{ ok: boolean; line: string }> {
-    // ANSWERED, NOT STARVED.
-    //
-    // The tick returns early when the market could not be read, and that return
-    // sits a thousand lines above the command drain — so an owner's explicit
-    // order was skipped entirely on such a tick, and with the fleet
-    // rate-limited, on every tick after it until the order expired. Watched
-    // exactly that: "the market could not be read this tick (49 read(s)
-    // failed)", four ticks running, while a queued buy waited to be told
-    // anything at all and was eventually swept as "never ran".
-    //
-    // REFUSED HERE RATHER THAN FILLED. The equity snapshot behind the drawdown
-    // breaker is precisely what could not be read, and checkPolicy SKIPS the
-    // breaker when equity is unknown — so running the order on this tick would
-    // place a trade with that guard silently switched off. A prompt no is worth
-    // more than a late yes, and the owner can ask again in a minute.
-    if (marketUnreadable) {
-      return {
-        ok: false,
-        line:
-          "I could not read the market this tick, so I did not place it — that is a fact about my reads, " +
-          "not about your order. Ask again in a minute.",
-      };
-    }
-    if (isPaused()) {
-      return { ok: false, line: "you have me paused, so I did not place it. Un-pause and ask again." };
-    }
-    const a = cmd.args ?? {};
-    const side = a.side === "buy" || a.side === "sell" ? a.side : null;
-    if (!side) return { ok: false, line: `'${String(a.side)}' is not a buy or a sell` };
-    // A SYMBOL IS A SHORT PLAIN TICKER OR IT IS NOTHING. It is resolved against
-    // the watch set below, so this only has to stop the shapes that have no
-    // business reaching a lookup at all.
-    const symbol = typeof a.symbol === "string" ? a.symbol.trim().toUpperCase() : "";
-    if (!/^[A-Z0-9]{1,12}$/.test(symbol)) return { ok: false, line: `'${String(a.symbol)}' is not a symbol I can look up` };
-    const size = typeof a.usdgAmount === "number" ? a.usdgAmount : Number(a.usdgAmount);
-    // FINITE AND POSITIVE, SAID OUT LOUD. The wall now refuses a non-positive
-    // swap by name too — two gates, neither relying on the other — but NaN and
-    // Infinity have to die before `usdg()` turns them into a BigInt throw.
-    if (!Number.isFinite(size) || size <= 0) {
-      return { ok: false, line: `${String(a.usdgAmount)} is not an amount I can trade` };
-    }
-    // THE OWNER'S OWN CEILING ON A TYPED ORDER. The setting predates this
-    // surface and is named for the other one, but it means the same thing in
-    // both: the most a single chat-typed action may spend. Applying it here
-    // rather than silently inheriting nothing is the point — the sealed
-    // per-trade cap is a wall, and this is the owner's own smaller fence
-    // inside it.
-    const ceiling = cfg.telegramMaxActionUsdg;
-    if (ceiling > 0 && size > ceiling) {
-      return {
-        ok: false,
-        line: `${size} USDG is over your ${ceiling} USDG limit for a chat order. Raise it in Settings if you mean it.`,
-      };
-    }
-    // And from here the wall decides. submitChatTrade reports what the LEDGER
-    // said, so this returns a verdict about a trade that really happened or
-    // really did not.
-    //
-    // THE VERDICT TRAVELS WITH THE SENTENCE. This used to sniff the first emoji
-    // of the prose, which recognised three branches and missed every refusal
-    // that returns before an intent is built — so all of those were recorded as
-    // successes. `ok` is the sole input to the event LEVEL, and "ok" is a level
-    // no surface in this app renders, so an owner refused for being paused,
-    // expired, over their ceiling or in an unwatched symbol saw nothing at all.
-    return submitChatTrade(side, symbol, size);
+  async function runOrderCommand(cmd: FileCommand, reads: StatedReads): Promise<OrderReply> {
+    // EVERY GATE BEFORE THE SUBMITTER lives in order-gate.ts, where a test
+    // runs it: the unreadable market and the unread book (both drained with
+    // their flag by the tick that could not read them — answered, not
+    // starved), a book that cannot be totalled for a BUY (checkPolicy would
+    // skip the drawdown breaker for it), the owner's pause, the arguments, and
+    // the owner's own ceiling — `cfg.telegramMaxActionUsdg`, named for the
+    // other surface and meaning the same thing in both. `reads` is what the
+    // draining tick read, stated to the tick book at its drain site (order-gate.ts
+    // createTickBook) and carried here whole: never a default, never a global
+    // beside it, and the same record a Telegram order is judged against.
+    return placeOrder(
+      cmd.args,
+      orderReadsOf(reads, { paused: isPaused(), ceilingUsdg: cfg.telegramMaxActionUsdg }),
+      async (side, symbol, size, route) => {
+        // And from here the wall decides. submitChatTrade reports what the
+        // LEDGER said, so this returns a verdict about a trade that really
+        // happened or really did not.
+        //
+        // THE VERDICT TRAVELS WITH THE SENTENCE. This used to sniff the first
+        // emoji of the prose, which recognised three branches and missed every
+        // refusal that returns before an intent is built — so all of those were
+        // recorded as successes. `ok` is the sole input to the event LEVEL.
+        //
+        // THE ORDER'S DEADLINE GOES INTO THE INTENT QUEUE WITH IT. The claim
+        // judged it once, but the queue can hold the order behind the tick's own
+        // intents for minutes, so the queue judges it again when it reaches the
+        // order. A command with no deadline — a legacy row — has none to carry.
+        //
+        // WHAT IT IS FILED UNDER comes from the order's own args (orderAsked):
+        // an approved MCP proposal says so in its reason, a typed order does
+        // not claim to be one.
+        const asked = {
+          ...orderAsked(cmd.args, side, symbol, size),
+          ...(typeof cmd.expiresAt === "number" ? { notAfterMs: cmd.expiresAt } : {}),
+        };
+        // $MERRYMEN'S ENERGY BUY IS NOT AN ORDINARY ORDER, and this is the ONLY
+        // place it is routed — on the explicit marker, never on the symbol
+        // (order-gate.ts orderRoute). The app's get-energy card places kind
+        // 'trade' {side:'buy', symbol:'MERRYMEN', usdgAmount: the owner's most
+        // for this ask, purpose:'energy'}, and it arrives here from the command
+        // drain — the owner's click, claimed once — after placeOrder's reads,
+        // pause, shape and ceiling gates have all passed. submitEnergyBuy works
+        // the size out from the chain; usdgAmount is only ever an upper bound.
+        // A marked order naming any other token is refused: the card fixes the
+        // symbol, so a mismatch means something upstream is wrong, and nothing
+        // is bought on it. An UNMARKED order for MERRYMEN — a buy card, a snipe,
+        // an MCP proposal — goes to submitChatTrade like any order, which
+        // resolves it by address and refuses the reserve itself.
+        if (route === "energy") {
+          if (!isEnergySymbol(symbol)) {
+            return no("That energy order names another token, so I bought nothing. Ask me to get my energy again.");
+          }
+          return submitEnergyBuy(side, size, asked);
+        }
+        return submitChatTrade(side, symbol, size, asked);
+      },
+    );
   }
 
   /**
@@ -4547,7 +6045,8 @@ async function main() {
       };
     }
     const probe = selfTestIntent(cfg);
-    await ensureDecision(probe, source, "pipeline probe (approve dust) — not a market view");
+    const stamped = await ensureDecision(probe, source, "pipeline probe (approve dust) — not a market view");
+    if (!stamped.ok) return { ok: false, line: stamped.why };
     // equityKnown: false, not equity 0 — the probe knows nothing about the book
     // and must not claim a zero.
     // ITS OWN OUTCOME. Reading the global after the await could hand this the
@@ -4585,12 +6084,12 @@ async function main() {
         lastStrandedAt = nowSec;
         return;
       }
-      const WINDOW_SEC = 26 * 3600;
+      // The same window opsHoldInference bounds the inference hold with.
       await resolveStrandedOps(
         agentId,
         makeReconcileChain(active.client),
         active.grant.smartAccount as `0x${string}`,
-        BigInt(WINDOW_SEC) * BLOCKS_PER_SEC,
+        BigInt(STRANDED_RESOLVE_WINDOW_SEC) * BLOCKS_PER_SEC,
       );
       lastStrandedAt = nowSec;
     } catch (e) {
@@ -4664,7 +6163,9 @@ async function main() {
       }
       if (!res.picks.length) {
         if (res.scanned > 0) {
-          console.log(`[trending] ${res.scanned} coins, ${res.screened} past the screen, none worth mentioning`);
+          const line = trendingStatusLine(res);
+          console.log(`[trending] ${line}`);
+          if (res.researchStatus === "failed") await addEvent(agentId, "warn", line);
         }
         return;
       }
@@ -4807,12 +6308,41 @@ async function main() {
     await addEvent(agentId, "warn", "session key expired — agent retired (grant a new key to redeploy)");
   }
 
+  /** One per process: it remembers which refused name the owner was already told about. */
+  const reconcileName = createNameReconciler(nameSeat);
+
   /**
    * Reconcile in-memory state with the grant file. Returns true if an agent is
    * armed after the sync. Kill switch = grant file deleted by web's DELETE.
    */
   async function syncGrant(): Promise<boolean> {
-    const grant = loadGrantFile();
+    // A PENDING HOSTED KILL MEANS NO GRANT, whatever grant.json says (see
+    // loadArmableGrant). A copy raced back into this home goes through the
+    // kill branch below. It is not re-armed.
+    const grant = loadArmableGrant();
+
+    // RECONCILE THE NAME BEFORE ANY RETURN, or it never happens.
+    //
+    // It has lost renames at two of the returns below. Under the unchanged
+    // short-circuit: a name is in neither `connectionKey` nor `strategyKey`
+    // (settings.ts), so renaming forces no re-arm, and for an armed agent
+    // `unchanged` is true on every tick forever. Under the expiry return: an
+    // agent whose key lapsed kept its old name on the roster for good, however
+    // many times the owner saved a new one. Settings is the durable SEED and
+    // the soul is the runtime seat; the seed has to reach the seat in every
+    // state the grant can be in.
+    //
+    // Safe to run first because it touches no chain — a soul write and one
+    // UPDATE, both only when the name actually differs (name-reconcile.ts).
+    // The row is keyed on the grant when there is one, expired or not, and on
+    // the armed handle when the grant has just been deleted; with neither, the
+    // soul still moves and the arm path mirrors it onto the row later.
+    await reconcileName(cfg.agentName, {
+      agentId: async () => (grant ? ensureAgent(grant) : (active?.agentId ?? null)),
+      setAgentName,
+      warn: (agentId, message) => addEvent(agentId, "warn", message),
+      log: (line) => console.log(line),
+    });
 
     if (!grant) {
       if (active) {
@@ -4847,31 +6377,6 @@ async function main() {
       active &&
       active.grant.smartAccount === grant.smartAccount &&
       active.grant.grantedAt === grant.grantedAt;
-
-    // RECONCILE THE NAME BEFORE THE SHORT-CIRCUIT, or it never happens.
-    //
-    // The reconcile used to sit below this early return, next to the re-arm. A
-    // name is in neither `connectionKey` nor `strategyKey` (settings.ts), so
-    // renaming changes nothing that forces a re-arm — and for an agent that is
-    // already armed, `unchanged` is true on every tick forever. The owner could
-    // save a name, watch the store accept it, and the soul would stay "Robin"
-    // for the life of the process. Settings is the durable SEED and the soul is
-    // the runtime seat, so the seed has to be able to reach the seat while the
-    // agent is running, not only when its grant changes.
-    //
-    // Guarded on a real difference, so the common tick does no work and writes
-    // nothing. Both sides are normalised the same way — the API stores soul-form
-    // now — which is what lets this converge after one write instead of
-    // rewriting the identity file every tick.
-    if (cfg.agentName) {
-      ensureSoul();
-      const want = cfg.agentName.trim().replace(/\s+/g, " ");
-      if (want && want !== getName()) {
-        const named = setName(want);
-        if (!named.ok) console.log(`[soul] refusing the configured name: ${named.reason}`);
-        else await setAgentName(await ensureAgent(grant), named.name);
-      }
-    }
 
     if (unchanged) return true;
 
@@ -4945,10 +6450,10 @@ async function main() {
     await restoreAnchoredHighWaterMark(agentId);
 
     // The soul's name is the source of truth — mirror it onto the roster. The
-    // configured name was reconciled into the soul above the short-circuit, so
-    // by here `getName()` is already what the owner asked for.
-    ensureSoul();
-    await setAgentName(agentId, getName());
+    // configured name was reconciled into the soul at the top of syncGrant, so
+    // by here `getName()` is already what the owner asked for — and an agent
+    // named before the letter rule reads back as that name, not as the default.
+    await mirrorNameOnArm(nameSeat, agentId, setAgentName);
     // No soul and no reconcile for the handle: unlike the name it has no
     // in-character meaning and nothing at runtime reads it, so there is no second
     // place for it to be true in a different version. Straight from settings.
@@ -5023,6 +6528,7 @@ async function main() {
             ...(grantPonsClassVaultFactory(grant)
               ? { ponsClassVaultFactoryAddress: grantPonsClassVaultFactory(grant)! }
               : {}),
+            ...(grantTrencher(grant) ? {trencherVaultAddress:grantTrencher(grant)!.vault,trencherFactoryAddress:grantTrencher(grant)!.factory} : {}),
           }) as never,
         );
         const env = firstEnableEnvelope(shape);
@@ -5454,6 +6960,19 @@ async function main() {
     // BEFORE seeding — else the seed under-counts the day's spend and loosens the
     // cap. Live only (paper never touches the chain); best-effort (guarded).
     if (executor) await reconcileInFlightAtArm(agentId, client, grant.smartAccount as `0x${string}`);
+    // THE ENERGY BUY'S BALANCE PIN, seeded from the ledger — after the resolver
+    // above, which ratchets it for any purchase it just settled. A restart after
+    // a landed purchase must not let the next ask read a node still behind that
+    // landing. Bounded and fail-soft (energy-settle.ts energyLandedBlockAtArm):
+    // the pin is a freshness floor, never a gate. Only where the buy can run.
+    if (executor && grant.chainId === MERRYMEN_TOKEN.chainId) {
+      noteEnergyLanded(
+        await energyLandedBlockAtArm({
+          newest: () => newestLandedEnergyBuy(agentId),
+          receiptBlock: async (hash) => (await client.getTransactionReceipt({ hash })).blockNumber,
+        }),
+      );
+    }
     await refreshBudget(agentId);
 
     // ── epoch boundary ───────────────────────────────────────────────────
@@ -5491,6 +7010,10 @@ async function main() {
     // HWM is persistent — a restart must not forget the peak, or the breaker
     // re-arms low and the fee ledger double-charges old profit.
     highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+    markBook = "live";
+    // A lift is relative to the mark it was observed above; a fresh arm starts
+    // from the persisted mark alone.
+    heldBreakerLiftUsdg = 0n;
     await setAgentStatus(agentId, "armed");
     await addEvent(
       agentId,
@@ -5536,9 +7059,21 @@ async function main() {
    * One function so the next venue is added in one place rather than seven, and
    * so a kind that has legs cannot quietly keep failing to name them.
    */
+  /** A swap or curve trade whose proceeds are cash: an exit, which spends no budget. */
+  function returnsCash(intent: TradeIntent): boolean {
+    const out = tokenLegs(intent).buy_token;
+    return out !== undefined && out.toLowerCase() === (CASH.USDG as string).toLowerCase();
+  }
+
   function tokenLegs(intent: TradeIntent): { sell_token?: string; buy_token?: string } {
     if (intent.kind === "swap") return { sell_token: intent.sellToken, buy_token: intent.buyToken };
     if (intent.kind === "curve-trade") return { sell_token: intent.assetIn, buy_token: intent.assetOut };
+    // THE ENERGY BUY NAMES ITS LEGS, and the pre-broadcast 'submitted' row is
+    // why that is load-bearing rather than tidy: the in-flight guard
+    // (energyBuysInFlight) and the stranded-op settle both find an energy
+    // purchase by kind OR by these legs, and a row that lost its kind to a
+    // rewrite would otherwise be invisible to both after a crash.
+    if (intent.kind === "energy-buy") return { sell_token: intent.sellToken, buy_token: intent.buyToken };
     return {};
   }
 
@@ -5552,6 +7087,12 @@ async function main() {
       };
     }
     if (intent.kind === "transfer") return { action: "transfer", sizeUsdg: usdgNum(intent.amountUsdg) };
+    // Its own action word, never "buy": it is not a position and must not read
+    // as one on any surface that groups decisions by action. The symbol is the
+    // reserve's own, from the core registry — never a model's spelling.
+    if (intent.kind === "energy-buy") {
+      return { action: "energy-buy", symbol: MERRYMEN_TOKEN.symbol, sizeUsdg: usdgNum(intent.notionalUsdg) };
+    }
     if (intent.kind === "equity-order") {
       return { action: intent.side, symbol: intent.ticker, sizeUsdg: usdgNum(intent.notionalUsdg) };
     }
@@ -5578,12 +7119,319 @@ async function main() {
    * hits the wall. No-op when already stamped — the strategist journals its own
    * survivors (with the model's reason); this covers deterministic strategies,
    * chat, and selftest so EVERY trade is attributable to a decision. */
-  async function ensureDecision(intent: TradeIntent, source: string, reason?: string): Promise<void> {
-    if (intent.decisionId || !active) return;
+
+  /**
+   * The bounds every evidence band is measured against.
+   *
+   * PASSED IN, NEVER GUESSED INSIDE THE BANDER. "liquidity thin" is a claim about
+   * this owner's market, and it is only defensible because the edges are anchored
+   * to numbers this route already acts on — the depth it refuses below, the round
+   * trip it will not accept, the graduation point at which the vault can no
+   * longer sell. A band function that invented its own round numbers would be
+   * publishing an opinion in the agent's voice that nothing in the system holds.
+   */
+  function classBandBounds(): BandBounds {
+    return {
+      depthFloorUsdg: cfg.classMinDepthUsdg,
+      roundTripCeilingBps: CLASS_MAX_ROUND_TRIP_BPS,
+      exitAtBps: Math.max(1, cfg.classExitAtGraduationPct * 100),
+      activityFloorTrades: ACTIVITY_GATE.minTrades,
+      impactCeilingBps: cfg.maxImpactBps,
+      maxHoldSec: cfg.classMaxHoldSec,
+    };
+  }
+
+  /**
+   * Everything one class `Why` contributes to its decision row, in the order
+   * `ensureDecision` takes it — so the two call sites spread it and cannot pair
+   * a reason with the wrong trade's evidence by getting an argument out of order.
+   *
+   * THE ACTION COMES FROM THE PRODUCER, not from the token addresses.
+   * `describeIntent` reads buy-vs-sell off `assetOut !== USDG`, which is right
+   * only while every class curve is USDG-quoted. Entries are refused unless they
+   * are, but a RECOVERED position need not be — policy.ts records that 42.8% of
+   * Pons curves quote in a stock token — and such a position would have had its
+   * own exit stamped "buy". The producer knows: a `class-exit` Why is a sell
+   * because the function that emitted it only ever sells.
+   */
+  function classDecision(
+    w: Why | null | undefined,
+  ): [string | undefined, { action?: string; symbol?: string; evidence?: string | null; whyCode?: string } | undefined] {
+    if (!w || (w.code !== "class-enter" && w.code !== "class-exit")) return [undefined, undefined];
+    const e = classEvidenceOf(w, classBandBounds());
+    return [
+      // THE PUBLIC REGISTER: this string becomes a post. The owner's copy of
+      // the same Why, remedies included, goes through addEvent elsewhere.
+      renderWhy(w, "public"),
+      {
+        action: w.code === "class-exit" ? "sell" : "buy",
+        symbol: w.symbol,
+        evidence: e === null ? null : JSON.stringify(e),
+        // A class EXIT is a hard risk exit — a clock running out or a contract
+        // about to stop accepting sells — and fires whatever the entry scoring
+        // wanted. An entry is the scoring itself, which is deterministic.
+        whyCode: w.code,
+      },
+    ];
+  }
+  /**
+   * WRITE THE AGENT'S OWN VIEW OF A TRADE THAT ACTUALLY HAPPENED.
+   *
+   * Every exit here is a normal outcome and none of them is an error: no
+   * evidence (not a class trade), no credentials (this owner runs no model), the
+   * model passing, the gate refusing. The trade is still published — its
+   * deterministic sentence is on the decision row either way. What is absent is
+   * only the agent's voice, and a social layer that must always produce
+   * something is one that will eventually produce anything.
+   *
+   * NOTHING HERE MAY THROW INTO THE TRADING PATH. It is invoked with `void` from
+   * the fill hook, so the whole body is wrapped: a model outage, a malformed
+   * completion or a storage failure costs a post and never a trade.
+   */
+  /**
+   * The coin's own name, if the tape gave one and it survives sanitising.
+   *
+   * DISPLAY ONLY. `symbol` stays the address-derived id everything prices,
+   * routes and settles against; this is the word a reader recognises. The name
+   * came off a third-party pool label, so it is the one string here somebody
+   * else wrote: the allowlist is deliberately narrow, an empty result is
+   * ABSENT rather than a placeholder, and anything address-shaped is dropped
+   * because a post may never carry one.
+   */
+  function displayNameOf(symbol: string): string | null {
+    return coinDisplayName(watchTokens.find((t) => t.symbol === symbol));
+  }
+
+  /**
+   * THE NAME EVERY DECISION ROW ABOUT A COIN IS WRITTEN WITH: the tape's, else
+   * the one this agent's buy used, else the coin's own contract — the one
+   * source a redeploy does not wipe. See decision-name.ts. Mainnet, like
+   * discovery's own reads of these tokens: a paper Trencher trades mainnet
+   * coins too. NEVER WAITED FOR: a decision takes what is already known and
+   * the read names the next one, so no exit sits behind a word nobody prices
+   * against. Discovery starts the reads for held coins (warmHeldNames).
+   */
+  const coinNames = new ChainCoinNames((address) =>
+    mainnetClient().readContract({ address, abi: erc20Abi, functionName: "symbol" }),
+  );
+  const decisionName = makeDecisionNamer({ watchTokens: () => watchTokens, ledger: displayNameFor, chain: coinNames });
+
+  async function maybePost(decisionId: string, status: string): Promise<void> {
+    try {
+      // PAPER POSTS TOO, and says so elsewhere — a simulated fill is still a
+      // decision the agent made and a view worth reading. `publishableThesis`
+      // carries the paper flag, so nobody is misled about the money. The
+      // predicate lives in social-post.ts so a test can pin it directly rather
+      // than reading this closure as text.
+      if (!postableStatus(status)) return;
+      if (!active) return;
+
+      // ALREADY SAID IS NOT A REASON TO SAY IT AGAIN, and a read failure is not
+      // permission either — `hasPost` returns null for that, and null is not
+      // false. An agent repeating itself about one trade reads as a bot.
+      const already = await hasPost(decisionId);
+      if (already !== false) return;
+
+      const rawEvidence = await decisionEvidence(decisionId);
+      let evidence: ClassEvidence | null = null;
+      if (rawEvidence) {
+        try {
+          evidence = JSON.parse(rawEvidence) as ClassEvidence;
+        } catch {
+          return;
+        }
+      } else {
+        // ── A BRAIN TRADE HAS NO BANDS, BUT IT HAS A BELIEF ─────────────────
+        //
+        // The class route bands its own measurements before writing them, so
+        // its decisions arrive here with `evidence_json` and post. A Trencher
+        // trade is decided by the Brain, which writes no bands — so every
+        // autonomous memecoin buy and sell fell out at the line above and the
+        // agent never said a word about the trades it actually makes.
+        //
+        // What the Brain DOES record is `reason`: its own thesis, in its own
+        // words, already on the decision row and already published verbatim by
+        // the feed. That is the belief the post should express, and using it
+        // means the writer paraphrases a view the agent genuinely held rather
+        // than one assembled afterwards from the fill.
+        //
+        // NOT A FABRICATED BAND. It is passed through as the single observation
+        // it is, so nothing downstream can mistake model prose for a measured
+        // quantity, and `decidedBy` says plainly that a model decided this.
+        const life = await lifecycleOf(decisionId);
+        const d = life?.decision;
+        const belief = d?.reason?.trim();
+        const act = d?.action === "buy" ? "enter" : d?.action === "sell" ? "exit" : null;
+        if (!belief || !act || !d?.symbol) return;
+        const shown = displayNameOf(d.symbol);
+        evidence = {
+          act,
+          symbol: d.symbol,
+          // Display only, and sanitised at the source — see ClassEvidence.
+          ...(shown ? { displayName: shown } : {}),
+          decidedBy: "brain",
+          bands: { thesis: belief },
+          // EMPTY, NOT INVENTED. `raw` is the drill-down of measured figures and
+          // the Brain recorded none as fields — its numbers live inside the
+          // prose. Synthesising entries here would put a model's sentence where
+          // a measurement belongs.
+          raw: {},
+        };
+      }
+      if (!evidence?.bands || Object.keys(evidence.bands).length === 0) return;
+
+      const creds = resolveLlm(cfg);
+      if (!creds) return;
+
+      const ctx = {
+        // The owner-chosen name, the same one the desk persona uses. Falls back
+        // rather than inventing one: an unnamed agent still has a view.
+        name: cfg.agentName?.trim() || "this desk",
+        evidence,
+        traits: traitsOf(
+          {
+            maxHoldSec: cfg.classMaxHoldSec,
+            exitAtGraduationPct: cfg.classExitAtGraduationPct,
+            perEntryUsdg: cfg.classPerEntryUsdg,
+            maxImpactBps: cfg.maxImpactBps,
+            minDepthUsdg: cfg.classMinDepthUsdg,
+          },
+          {
+            maxHoldSec: SETTINGS_DEFAULTS.classMaxHoldSec ?? 21600,
+            exitAtGraduationPct: SETTINGS_DEFAULTS.classExitAtGraduationPct ?? 85,
+            perEntryUsdg: SETTINGS_DEFAULTS.classPerEntryUsdg ?? 5,
+            maxImpactBps: SETTINGS_DEFAULTS.maxImpactBps ?? 300,
+            minDepthUsdg: SETTINGS_DEFAULTS.classMinDepthUsdg ?? 100,
+          },
+        ),
+        recent: await recentPosts(active.agentId, VOICE_WINDOW),
+      };
+
+      const raw = await llmText(creds, {
+        system:
+          "You write short posts as a trader, for other traders. You never invent a figure, " +
+          "never predict a price, and you vary how you write.",
+        prompt: writerPrompt(ctx),
+        // ROOM FOR HIDDEN REASONING, NOT FOR A LONG POST. A reasoning model
+        // spends its completion budget thinking BEFORE it writes: gpt-oss-120b
+        // measured 198 reasoning tokens on this prompt and had nothing left, so
+        // a 200 budget returned HTTP 200 with an empty completion on every
+        // call. The post itself is capped at TAKE_MAX (social-post.ts) either way.
+        maxTokens: 800,
+      });
+
+      const verdict = admitPost(raw, ctx);
+      if (!verdict.ok || !verdict.body) {
+        // THE REFUSAL IS OPERATOR-FACING ONLY. It names a model's behaviour, and
+        // a reader of the public feed can do nothing with it — the feed simply
+        // carries the deterministic sentence instead.
+        console.log(`[social] no post for ${decisionId} — ${verdict.refusal}`);
+        return;
+      }
+      await addPost(active.agentId, decisionId, verdict.body);
+    } catch (e) {
+      console.error("[social] post failed:", e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /**
+   * `known` is WHAT THE PRODUCER KNOWS AND `describeIntent` CANNOT DERIVE.
+   *
+   * Two things on the class route, and both were wrong before it existed:
+   *
+   *   SYMBOL. `symbolOfToken` searches watchTokens and STOCK_TOKENS. A class
+   *   token is in neither BY DEFINITION — it is a launch discovered at runtime
+   *   — so every class decision row carried symbol NULL, and `headOf` rendered
+   *   the post as "buy 5.00 USDG" with no ticker. It also made those rows
+   *   invisible to every symbol-keyed surface.
+   *
+   *   ACTION. The curve-trade arm decides buy-vs-sell by `assetOut !== USDG`,
+   *   which is right only while every class curve is USDG-quoted. Entries are
+   *   refused unless they are (class-legs.ts), but a RECOVERED row need not be:
+   *   policy.ts records that 42.8% of Pons curves are quoted in a stock token.
+   *   Such a position would have its own EXIT stamped "buy" — an agent
+   *   publicly announcing a purchase as it sold.
+   *
+   * The producer does not have to guess at either: it built the intent, so it
+   * knows which side of the trade it is on and what the thing is called. This
+   * is that knowledge travelling with the trade instead of being re-derived
+   * from token addresses further downstream.
+   */
+  async function ensureDecision(
+    intent: TradeIntent,
+    source: string,
+    reason?: string,
+    known?: { action?: string; symbol?: string; evidence?: string | null; provenance?: Provenance; whyCode?: string },
+  ): Promise<{ ok: true } | { ok: false; why: string }> {
+    if (!active) return { ok: false, why: "no agent armed" };
+
+    /**
+     * A SUPPLIED ID IS VERIFIED AND REUSED — NEVER REPLACED, NEVER TRUSTED.
+     *
+     * THE BUG THIS CLOSES. Brain writes its thesis row under its own
+     * `decision_id` BEFORE anything executes, then hands the order to
+     * `submitChatTrade`, which built a fresh intent carrying no id — so this
+     * function minted a SECOND, unrelated decision and the trade attached to
+     * that one. The thesis row never joined a trade; the trade joined a
+     * duplicate. Every reader then saw two posts with the same thesis, one
+     * saying "no trade came of it" and one saying "landed", and no id could
+     * reconstruct the chain because there were two of them.
+     *
+     * Crossing into execution is not a new decision. So when an id arrives, it
+     * is REUSED — and checked first, because reuse is an authorisation:
+     *
+     *   belongs to this agent  -> reuse it. No second row.
+     *   belongs to another     -> REFUSE THE TRADE. Not "mint a fresh one and
+     *                             carry on": a caller that handed us somebody
+     *                             else's decision is wrong about something, and
+     *                             quietly repairing it would attach real money
+     *                             to a row whose provenance we just disproved.
+     *   names nothing          -> REFUSE. An id with no row behind it cannot be
+     *                             the pre-trade thesis it claims to be.
+     *   unreadable             -> REFUSE. A database that will not answer is
+     *                             not permission; it is an unknown, and the
+     *                             unsafe direction here is to act on it.
+     *
+     * Refusing rather than throwing because the caller is a money path that has
+     * to answer its owner: it turns this into a refusal line, and the tick lives.
+     */
+    if (intent.decisionId) {
+      const owner = await decisionAgent(intent.decisionId);
+      const verified = verifyDecisionOwner(owner, active.agentId);
+      if (!verified.ok) {
+        // LOUD. This is the cross-tenant case, and it is the one shape here
+        // that would be an incident rather than a bug.
+        console.error(
+          `[${short(active.agentId)}] REFUSED: decision ${intent.decisionId}: ${verified.why}`,
+        );
+        return verified;
+      }
+      return { ok: true };
+    }
+
     const id = newDecisionId();
     intent.decisionId = id;
-    const d = describeIntent(intent);
-    await addDecision({ id, agent_id: active.agentId, source, symbol: d.symbol, action: d.action, size_usdg: d.sizeUsdg, reason });
+    // THE ROW, built in decision-row.ts where a test runs it: the symbol the
+    // producer knows, the coin's name from the one namer (never a wait on the
+    // chain — an exit's swap is sent only after this returns), and the
+    // provenance its why code gives.
+    const row = await intentDecisionRow({
+      id,
+      agentId: active.agentId,
+      source,
+      reason,
+      described: describeIntent(intent),
+      known,
+      name: decisionName,
+    });
+    await addDecision(row);
+    // addDecision is best-effort for observational producers. Execution needs
+    // evidence that its new decision really reached the ledger before acting.
+    const recorded = verifyDecisionOwner(await decisionAgent(id), active.agentId);
+    if (recorded.ok && publishableThesis({ name: cfg.agentName || "Merryman", source, action: row.action, symbol: row.symbol, reason })) {
+      reviewClock(active.agentId).noteDecision(Math.floor(Date.now() / 1000));
+    }
+    return recorded;
   }
 
   /**
@@ -5630,6 +7478,10 @@ async function main() {
         // The row goes in with 0 when depth is unknown, which the drain guard
         // already reads as "no baseline, this check is off" — and
         // upgradeTrenchEntry fills it in the first tick a real reading arrives.
+        // A buy onto a dust remainder is a fresh entry (buysOntoDust), not a
+        // top-up: forget the old baseline first, or the new position inherits
+        // the old clock and is sold next tick as past its window.
+        if (buysOntoDust(prev.qtyRaw, f.qtyRaw, f.cashUsdg)) await clearTrenchEntry(agentId, mode, f.symbol);
         await setTrenchEntry(agentId, mode, f.symbol, depth ?? 0);
         if (depth === undefined) {
           console.log(`[trench] no depth reading for ${f.symbol} — baseline stamped unknown, will fill in later`);
@@ -5796,16 +7648,26 @@ async function main() {
    * exactly the concurrency this exists to prevent. The chain is kept alive
    * across a rejection (the .catch below), or one throwing intent would
    * poison every later one — which is how a lock like this usually fails.
+   *
+   * AND THE CLOCK CAN SEE WHAT IS ON IT (`liveTrades`, command-wake.ts). Every
+   * trade is counted from the moment it joins the chain until it settles, so a
+   * regular tick due while one is between inclusion and its row waits for it,
+   * no command tick starts beside it, and the heartbeat keeps beating while the
+   * process waits on it. A trade typed in Telegram never touches the command
+   * slot, so the slot alone could not say any of that.
    */
+  const liveTrades = createLiveTrades();
   let intentChain: Promise<unknown> = Promise.resolve();
   function processIntent(intent: TradeIntent, equityUsdg: bigint, equityKnown = true): Promise<void> {
-    const run = intentChain.then(
-      () => processIntentLocked(intent, equityUsdg, equityKnown),
-      () => processIntentLocked(intent, equityUsdg, equityKnown),
-    );
-    // The chain must never hold a rejection, or the next waiter inherits it.
-    intentChain = run.catch(() => {});
-    return run;
+    return liveTrades.run(() => {
+      const run = intentChain.then(
+        () => processIntentLocked(intent, equityUsdg, equityKnown),
+        () => processIntentLocked(intent, equityUsdg, equityKnown),
+      );
+      // The chain must never hold a rejection, or the next waiter inherits it.
+      intentChain = run.catch(() => {});
+      return run;
+    });
   }
 
   /**
@@ -5831,23 +7693,46 @@ async function main() {
    * absorbed and recorded, which is the house rule about somebody's money
    * broken in the most direct way there is: the owner believes they hold $25
    * of TSLA and they do not.
+   *
+   * AND AN OWNER'S ORDER BRINGS ITS DEADLINE IN WITH IT. `notAfterMs` is read
+   * when the chain reaches this step, not when the order joined it: the
+   * intents ahead of it can each wait minutes on a receipt, and an order that
+   * starts after its own window has closed fills into a market the owner never
+   * saw. Past it, nothing is built or sent and the answer is `late`, which is
+   * not a ledger status — no row exists. See unlessLate in command-files.ts.
    */
   function processIntentReporting(
     intent: TradeIntent,
     equityUsdg: bigint,
+    equityKnown?: boolean,
+  ): Promise<LedgerFacts | null>;
+  function processIntentReporting(
+    intent: TradeIntent,
+    equityUsdg: bigint,
+    equityKnown: boolean,
+    notAfterMs: number | undefined,
+  ): Promise<LedgerFacts | LateOrder | null>;
+  function processIntentReporting(
+    intent: TradeIntent,
+    equityUsdg: bigint,
     equityKnown = true,
-  ): Promise<{ status: TradeRow["status"]; rejectRule?: string } | null> {
+    notAfterMs?: number,
+  ): Promise<LedgerFacts | LateOrder | null> {
     const step = async () => {
-      lastTradeOutcome = null;
-      await processIntentLocked(intent, equityUsdg, equityKnown);
-      return lastTradeOutcome;
+      return unlessLate(notAfterMs, Date.now, async () => {
+        lastTradeOutcome = null;
+        await processIntentLocked(intent, equityUsdg, equityKnown);
+        return lastTradeOutcome;
+      });
     };
-    const run = intentChain.then(step, step);
-    intentChain = run.then(
-      () => {},
-      () => {},
-    );
-    return run;
+    return liveTrades.run(() => {
+      const run = intentChain.then(step, step);
+      intentChain = run.then(
+        () => {},
+        () => {},
+      );
+      return run;
+    });
   }
 
   async function processIntentLocked(
@@ -5900,8 +7785,34 @@ async function main() {
       // first `last*` in this file read from main()'s own body rather than from
       // inside another closure, and with only nested assignments TypeScript
       // keeps the initializer's narrowing and resolves the reads to `never`.
-      lastTradeOutcome = { status: row.status, rejectRule: row.reject_rule };
+      //
+      // THE WHOLE ROW'S FACTS, not just its verdict: an owner's order carries
+      // them back as a receipt (order-receipt.ts), and a receipt read from this
+      // row and a sentence read from it cannot disagree about what happened.
+      lastTradeOutcome = ledgerFactsOf(row);
       const wrote = await addTrade({ ...row, decision_id });
+      /**
+       * AND THEN THE AGENT SAYS WHAT IT MAKES OF IT.
+       *
+       * GATED ON A FILL, NOT ON A DECISION, and this is the whole reason the
+       * call sits here rather than beside `ensureDecision`. A decision row
+       * exists for every intent including ones the wall turns back, and class
+       * entries are re-proposed with a fresh intent every tick — so a writer
+       * hung off the decision would mint a new post, in the agent's own voice,
+       * about a position it never took, once per tick, forever, each one costing
+       * a model call. `narrateTrade` learned this already and gates the same way.
+       *
+       * Deliberately not awaited into the trading path's critical section beyond
+       * what it needs: it writes its own row and cannot fail a trade. `wrote`
+       * matters because a post about a fill whose ledger row did not land would
+       * be the agent talking about a trade the ledger cannot account for.
+       */
+      if (wrote && decision_id) void maybePost(decision_id, row.status);
+      // TELEGRAM GROUPS, on the same gate and for the same reason: a line in a
+      // group about a fill the ledger cannot account for is the agent talking
+      // about a trade it cannot show. Answers a nominated coin's decision and
+      // a group-bought coin's exit; never throws into the trade.
+      if (wrote) tgNoteTradeRow(intent, decision_id, row.status);
       // A landed or simulated row is an internal explanation for a cash change.
       // Flow inference keys off this: if the count didn't move, nothing the
       // agent did can account for the money, so it came from outside.
@@ -5938,14 +7849,25 @@ async function main() {
     const state: AgentState = {
       spentTodayUsdg: spentToday(),
       opsToday: opsTodayCount(),
-      highWaterMarkUsdg,
+      // A LIVE INTENT NEVER MEETS THE PAPER PEAK. The tick re-reads the live
+      // mark before it trades (livePeaksStale), but a trade typed in Telegram
+      // can join in the reads before that; until then the ledger's is the mark.
+      highWaterMarkUsdg: paperActive()
+        ? highWaterMarkUsdg
+        : usdg(
+            (await getRiskPeriodPeak(agentId)) ??
+              (markBook === "paper" ? (await getAgentFinancials(agentId)).hwmUsdg : usdgNum(lifetimeBreakerPeak())),
+          ),
       equityUsdg,
       equityKnown,
       nowSec: Math.floor(Date.now() / 1000),
     };
     const verdict = checkPolicy(intent, limits, state, await scoutContextFor(intent));
     const notional =
-      intent.kind === "swap" || intent.kind === "equity-order" || intent.kind === "curve-trade"
+      intent.kind === "swap" ||
+      intent.kind === "equity-order" ||
+      intent.kind === "curve-trade" ||
+      intent.kind === "energy-buy"
         ? intent.notionalUsdg
         : intent.amountUsdg;
     // trades.target is NOT NULL and EVM-shaped; the ticker is the honest analog
@@ -5984,14 +7906,9 @@ async function main() {
       // suppressed log line is a suppressed measurement.
       console.log(`[policy] REJECTED ${intent.kind}: ${verdict.rule} — ${verdict.detail}`);
       // The OWNER line fires on change only. See lastPolicyRefusal.
-      const legs = tokenLegs(intent);
-      const refusalKey = ACCOUNT_WIDE_RULES.has(verdict.rule)
-        ? `${verdict.rule}|${intent.kind}`
-        : `${verdict.rule}|${intent.kind}|${legs.sell_token ?? ""}|${legs.buy_token ?? ""}`;
-      if (refusalKey !== lastPolicyRefusal) {
-        lastPolicyRefusal = refusalKey;
-        await addEvent(agentId, "warn", `policy rejected ${intent.kind}: ${verdict.rule} — ${verdict.detail}`);
-      }
+      const notice = ownerRefusalNotice(lastPolicyRefusal, verdict, intent.kind, tokenLegs(intent));
+      lastPolicyRefusal = notice.key;
+      if (notice.line) await addEvent(agentId, "warn", notice.line);
       await recordTrade({
         agent_id: agentId,
         kind: intent.kind,
@@ -6138,6 +8055,29 @@ async function main() {
     // trading off, a wrong-chain or empty account previously fell THROUGH this
     // block to the live rail and built a swap against a dead chain.
     const execRail = execMode();
+    // ── THE ENERGY BUY RUNS ONLY ON THE LIVE RAIL ──────────────────────────
+    //
+    // BEFORE the refuse and paper arms, because neither can hold it. A paper
+    // fill would put a purchase on the tape that no chain saw; and a REAL buy
+    // judged on the paper rail would be judged against the paper book — the
+    // daily cap and the ops count read paper rows, the breaker a simulated peak
+    // — while consent to trade real money (liveTradingEnabled) is a term with
+    // deliberately no override (exec-mode.ts). So there is no per-purchase
+    // exception: an agent that is not trading live does not buy its energy,
+    // and the owner is told the two ways round it (turn on Live trading, or
+    // send $MERRYMEN to the account directly — it counts the moment it lands).
+    if (intent.kind === "energy-buy" && execRail.mode !== "live") {
+      await recordTrade({
+        agent_id: agentId,
+        kind: intent.kind,
+        target: tradeTarget,
+        ...tokenLegs(intent),
+        amount_usdg: usdgNum(notional),
+        status: "rejected",
+        reject_rule: "energy-needs-live",
+      });
+      return;
+    }
     if (execRail.mode === "refuse") {
       console.log(`[policy] approved ${intent.kind} — not executed (${execRail.rule})`);
       // Leave a trace. This used to return with only a console line, so
@@ -6201,7 +8141,7 @@ async function main() {
       // idempotent, so on the normal path recordTrade has already released and
       // this is a no-op.
       try {
-        reserveBudget(intent.kind === "vault-withdraw" ? 0n : notional);
+        reserveBudget(intent.kind === "vault-withdraw" || returnsCash(intent) ? 0n : notional);
         console.log(`[paper] ${fill.receipt}`);
         await addEvent(agentId, "ok", `📜 ${fill.receipt} — inside the wall, nothing signed`);
         // Book the fill against the running cost basis. Paper fills are EXACT (we
@@ -6213,9 +8153,8 @@ async function main() {
               {
                 side: fill.fill.side,
                 symbol: fill.fill.symbol,
-                // Paper carries no ERC-8056 multiplier (1 share = 1e18 raw), the same
-                // convention the tick uses when it values the paper book.
-                qtyRaw: BigInt(Math.round(fill.fill.shares * 1e18)),
+                // Basis and checkpoints use the same split-invariant inventory units.
+                qtyRaw: BigInt(Math.round(fill.fill.rawShares * 1e18)),
                 cashUsdg: usdg(fill.fill.cashUsdg),
                 priceUsd: fill.fill.priceUsd,
               },
@@ -6306,7 +8245,9 @@ async function main() {
     // same stale spend figure and overshoot the daily cap by one action.
     // The reservation is released when the trade row lands (recordTrade) or
     // when execution throws (below) — never both, never neither.
-    const countsSpend = intent.kind !== "vault-withdraw";
+    // A sell into cash spends nothing (getSpentTodayUsdg says why), so it holds
+    // an op but no spend while in flight — the same thing its settled row counts.
+    const countsSpend = intent.kind !== "vault-withdraw" && !returnsCash(intent);
     reserveBudget(countsSpend ? notional : 0n);
 
     // Declared OUTSIDE the try so the revert path can still record it — the
@@ -6340,7 +8281,7 @@ async function main() {
        * in-flight window — the unsafe direction, and the thing this is for.
        */
       const submitHooks: ExecuteHooks = {
-        onSubmitted: async (userOpHash) => {
+        onSubmitted: async (userOpHash, op) => {
           const wrote = await addTrade({
             agent_id: agentId,
             kind: intent.kind,
@@ -6348,6 +8289,9 @@ async function main() {
             ...tokenLegs(intent),
             amount_usdg: usdgNum(notional),
             user_op_hash: userOpHash,
+            // The nonce it is signed with: what proves it dropped if the next
+            // op, signed with the same one, executes (resolveStrandedOps).
+            ...(op.nonce !== null ? { user_op_nonce: op.nonce.toString() } : {}),
             status: "submitted",
             decision_id,
             ...sim,
@@ -6401,7 +8345,7 @@ async function main() {
       let fillIsFromClassEvent = false;
       // Same-token "swaps" (the selftest no-op) skip the quote path — they are
       // approval-leg pipeline probes, not trades.
-      if (intent.kind === "swap" && cfg.swapVenue === "uniswap" && intent.sellToken !== intent.buyToken) {
+      if (intent.kind === "swap" && (cfg.swapVenue === "uniswap" || intent.custody === "trencher") && intent.sellToken !== intent.buyToken) {
         // Full leg: QuoterV2 simulation (reverts where the swap would) →
         // slippage-bounded minOut → approve + exactInputSingle in one UserOp.
         const quote = await bestRoute(active.client, {
@@ -6417,11 +8361,11 @@ async function main() {
           // on-chain, burning gas every tick. Same gate as v4 for the same
           // reason — quoting a route this key cannot reach is worse than never
           // having considered it.
-          via: grantHasMultihop(active.grant) ? (CASH.WETH as `0x${string}`) : undefined,
+          via: intent.custody === "trencher" || grantHasMultihop(active.grant) ? (CASH.WETH as `0x${string}`) : undefined,
           // Only consider v4 if THIS signature can actually reach it. Quoting a
           // venue the key can't touch would pick a route that reverts at the
           // wall — worse than never having considered it.
-          v4: grantHasV4(active.grant) || (active.v4AdapterLive && grantV4Adapter(active.grant) !== null),
+          v4: intent.custody !== "trencher" && (grantHasV4(active.grant) || (active.v4AdapterLive && grantV4Adapter(active.grant) !== null)),
           // Discovered pool keys make HOOKED pools routable — new launches
           // live behind hooks findV4Pool cannot guess. Empty for undiscovered
           // pairs, and inert when the v4 gate above is closed.
@@ -6543,7 +8487,7 @@ async function main() {
                 symbol,
                 qtyRaw,
                 cashUsdg,
-                priceUsd: Number(cashUsdg) / 1e6 / (Number(qtyRaw) / 1e18),
+                priceUsd: Number(cashUsdg) / 1e6 / (Number(qtyRaw) / 10 ** (watchTokens.find(t=>t.address.toLowerCase()===stockToken.toLowerCase())?.decimals ?? 18)),
               };
             }
           } else {
@@ -6555,7 +8499,14 @@ async function main() {
         // approves Permit2, which grants the router a bounded expiring
         // allowance. Building these by hand at the call site is how you approve
         // one router and swap through another.
-        const calls = buildTradeCalls({
+        const custody = intent.custody === "trencher" ? await verifyTrencherCustody(active.client,active.grant) : null;
+        const trenchDeadline = BigInt(Math.floor(Date.now()/1000)+60);
+        const calls = custody ? buildTrencherCalls({
+          grant:active.grant,deployed:custody.deployed,quote,
+          token:intent.sellToken.toLowerCase()===CASH.USDG.toLowerCase()?intent.buyToken:intent.sellToken,
+          side:intent.sellToken.toLowerCase()===CASH.USDG.toLowerCase()?"buy":"sell",
+          amountIn:intent.sellAmountRaw,minOut,deadline:trenchDeadline,
+        }) : buildTradeCalls({
           // The grant-sealed adapter, only when its code answered at arm time.
           // Absent, a v4 quote falls to the legacy Permit2 route — which only a
           // pre-adapter GRANT_V4 grant can execute, and the quote gate above
@@ -6584,7 +8535,12 @@ async function main() {
         // scope note in final-fence.ts. Reimplemented from Vex's final-request
         // guard with its author's permission.
         if (!quote.v4) {
-          const fence = checkV3SwapCalls(calls, {
+          const fence = custody ? checkTrencherCalls(calls, {
+            grant:active.grant,deployed:custody.deployed,
+            token:intent.sellToken.toLowerCase()===CASH.USDG.toLowerCase()?intent.buyToken:intent.sellToken,
+            side:intent.sellToken.toLowerCase()===CASH.USDG.toLowerCase()?"buy":"sell",
+            amountIn:intent.sellAmountRaw,minOut,deadline:trenchDeadline,
+          }) : checkV3SwapCalls(calls, {
             router: UNISWAP.swapRouter02 as `0x${string}`,
             tokenIn: intent.sellToken,
             tokenOut: intent.buyToken,
@@ -7155,7 +9111,37 @@ async function main() {
           const ev = mine
             .map((l) => decodeClassLog(l))
             .find((e) => e !== null && e.kind === want && e.token.toLowerCase() === classToken);
-          if (ev && ev.tokenRaw > 0n && ev.quoteRaw > 0n) {
+          /**
+           * WHAT WAS THIS FUNDED IN? A v2 event says; a v1 event does not.
+           *
+           * `null` means the log did not name the asset, which for a v1 vault is
+           * every log, and USDG is the only thing the producer has ever funded a
+           * class entry with — so null is read as USDG here and nowhere else.
+           *
+           * A NAMED ASSET THAT IS NOT USDG IS REFUSED, NOT CONVERTED. Every
+           * figure below treats `quoteRaw` as micro-USDG: the price line divides
+           * by a literal 1e6, the column it lands in is called cost_usdg, and
+           * the fold adds these across buys. An 18-decimal quote booked through
+           * that arithmetic is off by a factor of about a trillion, in the
+           * owner's favour on paper and nobody's in fact.
+           *
+           * THIS CANNOT FIRE TODAY, and that is the point of adding it now. The
+           * wall pins the buy's quote word to USDG and the producer refuses any
+           * candidate quoted in anything else, so reaching this branch means one
+           * of those two stopped being true — which is precisely the moment the
+           * ledger must say so rather than book a number nobody can use.
+           */
+          const evQuote = ev?.quoteAsset?.toLowerCase() ?? null;
+          const quoteIsUsdg = evQuote === null || evQuote === CASH.USDG.toLowerCase();
+          if (ev && !quoteIsUsdg) {
+            await addEvent(
+              agentId,
+              "warn",
+              `${symbol}: this trade was funded in ${short(evQuote!)}, not USDG, and every cost figure ` +
+                `here is denominated in USDG — so no basis was booked rather than one that would be ` +
+                `wrong by orders of magnitude. The position is still held and still sellable.`,
+            );
+          } else if (ev && ev.tokenRaw > 0n && ev.quoteRaw > 0n) {
             fillPair = {
               stockToken: classToken as `0x${string}`,
               symbol,
@@ -7371,6 +9357,142 @@ async function main() {
             deadline: BigInt(Math.floor(Date.now() / 1000) + CURVE_DEADLINE_SEC),
           }),
         );
+      } else if (intent.kind === "energy-buy") {
+        // ── THE ENERGY BUY ─────────────────────────────────────────────────
+        //
+        // USDG → VIRTUAL → $MERRYMEN over the one route the GRANT sealed, into
+        // the account itself. The plan that sized this was made minutes ago at
+        // most, from reads the chain may have moved past, so NOTHING of its
+        // pricing is trusted here: the tax is read again, the route re-quoted,
+        // the impact probed, and the floor derived from THIS quote — the one
+        // that is signed. Every refusal records a row (which releases the
+        // reservation) before it returns; the explicit releaseBudget() beside
+        // each is what budget-reservation.invariant.test.ts can see.
+        const route = grantEnergyRoute(active.grant);
+        if (!route) {
+          releaseBudget();
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            ...tokenLegs(intent),
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: "energy-not-granted",
+          });
+          return;
+        }
+        // THE TAX, READ NOW. Its owner can change it without a line of our code
+        // changing, and a floor computed from a freshly read tax would silently
+        // accept a hike — so above the ceiling this refuses instead.
+        const taxBps = await readEnergyTaxBps(active.client);
+        if (taxBps === null || taxBps > ENERGY.maxTaxBps) {
+          releaseBudget();
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            ...tokenLegs(intent),
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: taxBps === null ? "energy-tax-unreadable" : "energy-tax",
+          });
+          return;
+        }
+        // THE QUOTE THAT IS SIGNED: the pool's pre-tax output for exactly this
+        // input, both hops' fees included.
+        const gross = await quoteEnergyOut(active.client, intent.sellAmountRaw);
+        const minOut = gross === null ? 0n : energyMinOut(gross, taxBps, cfg.slippageBps);
+        if (gross === null || minOut <= 0n) {
+          releaseBudget();
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            ...tokenLegs(intent),
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: "energy-no-quote",
+          });
+          return;
+        }
+        sim = { sim_quote_out: gross.toString(), sim_min_out: minOut.toString(), sim_fee_tier: 3000 };
+        // ── impact guard, as the swap lane has it ─────────────────────────
+        // minOut cannot do this job: it is derived from the very quote in
+        // question. What the pools charge for THIS size is measured by
+        // re-quoting the same route at a small probe. A purchase is never an
+        // exit, so the cap applies in full.
+        let impact: number | null = null;
+        const probeIn = probeAmountIn(intent.sellAmountRaw);
+        if (probeIn !== null) {
+          const probeOut = await quoteEnergyOut(active.client, probeIn);
+          if (probeOut !== null) {
+            impact = impactBps({ amountIn: intent.sellAmountRaw, amountOut: gross, probeIn, probeOut });
+          }
+        }
+        const impactVerdict = judgeImpact({ bps: impact, maxBps: cfg.maxImpactBps, isExit: false });
+        if (!impactVerdict.ok) {
+          releaseBudget();
+          await addEvent(agentId, "warn", `${impactVerdict.detail} ($MERRYMEN energy)`);
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            ...tokenLegs(intent),
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: impactVerdict.rule,
+            ...sim,
+          });
+          return;
+        }
+        // The router refuses the fill after this; the wall leaves it open.
+        const deadline = BigInt(Math.floor(Date.now() / 1000) + ENERGY.deadlineSec);
+        const calls = buildEnergyCalls({
+          route,
+          amountIn: intent.sellAmountRaw,
+          minOut,
+          recipient: executor.address,
+          deadline,
+        });
+        // ── THE ENERGY FENCE — ALWAYS, and before anything is signed ─────
+        //
+        // No alternative builder, no skip, no condition: the bytes about to be
+        // signed must be the canonical encoding of exactly these terms, laid
+        // out as the wall pins them. Stricter than the wall on purpose — see
+        // final-fence.ts checkEnergySwapCalls.
+        const energyFence = checkEnergySwapCalls(calls, {
+          route,
+          recipient: executor.address,
+          amountIn: intent.sellAmountRaw,
+          minOut,
+          deadline,
+        });
+        if (!energyFence.ok) {
+          releaseBudget();
+          await addEvent(
+            agentId,
+            "err",
+            `refused to sign an energy buy: ${energyFence.detail}. Nothing was sent. This is a merrymen ` +
+              `fault — the calldata did not match the buy that was approved.`,
+          );
+          await recordTrade({
+            agent_id: agentId,
+            kind: intent.kind,
+            target: intent.target,
+            ...tokenLegs(intent),
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: `fence-${energyFence.rule}`,
+            ...sim,
+          });
+          return;
+        }
+        exec = await send(calls);
+        // It LANDED (send throws on a revert or an unread receipt). Remember
+        // where, so the next ask's balances are read no earlier than this.
+        noteEnergyLanded(exec.blockNumber);
+        await addEvent(agentId, "ok", `simulated ✓ energy route quote ${gross} min ${minOut} (after the token's buy tax)`);
       } else {
         // Every EVM kind is handled above, and this arm refuses rather than
         // falling through. It is deliberately NOT a `const never: never`
@@ -7385,6 +9507,16 @@ async function main() {
       }
 
       const txHash = exec.txHash;
+      // AN ENERGY PURCHASE IS NEVER A FILL. It is capital leaving the trading
+      // book (energy-settle.ts), booked as a flow below — a fill and a basis
+      // for it as well would count the same USDG twice, once as the flow and
+      // once as a position purchase in every fill-derived reader. Only the swap
+      // and curve arms ever assign these; this makes "never" a statement, not
+      // a coincidence of which arm ran.
+      if (isEnergyIntent(intent)) {
+        fillPair = null;
+        liveFill = null;
+      }
       // AN APPROVE THAT ACQUIRED NOTHING IS NOT A SWAP THAT LANDED.
       //
       // The selftest probe is a same-token "swap", so both of these read
@@ -7443,7 +9575,7 @@ async function main() {
           ? {
               token: intent.buyToken,
               label: fillPair?.symbol ?? short(intent.buyToken),
-              holder: executor.address,
+              holder: intent.custody === "trencher" ? grantTrencher(active.grant)!.vault : executor.address,
             }
           : intent.kind === "curve-trade" &&
               intent.assetOut.toLowerCase() !== (CASH.USDG as string).toLowerCase()
@@ -7452,7 +9584,11 @@ async function main() {
                 label: short(intent.assetOut),
                 holder: classVaultHolder ?? executor.address,
               }
-            : null;
+            : // The energy buy delivers into the account itself — and the
+              // reserve that arrives is the only thing that counts as energy.
+              intent.kind === "energy-buy"
+              ? { token: intent.buyToken, label: `$${MERRYMEN_TOKEN.symbol} (energy)`, holder: executor.address }
+              : null;
       if (acquired) {
         const delivery = await checkDelivery({
           balanceOf: () =>
@@ -7490,6 +9626,7 @@ async function main() {
           usdgToken: CASH.USDG as string,
           stockToken: fillPair.stockToken,
           symbol: fillPair.symbol,
+          decimals: watchTokens.find(t=>t.address.toLowerCase()===fillPair!.stockToken.toLowerCase())?.decimals ?? 18,
         });
         if (measured) {
           // THE VAULT'S OWN EVENT WINS. Quality measurement below still runs;
@@ -7566,6 +9703,22 @@ async function main() {
       if (liveFill?.side === "buy" && liveFill.qtyRaw > 0n) {
         await stampFloorFor(agentId, "live", liveFill.symbol);
       }
+      // ── THE ENERGY PURCHASE IS BOOKED BEFORE ITS LANDED ROW ──────────────
+      //
+      // From the receipt (the USDG that actually left, keyed tx#logIndex),
+      // through the booking gate, into ONE transaction with both peaks. The
+      // order is the crash-safety: a receipt that cannot be read THROWS here,
+      // the catch below leaves the op 'submitted' (still counted), and the
+      // stranded-op resolver books it on its next pass — which can never move
+      // the peaks twice. The in-memory peaks and the cash baseline are NOT
+      // touched: `booked` only marks them for the next tick to re-read.
+      if (isEnergyIntent(intent)) {
+        const energyBooked = await bookEnergyPurchase(
+          energySettleDeps(agentId, active.grant, makeReconcileChain(chainClient)),
+          { txHash: txHash as `0x${string}`, logs: exec.logs, blockNumber: exec.blockNumber },
+        );
+        if (energyBooked === "booked") capitalPeakDirty = true;
+      }
       await recordTrade({
         agent_id: agentId,
         kind: intent.kind,
@@ -7605,7 +9758,11 @@ async function main() {
         // A TRANSFER IS NOT A TRADE. Moving your own money home is not turnover
         // and must not be charged as it — the branch below books it as a flow
         // for the same reason.
-        ...(intent.kind === "transfer"
+        //
+        // AND NEITHER IS AN ENERGY PURCHASE: the owner's USDG set aside as the
+        // agent's own capacity, booked as capital leaving the book — not
+        // turnover, and never charged as it.
+        ...(intent.kind === "transfer" || isEnergyIntent(intent)
           ? {}
           : { trade_fee_usdg: usdgNum(tradeFeeUsdg(notional, cfg.tradeFeeBps)) }),
         ...sim,
@@ -7822,6 +9979,14 @@ async function main() {
       // stranded-op resolver settles it from the chain. The budget must NOT be
       // released here, which is why this sits above the rollback.
       if (submittedRow) {
+        // AND THE CALLER IS TOLD IT WENT OUT. No row was written on this path,
+        // so the outcome used to read as null — "never reached the ledger,
+        // nothing was sent; try again" — about an operation that WAS sent and
+        // may have landed. That sentence invites the second buy. The row in
+        // the ledger is 'submitted', so that is what the caller hears (the
+        // same status the unread-receipt branch above reports). An energy
+        // purchase whose receipt could not be booked lands here by design.
+        lastTradeOutcome = { status: "submitted", rejectRule: "unsettled-after-submit" };
         await refreshBudget(agentId);
         releaseBudget();
         await addEvent(
@@ -7958,17 +10123,13 @@ async function main() {
    * timestamp and a string, and it is the half a supervisor judges liveness by.
    */
   function beatFile(mode: string, sponsorGas: boolean, blockNumber?: bigint) {
-    const at = Math.floor(Date.now() / 1000);
     try {
       ensureHome();
-      writeFileSync(
-        homePaths.heartbeat(),
-        // `block` is omitted rather than zeroed when the chain was not read:
-        // a zero here would be a claim about chain height, and the dashboard
-        // would render it. Absent means absent.
-        JSON.stringify({ at, ...(blockNumber === undefined ? {} : { block: blockNumber.toString() }), mode, sponsorGas }),
-        "utf8",
-      );
+      // THE ONE WRITER, shared with the clock's beat (command-wake.ts). `block`
+      // is omitted rather than zeroed when the chain was not read: a zero here
+      // would be a claim about chain height, and the dashboard would render it.
+      // Absent means absent.
+      writeHeartbeat(homePaths.heartbeat(), { mode, sponsorGas, block: blockNumber }, Date.now());
     } catch {
       // heartbeat is best-effort telemetry — never let it kill the loop
     }
@@ -8097,7 +10258,35 @@ async function main() {
     resetRpcMeters();
   }
 
+  /**
+   * Set by the command watcher for the ONE tick it wakes, and read once at the
+   * top of that tick — so nothing that happens mid-tick can change what kind of
+   * tick it is. See runCommandTick at the run loop.
+   */
+  let commandTick = false;
   async function tick() {
+    // A COMMAND TICK is this same tick with its producers left out: the same
+    // grant sync, the same market read, the same book read and equity — the
+    // reads an owner's order must not be placed without — then the drain,
+    // waited for, and nothing after it. No strategy, no Brain, no class route:
+    // an order that arrives between ticks must not also buy the basket a second
+    // time. And no ratchet: it composes equity for the order and writes none of
+    // it down. Every one of those forks reads this plan (command-wake.ts
+    // tickPlan, where a test runs it) rather than a flag tested inline.
+    const plan = tickPlan(commandTick ? "command" : "regular");
+    const tickStartedAt = Date.now();
+    let brainOrderAccepted = false;
+    const fastTrencher = cfg.strategy === "trencher" && cfg.trencherFastEnabled;
+    const trenchContext = fastTrencher && active ? `${active.agentId}:${paperActive() ? "paper" : "live"}:${active.grant.grantedAt}:${cfg.brainUrl}` : "";
+    // A NEW CONTEXT ENDS EVERY REVIEW IN FLIGHT, so every nomination waiting on
+    // one is answered `expired` now rather than left to time out in silence;
+    // and nominations past their TTL are answered once per tick. Neither
+    // resets a cap (trencher-nominate.ts reset).
+    if (trenchBrain.reset(trenchContext)) tgDeliver(tgBook.reset());
+    tgDeliver(tgBook.expire());
+    if (fastTrencher && active && (!cfg.brainUrl || !cfg.brainToken)) {
+      trenchNotice(active.agentId, "Brain is not connected, so new buys are paused. Automatic exits remain active.");
+    }
     // BEAT FIRST, BEFORE ANY NETWORK CALL. See heartbeat() for why this line
     // moved: everything below can fail on somebody else’s rate limit, and none
     // of it changes whether this process is alive.
@@ -8105,8 +10294,39 @@ async function main() {
 
     await refreshConfig();
     const armed = await syncGrant();
+    await observeRailCash();
+
+    if (active && grantTrencher(active.grant)) {
+      refreshTrenchTape(); refreshAutoTrench();
+      if (!autoTrench) {
+        trenchNotice(active.agentId,"Reading autonomous Trencher holdings and verifying discovered pools before valuing the portfolio.");
+        return;
+      }
+      const base = watchTokensFor(cfg.basketSymbols,cfg.customTokens,officialCoins());
+      const addresses = new Set(base.map(t=>t.address.toLowerCase()));
+      const symbols = new Set(base.map(t=>t.symbol));
+      // The energy reserve is never a position, whatever a vault's tokens() says.
+      const discovered = autoTrench.tokens.filter(t=>!addresses.has(t.address.toLowerCase())&&!symbols.has(t.symbol)&&!isEnergyReserveToken(t.address));
+      // A PAPER POSITION OUTLIVES THE TAPE THAT FOUND IT. Live keeps a held coin
+      // in the universe through the vault's own `tokens()`; paper holds nothing
+      // in the vault, so a coin that left the qualified tape vanished from
+      // watchTokens and its position was orphaned — never valued, never exited.
+      // Carried only while the paper book still holds it. Entry-neutral: buys
+      // still need tape qualification, and a held symbol is never re-entered.
+      if (paperActive()) {
+        const seen = new Set(discovered.map(t=>t.address.toLowerCase()));
+        for (const t of watchTokens) {
+          const a = t.address.toLowerCase();
+          if (addresses.has(a) || symbols.has(t.symbol) || seen.has(a) || t.kind !== "memecoin") continue;
+          if ((await getBasis(active.agentId, "paper", t.symbol)).qtyRaw > 0n) { discovered.push(t); seen.add(a); }
+        }
+      }
+      watchTokens=[...base,...discovered];
+      active.limits.knownTrencherAssets=[...new Set([...autoTrench.tokens.map(t=>t.address), ...discovered.map(t=>t.address)])];
+    } else { autoTrench=null; autoTrenchBalances.clear(); }
 
     const market = await readMarketSafety();
+    const marketObservedAt = Math.floor(Date.now() / 1000);
     // Beat again WITH the height once the chain has answered, so the file still
     // carries block number whenever it is genuinely known.
     heartbeat(market.blockNumber ?? undefined);
@@ -8170,7 +10390,8 @@ async function main() {
       // no market data at all), and a trade is refused BY NAME rather than
       // filled — see runOrderCommand for why filling it would switch the
       // drawdown breaker off.
-      if (active) await runQueuedCommand(active.agentId, true).catch(() => {});
+      const marketUnread = tickBook.unread("market");
+      if (active) await runQueuedCommand(active.agentId, marketUnread).catch(() => {});
       return;
     }
 
@@ -8209,6 +10430,22 @@ async function main() {
     lastPrices = market.prices;
 
     const paper = paperActive();
+    // THE LIVE PEAKS, FROM THE LEDGER, BEFORE THIS TICK READS BALANCES AND
+    // COMPOSES EQUITY — when an energy purchase lowered them since the last book
+    // read (see capitalPeakDirty), or when the mark in memory is the PAPER
+    // book's because the last tick was paper (see markBook). Either way equity
+    // and the peak it is judged against come from the same side of the change,
+    // and the fee, the breaker and flow inference's first look below never see
+    // the other. Decided on `paper`, the same reading the accounting branch
+    // forks on. Read only (the risk peak is asked without observing).
+    if (livePeaksStale(paper, markBook, capitalPeakDirty)) {
+      highWaterMarkUsdg = usdg((await getAgentFinancials(agentId)).hwmUsdg);
+      const risk = await getRiskPeriodPeak(agentId);
+      riskHighWaterMarkUsdg = risk === null ? null : usdg(risk);
+      capitalPeakDirty = false;
+      markBook = "live";
+    }
+    if (paper) autoTrenchBalances.clear();
     let balances: { ethWei: bigint; cashUsdg: bigint; vaultUsdg: bigint };
     let positions: Position[];
     // Symbols the account HOLDS but couldn't be valued this tick (feed/multiplier
@@ -8239,6 +10476,14 @@ async function main() {
       symbols: [],
       tokens: [],
     };
+    // WHEN THIS TICK'S CASH WAS READ — taken before the book read below, so it
+    // is at or before the balance it stamps and before the flow look's ledger
+    // read. The equity row carries it as `cash_read_at`, and a restart takes it
+    // (not the row's INSERT time) as its reading's `since`: an op a chat trade
+    // submitted mid-tick, after this read but before the row was written, is
+    // not in this cash, and its settlement must shift the baseline rather than
+    // be skipped as "already in the reading" (store.ts lastKnownCashReading).
+    const cashReadAtSec = Math.floor(Date.now() / 1000);
     if (paper) {
       // The book IS the paper ledger, marked to market at the live oracle px.
       const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
@@ -8264,8 +10509,10 @@ async function main() {
       // arrangement where the arithmetic is about one world.
       const mults = await readMultipliers(mainnetClient(), watchTokens);
       lastMultipliers = mults.multipliers;
-      for (const p of paperPositionsOf(bookRow.shares)) {
-        if (p.shares <= 0) continue;
+      // paperBookPositions drops empty rows AND the energy reserve: a reserve row
+      // is in no watch set, so below it could only ever be a missingPrice — the
+      // branch that holds the tick, forever for a price that never comes.
+      for (const p of paperBookPositions(paperPositionsOf(bookRow.shares))) {
         const px = paperPriceOf(p.token);
         const mul = mults.multipliers.get(p.symbol);
         if (!px || mul === undefined) {
@@ -8362,6 +10609,32 @@ async function main() {
       positions = posRead.positions;
       missingPrice = posRead.missingPrice;
       unpricedByDesign = posRead.unpricedByDesign;
+      if (autoTrench && grantTrencher(grant)) {
+        const vault = autoTrench.custody.vault;
+        const custodyRead = await readPositions(client,vault,watchTokens,market.prices);
+        const raw = await client.multicall({contracts:watchTokens.map(t=>({address:t.address,abi:erc20Abi,functionName:"balanceOf" as const,args:[vault]}))});
+        autoTrenchBalances = new Map();
+        for (let i=0;i<raw.length;i++) {
+          const row=raw[i]!;
+          if (row.status!=="success") { posRead.readFailed=true; continue; }
+          if (row.result>0n) autoTrenchBalances.set(watchTokens[i]!.address.toLowerCase(),row.result);
+        }
+        for (const p of custodyRead.positions) {
+          const existing=positions.find(v=>v.token.toLowerCase()===p.token.toLowerCase());
+          if (existing) { existing.rawBalance+=p.rawBalance; existing.valueUsdg+=p.valueUsdg; }
+          else {
+            positions.push(p);
+            const saved = await getBasis(agentId,"live",p.symbol);
+            if (saved.qtyRaw === 0n && saved.costUsdg === 0n) {
+              const cost = await client.readContract({address:vault,abi:TRENCHER_VAULT_ABI,functionName:"cost",args:[p.token]});
+              if (cost > 0n) await setBasis(agentId,"live",p.symbol,{qtyRaw:p.rawBalance,costUsdg:cost});
+            }
+          }
+        }
+        missingPrice.push(...custodyRead.missingPrice);
+        unpricedByDesign.push(...custodyRead.unpricedByDesign);
+        posRead.readFailed ||= custodyRead.readFailed;
+      }
       // Only tokens the vault ACTUALLY holds. A recorded row with a zero balance
       // is a position that has been fully sold or swept — its basis is genuinely
       // stranded and should close, which is the one case the guard must not
@@ -8443,6 +10716,9 @@ async function main() {
        * on a bookkeeping artefact to be correct.
        */
       classCashUsdg = classRead.balances.get(CASH.USDG.toLowerCase()) ?? 0n;
+      if (autoTrench && grantTrencher(grant)) {
+        classCashUsdg += await client.readContract({address:CASH.USDG,abi:erc20Abi,functionName:"balanceOf",args:[autoTrench.custody.vault]});
+      }
       // Kept for the exit producer, which needs the balance AT THE VAULT and
       // must not pay for a second read of it. Replaced wholesale, never merged,
       // for the same reason `lastCurveLegs` is: a token that stopped answering
@@ -8531,6 +10807,13 @@ async function main() {
         "warn",
         `couldn't read ${unreadBook.join(", ")} this tick — trading + equity paused (fail-closed); this is a data gap, not a loss`,
       );
+      // AND AN ORDER WAITING ON THIS TICK IS ANSWERED, not starved. The same
+      // rule the unreadable-market return learned: this return sits above the
+      // drain, so a queued order was skipped until its window closed. With the
+      // book unread there is no equity for the breaker to judge it against, so
+      // it is refused by name — see runOrderCommand. And so is a Telegram
+      // order until a tick composes again: the book says so for both.
+      await runQueuedCommand(agentId, tickBook.unread("book")).catch(() => {});
       return;
     }
 
@@ -8541,6 +10824,8 @@ async function main() {
     if (missingPrice.length) {
       console.log(`[tick] incomplete market coverage — no price for held ${missingPrice.join(",")}; holding (equity + breaker skipped, not a real drawdown)`);
       await addEvent(agentId, "warn", `held ${missingPrice.join(", ")} couldn't be priced this tick — trading + equity paused (fail-closed); this is a data gap, not a loss`);
+      // Answered for the same reason as the unread book just above.
+      await runQueuedCommand(agentId, tickBook.unread("book")).catch(() => {});
       return;
     }
 
@@ -8719,6 +11004,8 @@ async function main() {
       );
     }
     if (unpricedByDesign.length === 0) notedUnpriced = false;
+    // What Telegram groups may know is held: memecoin names only, no sizes.
+    tgNoteHeld(positions, [...missingPrice, ...unpricedByDesign]);
 
     const positionsUsdg = positions.reduce((sum, p) => sum + p.valueUsdg, 0n);
     // Equity is the whole book — cash, vault, multiplier-aware stock value, and
@@ -8790,7 +11077,8 @@ async function main() {
         const b = await getBasis(agentId, "live", p.symbol).catch(() => null);
         if (!b || b.costUsdg <= 0n) uncovered.push(p.symbol);
       }
-      // BEFORE REPORTING IT, TRY TO FIX IT — from the receipts, once.
+      // Recover from receipts before reporting it. Rate-limit each symbol and
+      // bound the whole pass so accounting repair cannot starve decisions.
       //
       // Forward, a reconciled op books its own basis now. But the ops that
       // already went through the old path are `known` to the sweep and it will
@@ -8803,70 +11091,34 @@ async function main() {
       // nothing at all, and it stops as soon as it has nothing left to fix.
       if (uncovered.length && active?.executor) {
         const rc = makeReconcileChain(client);
-        // The ledger's own rows first, then the token's log. The rows are free —
-        // they are already here — and they carry the transaction directly. The
-        // log scan below is the fallback for the case the rows cannot cover: a
-        // child whose sqlite was rebuilt has no rows at all.
-        const candidates: { txHash: string }[] = [...(await landedFillsWithoutBasis(agentId))];
-        for (const sym of uncovered) {
-          const tok = watchTokens.find((t) => t.symbol === sym)?.address;
-          if (!tok) continue;
-          // ONCE PER SYMBOL, PER PROCESS. This walks two million blocks in
-          // spans, so it is hundreds of RPC calls — and every tick that found
-          // nothing would pay them again, on the shared endpoint this fleet
-          // already once brought to its knees (81 of 103 reads rate-limited,
-          // twelve agents unable to arm). A deep scan is worth doing; worth
-          // doing every four minutes it is not. Recorded whether it succeeded
-          // or not, because a failure that repeats forever costs the same as a
-          // success that repeats forever.
-          if (deepBasisTried.has(sym)) continue;
-          deepBasisTried.add(sym);
-          const found = await findSoleAcquisition({
-            chain: rc,
-            token: tok as `0x${string}`,
-            account: grant.smartAccount,
-            // A WIDER WINDOW THAN THE CAP SWEEP, on purpose. That one is sized
-            // to 26 hours because it exists to stop a mid-op restart loosening
-            // the day's spend, and an older op is outside the cap anyway. This
-            // has a different horizon: a position is held for as long as it is
-            // held, and its entry price does not age out.
-            lookbackBlocks: 2_000_000n,
-            // Wider spans than the op sweep uses, because this filter is
-            // indexed on `to` and one account's inbound transfers are a handful
-            // of logs however many blocks they span. The adaptive halving still
-            // handles a provider that refuses the range.
-            maxSpan: 50_000n,
-            log: (m) => console.log(`[basis] ${m}`),
-          }).catch(() => null);
-          if (found) candidates.push(found);
-          else console.log(`[basis] no single acquisition found for ${sym} — not retrying this process`);
-        }
-        for (const t of candidates) {
-          if (!uncovered.length) break;
-          const legs = await acquiredLegOf(rc, t.txHash as `0x${string}`, grant.smartAccount, CASH.USDG);
-          if (!legs) continue;
-          const sym = symbolOfToken(legs.token);
-          if (!sym || !uncovered.includes(sym)) continue;
-          await bookFill(
-            agentId,
-            "live",
-            {
-              side: legs.side,
-              symbol: sym,
-              qtyRaw: legs.qtyRaw,
-              cashUsdg: legs.cashUsdg,
-              priceUsd: Number(legs.cashUsdg) / 1e6 / (Number(legs.qtyRaw) / 1e18),
-            },
-            "receipt",
-          );
-          uncovered.splice(uncovered.indexOf(sym), 1);
-          await addEvent(
-            agentId,
-            "ok",
-            `recovered ${sym}'s entry price from its receipt (${fmt(legs.cashUsdg)} USDG) — the stop-loss and ` +
-              `take-profit can act on it again. Its row was written by the chain sweep after a restart, which ` +
-              `used to record what was spent and not what was bought.`,
-          );
+        const recoveryStarted = Date.now();
+        for (const sym of [...uncovered]) {
+          if (Date.now() - recoveryStarted >= 20_000) break;
+          const position = positions.find(p => p.symbol === sym);
+          if (!position) continue;
+          const now = Date.now();
+          if (now - (deepBasisTried.get(sym) ?? -Infinity) < 3_600_000) continue;
+          deepBasisTried.set(sym, now);
+          try {
+            const recovered = await recoverReceiptBasis({
+              chain: rc, token: position.token, account: grant.smartAccount,
+              usdgToken: CASH.USDG, heldRaw: position.rawBalance,
+              lookbackBlocks: 2_000_000n,
+              budgetMs: 20_000 - (Date.now() - recoveryStarted),
+            });
+            if (!recovered) {
+              console.log('[basis] ' + sym + ': incomplete receipt evidence; cost remains unknown, retry in one hour');
+              continue;
+            }
+            // Restore remaining basis, not historical fills/P&L a second time.
+            await setBasis(agentId, "live", sym, recovered.basis);
+            const saved = await getBasis(agentId, "live", sym);
+            if (saved.qtyRaw !== recovered.basis.qtyRaw || saved.costUsdg !== recovered.basis.costUsdg) continue;
+            uncovered.splice(uncovered.indexOf(sym), 1);
+            await addEvent(agentId, "ok", 'Recovered ' + sym + ' cost basis from ' + recovered.transactions.length + ' confirmed receipts matching the entire current holding. Transactions: ' + recovered.transactions.join(', '));
+          } catch {
+            console.log('[basis] ' + sym + ': receipt recovery unavailable; cost remains unknown, retry in one hour');
+          }
         }
       }
 
@@ -8906,8 +11158,15 @@ async function main() {
      * successful read there is nothing to keep, and the floor stands — which
      * is exactly where every agent starts anyway.
      */
-    const holderRead = await readHolderStatusResult(cfg.rpcMainnet, cfg.holderAddress);
-    holderReadOk = holderRead.ok;
+    //
+    // THE COMBINED BALANCE (core energy.ts, D1): the owner's holder wallet PLUS
+    // this agent's own account, where $MERRYMEN it buys or is sent lands. The
+    // account counts only on Robinhood Chain — on any other network the same
+    // address here is not this agent's, and tokens sent to it would not be.
+    // Still ONE read call and one metered client (circle.ts); `ok` only when
+    // every part answered, so the tier stays exact and the rule above holds.
+    const energyAccount = grant.chainId === MERRYMEN_TOKEN.chainId ? (grant.smartAccount as `0x${string}`) : undefined;
+    const holderRead = await readHolderStatusResult(cfg.rpcMainnet, cfg.holderAddress, energyAccount);
     if (holderRead.ok) holderTier = holderRead.status.tier;
     if (holderRead.ok && holderTier.id !== lastTierId) {
       lastTierId = holderTier.id;
@@ -8915,11 +11174,33 @@ async function main() {
         agentId,
         "ok",
         holderTier.id === "outsider"
-          ? "Merry Circle — no $MERRYMEN at your holder wallet; standard platform fee applies"
+          ? "Merry Circle — no $MERRYMEN between your wallet and my account; standard platform fee applies"
           : `Merry Circle — ${holderTier.emoji} ${holderTier.name}: ${holderTier.feeDiscountBps / 100}% off the platform fee`,
       );
     }
     const effFeeBps = effectivePerfFeeBps(cfg.perfFeeBps, holderTier);
+    // THE STANDING, from the same read — the parts, so a half that answered
+    // can still prove the line where the exact tier may not — and the durable
+    // last-good for a read that failed. In EVERY mode: energy reads it, and so
+    // does the Circle gate below (circle-gate.ts circleStanding), so a restart
+    // whose first read fails neither throttles a holder nor locks a Merry
+    // Man's Circle strategy. The fee above stays on the exact tier.
+    let holderStanding: { level: EnergyLevel; decided: boolean | null };
+    try {
+      holderStanding = await holderStandingFor(agentId, holderRead.parts);
+    } catch (e) {
+      // This read alone: a part that failed stays unread, never a guess.
+      holderStanding = energyLevel(holderRead.parts, null, Math.floor(Date.now() / 1000));
+      console.error(`[${short(agentId)}] [energy] could not load the last good reading — this read alone decides:`, e);
+    }
+    // AND TODAY'S ENERGY, from that standing. Decided here, once, before
+    // anything this tick could spend it. It never throws into the tick:
+    // energy is never the reason a tick fails.
+    try {
+      await refreshEnergy(agentId, grant, holderRead.parts, holderStanding);
+    } catch (e) {
+      console.error(`[${short(agentId)}] [energy] could not decide this tick — keeping the last plan:`, e);
+    }
 
     // A CURVE-VALUED POSITION MAY NOT RATCHET ANY HIGH-WATER MARK.
     //
@@ -8935,6 +11216,12 @@ async function main() {
     // charged, and a drawdown measured from the last honest peak. The breaker
     // still works -- a curve token falling is still measured against that peak.
     const curveMarked = curveMarkedSymbols(positions);
+    // WHAT THIS TICK MAY WRITE DOWN — the paper peak, the risk-period
+    // observation, the fee and the mark, and the equity row — decided in
+    // command-wake.ts tickRatchets, where a test runs every guard. A command
+    // tick writes none of them; a curve mark moves no peak; an untotalled book
+    // writes no row. Each write below is handed to the call that decides it.
+    let ratchet = tickRatchets(plan, { incomplete: bookIncomplete, curveMarked: curveMarked.length });
 
     // With an unvaluable holding on the books, equity is UNKNOWN — not lower.
     // Ratcheting the HWM, accruing a performance fee or judging drawdown off a
@@ -8955,11 +11242,15 @@ async function main() {
       // trading on a peak that never happened, which is precisely the signal
       // the owner would be reading to decide whether to go live.
       const bookRow = await getPaperBook(agentId, cfg.paperStartUsdg);
-      if (usdgNum(equityUsdg) > bookRow.hwmUsdg && curveMarked.length === 0) {
-        bookRow.hwmUsdg = usdgNum(equityUsdg);
-        await setPaperBook(agentId, bookRow);
-      }
-      highWaterMarkUsdg = usdg(bookRow.hwmUsdg);
+      // Raised past the recorded peak and written only on a regular tick with no
+      // curve mark: an owner's order is not a sample of the cadence the peak is
+      // measured on. See command-wake.ts tickRatchets.
+      highWaterMarkUsdg = usdg(await ratchet.paperPeak(bookRow, usdgNum(equityUsdg), (b) => setPaperBook(agentId, b)));
+      markBook = "paper";
+      // The mark is the paper book's now, until a live tick re-reads the live
+      // one (livePeaksStale); a live lift observed above the live mark means
+      // nothing on top of it. Paper never holds a flow look.
+      heldBreakerLiftUsdg = 0n;
     } else {
       // Capital first, performance second. Any deposit or withdrawal since the
       // last look moves the high-water mark with it, so what follows can only
@@ -8973,7 +11264,7 @@ async function main() {
       // it a transaction hash, instead of a balance change nobody can point at.
       // Off by default: it changes how CONTRIBUTIONS are counted, and every P&L
       // figure is measured against those.
-      await reconcileFlowsOrRetry(
+      const flows = await reconcileFlowsOrRetry(
         agentId,
         balances.cashUsdg,
         equityUsdg,
@@ -8986,6 +11277,30 @@ async function main() {
             }
           : undefined,
       );
+      // A HELD LOOK ACCRUES NO FEE AND MOVES NO LIFETIME PEAK. While an op the
+      // resolver may still settle is in flight, this equity's cash is not yet
+      // split into capital and performance: a deposit made in the hold is in it
+      // and not in the peak. The fee and the lifetime mark wait for the look
+      // that closes the interval (command-wake.ts tickRatchets `held`).
+      //
+      // THE BREAKER DOES NOT WAIT. A dropped userOp holds for 26 hours, and a
+      // drawdown limit switched off for a day is not a limit. Its peaks observe
+      // this equity less any cash above what the account is expected to hold —
+      // a figure no unbooked deposit can reach (heldCashBaseline) — and the row
+      // is written, flagged, so neither the restart baseline nor the hosted
+      // anchor ever takes its cash.
+      if (flows === "held") {
+        ratchet = tickRatchets(plan, {
+          incomplete: bookIncomplete,
+          curveMarked: curveMarked.length,
+          held: true,
+          breakerObservationUsdg: heldBreakerObservationUsdg({
+            equityUsdg,
+            cashUsdg: balances.cashUsdg,
+            expectedCashUsdg: await heldCashBaseline(agentId),
+          }),
+        });
+      }
       // A PERFORMANCE FEE NEEDS TO KNOW WHAT WAS CONTRIBUTED.
       //
       // "Profit" here means equity above the peak, and the peak only means
@@ -9000,7 +11315,10 @@ async function main() {
       // is also what the drawdown breaker measures against: freezing it would
       // make the breaker LESS likely to halt a falling book, which is the wrong
       // direction to fail in. Refusing the money movement and keeping the safety
-      // signal is the split that matters.
+      // signal is the split that matters. (A HELD look keeps the same split by
+      // another route: the lifetime mark cannot take a figure that may hold an
+      // unbooked deposit, so the breaker's peak takes one that cannot — the
+      // held observation above, through breakerLift and riskPeak below.)
       // PUBLISH THE QUALITY, not just act on it.
       //
       // This flag gated the fee and nothing else, and it lived in a process-local
@@ -9019,6 +11337,14 @@ async function main() {
       // net. A percentage published without saying which is not a performance
       // figure, and a model comparing gross history against net future returns
       // is comparing two different quantities.
+      // READ ON EVERY TICK, OBSERVED ONLY ON A REGULAR ONE. A command tick still
+      // needs the peak its order is judged against, but an order arriving must
+      // not move that reference point at the very moment it judges the order
+      // — null asks without observing (risk-period.ts markRiskPeriod), and
+      // tickRatchets passes null on a command tick or under a curve mark. On a
+      // held tick it passes the held observation, never the raw equity.
+      const riskPeak = await ratchet.riskPeak(usdgNum(equityUsdg), (observe) => getRiskPeriodPeak(agentId, observe));
+      riskHighWaterMarkUsdg = riskPeak === null ? null : usdg(riskPeak);
       const gasCov = await getGasPaidUsdg(agentId, await getAgentEpoch(agentId));
       await setAgentQuality(agentId, {
         contributionsKnown: accounting.contributionsKnown,
@@ -9065,7 +11391,24 @@ async function main() {
           `[fees] not ratcheting the high-water mark: ${curveMarked.join(", ")} valued off a bonding curve`,
         );
       }
-      if (accrual.profitUsdg > 0n && curveMarked.length === 0) {
+      // NO FEE ON A COMMAND TICK. The fee follows the running maximum of sampled
+      // equity, which only rises as samples are added — so a sample an owner's
+      // order added could charge a fee on a transient peak the regular cadence
+      // would never have seen. The next regular tick accrues whatever is real.
+      //
+      // AND THE IN-MEMORY MARK MOVES WITH IT, inside the same guard and not
+      // after it. That is the variable the drawdown BREAKER actually judges
+      // against (it is copied into AgentState and divided by in checkPolicy),
+      // and it is re-read from the database only at arm time and on a capital
+      // flow -- so an inflated value survives for the whole process. Leaving it
+      // outside meant the fee and the DB write were skipped while the peak that
+      // gates trading ratcheted anyway, and a curve mark reverting would then
+      // halt every non-exit intent on a drawdown that never happened.
+      // accrueAboveHwm returns the mark unchanged when there is no profit.
+      // tickRatchets.accrue returns the mark this tick may carry, and runs the
+      // write below only when it may and there is a profit to charge.
+      const markBeforeAccrual = highWaterMarkUsdg;
+      highWaterMarkUsdg = await ratchet.accrue(accrual, highWaterMarkUsdg, async () => {
         const feeOk = await addFeeAccrual(agentId, {
           profitUsdg: usdgNum(accrual.profitUsdg),
           feeUsdg: usdgNum(accrual.feeUsdg),
@@ -9094,17 +11437,11 @@ async function main() {
             `new high-water mark ${fmt(accrual.newHwmUsdg)} USDG — fee accrued ${fmt(accrual.feeUsdg)} (${effFeeBps / 100}% of ${fmt(accrual.profitUsdg)} profit)${circle}`,
           );
         }
-      }
-      // Inside the guard, not after it. This is the variable the drawdown
-      // BREAKER actually judges against (it is copied into AgentState and
-      // divided by in checkPolicy), and it is re-read from the database only
-      // at arm time and on a capital flow -- so an inflated value survives for
-      // the whole process. Leaving it outside meant the fee and the DB write
-      // were skipped while the peak that gates trading ratcheted anyway, and a
-      // curve mark reverting would then halt every non-exit intent on a
-      // drawdown that never happened. accrueAboveHwm returns the mark
-      // unchanged when there is no profit, so this is a no-op in that case.
-      if (curveMarked.length === 0) highWaterMarkUsdg = accrual.newHwmUsdg;
+      });
+      // THE BREAKER'S LIFT, after the mark has moved (or, held, not): what a
+      // held observation saw above the mark, less whatever the mark has since
+      // caught up with. See heldBreakerLiftUsdg.
+      heldBreakerLiftUsdg = ratchet.breakerLift(heldBreakerLiftUsdg, markBeforeAccrual, highWaterMarkUsdg);
     }
     console.log(
       `[account] ${grant.smartAccount} · eth ${formatUnits(balances.ethWei, 18)} · ` +
@@ -9114,9 +11451,17 @@ async function main() {
 
     // No equity row while the book is unvaluable: a partial total would read as
     // a real drop on the equity curve and in P&L. A gap is honest; a wrong
-    // number is not.
-    if (!bookIncomplete) {
-      await addEquity(agentId, {
+    // number is not. And none on a command tick: the curve is the regular
+    // cadence's record, and an order's extra sample is not a point on it.
+    // A held flow look's row IS written, flagged — a true valuation that is no
+    // cash baseline (store.ts `flows_held`). All decided in tickRatchets.equityRow.
+    await ratchet.equityRow(({ flowsHeld }) =>
+      addEquity(agentId, {
+        // TAKEN WHILE FLOW INFERENCE WAS HELD: the restart baseline and the
+        // hosted anchor skip it, the curve does not.
+        flowsHeld,
+        // WHEN ITS CASH WAS READ, which is what a restart's `since` must be.
+        cashReadAt: cashReadAtSec,
         // WHICH BOOK THIS MARK IS OF. `balances` is the paper ledger above and
         // the chain below, and until now the row said nothing about which — so
         // an agent that practised at 1,000 USDG and then went live wrote one
@@ -9147,8 +11492,8 @@ async function main() {
         // The block the balances were read at — where an auditor re-reads from.
         // Non-null by construction: an unreadable market returned above.
         blockNumber: market.blockNumber ?? undefined,
-      });
-    }
+      }),
+    );
     await setPositions(
       agentId,
       positions.map((p) => ({
@@ -9199,10 +11544,73 @@ async function main() {
       }
     }
 
-    if (shadowBrainEnabledFor(agentId) && cfg.brainUrl && cfg.brainToken && !bookIncomplete) {
+    // Brain execution uses this tick's book, including on the first tick; so
+    // does every order until the next tick states its own — and the drain
+    // below is handed this same statement: the book valued, and totalled or not.
+    const drainReads = tickBook.composed(equityUsdg, !bookIncomplete);
+    if (!paper) lastGasWei = balances.ethWei;
+    // THE DRAWDOWN THE WALL WOULD JUDGE A BUY AGAINST, measured once from the
+    // peak and equity settled above and read twice: by the Trencher's entry
+    // review below, and by every strategy through the snapshot. Null when the
+    // wall would not judge at all — see strategies/types.ts drawdownOf. A
+    // proposal it withholds is one the wall was certain to refuse; it never
+    // widens anything, and checkPolicy still judges whatever does go out.
+    const drawdownNow = drawdownOf({
+      peakUsdg: drawdownPeak(),
+      equityUsdg,
+      equityKnown: !bookIncomplete,
+      maxDrawdownBps: active.limits.maxDrawdownBps,
+    });
+
+    // A quiet strategy still forms a market view, and publishes it when it
+    // changes. Run this after the tick so an actual published decision takes
+    // precedence over a fallback. Only fresh public quotes are used; failures
+    // stay in the owner's events.
+    quietReview = async () => {
+      if (isPaused()) return;
+      const now = Math.floor(Date.now() / 1000);
+      reviewPreparationMs = Math.max(reviewPreparationMs, Date.now() - tickStartedAt);
+      const clock = reviewClock(agentId);
+      if (!clock.due(now, reviewPreparationMs)) return;
+      const focus = chooseFocus({
+        agentId,
+        positions: positions.filter(p => !p.priceStale).map(p => ({ ...p, valueUsdg: Number(p.valueUsdg) })),
+        universe: watchTokens.map(t => ({ symbol: t.symbol, address: t.address })),
+        prices: market.prices,
+        paused: market.pausedTokens,
+      });
+      const quote = focus ? { symbol: focus.symbol, priceUsd: Number(focus.price8) / 1e8,
+        stale: focus.priceStale, at: marketObservedAt } : null;
+      const feed = focus ? STOCK_TOKENS.find(t => t.address.toLowerCase() === focus.token.toLowerCase())?.chainlinkFeed ?? null : null;
+      const history = feed && now - marketObservedAt <= 300
+        ? await boundedRead(() => readFeedHistory(feed, mainnetClient()), 10_000) : null;
+      const fresh = Date.now() / 1000 - marketObservedAt <= 300;
+      const review = quote && fresh ? clock.prepare(quote, reviewPreparationMs,
+        history?.read ? history.points.map(p => ({ at: p.at, priceUsd: p.px })) : [], now) : null;
+      const id = newDecisionId();
+      // ALWAYS WRITTEN, PUBLISHED ONLY WHEN IT CHANGED, and with the quote it
+      // was written at as its mark — see quietReviewRow, where a test runs it.
+      await addDecision(quietReviewRow({
+        id, agentId, review, quote, focusSymbol: focus?.symbol, historyRead: history?.read ?? false,
+      }));
+      // Failed persistence leaves this decision due for the next tick.
+      if (verifyDecisionOwner(await decisionAgent(id), agentId).ok) {
+        if (quote) clock.recorded(quote, review);
+        clock.noteDecision(now);
+      }
+      nextMarketReviewAt = clock.nextAt;
+    };
+
+    // Not on a command tick (plan.brain): the Brain keeps its own clock, and an
+    // owner's order arriving is not a reason to ask it anything.
+    //
+    // NOR WHILE TODAY'S AI REVIEWS ARE PACED OR SPENT (energyNow.reviews):
+    // skipping the whole block leaves nextBrainReviewAt null, so the tick
+    // keeps its regular cadence instead of chasing a deadline it may not use.
+    if ((fastTrencher || shadowBrainEnabledFor(agentId) || brainLiveEnabledFor(agentId)) && cfg.brainUrl && cfg.brainToken && !bookIncomplete && plan.brain && energyNow.reviews.open) {
       try {
         const epochNow = await getAgentEpoch(agentId);
-        const netContrib = await getNetContributionsUsdg(agentId);
+        const netContrib = await durableNetContributions(agentId);
         const gasNow = await getGasPaidUsdg(agentId, epochNow);
         // Asked once per run, from the ledger this agent actually has.
         const historyAuditable = await accountingHistoryAuditable(agentId, epochNow);
@@ -9243,19 +11651,70 @@ async function main() {
         const feedFor = (token: string): `0x${string}` | null =>
           STOCK_TOKENS.find((t) => t.address.toLowerCase() === token.toLowerCase())?.chainlinkFeed ?? null;
 
+        // NO ENTRY REVIEW WHILE THE BREAKER IS TRIPPED. The wall refuses every
+        // buy, so each review of a new coin was a paid Brain call for an entry
+        // that could never be made — thirty of them in fifteen minutes on the
+        // live feed. Held positions are still reviewed below: exits only.
+        //
+        // AND NONE WHILE TODAY'S ENERGY FOR NEW TRADES IS USED UP: every entry
+        // would be withheld below, so a review of a coin not held is a paid
+        // call that cannot act. Held positions are still reviewed.
+        const energyEntriesClosed = energyNow.enforce && !energyNow.entries.open;
+        const entriesBraked = breakerTripped({ drawdown: drawdownNow }) || (energyNow.enforce && !energyNow.entries.open);
+        const trenchEligible = fastTrencher && !entriesBraked ? await trenchCandidates() : [];
+        const trenchHeld = fastTrencher ? new Set((await trenchOpen()).map(p => p.token.toLowerCase())) : new Set<string>();
+        // A nominated coin (Telegram groups) is looked at first when it is
+        // ELIGIBLE here — the same filter every tape coin passes. The hint
+        // moves it up the queue, never onto it (trencher-brain.ts candidate).
+        const trenchCandidate = trenchBrain.candidate(trenchEligible.filter(c => !market.pausedTokens.has(c.symbol) && !positions.some(p => p.token.toLowerCase() === c.token.toLowerCase()) && shouldEnter(c, TRENCHER_FAST, Math.floor(Date.now() / 1000)).enter), tgBook.priority());
+        const trenchSymbols = new Set(trenchCandidate ? [trenchCandidate.symbol] : []);
+        // Braked, "no pool passes the entry checks" would be a false sentence:
+        // none was looked at. The strategy's idle reason says why instead, as
+        // a WARNING written after this one, so it is the notice the desk shows
+        // (idle-notice.ts) — not a second Trencher line saying the same thing.
+        if (fastTrencher) trenchNotice(agentId, trenchSymbols.size || entriesBraked ? "" : "No permitted, freshly priced high-volume pool passes the entry checks. Discovery will retry; automatic exits remain active.");
+        const focusPositions = positions.filter(p => !fastTrencher || trenchHeld.has(p.token.toLowerCase())).map((p) => ({
+          symbol: p.symbol,
+          token: p.token,
+          valueUsdg: Number(p.valueUsdg),
+          price8: p.price8,
+          priceStale: p.priceStale,
+          priceSource: p.priceSource,
+        }));
         const focus = chooseFocus({
           agentId,
-          positions: positions.map((p) => ({
-            symbol: p.symbol,
-            token: p.token,
-            valueUsdg: Number(p.valueUsdg),
-            price8: p.price8,
-            priceStale: p.priceStale,
-            priceSource: p.priceSource,
-          })),
-          universe: watchTokens.map((t) => ({ symbol: t.symbol, address: t.address })),
+          positions: focusPositions,
+          universe: watchTokens
+            .filter(t => !fastTrencher || trenchSymbols.has(t.symbol))
+            // Energy spent: held tokens only — exits, never new entries.
+            .filter(t => fastTrencher || !energyEntriesClosed || positions.some(p => p.token.toLowerCase() === t.address.toLowerCase()))
+            .map((t) => ({ symbol: t.symbol, address: t.address })),
           prices: market.prices,
           paused: market.pausedTokens,
+          // ── TRENCHER ONLY ────────────────────────────────────────────────
+          //
+          // Without this an agent holding one memecoin reviews only that coin,
+          // so it can never open a second position and the gap between trades
+          // is the HOLD duration rather than the review interval. Safe here and
+          // nowhere else because this rail's exits are mechanical and run off
+          // the trading tick — see FocusAlternation. Spend is unchanged: the
+          // vault caps 5 USDG per buy and 25 USDG per 24h on chain.
+          ...(fastTrencher
+            ? {
+                alternate: {
+                  lastReviewedAtMs: new Map(
+                    focusPositions.flatMap((p) => {
+                      const at = trenchBrain.reviewedAt(p.symbol);
+                      // Omitted, never defaulted — chooseFocus reads absent as
+                      // overdue, and a default would invert that.
+                      return at === undefined ? [] : [[p.symbol, at] as const];
+                    }),
+                  ),
+                  nowMs: Date.now(),
+                  maxGapMs: HELD_REVIEW_MAX_GAP_MS,
+                },
+              }
+            : {}),
         });
         if (focus) {
           // The orchestrator materialises both of these from shared Postgres,
@@ -9341,12 +11800,16 @@ async function main() {
           // Awaited here rather than inside the object so the cost is visible:
           // this is the one lens that reads the chain, and it does so at most
           // once per token every fifteen minutes.
-          const curveOnchain = await onchainLensFor(focus.symbol);
+          const curveOnchain = fastTrencher ? null : await onchainLensFor(focus.symbol);
+          // Costs nothing: `research` was already read above for the news desk,
+          // and this is a lookup in an array the orchestrator filtered to this
+          // tenant's own contracts. No await, no credential, no chain read.
+          const curveBuilder = builderLensFor(focus.symbol, research);
           const inputs: ShadowInputs = {
             agentId,
             // A brain-live agent CAN reach a trade, so its thinking must not be
             // filed under a source this codebase lists as unable to.
-            decisionSource: brainLiveEnabledFor(agentId) ? "brain" : "brain-shadow",
+            decisionSource: fastTrencher || brainLiveEnabledFor(agentId) ? "brain" : "brain-shadow",
             now: Math.floor(Date.now() / 1000),
             epoch: epochNow,
             // A HEADLINE MAY WAKE THE AGENT — the half of the loop that had no
@@ -9393,16 +11856,13 @@ async function main() {
               quarantined: false,
             })),
             // NULL SURVIVES AS NULL all the way to Brain, which refuses on it.
-            // DURABLE FIRST, local second. The child ledger is ephemeral; the
-            // anchor is what the orchestrator read from Postgres. Falling back
-            // to the local sum keeps self-hosted working unchanged, where there
-            // is no anchor and the ledger IS the durable copy.
-            netContributionsUsdg:
-              anchorNetContributionsUsdg !== null
-                ? Number(anchorNetContributionsUsdg)
-                : netContrib === null
-                  ? null
-                  : Math.round(netContrib * 1e6),
+            // DURABLE FIRST, local second (durableNetContributions). The child
+            // ledger is ephemeral; the anchor is what the orchestrator read from
+            // Postgres — PLUS what this child booked since, or an energy
+            // purchase (or a deposit) after arm read as a loss (or a gain) of
+            // its own size until the next respawn. Self-hosted, with no anchor,
+            // it is the local sum, unchanged.
+            netContributionsUsdg: netContrib === null ? null : Number(netContrib),
             grossContributionsUsdg: null,
             grossWithdrawalsUsdg: null,
             gasUsdg: gasNow.unpricedTrades > 0 ? null : Math.round(gasNow.usdg * 1e6),
@@ -9476,7 +11936,7 @@ async function main() {
               // about nothing, which is worse than no analyst: it arrives looking
               // like evidence.
               instrumentClass: instrumentClassOf(focus.token),
-              priceUsd: (Number(focus.price8) / 1e8).toFixed(4),
+              priceUsd: String(Number(focus.price8) / 1e8),
               priceStale: focus.priceStale,
               // WHAT THE WORKER CAN HONESTLY SEE, and nothing more. A lens with
               // no data is OMITTED rather than filled with a plausible sentence
@@ -9550,6 +12010,21 @@ async function main() {
                 // Brain answers NO DATA AVAILABLE, which is the truthful
                 // input rather than a plausible sentence.
                 ...(curveOnchain ? { onchain: curveOnchain } : {}),
+                // AND A FIFTH, which is not a reading of the tape at all.
+                //
+                // The four above are price, depth, the float and what other
+                // Merrymen published — four lenses on one market. This one
+                // asks whether anybody is still building the thing the ticker
+                // is named after, which is the first question a human asks and
+                // the only one on this desk that is not downstream of price.
+                //
+                // Omitted for anything not on a curve, omitted when nobody has
+                // looked the contract up, and omitted when the directory holds
+                // no page for it — that last one being the case that matters,
+                // because most launchpad coins are unlisted and a coverage gap
+                // rendered as a sentence would be read as a finding about the
+                // token. See research/coin-builder.ts, which refuses.
+                ...(curveBuilder ? { builder: curveBuilder } : {}),
               },
             },
             expectedTradeGasUsdg: expectedTradeGasMicro === null ? null : Number(expectedTradeGasMicro),
@@ -9560,11 +12035,103 @@ async function main() {
             // it would permanently be having its first thought.
             memory: memoryLines(brainOwn, Math.floor(Date.now() / 1000)),
           };
-          const outcome = await runShadow(
+          reviewPreparationMs = Math.max(reviewPreparationMs, Date.now() - tickStartedAt);
+          inputs.reviewPreparationMs = reviewPreparationMs;
+          if (fastTrencher) {
+            if (paper) {
+              const capital = await getPaperBrainCapital(agentId, epochNow);
+              inputs.netContributionsUsdg = capital;
+              inputs.grossContributionsUsdg = capital;
+              inputs.grossWithdrawalsUsdg = 0;
+              inputs.gasUsdg = 0;
+              inputs.expectedTradeGasUsdg = 0;
+              inputs.quality.contributionsKnown = capital !== null;
+              inputs.quality.currentAccountingHistoryAuditable = capital !== null;
+              inputs.quality.gasBasis = "net";
+              inputs.memory = [...(inputs.memory ?? []), "This is the paper ledger. Capital is its recorded cash-only opening, not the live wallet's deposits. Paper fills include configured slippage."];
+            }
+            const freshTape = freshTrenchTape();
+            const verifiedPool = autoTrench?.qualified.find(p => p.tokenAddress.toLowerCase() === focus.token.toLowerCase());
+            const tape = freshTape.find(p => p.tokenAddress.toLowerCase() === focus.token.toLowerCase() && (!verifiedPool || p.poolAddress === verifiedPool.poolAddress));
+            inputs.persona = trenchBrainPersona(focus.symbol, focus.held);
+            if (tape) {
+              Object.assign(inputs.market.signals, trenchBrainSignals(tape, trenchTapeAt, lastLiquidityUsd.get(focus.token.toLowerCase()) ?? null));
+            }
+            const brainConfig = { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 25_000 };
+            trenchBrain.launch(trenchContext, inputs, focus.token, async () => {
+              // Enrichment cannot block the trading tick or mutate a review after its deadline.
+              if (tape) {
+                // THE BUDGET IS NOW SPENT PER LEG, INSIDE readPoolEvidence, so
+                // a slow trade read no longer destroys candles that arrived.
+                // The outer race stays as a hard backstop against a leg that
+                // never settles at all, and is given slack so it cannot preempt
+                // the per-leg budgets and re-create the all-or-nothing it
+                // replaced. Reaching it means the read hung past both legs'
+                // clocks, which is a fault rather than a slow feed.
+                let timer: ReturnType<typeof setTimeout> | undefined;
+                const evidence = await Promise.race([
+                  readPoolEvidence(tape.poolId, focus.token, EVIDENCE_BUDGET_MS).catch(() => null),
+                  new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), EVIDENCE_BUDGET_MS + 2000); }),
+                ]).finally(() => { if (timer) clearTimeout(timer); });
+                const detail = evidence ? JSON.stringify(summarizeEvidence(evidence)) : 'Detailed candles and trade sample unavailable within the review budget; do not infer zero activity.';
+                inputs.market.signals.technical += `\n${detail}`;
+                // EACH HALF PRINTS ITS OWN OUTCOME. Both halves used to be
+                // driven off one nullable, so `candles=23 trades=budget` was
+                // literally unprintable and every partial miss was logged as a
+                // total one — which is why the fleet looked like it never got
+                // evidence rather than like it kept throwing half of it away.
+                const half = (r: { failure?: string; data: unknown[] } | undefined) =>
+                  r === undefined ? "no-read" : r.failure ?? r.data.length;
+                console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: candles=${half(evidence?.candles)} trades=${half(evidence?.trades)}`);
+              } else {
+                // A REVIEW WITH NO TAPE ENTRY IS NOT A REVIEW WITH NO EVIDENCE
+                // LINE, and until now those were the same thing to anyone
+                // reading the log. `tape` is undefined when the snapshot has
+                // rolled past its 120s window or the pool no longer matches the
+                // verified one — and then the block above is skipped entirely,
+                // so the Brain is asked about a memecoin WITHOUT the memecoin
+                // signals (`trenchBrainSignals` is behind the same condition)
+                // and without any pool evidence, while the log says nothing at
+                // all. Observed in production: the same token reviewed at
+                // 17:54 with evidence and at 18:01 with none, indistinguishable
+                // from the outside.
+                //
+                // This does not fix the gap — it makes it countable, which is
+                // the prerequisite for deciding whether the window or the pool
+                // match is the thing to change.
+                console.log(`[${short(agentId)}] [trencher] evidence ${focus.symbol}: none — no fresh tape entry for this pool, so the review has no memecoin signals`);
+              }
+              // Once the decision is persisted (runShadow writes it before it
+              // returns), the nomination book hears what was decided about this
+              // token — tgNoteReview never throws into the review's promise.
+              return runShadow(brainConfig, inputs,
+              m => console.log(`[${short(agentId)}] ${m}`),
+              {
+                tier: "pulse",
+                // The coin's own name, so the feed can say what was traded
+                // instead of printing eleven hex at a reader, and its size
+                // from the same tape this review just read, so a trade can
+                // say "at $3.1M MC". Display only; see reviewRecord and
+                // decisionName.
+                ...reviewRecord({ displayName: await decisionName(agentId, focus.symbol), tape }),
+                triggers: { ...DEFAULT_TRIGGERS, scheduledIntervalSec: TRENCH_REVIEW_INTERVAL_MS / 1000, cooldownSec: { ...DEFAULT_TRIGGERS.cooldownSec, "scheduled-review": 30 } },
+                // A paid review, claimed against today's energy once the
+                // trigger has fired and before it is paid for.
+                admit: claimReview,
+              }).then(outcome => { tgNoteReview(focus.token, outcome); return outcome; }); },
+              m => console.log(`[trencher] ${m}`));
+          }
+          const outcome: ShadowOutcome = fastTrencher ? { ran: false, why: "Trencher Brain review runs off the trading tick", nextReviewAt: Math.floor(Date.now() / 1000) + 60, trigger: { fire: false, reason: null, detail: "background review", candidates: [] } } : await runShadow(
             { url: cfg.brainUrl, token: cfg.brainToken, timeoutMs: 90_000 },
             inputs,
             (m) => console.log(`[${short(agentId)}] ${m}`),
+            // The coin's name when the focus is a discovered coin; a stock has
+            // none, and this is null for it. No tape on this path, so no size.
+            // And the review is claimed against today's energy — refused, it
+            // returns nextReviewAt null, never a past deadline to spin on.
+            { ...reviewRecord({ displayName: await decisionName(agentId, focus.symbol) }), admit: claimReview },
           );
+          nextBrainReviewAt = outcome.nextReviewAt;
           if (!outcome.ran) console.log(`[${short(agentId)}] [brain] asleep — ${outcome.why}`);
           // WHICH QUESTION WAS ASKED. "Should I trim what I hold" and "is this
           // worth opening" produce the same words in a decision row and are
@@ -9628,6 +12195,11 @@ async function main() {
           // analysts must not read as a considered view of thin evidence.
           if (outcome.ran && outcome.result.ok) {
             const dd = outcome.result.decision;
+            // The kind the ledger recorded, not the Brain's: a hold on a stale
+            // mark is kept private, so it must not defer the public review.
+            if (publishesAView(dd, { name: cfg.agentName || "Merryman", source: inputs.decisionSource }, inputs.market)) {
+              reviewClock(agentId).noteDecision(Math.floor(Date.now() / 1000));
+            }
             const answered = (dd.analyst_views ?? [])
               .filter((v) => v.direction === "buy" || v.direction === "sell" || v.direction === "hold")
               .filter((v) => Number.isFinite(v.evidence_strength))
@@ -9638,14 +12210,36 @@ async function main() {
               at: Math.floor(Date.now() / 1000),
             });
           }
-          if (outcome.ran && outcome.result.ok && brainLiveEnabledFor(agentId)) {
+          if (!fastTrencher && outcome.ran && outcome.result.ok && brainLiveEnabledFor(agentId) && !isPaused()) {
             const d = outcome.result.decision;
             const ceiling = Math.min(cfg.llmMaxActionUsdg, Number(active.limits.perTradeUsdg) / 1e6);
             const want = orderFromDecision(d, { maxUsdg: ceiling, minUsdg: BRAIN_MIN_TRADE_USDG });
+            // A BRAIN BUY IS A NEW TRADE THIS AGENT STARTS ON ITS OWN, so it is
+            // claimed against today's energy HERE — at the one Brain call site,
+            // never inside submitChatTrade, which is also the owner's path and
+            // must not know energy exists. A sell is never claimed. Withheld:
+            // console only and no refusal row — a withheld buy is account
+            // state, and a `rejected` row would put it on the public tape.
+            const energyClaim = want.ok && want.order.side === "buy" ? await claimEntry() : null;
             if (!want.ok) {
-              // Held, or refused before the wall. Logged rather than filed as an
-              // event: a hold is the common case and 360 of them a day is noise.
+              // A hold has no execution outcome. A proposed order refused by
+              // sizing or a gate still belongs in its original decision's history.
+              if (d.action !== "hold") await recordDecisionRefusal(d.decision_id, agentId, want.why);
               console.log(`[${short(agentId)}] [brain] not acting — ${want.why}`);
+            } else if (energyClaim && !energyClaim.ok) {
+              // THE DECISION ROW IS ALREADY WRITTEN, and this leaves it with no
+              // outcome — accepted, not overlooked. runShadow persisted the BUY
+              // before this line could run, and the only per-decision history
+              // this repo has, recordDecisionRefusal, writes a `rejected` trade
+              // row: the public tape, which an energy refusal must never reach.
+              // There is no private equivalent to write instead. The gap is
+              // narrow: with entries closed the review is held to tokens already
+              // held (energyEntriesClosed above), so this arm is a buy-more of a
+              // held position, or a claim that lost to the plan read at the top
+              // of the tick. The owner hears it through today's energy notice
+              // (withholdEntry); the console line names the order.
+              console.log(`[${short(agentId)}] [brain] not acting — energy: today's new trades are used up (${want.order.side} ${want.order.symbol})`);
+              await withholdEntry(agentId);
             } else {
               const o = want.order;
               console.log(`[${short(agentId)}] [brain] acting — ${o.side} ${o.usdgAmount} USDG ${o.symbol}`);
@@ -9653,12 +12247,30 @@ async function main() {
               // owner's name on a decision they did not make, in the one table
               // the public feed reads for attribution — and brain-shadow.ts
               // refuses the mirror image of that for the same reason.
+              // ONE DECISION, CARRIED. `persist` already wrote the pre-trade
+              // thesis under d.decision_id, so the id travels with the order and
+              // ensureDecision reuses it — the trade, the fill and the outcome
+              // all attach to the row that holds the belief. Without this the
+              // executor minted a second decision and the thesis was orphaned.
               const r = await submitChatTrade(o.side, o.symbol, o.usdgAmount, {
                 source: "brain",
                 reason: d.thesis?.slice(0, 500) || `brain decided to ${o.side} ${o.symbol}`,
+                decisionId: d.decision_id,
+                provenance: "brain",
               });
+              brainOrderAccepted = tradeConsumesSnapshot(r.executionStatus);
+              // No trade came of it (refused, or never sent): the claim goes back.
+              if (!brainOrderAccepted) await refundEntry(energyClaim);
               await addEvent(agentId, r.ok ? "ok" : "warn", `brain: ${r.line}`);
             }
+          } else if (!fastTrencher && outcome.ran && outcome.result.ok && outcome.result.decision.action !== "hold") {
+            // SAID, NOT SILENT. A Brain BUY on an agent outside the live
+            // allowlist (or paused) is a thought by design, but it used to leave
+            // no line at all — Gary logged 8 of 8 `[brain] BUY NVDA` on
+            // 2026-09-26 with nothing after them, which reads exactly like a
+            // decision the executor lost.
+            const why = isPaused() ? "the agent is paused" : "Brain orders are not enabled for this agent (shadow only)";
+            console.log(`[${short(agentId)}] [brain] not acting — ${why}`);
           }
         }
       } catch (e) {
@@ -9727,7 +12339,20 @@ async function main() {
       // instead of re-proposing oversized intents every tick.
       spendHeadroomUsdg:
         active.limits.dailyUsdg > spentToday() ? active.limits.dailyUsdg - spentToday() : 0n,
+      // And what it will still accept by COUNT, from the same counters checkPolicy
+      // judges `ops-cap` against — so a strategy stops proposing at the same
+      // moment the wall would start refusing, rather than a tick in either
+      // direction. A grant with no finite count is "not read", never zero.
+      opsHeadroom: opsHeadroomOf(active.limits.maxOpsPerDay, opsTodayCount()),
+      // And the drawdown, the same way: a strategy stops proposing buys on the
+      // tick the breaker would start refusing them, and says so once.
+      drawdown: drawdownNow,
       perTradeCapUsdg: active.limits.perTradeUsdg,
+      // TODAY'S ENERGY, only while it limits anything: the new trades this
+      // agent may still start on its own. A hint the strategist reads so it
+      // does not pay for a window that could only buy; the rule is the hard
+      // filter below. Null — not limited — whenever the gate is not enforcing.
+      energy: energyNow.enforce ? { entriesLeft: energyNow.entries.left ?? 0 } : null,
       // Liquidity context, best-effort. Bounded and cached (venues/depth-cache),
       // so this costs a few RPC on the ticks where something has gone stale and
       // nothing on the rest. Absent is a normal state — a cold cache, a pool
@@ -9735,8 +12360,6 @@ async function main() {
       depth: await depthReader.read(watchTokens.map((t) => t.symbol)),
     };
 
-    lastEquityUsdg = equityUsdg; // for chat-triggered trades between ticks
-    lastEquityKnown = !bookIncomplete;
     // NOT ON PAPER. The paper tick hardcodes balances.ethWei to 0n instead of
     // reading the chain — honest for the snapshot, since a paper book holds no
     // ETH — but copying it here published a FABRICATED zero as the account's
@@ -9789,7 +12412,16 @@ async function main() {
     // bad minute must not delay a sell.
     // A dashboard-queued probe, before discovery: it is the thing somebody is
     // actively waiting on, and it is one operation.
-    if (active) void runQueuedCommand(active.agentId).catch(() => {});
+    //
+    // A COMMAND TICK WAITS FOR IT AND ENDS HERE. Waited for, because a tick
+    // that ended with its order mid-trade handed the clock straight back to a
+    // regular tick that read the book between the order's inclusion and its
+    // row. Ends, because everything below is a producer on its own clock or the
+    // strategy's per-tick cadence, and waking early for an order must not run
+    // either an extra time. A regular tick drains beside its strategy, as it
+    // always has. See command-wake.ts drainOnTick.
+    // With what this tick read and stated to the book above.
+    if (!(await drainOnTick(plan, () => (active ? runQueuedCommand(active.agentId, drainReads) : Promise.resolve())))) return;
     // Finish what we lost track of before starting anything new.
     void runStrandedResolve(agentId).catch(() => {});
     void runDiscovery(agentId).catch(() => {});
@@ -9844,25 +12476,39 @@ async function main() {
     }
     breakerBrickNoted = false;
 
-    // Merry Circle strategies run only for holders (Merry Man+). A non-holder may
-    // select one, but it stays idle with a one-time note until they hold $MERRYMEN.
-    if (isCircleStrategy(strategy.name) && !holderTier.bonusStrategies) {
-      if (!circleBlockedNoted) {
-        circleBlockedNoted = true;
-        await addEvent(
-          agentId,
-          "warn",
-          // AND WHICH KIND OF NO IT IS. Telling a holder to go and hold
-          // $MERRYMEN because our own read failed is advice they cannot act
-          // on — they already did the thing being asked of them.
-          holderReadOk
-            ? `${strategy.name} is a Merry Circle strategy — hold $MERRYMEN (Merry Man tier) to run it; idle until then`
-            : `${strategy.name} is a Merry Circle strategy and we could not read your $MERRYMEN balance this tick, so it is idle. That is our read failing, not your wallet — it should clear on its own.`,
-        );
-      }
-      return;
+    // Merry Circle strategies run only for holders (Merry Man+). A non-holder
+    // may select one; it opens nothing new and leaves its basket as it is,
+    // with a one-time note, until they hold $MERRYMEN.
+    //
+    // NEVER A RETURN. This used to end the tick here, ahead of the class
+    // route's exits too, so a class position with a deadline was never closed
+    // while its owner was short. Below the tier the Circle strategy is not
+    // ticked at all (circle-gate.ts — a rebalancer allowed only its trims sells
+    // the book down to cash), the class route proposes no entries, and the
+    // class exits run exactly as they do for everyone. Nothing below may
+    // `return` before them (circle-gate.test.ts).
+    //
+    // AT THE TIER BY THE STANDING, NOT ONLY BY THE EXACT TIER. holderTier
+    // starts at the outsider in every new process, so after a restart whose
+    // first read failed it locked a genuine Merry Man out of their own Circle
+    // strategy until the chain answered. The gate also takes the standing
+    // above — the lower bound, or the durable last good within a day — while
+    // the fee discount stays on the exact tier (circle-gate.ts circleStanding).
+    const circle = circleStanding({ tierUnlocks: holderTier.bonusStrategies, level: holderStanding.level });
+    const circleShort = isCircleStrategy(strategy.name) && !circle.unlocked;
+    // ONCE PER CHANGE OF REASON (circle-gate.ts circleNoteStep): a first
+    // read that failed and a later one that shows a real shortfall are two
+    // different notes. AND WHICH KIND OF NO IT IS: telling a holder to go and
+    // hold $MERRYMEN because our own read failed is advice they cannot act on.
+    const circleStep = circleNoteStep(circleNoted, { short: circleShort, readOk: circle.known });
+    circleNoted = circleStep.noted;
+    if (circleStep.say) {
+      await addEvent(
+        agentId,
+        "warn",
+        circleNote(circleStep.say, { strategyName: strategy.name, accountCounts: grant.chainId === MERRYMEN_TOKEN.chainId }),
+      );
     }
-    circleBlockedNoted = false;
 
     // A strategy may hand back a reason for each intent. It travels to the
     // decisions table and nowhere else — never onto the TradeIntent, because
@@ -9898,7 +12544,13 @@ async function main() {
       }
     }
 
-    const { intents: proposed, why: proposedWhy, idle } = takeTick(await strategy.tick(snap));
+    // A submitted Brain order invalidates this tick's pre-trade holdings.
+    // Do not run another discretionary strategy against the old book.
+    // Below the Circle tier the strategy is not asked at all — not for its
+    // trims either: half a rebalance is a liquidation (circle-gate.ts).
+    const { intents: proposed, why: proposedWhy, idle }: Tick = brainOrderAccepted
+      ? { intents: [], why: [] }
+      : await circleStrategyTick(circleShort, async () => takeTick(await strategy.tick(snap)));
 
     // ── AND WHY IT PROPOSED NOTHING ─────────────────────────────────────
     //
@@ -9911,71 +12563,56 @@ async function main() {
     // ONCE PER CHANGE, not once per tick: a stale weekend is 360 ticks, and
     // this repo already carries the incident where 1,242 identical rows told
     // nobody anything. The same de-duplication the live-rail blocker uses.
-    /**
-     * A MODE THAT LEAVES NOTHING TO TRADE MUST SAY SO.
-     *
-     * The one way the asset mode could be worse than no feature at all: an
-     * owner picks "crypto only" with a basket of equities, every strategy
-     * resolves zero legs, and the agent goes quiet with nothing on any screen
-     * to connect the silence to the dropdown they just moved. That is the exact
-     * shape of the trencher incident this file already carries — "it didn't
-     * take any trades yet", then "I think I'm stuck in paper mode".
-     *
-     * Computed from the same inputs `makeStrategy` resolves legs from, so it
-     * cannot disagree with them, and only when the mode is actually narrowing
-     * something. It rides the once-per-change idle channel below rather than
-     * inventing a second one.
-     */
-    const modeEmptied =
-      cfg.assetMode !== "all" &&
-      legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol), cfg.assetMode)
-        .length === 0 &&
-      legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol)).length > 0
-        ? `nothing in your basket is ${cfg.assetMode === "stocks" ? "a stock" : "a coin"}, and your asset mode is ` +
-          `${cfg.assetMode === "stocks" ? "Stocks only" : "Crypto only"} — so there is nothing to trade. ` +
-          `Change the mode in Settings, or add something it allows to your basket.`
-        : null;
-    const idleNow = idle ? renderWhy(idle) : modeEmptied;
-    if (idleNow !== lastIdleReason) {
-      lastIdleReason = idleNow;
-      if (idleNow) {
-        console.log(`[tick] idle — ${idleNow}`);
-        await addEvent(agentId, "ok", idleNow);
-        // ── AND WHERE PEOPLE ACTUALLY READ IT ──────────────────────────
-        //
-        // THE STRUCTURAL REASON A QUIET FLEET READS AS A DEAD FEED. A tick
-        // that proposes nothing writes its reason to `events` and nothing
-        // else — and only `decisions` can become a post. So an agent that
-        // thought about the market and concluded "not today, and here is
-        // why" was talking to a table nobody reads, while its owner watched
-        // a feed that said nothing at all. "The agents need to be social,
-        // talk a lot" is not a cadence problem; it is this.
-        //
-        // A DECISION WITH NO ACTION IS A `view`, which is a shape this
-        // product already has all the way through: thesis-policy classifies
-        // it, `outcome: "view"` exists for exactly "a decision the agent
-        // made, not a trade that failed to happen", and the feed grew a
-        // `view` arm that renders it from the publisher's own words.
-        //
-        // ONCE PER CHANGE, NOT ONCE PER TICK — the same de-duplication the
-        // event above uses, and it is load-bearing twice over. `renderWhy`
-        // is deterministic, so an unchanged reason would write an identical
-        // row every 240 seconds; read-theses would still group them into ONE
-        // post (the reason is part of its key), but the ledger would carry
-        // 12,000 rows a day saying the same sentence, and this repo already
-        // has the incident where 1,242 identical rows told nobody anything.
-        //
-        // renderWhy is the only producer of these strings — the same
-        // property that makes a deterministic strategy's trade reason safe
-        // to publish makes its SILENCE safe to publish.
-        await addDecision({
-          id: newDecisionId(),
-          agent_id: agentId,
-          source: publicationSourceFor(strategy.name),
-          reason: idleNow,
-        });
-      }
-    }
+    //
+    // A MODE THAT LEAVES NOTHING TO TRADE rides the same channel rather than
+    // inventing a second one, counted from the same inputs `makeStrategy`
+    // resolves legs from so it cannot disagree with them (modeEmptiedFact).
+    const modeEmptied = modeEmptiedFact(
+      cfg.assetMode,
+      (mode) => legsForUniverse(cfg.basketSymbols, watchTokens, officialCoinsIn(cfg).map((o) => o.symbol), mode).length,
+    );
+    // THE CLASS ROUTE'S ENTRY GATE AND THE IDLE WRITE, in one call where a
+    // test runs them (class-entry-gate.ts idleAndClassGate). The gate comes
+    // first because it can be the reason: under a tripped breaker no class
+    // entry is proposed, and the owner is told the breaker's reason whenever
+    // anything would have bought. Then TWO REGISTERS FROM ONE FACT, once per
+    // change, at a level the owner sees when the fact cannot be a post, kept on
+    // the owner's notice while it stands and taken down when the breaker
+    // measures clear — IdleChannel (idle-notice.ts). The view it writes is
+    // renderWhy's public register, the only producer of these strings, which
+    // is what makes a silence safe to publish; a tripped breaker is account
+    // state and is never a post. The entries themselves are below.
+    //
+    // BELOW THE CIRCLE TIER, neither: no class entries, and no idle write — a
+    // locked strategy's idle reason is not why nothing new is bought, the
+    // Circle is, and the Circle note above already said so.
+    const classGate = circleShort ? CIRCLE_SHORT_CLASS_GATE : await idleAndClassGate({
+      channel: idleChannel,
+      agentId,
+      strategyName: strategy.name,
+      snap,
+      routeLooks: classRouteLooks({
+        paper: paperActive(),
+        assetMode: cfg.assetMode,
+        vault: grantPonsClassVault(active?.grant),
+      }),
+      idle,
+      modeEmptied,
+      // No class entries once today's energy for new trades is used up. The
+      // class EXITS below never pass this gate.
+      entriesOpen: !energyNow.enforce || energyNow.entries.open,
+    });
+
+    // WHAT THE BOOK HOLDS ON A CURVE, and the curve and quote each leg sells
+    // back into — energy's own answer for a curve SALE the breaker's test reads
+    // as an entry (a quote that is an owner-added stock token on a legacy
+    // grant). The energy count only; the breaker is unchanged (energy.ts).
+    const heldLegs = heldCurveLegs({
+      positions,
+      curveLegs: lastCurveLegs,
+      classRows: await classPositions(agentId),
+      classBalances: lastClassBalances,
+    });
 
     for (const [proposedAt, intent] of proposed.entries()) {
       // The LLM strategist already journaled + stamped its survivors; this covers
@@ -9986,11 +12623,60 @@ async function main() {
       // day and say nothing about any of it. renderWhy is the only producer of
       // these strings, which is what makes them safe to publish.
       const w = proposedWhy[proposedAt];
-      await ensureDecision(intent, publicationSourceFor(strategy.name), w ? renderWhy(w) : undefined);
+      // ── TODAY'S ENERGY: THE HARD FILTER ─────────────────────────────────
+      //
+      // A NEW trade this agent starts on its own is claimed against today's
+      // allowance; an EXIT never is — the breaker's own exit test decides
+      // (policy.ts isExitIntent), with a curve sale out of a held leg added for
+      // this count alone (heldLegs above), and a vault deposit is housekeeping. Every
+      // producer passes through here, so a strategy that ignores the Snapshot
+      // hint is held to the rule anyway. Withheld BEFORE ensureDecision, with
+      // `continue` rather than a filtered array (`w` is paired with the intent
+      // by index): no decision row, no public post, no refusal on the tape.
+      const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits), sellsHeldLeg(intent, heldLegs));
+      // ── TELEGRAM GROUPS: THE EXTRA CAP, FIRST ───────────────────────────
+      //
+      // An entry into a coin a group nominated must also win a group-entry
+      // claim (3 per UTC day, docs/tg-groups.md). It raises nothing: every gate
+      // below still runs. Refused → this entry alone is skipped, before any
+      // energy is claimed or any decision row is written.
+      const groupEntry = entry ? tgClaimGroupEntry(intent) : null;
+      if (groupEntry?.group && !groupEntry.ok) continue;
+      const energyClaim = entry ? await claimEntry() : null;
+      if (energyClaim && !energyClaim.ok) {
+        tgSettleGroupEntry(groupEntry, intent.decisionId, null);
+        await withholdEntry(agentId);
+        continue;
+      }
+      // PUBLIC REGISTER — a decision row is a post. "re-sign to raise it" is
+      // advice for the owner and was going out on every capped keel-top.
+      // THE WHY CODE DECIDES THE PROVENANCE. A stop-floor sell and a dca-leg buy
+      // publish under the same source; only the typed Why knows that one of them
+      // is a hard risk exit that fired whatever the strategy wanted.
+      const stamped = await ensureDecision(intent, publicationSourceFor(strategy.name), w ? renderWhy(w, "public") : undefined, {
+        whyCode: w?.code,
+      });
+      if (!stamped.ok) {
+        await refundEntry(energyClaim);
+        tgSettleGroupEntry(groupEntry, intent.decisionId, null);
+        continue;
+      }
       // equityUsdg excludes anything we couldn't value, so when the book is
       // incomplete it is a partial sum — say so, or the drawdown rule reads the
       // gap as a loss and rejects every intent including the exit.
-      await processIntent(intent, equityUsdg, !bookIncomplete);
+      if (entry) {
+        // AN ENTRY IS COUNTED ONLY IF IT BECAME A TRADE — landed, submitted,
+        // or filled on paper (the statuses the ops cap counts). Refused by the
+        // wall, or never sent, the claim goes back.
+        const facts = await processIntentReporting(intent, equityUsdg, !bookIncomplete);
+        if (!tradeConsumesSnapshot(facts?.status)) await refundEntry(energyClaim);
+        tgSettleGroupEntry(groupEntry, intent.decisionId, facts?.status);
+      } else {
+        // A sale that empties a coin bought through a group may earn one
+        // "out of that one" line once its row lands (tgNoteTradeRow).
+        tgWatchExit(intent, w, positions);
+        await processIntent(intent, equityUsdg, !bookIncomplete);
+      }
     }
 
     // ── THE CLASS ROUTE ────────────────────────────────────────────────────
@@ -10029,13 +12715,53 @@ async function main() {
     // allowance opening a new position cannot close one that is about to become
     // unsellable — a curve at 85% of graduation has a deadline, and a new
     // candidate never does. The way out goes first.
-    for (const intent of await proposeClassExits()) {
-      await ensureDecision(intent, "class-route");
+    /**
+     * AND NOW WITH A REASON — the same third argument every other producer in
+     * this file has always passed.
+     *
+     * `ensureDecision(intent, "class-route")` with no reason is what made the
+     * class route the one rail that traded and said nothing: `addDecision` wrote
+     * NULL, and `class-route` was not in SOURCE_POLICY either, so both the row
+     * and its publication were empty. An agent completed a full autonomous buy
+     * and sell of a launch and its own feed never mentioned it.
+     *
+     * `why` is positionally paired with `intents` — the convention `takeTick`
+     * already established for every strategy — so the reason cannot drift onto
+     * the wrong trade as long as neither array is filtered independently of the
+     * other. Neither is.
+     */
+    const exits = await proposeClassExits();
+    for (const [at, intent] of exits.intents.entries()) {
+      const stamped = await ensureDecision(intent, "class-route", ...classDecision(exits.why[at]));
+      if (!stamped.ok) continue;
       await processIntent(intent, equityUsdg, !bookIncomplete);
     }
-    for (const intent of await proposeClassEntries()) {
-      await ensureDecision(intent, "class-route");
-      await processIntent(intent, equityUsdg, !bookIncomplete);
+    // Not while the breaker is tripped: every class entry is a buy the wall
+    // would refuse. The exits above are never withheld. The same gate gave the
+    // owner the reason, above. (Spelled as a call: the exits-first tests find
+    // this line by `await proposeClassEntries()`.)
+    const entries: Tick = await classGate.entries(async () => await proposeClassEntries());
+    for (const [at, intent] of entries.intents.entries()) {
+      // THE SAME HARD FILTER as the strategy loop above: each class entry is
+      // claimed against today's energy before its decision exists, and handed
+      // back if no trade came of it. (A class exit can never reach here.)
+      const entry = countsAsEntry(intent.kind, isExitIntent(intent, active.limits), sellsHeldLeg(intent, heldLegs));
+      const energyClaim = entry ? await claimEntry() : null;
+      if (energyClaim && !energyClaim.ok) {
+        await withholdEntry(agentId);
+        continue;
+      }
+      const stamped = await ensureDecision(intent, "class-route", ...classDecision(entries.why[at]));
+      if (!stamped.ok) {
+        await refundEntry(energyClaim);
+        continue;
+      }
+      if (entry) {
+        const facts = await processIntentReporting(intent, equityUsdg, !bookIncomplete);
+        if (!tradeConsumesSnapshot(facts?.status)) await refundEntry(energyClaim);
+      } else {
+        await processIntent(intent, equityUsdg, !bookIncomplete);
+      }
     }
   }
 
@@ -10173,19 +12899,30 @@ async function main() {
    * practice fill is not a success: the money did not move, and the owner needs
    * to know why more than they need a green tick.
    */
-  type OrderReply = { ok: boolean; line: string };
+  type OrderReply = { ok: boolean; line: string; executionStatus?: TradeRow["status"]; verdict?: OrderVerdict };
   /** A refusal. Every path that does not reach the wall returns one of these. */
   const no = (line: string): OrderReply => ({ ok: false, line });
+  /**
+   * Where an order that reached the pipeline ended up, as DATA for its receipt:
+   * the row the ledger wrote, or no row at all. Never a guess. A refusal built
+   * with `no` alone carries none, and order-receipt.ts reads that absence as
+   * what it is — the worker said no before anything was built or sent.
+   */
+  const verdictOf = (outcome: LedgerFacts | null): OrderVerdict =>
+    outcome ? { kind: "ledger", facts: outcome } : { kind: "no-row" };
 
   async function submitChatCurveTrade(
     side: "buy" | "sell",
     symbol: string,
     token: `0x${string}`,
     usdgAmount: number,
+    /** The book submitChatTrade's gate judged this order on — the equity it goes to the wall with. */
+    book: { equityUsdg: bigint; equityKnown: boolean },
     // Threaded through so a curve buy carries the same provenance a pool buy
     // does — memecoins are exactly where a reasoner other than the owner is
-    // most likely to be the one asking.
-    asked: { source: string; reason: string } = {
+    // most likely to be the one asking, and where a pre-trade thesis most
+    // needs its id to survive into the fill.
+    asked: { source: string; reason: string; decisionId?: string; provenance?: Provenance; notAfterMs?: number } = {
       source: "chat",
       reason: `owner asked to ${side} ${usdgAmount} USDG of ${symbol} on its bonding curve`,
     },
@@ -10337,8 +13074,18 @@ async function main() {
       notionalUsdg: isBuy ? sizeRaw : quoted,
     };
 
-    await ensureDecision(intent, asked.source, asked.reason);
-    const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown);
+    // THE DECISION THIS ORDER ALREADY BELONGS TO, when something decided it
+    // before execution. Stamped on the intent so ensureDecision VERIFIES and
+    // reuses it rather than minting a second row — and so the trade, the fill
+    // and the outcome all land under the id that holds the pre-trade thesis.
+    if (asked.decisionId) intent.decisionId = asked.decisionId;
+    const stamped = await ensureDecision(intent, asked.source, asked.reason, { provenance: asked.provenance });
+    // A REFUSAL HERE IS AN AUTHORISATION FAILURE, not a market one: the id named
+    // nothing, could not be read, or belongs to another agent. Nothing is sent.
+    if (!stamped.ok) return no(stamped.why);
+    const outcome = await processIntentReporting(intent, book.equityUsdg, book.equityKnown, asked.notAfterMs);
+    // Reached after its deadline: nothing was built or sent, and the line says so.
+    if (outcome?.status === "late") return { ...no(outcome.line), verdict: { kind: "late" } };
     // A CURVE SELL IS ALL-OR-NOTHING and the receipt has to name the size it
     // actually used, in whichever direction it differs. The requested amount is
     // discarded above — `amountInRaw` is the whole on-chain balance — so the
@@ -10346,7 +13093,7 @@ async function main() {
     // the note as "less than you asked for": a full liquidation annotated as
     // though it had been trimmed.
     const actual = isBuy ? usdgAmount : Number(quoted) / 1e6;
-    return sayTradeOutcome(outcome, side, symbol, usdgAmount, actual);
+    return { ...sayTradeOutcome(outcome, side, symbol, usdgAmount, actual), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
   }
 
   /**
@@ -10399,6 +13146,10 @@ async function main() {
         return no(
           `↩️ the ${side} reached the chain and turned back${outcome.rejectRule ? ` — ${outcome.rejectRule}` : ""}. Nothing moved, but the gas is spent.`,
         );
+      case "dropped":
+        // Only the stranded-op resolver writes this — said truthfully if an
+        // order ever meets it: it was sent, not refused.
+        return no(`↩️ the ${side} was dropped before it reached the chain. Nothing moved and no gas was spent.`);
       default: {
         /**
          * THE SLUG IS NOT AN EXPLANATION, and this line was handing one to
@@ -10438,67 +13189,132 @@ async function main() {
    * reads for attribution.
    *
    * Default `chat`, because the owner typing an order is what this path was
-   * built for and is still the overwhelming majority of its traffic.
+   * built for and is still the overwhelming majority of its traffic. Named so
+   * that an app order carrying a deadline files the very same ask as one typed
+   * without one.
    */
+  function chatAsked(side: "buy" | "sell", symbol: string, usdgAmount: number): { source: string; reason: string } {
+    return { source: "chat", reason: `owner asked to ${side} ${usdgAmount} USDG ${symbol} in chat` };
+  }
+
   async function submitChatTrade(
     side: "buy" | "sell",
     symbol: string,
     usdgAmount: number,
-    asked: { source: string; reason: string } = {
-      source: "chat",
-      reason: `owner asked to ${side} ${usdgAmount} USDG ${symbol} in chat`,
-    },
+    /**
+     * WHERE THIS ORDER CAME FROM — and, when something already decided it, the
+     * decision it belongs to.
+     *
+     * `decisionId` is how a pre-trade thesis survives into execution. Brain
+     * writes its row before it hands the order over; passing the id here means
+     * `ensureDecision` verifies and REUSES it instead of minting a second
+     * decision that the trade then attaches to. Absent for an owner's typed
+     * order, which genuinely is a new decision at this moment.
+     *
+     * `notAfterMs` is the deadline of an order that arrived as a command. The
+     * intent queue checks it again when it reaches the order — see
+     * processIntentReporting — so the order cannot start after it.
+     */
+    asked: { source: string; reason: string; decisionId?: string; provenance?: Provenance; notAfterMs?: number } = chatAsked(
+      side,
+      symbol,
+      usdgAmount,
+    ),
   ): Promise<OrderReply> {
-    if (!active) return no("no agent armed — sign a grant in the dashboard first.");
-    // Before the first tick completes, equity is unknown (0n) and the drawdown
-    // check would judge garbage — hold chat trades until the book is read.
-    if (lastEquityUsdg === 0n) return no("🐎 the band is still saddling up (first tick pending) — try again in a minute.");
-    // Resolve against the watch set, not the shipped registry — otherwise a
-    // memecoin the owner added, covered by their grant and priced from its pool
-    // still came back "unknown symbol" when they asked for it by name.
-    const token = watchTokens.find((t) => t.symbol === symbol)?.address;
-    if (!token) {
-      const known = watchTokens.map((t) => t.symbol).join(", ");
-      return no(`I don't know ${symbol}. I'm watching: ${known || "nothing yet"}. Add it in /settings and re-sign at /grant if you want me trading it.`);
-    }
-    // WHERE DOES THIS TOKEN ACTUALLY TRADE? A Pons token has no pool until it
-    // graduates, so routing it to the swap router would build an operation
-    // against a pool that does not exist. Asked before anything is sized.
-    if (await curveFor(token)) return submitChatCurveTrade(side, symbol, token, usdgAmount, asked);
+    return withDecisionOutcome(active?.agentId, asked.decisionId, async () => {
+      // WHICH TOKEN, BY ADDRESS — resolved against the watch set, not the
+      // shipped registry (otherwise a memecoin the owner added, covered by
+      // their grant and priced from its pool, came back "unknown symbol" when
+      // they asked for it by name), and BEFORE anything else is read, so the
+      // reserve is refused whatever the book says.
+      //
+      // THE RESERVE IS REFUSED BY ADDRESS, never by name (energy-buy.ts
+      // resolveOrderToken). $MERRYMEN is the agent's energy, never a position:
+      // this path is reached by the Brain (model-decided orders), by Telegram
+      // buys that run WITHOUT a confirmation, and by every app order that is
+      // not get-energy's marked one — none may spend USDG on it. But a WATCHED
+      // coin at another address that merely calls itself MERRYMEN is an
+      // ordinary token its owner may buy and sell like any other; refusing it
+      // by name left them no manual exit and told them "I never sell it" about
+      // a coin they held. A fixed sentence for the reserve, never "add it in
+      // /settings": adding it would not help, and it is never in the watch set.
+      const resolved = resolveOrderToken(symbol, watchTokens);
+      if (resolved.kind === "reserve") return no(ENERGY_NOT_AN_ORDER);
+      if (!active) return no("no agent armed — sign a grant in the dashboard first.");
+      // THE BOOK THIS ORDER IS JUDGED AGAINST, before anything is sized — the
+      // latest tick's, as it stated it (order-gate.ts createTickBook
+      // and chatOrderGate, where a test runs both). Before the first tick equity
+      // is its 0n initialiser and the drawdown check would judge garbage; after
+      // a tick that could not read the market, a balance or a price there is no
+      // equity to judge against at all; and with a holding that has neither a
+      // price nor a cost the book cannot be totalled, checkPolicy skips the
+      // breaker, and a BUY would go out with the loss limit off. Those refusals
+      // lived only in the app order's gate, so a buy typed in Telegram got
+      // through them. They are here now, where the app, Telegram and the Brain
+      // all pass, in the app's own words — and the equity the order goes to the
+      // wall with is the one this same call judged.
+      const judged = tickBook.judge(side);
+      if (!judged.ok) return no(judged.line);
+      if (resolved.kind === "unknown") {
+        const known = watchTokens.map((t) => t.symbol).join(", ");
+        return no(`I don't know ${symbol}. I'm watching: ${known || "nothing yet"}. Add it in /settings and re-sign at /grant if you want me trading it.`);
+      }
+      const token = resolved.address;
+      // AND ITS NAME AS THE WATCH SET SPELLS IT — the book stores the position
+      // under that, and an order may arrive upper-cased (resolveOrderToken).
+      const named = resolved.symbol;
+      // WHERE DOES THIS TOKEN ACTUALLY TRADE? A Pons token has no pool until it
+      // graduates, so routing it to the swap router would build an operation
+      // against a pool that does not exist. Asked before anything is sized.
+      if (await curveFor(token)) return submitChatCurveTrade(side, named, token, usdgAmount, judged, asked);
 
-    const router = swapRouterFor(cfg);
-    let intent: TradeIntent;
-    // The size ACTUALLY sent, when it is not the size asked for. Null means the
-    // two agree and the reply can quote the owner back to themselves.
-    let sold: number | null = null;
-    if (side === "buy") {
-      const raw = usdg(usdgAmount);
-      intent = { kind: "swap", target: router, sellToken: CASH.USDG as `0x${string}`, buyToken: token, sellAmountRaw: raw, notionalUsdg: raw };
-    } else {
-      const pos = readPositionRaw(active.agentId, symbol, usdg);
-      if (!pos) return no(`you don't hold any ${symbol}.`);
-      const want = usdg(usdgAmount);
-      const partial = want < pos.valueUsdg;
-      const sellRaw = partial ? (pos.rawBalance * want) / pos.valueUsdg : pos.rawBalance;
-      const notional = partial ? want : pos.valueUsdg;
-      if (sellRaw === 0n) return no(`${symbol} amount rounds to zero shares.`);
-      // AN OVER-ASK IS CLAMPED, AND THE REPLY HAS TO SAY SO. It used to clamp
-      // silently and then quote the amount asked for: "submitted sell 500 USDG
-      // NVDA" for a 12 USDG position, a claim the ledger will never support —
-      // the trade row carries 12. Same rule as everywhere else here.
-      if (!partial) sold = Number(pos.valueUsdg) / 1e6;
-      intent = { kind: "swap", target: router, sellToken: token, buyToken: CASH.USDG as `0x${string}`, sellAmountRaw: sellRaw, notionalUsdg: notional };
-    }
-    await ensureDecision(intent, asked.source, asked.reason);
-    const outcome = await processIntentReporting(intent, lastEquityUsdg, lastEquityKnown);
-    // WHAT THE LEDGER SAYS, NOT WHAT WE HOPED. `sold` is the amount actually
-    // sent, which is not always the amount asked for — see the clamp above.
-    return sayTradeOutcome(outcome, side, symbol, usdgAmount, sold ?? usdgAmount);
+      const router = swapRouterFor(cfg);
+      let intent: TradeIntent;
+      // The size ACTUALLY sent, when it is not the size asked for. Null means the
+      // two agree and the reply can quote the owner back to themselves.
+      let sold: number | null = null;
+      if (side === "buy") {
+        const raw = usdg(usdgAmount);
+        intent = { kind: "swap", target: router, sellToken: CASH.USDG as `0x${string}`, buyToken: token, sellAmountRaw: raw, notionalUsdg: raw };
+      } else {
+        const pos = readPositionRaw(active.agentId, named, usdg);
+        if (!pos) return no(`you don't hold any ${named}.`);
+        const want = usdg(usdgAmount);
+        const partial = want < pos.valueUsdg;
+        const sellRaw = partial ? (pos.rawBalance * want) / pos.valueUsdg : pos.rawBalance;
+        const notional = partial ? want : pos.valueUsdg;
+        if (sellRaw === 0n) return no(`${named} amount rounds to zero shares.`);
+        // AN OVER-ASK IS CLAMPED, AND THE REPLY HAS TO SAY SO. It used to clamp
+        // silently and then quote the amount asked for: "submitted sell 500 USDG
+        // NVDA" for a 12 USDG position, a claim the ledger will never support —
+        // the trade row carries 12. Same rule as everywhere else here.
+        if (!partial) sold = Number(pos.valueUsdg) / 1e6;
+        intent = { kind: "swap", target: router, sellToken: token, buyToken: CASH.USDG as `0x${string}`, sellAmountRaw: sellRaw, notionalUsdg: notional };
+      }
+      // THE DECISION THIS ORDER ALREADY BELONGS TO, when something decided it
+      // before execution. Stamped on the intent so ensureDecision VERIFIES and
+      // reuses it rather than minting a second row — and so the trade, the fill
+      // and the outcome all land under the id that holds the pre-trade thesis.
+      if (asked.decisionId) intent.decisionId = asked.decisionId;
+      const stamped = await ensureDecision(intent, asked.source, asked.reason, { provenance: asked.provenance });
+      // A REFUSAL HERE IS AN AUTHORISATION FAILURE, not a market one: the id named
+      // nothing, could not be read, or belongs to another agent. Nothing is sent.
+      if (!stamped.ok) return no(stamped.why);
+      const outcome = await processIntentReporting(intent, judged.equityUsdg, judged.equityKnown, asked.notAfterMs);
+      // Reached after its deadline: nothing was built or sent, and the line says so.
+      if (outcome?.status === "late") return { ...no(outcome.line), verdict: { kind: "late" } };
+      // WHAT THE LEDGER SAYS, NOT WHAT WE HOPED. `sold` is the amount actually
+      // sent, which is not always the amount asked for — see the clamp above.
+      return { ...sayTradeOutcome(outcome, side, named, usdgAmount, sold ?? usdgAmount), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
+    });
   }
 
   async function submitChatTransfer(to: `0x${string}`, usdgAmount: number): Promise<string> {
     if (!active) return "no agent armed — sign a grant in the dashboard first.";
-    if (lastEquityUsdg === 0n) return "🐎 the band is still saddling up (first tick pending) — try again in a minute.";
+    // A transfer is an exit the breaker exempts, so only the first-tick check
+    // applies; the book's latest state is what it goes to the wall with.
+    const book = tickBook.latest();
+    if (book.equityUsdg === 0n) return "🐎 the band is still saddling up (first tick pending) — try again in a minute.";
     // Worker-side daily transfer budget, on top of the grant's per-trade/daily
     // caps (checkPolicy) and the on-chain transfer amount cap.
     const transferredToday = await getTransferredTodayUsdg(active.agentId);
@@ -10511,9 +13327,188 @@ async function main() {
       recipient: to,
       amountUsdg: usdg(usdgAmount),
     };
-    await ensureDecision(intent, "chat", `owner asked to transfer ${usdgAmount} USDG to ${to} in chat`);
-    await processIntent(intent, lastEquityUsdg, lastEquityKnown);
+    const stamped = await ensureDecision(intent, "chat", `owner asked to transfer ${usdgAmount} USDG to ${to} in chat`);
+    if (!stamped.ok) return `Transfer refused: ${stamped.why}.`;
+    await processIntent(intent, book.equityUsdg, book.reads.equityKnown);
     return `📤 transfer submitted — ${usdgAmount} USDG to ${to.slice(0, 6)}…${to.slice(-4)}. Watch /trades for the result (it still passes the policy wall).`;
+  }
+
+  /**
+   * THE OWNER'S ENERGY BUY — "get my energy", confirmed on the app's card.
+   *
+   * REACHED FROM ONE PLACE: runOrderCommand's submit closure, for an order
+   * carrying get-energy's explicit `purpose: "energy"` marker (order-gate.ts
+   * orderRoute — never the symbol), inside the command drain — the owner's
+   * click, claimed once by the unlink, after placeOrder's reads, pause, shape
+   * and chat-ceiling gates. Never from the Brain, never from a Telegram message
+   * or a plain buy/snipe/MCP order (submitChatTrade refuses the reserve), never
+   * from the poll loop:
+   * running in the drain is also what keeps the purchase's booking off a tick
+   * that is between its balance read and its fee accrual.
+   *
+   * SERIAL, END TO END. energyLock is a promise chain like intentChain, with
+   * no timeout for the same reason: the reads, the plan, the execution and the
+   * reply of one ask finish before the next ask reads anything, so two asks can
+   * never both size a buy off the same pre-purchase balance. Across a restart,
+   * the ledger's in-flight guard carries the same rule.
+   *
+   * `maxUsdg` is the owner's MOST for this ask, never the amount: the size is
+   * derived from the chain every time (energy-buy.ts), under every cap at once.
+   */
+  let energyLock: Promise<unknown> = Promise.resolve();
+  async function submitEnergyBuy(
+    side: "buy" | "sell",
+    maxUsdg: number,
+    asked: { source: string; reason: string; notAfterMs?: number },
+  ): Promise<OrderReply> {
+    const step = () => energyBuyLocked(side, maxUsdg, asked);
+    const run = energyLock.then(step, step);
+    // The lock must never hold a rejection, or the next ask inherits it.
+    energyLock = run.catch(() => {});
+    return run;
+  }
+
+  /** One ask, under energyLock. Every no here is said before anything is built or sent. */
+  async function energyBuyLocked(
+    side: "buy" | "sell",
+    maxUsdg: number,
+    asked: { source: string; reason: string; notAfterMs?: number },
+  ): Promise<OrderReply> {
+    if (!active) return no("no agent armed — sign a grant in the dashboard first.");
+    const { agentId, grant, limits, client } = active;
+    // BUY-ONLY. The key has no approve for the reserve anywhere in the wall.
+    if (side !== "buy") return no(ENERGY_NO_SELL);
+    // Pause is the owner's stop button, whatever placed the order.
+    if (isPaused()) return no("you have me paused, so I did not buy anything. Un-pause and ask again.");
+    // Only on Robinhood Chain does the route exist and the account count.
+    if (grant.chainId !== MERRYMEN_TOKEN.chainId) return no(ENERGY_NOT_MAINNET);
+    // The book the purchase is judged against — the latest tick's, as it
+    // stated it: a tick that could not read, or a book that cannot be totalled,
+    // cannot judge a buy (order-gate.ts).
+    const judged = tickBook.judge("buy");
+    if (!judged.ok) return no(judged.line);
+    // THE LIVE RAIL ONLY — see processIntentLocked's energy-needs-live, which
+    // refuses the same thing again at the fork.
+    const rail = execMode();
+    if (rail.mode !== "live") return no(energyNeedsLiveLine(liveBlockerText(rail.rule)));
+    // THE PERMISSION the grant sealed, and the mirror built from it.
+    const route = grantEnergyRoute(grant);
+    if (!route || !limits.energy) return no(ENERGY_RESIGN);
+
+    // ── THE READS, fresh and pinned ─────────────────────────────────────
+    //
+    // Both $MERRYMEN halves at one block no earlier than the last energy
+    // purchase's landing (circle.ts), the account's USDG likewise on the
+    // grant's own client, and the ledger's in-flight guard. Every failure is
+    // null, and the planner refuses on any null.
+    const atLeast = lastEnergyLandedBlock ?? 0n;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const readCash = async (): Promise<bigint | null> => {
+      try {
+        const head = await client.getBlockNumber();
+        return (await client.readContract({
+          address: CASH.USDG as `0x${string}`,
+          abi: erc20Abi,
+          functionName: "balanceOf",
+          args: [grant.smartAccount as `0x${string}`],
+          blockNumber: head > atLeast ? head : atLeast,
+        })) as bigint;
+      } catch {
+        return null;
+      }
+    };
+    const readHeld = async () => {
+      try {
+        return (await readHolderStatusResult(cfg.rpcMainnet, cfg.holderAddress, grant.smartAccount as `0x${string}`, {
+          atLeastBlock: atLeast,
+        })).parts;
+      } catch {
+        return { holder: null, account: null };
+      }
+    };
+    const [held, cash, inFlight, taxBps, net, lifetime, risk] = await Promise.all([
+      readHeld(),
+      readCash(),
+      energyBuysInFlight(agentId, nowSec - 6 * 3600),
+      readEnergyTaxBps(client),
+      // DURABLE FIRST (durableNetContributions): a hosted child rebuilt by a
+      // redeploy has an empty flows table and the record is in the anchor.
+      durableNetContributions(agentId).catch(() => undefined),
+      getAgentFinancials(agentId).then((f) => f.hwmUsdg).catch(() => undefined),
+      getRiskPeriodPeak(agentId).catch(() => undefined),
+    ]);
+    // A ledger that would not answer is not an empty one: a contribution
+    // record nobody could read is not "no record", and a peak nobody could read
+    // is not a peak of zero — the one that switches the breaker off.
+    if (net === undefined || lifetime === undefined || risk === undefined) {
+      return no("I could not read my own ledger just now, so I did not buy anything. Ask again in a minute.");
+    }
+
+    // ── THE PLAN — one chunk, under every cap at once ───────────────────
+    let plan: Awaited<ReturnType<typeof planEnergyBuy>>;
+    try {
+      plan = await planEnergyBuy(
+        { holder: held.holder, account: held.account, cashUsdg: cash, inFlight },
+        {
+          ownerMaxRaw: usdg(maxUsdg),
+          perTradeRaw: limits.perTradeUsdg,
+          dailyRaw: limits.dailyUsdg,
+          spentTodayRaw: spentToday(),
+          opsRemaining: limits.maxOpsPerDay - opsTodayCount(),
+          maxOpsPerDay: limits.maxOpsPerDay,
+        },
+        // No slippage in the size: it is the executor's floor (energyMinOut) only.
+        { taxBps, amountInFor: (g) => energyAmountInFor(client, g) },
+        {
+          paper: paperActive(),
+          equityKnown: judged.equityKnown,
+          equityUsdg: judged.equityUsdg,
+          netContributionsUsdg: net,
+          lifetimePeakUsdg: usdg(lifetime),
+          // THE BREAKER'S OWN PEAK, the one checkPolicy will judge this intent
+          // against: the persisted risk period's, else the lifetime peak.
+          breakerPeakUsdg: risk === null ? usdg(lifetime) : usdg(risk),
+          maxDrawdownBps: limits.maxDrawdownBps,
+        },
+      );
+    } catch (e) {
+      console.log(`[${short(agentId)}] [energy-buy] could not plan: ${e instanceof Error ? e.message : String(e)}`);
+      return no("I could not work out the energy buy just now, so I bought nothing. Ask again in a minute.");
+    }
+    if (plan.kind === "full") return { ok: true, line: plan.line };
+    if (plan.kind === "refuse") return no(plan.line);
+    console.log(`[${short(agentId)}] [energy-buy] ${sayEnergyPlan(plan)}`);
+
+    // ── THE INTENT — built here and nowhere else ────────────────────────
+    const intent: TradeIntent = {
+      kind: "energy-buy",
+      target: route.router,
+      sellToken: CASH.USDG as `0x${string}`,
+      buyToken: route.path[route.path.length - 1]!,
+      sellAmountRaw: plan.amountInRaw,
+      notionalUsdg: plan.amountInRaw,
+    };
+    // Filed under the ORDER's own source and reason (order-gate.ts orderAsked),
+    // never a literal: only the get-energy card's marker reaches this line.
+    const stamped = await ensureDecision(intent, asked.source, `${asked.reason}, ${usdgText(plan.amountInRaw)} USDG this ask`);
+    if (!stamped.ok) return no(stamped.why);
+    const outcome = await processIntentReporting(intent, judged.equityUsdg, judged.equityKnown, asked.notAfterMs);
+    // Reached after its deadline: nothing was built or sent, and the line says so.
+    if (outcome?.status === "late") return { ...no(outcome.line), verdict: { kind: "late" } };
+
+    // AFTER A LANDING, what the chain now says — pinned to the landing block,
+    // so the sentence is about the purchase that just happened. A read that
+    // fails says so; the plan's arithmetic is never offered in its place.
+    let heldAfter: bigint | null = null;
+    if (outcome?.status === "landed") {
+      const after = await readHolderStatusResult(cfg.rpcMainnet, cfg.holderAddress, grant.smartAccount as `0x${string}`, {
+        atLeastBlock: lastEnergyLandedBlock ?? 0n,
+      }).catch(() => null);
+      if (after && after.parts.holder !== null && after.parts.account !== null) {
+        heldAfter = (after.parts.holder ?? 0n) + (after.parts.account ?? 0n);
+      }
+    }
+    return { ...sayEnergyOutcome(outcome, plan, heldAfter), executionStatus: outcome?.status, verdict: verdictOf(outcome) };
   }
 
   const buildStatusContext = () => ({
@@ -10538,6 +13533,8 @@ async function main() {
       : null,
     telegramMaxActionUsdg: cfg.telegramMaxActionUsdg,
     paperStartUsdg: cfg.paperStartUsdg,
+    // The worker's own energy report (refreshEnergy), for /status's one line.
+    energy: active ? energyReport : null,
   });
 
   // One shared persisted-state handle — the poll service and the notifier both
@@ -10557,11 +13554,29 @@ async function main() {
   // claim itself. Reported by @Victory-byte (PR #3); fixed on the worker side.
   if (cfg.telegramBotToken) {
     const before = tgState.get().linkCode;
-    tgState.set(ensureLinkCode(tgState.get(), cfg.telegramBotToken));
-    if (!before && tgState.get().linkCode) {
-      console.log(`[telegram] link code ready — send "/link ${tgState.get().linkCode}" to your bot to claim it`);
+    // A code the old scheme derived from this token is replaced first: it can
+    // be computed from the token, and hosted it was printed into the fleet's
+    // logs (state.ts retireLegacyCode). Here rather than only in the poll loop,
+    // so the code this prints, and the one the dashboard shows, is the one
+    // that works.
+    tgState.set(ensureLinkCode(retireLegacyCode(tgState.get(), cfg.telegramBotToken)));
+    if (tgState.get().linkCode && tgState.get().linkCode !== before) {
+      // HOSTED, NEVER THE CODE. The code is a bearer credential: whoever sends
+      // it first becomes the agent's owner. Hosted, this line lands in the
+      // fleet's shared logs, where every tenant who had not linked yet had a
+      // working code sitting in plain text. The owner reads theirs on the
+      // dashboard. Self-hosted, the log is the owner's own terminal, and the
+      // code there is how they link.
+      if (isHostedMode()) console.log("[telegram] link code ready (shown on the dashboard)");
+      else console.log(`[telegram] link code ready — send "/link ${tgState.get().linkCode}" to your bot to claim it`);
     }
   }
+
+  // What strangers did to the bot and which messages Telegram would not take,
+  // counted for the fleet's log (telegram/poll-rules.ts makeChatTally). One
+  // for the poll loop and the notifier, so a blocked bot is said once an hour
+  // between them; and never on strategyNote, which is the owner's event feed.
+  const tgTally = makeChatTally(telegramLog, () => Math.floor(Date.now() / 1000));
 
   startTelegram({
     // Resolve FRESH on every read: /link writes the allowlist to settings.json
@@ -10570,6 +13585,7 @@ async function main() {
     getCfg: () => resolveConfig(),
     stateRef: tgState,
     note: strategyNote,
+    tally: tgTally,
     buildStatusContext,
     setStrategy: (name) => {
       if ((BUILTIN_STRATEGIES as readonly string[]).includes(name)) return { ok: true };
@@ -10589,9 +13605,37 @@ async function main() {
     onNameChange: (name) => {
       if (active) void setAgentName(active.agentId, name);
     },
+    // Telegram groups (docs/tg-groups.md): the one store this child writes for
+    // group memory, and the port through which a posted coin reaches trading
+    // as an address and nothing else.
+    tgGroupsStore,
+    tgCoins,
+    // What the hold process kept about groups while this tenant's trading was
+    // held (telegram/held-groups.ts), in this home: applied at the first poll.
+    heldGroupUpdates: () => takeHeldGroupUpdates(merrymenHome()),
     kill: () => {
       try {
-        if (!loadGrantFile()) return { ok: false, reason: "no grant" };
+        const grant = loadGrantFile();
+        if (isHostedMode()) {
+          // HOSTED: grant.json is only this child's copy. The orchestrator
+          // restores a missing copy from the tenant store every pass, so
+          // deleting it alone was a kill that undid itself in fifteen seconds.
+          // killHosted leaves a request the orchestrator carries out against
+          // the store. See kill-request.ts. The hold process makes the same
+          // call (telegram/hold.ts), so a held tenant's owner can revoke too.
+          const r = hostedKillFromChat(merrymenHome(), homePaths.grant(), grant, Math.floor(Date.now() / 1000));
+          if (!r.ok || !grant) return r;
+          void addEvent(
+            active?.agentId ?? grant.smartAccount,
+            "warn",
+            r.revocation === "queued"
+              ? "kill switch (Telegram) — this agent's copy of the key is gone; the server is deleting the stored grant. Funds stay in the smart account."
+              : `kill switch (Telegram) — this copy of the key is gone, but the kill could not be recorded (${r.reason}), so the server may restore it. ` +
+                  "Revoke it for good on the web: Wallet & permissions → discard & start over.",
+          );
+          return r;
+        }
+        if (!grant) return { ok: false, reason: "no grant" };
         // ARCHIVE FIRST. grant.json is a single slot and, for a grant that has
         // never been replaced, the only on-disk copy of the owner key — the key
         // `merrymen recover` needs to sweep the account. Deleting it without a
@@ -10620,6 +13664,7 @@ async function main() {
   notifierHandle = startNotifier({
     getCfg: () => resolveConfig(), // fresh for the same reason as the poller
     note: strategyNote,
+    tally: tgTally,
     stateRef: tgState,
     buildStatusContext,
     getAlertInputs: () => ({
@@ -10632,13 +13677,13 @@ async function main() {
       maxActionUsdg: active
         ? Math.min(cfg.llmMaxActionUsdg, Number(active.limits.perTradeUsdg) / 1e6)
         : null,
-      // Real cash only. `lastEquityUsdg` includes positions, and a ceiling is
+      // Real cash only. The book's equity includes positions, and a ceiling is
       // judged against what can actually be DEPLOYED — an agent fully invested
       // in one holding is not being throttled by its cap.
       cashUsdg: lastCashUsdg === null ? null : Number(lastCashUsdg) / 1e6,
       drawdownBps:
-        highWaterMarkUsdg > 0n && lastEquityUsdg > 0n
-          ? Number(((highWaterMarkUsdg - lastEquityUsdg) * 10_000n) / highWaterMarkUsdg)
+        drawdownPeak() > 0n && tickBook.latest().equityUsdg > 0n
+          ? Math.max(0, Number(((drawdownPeak() - tickBook.latest().equityUsdg) * 10_000n) / drawdownPeak()))
           : null,
       breakerBps: active ? active.limits.maxDrawdownBps : null,
       // Pass ZERO through. It used to be mapped to null here AND filtered again
@@ -10655,6 +13700,15 @@ async function main() {
       // fabrication. This stays because the alert's WORDING still depends on
       // it: telling a paper agent to send ETH is advice it cannot act on.
       paper: paperActive(),
+      // TODAY'S ENERGY, for the once-a-day "spent" alert (telegram/energy-alert.ts).
+      // Every address from the grant and settings — never from a model.
+      energy: active ? energyReport : null,
+      energyAccount: active?.grant.smartAccount ?? null,
+      energyChainId: active?.grant.chainId ?? null,
+      energyHolder: cfg.holderAddress ?? null,
+      // ONLY FOR A DAY WHOSE NOTICE CLAIM THIS PROCESS WON — the durable
+      // once-a-day rule; telegram.json's keys do not survive a redeploy.
+      energyToldDay: energyToldDayOf(energyToldHere, active?.agentId),
     }),
     getChainId: () => active?.grant.chainId ?? null,
     // Scope the trade-cursor queries to THIS tenant's book. On a shared ledger an
@@ -10689,8 +13743,55 @@ async function main() {
    * repo carries the incident where 1,242 identical rows told nobody anything.
    */
   let lastTickError = "";
-  const runLoop = () => {
-    tick()
+  // A TICK THAT THREW IS THE ONE FAILURE THAT LEFT NO ROW.
+  //
+  // The heartbeat is written at the TOP of the tick, before any network
+  // call, and `setAgentMode` rides it — deliberately, so a rate limit
+  // cannot get a healthy worker SIGKILLed by the watchdog. The cost of
+  // that decision is that liveness and correctness came apart: a throw in
+  // readPositions, the depth reader, the paper book, `strategy.tick()` or
+  // `processIntent` silently ended the tick and every intent after it,
+  // while the orchestrator's watchdog and the dashboard's mode chip both
+  // went on reporting the agent as fine. The only trace was a stderr line
+  // in a fleet log nobody tails.
+  //
+  // Every other failure on this path writes a row naming its rule. This
+  // is the one place a failure produced nothing at all, so it writes one.
+  // Shared by the regular tick and the command tick: a command tick that
+  // throws is the same silence, one owner's order closer to them.
+  const tickFailed = async (e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[tick]", e);
+    if (active && msg !== lastTickError) {
+      lastTickError = msg;
+      await addEvent(active.agentId, "err", `tick failed: ${msg.slice(0, 300)}`).catch(() => {});
+    }
+  };
+  /**
+   * What follows a regular tick whether or not it threw, so a tick that failed
+   * still reports what it spent — the ticks that fail are exactly the ones
+   * whose RPC cost matters most. Its own function so the review deadlines the
+   * tick just wrote are read as the tick left them, not as runLoop reset them.
+   */
+  const afterTick = async (startedAt: number): Promise<number> => {
+    try { await quietReview?.(); } catch (e) { console.error("[market-review]", e); }
+    reportRpc();
+    const deadlines = [nextBrainReviewAt, nextMarketReviewAt].filter((v): v is number => v !== null);
+    const nextReview = deadlines.length ? Math.min(...deadlines) : null;
+    return nextTickDelayMs({ startedAt, now: Date.now(), tickSeconds: cfg.tickSeconds,
+      nextReviewAt: nextReview, preparationMs: reviewPreparationMs,
+      reviewIntervalSec: nextReview !== null && nextReview === nextBrainReviewAt ? scheduledInterval() : 300 });
+  };
+  /** One regular tick and everything after it; resolves to the wait before the next. */
+  const runLoop = async (): Promise<number> => {
+    const startedAt = Date.now();
+    // An early-returning tick must not retain an overdue deadline and spin.
+    nextBrainReviewAt = null;
+    nextMarketReviewAt = null;
+    quietReview = null;
+    // Through the tick book: a tick that fails before it states what it read
+    // cannot vouch for the book, and no order is placed on it until one does.
+    await tickBook.during(tick)
       // CLEARED BY A HEALTHY TICK. The latch was only ever assigned on failure,
       // so a fault that came back after recovering was reported once and never
       // again — the same shape `lastIdleReason` and `lastLiveBlocker` both got
@@ -10699,35 +13800,75 @@ async function main() {
       .then(() => {
         lastTickError = "";
       })
-      .catch(async (e) => {
-        // A TICK THAT THREW IS THE ONE FAILURE THAT LEFT NO ROW.
-        //
-        // The heartbeat is written at the TOP of the tick, before any network
-        // call, and `setAgentMode` rides it — deliberately, so a rate limit
-        // cannot get a healthy worker SIGKILLed by the watchdog. The cost of
-        // that decision is that liveness and correctness came apart: a throw in
-        // readPositions, the depth reader, the paper book, `strategy.tick()` or
-        // `processIntent` silently ended the tick and every intent after it,
-        // while the orchestrator's watchdog and the dashboard's mode chip both
-        // went on reporting the agent as fine. The only trace was a stderr line
-        // in a fleet log nobody tails.
-        //
-        // Every other failure on this path writes a row naming its rule. This
-        // is the one place a failure produced nothing at all, so it writes one.
-        const msg = e instanceof Error ? e.message : String(e);
-        console.error("[tick]", e);
-        if (active && msg !== lastTickError) {
-          lastTickError = msg;
-          await addEvent(active.agentId, "err", `tick failed: ${msg.slice(0, 300)}`).catch(() => {});
-        }
-      })
-      // In the finally so a tick that threw still reports what it spent — the
-      // ticks that fail are exactly the ones whose RPC cost matters most.
-      .finally(() => {
-        reportRpc();
-        setTimeout(runLoop, cfg.tickSeconds * 1000);
-      });
+      .catch(tickFailed);
+    return afterTick(startedAt);
   };
+
+  /**
+   * ONE COMMAND TICK, between two regular ones. See command-wake.ts for why
+   * this is a tick and not a side door, and tickPlan for what it leaves out.
+   *
+   * The flag is raised only for the synchronous call: tick() reads it in its
+   * first statement, before its first await, so it cannot leak into any other
+   * tick. No review deadline is reset and no market review is run — those
+   * belong to the regular tick, which the clock puts back at exactly the moment
+   * it was due.
+   */
+  const runCommandTick = async (): Promise<void> => {
+    commandTick = true;
+    // during() calls tick() before its first await, so the flag is still read synchronously.
+    const run = tickBook.during(tick);
+    commandTick = false;
+    await run
+      .then(() => {
+        lastTickError = "";
+      })
+      .catch(tickFailed);
+    reportRpc();
+  };
+
+  // THE CLOCK BOTH RUN ON, AND THE WATCHER THAT WAKES IT, wired to the drain's
+  // own one-at-a-time slot and to every trade on the intent chain inside
+  // createCommandClock, where a test runs that wiring. A command tick takes the
+  // next regular tick off the clock while it runs and hands it back for the
+  // moment it was already due, so an order never shortens the strategy's
+  // cadence; a regular tick that comes due while a command or any trade is
+  // still in flight waits for it to land before it reads the book; and each
+  // order that lands between ticks is owed one command tick, taken one at a
+  // time, only when no tick and no trade is already running.
+  //
+  // THE CLOCK BEATS WHILE IT WAITS ON A TRADE. tick() beats as its first
+  // statement and nothing else does, while a command tick holds the clock until
+  // its order lands — three receipt reads of up to two minutes — and a regular
+  // tick due meanwhile waits too. On the 15-second preset the watchdog's limit
+  // is 180 s, so the child was SIGKILLed between the send and the row. The file
+  // alone, with the mode heartbeat() would publish and no block: this is a claim
+  // about the process being alive, not about the chain, and the shared `agents`
+  // row stays the tick's to write.
+  const tickClock = createCommandClock({
+    now: Date.now,
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+    fallbackMs: tickIntervalMs(cfg.tickSeconds),
+    orders: commandInFlight,
+    trades: liveTrades,
+    pending: () => queuedCommandIds(merrymenHome()),
+    regular: runLoop,
+    command: runCommandTick,
+    // The file the watchdog reads, which the clock now writes itself — a test
+    // reads its `at` through a held order. Required, so a clock with no
+    // heartbeat does not compile.
+    heartbeat: { file: homePaths.heartbeat(), mode: () => publishedMode(execMode()), sponsorGas: gasSponsored },
+  });
+  // A directory listing every couple of seconds. Unref'd, so it never holds a
+  // process open that would otherwise exit.
+  setInterval(() => {
+    try {
+      tickClock.poll();
+    } catch (e) {
+      console.error("[command-wake]", e);
+    }
+  }, COMMAND_WAKE_EVERY_MS).unref();
 
   // ── DON'T ALL WAKE AT ONCE ──────────────────────────────────────────
   //
@@ -10747,7 +13888,7 @@ async function main() {
   // than they will routinely wait for their second.
   // MERRYMEN_HOME is …/children/<tenant> on a hosted child and a fixed path
   // self-hosted, where a stagger is neither needed nor harmful.
-  const slot = startupSlotMs(merrymenHome(), cfg.tickSeconds * 1000);
+  const slot = startupSlotMs(merrymenHome(), tickIntervalMs(cfg.tickSeconds));
   if (slot > 0) console.log(`[worker] first tick in ${Math.round(slot / 1000)}s — staggered so the fleet does not wake together`);
 
   /**
@@ -10775,7 +13916,7 @@ async function main() {
    * "idle" is the honest mode here — nothing is armed until the first tick.
    */
   beatFile("idle", gasSponsored());
-  setTimeout(runLoop, slot);
+  tickClock.start(slot);
 }
 
 

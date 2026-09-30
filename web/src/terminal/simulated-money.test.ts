@@ -78,7 +78,8 @@ describe("practice money can never wear the label real money wears", () => {
     // is lying. /api/grants reads balanceOf in a multicall; that is the input.
     const app = SURFACES["App.tsx"];
     assert.match(app, /autonomyOf\(/, "App must compute the verdict");
-    assert.match(app, /balances\.cashUsdg/, "real cash must come from the chain read");
+    // Where it comes from is run, not read: realCashOf (account-read.test.ts)
+    // takes the chain read and nothing else, and App passes it straight in.
     assert.ok(
       !/realCashUsd:\s*[^,\n]*glance/.test(app),
       "the verdict must not be decided from the book's own cash figure",

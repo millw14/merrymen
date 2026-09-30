@@ -22,13 +22,19 @@
  * Real viem signatures, no mocks.
  */
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_BINDING_VERSION, bindingMessage, isBindingVersion } from "@merrymen/core";
 
 process.env.MERRYMEN_SESSION_SECRET = "test-secret-at-least-thirty-two-characters-long";
+const testHome = mkdtempSync(join(tmpdir(), "merrymen-binding-version-"));
+process.env.MERRYMEN_HOME = testHome;
+delete process.env.DATABASE_URL;
+delete process.env.MERRYMEN_HOSTED;
+after(() => rmSync(testHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
 
 import { ENFORCE_LEGACY_TWO_PROOF, issueChallengeNonce, verifyGrantBinding } from "./auth";
 
@@ -138,7 +144,7 @@ test("a privy binding whose owner is not the signed-in tenant is refused", async
   assert.match(r.ok === false ? r.why : "", /not the wallet you signed in with/);
 });
 
-test("A COMPLETE PRIVY BINDING VERIFIES — token, matching DID, owner-is-tenant", async () => {
+test("a complete Privy binding verifies once even under concurrent replay", async () => {
   const embedded = privateKeyToAccount(generatePrivateKey());
   const did = "did:privy:clbeta0001";
   const nonce = issueChallengeNonce(ORIGIN);
@@ -151,7 +157,7 @@ test("A COMPLETE PRIVY BINDING VERIFIES — token, matching DID, owner-is-tenant
     chainId: CHAIN,
     did,
   });
-  const r = await verifyGrantBinding({
+  const claim = {
     origin: ORIGIN,
     // tenant IS the embedded wallet: what the auth route minted the session for.
     tenant: embedded.address.toLowerCase() as `0x${string}`,
@@ -163,8 +169,10 @@ test("A COMPLETE PRIVY BINDING VERIFIES — token, matching DID, owner-is-tenant
     version: "privy-did-owner-v1",
     did,
     verifiedDid: did,
-  });
-  assert.equal(r.ok, true, r.ok === false ? r.why : "");
+  };
+  const results = await Promise.all([verifyGrantBinding(claim), verifyGrantBinding(claim)]);
+  assert.equal(results.filter((result) => result.ok).length, 1);
+  assert.equal((await verifyGrantBinding(claim)).ok, false);
 });
 
 test("a privy signature cannot be replayed under a different identity", async () => {

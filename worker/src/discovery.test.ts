@@ -11,6 +11,7 @@ import {
   PONS_MAX_EVALUATE,
   describeDiscovery,
   describeTrending,
+  trendingStatusLine,
   discoverTrending,
   newTokenOf,
   ponsScanWindow,
@@ -324,6 +325,23 @@ describe("discoverTrending", () => {
     limits: LIMITS,
     nowSec: 1_000,
     ...over,
+  });
+
+  it("keeps provider failures distinct from a successful empty ranking", async () => {
+    const failed = await discoverTrending(deps([pool()], { scout: {
+      name: "groq", rank: async () => ({ picks: [], passed: [], ignored: [], failed: true }),
+    } }) as never);
+    assert.equal(failed.researchStatus, "failed");
+    assert.match(trendingStatusLine(failed), /research failed/);
+    assert.doesNotMatch(trendingStatusLine(failed), /none worth mentioning/);
+    const unavailable = await discoverTrending(deps([pool()], { scout: nullScout }) as never);
+    assert.equal(unavailable.researchStatus, "unavailable");
+    assert.match(trendingStatusLine(unavailable), /unassessed/);
+    const pass = await discoverTrending(deps([pool()], { scout: {
+      name: "groq", rank: async () => ({ picks: [], passed: [], ignored: [] }),
+    } }) as never);
+    assert.equal(pass.researchStatus, "ok");
+    assert.match(trendingStatusLine(pass), /none worth mentioning/);
   });
 
   it("dedupes a coin that appears on several venues, keeping the DEEPEST", async () => {

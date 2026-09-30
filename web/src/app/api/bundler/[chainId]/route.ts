@@ -205,7 +205,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ chainId: strin
     }
 
     const callData = typeof op.callData === "string" ? (op.callData as `0x${string}`) : "0x";
-    const shape = isRecoveryShape(callData, { classVault: ticket.classVault });
+    const shape = isRecoveryShape(callData, { classVaults: ticket.classVaults });
     if (!shape.ok) {
       return refuse(rpc.id, `this relay only carries withdrawals — ${shape.why}`);
     }

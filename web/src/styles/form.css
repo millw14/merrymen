@@ -351,3 +351,16 @@
   padding: 0 var(--mm-3);
   font-size: var(--mm-t-meta);
 }
+
+/*
+ * A numeric setting whose text cannot be read as a number.
+ *
+ * These fields were `type="number"`, where the browser refused a bad keystroke
+ * outright. They are `type="text"` now — so a comma survives long enough to be
+ * understood rather than being handed to JavaScript as an empty string, which
+ * the server reads as "clear to default". The refusal has to be visible here
+ * instead.
+ */
+.mm-input input[aria-invalid="true"] {
+  border-color: var(--down);
+}

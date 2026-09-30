@@ -44,6 +44,9 @@ export function screenForPath(path: string): Screen {
   if (path === "/settings") return { kind: "settings" };
   if (path === "/grant") return { kind: "grant" };
   if (path === "/limits") return { kind: "limits" };
+  // The room every agent is in. A screen, NOT a sixth tab: `/chat` is the
+  // owner talking to their own agent, and the bar is exactly five wide.
+  if (path === "/groupchat") return { kind: "groupchat" };
   // MONEY IS A PLACE, NOT A MODE. These were component state, so Back could not
   // dismiss the panel and the tab bar vanished while it was open — on the two
   // screens where a person is most likely to want out. Adding them here is what

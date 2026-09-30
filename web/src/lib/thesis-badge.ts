@@ -10,6 +10,7 @@
  * Every word below was argued for once already. Do not change one of them
  * without a reason better than "shorter".
  */
+import { IN_FLIGHT_TEXT } from "@merrymen/thesis";
 import type { PublicThesis } from "@/lib/thesis";
 
 export type BadgeKind = "bought" | "sold" | "thesis" | "turned" | "quiet";
@@ -39,6 +40,30 @@ export interface BadgeInput {
   action: PublicThesis["action"];
   outcome?: PublicThesis["outcome"] | null;
   shadow?: boolean | null;
+  /**
+   * The publisher's sentence for the outcome — which is how a "pending" order in
+   * flight is told from a "pending" decision nothing was ever sent for. See
+   * `inFlightOf`.
+   */
+  outcomeText?: string | null;
+}
+
+/**
+ * AN ORDER ON ITS WAY, as opposed to a decision that came to nothing.
+ *
+ * The publisher files two facts under "pending" (thesis-policy.ts
+ * `outcomeOf`): a submitted trade, whose sentence is IN_FLIGHT_TEXT, and a buy
+ * or sell decision with no trade at all — "no trade came of it", usually for
+ * good. Read as one, the second said "buying" on the card and the rail, in
+ * the money colour with the unsettled edge, about an order that was never
+ * sent. The feed rows already tell them apart this way (beat.ts `inFlight`).
+ *
+ * NO SENTENCE AT ALL is taken at its word, which is the owner's own desk tape:
+ * every row there is a trade, and a pending one was sent. A public post always
+ * carries its sentence.
+ */
+export function inFlightOf(t: Pick<BadgeInput, "outcome" | "outcomeText">): boolean {
+  return t.outcome === "pending" && (t.outcomeText == null || t.outcomeText === IN_FLIGHT_TEXT);
 }
 
 export function badgeOf(t: BadgeInput): Badge {
@@ -66,6 +91,10 @@ export function badgeOf(t: BadgeInput): Badge {
   // about one position. "view" is the outcome a researched hold produces.
   if (!t.action || t.action === "hold" || t.outcome === "view") {
     return { label: "thesis", kind: "thesis" };
+  }
+  // A decision nothing was sent for is not "buying": it tried, and it is over.
+  if (t.outcome === "pending" && !inFlightOf(t)) {
+    return { label: t.action === "sell" ? "tried to sell" : "tried to buy", kind: "quiet" };
   }
   if (t.action === "buy") {
     return { label: t.outcome === "landed" ? "bought" : "buying", kind: "bought" };

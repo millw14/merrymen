@@ -19,15 +19,12 @@ import path from "node:path";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-poolkeys-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, poolKeysFor, recordCandidate } = await import("./store");
+const { closeStoreForTest, initStore, poolKeysFor, recordCandidate } = await import("./store");
 
 await initStore();
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* Windows holds the sqlite handle a moment longer; the dir is disposable */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const USDG = "0x00000000000000000000000000000000000000aa";

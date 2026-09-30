@@ -24,7 +24,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { validAmount } from "./amount";
+import { CAP_FIELD, parseAmount } from "@/lib/parse-amount";
 import { barInterval, withGaps } from "./bars";
 import { dailyChange, spentToday } from "./account";
 import { elapsed, countdown } from "./clock";
@@ -202,13 +202,30 @@ describe("sizes and ages", () => {
 
 describe("what the owner is allowed to type into a money field", () => {
   it("takes a plain positive amount with at most two decimals", () => {
-    for (const good of ["1", "0.5", "12.34", "1000"]) assert.ok(validAmount(good), good);
+    for (const good of ["1", "0.5", "12.34", "1000"]) {
+      assert.ok(parseAmount(good, CAP_FIELD).ok, good);
+    }
   });
 
-  it("refuses everything that is not one", () => {
-    for (const bad of ["", "0", "-1", "1.234", "1e3", " 1", "1 ", "abc", "1.2.3", ".5", "+1", "Infinity", "NaN"]) {
-      assert.equal(validAmount(bad), false, `"${bad}" must be refused`);
+  it("AND TAKES THE SAME AMOUNT WRITTEN THE WAY MOST OF THE WORLD WRITES IT", () => {
+    // This is the line the bug report was about. The field is
+    // `inputMode="decimal"`, which renders a comma key on most keyboards, and
+    // the validator this replaced accepted only a dot.
+    assert.deepEqual(parseAmount("0,5", CAP_FIELD), { ok: true, value: 0.5 });
+    assert.deepEqual(parseAmount("12,34", CAP_FIELD), { ok: true, value: 12.34 });
+    assert.deepEqual(parseAmount("1.000", CAP_FIELD), { ok: true, value: 1000 });
+    assert.deepEqual(parseAmount("1 000", CAP_FIELD), { ok: true, value: 1000 });
+  });
+
+  it("refuses everything that is not an amount", () => {
+    for (const bad of ["", "0", "-1", "1e3", "abc", "1.2.3", ".5", "+1", "Infinity", "NaN"]) {
+      assert.equal(parseAmount(bad, CAP_FIELD).ok, false, `"${bad}" must be refused`);
     }
+  });
+
+  it("surrounding space is trimmed rather than treated as a refusal", () => {
+    // The old validator refused " 1" outright, which is a paste, not a mistake.
+    assert.deepEqual(parseAmount(" 1 ", CAP_FIELD), { ok: true, value: 1 });
   });
 });
 

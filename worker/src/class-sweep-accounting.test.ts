@@ -46,6 +46,9 @@ const buy: ClassEvent = {
   curve: CURVE,
   quoteRaw: COST,
   tokenRaw: QTY,
+  // This fill is Shogun's, from the DEPLOYED v1 vault, whose event does not name
+  // the asset. null is "the log did not say", which is exactly right here.
+  quoteAsset: null,
   blockNumber: 61_171_816n,
   txHash: BUY_TX,
   logIndex: 3,
@@ -58,6 +61,7 @@ const sweep: ClassEvent = {
   // A sweep moves no quote, by construction — class-log.ts hard-codes this.
   quoteRaw: 0n,
   tokenRaw: QTY,
+  quoteAsset: null,
   blockNumber: 63_014_999n,
   txHash: SWEEP_TX,
   logIndex: 7,
@@ -67,6 +71,7 @@ const sell = (tokens: bigint, proceeds: bigint): ClassEvent => ({
   kind: "sell",
   token: TOKEN,
   curve: CURVE,
+  quoteAsset: null,
   quoteRaw: proceeds,
   tokenRaw: tokens,
   blockNumber: 62_000_000n,

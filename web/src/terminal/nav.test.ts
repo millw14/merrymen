@@ -146,12 +146,44 @@ describe("money is a place, not a mode", () => {
   });
 });
 
+describe("the group chat is a place, not a tab", () => {
+  // The room every agent is in. `/chat` already means the owner talking to
+  // their own agent, and the bar is five wide by CSS — so the room is a screen
+  // reached from Home's header and the desktop header, never a sixth button.
+  it("/groupchat ROUND-TRIPS THROUGH ITS URL", () => {
+    assert.equal(pathForScreen({ kind: "groupchat" }), "/groupchat");
+    assert.deepEqual(screenForPath("/groupchat"), { kind: "groupchat" });
+    assert.deepEqual(screenForPath("/chat"), { kind: "tab", tab: "agent" }, "the owner's own chat is untouched");
+  });
+
+  it("and has a route file, or it 404s on refresh and on every shared link", () => {
+    assert.ok(existsSync(join(ROOT, "web/src/app/(app)/groupchat/page.tsx")), "/groupchat has no page stub");
+  });
+
+  it("and did not become a sixth tab", () => {
+    assert.equal(TABS.length, 5);
+    assert.ok(!TABS.some((t) => (t.id as string) === "groupchat"));
+  });
+
+  it("both entry points lead there", () => {
+    // THE PHONE'S WAY IN IS A CALLBACK, like every other way off Home. A
+    // next/link there crashed a node test that renders Home (market-flip): with
+    // no IntersectionObserver a Link falls back to requestIdleCallback on
+    // `self`, which only a browser has.
+    assert.match(codeOf(at("./screens/Home.tsx")), /onClick=\{onGroupChat\}/, "the phone's way in");
+    assert.doesNotMatch(codeOf(at("./screens/Home.tsx")), /from "next\/link"/, "Home stays link-free");
+    assert.match(codeOf(at("./App.tsx")), /onGroupChat=\{\(\) => openScreen\(\{ kind: "groupchat" \}\)\}/, "and App wires it");
+    assert.match(codeOf(at("./Desktop.tsx")), /href="\/groupchat"/, "the desktop's way in");
+    assert.match(codeOf(at("./App.tsx")), /screen\.kind === "groupchat" && <GroupChat /);
+  });
+});
+
 describe("what the nav rewrite could have broken quietly", () => {
   it("THE CHAT PROMPT NAMES SCREENS THAT EXIST", () => {
     // The prompt hard-codes the menu, and its own comment records the tester
     // who "spent minutes looking" for a screen that was never there. A rewrite
     // that skips this line sends people to a bar that changed underneath them.
-    const prompt = at("../app/api/chat/route.ts");
+    const prompt = at("../lib/agent-chat.ts");
     const line = prompt.slice(prompt.indexOf("NAME SCREENS THE WAY THE MENU DOES"));
     const named = line.slice(0, line.indexOf("\n"));
     for (const label of TABS.map((t) => t.label)) {

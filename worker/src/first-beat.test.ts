@@ -51,10 +51,11 @@ const HOSTED_TICK_SEC = 240;
 
 describe("a process that has started is alive", () => {
   it("THE WORKER BEATS BEFORE ITS STAGGERED WAIT", () => {
-    // The whole bug, in one assertion. `setTimeout(runLoop, slot)` may be a
-    // whole tick away; the file has to exist before it.
+    // The whole bug, in one assertion. `tickClock.start(slot)` — the first
+    // regular tick on the clock — may be a whole tick away; the file has to
+    // exist before it.
     const beat = INDEX.indexOf('beatFile("idle"');
-    const wait = INDEX.indexOf("setTimeout(runLoop, slot)");
+    const wait = INDEX.indexOf("tickClock.start(slot)");
     assert.ok(beat > 0, "the worker must write a heartbeat at startup");
     assert.ok(wait > 0 && beat < wait, "…and it must do so BEFORE the staggered wait");
   });

@@ -15,8 +15,20 @@ import {
   curveGraduated,
   curveMinOut,
 } from "../venues/pons-price";
-import type { Snapshot, Tick } from "./types";
+import { breakerIdle, breakerTripped, opsSpent, type Snapshot, type Tick } from "./types";
 import type { Why } from "./reasons";
+
+/**
+ * The smallest park worth proposing: one cent, raw USDG (6dp).
+ *
+ * A RENDERING FLOOR, NOT A RISK SETTING. usdg() prints to two decimals, so any
+ * amount below this renders as "0.00 USDG" — and a real intent for an amount
+ * the sentence beside it calls zero is how "vault-deposit 0.00 USDG" reached
+ * the public feed with a refusal badge on it. Nothing about WHEN cash above the
+ * idle floor is parked changes; only that a park must be an amount somebody
+ * could see.
+ */
+export const MIN_PARK_RAW = 10_000n;
 
 export type { Snapshot };
 
@@ -91,10 +103,24 @@ export interface SteadyBasketConfig {
 export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick {
   if (!snap.sequencerUp) return { intents: [], why: [] };
 
+  // ── THE DAY'S TRADE COUNT, READ BEFORE ANYTHING THAT SPENDS ONE ─────────
+  //
+  // The budget clamp below fixed "refused again" for the MONEY and left the
+  // COUNT exactly as it was: with `maxOpsPerDay` used up and budget to spare,
+  // this proposed the same legs every tick and the wall refused every one with
+  // `ops-cap`. So a buy, a park and an unpark are all withheld here — each is
+  // one operation, and none is an exit the wall exempts. The take-profit sell
+  // is untouched: the count does not bind it, so neither may this.
+  const countSpent = opsSpent(snap);
+  // THE DRAWDOWN BREAKER BINDS THE BUYS, and only the buys. Tripped, the wall
+  // refuses every buy and every park with `drawdown-breaker`; the take-profit
+  // and the unpark bring money home, which the breaker never blocks.
+  const braked = breakerTripped(snap);
+
   // Cash can't cover a buy but the vault can: pull enough back to fund the next
   // tick's buy plus the liquidity floor. Withdraw-only tick — buys resume next
   // tick once the cash has actually landed.
-  if (snap.cashUsdg < cfg.buyPerTickUsdg && snap.vaultUsdg > 0n) {
+  if (!countSpent && snap.cashUsdg < cfg.buyPerTickUsdg && snap.vaultUsdg > 0n) {
     const need = cfg.buyPerTickUsdg + cfg.idleFloorUsdg - snap.cashUsdg;
     const amountUsdg = need > snap.vaultUsdg ? snap.vaultUsdg : need;
     return {
@@ -173,8 +199,9 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   // `all-legs-stale` and `under-one-buy`.
   const budgetToday = snap.spendHeadroomUsdg;
   const budgetSpent = budgetToday <= 0n;
+  const buyBudget = cfg.buyPerTickUsdg < snap.cashUsdg ? cfg.buyPerTickUsdg : snap.cashUsdg;
 
-  if (!budgetSpent && snap.cashUsdg >= cfg.buyPerTickUsdg) {
+  if (!budgetSpent && !countSpent && !braked && buyBudget > 0n) {
     for (const leg of cfg.legs) {
       if (snap.pausedTokens.has(leg.token.toLowerCase())) {
         skippedPaused += 1;
@@ -184,7 +211,7 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
         skippedStale += 1;
         continue; // no reference price → no trade
       }
-      const wanted = (cfg.buyPerTickUsdg * BigInt(leg.weightBps)) / 10_000n;
+      const wanted = (buyBudget * BigInt(leg.weightBps)) / 10_000n;
       // CLAMP TO WHAT IS LEFT, per leg, as the legs consume it. Gating the loop
       // on `budgetToday > 0` alone would still propose a full 25 against a
       // headroom of 3 and be refused — the same dead loop, one tick later.
@@ -193,7 +220,8 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
         0n,
       );
       const room = budgetToday - alreadyProposed;
-      const legAmount = wanted < room ? wanted : room;
+      const available = wanted < room ? wanted : room;
+      const legAmount = available < snap.perTradeCapUsdg ? available : snap.perTradeCapUsdg;
       // A leg that rounds to nothing is not a trade. This also ends the loop
       // cleanly once the budget is exhausted mid-basket, rather than pushing
       // zero-sized intents that `non-positive` would refuse.
@@ -216,8 +244,13 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
     }
   }
 
-  const idleAfterBuys = snap.cashUsdg - (intents.length ? cfg.buyPerTickUsdg : 0n);
-  if (idleAfterBuys > cfg.idleFloorUsdg) {
+  // A sell consumes turnover headroom but does not spend existing cash. Do not
+  // count its proceeds until they settle, or reserve a full ticket for skipped legs.
+  const cashSpent = intents.reduce((sum, i) => sum +
+    (i.kind === "swap" && i.sellToken === cfg.usdg ? i.sellAmountRaw : 0n), 0n);
+  const idleAfterBuys = snap.cashUsdg - cashSpent;
+  // A deposit is an operation too, and the wall counts it like a buy.
+  if (!countSpent && !braked && idleAfterBuys > cfg.idleFloorUsdg) {
     const excess = idleAfterBuys - cfg.idleFloorUsdg;
     // Size the sweep to what the wall will actually take. A deposit is capped at
     // the DAILY limit (policy.ts), and this tick's buys have already eaten into
@@ -252,7 +285,13 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
     const reserve = oneBuy <= roomToday ? oneBuy : 0n;
     const headroom = roomToday > reserve ? roomToday - reserve : 0n;
     const amountUsdg = excess < headroom ? excess : headroom;
-    if (amountUsdg > 0n) {
+    // NOT DUST. This was `> 0n`, and a sub-cent excess produced a real intent
+    // for an amount the sentence beside it renders as "0.00 USDG" — the wall
+    // refused it, and the refusal went out as a public post reading
+    // "vault-deposit 0.00 USDG". The floor is the smallest amount usdg() can
+    // print as non-zero; it is a rendering floor, not a risk setting, and it
+    // changes nothing about when cash above the idle floor gets parked.
+    if (amountUsdg >= MIN_PARK_RAW) {
       intents.push({ kind: "vault-deposit", target: cfg.vault, amountUsdg });
       // `clamped` when the daily budget cut the sweep short. Saying 'parked the
       // idle cash' while parking part of it would leave the sentence and the
@@ -275,9 +314,9 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   // wrong. A sweep to the vault is not a buy, so this still fires beside one:
   // over a weekend that sweep is the only thing an agent does, and its owner is
   // still owed the sentence about why.
-  const bought = intents.some((i) => i.kind === "swap");
+  const bought = intents.some((i) => i.kind === "swap" && i.sellToken === cfg.usdg);
   const shut =
-    !bought && snap.cashUsdg >= cfg.buyPerTickUsdg && skippedStale + skippedPaused === cfg.legs.length && cfg.legs.length > 0;
+    !bought && buyBudget > 0n && skippedStale + skippedPaused === cfg.legs.length && cfg.legs.length > 0;
 
   // ── THE 24/7 FALLBACK ────────────────────────────────────────────────
   //
@@ -292,7 +331,7 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   // basket ("trade it") and the address is in their signature ("you may").
   // registry.ts calls that pairing deliberately not automatic, and it stays
   // that way: a coin the owner merely WATCHES is not reachable from here.
-  if (shut && cfg.curve) {
+  if (shut && cfg.curve && snap.cashUsdg >= cfg.buyPerTickUsdg) {
     const pick = pickCurveBuy(cfg, snap);
     if (pick) {
       intents.push(pick.intent);
@@ -324,8 +363,16 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   // moment. Behind `shut`, because a closed market is the more fundamental fact
   // — there would be nothing to buy either way.
   const spent = !bought && cfg.legs.length > 0 && budgetSpent;
-  const idle: Why | undefined =
-    shut && !boughtCurve
+  // The count's version of the same silence, ranked just behind it: when both
+  // are spent both sentences are true, and the money one is the sentence owners
+  // already know. Ahead of `short` for the reason `spent` is — cash is not what
+  // is stopping a buy the count forbids.
+  const counted = !bought && cfg.legs.length > 0 && countSpent;
+  // Ahead of every other silence: with the breaker tripped nothing else on
+  // this list could have bought either, and this is the one that says why.
+  const brake = !bought && cfg.legs.length > 0 ? breakerIdle(snap) : undefined;
+  const idle: Why | undefined = brake ??
+    (shut && !boughtCurve
       ? {
           code: "all-legs-stale",
           legs: cfg.legs.length,
@@ -336,6 +383,8 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
         }
       : spent
         ? { code: "budget-spent", capRaw: cfg.buyPerTickUsdg }
+        : counted
+        ? { code: "ops-spent" }
         : short
         ? {
             code: "under-one-buy",
@@ -345,7 +394,7 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
             // clears itself on the unpark, and without it the owner has to act.
             vaultRaw: snap.vaultUsdg,
           }
-        : undefined;
+        : undefined);
 
   return idle ? { intents, why, idle } : { intents, why };
 }

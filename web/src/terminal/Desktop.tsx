@@ -1,6 +1,9 @@
 import { useRef, useState } from "react";
+import { AgentStrip } from "./AgentStrip";
 import Link from "next/link";
 import { useWatchlist } from "./watchlist";
+import { useGroupChatSupported } from "./groupchat";
+import { CONNECT_ASSISTANT_HREF, useConnectAssistantOffered } from "./assistant-connect";
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -9,7 +12,7 @@ import {
   ArrowDownWideNarrow,
   ChevronDown,
 } from "lucide-react";
-import { Coin, Face, LogoMark, TabIcon, NameBlock } from "./ui";
+import { Coin, Face, LogoMark, TabIcon, NameBlock, MovingFigure } from "./ui";
 import {
   money,
   coinPrice,
@@ -25,7 +28,7 @@ import {
   deltaClass,
   type LiveState,
 } from "./live";
-import { positionsOf } from "./account";
+import { positionFigures, positionsOf } from "./account";
 import { BalanceFigure } from "./studio";
 import { strategyName } from "./strategy";
 import { Feed } from "./screens/Feed";
@@ -51,6 +54,10 @@ export function DesktopHeader({
 }: Actions & { hasAgent?: boolean; mine: LiveMine }) {
   const accountMenu = useRef<HTMLDetailsElement>(null);
   const closeAccountMenu = () => { if(accountMenu.current) accountMenu.current.open = false; };
+  // The desktop's way into the group chat; hidden where the install has no room.
+  const room = useGroupChatSupported();
+  // The way into /connect/mcp; hidden on a self-hosted install, which has none.
+  const assistants = useConnectAssistantOffered();
   return (
     <header className="desktop-header">
       <button
@@ -75,6 +82,7 @@ export function DesktopHeader({
         <span>Search tokens or agents</span>
       </button>
       <div className="desktop-header-account">
+        {room && <Link className="desktop-settings-link" href="/groupchat">Group chat</Link>}
         <Link className="desktop-settings-link" href="/settings">Settings</Link>
         {/* THE LABEL CARRIES THE TRUTH, not a caption under it. Someone who has
             already read "$964" as their deposit does not go on to read a
@@ -96,6 +104,7 @@ export function DesktopHeader({
             <Link href="/settings">Settings</Link>
             <Link href="/grant">Wallet & permissions</Link>
             <Link href="/limits">Trading limits</Link>
+            {assistants && <Link href={CONNECT_ASSISTANT_HREF}>Connect to Claude</Link>}
             {!hasAgent && <Link href="/create">Create an agent</Link>}
           </nav>
         </details>
@@ -115,9 +124,12 @@ export function DesktopSidebar({
   onScreen,
   onTab,
   reads,
+  retired = null,
 }: Actions & {
   /** Whether each read happened — an empty list is not automatically a quiet one. */
   reads: LiveState["reads"];
+  /** Accounts the board folded into a count. See Board. */
+  retired?: number | null;
   tokens: LiveToken[];
   agents: LiveAgent[];
   theses: Thesis[];
@@ -232,7 +244,7 @@ export function DesktopSidebar({
                 <small>{t.name}</small>
               </span>
               <span>
-                <strong title={quoteTitle(t)}>{coinPrice(t.priceUsd)}</strong>
+                <strong title={quoteTitle(t)}><MovingFigure value={t.priceUsd} text={coinPrice(t.priceUsd)} /></strong>
                 <small className={deltaClass(t.change24hPct)}>
                   {pctPts(t.change24hPct)}
                 </small>
@@ -270,7 +282,7 @@ export function DesktopSidebar({
           <h2>Your agents</h2>
           <span>{hasAgent ? "1 agent" : "0 agents"}</span>
         </div>
-        {hasAgent && <button className="sidebar-agent" onClick={() => onTab("agent")}>
+        {hasAgent && <button className="sidebar-agent" data-tour="your-agent" onClick={() => onTab("agent")}>
           <Face name={mine.name} slug={mine.slug} />
           <span>
             <strong>{mine.name}</strong>
@@ -305,19 +317,19 @@ export function DesktopSidebar({
                   */}
                   <small>{tradeLine(a)}</small>
                 </span>
-                <span aria-label={`Return ${pctBps(a.pnlBps)}, ${tradeLine(a)}`}>
+                <span aria-label={`Return ${pctBps((a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps))}, ${tradeLine(a)}`}>
                   <strong
                     className={
-                      a.pnlBps == null
+                      (a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps) == null
                         ? ""
-                        : a.pnlBps < 0
+                        : (a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps)! < 0
                           ? "down"
-                          : a.pnlBps > 0
+                          : (a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps)! > 0
                             ? "up"
                             : ""
                     }
                   >
-                    {pctBps(a.pnlBps)}
+                    {pctBps((a.mode === "paper" ? a.paperPnlBps ?? null : a.pnlBps))}
                   </strong>
                 </span>
               </button>
@@ -352,6 +364,7 @@ export function DesktopSidebar({
         {section === "board" && <Board
           compact
           read={reads.board}
+          retired={retired}
           agents={agents}
           theses={theses}
           mine={mine}
@@ -376,8 +389,9 @@ export function DesktopPortfolio({
   selectedToken?: LiveToken;
   tokens: LiveToken[];
   stopped: boolean;
-  perTrade: string;
-  perDay: string;
+  /** Null until the signed caps are read — drawn as a dash, never as $0.00. */
+  perTrade: number | null;
+  perDay: number | null;
 }) {
   return (
     <aside className="desktop-portfolio" aria-label="Your portfolio">
@@ -451,6 +465,23 @@ export function DesktopPortfolio({
             </button>
           </div>
         )}
+        {/* WHAT IS CONNECTED — the same two lines the phone shows on Home.
+
+            Home.tsx only renders below 1100px: above it, App swaps the home
+            and feed tabs for the desktop detail pane, so a desktop owner
+            never saw the strip at all and Telegram went back to being a
+            collapsed drawer eight blocks down the settings form.
+
+            THE SAME COMPONENT, NOT A SECOND COPY. It fetches its own two
+            readings and renders one list; a desktop-shaped duplicate would
+            be a second set of words to drift out of step with the phone's,
+            which is exactly how the settings screen ended up printing
+            "no token" for a fetch that had simply failed.
+
+            `hasAgent` is true by construction here: this component takes a
+            non-nullable `LiveMine`, and App renders it only on `desktop &&
+            mine`. The type is the gate. */}
+        <AgentStrip hasAgent />
       </section>
       {selectedToken && (
         <section className="desktop-token-context">
@@ -493,6 +524,8 @@ export function DesktopPortfolio({
         </div>
         {positionsOf(mine).map((p) => {
           const t = tokens.find((t) => t.symbol === p.symbol);
+          // The value AND the %, never one standing in for the other — see positionFigures.
+          const f = positionFigures(p);
           return (
             <button
               key={p.symbol}
@@ -502,8 +535,9 @@ export function DesktopPortfolio({
             >
               <Coin symbol={p.symbol} logo={t?.logo ?? ""} />
               <strong>{p.symbol}</strong>
-              <span className={p.pnl == null ? "" : p.pnl < 0 ? "down" : "up"}>
-                {p.pnl == null ? p.detail : pctPts(p.pnl)}
+              <span>
+                {f.value}
+                {f.pct !== null && <> · <span className={f.tone}>{f.pct}</span></>}
               </span>
             </button>
           );
@@ -521,11 +555,11 @@ export function DesktopPortfolio({
         </div>
         <div className="desktop-cash">
           <span>Per trade</span>
-          <strong>{money(Number(perTrade))}</strong>
+          <strong>{money(perTrade)}</strong>
         </div>
         <div className="desktop-cash">
           <span>Per day</span>
-          <strong>{money(Number(perDay))}</strong>
+          <strong>{money(perDay)}</strong>
         </div>
         <button className="desktop-chat-link" onClick={() => onTab("agent")}>
           Chat with {mine.name}

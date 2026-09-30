@@ -27,16 +27,13 @@ import { after, describe, it } from "node:test";
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-cashrow-"));
 process.env.MERRYMEN_HOME = HOME;
 
-const { initStore, classPositions, upsertClassPosition, writeClassLedger } = await import("./store");
+const { closeStoreForTest, initStore, classPositions, upsertClassPosition, writeClassLedger } = await import("./store");
 const { CASH } = await import("../../packages/core/src/index");
 
 await initStore();
 after(() => {
-  try {
-    rmSync(HOME, { recursive: true, force: true });
-  } catch {
-    /* Windows holds the sqlite handle a moment longer; the dir is disposable */
-  }
+  closeStoreForTest();
+  rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const AGENT = "0x05a198a677fbcd8f5c168d397fa7ef5eb6d65487";

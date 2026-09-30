@@ -1,3 +1,5 @@
+import { safeFetchUrl } from "../../../packages/core/src/safe-url";
+
 /**
  * What a launched token's logo URI is allowed to become.
  *
@@ -41,15 +43,9 @@ export function resolveLogo(raw: string): string[] {
 /**
  * Refuse a host that would turn the proxy into a probe of its own network.
  *
- * A guard, not a proof: a DNS name that RESOLVES to a private address is not
- * caught here, because that needs resolution before connect and `fetch` does
- * not expose it. The response size cap and the timeout are the rest of the
- * answer, and the proxy returns only `image/*` bodies regardless.
+ * This client-safe screen is shared with research. The route additionally
+ * resolves DNS and pins the actual connection through the Node transport.
  */
 export function safeHost(u: URL): boolean {
-  const h = u.hostname.toLowerCase();
-  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".internal")) return false;
-  if (/^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h)) return false;
-  if (h === "[::1]" || h.startsWith("[fc") || h.startsWith("[fd")) return false;
-  return true;
+  return safeFetchUrl(u.href) !== null;
 }

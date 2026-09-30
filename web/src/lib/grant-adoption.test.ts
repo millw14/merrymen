@@ -131,7 +131,7 @@ describe("the chat no longer refuses what it can do", () => {
     // here" while the command registry — appended to the same prompt,
     // unconditionally — carries set-strategy, set-size, set-basket, buy, sell,
     // open-deposit and the rest. It was following the older line.
-    const chat = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8");
+    const chat = readFileSync(new URL("./agent-chat.ts", import.meta.url), "utf8");
     assert.ok(
       !chat.includes("you can't do it in a chat reply"),
       "the line that told it to refuse must be gone",
@@ -143,7 +143,7 @@ describe("the chat no longer refuses what it can do", () => {
   });
 
   it("and the command block is still appended unconditionally", () => {
-    const chat = readFileSync(new URL("../app/api/chat/route.ts", import.meta.url), "utf8");
+    const chat = readFileSync(new URL("./agent-chat.ts", import.meta.url), "utf8");
     assert.match(chat, /system: SYSTEM \+ COMMANDS/);
   });
 });

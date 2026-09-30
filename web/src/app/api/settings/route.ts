@@ -20,6 +20,7 @@ import {
   SETTINGS_DEFAULTS,
   SLIPPAGE_BPS_MAX,
   STOCK_TOKENS,
+  TELEGRAM_GROUPS_CHATTINESS,
   isHostedMode,
   isValidCustomToken,
   officialCoinsFor,
@@ -28,7 +29,21 @@ import {
   type MerrymenSettings,
 } from "@merrymen/core";
 import { tenantOf } from "@/lib/auth";
+import { OWNER_CHANGED_SETTING, ownerMismatch } from "@/lib/order-owner";
+import { parseAmount, settingDecimals } from "@/lib/parse-amount";
 import { getSettingsStore } from "@merrymen/settings-store";
+import { agentNameSave } from "@/lib/settings-agent-name";
+import { clearsStaleProviderModel } from "@/lib/settings-llm-model";
+import { withoutEnergyReserve, withoutReserveBasket } from "@/lib/energy-reserve";
+import {
+  botClaimForSave,
+  isBotToken,
+  NOT_A_BOT_TOKEN_TEXT,
+  SAVE_BUSY,
+  SETTINGS_BUSY_TEXT,
+  withSettingsSaveLock,
+  type SaveClaims,
+} from "@/lib/telegram-claims";
 
 export const dynamic = "force-dynamic";
 
@@ -68,6 +83,23 @@ export interface SettingsView {
   strategies: { builtin: string[]; custom: string[] };
   /** The AI providers the brain can run on — powers the Settings picker. */
   llmProviders: LlmProviderInfo[];
+  /**
+   * WHOSE SETTINGS THESE ARE — the signed-in tenant the values were read for,
+   * hosted; null self-hosted, where the box has one operator.
+   *
+   * The Settings form sends it back with its save, and the PUT refuses a body
+   * that names someone other than the session (409 OWNER_CHANGED_SETTING).
+   * Another tab can sign a different wallet in unseen, and without this the
+   * form open on screen — loaded for one wallet — saved its edits to the other
+   * wallet's agent: "Trade for real" turned on for an agent its owner never
+   * looked at, while this tab said "Changes saved". Carried in the same answer
+   * as the values, so the claim is exactly whose values the form shows.
+   *
+   * "" when hosted and signed out: the form showed nobody's values, so its
+   * save names nobody, and the PUT refuses it for whichever wallet signs in
+   * before it goes out (a 7-day session can lapse with the page open).
+   */
+  owner: string | null;
 }
 
 const STRATEGIES_DIR = homePaths.strategies();
@@ -94,7 +126,7 @@ async function readStored(tenant?: `0x${string}` | null): Promise<MerrymenSettin
   if (tenant) return (await getSettingsStore().get(tenant)) ?? {};
   try {
     // BOM-strip: hand-edited or PowerShell-written files may carry a UTF-8 BOM.
-    return JSON.parse((await readFile(SETTINGS_FILE, "utf8")).replace(/^﻿/, "")) as MerrymenSettings;
+    return JSON.parse((await readFile(SETTINGS_FILE, "utf8")).replace(/^\ufeff/, "")) as MerrymenSettings;
   } catch {
     return {};
   }
@@ -131,6 +163,7 @@ export async function GET(req: Request) {
   const tenant = isHostedMode() ? tenantOf(req) : null;
   const stored: MerrymenSettings = isHostedMode() && !tenant ? {} : await readStored(tenant);
   const { bundlerApiKey, groqApiKey, anthropicApiKey, llmApiKey, rialtoApiKey, telegramBotToken, telegramTranscribeKey, virtualsApiKey, bitqueryApiKey, merrymenToken, ...values } = stored;
+  const servedTokens = withoutEnergyReserve(values.customTokens);
   // These URL fields can embed API keys — redact before they leave the server.
   const safeValues = {
     ...values,
@@ -138,6 +171,13 @@ export async function GET(req: Request) {
     rpcMainnet: redactUrl(values.rpcMainnet),
     rpcTestnet: redactUrl(values.rpcTestnet),
     telegramTranscribeBase: redactUrl(values.telegramTranscribeBase),
+    // Every signer builds its wall from this list — an old iOS engine or a
+    // stale tab would seal $MERRYMEN from it and be refused (energy-reserve.ts).
+    customTokens: servedTokens,
+    // AND THE BASKET SYMBOL ONLY THAT RESERVE ENTRY SUPPLIED, or every client
+    // that saves both fields is refused for a coin its own list no longer
+    // has (energy-reserve.ts withoutReserveBasket). Read-side, like the above.
+    basketSymbols: withoutReserveBasket(values.basketSymbols, values.customTokens, selectableSymbols(servedTokens)),
   };
   const view: SettingsView = {
     bundlerApiKey: mask(bundlerApiKey),
@@ -156,12 +196,19 @@ export async function GET(req: Request) {
     officialCoins: officialCoinsFor(robinhoodChain.id).map((c) => c.symbol),
     strategies: { builtin: BUILTIN_STRATEGIES, custom: await listCustomStrategies() },
     llmProviders: LLM_PROVIDERS,
+    owner: isHostedMode() ? (tenant ?? "") : null,
   };
   return NextResponse.json(view);
 }
 
 const KNOWN_SYMBOLS = new Set(STOCK_TOKENS.map((t) => t.symbol));
+/** What a basket may name: the registry's stocks plus these custom tokens' symbols — the PUT's own rule. */
+function selectableSymbols(custom: unknown): Set<string> {
+  const customSymbols = Array.isArray(custom) ? custom.filter(isValidCustomToken).map((t) => t.symbol) : [];
+  return new Set([...KNOWN_SYMBOLS, ...customSymbols]);
+}
 const URL_FIELDS = ["bundlerUrl", "rpcMainnet", "rpcTestnet"] as const;
+
 const NUM_FIELDS: Record<string, [number, number]> = {
   // Imported, never a literal. This entry and the worker's own clamp are two
   // enforcement points for one rule, and they read 5_000 and 5_000 while the
@@ -223,12 +270,18 @@ const NUM_FIELDS: Record<string, [number, number]> = {
   // follow.
   classPerEntryUsdg: [0, 1_000_000],
   classMaxPositions: [0, 1_000],
+  classMaxHoldSec: [60, 30 * 86_400],
   classMinDepthUsdg: [0, 10_000_000],
   // THE TRADING PROFILE'S TWO NUMBERS. A conviction floor is a fraction, so
   // this loop's Number.isFinite range check is the right shape; the top-N is
   // bounded because each researched candidate is a paid Brain run.
   profileConvictionMin: [0, 1],
   profileResearchTopN: [1, 5],
+  // The class exit by curve progress: the worker's clamp (settings.ts, 1-100)
+  // and the chat spec's bounds. It was missing, so a change approved from an
+  // assistant or saved from a client came back {ok:true, ignored:[…]} and
+  // the owner's exit never moved (spec-coverage.test.ts holds the two lists equal).
+  classExitAtGraduationPct: [1, 100],
 };
 const BOOL_FIELDS = [
   "paperTradingEnabled",
@@ -265,6 +318,7 @@ const BOOL_FIELDS = [
   "telegramAgentAutoShell",
   "virtualsEnabled",
   "trencherLiveEnabled",
+  "trencherFastEnabled",
   "scoutEnabled",
   // BUYING A TOKEN NOBODY ENUMERATED. See MerrymenSettings.classSnipeEnabled
   // for what this actually permits. It is a SECOND decision on top of sealing a
@@ -278,6 +332,14 @@ const BOOL_FIELDS = [
   // MerrymenSettings.officialCoinsEnabled.
   "officialCoinsEnabled",
   "discoveryEnabled",
+  // TELEGRAM GROUPS (docs/tg-groups.md "Settings"). Both default ON, so — like
+  // officialCoinsEnabled above — this entry is what makes OFF reachable: missing
+  // here, an owner's "stop looking at coins people post" would come back
+  // {ok:true, ignored} while the bot kept looking. Dashboard-only by design
+  // (the chat refuses them, DASHBOARD_ONLY.telegramGroups), and tenant-settable:
+  // how the owner's bot behaves in the owner's groups is the owner's call.
+  "telegramGroupsEnabled",
+  "telegramGroupCoinsEnabled",
 ] as const;
 /** Telegram PC string-array allowlists: (field, per-entry maxLen). */
 const STR_ARRAY_FIELDS: Record<string, number> = {
@@ -293,6 +355,15 @@ export async function PUT(req: Request) {
   } catch {
     return NextResponse.json({ errors: ["body is not JSON"] }, { status: 400 });
   }
+  // THE OWNER WHO CONFIRMED, when a chat card sent this (lib/order-owner.ts).
+  // Not a setting: taken off before anything below reads the body, so it is
+  // never stored and never reported as an unknown key.
+  const claimedOwner = (body as { owner?: unknown } | null)?.owner;
+  if (body && typeof body === "object") delete (body as Record<string, unknown>).owner;
+  // "MOVE IT HERE", the owner's answer to a 409 bot_claimed (lib/telegram-claims.ts).
+  // Not a setting either, and taken off the same way. Only `true` moves.
+  const moveBot = (body as { moveBot?: unknown } | null)?.moveBot === true;
+  if (body && typeof body === "object") delete (body as Record<string, unknown>).moveBot;
 
   let tenant: `0x${string}` | null = null;
   if (isHostedMode()) {
@@ -304,6 +375,11 @@ export async function PUT(req: Request) {
     // tenant still could.
     tenant = tenantOf(req);
     if (!tenant) return NextResponse.json({ errors: ["not signed in"] }, { status: 401 });
+    // FOR THE OWNER WHO CONFIRMED IT, OR NOT AT ALL — before any field is read
+    // or written. Another tab can sign a different wallet in unseen, and a
+    // chat card's change would otherwise be made to that wallet's agent. A
+    // body that names nobody (the Settings screen's own form) is judged as before.
+    if (ownerMismatch(claimedOwner, tenant)) return NextResponse.json({ errors: [OWNER_CHANGED_SETTING] }, { status: 409 });
     // Drop every house-key + remote-execution field before the handler sees it.
     // Silent strip, not a 4xx: a normal save echoes back masked/empty secret
     // fields, and rejecting the whole payload for their mere presence would break
@@ -311,6 +387,28 @@ export async function PUT(req: Request) {
     for (const k of HOSTED_FORBIDDEN_SETTING_FIELDS) delete (body as Record<string, unknown>)[k];
   }
 
+  if (!tenant) return saveSettings(body, null, moveBot, { db: null });
+  // ONE SAVE AT A TIME PER ACCOUNT, from the read below to the claims settled
+  // after the write: a save that read before another one wrote would write
+  // back what that one changed, the token included (lib/telegram-claims.ts
+  // withSettingsSaveLock). Held on the shared database, across web processes.
+  const account = tenant;
+  const saved = await withSettingsSaveLock(account, (claims) => saveSettings(body, account, moveBot, claims));
+  if (saved === SAVE_BUSY) return NextResponse.json({ error: "settings_busy", errors: [SETTINGS_BUSY_TEXT] }, { status: 503 });
+  return saved;
+}
+
+/**
+ * The save itself: everything from reading what is stored to writing it back.
+ * Hosted, it runs under the account's save lock, and `claims` is the database
+ * connection that lock is held on (see PUT).
+ */
+async function saveSettings(
+  body: Partial<Record<keyof MerrymenSettings, unknown>>,
+  tenant: `0x${string}` | null,
+  moveBot: boolean,
+  claims: SaveClaims,
+): Promise<NextResponse> {
   const errors: string[] = [];
   const stored = await readStored(tenant);
   const next: MerrymenSettings = { ...stored };
@@ -329,8 +427,15 @@ export async function PUT(req: Request) {
     if (!(key in body) || body[key] === undefined) continue;
     const v = body[key];
     if (v === "" || v === null) setOrClear(key, undefined);
-    else if (typeof v === "string" && v.trim().length >= 8) setOrClear(key, v.trim());
-    else errors.push(`${key}: too short to be a real key`);
+    else if (typeof v !== "string" || v.trim().length < 8) errors.push(`${key}: too short to be a real key`);
+    // A TELEGRAM TOKEN MUST BE ONE. It is pasted into the path of a Bot API
+    // URL, and getMe's answer to that URL decides who holds the bot
+    // (lib/telegram-claims.ts): a "token" carrying '/', '..' or '?' sent the
+    // question to another bot, which answered for the id it was given. No
+    // real token is refused, and a typo is told so now rather than saved to
+    // go unanswered.
+    else if (key === "telegramBotToken" && !isBotToken(v.trim())) errors.push(`${key}: ${NOT_A_BOT_TOKEN_TEXT}`);
+    else setOrClear(key, v.trim());
   }
 
   // ── URLs ────────────────────────────────────────────────────────────────
@@ -357,10 +462,27 @@ export async function PUT(req: Request) {
     const v = body[k];
     if (v === "" || v === null || v === undefined) {
       setOrClear(k, undefined);
-    } else {
-      const n = typeof v === "number" ? v : Number(v);
-      if (Number.isFinite(n) && n >= min && n <= max) setOrClear(k, n as never);
+    } else if (typeof v === "number") {
+      // Already a number, so it came from a JSON client rather than a typed
+      // field. There is no separator to interpret.
+      if (Number.isFinite(v) && v >= min && v <= max) setOrClear(k, v as never);
       else errors.push(`${key}: must be a number between ${min} and ${max}`);
+    } else {
+      // WAS `Number(v)`, AND THAT IS THE ONE PATH IN THIS APP THAT STORED A
+      // WRONG NUMBER RATHER THAN REFUSING. Ten of the fields feeding this loop
+      // are plain text inputs, so the owner's raw keystrokes arrive here
+      // untouched — and `Number("25.000")` is 25, which sits well inside
+      // minPoolLiquidityUsdg's [0, 100_000_000]. A German, Spanish, Italian,
+      // Dutch, Brazilian or Turkish owner setting the price-manipulation guard
+      // to twenty-five thousand stored twenty-five, in range, no error, while
+      // the screen said "Changes saved".
+      const parsed = parseAmount(String(v), { maxDecimals: settingDecimals(key), min, max });
+      if (parsed.ok) setOrClear(k, parsed.value as never);
+      else if (parsed.reason === "ambiguous") {
+        // Two honest readings. Naming both is the only answer that does not
+        // involve guessing which one the owner meant.
+        errors.push(`${key}: "${String(v)}" reads as either ${parsed.readings.join(" or ")}`);
+      } else errors.push(`${key}: must be a number between ${min} and ${max}`);
     }
   }
 
@@ -400,27 +522,14 @@ export async function PUT(req: Request) {
 
   // ── enums ───────────────────────────────────────────────────────────────
   if ("agentName" in body) {
-    const v = body.agentName;
-    // The SAME rule the soul enforces (worker/src/soul.ts NAME_RE), duplicated
-    // deliberately rather than imported: this runs in the web tier and the soul
-    // module touches the filesystem. If the two ever disagree the worker wins
-    // and silently keeps the old name, so the shapes must match exactly.
-    //
-    // THAT INCLUDES THE NORMALISATION, not just the regex. `setName` stores
-    // `raw.trim().replace(/\s+/g, " ")` while this stored a bare `.trim()`, and
-    // the shared regex admits internal double spaces — so "Little  John" was
-    // kept verbatim here and collapsed to "Little John" by the soul. The two
-    // then never agree, which makes `cfg.agentName !== getName()` true forever:
-    // harmless while the reconcile only ran on re-arm, an identity-file rewrite
-    // every tick once it runs unconditionally. Normalise once, at the door.
-    const norm = typeof v === "string" ? v.trim().replace(/\s+/g, " ") : v;
-    if (norm === "" || norm === null || norm === undefined) {
-      setOrClear("agentName", undefined);
-    } else if (typeof norm !== "string" || !/^[A-Za-z0-9][A-Za-z0-9 '.-]{0,23}$/.test(norm)) {
-      errors.push("name: letters and numbers to start, up to 24 characters");
-    } else {
-      setOrClear("agentName", norm);
-    }
+    // The rule, the normalisation and the grandfathering of a stored "007"
+    // live in lib/settings-agent-name.ts, where a test runs them. `stored` is
+    // what this tenant's settings hold NOW, read above — never `next`, which
+    // this same save may already have changed.
+    const save = agentNameSave(body.agentName, stored);
+    if (save.kind === "clear") setOrClear("agentName", undefined);
+    else if (save.kind === "error") errors.push(save.message);
+    else setOrClear("agentName", save.name);
   }
 
   if ("xHandle" in body) {
@@ -522,7 +631,7 @@ export async function PUT(req: Request) {
   if ("llmModel" in body) {
     const v = body.llmModel;
     if (v === "" || v === null || v === undefined) setOrClear("llmModel", undefined);
-    else if (typeof v === "string" && /^[a-z0-9.-]{3,64}$/.test(v.trim()))
+    else if (typeof v === "string" && /^[A-Za-z0-9._/:-]{2,96}$/.test(v.trim()))
       setOrClear("llmModel", v.trim());
     else errors.push("llmModel: must be a model id like claude-opus-4-8");
   }
@@ -531,7 +640,7 @@ export async function PUT(req: Request) {
   if ("groqModel" in body) {
     const v = body.groqModel;
     if (v === "" || v === null || v === undefined) setOrClear("groqModel", undefined);
-    else if (typeof v === "string" && /^[a-z0-9.-]{3,64}$/.test(v.trim()))
+    else if (typeof v === "string" && /^[A-Za-z0-9._/:-]{2,96}$/.test(v.trim()))
       setOrClear("groqModel", v.trim());
     else errors.push("groqModel: must be a model id like qwen/qwen3.8-27b");
   }
@@ -550,14 +659,15 @@ export async function PUT(req: Request) {
     else if (typeof v === "string" && /^https?:\/\/.+/.test(v.trim())) setOrClear("llmBaseUrl", v.trim());
     else errors.push("llmBaseUrl: must be an http(s) URL");
   }
-  // Model id for the selected provider — looser than llmModel: vendor ids carry
-  // slashes and uppercase (e.g. meta-llama/Llama-3.3-70B-Instruct-Turbo).
+  // Model ids remain provider-defined: vendor ids carry slashes and uppercase
+  // (e.g. meta-llama/Llama-3.3-70B-Instruct-Turbo), including Groq's catalog.
   if ("llmProviderModel" in body) {
     const v = body.llmProviderModel;
     if (v === "" || v === null || v === undefined) setOrClear("llmProviderModel", undefined);
     else if (typeof v === "string" && /^[A-Za-z0-9._/:-]{2,96}$/.test(v.trim())) setOrClear("llmProviderModel", v.trim());
     else errors.push("llmProviderModel: must be a model id (letters, digits, . _ / : -)");
   }
+  if (clearsStaleProviderModel(stored, next, body)) setOrClear("llmProviderModel", undefined);
   // PC files root — an absolute path (or blank to disable file ops).
   if ("telegramFilesRoot" in body) {
     const v = body.telegramFilesRoot;
@@ -611,6 +721,47 @@ export async function PUT(req: Request) {
     if (v === null || v === undefined || v === "") setOrClear(k, undefined);
     else if (typeof v === "string" && (allowed as readonly string[]).includes(v)) setOrClear(k, v as never);
     else errors.push(`${key}: must be one of ${allowed.join(", ")}`);
+  }
+
+  /**
+   * ── Telegram groups: how often it joins in ───────────────────────────
+   *
+   * ITS OWN BRANCH for the reason assetMode has one: a string enum fits
+   * neither table, and a key no branch reads is dropped with {ok:true}.
+   * Validated against core's one list, the same one the worker resolves with,
+   * so a level this route accepts is never one the worker quietly reads as
+   * "normal". Anything else is REFUSED rather than stored — the resolver would
+   * silently fall back, and the screen would go on showing a level that is not
+   * the one in force. Null or "" clears back to the default.
+   */
+  if ("telegramGroupsChattiness" in body) {
+    const v = body.telegramGroupsChattiness;
+    if (v === null || v === undefined || v === "") setOrClear("telegramGroupsChattiness", undefined);
+    else if (typeof v === "string" && (TELEGRAM_GROUPS_CHATTINESS as readonly string[]).includes(v)) setOrClear("telegramGroupsChattiness", v as never);
+    else errors.push("telegramGroupsChattiness: must be quiet, normal or chatty");
+  }
+
+  /**
+   * ── the public book ──────────────────────────────────────────────────
+   *
+   * ITS OWN BRANCH, not a line in `BOOL_FIELDS`, because it is a DISCLOSURE
+   * consent rather than a behaviour switch: turning it on puts this agent's
+   * sizes and dollar P&L on a public URL. read-agent.ts had read it for months
+   * while this handler had no branch, so an owner could not publish their book
+   * at all — the PUT said {ok:true} and dropped the field.
+   *
+   * A real boolean or nothing. "false" is truthy to any reader that forgets
+   * `=== true`, so a string is refused rather than coerced. Null clears back to
+   * the default, which is private.
+   *
+   * Tenant-settable on purpose, like liveTradingEnabled: it is the owner's
+   * decision about the owner's agent, and nothing the house may decide for them.
+   */
+  if ("publicBook" in body) {
+    const v = body.publicBook;
+    if (v === null || v === undefined) setOrClear("publicBook", undefined);
+    else if (typeof v === "boolean") setOrClear("publicBook", v);
+    else errors.push("publicBook: must be true or false");
   }
 
   // ── booleans (telegram toggles) ─────────────────────────────────────────
@@ -670,14 +821,20 @@ export async function PUT(req: Request) {
       // saving (or, absent that, what's already stored), so adding a token and
       // selecting it in one save works.
       const custom = ("customTokens" in body ? body.customTokens : stored.customTokens) ?? [];
-      const customSymbols = Array.isArray(custom)
-        ? custom.filter(isValidCustomToken).map((t) => t.symbol)
-        : [];
-      const selectable = new Set([...KNOWN_SYMBOLS, ...customSymbols]);
-      const bad = v.filter((s) => typeof s !== "string" || !selectable.has(s));
+      const selectable = selectableSymbols(custom);
+      // A SYMBOL ONLY THE ENERGY RESERVE SUPPLIED IS DROPPED, NOT REFUSED. GET
+      // no longer serves the reserve, so a client built on an older view (or a
+      // stored basket that outlived its reserve entry) still sends MERRYMEN
+      // with nothing left to select it by — refusing it left the owner a basket
+      // they could not edit from any client (energy-reserve.ts).
+      const legs = withoutReserveBasket(v as unknown[], [
+        ...(Array.isArray(stored.customTokens) ? stored.customTokens : []),
+        ...(Array.isArray(body.customTokens) ? body.customTokens : []),
+      ], selectable) ?? [];
+      const bad = legs.filter((s) => typeof s !== "string" || !selectable.has(s));
       if (bad.length > 0) errors.push(`basketSymbols: unknown symbols ${bad.join(", ")}`);
-      else if (v.length > 10) errors.push("basketSymbols: at most 10 legs");
-      else setOrClear("basketSymbols", v as string[]);
+      else if (legs.length > 10) errors.push("basketSymbols: at most 10 legs");
+      else setOrClear("basketSymbols", legs.length > 0 ? (legs as string[]) : undefined);
     } else {
       errors.push("basketSymbols: must be an array of symbols");
     }
@@ -709,11 +866,47 @@ export async function PUT(req: Request) {
 
   if (errors.length > 0) return NextResponse.json({ errors }, { status: 400 });
 
+  /**
+   * ONE BOT, ONE TENANT. A save carrying the Telegram token claims its bot
+   * first, so a bot another account holds is refused here, in words the owner
+   * can act on, rather than saved and then quietly never polled: the
+   * orchestrator hands a token only to the account its bot's claim names. The
+   * 409 names no account, and "Move it here" sends the same save back with
+   * `moveBot`, which getMe must confirm. Before the write, so a refusal writes
+   * nothing; undone if the write fails, so a claim never outlives a token that
+   * was not stored. See lib/telegram-claims.ts.
+   *
+   * A save without the token claims nothing and asks nothing, but settles all
+   * the same once it lands. What every save settles on is read back from the
+   * store, not taken from `next`: this PUT's saves take turns, but other
+   * writers of the blob do not (settleBotClaims names them).
+   */
+  const botClaim = await botClaimForSave({
+    tenant,
+    touched: touched.has("telegramBotToken"),
+    next,
+    moveBot,
+    settings: { before: stored, read: (t) => getSettingsStore().get(t) },
+    claims,
+  });
+  if (botClaim && !botClaim.ok) return NextResponse.json(botClaim.body, { status: botClaim.status });
+
   if (tenant) {
     // Hosted: the tenant's own settings go to the per-tenant store (sealed at
     // rest), and the orchestrator hands the child worker a settings.json from it
     // within a reconcile tick.
-    await getSettingsStore().put(tenant, next);
+    try {
+      await getSettingsStore().put(tenant, next);
+    } catch (e) {
+      await botClaim?.undo().catch((u) => console.warn(`[settings] telegram bot claim not undone: ${u instanceof Error ? u.message : String(u)}`));
+      throw e;
+    }
+    // The claims made to match the token stored NOW, read back after this
+    // write: the bot this account left, if it left one, is free for whoever
+    // takes it next, and the one it stores stays claimed. After the write,
+    // and not fatal: the save has landed, and a claim left behind is one the
+    // next save lets go of, or the next owner's move resolves.
+    await botClaim?.settle().catch((e) => console.warn(`[settings] telegram bot claims not settled: ${e instanceof Error ? e.message : String(e)}`));
   } else {
     await mkdir(DATA_DIR, { recursive: true });
     // settings.json holds plaintext API keys (bundler/Groq/Anthropic/Telegram/…) —
@@ -724,6 +917,9 @@ export async function PUT(req: Request) {
   return NextResponse.json({
     ok: true,
     appliesWithin: "one worker tick",
+    // The bot now answers here and nowhere else; its owner links it again
+    // with this agent's code.
+    ...(botClaim?.ok && botClaim.moved ? { botMoved: true } : {}),
     // Present only when something was dropped, so a caller can tell the
     // difference between 'saved' and 'saved, minus the field you cared about'.
     ...(ignored.length > 0 ? { ignored } : {}),
