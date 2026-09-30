@@ -188,6 +188,21 @@ describe("writeBootstrapForChild", () => {
       }
     },
   );
+
+  it("refuses the spawn if a failed replacement also cannot remove the previous anchor", { skip: !posix || process.getuid?.() === 0 }, async () => {
+    const home = childHome(tenant);
+    const file = path.join(home, BOOTSTRAP_FILE);
+    await writeBootstrapForChild(tenant, account);
+    const previous = readFileSync(file, "utf8");
+    chmodSync(home, 0o500);
+    try {
+      await assert.rejects(writeBootstrapForChild(tenant, account), /unsafe bootstrap anchor remains/);
+      assert.equal(readFileSync(file, "utf8"), previous, "the old file survives, so starting a child must be refused");
+      assert.deepEqual(leftovers(home), []);
+    } finally {
+      chmodSync(home, 0o700);
+    }
+  });
 });
 
 // ── the races, against the child's real loaders ─────────────────────────────

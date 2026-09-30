@@ -2298,8 +2298,9 @@ export async function writeBootstrapForChild(
     }
     log(
       `${tenant}: could not write ${BOOTSTRAP_FILE} — ${e instanceof Error ? e.message : String(e)}` +
-        (removed ? " (no anchor: the child will not book contributions)" : " — AND could not remove the previous one; the child may read an earlier spawn's anchor"),
+        (removed ? " (no anchor: the child will not book contributions)" : " — AND could not remove the previous one; refusing to start the child"),
     );
+    if (!removed) throw new Error(`${tenant}: unsafe bootstrap anchor remains; refusing to start the child`);
   }
 }
 

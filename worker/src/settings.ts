@@ -721,20 +721,9 @@ export function settingsHoldNotice(
  */
 export function patchSettingsFile(patch: Partial<MerrymenSettings>): MerrymenSettings {
   const file = process.env.MERRYMEN_SETTINGS_FILE ?? homePaths.settings();
-  let raw: string | null = null;
-  try {
-    raw = readFileSync(file, "utf8");
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-  }
-  let current: MerrymenSettings = {};
-  if (raw !== null) {
-    try {
-      current = JSON.parse(raw.replace(/^\ufeff/, "")) as MerrymenSettings;
-    } catch {
-      throw new Error("settings.json is not valid JSON — not overwriting it; fix or remove it first");
-    }
-  }
+  const read = readSettingsFileAt(file);
+  if (read.kind === "unusable") throw new Error(`${read.why} — not overwriting it; fix or remove it first`);
+  const current = read.kind === "parsed" ? read.settings : {};
   const next = { ...current, ...patch };
   ensureHome();
   // settings.json holds plaintext API keys — owner-only perms (0600), set on the

@@ -289,6 +289,15 @@ describe("patchSettingsFile", () => {
       assert.deepEqual(leftovers(dir), []);
     }
   });
+
+  it("refuses valid JSON that is not a settings object without overwriting it", () => {
+    for (const unusable of ["null", "[]", '"secret text"', "42", "true"]) {
+      writeFileSync(file, unusable);
+      assert.throws(() => patchSettingsFile({ strategy: "dip-hunter" }), /not a JSON object/);
+      assert.equal(readFileSync(file, "utf8"), unusable);
+      assert.deepEqual(leftovers(dir), []);
+    }
+  });
 });
 
 // ── the race ────────────────────────────────────────────────────────────────
