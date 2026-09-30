@@ -237,8 +237,9 @@ const getAgentControls = defineTool({
 /**
  * Where each control lives. Every `where` names a control that exists: the
  * web app's You → Wallet & permissions (/grant) screen, whose red "discard &
- * start over" button deletes the stored grant (DELETE /api/grants), the Trading
- * limits panel's "Edit signed limits" link, Settings, and the Telegram
+ * start over" button deletes the stored grant (POST /api/grants/discard,
+ * which removes it as DELETE /api/grants does and queues the paper reset), the
+ * Trading limits panel's "Edit signed limits" link, Settings, and the Telegram
  * commands in the bot's /help, which answer only while Settings → Advanced
  * settings → Telegram controls → "allow control commands" is on.
  * agents.test.ts checks each quoted label against the web app's source and

@@ -412,7 +412,13 @@ tenant_tg_groups (tenant TEXT PRIMARY KEY, sealed TEXT NOT NULL,
 > row holds; the mirror applies the requests to the row instead, and the
 > restore that ends the hold applies them again before writing the file. The
 > ferry takes the file away only after a publish of a memory file that
-> already reflected every request in it.
+> already reflected every request in it. The hold process that answers a
+> held tenant's bot (`telegram/hold.ts`) appends a `/forgetme` typed in a
+> group to the same file, so a hold never loses one; what else it passes over
+> in groups (the bot's own membership, migrations, the owner's Stay, Leave and
+> Forget) it keeps in `<child home>/telegram-held-groups.json` for the child
+> that ends the hold to apply at its first poll (docs/tg-groups.md "After an
+> outage, and while trading is held").
 
 **What owners must do: privacy mode.** Each owner's bot is their own, so
 there is nothing to configure on Telegram as the operator — but a bot in a

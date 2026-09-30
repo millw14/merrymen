@@ -351,7 +351,9 @@ describe("nothing is left behind after a save", () => {
     // save keeps showing the LOCAL value while `view` holds the server's, and
     // the two differ exactly when a write did not land. Derived from the
     // guards themselves, so a toggle added tomorrow is held to it too.
-    const save = code.slice(code.indexOf("async function save()"));
+    // `save(` and not `save()`: it takes the "Move it here" answer to a 409
+    // bot claim (lib/telegram-claims.ts), and the guards are the same either way.
+    const save = code.slice(code.indexOf("async function save("));
     const saved = save.indexOf('setStatus("Changes saved")');
     const refetch = save.indexOf('const fresh = await fetch("/api/settings")');
     assert.ok(saved > 0 && refetch > saved, "the post-save block was not found");

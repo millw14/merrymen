@@ -132,12 +132,19 @@ export type PaceDecision =
 
 // ─── The numbers ───────────────────────────────────────────────────────────
 
-/** Flood: after this many addressed answers to one person inside the window, it stops answering them. */
-const FLOOD_ANSWERS = 3;
-const FLOOD_WINDOW_MS = 2 * MIN;
+/**
+ * Flood: after this many addressed answers to one person inside the window,
+ * it stops answering them — everyone but the owner (`isFlooded`). Six in two
+ * minutes is a lively back-and-forth; three silenced a person having a normal
+ * conversation with it. Exported with the windows below because the handler
+ * opens and extends them after a line lands, and holds the coin flow's lines
+ * to the same rule: one copy, so the two can never drift apart.
+ */
+export const FLOOD_ANSWERS = 6;
+export const FLOOD_WINDOW_MS = 2 * MIN;
 /** At most this many roast exchanges with one person per window; then it disengages. */
 const ROAST_CAP = 2;
-const ROAST_WINDOW_MS = 30 * MIN;
+export const ROAST_WINDOW_MS = 30 * MIN;
 /** One kind line per person per hour; after that, silence rather than repeating itself. */
 const KIND_WINDOW_MS = HOUR;
 /** A chat is live when a human spoke within this. */
@@ -197,6 +204,19 @@ const react = (emoji: string): PaceDecision => ({ act: "react", emoji });
 /** A counter window still open at `now`: {count, sinceMs} with the window starting at sinceMs. */
 function inWindow(w: { count: number; sinceMs: number } | undefined, now: number, windowMs: number, cap: number): boolean {
   return !!w && Number.isFinite(w.count) && w.count >= cap && now - w.sinceMs < windowMs;
+}
+
+/**
+ * THE FLOOD RULE for one person: FLOOD_ANSWERS answers to them inside
+ * FLOOD_WINDOW_MS, and they get no more until the window closes. Never the
+ * owner: a back-and-forth with the person it trades for is the conversation
+ * itself, and leaving them on read mid-chat is the failure this rule must not
+ * cause. (Telegram's own limits still hold for every line: the handler's
+ * SendPacer spaces its sends whoever they answer.) Exported so the handler's
+ * coin lines read the very same rule.
+ */
+export function isFlooded(person: Pick<TgPerson, "answers"> | undefined, isOwner: boolean, nowMs: number): boolean {
+  return !isOwner && inWindow(person?.answers, nowMs, FLOOD_WINDOW_MS, FLOOD_ANSWERS);
 }
 
 /**
@@ -263,7 +283,7 @@ function answeredSince(earlier: readonly TgLine[], line: TgLine): boolean {
  *    somebody else's message) → "ok ok 🤐" (a second shush while already
  *    quiet only counts from the owner, who sets 2 h).
  * 4. A shushed chat → skip, unless the owner addressed it.
- * 5. Flood (3 answers to this person within 2 min) → skip.
+ * 5. Flood (6 answers to this person within 2 min; never the owner) → skip.
  * 6. Addressed → 🤡 for hateful; the injection / bot-question / private-ask
  *    moods; a roast for an insult or tease (affectionate for the owner; past
  *    2 per person per 30 min a 🥱 or silence, the owner a normal answer); a
@@ -305,7 +325,7 @@ export function decide(i: PaceInput): PaceDecision {
   if (s.shush && (addressed || afterOwn)) return shushed && !isOwner ? skip("shushed") : { act: "shush" };
   if (shushed && !(isOwner && addressed)) return skip("shushed");
 
-  if (inWindow(person?.answers, now, FLOOD_WINDOW_MS, FLOOD_ANSWERS)) return skip("flood");
+  if (isFlooded(person, isOwner, now)) return skip("flood");
 
   return addressed ? whenAddressed(i, person) : whenNotAddressed(i, person, earlier, afterOwn);
 }

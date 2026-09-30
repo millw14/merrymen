@@ -61,6 +61,7 @@ export type TgIntent =
   | { kind: "coin-skipped" }
   | { kind: "coin-exited"; notes: string[] }
   | { kind: "coin-cap" }
+  | { kind: "coin-unknown" }
   | { kind: "drop-ca" }
   | { kind: "ready-ask" }
   | { kind: "ready-nudge" }
@@ -119,6 +120,9 @@ const TEMPLATE_ONLY: ReadonlySet<TgIntent["kind"]> = new Set<TgIntent["kind"]>([
   "coin-look",
   "coin-seen",
   "coin-skipped",
+  // "can't pull that one up rn": nothing was looked at, so there is nothing
+  // for a model to add, and nothing it might invent about the coin.
+  "coin-unknown",
   "greet",
   // "hey 👋" to a hello, "np 🤝" to a thanks: nothing a model would add, and
   // a hail is the commonest thing said to it, so no allowance goes on it.
@@ -155,6 +159,7 @@ export function gateKindFor(intent: TgIntent): TgLineKind {
     case "coin-seen":
     case "coin-skipped":
     case "coin-cap":
+    case "coin-unknown":
       return "coin";
     case "roast":
       return "roast";
@@ -185,6 +190,7 @@ export function mentionFor(intent: TgIntent): "owner" | "sender" | null {
     case "coin-passed":
     case "coin-skipped":
     case "coin-exited":
+    case "coin-unknown":
       return "sender";
     default:
       return null;
@@ -278,6 +284,7 @@ const SLANG_OK: ReadonlySet<TgIntent["kind"]> = new Set<TgIntent["kind"]>([
   "coin-passed",
   "coin-skipped",
   "coin-cap",
+  "coin-unknown",
   "drop-ca",
   "faded-again",
 ]);
@@ -736,6 +743,21 @@ const POOLS: Readonly<Record<string, readonly string[]>> = {
     "one coin at a time 😅",
     "still chewing on the last one lol",
   ],
+  // An addressed CA whose look could not be made: the reads failed or timed
+  // out (a declined or rate-limited RPC, an index that would not answer).
+  // Said instead of leaving the person who asked on read. Never a verdict
+  // ("sitting it out", "passing"): nothing was looked at, so there is no take,
+  // and nothing here says which chain it is on or that it is a coin at all.
+  "coin-unknown": [
+    "can't pull that one up rn 🤷",
+    "can't get a look at that one rn",
+    "that one won't load for me rn 🤷",
+    "hmm can't pull that up rn",
+    "can't see anything on that one rn",
+    "not loading on my end rn 🤷",
+    "drawing a blank on that one rn, try me in a bit",
+    "can't get that one to load rn 🤷",
+  ],
   "drop-ca": ["drop the ca", "ca?", "got a ca?", "drop the ca 👀", "ca or it didn't happen", "no ca, no look 🤷", "where's the ca"],
   "ready-ask": [
     "put me on trencher mode and i'll get in on stuff like this with you 👀",
@@ -896,11 +918,17 @@ function recentOwn(room: TgRoom | undefined, n: number): string[] {
 }
 
 function tooLike(line: string, recent: readonly string[]): boolean {
+  return lastEcho(line, recent) >= 0;
+}
+
+/** Where in `recent` (oldest first) the newest line this one is too like sits; -1 when none is. */
+function lastEcho(line: string, recent: readonly string[]): number {
   const mine = line.toLowerCase().trim();
-  return recent.some((r) => {
-    const was = r.toLowerCase().trim();
-    return was === mine || similarity(mine, was) >= REPEAT_LIMIT;
-  });
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const was = recent[i]!.toLowerCase().trim();
+    if (was === mine || similarity(mine, was) >= REPEAT_LIMIT) return i;
+  }
+  return -1;
 }
 
 /**
@@ -946,6 +974,16 @@ function shuffled<T>(list: readonly T[], rand: () => number): T[] {
  * lines are tried first; each is tried dressed in its style and then plain,
  * and the first the gate admits is returned. A template that names somebody
  * whose chosen name the gate will not say simply loses to one that does not.
+ *
+ * A TEMPLATE-ONLY LINE MAY RECUR. When every line of its pool is too like one
+ * of its recent own lines, the one said longest ago goes out, and the gate
+ * judges it by its kind's clauses without the repeat clause — the rule gate.ts
+ * keeps for a code template ("fixed"), since a template recurs by design and
+ * pacing and the coin flow cap how often. A coin line still answers to the
+ * coin clauses (no figure, no cashtag). Without this, the owner posting a
+ * fifth bonding-curve coin in a row got nothing at all: the curve pool's six
+ * lines all say "curve". A line a model may write stays held to the repeat
+ * clause, its template fallback included: there silence is the answer.
  */
 export function templateLine(intent: TgIntent, ctx: SpeakCtx): string | null {
   try {
@@ -953,13 +991,17 @@ export function templateLine(intent: TgIntent, ctx: SpeakCtx): string | null {
     if (pool.length === 0) return null;
     const style = styleFor(ctx.agentKey);
     const gctx = gateCtxFor(intent, ctx);
+    const recent = gctx.recentOwn;
+    const judge: TgGateCtx = templateOnly(intent) ? { ...gctx, recentOwn: [] } : gctx;
     const rand = typeof ctx.rand === "function" ? ctx.rand : Math.random;
     const order = shuffled(pool, rand);
-    const fresh = order.filter((l) => !tooLike(l, gctx.recentOwn));
-    const tries = [...fresh, ...order.filter((l) => !fresh.includes(l))];
-    for (const line of tries) {
+    const fresh = order.filter((l) => !tooLike(l, recent));
+    // The worn lines by how long ago their echo was said, oldest first (a
+    // stable sort, so the dice still order lines said equally long ago).
+    const worn = order.filter((l) => !fresh.includes(l)).sort((a, b) => lastEcho(a, recent) - lastEcho(b, recent));
+    for (const line of [...fresh, ...worn]) {
       for (const candidate of [styleLine(line, intent, style, rand), line]) {
-        const v = admitFor(candidate, intent, gctx);
+        const v = admitFor(candidate, intent, judge);
         if (v.ok) return v.text;
       }
     }

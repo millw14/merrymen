@@ -39,7 +39,10 @@ jobs:
   app:
     name: app
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The suite alone takes ~16 minutes on a hosted runner, after ~3.5 of
+    # install, typecheck and build: 20 left seconds of headroom, and PRs that
+    # add tests were cancelled at the limit mid-run (a cancel, not a failure).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 

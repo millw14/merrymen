@@ -445,11 +445,13 @@ describe("tg-groups writes nothing a trading decision reads", () => {
     });
   }
 
-  it("only store.ts writes a file (its own), and only model.ts reaches the model client", () => {
+  it("only store.ts and forget-file.ts write a file (their own), and only model.ts reaches the model client", () => {
+    // forget-file.ts is the forget requests' file, apart from the store so the
+    // hold process can write a /forgetme down without holding any memory.
     const writers = TG_SOURCES.filter((f) =>
       /\b(?:writeFile|writeFileSync|appendFile|appendFileSync|renameSync|createWriteStream|copyFileSync|unlinkSync|rmSync)\b/.test(lexFile(f).code),
     ).map((f) => path.basename(f));
-    assert.deepEqual(writers, ["store.ts"]);
+    assert.deepEqual(writers.sort(), ["forget-file.ts", "store.ts"]);
     const llmUsers = TG_SOURCES.filter((f) => imports(lexFile(f).code).some((e) => resolved(f, e.spec) === "worker/src/llm")).map((f) =>
       path.basename(f),
     );

@@ -155,7 +155,7 @@ import { readHolderStatus, readHolderStatusResult } from "./circle";
 import { CIRCLE_SHORT_CLASS_GATE, circleNote, circleNoteStep, circleStanding, circleStrategyTick, type CircleNoted } from "./circle-gate";
 import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
-import { killHosted, killRequested } from "./kill-request";
+import { hostedKillFromChat } from "./kill-request";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
 import { execModeOf, liveBlockerText, publishedMode, type ExecMode, type RefuseRule } from "./exec-mode";
 import { limitsFromGrant } from "./limits";
@@ -253,12 +253,14 @@ import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
 import type { Holding, Snapshot, Strategy, Tick } from "./strategies/types";
 import { isPaused, startTelegram } from "./telegram/service";
 import { TgGroupsStore } from "./telegram/tg-groups/store";
+import { takeHeldGroupUpdates } from "./telegram/held-groups";
 import { NOMINATE, NominationBook, trencherReadiness } from "./trencher-nominate";
 import { chainTokenProbe, claimGroupEntry, createCoinLook, createTgCoinsPort, groupExitOf, reviewedDecisionOf, type GroupEntryClaim } from "./tg-coin-look";
 import { startNotifier } from "./telegram/notifier";
 import { energyToldDayOf, type EnergyToldHere } from "./telegram/energy-alert";
 import { startVirtualsStreamer } from "./virtuals-streamer";
-import { createStateRef, ensureLinkCode } from "./telegram/state";
+import { createStateRef, ensureLinkCode, retireLegacyCode } from "./telegram/state";
+import { makeChatTally, telegramLog } from "./telegram/poll-rules";
 import { readPositionRaw } from "./telegram/reads";
 import { formatDepth, formatNoDepth } from "./telegram/depth-format";
 import { bestCashPool } from "./venues/pool-price";
@@ -13552,11 +13554,29 @@ async function main() {
   // claim itself. Reported by @Victory-byte (PR #3); fixed on the worker side.
   if (cfg.telegramBotToken) {
     const before = tgState.get().linkCode;
-    tgState.set(ensureLinkCode(tgState.get(), cfg.telegramBotToken));
-    if (!before && tgState.get().linkCode) {
-      console.log(`[telegram] link code ready — send "/link ${tgState.get().linkCode}" to your bot to claim it`);
+    // A code the old scheme derived from this token is replaced first: it can
+    // be computed from the token, and hosted it was printed into the fleet's
+    // logs (state.ts retireLegacyCode). Here rather than only in the poll loop,
+    // so the code this prints, and the one the dashboard shows, is the one
+    // that works.
+    tgState.set(ensureLinkCode(retireLegacyCode(tgState.get(), cfg.telegramBotToken)));
+    if (tgState.get().linkCode && tgState.get().linkCode !== before) {
+      // HOSTED, NEVER THE CODE. The code is a bearer credential: whoever sends
+      // it first becomes the agent's owner. Hosted, this line lands in the
+      // fleet's shared logs, where every tenant who had not linked yet had a
+      // working code sitting in plain text. The owner reads theirs on the
+      // dashboard. Self-hosted, the log is the owner's own terminal, and the
+      // code there is how they link.
+      if (isHostedMode()) console.log("[telegram] link code ready (shown on the dashboard)");
+      else console.log(`[telegram] link code ready — send "/link ${tgState.get().linkCode}" to your bot to claim it`);
     }
   }
+
+  // What strangers did to the bot and which messages Telegram would not take,
+  // counted for the fleet's log (telegram/poll-rules.ts makeChatTally). One
+  // for the poll loop and the notifier, so a blocked bot is said once an hour
+  // between them; and never on strategyNote, which is the owner's event feed.
+  const tgTally = makeChatTally(telegramLog, () => Math.floor(Date.now() / 1000));
 
   startTelegram({
     // Resolve FRESH on every read: /link writes the allowlist to settings.json
@@ -13565,6 +13585,7 @@ async function main() {
     getCfg: () => resolveConfig(),
     stateRef: tgState,
     note: strategyNote,
+    tally: tgTally,
     buildStatusContext,
     setStrategy: (name) => {
       if ((BUILTIN_STRATEGIES as readonly string[]).includes(name)) return { ok: true };
@@ -13589,6 +13610,9 @@ async function main() {
     // as an address and nothing else.
     tgGroupsStore,
     tgCoins,
+    // What the hold process kept about groups while this tenant's trading was
+    // held (telegram/held-groups.ts), in this home: applied at the first poll.
+    heldGroupUpdates: () => takeHeldGroupUpdates(merrymenHome()),
     kill: () => {
       try {
         const grant = loadGrantFile();
@@ -13597,14 +13621,10 @@ async function main() {
           // restores a missing copy from the tenant store every pass, so
           // deleting it alone was a kill that undid itself in fifteen seconds.
           // killHosted leaves a request the orchestrator carries out against
-          // the store. See kill-request.ts.
-          if (!grant) {
-            return {
-              ok: false,
-              reason: killRequested(merrymenHome()) ? "already killed — the server is removing the grant" : "no grant",
-            };
-          }
-          const r = killHosted(merrymenHome(), homePaths.grant(), grant, Math.floor(Date.now() / 1000));
+          // the store. See kill-request.ts. The hold process makes the same
+          // call (telegram/hold.ts), so a held tenant's owner can revoke too.
+          const r = hostedKillFromChat(merrymenHome(), homePaths.grant(), grant, Math.floor(Date.now() / 1000));
+          if (!r.ok || !grant) return r;
           void addEvent(
             active?.agentId ?? grant.smartAccount,
             "warn",
@@ -13644,6 +13664,7 @@ async function main() {
   notifierHandle = startNotifier({
     getCfg: () => resolveConfig(), // fresh for the same reason as the poller
     note: strategyNote,
+    tally: tgTally,
     stateRef: tgState,
     buildStatusContext,
     getAlertInputs: () => ({

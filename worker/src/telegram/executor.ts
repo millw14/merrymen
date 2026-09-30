@@ -15,6 +15,7 @@ import { esc } from "./api";
 import { CONTROL_KINDS, PC_CAP_OF, PC_KINDS, type Command } from "./interpreter";
 import { resolveInRoot, shellAllowed, type PcActions } from "./pc";
 import { WALLET_TEXT } from "./reads";
+import { CONFIRM_TTL_SEC, killDoneText, killPromptText, type KillResult } from "./kill-confirm";
 
 /** A vetted action awaiting the user's explicit /confirm. Widened from the
  * original transfer-only store so a pending PC action and a pending transfer
@@ -43,20 +44,10 @@ export type PendingAction =
   | { kind: "setting"; key: string; value: unknown; expiresAt: number };
 
 /**
- * What a kill actually did, so the reply can say exactly that.
- *
- * `revocation` is present only for a HOSTED kill (kill-request.ts). There the
- * grant lives in the tenant store and this agent only holds a copy of it.
- * `queued`: the copy is gone and the server will remove the stored grant.
- * `failed`: the copy is gone, but the request that stops the server restoring
- * it could not be written.
+ * What a kill actually did, so the reply can say exactly that. Defined with
+ * the kill's words in kill-confirm.ts, which the hold process shares.
  */
-export interface KillResult {
-  ok: boolean;
-  reason?: string;
-  archived?: string | null;
-  revocation?: "queued" | "failed";
-}
+export type { KillResult };
 
 export interface CommandDeps {
   controlEnabled: boolean;
@@ -143,7 +134,7 @@ export interface CommandDeps {
   now?: () => number;
 }
 
-export const CONFIRM_TTL_SEC = 90;
+export { CONFIRM_TTL_SEC };
 /**
  * A settings question waits longer than a transfer: nothing leaves the account
  * and the owner may be answering from a phone later. Ten minutes, then it
@@ -184,6 +175,12 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
         : `couldn't link: ${r.reason ?? "bad or expired code"}`;
     }
     case "help":
+      return deps.help();
+    // Only a chat already on the allowlist gets here with a payload: the
+    // service hands an unlisted chat's payload to /link, with its counting and
+    // lockout. Someone already linked is shown what they can do, and the
+    // payload is not looked at, so it counts toward nothing.
+    case "start":
       return deps.help();
     // Static signpost — no state, no gating: it only tells you where the
     // dashboard is. Safe to answer even unlinked/read-only.
@@ -318,37 +315,10 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           return await deps.pc.power(p.action);
         case "setting":
           return deps.applySetting ? deps.applySetting(p.key, p.value) : "settings can't be changed from chat here — nothing changed.";
-        case "kill": {
-          const r = deps.kill();
-          if (!r.ok) return `nothing to kill: ${r.reason ?? "no grant"}`;
-          // HOSTED: say only what THIS agent did. Nothing was archived. The
-          // stored grant is deleted by the server a few seconds later, and the
-          // server confirms that itself, because only it knows (KILL_DONE_TEXT,
-          // kill-request.ts). The request waits in a home a redeploy would
-          // discard, so a missing ✅ has to mean something the owner can act on.
-          if (r.revocation === "queued") {
-            return (
-              `🛑 KILL SWITCH — this agent's copy of the key is gone, and the band stands down on the next tick. ` +
-              `The server is deleting your stored grant now; you'll get a ✅ in the owner chat when it's done.\n` +
-              `No ✅ within a few minutes? Revoke it in the dashboard: You → Wallet &amp; permissions → discard &amp; start over. ` +
-              `Your funds stay in your smart account.`
-            );
-          }
-          if (r.revocation === "failed") {
-            return (
-              `⚠️ KILL SWITCH — only half done. This agent's copy of the key is gone, but I could not record the kill, ` +
-              `so the server may hand the key back on its next pass.\n` +
-              `Revoke it for good in the dashboard: You → Wallet &amp; permissions → discard &amp; start over.`
-            );
-          }
-          return (
-            `🛑 KILL SWITCH — grant destroyed, the band stands down on the next tick.\n` +
-            (r.archived
-              ? `Owner key archived to <code>~/.merrymen/grants/</code> — <code>merrymen recover</code> can still sweep the funds.`
-              : `⚠️ nothing could be archived — if this account held funds, check ~/.merrymen/grants/ before re-granting.`) +
-            `\nRe-grant in the dashboard to ride again.`
-          );
-        }
+        case "kill":
+          // What THIS agent did, in the words the hold process uses too
+          // (kill-confirm.ts).
+          return killDoneText(deps.kill());
       }
     }
     case "set":
@@ -449,21 +419,7 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       return deps.removeWatcher(cmd.id);
     case "kill": {
       deps.setPending({ kind: "kill", expiresAt: now() + CONFIRM_TTL_SEC });
-      if (deps.hosted) {
-        // Hosted there is no owner key on the server (the grant store refuses
-        // one) and no `merrymen recover` to run on it.
-        return (
-          `⚠️ <b>confirm kill</b> — this revokes my trading permission and stands the band down.\n` +
-          `Your funds stay in your smart account; the server never held your owner key.\n\n` +
-          `/confirm to kill (${CONFIRM_TTL_SEC}s) or /cancel.`
-        );
-      }
-      return (
-        `⚠️ <b>confirm kill</b> — this destroys the grant and stands the band down.\n` +
-        `Your owner key is archived to <code>~/.merrymen/grants/</code> first, so ` +
-        `<code>merrymen recover</code> can still sweep the funds.\n\n` +
-        `/confirm to kill (${CONFIRM_TTL_SEC}s) or /cancel.`
-      );
+      return killPromptText(deps.hosted === true, CONFIRM_TTL_SEC);
     }
     case "chat":
       return cmd.reply;

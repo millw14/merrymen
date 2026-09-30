@@ -187,6 +187,12 @@ async function post(flow: CoinFlow, chatId: number, text: string, o: MsgOpts = {
   return { r, line, info };
 }
 
+/** The handler's way in: owned at once, the rest on the chat's coin lane. */
+function begin(flow: CoinFlow, chatId: number, text: string, o: MsgOpts = {}) {
+  const { line, info } = msg(chatId, text, o);
+  return flow.begin(chatId, line, info);
+}
+
 const intents = () => spoken.map((s) => s.intent);
 const memoOf = (address: string, chatId = CHAT): TgCoinMemo | undefined => store.coin(chatId, address);
 const onDisk = (): { rooms: Record<string, { claims: Record<string, number> }> } =>
@@ -844,7 +850,10 @@ describe("the quick look", () => {
       for (const [i, kind] of NOT_HERE.entries()) {
         const address = ca(0x200 + i + (ready ? 0 : 0x10));
         port!.looks.set(address, { kind, name: "Frog Cash" });
-        const r = await post(flow, CHAT, `@pine what about ${address}`, { addressed: true });
+        // Addressed for the two that are not a Robinhood Chain coin: silence
+        // all the same. `unknown` unaddressed: silence (addressed, below).
+        const addressed = kind !== "unknown";
+        const r = await post(flow, CHAT, `${addressed ? "@pine " : ""}what about ${address}`, { addressed });
         assert.equal(r.r, "handled", `${kind}: owned, so nothing else answers it either`);
         assert.equal(memoOf(address), undefined, kind);
       }
@@ -852,6 +861,65 @@ describe("the quick look", () => {
     assert.equal(port!.lookCalls.length, NOT_HERE.length * 2);
     assert.equal(spoken.length + reacts.length + dms.length + port!.nominations.length, 0);
     assert.equal(store.room(CHAT)!.lastReadyAskAtMs, undefined, "the owner is never asked about another chain's coin");
+  });
+
+  it("unknown ADDRESSED (the reads failed): one 'can't pull that one up rn', tagging the sender, as a reply; nothing remembered; once per chat per 10 minutes", async () => {
+    const flow = makeFlow();
+    port!.looks.set(CA1, { kind: "unknown" });
+    port!.looks.set(CA2, { kind: "unknown" });
+    const first = await post(flow, CHAT, `@pine thoughts on ${CA1}?`, { addressed: true });
+    assert.equal(first.r, "handled");
+    assert.deepEqual(intents(), [{ kind: "coin-unknown" }]);
+    assert.deepEqual(spoken[0]!.o.mention, { id: ANN, name: "ann" });
+    assert.equal(spoken[0]!.o.replyTo, first.line.messageId);
+    assert.equal(spoken[0]!.o.coinName, undefined, "nothing was looked at: no name to say");
+    assert.equal(memoOf(CA1), undefined, "a failed look leaves no memo: a repost gets a fresh look");
+    assert.equal(store.room(CHAT)!.lastCoinUnknownAtMs, T0);
+    assert.equal(port!.nominations.length + dms.length, 0);
+
+    // Inside the 10 minutes: silence, from anyone, and the room says why.
+    clock += 9 * MIN;
+    const second = await begin(flow, CHAT, `@pine and ${CA2}?`, { from: BOB, addressed: true });
+    assert.deepEqual(await second.done, { acted: false, quiet: "coin-unknown" });
+    assert.equal(spoken.length, 1);
+    // Past them: said again.
+    clock += MIN;
+    await post(flow, CHAT, `@pine ${CA1}??`, { from: BOB, addressed: true });
+    assert.equal(spoken.length, 2);
+    assert.deepEqual(spoken[1]!.o.mention, { id: BOB, name: "bob" });
+  });
+
+  it("the unknown line is only for a post nothing else was said about, and a line that did not go out does not use up the 10 minutes", async () => {
+    const flow = makeFlow();
+    port!.looks.set(CA1, { kind: "unknown" });
+    port!.looks.set(CA2, { kind: "curve", name: "Curvy" });
+    // One CA failed, the other is a curve coin: the curve line is the answer.
+    await post(flow, CHAT, `@pine ${CA1} or ${CA2}?`, { addressed: true });
+    assert.deepEqual(intents(), [{ kind: "coin-look", look: "curve" }]);
+    assert.equal(store.room(CHAT)!.lastCoinUnknownAtMs, undefined);
+    // A wallet beside a failed look: the failed look still gets its line.
+    spoken = [];
+    port!.looks.set(ca(0x301), { kind: "wallet" });
+    port!.looks.set(ca(0x302), { kind: "unknown" });
+    speakOk = false;
+    await post(flow, CHAT, `@pine ${ca(0x301)} ${ca(0x302)}`, { addressed: true });
+    assert.deepEqual(intents(), [{ kind: "coin-unknown" }]);
+    assert.equal(store.room(CHAT)!.lastCoinUnknownAtMs, undefined, "not sent: the window is given back");
+    speakOk = true;
+    await post(flow, CHAT, `@pine ${ca(0x302)}`, { addressed: true });
+    assert.equal(spoken.length, 2);
+    // Coins switched off meanwhile, or the sender forgotten: nothing.
+    clock += 11 * MIN;
+    const { line, info } = msg(CHAT, `@pine ${ca(0x303)}`, { addressed: true });
+    port!.looks.set(ca(0x303), { kind: "unknown" });
+    await flow.onPost(CHAT, line, { ...info, forgotten: () => false });
+    assert.equal(spoken.length, 3);
+    clock += 11 * MIN;
+    port!.onLook = () => {
+      coinsOn = false;
+    };
+    await post(flow, CHAT, `@pine ${ca(0x304)}`, { addressed: true });
+    assert.equal(spoken.length, 3);
   });
 
   it("an Ethereum token posted again is looked at again (the look's cache makes it free), and still gets nothing", async () => {
@@ -908,6 +976,62 @@ describe("the quick look", () => {
     assert.equal(memoOf(CA2)!.name, undefined);
   });
 
+  it(`a look that never answers is 'unknown' after ${COIN_FLOW.lookMs / 1000} s: the post is let go, and the room hears it only when it was asked`, async () => {
+    const waits: Array<{ ms: number; fire: () => void }> = [];
+    const flow = makeFlow({
+      timer: (ms) =>
+        new Promise<void>((fire) => {
+          waits.push({ ms, fire });
+        }),
+    });
+    port!.look = (address: string) => {
+      port!.lookCalls.push(address);
+      return new Promise<CoinLook>(() => {});
+    };
+    const quiet = await begin(flow, CHAT, CA1);
+    assert.equal(quiet.owned, "handled", "owned at once: nothing else answers it meanwhile");
+    await settle();
+    assert.deepEqual(port!.lookCalls, [CA1]);
+    assert.deepEqual(waits.map((w) => w.ms), [COIN_FLOW.lookMs]);
+    waits.shift()!.fire();
+    assert.deepEqual(await quiet.done, { acted: false, quiet: "coin-unknown" });
+    assert.deepEqual(spoken, [], "unaddressed: silence");
+    assert.ok(logs.some((l) => /look timed out/.test(l)));
+    assert.ok(!logs.join("\n").includes(CA1.slice(2, 12)), "never the address");
+
+    const asked = await begin(flow, CHAT, `@pine ${CA2}`, { addressed: true });
+    await settle();
+    waits.shift()!.fire();
+    assert.deepEqual(await asked.done, { acted: true });
+    assert.deepEqual(intents(), [{ kind: "coin-unknown" }]);
+    assert.equal(memoOf(CA1), undefined);
+    assert.equal(memoOf(CA2), undefined);
+  });
+
+  it("the real timer: a look that answers in time is not cut short; one that does not is let go at the bound", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const flow = makeFlow();
+      let answer!: (l: CoinLook) => void;
+      port!.look = () => new Promise<CoinLook>((r) => (answer = r));
+      const p = begin(flow, CHAT, CA1);
+      const started = await p;
+      await settle();
+      mock.timers.tick(COIN_FLOW.lookMs - 1);
+      answer({ kind: "too-quiet", name: "Slowcoin" });
+      assert.deepEqual(await started.done, { acted: true });
+      assert.deepEqual(intents(), [{ kind: "coin-look", look: "too-quiet" }]);
+      // …and one that does not answer is let go at the bound.
+      port!.look = () => new Promise<CoinLook>(() => {});
+      const late = await begin(flow, CHAT, CA2);
+      await settle();
+      mock.timers.tick(COIN_FLOW.lookMs);
+      assert.deepEqual(await late.done, { acted: false, quiet: "coin-unknown" });
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
   it("the room was left during the look: nothing said, nothing nominated, the next CA not even claimed", async () => {
     port!.onLook = () => store.setStatus(CHAT, "left");
     const flow = makeFlow();
@@ -929,6 +1053,263 @@ describe("the quick look", () => {
     await post(flow, CHAT, `ape ${CA1}`);
     assert.deepEqual(intents(), [{ kind: "ready-ask" }]);
     assert.equal(dms.length, 0);
+  });
+});
+
+// ─── The coin lane ─────────────────────────────────────────────────────────
+
+describe("the coin lane: a post's reads never hold the chat's queue", () => {
+  /** A look that answers only when the test says so. */
+  function heldLooks(): { release: (address: string, l: CoinLook) => void; waiting: () => string[] } {
+    const open = new Map<string, (l: CoinLook) => void>();
+    port!.look = (address: string) => {
+      port!.lookCalls.push(address);
+      return new Promise<CoinLook>((r) => open.set(address, r));
+    };
+    return {
+      release: (address, l) => {
+        open.get(address)?.(l);
+        open.delete(address);
+      },
+      waiting: () => [...open.keys()],
+    };
+  }
+
+  it("begin owns a CA line at once, before any read answers; the claim is on disk before the look; done is the rest", async () => {
+    const looks = heldLooks();
+    const flow = makeFlow();
+    const started = await begin(flow, CHAT, `ape ${CA1}`, { id: 700 });
+    assert.equal(started.owned, "handled");
+    await settle();
+    assert.deepEqual(looks.waiting(), [CA1], "the look is out, and begin did not wait for it");
+    assert.ok(onDisk().rooms[String(CHAT)]!.claims[`700:${CA1}`], "claimed before the look");
+    assert.equal(spoken.length, 0);
+    looks.release(CA1, { kind: "candidate", name: "Froggy" });
+    assert.deepEqual(await started.done, { acted: true });
+    assert.deepEqual(intents(), [{ kind: "coin-ack" }]);
+    assert.equal(port!.nominations.length, 1);
+  });
+
+  it("posts in one chat are worked in order: the coin's second post waits for the first and is answered from memory, one look", async () => {
+    const looks = heldLooks();
+    const flow = makeFlow();
+    port!.ready = { kind: "off", ownerReason: "off" };
+    const a = await begin(flow, CHAT, CA1);
+    const b = await begin(flow, CHAT, `${CA1} again`, { from: BOB });
+    await settle();
+    assert.deepEqual(looks.waiting(), [CA1], "the second post has not been looked at yet");
+    looks.release(CA1, { kind: "too-quiet", name: "Slowcoin" });
+    await a.done;
+    await b.done;
+    assert.deepEqual(port!.lookCalls, [CA1], "one look for both posts");
+    assert.deepEqual(intents(), [
+      { kind: "coin-look", look: "too-quiet" },
+      { kind: "coin-seen", verdict: "too-quiet" },
+    ]);
+  });
+
+  it("a look hanging in one chat holds nothing in another", async () => {
+    approve(OTHER, "Toad Hall");
+    const looks = heldLooks();
+    const flow = makeFlow();
+    const stuck = await begin(flow, CHAT, CA1);
+    const other = await begin(flow, OTHER, CA2);
+    await settle();
+    assert.deepEqual(looks.waiting().sort(), [CA1, CA2].sort(), "both looked at together");
+    looks.release(CA2, { kind: "curve" });
+    assert.deepEqual(await other.done, { acted: true });
+    assert.equal(spoken.filter((s) => s.chatId === OTHER).length, 1);
+    looks.release(CA1, { kind: "curve" });
+    await stuck.done;
+  });
+
+  it("someone forgotten while their post waited on the lane: not claimed, looked at or answered", async () => {
+    const looks = heldLooks();
+    const flow = makeFlow();
+    const first = await begin(flow, CHAT, CA1, { from: BOB });
+    let gone = false;
+    const { line, info } = msg(CHAT, CA2, { id: 701 });
+    const second = await flow.begin(CHAT, line, { ...info, forgotten: () => gone });
+    await settle();
+    gone = true;
+    looks.release(CA1, { kind: "curve" });
+    await first.done;
+    assert.deepEqual(await second.done, { acted: false, quiet: "forgotten" });
+    assert.deepEqual(port!.lookCalls, [CA1]);
+    assert.equal(store.room(CHAT)!.claims[`701:${CA2}`], undefined);
+  });
+
+  it("stop(): what is still on a lane does nothing more", async () => {
+    const looks = heldLooks();
+    const flow = makeFlow();
+    const first = await begin(flow, CHAT, CA1);
+    const second = await begin(flow, CHAT, CA2);
+    await settle();
+    flow.stop();
+    looks.release(CA1, { kind: "curve" });
+    await first.done;
+    await second.done;
+    assert.deepEqual(port!.lookCalls, [CA1], "the second post is not even looked at");
+  });
+
+  it("whoever asked goes first: a post that addresses it, or the owner's, before the posts already waiting; equals in arrival order", async () => {
+    const looks = heldLooks();
+    const flow = makeFlow();
+    port!.ready = { kind: "off", ownerReason: "off" };
+    const [c1, c2, c3, c4, c5, c6] = [ca(0x11), ca(0x12), ca(0x13), ca(0x14), ca(0x15), ca(0x16)];
+    const posts = [
+      await begin(flow, CHAT, c1, { from: BOB }), // being worked
+      await begin(flow, CHAT, c2, { from: BOB }), // anyone's
+      await begin(flow, CHAT, c3, { from: OWNER, name: "mike" }), // the owner's
+      await begin(flow, CHAT, c4, { from: BOB }), // anyone's, later
+      await begin(flow, CHAT, `@pine ${c5}`, { from: ANN, addressed: true }), // asked
+      await begin(flow, CHAT, `@pine ${c6}`, { from: OWNER, name: "mike", addressed: true }), // the owner asking
+    ];
+    for (let i = 0; i < posts.length; i++) {
+      await settle();
+      const out = looks.waiting();
+      assert.equal(out.length, 1, "one look at a time in a chat");
+      looks.release(out[0]!, { kind: "too-quiet", name: "Slowcoin" });
+    }
+    for (const p of posts) await p.done;
+    assert.deepEqual(port!.lookCalls, [c1, c6, c5, c3, c2, c4]);
+  });
+
+  it("a post that waited past its reply window is claimed and not looked at; a look is cut to fit the window", async () => {
+    const waits: number[] = [];
+    let answer!: (l: CoinLook) => void;
+    const flow = makeFlow({
+      timer: (ms) => {
+        waits.push(ms);
+        return new Promise<void>(() => {});
+      },
+    });
+    port!.look = (address: string) => {
+      port!.lookCalls.push(address);
+      return new Promise<CoinLook>((r) => (answer = r));
+    };
+    const window = (text: string, id: number, o: MsgOpts = {}) => {
+      const { line, info } = msg(CHAT, text, { id, ...o });
+      return flow.begin(CHAT, line, { ...info, replyByMs: clock + 90_000 });
+    };
+    const first = await window(CA1, 800);
+    const late = await window(CA2, 801, { from: BOB });
+    const tight = await window(`@pine ${ca(0xc3)}`, 802, { addressed: true });
+    await settle();
+    assert.deepEqual(waits, [COIN_FLOW.lookMs], "the first look: its whole bound, the window is wide open");
+    // The first look takes most of the window; the two behind it are left with little.
+    clock += 90_000 - COIN_FLOW.lineMs - COIN_FLOW.lookMinMs - 1_000;
+    answer({ kind: "too-quiet", name: "Slowcoin" });
+    await first.done;
+    await settle();
+    // The addressed one goes next, with just room for a short look: cut to fit.
+    assert.deepEqual(port!.lookCalls, [CA1, ca(0xc3)]);
+    assert.deepEqual(waits, [COIN_FLOW.lookMs, COIN_FLOW.lookMinMs + 1_000]);
+    clock += COIN_FLOW.lookMinMs;
+    answer({ kind: "curve" });
+    await tight.done;
+    // Bob's: its window has no room for a look and a line. Claimed, nothing more.
+    assert.deepEqual(await late.done, { acted: false, quiet: "coin-stale" });
+    assert.deepEqual(port!.lookCalls, [CA1, ca(0xc3)], "never looked at");
+    assert.ok(store.room(CHAT)!.claims[`801:${CA2}`], "but claimed: a replay repeats nothing");
+    assert.equal(memoOf(CA2), undefined);
+  });
+
+  it(`a full lane (${COIN_FLOW.laneMax} waiting) lets go of posts nobody asked about — claimed, never looked at — and still takes the asked and the owner's`, async () => {
+    const looks = heldLooks();
+    const flow = makeFlow();
+    const stuck = await begin(flow, CHAT, ca(0x200), { from: BOB });
+    const waiting = [];
+    for (let i = 1; i <= COIN_FLOW.laneMax; i++) waiting.push(await begin(flow, CHAT, ca(0x200 + i), { from: BOB }));
+    const shed = await begin(flow, CHAT, ca(0x2ff), { from: BOB, id: 900 });
+    assert.equal(shed.owned, "handled", "still owned: nothing else answers it");
+    assert.deepEqual(await shed.done, { acted: false, quiet: "coin-busy" });
+    assert.ok(store.room(CHAT)!.claims[`900:${ca(0x2ff)}`], "claimed");
+    const asked = await begin(flow, CHAT, `@pine ${ca(0x2fe)}`, { from: ANN, addressed: true });
+    const owners = await begin(flow, CHAT, ca(0x2fd), { from: OWNER, name: "mike" });
+    await settle();
+    looks.release(ca(0x200), { kind: "curve" });
+    await stuck.done;
+    await settle();
+    assert.deepEqual(looks.waiting(), [ca(0x2fe)], "the asked one next");
+    looks.release(ca(0x2fe), { kind: "curve" });
+    assert.deepEqual(await asked.done, { acted: true });
+    await settle();
+    assert.deepEqual(looks.waiting(), [ca(0x2fd)], "then the owner's");
+    looks.release(ca(0x2fd), { kind: "curve" });
+    await owners.done;
+    for (let i = 1; i <= COIN_FLOW.laneMax; i++) {
+      await settle();
+      looks.release(ca(0x200 + i), { kind: "curve" });
+    }
+    for (const w of waiting) await w.done;
+    assert.ok(!port!.lookCalls.includes(ca(0x2ff)), "the shed post is never looked at");
+  });
+
+  it("drain() waits for every lane", async () => {
+    const looks = heldLooks();
+    const flow = makeFlow();
+    await begin(flow, CHAT, CA1);
+    await settle();
+    let drained = false;
+    const d = flow.drain().then(() => {
+      drained = true;
+    });
+    await settle();
+    assert.equal(drained, false);
+    looks.release(CA1, { kind: "curve" });
+    await d;
+    assert.equal(drained, true);
+    assert.equal(spoken.length, 1);
+  });
+
+  it("an outcome that arrives while its ack is still going out waits for the ack", async () => {
+    const order: string[] = [];
+    let ackSent!: () => void;
+    const flow = makeFlow({
+      speak: async (chatId, intent, o) => {
+        spoken.push({ chatId, intent, o });
+        if (intent.kind === "coin-ack") await new Promise<void>((r) => (ackSent = r));
+        order.push(intent.kind);
+        return true;
+      },
+    });
+    flow.start();
+    const started = await begin(flow, CHAT, CA1, { id: 702 });
+    await settle();
+    assert.equal(port!.nominations.length, 1);
+    // The Brain is fast today: the outcome lands while the ack is still typing.
+    port!.emit({ kind: "passed", address: CA1, chatId: CHAT, messageId: 702, decisionId: "d-1", notes: [] });
+    await settle();
+    assert.deepEqual(order, [], "the outcome waits");
+    assert.equal(memoOf(CA1)!.verdict, "passed", "the verdict moved at once, so a duplicate finds it moved");
+    ackSent();
+    await started.done;
+    await settle();
+    assert.deepEqual(order, ["coin-ack", "coin-passed"]);
+  });
+
+  it("done says why a post got nothing: a stable code, never the address", async () => {
+    const flow = makeFlow();
+    const code = async (text: string, o: MsgOpts = {}) => (await (await begin(flow, CHAT, text, o)).done).quiet;
+    port!.looks.set(CA1, { kind: "wallet" });
+    assert.equal(await code(CA1), "coin-not-here");
+    assert.equal(await code(`https://etherscan.io/token/${CA2}`), "coin-not-here", "another chain's link");
+    assert.equal(await code(`${MINT} 🚀`), "coin-not-here", "a Solana mint");
+    assert.equal(await code(ca(0x401), { dateSec: Math.floor((clock - 11 * MIN) / 1000) }), "coin-stale");
+    assert.equal(await code(ca(0x402), { id: 703 }), undefined, "said: no code");
+    assert.equal(await code(ca(0x402), { id: 703 }), "coin-replay");
+    port = null;
+    assert.equal(await code(ca(0x403)), "coin-no-port");
+    port = new FakePort();
+    coinsOn = false;
+    assert.equal(await code(ca(0x404)), "coin-off");
+    coinsOn = true;
+    port.looks.set(ca(0x405), { kind: "unknown" });
+    assert.equal(await code(ca(0x405)), "coin-unknown");
+    speakOk = false;
+    port.looks.set(ca(0x406), { kind: "curve" });
+    assert.equal(await code(ca(0x406)), "send-failed");
   });
 });
 

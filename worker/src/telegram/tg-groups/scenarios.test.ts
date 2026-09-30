@@ -20,7 +20,7 @@ import type { FetchLike, TgCallback, TgMemberUpdate, TgMessage, TgServiceMessage
 import { startTelegram } from "../service";
 import { ensureLinkCode, loadTelegramState, type StateRef, type TelegramState } from "../state";
 import type { BotSelf } from "./detect";
-import { createTgGroups, type TgGroups } from "./handler";
+import { createTgGroups, type TgGroups, type TgGroupsDeps } from "./handler";
 import { __resetMemoryPassThrottleForTest } from "./memory";
 import { TgGroupsStore, emptyTgGroupsState } from "./store";
 import type { CoinLook, CoinOutcome, NominateResult, Nomination, TgCoinsPort, TrencherReadiness } from "./types";
@@ -137,7 +137,7 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     },
   };
 
-  const make = (): TgGroups =>
+  const make = (over: Partial<TgGroupsDeps> = {}): TgGroups =>
     (groups = createTgGroups({
       opts: () => ({ token: TOKEN, fetchFn: tg.fetchFn }),
       store,
@@ -157,6 +157,7 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
         clock += Math.max(0, ms);
       },
       log: () => {},
+      ...over,
     }));
 
   const approve = (): void => {
@@ -175,6 +176,7 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
       fromFirstName: "Ann",
       fromIsBot: false,
       text,
+      date: Math.floor(clock / 1000),
       messageId: id,
       dateSec: Math.floor(clock / 1000),
       chatType: "supergroup",
@@ -193,7 +195,7 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     dateSec: 1,
     ...over,
   });
-  const press = (data: string): TgCallback => ({ updateId: nextMsg++, id: "cb", chatId: OWNER, fromId: OWNER, messageId: 77, data });
+  const press = (data: string): TgCallback => ({ updateId: nextMsg++, id: "cb", chatId: OWNER, fromId: OWNER, messageId: 77, data, date: 0 });
   const said = async (m: TgMessage): Promise<void> => {
     groups.onMessage(m);
     await groups.drain();
@@ -901,6 +903,177 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     const everything = tg.calls.filter((c) => c.method === "sendMessage").map((c) => String(c.body.text));
     assert.ok(!everything.some((x) => /not authorized|\/link|code/i.test(x)), JSON.stringify(everything));
   });
+
+  it("The owner chats, posts a bare Robinhood CA while every read hangs, then '@bot didnt you see' and '@bot ??' → every addressed line is answered, promptly; the failed look is silence", async () => {
+    // The live failure, replayed. The owner had a normal back-and-forth, then
+    // posted a Pons bonding-curve coin's address while the fleet's RPC reads
+    // were declined and GeckoTerminal was timing out. The look was awaited on
+    // the chat's queue with no bound, so her "didnt you see" (a reply to the
+    // CA) and "??" waited behind it until they went stale; and three answers
+    // in two minutes had flooded her anyway.
+    const waits: Array<() => void> = [];
+    const logs: string[] = [];
+    make({
+      timer: (ms) =>
+        new Promise<void>((fire) => {
+          waits.push(() => {
+            clock += ms;
+            fire();
+          });
+        }),
+      log: (l) => logs.push(l),
+    });
+    approve();
+    port.look = (address: string) => {
+      port.lookCalls.push(address);
+      return new Promise<CoinLook>(() => {});
+    };
+    // When each answer went out, by the message it replies to.
+    const sentAt = new Map<number, number>();
+    const send = tg.fetchFn;
+    tg.fetchFn = async (url, init) => {
+      if (url.endsWith("/sendMessage") && init?.body) {
+        const to = (JSON.parse(init.body) as { reply_parameters?: { message_id?: number } }).reply_parameters?.message_id;
+        if (typeof to === "number") sentAt.set(to, clock);
+      }
+      return send(url, init);
+    };
+    const until = async (done: () => boolean): Promise<void> => {
+      for (let i = 0; i < 200 && !done(); i++) await new Promise((r) => setImmediate(r));
+    };
+    const milla = (text: string, over: Partial<TgMessage> = {}): TgMessage => msg(text, { fromId: OWNER, fromFirstName: "Milla", ...over });
+
+    // A normal back-and-forth: seven lines inside two minutes, by handle and by name.
+    const start = clock;
+    const chat = ["@pinebot sup", "@pinebot how's your day going", "pine you trading today?", "@pinebot nice", "@pinebot what are you looking at", "@pinebot lol ok", "pine say something"];
+    const asked: TgMessage[] = [];
+    for (const t of chat) {
+      const m = milla(t);
+      asked.push(m);
+      await said(m);
+    }
+    assert.ok(clock - start < 2 * MIN, "all inside one flood window");
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), asked.map((m) => m.messageId), "every one answered, as a reply");
+
+    // The bare CA. Not addressed; its look never answers.
+    const CA = "0x0338a1b7fa2ae1cd997b541432d01af011754b0e";
+    const post = milla(CA);
+    groups.onMessage(post);
+    await until(() => port.lookCalls.length > 0);
+    assert.deepEqual(port.lookCalls, [CA]);
+
+    // "didnt you see", a reply to the CA: answered while the look is still out.
+    const didnt = milla("@pinebot didnt you see", { replyTo: { messageId: post.messageId!, fromId: OWNER, fromIsBot: false } });
+    const didntAt = clock;
+    groups.onMessage(didnt);
+    await until(() => sentAt.has(didnt.messageId!));
+    assert.ok(sentAt.has(didnt.messageId!), "answered, not dropped as stale");
+    assert.ok(sentAt.get(didnt.messageId!)! - didntAt < 20 * SEC, `promptly: ${sentAt.get(didnt.messageId!)! - didntAt} ms`);
+
+    // A minute later, "??": answered too, the look still out.
+    clock += MIN;
+    const nudge = milla("@pinebot ??");
+    const nudgeAt = clock;
+    groups.onMessage(nudge);
+    await until(() => sentAt.has(nudge.messageId!));
+    assert.ok(sentAt.has(nudge.messageId!), "answered, not dropped as stale");
+    assert.ok(sentAt.get(nudge.messageId!)! - nudgeAt < 20 * SEC);
+    // And by name, the way people call it.
+    const byName = milla("Pine?? you alive");
+    groups.onMessage(byName);
+    await until(() => sentAt.has(byName.messageId!));
+    assert.ok(sentAt.has(byName.messageId!), "its name calls it too");
+    assert.equal(waits.length, 1, "all the while, the look was out");
+
+    // The look's bound passes: unknown. Unaddressed, that is silence — no
+    // line, no 👀, nothing remembered — and nothing else answers the CA.
+    waits[0]!();
+    await groups.drain();
+    assert.deepEqual(
+      tg.sends(CHAT).map(replyOf),
+      [...asked, didnt, nudge, byName].map((m) => m.messageId),
+    );
+    assert.deepEqual(tg.reactions(CHAT), []);
+    assert.deepEqual(store.room(CHAT)?.coins, []);
+    assert.equal(port.nominations.length, 0);
+    assert.ok(!logs.some((l) => /got nothing/.test(l)), logs.join("\n"));
+    assert.ok(!logs.join("\n").includes(CA.slice(2, 12)), "never the address in a log");
+  });
+
+  it("…and the same CA said TO it while the reads hang → 'can't pull that one up rn', tagging her, instead of silence", async () => {
+    const waits: Array<() => void> = [];
+    make({
+      timer: (ms) =>
+        new Promise<void>((fire) => {
+          waits.push(() => {
+            clock += ms;
+            fire();
+          });
+        }),
+    });
+    approve();
+    port.look = () => new Promise<CoinLook>(() => {});
+    const post = msg("@pinebot 0x0338a1b7fa2ae1cd997b541432d01af011754b0e thoughts?", { fromId: OWNER, fromFirstName: "Milla" });
+    groups.onMessage(post);
+    for (let i = 0; i < 200 && waits.length === 0; i++) await new Promise((r) => setImmediate(r));
+    waits[0]!();
+    await groups.drain();
+    const s = tg.sends(CHAT);
+    assert.equal(s.length, 1);
+    assert.equal(replyOf(s[0]), post.messageId);
+    assert.match(String(s[0]?.body.text), new RegExp(`^<a href="tg://user\\?id=${OWNER}">Milla</a> `));
+    assert.match(plain(String(s[0]?.body.text)), /can't|won't|not loading|blank/);
+    assert.ok(!/\d/.test(plain(String(s[0]?.body.text))));
+  });
+
+  it("'when I sent a ca she stopped responding': the owner in a Pons group posts bonding-curve CA after CA, chatting and calling it by name between → every CA its curve line, every line its answer", async () => {
+    const logs: string[] = [];
+    make({ self: () => ({ ...BOT, name: "Robin", aliases: ["Merryman"] }), log: (l) => logs.push(l) });
+    approve();
+    const milla = (text: string): TgMessage => msg(text, { fromId: OWNER, fromFirstName: "Milla" });
+    const names = ["AppShare", "Froggy", "Moonpie", "Rocket", "Pumpkin", "Zebra", "Lambo", "Kitten"];
+    const talk = ["robin you there", "what do you think robin", "@pinebot nice", "robin what else is good"];
+    const expected: number[] = [];
+    for (let i = 0; i < names.length; i++) {
+      port.looks.set(ca(0x30 + i), { kind: "curve", name: names[i]! });
+      const post = milla(i % 2 === 0 ? ca(0x30 + i) : `@pinebot ${ca(0x30 + i)}`);
+      await said(post);
+      expected.push(post.messageId!);
+      clock += 20 * SEC;
+      const line = milla(talk[i % talk.length]!);
+      await said(line);
+      expected.push(line.messageId!);
+      clock += 20 * SEC;
+    }
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), expected, "a reply to every CA and every line");
+    const curveLines = tg.sends(CHAT).filter((c) => /curve/.test(String(c.body.text)));
+    assert.equal(curveLines.length, names.length, "each CA its curve line");
+    for (const c of curveLines) assert.match(String(c.body.text), new RegExp(`^<a href="tg://user\\?id=${OWNER}">Milla</a> `));
+    assert.ok(!logs.some((l) => /got nothing/.test(l)), logs.join("\n"));
+  });
+
+  for (const [name, calls, notCalls] of [
+    ["Maid Marian", ["marian what do you think", "what do you think marian", "marian you there"], ["marianne said hi"]],
+    ["Amber Heron", ["heron what do you think", "heron you there", "amber what do you think", "you up heron?"], ["saw a heron today", "what do you think about herons"]],
+    ["Robin", ["Robin you there", "robin what do you think", "what do you think robin"], ["robin hood chain is pumping", "anyone bridged to robin yet"]],
+  ] as const) {
+    it(`'she should reply to chats mentioning their names': "${calls.join('", "')}" → answered, for an agent called ${name}; "${notCalls.join('", "')}" → not a call`, async () => {
+      make({ self: () => ({ ...BOT, name, aliases: ["Merryman"] }) });
+      approve();
+      for (const [i, text] of calls.entries()) {
+        const m = msg(text, i % 2 === 0 ? { fromId: OWNER, fromFirstName: "Milla" } : {});
+        await said(m);
+        assert.equal(replyOf(tg.sends(CHAT).at(-1)), m.messageId, `"${text}" is answered, as a reply`);
+        clock += 30 * SEC;
+      }
+      const before = tg.sends(CHAT).length;
+      for (const text of notCalls) {
+        await said(msg(text, { fromId: BOB, fromFirstName: "Bob" }));
+        clock += 30 * SEC;
+      }
+      assert.equal(tg.sends(CHAT).length, before, "words in a sentence are not a call");
+    });
+  }
 });
 
 // ─── Through the real poll service ───────────────────────────────────────────
@@ -1028,6 +1201,9 @@ describe("docs/tg-groups.md Scenarios, through the poll service", () => {
       tgGroupsStore: store,
       tgCoins: port,
       tgGroupsTest: { now: () => clock, rand: () => 0.99, sleep: async () => {}, env: {}, log: () => {} },
+      // The poll's own clock too: its backlog rule dates every update against
+      // when it began listening, and these updates are dated by `clock`.
+      now: () => Math.floor(clock / 1000),
     });
     stop = h.stop;
   });
@@ -1104,7 +1280,7 @@ describe("docs/tg-groups.md Scenarios, through the poll service", () => {
 
   it("/link in a group: no code is asked for or taken; the room hears 'no code needed'; nothing is allowlisted", async () => {
     const groupBefore = sendsTo(CHAT).length;
-    tstate = ensureLinkCode(tstate, TOKEN);
+    tstate = ensureLinkCode(tstate);
     const codeBefore = tstate.linkCode;
     const l = groupMsg("/link WRONGCODE", { id: CAT, first: "Xfyt" });
     await deliver(l.update);
@@ -1121,7 +1297,7 @@ describe("docs/tg-groups.md Scenarios, through the poll service", () => {
   });
 
   it("the live link code typed in a group is never consumed: it is replaced, and the owner is told in their DM", async () => {
-    tstate = ensureLinkCode(tstate, TOKEN);
+    tstate = ensureLinkCode(tstate);
     const live = tstate.linkCode;
     const ownerBefore = tstate.ownerId;
     const dmBefore = sendsTo(OWNER).length;

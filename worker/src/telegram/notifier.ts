@@ -24,7 +24,8 @@ import { homePaths, merrymenHome } from "../home";
 import type { ResolvedConfig } from "../settings";
 import { appendJournal, getName, relationship } from "../soul";
 import { cpuPercent, procRunning } from "../pc/platform";
-import { esc, sendMessage } from "./api";
+import { esc, sendMessage as sendTelegramMessage } from "./api";
+import { makeChatTally, telegramLog, type ChatTally } from "./poll-rules";
 import { pnlCardFromFill } from "../pnl-card";
 import { sendPnlPhoto } from "./pnl-photo";
 import { resolveLlm } from "../llm";
@@ -111,6 +112,13 @@ export interface NotifierDeps {
   getChainId: () => number | null;
   /** This tenant's own agent id — scopes the trade cursor. Null when unarmed. */
   getAgentId: () => string | null;
+  /**
+   * Where a message Telegram would not take is logged (poll-rules.ts
+   * makeChatTally, on the fleet's log). index.ts hands in the tally the poll
+   * loop uses, so a blocked bot is said once an hour between them. One of
+   * its own otherwise.
+   */
+  tally?: ChatTally;
   now?: () => number;
 }
 
@@ -477,6 +485,20 @@ export interface NotifierHandle {
 export function startNotifier(deps: NotifierDeps): NotifierHandle {
   let stopped = false;
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
+  /**
+   * EVERY MESSAGE BELOW GOES THROUGH HERE, so one Telegram would not take is
+   * logged rather than dropped. These are the ones the agent starts: trade
+   * receipts, digests, alerts, reminders, watchers, the daily report, all to
+   * the owner's chat. A bot the owner blocked, or a chat that is gone, failed
+   * every one of them without a line anywhere, and the sign and energy
+   * prompts, which did look at the answer, said nothing about it either.
+   */
+  const tally = deps.tally ?? makeChatTally(telegramLog, now);
+  const sendMessage: typeof sendTelegramMessage = async (opts, chatId, text, extra) => {
+    const r = await sendTelegramMessage(opts, chatId, text, extra);
+    if (!r.ok) tally.sendFailed(chatId, r.reason);
+    return r;
+  };
   let latestPrices: Map<string, number> = new Map();
   /** A refused energy alert, and when it may be tried again (energy-alert.ts). In memory: a restart just tries now. */
   let energyRetry: { key: string; at: number } | null = null;
