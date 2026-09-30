@@ -63,13 +63,20 @@ import dev.merrymen.app.ui.Money
 import dev.merrymen.app.ui.Notice
 import dev.merrymen.app.ui.OwnBook
 import dev.merrymen.app.ui.PagePadH
+import dev.merrymen.app.ui.PERPS_DASHBOARD_PATH
+import dev.merrymen.app.ui.PERPS_CLOSE_ALL_PATH
 import dev.merrymen.app.ui.PageTitle
+import dev.merrymen.app.ui.PerpsStatus
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.accountControlsOf
 import dev.merrymen.app.ui.modeChipOf
 import dev.merrymen.app.ui.numerals
 import dev.merrymen.app.ui.ownAgentName
 import dev.merrymen.app.ui.ownBookOf
+import dev.merrymen.app.ui.perpsCustodyOfStopAnswer
+import dev.merrymen.app.ui.perpsKillWarning
+import dev.merrymen.app.ui.perpsStatusOf
+import dev.merrymen.app.ui.perpsStopCustody
 import dev.merrymen.app.ui.pnlLineOf
 import dev.merrymen.app.ui.sans
 import dev.merrymen.app.ui.shortAddress
@@ -163,6 +170,9 @@ fun ProfileScreen(nav: NavHostController) {
   }
   val book = ownBookOf(reads.feed, signedIn, hosted, canOfferSignIn)
   val controls = accountControlsOf(signedIn, hosted, canOfferSignIn)
+  // The agent's perps from the status read, for the banner and the kill
+  // switch's words. Null while that read has not come back.
+  val perps = (reads.grants as? Loaded.Value)?.value?.let { perpsStatusOf(it, nowMs) }
   val pull = rememberPullToRefreshState()
 
   PullToRefreshBox(
@@ -227,6 +237,11 @@ fun ProfileScreen(nav: NavHostController) {
         is OwnBook.Mine -> {
           val g = (reads.grants as? Loaded.Value)?.value
           if (g != null && !g.exists) {
+            AccountPerpsBanner(
+              perpsStatusOf(g, nowMs),
+              onManage = { nav.navigate(Routes.web(PERPS_DASHBOARD_PATH, "Dashboard")) },
+              onCloseAll = { nav.navigate(Routes.web(PERPS_CLOSE_ALL_PATH, "Review close all")) },
+            )
             Notice(
               title = "Your agents belong here",
               body = "Create an agent to manage your portfolio and follow its trades here.",
@@ -236,6 +251,13 @@ fun ProfileScreen(nav: NavHostController) {
           } else {
             staleLine(reads.feedFailure, reads.feedAtMs, nowMs)?.let { Prose(it, 13.sp, 18.85.sp, MerryColors.tx2) }
             AccountStatusNote(reads, nowMs, onRetry = { scope.launch { load() } })
+            // The balance below counts Lighter (rule 12); the banner says what
+            // is there, and cannot be dismissed while anything may be.
+            AccountPerpsBanner(
+              perps,
+              onManage = { nav.navigate(Routes.web(PERPS_DASHBOARD_PATH, "Dashboard")) },
+              onCloseAll = { nav.navigate(Routes.web(PERPS_CLOSE_ALL_PATH, "Review close all")) },
+            )
             AccountPerson(signedIn, g)
             AccountBalance(book.feed, g, nav)
             YourAgent(book.feed, g, nav)
@@ -293,7 +315,7 @@ fun ProfileScreen(nav: NavHostController) {
       // THE KILL SWITCH, for whoever this server acts for: a signed-in owner
       // hosted, or the one operator of a self-hosted box (which has no session
       // at all, and whose DELETE /api/grants needs none). See accountControlsOf.
-      if (controls.stop) StopControl()
+      if (controls.stop) StopControl(perps)
 
       // SIGN OUT ONLY WHERE THERE IS A SESSION TO END. `.profile-session-actions
       // button` — polish.css:75-76: #f47777, min-height 44px, 15px.
@@ -325,9 +347,17 @@ fun ProfileScreen(nav: NavHostController) {
  * A LOST ANSWER IS NOT "it didn't stop". The grant may be gone. So the status
  * route is asked, and the owner is told what it says — stopped, or still
  * armed and theirs to stop again — rather than a failure that may be false.
+ *
+ * PERPS ARE STOOD DOWN BY THE SAME STOP (docs/perps.md rule 13), and the words
+ * say so both ways: the armed note carries the web's kill warning (closes at
+ * market can realize a loss), and the stopped note says where the money is —
+ * the DELETE answer's own custody sentence when it sent one, else core's
+ * custodySentence over [perps], the read from before the stop (once the grant
+ * is gone /api/grants no longer answers for it). Neither ever says the funds
+ * are all in the smart account while anything may be on Lighter.
  */
 @Composable
-private fun StopControl() {
+private fun StopControl(perps: PerpsStatus?) {
   val c = LocalContainer.current
   val scope = rememberCoroutineScope()
   var armed by remember { mutableStateOf(false) }
@@ -339,19 +369,25 @@ private fun StopControl() {
         .clickable(role = Role.Button) {
           if (!armed) {
             armed = true
-            stopNote = "Tap again to stop it. This revokes its trading permission until you re-sign."
+            stopNote = "Tap again to stop it. This revokes its trading permission until you re-sign." +
+              (perpsKillWarning(perps)?.let { " $it" } ?: "")
           } else {
             armed = false
             // The stop goes to the server this page shows, or nowhere (ServerBound).
             scope.launch(c.api.boundHere()) {
+              // The read the owner confirmed against, not whatever a refresh
+              // brings in while the DELETE is out.
+              val before = perps
+              fun custody(server: String?) = perpsStopCustody(before, server)?.let { " $it" } ?: ""
               stopNote = when (val r = c.api.revokeGrant()) {
                 is ApiResult.Ok ->
-                  "Stopped. Your agent will not trade again until you re-sign its permission."
+                  "Stopped. Your agent will not trade again until you re-sign its permission." +
+                    custody(perpsCustodyOfStopAnswer(r.value))
                 is ApiResult.Refused ->
                   if (r.status == 401) "Sign in first. Nothing was stopped." else r.message
                 is ApiResult.Unreachable -> when (val after = c.api.grants()) {
                   is ApiResult.Ok -> if (!after.value.exists) {
-                    "Stopped. Your agent will not trade again until you re-sign its permission."
+                    "Stopped. Your agent will not trade again until you re-sign its permission." + custody(null)
                   } else {
                     "Couldn't tell whether that went through (${r.said.trimEnd('.')}), and your agent's " +
                       "permission is still in place. Tap again to stop it."

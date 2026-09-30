@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -70,6 +71,9 @@ import dev.merrymen.app.ui.HOUSE_AGENT_NAME
 import dev.merrymen.app.ui.MerryColors
 import dev.merrymen.app.ui.Notice
 import dev.merrymen.app.ui.OWN_TAPE_LIMIT
+import dev.merrymen.app.ui.PERPS_MANAGE
+import dev.merrymen.app.ui.PERPS_CLOSE_ALL
+import dev.merrymen.app.ui.PerpsStatus
 import dev.merrymen.app.ui.PositionLine
 import dev.merrymen.app.ui.NameSave
 import dev.merrymen.app.ui.TapeItem
@@ -89,6 +93,12 @@ import dev.merrymen.app.ui.lastHeardText
 import dev.merrymen.app.ui.modeChipOf
 import dev.merrymen.app.ui.numerals
 import dev.merrymen.app.ui.offersNameChip
+import dev.merrymen.app.ui.perpsAtLighterOf
+import dev.merrymen.app.ui.perpsAtLighterRowOf
+import dev.merrymen.app.ui.perpsBannerOf
+import dev.merrymen.app.ui.perpsEmptyPositions
+import dev.merrymen.app.ui.perpsPositionRows
+import dev.merrymen.app.ui.perpsPositionsHeading
 import dev.merrymen.app.ui.sans
 import dev.merrymen.app.ui.tapeItemsOf
 import dev.merrymen.app.ui.tapeOpWords
@@ -183,16 +193,61 @@ internal fun AccountBlockerPanel(grants: Loaded<GrantView>, onFix: (BlockerFix) 
 }
 
 /**
- * THE OWNER'S POSITIONS: the value always, the % only beside a cost the ledger
- * vouches for, and the note that says why when there is none. An empty list
- * here is a fact — this block only renders for a book the server READ.
+ * THE BANNER THAT CANNOT BE DISMISSED (docs/perps.md, Surfaces → Mobile).
+ *
+ * Drawn whenever the agent's perps report is not none — leveraged positions,
+ * USDG left on Lighter, an incident, or a venue nobody could read — and there
+ * is deliberately no close on it: the condition it names is a standing one,
+ * and a banner an owner can swipe away is how "No positions" comes back while
+ * 10x is open. Every word is ui/PerpsStatus.kt's, where a JVM test holds it.
+ *
+ * LOUD, in red, for what may be unknown or not ours (unread, stale, an
+ * incident); loud in the strip's amber for leverage that is read and
+ * accounted for; the quiet slab for a practice book, which is labelled paper
+ * in its first words.
+ *
+ * Close-all opens the owner-bound web confirmation. No order is sent on navigation.
  */
 @Composable
-internal fun AccountPositions(lines: List<PositionLine>, modifier: Modifier = Modifier) {
+internal fun AccountPerpsBanner(perps: PerpsStatus?, onManage: () -> Unit, onCloseAll: () -> Unit, modifier: Modifier = Modifier) {
+  val s = perps ?: return
+  val b = perpsBannerOf(s) ?: return
+  val body = buildList {
+    addAll(perpsPositionRows(s))
+    addAll(b.lines)
+    perpsAtLighterOf(s)?.let { (label, value) -> add("$label: $value") }
+  }.joinToString("\n")
+  Column(modifier) {
+  Notice(
+    title = b.headline,
+    body = body,
+    actionLabel = PERPS_MANAGE,
+    onAction = onManage,
+    tone = when {
+      b.alarm -> MerryColors.down
+      b.paper -> null
+      else -> StripWarn
+    },
+
+  )
+    TextButton(onClick = onCloseAll) { Text(PERPS_CLOSE_ALL) }
+  }
+}
+
+/**
+ * THE OWNER'S POSITIONS: the value always, the % only beside a cost the ledger
+ * vouches for, and the note that says why when there is none. These are the
+ * SPOT book — perps never enter /api/feed's positions (docs/perps.md rule 11)
+ * — so an empty list says "No positions" only when [perps] is a known none;
+ * held leverage, an unread venue, or a status not read yet (null) each say
+ * what they are instead.
+ */
+@Composable
+internal fun AccountPositions(lines: List<PositionLine>, perps: PerpsStatus?, modifier: Modifier = Modifier) {
   Column(modifier.fillMaxWidth()) {
-    TabSectionHeading("Positions", Modifier.padding(bottom = 12.dp))
+    TabSectionHeading(perpsPositionsHeading(perps), Modifier.padding(bottom = 12.dp))
     if (lines.isEmpty()) {
-      Prose("No positions reported yet.", 13.sp, 18.85.sp, MerryColors.tx2)
+      Prose(perpsEmptyPositions(perps), 13.sp, 18.85.sp, MerryColors.tx2)
       return@Column
     }
     lines.forEach { p ->
@@ -233,10 +288,11 @@ internal fun AccountPositions(lines: List<PositionLine>, modifier: Modifier = Mo
  * ([accountVaultUsdOf]).
  */
 @Composable
-internal fun AccountBalances(grants: Loaded<GrantView>, feed: Feed, modifier: Modifier = Modifier) {
+internal fun AccountBalances(grants: Loaded<GrantView>, feed: Feed, perps: PerpsStatus?, modifier: Modifier = Modifier) {
   val g = (grants as? Loaded.Value)?.value?.takeIf { it.exists } ?: return
   val b = g.balances
   val vault = accountVaultUsdOf(g, feed)
+  val atLighter = perpsAtLighterRowOf(perps)
   Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
     TabSectionHeading("In the account", Modifier.padding(bottom = 4.dp))
     BalanceRow("USDG", b?.let { usdgFromUnits(it.cashUsdg)?.let { v -> accountUsd(v) } } ?: BALANCE_UNREAD)
@@ -247,6 +303,9 @@ internal fun AccountBalances(grants: Loaded<GrantView>, feed: Feed, modifier: Mo
       Prose("Real funds, on chain. In Paper mode none of it trades.", 12.sp, 18.sp, MerryColors.faint)
     }
     vault?.let { BalanceRow("In vaults", accountUsd(it)) }
+    // Money at Lighter is not in the account and never folded into a line
+    // that is: its own row, "couldn't read" when the venue was not read.
+    atLighter?.let { BalanceRow("At Lighter", it) }
   }
 }
 

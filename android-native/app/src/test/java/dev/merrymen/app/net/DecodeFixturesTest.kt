@@ -1,5 +1,7 @@
 package dev.merrymen.app.net
 
+import dev.merrymen.app.ui.PerpsStatus
+import dev.merrymen.app.ui.perpsStatusOf
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.JsonArray
@@ -13,6 +15,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -242,6 +245,10 @@ class DecodeFixturesTest {
     assertNull("an unread balance is null, not 0", g.balances)
     assertNull(g.perTradeUsdg)
     assertNull(g.dailyUsdg)
+    // Captured before perps: the key is absent, which is its own answer —
+    // not null, and not a report — and says nothing is held.
+    assertSame(GRANTS_PERPS_NOT_SENT, g.perps)
+    assertEquals(PerpsStatus.NONE, perpsStatusOf(g, CAPTURED_SEC * 1000))
   }
 
   @Test fun signedOutSettingsWereReadForNobody() = runBlocking {

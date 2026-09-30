@@ -319,6 +319,12 @@ fun liveTradingNote(shown: SettingsShown): LiveTradingNote? {
   }
 }
 
+/** Real perps keep their exits even when the spot live switch is turned off. */
+const val PERPS_LIVE_TRADING_OFF = "Perpetuals on Lighter are the exception: real positions there keep their stops at Lighter and are still closed by their exit rules. Nothing new is opened, and the USDG comes home once they are flat."
+fun perpsLiveTradingOffNote(shown: SettingsShown): String? =
+  if (!shown.bool("liveTradingEnabled") && shown.savedBool("liveTradingEnabled") &&
+    (shown.savedBool("perpsEnabled") || shown.savedBool("perpsLiveEnabled"))) PERPS_LIVE_TRADING_OFF else null
+
 /** What the published book reveals, while it is on (Profile.tsx BookSwitch). */
 const val PUBLIC_BOOK_ON = "Anyone can see this agent's trade sizes and dollar P&L, what it holds and how much, " +
   "and its name as a holder on the token pages of what it holds. Its return and the percentage on each trade " +

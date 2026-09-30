@@ -1,4 +1,5 @@
 import SwiftUI
+import MerrymenPolicy
 import UIKit
 
 struct ChatScreen: View {
@@ -144,6 +145,7 @@ struct ChatBubble: View {
 struct CommandCard: View {
     @EnvironmentObject var store: AppStore
     @StateObject private var presentation = FeedPresentation()
+    @State private var perpsReview: PerpsWebReview?
     let command: J
     let dismiss: () -> Void
     var body: some View {
@@ -152,7 +154,9 @@ struct CommandCard: View {
             Text(proposal["say"].text)
             Button("Review proposal") { review(proposal) }
             Button("Dismiss", role: .cancel, action: dismiss)
-        }.padding(12).background(Brand.card, in: RoundedRectangle(cornerRadius: 10)) }
+        }.padding(12).background(Brand.card, in: RoundedRectangle(cornerRadius: 10))
+            .sheet(item: $perpsReview, onDismiss: dismiss) { PerpsWebSheet(url: $0.url) }
+        }
     }
     private func review(_ proposal: J) {
         let payload = proposal["payload"]
@@ -161,6 +165,12 @@ struct CommandCard: View {
             guard let data = try? JSONEncoder().encode(command) else { return }
             store.path.append(.settingsProposal(String(decoding: data, as: UTF8.self)))
         case "order":
+            if ["close-perp", "flatten-perps"].contains(payload["purpose"].text) {
+                guard let path = PerpsBannerCopy.reviewPath(purpose: payload["purpose"].text, symbol: payload["symbol"].text, book: payload["book"].string),
+                      let url = URL(string: path, relativeTo: API.origin)?.absoluteURL else { return }
+                perpsReview = PerpsWebReview(url: url)
+                return // Dismiss the proposal only after the separate web review closes.
+            }
             // THE ENERGY MARKER comes from the command's own fixed values
             // (feed.ts → commandPayload), never the model: get-energy's card
             // opens the energy review, which sends it; every other order card

@@ -234,6 +234,22 @@ val COMMANDS: Map<String, CommandSpec> = listOf(
       "It stays in my account as energy; my key can't sell or send it. I'll place it — my key's limits still decide " +
       "whether it goes through."
   },
+  CommandSpec(
+    "close-perp", Via.ORDER, listOf("side", "symbol", "usdgAmount", "purpose"),
+    fixed = mapOf("side" to JsonPrimitive("sell"), "usdgAmount" to JsonPrimitive(0), "purpose" to JsonPrimitive("close-perp")),
+    weighty = true,
+  ) {
+    "Review closing the whole ${arg(it, "symbol").uppercase()} perpetual position on the web dashboard. " +
+      "Nothing is sent until you confirm there; a reduce-only close may realize a loss or fill partly."
+  },
+  CommandSpec(
+    "flatten-perps", Via.ORDER, listOf("side", "symbol", "usdgAmount", "purpose"),
+    fixed = mapOf("side" to JsonPrimitive("sell"), "symbol" to JsonPrimitive("ALL-PERPS"), "usdgAmount" to JsonPrimitive(0), "purpose" to JsonPrimitive("flatten-perps")),
+    weighty = true,
+  ) {
+    "Review closing all perpetual positions and halting new perpetual entries on the web dashboard. " +
+      "Nothing is sent until you confirm there; partial fills or refusals can leave positions open."
+  },
   CommandSpec("open-deposit", Via.NAVIGATE, to = "/deposit", title = "Add funds") { "Show you where to send funds." },
   CommandSpec("open-withdraw", Via.NAVIGATE, to = "/withdraw", weighty = true, title = "Withdraw") {
     "Take you to the withdraw screen. I cannot send it from chat — moving money out needs a " +

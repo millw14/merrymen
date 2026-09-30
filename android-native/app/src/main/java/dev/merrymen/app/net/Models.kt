@@ -862,6 +862,12 @@ data class CustomToken(val symbol: String, val address: String, val decimals: In
 // ── grants ──────────────────────────────────────────────────────────────────
 
 /**
+ * [GrantView.perps] when the answer did not carry the key at all. Compared by
+ * identity; the wire only ever carries an object or null there.
+ */
+val GRANTS_PERPS_NOT_SENT: JsonElement = JsonPrimitive("perps-not-sent")
+
+/**
  * GET /api/grants — the account's status as the WORKER reports it.
  *
  * `mode`, `liveBlocker`, `workerAliveAt` and `gasSponsored` are the child's
@@ -890,6 +896,29 @@ data class GrantView(
    */
   val workerAliveAt: Long? = null,
   val balances: GrantBalances? = null,
+  /**
+   * THE AGENT'S PERPS REPORT (core PerpsReport; docs/perps.md, Surfaces →
+   * Mobile) — the worker's own statement of what it holds on Lighter, and the
+   * one thing standing between a leveraged owner and "No positions reported
+   * yet". Kept RAW and read only through ui/PerpsStatus.kt perpsStatusOf,
+   * whose strict parser (net/PerpsWire.kt) turns anything malformed into
+   * UNREAD, never into an empty book.
+   *
+   * Three answers, kept apart: ABSENT (the default, [GRANTS_PERPS_NOT_SENT]) is
+   * a server from before the report, which could never have opened a perp;
+   * NULL is "the worker has not said, or said something unreadable" (web
+   * lib/agent-perps.ts); an object is the report.
+   */
+  val perps: JsonElement? = GRANTS_PERPS_NOT_SENT,
+  /**
+   * Does this server's kill stand perpetuals down? True only where the server
+   * says so (self-hosted). The hosted service closes nothing on a kill yet
+   * (rule 13's sealed perp_standdown row is not built), and absent is read as
+   * false: the kill copy never promises a close the server will not make.
+   */
+  val perpsStanddownOnKill: Boolean? = null,
+  /** A removed grant can still have unresolved real custody at Lighter. */
+  val perpsShutdown: JsonElement? = null,
 )
 
 /**

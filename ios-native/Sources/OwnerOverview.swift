@@ -1,9 +1,15 @@
 import SwiftUI
+import MerrymenPolicy
 
 struct OwnerOverview: View {
     @EnvironmentObject var store: AppStore
     @StateObject private var presentation = FeedPresentation()
     let feed: J
+    /// The agent's perps state (OwnerHome), or nil while its status is unread.
+    /// These positions are the SPOT book — perps never enter it (docs/perps.md
+    /// rule 11) — so "No positions" is only said when perps are known to be
+    /// none; nil is not none.
+    var perps: PerpsStatus?
     var body: some View {
         if let view = presentation.overview(feed), view != .null {
             Card(hero: true) {
@@ -19,8 +25,10 @@ struct OwnerOverview: View {
                 }
                 if let notice = view["notice"]["message"].string { AgentNotice(message: notice) }
             }
-            DisclosureGroup("Positions · \(view["positions"].array.count)") {
-                if view["positions"].array.isEmpty { Text("No positions in this book.").foregroundStyle(.secondary) }
+            DisclosureGroup("\(perps?.positionsLabel ?? "Spot positions") · \(view["positions"].array.count)") {
+                if view["positions"].array.isEmpty {
+                    Text(perps?.emptyPositions ?? "No spot positions in this book. Your agent's status has not been read, so leveraged positions are not ruled out.").foregroundStyle(.secondary)
+                }
                 Rows(values: view["positions"].array) { position in Card {
                     Metric(label: position["symbol"].text, value: position["detail"].text)
                     if let pct = position["pnl"].number { Metric(label: "Return on evidenced cost", value: bps(pct * 100)) }

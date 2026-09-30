@@ -30,6 +30,27 @@ class ChatOrdersTest {
     json("""{"reply":"I can do that.","command":{"id":"buy","args":{"symbol":"NVDA","usdgAmount":$amount}}}""")
   }
 
+  @Test fun perpetualExitCardsNavigateToWebReviewWithoutSubmittingAnyOrder() {
+    val chat = rig.thread()
+    rig.signIn(A)
+    waitFor("A") { chat.thread.value.key == A }
+    for ((id, symbol, path) in listOf(
+      Triple("close-perp", "BTC-PERP", "/agent?perps=close&market=BTC-PERP"),
+      Triple("flatten-perps", "ALL-PERPS", "/agent?perps=flatten"),
+    )) {
+      rig.route("POST /api/chat") {
+        json("""{"reply":"Review on the dashboard.","command":{"id":"$id","args":{"symbol":"$symbol"}}}""")
+      }
+      runBlocking { chat.sendNow("close perps", null) }
+      waitFor("the exit card") { chat.card.value?.command?.id == id }
+      var destination: String? = null
+      chat.confirm { to, _ -> destination = to }
+      waitFor("web review") { destination != null }
+      assertEquals(path, destination)
+      assertTrue("navigation must never submit an order", rig.writes().none { it.path == "/api/orders" })
+    }
+  }
+
   @Test fun aConfirmedBuyIsPlacedFollowedAndItsReceiptLandsWhileChatIsClosed() {
     proposeBuy(5)
     rig.route("POST /api/orders") { json("""{"id":"$id","queued":true,"expiresAt":1000495000,"expiresInMs":495000}""") }

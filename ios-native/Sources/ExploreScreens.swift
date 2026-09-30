@@ -7,7 +7,8 @@ struct HomeScreen: View {
     var body: some View { Page {
         Group {
             if store.owner == nil { SignInCard() }
-            else { Remote(path: "/api/feed") { OwnerOverview(feed: $0) } }
+            // The leverage banner stands above the book (OwnerHome, PerpsBanner.swift).
+            else { OwnerHome() }
         }.tourAnchor("home-top")
         if store.owner != nil {
             Remote(path: "/api/grants") { status in

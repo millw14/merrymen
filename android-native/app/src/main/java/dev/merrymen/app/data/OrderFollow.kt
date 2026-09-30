@@ -195,6 +195,15 @@ val REJECT_RULE_LABELS: Map<String, String> = mapOf(
   "live-not-enabled" to "its owner has not turned on live trading, so it places no real orders",
   "wrong-chain" to "its key was signed for a different network",
   "no-cash" to "the account held no USDG to trade with",
+  "energy-not-granted" to "its signed key has no route to buy its own energy",
+  "energy-needs-live" to "it buys its own energy only while trading live",
+  "energy-tax" to "the token's own buy tax was above what the energy buy accepts",
+  "energy-tax-unreadable" to "the token's buy tax could not be read, so no safe floor could be set",
+  "energy-no-quote" to "the energy route could not be quoted",
+  "energy-unreadable" to "its balances could not be read, so it bought no energy",
+  "energy-in-flight" to "an earlier energy buy was still settling",
+  "energy-too-small" to "the most it could spend was below the smallest energy buy",
+  "would-exhaust-contributions" to "spending that much on energy would have used up all, or nearly all, the capital put into it",
 )
 
 fun rejectRuleLabel(rule: String?): String? = rule?.let { REJECT_RULE_LABELS[it] }

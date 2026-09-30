@@ -83,6 +83,7 @@ import dev.merrymen.app.ui.SETTINGS_RANGES
 import dev.merrymen.app.ui.SettingsDraft
 import dev.merrymen.app.ui.SettingsShown
 import dev.merrymen.app.ui.liveTradingNote
+import dev.merrymen.app.ui.perpsLiveTradingOffNote
 import dev.merrymen.app.ui.liveTradingReadout
 import dev.merrymen.app.ui.outOfRange
 import dev.merrymen.app.ui.plainBound
@@ -606,6 +607,7 @@ private fun LiveTradingField(shown: SettingsShown, onChange: (Boolean) -> kotlin
             append(note.lead)
           }
           append(note.body)
+          perpsLiveTradingOffNote(shown)?.let { append(" " + it) }
         },
         style = HintStyle,
         color = MerryColors.tx2,

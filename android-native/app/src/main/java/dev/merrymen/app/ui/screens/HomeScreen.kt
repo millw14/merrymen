@@ -72,10 +72,13 @@ import dev.merrymen.app.ui.MerryColors
 import dev.merrymen.app.ui.Notice
 import dev.merrymen.app.ui.OwnBook
 import dev.merrymen.app.ui.PagePadH
+import dev.merrymen.app.ui.PERPS_DASHBOARD_PATH
+import dev.merrymen.app.ui.PERPS_CLOSE_ALL_PATH
 import dev.merrymen.app.ui.PageTitle
 import dev.merrymen.app.ui.Routes
 import dev.merrymen.app.ui.ownAgentName
 import dev.merrymen.app.ui.ownBookOf
+import dev.merrymen.app.ui.perpsStatusOf
 import dev.merrymen.app.ui.pnlLineOf
 import dev.merrymen.app.ui.positionLinesOf
 import dev.merrymen.app.ui.sans
@@ -356,6 +359,11 @@ fun HomeScreen(nav: NavHostController) {
         is OwnBook.Mine -> {
           val g = (reads.grants as? Loaded.Value)?.value
           if (g != null && !g.exists) {
+            AccountPerpsBanner(
+              perpsStatusOf(g, nowMs),
+              onManage = { nav.navigate(Routes.web(PERPS_DASHBOARD_PATH, "Dashboard")) },
+              onCloseAll = { nav.navigate(Routes.web(PERPS_CLOSE_ALL_PATH, "Review close all")) },
+            )
             // SIGNED IN, NO AGENT YET. The feed still answers (with the name
             // and strategy they configured), but there is no book behind it,
             // and a "$—" hero would describe an account that does not exist.
@@ -406,6 +414,10 @@ private fun OwnHome(feed: Feed, reads: OwnReads, nowMs: Long, hosted: Boolean?, 
   val c = LocalContainer.current
   val agent = feed.agent
   val g = (reads.grants as? Loaded.Value)?.value
+  // THE AGENT'S PERPS, from the same status read (the last good one — see
+  // OwnReads.load). Null while that read has not come back, which the
+  // positions below must not take for "none".
+  val perps = g?.let { perpsStatusOf(it, nowMs) }
   Column(Modifier.fillMaxWidth()) {
     staleLine(reads.feedFailure, reads.feedAtMs, nowMs)?.let {
       Prose(it, 13.sp, 18.85.sp, MerryColors.tx2, modifier = Modifier.padding(bottom = 16.dp))
@@ -415,6 +427,15 @@ private fun OwnHome(feed: Feed, reads: OwnReads, nowMs: Long, hosted: Boolean?, 
     // status could not be read, that is said in its place.
     AccountStatusNote(reads, nowMs, onRetry = onChanged, modifier = Modifier.padding(bottom = 16.dp))
     AccountBlockerPanel(reads.grants, onFix = { nav.navigate(fixRoute(it)) }, modifier = Modifier.padding(bottom = 28.dp))
+    // LEVERAGE IS PINNED UP HERE TOO, for the blocker's reason: a standing
+    // condition that must not be scrolled past, above the positions it
+    // explains (docs/perps.md, Surfaces → Mobile). Nothing when perps are none.
+    AccountPerpsBanner(
+      perps,
+      onManage = { nav.navigate(Routes.web(PERPS_DASHBOARD_PATH, "Dashboard")) },
+      onCloseAll = { nav.navigate(Routes.web(PERPS_CLOSE_ALL_PATH, "Review close all")) },
+      modifier = Modifier.padding(bottom = 28.dp),
+    )
 
     // `polish.css:90-94` — `.hero-who { gap:12px }`, the face at 40x40, the
     // name at 18px, and the balance at 56px.
@@ -490,8 +511,8 @@ private fun OwnHome(feed: Feed, reads: OwnReads, nowMs: Long, hosted: Boolean?, 
       )
     }
 
-    AccountPositions(positionLinesOf(feed.positions), Modifier.padding(top = 28.dp))
-    AccountBalances(reads.grants, feed, Modifier.padding(top = 28.dp))
+    AccountPositions(positionLinesOf(feed.positions), perps, Modifier.padding(top = 28.dp))
+    AccountBalances(reads.grants, feed, perps, Modifier.padding(top = 28.dp))
     AccountTape(feed, nowMs, Modifier.padding(top = 28.dp))
   }
 }

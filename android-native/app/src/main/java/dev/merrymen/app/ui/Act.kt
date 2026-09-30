@@ -902,6 +902,18 @@ suspend fun runConfirmedCard(
       // that fixes it (get-energy) sends it, and it is what the worker routes
       // the energy buy on. Every other order card sends none.
       val purpose = spec.fixed["purpose"]?.jsonPrimitive?.content
+      if (purpose == "close-perp" || purpose == "flatten-perps") {
+        val path = if (purpose == "flatten-perps") PERPS_CLOSE_ALL_PATH else {
+          if (!Regex("^[A-Z0-9]{1,24}-PERP$").matches(symbol)) {
+            scope.say("agent", "Name a perpetual market such as BTC-PERP.")
+            return
+          }
+          "/agent?perps=close&market=$symbol"
+        }
+        scope.clearCard()
+        onNavigate(path, "Review perpetual exit")
+        return
+      }
       val usdg = amountOf(args)
       if (usdg == null || symbol.isEmpty()) {
         scope.say("agent", "That isn't an order I can place — it needs a coin and an amount — so nothing was sent.")

@@ -3,6 +3,7 @@ import PhotosUI
 import CoreImage.CIFilterBuiltins
 import UIKit
 import ImageIO
+import MerrymenPolicy
 
 struct AccountScreen: View {
     @EnvironmentObject var store: AppStore
@@ -18,6 +19,8 @@ struct AccountScreen: View {
                 }.tourAnchor("profile-top")
                 Remote(path: "/api/grants") { status in
                     ResignNotice(status: status)
+                    // Where the agent is managed from, leverage is said too.
+                    PerpsNotice(perps: PerpsStatus(status: status))
                     if status["exists"].bool == true {
                         Card {
                             HStack { Text("Your Merryman").font(.title2.bold()); Spacer(); Pill(text: status["mode"].string ?? "Unknown", tint: status["mode"].string == "paper" ? .orange : Brand.accent) }
@@ -137,6 +140,10 @@ func rawUnits(_ raw: String?, decimals: Int) -> String {
 struct PermissionsScreen: View {
     @EnvironmentObject var store: AppStore
     @State private var stop = false
+    /// The perps state AS READ when "Stand down" was tapped. Once the grant is
+    /// gone /api/grants no longer answers for it, so the words said after the
+    /// stand-down can only come from this read — and say so.
+    @State private var standingDown: PerpsStatus = .none
     @State private var resetPaper = false
     @State private var busy = false
     @State private var revision = 0
@@ -144,6 +151,8 @@ struct PermissionsScreen: View {
         Page {
             if store.owner == nil { SignInCard() } else {
                 Remote(path: "/api/grants") { status in
+                    let perps = PerpsStatus(status: status)
+                    PerpsNotice(perps: perps)
                     if status["exists"].bool == true {
                         Card {
                             Text(status["mode"].string?.capitalized ?? "Mode unknown").font(.title2.bold())
@@ -154,6 +163,9 @@ struct PermissionsScreen: View {
                             Metric(label: "Operations per day", value: status["grant"]["caps"]["maxOpsPerDay"].text)
                             Metric(label: "USDG", value: rawUnits(status["balances"]["cashUsdg"].string, decimals: 6))
                             Metric(label: "ETH for gas", value: rawUnits(status["balances"]["ethWei"].string, decimals: 18))
+                            // Beside the chain balances, never folded into them:
+                            // money at Lighter is not in the smart account.
+                            if let row = perps.atLighter { Metric(label: row.label, value: row.value) }
                             if let heartbeat = status["workerAliveAt"].number { HStack { Text("Last heartbeat"); Text(Date(timeIntervalSince1970: heartbeat), style: .relative) }.font(.caption).foregroundStyle(.secondary) }
                             if let blocker = status["liveBlocker"].string { Text("Live trading: " + blocker.replacingOccurrences(of: "-", with: " ")).font(.caption).foregroundStyle(.orange) }
                             NavigationLink("Edit signed limits", value: Route.limits)
@@ -164,7 +176,7 @@ struct PermissionsScreen: View {
                             Button("Restart paper book") { resetPaper = true }.buttonStyle(SecondaryButtonStyle(fill: true)).disabled(busy)
                             Text("Paper cash goes back to the starting stake and simulated positions are cleared. Earlier paper trades stay on file but no longer count.").font(.caption).foregroundStyle(.secondary)
                         }
-                        Button("Stand down agent", role: .destructive) { stop = true }.disabled(busy)
+                        Button("Stand down agent", role: .destructive) { standingDown = perps; stop = true }.disabled(busy)
                         Text("Stand-down removes the service's active grant. It does not withdraw assets or invalidate the existing permission on-chain.").font(.caption).foregroundStyle(.secondary)
                     } else {
                         InactiveWalletPanel(status: status) { revision += 1 }
@@ -177,11 +189,22 @@ struct PermissionsScreen: View {
             Button("Stand down", role: .destructive) {
                 guard !busy else { return }; busy = true; let owner = store.owner
                 Task { defer { busy = false }; do {
-                    _ = try await store.perform("/api/grants", method: "DELETE", body: .object([:]), expectedOwner: owner)
-                    revision += 1; store.notice = "Stand-down request accepted. Existing assets remain in the smart account."
+                    let answer = try await store.perform("/api/grants", method: "DELETE", body: .object([:]), expectedOwner: owner)
+                    // Core custodySentence's rule: "remain in the smart account"
+                    // only when nothing is, or may be, on Lighter. The answer's
+                    // own `custody` (built from the stand-down's result) wins
+                    // over this app's last read.
+                    revision += 1; store.notice = standingDown.standDownNotice(accepted: "Stand-down request accepted.", stayed: "Existing assets remain in the smart account.", server: answer["custody"].string)
                 } catch { store.notice = error.localizedDescription } }
             }
-        } message: { Text("The agent will stop managing positions. This does not sell them or revoke permissions on-chain.") }
+        } message: {
+            // A stand-down closes leveraged positions (docs/perps.md rule 13) but
+            // never sells the spot book, so with real perps the spot sentence
+            // says which positions it is about.
+            Text(standingDown.standDownPrompt(base: standingDown.realMoney
+                ? "The agent will stop managing its spot positions. This does not sell them or revoke permissions on-chain."
+                : "The agent will stop managing positions. This does not sell them or revoke permissions on-chain."))
+        }
         // The worker refuses this on the live rail, so it can only ever touch
         // the paper book; the button is also shown only for paper agents.
         .confirmationDialog("Restart the paper book?", isPresented: $resetPaper, titleVisibility: .visible) {

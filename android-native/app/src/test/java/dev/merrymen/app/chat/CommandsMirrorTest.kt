@@ -90,7 +90,7 @@ class CommandsMirrorTest {
     )
     assertEquals(listOf("side", "symbol", "usdgAmount", "purpose"), COMMANDS.getValue("get-energy").writes)
     // No other card carries the marker: a buy of MERRYMEN is an ordinary order.
-    assertEquals(listOf("get-energy"), COMMANDS.values.filter { "purpose" in it.fixed }.map { it.id })
+    assertEquals(listOf("get-energy"), COMMANDS.values.filter { it.fixed["purpose"] == JsonPrimitive("energy") }.map { it.id })
     assertEquals("Refuse a fill worse than 0.5% off the quote.", COMMANDS.getValue("set-slippage").say(mapOf("slippageBps" to "50")))
     assertEquals("Refuse a fill worse than 1% off the quote.", COMMANDS.getValue("set-slippage").say(mapOf("slippageBps" to "100")))
     assertEquals("Trade this basket from now on: TSLA, NVDA. Anything not on that list I stop buying.",

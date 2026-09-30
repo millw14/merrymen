@@ -8,6 +8,8 @@ import dev.merrymen.app.ui.SettingsDraft
 import dev.merrymen.app.ui.SettingsShown
 import dev.merrymen.app.ui.blockerAdviceOf
 import dev.merrymen.app.ui.liveTradingNote
+import dev.merrymen.app.ui.perpsLiveTradingOffNote
+import dev.merrymen.app.ui.PERPS_LIVE_TRADING_OFF
 import dev.merrymen.app.ui.liveTradingReadout
 import dev.merrymen.app.ui.rejectRuleLabel
 import java.io.File
@@ -87,7 +89,7 @@ class WebMirrorTest {
     fun noteAfter(condition: String): Pair<String, String> {
       val m = Regex("""<b>(.*?)</b>(.*?)</p>""").find(section.substringAfter(condition))
         ?: error("no warning after $condition in Settings.tsx")
-      return m.groupValues[1].trim() to m.groupValues[2].trim()
+      return m.groupValues[1].trim() to m.groupValues[2].substringBefore("{/* PERPETUALS ARE THE EXCEPTION").trim()
     }
     val env = LENIENT.decodeFromString(SettingsEnvelope.serializer(), Fixtures.text("probe-settings-signedout.json"))
     fun noteFor(saved: Boolean, ticked: Boolean): Pair<String, String> {
@@ -102,6 +104,19 @@ class WebMirrorTest {
     assertEquals(noteAfter("{!liveTradingVal &&"), noteFor(saved = true, ticked = false))
     // Ticked over a saved OFF: "This spends real money."
     assertEquals(noteAfter("{liveTradingVal && !("), noteFor(saved = false, ticked = true))
+  }
+
+  @Test fun switchingOffLiveKeepsThePerpetualsExceptionVisible() {
+    val src = sibling("web/src/lib/messages/en.ts")
+    assumeTrue(src != null)
+    val expected = src!!.substringAfter("\"settings.perps.liveTradingOff\": \"").substringBefore("\",")
+    assertEquals(expected, PERPS_LIVE_TRADING_OFF)
+    val env = LENIENT.decodeFromString(SettingsEnvelope.serializer(), Fixtures.text("probe-settings-signedout.json"))
+    for (enabled in listOf(false, true)) {
+      val values = Json.parseToJsonElement("""{"liveTradingEnabled":true,"perpsEnabled":$enabled}""")
+      val shown = SettingsShown(env.copy(values = values), SettingsDraft().setBool("liveTradingEnabled", false))
+      assertEquals(if (enabled) expected else null, perpsLiveTradingOffNote(shown))
+    }
   }
 
   @Test fun rejectLabelsMatchThesisPolicyTs() {
