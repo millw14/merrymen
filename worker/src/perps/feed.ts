@@ -225,7 +225,7 @@ export const LIGHTER_FEED_DEFAULTS = Object.freeze({
   /** A snapshot side larger than this is refused. */
   maxLevelsPerSide: 50_000,
   /** 4 h candles asked per history read: the one in progress plus ≥ FEED_MIN_CANDLES closed. */
-  candleCountBack: 150,
+  candleCountBack: 499,
   /** ≥ 60_000: candles are re-read this long after each 4 h close (the contract: close + 60 s). */
   candleRefreshLagMs: 60_000,
   /** ≥ 60_000: hourly fundings are re-read this long after each hour. */

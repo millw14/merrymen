@@ -485,6 +485,8 @@
     "settings.perps.groupSaves": "These save with their own button, below — not with Save changes at the bottom of the page.",
     "settings.perps.label.driver": "Who opens positions",
     "settings.perps.driver.perpTrend": "Trend rule (default)",
+    "settings.perps.driver.brain": "MerrymenBrain review",
+    "settings.perps.driver.brainHint": "Reviews BTC, ETH and SOL trend entries using market conditions, historical analogs, funding and trading costs. Weak or unread evidence means no entry. Needs the Brain service configured. Forecasts are uncertain; higher returns are not established. Stops and trend exits keep running independently.",
     "settings.perps.driver.strategist": "LLM strategist",
     "settings.perps.driver.manual": "Manual — no automatic opens",
     "settings.perps.driver.perpTrendHint": "A fixed trend-following rule on 4-hour candles, for BTC, ETH and SOL only — whichever of them you pick below. It is not a prediction, and it can sit idle for days.",

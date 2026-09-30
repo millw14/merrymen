@@ -1,3 +1,4 @@
+import { preserveAccountControls } from "./owner-controls";
 /** Version 3 recovery stream. Memory is bounded by one record, never total history. */
 import { createHash } from "node:crypto";
 import type { Db } from "../db";
@@ -102,6 +103,7 @@ export async function* validateFinancialStream(chunks:FinancialChunks,account:st
   } else if(raw.type==="row") {
    const table=tables[tableIndex],row=raw.value;
    if(!scope||!table||Object.keys(raw).some(k=>!["type","value"].includes(k))||!row||typeof row!=="object"||Array.isArray(row)||String(row[identity(table)]).toLowerCase()!==bound||Object.keys(row).some(k=>!/^[_a-z]+$/.test(k))||Object.values(row).some(v=>v!==null&&typeof v!=="string"&&(typeof v!=="number"||!Number.isFinite(v)))) throw new Error("financial stream foreign or malformed row");
+   if (table === "perp_accounts") preserveAccountControls(row);
    if(table==="agents" && (++counts[table]!>1||scope==="standdown"&&Object.keys(row).some(k=>!(PUBLIC_AGENT_COLUMNS as readonly string[]).includes(k)))) throw new Error("financial stream agent refused");
    if(table!=="agents") counts[table]!++;
    if(scope==="standdown"&&(STANDDOWN_TABLES as readonly string[]).includes(table)&&row.mode!=="live") throw new Error("standdown financial stream paper row refused");
@@ -151,21 +153,33 @@ export async function restoreFinancialStream(db:Db,chunks:FinancialChunks,accoun
 export async function restoreFinancialStreamInTx(db:Db,chunks:FinancialChunks,account:string,opts:{scope?:FinancialScope}={}):Promise<void> {
  const bound=boundAccount(account); let table="",scope:FinancialScope="financial",allowed=new Set<string>();
  let deadlines:OrderDeadlineFloor|undefined;
+ const heldAccounts = new Map<string, FinancialRow>();
+ const restoreOmittedAccounts = async () => {
+  for (const value of heldAccounts.values()) {
+   const keys = Object.keys(value);
+   await db.prepare(`INSERT INTO perp_accounts (${keys.join(",")}) VALUES (${keys.map(()=>"?").join(",")})`).run(...keys.map(k=>value[k]));
+  }
+  heldAccounts.clear();
+ };
  try {
  for await(const record of decodeFinancialRecords(validateFinancialStream(chunks,account,opts))) {
   if(record.type==="header") { scope=record.scope; if(scope==="financial")await resetBootstrapFlowIdentity(db); }
   else if(record.type==="table") {
+   if (table === "perp_accounts") await restoreOmittedAccounts();
    table=record.name;
    allowed=new Set((await db.prepare(`PRAGMA table_info(${table})`).all() as {name:string}[]).map(c=>c.name));
    if(await db.prepare(`SELECT 1 FROM ${table} WHERE lower(${identity(table)}) <> ? LIMIT 1`).get(bound))throw new Error("financial recovery found a foreign tenant row");
+   if(table === "perp_accounts") for (const row of await db.prepare(`SELECT * FROM perp_accounts WHERE lower(agent_id) = ?${scope === "standdown" ? " AND mode = 'live'" : ""}`).all(bound) as FinancialRow[]) heldAccounts.set(String(row.mode), row);
    if(table==="perp_orders") { deadlines=await OrderDeadlineFloor.create(db);await deadlines.rememberLedger(bound,scope==="standdown"); }
    await db.prepare(`DELETE FROM ${table} WHERE lower(${identity(table)}) = ?${scope==="standdown"&&(STANDDOWN_TABLES as readonly string[]).includes(table)?" AND mode = 'live'":""}`).run(bound);
   } else if(record.type==="row") {
-   const value=table==="perp_orders"?await deadlines!.apply(record.value):record.value;
+   const value = table === "perp_accounts" ? preserveAccountControls(record.value, heldAccounts.get(String(record.value.mode))) : table === "perp_orders" ? await deadlines!.apply(record.value) : record.value;
+   if (table === "perp_accounts") heldAccounts.delete(String(record.value.mode));
    const keys=Object.keys(value);
    if(!keys.length||keys.some(k=>!allowed.has(k)))throw new Error("financial stream schema refused");
    await db.prepare(`INSERT INTO ${table} (${keys.join(",")}) VALUES (${keys.map(()=>"?").join(",")})`).run(...keys.map(k=>value[k]));
   }
  }
+ if (table === "perp_accounts") await restoreOmittedAccounts();
  } finally { await deadlines?.close(); }
 }

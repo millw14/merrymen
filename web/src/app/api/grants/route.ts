@@ -1,3 +1,4 @@
+import { carryPerpRecovery, perpRecoveryIntakeRefusal } from "@/lib/perp-recovery-intake";
 /**
  * Dev-mode grant handoff + agent status.
  * POST: browser saves a signed grant → .data/grant.json (worker picks it up).
@@ -473,9 +474,11 @@ export async function POST(req: Request) {
       perpsOffered: perpsOptInOffered(grant.smartAccount),
     });
     if (!perpIntake.ok) return perpRefused(perpIntake.refusal);
+    const recoveryRefusal = await perpRecoveryIntakeRefusal(stored, grant);
+    if (recoveryRefusal) return perpRefused(recoveryRefusal);
     const drop = await perpDropRefusal({ stored, incoming: grant });
     if (drop) return perpRefused(drop);
-    const toStore = perpIntake.grant;
+    const toStore = carryPerpRecovery(stored, perpIntake.grant);
 
     // FIRST-ARM IDENTITY PROOF. owner == tenant above only proves the CLAIMED
     // owner is this wallet — it says nothing about smartAccount, which the client
@@ -602,6 +605,8 @@ export async function POST(req: Request) {
     perpsOffered: perpsOptInOffered(grant.smartAccount),
   });
   if (!perpIntake.ok) return perpRefused(perpIntake.refusal);
+  const recoveryRefusal = await perpRecoveryIntakeRefusal(stored, grant);
+  if (recoveryRefusal) return perpRefused(recoveryRefusal);
   const drop = await perpDropRefusal({ stored, incoming: grant });
   if (drop) return perpRefused(drop);
 
@@ -609,7 +614,7 @@ export async function POST(req: Request) {
   // Keep the outgoing wallet (and its owner key) before this one replaces it.
   await archiveCurrentGrant();
   // grant.json holds the owner + session PRIVATE KEYS — owner-only perms (0600).
-  await writeFile(GRANT_FILE, JSON.stringify(perpIntake.grant, null, 2), { encoding: "utf8", mode: 0o600 });
+  await writeFile(GRANT_FILE, JSON.stringify(carryPerpRecovery(stored, perpIntake.grant), null, 2), { encoding: "utf8", mode: 0o600 });
   await chmod(GRANT_FILE, 0o600).catch(() => {});
   return NextResponse.json({ ok: true });
 }

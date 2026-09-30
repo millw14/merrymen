@@ -1,3 +1,4 @@
+import { preserveAccountControls } from "./owner-controls";
 /** Fold a finished shutdown into its exact full financial book without loading either history. */
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
@@ -44,6 +45,7 @@ export async function* mergeFinancialStreams(full: FinancialChunks, shutdown: Fi
   const original = new Cursor(decodeFinancialRecords(validateFinancialStream(full, account, { scope: "financial" })));
   let reduced: Cursor | undefined;
   let agent: FinancialRow | undefined;
+  let liveAccount: FinancialRow | undefined;
   let deadlineHome:string|undefined,deadlineDb:DatabaseSync|undefined,deadlines:OrderDeadlineFloor|undefined;
   try {
     await original.header("financial");
@@ -84,6 +86,7 @@ export async function* mergeFinancialStreams(full: FinancialChunks, shutdown: Fi
             await deadlines.remember(row);
           }
           if (table === "agents") agent = row;
+          if (table === "perp_accounts" && row.mode === "live") liveAccount = row;
           if (!perps || row.mode !== "live") yield encodeFinancialRecord(original.item);
           await original.next();
         }
@@ -91,9 +94,12 @@ export async function* mergeFinancialStreams(full: FinancialChunks, shutdown: Fi
           if (!reduced) throw new Error("financial merge shutdown journal missing");
           await reduced.table(table);
           while (reduced.item?.type === "row") {
-            const value = table === "perp_orders" ? { ...(deadlines?await deadlines.apply(reduced.item.value):reduced.item.value), tx_info: null } : reduced.item.value;
-            yield encodeFinancialRecord({ type: "row", value }); await reduced.next();
+            const value = table === "perp_accounts" ? preserveAccountControls(reduced.item.value, liveAccount) : table === "perp_orders" ? { ...(deadlines?await deadlines.apply(reduced.item.value):reduced.item.value), tx_info: null } : reduced.item.value;
+            yield encodeFinancialRecord({ type: "row", value });
+            if (table === "perp_accounts") liveAccount = undefined;
+            await reduced.next();
           }
+          if (table === "perp_accounts" && liveAccount) { yield encodeFinancialRecord({ type: "row", value: liveAccount }); liveAccount = undefined; }
         }
       }
     }

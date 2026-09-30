@@ -99,12 +99,14 @@ const LLM_STRATEGIST = "llm-strategist";
 
 const DRIVER_LABEL = {
   "perp-trend": "settings.perps.driver.perpTrend",
+  brain: "settings.perps.driver.brain",
   strategist: "settings.perps.driver.strategist",
   manual: "settings.perps.driver.manual",
 } as const satisfies Record<PerpsDriver, MessageKey>;
 
 const DRIVER_HINT = {
   "perp-trend": "settings.perps.driver.perpTrendHint",
+  brain: "settings.perps.driver.brainHint",
   strategist: "settings.perps.driver.strategistHint",
   manual: "settings.perps.driver.manualHint",
 } as const satisfies Record<PerpsDriver, MessageKey>;

@@ -279,6 +279,7 @@
 "memecoins" = "memecoins";
 "Merry Circle" = "Merry Circle";
 "merry circle token" = "merry circle token";
+"MerrymenBrain review" = "MerrymenBrain review";
 "metals" = "metals";
 "min" = "min";
 "minimum" = "minimum";
@@ -415,6 +416,7 @@
 "Review signed permission" = "Review signed permission";
 "Review the available cash, destination and amount before confirming a withdrawal. Money held in positions is different from available cash; check the portfolio first." = "출금을 확정하기 전에 사용 가능한 현금, 받는 주소, 금액을 확인하세요. 포지션에 들어가 있는 돈은 사용 가능한 현금과 다르므로, 먼저 포트폴리오를 확인하세요.";
 "Review what the agent may trade and the permissions you are signing. Changes to signed permissions require a new wallet signature. The tutorial never signs or submits one for you." = "에이전트가 무엇을 매매할 수 있는지, 그리고 지금 서명하려는 권한이 무엇인지 확인하세요. 이미 서명한 권한을 바꾸려면 지갑으로 다시 서명해야 합니다. 이 안내가 대신 서명하거나 제출하는 일은 없습니다.";
+"Reviews BTC, ETH and SOL trend entries using market conditions, historical analogs, funding and trading costs. Weak or unread evidence means no entry. Needs the Brain service configured. Forecasts are uncertain; higher returns are not established. Stops and trend exits keep running independently." = "Reviews BTC, ETH and SOL trend entries using market conditions, historical analogs, funding and trading costs. Weak or unread evidence means no entry. Needs the Brain service configured. Forecasts are uncertain; higher returns are not established. Stops and trend exits keep running independently.";
 "Rialto integrator key" = "Rialto integrator key";
 "Rialto key header" = "Rialto key header";
 "Rialto requires an integrator key." = "Rialto requires an integrator key.";

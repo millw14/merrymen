@@ -98,15 +98,15 @@ describe("perpsEnabled — the paper switch", () => {
 
 describe("perpsDriver", () => {
   it("takes each of core's drivers, refuses anything else by name, and null clears it", async () => {
-    for (const d of ["perp-trend", "strategist", "manual"]) {
+    for (const d of ["perp-trend", "brain", "strategist", "manual"]) {
       const r = await put({ perpsDriver: d });
       assert.equal(r.status, 200, JSON.stringify(r.body));
       assert.equal((await stored()).perpsDriver, d);
     }
-    for (const bad of ["brain", "Strategist", 3, ["manual"]]) {
+    for (const bad of ["future-driver", "Strategist", 3, ["manual"]]) {
       const r = await put({ perpsDriver: bad });
       assert.equal(r.status, 400, JSON.stringify(bad));
-      assert.match(errorsOf(r), /^perpsDriver: must be perp-trend, strategist, manual/);
+      assert.match(errorsOf(r), /^perpsDriver: must be perp-trend, brain, strategist, manual/);
     }
     assert.equal((await stored()).perpsDriver, "manual", "a refused value left the last good one in place");
     assert.equal((await put({ perpsDriver: null })).status, 200);
@@ -316,7 +316,7 @@ describe("real-money perpetuals are a consent record, not a switch", () => {
       ["the attestation withdrawn beside an echoed switch and a bad number", { perpsLiveEnabled: true, perpsRegionAttested: false, perpsMaxLeverage: 0 }, ["perpsLiveEnabled"]],
       ["paper off beside an unknown market", { perpsEnabled: false, perpsMarkets: ["DOGE-PERP"] }, ["perpsEnabled"]],
       ["the live rail off beside a bad value", { liveTradingEnabled: false, perpsMaxLeverage: 11 }, ["liveTradingEnabled"]],
-      ["everything off beside a bad value", { perpsLiveEnabled: false, perpsEnabled: false, liveTradingEnabled: false, perpsDriver: "brain" }, ["perpsEnabled", "liveTradingEnabled", "perpsLiveEnabled"]],
+      ["everything off beside a bad value", { perpsLiveEnabled: false, perpsEnabled: false, liveTradingEnabled: false, perpsDriver: "future-driver" }, ["perpsEnabled", "liveTradingEnabled", "perpsLiveEnabled"]],
     ];
     for (const [why, body, off] of cases) {
       await getSettingsStore().put(TENANT, { ...onEverything });

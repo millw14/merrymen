@@ -30,6 +30,8 @@ RUN pip install --no-cache-dir \
 
 # The service, and nothing else from the monorepo.
 COPY services/brain/brain ./brain
+COPY services/brain/check-perps-vendor.py ./check-perps-vendor.py
+RUN python check-perps-vendor.py
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1

@@ -255,6 +255,9 @@ import {
   insertPerpOrderSubmitted,
   listSubmittedPerpOrders,
   patchPerpAccount,
+  getPerpRecoveryContext,
+  commitVerifiedPerpRecovery,
+  perpFillRecoveryAcknowledged,
   perpLaneLedgerFacts,
   perpNonceRecorded,
   perpOrderByCoi,
@@ -270,6 +273,7 @@ import { createPerpFeedHost, createPerpLane, isHostedChildProcess, type PerpLane
 // the hash-pinned, KAT-checked signer, loaded lazily — only a live account
 // with the perp block ever reaches it (paper never loads the WASM).
 import { loadSigner } from "./perps/signer";
+import { brainFingerprint, requestPerpsBrain } from "./perps/brain";
 import { lighterFeedPath, readLighterFeed } from "./perps/feed-reader";
 import { startLighterFeed } from "./perps/feed";
 import { createLighterApi } from "./perps/api";
@@ -3264,6 +3268,9 @@ async function main() {
     listSubmittedPerpOrders,
     perpOrderByCoi,
     insertPerpFill: (f) => insertPerpFill(f),
+    getPerpRecoveryContext,
+    commitVerifiedPerpRecovery,
+    perpFillRecoveryAcknowledged,
     insertPerpFunding: (f) => insertPerpFunding(f),
     listOpenPerpTransfers,
     setPerpPositions,
@@ -3325,7 +3332,7 @@ async function main() {
     armed: () => {
       if (!active) return null;
       perpEventsAgent = active.agentId;
-      return { agentId: active.agentId, smartAccount: active.grant.smartAccount, limits: active.limits };
+      return { agentId: active.agentId, smartAccount: active.grant.smartAccount, limits: active.limits, recovery: active.grant.perpRecovery };
     },
     config: () => cfg,
     execMode: () => execMode(),
@@ -3359,6 +3366,26 @@ async function main() {
       return id ? addEvent(id, level, message) : Promise.resolve();
     },
     decide: (intent, source, reason, known) => ensureDecision(intent, source, reason, known),
+    brain: {
+      configured: () => !!cfg.brainUrl && !!cfg.brainToken,
+      configKey: () => brainFingerprint({ url: cfg.brainUrl, token: cfg.brainToken }),
+      admit: claimReview,
+      review: (request) => requestPerpsBrain({ url: cfg.brainUrl ?? "", token: cfg.brainToken ?? "" }, request),
+      record: async (recording) => {
+        const { request, response } = recording;
+        const evidence = JSON.stringify(recording);
+        // The financial stream permits 8 MiB/record. Keep this public-data
+        // artifact below 2.5 MB, including candles, context and the answer.
+        if (Buffer.byteLength(evidence) > 2_500_000) throw new Error("perps Brain research artifact exceeded its bound");
+        await addDecision({ id: request.run_id, agent_id: request.agent_id, source: "perp:brain", strategy: "brain",
+          symbol: request.market, action: response === null ? undefined : response.action === "hold" ? "hold" : `open-${response.action}`,
+          size_usdg: response !== null && response.action !== "hold" ? Number(recording.candidateNotionalMicro) / 1_000_000 : undefined,
+          reason: response?.reason_codes.join(", ") ?? "Brain review unavailable",
+          ...(response === null ? { dropped_rule: "perp-brain-unavailable" } : {}), evidence_json: evidence, provenance: "brain" });
+        if ((await decisionAgent(request.run_id))?.toLowerCase() !== request.agent_id.toLowerCase())
+          throw new Error("perps Brain review was not durably recorded");
+      },
+    },
     onActive: () => perpFeed.ensure(),
     /**
      * THE LIVE VENUE (docs/perps.md rules 5, 8a, 9–13, 16; perps/lane.ts):
@@ -3371,6 +3398,7 @@ async function main() {
      */
     live: {
       home: () => merrymenHome(),
+      recoveryRpcUrl: () => cfg.rpcMainnet,
       loadSigner: () => loadSigner(),
       api: (smartAccount) => perpApiFor(smartAccount),
       publicApi: () => (perpPublicApi ??= createLighterApi({ home: merrymenHome(), budgetKey: "public" })),
@@ -6529,7 +6557,9 @@ async function main() {
     if (cmd.kind === "resume-perps") {
       const mode = cmd.args?.mode;
       if (mode !== "paper" && mode !== "live") return { ok: false, line: "Choose the perpetual book to resume." };
-      const result = await perpLane.resumeEntries(mode, { notAfterMs: cmd.expiresAt });
+      const expectedControlHead = cmd.args?.expectedControlHead;
+      if (typeof expectedControlHead !== "string" || !/^[a-f0-9]{64}$/.test(expectedControlHead)) return { ok: false, line: "Review the current entry halt on the dashboard before resuming." };
+      const result = await perpLane.resumeEntries(mode, { notAfterMs: cmd.expiresAt, expectedControlHead });
       return { ok: result.ok, line: result.sentence };
     }
     if (cmd.kind === "trade") return orderOutcome(cmd, await runOrderCommand(cmd, reads));

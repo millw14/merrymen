@@ -45,7 +45,7 @@ function persist(agentId: string): Promise<void> {
  tail = run.catch(() => {}); return run;
 }
 export function durableHostedPerpStore<T extends object>(store: T): T {
- const reads = new Set(["getPerpOrder", "listSubmittedPerpOrders", "perpOrderByCoi", "listOpenPerpTransfers", "getPerpPositions", "getPerpAccount", "getNonceHighWater", "perpNonceRecorded", "perpLaneLedgerFacts"]);
+ const reads = new Set(["getPerpRecoveryContext", "perpFillRecoveryAcknowledged", "getPerpOrder", "listSubmittedPerpOrders", "perpOrderByCoi", "listOpenPerpTransfers", "getPerpPositions", "getPerpAccount", "getNonceHighWater", "perpNonceRecorded", "perpLaneLedgerFacts"]);
  return new Proxy(store, { get(target, key) {
   const fn = Reflect.get(target, key);
   if (typeof fn !== "function" || reads.has(String(key))) return fn;

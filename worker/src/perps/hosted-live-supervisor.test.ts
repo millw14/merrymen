@@ -1,3 +1,4 @@
+import { initialOwnerControls } from "./owner-controls";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import type { EventEmitter } from "node:events";
@@ -76,6 +77,8 @@ describe("ordinary hosted financial recovery", () => {
       await assert.rejects(HostedLiveCheckpointBridge.prepare({ shared: unavailable, dek: DEK, tenant: TENANT, account: ACCOUNT, publicKey: PUB, home: f.home, healthy: () => true }), /connection reset/);
       await spotFact(f.local, 4); // spot/paper continued while venue sends were held
       const expected = validateFinancialCapsule(await capture(f.local), ACCOUNT);
+      // prepare upgrades pre-history account rows before publishing the checkpoint.
+      expected.tables.perp_accounts![0]!.owner_controls_json = initialOwnerControls(ACCOUNT, "live", false);
       let stopped = false;
       await recoverHostedChild({ healthy: () => true, probe: async () => { await f.shared.prepare("SELECT 1").get(); },
         stop: async () => { stopped = true; return true; },

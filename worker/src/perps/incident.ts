@@ -229,8 +229,8 @@ export function detectIncidents(i: IncidentInputs): Incident | null {
 
 /** The two store.ts functions the flag is kept with; the store module fits as is. */
 export interface IncidentStore {
-  getPerpAccount(agentId: string, mode: "live"): Promise<{ incident: PerpIncident | null } | null>;
-  patchPerpAccount(agentId: string, mode: "live", patch: { incident: PerpIncident | null }): Promise<void>;
+  getPerpAccount(agentId: string, mode: "live"): Promise<{ incident: PerpIncident | null; incidentId?: string | null; incidentSealedPubkey?: string | null } | null>;
+  patchPerpAccount(agentId: string, mode: "live", patch: { incident: PerpIncident | null; incidentSealedPubkey?: string }): Promise<void>;
 }
 
 /**
@@ -240,10 +240,13 @@ export interface IncidentStore {
  * must then keep refusing opens from memory and say the flag is not stored,
  * never carry on as if it were.
  */
-export async function persistIncident(store: IncidentStore, args: { agentId: string; incident: Incident }): Promise<"set" | "already-set"> {
+export async function persistIncident(store: IncidentStore, args: { agentId: string; incident: Incident; sealedPubKey?: string }): Promise<"set" | "already-set"> {
   const held = await store.getPerpAccount(args.agentId, "live");
-  if (held?.incident) return "already-set";
-  await store.patchPerpAccount(args.agentId, "live", { incident: args.incident });
+  if (held?.incident) {
+    if (("incidentId" in held && !held.incidentId) || (args.sealedPubKey && !held.incidentSealedPubkey)) await store.patchPerpAccount(args.agentId, "live", { incident: held.incident, ...(args.sealedPubKey ? { incidentSealedPubkey: args.sealedPubKey } : {}) });
+    return "already-set";
+  }
+  await store.patchPerpAccount(args.agentId, "live", { incident: args.incident, ...(args.sealedPubKey ? { incidentSealedPubkey: args.sealedPubKey } : {}) });
   // Read back: "durably" means the row says so, not that a write returned.
   const after = await store.getPerpAccount(args.agentId, "live");
   if (!after?.incident) throw new Error("perp incident: the flag did not persist");

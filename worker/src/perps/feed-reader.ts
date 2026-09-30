@@ -272,6 +272,8 @@ export interface PerpFeedMarket {
 }
 
 export interface LighterFeedRead {
+  /** Exact validated public input retained for point-in-time research replay; never owner credentials. */
+  source?: LighterFeedFile;
   /** ms: when the writer built the file. */
   observedAt: number;
   /** Every market in the file, fresh or not (a display may show the last known). */
@@ -657,7 +659,7 @@ export function parseLighterFeed(raw: unknown, nowMs: number, opts: LighterFeedR
         bookFresh,
       });
     }
-    return { observedAt, markets, stale, staleBooks };
+    return { observedAt, markets, stale, staleBooks, source: raw as unknown as LighterFeedFile };
   } catch {
     return null;
   }

@@ -381,8 +381,8 @@ export function perpsAutonomyReadiness(values: PerpsStored, defaults: PerpsDefau
   return {
     driver, enabled, manual: enabled && driver === "manual",
     strategistMismatch: enabled && driver === "strategist" && (values.strategy ?? defaults.strategy) !== "llm-strategist",
-    noTrendMarkets: enabled && driver === "perp-trend" && !markets.some(m => (PERP_TREND_UNIVERSE as readonly string[]).includes(m)),
-    authority: !enabled || driver !== "perp-trend" || (!live && expiresAt === null) ? null : remainingHours === null ? "unknown" : remainingHours <= PERP_TREND_MAX_HOLD_HOURS ? "short" : null,
+    noTrendMarkets: enabled && (driver === "perp-trend" || driver === "brain") && !markets.some(m => (PERP_TREND_UNIVERSE as readonly string[]).includes(m)),
+    authority: !enabled || (driver !== "perp-trend" && driver !== "brain") || (!live && expiresAt === null) ? null : remainingHours === null ? "unknown" : remainingHours <= PERP_TREND_MAX_HOLD_HOURS ? "short" : null,
     remainingHours, requiredHours: PERP_TREND_MAX_HOLD_HOURS, cap,
     minimums: (report?.entryMinimums ?? []).filter(m => markets.includes(m.market)).map(m => {
       const minimumUsdg = Number(m.minNotionalMicro) / 1_000_000;

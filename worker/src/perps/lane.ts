@@ -1,3 +1,8 @@
+import { ownerControlHead } from "./owner-controls";
+import { readPerpRecoveryReference, type PerpRecoveryReference } from "../../../packages/core/src/perps";
+import { boundedRecoveryProof, verifyLiveOwnerRecovery, type PerpRecoveryContext } from "./owner-recovery-live";
+import type { VerifiedOwnerRecovery } from "./owner-recovery-proof";
+import { readRecoveries, recoveryReplacementKeys } from "./owner-recovery-state";
 /**
  * THE PERP LANE — where a perp intent meets the ledger, the policy and an
  * executor, and where the protective loop, the perps route, the on-chain
@@ -141,6 +146,7 @@ import {
 } from "./protect";
 import type { ReconcileResult } from "./reconcile";
 import { runPerpRoute, type PerpRouteIntent } from "./route";
+import { brainFingerprint, buildPerpsBrainRequest, brainMarketStillQualified, PerpsBrainReview, validatePerpsBrainResponse, PERPS_BRAIN_MAX_DRIFT_BPS, type PerpsBrainApproval, type PerpsBrainRequest, type PerpsBrainRecording, type PerpsBrainResponse } from "./brain";
 import { runStanddown, standdownExposure, standdownStepLine, type StanddownReason, type StanddownResult } from "./standdown";
 import { readPendingStanddownRequests, writeStanddownProgress, writeStanddownResult } from "./standdown-files";
 import {
@@ -230,7 +236,7 @@ export type PerpLaneConfig = Pick<
 /** The store functions the lane reads and books through — store.ts's own; a test passes the module. */
 export interface PerpLaneStore extends PaperPerpStore {
   listSubmittedPerpOrders(agentId: string, mode: "paper"): Promise<readonly Pick<PerpOrderRow, "marketId" | "effect" | "reduceOnly" | "worstNotionalMicro">[]>;
-  getPerpAccount(agentId: string, mode: "paper"): Promise<Pick<PerpAccountRow, "paperCollateralMicro" | "incident" | "entriesHalted"> | null>;
+  getPerpAccount(agentId: string, mode: "paper"): Promise<Pick<PerpAccountRow, "paperCollateralMicro" | "incident" | "entriesHalted" | "ownerControlsJson"> | null>;
   perpLaneLedgerFacts(
     agentId: string,
     mode: "paper",
@@ -245,7 +251,7 @@ export interface PerpLaneStore extends PaperPerpStore {
   /** store.ts returnFoldedPaperCollateral — a restore's folded paper collateral back to paper cash once flat. */
   returnFoldedPaperCollateral?(agentId: string): Promise<bigint>;
   /** store.ts patchPerpAccount — the paper book's /flatten halt. */
-  patchPerpAccount?(agentId: string, mode: "paper", patch: { entriesHalted: boolean }): Promise<void>;
+  patchPerpAccount?(agentId: string, mode: "paper", patch: { entriesHalted: boolean; expectedOwnerControlHead?: string }): Promise<void>;
 }
 
 /** The armed agent as index.ts's `active` knows it. */
@@ -253,6 +259,7 @@ export interface PerpLaneAgent {
   agentId: string;
   smartAccount: string;
   limits: AgentLimits;
+  recovery?: PerpRecoveryReference;
 }
 
 export interface PerpLaneBudget {
@@ -276,11 +283,13 @@ export type DecideFn = (
   intent: TradeIntent,
   source: string,
   reason?: string,
-  known?: { whyCode?: string },
+  known?: { whyCode?: string; evidence?: string; provenance?: "brain" },
 ) => Promise<{ ok: true } | { ok: false; why: string }>;
 
 /** The ledger functions the live side reads and writes through — store.ts's own. */
 export interface PerpLiveStore extends LiveHandleStore {
+  getPerpRecoveryContext?(agentId: string): Promise<PerpRecoveryContext>;
+  commitVerifiedPerpRecovery?(agentId: string, verified: VerifiedOwnerRecovery, now: () => number): Promise<"applied" | "already-applied">;
   getPerpPositions(agentId: string, mode: "live", opts?: { includeFlat?: boolean }): Promise<PerpPositionRow[]>;
   /** store.ts upsertPerpPosition — the stop an open of ours carried, recorded on the venue's position (recordOpenStops). */
   upsertPerpPosition(p: PerpPositionInput): Promise<void>;
@@ -305,6 +314,8 @@ export interface PerpLiveStore extends LiveHandleStore {
 export interface PerpLiveDeps {
   /** MERRYMEN_HOME — the keystore and the stand-down request/result files. */
   home: () => string;
+  recoveryRpcUrl?: () => string | undefined;
+  verifyRecovery?: typeof verifyLiveOwnerRecovery;
   /** The process's signer (signer.ts loadSigner). */
   loadSigner: () => Promise<LiveSignerLike>;
   /** The ADDRESS-KEYED client for this L1 address (api.ts budgetKey = the smart account). */
@@ -369,6 +380,15 @@ export interface PerpLaneDeps {
   decide: DecideFn;
   /** Called whenever a read finds the lane ON — index.ts starts the in-process feed from it. */
   onActive?: () => void;
+  /** Bounded background research; absent/unconfigured means Brain refuses opens. */
+  brain?: {
+    configured: () => boolean;
+    configKey: () => string;
+    admit: () => Promise<boolean>;
+    review: (request: PerpsBrainRequest) => Promise<PerpsBrainResponse | null>;
+    /** Must journal before an approval becomes available; index.ts verifies the insert. */
+    record?: (recording: PerpsBrainRecording) => Promise<void>;
+  };
   /** The live venue's edges; absent = no live perps in this process. */
   live?: PerpLiveDeps;
   checkPolicy?: typeof realCheckPolicy;
@@ -410,6 +430,8 @@ export interface PerpLaneRead {
   /** Live: the venue (or, unread, the ledger) shows exposure — rule 8a's exits-only lane runs while it does. */
   exposure?: boolean;
   feedFresh: boolean;
+  /** The same public feed snapshot the view was built from, for bound research replay. */
+  feed?: LighterFeedRead | null;
   /** The book holds a position, an unresolved order or collateral. */
   held: boolean;
   report: PerpsReport;
@@ -695,7 +717,7 @@ export interface PerpLane {
   /** Owner-requested reduce-only close; live holdings take precedence over practice holdings. */
   close(market: PerpKey, opts?: { notAfterMs?: number; book?: "paper" | "live" }): Promise<{ ok: boolean; sentence: string }>;
   /** Dashboard-only control, bound to the book the owner viewed. Never clears an incident. */
-  resumeEntries(mode: "paper" | "live", opts?: { notAfterMs?: number }): Promise<{ ok: boolean; sentence: string }>;
+  resumeEntries(mode: "paper" | "live", opts?: { notAfterMs?: number; expectedControlHead?: string }): Promise<{ ok: boolean; sentence: string }>;
   /** The self-hosted request files (standdown-files.ts), from index.ts's 2 s command-wake watcher. */
   pollStanddownRequests(): Promise<void>;
   /**
@@ -716,6 +738,10 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
 
   // ── per-agent memory (forgotten on a new agent, an arm, a paper reset) ──
   let agentKey: string | null = null;
+  const brainReview = new PerpsBrainReview(deps.now);
+  const brainPermits = new WeakMap<object, PerpsBrainApproval>();
+  const brainContext = (a: PerpLaneAgent) => brainFingerprint({ agent: a, settings: deps.config(), brain: deps.brain?.configKey() ?? "unconfigured" });
+  let brainNotice: string | null = null;
   // A failed halt write must still prevent entries in this process. Kept
   // across re-arms, scoped to the account/book, and cleared only by resume.
   const ownerEntryHalts = new Set<string>();
@@ -819,6 +845,8 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     liveProtectMemory = emptyProtectMemory();
     entryCandles = new Map();
     strategistIntents = [];
+    brainReview.reset("");
+    brainNotice = null;
     lastRefusalKey = null;
     lastIdleKey = null;
     railKey = null;
@@ -1127,6 +1155,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       lastKnownMicro: lastKnownPaperMicro,
       policy,
       feedFresh: feed !== null && nowMs - feed.observedAt <= 30_000,
+      feed,
       held,
       report,
       readAtMs: nowMs,
@@ -1327,9 +1356,34 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     await run.catch((e) => log(`venue read: ${errText(e)}`));
   }
 
+  /** Only a new owner grant carrying a verified, incident-bound recovery can enter this transition. */
+  async function applyOwnerRecovery(a: PerpLaneAgent): Promise<void> {
+    const L = deps.live, ref = readPerpRecoveryReference(a.recovery);
+    if (!L || !ref || !L.store.getPerpRecoveryContext || !L.store.commitVerifiedPerpRecovery) return;
+    await lock.run(async () => {
+      if (latched || standing !== null) return;
+      const current = agentNow(), key = current ? perpGrantOf(current.limits)?.apiPublicKey : null;
+      if (!current || current.agentId !== a.agentId || current.smartAccount.toLowerCase() !== ref.smartAccount || key !== ref.newPublicKey) return;
+      const account = await L.store.getPerpAccount(a.agentId, "live");
+      if (readRecoveries(account?.recoveriesJson, a.smartAccount).some(r => r.reference.incidentId === ref.incidentId)) return;
+      const context = await L.store.getPerpRecoveryContext!(a.agentId);
+      const proof = await boundedRecoveryProof(() => (L.verifyRecovery ?? verifyLiveOwnerRecovery)(ref, context, { newPublicKey: key, home: L.home(), rpcUrl: L.recoveryRpcUrl?.() }));
+      if (!proof.ok) { log(`owner recovery remains halted: ${proof.why}`); return; }
+      const after = agentNow();
+      if (latched || standing !== null || !after || after.agentId !== a.agentId || JSON.stringify(readPerpRecoveryReference(after.recovery)) !== JSON.stringify(ref) || perpGrantOf(after.limits)?.apiPublicKey !== key) return;
+      await L.beforeSend?.(a.agentId);
+      const fenced = agentNow();
+      if (latched || standing !== null || !fenced || fenced.agentId !== a.agentId || JSON.stringify(readPerpRecoveryReference(fenced.recovery)) !== JSON.stringify(ref) || perpGrantOf(fenced.limits)?.apiPublicKey !== key) return;
+      await L.store.commitVerifiedPerpRecovery!(a.agentId, proof.verified, deps.now);
+      if (wantStanddown === "incident") wantStanddown = null;
+      await say("ok", "Owner recovery was verified. The old key is retired; the fresh permission can register its new key, subject to your existing consent, settings and entry halt.");
+    }, { label: "verified owner recovery" });
+  }
+
   async function venueReadNow(a: PerpLaneAgent, depth: "full" | "light"): Promise<void> {
     const L = deps.live;
     if (L === undefined) return;
+    await applyOwnerRecovery(a);
     const idxRaw = L.accountIndex();
     const grant = perpGrantOf(a.limits);
     const kept = live !== null && live.handle !== null ? live.sealed : null;
@@ -1569,7 +1623,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       grantPerp: grant,
       chainState: { usdgBalanceMicro: null, accountIndex: side.accountIndex, pendingBalanceMicro: null },
       venue: { apikeysAtIndex: side.slot, crossCollateralMicro: null },
-      ledger: { registeredPubKey: row?.registeredPubkey ?? null, retiredPubKeys: row?.retiredPubkeys ?? [], depositsInFlight: 0, keyRegistrationInFlight: false },
+      ledger: { registeredPubKey: row?.registeredPubkey ?? null, retiredPubKeys: row?.retiredPubkeys ?? [], ownerRotatedPubKeys: recoveryReplacementKeys(row?.recoveriesJson, a.smartAccount, grant.apiPublicKey), depositsInFlight: 0, keyRegistrationInFlight: false },
       needMarginMicro: null,
       caps: { perTradeMicro: 0n, maxCollateralMicro: 0n, committedMicro: 0n },
     });
@@ -1593,7 +1647,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       },
     };
     try {
-      const r = await persistIncident(L.store, { agentId: a.agentId, incident });
+      const r = await persistIncident(L.store, { agentId: a.agentId, incident, sealedPubKey: grant.apiPublicKey });
       if (r === "set") {
         await say(
           "err",
@@ -1938,6 +1992,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       ...(liveTerm !== undefined ? { liveTerm } : {}),
       exposure,
       feedFresh: feed !== null && nowMs - feed.observedAt <= 30_000,
+      feed,
       held: exposure,
       report,
       readAtMs: nowMs,
@@ -2020,6 +2075,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       ledger: {
         registeredPubKey: led?.account?.registeredPubkey ?? null,
         retiredPubKeys: led?.account?.retiredPubkeys ?? [],
+        ownerRotatedPubKeys: recoveryReplacementKeys(led?.account?.recoveriesJson, a.smartAccount, grant.apiPublicKey),
         depositsInFlight: deposits.length,
         keyRegistrationInFlight: keyInFlight,
       },
@@ -2325,6 +2381,20 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       return refuse(intent, { rule: "perp-standing-down", detail: "the perps are being stood down right now, and nothing else is sent at Lighter until that ends." }, "lane");
     }
     let r = opts.read ?? (await readLocked());
+    // Approval remains bound after queue/DB waits. Its deadline is persisted by
+    // the executor, so a submitted row cannot replay after research expires.
+    const brainPermit = brainPermits.get(intent);
+    if (brainPermit !== undefined && intent.kind === "perp-order" && intent.effect === "open") {
+      const mark = r.view?.markets.get(intent.market)?.markPrice;
+      const reference = BigInt(brainPermit.request.mark_price);
+      const drift = mark === undefined ? reference : mark > reference ? mark - reference : reference - mark;
+      const currentEvidence = r.view ? buildPerpsBrainRequest({ agentId: a.agentId, context: brainPermit.context, nowMs: deps.now(), view: r.view,
+        candidate: intent as import("./drafts").PerpOpenDraft, candleT: brainPermit.request.candidate.bar_t, feed: r.feed ?? null }) : null;
+      if (!currentEvidence || !brainMarketStillQualified(brainPermit.request, currentEvidence, brainPermit.response) || brainContext(a) !== brainPermit.context || !validatePerpsBrainResponse(brainPermit.response, brainPermit.request, deps.now()) ||
+          mark === undefined || drift * 10_000n > reference * BigInt(PERPS_BRAIN_MAX_DRIFT_BPS))
+        return refuse(intent, { rule: "perp-brain-expired", detail: "the Brain review is no longer current; the next entry needs a fresh review" }, "brain");
+      opts = { ...opts, notAfterMs: Math.min(opts.notAfterMs ?? Infinity, brainPermit.request.expires_at_ms) };
+    }
     const stateFor = async (read: PerpLaneRead, legs = false): Promise<AgentState> => ({
       ...(base ?? (await deps.agentState(equity))),
       // THE DAY'S COUNTERS AS THEY STAND UNDER THE LOCK (deps.counters): a
@@ -2957,7 +3027,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     // ONE WRITER PER BOOK: `strategist` without a real model behind it is
     // nobody, so it is manual — never a fall back to perp-trend.
     const driver = cfg.perpsDriver === "strategist" && !t.strategistLive ? "manual" : cfg.perpsDriver;
-    const out = runPerpRoute({
+    const routeInput = {
       view: r.view,
       settings: cfg,
       driver,
@@ -2972,7 +3042,40 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
         nowSec: Math.floor(deps.now() / 1000),
       },
       strategistPerpIntents: handoff,
-    });
+    };
+    let approval: PerpsBrainApproval | null = null;
+    if (driver === "brain") {
+      const context = brainContext(a);
+      brainReview.reset(context);
+      // Generate the same capped trend candidate the baseline would consider.
+      // The public route still refuses it unless a current Brain review agrees.
+      const candidate = runPerpRoute({ ...routeInput, driver: "perp-trend" });
+      if (candidate.entry?.effect === "open" && candidate.entryCandleT !== null && r.view) {
+        const market = r.view.markets.get(candidate.entry.market);
+        const request = buildPerpsBrainRequest({ agentId: a.agentId, context, nowMs: deps.now(), view: r.view,
+          candidate: candidate.entry, candleT: candidate.entryCandleT, feed: r.feed ?? null });
+        if (market && request) approval = brainReview.take(context, candidate.entry, candidate.entryCandleT, market.markPrice, request);
+        if (approval === null) {
+          const B = deps.brain;
+          const note = (message: string) => { if (message !== brainNotice) { brainNotice = message; void say("ok", `perps: ${message}`); } };
+          if (!B?.configured()) note("MerrymenBrain is not configured; new entries wait while stops and trend exits continue.");
+          else {
+            if (request === null) note("MerrymenBrain needs current candles, funding and executable depth before reviewing an entry.");
+            else brainReview.launch(context, request, candidate.entry, async () => {
+              if (!await B.admit() || brainContext(a) !== context) return null;
+              const response = await B.review(request);
+              if (B.record) {
+                if (!r.feed?.source) return null;
+                const sourceFrame = { atMs: request.as_of_ms, feed: r.feed.source };
+                await B.record({ context, sourceFrame, sourceFrameSha256: brainFingerprint(sourceFrame), request, response, candidateNotionalMicro: candidate.entry!.notionalUsdg.toString(), completedAtMs: deps.now() });
+              }
+              return response;
+            }, note);
+          }
+        }
+      }
+    } else brainReview.reset("");
+    const out = runPerpRoute({ ...routeInput, brainApproved: approval !== null });
     for (const d of out.dropped) log(`strategist ${labelOf(d.intent)} dropped: ${d.why}`);
     const source = out.source ?? "perp-route";
     const all: { intent: PerpRouteIntent; why: Why | null }[] = [
@@ -2989,12 +3092,24 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
         await hooks.withholdEntry();
         continue;
       }
-      const stamped = await hooks.ensureDecision(intent, source, why ? renderWhy(why, "public") : undefined, why ? { whyCode: why.code } : undefined);
+      const brainEntry = entry && driver === "brain" ? approval : null;
+      if (brainEntry !== null) {
+        brainPermits.set(intent, brainEntry);
+        // Production recorded every completed review under its run identity.
+        if (deps.brain?.record) intent.decisionId = brainEntry.request.run_id;
+      }
+      const stamped = await hooks.ensureDecision(intent, brainEntry !== null ? "perp:brain" : source,
+        brainEntry !== null ? `MerrymenBrain reviewed the trend candidate: ${brainEntry.response.reason_codes.join(", ")}` : why ? renderWhy(why, "public") : undefined,
+        brainEntry !== null ? { whyCode: why?.code, provenance: "brain", evidence: JSON.stringify({ request: brainEntry.request, review: brainEntry.response }) } : why ? { whyCode: why.code } : undefined);
       if (!stamped.ok) {
         await hooks.refundEntry(claim);
         continue;
       }
       if (entry) {
+        if (brainEntry !== null && (brainContext(a) !== brainEntry.context || !validatePerpsBrainResponse(brainEntry.response, brainEntry.request, deps.now()))) {
+          await hooks.refundEntry(claim);
+          continue;
+        }
         // Admission and the decision must succeed before this signal is spent.
         // A temporary energy-claim race or failed journal stamp sent nothing;
         // the next tick must be able to reconsider it against fresh gates.
@@ -3432,6 +3547,8 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       kickStanddown();
     },
     async configChanged() {
+      brainReview.reset("");
+      brainNotice = null;
       lastRefusalKey = null;
       lastIdleKey = null;
       lane.startProtect();
@@ -3540,10 +3657,11 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
         const liveStore = deps.live?.store;
         if (mode === "live" ? liveStore === undefined : deps.store.getPerpAccount === undefined || deps.store.patchPerpAccount === undefined) return { ok: false, sentence: "The perpetual ledger is unavailable; entries remain paused." };
         const account = mode === "live" ? await liveStore!.getPerpAccount(a.agentId, "live") : await deps.store.getPerpAccount!(a.agentId, "paper");
+        if (opts.expectedControlHead !== undefined && ownerControlHead(account?.ownerControlsJson, a.agentId, mode) !== opts.expectedControlHead) return { ok: false, sentence: "The entry halt changed after you confirmed. Review the current state before resuming." };
         if (account?.incident != null) return { ok: false, sentence: "The perpetual key incident must be resolved before entries can resume." };
         if (opts.notAfterMs !== undefined && deps.now() >= opts.notAfterMs) return { ok: false, sentence: "This resume request expired; entries remain paused." };
-        if (mode === "live") await liveStore!.patchPerpAccount(a.agentId, "live", { entriesHalted: false });
-        else await deps.store.patchPerpAccount!(a.agentId, "paper", { entriesHalted: false });
+        if (mode === "live") await liveStore!.patchPerpAccount(a.agentId, "live", { entriesHalted: false, expectedOwnerControlHead: opts.expectedControlHead });
+        else await deps.store.patchPerpAccount!(a.agentId, "paper", { entriesHalted: false, expectedOwnerControlHead: opts.expectedControlHead });
         ownerEntryHalts.delete(`${a.agentId}:${mode}`);
         await readLocked();
         return { ok: true, sentence: `${mode === "paper" ? "Practice" : "Live"} perpetual entries are resumed, subject to your trading settings and limits.` };

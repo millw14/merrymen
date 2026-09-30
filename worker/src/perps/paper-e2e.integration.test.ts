@@ -33,6 +33,7 @@ import type { ExecMode } from "../exec-mode";
 import type { AgentLimits, PerpOrderIntent, TradeIntent } from "../policy";
 import { provenanceOf } from "../provenance";
 import { buildOpenDraft } from "./drafts";
+import { PERPS_BRAIN_TTL_MS, perpsBrainEstimatedCostBps, type PerpsBrainRequest, type PerpsBrainResponse } from "./brain";
 import { readLighterFeed, specToJson, type LighterFeedFileMarket } from "./feed-reader";
 import { createPaperPerpExecutor } from "./executor";
 import { createPerpLane, type PerpLane, type PerpLaneConfig, type PerpLaneDeps } from "./lane";
@@ -74,6 +75,7 @@ function writeFeed(v: { mark: bigint; bids: [bigint, bigint][]; asks: [bigint, b
   const m: LighterFeedFileMarket = {
     observedAt: clock - 1_000,
     priceSource: "ws",
+    fundingRatePctPerHour: "0.0010",
     mark: v.mark.toString(),
     index: v.mark.toString(),
     status: "active",
@@ -138,7 +140,7 @@ interface Account {
   exec: ExecMode;
 }
 
-async function account(opts: { cfg?: Partial<PerpLaneConfig>; exec?: ExecMode } = {}): Promise<Account> {
+async function account(opts: { cfg?: Partial<PerpLaneConfig>; exec?: ExecMode; brain?: PerpLaneDeps["brain"] } = {}): Promise<Account> {
   const hex = (nextAccount++).toString(16).padStart(38, "0");
   const id = await store.ensureAgent({
     smartAccount: `0xAb${hex}`,
@@ -173,6 +175,7 @@ async function account(opts: { cfg?: Partial<PerpLaneConfig>; exec?: ExecMode } 
   } as Account;
   const deps: PerpLaneDeps = {
     store,
+    brain: opts.brain,
     armed: () => ({ agentId: id, smartAccount: `0xAb${hex}`, limits }),
     config: () => acct.cfg,
     execMode: () => acct.exec,
@@ -217,7 +220,7 @@ async function account(opts: { cfg?: Partial<PerpLaneConfig>; exec?: ExecMode } 
 }
 
 /** index.ts ensureDecision's contract: mint an id, write the row with the provenance its Why gives. */
-async function decide(agentId: string, intent: TradeIntent, source: string, reason?: string, known?: { whyCode?: string }) {
+async function decide(agentId: string, intent: TradeIntent, source: string, reason?: string, known?: { whyCode?: string; provenance?: "brain"; evidence?: string }) {
   if (intent.decisionId) return { ok: true as const };
   const id = store.newDecisionId();
   intent.decisionId = id;
@@ -226,7 +229,8 @@ async function decide(agentId: string, intent: TradeIntent, source: string, reas
     agent_id: agentId,
     source,
     ...(reason !== undefined ? { reason } : {}),
-    provenance: provenanceOf(source, known?.whyCode),
+    provenance: known?.provenance ?? provenanceOf(source, known?.whyCode),
+    evidence_json: known?.evidence,
   });
   return { ok: true as const };
 }
@@ -250,7 +254,7 @@ function hooks(a: Account, equityUsdg: bigint) {
       if (c?.ok) a.energy.refunded += 1;
     },
     withholdEntry: async () => {},
-    ensureDecision: (i: TradeIntent, s: string, r?: string, k?: { whyCode?: string }) => decide(a.id, i, s, r, k),
+    ensureDecision: (i: TradeIntent, s: string, r?: string, k?: { whyCode?: string; provenance?: "brain"; evidence?: string }) => decide(a.id, i, s, r, k),
     // processIntentReporting → processIntentLocked's perp branch.
     processIntentReporting: (i: TradeIntent) => a.lane.execute(i as PerpOrderIntent, { equityUsdg, equityKnown: true }),
     processIntent: async (i: TradeIntent) => {
@@ -697,5 +701,79 @@ describe("the refusal the owner sees", () => {
     assert.equal(await held(a), null);
     assert.deepEqual(a.inFlight, { ops: 0, spend: 0n });
     assert.ok(a.events.some((e) => e.level === "warn" && /open long BTC-PERP refused — perp-collateral-cap/.test(e.message)));
+  });
+});
+
+
+function approvedBrain(r: PerpsBrainRequest): PerpsBrainResponse {
+  return { schema_version: r.schema_version, run_id: r.run_id, agent_id: r.agent_id, snapshot_id: r.snapshot_id,
+    market: r.market, as_of_ms: r.as_of_ms, expires_at_ms: r.expires_at_ms, strategy_version: "merrymenbrain-perps-analogs-v1",
+    candidate_bar_t: r.candidate.bar_t, candidate_side: r.candidate.side, action: r.candidate.side, reason_codes: ["evidence-qualified"], features: {},
+    forecast: { method: "causal-regime-analogs-v1", horizon_bars: 3, target: "signed-mark-return-after-estimated-costs", samples: 40,
+      win_probability: .7, lower_95: .55, upper_95: .85, mean_net_bps: 60, mean_lower_95_bps: 10, cost_bps: perpsBrainEstimatedCostBps(r), calibrated: false },
+    committee: ["bull", "bear", "risk"].map(lens => ({ lens, verdict: "accept", reason: "fixture evidence only" })) };
+}
+const flushBrain = () => new Promise<void>(resolve => setImmediate(resolve));
+
+describe("MerrymenBrain route through the real paper lane and ledger", () => {
+  it("protects while research is pending, then journals and executes one unchanged capped candidate", async () => {
+    clock = T_LAST + H4 + 3_600_000;
+    writeFeed({ mark: 802_000n, bids: [[802_000n, 1000n]], asks: [[802_010n, 1000n]] });
+    let finish!: () => void; let reviews = 0;
+    const a = await account({ cfg: { perpsDriver: "brain" }, brain: { configured: () => true, configKey: () => "test", admit: async () => true,
+      review: request => { reviews++; return new Promise(resolve => { finish = () => resolve(approvedBrain(request)); }); },
+      record: async recording => {
+        await store.addDecision({ id: recording.request.run_id, agent_id: recording.request.agent_id, source: "perp:brain", provenance: "brain",
+          action: "open-long", evidence_json: JSON.stringify(recording) });
+      } } });
+    const start = await equityOf(a);
+    await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, hooks(a, start.equity));
+    await flushBrain(); assert.equal(reviews, 1); assert.equal(await held(a), null);
+    await pass(a); // This must resolve while the model promise is still unsettled.
+    finish(); await flushBrain();
+    await equityOf(a);
+    await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, hooks(a, start.equity));
+    assert.ok(await held(a));
+    const raw = new DatabaseSync(path.join(process.env.MERRYMEN_HOME!, "merrymen.db"));
+    try {
+      const decision = raw.prepare("SELECT source, provenance, evidence_json FROM decisions WHERE agent_id = ? AND source = 'perp:brain'").get(a.id) as { source: string; provenance: string; evidence_json: string };
+      assert.equal(decision.source, "perp:brain"); assert.equal(decision.provenance, "brain");
+      const evidence = JSON.parse(decision.evidence_json);
+      assert.equal(evidence.request.snapshot_id, evidence.response.snapshot_id);
+      assert.equal(evidence.sourceFrame.atMs, evidence.request.as_of_ms);
+      assert.equal(evidence.sourceFrame.feed.markets["1"].mark, "802000");
+      const count = raw.prepare("SELECT COUNT(*) AS n FROM decisions WHERE agent_id = ?").get(a.id) as { n: number };
+      assert.equal(count.n, 1, "execution reuses the durable review identity");
+    } finally { raw.close(); }
+    assert.equal(a.energy.claimed, 1);
+    await equityOf(a);
+    await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, hooks(a, start.equity));
+    assert.equal(a.energy.claimed, 1, "one-use approval cannot generate another entry");
+  });
+  it("expires after a queued process call and never reaches the paper settlement", async () => {
+    clock = T_LAST + H4 + 3_600_000;
+    writeFeed({ mark: 802_000n, bids: [[802_000n, 1000n]], asks: [[802_010n, 1000n]] });
+    const a = await account({ cfg: { perpsDriver: "brain" }, brain: { configured: () => true, configKey: () => "test", admit: async () => true,
+      review: async request => approvedBrain(request) } });
+    const start = await equityOf(a), h = hooks(a, start.equity);
+    await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, h); await flushBrain(); await equityOf(a);
+    let refusal: string | undefined;
+    await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, { ...h, processIntentReporting: async i => {
+      clock += PERPS_BRAIN_TTL_MS;
+      const result = await h.processIntentReporting(i); refusal = result.rejectRule; return result;
+    } });
+    assert.equal(refusal, "perp-brain-expired"); assert.equal(await held(a), null); assert.equal(a.energy.refunded, 1);
+  });
+  it("a saved settings change discards an outstanding approval", async () => {
+    clock = T_LAST + H4 + 3_600_000;
+    writeFeed({ mark: 802_000n, bids: [[802_000n, 1000n]], asks: [[802_010n, 1000n]] });
+    const a = await account({ cfg: { perpsDriver: "brain" }, brain: { configured: () => true, configKey: () => "test", admit: async () => true,
+      review: async request => approvedBrain(request) } });
+    const start = await equityOf(a), h = hooks(a, start.equity);
+    await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, h); await flushBrain();
+    a.cfg.perpsPerTradeUsdg = 20; await a.lane.configChanged(); await equityOf(a);
+    await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, h);
+    assert.equal(await held(a), null); assert.equal(a.energy.claimed, 0);
+    await a.lane.stopProtect();
   });
 });

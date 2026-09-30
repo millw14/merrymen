@@ -342,15 +342,15 @@ async function boot(ids: number[], at: number, apiOpts: Parameters<typeof api>[0
   return { feed, clock, calls: fa.calls, logs, sock };
 }
 
-test("writer: the capture moment — the candle in progress is dropped, 149 closed candles go into the file, stamped with the ask", async () => {
+test("writer: requests deeper Brain history and keeps only the captured fixture's 149 closed candles", async () => {
   const f = await boot([1], CAPTURED);
   assert.equal(f.calls.candles.length, 1);
   const { args, at } = f.calls.candles[0]!;
   assert.equal(args.resolution, "4h");
-  assert.equal(args.countBack, 150);
+  assert.equal(args.countBack, 499);
   assert.equal(args.marketId, 1);
   assert.equal(args.endSec, Math.floor(at / 1000));
-  assert.equal(args.startSec, args.endSec - 150 * 14_400, "start/end in SECONDS, both sent");
+  assert.equal(args.startSec, args.endSec - 499 * 14_400, "start/end in SECONDS, both sent");
   assert.equal(args.priceDecimals, BTC.spec.priceDecimals);
 
   const snap = f.feed.snapshot();

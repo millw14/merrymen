@@ -1,3 +1,4 @@
+import { preserveAccountControls } from "./owner-controls";
 /** Parent half of ordinary hosted durability. Histories are streamed, never retained in RAM. */
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
@@ -50,6 +51,7 @@ export class HostedLiveCheckpointBridge {
   const prior = await store.latest(o.tenant, o.account);
   const raw = new DatabaseSync(path.join(o.home, "merrymen.db"));
   let deadlines:OrderDeadlineFloor|undefined;
+  const accountControls = new Map<string, FinancialRow>();
   try {
    const local=wrapSqlite(raw);await applyLedgerSchema(local);
    deadlines=await OrderDeadlineFloor.create(local);
@@ -64,6 +66,7 @@ export class HostedLiveCheckpointBridge {
      if(!pk.has(table))pk.set(table,await primaryKeys(local,table));
      const found=await matchingRow(local,table,row,pk.get(table)!);
      if(!found){mismatch=true;return;}
+     if (table === "perp_accounts") accountControls.set(String(row.mode), preserveAccountControls(found, row));
      let immutable:string[]=[];
      if(table==="perp_orders")immutable=["mode","epoch","effect","reduce_only","nonce","tx_hash","tx_info","account_index","api_key_index","market_id","client_order_index","worst_notional_micro"];
      else if(table==="trades")immutable=["kind","target","sell_token","buy_token","amount_usdg","user_op_hash","tx_hash","decision_id","epoch","mode"];
@@ -99,7 +102,10 @@ export class HostedLiveCheckpointBridge {
     await checkMigration(o.shared,local,o.account,current.journalProof.count);
    }
    if(!o.healthy())throw new Error("hosted perps lease lost before recovery");
-   await local.tx(tx=>deadlines!.tightenLedger(tx));
+   await local.tx(async tx => {
+    await deadlines!.tightenLedger(tx);
+    for (const row of accountControls.values()) await tx.prepare("UPDATE perp_accounts SET owner_controls_json = ?, entries_halted = ?, retired_pubkeys = ?, recoveries_json = ?, incident_json = ?, incident_id = ?, incident_sealed_pubkey = ? WHERE agent_id = ? AND mode = ?").run(row.owner_controls_json ?? null,row.entries_halted,row.retired_pubkeys,row.recoveries_json ?? null,row.incident_json ?? null,row.incident_id ?? null,row.incident_sealed_pubkey ?? null,o.account.toLowerCase(),row.mode);
+   });
    const row=await store.claim(o.tenant,o.account,o.publicKey,randomUUID());let summary:FinancialStreamSummary|undefined;
    await local.tx(tx=>store.saveStream(row,validateFinancialStream(captureFinancialStream(tx,o.account),o.account,{scope:"financial",onComplete:s=>{summary=s;}})));
    if(!o.healthy()||!(await store.fence(row)))throw new Error("hosted perps recovery was fenced");

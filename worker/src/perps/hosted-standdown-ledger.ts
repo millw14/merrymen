@@ -1,3 +1,4 @@
+import { preserveAccountControls } from "./owner-controls";
 /** A bounded account-bound ledger capsule, never a copy of the normal child's home. */
 import type { Db } from "../db";
 import { JOURNAL_GENESIS, journalHash } from "../store";
@@ -81,7 +82,13 @@ export async function restoreStanddownLedger(db: Db, bytes: Buffer, account: str
   const insert = async (table: string, rows: Row[]) => {
    const schema = await tx.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
    const allowed = new Set(schema.map(c => c.name));
-   for (const row of rows) {
+   for (const original of rows) {
+    const held = table === "perp_accounts" ? await tx.prepare("SELECT * FROM perp_accounts WHERE agent_id = ? AND mode = ?").get(original.agent_id,original.mode) as Row | undefined : undefined;
+    const row = table === "perp_accounts" ? preserveAccountControls(original, held) : original;
+    if (held) {
+      await tx.prepare("UPDATE perp_accounts SET owner_controls_json = ?, entries_halted = ?, retired_pubkeys = ?, recoveries_json = ?, incident_json = ?, incident_id = ?, incident_sealed_pubkey = ? WHERE agent_id = ? AND mode = ?").run(row.owner_controls_json ?? null,row.entries_halted,row.retired_pubkeys,row.recoveries_json ?? null,row.incident_json ?? null,row.incident_id ?? null,row.incident_sealed_pubkey ?? null,row.agent_id,row.mode);
+      continue;
+    }
     const cols = Object.keys(row);
     if (!cols.length || cols.some(c => !allowed.has(c))) throw new Error("stand-down ledger schema refused");
     await tx.prepare(`INSERT INTO ${table} (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")}) ON CONFLICT DO NOTHING`).run(...cols.map(c => row[c]));

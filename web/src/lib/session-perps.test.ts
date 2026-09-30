@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 // bytecode hash in the environment, which trencher-permission.ts reads once,
 // when session.ts loads it.
 import { signerGrant } from "./canonical-wall-fixture";
-import { GRANT_PERP_LIGHTER, LIGHTER_ROUTE_V1, publicGrantView, type StoredGrant } from "@merrymen/core";
+import { GRANT_PERP_LIGHTER, LIGHTER_ROUTE_V1, publicGrantView, type StoredGrant, type PerpRecoveryReference } from "@merrymen/core";
 import { decidePerpSeal, PerpSigningRefusal, priorPerpFor, type PerpRefusalCode } from "./session";
 import { checkCanonicalWall } from "./canonical-wall";
 
@@ -235,4 +235,12 @@ describe("through the real signer", () => {
     await refusedAsync(signerGrant({ account: ACCOUNT, perp: { apiPublicKey: KEY }, chainId: 46630 }), "perp-off-mainnet");
     await refusedAsync(signerGrant({ account: ACCOUNT, previousGrant: withPerps(OTHER_ACCOUNT) }), "perp-other-account");
   });
+});
+
+it("a carried key changes only for an explicit unexpired recovery bound to this account, old key and fresh key", () => {
+  const prior = priorPerpFor(ACCOUNT, { server: withPerps(ACCOUNT) });
+  const recovery: PerpRecoveryReference = { v: 1 as const, smartAccount: ACCOUNT, chainId: 4663, route: GRANT_PERP_LIGHTER, accountIndex: 123, apiKeyIndex: 16, incidentId: "11111111-2222-4333-8444-555555555555", evidenceDigest: "a".repeat(64), txHash: `0x${"11".repeat(32)}` as `0x${string}`, userOpHash: `0x${"22".repeat(32)}` as `0x${string}`, recoveryPublicKey: `0x${"33".repeat(40)}` as `0x${string}`, oldPublicKey: KEY, newPublicKey: OTHER_KEY, notAfterMs: Date.now() + 60_000 };
+  const input = { chainId: 4663, requested: { apiPublicKey: OTHER_KEY }, prior, drop: false, venueFlat: true, recovery, smartAccount: ACCOUNT };
+  assert.equal(decidePerpSeal(input)?.apiPublicKey, OTHER_KEY);
+  for (const invalid of [{ venueFlat: false }, { smartAccount: OTHER_ACCOUNT }, { recovery: { ...recovery, notAfterMs: 1 } }, { recovery: { ...recovery, oldPublicKey: OTHER_KEY } }]) assert.throws(() => decidePerpSeal({ ...input, ...invalid }), /refusing to sign/);
 });

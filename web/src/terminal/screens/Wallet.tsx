@@ -1,4 +1,5 @@
 "use client";
+import { readPerpRecoveryReference, type PerpRecoveryReference } from "@merrymen/core";
 
 import Link from "next/link";
 import { PerpsShutdownNotice } from "../PerpsShutdownNotice";
@@ -523,6 +524,30 @@ export default function GrantPage() {
   /** Every agent account this browser holds a key for — current and superseded. */
   const [savedWallets, setSavedWallets] = useState<SavedWallet[]>([]);
   const [reArming, setReArming] = useState(false);
+  const recoveryRequest = useRef(0);
+  const [recoveryTx, setRecoveryTx] = useState("");
+  const [recoveryOp, setRecoveryOp] = useState("");
+  const [recoveryPreparing, setRecoveryPreparing] = useState(false);
+  const [recoveryNote, setRecoveryNote] = useState("");
+  const [preparedRecovery, setPreparedRecovery] = useState<{ recovery: PerpRecoveryReference; key: PerpSealRequest } | null>(null);
+  useEffect(() => { recoveryRequest.current++; setPreparedRecovery(null); setRecoveryNote(""); setRecoveryPreparing(false); return () => { recoveryRequest.current++; }; }, [grant?.smartAccount, session?.address]);
+  async function preparePerpRecovery() {
+    if (!grant || !session) return;
+    const request = ++recoveryRequest.current;
+    setRecoveryPreparing(true); setPreparedRecovery(null); setRecoveryNote("");
+    const account = grant.smartAccount, owner = session.address;
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 25_000);
+    try {
+      const r = await fetch("/api/perps/recovery", { signal: controller.signal, method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ owner, confirm: true, txHash: recoveryTx.trim(), userOpHash: recoveryOp.trim() }) });
+      const answer = await r.json();
+      const recovery = readPerpRecoveryReference(answer.recovery);
+      if (!r.ok || !recovery || recovery.smartAccount !== account.toLowerCase() || answer.key?.apiPublicKey !== recovery.newPublicKey) throw new Error(answer.error || "The recovery response could not be verified.");
+      if (request !== recoveryRequest.current) return;
+      setPreparedRecovery({ recovery, key: answer.key }); setRecoveryNote("Recovery verified. The Re-sign button below will sign a fresh venue key and acknowledge this incident. Your consent, limits and entry halt remain in force.");
+    } catch (e) { if (request === recoveryRequest.current) setRecoveryNote(controller.signal.aborted ? "Recovery verification timed out. The incident remains halted; try again." : e instanceof Error ? e.message : "Recovery could not be verified."); }
+    finally { clearTimeout(timeout); if (request === recoveryRequest.current) setRecoveryPreparing(false); }
+  }
+
   // ── restore: bring an already-funded wallet back with its owner key ──────
   const [mode, setMode] = useState<"create" | "restore">("restore");
   const [restoreKey, setRestoreKey] = useState("");
@@ -1117,7 +1142,12 @@ export default function GrantPage() {
       const perpsDropping = priorAtClick.state !== "none" && perpsDrop;
       let perpSeal: PerpSealRequest | undefined;
       let perpsFlat: boolean | undefined;
-      if (perpsDropping) {
+      if (preparedRecovery) {
+        if (perpsDropping || chainId !== MAINNET || preparedRecovery.recovery.smartAccount !== grant.smartAccount.toLowerCase() || Date.now() >= preparedRecovery.recovery.notAfterMs) throw new Error("Recovery preparation changed or expired. Verify it again before re-signing.");
+        const read = await readVenueFlat(grant.smartAccount);
+        if (read.flat !== true) throw new Error(t("wallet.perps.dropNotFlat"));
+        perpSeal = preparedRecovery.key; perpsFlat = true;
+      } else if (perpsDropping) {
         const read = await readVenueFlat(grant.smartAccount);
         if (read.flat !== true) throw new Error(t("wallet.perps.dropNotFlat"));
         perpsFlat = true;
@@ -1203,6 +1233,7 @@ export default function GrantPage() {
          * server projection is what covers a key sealed somewhere else.
          */
         perp: perpSeal,
+        recovery: preparedRecovery?.recovery,
         previousGrant,
         perpDrop: perpsDropping,
         venueFlat: perpsFlat,
@@ -2531,6 +2562,14 @@ export default function GrantPage() {
                     wondering what they did wrong; a disabled one sits directly
                     under the checkbox that enables it.
                   */}
+                  {grant.chainId === MAINNET && <details style={{ marginTop: 12 }}>
+                    <summary>Re-enable perpetuals after owner key recovery</summary>
+                    <p>After running owner recovery and confirming Lighter is empty, verify its receipt here. You will then review and sign a fresh permission. Existing trading consent, limits and entry pauses still apply.</p>
+                    <label className="field"><span className="field-label">Recovery transaction hash</span><input value={recoveryTx} onChange={e => { recoveryRequest.current++; setRecoveryTx(e.target.value); setPreparedRecovery(null); setRecoveryPreparing(false); }} /></label>
+                    <label className="field"><span className="field-label">Recovery operation hash</span><input value={recoveryOp} onChange={e => { recoveryRequest.current++; setRecoveryOp(e.target.value); setPreparedRecovery(null); setRecoveryPreparing(false); }} /></label>
+                    <button type="button" disabled={recoveryPreparing || renewing || !session || (!!session.hosted && !session.address)} onClick={() => void preparePerpRecovery()}>{recoveryPreparing ? "Verifying recovery…" : "Verify recovery and prepare a fresh key"}</button>
+                    {recoveryNote && <p role="status">{recoveryNote}</p>}
+                  </details>}
                   <button
                     className="grant-btn"
                     style={{ marginTop: 10, width: "100%" }}

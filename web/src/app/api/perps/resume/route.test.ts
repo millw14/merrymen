@@ -11,6 +11,7 @@ import { resetSettingsStoreForTest } from "@merrymen/settings-store";
 import type { StoredGrant } from "@merrymen/core";
 import { homePaths } from "../../../../../../worker/src/home";
 import { runTickCommand } from "../../../../../../worker/src/command-files";
+import { appendEntryControl, initialOwnerControls } from "../../../../../../worker/src/perps/owner-controls";
 import { POST, GET } from "./route";
 import { POST as EXIT } from "../../orders/route";
 const TENANT = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", OTHER = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -26,6 +27,10 @@ beforeEach(() => {
   delete process.env.DATABASE_URL; delete process.env.MERRYMEN_HOSTED;
   resetGrantStoreForTest(); resetSettingsStoreForTest();
   writeFileSync(path.join(dir, "grant.json"), JSON.stringify({ smartAccount: ACCOUNT }));
+  const db = new DatabaseSync(homePaths.db());
+  db.exec("CREATE TABLE perp_accounts(agent_id TEXT,mode TEXT,owner_controls_json TEXT)");
+  for (const account of [ACCOUNT, SECOND]) for (const mode of ["paper", "live"] as const) db.prepare("INSERT INTO perp_accounts VALUES (?,?,?)").run(account,mode,initialOwnerControls(account,mode,true));
+  db.close();
 });
 afterEach(() => { resetGrantStoreForTest(); resetSettingsStoreForTest(); rmSync(dir, { recursive: true, force: true }); });
 after(() => { for (const k of KEYS) { if (previous[k] === undefined) delete process.env[k]; else process.env[k] = previous[k]; } });
@@ -69,13 +74,23 @@ describe("dashboard perps resume and owner exit routes", () => {
     assert.equal(answer.status, 200);
     let ran = 0;
     await runTickCommand(dir, { now: Date.now, told: async () => {}, run: async (cmd) => {
-      ran++; assert.equal(cmd.kind, "resume-perps"); assert.deepEqual(Object.keys(cmd.args!).sort(), ["expiresAt", "mode"]);
+      ran++; assert.equal(cmd.kind, "resume-perps"); assert.deepEqual(Object.keys(cmd.args!).sort(), ["expectedControlHead", "expiresAt", "mode"]);
       assert.equal(cmd.args!.mode, "paper"); assert.ok(cmd.expiresAt! > Date.now()); return { ok: true, line: "paper entries resumed" };
     } });
     await runTickCommand(dir, { now: Date.now, told: async () => {}, run: async () => { throw new Error("replay"); } });
     const again = await POST(req("/api/perps/resume", { mode: "paper", confirm: true }));
     assert.equal((await again.json()).duplicate, true);
     assert.equal(ran, 1);
+  });
+  it("a fresh halt head can be acknowledged in the same minute, while identical retries stay idempotent", async () => {
+    const body={mode:"paper",confirm:true};
+    const first=await (await POST(req("/api/perps/resume",body))).json();
+    await runTickCommand(dir,{now:Date.now,told:async()=>{},run:async()=>({ok:false,line:"halt changed"})});
+    const duplicate=await (await POST(req("/api/perps/resume",body))).json(); assert.equal(duplicate.id,first.id); assert.equal(duplicate.duplicate,true);
+    const db=new DatabaseSync(homePaths.db());
+    const prior=db.prepare("SELECT * FROM perp_accounts WHERE agent_id=? AND mode='paper'").get(ACCOUNT)!;
+    db.prepare("UPDATE perp_accounts SET owner_controls_json=? WHERE agent_id=? AND mode='paper'").run(appendEntryControl({...prior,entries_halted:1},true),ACCOUNT); db.close();
+    const next=await (await POST(req("/api/perps/resume",body))).json(); assert.notEqual(next.id,first.id); assert.equal(next.queued,true);
   });
   it("an exit uses the same claimed-once queue and never accepts an open-shaped payload", async () => {
     const bad = await EXIT(req("/api/orders", { book: "live", side: "buy", symbol: "BTC-PERP", usdgAmount: 10, purpose: "close-perp" }));

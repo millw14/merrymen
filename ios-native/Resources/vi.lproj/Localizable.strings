@@ -279,6 +279,7 @@
 "memecoins" = "memecoins";
 "Merry Circle" = "Merry Circle";
 "merry circle token" = "merry circle token";
+"MerrymenBrain review" = "MerrymenBrain review";
 "metals" = "metals";
 "min" = "min";
 "minimum" = "minimum";
@@ -415,6 +416,7 @@
 "Review signed permission" = "Review signed permission";
 "Review the available cash, destination and amount before confirming a withdrawal. Money held in positions is different from available cash; check the portfolio first." = "Hãy xem lại số tiền mặt khả dụng, địa chỉ nhận và số tiền trước khi xác nhận rút. Tiền đang nằm trong các vị thế khác với tiền mặt khả dụng; hãy kiểm tra danh mục trước.";
 "Review what the agent may trade and the permissions you are signing. Changes to signed permissions require a new wallet signature. The tutorial never signs or submits one for you." = "Xem lại những gì tác nhân được phép giao dịch và các quyền bạn sắp ký. Mọi thay đổi với quyền đã ký đều cần một chữ ký ví mới. Phần hướng dẫn này không bao giờ ký hay gửi chữ ký thay bạn.";
+"Reviews BTC, ETH and SOL trend entries using market conditions, historical analogs, funding and trading costs. Weak or unread evidence means no entry. Needs the Brain service configured. Forecasts are uncertain; higher returns are not established. Stops and trend exits keep running independently." = "Reviews BTC, ETH and SOL trend entries using market conditions, historical analogs, funding and trading costs. Weak or unread evidence means no entry. Needs the Brain service configured. Forecasts are uncertain; higher returns are not established. Stops and trend exits keep running independently.";
 "Rialto integrator key" = "Rialto integrator key";
 "Rialto key header" = "Rialto key header";
 "Rialto requires an integrator key." = "Rialto requires an integrator key.";

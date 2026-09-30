@@ -421,7 +421,7 @@ const TRADED_ONLY: ReadonlySet<string> = new Set<string>(TRADED_ONLY_SOURCES);
  * tidy the map. thesis-policy.test.ts pins both, the way the strategist's own
  * absence is pinned.
  */
-export const WITHHELD_PERP_SOURCES = ["perp-route", "perp:strategist"] as const;
+export const WITHHELD_PERP_SOURCES = ["perp-route", "perp:strategist", "perp:brain"] as const;
 
 /**
  * Is this row about perpetuals at all — by its source, its market key or its
@@ -1109,6 +1109,11 @@ export const WITHHELD_REJECT_RULES: Readonly<Record<string, { why: string; owner
       why: PERP_WHY,
       owner: "the perpetual positions are being stood down right now, so nothing else is sent to Lighter until that finishes",
       remedy: "Nothing to do — it ends on its own within fifteen minutes, and the result says what is left at Lighter.",
+    },
+    "perp-brain-expired": {
+      why: PERP_WHY,
+      owner: "the Brain review expired or the market, permission or trading conditions changed before the entry could be sent",
+      remedy: "The agent will request a fresh review for an eligible entry. Existing stops and exits continue; no action is needed.",
     },
     "perp-no-cash": {
       why: PERP_WHY,

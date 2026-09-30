@@ -5,6 +5,11 @@
  * Postgres is a schema port when the platform goes multi-user.
  */
 
+import { assertPerpRecoverySettled, readPerpRecoveryContext } from "./perps/owner-recovery-live";
+import type { VerifiedOwnerRecovery } from "./perps/owner-recovery-proof";
+import { readRecoveries, recoveryRecord, recoveryFillFingerprint, recoveryEvidenceDigest } from "./perps/owner-recovery-state";
+import { readPerpRecoveryReference, type PerpRecoveryReference } from "../../packages/core/src/perps";
+import { appendEntryControl, initialOwnerControls, ownerControlHead, preserveAccountControls } from "./perps/owner-controls";
 import { RISK_PERIOD_SCHEMA, mergeRiskPeriod, markRiskPeriod, adjustRiskCapital, type RiskPeriod } from "./risk-period";
 import {
   ENERGY_DAYS_ALTERS,
@@ -724,6 +729,10 @@ export const PERP_LEDGER_DDL: readonly string[] = [
   "ALTER TABLE equity ADD COLUMN perp_snapshot_time INTEGER",
   "ALTER TABLE equity ADD COLUMN cash_read_block INTEGER",
   "ALTER TABLE perp_accounts ADD COLUMN flat_since_json TEXT",
+  "ALTER TABLE perp_accounts ADD COLUMN owner_controls_json TEXT",
+  "ALTER TABLE perp_accounts ADD COLUMN incident_id TEXT",
+  "ALTER TABLE perp_accounts ADD COLUMN incident_sealed_pubkey TEXT",
+  "ALTER TABLE perp_accounts ADD COLUMN recoveries_json TEXT",
   "ALTER TABLE perp_orders ADD COLUMN send_not_after_ms INTEGER",
 ];
 
@@ -1365,6 +1374,7 @@ function initSqlite(): Db {
   // and a diagnostic line landing in the middle of it corrupts the file. A log
   // is not data.
   console.error(`[store] sqlite at ${DB_FILE}`);
+  for (const r of db.prepare("SELECT agent_id,mode,entries_halted FROM perp_accounts WHERE owner_controls_json IS NULL").all() as {agent_id:string;mode:"paper"|"live";entries_halted:number}[]) db.prepare("UPDATE perp_accounts SET owner_controls_json = ? WHERE agent_id = ? AND mode = ? AND owner_controls_json IS NULL AND entries_halted = ?").run(initialOwnerControls(r.agent_id,r.mode,r.entries_halted === 1),r.agent_id,r.mode,r.entries_halted);
   ledgerFile = db;
   return wrapSqlite(db);
 }
@@ -1383,6 +1393,10 @@ function initSqlite(): Db {
  * Idempotent: CREATE TABLE IF NOT EXISTS, and each ALTER swallowed the way
  * initSqlite and initPostgres already swallow it.
  */
+async function seedOwnerControlRoots(db: Db): Promise<void> {
+  const rows = await db.prepare("SELECT agent_id,mode,entries_halted FROM perp_accounts WHERE owner_controls_json IS NULL").all() as {agent_id:string;mode:"paper"|"live";entries_halted:number}[];
+  for (const r of rows) await db.prepare("UPDATE perp_accounts SET owner_controls_json = ? WHERE agent_id = ? AND mode = ? AND owner_controls_json IS NULL AND entries_halted = ?").run(initialOwnerControls(r.agent_id,r.mode,r.entries_halted === 1),r.agent_id,r.mode,r.entries_halted);
+}
 export async function applyLedgerSchema(db: Db): Promise<void> {
   await execSchemaBatch(db);
   for (const ddl of SQLITE_ALTERS) {
@@ -1392,6 +1406,7 @@ export async function applyLedgerSchema(db: Db): Promise<void> {
       // column already exists — the same no-op the two init paths rely on
     }
   }
+  await seedOwnerControlRoots(db);
 }
 
 /**
@@ -1438,6 +1453,7 @@ async function initPostgres(url: string): Promise<Db> {
       // surfaces on the first real query rather than being masked here.
     }
   }
+  await seedOwnerControlRoots(d);
   console.error("[store] postgres ledger");
   return d;
 }
@@ -3549,7 +3565,15 @@ export async function addTrade(
     // are thousands of them. They stay in `trades` (and in the export, as
     // context) without being part of the tamper-evident record.
     const moved = row.status === "landed" || row.status === "paper";
+    const perpLeg = ["perp-key", "perp-deposit", "perp-claim"].includes(row.kind);
     const writeRow = async (db: Db) => {
+      if (perpLeg) {
+        // Same order as fill/transfer writers: agent first, then live account.
+        // Recovery holds the account while checking every unresolved operation.
+        await perpBookingOf(db, row.agent_id);
+        await db.prepare("INSERT INTO perp_accounts(agent_id,mode) VALUES (?,'live') ON CONFLICT DO NOTHING").run(row.agent_id.toLowerCase());
+        await db.prepare("UPDATE perp_accounts SET entries_halted = entries_halted WHERE agent_id = ? AND mode = 'live'").run(row.agent_id.toLowerCase());
+      }
       // RESOLVE THE PRE-BROADCAST ROW, if there is one.
       //
       // executor.execute writes a 'submitted' row the instant the op leaves,
@@ -3659,10 +3683,10 @@ export async function addTrade(
     };
     const withFn = opts.with;
     if (!moved) {
-      if (withFn) {
+      if (withFn || perpLeg) {
         await getDb().tx(async (tx) => {
           await writeRow(tx);
-          await withFn(tx);
+          await withFn?.(tx);
         });
       } else {
         await writeRow(getDb());
@@ -5973,6 +5997,10 @@ export async function insertPerpFill(fill: PerpFillInput, opts: { with?: PerpWit
   const venueTsMs = safeInt(fill.venueTsMs, "venue timestamp (ms)", 1);
 
   return perpJournaled(fill.agentId, "perp-fill", async (db, epoch) => {
+    if (mode === "live" && attribution === "venue-unknown") {
+      await db.prepare("INSERT INTO perp_accounts(agent_id,mode) VALUES (?,'live') ON CONFLICT DO NOTHING").run(agent);
+      await db.prepare("UPDATE perp_accounts SET entries_halted = entries_halted WHERE agent_id = ? AND mode = 'live'").run(agent);
+    }
     const res = await db
       .prepare(
         `INSERT INTO perp_fills (agent_id, mode, epoch, venue_trade_id, side_role, market_id, side, role, base, price,
@@ -6209,6 +6237,10 @@ async function writePerpTransferIn(
   withFn: PerpWith | undefined,
 ): Promise<{ result: PerpTransferOutcome; payload: unknown | null }> {
   const { agent, mode, direction, state, amount, initiator, id, chainId, txHash, logIndex, userOpHash, venueTxHash, paidTxHash, paidLogIndex } = v;
+  if (mode === "live") {
+    await db.prepare("INSERT INTO perp_accounts(agent_id,mode) VALUES (?,'live') ON CONFLICT DO NOTHING").run(agent);
+    await db.prepare("UPDATE perp_accounts SET entries_halted = entries_halted WHERE agent_id = ? AND mode = 'live'").run(agent);
+  }
   const retireIdleClock = async () => {
     // Fresh funding is for the next entry. Retire its previous idle interval
     // in the same transaction as each new deposit/progress fact, never on an
@@ -6698,6 +6730,7 @@ export async function insertPerpOrderSubmitted(s: PerpOrderSubmission): Promise<
     await getDb().tx(async (db) => {
       const { epoch } = await perpBookingOf(db, s.agentId);
       if (signed) {
+        await db.prepare("UPDATE perp_accounts SET entries_halted = entries_halted WHERE agent_id = ? AND mode = 'live'").run(agent);
         const hw = (await db
           .prepare(`SELECT nonce_high_water FROM perp_accounts WHERE agent_id = ? AND mode = 'live'`)
           .get(agent)) as { nonce_high_water: string | null } | undefined;
@@ -7392,7 +7425,11 @@ export interface PerpAccountRow {
   nonceHighWater: bigint | null;
   paperCollateralMicro: bigint | null;
   incident: PerpIncident | null;
+  incidentId?: string | null;
+  incidentSealedPubkey?: string | null;
+  recoveriesJson?: string | null;
   entriesHalted: boolean;
+  ownerControlsJson?: string | null;
   lastVenueReadAt: number | null;
   /** Optional only for older checkpoints/test adapters; absent never proves a flat interval. */
   flatSince?: PerpFlatSince | null;
@@ -7414,7 +7451,9 @@ export interface PerpAccountPatch {
   /** Paper rail only. */
   paperCollateralMicro?: bigint | null;
   incident?: PerpIncident | null;
+  incidentSealedPubkey?: string;
   entriesHalted?: boolean;
+  expectedOwnerControlHead?: string;
   lastVenueReadAt?: number | null;
   flatSince?: PerpFlatSince | null;
   /**
@@ -7476,9 +7515,10 @@ export async function patchPerpAccount(agentId: string, mode: PerpMode, patch: P
   const snapshot = patch.lastSnapshotTime === undefined ? null : safeInt(patch.lastSnapshotTime, "snapshot time");
   await getDb().tx(async (db) => {
     await db.prepare(`INSERT INTO perp_accounts (agent_id, mode) VALUES (?, ?) ON CONFLICT DO NOTHING`).run(agent, m);
+    await db.prepare("UPDATE perp_accounts SET entries_halted = entries_halted WHERE agent_id = ? AND mode = ?").run(agent, m);
     const row = (await db
-      .prepare(`SELECT retired_pubkeys FROM perp_accounts WHERE agent_id = ? AND mode = ?`)
-      .get(agent, m)) as { retired_pubkeys: string } | undefined;
+      .prepare(`SELECT agent_id, mode, retired_pubkeys, entries_halted, owner_controls_json, incident_id, incident_json, incident_sealed_pubkey FROM perp_accounts WHERE agent_id = ? AND mode = ?`)
+      .get(agent, m)) as { agent_id: string; mode: string; retired_pubkeys: string; entries_halted: number; owner_controls_json: string | null; incident_id: string | null; incident_json: string | null; incident_sealed_pubkey: string | null } | undefined;
     let retired: string[];
     try {
       const parsed = JSON.parse(row?.retired_pubkeys ?? "[]") as unknown;
@@ -7495,6 +7535,22 @@ export async function patchPerpAccount(agentId: string, mode: PerpMode, patch: P
     }
     const allSets = [...sets];
     const allArgs = [...args];
+    if (patch.incident !== undefined) {
+      allSets.push("incident_id = ?");
+      allArgs.push(patch.incident === null ? null : row?.incident_json != null && row.incident_id ? row.incident_id : randomUUID());
+    }
+    if (patch.incidentSealedPubkey !== undefined) {
+      const key = pubkeyText(patch.incidentSealedPubkey);
+      if (row?.incident_sealed_pubkey && row.incident_json && row.incident_sealed_pubkey !== key) throw new Error("perp incident sealed key cannot change");
+      allSets.push("incident_sealed_pubkey = ?"); allArgs.push(key);
+    } else if (patch.incident === null) { allSets.push("incident_sealed_pubkey = ?"); allArgs.push(null); }
+    if (patch.entriesHalted !== undefined) {
+      if (!row) throw new Error("perp account disappeared during owner control");
+      if (patch.entriesHalted === false && row.incident_json !== null) throw new Error("perp incident remains halted; owner Resume cannot acknowledge it");
+      if (patch.expectedOwnerControlHead !== undefined && ownerControlHead(row.owner_controls_json, agent, m) !== patch.expectedOwnerControlHead) throw new Error("perp owner halt changed after confirmation");
+      allSets.push("owner_controls_json = ?");
+      allArgs.push(appendEntryControl(row, patch.entriesHalted));
+    }
     if (retiring.length) {
       allSets.push("retired_pubkeys = ?");
       allArgs.push(JSON.stringify(union));
@@ -7516,6 +7572,14 @@ export async function getPerpAccount(agentId: string, mode: PerpMode): Promise<P
     .prepare(`SELECT * FROM perp_accounts WHERE agent_id = ? AND mode = ?`)
     .get(perpAgent(agentId), perpMode(mode))) as Record<string, unknown> | undefined;
   if (!r) return null;
+  // Corrupt or mixed-version owner controls forbid new exposure without
+  // hiding balances/positions from the protective loop. Their stored bytes
+  // remain untouched and every mutation/checkpoint still validates strictly.
+  let controlsInvalid = false;
+  try { preserveAccountControls(r); } catch (e) {
+    if (!(e instanceof Error) || !e.message.startsWith("perp owner control")) throw e;
+    controlsInvalid = true;
+  }
   const retired = JSON.parse(String(r.retired_pubkeys ?? "[]")) as unknown;
   if (!Array.isArray(retired)) throw new Error("perp ledger: the retired key set is unreadable");
   const high = r.nonce_high_water === null || r.nonce_high_water === undefined ? null : textInt(r.nonce_high_water);
@@ -7543,7 +7607,11 @@ export async function getPerpAccount(agentId: string, mode: PerpMode): Promise<P
     nonceHighWater: high,
     paperCollateralMicro: collateral,
     incident,
-    entriesHalted: Number(r.entries_halted) === 1,
+    incidentId: (r.incident_id as string | null) ?? null,
+    incidentSealedPubkey: (r.incident_sealed_pubkey as string | null) ?? null,
+    recoveriesJson: (r.recoveries_json as string | null) ?? null,
+    entriesHalted: controlsInvalid || Number(r.entries_halted) === 1,
+    ownerControlsJson: (r.owner_controls_json as string | null) ?? null,
     lastVenueReadAt: nullableNum(r.last_venue_read_at),
     flatSince: flatSinceOf(r.flat_since_json),
     lastSnapshotTime: nullableNum(r.last_snapshot_time),
@@ -8107,3 +8175,46 @@ export async function perpLaneLedgerFacts(
   }
   return { opensToday: Number(opens?.n ?? 0), lastExits, lastOpenAt };
 }
+
+/** Called only after independent receipt/slot/flatness verification against the active fresh owner grant. */
+export async function commitVerifiedPerpRecovery(agentId: string, verified: VerifiedOwnerRecovery, now: () => number = Date.now): Promise<"applied" | "already-applied"> {
+ const ref = readPerpRecoveryReference(verified.reference);
+ if (!ref || ref.smartAccount !== perpAgent(agentId) || !Number.isSafeInteger(now()) || now() >= ref.notAfterMs) throw new Error("perp recovery acknowledgement expired or malformed");
+ return getDb().tx(async db => {
+  await db.prepare("UPDATE perp_accounts SET entries_halted = entries_halted WHERE agent_id = ? AND mode = 'live'").run(ref.smartAccount);
+  const row = await db.prepare("SELECT * FROM perp_accounts WHERE agent_id = ? AND mode = 'live'").get(ref.smartAccount) as Record<string, unknown> | undefined;
+  if (!row) throw new Error("perp recovery account is unavailable");
+  const records = readRecoveries(row.recoveries_json, ref.smartAccount);
+  const previous = records.find(r => r.reference.incidentId === ref.incidentId);
+  if (previous) {
+   if (JSON.stringify(previous.reference) !== JSON.stringify(ref)) throw new Error("perp recovery acknowledgement was already consumed differently");
+   return "already-applied";
+  }
+  if (row.incident_json == null || row.incident_id !== ref.incidentId || row.incident_sealed_pubkey !== ref.oldPublicKey || Number(row.account_index) !== ref.accountIndex) throw new Error("perp recovery incident or account changed");
+  await assertPerpRecoverySettled(db, ref.smartAccount);
+  const retired = JSON.parse(String(row.retired_pubkeys ?? "[]")) as unknown;
+  if (!Array.isArray(retired) || retired.some(k => typeof k !== "string" || !/^0x[a-f0-9]{80}$/.test(k))) throw new Error("perp recovery retired keys unreadable");
+  const retiring = [...new Set([...retired as string[], ref.oldPublicKey, ...(typeof row.registered_pubkey === "string" ? [row.registered_pubkey] : [])])].sort();
+  if (retiring.includes(ref.newPublicKey)) throw new Error("perp recovery requires a fresh non-retired key");
+  const fills = await db.prepare("SELECT * FROM perp_fills WHERE agent_id = ? AND mode = 'live' AND attribution = 'venue-unknown'").all(ref.smartAccount) as Record<string, unknown>[];
+  const fingerprints = fills.map(recoveryFillFingerprint);
+  if (recoveryEvidenceDigest(fingerprints) !== ref.evidenceDigest) throw new Error("perp recovery evidence changed; review it again");
+  records.push(recoveryRecord(ref, retiring, fingerprints));
+  const encoded = JSON.stringify(records.sort((a,b) => a.id.localeCompare(b.id)));
+  readRecoveries(encoded, ref.smartAccount);
+  if (now() >= ref.notAfterMs) throw new Error("perp recovery acknowledgement expired before commit");
+  // Every fact checked above and the clear are one transaction. The owner's halt remains intact.
+  await db.prepare("UPDATE perp_accounts SET retired_pubkeys = ?, recoveries_json = ?, incident_json = NULL, incident_id = NULL, incident_sealed_pubkey = NULL, flat_since_json = NULL, updated_at = unixepoch() WHERE agent_id = ? AND mode = 'live'").run(JSON.stringify(retiring), encoded, ref.smartAccount);
+  return "applied";
+ });
+}
+/** Acknowledges an exact previously persisted fact; different venue facts never inherit it. */
+export async function perpFillRecoveryAcknowledged(agentId: string, venueTradeId: string, sideRole: "ask" | "bid", fingerprint: string): Promise<boolean> {
+ const agent = perpAgent(agentId);
+ const row = await getDb().prepare("SELECT recoveries_json FROM perp_accounts WHERE agent_id = ? AND mode = 'live'").get(agent) as Record<string, unknown> | undefined;
+ if (!row) return false;
+ const fill = await getDb().prepare("SELECT * FROM perp_fills WHERE agent_id = ? AND mode = 'live' AND venue_trade_id = ? AND side_role = ?").get(agent, venueTradeId, sideRole) as Record<string, unknown> | undefined;
+ return !!fill && recoveryFillFingerprint(fill) === fingerprint && readRecoveries(row.recoveries_json, agent).some(r => r.acknowledgedFills.includes(fingerprint));
+}
+
+export async function getPerpRecoveryContext(agentId: string) { return readPerpRecoveryContext(getDb(), perpAgent(agentId)); }

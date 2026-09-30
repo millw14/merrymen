@@ -195,7 +195,7 @@ describe("a peer's landed trade is not buried under refusals the gate drops", ()
  */
 describe("perps are withheld from every public surface", () => {
   it("THE PERP SOURCES ARE ABSENT from the policy and from the strategy list — change both or neither", () => {
-    assert.deepEqual([...WITHHELD_PERP_SOURCES], ["perp-route", "perp:strategist"]);
+    assert.deepEqual([...WITHHELD_PERP_SOURCES], ["perp-route", "perp:strategist", "perp:brain"]);
     for (const source of WITHHELD_PERP_SOURCES) {
       assert.ok(!PUBLISHABLE_SOURCES.includes(source), `${source} must never be publishable`);
     }

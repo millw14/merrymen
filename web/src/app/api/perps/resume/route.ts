@@ -1,3 +1,4 @@
+import { ownerControlHead } from "../../../../../../worker/src/perps/owner-controls";
 /** Dashboard-only request to clear an owner's flatten halt. Never clears an incident. */
 import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
@@ -33,9 +34,18 @@ export async function POST(req: Request) {
     const tenant = tenantOf(req);
     try { tick = (tenant ? (await getSettingsStore().get(tenant))?.tickSeconds : undefined) ?? tick; } catch { /* fallback */ }
   }
+  let expectedControlHead: string | null = null;
+  try {
+    expectedControlHead = await withReadDb(async db => {
+      if (!db) throw new Error("unread");
+      const row = await db.prepare("SELECT owner_controls_json FROM perp_accounts WHERE agent_id = ? AND mode = ?").get(agent, body!.mode) as {owner_controls_json: string | null} | undefined;
+      return row ? ownerControlHead(row.owner_controls_json, agent, body!.mode) : null;
+    });
+  } catch { return NextResponse.json({ error: "The current entry halt could not be read. Refresh before resuming." }, { status: 503 }); }
+  if (!expectedControlHead) return NextResponse.json({ error: "The worker must record the current halt before it can be resumed. Wait for its next update." }, { status: 409 });
   const now = Date.now(), expiresAt = now + orderTtlMs(tick);
-  const id = createHash("sha256").update(`${agent.toLowerCase()}|resume-perps|${body.mode}|${Math.floor(now / 60_000)}`).digest("hex").slice(0, 32);
-  const args = { mode: body.mode, expiresAt };
+  const id = createHash("sha256").update(`${agent.toLowerCase()}|resume-perps|${body.mode}|${expectedControlHead}|${Math.floor(now / 60_000)}`).digest("hex").slice(0, 32);
+  const args = { mode: body.mode, expectedControlHead, expiresAt };
   const queued = (duplicate = false) => NextResponse.json({ id, queued: true, expiresAt, expiresInMs: expiresAt - now, ...(duplicate ? { duplicate: true } : {}) });
   const busy = () => NextResponse.json({ error: "Another request is still waiting on your agent. Wait for its result before resuming entries." }, { status: 409 });
   try {

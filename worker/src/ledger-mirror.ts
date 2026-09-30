@@ -32,6 +32,8 @@
  * lands mid-copy, which on a trade ledger is worse than lagging.
  */
 
+import { mergeRecoveries } from "./perps/owner-recovery-state";
+import { mergeEntryControls, preserveAccountControls } from "./perps/owner-controls";
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { existsSync } from "node:fs";
@@ -1450,7 +1452,7 @@ const PERP_POSITION_COLS = [
 ] as const;
 const PERP_ACCOUNT_COLS = [
   "agent_id", "mode", "account_index", "registered_pubkey", "retired_pubkeys", "nonce_high_water",
-  "paper_collateral_micro", "incident_json", "entries_halted", "last_venue_read_at", "last_snapshot_time", "flat_since_json",
+  "paper_collateral_micro", "incident_json", "incident_id", "incident_sealed_pubkey", "recoveries_json", "entries_halted", "owner_controls_json", "last_venue_read_at", "last_snapshot_time", "flat_since_json",
   "created_at", "updated_at",
 ] as const;
 
@@ -1895,6 +1897,7 @@ export async function mirrorPerpLedger(args: {
     await shared.tx(async (db) => {
       for (const r of rows) {
         const agent = String(r.agent_id ?? "").toLowerCase();
+        await db.prepare("UPDATE perp_accounts SET entries_halted = entries_halted WHERE agent_id = ? AND mode = ?").run(agent, r.mode);
         const held = (await db
           .prepare(`SELECT ${PERP_ACCOUNT_COLS.join(", ")} FROM perp_accounts WHERE agent_id = ? AND mode = ?`)
           .get(agent, r.mode)) as Row | undefined;
@@ -1902,7 +1905,7 @@ export async function mirrorPerpLedger(args: {
         if (!held) {
           n += Number(
             (await db.prepare(insertSql("perp_accounts", PERP_ACCOUNT_COLS)).run(
-              ...valuesOf({ ...r, incident_json: incident }, PERP_ACCOUNT_COLS),
+              ...valuesOf(preserveAccountControls({ ...r, incident_json: incident }), PERP_ACCOUNT_COLS),
             )).changes,
           );
           continue;
@@ -1923,30 +1926,30 @@ export async function mirrorPerpLedger(args: {
           retired_pubkeys: JSON.stringify(retired),
           nonce_high_water: high === null ? null : high.toString(),
           paper_collateral_micro: pick("paper_collateral_micro"),
-          // STICKY HERE: the flag clears only from the dashboard (rule 16),
-          // which writes this row itself. A rebuilt child that has forgotten
-          // its incident must not clear it on the way up.
-          incident_json: incident ?? held.incident_json ?? null,
-          entries_halted: Number(r.entries_halted) === 1 || Number(held.entries_halted) === 1 ? 1 : 0,
+          // Only the exact verified acknowledgement clears its own incident.
+          // A stale child or a novel incident never inherits that clear.
+          ...mergeRecoveries(held, { ...r, incident_json: incident }),
+          ...mergeEntryControls(held, r),
           last_venue_read_at: pick("last_venue_read_at"),
           flat_since_json: pick("flat_since_json"),
           last_snapshot_time:
             Math.max(Number(r.last_snapshot_time ?? 0), Number(held.last_snapshot_time ?? 0)) || null,
           updated_at: newer ? r.updated_at : held.updated_at,
         };
+        preserveAccountControls({ ...next, agent_id: agent, mode: r.mode });
         const changed = Object.keys(next).some((k) => String(next[k] ?? "") !== String(held[k] ?? ""));
         if (!changed) continue;
         n += Number(
           (await db
             .prepare(
               `UPDATE perp_accounts SET account_index = ?, registered_pubkey = ?, retired_pubkeys = ?, nonce_high_water = ?,
-                      paper_collateral_micro = ?, incident_json = ?, entries_halted = ?, last_venue_read_at = ?,
+                      paper_collateral_micro = ?, incident_json = ?, incident_id = ?, incident_sealed_pubkey = ?, recoveries_json = ?, entries_halted = ?, owner_controls_json = ?, last_venue_read_at = ?,
                       last_snapshot_time = ?, flat_since_json = ?, updated_at = ?
                 WHERE agent_id = ? AND mode = ?`,
             )
             .run(
               next.account_index, next.registered_pubkey, next.retired_pubkeys, next.nonce_high_water,
-              next.paper_collateral_micro, next.incident_json, next.entries_halted, next.last_venue_read_at,
+              next.paper_collateral_micro, next.incident_json, next.incident_id, next.incident_sealed_pubkey, next.recoveries_json, next.entries_halted, next.owner_controls_json, next.last_venue_read_at,
               next.last_snapshot_time, next.flat_since_json, next.updated_at, agent, r.mode,
             )).changes,
         );

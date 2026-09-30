@@ -73,6 +73,8 @@ export interface PerpRouteInput {
    * `strategist`.
    */
   strategistPerpIntents?: readonly PerpRouteIntent[];
+  /** Brain may only veto the current deterministic candidate; the lane validates its bound review. */
+  brainApproved?: boolean;
 }
 
 export interface PerpRouteResult {
@@ -115,14 +117,14 @@ function stopPctOf(o: Extract<PerpRouteIntent, { effect: "open" }>): number {
 export function runPerpRoute(input: PerpRouteInput): PerpRouteResult {
   const { view, settings: s, driver, perpTrendCtx: ctx } = input;
   if (driver === "manual") return nothing();
-  if (driver !== "perp-trend" && driver !== "strategist") return nothing();
-  if (!view) return nothing(driver === "perp-trend" && s.perpsEnabled ? { code: "perp-signal-unread", market: null } : null);
+  if (driver !== "perp-trend" && driver !== "brain" && driver !== "strategist") return nothing();
+  if (!view) return nothing((driver === "perp-trend" || driver === "brain") && s.perpsEnabled ? { code: "perp-signal-unread", market: null } : null);
 
-  if (driver === "perp-trend") {
+  if (driver === "perp-trend" || driver === "brain") {
     const r = perpTrendTick(view, s, ctx);
     // Perps switched off in Settings stops OPENS only (rule 5, 8a): the
     // strategy still closes what it holds on its own rules.
-    const entry = s.perpsEnabled ? r.entry : null;
+    const entry = s.perpsEnabled && (driver !== "brain" || input.brainApproved === true) ? r.entry : null;
     const why: (Why | null)[] = r.why.slice(0, r.exits.length);
     if (entry !== null) why.push(r.why[r.exits.length] ?? null);
     const produced = r.exits.length > 0 || entry !== null;

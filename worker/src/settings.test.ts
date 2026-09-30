@@ -620,8 +620,8 @@ describe("mergeSettings — perpetuals (docs/perps.md \"Settings\")", () => {
 
   it("driver: absent is perp-trend; a value this build does not know is manual, never an autonomous producer", () => {
     assert.equal(mergeSettings({}, {}).perpsDriver, "perp-trend");
-    for (const d of ["perp-trend", "strategist", "manual"] as const) assert.equal(mergeSettings(file({ perpsDriver: d }), {}).perpsDriver, d);
-    for (const junk of ["brain", "Strategist", "", null, 7]) {
+    for (const d of ["perp-trend", "brain", "strategist", "manual"] as const) assert.equal(mergeSettings(file({ perpsDriver: d }), {}).perpsDriver, d);
+    for (const junk of ["future-driver", "Strategist", "", null, 7]) {
       assert.equal(mergeSettings(file({ perpsDriver: junk }), {}).perpsDriver, "manual", JSON.stringify(junk));
     }
   });

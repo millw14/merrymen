@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { wrapSqlite } from "../db";
 import { JOURNAL_GENESIS, journalHash } from "../store";
 import { FINANCIAL_CAPSULE_TABLES } from "./hosted-financial-capsule";
+import { preserveAccountControls } from "./owner-controls";
 import { mergeFinancialStreams } from "./hosted-financial-merge";
 import { PAGED_CHECKPOINT_SCHEMA, savePagedCheckpointStream } from "./hosted-financial-pages";
 import { encodeFinancialRecord, inspectFinancialStream, STANDDOWN_STREAM_TABLES, type FinancialRow, type FinancialScope } from "./hosted-financial-stream";
@@ -60,7 +61,7 @@ describe("streamed shutdown accounting merge", () => {
     assert.deepEqual(result.rows.trades, f.full.trades);
     assert.deepEqual(result.rows.paper_book, f.full.paper_book);
     assert.deepEqual(result.rows.journal, [FIRST, CLOSE]);
-    assert.deepEqual(result.rows.perp_accounts, [f.full.perp_accounts![1], f.shutdown.perp_accounts![0]]);
+    assert.deepEqual(result.rows.perp_accounts, [f.full.perp_accounts![1], preserveAccountControls(f.shutdown.perp_accounts![0]!, f.full.perp_accounts![0]!)]);
     assert.deepEqual(result.rows.perp_orders, [f.full.perp_orders![1], { ...f.shutdown.perp_orders![0], tx_info: null }]);
     assert.deepEqual(result.rows.perp_payouts, f.shutdown.perp_payouts);
     assert.equal(result.summary.journalProof.count, 2);

@@ -204,7 +204,7 @@ function perpLegKindOf(intent: PerpLegIntent): PerpLegKind | null {
 // ── what landed ─────────────────────────────────────────────────────────────
 
 /** NewPriorityRequest(address sender, uint64 serialId, uint8 pubdataType, bytes pubData, uint64 expirationTimestamp) — nothing indexed (lighter-contracts IEvents.sol). */
-const PRIORITY_ABI = parseAbi([
+export const PRIORITY_ABI = parseAbi([
   "event NewPriorityRequest(address sender, uint64 serialId, uint8 pubdataType, bytes pubData, uint64 expirationTimestamp)",
 ]);
 /** topic0 of NewPriorityRequest, derived from the signature rather than typed. */
@@ -309,7 +309,7 @@ export function perpLegOfReceipt(logs: readonly ReceiptLogLike[], account: strin
 }
 
 /** The packed changePubKey pubdata (TxTypes.writeChangePubKeyPubDataForPriorityQueue), or null. */
-function changePubKeyOf(pubData: Hex): { accountIndex: bigint; masterAccountIndex: bigint; apiKeyIndex: number; publicKey: `0x${string}` } | null {
+export function changePubKeyOf(pubData: Hex): { accountIndex: bigint; masterAccountIndex: bigint; apiKeyIndex: number; publicKey: `0x${string}` } | null {
   if (typeof pubData !== "string" || !/^0x[0-9a-fA-F]*$/.test(pubData) || pubData.length !== 2 + CHANGE_PUBKEY_PUBDATA_BYTES * 2) return null;
   const hex = pubData.slice(2).toLowerCase();
   const byte = (i: number, n: number) => hex.slice(i * 2, (i + n) * 2);

@@ -107,6 +107,8 @@ import {
   type CustomToken,
   type GrantCaps,
   type StoredGrant,
+  type PerpRecoveryReference,
+  readPerpRecoveryReference,
 } from "@merrymen/core";
 import { findInjectedProvider, requestAccount } from "./wallet";
 
@@ -427,6 +429,8 @@ export function decidePerpSeal(a: {
   prior: ReturnType<typeof priorPerpFor>;
   drop: boolean;
   venueFlat: boolean | null | undefined;
+  recovery?: PerpRecoveryReference;
+  smartAccount?: string;
 }): PerpSealRequest | null {
   let requested: PerpSealRequest | null = null;
   if (a.requested != null) {
@@ -485,7 +489,9 @@ export function decidePerpSeal(a: {
         "venue is flat) and sign again. Your current key has not been replaced.",
     );
   } else if (prior.state === "carried") {
-    if (requested && requested.apiPublicKey !== prior.apiPublicKey) {
+    const recovery = readPerpRecoveryReference(a.recovery);
+    const recovering = requested !== null && recovery !== null && a.venueFlat === true && recovery.smartAccount === a.smartAccount?.toLowerCase() && recovery.chainId === a.chainId && recovery.oldPublicKey === prior.apiPublicKey && recovery.newPublicKey === requested.apiPublicKey && Date.now() < recovery.notAfterMs;
+    if (requested && requested.apiPublicKey !== prior.apiPublicKey && !recovering) {
       throw new PerpSigningRefusal(
         "perp-key-changed",
         "refusing to sign: this agent already has a Lighter key sealed, and a re-sign carries that same key " +
@@ -496,7 +502,7 @@ export function decidePerpSeal(a: {
     // browser's own copy of the last one. Hosted, the server can also join it
     // from its stored grant by equal public key, so absence is not a loss.
     const blob = requested?.apiKeySealed ?? prior.apiKeySealed;
-    seal = { apiPublicKey: prior.apiPublicKey, ...(blob ? { apiKeySealed: blob } : {}) };
+    seal = recovering ? requested : { apiPublicKey: prior.apiPublicKey, ...(blob ? { apiKeySealed: blob } : {}) };
   } else {
     seal = requested;
   }
@@ -893,6 +899,8 @@ async function prepareGrantCore(
     prior: perpPrior,
     drop: perpIn.perpDrop === true,
     venueFlat: perpIn.venueFlat,
+    recovery: perpIn.recovery,
+    smartAccount: sudoOnlyAccount.address,
   });
   // The ROUTE'S key index, never a caller's: `perp-lighter-v1` names index 16
   // forever and the wall pins it EQUAL, so it is not an input to this call.
@@ -1096,6 +1104,7 @@ async function prepareGrantCore(
     // the private key. There is no field here a plaintext private key fits in —
     // this object goes to localStorage, the server and back out of GET
     // /api/grants (through publicGrantView, which drops even the blob).
+    ...(perpIn.recovery && wallOpts.perpLighter ? { perpRecovery: perpIn.recovery } : {}),
     ...(wallOpts.perpLighter
       ? {
           perp: {
@@ -1586,6 +1595,7 @@ export interface MintOptions {
    * `previousGrant` and `perpDrop` — so leaving this unset never drops them.
    */
   perp?: PerpSealRequest | null;
+  recovery?: PerpRecoveryReference;
   /**
    * The server's PUBLIC projection of the tenant's current grant (GET
    * /api/grants → `grant`), or `null` when the server says it holds none, or
@@ -1608,6 +1618,7 @@ export interface MintOptions {
 
 /** What the preparation core takes about perpetuals; built from MintOptions by `perpInput`. */
 export interface PerpSigningInput {
+  recovery?: PerpRecoveryReference;
   perp?: PerpSealRequest | null;
   previousGrant?: unknown;
   /** The browser's own copies — filled in by `mintGrant`, never by a caller of the embedded path. */
@@ -1621,7 +1632,7 @@ export interface PerpSigningInput {
  * new entry point cannot thread three of the four and forget the drop guard.
  */
 function perpInput(o: Omit<MintOptions, "hostedAs">): PerpSigningInput {
-  return { perp: o.perp, previousGrant: o.previousGrant, perpDrop: o.perpDrop, venueFlat: o.venueFlat };
+  return { perp: o.perp, recovery: o.recovery, previousGrant: o.previousGrant, perpDrop: o.perpDrop, venueFlat: o.venueFlat };
 }
 
 /**

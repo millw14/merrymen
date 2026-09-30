@@ -802,7 +802,7 @@ export type TelegramGroupsChattiness = (typeof TELEGRAM_GROUPS_CHATTINESS)[numbe
  * producer, `strategist` the LLM strategist's perpActions, `manual` owner
  * orders only.
  */
-export const PERPS_DRIVERS = ["perp-trend", "strategist", "manual"] as const;
+export const PERPS_DRIVERS = ["perp-trend", "brain", "strategist", "manual"] as const;
 export type PerpsDriver = (typeof PERPS_DRIVERS)[number];
 
 /** How many markets `perpsMarkets` may name (docs/perps.md "Settings": 1–8). */

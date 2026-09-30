@@ -1,3 +1,4 @@
+import { recoveryFillInputFingerprint } from "./owner-recovery-state";
 /**
  * THE LIVE RECONCILER — what happened at Lighter, booked once, and what the
  * venue shows that we did not do, noticed (docs/perps.md rules 9, 10, 11, 12,
@@ -162,6 +163,7 @@ export interface LiveReconcileStore {
   }): Promise<boolean>;
   perpOrderByCoi(agentId: string, mode: "live", clientOrderIndex: number | bigint): Promise<{ order: PerpOrderRow; leg: PerpLegRow } | null>;
   insertPerpFill(fill: PerpFillInput): Promise<PerpInsertOutcome>;
+  perpFillRecoveryAcknowledged?(agentId: string, venueTradeId: string, sideRole: "ask" | "bid", fingerprint: string): Promise<boolean>;
   insertPerpFunding(f: PerpFundingInput): Promise<PerpFundingOutcome>;
   upsertPerpTransfer(t: PerpTransferInput): Promise<PerpTransferOutcome>;
   listOpenPerpTransfers(agentId: string, mode: "live"): Promise<PerpTransferRow[]>;
@@ -1126,7 +1128,7 @@ export function createLiveReconciler(deps: LiveReconcilerDeps): LiveReconciler {
       venuePnlMicro: s.side === "ask" ? t.askAccountPnlMicro : t.bidAccountPnlMicro,
     });
     const fee = perpFeeMicro(t.usdAmountMicro, s.feePpm);
-    const outcome = await store.insertPerpFill({
+    const fill: PerpFillInput = {
       agentId,
       mode: "live",
       venueTradeId: t.tradeId,
@@ -1148,7 +1150,8 @@ export function createLiveReconciler(deps: LiveReconcilerDeps): LiveReconciler {
       clientOrderIndex: coi === null ? null : Number(coi),
       venueTxHash: /^[0-9a-f]+$/.test(t.txHash) ? t.txHash : null,
       venueTsMs: t.timestampMs,
-    });
+    };
+    const outcome = await store.insertPerpFill(fill);
     const key = `${t.tradeId}:${s.side}`;
     if (outcome === "mismatch") {
       gap(p, `fills: trade ${t.tradeId} (${s.side}) was booked with different venue facts; the first booking stands`);
@@ -1185,7 +1188,8 @@ export function createLiveReconciler(deps: LiveReconcilerDeps): LiveReconciler {
     // every read (not only the first), so a flag that failed to persist is
     // raised again on the next pass.
     if (attr.attribution === "venue-unknown") {
-      p.unknownFills++;
+      const acknowledged = outcome !== "mismatch" && await store.perpFillRecoveryAcknowledged?.(agentId, t.tradeId, s.side, recoveryFillInputFingerprint(fill)) === true;
+      if (!acknowledged) p.unknownFills++;
       if (outcome === "inserted") alert(p, `unknown activity: fill ${t.tradeId} in market ${t.marketId} matches no order of ours`);
     }
     return true;
@@ -1709,7 +1713,7 @@ export function createLiveReconciler(deps: LiveReconcilerDeps): LiveReconciler {
     }
     if (incident !== null) {
       try {
-        const r = await persistIncident(store, { agentId, incident });
+        const r = await persistIncident(store, { agentId, incident, sealedPubKey: deps.sealedPubKey });
         if (r === "set") alert(p, `INCIDENT (${incident.kind}): the Lighter API key may be compromised — opens are refused; ${incident.detail.triggers.map((t) => t.evidence).join("; ")}`);
       } catch (e) {
         const s = `incident: the flag could not be stored (${msg(e)}); opens must be refused from memory`;

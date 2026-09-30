@@ -1,4 +1,5 @@
 /** A single, encrypted recovery snapshot for the journal and every financial domain it describes. */
+import { preserveAccountControls } from "./owner-controls";
 import type { Db } from "../db";
 import { resetBootstrapFlowIdentity } from "../bootstrap-flow-cursor";
 import { OrderDeadlineFloor } from "./restore-order-deadline";
@@ -53,12 +54,15 @@ export async function restoreFinancialCapsule(db: Db, bytes: Buffer, account: st
    const allowed = new Set(columns.map(c => c.name));
    // The destination is this account's child. A foreign row is never overwritten.
    if (await tx.prepare(`SELECT 1 FROM ${table} WHERE lower(${identity(table)}) <> ? LIMIT 1`).get(account.toLowerCase())) throw new Error("financial recovery found a foreign tenant's row");
+   const heldAccounts = table === "perp_accounts" ? await tx.prepare("SELECT * FROM perp_accounts WHERE lower(agent_id) = ?").all(account.toLowerCase()) as Row[] : [];
    const deadlines=table==="perp_orders"?await OrderDeadlineFloor.create(tx):undefined;
    try {
    if(deadlines)await deadlines.rememberLedger(account,false);
    await tx.prepare(`DELETE FROM ${table} WHERE lower(${identity(table)}) = ?`).run(account.toLowerCase());
-   for (const original of x.tables[table]!) {
-    const row=deadlines?await deadlines.apply(original):original;
+   const sourceRows = [...x.tables[table]!];
+   if (table === "perp_accounts") for (const held of heldAccounts) if (!sourceRows.some(r => r.mode === held.mode)) sourceRows.push(held);
+   for (const original of sourceRows) {
+    const row = table === "perp_accounts" ? preserveAccountControls(original, heldAccounts.find(r => r.mode === original.mode)) : deadlines ? await deadlines.apply(original) : original;
     const keys = Object.keys(row);
     if (!keys.length || keys.some(k => !allowed.has(k))) throw new Error("financial capsule schema refused");
     await tx.prepare(`INSERT INTO ${table} (${keys.join(",")}) VALUES (${keys.map(() => "?").join(",")})`).run(...keys.map(k => row[k]));

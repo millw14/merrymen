@@ -51,6 +51,17 @@ describe("runPerpRoute: one producer per driver", () => {
     assert.deepEqual(r.entry, t.entry);
   });
 
+  it("Brain keeps deterministic exits while entries wait for a matching review", () => {
+    const v = withBtcExit();
+    const input = { view: v, settings: settings(), driver: "brain" as const, perpTrendCtx: ctx() };
+    const waiting = runPerpRoute(input), approved = runPerpRoute({ ...input, brainApproved: true });
+    const baseline = runPerpRoute({ ...input, driver: "perp-trend" });
+    assert.deepEqual(waiting.exits, baseline.exits);
+    assert.equal(waiting.entry, null);
+    assert.deepEqual(approved.entry, baseline.entry, "Brain never changes size, leverage or stop");
+    assert.deepEqual(approved.exits, baseline.exits);
+  });
+
   it("strategist: only the strategist's intents, exits first, at most one entry, filed under perp:strategist", () => {
     const v = withBtcExit();
     const intents = [strategistOpen(v, "ETH-PERP", "a"), strategistClose(v), strategistOpen(v, "ETH-PERP", "b")];
@@ -75,13 +86,13 @@ describe("runPerpRoute: one producer per driver", () => {
   });
 
   it("an unknown driver produces nothing — it never falls back to perp-trend", () => {
-    const r = runPerpRoute({ view: withBtcExit(), settings: settings(), driver: "brain" as "manual", perpTrendCtx: ctx() });
+    const r = runPerpRoute({ view: withBtcExit(), settings: settings(), driver: "future-driver" as "manual", perpTrendCtx: ctx() });
     assert.equal(r.source, null);
     assert.equal(r.exits.length + (r.entry ? 1 : 0), 0);
   });
 
   it("Lighter unread: no entry and no exit from any driver", () => {
-    for (const driver of ["perp-trend", "strategist", "manual"] as const) {
+    for (const driver of ["perp-trend", "brain", "strategist", "manual"] as const) {
       for (const v of [null, undefined]) {
         const r = runPerpRoute({ view: v, settings: settings(), driver, perpTrendCtx: ctx(), strategistPerpIntents: [strategistClose(withBtcExit())] });
         assert.equal(r.exits.length, 0, driver);

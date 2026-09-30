@@ -11,7 +11,7 @@ import {
 import { isEnergyReserveToken } from "./energy";
 // perps.ts imports nothing at all (its grant reader takes a structural type for
 // exactly this reason), so neither is this.
-import { GRANT_PERP_LIGHTER, validatePerpPubKey, type PerpGrant } from "./perps";
+import { GRANT_PERP_LIGHTER, validatePerpPubKey, type PerpGrant, type PerpRecoveryReference } from "./perps";
 
 /**
  * grantFeatures marker meaning "this signature carries the WIDE tradable set".
@@ -376,6 +376,8 @@ export function bindingMessage(args: BindingClaim): string {
 }
 
 export interface StoredGrant {
+  /** Explicit owner recovery reference, independently verified before incident clearing. */
+  perpRecovery?: PerpRecoveryReference;
   smartAccount: `0x${string}`;
   owner: `0x${string}`;
   sessionKeyAddress: `0x${string}`;

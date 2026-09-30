@@ -1141,7 +1141,7 @@ export function perpsBlockerText(b: PerpBlocker): { what: string; remedy: string
     case "perps-key-mismatch":
       return {
         what: "Lighter holds a different trading key for this agent than the one you signed.",
-        remedy: "If you did not change it yourself, treat the key as compromised and use `merrymen recover` with your owner key. Perpetual trading stays halted after recovery; verified re-enablement is not available in this build.",
+        remedy: "If you did not change it yourself, treat the key as compromised and use `merrymen recover` with your owner key. Once Lighter is flat, use Wallet → Re-enable perpetuals to verify the recovery receipt and sign a fresh permission.",
       };
     case "perps-venue-unreachable":
       // No remedy: it retries by itself, and resting stops at the venue keep
@@ -1157,7 +1157,7 @@ export function perpsBlockerText(b: PerpBlocker): { what: string; remedy: string
     case "perps-unknown-activity":
       return {
         what: "Lighter shows activity on the agent's account that the agent did not do. New positions are stopped and open ones are being closed.",
-        remedy: "Use `merrymen recover` with your owner key to replace the trading key and recover available funds. Perpetual trading stays halted; verified re-enablement after recovery is not available in this build.",
+        remedy: "Use `merrymen recover` with your owner key to replace the trading key and recover available funds. Once Lighter is flat, use Wallet → Re-enable perpetuals to verify the recovery receipt and sign a fresh permission.",
       };
     case "perps-entries-halted":
       return {
@@ -1493,4 +1493,41 @@ export function parsePerpsReport(raw: unknown): PerpsReport | null {
     ...(raw.entriesHalted === undefined ? {} : { entriesHalted: raw.entriesHalted }),
     ...(entryMinimums === undefined ? {} : { entryMinimums }),
   };
+}
+
+/** Public evidence requested by an owner who re-enables perps after key recovery.
+ * This reference is NOT authority by itself: intake and the worker verify the receipt,
+ * current slot, incident identity and the fresh key sealed in the owner's grant.
+ */
+export interface PerpRecoveryReference {
+  v: 1;
+  smartAccount: `0x${string}`;
+  chainId: number;
+  route: typeof GRANT_PERP_LIGHTER;
+  accountIndex: number;
+  apiKeyIndex: number;
+  incidentId: string;
+  evidenceDigest: string;
+  txHash: `0x${string}`;
+  userOpHash: `0x${string}`;
+  recoveryPublicKey: `0x${string}`;
+  oldPublicKey: `0x${string}`;
+  newPublicKey: `0x${string}`;
+  notAfterMs: number;
+}
+export function readPerpRecoveryReference(value: unknown): PerpRecoveryReference | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const r = value as PerpRecoveryReference;
+  const fields = ["v", "smartAccount", "chainId", "route", "accountIndex", "apiKeyIndex", "incidentId", "evidenceDigest", "txHash", "userOpHash", "recoveryPublicKey", "oldPublicKey", "newPublicKey", "notAfterMs"];
+  if (Object.keys(r).length !== fields.length || Object.keys(r).some(k => !fields.includes(k)) || r.v !== 1 || !/^0x[a-f0-9]{40}$/.test(r.smartAccount) || r.chainId !== LIGHTER_ROUTE_V1.chainId || r.route !== GRANT_PERP_LIGHTER || !Number.isSafeInteger(r.accountIndex) || r.accountIndex < 1 || r.apiKeyIndex !== LIGHTER_ROUTE_V1.apiKeyIndex || !/^[a-f0-9-]{36}$/.test(r.incidentId) || !/^[a-f0-9]{64}$/.test(r.evidenceDigest) || !/^0x[a-f0-9]{64}$/.test(r.txHash) || !/^0x[a-f0-9]{64}$/.test(r.userOpHash) || !Number.isSafeInteger(r.notAfterMs) || r.notAfterMs < 1) return null;
+  for (const key of [r.recoveryPublicKey, r.oldPublicKey, r.newPublicKey]) if (validatePerpPubKey(key) !== key) return null;
+  if (new Set([r.recoveryPublicKey, r.oldPublicKey, r.newPublicKey]).size !== 3) return null;
+  return { v: r.v, smartAccount: r.smartAccount, chainId: r.chainId, route: r.route, accountIndex: r.accountIndex, apiKeyIndex: r.apiKeyIndex, incidentId: r.incidentId, evidenceDigest: r.evidenceDigest, txHash: r.txHash, userOpHash: r.userOpHash, recoveryPublicKey: r.recoveryPublicKey, oldPublicKey: r.oldPublicKey, newPublicKey: r.newPublicKey, notAfterMs: r.notAfterMs };
+}
+
+/** The same prepared recovery may be re-proved after expiry, never silently extended. */
+export function samePerpRecoveryAttempt(a: unknown, b: unknown): boolean {
+  const left = readPerpRecoveryReference(a), right = readPerpRecoveryReference(b);
+  if (!left || !right) return false;
+  return JSON.stringify({ ...left, notAfterMs: 0 }) === JSON.stringify({ ...right, notAfterMs: 0 });
 }

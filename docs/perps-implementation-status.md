@@ -1,27 +1,41 @@
 # Perpetuals implementation handoff
 
-Status recorded 2026-09-30. This describes the local implementation and its
+Status recorded 2026-10-01. This describes the local implementation and its
 verification. Live rollout remains subject to the gates below. The governing
 behavior is in [perps.md](perps.md); operational procedures are in the
 [hosted runbook](hosted-deploy.md#perpetual-futures-paper-by-default-hosted-live-only-by-allowlist)
 and [mainnet checklist](perps-mainnet-checklist.md).
 
-## Open implementation blocker
+## Brain research and owner recovery follow-up
 
-**Re-enabling perps after owner key recovery is not wired.** `merrymen recover`
-records the replacement and retired keys in `perp-owner-rotations.json`, but
-the worker does not consume that journal. Both onboarding calls omit the verified
-owner replacement key set; `clearIncident` has no production caller, and Resume
-correctly refuses incidents. A fresh signed grant therefore still sees the
-recovery throwaway key as foreign. Recovery of funds and revocation are separate
-from re-enabling trading.
+The optional [MerrymenBrain driver](perps-brain.md) is implemented in both repos.
+Its numerical module comes from the MerrymenBrain repository with a pinned
+source commit, file hashes and license. It measures market regime, trend,
+volatility, funding, executable depth and costs, then compares causally observed
+historical outcomes. Three grounded model reviews may veto a qualifying trend
+candidate. They cannot increase risk or override a numerical refusal.
 
-Before live release, implement an authenticated owner recovery acknowledgement
-bound to the exact account, frozen route and verified on-chain rotation receipt.
-It must durably retire the old keys, authorize replacement of only the verified
-recovery key by a fresh non-retired signed key, and clear the incident only as
-part of that verified transition. File existence, an arbitrary key mismatch,
-or an ordinary Resume request must never provide that authority.
+The driver is explicit opt-in. Research runs outside the protective loop, with
+bounded calls, expiring approvals and execution-time checks. Exact source frames,
+requests, holds and responses are recorded for [replay and evaluation](perps-replay.md).
+Forecast probabilities are uncalibrated historical frequencies, not established
+trade win rates. No real forward dataset or evidence of improved returns exists
+in this handoff; live promotion is never automatic.
+
+The previous owner recovery implementation gap is addressed by a dashboard
+preparation and re-sign flow. Grant intake and the worker independently verify
+the exact account, incident, evidence digest, chain, canonical receipt, successful
+owner operation and current recovery slot. The ledger transition retires old
+keys and acknowledges only exact previously recorded unknown fills. Only the
+verified throwaway key can be replaced by the fresh signed key. Unresolved venue
+orders, on-chain operations and transfers block the transition. Ordinary Resume
+does not clear incidents. An interrupted, expired handoff requires an explicit
+owner re-proof; expiry is never extended automatically.
+
+Owner entry controls now carry a durable history. Mirroring and checkpoint
+recovery preserve a newer Resume without allowing an older request to clear a
+later halt. Divergent histories and contradictory legacy writers refuse opens.
+These local changes do not complete the mainnet or device acceptance gates below.
 
 ## Delivered work
 
@@ -85,8 +99,8 @@ The fresh review reproduced and corrected these issues:
   unreadable or contained unlisted holdings. It now reports that uncertainty and
   avoids presenting dashboard Resume as a remedy for an operator halt.
 
-The owner recovery re-enablement gap above remains a release blocker. No incident
-or authority check was bypassed to make recovery appear complete.
+The subsequent recovery work described above closes that implementation gap;
+mainnet acceptance remains unrun. No incident or authority check is bypassed.
 
 ## Verification evidence
 
@@ -96,10 +110,16 @@ replace the final run after all edits settle.
 
 | Check | Evidence available |
 |---|---|
+| MerrymenBrain numerical module | 25 Python tests and Ruff passed in the MerrymenBrain repo. The committed export matches source commit `8a48ca0faf96`; the service build verifies its manifest and hashes. These are invariant tests, not performance evidence. |
+| Brain service | Full service Python suite: 99 passed, two skipped. Numerical holds avoid model calls; three valid model acceptances are required for a qualified candidate. No paid provider calls were made. |
+| Brain recording and evaluation | 31 tests passed across Brain, baseline replay, exact archived-request replay, source-frame recording, completed trade metrics, causal forecast scoring and the CLI. Missing real forward observations produce insufficient evidence; reports cannot authorize promotion. |
+| Recovered autonomous lane | Six real-lane integration tests passed with a localhost fake venue and fake chain reads, using the real signer, receipt verifier, store and policy. Covers recovery → registration → isolated leverage → persisted protected entry under a tightened cap, below-minimum refusal, failed/expired proof, revocation during a final await and a foreign replacement key. |
+| Recovery receipt boundary | 63 focused proof/on-chain-leg tests passed. Checks include own-operation bundle boundaries, canonical receipt, removed/foreign logs, exact account/slot/key/incident/evidence binding and expiry. |
+| Recovery controls and handoff | Focused runs passed: 42 checkpoint/history tests, 60 atomic-store/intake/Resume/ledger tests, 24 authentication/control/surface tests and five intake/carry-forward tests. Covers pending L1/L2 operations, transfers, rollback, fresh incidents, expired retry, same-key renewal, newer halt identity and preserving protective reads with corrupt owner controls. |
 | Second crosscheck: stop renewal and owner deadlines | 178 focused tests passed across the real lane with a fake venue, live executor, send guard, stand-down, API and mirror. Includes delayed owner decisions, expiry during durable writes, failed rejection writes, crash/restart replay refusal, queued Flatten budget, lease waits and final HTTP boundary checks. |
 | Second crosscheck: accounting boundary | 105 focused tests passed, including same-second deposits/withdrawals, cold startup in epoch 3, an older database upgraded after anchor capture, replaced ledgers and complete final mirroring. Independent source review found no remaining issue in this correction. |
 | Second crosscheck: recovery deadlines | 33 focused tests passed across current/legacy restores, streamed merge, warm supervisor recovery and cursor compatibility. Independent source review verified that later or absent deadlines cannot erase an earlier known cutoff. |
-| Full repository tests | Final second-crosscheck run: **15,718 passed, zero failed, three skipped** (15,721 tests; 191 seconds), after all production edits settled. The skips are the existing optional PostgreSQL energy/holder, partner-store and energy-release checks; perps PostgreSQL was exercised separately below. |
+| Full repository tests | Final Brain/recovery run: **15,817 passed, zero failed, three skipped** (15,820 tests; 199 seconds), after production and test edits settled. The skips are the existing optional PostgreSQL energy/holder, partner-store and energy-release checks; perps PostgreSQL was exercised separately below. |
 | Lane and live accounting regressions | 66 passed, including cap enforcement, failed-checkpoint accounting, retained real exposure, and paper/live last-known value isolation. |
 | Autonomous lane follow-up | 179 passed, including transient admission/key recovery, a durable idle interval across restarts, and withdrawal → payout → new deposit → temporary setup wait → protected entry. These use the real lane/store with a fake venue. |
 | Setup and readiness follow-up | 294 passed in the UI/core/view integration run, including owner-bound refresh, hung response recovery, saved automatic producers, grant lifetime, market minimums and owner versus operator halts. |
@@ -113,9 +133,9 @@ replace the final run after all edits settle.
 | Durable payout allocation | 95 payout/on-chain-leg/accounting tests passed, including restart after partial allocation, duplicate logs, changed chain evidence, and transaction rollback. |
 | TypeScript | Final `npm run typecheck` passed for worker, web, browser and SDK; the site TypeScript check passed separately. |
 | Production build | `npm run build` completed successfully for the SDK and production Next.js app. |
-| iOS | Earlier simulator build succeeded and 34 policy tests passed. After this crosscheck's shared wording correction, regenerated bundles passed source/copy consistency, signing TypeScript, standard/Trencher/legacy signing and read-only recovery fixtures, feed and crypto checks. Branding passed in the earlier autonomy verification. |
-| Android | Debug unit test task succeeded: 676 tests across 69 suites, zero failures, errors or skips. |
-| PostgreSQL | Disposable local PostgreSQL 17 lifecycle passed: cold recovery, grant revocation, shutdown checkpointing, expiry scrubbing and terminal accounting merge. The latest crosscheck separately verified the nullable deadline-column upgrade, conservative mirror minimum, current/legacy restores, flow cursor invalidation, warm/cold recovery, and full/narrow shutdown checkpoint → expiry → terminal merge with replay bytes removed. This used local fixtures, not live venue execution; the cluster was stopped afterward. |
+| iOS | Earlier simulator build succeeded and 34 policy tests passed. After the Brain/recovery shared changes, regenerated bundles passed source/copy consistency across 11 languages, signing TypeScript, standard/Trencher/legacy signing fixtures, feed and crypto checks. Signing fixtures made zero real writes. Branding passed in the earlier autonomy verification; device acceptance remains unrun. |
+| Android | Earlier debug unit test task succeeded: 676 tests across 69 suites, zero failures, errors or skips. No Kotlin changes were made in the Brain/recovery follow-up. |
+| PostgreSQL | Disposable PostgreSQL 17 checks passed for schema upgrade, concurrent Halt versus queued Resume, exact recovery commit/replay refusal, retained owner halt and retired keys. A real SQLite child plus PostgreSQL checkpoints preserved newer control/recovery histories through stale mirrors, current/legacy restores, warm/cold startup and stale narrow shutdown checkpoint → expiry → full terminal merge. Earlier execution deadlines and replay-byte scrubbing also remained intact. These used local fixtures, not live venue execution. |
 
 Final repository checks, from the worktree root:
 
@@ -127,6 +147,9 @@ npm run build
 node ios-native/Signing/build.mjs --check
 git diff --check
 ```
+
+The disposable PostgreSQL cluster was stopped after verification. No mainnet
+or paid model calls were made during these tests.
 
 ## Defaults, authority and custody
 

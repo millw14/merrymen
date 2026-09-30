@@ -5,12 +5,14 @@
 import { SETTINGS_DEFAULTS, perpsNumberOk, type PerpsNumKey } from "../../../packages/core/src/settings";
 import { leverageTarget, perpMarketByKey, perpMarketById, type PerpKey } from "../../../packages/core/src/perps";
 import { checkPolicy, type AgentLimits } from "../policy";
-import { parseLighterFeed } from "./feed-reader";
+import { parseLighterFeed, type LighterFeedRead } from "./feed-reader";
 import { buildPerpsView, buildPerpPolicyState, perpsUsdgToMicro, type PerpsViewInput, type PerpsViewSettings, type PerpsViewLedgerRow } from "./view";
-import { perpTrendTick } from "./perp-trend";
+import { perpTrendTick, type PerpTrendCtx, type PerpTrendResult } from "./perp-trend";
 import { emptyProtectMemory, evaluateProtection } from "./protect";
-import { applyPaperOpen, applyPaperClose, applyPaperFunding, evaluatePaperTriggers, paperFundingTerms, paperPerpTerms, simulateTakerFill, type PaperPerpBook, type PaperStep } from "./paper";
+import { applyPaperOpen, applyPaperClose, applyPaperReduce, applyPaperFunding, evaluatePaperTriggers, paperFundingTerms, paperPerpTerms, simulateTakerFill, type PaperPerpBook, type PaperStep } from "./paper";
 import type { PerpIntentDraft } from "./drafts";
+import type { PerpsView } from "../strategies/types";
+import { createReplayTradeTracker, replayTradeMetrics } from "./replay-metrics";
 export interface PerpsReplayConfig {
   initialCashUsdg: number;
   /** Omitted settings use the shipped defaults, including their small position cap. */
@@ -24,6 +26,19 @@ export interface PerpsReplayConfig {
 export interface PerpsReplayFrame {
   atMs: number;
   feed: unknown;
+}
+/** Offline producers receive only the current frame and causal account state. */
+export interface PerpsReplayProducer {
+  id: string;
+  diagnostics?(): unknown;
+  tick(input: {
+    frame: PerpsReplayFrame;
+    feed: LighterFeedRead;
+    view: PerpsView | null;
+    settings: PerpsViewSettings;
+    context: PerpTrendCtx;
+    trend: PerpTrendResult;
+  }): PerpTrendResult;
 }
 export const REPLAY_LIMITS = [
   "Stops, liquidation and protection run only at recorded snapshots; crossings between samples are unknown.",
@@ -59,7 +74,7 @@ export function replaySettings(over: Partial<PerpsViewSettings> = {}): PerpsView
     throw new RangeError("per-trade cap exceeds total notional cap");
   return s;
 }
-export function runPerpsReplay(config: PerpsReplayConfig, frames: readonly PerpsReplayFrame[]) {
+export function runPerpsReplay(config: PerpsReplayConfig, frames: readonly PerpsReplayFrame[], producer?: PerpsReplayProducer) {
   const settings = replaySettings(config.settings);
   const initial = perpsUsdgToMicro(positive(config.initialCashUsdg, "initialCashUsdg"));
   const sealed = perpsUsdgToMicro(positive(config.perTradeUsdg ?? 50, "perTradeUsdg"));
@@ -111,8 +126,10 @@ export function runPerpsReplay(config: PerpsReplayConfig, frames: readonly Perps
   }[] = [];
   let sequence = 0;
   let now = 0;
+  const trades = createReplayTradeTracker();
   const limits: AgentLimits = { perTradeUsdg: sealed, dailyUsdg: daily, maxOpsPerDay: maxOps, maxDrawdownBps: breakerBps, expiresAt: Number.MAX_SAFE_INTEGER, allowedTargets: [], allowedAssets: [], cashToken: "0x0000000000000000000000000000000000000000" };
   const record = (step: PaperStep, kind: string) => {
+    trades.record(step, now, kind);
     book = step.book;
     for (const f of step.fills) {
       realized += f.realizedMicro;
@@ -133,7 +150,11 @@ export function runPerpsReplay(config: PerpsReplayConfig, frames: readonly Perps
     now = frame.atMs;
     if (i)
       maxSampleGapMs = Math.max(maxSampleGapMs, now - frames[i - 1]!.atMs);
-    const feed = parseLighterFeed(frame.feed, now);
+    // Live ingestion tolerates clock skew; historical evaluation cannot borrow
+    // even a few seconds of future observations to improve a simulated fill.
+    const future = frame.feed && typeof frame.feed === "object" && "observedAt" in frame.feed &&
+      typeof frame.feed.observedAt === "number" && frame.feed.observedAt > now;
+    const feed = future ? null : parseLighterFeed(frame.feed, now);
     const fail = (reason: string) => { failure = { atMs: now, reason }; };
     if (!feed) {
       fail("feed unread or invalid");
@@ -200,7 +221,8 @@ export function runPerpsReplay(config: PerpsReplayConfig, frames: readonly Perps
       }
       const fill = simulateTakerFill({ isAsk: intent.effect === "open" ? intent.side === "short" : intent.side === "long", baseAmount: intent.baseAmount, worstPrice: intent.worstPrice, book: { bids: m.bids, asks: m.asks }, spec: m.spec, takerFeePpm: m.takerFeePpm });
       const args = { book, marketId: intent.marketId, fill, spec: m.spec, nowMs: now, tradeId: `replay:${++sequence}` };
-      const step = intent.effect === "open" ? applyPaperOpen({ ...args, side: intent.side, imfBp: intent.imfBp, stop: { trigger: intent.stopTrigger, price: intent.stopPrice } }) : applyPaperClose(args);
+      const step = intent.effect === "open" ? applyPaperOpen({ ...args, side: intent.side, imfBp: intent.imfBp, stop: { trigger: intent.stopTrigger, price: intent.stopPrice } }) :
+        intent.effect === "reduce" ? applyPaperReduce({ ...args, leg: "close" }) : applyPaperClose(args);
       record(step, kind);
       if (step.fills.length) {
         operations.push(nowSec);
@@ -222,7 +244,10 @@ export function runPerpsReplay(config: PerpsReplayConfig, frames: readonly Perps
     const term = valuation();
     const equity = book.cashMicro + term.isolatedMarginMicro + term.unrealizedMicro;
     breakerPeak = breakerPeak > equity - term.unrealizedGainMicro ? breakerPeak : equity - term.unrealizedGainMicro;
-    const trend = perpTrendTick(buildPerpsView(input()), settings, { equityMicro: equity, breakerIdle: equity * 10000n >= breakerPeak * BigInt(10000 - breakerBps), breakerLimitBps: breakerBps, energyEntriesLeft: today().length < energy, opsHeadroom: ops() < maxOps, spendHeadroomMicro: daily > spent() ? daily - spent() : 0n, perTradeSealedMicro: sealed, nowSec });
+    const view = buildPerpsView(input());
+    const context: PerpTrendCtx = { equityMicro: equity, breakerIdle: equity * 10000n >= breakerPeak * BigInt(10000 - breakerBps), breakerLimitBps: breakerBps, energyEntriesLeft: today().length < energy, opsHeadroom: ops() < maxOps, spendHeadroomMicro: daily > spent() ? daily - spent() : 0n, perTradeSealedMicro: sealed, nowSec };
+    const baseline = perpTrendTick(view, settings, context);
+    const trend = producer?.tick({ frame, feed, view, settings, context, trend: baseline }) ?? baseline;
     for (const exit of trend.exits)
       execute(exit, "strategy-close");
     if (trend.entry) {
@@ -241,7 +266,7 @@ export function runPerpsReplay(config: PerpsReplayConfig, frames: readonly Perps
     curve.push({ atMs: now, equityMicro: value, cashMicro: book.cashMicro, marginMicro: end.isolatedMarginMicro, unrealizedMicro: end.unrealizedMicro });
   }
   return {
-    strategy: "perp-trend", complete: failure === null, failure: failure as {
+    strategy: producer?.id ?? "perp-trend", complete: failure === null, failure: failure as {
       atMs: number;
       reason: string;
     } | null, settings,
@@ -250,6 +275,9 @@ export function runPerpsReplay(config: PerpsReplayConfig, frames: readonly Perps
     initialCashMicro: initial, finalEquityMicro: failure ? null : curve.at(-1)!.equityMicro,
     realizedMicro: realized, fundingMicro: funding, feesMicro: fees, maxDrawdownMicro,
     tailPositions: [...book.positions.values()], curve,
+    completedTrades: trades.completed(), openTrades: trades.open(),
+    metrics: replayTradeMetrics({ completed: trades.completed(), open: trades.open(), initialCashMicro: initial, curve, complete: failure === null }),
+    producerDiagnostics: producer?.diagnostics?.(),
     events: events.map(({ step, ...e }) => step ? { ...e, fills: step.fills, funding: step.funding, cashDeltaMicro: step.cashDeltaMicro } : e),
   };
 }

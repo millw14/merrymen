@@ -26,6 +26,7 @@ from .credential import CredentialRefused, resolve as resolve_credential
 from .graph import BrainGraph
 from .llm import Llm, LlmConfig
 from .schemas import BrainDecision, DecideRequest, Refusal, SCHEMA_VERSION
+from .perps import PerpsDecideRequest, numerical_review, review_perps
 
 app = FastAPI(title="Merrymen Brain", version=SCHEMA_VERSION)
 
@@ -120,7 +121,7 @@ async def decide(req: DecideRequest, authorization: str | None = Header(default=
             },
         )
 
-    lock = _concurrency.lock_for(req.agent_id)
+    lock = _concurrency.lock_for(req.agent_id.lower())
     if lock.locked():
         # ONE RUN PER AGENT. Queuing would let a burst of triggers stack up
         # against a shared allowance; refusing tells the caller to back off.
@@ -170,3 +171,27 @@ async def decide(req: DecideRequest, authorization: str | None = Header(default=
         status_code=200,
         content={"ok": True, "decision": result.model_dump(), "seconds": elapsed},
     )
+
+
+@app.post("/v1/perps/decide")
+async def decide_perps(req: PerpsDecideRequest, authorization: str | None = Header(default=None)) -> JSONResponse:
+    _require_token(authorization)
+    # Same tenant lock as spot Brain: perps cannot silently double paid concurrency.
+    lock = _concurrency.lock_for(req.agent_id.lower())
+    if lock.locked():
+        return JSONResponse(status_code=429, content={"ok": False, "detail": "a review is already in flight"})
+    async with lock:
+        try:
+            numerical = numerical_review(req)
+            if numerical["action"] == "hold":
+                return JSONResponse(content={"ok": True, "decision": numerical})
+            llm = Llm(LlmConfig.from_env())
+            try:
+                result = await review_perps(req, llm, numerical)
+            finally:
+                if llm._client is not None:
+                    await llm._client.aclose()
+            return JSONResponse(content={"ok": True, "decision": result})
+        except Exception:
+            # Never echo provider bodies, private URLs, credentials or executable data.
+            return JSONResponse(content={"ok": False, "detail": "perps review unavailable or invalid"})
