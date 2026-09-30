@@ -618,6 +618,32 @@ test("size cap: an export never exceeds 2 MB; a big one is not inlined", async (
   assert.match(g.content_note, /inline limit/);
 });
 
+test("get_export inlines at most 32 KB; anything larger is left to its resource and download link", async () => {
+  const { d, a } = await setup({ seed: false });
+  assert.equal(INLINE_CONTENT_MAX, 32 * 1024);
+  const put = d.raw.prepare(`INSERT INTO decisions (id, agent_id, source, action, reason, at) VALUES (?, ?, 'strategist', 'hold', ?, ?)`);
+  const reason = "r".repeat(2000);
+  // Small enough to have been inlined under the old 200 KB cap, too big for this one.
+  for (let i = 0; i < 40; i++) put.run(`mid-${i}`, ACCOUNT_A, reason, NOW - 5000 + i);
+  const big = data(await run("create_export", { kind: "decisions" }, a));
+  assert.ok(big.bytes > INLINE_CONTENT_MAX && big.bytes < 200 * 1024, `${big.bytes} bytes`);
+  assert.equal(big.truncated, false);
+  const g = data(await run("get_export", { export_id: big.export_id, include_content: true }, a));
+  assert.equal(g.content, null);
+  assert.equal(g.content_note, `The export is ${big.bytes} bytes, over the 32 KB inline limit; read ${big.resource_uri} or use the download link.`);
+  assert.equal(g.resource_uri, `merrymen://exports/${big.export_id}`);
+  assert.ok(g.download_url, "the download link is still there");
+  assert.match(REPORTS_TOOLS.find((t) => t.name === "get_export")!.description, /at most 32 KB/);
+
+  d.raw.exec("DELETE FROM decisions");
+  for (let i = 0; i < 3; i++) put.run(`small-${i}`, ACCOUNT_A, "a short reason", NOW - 100 + i);
+  const small = data(await run("create_export", { kind: "decisions" }, a));
+  assert.ok(small.bytes <= INLINE_CONTENT_MAX);
+  const s = data(await run("get_export", { export_id: small.export_id, include_content: true }, a));
+  assert.equal(s.content, await exportContent(d, small.export_id));
+  assert.equal(s.content_note, "Content included.");
+});
+
 test("get_export: the owner reads it; another owner, a malformed id and an expired export do not", async () => {
   const { d, a, b } = await setup();
   const r = data(await run("create_export", { kind: "decisions" }, a));

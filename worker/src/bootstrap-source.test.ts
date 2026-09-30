@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Db } from "./db";
+import { DatabaseSync } from "node:sqlite";
+import { wrapSqlite } from "./db";
+import { applyLedgerSchema } from "./store";
 import { deriveBootstrapAccounting, usdgRealToMicro } from "./bootstrap-source";
 import {
   accountingLicence,
@@ -88,7 +91,7 @@ const FUNDED = [
   { match: "tx_hash IS NOT NULL", row: { net: 10, n: 1, last_at: NOW - 100 } },
   { match: "FROM flows", row: { net: 10, n: 1, last_at: NOW - 100 } },
   { match: "SELECT equity_usdg FROM equity", row: { equity_usdg: 0 } },
-  { match: "FROM equity", row: { cash_usdg: 3.334, at: NOW - 50 } },
+  { match: "FROM equity", row: { cash_usdg: 3.334, read_at: NOW - 50 } },
   { match: "FROM fee_accruals", row: { n: 0 } },
 ];
 
@@ -130,7 +133,7 @@ describe("B2 — 'no prior accounting' is a positive finding, not a default", ()
     const cases: [string, { match: string; row: unknown }[]][] = [
       ["a high-water mark", [{ match: "FROM agents", row: { hwm_usdg: 10, epoch: 2 } }]],
       ["a flow row", [{ match: "FROM flows", row: { net: 10, n: 1, last_at: NOW } }]],
-      ["an equity mark", [{ match: "FROM equity", row: { cash_usdg: 0, at: NOW } }]],
+      ["an equity mark", [{ match: "FROM equity", row: { cash_usdg: 0, read_at: NOW } }]],
       ["a fee accrual", [{ match: "FROM fee_accruals", row: { n: 1 } }]],
     ];
     for (const [what, override] of cases) {
@@ -217,7 +220,7 @@ describe("B4 — the receipts-only total is computed separately and reported hon
       { match: "tx_hash IS NOT NULL", row: { net: 0, n: 0, last_at: 0 } },
       { match: "FROM flows", row: { net: 30, n: 3, last_at: NOW } },
       { match: "SELECT equity_usdg FROM equity", row: { equity_usdg: 0 } },
-      { match: "FROM equity", row: { cash_usdg: 3.334, at: NOW } },
+      { match: "FROM equity", row: { cash_usdg: 3.334, read_at: NOW } },
       { match: "FROM fee_accruals", row: { n: 0 } },
     ];
     const a = await deriveBootstrapAccounting(fakeDb(rows).db, SMART, NOW);
@@ -234,7 +237,7 @@ describe("B4 — the receipts-only total is computed separately and reported hon
     assert.equal(a.kind === "established" && a.lastObservedCashUsdg, null);
 
     const zero = FUNDED.map((e) =>
-      e.match === "FROM equity" ? { match: "FROM equity", row: { cash_usdg: 0, at: NOW } } : e,
+      e.match === "FROM equity" ? { match: "FROM equity", row: { cash_usdg: 0, read_at: NOW } } : e,
     );
     const b = await deriveBootstrapAccounting(fakeDb(zero).db, SMART, NOW);
     assert.equal(b.kind === "established" && b.lastObservedCashUsdg, "0");
@@ -258,7 +261,7 @@ describe("B4 — the receipts-only total is computed separately and reported hon
       { match: "FROM agents", row: { hwm_usdg: "10", epoch: "2" } },
       { match: "tx_hash IS NOT NULL", row: { net: "10", n: "1", last_at: "0" } },
       { match: "FROM flows", row: { net: "10", n: "1", last_at: String(NOW) } },
-      { match: "FROM equity", row: { cash_usdg: "3.334", at: String(NOW) } },
+      { match: "FROM equity", row: { cash_usdg: "3.334", read_at: String(NOW) } },
       { match: "FROM fee_accruals", row: { n: "0" } },
     ];
     const a = await deriveBootstrapAccounting(fakeDb(rows).db, SMART, NOW);
@@ -291,7 +294,7 @@ describe("B6 — THE PRE-DEPLOY GATE: the polluted Postgres, as it actually is",
     // All four rows: the deposit plus three phantoms.
     { match: "FROM flows", row: { net: 40, n: 4, last_at: NOW - 100 } },
     { match: "SELECT equity_usdg FROM equity", row: undefined },
-    { match: "FROM equity", row: { cash_usdg: 3.334, at: NOW - 50 } },
+    { match: "FROM equity", row: { cash_usdg: 3.334, read_at: NOW - 50 } },
     { match: "FROM fee_accruals", row: { n: 0 } },
   ];
 
@@ -373,5 +376,149 @@ describe("B5 — the REAL to micro conversion", () => {
     // cannot make a downstream total larger than the truth.
     assert.equal(usdgRealToMicro(Number.NaN), 0n);
     assert.equal(usdgRealToMicro(Number.POSITIVE_INFINITY), 0n);
+  });
+});
+
+/**
+ * A MARK TAKEN WHILE THE FLOWS WERE HELD IS NO CASH BASELINE. A held tick writes
+ * its valuation flagged `flows_held` (store.ts): the curve keeps it, but its
+ * cash may carry a stranded op's movement, which that op's settlement would
+ * then shift a second time — so the anchor's downtime baseline skips it. It is
+ * still a durable trace of a funded account, though. Real schema, real SQL.
+ */
+describe("B7 — the anchor's cash is never a held mark", () => {
+  async function ledger(marks: { cash: number; at: number; held: number | null; readAt?: number }[], hwm = 100): Promise<Db> {
+    const db = wrapSqlite(new DatabaseSync(":memory:"));
+    await applyLedgerSchema(db);
+    await db.prepare(
+      `INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, hwm_usdg, epoch)
+       VALUES (?, ?, ?, 4663, '{}', 1, 2, ?, 2)`,
+    ).run(SMART.toLowerCase(), OWNER, OWNER, hwm);
+    for (const m of marks) {
+      await db.prepare(
+        `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, cash_read_at, at)
+         VALUES (?, '0', ?, 0, 0, ?, 2, 'live', ?, ?, ?)`,
+      ).run(SMART.toLowerCase(), m.cash, m.cash, m.held, m.readAt ?? null, m.at);
+    }
+    return db;
+  }
+
+  it("takes the newest UNHELD mark's cash and time, however many held marks are newer", async () => {
+    const a = await deriveBootstrapAccounting(
+      await ledger([
+        { cash: 100, at: NOW - 3_600, held: null },
+        { cash: 95, at: NOW - 1_800, held: 0 },
+        { cash: 85, at: NOW - 600, held: 1 },
+        { cash: 85, at: NOW - 60, held: 1 },
+      ]),
+      SMART,
+      NOW,
+    );
+    assert.equal(a.kind, "established");
+    if (a.kind !== "established") return;
+    assert.equal(a.lastObservedCashUsdg, "95000000", "the held marks' 85 is never the baseline");
+    assert.equal(a.observedAt, NOW - 1_800);
+  });
+
+  it("ITS TIME IS WHEN THE CASH WAS READ, not when the row was inserted — the hosted resume's `since`", async () => {
+    // The row is inserted at the end of its tick, after the flow look listed
+    // the ledger; an op a chat trade submitted in between is not in this cash.
+    // Stamped by the insert, its settlement read as already in the anchor's
+    // cash, and the resume doubted contributions over a movement it could
+    // explain.
+    const a = await deriveBootstrapAccounting(
+      await ledger([
+        { cash: 100, at: NOW - 3_600, held: null },
+        { cash: 95, at: NOW - 600, held: 0, readAt: NOW - 602 },
+      ]),
+      SMART,
+      NOW,
+    );
+    assert.equal(a.kind, "established");
+    if (a.kind !== "established") return;
+    assert.equal(a.lastObservedCashUsdg, "95000000");
+    assert.equal(a.observedAt, NOW - 602);
+  });
+
+  it("ONLY held marks: no cash reading on record — and still NOT a new account, with nothing else on record", async () => {
+    // No peak, no flow, no fee: the held mark is the only trace, and it must
+    // refuse the one claim that licenses booking the balance as a contribution.
+    const a = await deriveBootstrapAccounting(await ledger([{ cash: 85, at: NOW - 60, held: 1 }], 0), SMART, NOW);
+    assert.equal(a.kind, "established");
+    if (a.kind !== "established") return;
+    assert.equal(a.lastObservedCashUsdg, null);
+  });
+});
+
+/**
+ * THE FIRST PASS AFTER THE DEPLOY THAT ADDS `flows_held` AND `cash_read_at`.
+ *
+ * The orchestrator derives every child's anchor at spawn (writeBootstrapForChild),
+ * and its first reconcile spawns the whole fleet BEFORE its first mirror pass
+ * runs applyLedgerSchema on shared Postgres. So on that pass the shared
+ * `equity` table is still the shape production had before the columns, and a
+ * query naming them fails: every child armed with an UNKNOWN anchor — its peak
+ * not restored, its epoch not adopted, contributions unknown — for as long as
+ * it ran. Measured on a Postgres built by the previous release's own boot code
+ * (pg-upgrade.postgres.test.ts): `column "cash_read_at" does not exist`.
+ *
+ * Without the columns no row can be a held mark (nothing could have flagged
+ * one) and none has a read time, so the anchor must read exactly what the
+ * pre-column query read. And only THAT absence is forgiven: any other failure
+ * is still `unknown`, never a guess.
+ */
+describe("B8 — a shared ledger the flows_held/cash_read_at migration has not reached yet", () => {
+  async function preMigrationLedger(): Promise<Db> {
+    const db = wrapSqlite(new DatabaseSync(":memory:"));
+    await applyLedgerSchema(db);
+    // The equity table exactly as the previous release left it in production.
+    await db.exec("ALTER TABLE equity DROP COLUMN flows_held");
+    await db.exec("ALTER TABLE equity DROP COLUMN cash_read_at");
+    await db.prepare(
+      `INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, hwm_usdg, hwm_withdrawn_usdg, epoch)
+       VALUES (?, ?, ?, 4663, '{}', 1, 2, 120, 5, 2)`,
+    ).run(SMART, OWNER, OWNER);
+    await db.prepare(
+      `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id, at)
+       VALUES (?, 'in', 100, ?, 10, 0, 'chain-log', 2, 4663, ?)`,
+    ).run(SMART, "0x" + "ab".repeat(32), NOW - 7_200);
+    for (const [cash, at] of [[100, NOW - 3_600], [97, NOW - 600]] as const) {
+      await db.prepare(
+        `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, at)
+         VALUES (?, '0', ?, 0, 0, ?, 2, 'live', ?)`,
+      ).run(SMART, cash, cash, at);
+    }
+    return db;
+  }
+
+  it("is ESTABLISHED from the pre-column rows — peak, epoch and cash baseline all carried", async () => {
+    const a = await deriveBootstrapAccounting(await preMigrationLedger(), SMART, NOW);
+    assert.equal(a.kind, "established", a.kind === "unknown" ? a.why : "");
+    if (a.kind !== "established") return;
+    assert.equal(a.highWaterMarkUsdg, "120000000");
+    assert.equal(a.highWaterWithdrawnUsdg, "5000000");
+    assert.equal(a.accountingEpoch, 2);
+    assert.equal(a.netContributionsUsdg, "100000000");
+    assert.equal(a.lastObservedCashUsdg, "97000000", "the newest mark, as the pre-column query read it");
+    assert.equal(a.observedAt, NOW - 600, "its insert time — the only time such a row has");
+  });
+
+  it("forgives ONLY those two columns: any other failure of the cash read is still unknown", async () => {
+    const other = await deriveBootstrapAccounting(
+      fakeDb([], (a) => {
+        if (a.sql.includes("FROM equity")) throw Object.assign(new Error('column "cash_usdg" does not exist'), { code: "42703" });
+      }).db,
+      SMART,
+      NOW,
+    );
+    assert.equal(other.kind, "unknown");
+    const locked = await deriveBootstrapAccounting(
+      fakeDb([], (a) => {
+        if (a.sql.includes("flows_held")) throw new Error("database is locked (flows_held)");
+      }).db,
+      SMART,
+      NOW,
+    );
+    assert.equal(locked.kind, "unknown", "a column name in some other error is not a missing column");
   });
 });

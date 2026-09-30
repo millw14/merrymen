@@ -4,6 +4,7 @@ import { DEFAULT_LOCALE } from "@/lib/locale";
 import { ConsentClient } from "./ConsentClient";
 import "../connect.css";
 import "../mcp-connect.css";
+import "../mcp-consent.css";
 
 export const metadata: Metadata = {
   title: "Connect an AI assistant · merrymen",

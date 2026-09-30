@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { KeyRound, Plug, ShieldCheck, Unplug } from "lucide-react";
 import { fullDateTime } from "@/lib/format";
 import { SignIn } from "@/terminal/HostedControls";
+import { installLinks } from "@/mcp/install-links";
 import { BrandLockup } from "../BrandLockup";
 
 interface ScopeTag { id: string; title: string; level: string }
@@ -22,6 +23,8 @@ interface Connection {
   agentSlugs: string[];
   createdAt: number;
   lastUsedAt: number | null;
+  /** "directory": connected through the limited Claude directory listing (/mcp/directory). */
+  profile?: "full" | "directory";
   recent: Array<{ action: string; outcome: string; at: number }>;
 }
 interface AvailableScope { id: string; title: string; detail: string; level: string; needsAgent: boolean }
@@ -181,13 +184,20 @@ export function AppsClient() {
           </>}
           {/* The controls are hidden while signed out: nothing pressed there could be sent. */}
           {!loading && listing && !signedOut && <>
-            {listing.connections.length === 0 && <p className="mcp-note">Nothing is connected. Add Merrymen to your assistant with the server address on the left.</p>}
+            {/* Nothing connected: offer the same one-click install as the connect hub, not a bare address. */}
+            {listing.connections.length === 0 && <div className="mcp-hub-empty">
+              <p className="mcp-note">Nothing is connected. Add Merrymen to Claude in one click, or pick another assistant.</p>
+              <a className="flow-primary" href={installLinks(listing.endpoint).claude} target="_blank" rel="noopener noreferrer">Add Merrymen to Claude<span className="sr-only"> (opens in a new tab)</span></a>
+              <a className="connect-cancel" href="/connect/mcp">Other assistants</a>
+            </div>}
             <ul className="mcp-apps">{listing.connections.map((c) => (
               <li key={c.id} className="mcp-app">
                 <header>
                   <div>
                     <h3>{c.kind === "personal" ? <><KeyRound size={14} aria-hidden /> {c.clientName ?? "Personal token"}</> : <><Plug size={14} aria-hidden /> {c.clientName ?? c.clientHost ?? "AI assistant"}</>}</h3>
                     <div className="mcp-meta">{c.kind === "personal" ? "Personal access token" : `via ${c.clientHost ?? c.clientId}`} · connected {when(c.createdAt)} · last used {when(c.lastUsedAt)}</div>
+                    {/* The same app can be connected twice, once per address: say which this one is. */}
+                    {c.profile === "directory" && <div className="mcp-meta">Via the Claude directory listing, which can never suggest trades, setting changes or posts</div>}
                     <div className="mcp-meta">Agents: {c.agentSlugs.length ? c.agentSlugs.join(", ") : "none (research only)"}</div>
                   </div>
                 </header>

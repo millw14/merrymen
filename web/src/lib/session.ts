@@ -79,6 +79,9 @@ import {
   buildCallPermissions,
   wallShape,
   wallSignable,
+  energyBuyFits,
+  GRANT_ENERGY,
+  ENERGY_ROUTE_V1,
   chainForId,
   officialCoinTokens,
   ponsAdapterForSigning,
@@ -543,6 +546,31 @@ async function prepareGrantCore(
   }
 
   const trenchScope = trencherFactory ? await resolveTrencherPermission(publicClient, trencherFactory, sudoOnlyAccount.address) : {};
+
+  // ── IS THIS A FIRST INSTALL, OR A RE-SIGN ONTO AN ACCOUNT THAT EXISTS? ────
+  //
+  // A fact about the account, read from the chain, not a constant. It used to be
+  // hardcoded `true` inside `wallSignable`, which charged every renewal for a
+  // CREATE2 and an initCode it will never pay — 316,250 bounded gas — and at
+  // this ceiling that is the difference between signable and refused. A beta
+  // owner was told to delete a fifth token when four was the true answer.
+  //
+  // AN UNREADABLE ACCOUNT COUNTS AS UNDEPLOYED. Over-charging refuses a wall
+  // that would have fitted, which the owner can retry; under-charging mints one
+  // whose first operation the executor then refuses forever, which they cannot.
+  // Only one of those is recoverable, so the RPC failing picks that one.
+  //
+  // READ BEFORE THE WALL OPTIONS, because one of them now depends on it: the
+  // energy buy is sealed only when the wall still fits, and whether it fits
+  // depends on whether this signature also pays for the account's deployment.
+  let alreadyDeployed = false;
+  try {
+    const code = await publicClient.getBytecode({ address: sudoOnlyAccount.address });
+    alreadyDeployed = code !== undefined && code !== "0x";
+  } catch {
+    alreadyDeployed = false;
+  }
+
   const wallOpts = {
     ...trenchScope,
     extraTokens: sealedTokens,
@@ -554,7 +582,26 @@ async function prepareGrantCore(
     // without one — two of three class permissions is a key that can reach a
     // vault it can never create.
     ponsClassVaultFactoryAddress: sealedClassFactory,
+    // Decided just below, by energyBuyFits, and nowhere else.
+    energyBuy: false as boolean,
   };
+  // ── THE ENERGY BUY: SEALED ONLY WHERE IT EXISTS AND ONLY WHEN IT FITS ─────
+  //
+  // USDG into $MERRYMEN over the frozen v2 route, into this account, and
+  // nothing else (packages/core/src/wall.ts). Mainnet only — elsewhere the
+  // router is codeless and a buy would land having bought nothing — and only
+  // when this wall still fits the first-enable ceiling WITH it: sealing it
+  // unconditionally would turn a full basket's re-sign into a refusal. An owner
+  // without room signs exactly the wall they would have signed anyway, and
+  // their agent's energy arrives as $MERRYMEN sent to it directly.
+  //
+  // ONE BOOLEAN decides the permission (through wallOpts, below) AND the
+  // GRANT_ENERGY marker (in grantFeatures) — marker and permission move
+  // together, which signer-lockstep.test.ts pins in both signers.
+  wallOpts.energyBuy = energyBuyFits(caps, sudoOnlyAccount.address, chain.id, !alreadyDeployed, wallOpts);
+  if (!wallOpts.energyBuy && chain.id === ENERGY_ROUTE_V1.chainId) {
+    onStatus("no room in this permission for the agent to buy its own energy — $MERRYMEN can still be sent to it directly");
+  }
 
   // ── CAN THIS WALL EVER BE INSTALLED? ASKED BEFORE A SIGNATURE EXISTS ──────
   //
@@ -570,27 +617,8 @@ async function prepareGrantCore(
   // signature is about to be made over — not the same arithmetic reproduced
   // here. Two implementations of one policy is exactly how the two sides came
   // to disagree, and `wall-policy-lockstep.test.ts` fails if either grows its
-  // own.
-  // ── IS THIS A FIRST INSTALL, OR A RE-SIGN ONTO AN ACCOUNT THAT EXISTS? ────
-  //
-  // A fact about the account, read from the chain, not a constant. It used to be
-  // hardcoded `true` inside `wallSignable`, which charged every renewal for a
-  // CREATE2 and an initCode it will never pay — 316,250 bounded gas — and at
-  // this ceiling that is the difference between signable and refused. A beta
-  // owner was told to delete a fifth token when four was the true answer.
-  //
-  // AN UNREADABLE ACCOUNT COUNTS AS UNDEPLOYED. Over-charging refuses a wall
-  // that would have fitted, which the owner can retry; under-charging mints one
-  // whose first operation the executor then refuses forever, which they cannot.
-  // Only one of those is recoverable, so the RPC failing picks that one.
-  let alreadyDeployed = false;
-  try {
-    const code = await publicClient.getBytecode({ address: sudoOnlyAccount.address });
-    alreadyDeployed = code !== undefined && code !== "0x";
-  } catch {
-    alreadyDeployed = false;
-  }
-
+  // own. `wallOpts` already carries the energy decision, so this asks about the
+  // wall that will actually be signed.
   const signable = wallSignable(
     wallShape(buildCallPermissions(caps, sudoOnlyAccount.address, wallOpts)),
     {
@@ -703,6 +731,10 @@ async function prepareGrantCore(
       // that could not be read — and that case never gets here, because
       // resolveClassVault throws instead of returning undefined.
       ...(ponsClassVaultAddress ? [GRANT_PONS_CLASS] : []),
+      // From the SAME boolean that put the router permission into the wall
+      // above — never from the chain id or a setting. A marker the wall does
+      // not back sends the worker building an energy buy the chain refuses.
+      ...(wallOpts.energyBuy ? [GRANT_ENERGY] : []),
     ],
     ...(v4AdapterAddress ? { v4AdapterAddress: v4AdapterAddress.toLowerCase() } : {}),
     ...(sealedPonsAdapter ? { ponsAdapterAddress: sealedPonsAdapter.toLowerCase() } : {}),

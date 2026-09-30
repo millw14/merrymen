@@ -10,7 +10,8 @@
  * web/src/lib/services/proposals.ts.
  */
 import * as z from "zod";
-import { STOCK_TOKENS, RISK_PROFILES, sellableAssets, normalizeAgentName, AGENT_NAME_RE } from "@merrymen/core";
+import { STOCK_TOKENS, RISK_PROFILES, sellableAssets, normalizeAgentName, AGENT_NAME_RE, isEnergyReserveToken } from "@merrymen/core";
+import { ENERGY_RESERVE_WHY } from "@/lib/energy-reserve";
 import { settingsReader, type SettingsView } from "@/lib/services/settings-view";
 import { quoteTrade, type TradeQuote } from "@/lib/services/trade-quote";
 import { randomBytes } from "node:crypto";
@@ -78,6 +79,10 @@ function translate(e: unknown): never {
  */
 export function addressableSymbol(token: string, settings: SettingsView | null, chainId: number, o: { officialCoinsEnabled?: boolean } = {}): { symbol: string } | { why: string } {
   const t = token.toLowerCase();
+  // FIRST, whatever the settings say: every answer below ends in "add it / re-sign",
+  // and for the energy reserve no signature ever covers it. A trade proposal can
+  // neither buy nor sell it; that happens only in the Merrymen app chat.
+  if (isEnergyReserveToken(t)) return { why: `${ENERGY_RESERVE_WHY} A trade proposal cannot buy or sell it.` };
   const watch = watchSetFor(settings, chainId);
   const officialOff = o.officialCoinsEnabled === false;
   const watched = officialOff ? watch.tokens.filter((w) => w.origin !== "official") : watch.tokens;
@@ -646,7 +651,8 @@ const cancel = defineTool({
   anyOf: ANY_PROPOSAL,
   input: z.object({ proposal_id: PROPOSAL_ID }).strict(),
   output: VIEW,
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  // Destructive: a cancelled proposal cannot be reopened, and a withdrawn trade is gone; the owner has to ask again.
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   async handler(args, ctx) {
     const owned = await ownedProposal(ctx, args.proposal_id);
     const d = await ctx.mcp();

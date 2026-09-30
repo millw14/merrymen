@@ -80,7 +80,21 @@ const STOCKS: MarketData = {
   })),
 };
 
-function fakeReaders(o: { pools?: "down"; payload?: Payload; stocks?: "down"; cachedBase?: string } = {}) {
+/**
+ * `count` hourly bars ending half an hour ago, oldest first, with two empty
+ * slots: one among the oldest bars and one two slots before the newest.
+ */
+function hourlySeries(count: number): CandleRead["candles"] {
+  const out: CandleRead["candles"] = [];
+  for (let k = 0; k <= count + 1; k++) {
+    if (k === 10 || k === count - 1) continue;
+    const t = NOW - 1800 - (count + 1 - k) * 3600;
+    out.push({ t, o: 1 + k / 1000, h: 2, l: 0.5, c: 1.5, v: k });
+  }
+  return out;
+}
+
+function fakeReaders(o: { pools?: "down"; payload?: Payload; stocks?: "down"; cachedBase?: string; series?: number } = {}) {
   const calls = { candles: [] as string[][], evidence: [] as string[][], pools: 0, stocks: 0 };
   const readers: MarketReaders = {
     async pools() {
@@ -99,8 +113,8 @@ function fakeReaders(o: { pools?: "down"; payload?: Payload; stocks?: "down"; ca
       calls.candles.push([poolId, token, window]);
       // A shared cache keyed by pool can hold a series another token's request verified.
       return {
-        state: "ok", reason: null, base: o.cachedBase ?? token, quoteSymbol: "WETH\u202e", interval: 3600, label: "hourly", gaps: 1, lastBarAgeSec: 1800,
-        candles: [{ t: NOW - 9000, o: 1, h: 2, l: 0.5, c: 1.5, v: 100 }, { t: NOW - 1800, o: 1.5, h: 1.8, l: 1.4, c: 1.6, v: 40 }],
+        state: "ok", reason: null, base: o.cachedBase ?? token, quoteSymbol: "WETH\u202e", interval: 3600, label: "hourly", gaps: o.series ? 2 : 1, lastBarAgeSec: 1800,
+        candles: o.series ? hourlySeries(o.series) : [{ t: NOW - 9000, o: 1, h: 2, l: 0.5, c: 1.5, v: 100 }, { t: NOW - 1800, o: 1.5, h: 1.8, l: 1.4, c: 1.6, v: 40 }],
       };
     },
     async evidence(poolId, token): Promise<PoolEvidence> {
@@ -357,6 +371,35 @@ test("get_candles resolves the token's pool from discovery and marks bar volume 
   assert.equal(r.last_bar_partial, true);
   assert.equal(r.quote_symbol, "WETH");
   assert.ok(r.notes.some((n: string) => /display-only|shape only/.test(n)));
+  assert.equal(r.bars_available, 2);
+  assert.equal(r.gaps, 1);
+});
+
+test("get_candles returns the newest 100 bars unless limit asks otherwise, and counts gaps over the bars it returns", async () => {
+  const { a, calls } = await setup({ readers: { series: 250 } });
+  const newest = new Date((NOW - 1800) * 1000).toISOString();
+  const r = await ok(a, "get_candles", { address: MEME });
+  assert.equal(r.bars.length, 100);
+  assert.equal(r.bars_available, 250);
+  assert.equal(r.bars[99].time, newest, "the newest bar is kept");
+  assert.ok(r.bars.every((b: { time: string }, i: number) => i === 0 || Date.parse(b.time) > Date.parse(r.bars[i - 1].time)), "oldest first");
+  assert.equal(r.gaps, 1, "the empty slot among the oldest bars is outside these 100");
+
+  const five = await ok(a, "get_candles", { address: MEME, limit: 5 });
+  assert.equal(five.bars.length, 5);
+  assert.equal(five.bars[4].time, newest);
+  assert.equal(five.gaps, 1);
+  const two = await call(a, "get_candles", { address: MEME, limit: 2 });
+  assert.equal(two.content[0]!.text.split("\n")[0], "2 1h bars, the newest of 250.", "the summary says older bars were left out");
+  assert.equal((two.structuredContent as { gaps: number }).gaps, 0);
+
+  const all = await ok(a, "get_candles", { address: MEME, limit: 300 });
+  assert.equal(all.bars.length, 250);
+  assert.equal(all.gaps, 2);
+
+  const before = calls.candles.length;
+  for (const limit of [0, 301, 2.5, -1, "10"]) assert.equal(await errCode(a, "get_candles", { address: MEME, limit }), "invalid_input", String(limit));
+  assert.equal(calls.candles.length, before, "a bad limit never reaches the provider");
 });
 
 test("get_candles never reads another token's pool, so the shared chart cache cannot be pointed at the wrong side of a pair", async () => {

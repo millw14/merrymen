@@ -1,0 +1,16 @@
+{
+  "name": "merrymen",
+  "owner": {
+    "name": "Merrymen",
+    "url": "https://merrymen.dev"
+  },
+  "description": "Merrymen for Claude Code: ask about your trading agent, its trades and your portfolio from any session.",
+  "plugins": [
+    {
+      "name": "merrymen",
+      "source": "./plugins/merrymen",
+      "category": "productivity",
+      "tags": ["trading", "agents", "mcp", "robinhood-chain"]
+    }
+  ]
+}

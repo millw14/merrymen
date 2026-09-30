@@ -4,7 +4,7 @@
  * Merrymen session; nothing is granted by visiting this URL.
  */
 import { mcpConfig } from "@/mcp/config";
-import { ipLimited, oauthDeps } from "@/mcp/oauth/deps";
+import { ipLimited, oauthDeps, rawRequestUrl } from "@/mcp/oauth/deps";
 import { startAuthorization } from "@/mcp/oauth/server";
 
 export const dynamic = "force-dynamic";
@@ -26,7 +26,8 @@ export async function GET(req: Request): Promise<Response> {
   const deps = await oauthDeps();
   const limited = await ipLimited(deps, req, "authorize", 60, 60);
   if (limited) return limited;
-  const outcome = await startAuthorization(deps, new URL(req.url).searchParams);
+  // The query as sent: NextRequest.url rewrites 127.0.0.1 in it to localhost (see rawRequestUrl).
+  const outcome = await startAuthorization(deps, new URL(rawRequestUrl(req)).searchParams);
   if (outcome.kind === "page_error") return errorPage(outcome.status, outcome.error, outcome.description);
   return new Response(null, { status: 302, headers: { Location: outcome.location, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" } });
 }

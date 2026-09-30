@@ -16,16 +16,26 @@
  *    cannot probe which agents or ids exist.
  */
 import { McpError } from "./errors";
-import { scopeFor, type Capability } from "./scopes";
+import { capabilityAllowedIn, scopeFor, type Capability } from "./scopes";
 import type { AgentDirectory, OwnedAgent } from "./agents";
 import type { Principal } from "./oauth/server";
 
 export function hasCapability(p: Principal, capability: Capability): boolean {
   if (capability === "staff.diagnostics" && !p.staff) return false;
+  // A connection through the directory listing never reaches a capability
+  // outside it, even holding the scope (it cannot be granted one: this is the
+  // last of several independent checks).
+  if (!capabilityAllowedIn(p.profile ?? "full", capability)) return false;
   return p.scopes.has(scopeFor(capability));
 }
 
 export function requireCapability(p: Principal, capability: Capability): void {
+  if (!capabilityAllowedIn(p.profile ?? "full", capability)) {
+    // No reconnect can fix this one: the directory listing never offers it.
+    throw new McpError("insufficient_scope", `This connection was made through the Merrymen directory listing, which cannot be granted "${scopeFor(capability)}". The owner can add the full Merrymen server as a custom connector to use it.`, {
+      details: { required_scope: scopeFor(capability) },
+    });
+  }
   if (!hasCapability(p, capability)) {
     // The recovery named here must actually work: a client holding a live token
     // never re-asks by itself, so the owner disconnects it on Connected apps,

@@ -19,11 +19,18 @@ import {
   refreshTokens, revokeConnection, revokeToken, startAuthorization, verifyAccessToken,
 } from "./server";
 import { authorizationServerMetadata, protectedResourceMetadata, bearerChallenge } from "./metadata";
-import { scopeInfo } from "../scopes";
+import { SCOPES, scopeInfo } from "../scopes";
 import { DOC_RESOURCES } from "../resources-catalog";
 import { mintSession } from "../../lib/auth";
 import { POST as connectionsPost } from "../../app/api/mcp/connections/route";
-import { ACCOUNT_A, OWNER_A, OWNER_B, SLUG_A, SLUG_B, VERIFIER, connectAs, installFixtures, makeDeps, makeTestDb, testConfig } from "../testing";
+import { ACCOUNT_A, ACCOUNT_B, OWNER_A, OWNER_B, SLUG_A, SLUG_B, VERIFIER, agentFixture, connectAs, fixtureDirectory, installFixtures, makeDeps, makeTestDb, testConfig } from "../testing";
+import { DatabaseSync } from "node:sqlite";
+import { wrapSqlite } from "../../../../worker/src/db";
+import { applyLedgerSchema } from "../../../../worker/src/store";
+import { MCP_SCHEMA, ensureMcpSchema } from "../../../../worker/src/mcp/schema";
+import { CANONICAL_ROUTE_PATH, mcpConfig, profileOfResource, protectedResourceMetadataUrl, resourcePath } from "../config";
+import { ADVERTISED_SCOPES, DIRECTORY_SCOPES, advertisedScopesFor } from "../scopes";
+import { randomCredential, randomId, sha256hex } from "./crypto";
 
 const REDIRECT = "http://127.0.0.1:33418/callback";
 
@@ -325,10 +332,45 @@ test("DCR rejects unsafe metadata", async () => {
     { redirect_uris: ["https://ok.test/cb"], grant_types: ["client_credentials"] },
     { redirect_uris: ["https://ok.test/cb"], response_types: ["token"] },
     { redirect_uris: ["https://ok.test/cb"], token_endpoint_auth_method: "private_key_jwt" },
+    // Only app-scheme callbacks: nothing a code could be sent to.
+    { redirect_uris: ["cursor://anysphere.cursor-mcp/oauth/callback"] },
+    // An app scheme is ignored, a bad http(s) redirect still fails the registration.
+    { redirect_uris: ["cursor://anysphere.cursor-mcp/oauth/callback", "http://evil.test/cb"] },
+    // Not app schemes, just malformed: a scheme-less loopback, and schemes with no "//".
+    { redirect_uris: ["localhost:8787/callback", "https://ok.test/cb"] },
+    { redirect_uris: ["javascript:alert(1)", "https://ok.test/cb"] },
+    { redirect_uris: Array.from({ length: 11 }, (_, i) => `https://ok.test/cb${i}`) },
   ]) {
     const r = await registerClient(d, bad, 1);
     assert.equal(r.status, 400, JSON.stringify(bad));
   }
+});
+
+test("DCR: Cursor's three callbacks register; its app-scheme one is ignored and never receives a code", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  // Cursor (IDE/CLI) registers all three together, per its staff on the Cursor forum (2026-07).
+  const cursorScheme = "cursor://anysphere.cursor-mcp/oauth/callback";
+  const loopback = "http://localhost:8787/callback";
+  const reg = await registerClient(d, {
+    client_name: "Cursor", token_endpoint_auth_method: "none",
+    redirect_uris: [cursorScheme, "https://www.cursor.com/agents/mcp/oauth/callback", loopback],
+  }, deps.now());
+  assert.equal(reg.status, 201);
+  assert.deepEqual(reg.body.redirect_uris, ["https://www.cursor.com/agents/mcp/oauth/callback", loopback], "the response lists only what was kept");
+  const clientId = String(reg.body.client_id);
+  assert.deepEqual(await startAuthorization(deps, authorizeParams(clientId, { redirect_uri: cursorScheme })),
+    { kind: "page_error", status: 400, error: "invalid_request", description: "redirect_uri is missing or not registered for this client" });
+  const start = await startAuthorization(deps, authorizeParams(clientId, { redirect_uri: loopback }));
+  const view = await describeRequest(deps, requestOf((start as { location: string }).location), OWNER_A);
+  assert.equal(view.client.redirectHost, "localhost:8787");
+});
+
+test("CIMD: app-scheme callbacks in a metadata document are ignored, not fatal", () => {
+  const id = "https://client.example/oauth/metadata.json";
+  const doc = { client_id: id, redirect_uris: ["myapp://callback", "http://127.0.0.1/callback"], token_endpoint_auth_method: "none" };
+  assert.deepEqual(parseCimd(id, Buffer.from(JSON.stringify(doc))).redirectUris, ["http://127.0.0.1/callback"]);
+  assert.throws(() => parseCimd(id, Buffer.from(JSON.stringify({ ...doc, redirect_uris: ["myapp://callback"] }))), /redirect_uris/);
 });
 
 test("CIMD: the document must name itself, be public, and list safe redirects", async () => {
@@ -786,7 +828,7 @@ test("token-family writes are serialised on the connection row, so a revocation 
   const { d, log } = recordingDb(base);
   const deps = makeDeps(d);
   const client = await resolveClient(d, a.clientId, deps.now(), { ownHosts: ownHostsOf(deps.cfg) });
-  const LOCK = /^tx SELECT id, tenant, status, scopes FROM mcp_connections WHERE id = \? FOR UPDATE$/;
+  const LOCK = /^tx SELECT id, tenant, status, scopes, resource FROM mcp_connections WHERE id = \? FOR UPDATE$/;
   const at = (re: RegExp) => log.findIndex((l) => re.test(l));
   const r = (token: string) => new URLSearchParams({ grant_type: "refresh_token", refresh_token: token, client_id: a.clientId });
 
@@ -954,5 +996,558 @@ test("authorize refuses a state with a control character on its own page, never 
   // Visible ASCII and non-ASCII letters are still fine.
   for (const state of ["xyz-._~+/=", `${String.fromCharCode(0xe9)}tat`]) {
     assert.equal((await startAuthorization(deps, authorizeParams(dcr, { state }))).kind, "consent", state);
+  }
+});
+
+test("after the endpoint moves, refreshing a connection made for the old address is invalid_grant, not a token /mcp refuses", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const { tokens, clientId } = await connectAs(deps, OWNER_A);
+  const client = await resolveClient(d, clientId, deps.now(), { ownHosts: ownHostsOf(deps.cfg) });
+  const moved = { ...deps, cfg: { ...deps.cfg, resource: "https://mcp.app.test/mcp" } };
+  await assert.rejects(
+    refreshTokens(moved, new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokens.refresh_token!, client_id: clientId }), client),
+    (e: unknown) => e instanceof OAuthError && e.error === "invalid_grant" && /Connect again/.test(e.description),
+  );
+  // A client that already switched to the new address sends it as `resource` with its old token:
+  // still told to reconnect (invalid_grant), not invalid_target.
+  await assert.rejects(
+    refreshTokens(moved, new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokens.refresh_token!, client_id: clientId, resource: "https://mcp.app.test/mcp" }), client),
+    (e: unknown) => e instanceof OAuthError && e.error === "invalid_grant" && /Connect again/.test(e.description),
+  );
+  // Where the address did not move, the same token still refreshes.
+  const same = await refreshTokens(deps, new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokens.refresh_token!, client_id: clientId }), client);
+  assert.ok(same.access_token);
+});
+
+// ── one-click consent ───────────────────────────────────────────────────────
+
+test("every scope has a short lowercase phrase for the consent screen's summary", () => {
+  for (const s of SCOPES) {
+    assert.ok(s.phrase.trim().length > 0, `${s.id} has a phrase`);
+    assert.equal(s.phrase, s.phrase.trim(), s.id);
+    assert.match(s.phrase, /^[a-z]/, `${s.id} starts lowercase, to read after a verb`);
+    assert.doesNotMatch(s.phrase, /[.!?;:]$/, `${s.id} is a phrase, not a sentence`);
+    assert.ok(s.phrase.split(/\s+/).length <= 6, `${s.id} is short`);
+  }
+});
+
+/** Connect OWNER_A to one client with trade:propose ticked, then park a new request from that same client. */
+async function reconnecting(deps: ReturnType<typeof makeDeps>, scope?: string) {
+  const first = await connectAs(deps, OWNER_A, { scopes: ["market:read", "portfolio:read", "trade:propose", "offline_access"] });
+  const asked = scope ?? /scope="([^"]*)"/.exec(bearerChallenge(deps.cfg))![1]!;
+  const start = await startAuthorization(deps, authorizeParams(first.clientId, { scope: asked }));
+  assert.equal(start.kind, "consent");
+  return { first, req: requestOf((start as { location: string }).location) };
+}
+
+test("a reconnect from the same app is described with what its active connection holds, so a sensitive permission is not dropped", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const since = deps.now();
+  const { first, req } = await reconnecting(deps);
+  deps.advance(60);
+  const view = await describeRequest(deps, req, OWNER_A);
+  assert.deepEqual(view.previous, { scopes: ["market:read", "portfolio:read", "trade:propose"], agentSlugs: [SLUG_A], since, partial: false });
+  // The tenant is matched however the session spells it.
+  const upper = `0x${OWNER_A.slice(2).toUpperCase()}` as const;
+  assert.deepEqual((await describeRequest(deps, req, upper)).previous?.scopes, view.previous!.scopes);
+  // The page sends that choice back explicitly: the reconnect keeps trade:propose on the same connection.
+  await decideRequest(deps, req, OWNER_A, { approve: true, scopes: view.previous!.scopes, agentSlugs: view.previous!.agentSlugs });
+  const conns = await listConnections(d, OWNER_A);
+  assert.equal(conns.length, 1);
+  assert.equal(conns[0]!.id, first.principal.connectionId);
+  assert.ok(conns[0]!.scopes.includes("trade:propose"));
+});
+
+test("previous is null signed out, for another app, for another owner, and after the owner disconnects", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const { first, req } = await reconnecting(deps);
+  assert.equal((await describeRequest(deps, req, null)).previous, null);
+  // Owner B has no connection with this app; owner A's is never shown to them.
+  assert.equal((await describeRequest(deps, req, OWNER_B)).previous, null);
+  // Another app owner A never connected starts from the defaults.
+  const other = await publicClient(deps, "http://127.0.0.1:44001/callback");
+  const otherStart = await startAuthorization(deps, authorizeParams(other, { redirect_uri: "http://127.0.0.1:44001/callback" }));
+  assert.equal((await describeRequest(deps, requestOf((otherStart as { location: string }).location), OWNER_A)).previous, null);
+  // Disconnected on Connected apps: the next consent starts fresh.
+  assert.ok(await revokeConnection(d, OWNER_A, first.principal.connectionId, deps.now()));
+  assert.equal((await describeRequest(deps, req, OWNER_A)).previous, null);
+});
+
+test("previous never holds a scope the request does not offer, nor offline_access, nor an agent the owner no longer has", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const { req } = await reconnecting(deps, "market:read agents:read offline_access");
+  const view = await describeRequest(deps, req, OWNER_A);
+  assert.deepEqual(view.previous?.scopes, ["market:read"]);
+  assert.equal(view.previous?.partial, true, "approving would remove portfolio:read and trade:propose");
+  const offered = new Set(view.scopes.map((s) => s.id));
+  for (const s of view.previous!.scopes) assert.ok(offered.has(s), s);
+  // The agent is gone from the owner's directory: it is not carried over.
+  const moved = { ...deps, agents: fixtureDirectory({ [OWNER_A]: [agentFixture(SLUG_B, ACCOUNT_A)] }) };
+  assert.deepEqual((await describeRequest(moved, req, OWNER_A)).previous?.agentSlugs, []);
+});
+
+test("the agent's name comes from the optional dependency, for the signed-in owner only, and never fails the page", async () => {
+  const d = await makeTestDb();
+  const clientDeps = makeDeps(d);
+  const clientId = await publicClient(clientDeps);
+  const park = async (deps: ReturnType<typeof makeDeps>) => requestOf(((await startAuthorization(deps, authorizeParams(clientId))) as { location: string }).location);
+  const asked: string[] = [];
+  const named = makeDeps(d, { agentName: async (tenant) => { asked.push(tenant); return tenant === OWNER_A ? "  Sherwood  " : null; } });
+  const req = await park(named);
+  assert.deepEqual((await describeRequest(named, req, null)).agents, []);
+  assert.deepEqual(asked, [], "signed out: nobody's name is read");
+  assert.deepEqual((await describeRequest(named, req, OWNER_A)).agents, [{ slug: SLUG_A, account: ACCOUNT_A, name: "Sherwood" }]);
+  assert.deepEqual(asked, [OWNER_A], "only the signed-in owner's name is read");
+  // A throwing or missing dependency, or an empty name, is no name, never an error.
+  const throwing = makeDeps(d, { agentName: async () => { throw new Error("settings store down"); } });
+  assert.equal((await describeRequest(throwing, await park(throwing), OWNER_A)).agents[0]!.name, null);
+  assert.equal((await describeRequest(clientDeps, await park(clientDeps), OWNER_A)).agents[0]!.name, null);
+  const blank = makeDeps(d, { agentName: async () => "   " });
+  assert.equal((await describeRequest(blank, await park(blank), OWNER_A)).agents[0]!.name, null);
+  // The name is per owner: with several agents it could label the wrong one, so none is given.
+  const several = makeDeps(d, {
+    agentName: async () => "Sherwood",
+    agents: fixtureDirectory({ [OWNER_A]: [agentFixture(SLUG_A, ACCOUNT_A), agentFixture(SLUG_B, ACCOUNT_B)] }),
+  });
+  const both = (await describeRequest(several, await park(several), OWNER_A)).agents;
+  assert.deepEqual(both.map((a) => [a.slug, a.name]), [[SLUG_A, null], [SLUG_B, null]]);
+});
+
+test("the consent view gives every offered scope its phrase", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const { req } = await reconnecting(deps);
+  const view = await describeRequest(deps, req, OWNER_A);
+  for (const s of view.scopes) assert.equal(s.phrase, scopeInfo(s.id)!.phrase, s.id);
+});
+
+// ── the directory profile (/mcp/directory) ──────────────────────────────────
+
+const DIR = "https://app.test/mcp/directory";
+const CANONICAL = "https://app.test/mcp";
+const SENSITIVE = ["drafts:write", "social:write", "trade:propose"];
+/** Everything a client could ask for, the staff scope included. */
+const EVERYTHING = [...ADVERTISED_SCOPES, "staff:diagnostics"].join(" ");
+const refreshForm = (token: string, clientId: string, over: Record<string, string> = {}) =>
+  new URLSearchParams({ grant_type: "refresh_token", refresh_token: token, client_id: clientId, ...over });
+const clientOf = (deps: ReturnType<typeof makeDeps>, clientId: string) => resolveClient(deps.d, clientId, deps.now(), { ownHosts: ownHostsOf(deps.cfg) });
+const noneSensitive = (scopes: Iterable<string>, what: string) => {
+  for (const s of scopes) assert.ok(!SENSITIVE.includes(s) && s !== "staff:diagnostics", `${what}: ${s}`);
+};
+
+async function parkRequest(deps: ReturnType<typeof makeDeps>, clientId: string, over: Record<string, string | null>) {
+  const start = await startAuthorization(deps, authorizeParams(clientId, over));
+  assert.equal(start.kind, "consent", JSON.stringify(start));
+  return requestOf((start as { location: string }).location);
+}
+
+async function exchange(deps: ReturnType<typeof makeDeps>, clientId: string, location: string, resource?: string) {
+  const code = new URL(location).searchParams.get("code")!;
+  const form = new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: REDIRECT, code_verifier: VERIFIER, client_id: clientId });
+  if (resource) form.set("resource", resource);
+  return exchangeCode(deps, form, await clientOf(deps, clientId));
+}
+
+test("directory profile: /mcp/directory on the endpoint's origin by default, only the origin overridable, off with MERRYMEN_MCP_DIRECTORY=0, never the canonical path", () => {
+  const base = { MERRYMEN_PUBLIC_ORIGIN: "https://app.test", MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test/mcp" } as unknown as NodeJS.ProcessEnv;
+  const cfg = mcpConfig(base);
+  assert.equal(cfg.resource, "https://mcp.test/mcp");
+  assert.equal(cfg.directoryResource, "https://mcp.test/mcp/directory");
+  assert.equal(resourcePath(cfg), "/mcp");
+  assert.equal(resourcePath(cfg, "directory"), "/mcp/directory");
+  assert.equal(protectedResourceMetadataUrl(cfg), "https://mcp.test/.well-known/oauth-protected-resource/mcp");
+  assert.equal(protectedResourceMetadataUrl(cfg, "directory"), "https://mcp.test/.well-known/oauth-protected-resource/mcp/directory");
+  assert.equal(mcpConfig({ ...base, MERRYMEN_MCP_DIRECTORY: "0" }).directoryResource, "", "the kill switch");
+  assert.equal(mcpConfig({ ...base, MERRYMEN_MCP_DIRECTORY: "1" }).directoryResource, "https://mcp.test/mcp/directory");
+  assert.equal(mcpConfig({ ...base, MERRYMEN_MCP_DIRECTORY: "0" }).resource, "https://mcp.test/mcp", "switching the directory off leaves the canonical endpoint alone");
+  const over = mcpConfig({ ...base, MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: "https://dir.test/mcp/directory/" });
+  assert.equal(over.directoryResource, "https://dir.test/mcp/directory");
+  assert.ok(over.allowedHosts.has("dir.test"), "the directory answers on its own host");
+  // Only the origin may change: the route is app/mcp/directory, so any other
+  // path would be advertised to clients and answer 404.
+  for (const bad of ["https://dir.test/listing", "https://mcp.test/listing", "https://mcp.test/mcp/directory/x", "https://mcp.test/directory", "https://dir.test/MCP/directory", "http://dir.test/mcp/directory", "https://mcp.test/mcp", "https://other.test/mcp", "https://mcp.test/", "not a url", "https://dir.test/mcp/directory?y=1", "https://u:p@dir.test/mcp/directory"]) {
+    assert.equal(mcpConfig({ ...base, MERRYMEN_MCP_DIRECTORY_RESOURCE_URL: bad }).directoryResource, "", bad);
+  }
+  // With no usable canonical endpoint (any path but /mcp is one) there is
+  // no directory profile either.
+  for (const canonical of ["https://mcp.test/v2/mcp", "https://mcp.test/mcp/directory", "https://mcp.test/"]) {
+    const off = mcpConfig({ ...base, MERRYMEN_MCP_RESOURCE_URL: canonical });
+    assert.equal(off.resource, "", canonical);
+    assert.equal(off.directoryResource, "", canonical);
+  }
+  assert.equal(profileOfResource(cfg, "https://mcp.test/mcp"), "full");
+  assert.equal(profileOfResource(cfg, "https://mcp.test/mcp/directory"), "directory");
+  for (const other of ["https://mcp.test/mcp/", "https://mcp.test/mcp/directory/x", "", null]) assert.equal(profileOfResource(cfg, other), null, String(other));
+  assert.equal(profileOfResource(testConfig({ directoryResource: "" }), ""), null, "an empty directory URL names nothing");
+});
+
+test("directory profile: its own protected-resource document and 401 challenge list only what it can grant; the canonical ones are unchanged", () => {
+  const cfg = testConfig();
+  // Exactly the three sensitive scopes and the staff scope are outside it.
+  assert.deepEqual(SCOPES.filter((s) => s.level === "sensitive").map((s) => s.id).sort(), SENSITIVE);
+  assert.deepEqual([...DIRECTORY_SCOPES].sort(), SCOPES.filter((s) => !SENSITIVE.includes(s.id) && s.level !== "staff").map((s) => s.id).sort());
+  const full = protectedResourceMetadata(cfg);
+  assert.equal(full.resource, CANONICAL);
+  assert.deepEqual(full.scopes_supported, [...ADVERTISED_SCOPES]);
+  const dir = protectedResourceMetadata(cfg, "directory");
+  assert.equal(dir.resource, DIR, "resource is exactly the directory URL");
+  assert.deepEqual(dir.authorization_servers, ["https://app.test"]);
+  assert.deepEqual(dir.scopes_supported, ADVERTISED_SCOPES.filter((s) => !SENSITIVE.includes(s)));
+  assert.deepEqual(dir.scopes_supported, [...advertisedScopesFor("directory")]);
+  noneSensitive(dir.scopes_supported as string[], "directory metadata");
+  const challenge = bearerChallenge(cfg, { profile: "directory", error: "invalid_token" });
+  assert.match(challenge, /resource_metadata="https:\/\/app\.test\/\.well-known\/oauth-protected-resource\/mcp\/directory"/);
+  assert.equal(/scope="([^"]*)"/.exec(challenge)![1], (dir.scopes_supported as string[]).join(" "));
+  assert.match(bearerChallenge(cfg), /resource_metadata="https:\/\/app\.test\/\.well-known\/oauth-protected-resource\/mcp"/);
+  assert.equal(/scope="([^"]*)"/.exec(bearerChallenge(cfg))![1], ADVERTISED_SCOPES.join(" "), "the canonical challenge still asks for everything grantable");
+  assert.deepEqual(authorizationServerMetadata(cfg).scopes_supported, [...ADVERTISED_SCOPES], "authorization-server metadata unchanged");
+});
+
+test("directory profile: a request for trade:propose (or any sensitive or staff scope) is cut down before it is parked, so consent never offers it", async () => {
+  const d = await makeTestDb();
+  // Owner A is staff here: even so, the directory offers no staff scope.
+  const deps = makeDeps(d, { cfg: testConfig({ staffTenants: new Set([OWNER_A]) }) });
+  const clientId = await publicClient(deps);
+  const req = await parkRequest(deps, clientId, { resource: DIR, scope: EVERYTHING });
+  const parked = d.raw.prepare("SELECT scopes, resource FROM mcp_auth_requests WHERE id_hash = ?").get(sha256hex(req)) as { scopes: string; resource: string };
+  assert.equal(parked.resource, DIR);
+  noneSensitive(parked.scopes.split(" "), "parked");
+  assert.ok(parked.scopes.split(" ").includes("market:read"));
+  const view = await describeRequest(deps, req, OWNER_A);
+  assert.equal(view.profile, "directory");
+  noneSensitive(view.scopes.map((s) => s.id), "offered");
+  assert.ok(!view.scopes.some((s) => s.level === "sensitive" || s.level === "staff"));
+  assert.ok(view.scopes.some((s) => s.id === "chat:write"));
+  // With a trailing slash the resource is the same address.
+  assert.equal((await describeRequest(deps, await parkRequest(deps, clientId, { resource: `${DIR}/`, scope: EVERYTHING }), OWNER_A)).profile, "directory");
+  // A request that asks only for what the directory cannot grant has nothing to offer.
+  const only = await startAuthorization(deps, authorizeParams(clientId, { resource: DIR, scope: "trade:propose drafts:write social:write staff:diagnostics" }));
+  assert.equal(only.kind, "page_error");
+  assert.equal((only as { error: string }).error, "invalid_scope");
+  // No resource still means the canonical one, which still offers trade:propose (and, to staff, staff).
+  const canonical = await parkRequest(deps, clientId, { resource: null, scope: EVERYTHING });
+  assert.equal((d.raw.prepare("SELECT resource FROM mcp_auth_requests WHERE id_hash = ?").get(sha256hex(canonical)) as { resource: string }).resource, CANONICAL);
+  const fullView = await describeRequest(deps, canonical, OWNER_A);
+  assert.equal(fullView.profile, "full");
+  for (const s of [...SENSITIVE, "staff:diagnostics"]) assert.ok(fullView.scopes.some((x) => x.id === s), s);
+  // Any other address, or the directory's once it is switched off, is invalid_target.
+  const off = makeDeps(d, { cfg: testConfig({ directoryResource: "" }) });
+  for (const [deps2, resource] of [[deps, "https://app.test/mcp/other"], [deps, "https://app.test/mcp/directory/x"], [off, DIR]] as const) {
+    const out = await startAuthorization(deps2, authorizeParams(clientId, { resource }));
+    assert.equal((out as { error?: string }).error, "invalid_target", resource);
+  }
+});
+
+test("directory profile: consent can never grant a sensitive scope: not by default, not by an explicit choice, not from a tampered parked request", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const clientId = await publicClient(deps);
+  const req = await parkRequest(deps, clientId, { resource: DIR, scope: EVERYTHING });
+  // An explicit choice of a sensitive scope is refused with a reason (and the request survives).
+  await assert.rejects(
+    decideRequest(deps, req, OWNER_A, { approve: true, scopes: ["market:read", "trade:propose"], agentSlugs: [SLUG_A] }),
+    (e: unknown) => e instanceof OAuthError && e.error === "invalid_scope" && /directory listing/.test(e.description),
+  );
+  // A parked row that somehow holds every scope (written by hand here) is still cut down at each later step.
+  d.raw.prepare("UPDATE mcp_auth_requests SET scopes = ? WHERE id_hash = ?").run(EVERYTHING.split(" ").sort().join(" "), sha256hex(req));
+  const view = await describeRequest(deps, req, OWNER_A);
+  noneSensitive(view.scopes.map((s) => s.id), "offered from a tampered row");
+  for (const s of SENSITIVE) {
+    await assert.rejects(decideRequest(deps, req, OWNER_A, { approve: true, scopes: ["market:read", s], agentSlugs: [SLUG_A] }), /directory listing/, s);
+  }
+  // Ticking everything the page shows grants no sensitive scope; the connection is the directory's.
+  const decided = await decideRequest(deps, req, OWNER_A, { approve: true, scopes: view.scopes.map((s) => s.id), agentSlugs: [SLUG_A] });
+  const row = d.raw.prepare("SELECT scopes, resource FROM mcp_connections WHERE id = ?").get(decided.connectionId) as { scopes: string; resource: string | null };
+  assert.equal(row.resource, DIR);
+  noneSensitive(row.scopes.split(" "), "stored");
+  const tokens = await exchange(deps, clientId, decided.location, DIR);
+  noneSensitive(tokens.scope.split(" "), "issued");
+  // The default (no explicit choice) likewise.
+  const req2 = await parkRequest(deps, clientId, { resource: DIR, scope: EVERYTHING });
+  d.raw.prepare("UPDATE mcp_auth_requests SET scopes = ? WHERE id_hash = ?").run(EVERYTHING.split(" ").sort().join(" "), sha256hex(req2));
+  const second = await decideRequest(deps, req2, OWNER_A, { approve: true, agentSlugs: [SLUG_A] });
+  assert.equal(second.connectionId, decided.connectionId, "the same directory connection");
+  noneSensitive((d.raw.prepare("SELECT scopes FROM mcp_connections WHERE id = ?").get(second.connectionId) as { scopes: string }).scopes.split(" "), "default");
+});
+
+test("directory profile: a code or token row that somehow carries a sensitive scope still mints, refreshes and verifies without it", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const clientId = await publicClient(deps);
+  const all = EVERYTHING.split(" ").sort().join(" ");
+  // Code exchange: the code row says everything.
+  const req = await parkRequest(deps, clientId, { resource: DIR });
+  const decided = await decideRequest(deps, req, OWNER_A, { approve: true, agentSlugs: [SLUG_A] });
+  d.raw.prepare("UPDATE mcp_codes SET scopes = ?").run(all);
+  const tokens = await exchange(deps, clientId, decided.location);
+  noneSensitive(tokens.scope.split(" "), "code exchange");
+  // Verification and refresh: the token and the connection both say everything.
+  d.raw.prepare("UPDATE mcp_connections SET scopes = ? WHERE id = ?").run(all, decided.connectionId);
+  d.raw.prepare("UPDATE mcp_tokens SET scopes = ? WHERE connection_id = ?").run(all, decided.connectionId);
+  const p = await verifyAccessToken(d, deps.cfg, tokens.access_token, deps.now(), "directory");
+  assert.ok(p);
+  assert.equal(p.profile, "directory");
+  noneSensitive(p.scopes, "verified");
+  assert.ok(p.scopes.has("market:read"));
+  const client = await clientOf(deps, clientId);
+  const refreshed = await refreshTokens(deps, refreshForm(tokens.refresh_token, clientId, { scope: all }), client);
+  noneSensitive(refreshed.scope.split(" "), "refresh asking for everything");
+  const noScope = await refreshTokens(deps, refreshForm(refreshed.refresh_token, clientId), client);
+  noneSensitive(noScope.scope.split(" "), "refresh with no scope parameter");
+  await assert.rejects(refreshTokens(deps, refreshForm(noScope.refresh_token, clientId, { scope: "trade:propose" }), client), /cannot add scopes/);
+});
+
+test("directory profile: a code only ever mints for a connection on its own address", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const full = await connectAs(deps, OWNER_A);
+  const req = await parkRequest(deps, full.clientId, { resource: DIR });
+  const decided = await decideRequest(deps, req, OWNER_A, { approve: true, agentSlugs: [SLUG_A] });
+  assert.notEqual(decided.connectionId, full.principal.connectionId);
+  // Point the directory code at the full-server connection (never written by the server): refused.
+  d.raw.prepare("UPDATE mcp_codes SET connection_id = ? WHERE connection_id = ?").run(full.principal.connectionId, decided.connectionId);
+  await assert.rejects(exchange(deps, full.clientId, decided.location), (e: unknown) => e instanceof OAuthError && e.error === "invalid_grant");
+  // A code whose address stopped being served while it was in flight mints nothing either.
+  const req2 = await parkRequest(deps, full.clientId, { resource: DIR });
+  const decided2 = await decideRequest(deps, req2, OWNER_A, { approve: true, agentSlugs: [SLUG_A] });
+  const off = { ...deps, cfg: testConfig({ directoryResource: "" }) };
+  // So does a consent screen left open while the directory was switched off.
+  const parkedThenOff = await parkRequest(deps, full.clientId, { resource: DIR });
+  await assert.rejects(describeRequest(off, parkedThenOff, OWNER_A), (e: unknown) => e instanceof OAuthError && e.status === 410);
+  await assert.rejects(decideRequest(off, parkedThenOff, OWNER_A, { approve: true, agentSlugs: [SLUG_A] }), (e: unknown) => e instanceof OAuthError && e.status === 410);
+  const code = new URL(decided2.location).searchParams.get("code")!;
+  await assert.rejects(
+    exchangeCode(off, new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: REDIRECT, code_verifier: VERIFIER, client_id: full.clientId }), await clientOf(deps, full.clientId)),
+    (e: unknown) => e instanceof OAuthError && e.error === "invalid_grant",
+  );
+});
+
+test("the same app can hold a full-server and a directory connection at once; approving or revoking either leaves the other's scopes and tokens alone", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const full = await connectAs(deps, OWNER_A, { scopes: ["market:read", "portfolio:read", "trade:propose", "offline_access"] });
+  const dir = await connectAs(deps, OWNER_A, { profile: "directory", clientId: full.clientId, scopes: ["market:read", "portfolio:read", "chat:write", "offline_access"] });
+  assert.notEqual(dir.principal.connectionId, full.principal.connectionId);
+  const byId = async () => new Map((await listConnections(d, OWNER_A)).map((c) => [c.id, c]));
+  let conns = await byId();
+  assert.equal(conns.size, 2);
+  assert.equal(conns.get(full.principal.connectionId)!.profile, "full");
+  assert.equal(conns.get(dir.principal.connectionId)!.profile, "directory");
+  assert.ok(conns.get(full.principal.connectionId)!.scopes.includes("trade:propose"), "connecting the directory did not touch the full connection");
+  // Each token works at its own endpoint only.
+  const at = (token: string, profile: "full" | "directory") => verifyAccessToken(d, deps.cfg, token, deps.now(), profile);
+  assert.ok((await at(full.tokens.access_token, "full"))?.scopes.has("trade:propose"));
+  assert.equal(await at(full.tokens.access_token, "directory"), null);
+  assert.ok((await at(dir.tokens.access_token, "directory"))?.scopes.has("chat:write"));
+  assert.equal(await at(dir.tokens.access_token, "full"), null);
+
+  // Reconnecting through the directory starts from the DIRECTORY connection, never the full one's trade:propose.
+  const dirReq = await parkRequest(deps, full.clientId, { resource: DIR, scope: EVERYTHING });
+  const dirView = await describeRequest(deps, dirReq, OWNER_A);
+  assert.deepEqual(dirView.previous?.scopes, dirView.scopes.map((s) => s.id).filter((s) => ["chat:write", "market:read", "portfolio:read"].includes(s)));
+  assert.equal(dirView.previous?.partial, false);
+  const again = await decideRequest(deps, dirReq, OWNER_A, { approve: true, scopes: ["market:read"], agentSlugs: [SLUG_A] });
+  assert.equal(again.connectionId, dir.principal.connectionId, "the directory connection is updated in place");
+  conns = await byId();
+  assert.deepEqual(conns.get(dir.principal.connectionId)!.scopes, ["market:read", "offline_access"]);
+  assert.deepEqual(conns.get(full.principal.connectionId)!.scopes, ["market:read", "offline_access", "portfolio:read", "trade:propose"]);
+  assert.ok((await at(full.tokens.access_token, "full"))?.scopes.has("trade:propose"), "the full connection's tokens keep working, unchanged");
+
+  // Reconnecting the full server starts from the full connection, and leaves the directory's alone.
+  const fullReq = await parkRequest(deps, full.clientId, { scope: EVERYTHING });
+  const fullView = await describeRequest(deps, fullReq, OWNER_A);
+  assert.ok(fullView.previous?.scopes.includes("trade:propose"));
+  const fullAgain = await decideRequest(deps, fullReq, OWNER_A, { approve: true, scopes: ["market:read", "portfolio:read"], agentSlugs: [SLUG_A] });
+  assert.equal(fullAgain.connectionId, full.principal.connectionId);
+  conns = await byId();
+  assert.deepEqual(conns.get(dir.principal.connectionId)!.scopes, ["market:read", "offline_access"]);
+  const dirP = await at(dir.tokens.access_token, "directory");
+  assert.deepEqual([...dirP!.scopes].sort(), ["market:read", "offline_access"], "the directory token still verifies, narrowed only by its own connection");
+
+  // At most one active connection per (owner, app, address), enforced by the database too.
+  assert.throws(() => d.raw.prepare(`INSERT INTO mcp_connections (id, tenant, client_id, kind, scopes, agent_slugs, status, created_at, updated_at, resource)
+    VALUES ('x1', ?, ?, 'oauth', 'market:read', '[]', 'active', 0, 0, ?)`).run(OWNER_A, full.clientId, DIR), /UNIQUE/);
+  assert.throws(() => d.raw.prepare(`INSERT INTO mcp_connections (id, tenant, client_id, kind, scopes, agent_slugs, status, created_at, updated_at, resource)
+    VALUES ('x2', ?, ?, 'oauth', 'market:read', '[]', 'active', 0, 0, NULL)`).run(OWNER_A, full.clientId), /UNIQUE/);
+
+  // Disconnecting one leaves the other working.
+  assert.ok(await revokeConnection(d, OWNER_A, dir.principal.connectionId, deps.now()));
+  assert.equal(await at(dir.tokens.access_token, "directory"), null);
+  assert.ok(await at(full.tokens.access_token, "full"));
+  assert.equal((await listConnections(d, OWNER_A)).length, 1);
+  // A fresh directory consent after the disconnect starts from the defaults, with a new connection.
+  const fresh = await parkRequest(deps, full.clientId, { resource: DIR, scope: EVERYTHING });
+  assert.equal((await describeRequest(deps, fresh, OWNER_A)).previous, null);
+});
+
+test("refresh keeps each token on its own address, on both; a moved or switched-off directory is invalid_grant and leaves /mcp alone", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const full = await connectAs(deps, OWNER_A);
+  const dir = await connectAs(deps, OWNER_A, { profile: "directory", clientId: full.clientId });
+  const client = await clientOf(deps, full.clientId);
+  const resourceOf = (token: string) => (d.raw.prepare("SELECT resource FROM mcp_tokens WHERE token_hash = ?").get(sha256hex(token)) as { resource: string }).resource;
+  const f2 = await refreshTokens(deps, refreshForm(full.tokens.refresh_token, full.clientId), client);
+  const d2 = await refreshTokens(deps, refreshForm(dir.tokens.refresh_token, full.clientId, { resource: DIR }), client);
+  assert.equal(resourceOf(f2.access_token), CANONICAL);
+  assert.equal(resourceOf(f2.refresh_token), CANONICAL);
+  assert.equal(resourceOf(d2.access_token), DIR);
+  assert.equal(resourceOf(d2.refresh_token), DIR);
+  assert.ok(await verifyAccessToken(d, deps.cfg, f2.access_token, deps.now(), "full"));
+  assert.equal(await verifyAccessToken(d, deps.cfg, f2.access_token, deps.now(), "directory"), null);
+  assert.ok(await verifyAccessToken(d, deps.cfg, d2.access_token, deps.now(), "directory"));
+  assert.equal(await verifyAccessToken(d, deps.cfg, d2.access_token, deps.now()), null);
+  // Asking to move a token to the other address is invalid_target, and spends nothing.
+  await assert.rejects(refreshTokens(deps, refreshForm(d2.refresh_token, full.clientId, { resource: CANONICAL }), client), (e: unknown) => e instanceof OAuthError && e.error === "invalid_target");
+  await assert.rejects(refreshTokens(deps, refreshForm(f2.refresh_token, full.clientId, { resource: DIR }), client), (e: unknown) => e instanceof OAuthError && e.error === "invalid_target");
+  // The directory address moved, or was switched off: its tokens say "connect again"; the full server's refresh as before.
+  for (const cfg of [testConfig({ directoryResource: "https://app.test/mcp/listing" }), testConfig({ directoryResource: "" })]) {
+    const moved = { ...deps, cfg };
+    await assert.rejects(refreshTokens(moved, refreshForm(d2.refresh_token, full.clientId), client), (e: unknown) => e instanceof OAuthError && e.error === "invalid_grant" && /Connect again/.test(e.description));
+    assert.equal(await verifyAccessToken(d, cfg, d2.access_token, deps.now(), "directory"), null);
+  }
+  const f3 = await refreshTokens({ ...deps, cfg: testConfig({ directoryResource: "" }) }, refreshForm(f2.refresh_token, full.clientId), client);
+  assert.ok(await verifyAccessToken(d, deps.cfg, f3.access_token, deps.now()));
+  // And the canonical endpoint moving is still caught for the canonical token (the existing rule).
+  await assert.rejects(refreshTokens({ ...deps, cfg: testConfig({ resource: "https://mcp.app.test/mcp" }) }, refreshForm(f3.refresh_token, full.clientId), client), /Connect again/);
+  // Where nothing moved, the directory token still refreshes.
+  assert.ok((await refreshTokens(deps, refreshForm(d2.refresh_token, full.clientId), client)).access_token);
+});
+
+test("personal access tokens are canonical only: never accepted at the directory endpoint", async () => {
+  const d = await makeTestDb();
+  const deps = makeDeps(d);
+  const pat = await createPersonalToken(d, deps.cfg, OWNER_A, { label: "Codex", scopes: ["market:read"], agentSlugs: [SLUG_A], days: 7 }, [SLUG_A], deps.now());
+  assert.ok(await verifyAccessToken(d, deps.cfg, pat.token, deps.now()));
+  assert.equal(await verifyAccessToken(d, deps.cfg, pat.token, deps.now(), "directory"), null);
+  // Even a personal token row relabelled with the directory address (never written by the server) is refused.
+  d.raw.prepare("UPDATE mcp_tokens SET resource = ? WHERE connection_id = ?").run(DIR, pat.connectionId);
+  d.raw.prepare("UPDATE mcp_connections SET resource = ? WHERE id = ?").run(DIR, pat.connectionId);
+  assert.equal(await verifyAccessToken(d, deps.cfg, pat.token, deps.now(), "directory"), null);
+  const [listed] = await listConnections(d, OWNER_A);
+  assert.equal(listed!.kind, "personal");
+});
+
+test("after the migration, a connection and tokens written before the resource column existed still verify, refresh and reconnect as the canonical ones", async () => {
+  // The database as it was: mcp_connections without `resource`, and the old (tenant, client_id) one-active index.
+  const OLD = MCP_SCHEMA.replace("revoked_why TEXT,\n  resource TEXT\n);", "revoked_why TEXT\n);").replace("(tenant, client_id, COALESCE(resource, ''))", "(tenant, client_id)");
+  assert.ok(!OLD.includes("COALESCE") && !OLD.includes("revoked_why TEXT,\n  resource TEXT"), "the old DDL was rebuilt");
+  const raw = new DatabaseSync(":memory:");
+  const db = wrapSqlite(raw);
+  await applyLedgerSchema(db);
+  await db.exec(OLD);
+  const d = { db, dialect: "sqlite" as const, raw };
+  const deps = makeDeps(d);
+  const now = deps.now();
+  const clientId = await publicClient(deps);
+  // Rows exactly as the old code wrote them.
+  const conn = randomId("mcpcon_");
+  raw.prepare(`INSERT INTO mcp_connections (id, tenant, client_id, client_name, client_host, kind, scopes, agent_slugs, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'Claude Code', '127.0.0.1', 'oauth', ?, ?, 'active', ?, ?)`).run(conn, OWNER_A, clientId, "market:read offline_access portfolio:read trade:propose", JSON.stringify([SLUG_A]), now, now);
+  const access = randomCredential("mcp_at_");
+  const refresh = randomCredential("mcp_rt_");
+  const family = randomId("fam_");
+  const tok = raw.prepare(`INSERT INTO mcp_tokens (token_hash, connection_id, kind, family, scopes, resource, client_id, label, created_at, expires_at, family_expires_at, used_at, revoked_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, NULL)`);
+  tok.run(sha256hex(access), conn, "access", family, "market:read offline_access portfolio:read trade:propose", CANONICAL, clientId, now, now + 3600, now + 86_400);
+  tok.run(sha256hex(refresh), conn, "refresh", family, "market:read offline_access portfolio:read trade:propose", CANONICAL, clientId, now, now + 86_400, now + 86_400);
+  assert.equal((raw.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('mcp_connections') WHERE name = 'resource'").get() as { n: number }).n, 0);
+
+  await ensureMcpSchema(db, "sqlite");
+  assert.equal((raw.prepare("SELECT resource FROM mcp_connections WHERE id = ?").get(conn) as { resource: string | null }).resource, null, "an old row reads as canonical");
+  assert.match((raw.prepare("SELECT sql FROM sqlite_master WHERE name = 'mcp_connections_one_active'").get() as { sql: string }).sql, /COALESCE\(resource, ''\)/);
+
+  const p = await verifyAccessToken(d, deps.cfg, access, now);
+  assert.equal(p?.connectionId, conn);
+  assert.equal(p?.profile, "full");
+  assert.ok(p?.scopes.has("trade:propose"), "nothing it held is lost");
+  assert.equal(await verifyAccessToken(d, deps.cfg, access, now, "directory"), null);
+  const client = await clientOf(deps, clientId);
+  const next = await refreshTokens(deps, refreshForm(refresh, clientId), client);
+  assert.ok((await verifyAccessToken(d, deps.cfg, next.access_token, now))?.scopes.has("trade:propose"));
+  assert.equal((await listConnections(d, OWNER_A))[0]!.profile, "full");
+  // A reconnect of the same app to the full server is that same (NULL) row; a directory connection sits beside it.
+  const req = await parkRequest(deps, clientId, { scope: EVERYTHING });
+  assert.ok((await describeRequest(deps, req, OWNER_A)).previous?.scopes.includes("trade:propose"));
+  assert.equal((await decideRequest(deps, req, OWNER_A, { approve: true, scopes: ["market:read", "trade:propose"], agentSlugs: [SLUG_A] })).connectionId, conn);
+  const dir = await connectAs(deps, OWNER_A, { profile: "directory", clientId });
+  assert.notEqual(dir.principal.connectionId, conn);
+  assert.equal((await listConnections(d, OWNER_A)).length, 2);
+  assert.ok((await verifyAccessToken(d, deps.cfg, next.access_token, now))?.scopes.has("trade:propose"), "the old connection kept its grant");
+});
+
+/** mcpConfig reads hosted mode from process.env (isHostedMode), everything else from the env it is given. */
+function hostedConfig(env: Record<string, string>): ReturnType<typeof mcpConfig> {
+  const saved = process.env.MERRYMEN_HOSTED;
+  process.env.MERRYMEN_HOSTED = "1";
+  try {
+    return mcpConfig({ DATABASE_URL: "postgres://unused-in-tests", MERRYMEN_SESSION_SECRET: "s".repeat(48), ...env } as unknown as NodeJS.ProcessEnv);
+  } finally {
+    if (saved === undefined) delete process.env.MERRYMEN_HOSTED;
+    else process.env.MERRYMEN_HOSTED = saved;
+  }
+}
+
+const PRODUCTION_RESOURCE = "https://mcp.merrymen.dev/mcp";
+const PRODUCTION_ENV = { MERRYMEN_PUBLIC_ORIGIN: "https://app.merrymen.dev", MERRYMEN_MCP_RESOURCE_URL: PRODUCTION_RESOURCE };
+
+test("canonical resource: production's MERRYMEN_MCP_RESOURCE_URL gives the same resource string, metadata and challenge as before", () => {
+  const cfg = hostedConfig(PRODUCTION_ENV);
+  assert.equal(cfg.enabled, true, String(cfg.disabledWhy));
+  assert.equal(cfg.resource, PRODUCTION_RESOURCE, "byte-identical: every existing token is bound to exactly this");
+  assert.equal(cfg.issuer, "https://app.merrymen.dev");
+  assert.equal(resourcePath(cfg), CANONICAL_ROUTE_PATH);
+  assert.equal(protectedResourceMetadataUrl(cfg), "https://mcp.merrymen.dev/.well-known/oauth-protected-resource/mcp");
+  assert.equal(protectedResourceMetadata(cfg).resource, PRODUCTION_RESOURCE);
+  assert.match(bearerChallenge(cfg), /resource_metadata="https:\/\/mcp\.merrymen\.dev\/\.well-known\/oauth-protected-resource\/mcp"/);
+  assert.ok(cfg.allowedHosts.has("mcp.merrymen.dev") && cfg.allowedHosts.has("app.merrymen.dev"));
+  // Spellings of the same URL normalise to the same string, as they always did.
+  for (const same of ["https://mcp.merrymen.dev/mcp/", "https://mcp.merrymen.dev/mcp//", " https://MCP.merrymen.dev/mcp ", "https://mcp.merrymen.dev:443/mcp"]) {
+    assert.equal(hostedConfig({ ...PRODUCTION_ENV, MERRYMEN_MCP_RESOURCE_URL: same }).resource, PRODUCTION_RESOURCE, same);
+  }
+  // Unset, it is the issuer's own /mcp; and the origin alone may be moved.
+  assert.equal(hostedConfig({ MERRYMEN_PUBLIC_ORIGIN: "https://app.merrymen.dev" }).resource, "https://app.merrymen.dev/mcp");
+  const moved = hostedConfig({ ...PRODUCTION_ENV, MERRYMEN_MCP_RESOURCE_URL: "https://mcp.test:8443/mcp" });
+  assert.equal(moved.enabled, true);
+  assert.equal(moved.resource, "https://mcp.test:8443/mcp");
+  assert.ok(moved.allowedHosts.has("mcp.test:8443"));
+});
+
+test("canonical resource: a token and refresh token minted under production's configuration still work under it", async () => {
+  const d = await makeTestDb();
+  // As production's config read before the path rule: the same issuer and resource strings.
+  const before = makeDeps(d, { cfg: testConfig({ issuer: "https://app.merrymen.dev", resource: PRODUCTION_RESOURCE, allowedHosts: new Set(["app.merrymen.dev", "mcp.merrymen.dev"]) }) });
+  const { tokens, clientId } = await connectAs(before, OWNER_A);
+  const after = makeDeps(d, { cfg: hostedConfig(PRODUCTION_ENV) });
+  assert.ok(await verifyAccessToken(d, after.cfg, tokens.access_token, after.now()), "the access token still verifies");
+  const client = await resolveClient(d, clientId, after.now(), { ownHosts: ownHostsOf(after.cfg) });
+  const refreshed = await refreshTokens(after, new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: clientId, resource: PRODUCTION_RESOURCE }), client);
+  assert.ok(await verifyAccessToken(d, after.cfg, refreshed.access_token, after.now()), "and refreshing does not ask the owner to reconnect");
+});
+
+test("canonical resource: only the origin may change; any other path (the root included) switches MCP off and names MERRYMEN_MCP_RESOURCE_URL", () => {
+  // app/mcp/route.ts is the only route that serves the endpoint and
+  // next.config.mjs has no rewrites, so every one of these was advertised (in
+  // llms.txt, health, the protected-resource metadata, the 401 challenge and
+  // the install links) and answered every client POST with 404.
+  for (const bad of [
+    "https://mcp.test/v2/mcp", "https://mcp.test/", "https://mcp.test", "https://mcp.test/MCP", "https://mcp.test/mcpx",
+    "https://mcp.test/mcp/directory", "https://mcp.test/mcp/x", "https://mcp.test/api/mcp", "https://mcp.test/%6Dcp", "https://app.merrymen.dev/v1/mcp",
+  ]) {
+    const cfg = hostedConfig({ ...PRODUCTION_ENV, MERRYMEN_MCP_RESOURCE_URL: bad });
+    assert.equal(cfg.enabled, false, bad);
+    assert.equal(cfg.resource, "", `${bad}: nothing to advertise`);
+    assert.equal(cfg.disabledWhy, "MERRYMEN_MCP_RESOURCE_URL must have the path /mcp, the only path the MCP endpoint is served at (only the origin may change)", bad);
+    assert.deepEqual([...cfg.allowedHosts], ["app.merrymen.dev"], `${bad}: treated like an unusable URL, so its host is not allowed either`);
+  }
+  // An unusable URL keeps its own reason.
+  for (const bad of ["http://mcp.test/mcp", "not a url", "https://mcp.test/mcp?x=1", "https://mcp.test/mcp#f", "https://u:p@mcp.test/mcp"]) {
+    const cfg = hostedConfig({ ...PRODUCTION_ENV, MERRYMEN_MCP_RESOURCE_URL: bad });
+    assert.equal(cfg.enabled, false, bad);
+    assert.equal(cfg.disabledWhy, "MERRYMEN_MCP_RESOURCE_URL must be an https URL", bad);
   }
 });

@@ -35,6 +35,12 @@ export type ScopeLevel = "read" | "write" | "sensitive" | "staff";
 export interface ScopeInfo {
   id: string;
   title: string;
+  /**
+   * The title as a short lowercase noun phrase, for the consent screen's
+   * one-line summary, where it is listed under a verb ("See", "Do", "Suggest,
+   * only with your approval"): "your portfolio and trades", "backtests".
+   */
+  phrase: string;
   /** Plain-language consent text: what the connected app can do. */
   detail: string;
   level: ScopeLevel;
@@ -49,78 +55,91 @@ export const SCOPES: readonly ScopeInfo[] = [
   {
     id: "market:read", level: "read", needsAgent: false, defaultOn: true,
     title: "Research markets and public agents",
+    phrase: "market and public-agent research",
     detail: "Search tokens, read prices, candles, liquidity and public agent profiles, theses and leaderboards. Nothing private.",
     capabilities: ["market.read"],
   },
   {
     id: "agents:read", level: "read", needsAgent: true, defaultOn: true,
     title: "See your agent’s status and settings",
+    phrase: "your agent’s status and settings",
     detail: "Its mode (paper or live), strategy, limits, permission expiry and whether it is running.",
     capabilities: ["agents.read"],
   },
   {
     id: "portfolio:read", level: "read", needsAgent: true, defaultOn: true,
     title: "See your portfolio and trades",
+    phrase: "your portfolio and trades",
     detail: "Cash, savings, positions, profit and loss, fees and your trade history with receipts.",
     capabilities: ["portfolio.read"],
   },
   {
     id: "decisions:read", level: "read", needsAgent: true, defaultOn: true,
     title: "See your agent’s decisions",
+    phrase: "your agent’s decisions",
     detail: "What it decided and why, what it refused, and why it has not traded.",
     capabilities: ["decisions.read"],
   },
   {
     id: "reports:read", level: "read", needsAgent: true, defaultOn: true,
     title: "Create reports and exports",
+    phrase: "reports and exports",
     detail: "Daily and weekly summaries and downloadable portfolio or trade exports that expire after a day.",
     capabilities: ["reports.read"],
   },
   {
     id: "chat:write", level: "write", needsAgent: true, defaultOn: true,
     title: "Talk with your agent",
+    phrase: "chats with your agent",
     detail: "Send it messages and research notes and read the replies. Messages cannot change settings or place trades.",
     capabilities: ["chat.send", "research.submit"],
   },
   {
     id: "watchlist:manage", level: "write", needsAgent: false, defaultOn: true,
     title: "Manage your watchlist",
+    phrase: "your watchlist",
     detail: "Add and remove tokens you are watching. Watching a token never buys it.",
     capabilities: ["watchlist.manage"],
   },
   {
     id: "notifications:manage", level: "write", needsAgent: true, defaultOn: true,
     title: "Manage your alerts",
+    phrase: "your alerts",
     detail: "Choose which alerts your agent sends to your linked Telegram, and see whether they were delivered.",
     capabilities: ["notifications.manage"],
   },
   {
     id: "jobs:run", level: "write", needsAgent: false, defaultOn: true,
     title: "Run backtests",
+    phrase: "backtests",
     detail: "Run historical strategy tests. Results are simulations, never promises of live returns.",
     capabilities: ["jobs.run"],
   },
   {
     id: "drafts:write", level: "sensitive", needsAgent: false, defaultOn: false,
     title: "Suggest setting changes for you to approve",
+    phrase: "setting-change suggestions",
     detail: "Prepare agent drafts and setting changes. Nothing changes until you approve it in Merrymen.",
     capabilities: ["drafts.write"],
   },
   {
     id: "trade:propose", level: "sensitive", needsAgent: true, defaultOn: false,
     title: "Suggest trades for you to approve",
+    phrase: "trade suggestions",
     detail: "Get quotes and prepare exact trade proposals. Nothing is bought or sold until you approve it in Merrymen, and your agent’s limits still apply.",
     capabilities: ["trade.propose"],
   },
   {
     id: "social:write", level: "sensitive", needsAgent: true, defaultOn: false,
     title: "Follow agents and draft posts",
+    phrase: "follows and draft posts",
     detail: "Follow or unfollow public agents for research and draft posts. A post is published only after you approve it in Merrymen. Following never copies trades.",
     capabilities: ["social.write"],
   },
   {
     id: "staff:diagnostics", level: "staff", needsAgent: false, defaultOn: false,
     title: "Merrymen staff diagnostics",
+    phrase: "fleet health and error diagnostics",
     detail: "Fleet health, provider errors and execution failures, with owners’ private data redacted. Staff only.",
     capabilities: ["staff.diagnostics"],
   },
@@ -130,6 +149,7 @@ export const SCOPES: readonly ScopeInfo[] = [
     // refresh tokens are issued whether or not a client asks for this.
     id: "offline_access", level: "read", needsAgent: false, defaultOn: true,
     title: "Offline access (compatibility only)",
+    phrase: "offline access (compatibility only)",
     detail: "Accepted for compatibility with standard OAuth clients; it grants nothing extra. Every app connected through sign-in gets refresh tokens whether or not it asks for this scope (a personal access token has none), and access ends when you disconnect the app on Connected apps or the connection reaches its time limit.",
     capabilities: [],
   },
@@ -143,6 +163,37 @@ export function scopeInfo(id: string): ScopeInfo | undefined {
 
 /** Scopes advertised to clients (the staff scope is never advertised). */
 export const ADVERTISED_SCOPES: readonly string[] = SCOPES.filter((s) => s.level !== "staff").map((s) => s.id);
+
+/**
+ * Which server a connection reaches. "full" is the canonical endpoint (/mcp,
+ * custom connectors and personal tokens). "directory" is the limited profile
+ * listed in Anthropic's connector directory (/mcp/directory): the same server
+ * with every sensitive scope (trade:propose, drafts:write, social:write) and
+ * the staff scope impossible to grant, so nothing reached through the listing
+ * can prepare a trade, a setting change, an agent draft, a follow or a post,
+ * even for the owner's own approval.
+ */
+export type McpProfile = "full" | "directory";
+
+/**
+ * The scopes the directory profile can hold: the read and write levels only.
+ * By level, not by name, so a sensitive scope added later is excluded from
+ * the listing until someone decides otherwise (fail closed).
+ */
+export const DIRECTORY_SCOPES: readonly string[] = SCOPES.filter((s) => s.level === "read" || s.level === "write").map((s) => s.id);
+
+const DIRECTORY_SET = new Set(DIRECTORY_SCOPES);
+
+/** May a connection on this profile hold this scope at all? Unknown scopes never. */
+export function scopeAllowedIn(profile: McpProfile, id: string): boolean {
+  if (!BY_ID.has(id)) return false;
+  return profile === "full" || DIRECTORY_SET.has(id);
+}
+
+/** Scopes advertised for a profile's resource (discovery metadata, the 401 challenge). */
+export function advertisedScopesFor(profile: McpProfile): readonly string[] {
+  return profile === "directory" ? ADVERTISED_SCOPES.filter((s) => DIRECTORY_SET.has(s)) : ADVERTISED_SCOPES;
+}
 
 /** What a client gets asked for when it requests no scope at all: read access plus chat. */
 export const DEFAULT_REQUEST_SCOPES: readonly string[] = [
@@ -171,6 +222,11 @@ export function parseScopeParam(raw: string | null | undefined, opts: { staff: b
     out.add(s);
   }
   return [...out].sort();
+}
+
+/** May a connection on this profile use this capability at all (whatever it holds)? */
+export function capabilityAllowedIn(profile: McpProfile, capability: Capability): boolean {
+  return scopeAllowedIn(profile, scopeFor(capability));
 }
 
 export function normalizeScopes(list: readonly string[]): string[] {

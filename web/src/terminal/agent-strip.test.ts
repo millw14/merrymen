@@ -22,16 +22,21 @@ const originalFetch = globalThis.fetch;
 let allowed: boolean | undefined;
 /** What /api/settings says of the tenant: an address hosted, null self-hosted. */
 let owner: string | null;
+let heldReason: string | null;
 
 beforeEach(() => {
   ui = testDom();
   owner = "0x" + "a".repeat(40);
+  heldReason = null;
   // A Next <Link> on the strip schedules its prefetch through `self`.
   (globalThis as { self?: unknown }).self = ui.dom.window;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url === "/api/settings") {
       return json({ values: { strategy: "trencher", assetMode: "crypto", trencherLiveEnabled: allowed }, owner });
+    }
+    if (url === "/api/telegram" && heldReason !== null) {
+      return json({ hasToken: false, tradingHeld: heldReason });
     }
     return json({ error: "not scripted" }, 404);
   }) as typeof fetch;
@@ -61,6 +66,17 @@ async function trencherLine(mode: AgentMode, permission: boolean | undefined) {
 }
 
 describe("the strip's Trencher line says whose money", () => {
+  it("keeps the trading hold warning alongside the paper rail when no bot is connected", async () => {
+    heldReason = "ledger-unavailable";
+    const line = await trencherLine("paper", true);
+    assert.equal(line.value, "on, practice money only");
+    const first = ui.container.querySelector(".agent-strip-row");
+    assert.equal(first?.querySelector(".agent-strip-label")?.textContent, "Trading");
+    assert.equal(first?.querySelector(".agent-strip-value")?.textContent, "held");
+    assert.equal(first?.classList.contains("is-warn"), true);
+    assert.match(first?.textContent ?? "", /ledger-unavailable/);
+  });
+
   it("A PAPER AGENT WITH THE BOX TICKED IS PRACTICE MONEY, not real money", async () => {
     const line = await trencherLine("paper", true);
     assert.equal(line.value, "on, practice money only");

@@ -8,7 +8,7 @@ const ownerTag = (tenant: string) => createHash("sha256").update(`cursor:${tenan
 
 export const AGENT_ARG = z.string().regex(/^[0-9a-hjkmnp-tv-z]{16}$/, "an agent id from list_agents")
   .optional()
-  .describe("Agent id from list_agents. Optional when exactly one agent is shared with this connection.");
+  .describe("The id of an agent shared with this connection. Optional when exactly one agent is shared.");
 
 export const ADDRESS_ARG = z.string().regex(/^0x[0-9a-fA-F]{40}$/, "a 0x-prefixed 20-byte address");
 

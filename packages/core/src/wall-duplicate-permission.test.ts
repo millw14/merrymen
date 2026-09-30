@@ -34,6 +34,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildCallPermissions } from "./wall";
+import { ENERGY_ROUTE_V1 } from "./energy";
 
 const SELF = "0x1111111111111111111111111111111111111111";
 const CAPS = { perTradeUsdg: 10, dailyUsdg: 500, maxOpsPerDay: 24, maxDrawdownBps: 500, expiryDays: 7 };
@@ -76,8 +77,23 @@ test("nor does it with every optional rail switched on at once", () => {
     v4AdapterAddress: "0x6666666666666666666666666666666666666666",
     ponsAdapterAddress: "0x7777777777777777777777777777777777777777",
     withdrawalAddresses: ["0x8888888888888888888888888888888888888888"],
+    // The energy buy is the newest rail and the one that most invites the
+    // Trencher mistake: its router pulls USDG, so the obvious build is a second
+    // USDG `approve` scoped to the router — the exact (target, selector) pair
+    // the ordinary approve already holds.
+    energyBuy: true,
   } as never;
   assert.deepEqual(duplicatesIn(buildCallPermissions(CAPS as never, SELF, everything) as never), []);
+});
+
+test("the energy router is a USDG spender through the ONE approve, not a second one", () => {
+  const wall = buildCallPermissions(CAPS as never, SELF, { energyBuy: true } as never) as readonly {
+    target: string; functionName?: string; args?: readonly (null | { value?: unknown })[];
+  }[];
+  const approvals = wall.filter((p) => p.functionName === "approve" && /^0x5fc5360d/i.test(p.target));
+  assert.equal(approvals.length, 1, "exactly one USDG approve permission");
+  const spenders = (approvals[0]!.args?.[0]?.value as string[]).map((a) => a.toLowerCase());
+  assert.ok(spenders.includes(ENERGY_ROUTE_V1.router), "the router rides in that approve's ONE_OF");
 });
 
 test("the Trencher vault is still an approved USDG spender after any de-duplication", () => {

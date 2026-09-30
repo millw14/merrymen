@@ -32,6 +32,7 @@
  */
 import { mcpConfig } from "./config";
 import type { ResourceDef } from "./resources";
+import type { Capability } from "./scopes";
 import type { ToolDef } from "./tool";
 
 /** MIME type the extension defines for a view (RESOURCE_MIME_TYPE in @modelcontextprotocol/ext-apps). */
@@ -1434,9 +1435,9 @@ function renderQuote(parent, q, standalone) {
 const CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'";
 
 const VIEWS: Record<AppView, { title: string; js: string; description: string }> = {
-  portfolio: { title: "Merrymen portfolio", js: PORTFOLIO_JS, description: "Renders get_portfolio and get_performance: paper and live books side by side, never summed." },
-  decision: { title: "Merrymen decision", js: DECISION_JS, description: "Renders explain_agent_inactivity and get_decision: the primary cause, each check's status, evidence and what the owner can do." },
-  token: { title: "Merrymen token", js: TOKEN_JS, description: "Renders get_token, search_tokens and check_token_eligibility: discoverable, priceable and executable, with third-party text marked." },
+  portfolio: { title: "Merrymen portfolio", js: PORTFOLIO_JS, description: "Renders a portfolio and its performance: paper and live books side by side, never summed." },
+  decision: { title: "Merrymen decision", js: DECISION_JS, description: "Renders why an agent has not traded, or one of its decisions: the primary cause, each check's status, evidence and what the owner can do." },
+  token: { title: "Merrymen token", js: TOKEN_JS, description: "Renders a token's market data, a token search or a trade-eligibility check: discoverable, priceable and executable, with third-party text marked." },
   proposal: { title: "Merrymen proposal", js: PROPOSAL_JS, description: "Renders quote_trade, propose_trade and get_proposal: the paper or live banner, the status timeline and the approval link." },
 };
 
@@ -1477,6 +1478,9 @@ export interface AppResourceDef extends ResourceDef {
   meta: Readonly<Record<string, unknown>>;
 }
 
+/** The capabilities the tools the proposal view renders are reachable with (tools/proposals.ts, ANY_PROPOSAL). */
+const PROPOSAL_VIEW_CAPABILITIES: readonly Capability[] = ["trade.propose", "drafts.write", "social.write"];
+
 function appResource(view: AppView): AppResourceDef {
   const v = VIEWS[view];
   return {
@@ -1486,6 +1490,11 @@ function appResource(view: AppView): AppResourceDef {
     mimeType: MCP_APP_MIME,
     // Pure presentation: the page carries no owner data, so it needs no scope.
     capability: null,
+    // The proposal view renders only quote_trade, propose_trade and
+    // get_proposal, none of which exist on the directory profile, so it is not
+    // listed there. Still no scope: any connection that can hold one of these
+    // may read it.
+    ...(view === "proposal" ? { profileAnyOf: PROPOSAL_VIEW_CAPABILITIES } : {}),
     uri: APP_VIEW_URI[view],
     meta: APP_RESOURCE_META,
     async read() {

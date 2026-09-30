@@ -36,6 +36,23 @@ export type CapitalKind =
   | "trade-out"
   /** USDG received selling something — the buy leg of a swap. Not capital. */
   | "trade-in"
+  /**
+   * USDG spent buying the ENERGY RESERVE into the account itself.
+   *
+   * Capital leaving the trading BOOK while staying in the account: not a trade,
+   * because what it bought is never a position (never watched, never valued,
+   * never sold by a strategy), and not a withdrawal to an outside address,
+   * because nothing left the account. It sits beside `capital-out` rather than
+   * inside it for one reason that matters: the live deposit scanner books every
+   * `capital-in`/`capital-out` it sees, and the worker already books this one
+   * itself at landing — a second booker that dedupes the row but moves the
+   * high-water mark again is the Shogun double-lowering. So the live scanner
+   * logs this kind as "not capital", and only the fleet tools (chain-capital,
+   * hwm-repair, reconstruction) count it as capital leaving the book.
+   *
+   * Only produced when the caller passes `reserveTokens`; see ClassifyInput.
+   */
+  | "reserve-out"
   /** A movement between accounts this system controls. Not external capital. */
   | "internal"
   /**
@@ -117,6 +134,21 @@ export interface ClassifyInput {
    * is byte-identical to before this field existed.
    */
   custodyAddresses?: readonly string[];
+  /**
+   * Tokens held as ENERGY rather than traded — energyReserveTokens(chainId).
+   *
+   * A USDG outflow whose ONLY inbound pair is one of these, landing at the
+   * account itself, is `reserve-out` rather than `trade-out`. Every other shape
+   * is unchanged: a mixed batch (a reserve token AND anything else arriving)
+   * stays a trade, because part of it bought a position; a reserve landing at a
+   * custody vault stays a trade, because the energy route delivers to the
+   * account and nothing else is that route. There is no `reserve-in` — selling
+   * the reserve back is unsupported, so USDG arriving against a reserve token
+   * leaving stays `trade-in`.
+   *
+   * Absent or empty is byte-identical to before this field existed.
+   */
+  reserveTokens?: readonly string[];
 }
 
 /**
@@ -134,6 +166,7 @@ export interface ClassificationEvidence {
   /** The rule that fired, so two verdicts can be compared without reading prose. */
   rule:
     | "paired-token-movement"
+    | "reserve-purchase"
     | "custody-transfer"
     | "known-account"
     | "system-address"
@@ -203,6 +236,28 @@ export function classifyUsdgMovement(input: ClassifyInput): Classification {
       BigInt(l.amountRaw || "0") > 0n,
   );
   if (paired) {
+    // ── THE ENERGY RESERVE: a paired movement that is not a trade. ──────────
+    //
+    // Decided on the same transaction context as a trade, then narrowed: EVERY
+    // token that arrived must be a reserve token and must have arrived at the
+    // account itself. One other token arriving makes it a (mixed) trade, which
+    // is the conservative reading — a trade leaves contributions alone, while a
+    // wrong reserve-out would lower them.
+    if (outbound && (input.reserveTokens?.length ?? 0) > 0) {
+      const arrived = txLegs.filter(
+        (l) => !eq(l.token, usdgToken) && ours(l.to) && BigInt(l.amountRaw || "0") > 0n,
+      );
+      if (arrived.every((l) => has(input.reserveTokens, l.token) && eq(l.to, account))) {
+        return {
+          kind: "reserve-out",
+          pairedToken: paired.token,
+          why:
+            `the same transaction moved ${paired.token} INTO the account, and it is the energy reserve — this USDG ` +
+            `was set aside outside the trading book, not spent on a position and not sent anywhere`,
+          evidence: { ...base, rule: "reserve-purchase" },
+        };
+      }
+    }
     const custodied = outbound ? !eq(paired.to, account) : !eq(paired.from, account);
     return {
       kind: outbound ? "trade-out" : "trade-in",
@@ -277,9 +332,16 @@ export function classifyUsdgMovement(input: ClassifyInput): Classification {
 export interface CapitalTotals {
   /** Σ external capital in. Non-zero even for an account that later withdrew it all. */
   grossContributionsRaw: string;
-  /** Σ external capital out. */
+  /** Σ external capital out. Withdrawals to an outside address ONLY — never the energy reserve. */
   grossWithdrawalsRaw: string;
-  /** in − out. May be zero while both figures above are large. */
+  /**
+   * Σ USDG spent buying the energy reserve (`reserve-out`). Capital that left
+   * the trading book without leaving the account, kept apart from withdrawals
+   * so "the owner took money home" and "the agent bought its energy" stay two
+   * different facts.
+   */
+  grossReservePurchasesRaw: string;
+  /** in − out − reserve. May be zero while the figures above are large. */
   netContributionsRaw: string;
   /** Movements the classifier refused to decide. A repair must not touch these. */
   ambiguous: number;
@@ -287,6 +349,8 @@ export interface CapitalTotals {
   internal: number;
   /** Movements to chain infrastructure. Never capital, never a trade. */
   protocol: number;
+  /** How many `reserve-out` movements the total above is made of. */
+  reservePurchases: number;
 }
 
 /**
@@ -301,6 +365,8 @@ export function totalCapital(
 ): CapitalTotals {
   let inRaw = 0n;
   let outRaw = 0n;
+  let reserveRaw = 0n;
+  let reservePurchases = 0;
   let ambiguous = 0;
   let tradeLegs = 0;
   let internal = 0;
@@ -313,6 +379,12 @@ export function totalCapital(
         break;
       case "capital-out":
         outRaw += amt;
+        break;
+      case "reserve-out":
+        // Capital leaving the book — it lowers net contributions exactly as a
+        // withdrawal does, so P&L (equity − contributions) is unmoved by it.
+        reserveRaw += amt;
+        reservePurchases += 1;
         break;
       case "trade-in":
       case "trade-out":
@@ -332,10 +404,12 @@ export function totalCapital(
   return {
     grossContributionsRaw: inRaw.toString(),
     grossWithdrawalsRaw: outRaw.toString(),
-    netContributionsRaw: (inRaw - outRaw).toString(),
+    grossReservePurchasesRaw: reserveRaw.toString(),
+    netContributionsRaw: (inRaw - outRaw - reserveRaw).toString(),
     ambiguous,
     tradeLegs,
     internal,
     protocol,
+    reservePurchases,
   };
 }

@@ -40,7 +40,8 @@ import { labelText, shortAddr, tokenLabel, tokenLabelSync } from "../token-label
 import { readTokenMeta, sanitizeMeta, type TokenMeta } from "../venues/pons-meta";
 import { carriedDecisionsFrom, carriedHistory, historyFileKey, overlayHistory } from "./history-overlay";
 import { accountSeries, bookOf, periodChange, type PeriodChange } from "../period-pnl";
-import { agentEpoch, openRO, readPositions, resolveAgent, type StatusContext } from "./reads";
+import { heldSqlSync, isHeld } from "../held-marks";
+import { agentEpoch, energyStatusLine, openRO, readPositions, redactAddresses, resolveAgent, type StatusContext } from "./reads";
 import { settingsListText } from "./settings-chat";
 import { settleFor, signNeed, type SignNeed } from "./sign-prompt";
 import { isActiveClassState, isQuoteTokenRow } from "../class-active";
@@ -307,6 +308,12 @@ const agentStatus: ChatTool = {
               : "Mode: live trading is OFF, so no real orders are placed.",
         );
         lines.push(ctx.paused ? "The owner's PAUSE button is ON — I place no new trades until they resume." : "The pause button is off.");
+        // TODAY'S ENERGY, when the gate enforces — the same line /status shows,
+        // from the worker's own report. It paces what I start on my own — my
+        // AI reviews too, including of my open positions; it never limits
+        // stop-losses, take-profits or the owner's own orders.
+        const energy = energyStatusLine(s.energy, ctx.now);
+        if (energy) lines.push(`Energy: ${energy.replace(/^• energy: /, "")}.`);
         const alive = s.workerAliveSec !== null && s.workerAliveSec < 90;
         if (!alive) lines.push("My trading loop has not checked in for a while — I may be restarting.");
 
@@ -379,6 +386,8 @@ const agentStatus: ChatTool = {
         }
 
         try {
+          // What the account is worth NOW: the newest reading, taken mid-hold or
+          // not (held-marks.ts). It is no return, so nothing unbooked can skew it.
           const eq = db.prepare("SELECT equity_usdg, at FROM equity WHERE agent_id = ? ORDER BY at DESC, id DESC LIMIT 1").get(who) as
             | { equity_usdg: number; at: number }
             | undefined;
@@ -440,6 +449,9 @@ function periodStart(period: string, now: number): { since: number; label: strin
   return { since: now - (now % 86_400), label: "today (since 00:00 UTC)" };
 }
 
+/** Why a change stops short of the newest reading (held-marks.ts): its cash may carry a movement not booked yet. */
+const SETTLING = "a deposit, withdrawal or purchase was still settling";
+
 /** Readings the P&L breakdown reads at most (about nine days on a fifteen-second tick). */
 const LOCAL_MARKS_MAX = 50_000;
 
@@ -460,31 +472,58 @@ const NOT_A_COPY = "NOT (kind = 'swap' AND target IS NOT NULL AND lower(target) 
  * anything else would count a stretch twice. When the ledger already holds a
  * reading at or before `since`, the period opens there and the carried part
  * is not needed at all.
+ *
+ * ONLY MEASURED READINGS (held-marks.ts). A reading taken while flow
+ * inference was held can carry a deposit, a withdrawal or a purchase the
+ * flows table has not booked yet: as the period's close it is a change no
+ * booked flow explains, and inside a continuous run — where a step counts its
+ * booked flows, not its cash — the owner's own money lands in "trading". So
+ * the series is built from measured readings alone, and a flow booked during
+ * the hold falls in the step to the first measured reading after it, whose
+ * cash does carry it. The book is still the newest reading's, held or not;
+ * `newestHeld` is that reading when it was held, so the answer can say why it
+ * stops short of it.
  */
-function accountChange(db: DatabaseSync, who: string, since: number): PeriodChange {
+function accountChange(
+  db: DatabaseSync,
+  who: string,
+  since: number,
+): { change: PeriodChange; newestHeld: { at: number; equity: number } | null } {
   try {
     const epoch = agentEpoch(db, who);
+    const held = heldSqlSync(db);
     // Where this ledger's own record starts: its first reading OR flow. A run
     // that booked a deposit and died before its first reading still began then.
     const firstMark = scalar(db, "SELECT MIN(at) AS t FROM main.equity WHERE agent_id = ? AND epoch = ?", who, epoch);
     const firstFlow = scalar(db, "SELECT MIN(at) AS t FROM main.flows WHERE agent_id = ? AND epoch = ?", who, epoch);
     const firstLocal = firstMark === null ? firstFlow : firstFlow === null ? firstMark : Math.min(firstMark, firstFlow);
-    const before = scalar(db, "SELECT MAX(at) AS t FROM main.equity WHERE agent_id = ? AND epoch = ? AND at <= ?", who, epoch, since);
+    // The period opens on a MEASURED reading: one taken mid-hold is no more an
+    // opening figure than a closing one.
+    const before = scalar(
+      db,
+      `SELECT MAX(at) AS t FROM main.equity WHERE agent_id = ? AND epoch = ? AND at <= ? AND ${held.measurable()}`,
+      who,
+      epoch,
+      since,
+    );
     const from = before ?? 0;
     // Newest LOCAL_MARKS_MAX readings at most (about nine days on a fifteen-
     // second tick): this runs inside the process that trades, and "all" on a
     // long-lived ledger is every reading it holds.
-    const local = (
+    const read = (
       db
-        .prepare("SELECT at, mode, equity_usdg AS equity, cash_usdg AS cash FROM main.equity WHERE agent_id = ? AND epoch = ? AND at >= ? ORDER BY at DESC, id DESC LIMIT ?")
-        .all(who, epoch, from, LOCAL_MARKS_MAX) as { at: number; mode: string | null; equity: number; cash: number }[]
-    )
-      .reverse()
-      .map((m) => ({ at: m.at, equity: m.equity, cash: m.cash, book: bookOf(m.mode) }));
+        .prepare(
+          `SELECT at, mode, equity_usdg AS equity, cash_usdg AS cash, ${held.flag()} AS held FROM main.equity
+            WHERE agent_id = ? AND epoch = ? AND at >= ? ORDER BY at DESC, id DESC LIMIT ?`,
+        )
+        .all(who, epoch, from, LOCAL_MARKS_MAX) as { at: number; mode: string | null; equity: number; cash: number; held: unknown }[]
+    ).reverse();
+    const newest = read[read.length - 1];
+    const local = read.filter((m) => !isHeld(m.held)).map((m) => ({ at: m.at, equity: m.equity, cash: m.cash, book: bookOf(m.mode) }));
     // Cut short, the period opens at the oldest reading read — and the carried
     // record is not joined: its seam would be judged against that reading, a
     // stretch of this ledger's own days folded into one step.
-    const cut = local.length >= LOCAL_MARKS_MAX && firstMark !== null && local[0]!.at > firstMark;
+    const cut = read.length >= LOCAL_MARKS_MAX && firstMark !== null && read[0]!.at > firstMark;
     const acct = before === null && !cut ? carriedHistory(who)?.account : null;
     const carried = acct && acct.epoch === epoch && acct.points.length && (firstLocal === null || firstLocal >= acct.until) ? acct : null;
     const localFlows = (
@@ -510,9 +549,12 @@ function accountChange(db: DatabaseSync, who: string, since: number): PeriodChan
       localBreaks: [PROCESS_START_SEC],
       tradeTimes: { paper: trades.filter((t) => t.status === "paper").map((t) => t.at), live: trades.filter((t) => t.status !== "paper").map((t) => t.at) },
     });
-    return periodChange(series, since);
+    return {
+      change: periodChange(series, since, newest ? bookOf(newest.mode) : undefined),
+      newestHeld: newest && isHeld(newest.held) ? { at: newest.at, equity: newest.equity } : null,
+    };
   } catch {
-    return { kind: "none" };
+    return { change: { kind: "none" }, newestHeld: null };
   }
 }
 
@@ -533,11 +575,16 @@ const pnlBreakdown: ChatTool = {
       async (db, who) => {
         const { since, label } = periodStart(str(input.period) || "today", ctx.now);
         const lines: string[] = [`Period: ${label}.`];
-        const pc = accountChange(db, who, since);
+        const { change: pc, newestHeld } = accountChange(db, who, since);
         const signed = (n: number) => `${n >= 0 ? "+" : "−"}${dollars(Math.abs(n))}`;
         if (pc.kind === "change") {
           const { open, close } = pc;
           lines.push(`Account value went from ${dollars(open.equity)} (${when(open.at)}) to ${dollars(close.equity)} (${when(close.at)}): ${signed(pc.change)}.`);
+          if (newestHeld && newestHeld.at > close.at) {
+            lines.push(
+              `My newest reading, ${dollars(newestHeld.equity)} (${when(newestHeld.at)}), is what the account is worth now, but it was taken while ${SETTLING}, so the change above stops at ${when(close.at)}.`,
+            );
+          }
           if (open.carried) lines.push("The first figure is from before my last restart; my records are joined across it.");
           const parts: string[] = [];
           if (Math.abs(pc.flows) >= 0.005) parts.push(pc.flows > 0 ? `${dollars(pc.flows)} was money put in` : `${dollars(-pc.flows)} was money taken out`);
@@ -564,6 +611,8 @@ const pnlBreakdown: ChatTool = {
                 : "Part of this period I traded real money; these are the practice figures, kept separate from it.",
             );
           }
+        } else if (newestHeld) {
+          lines.push(`My account-value readings for this period were taken while ${SETTLING}, so I can't measure the change yet.`);
         } else {
           lines.push("I don't have enough account-value history for this period.");
         }
@@ -724,7 +773,11 @@ const recentActivity: ChatTool = {
           return "No log yet.";
         }
         if (!rows.length) return `Nothing logged in that window.\n${logHorizon(db, who)}`;
-        return cap(rows.map((r) => `[${when(r.created_at)}] ${eventLabel(r.message)}: ${r.message.slice(0, 220)}`).join("\n"));
+        // Redacted BEFORE the cap, so the cap cannot leave most of an address
+        // behind: this answer goes to the model (redactAddresses, reads.ts).
+        return cap(
+          rows.map((r) => `[${when(r.created_at)}] ${eventLabel(r.message)}: ${redactAddresses(r.message).slice(0, 220)}`).join("\n"),
+        );
       },
       NO_AGENT,
       false,

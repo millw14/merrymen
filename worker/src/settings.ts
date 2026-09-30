@@ -12,13 +12,16 @@ import {
   SETTINGS_DEFAULTS,
   SLIPPAGE_BPS_MAX,
   STOCK_TOKENS,
+  TELEGRAM_GROUPS_CHATTINESS,
   isHostedMode,
   isValidCustomToken,
   type CustomToken,
   type MerrymenSettings,
+  type TelegramGroupsChattiness,
 } from "../../packages/core/src/index";
 import { ensureHome, homePaths } from "./home";
 import { MAX_DECISION_INTERVAL_SEC } from "./decision-cadence";
+import { energyModeOf, type EnergyMode } from "./energy";
 
 /**
  * A tenant settings file with every house-key field removed (hosted mode). The
@@ -77,6 +80,15 @@ export interface ResolvedConfig {
    * outage until somebody has written the field for the people mid-trade.
    */
   enforceLiveIntent: boolean;
+  /**
+   * The energy gate (core energy.ts, worker/src/energy.ts): off, observe or
+   * enforce. OPERATOR ENV ONLY — MERRYMEN_ENERGY_GATE, never a settings-file
+   * key, never a house key a tenant could strip or set — and HOSTED ONLY:
+   * self-hosted is always 'off' whatever the env says. On their own machine the
+   * owner pays their own model and runs open code; a throttle there would be
+   * both unenforceable and against the token's stance.
+   */
+  energyGate: EnergyMode;
   paperStartUsdg: number;
   /** Builtin name, or a user strategy filename (strategies/<name>.ts). */
   strategy: string;
@@ -160,6 +172,17 @@ export interface ResolvedConfig {
   telegramNotifyEnabled: boolean;
   telegramNotifyEveryMin: number;
   telegramDigestHour: number;
+  /**
+   * Telegram groups (docs/tg-groups.md "Settings"). Read live on every poll
+   * like the rest of the Telegram block, so a dashboard change applies without
+   * a restart. Off = silent in every group, while membership changes are
+   * still recorded so turning it back on works.
+   */
+  telegramGroupsEnabled: boolean;
+  /** Look at coins posted in a group (trencher mode only; a nomination, never an order). */
+  telegramGroupCoinsEnabled: boolean;
+  /** How often it joins a group conversation unprompted. */
+  telegramGroupsChattiness: TelegramGroupsChattiness;
   telegramPcControlEnabled: boolean;
   telegramCapabilities: string[];
   telegramFilesRoot: string | undefined;
@@ -374,6 +397,13 @@ export function mergeSettings(
     // `liveTradingEnabled` recorded yet — a fresh self-hosted upgrade — and
     // remove it in the same session, as docs/live-trading-consent.md sets out.
     enforceLiveIntent: (env.MERRYMEN_LIVE_INTENT_STAND_DOWN ?? "").trim() !== "1",
+    // THE ENERGY GATE, from the operator's environment and nowhere else — the
+    // same shape as the line above. `file` is never consulted: a tenant must
+    // not be able to switch off the throttle they are under, and a key in the
+    // file would be exactly that. Off unless the operator says otherwise, and
+    // off self-hosted whatever they say. Reaches hosted children through
+    // childEnv; it is not a secret, so CHILD_SECRET_STRIP leaves it alone.
+    energyGate: hosted ? energyModeOf(env.MERRYMEN_ENERGY_GATE) : "off",
     paperStartUsdg: num(file.paperStartUsdg, env.MERRYMEN_PAPER_START_USDG, d.paperStartUsdg, 1, 10_000_000),
     // Any sane token is a valid strategy name — builtins resolve directly,
     // everything else resolves to strategies/<name>.* (missing file = honest
@@ -450,6 +480,15 @@ export function mergeSettings(
     telegramNotifyEnabled: bool(file.telegramNotifyEnabled, env.MERRYMEN_TELEGRAM_NOTIFY, d.telegramNotifyEnabled),
     telegramNotifyEveryMin: num(file.telegramNotifyEveryMin, env.MERRYMEN_TELEGRAM_NOTIFY_EVERY_MIN, d.telegramNotifyEveryMin, 0, 1440),
     telegramDigestHour: num(file.telegramDigestHour, env.MERRYMEN_TELEGRAM_DIGEST_HOUR, d.telegramDigestHour, 0, 23),
+    // Telegram groups. NOT forced off hosted, unlike the remote-execution block
+    // below: talking in a group runs no shell and moves no money (its model
+    // calls have their own daily allowance, docs/tg-groups.md rule 7), and a
+    // coin posted there is a nomination the Brain and every trencher limit
+    // still judge. A chattiness the resolver does not know (a typo, a level from
+    // a newer build) falls back to "normal" rather than to anything louder.
+    telegramGroupsEnabled: bool(file.telegramGroupsEnabled, env.MERRYMEN_TELEGRAM_GROUPS, d.telegramGroupsEnabled),
+    telegramGroupCoinsEnabled: bool(file.telegramGroupCoinsEnabled, env.MERRYMEN_TELEGRAM_GROUP_COINS, d.telegramGroupCoinsEnabled),
+    telegramGroupsChattiness: oneOf(file.telegramGroupsChattiness, env.MERRYMEN_TELEGRAM_GROUPS_CHATTINESS, TELEGRAM_GROUPS_CHATTINESS, d.telegramGroupsChattiness),
     // Remote-execution surface — FORCED OFF hosted, regardless of file or env.
     // Self-hosted these mean "a shell / PC control on the owner's own machine";
     // hosted they would mean "a shell on OUR server", with an allowlist the

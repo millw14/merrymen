@@ -66,14 +66,16 @@ describe("a fresh child gets its link back", () => {
     assert.match(FN, /if \(existsSync\(file\)\) return;/);
   });
 
-  it("writes nothing when there is no recipient to restore", () => {
+  it("writes nothing when there is nothing to restore", () => {
     // An empty file is worse than no file: it looks linked to every later
     // reader and would mask a genuine publish.
     //
-    // Tested on the RECOVERED id rather than the mirror's, because the mirror
+    // Decided on the RECOVERED id rather than the mirror's, because the mirror
     // turned out to be empty fleet-wide and the allowlist fallback is what
-    // actually produces a recipient.
-    assert.match(FN, /if \(!ownerId\) return;/);
+    // actually produces a recipient; and on the published code, which comes
+    // back with or without one (telegram-restore-code.integration.test.ts).
+    assert.match(FN, /const restored = restoredTelegramFile\(tg, ownerId\);/);
+    assert.match(FN, /if \(!restored\) return;/);
   });
 
   it("cannot take the fleet down if the shared record is unreadable", () => {
@@ -115,10 +117,14 @@ describe("recovering a link the mirror never held", () => {
     assert.match(FN, /sort\(\(a, b\) => a - b\)\[0\]/, "the earliest linker, which is who /link made the owner");
   });
 
-  it("does NOT recover the link code, which rotates", () => {
-    // A stale code is worse than none: it looks usable and is not. The child
-    // mints a fresh one and the dashboard shows it.
-    assert.match(FN, /linkCode: tg\?\.linkCode \?\? ""/);
+  it("restores the published link code, even with no owner to restore", () => {
+    // This test used to say the code was NOT recovered, while the line it
+    // pinned wrote it back. Codes are random now, so a child left to mint its
+    // own would change the dashboard's code on every redeploy. The published
+    // code is the current one: a link rotates it, and the rotation is what
+    // gets published.
+    assert.match(FN, /if \(tg\?\.linkCode\) out\.linkCode = tg\.linkCode;/);
+    assert.doesNotMatch(FN, /linkedChats: /, "never the chats: that would re-authorize ones the owner removed");
   });
 
   it("says when the recovery was a heuristic rather than a read", () => {

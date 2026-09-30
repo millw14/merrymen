@@ -20,16 +20,19 @@
  * while being structurally unable to trade. Three separate re-signs were spent
  * before anyone suspected the client rather than the chain.
  *
- * ── WHY A DUPLICATE CHECK AND NOT A FULL WALL COMPARISON ─────────────────
+ * ── AND WHY IT SURVIVES THE FULL WALL COMPARISON ─────────────────────────
  *
- * The partner path rebuilds the canonical wall and demands byte equality
- * (`partner-enrollment.ts`), which is stronger and right for a third party
- * submitting bytes. It is the wrong tool here, and for a reason this very bug
- * demonstrates: during any deploy the server and the signing client are
- * briefly on different versions, so byte equality would refuse legitimate
- * grants exactly when someone is signing. A duplicate, by contrast, is never
- * legitimate and never version-dependent — it is uninstallable on every
- * version, so refusing it cannot be a false positive.
+ * Hosted POST /api/grants now also rebuilds the canonical wall and demands
+ * byte equality (web/src/lib/canonical-wall.ts, shared with partner
+ * enrollment), because a hand-built permission could otherwise be stored with
+ * a transfer or an unconstrained router in it. That comparison subsumes this
+ * one on the hosted path, and it has a cost this one does not: during a deploy
+ * that changes wall.ts, a tab from before it seals the old wall and is refused
+ * until reloaded — accepted, because the old wall is not what the server's
+ * mirror believes a grant permits. This check stays, and runs first, for the
+ * two things the comparison cannot do: it runs in SELF-HOSTED mode, where the
+ * comparison does not, and its refusal names the one defect that is never
+ * legitimate on any version, in words an owner can act on.
  *
  * ── AND WHY IT REFUSES RATHER THAN REPAIRS ───────────────────────────────
  *

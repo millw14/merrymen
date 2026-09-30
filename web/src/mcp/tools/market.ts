@@ -41,6 +41,7 @@ import {
   tokenKind,
   tokenView,
   trustedIdentity,
+  type CandleView,
   type DiscoverItem,
   type OwnerToken,
   type WatchlistRow,
@@ -49,7 +50,7 @@ import { checkEligibility, judgeEligibility } from "@/lib/services/eligibility";
 import { McpError } from "../errors";
 import { hasCapability } from "../policy";
 import type { ResourceDef } from "../resources";
-import { defineTool, type ToolContext } from "../tool";
+import { defineTool, withToolRefs, type ToolContext } from "../tool";
 import { ADDRESS_ARG, AGENT_ARG, CHAIN_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, refuseControls, untrusted } from "./shared";
 
 // ── shared pieces ───────────────────────────────────────────────────────────
@@ -65,10 +66,10 @@ const fact = z.object({ value: z.number().nullable(), source: z.string().nullabl
 
 const POOL_ID_RULE = z.string().regex(POOL_ID_RE, "a lowercase 0x-prefixed 20-byte pool address or 32-byte pool id");
 const POOL_ID_ARG = POOL_ID_RULE
-  .describe("The index's pool id (see get_token pool.pool_id). Optional: defaults to the pool the index lists for the token.");
+  .describe("The index's pool id (the pool_id in token or discovery results). Optional: defaults to the pool the index lists for the token.");
 /** Candles are only ever read for the token's listed pool (see resolvePool in market-intel.ts on the shared chart cache). */
 const CANDLE_POOL_ID_ARG = POOL_ID_RULE
-  .describe("Optional, and if given it must be the pool the index lists for this token (get_token pool.pool_id); any other pool is refused.");
+  .describe("Optional, and if given it must be the pool the index lists for this token (its pool.pool_id); any other pool is refused.");
 const CURSOR_ARG = z.string().min(1).max(512).optional().describe("next_cursor from the previous page");
 
 /** Tools that spend the index's per-pool quota share one budget. */
@@ -130,7 +131,7 @@ const trustedOr = (trusted: boolean, text: string | null, max: number) => (trust
 const searchTokensTool = defineTool({
   name: "search_tokens",
   title: "Search tokens",
-  description: "Find tokens by address, ticker or name across Merrymen's curated registry (stock tokens, cash), the market index's pools, and — when this connection may see them — your own added tokens (agents:read) and watchlist (watchlist:manage). The address is the identity: tickers are not unique on this chain, so results are grouped by ticker and flag duplicates and impostors of trusted tickers. Each result says whether it is discoverable and priceable. " + DEFINITIONS,
+  ...withToolRefs("Find tokens by address, ticker or name across Merrymen's curated registry (stock tokens, cash), the market index's pools, and — when this connection may see them — your own added tokens (agents:read) and watchlist (watchlist:manage). The address is the identity: tickers are not unique on this chain, so results are grouped by ticker and flag duplicates and impostors of trusted tickers. Each result says whether it is discoverable and priceable. " + DEFINITIONS, " (check_token_eligibility)"),
   capability: "market.read",
   input: z.object({
     query: refuseControls(z.string().trim().min(1).max(64)).describe("A 0x address, a ticker (with or without $) or part of a name"),
@@ -151,7 +152,7 @@ const searchTokensTool = defineTool({
       matched_on: z.enum(["address", "symbol", "name", "watchlist_label"]),
       flags: flagsOut,
       watchlist_label: z.string().nullable().describe("Your own label, when the token is on your watchlist"),
-      price_usd: z.number().nullable().describe("The index's price; null for stock tokens (use get_token) or when unknown"),
+      price_usd: z.number().nullable().describe("The index's price; null for stock tokens or when unknown"),
       reserve_usd: z.number().nullable(),
       volume_24h_usd: z.number().nullable(),
       discoverable: verdict,
@@ -214,7 +215,7 @@ const searchTokensTool = defineTool({
 const getTokenTool = defineTool({
   name: "get_token",
   title: "Token market data",
-  description: "Market facts for one token by address: price with its source and time, liquidity, 24h volume, holders where available, the index's tape (5m/1h/6h/24h), its pool, and for stock tokens the Chainlink price and halt state. Every missing figure is null with a reason, never zero. Says whether the token is discoverable and priceable; whether an agent could trade it is agent-specific (check_token_eligibility).",
+  ...withToolRefs("Market facts for one token by address: price with its source and time, liquidity, 24h volume, holders where available, the index's tape (5m/1h/6h/24h), its pool, and for stock tokens the Chainlink price and halt state. Every missing figure is null with a reason, never zero. Says whether the token is discoverable and priceable; whether an agent could trade it is agent-specific (check_token_eligibility).", " (check_token_eligibility)"),
   capability: "market.read",
   input: z.object({ address: ADDRESS_ARG, chain_id: CHAIN_ARG }).strict(),
   output: z.object({
@@ -295,15 +296,35 @@ const getTokenTool = defineTool({
 
 // ── get_candles ─────────────────────────────────────────────────────────────
 
+/** The most bars one answer carries (what the reader keeps), and how many it carries unless asked. */
+const CANDLES_MAX = 300;
+const CANDLES_DEFAULT = 100;
+
+/**
+ * The newest `limit` bars of a series (oldest first, as the chart reads it),
+ * with the gap count measured over the range those bars span: a count over
+ * the whole read would describe slots that are not in the answer.
+ */
+function newestBars(v: Pick<CandleView, "bars" | "gaps" | "interval_s">, limit: number): { bars: CandleView["bars"]; gaps: number | null; bars_available: number } {
+  const bars = v.bars.slice(-limit);
+  const first = bars[0];
+  const last = bars[bars.length - 1];
+  const gaps = v.gaps === null || !first || !last || !v.interval_s
+    ? v.gaps
+    : Math.max(0, Math.floor((Date.parse(last.time) - Date.parse(first.time)) / 1000 / v.interval_s) + 1 - bars.length);
+  return { bars, gaps, bars_available: v.bars.length };
+}
+
 const getCandlesTool = defineTool({
   name: "get_candles",
   title: "Price candles",
-  description: "Up to 300 USD price bars (15m, 1h, 4h or 1d) for a token from the market index, read from the pool the index lists for that token (the same series the Merrymen token page charts). The reader refuses bars that describe the other side of the pair. Each bar's volume is display-only (see notes). Budgeted: it can spend the index's quota.",
+  description: `The newest USD price bars (15m, 1h, 4h or 1d) for a token from the market index: ${CANDLES_DEFAULT} unless limit asks for fewer or more (at most ${CANDLES_MAX}). Read from the pool the index lists for that token (the same series the Merrymen token page charts). The reader refuses bars that describe the other side of the pair. Each bar's volume is display-only (see notes). Budgeted: it can spend the index's quota.`,
   capability: "market.read",
   input: z.object({
     address: ADDRESS_ARG,
     pool_id: CANDLE_POOL_ID_ARG.optional(),
     window: z.enum(CANDLE_WINDOWS).default("1h"),
+    limit: LIMIT_ARG(CANDLES_MAX, CANDLES_DEFAULT),
     chain_id: CHAIN_ARG,
   }).strict(),
   output: z.object({
@@ -321,8 +342,9 @@ const getCandlesTool = defineTool({
       low: z.number(),
       close: z.number(),
       volume_display_only: z.number(),
-    })).max(300),
-    gaps: z.number().nullable().describe("Bar slots inside the range with no bar"),
+    })).max(CANDLES_MAX),
+    bars_available: z.number().describe("Bars the index returned; bars holds the newest `limit` of them"),
+    gaps: z.number().nullable().describe("Bar slots inside the range of the returned bars with no bar"),
     last_bar_partial: z.boolean().nullable(),
     last_bar_age_s: z.number().nullable(),
     stale: z.boolean().describe("True when these are the last good bars and the index has since refused"),
@@ -336,12 +358,14 @@ const getCandlesTool = defineTool({
   annotations: { readOnlyHint: true, openWorldHint: true },
   budget: PROVIDER_BUDGET,
   timeoutMs: 20_000,
-  async handler({ address, pool_id, window, chain_id }, ctx) {
+  async handler({ address, pool_id, window, limit, chain_id }, ctx) {
     mainnetOnly(chain_id);
     const v = await candlesFor({ address, poolId: pool_id, window, readers: marketReaders() }).catch(serviceError);
+    const kept = newestBars(v, limit);
     return {
       data: {
         ...v,
+        ...kept,
         quote_symbol: untrusted(v.quote_symbol, 16),
         notes: [
           "volume_display_only is the index's per-bar quote volume. The candle reader itself marks it as not a figure to publish: on bonding-curve pools it has measured several times the pool's real volume. Use it for shape only.",
@@ -350,7 +374,9 @@ const getCandlesTool = defineTool({
         served_at: at(ctx),
         untrusted_note: UNTRUSTED_NOTE,
       },
-      summary: v.state === "ok" ? `${v.bars.length} ${window} bars.` : `No bars: ${v.reason ?? v.state}.`,
+      summary: v.state === "ok"
+        ? `${kept.bars.length} ${window} bars${kept.bars.length < kept.bars_available ? `, the newest of ${kept.bars_available}` : ""}.`
+        : `No bars: ${v.reason ?? v.state}.`,
     };
   },
 });
@@ -625,7 +651,7 @@ const OWNER_TEXT_NOTE = "label and note are text written through your own connec
 const watchItemOut = z.object({
   address: z.string(),
   chain_id: z.number(),
-  symbol: z.string().nullable().describe("A registry ticker, or your own ticker for a token you added when this connection may read your settings (agents:read); null otherwise (use get_token)"),
+  symbol: z.string().nullable().describe("A registry ticker, or your own ticker for a token you added when this connection may read your settings (agents:read); null otherwise"),
   kind: kindOut,
   label: z.string().nullable(),
   note: z.string().nullable(),
@@ -648,7 +674,7 @@ function watchOut(r: WatchlistRow, custom: readonly OwnerToken[]) {
 const listWatchlistTool = defineTool({
   name: "list_watchlist",
   title: "My watchlist",
-  description: `The tokens on your Merrymen watchlist (at most ${WATCHLIST_MAX}), newest first, with your labels and notes. Watching a token never buys it. Use get_token for market data.`,
+  ...withToolRefs(`The tokens on your Merrymen watchlist (at most ${WATCHLIST_MAX}), newest first, with your labels and notes. Watching a token never buys it. Use get_token for market data.`, " Use get_token for market data."),
   capability: "watchlist.manage",
   input: z.object({}).strict(),
   output: z.object({

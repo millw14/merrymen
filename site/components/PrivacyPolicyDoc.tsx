@@ -1,84 +1,780 @@
+import type { ReactNode } from "react";
+
 /**
  * The privacy policy itself, kept in one place because it is served at two
  * URLs: `/privacy` (the canonical one, linked from the footer) and
  * `/privacypolicy` (the spelling app stores and OAuth consoles ask for). One
  * component means the two can never drift into saying different things about
  * what we store.
+ *
+ * It describes the HOSTED service (app.merrymen.dev) and its MCP connector
+ * (mcp.merrymen.dev) as the code actually behaves. Every retention period is
+ * copied from the code that enforces it, so change them together:
+ * worker/src/mcp/maintenance.ts (MCP tables, hourly), docs/mcp/oauth.md and
+ * docs/mcp/operations.md (token lifetimes), worker/src/store.ts
+ * CHAT_TURNS_KEPT (Telegram chat), worker/src/groupchat/conductor.ts
+ * retentionDays (group chat), web/src/lib/auth.ts SESSION_TTL_MS (cookie),
+ * worker/src/soul.ts MAX_OWNER_FACTS / MAX_JOURNAL_CHARS (what a hosted agent
+ * notes in Telegram, kept in its child home, which worker/src/orchestrator.ts
+ * deletes with the grant and a redeploy discards).
+ *
+ * Other facts it states, and where they live: the public leaderboard's curve is
+ * raw equity_usdg for every ranked live agent, whatever publicBook says
+ * (web/src/lib/read-leaderboard.ts); in-app chat and assistant conversations
+ * always use the web tier's own model key (web/src/lib/agent-chat.ts
+ * resolveLlm(resolveConfig())), while an owner's key reaches only the worker
+ * (packages/core/src/settings.ts HOUSE_KEY_FIELDS); the orchestrator writes the
+ * decrypted grant and settings into the child home (writeGrantForChild,
+ * writeSettingsForChild); the OAuth limiter's bucket holds the caller's IP
+ * (web/src/mcp/oauth/deps.ts clientIp); and which limits the chain enforces is
+ * packages/core/src/wall.ts buildWallPolicies.
+ *
+ * What "What is public" lists: the public profile's buy/sell list is
+ * web/src/lib/profile-trades.ts readProfileTrades/readTopTrades, which return
+ * every recent fill's symbol, side, time, paper flag and realizedPnlBps
+ * whatever publicBook says (only size and dollar P&L are gated), paper fills
+ * included; "how it decides" is web/src/lib/read-agent.ts `how`; holdings are
+ * read only under publicBook. The group chat GET
+ * (web/src/app/api/groupchat/route.ts) is session-free, and hiding an owner line
+ * (worker/src/groupchat/store.ts hideOwnMessage) only sets `hidden`.
+ *
+ * Withdrawal: a Privy-owned account has no exportable key and withdraws through
+ * the hosted app's relay (web/src/lib/recover-client.ts, RecoverPanel.tsx); a
+ * browser-key account can also run `merrymen recover` (cli/bin.mjs, which needs
+ * a bundler key). Alerts are evaluated only while an active MCP connection holds
+ * notifications:manage (worker/src/mcp/notify.ts), and removing one only marks
+ * it deleted. The watchlist server rows are written only by MCP tools
+ * (web/src/mcp/tools/market.ts); the app's star list is localStorage
+ * (web/src/terminal/watchlist.ts). Partner apps: web/src/lib/partner-store.ts
+ * (what is stored, PARTNER_HISTORY_EXCHANGES) and partner-service.ts `view`
+ * (what a partner receives). The holder gateway's state is gateway/lib/store.mjs.
+ *
+ * Posting on X (docs/x-posting.md): what is stored is worker/src/xpost/store.ts
+ * — the connection and its sealed tokens (deleteAccount removes them; the web's
+ * DELETE /api/x/account then ASKS X to revoke them, best effort, and not at all
+ * when that process has no X app or no DEK), the owner's consent bound to one X
+ * user id with the zone the device reported (xpost_accounts.tz; placeless zones
+ * are dropped by web/src/lib/x-connect.ts xpostTz), the pending connect (it
+ * works for 15 minutes, PENDING_TTL_MS in web/src/app/api/x/connect/route.ts,
+ * and is deleted when it is used or by prunePending, which runs only when
+ * someone starts a connect) and every post, which nothing deletes. Each post
+ * waits at least ten minutes under Coming up (the planner's MIN_LEAD_MS). A
+ * browser never receives a token (web/src/lib/x-connect.ts accountBody). What
+ * the post writer is given (worker/src/xpost/writer.ts WriterFacts and its
+ * kin), and the gate that refuses a post with a number in it, are
+ * worker/src/xpost/ — keep the Groq row in step with them. The writer's
+ * provider is MERRYMEN_XPOST_LLM_PROVIDER (Groq by default): a provider other
+ * than Groq must be named in section 5 before it is deployed.
+ *
+ * Telegram groups (docs/tg-groups.md) are NOT the group chat room. "The group
+ * chat room" in this policy is the public web room; a Telegram group is a chat
+ * on Telegram that an owner's bot was added to, full of people who never signed
+ * up to Merrymen. Keep the two apart in every sentence. What is kept per group
+ * and for how long is worker/src/telegram/tg-groups/store.ts TG_LIMITS (the
+ * last 60 lines, none older than 14 days; up to 40 people; the coins for 14
+ * days; a group the bot left kept 30 days; at most 30 groups; coin claims 2
+ * days) — change the Telegram groups rows with it. The age limits hold while a
+ * child runs too (tg-groups/handler.ts sweep prunes hourly). Where:
+ * tg-groups.json in the child home, and hosted, a DEK-sealed copy in
+ * tenant_tg_groups (worker/src/tg-groups-ferry.ts), restored at spawn and
+ * deleted with the grant: by the orchestrator's kill switch with the child
+ * home, when a /kill removes the grant (honourKill), and by every reconcile
+ * pass for any tenant the grant store no longer lists (sweepTgGroups), from
+ * the row and from a home no child of that tenant runs in — which is why a
+ * redeploy does not clear it, unlike the soul files above, but discarding the
+ * permission does. Each /forget and /forgetme is also written to its own file
+ * beside the memory (store.ts TG_GROUPS_FORGET_FILE: the group id, the
+ * person's Telegram id or "*", and when), so the deletion reaches the sealed
+ * copy even while a child's groups are held off; hosted, the ferry removes it
+ * once a publish shows the memory reflects it; self-hosted it is kept,
+ * compacted past 64 KB (TG_FORGET_LIMITS). Keep the forget rows with it.
+ * Who writes the lines is worker/src/telegram/tg-groups/model.ts: the dedicated key, else the owner's
+ * own saved key, else (hosted) the house key only under
+ * MERRYMEN_TG_GROUPS_SHARE_HOUSE_KEY=1, else templates. Its provider is
+ * MERRYMEN_TG_GROUPS_LLM_PROVIDER (Groq by default): a provider other than Groq
+ * must be named in section 5 before it is deployed. The model sees only the
+ * fixed group-safe context of docs/tg-groups.md "How it talks", never the DM
+ * prompt builders. The one thing that reaches trading is a validated address
+ * (types.ts Nomination, via TgCoinsPort.nominate); the Brain's input is the
+ * same market signals any tape coin gets, never the chat, sender or message.
+ *
+ * The date is fixed, not `new Date()`: a policy's date says when its words
+ * last changed, and a build-time date claimed a new policy on every deploy.
  */
+const LAST_UPDATED = "September 29, 2026";
+
+const CONNECTED_APPS = "https://app.merrymen.dev/connect/apps";
+
+/**
+ * A two-column table that scrolls inside its own box on a phone rather than
+ * widening the page. Two columns, not three: at phone width a third column
+ * squeezed the one that matters to a word per line.
+ */
+function Table({ head, rows }: { head: [string, string]; rows: Array<[ReactNode, ReactNode]> }) {
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table>
+        <thead>
+          <tr>
+            <th scope="col" style={{ width: "40%" }}>{head[0]}</th>
+            <th scope="col">{head[1]}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((cells, i) => (
+            <tr key={i}>{cells.map((c, j) => <td key={j}>{c}</td>)}</tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** A provider's name with what we use it for underneath, for the first column of section 5. */
+function provider(name: string, purpose: string) {
+  return <><strong>{name}</strong><br />{purpose}</>;
+}
+
 export function PrivacyPolicyDoc() {
   return (
     <div className="wrap" style={{ maxWidth: 760, padding: "40px 24px 80px" }}>
       <article className="doc-body">
         <h1>Privacy Policy</h1>
-        <p className="doc-lead">Last updated: {new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}</p>
+        <p className="doc-lead">Last updated: {LAST_UPDATED}</p>
 
         <div className="callout">
-          <strong>The short version:</strong> merrymen is self-hosted. The software runs entirely on
-          your own machine, your keys and data live in <code className="inline">~/.merrymen</code> and never leave
-          it, and we operate no backend that receives them. The one exception is the iOS beta list:
-          if you type your email into that form, we keep the address. Nothing else, and only until
-          the beta ships or you ask us to delete it.
+          <strong>The short version:</strong> Merrymen comes in two forms. The{" "}
+          <strong>hosted service</strong> (app.merrymen.dev, and its connector for AI assistants at
+          mcp.merrymen.dev) runs your trading agent for you, so it stores what that takes: who you
+          are when you sign in, your agent&apos;s settings and the trading permission you signed
+          (its key encrypted in our database), your agent&apos;s trading record, and the
+          conversations, alerts and assistant connections you set up. If you add your
+          agent&apos;s Telegram bot to a Telegram group, it also keeps a short memory of what is
+          said there, including by the group&apos;s other members. The key that owns your
+          account never reaches us. Some of what your agent does is public by design, including
+          its recent buys and sells and the group chat room (section 2). The{" "}
+          <strong>self-hosted software</strong> runs on your own machine and sends us nothing,
+          unless you choose Merrymen&apos;s optional holder gateway for its language model or
+          token discovery (section 9). We do not sell personal data, and there is no advertising
+          or tracking in any of it.
         </div>
 
-        <h2>1 · The software</h2>
+        <h2 id="who-we-are">1 · Who we are</h2>
         <p>
-          merrymen runs locally on your computer. It stores its settings, keys, ledger, strategies,
-          and your agent&apos;s “soul” files in a directory on your machine
+          “Merrymen”, “we” and “us” mean the team that runs the hosted Merrymen service and
+          publishes the open-source project at{" "}
+          <a className="link" href="https://github.com/millw14/merrymen" target="_blank" rel="noreferrer">github.com/millw14/merrymen</a>.
+          This policy covers the hosted service at app.merrymen.dev, the Merrymen MCP server that AI
+          assistants connect to at mcp.merrymen.dev, this website (merrymen.dev) and the self-hosted
+          software. For questions, requests or complaints, email{" "}
+          <a className="link" href="mailto:support@merrymen.dev">support@merrymen.dev</a>.
+        </p>
+
+        <h2 id="what-we-collect">2 · What the hosted service stores, and why</h2>
+        <p>
+          We store what running your agent needs, and nothing for advertising or profiling. All of
+          it is tied to your Merrymen account, which is identified by a wallet address.
+        </p>
+
+        <h3>Your sign-in</h3>
+        <ul>
+          <li>
+            <strong>X or an email one-time code</strong> is handled by Privy. Privy tells us a Privy
+            user id and the address of the wallet Privy provides for your login; that address is
+            your Merrymen account. If you use X, we also keep your X user id, handle, display name
+            and profile picture link. If you use email, Privy keeps your email address; we store
+            only that you signed in by email.
+          </li>
+          <li>
+            <strong>A wallet</strong>: we keep the wallet&apos;s address and check a signature from
+            it. We never receive its private key.
+          </li>
+          <li>A sign-in cookie keeps you signed in for up to 7 days.</li>
+        </ul>
+        <p><em>Why:</em> to know which agent is yours and to let only you control it.</p>
+
+        <h3>Your agent and its trading permission</h3>
+        <ul>
+          <li>
+            Your agent&apos;s name, the picture and banner you upload, and its settings: strategy,
+            tokens, limits, paper or live, alerts and Telegram, and any API key you add for your own
+            language-model provider (section 5 says what it is used for).
+          </li>
+          <li>
+            The trading permission you sign. It contains a session key that lets our hosted worker
+            trade for you within the limits you signed. The copy in our database is encrypted; while
+            your agent runs, the hosted worker keeps a decrypted working copy (section 7). The
+            session key has no permission to transfer or withdraw your funds, but it can trade: if
+            you turn on launchpad (Pons) memecoin trading, each launchpad trade pays the curve
+            contract that trade names, up to your per-trade limit.
+          </li>
+          <li>
+            Your agent&apos;s account address on Robinhood Chain, and a holder wallet address if you
+            link one for the Merry Circle.
+          </li>
+        </ul>
+        <p><em>Why:</em> to run your agent the way you set it up.</p>
+
+        <h3>Your trading record</h3>
+        <ul>
+          <li>
+            Trades with their on-chain receipts, your agent&apos;s decisions and the reasons it
+            gave, refused trades, positions, cost basis, balances and equity over time, deposits and
+            withdrawals it saw, and the fees accrued. Paper (practice) and live records are kept
+            apart.
+          </li>
+        </ul>
+        <p><em>Why:</em> so you can see what your agent did and why, and so it can keep to its limits and budget.</p>
+
+        <h3>Conversations and research</h3>
+        <ul>
+          <li>Messages you send your agent through an AI assistant, and its replies.</li>
+          <li>Messages you exchange with your agent through your Telegram bot: the latest 40 in each chat.</li>
+          <li>
+            Chat in the Merrymen app itself is kept in your browser, not on our servers. Each
+            message is still sent to the language-model provider that writes the reply (section 5).
+          </li>
+          <li>Research notes you or an assistant give your agent.</li>
+          <li>
+            The lines you and your agent post in the group chat room. These are not private: anyone
+            can read the room (see What is public, below).
+          </li>
+          <li>
+            What your agent notes about you in Telegram chats: short facts it picks up or you ask it
+            to <code className="inline">/remember</code>, such as your Telegram handle (up to 60 at
+            a time, older ones moved to an archive), and a short daily journal of its day with you.
+            These live in your agent&apos;s working files on the hosted worker, not in our database
+            (section 4).
+          </li>
+        </ul>
+        <p><em>Why:</em> so your agent&apos;s replies can follow the conversation.</p>
+
+        <h3>Watchlist, alerts and Telegram</h3>
+        <ul>
+          <li>
+            The tokens on your watchlist and the alerts you subscribe to. Only a connected AI
+            assistant can add, list or remove them; the Merrymen app has no page for them. (The
+            watchlist you keep with the star on a token page in the Merrymen app is a separate list,
+            kept in your browser.)
+          </li>
+          <li>A record of each alert we sent or tried to send.</li>
+          <li>
+            If you connect a Telegram bot: its bot token (encrypted), and the Telegram user and chat
+            ids your bot talks to.
+          </li>
+        </ul>
+        <p>
+          Alerts are checked only while you have an AI assistant connected with the permission to
+          manage alerts. Disconnect every such assistant and no new alerts are sent (any already
+          waiting to go out are still sent), but your watchlist and alerts stay stored (section 4).
+        </p>
+        <p><em>Why:</em> to deliver the alerts and chats you asked for, through your own bot.</p>
+
+        <h3>Telegram groups</h3>
+        <p>
+          Only if your agent&apos;s Telegram bot is added to a Telegram group. This is not the group
+          chat room above, which is Merrymen&apos;s own public room on the web: a Telegram group
+          lives on Telegram, and most of the people in it have nothing to do with Merrymen. Your
+          agent talks only in groups you added it to or approved (in a group it was already in
+          before it knew who added it, writing there yourself approves it). So that it can take
+          part there like one more person, it keeps a short memory of each group, and most of that
+          memory is about the group&apos;s other members:
+        </p>
+        <ul>
+          <li>
+            The group&apos;s name and Telegram id, whether you approved it, the Telegram user id of
+            whoever added your bot, and your first name as it shows in the group.
+          </li>
+          <li>
+            The group&apos;s latest 60 messages that your bot received, none kept longer than 14
+            days: each one&apos;s text (or a photo&apos;s caption) cut to 400 characters, the
+            sender&apos;s display name and Telegram user id, when it was sent, and which message it
+            replied to. Your agent&apos;s own lines there are kept the same way.
+          </li>
+          <li>A rolling summary of the group, which the language model rewrites as the conversation moves on.</li>
+          <li>
+            Short notes on up to 40 people in the group: each one&apos;s display name and Telegram
+            user id, when they last spoke, and a line of what your agent knows of them from that
+            group, such as a running joke or the kind of coins they post. It is told never to note
+            health, religion, politics, sexuality, money matters, contact details or addresses.
+          </li>
+          <li>
+            The addresses of Robinhood Chain coins posted in the group in the last 14 days, who
+            posted each (display name and Telegram user id) and what your agent decided about it;
+            and, for 2 days, which messages carried a coin address, so that a message Telegram
+            delivers twice is never acted on twice. Coins from other chains are not remembered, and
+            your agent says nothing about them.
+          </li>
+        </ul>
+        <p>
+          What your bot receives at all is up to Telegram. With Telegram&apos;s privacy mode on, the
+          default for every bot, and your bot not an admin of the group, it gets only commands and
+          replies to its own messages there, and can remember only those; with privacy mode turned
+          off, or your bot made an admin of the group, it reads the whole group.
+        </p>
+        <p>
+          The memory lives in your agent&apos;s working files on the hosted worker and, so that it
+          survives the worker restarting or being redeployed, as an encrypted copy in our database
+          (section 7). What is said in one group is used only in that group: never in another
+          group, and never in your private chats with your agent.
+        </p>
+        <p>
+          <strong>What the group sees.</strong> Everyone in a group reads what your agent says
+          there. It is built to say nothing private in a group: not your balances, amounts, prices
+          or profit and loss, not a wallet address or your settings, and nothing you told it in
+          private. Ask it for your figures there and it answers in your private chat instead.
+        </p>
+        <p>
+          <strong>Trading.</strong> A group message cannot order a trade. The only thing that can
+          pass from a group to your agent&apos;s trading is the contract address of a coin someone
+          posts (for a chart link, the coin its trading pool is for, read from the blockchain), and
+          only if your agent trades memecoins on its own (trencher mode) and you left
+          “Look at coins people post” on. The address only tells your agent which coin to look at.
+          Its coin review (its Brain) judges that coin from market data like any other and is never
+          given the message, who posted it or which group it came from, and a buy still has to pass
+          every limit you signed, with extra limits on coins from groups. Message text, names and
+          amounts never reach trading.
+        </p>
+        <p>
+          <em>Why:</em> so your agent can follow a group&apos;s conversation, remember who is who,
+          and not look at the same coin twice.
+        </p>
+        <p>
+          Anyone in the group can send <code className="inline">/forgetme</code> there to remove
+          their messages and the note about them from your agent&apos;s memory of that group, and
+          to take their display name and Telegram user id off the coins they posted there (the
+          coin and what your agent decided about it stay). If the group&apos;s summary mentions them
+          by name, the summary is deleted too, and later rewritten from the messages that are left.
+          So that the deletion also reaches the encrypted copy in our database, your agent keeps a
+          short record of the request itself: the group&apos;s Telegram id, their Telegram user id,
+          and when they asked. It is deleted once that copy reflects the request, normally within a
+          minute. You can wipe everything your agent remembers of a group with{" "}
+          <code className="inline">/forget</code> (section 8). Someone in a group with a Merrymen
+          agent who wants more deleted can ask its owner, or email us with the group&apos;s name and
+          the bot&apos;s @username.
+        </p>
+
+        <h3>Posting on X</h3>
+        <p>Only if you connect an X account in Settings for your agent to post from:</p>
+        <ul>
+          <li>
+            That account&apos;s X user id and handle, as X reports them, and the access and refresh
+            tokens X issues for it, encrypted (section 7). The tokens are never sent to your browser.
+          </li>
+          <li>
+            Whether you turned posting on, when, and for which X account. Connecting an account does
+            not turn posting on.
+          </li>
+          <li>
+            The time zone your browser or phone reported when you turned posting on, so your agent
+            does not post during your night. A zone that says nothing about where you are, such as
+            UTC, is not kept.
+          </li>
+          <li>
+            Each post your agent writes for X: its text, what kind of post it is (a hello, a casual
+            post, or a coin it bought), when it is due and when it went out, X&apos;s id for it once
+            posted, and whether it was skipped, cancelled or failed.
+          </li>
+          <li>While you are connecting, a one-time value that ties the approval on X to your account. It works for 15 minutes.</li>
+        </ul>
+        <p>
+          <em>Why:</em> to post only when you allowed it, only from the account you chose, and to
+          list each post under Coming up in Settings for at least ten minutes before it goes out, so
+          you can skip it.
+        </p>
+
+        <h3>AI assistant connections (MCP)</h3>
+        <ul>
+          <li>
+            Each app you connect: its name and where it signs in from, the permissions you ticked,
+            the agents you shared, and when the connection was made, last used and ended.
+          </li>
+          <li>Access tokens, refresh tokens, sign-in codes and personal access tokens, stored only as one-way hashes.</li>
+          <li>
+            A record of every call an app makes: the tool&apos;s name, the permission it used,
+            whether it worked, how long it took, a trace id, and the names of its arguments with
+            short ids. Not the text you or the assistant wrote.
+          </li>
+          <li>Trades, setting changes and posts an app prepared for your approval, and whether you approved or declined them.</li>
+          <li>Exports you ask for, and backtests you run with their settings and results.</li>
+          <li>
+            The IP address that requests to our public sign-in (OAuth) endpoints come from, kept in
+            a counter that limits repeated requests. It is deleted about 3 days later.
+          </li>
+        </ul>
+        <p>
+          <em>Why:</em> to let in only the apps you approved, to show you on{" "}
+          <a className="link" href={CONNECTED_APPS}>Connected apps</a> what each one did, and to
+          stop misuse.
+        </p>
+
+        <h3>Partner apps</h3>
+        <p>
+          Another company&apos;s app can offer Merrymen through our partner API. If you connect your
+          agent to one (on a Merrymen page, or by signing an authorization inside that app), we
+          store:
+        </p>
+        <ul>
+          <li>
+            The app&apos;s name and id, the id that app uses for you, your agent&apos;s name, which
+            Merrymen account it is linked to, the access you approved (seeing your agent&apos;s
+            status, and chatting with it if the app asked for that), and when the connection was
+            made and last changed.
+          </li>
+          <li>The messages the app sends your agent and its replies: the latest 40 exchanges in each connection.</li>
+        </ul>
+        <p>
+          What the app receives is in section 5. <em>Why:</em> to let only the apps you approved see
+          and talk to your agent.
+        </p>
+
+        <h3>Server logs</h3>
+        <p>
+          Our hosting providers keep basic request logs (such as IP address, time and the page or
+          API called) for security and reliability. Our own MCP logs identify an owner or a
+          connection only by a short one-way hash, and leave out addresses, tokens, message text and
+          balances.
+        </p>
+
+        <h3>What is public</h3>
+        <p>
+          Some things are public by design. Anyone can see them, signed in or not, whatever your
+          book setting:
+        </p>
+        <ul>
+          <li>Your agent&apos;s name, picture and public page, and an X handle if you add one to its profile.</li>
+          <li>How it decides: the name of the built-in strategy it runs, or the provider and model of the language model that decides for it.</li>
+          <li>Its posts and theses in the feed, and its returns, drawdown and trade counts.</li>
+          <li>
+            Its recent buys and sells, practice (paper) ones included: for each, the token, whether it
+            was a buy or a sell, when, whether it was paper or live, and for a sale its percentage
+            return.
+          </li>
+          <li>
+            Some dollar figures: for each live agent it ranks, the public leaderboard publishes its
+            equity curve, which is the value of its account in dollars over its current run, and a
+            live agent&apos;s public page shows the gas its trades cost.
+          </li>
+          <li>
+            The group chat room. Every line you or your agent post there can be read by anyone,
+            without signing in, for the 14 days it is kept (section 4). Taking back a line of your
+            own hides it from the room.
+          </li>
+          <li>
+            If you connect an X account for posting, the posts your agent makes there, under that
+            account, for as long as they stay on X.
+          </li>
+        </ul>
+        <p>
+          Keeping your book private, the default, hides your agent&apos;s trade sizes, its dollar
+          profit and loss, and its holdings: what it holds now and how much of each token. Turn on
+          publishing your book in your profile and those are public too. Everything your agent does
+          on chain is public in any case (section 6).
+        </p>
+
+        <h2 id="stays-with-you">3 · What stays with you</h2>
+        <ul>
+          <li>
+            <strong>The key that owns your agent&apos;s account.</strong> If you signed in with X or
+            email, it belongs to the wallet Privy provides for that login, and it is never exported.
+            If your account was made with a key generated in your browser, that key is in that
+            browser, and you were asked to save a copy as your recovery key. It never reaches our
+            servers, so we cannot withdraw your funds from your account (the session key we hold can
+            only trade; section 7), and we cannot recover the key for you. Section 8 says how you
+            withdraw.
+          </li>
+          <li><strong>Your chat in the Merrymen app</strong>, which your browser keeps.</li>
+          <li><strong>The watchlist you keep with the star on a token page</strong>, which your browser keeps.</li>
+        </ul>
+
+        <h2 id="retention">4 · How long we keep it</h2>
+        <Table
+          head={["What", "How long"]}
+          rows={[
+            ["Your sign-in identity, agent settings and trading record", "As long as your account exists. Nothing deletes them automatically; ask and we will delete them (records on the blockchain excepted)."],
+            ["Your trading permission (the encrypted session key)", "Until you discard it on Wallet & permissions or stop your agent with Telegram /kill; the hosted worker's decrypted working copy is deleted then too. On chain, it stops working at the expiry date you signed."],
+            ["Telegram bot token and ids", "Until you remove them from your settings or ask us to delete them."],
+            ["Telegram chat with your agent", "The latest 40 messages in each chat."],
+            ["Your agent's memory of a Telegram group it is in: recent messages with their senders' display names and Telegram ids, a summary, notes on people, and the coins posted", "The latest 60 messages in each group, none older than 14 days. The coins posted there and what your agent decided, 14 days. The summary and the notes on people (up to 40 per group), while your bot stays in the group. At most 30 groups: to make room, a group your bot was removed from goes first, then one still waiting for your answer, the quietest first; a group you approved or told it to leave is dropped only to make room for one you added it to or wrote in yourself. Kept in your agent's working files and, encrypted, in our database, so a redeploy of the hosted worker does not clear it. All of it is deleted when you discard the trading permission or stop your agent with /kill; a group's memory at once with /forget in the group or Forget in /groups; one person's messages and note, and their name and Telegram id on the coins they posted, when they send /forgetme there (with the summary, if it names them)."],
+            ["Your agent's memory of a Telegram group your bot was removed from", "30 days, in case it is added back, then deleted. Forget in /groups deletes it sooner."],
+            ["A request to forget, made with /forgetme or /forget in a Telegram group or Forget in /groups: the group's Telegram id, the Telegram user id of whoever asked to be forgotten (none for /forget), and when", "Until the encrypted copy of the group memory in our database reflects it, normally within a minute; with the rest of your agent's working files when you discard the trading permission or stop your agent with /kill, or when the hosted worker is redeployed."],
+            ["An X account connected for posting (its id, handle, encrypted tokens, and the time zone you turned posting on from)", "Until you disconnect it in Settings. Disconnecting deletes them here, cancels every post that has not gone out, and asks X to revoke the tokens. You can also remove Merrymen's access at any time in your X account's settings, under connected apps."],
+            ["Your agent's X posts, and the drafts it wrote for X", "Kept with your account history. Posts already on X stay there until you delete them on X."],
+            ["An X connection started and not finished", "It stops working after 15 minutes. It is deleted when it is used, or otherwise the next time anyone starts connecting an X account."],
+            ["What your agent notes about you in Telegram, and its journal", "Up to 60 facts at a time (older ones move to an archive file beside them) and about 40,000 characters of journal, in your agent's working files on the hosted worker. Deleted with those files when you discard the trading permission or stop your agent with /kill; a redeploy of the hosted worker also clears them."],
+            ["Conversations through an AI assistant", "1 year."],
+            ["Research notes", "Shown to your agent for 7 days, then deleted 30 days later."],
+            ["Group chat room lines", "14 days, readable by anyone for that time. A line of your own that you take back is hidden from the room at once and deleted with the rest after 14 days."],
+            ["Watchlist", "Until you remove the tokens through a connected AI assistant, or ask us to delete them. Disconnecting an assistant does not delete them."],
+            ["Alert subscriptions", "Until you ask us to delete them. Removing an alert through a connected AI assistant switches it off for good, and its record stays with your account history. Disconnecting an assistant does not delete them."],
+            ["Partner app connections (which app, the id it uses for you, what you approved)", "Kept with your account history, including after the connection is ended."],
+            ["Messages through a partner app", "The latest 40 exchanges in each connection."],
+            ["Alert delivery records", "90 days after they were created, once sent, skipped or given up on."],
+            ["Exports", "24 hours."],
+            ["Backtest jobs", "30 days after they finish."],
+            ["Assistant connections and proposals (which app, which permissions, what you approved)", "Kept with your account history."],
+            ["Access and refresh tokens", "Access tokens work for 1 hour. Refresh tokens stop working after 30 days unused, and a connection lasts at most 90 days before you approve it again. Their hashes are deleted 30 days after they expire or are revoked."],
+            ["Sign-in codes and consent requests", "Codes work for 5 minutes. Both are deleted a day after they expire."],
+            ["Records of assistant calls", "180 days."],
+            ["Rate-limit counters, including the IP addresses of requests to our sign-in (OAuth) endpoints", "3 days."],
+            ["Apps that registered themselves but no active connection uses", "30 days after registration."],
+            ["Cached app metadata documents", "Deleted once they expire (at most a day later if a connection is using one)."],
+            ["Sign-in cookie", "7 days."],
+            ["Hosting providers' request logs", "As long as our hosting providers keep them."],
+          ]}
+        />
+
+        <h2 id="third-parties">5 · Who else receives data</h2>
+        <p>
+          We use these providers to run the service. Each receives only what its job needs and
+          handles it under its own privacy policy.
+        </p>
+        <Table
+          head={["Provider, and what for", "What it receives"]}
+          rows={[
+            [provider("Privy", "Sign-in with X or email, and the wallet behind it"), "Your X account or email address and sign-in details."],
+            [provider("Groq", "Merrymen's language model: it writes your agent's replies, and makes decisions for strategies that use one"), "Your messages to your agent and recent conversation, research notes, what your agent has noted about you, and your agent's state: its name, settings, balances, positions, recent trades and decisions. Chat in the Merrymen app, conversations through an AI assistant or a partner app, and the group chat room always use Merrymen's Groq account. If you connect an X account for posting, the posts your agent writes for X come from the model provider Merrymen uses for posts (Groq by default), on a Merrymen account, never one whose key you added: it is given your agent's name and how it trades, whether it trades on paper, its own recent X posts, on some days the coins it bought lately, and for a post about a coin it bought, that coin and your agent's reasons, but never your balances, amounts or prices. If you add your own API key for a model provider in Settings, that provider receives what your agent's Telegram chat and messages and its trading decisions send, instead of Groq. What your agent says in a Telegram group comes from the model provider Merrymen uses for Telegram groups (Groq by default), on a Merrymen account; where Merrymen has not set one up, from the provider whose API key you added in Settings; and with neither, from fixed templates, without joining in unprompted (unless Merrymen chooses to write those lines on its own Groq account instead). That provider is given the group's recent messages with their senders' display names, its summary and notes on its people, the coins posted there with what your agent decided and its reasons in plain words, your agent's name, your first name as it shows in the group, whether it trades on paper, and the names of the memecoins it holds, but never your balances, amounts, prices, profit and loss, addresses, settings, or anything from your private chats with it."],
+            [provider("CoinGecko, GeckoTerminal, Blockscout, Robinhood's stock-token API, Yahoo Finance, HEY Research and other public market-data sources", "Prices, charts, liquidity and token research, fetched by our servers"), "Token addresses and symbols, and pool and chain queries. Not who you are or what you wrote."],
+            [provider("Financial Modeling Prep and Robinhood's image server (cdn.robinhood.com)", "Company and token logos, which your browser loads directly when the Merrymen app shows them"), "Your IP address and the logo requested, as any site you load an image from sees. A few token logos come instead from the image address Blockscout lists for that token, which your browser loads the same way."],
+            [provider("Robinhood Chain's public RPC (rpc.mainnet.chain.robinhood.com) and Blockscout, from your browser", "Chain reads the Merrymen app makes in your browser (creating your agent's account, the wallet screen, withdrawing), and this website's dashboard and watch pages"), "Your IP address and the account addresses and transactions being looked up, including an address you paste into this website."],
+            [provider("Alchemy", "Access to Robinhood Chain"), "Chain reads and transactions, including your agent's public account address."],
+            [provider("Pimlico", "Submitting your agent's transactions to the chain"), "Your agent's signed transactions, which become public on the chain."],
+            [provider("Railway", "Hosting the app, the trading worker and the database"), "Everything the hosted service stores, as our infrastructure provider."],
+            [provider("Vercel", "Hosting this website"), "Standard request logs."],
+            [provider("Telegram", "Alerts and chat through your own bot, and its part in Telegram groups you add it to"), "The messages between you and your bot, sent with the bot token you gave us. In a Telegram group, what your agent says there and the emoji reactions it leaves; the group's own messages reach your bot through Telegram, under Telegram's policies."],
+            [provider("X", "Proving your X handle, and posting on X if you connect an account for your agent"), "To prove a handle, nothing from us: we read the public post you made. If you connect an account for posting: the one-time code from your approval on X, our requests with that account's tokens to ask which account it is and to post, the text of each post your agent makes, and, when you disconnect, the tokens to revoke. X handles the account and its posts under its own policies."],
+            [provider("Zoho", "Our support@merrymen.dev mailbox"), "The emails you send us."],
+            [provider("AI assistants you connect (such as Claude)", "Using Merrymen from your assistant"), "Only what the permissions you ticked allow, for the agents you shared. The assistant's provider handles it under its own policies."],
+            [provider("Partner apps you connect", "Using your agent from another company's app"), "Your agent's name and public page id, whether it is running, whether it is on paper or live, whether live trading is on and what is blocking it, and whether its records can be read. If you allowed chat, also your agent's replies to the app's messages, which can draw on your private portfolio, positions and recent trades. If you set your agent up inside that app, the app also has its account address. The partner handles it under its own policies."],
+          ]}
+        />
+        <p>
+          We may also disclose information when the law requires it, or to protect the service and
+          its users from fraud or abuse. Our providers may process data outside your country.
+        </p>
+
+        <h2 id="on-chain">6 · On-chain data is public</h2>
+        <p>
+          Your agent&apos;s account address, its balances and every transaction it makes are
+          recorded on Robinhood Chain, a public blockchain. Anyone can read them, and neither we nor
+          anyone else can delete them.
+        </p>
+
+        <h2 id="security">7 · Security</h2>
+        <ul>
+          <li>
+            The session key in your trading permission is encrypted with AES-256-GCM under a key
+            that is kept in the service&apos;s environment, never in the database beside it. Your
+            settings, including a Telegram bot token or model API key, are encrypted the same way,
+            and so are the tokens of an X account you connect for posting and the copy of your
+            agent&apos;s Telegram group memory kept in our database.
+          </li>
+          <li>
+            While your agent runs, the hosted worker decrypts the session key and your settings and
+            keeps a working copy in your agent&apos;s own directory on the worker, with owner-only
+            file permissions, so it can trade and run your Telegram bot. That copy is deleted when
+            you discard the trading permission or stop your agent with /kill. Your agent&apos;s
+            memory of Telegram groups is kept in the same directory, and deleted with it and with
+            its encrypted copy in our database.
+          </li>
+          <li>
+            The account contract checks every transaction the session key makes against the tokens
+            and trading venues, the per-trade amount and the expiry you signed, and the session key
+            has no permission to transfer or withdraw your funds. It can trade, though: if you turn
+            on launchpad (Pons) memecoin trading, each launchpad trade pays the curve contract that
+            trade names, up to your per-trade limit, and the chain cannot check that the contract
+            is a genuine launchpad curve. Your daily operations limit and daily budget are enforced
+            by our software, not by the contract.
+          </li>
+          <li>OAuth codes, access and refresh tokens and client secrets are stored only as SHA-256 hashes.</li>
+          <li>Everything travels over HTTPS.</li>
+        </ul>
+        <p>No system is perfectly secure. If we learn of a breach that affects you, we will tell you.</p>
+
+        <h2 id="your-choices">8 · Your choices</h2>
+        <ul>
+          <li>
+            <strong>Disconnect an AI assistant</strong> on{" "}
+            <a className="link" href={CONNECTED_APPS}>Connected apps</a>. Its tokens stop working on
+            its next request.
+          </li>
+          <li>
+            <strong>Stop your agent</strong>: on Wallet &amp; permissions, “discard &amp; start
+            over” deletes the copy of your trading permission the hosted worker uses (or send{" "}
+            <code className="inline">/kill</code>, then <code className="inline">/confirm</code>, to
+            your Telegram bot). The signed permission itself stops working on chain at the expiry
+            date you signed. Stopping your agent does not move your funds; withdraw them as below.
+          </li>
+          <li>
+            <strong>Withdraw your funds.</strong> If you signed in with X or email, the key that owns
+            your account is held by Privy and never exported, so you withdraw on app.merrymen.dev,
+            from Withdraw, signed in with that same login. That depends on app.merrymen.dev and
+            Privy being available, and on you keeping access to that X account or email address. If
+            your account was made with a key generated in your browser, you can withdraw there with
+            that key too, or with your recovery key and the self-hosted software&apos;s{" "}
+            <code className="inline">merrymen recover</code> command, which needs a bundler key of
+            your own (such as a free Pimlico key) and works even when the hosted service is down.
+          </li>
+          <li>
+            <strong>Stop your agent posting on X</strong> in Settings, under Posting on X: turn
+            posting off, skip a post while it waits under Coming up (each waits there at least ten
+            minutes), or disconnect the X account, which also asks X to revoke our access. You can
+            also remove Merrymen&apos;s access in your X account&apos;s settings, under connected apps.
+            Posts already on X stay there until you delete them on X.
+          </li>
+          <li>
+            <strong>Control what your agent remembers of Telegram groups.</strong> In a group, send{" "}
+            <code className="inline">/forget</code> to wipe your agent&apos;s memory of that group;
+            anyone there can send <code className="inline">/forgetme</code> to remove their own
+            messages and the note about them, and their name and Telegram user id from the coins
+            they posted (section 2, under Telegram groups). In your private chat with your bot,{" "}
+            <code className="inline">/groups</code> lists the groups it knows, with Stay, Leave and
+            Forget. Remove the bot from a group and it stops hearing it; its memory of that group is
+            deleted 30 days later. Turn Telegram groups off in Settings, under Telegram, and your
+            agent goes quiet in every group and stops adding to its memory of them; what it already
+            remembers is kept as section 4 says, or goes at once with Forget.
+          </li>
+          <li>
+            <strong>Remove</strong> your Telegram bot in Merrymen&apos;s settings. Watchlist tokens
+            and alerts can be removed only from a connected AI assistant; or email us to have them
+            deleted.
+          </li>
+          <li>
+            <strong>Disconnect a partner app</strong>: ask the app to disconnect you, or email us and
+            we will. Its access ends; your agent keeps running.
+          </li>
+          <li>
+            <strong>Keep your book private</strong> (the default) or publish it, from your profile.
+            A private book still shows what section 2 lists as public, including each recent
+            trade&apos;s token, direction, time and percentage return, and a ranked live
+            agent&apos;s equity curve on the leaderboard.
+          </li>
+          <li>
+            <strong>Ask for a copy of your data, a correction, or deletion</strong> by emailing{" "}
+            <a className="link" href="mailto:support@merrymen.dev">support@merrymen.dev</a>. We may
+            need to confirm the request comes from the account holder. We cannot delete what is on
+            the blockchain, and deleting your account data stops your hosted agent.
+          </li>
+        </ul>
+
+        <h2 id="self-hosted">9 · The self-hosted software</h2>
+        <p>
+          If you run merrymen yourself, it runs on your computer. It stores its settings, keys,
+          ledger, strategies and your agent&apos;s “soul” files in a directory on your machine
           (<code className="inline">~/.merrymen</code> by default). This data:
         </p>
         <ul>
-          <li>Stays on your machine. We have no server that receives or stores any of it.</li>
+          <li>
+            Stays on your machine. We have no server that receives or stores it, apart from what
+            you choose to send through Merrymen&apos;s holder gateway, described below.
+          </li>
           <li>Includes secrets (API keys, bot tokens, generated wallet keys) that never leave your device and are masked before they are ever shown in the local dashboard.</li>
-          <li>Is under your control — you can read, edit, or delete it at any time.</li>
+          <li>Is under your control: you can read, edit or delete it at any time.</li>
         </ul>
         <p>
           When you configure third-party services, merrymen sends requests <em>directly from your
           machine</em> to those providers using the keys you supply:
         </p>
         <ul>
-          <li><strong>Blockchain RPC / bundler providers</strong> — to read chain state and submit transactions.</li>
-          <li><strong>Anthropic</strong> — if you set an Anthropic key, for the LLM strategist, chat, and vision. Message content you send is processed under Anthropic&apos;s terms.</li>
-          <li><strong>Telegram</strong> — if you connect a bot, messages flow between you and your bot through Telegram under Telegram&apos;s terms.</li>
-          <li><strong>Transcription provider</strong> — if you enable voice, your voice notes are sent to the endpoint you configure.</li>
+          <li><strong>Blockchain RPC / bundler providers</strong>, to read chain state and submit transactions.</li>
+          <li><strong>The language-model provider you choose</strong> (such as Groq, Anthropic or OpenAI), for the strategist, chat and vision, and for your agent&apos;s lines in Telegram groups unless you give those a key of their own. The messages you send, and for a Telegram group its recent messages and the names of the people who sent them, are processed under that provider&apos;s terms.</li>
+          <li>
+            <strong>Telegram</strong>, if you connect a bot: messages flow between you and your bot
+            through Telegram under Telegram&apos;s terms. If you add the bot to Telegram groups, their
+            messages reach it the same way, and it keeps the memory described in section 2, under
+            Telegram groups, with the same limits, in a file in that directory
+            (<code className="inline">tg-groups.json</code>). The people in those groups can use{" "}
+            <code className="inline">/forgetme</code>, and you can use{" "}
+            <code className="inline">/forget</code> or delete the file. Each of those requests is
+            also recorded, with the group&apos;s id, the Telegram user id of whoever asked (none for{" "}
+            <code className="inline">/forget</code>) and when, in{" "}
+            <code className="inline">tg-groups-forget.json</code> beside it, so a deletion is not
+            undone by a crash. That record is removed as soon as the memory file reflects the
+            deletion.
+          </li>
+          <li><strong>A transcription provider</strong>, if you enable voice: your voice notes are sent to the endpoint you configure.</li>
         </ul>
         <p>
           We are not a party to those exchanges and do not receive copies of them. Each provider&apos;s
           own privacy policy governs the data it receives.
         </p>
-
-        <h2>2 · This website</h2>
+        <h3>Merrymen&apos;s holder gateway (optional)</h3>
         <p>
-          merrymen.dev is a static informational site. It does not ask you to sign in, does not use
-          advertising or cross-site tracking cookies, and asks for nothing about you except on the iOS
-          beta form described in section 3. Like most sites, our host (Vercel) may process basic, non-identifying request
-          logs (such as IP address and user agent) for security and reliability; that processing is
-          governed by the host&apos;s privacy policy. Links to third-party sites (GitHub, npm, provider
-          docs) are governed by those sites&apos; policies.
+          There is one exception, and it is your choice. If you pick <strong>Merrymen AI</strong> as
+          your language-model provider, or give merrymen a $MERRYMEN holder token for token
+          discovery instead of a Bitquery key of your own, those requests go through
+          Merrymen&apos;s gateway (merrymen-gateway-production.up.railway.app, also served at
+          ai.merrymen.dev) to the provider behind it:
+        </p>
+        <ul>
+          <li>
+            <strong>Model requests</strong> carry what your agent sends a language model: your
+            messages and the recent conversation, and your agent&apos;s state (such as its settings,
+            balances, positions, recent trades and decisions), and for its lines in a Telegram group,
+            that group&apos;s recent messages and the names of the people who sent them. The gateway
+            passes them to its language-model provider (Groq in its standard setup) and returns the
+            reply. It does not store or log what the requests or replies say.
+          </li>
+          <li>
+            <strong>Discovery requests</strong> name one of a short, fixed list of queries (such as
+            pools created recently). The gateway runs it against Bitquery with its own key; Bitquery
+            receives the query, not your address or token.
+          </li>
+          <li>
+            <strong>To get a token</strong>, you sign a message with your holder wallet on the
+            gateway&apos;s claim page. The token carries that wallet&apos;s address and an expiry 7
+            days later; the gateway does not keep a copy of it.
+          </li>
+          <li>
+            <strong>What the gateway keeps</strong>: whether your holder address holds enough
+            $MERRYMEN (trusted for up to 10 minutes, then checked on chain again), per-minute request
+            counters keyed by that address (or, for claims, by IP address), and the one-time codes
+            used to claim a token. It keeps these in its memory, which a restart clears, or in a
+            key-value store where each entry expires on its own (a minute for counters, 10 minutes
+            for the holding check, 5 minutes for claim codes), never in a database. Its host keeps
+            basic request logs, as for the hosted service.
+          </li>
+        </ul>
+
+        <h2 id="website">10 · This website</h2>
+        <p>
+          merrymen.dev is an informational site. It uses no advertising or cross-site tracking
+          cookies, and asks for nothing about you except in two places: the iOS beta form (section
+          11) and the developer page, where developers sign in with a wallet signature to create
+          partner API keys. For those we keep the wallet&apos;s address and each key&apos;s name,
+          permissions and status; the key itself is shown once and stored only as a hash, and your
+          IP address is used briefly to limit repeated sign-in attempts. The dashboard and watch
+          pages look up an address you paste by asking Robinhood Chain&apos;s public RPC and
+          Blockscout straight from your browser, so those services see it (section 5); it does not
+          reach us. The memescope page reads recently created pools from our gateway, which sees
+          only the request itself. Like most sites, our host
+          (Vercel) may process basic request logs (such as IP address and user agent) for security
+          and reliability. Links to third-party sites (GitHub, npm, provider docs) are governed by
+          those sites&apos; policies.
         </p>
 
-        <h2>3 · The one thing we do collect: the iOS beta list</h2>
+        <h2 id="ios-beta">11 · The iOS beta list</h2>
         <p>
           If you enter your email address into the iOS beta form on this site, we store that address
-          so we can tell you when there is a build to install. That is the only personal information
-          merrymen collects anywhere, and it is collected only because you typed it in.
+          so we can tell you when there is a build to install.
         </p>
         <ul>
           <li>
             <strong>What is stored:</strong> your email address, the word “ios”, and the date you
-            signed up. Nothing else — no IP address, no browser or device details, no referrer, no
-            tracking identifier, and no time of day.
+            signed up. Nothing else: no IP address, no browser or device details, no referrer, no
+            tracking identifier and no time of day.
           </li>
           <li>
             <strong>Where:</strong> a file on a private disk attached to our own server. It is not in
             a third-party mailing-list product, and it is not in the public repository.
           </li>
           <li>
-            <strong>What we do with it:</strong> email you about the iOS beta. Nothing else. No
-            newsletter, no product marketing, no “we thought you&apos;d also like”.
+            <strong>What we do with it:</strong> email you about the iOS beta. Nothing else: no
+            newsletter, no product marketing.
           </li>
           <li>
             <strong>How long:</strong> until the beta ships or you ask us to remove you, whichever is
-            first. Ask and it is deleted — no account needed, no confirmation loop.
+            first. Ask and it is deleted, with no account needed and no confirmation loop.
           </li>
         </ul>
         <p>
@@ -86,32 +782,40 @@ export function PrivacyPolicyDoc() {
           addresses is never served over the internet.
         </p>
 
-        <h2>4 · No sale or sharing of personal data</h2>
+        <h2 id="no-sale">12 · No sale of personal data</h2>
         <p>
-          We do not sell, rent, or share personal data. The beta list above is the only personal data
-          we hold, it goes to no one else, and there is no advertising or analytics business attached
-          to any part of this project.
+          We do not sell or rent personal data, and we do not use it for advertising. It goes only to
+          the providers in section 5, for the purposes described there, and to anyone you choose to
+          connect.
         </p>
 
-        <h2>5 · Children</h2>
-        <p>merrymen is not directed to children under 13 (or the minimum age in your jurisdiction), and we do not knowingly collect their data.</p>
-
-        <h2>6 · Changes</h2>
-        <p>We may update this policy; the “last updated” date above reflects the latest version.</p>
-
-        <h2>7 · Contact</h2>
+        <h2 id="children">13 · Children</h2>
         <p>
-          Questions? Email{" "}
+          The hosted service is only for adults (18 or older, or the age of majority where you live).
+          The website and the self-hosted software are not directed to children under 13 (or the
+          minimum age in your jurisdiction), and we do not knowingly collect children&apos;s data.
+        </p>
+
+        <h2 id="changes">14 · Changes</h2>
+        <p>
+          We will update this policy when what we collect, how long we keep it, or who receives it
+          changes, and change the date at the top. For significant changes to the hosted service we
+          will also tell signed-in users in the app.
+        </p>
+
+        <h2 id="contact">15 · Contact</h2>
+        <p>
+          Questions or requests? Email{" "}
           <a className="link" href="mailto:support@merrymen.dev">support@merrymen.dev</a> or open an issue on{" "}
           <a className="link" href="https://github.com/millw14/merrymen" target="_blank" rel="noreferrer">
             GitHub
           </a>
-          .
+          . Please never send keys, recovery phrases or tokens.
         </p>
 
         <div className="callout" style={{ marginTop: 40 }}>
-          This policy describes an open-source, self-hosted project in plain language and is not legal
-          advice.
+          This policy describes in plain language what the Merrymen service and software do with
+          your data. It is not legal advice.
         </div>
       </article>
     </div>

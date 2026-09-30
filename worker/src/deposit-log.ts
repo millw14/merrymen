@@ -35,17 +35,33 @@
  * flows AND moves the high-water mark with them, because a deposit that lifts
  * equity without lifting the peak it is measured against is the original bug
  * wearing a tx hash.
+ *
+ * NOR DOES IT BOOK AN ENERGY PURCHASE. USDG the agent spent on its energy
+ * reserve is capital leaving the trading book, and it IS booked — by the worker,
+ * at landing, from the receipt, with both peaks in one transaction
+ * (energy-accounting.ts, store.bookCapitalFlow). The classifier calls that leg
+ * `reserve-out`, and this scanner books only `capital-in`/`capital-out`, so it
+ * logs the purchase as "not capital" and moves nothing. That is deliberate and
+ * load-bearing: this caller moves the peak whenever `addFlow` returns true, and
+ * `addFlow` returns true on a duplicate — a second booker of the same leg would
+ * lower the peak twice (the Shogun double-lowering). One live booker per flow.
  */
 import { decodeEventLog, parseAbi, type Hex } from "viem";
 import { addressTopic, getLogsAdaptive, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 // The one rule that decides whether a USDG movement is the owner's capital or
 // the agent trading. Imported rather than restated so the scanner and the
 // accounting backfill cannot reach different answers about the same transfer.
-import { classifyUsdgMovement, type TransferLeg } from "../../packages/core/src/index";
+import { classifyUsdgMovement, energyReserveTokens, MERRYMEN_TOKEN, type TransferLeg } from "../../packages/core/src/index";
 import type { ReceiptLog } from "./fills";
 
-/** Every ERC-20 Transfer in a receipt, as classification legs. */
-function legsFromReceiptLogs(logs: readonly ReceiptLog[]): TransferLeg[] {
+/**
+ * Every ERC-20 Transfer in a receipt, as classification legs.
+ *
+ * Exported so the energy booking (energy-accounting.ts) reads a receipt into
+ * legs exactly as this scanner does — two decoders would be two answers about
+ * which legs a transaction had, and the classifier's verdict turns on them.
+ */
+export function legsFromReceiptLogs(logs: readonly ReceiptLog[]): TransferLeg[] {
   const out: TransferLeg[] = [];
   for (const l of logs) {
     if ((l.topics?.[0] ?? "").toLowerCase() !== TRANSFER_TOPIC) continue;
@@ -138,6 +154,14 @@ export async function findTransferFlows(opts: {
    * means no class route, which is every grant today.
    */
   custodyAddresses?: readonly string[];
+  /**
+   * The chain this account is on, so the classifier is told which tokens are
+   * the energy reserve there (energyReserveTokens). A named reserve makes the
+   * energy purchase `reserve-out` — still "not capital" here, see the header —
+   * and keeps the "not capital" log honest about what it saw. Defaults to
+   * mainnet, where the reserve exists.
+   */
+  chainId?: number;
   maxSpan?: bigint;
   log?: (m: string) => void;
 }): Promise<TransferFlow[]> {
@@ -298,8 +322,14 @@ export async function findTransferFlows(opts: {
       // as a withdrawal — corrupting the denominator of every P&L figure.
       // See ClassifyInput.custodyAddresses.
       custodyAddresses: opts.custodyAddresses,
+      // The energy reserve on this chain. Its purchase classifies `reserve-out`,
+      // which the condition below deliberately does NOT book: the worker is its
+      // one live booker. See the header.
+      reserveTokens: energyReserveTokens(opts.chainId ?? MERRYMEN_TOKEN.chainId),
     });
 
+    // EXACTLY capital-in or capital-out. Never widen this to `reserve-out`:
+    // deposit-log.test.ts pins the condition, and why is in the header.
     if (v.kind === "capital-in" || v.kind === "capital-out") {
       out.push({
         direction: c.direction,
@@ -320,7 +350,8 @@ export async function findTransferFlows(opts: {
       throw new Error(`deposit scan: ${c.txHash}#${c.logIndex} could not be classified — ${v.why}`);
     }
 
-    // trade-in / trade-out / internal / protocol: real movements, not capital.
+    // trade-in / trade-out / internal / protocol / reserve-out: real movements,
+    // not capital THIS scanner books.
     opts.log?.(`not capital: ${c.txHash.slice(0, 10)}…#${c.logIndex} is ${v.kind} — ${v.why}`);
   }
 

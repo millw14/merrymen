@@ -153,3 +153,58 @@ describe("the budget window actually rolls", () => {
     assert.equal(await getSpentTodayUsdg(AGED, "live"), 0);
   });
 });
+
+describe("a sell into cash spends nothing", () => {
+  const TRADER = "0xroundtrip00000000000000000000000000000d";
+  const USDG = "0xUSDGUSDGUSDGUSDGUSDGUSDGUSDGUSDGUSDGUSDG";
+  const TOKEN = "0x5555555555555555555555555555555555555555";
+
+  it("a round trip draws the budget down by the buy only", async () => {
+    // Buy 5 USDG of a token, sell it back for 6. policy.ts exempts the sell
+    // from the daily-cap check because it spends nothing; the settled sum used
+    // to add its proceeds anyway, so this read 11 and the next buys were
+    // refused with more than half the day's allowance never spent.
+    await addTrade({ agent_id: TRADER, kind: "swap", target: TOKEN, sell_token: USDG, buy_token: TOKEN, amount_usdg: 5, status: "landed" });
+    await addTrade({ agent_id: TRADER, kind: "swap", target: TOKEN, sell_token: TOKEN, buy_token: USDG, amount_usdg: 6, status: "landed" });
+    await addTrade({ agent_id: TRADER, kind: "curve-trade", target: TOKEN, sell_token: TOKEN, buy_token: USDG.toLowerCase(), amount_usdg: 2, status: "landed" });
+
+    assert.equal(await getSpentTodayUsdg(TRADER, "live", USDG), 5);
+    // Every one of them is still an op: the ops cap is not a spend.
+    assert.equal(await getOpsToday(TRADER, "live"), 3);
+    // Without the cash token the old, conservative sum is unchanged.
+    assert.equal(await getSpentTodayUsdg(TRADER, "live"), 13);
+  });
+});
+
+describe("the energy buy is a real spend on the LIVE book, and only there", () => {
+  const ENERGY = "0xenergyaccount0000000000000000000000000e";
+  const USDG_LC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+  const MERRY_LC = "0xa15cd06dd305269a0f48bebeb30aa3588fba7b32";
+  const energyRow = (status: "landed" | "submitted" | "rejected", amount: number) =>
+    addTrade({
+      agent_id: ENERGY,
+      kind: "energy-buy",
+      target: "0x89e5db8b5aa49aa85ac63f691524311aeb649eba",
+      sell_token: USDG_LC,
+      buy_token: MERRY_LC,
+      amount_usdg: amount,
+      status,
+    });
+
+  it("landed and submitted energy buys count toward the live day's spend AND ops — with the sell-exemption asleep", async () => {
+    // getSpentTodayUsdg's sell exemption is keyed on kind swap/curve-trade with
+    // a CASH buy leg; an energy buy's buy leg is the reserve, so it is spend in
+    // full whatever the cash token passed — the cap the policy mirror judged.
+    await energyRow("landed", 10);
+    await energyRow("submitted", 7);
+    await energyRow("rejected", 99);
+    assert.equal(await getSpentTodayUsdg(ENERGY, "live", USDG_LC), 17);
+    assert.equal(await getSpentTodayUsdg(ENERGY, "live"), 17);
+    assert.equal(await getOpsToday(ENERGY, "live"), 2);
+  });
+
+  it("and are invisible to the paper book — a real purchase never spends a practice allowance", async () => {
+    assert.equal(await getSpentTodayUsdg(ENERGY, "paper", USDG_LC), 0);
+    assert.equal(await getOpsToday(ENERGY, "paper"), 0);
+  });
+});

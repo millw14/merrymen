@@ -221,7 +221,7 @@ export async function llmToolCall(
       tools: [{ name: opts.tool.name, description: opts.tool.description, input_schema: opts.tool.schema } as never],
       tool_choice: { type: "tool", name: opts.tool.name },
       messages: opts.messages,
-    });
+    }).catch((error: unknown) => { throw normalizedAnthropicError(creds, error); });
     const t = res.content.find((b) => b.type === "tool_use");
     return t && t.type === "tool_use" ? (t.input as Record<string, unknown>) : {};
   }
@@ -327,7 +327,7 @@ export async function llmAgentTurn(
       thinking: { type: "disabled" },
       tools: opts.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.schema }) as never),
       messages,
-    });
+    }).catch((error: unknown) => { throw normalizedAnthropicError(creds, error); });
     const text = res.content.filter((b) => b.type === "text").map((b) => (b.type === "text" ? b.text : "")).join("\n").trim();
     const toolUses: AgentToolUse[] = res.content
       .filter((b) => b.type === "tool_use")
@@ -417,8 +417,37 @@ async function providerError(creds: LlmCreds, r: Response): Promise<string> {
   } catch {
     detail = raw;
   }
+  return providerFailure(creds, r.status, detail);
+}
+
+function providerFailure(creds: LlmCreds, status: number, detail: string): string {
   const safe = redactSecrets(detail, [creds.apiKey].filter(Boolean)).replace(/\s+/g, " ").trim();
-  return `${creds.provider} ${r.status}${safe ? ` — ${safe.slice(0, 300)}` : ""}`;
+  return `${creds.provider} ${status}${safe ? ` — ${safe.slice(0, 300)}` : ""}`;
+}
+
+/**
+ * The SDK throws `404 { ... }`, while fetch errors already name the provider.
+ * Without this boundary an unavailable Anthropic model reached the owner as an
+ * unrecognised failure, even though its status said exactly what to change.
+ * Read SDK fields, redact before logging, and keep local errors/aborts intact.
+ */
+function normalizedAnthropicError(creds: LlmCreds, error: unknown): unknown {
+  if (error instanceof Anthropic.APIUserAbortError) return error;
+  if (error instanceof Anthropic.APIConnectionError) {
+    return new Error(`${creds.provider} network request failed`);
+  }
+  if (!(error instanceof Anthropic.APIError)) return error;
+  const body = error.error as { error?: { type?: unknown; code?: unknown; message?: unknown }; message?: unknown } | undefined;
+  const detail = body?.error;
+  const code = detail?.code ?? detail?.type ?? error.type;
+  const message = detail?.message ?? body?.message;
+  if (typeof error.status === "number") {
+    const text = [code, message].filter((part) => typeof part === "string" && part).join(": ");
+    return new Error(providerFailure(creds, error.status, text));
+  }
+  // SSE errors arrive after HTTP 200, without a failure status. Do not invent
+  // one or let the partially received reply count as a completed answer.
+  return new Error(streamError(creds, { code, message }));
 }
 
 /**
@@ -449,7 +478,7 @@ export async function llmText(
       thinking: { type: "disabled" },
       system: opts.system,
       messages: [{ role: "user", content: opts.prompt }],
-    });
+    }).catch((error: unknown) => { throw normalizedAnthropicError(creds, error); });
     const t = res.content.find((b) => b.type === "text");
     return t && t.type === "text" ? t.text.trim() : "";
   }
@@ -545,34 +574,38 @@ export async function llmTextStream(
   onText: (piece: string) => void,
 ): Promise<string> {
   if (creds.transport === "anthropic") {
-    const client = new Anthropic({ apiKey: creds.apiKey });
-    const stream = await client.messages.create(
-      {
-        model: creds.model,
-        max_tokens: opts.maxTokens ?? 400,
-        thinking: { type: "disabled" },
-        system: opts.system,
-        messages: [{ role: "user", content: opts.prompt }],
-        stream: true,
-      },
-      { signal: opts.signal },
-    );
-    let raw = "";
-    let stopped = false;
-    for await (const ev of stream) {
-      if (ev.type === "content_block_delta" && ev.delta.type === "text_delta" && ev.delta.text) {
-        raw += ev.delta.text;
-        onText(ev.delta.text);
+    try {
+      const client = new Anthropic({ apiKey: creds.apiKey });
+      const stream = await client.messages.create(
+        {
+          model: creds.model,
+          max_tokens: opts.maxTokens ?? 400,
+          thinking: { type: "disabled" },
+          system: opts.system,
+          messages: [{ role: "user", content: opts.prompt }],
+          stream: true,
+        },
+        { signal: opts.signal },
+      );
+      let raw = "";
+      let stopped = false;
+      for await (const ev of stream) {
+        if (ev.type === "content_block_delta" && ev.delta.type === "text_delta" && ev.delta.text) {
+          raw += ev.delta.text;
+          onText(ev.delta.text);
+        }
+        if (ev.type === "message_stop" || (ev.type === "message_delta" && ev.delta.stop_reason)) stopped = true;
       }
-      if (ev.type === "message_stop" || (ev.type === "message_delta" && ev.delta.stop_reason)) stopped = true;
+      // See the OpenAI branch below: a stream that never said it stopped was cut.
+      if (!stopped) throw new Error(`${creds.provider} ${creds.model} stream ended before the reply was finished`);
+      const text = raw.trim();
+      // llmText answers "" here and leaves the caller to notice; a stream the
+      // owner watched arrive empty is a failure, and is said as one.
+      if (!text) throw new Error(`${creds.provider} ${creds.model} returned an empty reply`);
+      return text;
+    } catch (error) {
+      throw normalizedAnthropicError(creds, error);
     }
-    // See the OpenAI branch below: a stream that never said it stopped was cut.
-    if (!stopped) throw new Error(`${creds.provider} ${creds.model} stream ended before the reply was finished`);
-    const text = raw.trim();
-    // llmText answers "" here and leaves the caller to notice; a stream the
-    // owner watched arrive empty is a failure, and is said as one.
-    if (!text) throw new Error(`${creds.provider} ${creds.model} returned an empty reply`);
-    return text;
   }
 
   const base: Record<string, unknown> = {

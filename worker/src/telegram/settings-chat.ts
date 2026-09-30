@@ -70,6 +70,28 @@ const ALIASES: Readonly<Record<string, readonly string[]>> = Object.freeze({
   classMaxPositions: ["max positions", "max coins"],
   classExitAtGraduationPct: ["graduation exit", "exit at graduation"],
   strategy: ["playbook"],
+  // Posting on X is dashboard-only (DASHBOARD_ONLY.xPosting): these words
+  // reach the refusal and its Settings button, never a change.
+  xPosting: ["post on x", "posting on x", "x posting", "posts on x", "post on twitter", "twitter", "tweets", "tweeting", "x account"],
+  // Telegram groups are dashboard-only (DASHBOARD_ONLY.telegramGroups). "group
+  // chats" is how owners say it even though the product never does — the
+  // public web room owns that name — so it has to reach the refusal too. The
+  // three real keys are listed as well, so `/set telegramGroupsChattiness
+  // chatty` gets the Settings button rather than the generic "I can change
+  // these" list, which would read as though the key simply did not exist.
+  telegramGroups: [
+    "group chats",
+    "group chat",
+    "groups",
+    "gc",
+    "telegram groups",
+    "telegram group",
+    "chattiness",
+    "group coins",
+    "telegramGroupsEnabled",
+    "telegramGroupCoinsEnabled",
+    "telegramGroupsChattiness",
+  ],
 });
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "");

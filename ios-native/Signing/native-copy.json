@@ -43,7 +43,9 @@
     "Watchlist": "Watchlist",
     "Withdraw": "Withdraw",
     "Add funds": "Add funds",
-    "Copy message": "Copy message"
+    "Copy message": "Copy message",
+    "Continue with X": "Continue with X",
+    "Other ways to sign in": "Other ways to sign in"
   },
   "es": {
     "Home": "Inicio",
@@ -89,7 +91,9 @@
     "Watchlist": "Lista de seguimiento",
     "Withdraw": "Retirar",
     "Add funds": "Añadir fondos",
-    "Copy message": "Copiar mensaje"
+    "Copy message": "Copiar mensaje",
+    "Continue with X": "Continuar con X",
+    "Other ways to sign in": "Otras formas de iniciar sesión"
   },
   "pt-BR": {
     "Home": "Início",
@@ -135,7 +139,9 @@
     "Watchlist": "Lista de acompanhamento",
     "Withdraw": "Sacar",
     "Add funds": "Adicionar fundos",
-    "Copy message": "Copiar mensagem"
+    "Copy message": "Copiar mensagem",
+    "Continue with X": "Continuar com o X",
+    "Other ways to sign in": "Outras formas de entrar"
   },
   "id": {
     "Home": "Beranda",
@@ -181,7 +187,9 @@
     "Watchlist": "Daftar pantauan",
     "Withdraw": "Tarik dana",
     "Add funds": "Tambah dana",
-    "Copy message": "Salin pesan"
+    "Copy message": "Salin pesan",
+    "Continue with X": "Lanjutkan dengan X",
+    "Other ways to sign in": "Cara lain untuk masuk"
   },
   "vi": {
     "Home": "Trang chủ",
@@ -227,7 +235,9 @@
     "Watchlist": "Danh sách theo dõi",
     "Withdraw": "Rút tiền",
     "Add funds": "Nạp tiền",
-    "Copy message": "Sao chép tin nhắn"
+    "Copy message": "Sao chép tin nhắn",
+    "Continue with X": "Tiếp tục với X",
+    "Other ways to sign in": "Cách đăng nhập khác"
   },
   "tr": {
     "Home": "Ana sayfa",
@@ -273,7 +283,9 @@
     "Watchlist": "İzleme listesi",
     "Withdraw": "Çek",
     "Add funds": "Para ekle",
-    "Copy message": "Mesajı kopyala"
+    "Copy message": "Mesajı kopyala",
+    "Continue with X": "X ile devam et",
+    "Other ways to sign in": "Diğer giriş yöntemleri"
   },
   "ru": {
     "Home": "Главная",
@@ -319,7 +331,9 @@
     "Watchlist": "Список наблюдения",
     "Withdraw": "Вывести",
     "Add funds": "Пополнить",
-    "Copy message": "Копировать сообщение"
+    "Copy message": "Копировать сообщение",
+    "Continue with X": "Продолжить с X",
+    "Other ways to sign in": "Другие способы входа"
   },
   "th": {
     "Home": "หน้าหลัก",
@@ -365,7 +379,9 @@
     "Watchlist": "รายการเฝ้าดู",
     "Withdraw": "ถอน",
     "Add funds": "เติมเงิน",
-    "Copy message": "คัดลอกข้อความ"
+    "Copy message": "คัดลอกข้อความ",
+    "Continue with X": "ดำเนินการต่อด้วย X",
+    "Other ways to sign in": "วิธีอื่นในการเข้าสู่ระบบ"
   },
   "zh-CN": {
     "Home": "首页",
@@ -411,7 +427,9 @@
     "Watchlist": "关注列表",
     "Withdraw": "提现",
     "Add funds": "充值",
-    "Copy message": "复制消息"
+    "Copy message": "复制消息",
+    "Continue with X": "使用 X 继续",
+    "Other ways to sign in": "其他登录方式"
   },
   "ja": {
     "Home": "ホーム",
@@ -457,7 +475,9 @@
     "Watchlist": "ウォッチリスト",
     "Withdraw": "出金",
     "Add funds": "入金",
-    "Copy message": "メッセージをコピー"
+    "Copy message": "メッセージをコピー",
+    "Continue with X": "Xで続ける",
+    "Other ways to sign in": "その他のログイン方法"
   },
   "ko": {
     "Home": "홈",
@@ -503,6 +523,8 @@
     "Watchlist": "관심 목록",
     "Withdraw": "출금",
     "Add funds": "입금",
-    "Copy message": "메시지 복사"
+    "Copy message": "메시지 복사",
+    "Continue with X": "X로 계속하기",
+    "Other ways to sign in": "다른 로그인 방법"
   }
 }

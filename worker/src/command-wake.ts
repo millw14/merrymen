@@ -225,6 +225,33 @@ export function tickPlan(kind: TickKind): TickPlan {
  *   incomplete  — a book that could not be totalled has no equity to write: a
  *                 gap is honest, a partial total is not. tick() skips the peaks
  *                 for it before it gets here; this holds that too.
+ *   held        — flow inference HELD this tick (flow-inference.ts): an op the
+ *                 resolver may still settle is in flight, so the cash in this
+ *                 equity is not yet split into capital and performance. A
+ *                 deposit made during the hold is in the equity and not yet in
+ *                 the peak, so a fee accrued now is a fee on principal, and a
+ *                 lifetime peak raised now counts the deposit twice once it is
+ *                 booked. So no fee, and no paper or lifetime peak.
+ *
+ *                 THE BREAKER STILL OBSERVES. It used to freeze with the rest,
+ *                 and a dropped userOp holds for the resolver's whole 26-hour
+ *                 window: a book that ran 100 → 150 → 110 in the hold was
+ *                 judged at 110 against 100, no drawdown, while every non-exit
+ *                 buy went out. `breakerObservationUsdg` is this tick's equity
+ *                 with any cash above the expected baseline taken out
+ *                 (flow-inference.ts heldBreakerObservationUsdg), so it cannot
+ *                 hold an unbooked deposit; the breaker's peaks — the risk
+ *                 period's in the ledger, and the in-memory lift above the
+ *                 lifetime mark (`breakerLift`) — take it. Absent, a held tick
+ *                 observes nothing, as before.
+ *
+ *                 AND THE ROW IS WRITTEN, FLAGGED. A 26-hour gap in the curve
+ *                 left the hosted anchor (bootstrap-source.ts) and the restart
+ *                 baseline a day stale. The row is a true valuation; what it may
+ *                 not be is a CASH BASELINE, because a held reading can carry a
+ *                 stranded op's movement. So it is written with `flowsHeld`, and
+ *                 the two readers that take a baseline from the newest row
+ *                 (store.ts lastKnownCashReading, the anchor) skip it.
  *
  * The reads stay unconditional. A command tick still needs the peak its order
  * is judged against — it is asked with `null`, which reads without observing
@@ -233,16 +260,41 @@ export function tickPlan(kind: TickKind): TickPlan {
 export interface TickRatchets {
   /** The paper book's peak after this tick: raised on `book` and written only when this tick may, and past it. */
   paperPeak<B extends { hwmUsdg: number }>(book: B, equityUsdg: number, write: (book: B) => Promise<unknown>): Promise<number>;
-  /** The risk-period peak, read with this tick's equity as an observation only when this tick may. */
+  /**
+   * The risk-period peak, read with this tick's equity as an observation only
+   * when this tick may — or, on a held tick, with the held observation.
+   */
   riskPeak<P>(equityUsdg: number, read: (observe: number | null) => Promise<P>): Promise<P>;
   /** The live mark after the accrual: the fee and the mark persisted, on a profit, only when this tick may. */
   accrue(accrual: { profitUsdg: bigint; newHwmUsdg: bigint }, peakUsdg: bigint, persist: () => Promise<unknown>): Promise<bigint>;
-  /** The equity row: written on a regular tick whose book could be totalled. */
-  equityRow(write: () => Promise<unknown>): Promise<void>;
+  /**
+   * THE BREAKER'S LIFT ABOVE THE LIFETIME MARK, after this tick (USDG 6dp).
+   *
+   * With no risk period standing, the breaker judges against the in-memory
+   * lifetime mark — the same figure the fee ratchets — and a held tick may not
+   * raise that one. The lift is what held observations saw above it: the
+   * breaker's peak is `mark + lift`. Kept RELATIVE to the mark so a capital
+   * flow, which moves the mark (and is re-read into it), moves the breaker's
+   * peak with it exactly as adjustRiskCapital moves a risk period's. When the
+   * mark rises past the old breaker peak the lift is absorbed into it.
+   * `peakBefore`/`peakAfter` are the mark on either side of this tick's accrue.
+   */
+  breakerLift(liftUsdg: bigint, peakBeforeUsdg: bigint, peakAfterUsdg: bigint): bigint;
+  /** The equity row: written on a regular tick whose book could be totalled, and flagged when the flows were held. */
+  equityRow(write: (row: { flowsHeld: boolean }) => Promise<unknown>): Promise<void>;
 }
 
-export function tickRatchets(plan: TickPlan, book: { incomplete: boolean; curveMarked: number }): TickRatchets {
-  const peaks = plan.ratchets && !book.incomplete && book.curveMarked === 0;
+export function tickRatchets(
+  plan: TickPlan,
+  book: { incomplete: boolean; curveMarked: number; held?: boolean; breakerObservationUsdg?: bigint },
+): TickRatchets {
+  const held = book.held === true;
+  const may = plan.ratchets && !book.incomplete && book.curveMarked === 0;
+  const peaks = may && !held;
+  // A held tick's breaker observation, when it may make one: the same guards as
+  // every other peak (a command tick or a curve mark observes nothing), and
+  // only with the figure the caller computed — never the raw equity.
+  const observation = may && held && book.breakerObservationUsdg !== undefined ? book.breakerObservationUsdg : null;
   return {
     async paperPeak(b, equityUsdg, write) {
       if (peaks && equityUsdg > b.hwmUsdg) {
@@ -251,16 +303,53 @@ export function tickRatchets(plan: TickPlan, book: { incomplete: boolean; curveM
       }
       return b.hwmUsdg;
     },
-    riskPeak: (equityUsdg, read) => read(peaks ? equityUsdg : null),
+    riskPeak: (equityUsdg, read) => read(peaks ? equityUsdg : observation !== null ? Number(observation) / 1e6 : null),
     async accrue(accrual, peakUsdg, persist) {
       if (!peaks) return peakUsdg;
       if (accrual.profitUsdg > 0n) await persist();
       return accrual.newHwmUsdg;
     },
+    breakerLift(liftUsdg, peakBeforeUsdg, peakAfterUsdg) {
+      const stood = peakBeforeUsdg + liftUsdg - peakAfterUsdg;
+      let lift = stood > 0n ? stood : 0n;
+      if (observation !== null && observation - peakAfterUsdg > lift) lift = observation - peakAfterUsdg;
+      return lift;
+    },
     async equityRow(write) {
-      if (plan.ratchets && !book.incomplete) await write();
+      if (plan.ratchets && !book.incomplete) await write({ flowsHeld: held });
     },
   };
+}
+
+/**
+ * WHOSE PEAK THE IN-MEMORY MARK IS. tick() keeps one `highWaterMarkUsdg`, and a
+ * paper tick puts the PAPER book's peak in it — the figure the paper breaker
+ * judges against. On a live tick the same variable is the lifetime mark the
+ * performance fee ratchets, and the breaker's peak when no risk period stands.
+ */
+export type MarkBook = "live" | "paper";
+
+/**
+ * WHETHER A TICK RE-READS THE PERSISTED LIVE PEAKS, before it reads a balance.
+ *
+ *   capitalPeakDirty — an energy purchase lowered them in the ledger and the
+ *                      in-memory marks have not caught up, on purpose (index.ts,
+ *                      at the flag).
+ *   a paper mark     — the last tick to set the mark was a paper tick. Arm, a
+ *                      booked flow, a landed transfer and an energy purchase
+ *                      re-read the live mark; going live again is none of those.
+ *                      So the first live tick after one accrued a performance
+ *                      fee on live equity above the PAPER peak — the owner's
+ *                      principal, whenever the account sat below its real mark —
+ *                      and with no risk period standing the breaker judged live
+ *                      drawdown against the paper book. An owner turning Live off
+ *                      and on did it, and so did a live rail that broke and
+ *                      recovered: paper is the fallback while it is down.
+ *
+ * Never on a paper tick: the paper branch sets the mark that tick judges by.
+ */
+export function livePeaksStale(paper: boolean, markBook: MarkBook, capitalPeakDirty: boolean): boolean {
+  return !paper && (capitalPeakDirty || markBook === "paper");
 }
 
 /**

@@ -10,7 +10,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { encodeAbiParameters, encodeEventTopics, parseAbi, toHex, type Hex } from "viem";
-import { acquiredLegOf, addressTopic, findOrphanOps, findSoleAcquisition, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { acquiredLegOf, addressTopic, DROP_PROOF_CONFIRMATIONS, findDroppedOps, findOrphanOps, findSoleAcquisition, pickAcquiredLeg, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
+import { netTokenDeltas } from "./fills";
+import { MERRYMEN_TOKEN } from "../../packages/core/src/index";
 import type { ReceiptLog } from "./fills";
 
 const EP_ABI = parseAbi([
@@ -179,6 +181,53 @@ describe("resolveSubmittedOps", () => {
     assert.equal(res[0]!.txHash, tx);
     assert.equal(res[0]!.notionalUsdg6, 25_000_000n);
     assert.equal(res[0]!.attributed, true);
+  });
+
+  it("CARRIES THE ACCOUNT'S OWN SIGNED USDG MOVEMENT — and null, never 0, when the receipt could not be read", async () => {
+    // Flow inference folds this into its cash baseline (flow-inference.ts rule
+    // 2). A buy is negative, a sell positive, a stock-for-stock op 0, a revert
+    // 0 — and an unreadable receipt NULL: `attributed: false` alone cannot tell
+    // "moved no USDG" from "could not read", and reading the second as the
+    // first would book the op's whole movement as a deposit or a withdrawal.
+    const [buy, sell, none, unread, reverted] = [h(0x71), h(0x72), h(0x73), h(0x74), h(0x75)];
+    const [t1, t2, t3, t4, t5] = [h(0x81), h(0x82), h(0x83), h(0x84), h(0x85)];
+    const res = await resolveSubmittedOps({
+      chain: chainFor(
+        [opLog(buy, true, t1), opLog(sell, true, t2), opLog(none, true, t3), opLog(unread, true, t4), opLog(reverted, false, t5)],
+        {
+          [t1]: [transfer(USDG, ACCOUNT, ROUTER, 25_000_000n), transfer(STOCK, ROUTER, ACCOUNT, 10n ** 18n)],
+          [t2]: [transfer(STOCK, ACCOUNT, ROUTER, 10n ** 18n), transfer(USDG, ROUTER, ACCOUNT, 7_500_000n)],
+          [t3]: [transfer(STOCK, ACCOUNT, ROUTER, 10n ** 18n)],
+        },
+      ),
+      smartAccount: ACCOUNT,
+      usdgToken: USDG,
+      hashes: [buy, sell, none, unread, reverted],
+      lookbackBlocks: 1000n,
+    });
+    const by = new Map(res.map((r) => [r.userOpHash, r]));
+    assert.equal(by.get(buy)!.usdgDelta6, -25_000_000n);
+    assert.equal(by.get(sell)!.usdgDelta6, 7_500_000n);
+    assert.equal(by.get(none)!.usdgDelta6, 0n, "read, and no USDG moved");
+    assert.equal(by.get(none)!.attributed, false);
+    assert.equal(by.get(unread)!.usdgDelta6, null, "NOT READ — which attributed:false alone cannot say");
+    assert.equal(by.get(unread)!.attributed, false);
+    assert.equal(by.get(reverted)!.usdgDelta6, 0n, "a revert moved nothing");
+  });
+
+  it("carries the block the op landed in, when its log says — the energy buy's balance pin needs it", async () => {
+    const [op, tx] = [h(0x53), h(0x63)];
+    const res = await resolveSubmittedOps({
+      chain: chainFor([{ ...opLog(op, true, tx), blockNumber: "0x8a3b1f" }]),
+      smartAccount: ACCOUNT,
+      usdgToken: USDG,
+      hashes: [op],
+      lookbackBlocks: 1000n,
+    });
+    assert.equal(res[0]!.blockNumber, 0x8a3b1fn);
+    // A log without one leaves it absent — never a 0 that would read as a pin.
+    const bare = await resolveSubmittedOps({ chain: chainFor([opLog(op, true, tx)]), smartAccount: ACCOUNT, usdgToken: USDG, hashes: [op], lookbackBlocks: 1000n });
+    assert.equal("blockNumber" in bare[0]!, false);
   });
 
   it("settles a stranded op the chain REVERTED — which findOrphanOps would skip", async () => {
@@ -394,6 +443,40 @@ describe("the same judgement, read from the other end", () => {
   });
 });
 
+/**
+ * THE ENERGY RESERVE IS NEVER A FILL.
+ *
+ * An energy purchase is USDG out and $MERRYMEN in — exactly the shape a buy has.
+ * But the reserve is capital set aside, booked as an 'energy-buy' flow, never a
+ * position. Read as a fill it would be counted twice (flow and purchase) and
+ * handed a cost basis a stop-loss could act on.
+ */
+describe("the energy reserve is never an acquired leg", () => {
+  const MERRYMEN = MERRYMEN_TOKEN.address;
+  const PAIR = "0x00000000000000000000000000000000000000b2" as const;
+  const energyLogs = () => [transfer(USDG, ACCOUNT, ROUTER, 42_000000n), transfer(MERRYMEN, PAIR, ACCOUNT, 98_000n * 10n ** 18n)];
+
+  it("pickAcquiredLeg returns null when the token acquired is MERRYMEN — in any case", () => {
+    assert.equal(pickAcquiredLeg(netTokenDeltas(energyLogs(), ACCOUNT), USDG), null);
+    const shouted = new Map([
+      [USDG.toLowerCase(), -42_000000n],
+      [`0x${MERRYMEN.slice(2).toUpperCase()}`, 98n],
+    ]);
+    assert.equal(pickAcquiredLeg(shouted, USDG), null);
+  });
+
+  it("an ordinary buy of the same shape is still read", () => {
+    const leg = pickAcquiredLeg(netTokenDeltas([transfer(USDG, ACCOUNT, ROUTER, 5_000000n), transfer(STOCK, ROUTER, ACCOUNT, 42n)], ACCOUNT), USDG);
+    assert.equal(leg?.token, STOCK.toLowerCase());
+  });
+
+  it("so neither the orphan sweep nor the backfill books it", async () => {
+    const tx = h(0xe1);
+    const chain = fakeChain([], { [tx.toLowerCase()]: energyLogs() });
+    assert.equal(await acquiredLegOf(chain, tx, ACCOUNT, USDG), null);
+  });
+});
+
 describe("the last resort for an entry price", () => {
   const TOKEN = STOCK;
   const xfer = (tx: Hex, from: string, to: string, value: bigint): RawLog => ({
@@ -488,5 +571,101 @@ describe("the deep scan is a recovery, not a habit", () => {
     assert.ok(block.indexOf("deepBasisTried.set(sym, now)") < block.indexOf("recoverReceiptBasis({"));
     assert.match(block, /await setBasis/);
     assert.doesNotMatch(block, /await bookFill/);
+  });
+});
+/**
+ * A USEROP THE BUNDLER DROPPED CAN BE WRITTEN OFF ONLY ON POSITIVE PROOF: our
+ * own other op, signed with the same nonce, executed on-chain. Nothing here may
+ * conclude "dropped" from a log that did not come back.
+ */
+describe("findDroppedOps", () => {
+  const HEAD = 10_000n;
+  /** One UserOperationEvent: which op, with which nonce, in which block. */
+  const event = (userOpHash: Hex, nonce: bigint, block: bigint, sender: string = ACCOUNT, success = true): RawLog => {
+    const topics = encodeEventTopics({
+      abi: EP_ABI,
+      eventName: "UserOperationEvent",
+      args: { userOpHash, sender: sender as Hex, paymaster: "0x0000000000000000000000000000000000000000" },
+    });
+    const data = encodeAbiParameters(
+      [{ type: "uint256" }, { type: "bool" }, { type: "uint256" }, { type: "uint256" }],
+      [nonce, success, 0n, 0n],
+    );
+    return { topics: topics as readonly Hex[], data, transactionHash: h(0x7000 + Number(block % 1000n)), blockNumber: toHex(block) };
+  };
+  /** A chain that honours the hash filter; `failFor` makes that hash's scan give up. */
+  const chainOf = (logs: RawLog[], failFor: Hex[] = []) => {
+    const asked: string[] = [];
+    const chain = {
+      async getBlockNumber() {
+        return HEAD;
+      },
+      async getLogs(a: { topics: (Hex | Hex[] | null)[] }) {
+        const want = String(a.topics[1]).toLowerCase();
+        asked.push(want);
+        if (failFor.some((f) => f.toLowerCase() === want)) throw new Error("execution reverted: not a range or rate problem");
+        return logs.filter((l) => l.topics[1]?.toLowerCase() === want);
+      },
+      async getReceiptLogs() {
+        return null;
+      },
+    } as ReconcileChain;
+    return { chain, asked };
+  };
+  // A Kernel-shaped nonce: a 24-byte key over an 8-byte sequence.
+  const NONCE = (0x0102n << 240n) | 7n;
+  const [dropped, rival] = [h(0xd1), h(0xd2)];
+  const deep = HEAD - DROP_PROOF_CONFIRMATIONS;
+
+  it("WRITES OFF an op whose nonce another op of ours spent on-chain — with the proof", async () => {
+    const { chain } = chainOf([event(rival, NONCE, deep)]);
+    const got = await findDroppedOps({ chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n });
+    assert.equal(got.length, 1);
+    assert.equal(got[0]!.userOpHash, dropped);
+    assert.equal(got[0]!.usedBy, rival);
+    assert.equal(got[0]!.nonce, NONCE);
+    assert.equal(got[0]!.blockNumber, deep);
+  });
+
+  it("a REVERTED rival spent the nonce just the same — the EntryPoint emits the event only for an op it executed", async () => {
+    const { chain } = chainOf([event(rival, NONCE, deep, ACCOUNT, false)]);
+    const got = await findDroppedOps({ chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n });
+    assert.equal(got.length, 1);
+  });
+
+  it("AN OP STILL PENDING IS NEVER WRITTEN OFF: no recorded rival, or a rival the chain has not executed", async () => {
+    const none = chainOf([]);
+    assert.deepEqual(await findDroppedOps({ chain: none.chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [] }], lookbackBlocks: 5_000n }), []);
+    assert.deepEqual(none.asked, [], "with no rival recorded, the chain is not even asked");
+    const pending = chainOf([]);
+    assert.deepEqual(await findDroppedOps({ chain: pending.chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n }), []);
+    assert.deepEqual(await findDroppedOps({ chain: pending.chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [dropped] }], lookbackBlocks: 5_000n }), [], "itself is no rival");
+  });
+
+  it("A RIVAL THAT SPENT A DIFFERENT NONCE PROVES NOTHING — the chain's figure, not the ledger's, decides", async () => {
+    const { chain } = chainOf([event(rival, NONCE + 1n, deep)]);
+    assert.deepEqual(await findDroppedOps({ chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n }), []);
+  });
+
+  it("the same sequence under ANOTHER KEY is another nonce: an enable-mode op does not spend a default-mode one", async () => {
+    const { chain } = chainOf([event(rival, (0x0002n << 240n) | 7n, deep)]);
+    assert.deepEqual(await findDroppedOps({ chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n }), []);
+  });
+
+  it("A PROOF TOO SHALLOW TO OUTLAST A REORG WAITS for the next pass", async () => {
+    const { chain } = chainOf([event(rival, NONCE, HEAD - DROP_PROOF_CONFIRMATIONS + 1n)]);
+    assert.deepEqual(await findDroppedOps({ chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n }), []);
+  });
+
+  it("IF THE STRANDED OP'S OWN EVENT IS THERE, or its scan did not finish, nothing is written off", async () => {
+    const landed = chainOf([event(rival, NONCE, deep), event(dropped, NONCE, deep)]);
+    assert.deepEqual(await findDroppedOps({ chain: landed.chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n }), []);
+    const blind = chainOf([event(rival, NONCE, deep)], [dropped]);
+    assert.deepEqual(await findDroppedOps({ chain: blind.chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n }), []);
+  });
+
+  it("an event for ANOTHER SENDER under the rival's hash is not ours and proves nothing", async () => {
+    const { chain } = chainOf([event(rival, NONCE, deep, "0x00000000000000000000000000000000000acc02")]);
+    assert.deepEqual(await findDroppedOps({ chain, smartAccount: ACCOUNT, stranded: [{ userOpHash: dropped, nonce: NONCE, rivals: [rival] }], lookbackBlocks: 5_000n }), []);
   });
 });

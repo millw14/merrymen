@@ -170,3 +170,66 @@ describe("the fleet sweep", () => {
     for (const t of shapes) assert.notEqual(t[t.length - 1], null, "no trailing null");
   });
 });
+
+/**
+ * THE FLEET SWEEP SEES AN ENERGY PURCHASE THE WAY THE LEDGER DOES.
+ *
+ * The worker books it as capital leaving the book. Named the reserve, the sweep
+ * classifies the same leg `reserve-out` and totals it as its own figure, so
+ * hwm-repair and reconstruction agree with the ledger instead of calling it a
+ * trade and deriving a peak too high by every purchase.
+ */
+describe("energy purchases in the fleet sweep", () => {
+  const MERRYMEN = "0xa15cd06dd305269a0f48bebeb30aa3588fba7b32";
+  const VIRTUAL = "0xc6911796042b15d7fa4f6cde69e245ddcd3d9c31";
+  const PAIR_A = "0x00000000000000000000000000000000000000b1";
+  const PAIR_B = "0x00000000000000000000000000000000000000b2";
+  const USDG_OUT = transferLog({ from: ACCT, to: PAIR_A, amount: 42_000_000n, tx: "0xenergy", block: 4_200_000, idx: 5 });
+  const other = (token: string, from: string, to: string, amount: bigint, idx: number) => ({
+    ...transferLog({ from, to, amount, tx: "0xenergy", block: 4_200_000, idx }),
+    address: token,
+  });
+  const RECEIPT = [
+    USDG_OUT,
+    other(VIRTUAL, PAIR_A, PAIR_B, 9n * 10n ** 19n, 6),
+    other(MERRYMEN, PAIR_B, MERRYMEN, 2n * 10n ** 21n, 7),
+    other(MERRYMEN, PAIR_B, ACCT, 98n * 10n ** 21n, 8),
+  ];
+  const rpc: RpcCall = async (method, params) => {
+    if (method === "eth_getTransactionReceipt") {
+      return { logs: params[0] === "0xenergy" ? RECEIPT : [DEPOSIT] };
+    }
+    const p = params[0] as { topics: (string | string[] | null)[] };
+    return [DEPOSIT, USDG_OUT].filter((log) =>
+      p.topics.every((want, i) => {
+        if (want === null || want === undefined) return true;
+        const list = Array.isArray(want) ? want : [want];
+        return list.some((w) => w.toLowerCase() === String(log.topics[i]).toLowerCase());
+      }),
+    );
+  };
+  const sweep = (reserveTokens?: string[]) =>
+    scanFleetCapital(rpc, { accounts: [ACCT], usdgToken: USDG, fromBlock: 0n, toBlock: 5_000_000n, reserveTokens });
+
+  it("with the reserve named, the purchase is reserve-out and totalled as such", async () => {
+    const cap = (await sweep([MERRYMEN])).get(ACCT)!;
+    const m = cap.movements.find((x) => x.txHash === "0xenergy")!;
+    assert.equal(m.classification.kind, "reserve-out");
+    assert.equal(m.classification.evidence.rule, "reserve-purchase");
+    assert.equal(m.logIndex, 5, "the identity reconstruction will key on");
+    assert.equal(cap.totals.grossReservePurchasesRaw, "42000000");
+    assert.equal(cap.totals.reservePurchases, 1);
+    assert.equal(cap.totals.grossWithdrawalsRaw, "0", "not a withdrawal");
+    assert.equal(cap.totals.netContributionsRaw, "-32000000", "10 in − 42 on energy");
+    assert.equal(cap.complete, true);
+  });
+
+  it("without it, the same leg is the trade it always was", async () => {
+    const cap = (await sweep()).get(ACCT)!;
+    const m = cap.movements.find((x) => x.txHash === "0xenergy")!;
+    assert.equal(m.classification.kind, "trade-out");
+    assert.equal(cap.totals.grossReservePurchasesRaw, "0");
+    assert.equal(cap.totals.tradeLegs, 1);
+    assert.equal(cap.totals.netContributionsRaw, "10000000");
+  });
+});

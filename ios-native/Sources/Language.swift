@@ -26,7 +26,11 @@ struct LanguagePicker: View {
     @AppStorage("language") private var language = "en"
     var body: some View {
         Card {
-            Picker("Language", selection: $language) { ForEach(Language.options, id: \.0) { code, name in Text(name).tag(code) } }
+            HStack {
+                Label("Language", systemImage: "globe").foregroundStyle(.primary)
+                Spacer()
+                Picker("Language", selection: $language) { ForEach(Language.options, id: \.0) { code, name in Text(name).tag(code) } }.labelsHidden()
+            }
             Text("Some text is available in English.").font(.caption).foregroundStyle(.secondary)
         }
     }

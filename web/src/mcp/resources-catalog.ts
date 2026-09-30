@@ -4,7 +4,7 @@
  * their modules.
  */
 import type { ResourceDef } from "./resources";
-import { SCOPES } from "./scopes";
+import { SCOPES, scopeAllowedIn, type McpProfile } from "./scopes";
 import { ERROR_CODES } from "./errors";
 import { PORTFOLIO_RESOURCES } from "./tools/portfolio";
 import { DECISIONS_RESOURCES } from "./tools/decisions";
@@ -13,8 +13,9 @@ import { REPORTS_RESOURCES } from "./tools/reports";
 import { PUBLIC_RESOURCES } from "./tools/public";
 import { APP_RESOURCES } from "./apps";
 
-function capabilitiesDoc(): string {
-  const scopes = SCOPES.filter((s) => s.level !== "staff").map((s) => `- \`${s.id}\` (${s.level}): ${s.title}. ${s.detail}`).join("\n");
+/** On the directory profile only the scopes it can hold are described: the rest cannot exist there. */
+function capabilitiesDoc(profile: McpProfile = "full"): string {
+  const scopes = SCOPES.filter((s) => s.level !== "staff" && scopeAllowedIn(profile, s.id)).map((s) => `- \`${s.id}\` (${s.level}): ${s.title}. ${s.detail}`).join("\n");
   const errors = Object.entries(ERROR_CODES).map(([code, e]) => `- \`${code}\` (HTTP-like ${e.http}${e.retryable ? ", retryable" : ""}): ${e.what}`).join("\n");
   return `# Merrymen MCP: scopes and errors
 
@@ -49,8 +50,8 @@ export const DOC_RESOURCES: ResourceDef[] = [
     mimeType: "text/markdown",
     capability: null,
     uri: "merrymen://docs/capabilities",
-    async read() {
-      return { mimeType: "text/markdown", text: capabilitiesDoc() };
+    async read(_uri, _vars, ctx) {
+      return { mimeType: "text/markdown", text: capabilitiesDoc(ctx?.principal?.profile) };
     },
   },
   {

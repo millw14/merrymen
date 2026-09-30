@@ -30,6 +30,9 @@
  * which is the exact failure `sweepList` was written to prevent. So it comes
  * from the grant in localStorage, which carries `grantTokens`: the addresses the
  * wall actually covers. `sweepList` re-validates every entry anyway.
+ *
+ * Those are ADDRESSES ONLY — the grant carries no symbol and no decimals — and
+ * they are passed on as exactly that (see `grantExtraTokens`).
  */
 
 import { privateKeyToAccount } from "viem/accounts";
@@ -152,6 +155,21 @@ export interface BrowserPlan extends RecoverPlan {
   needsGas: boolean;
 }
 
+/**
+ * The grant's token addresses, as the engine's extra-token list.
+ *
+ * ADDRESS ONLY, and nothing invented to go with it. This used to add
+ * `symbol: "", decimals: 18`: the 18 was a guess, and the empty symbol failed
+ * the engine's validation, so every owner-added token was silently dropped from
+ * the sweep and left in the account. `sweepList` now takes an address-only
+ * entry and labels it by address, and `planRecovery` reads its decimals from
+ * the token itself.
+ *
+ * Exported because the phone's wallet engine plans with it too.
+ */
+export const grantExtraTokens = (grantTokens: readonly string[] = []) =>
+  grantTokens.map((address) => ({ address, symbol: "" }));
+
 /** What is in the account, read straight from the chain. No relay, no session. */
 export async function planFromBrowser(w: BrowserWallet): Promise<BrowserPlan> {
   const plan = (await planRecovery({
@@ -161,7 +179,7 @@ export async function planFromBrowser(w: BrowserWallet): Promise<BrowserPlan> {
     // the browser knows which account this wallet is meant to be, so a wrong key
     // fails loudly instead of sweeping a stranger's empty account.
     expectedSmartAccount: w.smartAccount,
-    extraTokens: (w.grantTokens ?? []).map((address) => ({ address, symbol: "", decimals: 18 })),
+    extraTokens: grantExtraTokens(w.grantTokens),
   })) as RecoverPlan;
   return { ...plan, needsGas: plan.gasWei === 0n };
 }
@@ -199,7 +217,7 @@ export async function sweepFromBrowser(
     bundlerUrl: relayUrl(w.chainId),
     to,
     expectedSmartAccount: w.smartAccount,
-    extraTokens: (w.grantTokens ?? []).map((address) => ({ address, symbol: "", decimals: 18 })),
+    extraTokens: grantExtraTokens(w.grantTokens),
     ...(approvedClass
       ? {
           approvedClass: { ...approvedClass, destination: to },

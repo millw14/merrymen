@@ -534,6 +534,9 @@ export function App() {
             onSettings={() => openScreen({ kind: "settings" })}
             liveBlocker={account?.status.liveBlocker}
             staleBlocker={autonomy.state === "checking"}
+            energy={account?.status.energy}
+            account={account?.status.grant?.smartAccount ?? null}
+            chainId={account?.status.grant?.chainId ?? null}
           />
         )}
         {screen.kind === "tab" && screen.tab === "alpha" && (
@@ -768,6 +771,9 @@ export function App() {
             onSettings={() => openScreen({ kind: "settings" })}
             liveBlocker={account?.status.liveBlocker}
             staleBlocker={autonomy.state === "checking"}
+            energy={account?.status.energy}
+            account={account?.status.grant?.smartAccount ?? null}
+            chainId={account?.status.grant?.chainId ?? null}
           />
         </ChatDock>
       )}
