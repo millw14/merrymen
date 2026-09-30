@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -242,7 +242,8 @@ test("containsSecret detects a laundered secret file's bytes", () => {
 });
 
 test("send_file scans the WHOLE file — a secret past the old 200KB window is refused", async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "mm-agent-"));
+  // macOS exposes TMPDIR through /var -> /private/var. The file guard compares canonical paths.
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "mm-agent-")));
   try {
     // secret sits AFTER 200KB of padding — the old head-only scan would miss it
     const laundered = "x".repeat(250_000) + "\nkey=AIzaSyD-ExAmPlEkEyVaLuE1234567890abcd\n";
@@ -294,7 +295,8 @@ function makeDeps(cfg: AgentConfig, turns: AgentTurn[], sent: string[], seen?: A
 }
 
 test("loop: streams text, executes tools, stops when the model stops", async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "mm-agent-"));
+  // macOS exposes TMPDIR through /var -> /private/var. The file guard compares canonical paths.
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "mm-agent-")));
   try {
     writeFileSync(path.join(root, "hello.txt"), "hi");
     const sent: string[] = [];
@@ -374,7 +376,8 @@ test("loop: no armed tools → honest refusal, no model call", async () => {
 });
 
 test("loop: file write + read round-trip inside the root; secrets path refused", async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "mm-agent-"));
+  // macOS exposes TMPDIR through /var -> /private/var. The file guard compares canonical paths.
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "mm-agent-")));
   try {
     const sent: string[] = [];
     const seen: AgentMsg[][] = [];
