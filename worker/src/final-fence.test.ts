@@ -301,3 +301,197 @@ test("ENERGY: the lanes never cross — the v3 fence refuses energy calls, the e
   } as Parameters<typeof buildTradeCalls>[0]) as FenceCall[];
   assert.equal(checkEnergySwapCalls(single, eExpect).ok, false);
 });
+
+// ── the perp lanes: Lighter's three on-chain legs ───────────────────────────
+//
+// Fed from the REAL builders (perps/onboard.ts), for the reason the header
+// gives: the pass case is the production shape, and every refusal is a
+// mutation of it, one field at a time.
+import {
+  LIGHTER_CHANGE_PUBKEY_ABI,
+  LIGHTER_DEPOSIT_ABI,
+  LIGHTER_ROUTE_V1,
+  LIGHTER_WITHDRAW_PENDING_ABI,
+  pubKeyWords,
+  type PerpGrant,
+} from "../../packages/core/src/index";
+import { checkPerpClaimCalls, checkPerpDepositCalls, checkPerpKeyCalls, type PerpClaimFenceExpect, type PerpDepositFenceExpect, type PerpKeyFenceExpect } from "./final-fence";
+import { buildClaimCalls, buildDepositCalls, buildKeyCalls } from "./perps/onboard";
+
+// Two canonical API keys: five little-endian Goldilocks limbs each, all < p.
+const PK = `0x${("01" + "00".repeat(7)).repeat(5)}` as `0x${string}`;
+const PK_OTHER = `0x${("02" + "00".repeat(7)).repeat(5)}` as `0x${string}`;
+const PERP: PerpGrant = { route: "perp-lighter-v1", apiKeyIndex: 16, apiPublicKey: PK };
+const L_PROXY = LIGHTER_ROUTE_V1.proxy;
+const L_USDG = LIGHTER_ROUTE_V1.usdg;
+const IDX = 22_149;
+const DEP = 12_500_000n;
+const CLAIM = 7_000_001n;
+
+const dExpect: PerpDepositFenceExpect = { account: ME, usdg: L_USDG, proxy: L_PROXY, amount: DEP };
+const kExpect: PerpKeyFenceExpect = { proxy: L_PROXY, accountIndex: IDX, apiKeyIndex: 16, apiPublicKey: PK };
+const cExpect: PerpClaimFenceExpect = { proxy: L_PROXY, account: ME, amount: CLAIM };
+const dCalls = (): FenceCall[] => buildDepositCalls({ perp: PERP, account: ME, amountMicro: DEP }) as FenceCall[];
+const kCalls = (): FenceCall[] => buildKeyCalls({ perp: PERP, accountIndex: IDX }) as FenceCall[];
+const cCalls = (): FenceCall[] => buildClaimCalls({ perp: PERP, account: ME, amountMicro: CLAIM }) as FenceCall[];
+const ruleOf = (v: ReturnType<typeof checkPerpDepositCalls>) => (v.ok ? "ok" : v.rule);
+const dRule = (calls: FenceCall[], e: PerpDepositFenceExpect = dExpect) => ruleOf(checkPerpDepositCalls(calls, e));
+const kRule = (calls: FenceCall[], e: PerpKeyFenceExpect = kExpect) => ruleOf(checkPerpKeyCalls(calls, e));
+const cRule = (calls: FenceCall[], e: PerpClaimFenceExpect = cExpect) => ruleOf(checkPerpClaimCalls(calls, e));
+const deposit = (to: `0x${string}`, asset: number, route: number, amount: bigint) =>
+  encodeFunctionData({ abi: LIGHTER_DEPOSIT_ABI, functionName: "deposit", args: [to, asset, route, amount] });
+const withDeposit = (data: `0x${string}`): FenceCall[] => {
+  const [a, d] = dCalls();
+  return [a!, { ...d!, data }];
+};
+const upper = (d: `0x${string}`) => `0x${d.slice(2).toUpperCase()}` as `0x${string}`;
+const word = (n: bigint) => n.toString(16).padStart(64, "0");
+
+test("PERP DEPOSIT: the real builder's output passes, whatever the hex case", () => {
+  assert.deepEqual(checkPerpDepositCalls(dCalls(), dExpect), { ok: true });
+  const [a, d] = dCalls();
+  assert.deepEqual(checkPerpDepositCalls([{ ...a!, data: upper(a!.data) }, { ...d!, data: upper(d!.data) }], dExpect), { ok: true });
+  // …and the expectation's address case never matters either.
+  assert.deepEqual(checkPerpDepositCalls(dCalls(), { ...dExpect, account: ME.toUpperCase().replace("0X", "0x") as `0x${string}` }), { ok: true });
+});
+
+test("PERP DEPOSIT PROVENANCE: count, value, and an approval bound to this deposit and this proxy", () => {
+  const [a, d] = dCalls();
+  assert.equal(dRule([d!]), "build-integrity", "no approve");
+  assert.equal(dRule([a!, d!, d!]), "build-integrity", "an extra call");
+  assert.equal(dRule([a!, d!, { to: THIEF, value: 0n, data: "0x" }]), "build-integrity", "an extra call anywhere");
+  assert.equal(dRule([{ ...a!, value: 1n }, d!]), "build-integrity");
+  // `deposit` is payable: value here is ETH posted to the venue, not a typo.
+  assert.equal(dRule([a!, { ...d!, value: 1n }]), "build-integrity");
+  assert.equal(dRule([{ ...a!, to: QQQ }, d!]), "asset", "an approve on another token");
+  const approve = (spender: `0x${string}`, amount: bigint) =>
+    ({ ...a!, data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [spender, amount] }) }) as FenceCall;
+  // The wall's USDG approve admits every spender in usdgSpenders — the energy
+  // router passes the chain. Only this fence refuses it.
+  assert.equal(dRule([approve(ENERGY_ROUTE_V1.router, DEP), d!]), "approval", "the energy router is not the proxy");
+  assert.equal(dRule([approve(THIEF, DEP), d!]), "approval", "the wrong spender");
+  assert.equal(dRule([approve(L_PROXY, DEP + 1n), d!]), "approval", "a ceiling above the deposit is a standing permission");
+  assert.equal(dRule([approve(L_PROXY, DEP - 1n), d!]), "approval");
+  assert.equal(dRule([approve(L_PROXY, 2n ** 256n - 1n), d!]), "approval", "infinite");
+  assert.equal(
+    dRule([{ ...a!, data: encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [L_PROXY, DEP] }) }, d!]),
+    "approval",
+    "a transfer to the proxy is not a deposit",
+  );
+  assert.equal(dRule([{ ...a!, data: `${a!.data}${"00".repeat(32)}` as `0x${string}` }, d!]), "build-integrity", "trailing bytes on the approve");
+});
+
+test("PERP DEPOSIT MEANING: `_to`, asset, route, amount and target — each one moved alone", () => {
+  const [a, d] = dCalls();
+  // THE ONE THAT MATTERS MOST: Lighter credits whoever `_to` names.
+  assert.equal(dRule(withDeposit(deposit(THIEF, 3, 0, DEP))), "recipient", "a stranger's venue account");
+  assert.equal(dRule(withDeposit(deposit(ME, 2, 0, DEP))), "asset", "another Lighter asset");
+  assert.equal(dRule(withDeposit(deposit(ME, 3, 1, DEP))), "asset", "route 1 is Lighter's spot book");
+  assert.equal(dRule(withDeposit(deposit(ME, 3, 0, DEP + 1n))), "build-integrity", "posts more than the approve allows");
+  assert.equal(dRule(withDeposit(deposit(ME, 3, 0, DEP - 1n))), "build-integrity");
+  assert.equal(dRule([a!, { ...d!, to: THIEF }]), "build-integrity", "addressed anywhere but the proxy");
+  assert.equal(dRule(withDeposit(`0xd20191bd${d!.data.slice(10)}` as `0x${string}`)), "build-integrity", "the owner's withdraw selector");
+  assert.equal(dRule(withDeposit(`${d!.data}${"00".repeat(32)}` as `0x${string}`)), "build-integrity", "trailing bytes");
+  const v = checkPerpDepositCalls(withDeposit(`${d!.data}${"00".repeat(32)}` as `0x${string}`), dExpect);
+  assert.match(!v.ok ? v.detail : "", /non-canonical encoding/);
+});
+
+test("PERP DEPOSIT: an expectation off the sealed route is itself refused", () => {
+  assert.equal(dRule(dCalls(), { ...dExpect, proxy: THIEF }), "build-integrity");
+  assert.equal(dRule(dCalls(), { ...dExpect, usdg: QQQ }), "asset");
+  assert.equal(dRule(dCalls(), { ...dExpect, amount: 0n }), "build-integrity");
+  assert.equal(dRule(dCalls(), { ...dExpect, account: "0x1234" as `0x${string}` }), "recipient");
+});
+
+test("PERP KEY: the real builder's output passes, index as number or bigint, any hex case", () => {
+  assert.deepEqual(checkPerpKeyCalls(kCalls(), kExpect), { ok: true });
+  assert.deepEqual(checkPerpKeyCalls(buildKeyCalls({ perp: PERP, accountIndex: BigInt(IDX) }) as FenceCall[], { ...kExpect, accountIndex: BigInt(IDX) }), { ok: true });
+  const [c] = kCalls();
+  assert.deepEqual(checkPerpKeyCalls([{ ...c!, data: upper(c!.data) }], { ...kExpect, apiPublicKey: PK.toUpperCase().replace("0X", "0x") }), { ok: true });
+  // The words the wall pins, read straight off the builder's bytes.
+  const words = c!.data.slice(10).match(/.{64}/g)!;
+  const [w4, w5] = pubKeyWords(PK);
+  assert.deepEqual(words, [word(BigInt(IDX)), word(16n), word(0x60n), word(40n), w4.slice(2), w5.slice(2)]);
+});
+
+test("PERP KEY: a different key, a different index, a different account — and the relocated offset", () => {
+  const [c] = kCalls();
+  const other = encodeFunctionData({ abi: LIGHTER_CHANGE_PUBKEY_ABI, functionName: "changePubKey", args: [IDX, 16, PK_OTHER] });
+  assert.equal(kRule([{ ...c!, data: other }]), "key", "a key the grant never sealed");
+  const v = checkPerpKeyCalls([{ ...c!, data: other }], kExpect);
+  assert.doesNotMatch(!v.ok ? v.detail : "", new RegExp(PK_OTHER.slice(2)), "never echoes somebody's key");
+  // The fence holds the builder to the SEALED key: a grant sealing another key
+  // refuses these bytes even though they are well formed.
+  assert.equal(kRule(kCalls(), { ...kExpect, apiPublicKey: PK_OTHER }), "key");
+  const reserved = encodeFunctionData({ abi: LIGHTER_CHANGE_PUBKEY_ABI, functionName: "changePubKey", args: [IDX, 3, PK] });
+  assert.equal(kRule([{ ...c!, data: reserved }]), "key", "index 3 is the owner's Robinhood Wallet session");
+  const elsewhere = encodeFunctionData({ abi: LIGHTER_CHANGE_PUBKEY_ABI, functionName: "changePubKey", args: [IDX + 1, 16, PK] });
+  assert.equal(kRule([{ ...c!, data: elsewhere }]), "build-integrity", "another Lighter account");
+  // THE ATTACK THE WALL'S OFFSET PIN EXISTS FOR: w3..w5 still hold the sealed
+  // words, but w2 points the decoder at a second key past them. The decoder
+  // registers the second key; byte equality refuses the whole layout and the
+  // decode names the key it would really register.
+  const [w4, w5] = pubKeyWords(PK);
+  const [o4, o5] = pubKeyWords(PK_OTHER);
+  const relocated = `0x17010c68${[word(BigInt(IDX)), word(16n), word(0xc0n), word(40n), w4.slice(2), w5.slice(2), word(40n), o4.slice(2), o5.slice(2)].join("")}` as `0x${string}`;
+  assert.equal(kRule([{ ...c!, data: relocated }]), "key");
+  // The same relocation pointing at the SEALED key still is not the one layout.
+  const reLaid = `0x17010c68${[word(BigInt(IDX)), word(16n), word(0x80n), "0".repeat(64), word(40n), w4.slice(2), w5.slice(2)].join("")}` as `0x${string}`;
+  assert.equal(kRule([{ ...c!, data: reLaid }]), "build-integrity");
+  // Dirty padding after the 40 key bytes, and trailing bytes: the decoder
+  // reads the sealed key from both, and neither is the canonical encoding.
+  const dirty = `${c!.data.slice(0, -2)}01` as `0x${string}`;
+  assert.equal(kRule([{ ...c!, data: dirty }]), "build-integrity");
+  assert.match((() => { const r = checkPerpKeyCalls([{ ...c!, data: dirty }], kExpect); return r.ok ? "" : r.detail; })(), /non-canonical encoding/);
+  assert.equal(kRule([{ ...c!, data: `${c!.data}${"00".repeat(32)}` as `0x${string}` }]), "build-integrity");
+});
+
+test("PERP KEY PROVENANCE: one call, no value, the proxy, and an expectation that names the route's key", () => {
+  const [c] = kCalls();
+  assert.equal(kRule([]), "build-integrity");
+  assert.equal(kRule([c!, c!]), "build-integrity", "an extra call");
+  assert.equal(kRule([{ ...c!, value: 1n }]), "build-integrity");
+  assert.equal(kRule([{ ...c!, to: THIEF }]), "build-integrity");
+  assert.equal(kRule([{ ...c!, data: `0x2f25807e${c!.data.slice(10)}` as `0x${string}` }]), "build-integrity", "another proxy selector");
+  assert.equal(kRule(kCalls(), { ...kExpect, apiKeyIndex: 15 }), "key");
+  assert.equal(kRule(kCalls(), { ...kExpect, apiPublicKey: `0x${"ff".repeat(40)}` }), "key", "limbs ≥ p: not a key the contract accepts");
+  assert.equal(kRule(kCalls(), { ...kExpect, accountIndex: 0 }), "build-integrity", "account 0 is 'no account'");
+  assert.equal(kRule(kCalls(), { ...kExpect, accountIndex: 2 ** 48 }), "build-integrity");
+  assert.equal(kRule(kCalls(), { ...kExpect, proxy: THIEF }), "build-integrity");
+});
+
+test("PERP CLAIM: the real builder's output passes; `_owner`, asset and amount each refused alone", () => {
+  assert.deepEqual(checkPerpClaimCalls(cCalls(), cExpect), { ok: true });
+  const [c] = cCalls();
+  assert.deepEqual(checkPerpClaimCalls([{ ...c!, data: upper(c!.data) }], cExpect), { ok: true });
+  const claim = (owner: `0x${string}`, asset: number, amount: bigint) =>
+    [{ ...c!, data: encodeFunctionData({ abi: LIGHTER_WITHDRAW_PENDING_ABI, functionName: "withdrawPendingBalance", args: [owner, asset, amount] }) }];
+  assert.equal(cRule(claim(THIEF, 3, CLAIM)), "recipient", "the proxy pays `_owner`, whoever called");
+  assert.equal(cRule(claim(ME, 0, CLAIM)), "asset");
+  assert.equal(cRule(claim(ME, 3, CLAIM + 1n)), "build-integrity", "more than is pending reverts after it was paid for");
+  assert.equal(cRule(claim(ME, 3, CLAIM - 1n)), "build-integrity");
+  assert.equal(cRule([{ ...c!, data: `${c!.data}${"00".repeat(32)}` as `0x${string}` }]), "build-integrity", "trailing bytes");
+  assert.equal(cRule([{ ...c!, value: 1n }]), "build-integrity");
+  assert.equal(cRule([c!, c!]), "build-integrity", "an extra call");
+  assert.equal(cRule([{ ...c!, to: THIEF }]), "build-integrity");
+  assert.equal(cRule(cCalls(), { ...cExpect, amount: 0n }), "build-integrity");
+  assert.equal(cRule(cCalls(), { ...cExpect, proxy: ENERGY_ROUTE_V1.router }), "build-integrity");
+  // A hand-laid claim whose amount word is dirty above uint128 does not decode.
+  const dirty = `0x2f25807e${word(BigInt(ME))}${word(3n)}${"01" + word(CLAIM).slice(2)}` as `0x${string}`;
+  assert.equal(cRule([{ ...c!, data: dirty }]), "build-integrity");
+});
+
+test("PERP: the lanes never cross — each fence refuses the others' calls, and the swap fences refuse all three", () => {
+  assert.equal(checkPerpDepositCalls(kCalls(), dExpect).ok, false);
+  assert.equal(checkPerpDepositCalls(cCalls(), dExpect).ok, false);
+  assert.equal(checkPerpKeyCalls(dCalls(), kExpect).ok, false);
+  assert.equal(checkPerpKeyCalls(cCalls(), kExpect).ok, false);
+  assert.equal(checkPerpClaimCalls(kCalls(), cExpect).ok, false);
+  assert.equal(checkPerpClaimCalls(dCalls(), cExpect).ok, false);
+  // A deposit is an approve + one more call, like a swap: neither swap fence
+  // may mistake it for one.
+  assert.equal(checkV3SwapCalls(dCalls(), { ...expect, router: L_PROXY, tokenIn: L_USDG, amountIn: DEP }).ok, false);
+  assert.equal(checkEnergySwapCalls(dCalls(), { ...eExpect, amountIn: DEP }).ok, false);
+  // And no perp fence passes a swap.
+  assert.equal(checkPerpDepositCalls(eCalls(), { ...dExpect, amount: E_IN }).ok, false);
+});
