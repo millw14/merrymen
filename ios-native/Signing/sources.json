@@ -1,5 +1,5 @@
 {
-  "ios-native/Resources/FeedEngine.js": "212a019655a82f42225748228b4c9404604a8cc8deaddd2ddcba451a4bafc4a3",
+  "ios-native/Resources/FeedEngine.js": "3c4390d440586a08fd5442e569b9cc08c22aa3053d5f89016b53ccfd3854f728",
   "ios-native/Resources/WalletCryptography.js": "2acd222eb726c067fefe9b18aa9af7e98c138e2f1c518c951650dfd0393ee02c",
   "ios-native/Resources/WalletEngine.js": "1f08f4f7d98c7a04ac5097a407dd85f3d94fd2d308ceebdc5e7d33432eed237f",
   "ios-native/Resources/WalletRuntime.js": "ab934c4b8ff5fb422e2276dc30cc0eaf7696a4a31dd9c2606533d6aca95dfdd3",
@@ -72,6 +72,6 @@
   "worker/src/class-recovery.ts": "87e2a987769677dfa28ea1fa5d64e540076625c99ad2291af00df7a9f5646818",
   "worker/src/gas.ts": "26151ec23d111c235d09ddd48ca25325f7b8f5ef18b7ca9546edc24ab291b24c",
   "worker/src/recover.ts": "e483ed3b96860e0c90040bbaf4cd05f8257be57a5cf1345ce3d8d0a90febb97c",
-  "worker/src/thesis-policy.ts": "af29103d58911fc7b0a99b9455f41dde02a1b5be899f0857a4ca76e595f54cb5",
+  "worker/src/thesis-policy.ts": "b1b2dbc9aee4de1acf8bb3fe333c625b252250e2c7e9e4d48f914e7e09faa147",
   "worker/src/venues/class-log.ts": "d14520eeba5174d8077d8e17df16d98c66b95ef11d04b413d69983ecf60dc2ab"
 }
