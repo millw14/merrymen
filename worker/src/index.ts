@@ -754,9 +754,9 @@ async function main() {
   let autoTrenchNext = 0;
   let autoTrenchBalances = new Map<string,bigint>();
   // Pools proved canonical stay proved across passes (trencher-discovery.ts).
-  // Not reset with the context: a pool's pair and the factory's answer are
-  // facts about the chain, not about this agent or its grant.
-  const trenchPoolCache = new TrencherPoolCache();
+  // Grant changes keep these chain facts; connection changes replace the cache
+  // because another RPC can serve a different chain or fork.
+  let trenchPoolCache = new TrencherPoolCache();
   function refreshAutoTrench() {
     if (!active || !grantTrencher(active.grant)) return;
     const context = `${active.agentId}:${active.grant.grantedAt}`;
@@ -764,13 +764,14 @@ async function main() {
     if (autoTrenchPending || Date.now()<autoTrenchNext) return;
     autoTrenchPending=true; autoTrenchNext=Date.now()+60_000;
     const current=active;
+    const poolCache=trenchPoolCache;
     // Nominated coins (Telegram groups) are verified beyond the top slice by
     // the same on-chain checks; the set is addresses only (trencher-discovery.ts).
     void discoverTrencherUniverse(mainnetClient(),current.grant,freshTrenchTape(),{nominated:new Set(tgNominated),cache:trenchPoolCache}).then(result=>{
-      if (autoTrenchContext===context) autoTrench=result;
+      if (autoTrenchContext===context && trenchPoolCache===poolCache) autoTrench=result;
       // The held coins' names are read now, minutes before any exit needs one:
       // a decision never waits for the chain (decision-name.ts).
-      if (autoTrenchContext===context) warmHeldNames(coinNames, result);
+      if (autoTrenchContext===context && trenchPoolCache===poolCache) warmHeldNames(coinNames, result);
     }).catch(()=>trenchNotice(current.agentId,"Autonomous discovery could not verify its pool or custody data. Retrying; no new token authorized.")).finally(()=>{autoTrenchPending=false;});
   }
   const trenchTapeReader = new TrenchTapeReader();
@@ -3064,6 +3065,11 @@ async function main() {
       // Cached routes were read through the OLD endpoint. Keeping them would
       // serve one chain's prices while pointed at another.
       poolPrices.reset();
+      // Replace, rather than clear: an old in-flight discovery can still write
+      // to its cache. Its result also belongs to the old connection.
+      trenchPoolCache = new TrencherPoolCache();
+      autoTrench = null;
+      autoTrenchNext = 0;
       if (active) {
         await addEvent(active.agentId, "ok", "connection settings changed — re-arming executor");
         active = null; // syncGrant re-arms with the new bundler/RPC this tick

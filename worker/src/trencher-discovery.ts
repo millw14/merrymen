@@ -211,7 +211,7 @@ export async function discoverTrencherUniverse(client: PublicClient, grant: Stor
   // undecodable result is that address's read failing, and a failed batch is
   // every address's read failing.
   const reads: readonly ({status:"success";result:number}|{status:"failure";error:unknown})[] = addresses.length
-    ? await client.multicall({contracts:addresses.map(address=>({address,abi:erc20Abi,functionName:"decimals"}) as const),allowFailure:true})
+    ? await client.multicall({contracts:addresses.map(address=>({address,abi:erc20Abi,functionName:"decimals"}) as const),allowFailure:true,batchSize:0})
         .then(r=>r as readonly ({status:"success";result:number}|{status:"failure";error:unknown})[])
         .catch((error: unknown)=>addresses.map(()=>({status:"failure" as const,error})))
     : [];

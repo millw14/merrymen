@@ -13,9 +13,10 @@
  * verification.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { keccak256, type PublicClient } from "viem";
-import { CASH, UNISWAP, GRANT_TRENCHER, type StoredGrant } from "../../packages/core/src/index";
+import { createPublicClient, custom, decodeFunctionData, encodeFunctionResult, erc20Abi, keccak256, multicall3Abi, type Hex, type PublicClient } from "viem";
+import { CASH, UNISWAP, GRANT_TRENCHER, robinhoodChain, type StoredGrant } from "../../packages/core/src/index";
 import { POOL_REFUSAL_TTL_MS, TrencherPoolCache, discoverTrencherUniverse } from "./trencher-discovery";
 import { emptyGeckoBuckets, type GeckoPool } from "./venues/geckoterminal";
 
@@ -140,6 +141,86 @@ test("A SECOND PASS OVER THE SAME TAPE MAKES FAR FEWER READS, and finds the same
   c.reset();
   await discoverTrencherUniverse(c.client, grant, pools);
   assert.equal(c.poolReads().length, 80);
+});
+
+test("decimals use one actual aggregate3 request even with a small client batch default", async (t) => {
+  trustedHash(t);
+  const c = chain();
+  const pools = tape(20);
+  c.add(pools);
+  const requestSizes: number[] = [];
+  const wire = createPublicClient({
+    chain: robinhoodChain,
+    // One decimals() selector fits in this default. Discovery must explicitly
+    // keep the pass together rather than rely on a caller's batch settings.
+    batch: { multicall: { batchSize: 4 } },
+    transport: custom({
+      async request({ method, params }) {
+        assert.equal(method, "eth_call");
+        const [{ data }] = params as [{ data: Hex }];
+        const decoded = decodeFunctionData({ abi: multicall3Abi, data });
+        if (decoded.functionName !== "aggregate3") throw new Error(`Unexpected multicall: ${decoded.functionName}`);
+        const calls = decoded.args[0];
+        requestSizes.push(calls.length);
+        return encodeFunctionResult({
+          abi: multicall3Abi,
+          functionName: "aggregate3",
+          result: calls.map(call => {
+            assert.equal(decodeFunctionData({ abi: erc20Abi, data: call.callData }).functionName, "decimals");
+            return { success: true, returnData: encodeFunctionResult({ abi: erc20Abi, functionName: "decimals", result: 6 }) };
+          }),
+        });
+      },
+    }),
+  });
+  const result = await discoverTrencherUniverse({ ...c.client, multicall: wire.multicall } as PublicClient, grant, pools);
+  assert.equal(result.tokens.length, 20);
+  assert.deepEqual(requestSizes, [20]);
+});
+
+test("changing the connection discards cached evidence and a discovery already in flight", async () => {
+  // Exercise the actual worker wiring without starting its main loop. Both
+  // fragments are ordinary JavaScript; the surrounding module is TypeScript.
+  const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  const refresh = source.slice(source.indexOf("  function refreshAutoTrench()"), source.indexOf("  const trenchTapeReader ="));
+  const resetStart = source.indexOf("      poolPrices.reset();", source.indexOf("  async function refreshConfig()"));
+  const reset = source.slice(resetStart, source.indexOf("      if (active) {", resetStart));
+  const pending: { cache: TrencherPoolCache; resolve: (result: unknown) => void }[] = [];
+  const discover = (_client: unknown, _grant: unknown, _tape: unknown, opts: { cache: TrencherPoolCache }) =>
+    new Promise(resolve => pending.push({ cache: opts.cache, resolve }));
+  const worker = new Function("discoverTrencherUniverse", "TrencherPoolCache", `
+    let active = { agentId: "agent", grant: { grantedAt: 1 } };
+    let autoTrench = null, autoTrenchContext = "", autoTrenchPending = false, autoTrenchNext = 0;
+    let trenchPoolCache = new TrencherPoolCache(), names = 0;
+    const grantTrencher = () => true, mainnetClient = () => ({}), freshTrenchTape = () => [];
+    const tgNominated = new Set(), coinNames = {}, poolPrices = { reset() {} };
+    const warmHeldNames = () => { names++; }, trenchNotice = () => {};
+    ${refresh}
+    return {
+      tick: refreshAutoTrench,
+      reconnect() { ${reset} },
+      snapshot: () => ({ result: autoTrench, names, cache: trenchPoolCache }),
+    };
+  `)(discover, TrencherPoolCache) as {
+    tick(): void; reconnect(): void;
+    snapshot(): { result: unknown; names: number; cache: TrencherPoolCache };
+  };
+  worker.tick();
+  const old = pending[0]!;
+  old.cache.rememberVerified(factory, vault, { token0: CASH.USDG, token1: owner, fee: 3000 });
+  worker.reconnect();
+  assert.notEqual(worker.snapshot().cache, old.cache);
+  assert.equal(worker.snapshot().cache.verified(factory, vault), undefined);
+  old.resolve({ oldConnection: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(worker.snapshot().result, null);
+  assert.equal(worker.snapshot().names, 0, "old holdings must not warm names on the new connection");
+  worker.tick();
+  assert.equal(pending.length, 2, "new connection is read without waiting for the old refresh interval");
+  pending[1]!.resolve({ newConnection: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(worker.snapshot().result, { newConnection: true });
+  assert.equal(worker.snapshot().names, 1);
 });
 
 test("A NEW POOL IS FULLY VERIFIED, and a remembered one is re-checked against what the tape now claims", async (t) => {
