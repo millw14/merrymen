@@ -1082,6 +1082,33 @@ export async function mirrorTenant(args: {
       } catch (e) {
         failed.energy_days = e instanceof Error ? e.message : String(e);
       }
+
+      // ── THE WORKER'S PERPS REPORT (agents.perps), carried up beside energy ──
+      //
+      // Its OWN statement and its own try, never a column on the INSERT above:
+      // a child (or a shared schema) from before the column exists must still
+      // copy every other agents field — a failed column here is one missing
+      // report, not a fleet whose rows stopped moving. Probed on the child by
+      // name; a child without it has said nothing and sends nothing.
+      //
+      // NULL IS "NOT YET", the rule mode, beat_at and energy follow: a rebuilt
+      // child that has not reported leaves the last report standing, and the
+      // lane writes a fresh one on its first pass.
+      try {
+        const cols = (await child.prepare("PRAGMA table_info(agents)").all()) as { name?: unknown }[];
+        if (cols.some((c) => c.name === "perps")) {
+          const reports = (await child
+            .prepare("SELECT smart_account, perps FROM agents WHERE perps IS NOT NULL")
+            .all()) as { smart_account: string; perps: string }[];
+          await shared.tx(async (db) => {
+            const up = db.prepare("UPDATE agents SET perps = ? WHERE smart_account = ?");
+            for (const r of reports) await up.run(r.perps, r.smart_account);
+          });
+          copied.agent_perps = reports.length;
+        }
+      } catch (e) {
+        failed.agent_perps = e instanceof Error ? e.message : String(e);
+      }
       copied.paper_checkpoints = await mirrorPaperCheckpoints(child, shared);
 
       const positions = (await child
