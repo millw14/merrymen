@@ -36,10 +36,17 @@ jobs:
           node-version: 22
       - run: node --test .github/kaka/gate.test.cjs
 
-  app:
-    name: app
+  # THE APP CHECK, IN PARALLEL. It was one job — install, typecheck, build,
+  # then the whole suite — at about 20 minutes, most of it the tests, and PRs
+  # that added tests were cancelled at the job's limit. Its parts now run side
+  # by side: the typecheck, the production build, and the suite in four
+  # shards (node --test --test-shard splits the test files). Same commands,
+  # same coverage. `app` below is still the one check branch protection and
+  # the Kaka gate require, and it passes only when every part did.
+  app-typecheck:
+    name: app · typecheck
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -58,11 +65,71 @@ jobs:
       - name: Typecheck
         run: npm run typecheck # tsc --noEmit -p worker && -p web
 
+  app-build:
+    name: app · build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22 # latest 22.x includes unflagged node:sqlite
+          cache: npm
+
+      # The prepare hook deliberately tolerates build failures for end users.
+      # CI must run the production build as its own required command.
+      - name: Install
+        run: npm ci
+        env:
+          MERRYMEN_SKIP_BUILD: "1"
+
       - name: Production build
         run: npm run build
 
+  app-test:
+    name: app · tests ${{ matrix.shard }}/4
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      # Every shard reports: one failing shard must not hide another's failures.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22 # latest 22.x includes unflagged node:sqlite
+          cache: npm
+
+      # The prepare hook deliberately tolerates build failures for end users.
+      # CI must run the production build as its own required command.
+      - name: Install
+        run: npm ci
+        env:
+          MERRYMEN_SKIP_BUILD: "1"
+
       - name: Test
-        run: npm test # tsx --test worker/src/**/*.test.ts
+        # The same file set as `npm test` (package.json), one shard of it.
+        run: npx tsx --test --test-shard=${{ matrix.shard }}/4 "worker/src/**/*.test.ts" "web/src/**/*.test.ts" "packages/*/src/**/*.test.ts" "sdk/*.test.ts"
+
+  app:
+    name: app
+    needs: [app-typecheck, app-build, app-test]
+    # Runs even when a part failed, so the required check reports a failure
+    # rather than being skipped (a skipped required check never passes).
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every part passed
+        run: |
+          echo "typecheck: ${{ needs.app-typecheck.result }}, build: ${{ needs.app-build.result }}, tests: ${{ needs.app-test.result }}"
+          test "${{ needs.app-typecheck.result }}" = success
+          test "${{ needs.app-build.result }}" = success
+          test "${{ needs.app-test.result }}" = success
 
   contracts:
     name: contracts

@@ -23,6 +23,7 @@ import { resetIdentityStoreForTest } from "../identity-store";
 import { applyLedgerSchema } from "../store";
 import {
   cachedIdentities,
+  CALLS_PER_AGENT,
   callsSql,
   chatProfileOf,
   loadFacts,
@@ -32,6 +33,7 @@ import {
   type AgentFacts,
   type ChatProfile,
 } from "./facts";
+import { appendMessage, ensureGroupchatSchema } from "./store";
 
 const NOW = 1_790_000_000;
 
@@ -842,6 +844,60 @@ describe("loadFacts against the ledger schema", () => {
       assert.equal(out.get(T1)!.calls.length, 180);
       assert.equal(out.get(T1)!.calls[0]!.atSec, NOW - 10, "the newest are the ones kept");
       assert.deepEqual(out.get(T2)!.calls.map((c) => c.decisionId), [quiet]);
+    } finally {
+      r.close();
+    }
+  });
+
+  it("keeps a call the room already posted past the per-agent cut — with the dialect, and only for the card's own key", async () => {
+    // 2026-09-25 16:53: a paper basket filling three coins every few minutes
+    // pushed its earlier card's fill past the newest CALLS_PER_AGENT, and a
+    // redeploy weighed the unsaid fills after it against nothing: three
+    // hours-old "bought TSLA" cards at once. The conductor passes the dialect,
+    // and a fill whose "call:<decision>" card is in the room survives the cut.
+    const r = new DatabaseSync(":memory:");
+    const d = wrapSqlite(r);
+    try {
+      await applyLedgerSchema(d);
+      await agent(d, { id: A1, name: "Busy Basket", mode: "paper" });
+      const made: string[] = [];
+      for (let i = 0; i < CALLS_PER_AGENT + 20; i++) {
+        const id = await decision(d, { agent: A1, source: "strategy:steady-basket", action: "buy", at: NOW - 5 * 3600 + i * 60, symbol: "TSLA" });
+        await trade(d, { agent: A1, decision: id, status: "paper", buy: TSLA, sell: CASH.USDG });
+        made.push(id);
+      }
+      const anchor = made[0]!;
+      const answered = made[1]!;
+      await ensureGroupchatSchema(d, "sqlite");
+      const row = (over: Partial<Parameters<typeof appendMessage>[1]>) => ({
+        createdAtMs: (NOW - 5 * 3600) * 1000,
+        authorKind: "agent" as const,
+        tenant: T1,
+        agentId: A1,
+        speakerSlug: null,
+        speakerName: "Busy Basket",
+        body: "bought TSLA",
+        replyTo: null,
+        kind: "call" as const,
+        call: { side: "buy" as const, symbol: "TSLA", name: null, token: TSLA.toLowerCase(), paper: true },
+        callDecisionId: anchor,
+        dedupeKey: `call:${anchor}`,
+        ...over,
+      });
+      const card = await appendMessage(d, row({}));
+      assert.ok(card !== null, "fixture: the card is in the room");
+      // A key that only CONTAINS "call:<decision>" is not the card's own.
+      await appendMessage(d, row({ body: "nice one", replyTo: card, kind: "chat", call: null, callDecisionId: null, dedupeKey: `re:call:${answered}` }));
+
+      const roster = [{ tenant: T1, agentId: A1 }];
+      const ids = (m: Map<string, AgentFacts>) => m.get(T1)!.calls.map((c) => c.decisionId);
+      const plain = ids(await loadFacts(d, roster, new Map(), NOW, { identities }));
+      const kept = ids(await loadFacts(d, roster, new Map(), NOW, { identities, dialect: "sqlite" }));
+      assert.equal(plain.length, CALLS_PER_AGENT, "fixture: the cut binds");
+      assert.ok(!plain.includes(anchor) && !plain.includes(answered), "fixture: the two oldest fills are past the cut");
+      assert.ok(kept.includes(anchor), "a fill whose card is in the room was cut: a restart weighs the fills after it against nothing");
+      assert.ok(!kept.includes(answered), `a "re:call:" key counted as the card's own`);
+      assert.equal(kept.length, CALLS_PER_AGENT + 1, "the cut still bounds every fill the room has not posted");
     } finally {
       r.close();
     }

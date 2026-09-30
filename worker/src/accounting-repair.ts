@@ -4,7 +4,8 @@
  *
  * The order is the design. For each account:
  *
- *   1. INSERT the evidence-backed chain-log rows.
+ *   1. INSERT the evidence-backed rows (chain-log, and energy-buy for a
+ *      `reserve-out` the worker may already hold — a no-op on the index then).
  *   2. VERIFY they landed and match the proposal exactly.
  *   3. ONLY THEN quarantine the legacy inferred rows.
  *   4. Recompute the contribution state.
@@ -28,6 +29,11 @@
  */
 import type { Db } from "./db";
 import type { AccountPlan, ProposedFlowRow } from "./accounting-reconstruction";
+// The ONE list of sources that count as evidence, shared with the worker's
+// anchor and the web. Hard-coding it here is how this repair once disagreed
+// with both: a new evidenced source (energy-buy) would have flipped every
+// repaired account holding one to contributions_known = 0.
+import { EVIDENCED_FLOW_SOURCES } from "./accounting-scope";
 
 export type RepairMode = "dry-run" | "verify-only" | "commit";
 
@@ -129,7 +135,7 @@ async function verifyInserted(
       | undefined;
 
     if (!row) {
-      return { ok: false, why: `expected chain-log row ${r.txHash}#${r.logIndex} is not in the ledger`, present };
+      return { ok: false, why: `expected ${r.source} row ${r.txHash}#${r.logIndex} is not in the ledger`, present };
     }
     if (row.direction !== r.direction) {
       return {
@@ -147,12 +153,16 @@ async function verifyInserted(
         present,
       };
     }
-    if (String(row.source) !== "chain-log") {
-      return { ok: false, why: `${r.txHash}#${r.logIndex} is source '${row.source}', not chain-log`, present };
+    // THE PROPOSED SOURCE, not a fixed one. An energy purchase is proposed as
+    // 'energy-buy' — the source the worker books it under — so a worker row
+    // already holding that identity verifies, while the same identity held
+    // under ANOTHER source is a disagreement about what the movement was.
+    if (String(row.source) !== r.source) {
+      return { ok: false, why: `${r.txHash}#${r.logIndex} is source '${row.source}', not ${r.source}`, present };
     }
     present += 1;
   }
-  return { ok: true, why: `${present} chain-log row(s) verified against the chain`, present };
+  return { ok: true, why: `${present} evidenced row(s) verified against the chain`, present };
 }
 
 /**
@@ -234,10 +244,10 @@ export async function repairAccount(
         const res = await tx
           .prepare(
             `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id)
-             VALUES (?, ?, ?, ?, ?, ?, 'chain-log', ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT DO NOTHING`,
           )
-          .run(r.agentId, r.direction, r.amountUsdg, r.txHash, r.blockNumber, r.logIndex, r.epoch, chainId);
+          .run(r.agentId, r.direction, r.amountUsdg, r.txHash, r.blockNumber, r.logIndex, r.source, r.epoch, chainId);
         if (num((res as { changes?: number }).changes) > 0) inserted += 1;
       }
 
@@ -273,10 +283,10 @@ export async function repairAccount(
         .prepare(
           `SELECT COUNT(*) AS n,
                   COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net,
-                  SUM(CASE WHEN source IN ('chain-log','epoch-carry') THEN 0 ELSE 1 END) AS unevidenced
+                  SUM(CASE WHEN source IN (${EVIDENCED_FLOW_SOURCES.map(() => "?").join(",")}) THEN 0 ELSE 1 END) AS unevidenced
              FROM flows WHERE agent_id = ? AND epoch = ?`,
         )
-        .get(plan.smartAccount, plan.epoch)) as
+        .get(...EVIDENCED_FLOW_SOURCES, plan.smartAccount, plan.epoch)) as
         | { n: number; net: number; unevidenced: number | null }
         | undefined;
 

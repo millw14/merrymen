@@ -16,7 +16,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { CHAT_COMMANDS, COMMAND_IDS, COMMAND_SPEC, commandFor, commandPayload, modelArgsFor, splitCommand } from "./chat-commands";
+import { CHAT_COMMANDS, COMMAND_IDS, COMMAND_SPEC, commandFor, commandPayload, isComplete, modelArgsFor, splitCommand } from "./chat-commands";
 import { RISK_PROFILES } from "@merrymen/core";
 
 describe("what the model actually says, and what survives it", () => {
@@ -368,7 +368,7 @@ describe("the two commands that spend money", () => {
     // minute later. "Bought" on the card would be a claim about somebody's
     // money made by a browser, ahead of any evidence, and the ledger is what
     // states a trade here.
-    for (const id of ["buy", "sell"]) {
+    for (const id of ["buy", "sell", "get-energy"]) {
       const said = commandFor(id)!.say({ symbol: "TSLA", usdgAmount: 25 });
       assert.match(said, /I'll place it/i, `${id} must not promise a fill`);
       assert.ok(!/\b(bought|sold|filled)\b/i.test(said), `${id} claims a trade that has not happened`);
@@ -392,10 +392,95 @@ describe("the two commands that spend money", () => {
   });
 
   it("they are the ONLY commands that place an order", () => {
+    // get-energy joined them deliberately: it is a buy of one fixed token, on
+    // the same rail, with the same card and the same click (see below).
     assert.deepEqual(
       CHAT_COMMANDS.filter((c) => c.via === "order").map((c) => c.id).sort(),
-      ["buy", "sell"],
+      ["buy", "get-energy", "sell"],
     );
+  });
+});
+
+/**
+ * GET-ENERGY — the agent buying its own $MERRYMEN with its own USDG.
+ *
+ * A money command the model can propose, so the properties that make that
+ * safe are pinned one by one: the model chooses neither the token nor the side,
+ * nothing else rides along, the amount it supplies is the owner's ceiling and
+ * is on the card, and the card says what happens in words that cannot go stale
+ * — no fee or tax percentage, which the token's owner can change under us.
+ */
+describe("get-energy", () => {
+  const cmd = commandFor("get-energy")!;
+
+  it("GET-ENERGY FIXES ITS OWN TOKEN, SIDE AND PURPOSE — a proposal cannot redirect the spend", () => {
+    assert.deepEqual(
+      commandPayload(cmd, { symbol: "PEPE", side: "sell", usdgAmount: 30, to: "0xattacker", purpose: "trade" }),
+      { side: "buy", symbol: "MERRYMEN", usdgAmount: 30, purpose: "energy" },
+    );
+  });
+
+  it("THE ENERGY MARKER IS WRITTEN BY THIS CARD ALONE — a buy, a sell or a snipe never carries it, whatever the model sends", () => {
+    // The worker routes to the energy buy on this marker and never on the
+    // symbol (worker/src/order-gate.ts orderRoute), so no other card may carry
+    // it: a `buy` of MERRYMEN is an ordinary order the worker refuses by name.
+    for (const id of ["buy", "sell", "snipe"]) {
+      const payload = commandPayload(commandFor(id)!, { symbol: "MERRYMEN", query: "merrymen", usdgAmount: 30, purpose: "energy" });
+      assert.equal("purpose" in payload, false, id);
+    }
+    const carriers = CHAT_COMMANDS.filter((c) => (c.writes ?? []).includes("purpose")).map((c) => c.id);
+    assert.deepEqual(carriers, ["get-energy"]);
+  });
+
+  it("the model is asked for the amount and nothing else", () => {
+    assert.deepEqual(modelArgsFor(cmd), ["usdgAmount"]);
+    assert.match(COMMAND_SPEC, /get-energy \{usdgAmount\}/);
+  });
+
+  it("A PROPOSAL WITH NO AMOUNT IS NOT ONE — never a number the owner did not give", () => {
+    assert.equal(isComplete(cmd, {}), false);
+    assert.equal(isComplete(cmd, { symbol: "MERRYMEN" }), false);
+    assert.equal(isComplete(cmd, { usdgAmount: 30 }), true);
+    const { command } = splitCommand("Right.\n<<CMD get-energy {}>>");
+    assert.equal(command, undefined);
+  });
+
+  it("IT IS WEIGHTY AND IT IS AN ORDER, on the rail every client already confirms", () => {
+    assert.equal(cmd.via, "order");
+    assert.equal(cmd.weighty, true);
+    // After sell and before the navigate commands: Android's mirror is by index.
+    const ids = CHAT_COMMANDS.map((c) => c.id);
+    assert.equal(ids.indexOf("get-energy"), ids.indexOf("sell") + 1);
+  });
+
+  it("THE CARD SAYS WHERE, HOW MUCH AT MOST, AND WHAT THE KEY CAN NEVER DO WITH IT", () => {
+    const said = cmd.say({ usdgAmount: 30 });
+    assert.match(said, /Spend up to \$30\.00 of my real USDG/);
+    assert.match(said, /Robinhood Chain/);
+    // What the sizing actually does: it covers the shortfall with a margin,
+    // never "only what's missing", and the fees and tax come out of the USDG.
+    assert.match(said, /I size it to cover what's missing, with a small margin for price movement \(at least \$1\.00\)/);
+    assert.match(said, /the pool fees and the token's own tax are paid out of the USDG/);
+    assert.doesNotMatch(said, /only what's missing|come out of what arrives/, "the old, false sizing claims");
+    assert.match(said, /can't sell or send it/);
+    assert.match(said, /I'll place it/);
+    assert.ok(!/\d\s*%/.test(said), "no fee or tax percentage — the token's owner can change the tax");
+    assert.doesNotMatch(said, /\b(bought|sold|filled)\b/i, "it places; it never claims the trade happened");
+    // "price movement" is the size's small margin over the shortfall (the
+    // quote can move before the fill), not a word about what the token is
+    // worth; everything else stays banned.
+    assert.doesNotMatch(said.replace("small margin for price movement", ""), /price|returns?\b|profit|invest/i, "$MERRYMEN is energy, nothing more");
+  });
+});
+
+describe("set-strategy no longer says money cannot help", () => {
+  it("A HOLDER-ONLY PICK NAMES THE COMBINED BALANCE, not 'however well funded'", () => {
+    // It used to end "below that I stay idle, however well funded I am" —
+    // false once USDG can be turned into the agent's own $MERRYMEN.
+    const said = commandFor("set-strategy")!.say({ strategy: "dip-hunter" });
+    assert.doesNotMatch(said, /however well funded/);
+    assert.match(said, /your wallet and my account hold 100,000 \$MERRYMEN between them — below that I leave it idle\./);
+    assert.doesNotMatch(commandFor("set-strategy")!.say({ strategy: "steady-basket" }), /MERRYMEN/);
   });
 });
 

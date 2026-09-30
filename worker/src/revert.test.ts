@@ -418,6 +418,7 @@ describe("suppression survives the round trip, for every kind that has legs", ()
     { kind: "curve-trade", assetIn: A, assetOut: B, curve: A, target: B },
     { kind: "vault-deposit", target: A },
     { kind: "transfer", target: A, recipient: B },
+    { kind: "energy-buy", target: B, sellToken: A, buyToken: B },
   ] as const;
 
   for (const intent of intents) {
@@ -451,6 +452,16 @@ describe("suppression survives the round trip, for every kind that has legs", ()
 
   it("a kind with no legs still gets a stable key rather than throwing", () => {
     assert.equal(suppressionKey("vault-deposit", ...suppressionLegs(intents[2])), "vault-deposit:->");
+  });
+
+  it("THE ENERGY BUY NAMES ITS LEGS, and its key never collides with a swap over the same tokens", () => {
+    // Legs, not `energy-buy:->`: a suppression is scoped to its pair like every
+    // other kind that has one. And the kind is in the key, so a non-retryable
+    // energy revert never silences an ordinary swap of the same pair.
+    const energy = suppressionKey("energy-buy", ...suppressionLegs(intents[4]));
+    assert.notEqual(energy, "energy-buy:->");
+    assert.notEqual(energy, suppressionKey("swap", ...suppressionLegs(intents[0])));
+    assert.deepEqual(suppressionLegs(intents[4]), [A, B]);
   });
 });
 

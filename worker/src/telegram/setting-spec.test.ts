@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { formatSettingValue, parseSettingValue, specFor, stockSymbols, validStoredSetting, SETTING_SPECS } from "./setting-spec";
+import { CHAT_SETTING_KEYS, DASHBOARD_ONLY, formatSettingValue, parseSettingValue, specFor, stockSymbols, validStoredSetting, SETTING_SPECS } from "./setting-spec";
+import { SETTING_CHOICES } from "./interpreter";
 
 const spec = (k: string) => specFor(k)!;
 
@@ -120,5 +121,34 @@ describe("validStoredSetting — the promotion-time check", () => {
 
   it("refuses keys it does not know", () => {
     assert.equal(validStoredSetting("liveTradingEnabled", true), false);
+  });
+});
+
+describe("Telegram groups are asked about, never set, by text", () => {
+  const GROUP_KEYS = ["telegramGroupsEnabled", "telegramGroupCoinsEnabled", "telegramGroupsChattiness"];
+
+  it("none of the three is in the chat-settable table, so no value for one is ever valid to store", () => {
+    // validStoredSetting is the check a promotion runs; a key outside the
+    // table fails it whatever the value, which is what keeps a room from
+    // reaching these through a child's chatSettings.
+    for (const k of GROUP_KEYS) {
+      assert.equal(specFor(k), null, `${k} became chat-settable`);
+      assert.ok(!CHAT_SETTING_KEYS.includes(k), `${k} is in CHAT_SETTING_KEYS`);
+      for (const v of [true, false, "quiet", "normal", "chatty"]) assert.equal(validStoredSetting(k, v), false, `${k}=${String(v)}`);
+    }
+  });
+
+  it("one dashboard-only pseudo-key answers for all three, with the Settings path in its words", () => {
+    const said = DASHBOARD_ONLY.telegramGroups;
+    assert.ok(said, "DASHBOARD_ONLY.telegramGroups is missing");
+    assert.match(said, /^Telegram groups are switched in Settings → Telegram/);
+    // Nothing here is a real settings key, so the classifier cannot confuse a
+    // refusal with a change.
+    assert.equal(specFor("telegramGroups"), null);
+  });
+
+  it("the classifier may name it, so an owner's 'groups off' reaches the refusal rather than 'unknown'", () => {
+    assert.ok(SETTING_CHOICES.includes("telegramGroups"));
+    for (const k of GROUP_KEYS) assert.ok(!SETTING_CHOICES.includes(k), `${k} is a classifier choice`);
   });
 });

@@ -111,7 +111,9 @@ function Locked({ wire, onRefresh }: { wire: Extract<Wire, { locked: true }>; on
   return <>
     <section className="alpha-gate">
       <LockKeyhole size={32}/><h2>An edge for holders.</h2>
-      <p>Hold {wire.token.symbol} in your signed-in wallet to unlock Alpha.</p>
+      {/* WHAT THE ROUTE COUNTS, said as it counts it: the owner's wallet and
+          their agent's own account together (lib/merrymen-standing.ts). */}
+      <p>Hold {wire.token.symbol} between your wallet and your agent&apos;s account to unlock Alpha.</p>
       <div className="alpha-threshold"><strong>{count(wire.need.tokens)}</strong><span>{wire.token.symbol}</span></div>
       {wire.why === "unreachable" && <p role="status">Could not verify your holdings. Try again.</p>}
       {wire.why === "sign-in" ? <a className="flow-primary" href="/profile">Sign in with wallet</a> : <button className="flow-primary" onClick={onRefresh}>Verify wallet holdings</button>}

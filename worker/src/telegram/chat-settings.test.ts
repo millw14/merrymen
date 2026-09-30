@@ -158,6 +158,19 @@ describe("what a chat may not change", () => {
     })!;
     assert.deepEqual(Object.keys(out).sort(), ["telegramSettingsAt"]);
   });
+
+  it("does not let a chat change how it behaves in Telegram groups", () => {
+    // A child that wrote these into its own chatSettings — a bug, or a room
+    // that talked it into it — must not reach the stored settings: the switch
+    // that lets people's posted coins become nominations stays a dashboard act.
+    const out = promote({ telegramGroupCoinsEnabled: false }, {
+      at: 1,
+      patch: { telegramGroupsEnabled: false, telegramGroupCoinsEnabled: true, telegramGroupsChattiness: "chatty" },
+    })!;
+    assert.equal(out.telegramGroupCoinsEnabled, false, "the dashboard's value stands");
+    assert.ok(!("telegramGroupsEnabled" in out));
+    assert.ok(!("telegramGroupsChattiness" in out));
+  });
 });
 
 describe("a rename from chat survives the next tick", () => {
@@ -241,6 +254,12 @@ describe("a rename from chat survives the next tick", () => {
       "telegramShellAllowlist",
       "telegramFilesRoot",
       "telegramSettingsAt",
+      // Telegram groups (docs/tg-groups.md): a group is a chat anyone in it can
+      // type into, and "look at coins people post" is the door a group's coin
+      // nominations come through. Dashboard-only, DASHBOARD_ONLY.telegramGroups.
+      "telegramGroupsEnabled",
+      "telegramGroupCoinsEnabled",
+      "telegramGroupsChattiness",
       "bundlerApiKey",
       "groqApiKey",
       "llmApiKey",

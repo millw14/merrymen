@@ -1,0 +1,760 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Merrymen × Claude</title>
+<style>
+@font-face{font-family:'DM Sans';font-weight:100 1000;src:url(fonts/DMSans-400.woff2) format('woff2')}
+@font-face{font-family:'JB';font-weight:100 800;src:url(fonts/JetBrainsMono-400.woff2) format('woff2')}
+@font-face{font-family:'Serif';font-weight:200 900;src:url(fonts/SourceSerif4.woff2) format('woff2')}
+:root{--bg:#070806;--bg1:#0c0d0a;--bg2:#12130f;--bg3:#1a1b16;--line:#24261e;--text:#ecece4;--dim:#abada1;--faint:#898c80;
+--lime:#a5ce1f;--lime2:#b9df42;--green:#3dd68c;--gold:#eab308;--red:#ff5c71;--claude:#d97757;
+--c-bg:#faf9f5;--c-side:#f3f1ea;--c-line:#e6e3d8;--c-text:#1f1e1b;--c-dim:#6f6c62;--c-bubble:#efece3}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1920px;height:1080px;overflow:hidden;background:#070806;font-family:'DM Sans',sans-serif;color:var(--text);-webkit-font-smoothing:antialiased}
+.abs{position:absolute}
+#stage{position:absolute;inset:0;overflow:hidden;background:#070806}
+.scene{position:absolute;inset:0;display:none;transform-origin:50% 50%}
+.cam{position:absolute;inset:0;transform-origin:50% 50%}
+.mono{font-family:'JB',monospace}
+b{font-weight:700}
+
+/* ambient */
+#amb{position:absolute;inset:-200px}
+.glow{position:absolute;border-radius:50%;filter:blur(90px)}
+#dots{position:absolute;inset:0;background-image:radial-gradient(rgba(165,206,31,.16) 1.3px,transparent 1.6px);background-size:26px 26px;
+  -webkit-mask-image:radial-gradient(ellipse 60% 55% at 50% 50%,#000 10%,transparent 75%)}
+#grain{position:absolute;inset:0;pointer-events:none;opacity:.075;mix-blend-mode:overlay;z-index:90}
+#vig{position:absolute;inset:0;pointer-events:none;z-index:89;background:radial-gradient(ellipse 75% 70% at 50% 50%,transparent 55%,rgba(0,0,0,.55) 100%)}
+#flash{position:absolute;inset:0;pointer-events:none;z-index:95;background:#fff;opacity:0}
+#leak{position:absolute;inset:0;pointer-events:none;z-index:88;mix-blend-mode:screen;opacity:0;
+  background:radial-gradient(ellipse 40% 60% at 0% 30%,rgba(185,223,66,.55),transparent 70%),radial-gradient(ellipse 30% 50% at 100% 80%,rgba(217,119,87,.35),transparent 70%)}
+#bars{position:absolute;inset:0;z-index:96;pointer-events:none}
+#bars div{position:absolute;left:0;right:0;height:0;background:#000}
+
+/* HUD */
+#hud{position:absolute;top:44px;left:50%;transform:translateX(-50%);z-index:80;display:flex;gap:14px;align-items:center;font-family:'JB';font-size:15px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint)}
+#hud .st{display:flex;align-items:center;gap:10px;padding:9px 16px;border-radius:999px;border:1px solid rgba(255,255,255,.08);background:rgba(12,13,10,.6);backdrop-filter:blur(10px)}
+#hud .st i{width:8px;height:8px;border-radius:50%;background:#3a3c33;display:block}
+#hud .st.on{color:#0a1400;background:var(--lime);border-color:var(--lime)}
+#hud .st.on i{background:#0a1400}
+#hud .st.done{color:var(--lime)} #hud .st.done i{background:var(--lime)}
+#hud .sep{width:26px;height:1px;background:#33352c}
+
+/* captions */
+.cap{position:absolute;left:120px;top:0;width:520px}
+.capnum{font-family:'JB';font-weight:700;font-size:150px;line-height:1;color:transparent;-webkit-text-stroke:2px var(--lime);letter-spacing:-.04em}
+.capk{margin-top:18px;font-family:'JB';font-size:17px;letter-spacing:.22em;color:var(--lime);text-transform:uppercase}
+.capt{margin-top:14px;font-size:58px;font-weight:700;letter-spacing:-.03em;line-height:1.02}
+.caps{margin-top:22px;font-size:25px;line-height:1.45;color:var(--dim);max-width:470px}
+.caps b{color:var(--text)}
+.capline{margin-top:30px;height:3px;width:120px;background:var(--lime);transform-origin:left}
+
+/* windows */
+.win{position:absolute;border-radius:18px;overflow:hidden;box-shadow:0 50px 120px rgba(0,0,0,.6),0 0 0 1px rgba(255,255,255,.08)}
+.chrome{height:58px;display:flex;align-items:center;gap:16px;padding:0 20px;background:#17180f}
+.chrome.light{background:#e9e6dc}
+.dots3{display:flex;gap:9px}.dots3 i{width:14px;height:14px;border-radius:50%;display:block}
+.dots3 i:nth-child(1){background:#ff5f57}.dots3 i:nth-child(2){background:#febc2e}.dots3 i:nth-child(3){background:#28c840}
+.url{flex:1;height:36px;border-radius:10px;background:#0b0c09;display:flex;align-items:center;gap:10px;padding:0 16px;font-size:18px;color:var(--dim);font-family:'DM Sans'}
+.chrome.light .url{background:#fbfaf6;color:#55534b}
+.url svg{width:15px;height:15px;opacity:.8}
+.cursor{position:absolute;left:0;top:0;width:38px;height:38px;z-index:50;filter:drop-shadow(0 6px 10px rgba(0,0,0,.45));transform-origin:4px 3px}
+.ripple{position:absolute;width:40px;height:40px;margin:-20px 0 0 -20px;border-radius:50%;border:3px solid var(--lime);z-index:49;opacity:0}
+
+/* S0 */
+#s0logo{position:absolute;left:50%;top:50%;width:420px;height:282px;margin:-141px 0 0 -210px}
+#s0logo rect{transform-box:fill-box;transform-origin:center}
+#wordmark{position:absolute;left:0;right:0;top:640px;text-align:center;font-size:110px;font-weight:700;letter-spacing:-.045em}
+#wordmark span{display:inline-block}
+#tagline{position:absolute;left:0;right:0;top:790px;text-align:center;font-size:36px;color:var(--dim);letter-spacing:-.01em}
+#tagline b{color:var(--text);font-weight:600}
+#sweep{position:absolute;left:0;right:0;top:539px;height:2px;background:linear-gradient(90deg,transparent,var(--lime2),transparent);box-shadow:0 0 30px var(--lime)}
+#lock{position:absolute;left:0;right:0;top:0;bottom:0}
+#lockrow{position:absolute;left:50%;top:50%;display:flex;align-items:center;gap:60px;transform:translate(-50%,-50%)}
+.lk{display:flex;align-items:center;gap:24px;font-size:88px;font-weight:700;letter-spacing:-.045em}
+#lkx{font-size:70px;color:var(--faint);font-weight:300}
+#lksub{position:absolute;left:0;right:0;top:640px;text-align:center;font-family:'JB';font-size:22px;letter-spacing:.3em;color:var(--lime);text-transform:uppercase}
+
+/* S1 kinetic */
+.kin{position:absolute;left:0;right:0;top:50%;text-align:center;font-size:170px;font-weight:800;letter-spacing:-.055em;line-height:1;transform-origin:50% 50%;opacity:0;margin-top:-85px}
+.kin em{font-style:normal;color:var(--lime)}
+#kinTop{position:absolute;left:0;right:0;top:300px;text-align:center;font-family:'JB';font-size:20px;letter-spacing:.34em;color:var(--faint)}
+.strip{position:absolute;left:0;right:0;height:10px;background:var(--lime);opacity:0}
+
+/* merrymen site page */
+.site{background:#070806;position:absolute;inset:58px 0 0 0;overflow:hidden}
+.site .nav{height:72px;display:flex;align-items:center;gap:12px;padding:0 44px;border-bottom:1px solid #1a1b16}
+.site .nav .nm{font-size:22px;font-weight:600;letter-spacing:-.02em}
+.site .nav .links{margin-left:auto;display:flex;gap:30px;color:var(--dim);font-size:17px}
+.site .body{padding:56px 90px}
+.site h1{font-size:62px;letter-spacing:-.035em;line-height:1.02;font-weight:700}
+.site .lead{margin-top:22px;font-size:25px;color:var(--dim);line-height:1.45;max-width:820px}
+.btnL{display:inline-flex;align-items:center;gap:14px;margin-top:34px;padding:0 10px 0 30px;height:70px;border-radius:14px;background:var(--lime);color:#0a1400;font-size:25px;font-weight:700;letter-spacing:-.01em;position:relative}
+.btnL .box{width:50px;height:50px;border-radius:10px;background:#0a1400;color:var(--lime);display:grid;place-items:center}
+.site p.t{margin-top:34px;font-size:20px;color:var(--faint);line-height:1.6;max-width:880px}
+.site p.t b{color:var(--text);font-weight:600}
+.site h2{margin-top:40px;font-size:32px;letter-spacing:-.02em}
+
+/* claude web (light) */
+.cl{position:absolute;inset:58px 0 0 0;background:var(--c-bg);color:var(--c-text);display:flex}
+.cl .side{width:270px;background:var(--c-side);border-right:1px solid var(--c-line);padding:22px 18px;display:flex;flex-direction:column;gap:6px}
+.cl .brand{display:flex;align-items:center;gap:10px;font-family:'Serif';font-size:28px;font-weight:600;letter-spacing:-.02em;margin:4px 6px 18px}
+.cl .si{display:flex;align-items:center;gap:12px;font-size:17px;color:#3c3a33;padding:10px 10px;border-radius:10px}
+.cl .si svg{width:20px;height:20px;opacity:.7}
+.cl .si.act{background:#e7e4d9}
+.cl .rec{font-size:13px;color:var(--c-dim);margin:18px 10px 4px;letter-spacing:.02em}
+.cl .main{flex:1;padding:48px 70px;position:relative}
+.cl h3{font-family:'Serif';font-weight:500;font-size:40px;letter-spacing:-.02em}
+.cl .sub{color:var(--c-dim);font-size:18px;margin-top:8px}
+.crow{margin-top:18px;display:flex;align-items:center;gap:18px;padding:18px 22px;border:1px solid var(--c-line);border-radius:14px;background:#fff;font-size:19px}
+.crow .ic{width:46px;height:46px;border-radius:12px;display:grid;place-items:center;background:#f0ede4}
+.crow .nm{font-weight:600}.crow .ds{color:var(--c-dim);font-size:15px;margin-top:2px}
+.crow .bt{margin-left:auto;padding:10px 22px;border-radius:10px;border:1px solid #cfccc0;font-size:17px;font-weight:600;background:#fff;position:relative}
+.crow .bt.dark{background:#1f1e1b;color:#fff;border-color:#1f1e1b}
+.ov{position:absolute;inset:0;background:rgba(20,20,18,.42)}
+.modal{position:absolute;left:50%;top:50%;width:640px;margin-left:-320px;margin-top:-250px;background:#fff;border-radius:20px;padding:34px 36px;box-shadow:0 30px 80px rgba(0,0,0,.35);color:var(--c-text)}
+.modal h4{font-family:'Serif';font-weight:500;font-size:31px;letter-spacing:-.015em;display:flex;align-items:center;gap:12px}
+.pill{font-family:'DM Sans';font-size:12px;font-weight:700;letter-spacing:.08em;padding:4px 9px;border-radius:6px;background:#eeeadf;color:#6f6c62}
+.modal .ms{color:var(--c-dim);font-size:17px;margin-top:6px}
+.fl{margin-top:22px;font-size:15px;font-weight:600;color:#3c3a33}
+.fi{margin-top:8px;height:54px;border:1.5px solid #dcd8cc;border-radius:12px;display:flex;align-items:center;padding:0 16px;font-size:19px;position:relative;overflow:hidden}
+.fi .sh{position:absolute;top:0;bottom:0;width:180px;background:linear-gradient(90deg,transparent,rgba(165,206,31,.45),transparent)}
+.adv{margin-top:18px;font-size:15px;color:var(--c-dim)}
+.mbt{margin-top:26px;display:flex;justify-content:flex-end;gap:12px}
+.mbt div{padding:13px 26px;border-radius:11px;font-size:18px;font-weight:600;border:1px solid #d6d2c6;position:relative}
+.mbt .pri{background:#1f1e1b;color:#fff;border-color:#1f1e1b}
+.callout{position:absolute;padding:12px 18px;border-radius:12px;background:var(--lime);color:#0a1400;font-weight:700;font-size:19px;display:flex;align-items:center;gap:10px;box-shadow:0 12px 30px rgba(0,0,0,.3);white-space:nowrap}
+
+/* consent */
+.cs{position:absolute;inset:58px 0 0 0;background:#070806;display:grid;place-items:center}
+.card{width:760px;background:#0f100c;border:1px solid #24261e;border-radius:22px;padding:34px 40px}
+.pair{display:flex;align-items:center;justify-content:center;gap:0}
+.pair .ic{width:74px;height:74px;border-radius:18px;display:grid;place-items:center;background:#16170f;border:1px solid #2a2c22}
+.pair .ln{width:150px;height:2px;background-image:linear-gradient(90deg,var(--lime) 50%,transparent 50%);background-size:14px 2px}
+.card h5{margin-top:24px;text-align:center;font-size:33px;letter-spacing:-.025em;font-weight:700}
+.card .cs2{text-align:center;color:var(--dim);font-size:18px;margin-top:8px}
+.agent{margin-top:22px;display:flex;align-items:center;gap:14px;padding:14px 18px;border:1px solid #2a2c22;border-radius:14px;background:#12130f}
+.agent .av{width:40px;height:40px;border-radius:10px;background:#1d2410;display:grid;place-items:center;color:var(--lime);font-weight:800}
+.agent .tg{margin-left:auto;width:52px;height:30px;border-radius:99px;background:var(--lime);position:relative}
+.agent .tg::after{content:'';position:absolute;right:4px;top:4px;width:22px;height:22px;border-radius:50%;background:#0a1400}
+.perm{display:flex;align-items:center;gap:14px;padding:9px 2px;font-size:18px}
+.perm .cb{width:24px;height:24px;border-radius:7px;border:2px solid #3a3c33;display:grid;place-items:center;flex:none}
+.perm .cb svg{width:16px;height:16px;opacity:0}
+.perm .sc{margin-left:auto;font-family:'JB';font-size:14px;color:var(--faint)}
+.perm.sens{color:var(--dim)}
+.plab{margin-top:18px;font-family:'JB';font-size:13px;letter-spacing:.18em;color:var(--faint);text-transform:uppercase}
+.cbt{margin-top:24px;display:flex;gap:14px;justify-content:flex-end}
+.cbt div{height:56px;padding:0 30px;display:grid;place-items:center;border-radius:12px;font-size:20px;font-weight:700;border:1px solid #2e3027;position:relative}
+.cbt .al{background:var(--lime);color:#0a1400;border-color:var(--lime)}
+#okwrap{position:absolute;inset:0;display:grid;place-items:center}
+#okring{width:300px;height:300px}
+#oktxt{position:absolute;left:0;right:0;top:700px;text-align:center}
+#oktxt .a{font-size:84px;font-weight:800;letter-spacing:-.045em}
+#oktxt .b{font-size:28px;color:var(--dim);margin-top:10px}
+.part{position:absolute;left:960px;top:470px;height:14px;border-radius:7px;background:var(--lime)}
+
+/* chat */
+#app{left:80px;top:80px;width:1760px;height:960px;background:var(--c-bg)}
+.tbar{height:44px;display:flex;align-items:center;padding:0 18px;background:#ece9df;border-bottom:1px solid var(--c-line)}
+#app .cl{inset:44px 0 0 0}
+#chatMain{flex:1;position:relative;overflow:hidden}
+#convVp{position:absolute;left:0;right:0;top:0;bottom:190px;overflow:hidden}
+#conv{position:absolute;left:50%;width:900px;margin-left:-450px;top:60px}
+.umsg{display:flex;justify-content:flex-end;margin:26px 0}
+.umsg div{background:var(--c-bubble);padding:16px 24px;border-radius:22px;font-size:23px;max-width:680px;line-height:1.4}
+.amsg{font-family:'Serif';font-size:24px;line-height:1.55;color:#262521;margin:14px 0}
+.amsg b{font-weight:600}
+.spark{width:40px;height:40px}
+.tool{display:inline-flex;align-items:center;gap:12px;padding:11px 18px 11px 12px;border:1px solid var(--c-line);border-radius:14px;background:#fff;font-size:18px;color:#3c3a33;margin:10px 0 6px}
+.tool .lg{width:32px;height:32px;border-radius:8px;background:#070806;display:grid;place-items:center}
+.tool code{font-family:'JB';font-size:16px;color:#1f1e1b;background:#f3f1ea;padding:3px 8px;border-radius:6px}
+.tool .stt{display:flex;align-items:center;gap:6px;color:#2f8f4e;font-weight:600}
+.tool .spin{width:20px;height:20px;border-radius:50%;border:3px solid #e2dfd4;border-top-color:var(--claude)}
+.diag{margin:16px 0;border:1px solid var(--c-line);border-radius:16px;background:#fff;overflow:hidden;font-family:'DM Sans'}
+.dr{display:flex;align-items:center;gap:16px;padding:14px 22px;border-top:1px solid #f0eee6;font-size:20px}
+.dr:first-child{border-top:0}
+.dr .dot{width:12px;height:12px;border-radius:50%}
+.dr .k{font-weight:600;width:210px}
+.dr .v{color:var(--c-dim)}
+.dr .pl{margin-left:auto;font-family:'JB';font-size:14px;font-weight:700;padding:4px 10px;border-radius:6px;letter-spacing:.06em}
+.ok{background:#e4f4e6;color:#23793f}.wn{background:#fbf0d4;color:#8a6408}
+.books{display:flex;gap:18px;margin:16px 0}
+.book{flex:1;border:1px solid var(--c-line);border-radius:16px;background:#fff;padding:20px 22px;font-family:'DM Sans'}
+.book .bh{display:flex;align-items:center;gap:10px;font-family:'JB';font-size:14px;letter-spacing:.16em;color:var(--c-dim)}
+.book .bh i{width:10px;height:10px;border-radius:50%;display:block}
+.book .big{font-size:52px;font-weight:800;letter-spacing:-.04em;margin-top:6px}
+.book .meta{font-size:16px;color:var(--c-dim)}
+.book svg{width:100%;height:90px;margin-top:8px}
+#inputBox{position:absolute;left:50%;width:900px;margin-left:-450px;bottom:42px;height:132px;background:#fff;border:1px solid #dedbd0;border-radius:24px;box-shadow:0 8px 30px rgba(0,0,0,.06);padding:20px 24px}
+#inputTxt{font-size:23px;color:#1f1e1b;min-height:34px}
+#inputTxt.ph{color:#a09d92}
+.caret{display:inline-block;width:2px;height:28px;background:#1f1e1b;vertical-align:-5px;margin-left:1px}
+.ibar{position:absolute;left:18px;right:18px;bottom:14px;display:flex;align-items:center;gap:10px}
+.ibar .ib{height:38px;min-width:38px;border:1px solid #e1ded3;border-radius:10px;display:flex;align-items:center;justify-content:center;gap:8px;padding:0 10px;font-size:15px;color:#55534b}
+.ibar .mm{border-color:#cfe39a;background:#f4f9e6;color:#3d5200;font-weight:600}
+.ibar .model{margin-left:auto;font-size:16px;color:#55534b;font-family:'Serif'}
+#send{width:42px;height:42px;border-radius:11px;background:var(--claude);display:grid;place-items:center}
+.demo{position:absolute;right:26px;bottom:14px;font-family:'JB';font-size:12px;color:#aaa69a;letter-spacing:.12em}
+.chcap{position:absolute;z-index:40;padding:22px 30px;border-radius:20px;background:rgba(10,11,8,.86);backdrop-filter:blur(14px);border:1px solid rgba(165,206,31,.3);box-shadow:0 30px 60px rgba(0,0,0,.35)}
+.chcap .n{font-family:'JB';font-size:15px;letter-spacing:.24em;color:var(--lime)}
+.chcap .t{font-size:44px;font-weight:800;letter-spacing:-.035em;margin-top:6px}
+.chcap .s{font-size:20px;color:var(--dim);margin-top:4px}
+
+/* terminal */
+#term{left:310px;top:250px;width:1300px;height:680px;background:#0b0c09}
+#term .chrome{background:#15160f;height:50px}
+#term .tt{flex:1;text-align:center;font-family:'JB';font-size:15px;color:var(--faint);margin-right:60px}
+#tbody{padding:30px 36px;font-family:'JB';font-size:23px;line-height:1.7;color:#d8d9cf;white-space:pre}
+.tp{color:var(--lime)}.tg{color:var(--green)}.tf{color:var(--faint)}.tc{color:var(--claude)}
+.tbox{margin-top:14px;border:1.5px solid #3b3d33;border-radius:10px;padding:16px 22px;line-height:1.6}
+#termTitle{position:absolute;left:0;right:0;top:120px;text-align:center}
+#termTitle .a{font-size:62px;font-weight:800;letter-spacing:-.04em}
+#termTitle .a em{font-style:normal;color:var(--lime)}
+
+/* safety */
+#sfH{position:absolute;left:0;right:0;top:170px;text-align:center;font-size:96px;font-weight:800;letter-spacing:-.05em;line-height:1.05}
+#sfH span{display:inline-block}
+#sfH em{font-style:normal;color:var(--lime)}
+#sfGrid{position:absolute;left:50%;top:470px;width:1560px;margin-left:-780px;display:grid;grid-template-columns:repeat(4,1fr);gap:24px}
+.sfc{padding:34px 30px;border-radius:22px;background:linear-gradient(180deg,#12130f,#0c0d0a);border:1px solid #24261e;position:relative;overflow:hidden}
+.sfc .ico{width:74px;height:74px;border-radius:18px;background:rgba(165,206,31,.1);border:1px solid rgba(165,206,31,.35);display:grid;place-items:center;color:var(--lime)}
+.sfc .ico svg{width:38px;height:38px}
+.sfc .h{margin-top:26px;font-size:32px;font-weight:700;letter-spacing:-.025em;line-height:1.1}
+.sfc .p{margin-top:12px;font-size:19px;color:var(--dim);line-height:1.45}
+.sfc .x{position:absolute;right:24px;top:28px;font-family:'JB';font-size:14px;color:var(--red);letter-spacing:.12em}
+#sfFoot{position:absolute;left:0;right:0;top:860px;text-align:center;font-size:30px;color:var(--dim)}
+#sfFoot b{color:var(--text)}
+
+/* outro */
+#s8logo{position:absolute;left:50%;top:230px;width:230px;height:154px;margin-left:-115px}
+#s8logo rect{transform-box:fill-box;transform-origin:center}
+#s8h{position:absolute;left:0;right:0;top:430px;text-align:center;font-size:104px;font-weight:800;letter-spacing:-.05em;line-height:1}
+#s8h em{font-style:normal;color:var(--lime)}
+#s8pill{position:absolute;left:50%;top:600px;transform:translateX(-50%);display:flex;align-items:center;gap:18px;padding:22px 34px;border-radius:999px;background:#12130f;border:1px solid #2e3027;font-size:32px;white-space:nowrap}
+#s8pill .q{font-family:'JB';color:var(--lime);font-size:30px}
+#s8url{position:absolute;left:50%;top:740px;transform:translateX(-50%);padding:18px 40px;border-radius:16px;background:var(--lime);color:#0a1400;font-size:40px;font-weight:800;letter-spacing:-.02em;white-space:nowrap}
+#s8plat{position:absolute;left:0;right:0;top:880px;text-align:center;font-family:'JB';font-size:19px;letter-spacing:.2em;color:var(--faint);text-transform:uppercase}
+#s8plat span{margin:0 16px}
+</style></head>
+<body>
+<div id="stage">
+  <div id="amb">
+    <div class="glow" id="g1" style="width:900px;height:700px;background:rgba(165,206,31,.16)"></div>
+    <div class="glow" id="g2" style="width:800px;height:800px;background:rgba(61,214,140,.08)"></div>
+    <div class="glow" id="g3" style="width:700px;height:600px;background:rgba(217,119,87,.10)"></div>
+  </div>
+  <div id="dots"></div>
+
+  <!-- S0 INTRO -->
+  <div class="scene" id="s0"><div class="cam" id="s0cam">
+    <div id="sweep"></div>
+    <div id="s0logo"></div>
+    <div id="wordmark"></div>
+    <div id="tagline">Your trading agent. <b>Now inside Claude.</b></div>
+    <div id="lock">
+      <div id="lockrow">
+        <div class="lk" id="lkm"><span id="lkmLogo" style="width:120px;height:81px;display:block"></span>merrymen</div>
+        <div id="lkx">×</div>
+        <div class="lk" id="lkc"><span id="lkcSpark" style="width:92px;height:92px;display:block"></span><span style="font-family:'Serif';font-weight:600;letter-spacing:-.03em">Claude</span></div>
+      </div>
+      <div id="lksub">The Merrymen MCP connector</div>
+    </div>
+  </div></div>
+
+  <!-- S1 KINETIC -->
+  <div class="scene" id="s1"><div class="cam" id="s1cam">
+    <div class="strip" id="st1" style="top:180px"></div><div class="strip" id="st2" style="top:890px"></div>
+    <div id="kinTop">SETTING UP MERRYMEN IN CLAUDE</div>
+    <div class="kin" id="k1">No API keys.</div>
+    <div class="kin" id="k2">No config files.</div>
+    <div class="kin" id="k3">No passwords pasted.</div>
+    <div class="kin" id="k4">Just <em>one click.</em></div>
+  </div></div>
+
+  <!-- S2 STEP 1 site -->
+  <div class="scene" id="s2"><div class="cam" id="s2cam">
+    <div class="cap" id="cap1" style="top:250px">
+      <div class="capnum">01</div><div class="capk">Step one</div>
+      <div class="capt">Open the setup page</div>
+      <div class="caps">Go to <b>merrymen.dev/claude</b> and hit <b>Add to Claude</b>. Nothing to copy, nothing to paste.</div>
+      <div class="capline"></div>
+    </div>
+    <div class="win" id="w1" style="left:700px;top:150px;width:1120px;height:780px;background:#070806">
+      <div class="chrome"><div class="dots3"><i></i><i></i><i></i></div>
+        <div class="url"><span class="lockico"></span><span id="url1"></span></div></div>
+      <div class="site">
+        <div class="nav"><span class="mmlogo" data-w="44"></span><span class="nm">merrymen</span>
+          <div class="links"><span>Docs</span><span>Leaderboard</span><span>Claude</span><span style="color:var(--lime)">Open app</span></div></div>
+        <div class="body">
+          <h1>Set up Merrymen<br>in Claude</h1>
+          <div class="lead">The quickest way: tell Claude “set up merrymen mcp”. Or add it yourself in one click.</div>
+          <div class="btnL" id="addBtn">Add to Claude <span class="box"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div>
+          <p class="t">The button opens Claude’s <b>Add custom connector</b> dialog with Merrymen filled in. Click <b>Continue</b>, then <b>Connect</b>, then <b>Allow</b>. It then works in claude.ai, Claude Desktop, Claude mobile and Claude Code.</p>
+          <h2>Two addresses, one Merrymen</h2>
+        </div>
+      </div>
+      <div class="ripple" id="rp1"></div>
+      <svg class="cursor" id="cur1" viewBox="0 0 24 24"><path d="M3 2l17 9.5-7.4 1.6L9.2 20z" fill="#fff" stroke="#000" stroke-width="1.4" stroke-linejoin="round"/></svg>
+    </div>
+  </div></div>
+
+  <!-- S3 STEP 2 claude.ai -->
+  <div class="scene" id="s3"><div class="cam" id="s3cam">
+    <div class="cap" id="cap2" style="top:250px">
+      <div class="capnum">02</div><div class="capk">Step two</div>
+      <div class="capt">Add it to Claude</div>
+      <div class="caps">Name and server URL arrive <b>already filled in</b>. Click Add, then Connect.</div>
+      <div class="capline"></div>
+    </div>
+    <div class="win" id="w2" style="left:700px;top:150px;width:1120px;height:780px;background:var(--c-bg)">
+      <div class="chrome light"><div class="dots3"><i></i><i></i><i></i></div>
+        <div class="url"><span class="lockico"></span><span>claude.ai/customize/connectors</span></div></div>
+      <div class="cl">
+        <div class="side">
+          <div class="brand"><span class="sparkS" data-w="30"></span>Claude</div>
+          <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>New chat</div>
+          <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v11H8l-4 4z"/></svg>Chats</div>
+          <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h7l2 2h9v10H3z"/></svg>Projects</div>
+          <div class="si act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 7V3M15 7V3M7 7h10v5a5 5 0 0 1-10 0zM12 17v4"/></svg>Connectors</div>
+        </div>
+        <div class="main">
+          <h3>Connectors</h3>
+          <div class="sub">Let Claude use your tools and data. You choose what each one can access.</div>
+          <div class="crow" id="mmRow">
+            <div class="ic" style="background:#070806"><span class="mmlogo" data-w="30"></span></div>
+            <div><div class="nm">Merrymen</div><div class="ds">Custom · mcp.merrymen.dev</div></div>
+            <div class="bt dark" id="connBtn">Connect</div>
+          </div>
+          <div class="crow" id="addRow" style="border-style:dashed;background:transparent;color:var(--c-dim)">
+            <div class="ic"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg></div>
+            <div>Add custom connector</div>
+          </div>
+          <div class="ov" id="ov2"></div>
+          <div class="modal" id="modal">
+            <h4>Add custom connector <span class="pill">BETA</span></h4>
+            <div class="ms">Connect Claude to a remote MCP server.</div>
+            <div class="fl">Name</div>
+            <div class="fi" id="f1"><span>Merrymen</span><div class="sh" id="sh1"></div></div>
+            <div class="fl">Remote MCP server URL</div>
+            <div class="fi" id="f2"><span class="mono" style="font-size:18px">https://mcp.merrymen.dev/mcp</span><div class="sh" id="sh2"></div></div>
+            <div class="adv">› Advanced settings</div>
+            <div class="mbt"><div>Cancel</div><div class="pri" id="addC">Add</div></div>
+          </div>
+          <div class="callout" id="call2"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg>Pre-filled for you</div>
+        </div>
+      </div>
+      <div class="ripple" id="rp2"></div>
+      <svg class="cursor" id="cur2" viewBox="0 0 24 24"><path d="M3 2l17 9.5-7.4 1.6L9.2 20z" fill="#fff" stroke="#000" stroke-width="1.4" stroke-linejoin="round"/></svg>
+    </div>
+  </div></div>
+
+  <!-- S4 STEP 3 consent -->
+  <div class="scene" id="s4"><div class="cam" id="s4cam">
+    <div class="cap" id="cap3" style="top:250px">
+      <div class="capnum">03</div><div class="capk">Step three</div>
+      <div class="capt">Sign in &amp; allow</div>
+      <div class="caps">You choose what Claude may see and do. Anything that could trade <b>stays off</b> unless you tick it.</div>
+      <div class="capline"></div>
+    </div>
+    <div class="win" id="w3" style="left:700px;top:110px;width:1120px;height:880px;background:#070806">
+      <div class="chrome"><div class="dots3"><i></i><i></i><i></i></div>
+        <div class="url"><span class="lockico"></span><span>app.merrymen.dev/connect/authorize</span></div></div>
+      <div class="cs"><div class="card" id="card3">
+        <div class="pair"><div class="ic"><span class="sparkS" data-w="44"></span></div><div class="ln" id="pairln"></div><div class="ic"><span class="mmlogo" data-w="46"></span></div></div>
+        <h5>Claude wants to connect to Merrymen</h5>
+        <div class="cs2">Choose what it can do. Disconnect any time.</div>
+        <div class="agent"><div class="av">R</div><div><div style="font-weight:700;font-size:19px">Robin</div><div style="color:var(--faint);font-size:15px">Share this agent · paper + live books</div></div><div class="tg"></div></div>
+        <div class="plab">Starts ticked</div>
+        <div id="permsOn"></div>
+        <div class="plab">Needs your approval in Merrymen · off by default</div>
+        <div id="permsOff"></div>
+        <div class="cbt"><div>Cancel</div><div class="al" id="allowBtn">Allow</div></div>
+      </div></div>
+      <div class="ripple" id="rp3"></div>
+      <svg class="cursor" id="cur3" viewBox="0 0 24 24"><path d="M3 2l17 9.5-7.4 1.6L9.2 20z" fill="#fff" stroke="#000" stroke-width="1.4" stroke-linejoin="round"/></svg>
+    </div>
+    <div id="okwrap">
+      <svg id="okring" viewBox="0 0 300 300"><circle cx="150" cy="150" r="130" fill="none" stroke="rgba(165,206,31,.15)" stroke-width="10"/>
+        <circle id="okc" cx="150" cy="150" r="130" fill="none" stroke="#a5ce1f" stroke-width="10" stroke-linecap="round" stroke-dasharray="817" stroke-dashoffset="817" transform="rotate(-90 150 150)"/>
+        <path id="okp" d="M95 155l38 38 75-80" fill="none" stroke="#a5ce1f" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="200" stroke-dashoffset="200"/></svg>
+    </div>
+    <div id="parts"></div>
+    <div id="oktxt"><div class="a">Connected.</div><div class="b">Merrymen is now a tool Claude can use — everywhere you use Claude.</div></div>
+  </div></div>
+
+  <!-- S5 CHAT -->
+  <div class="scene" id="s5"><div class="cam" id="s5cam">
+    <div class="win" id="app">
+      <div class="tbar"><div class="dots3"><i></i><i></i><i></i></div></div>
+      <div class="cl">
+        <div class="side">
+          <div class="brand"><span class="sparkS" data-w="30"></span>Claude</div>
+          <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>New chat</div>
+          <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v11H8l-4 4z"/></svg>Chats</div>
+          <div class="si"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h7l2 2h9v10H3z"/></svg>Projects</div>
+          <div class="rec">Recents</div>
+          <div class="si act">My agent check-in</div>
+          <div class="si">Weekly P&amp;L notes</div>
+          <div class="si">NVDA research</div>
+          <div class="si">Backtest ideas</div>
+        </div>
+        <div id="chatMain">
+          <div id="convVp"><div id="conv">
+            <div class="umsg" id="u1"><div>Why hasn’t my agent traded?</div></div>
+            <div id="a1s"><span class="sparkS spk" data-w="40"></span></div>
+            <div class="tool" id="t1"><span class="lg"><span class="mmlogo" data-w="20"></span></span>Merrymen <code>explain_agent_inactivity</code><span class="stt" id="t1s"></span></div>
+            <div class="amsg stream" id="a1p">Nothing is broken. <b>Robin</b> is running, funded and permitted — it has simply chosen to <b>hold</b>. Here’s the diagnosis:</div>
+            <div class="diag" id="a1d">
+              <div class="dr"><span class="dot" style="background:#2f9e57"></span><span class="k">Permission</span><span class="v">signed grant valid · 12 days left</span><span class="pl ok">OK</span></div>
+              <div class="dr"><span class="dot" style="background:#2f9e57"></span><span class="k">Worker</span><span class="v">last heartbeat 14 s ago</span><span class="pl ok">OK</span></div>
+              <div class="dr"><span class="dot" style="background:#2f9e57"></span><span class="k">Funding</span><span class="v">1,240 USDC in the live book</span><span class="pl ok">OK</span></div>
+              <div class="dr"><span class="dot" style="background:#d9a20b"></span><span class="k">Model holds</span><span class="v">6 reviews today, no setup cleared its bar</span><span class="pl wn">HOLD</span></div>
+              <div class="dr"><span class="dot" style="background:#2f9e57"></span><span class="k">Policy refusals</span><span class="v">none in 24 h</span><span class="pl ok">OK</span></div>
+            </div>
+            <div class="amsg stream" id="a1q">It’s being patient, not stuck. Want me to ask Robin what would change its mind?</div>
+            <div class="umsg" id="u2"><div>How did my agent do this week? Keep paper and live apart.</div></div>
+            <div id="a2s"><span class="sparkS spk" data-w="40"></span></div>
+            <div class="tool" id="t2"><span class="lg"><span class="mmlogo" data-w="20"></span></span>Merrymen <code>get_performance</code><span class="stt" id="t2s"></span></div>
+            <div class="amsg stream" id="a2p">Here’s the week, book by book. They’re different books, so I never add them together:</div>
+            <div class="books" id="a2b">
+              <div class="book"><div class="bh"><i style="background:#2f9e57"></i>LIVE · REAL FUNDS</div><div class="big" style="color:#23793f">+3.2%</div><div class="meta">time-weighted · max drawdown −1.1%</div>
+                <svg viewBox="0 0 400 90" preserveAspectRatio="none"><path class="chart" id="ch1" d="M0 70 L40 66 L80 72 L120 58 L160 61 L200 50 L240 54 L280 40 L320 44 L360 30 L400 26" fill="none" stroke="#2f9e57" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/></svg></div>
+              <div class="book"><div class="bh"><i style="background:#8a8678"></i>PAPER · PRACTICE</div><div class="big">+5.8%</div><div class="meta">simulated fills · max drawdown −2.4%</div>
+                <svg viewBox="0 0 400 90" preserveAspectRatio="none"><path class="chart" id="ch2" d="M0 76 L40 70 L80 74 L120 60 L160 48 L200 55 L240 38 L280 42 L320 28 L360 22 L400 14" fill="none" stroke="#8a8678" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="1 0"/></svg></div>
+            </div>
+            <div class="amsg stream" id="a2q">Past results aren’t a promise — but the live book is ahead of its start with a shallow drawdown.</div>
+            <div style="height:40px"></div>
+          </div></div>
+          <div id="inputBox">
+            <div id="inputTxt" class="ph">How can I help you today?</div>
+            <div class="ibar">
+              <div class="ib"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg></div>
+              <div class="ib mm" id="mmChip"><span class="mmlogo" data-w="20"></span>Merrymen</div>
+              <div class="model">Claude</div>
+              <div id="send"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"><path d="M12 19V5M6 11l6-6 6 6"/></svg></div>
+            </div>
+          </div>
+          <div class="demo">ILLUSTRATIVE DATA</div>
+        </div>
+      </div>
+    </div>
+    <div class="chcap" id="chcap" style="left:40px;top:110px"><div class="n">04 · STEP FOUR</div><div class="t">Just ask.</div><div class="s">Claude calls your agent’s tools for you.</div></div>
+  </div></div>
+
+  <!-- S6 TERMINAL -->
+  <div class="scene" id="s6"><div class="cam" id="s6cam">
+    <div id="termTitle"><div class="a">Live in the terminal? <em>One command.</em></div></div>
+    <div class="win" id="term">
+      <div class="chrome"><div class="dots3"><i></i><i></i><i></i></div><div class="tt">~ — claude</div></div>
+      <div id="tbody"></div>
+    </div>
+  </div></div>
+
+  <!-- S7 SAFETY -->
+  <div class="scene" id="s7"><div class="cam" id="s7cam">
+    <div id="sfH"><span id="sfa">Claude can help.</span><br><span id="sfb"><em>It can’t take over.</em></span></div>
+    <div id="sfGrid">
+      <div class="sfc"><div class="x">NEVER</div><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="3"/><path d="M3 10h18M16 14.5h2"/></svg></div><div class="h">Move your funds</div><div class="p">Deposits and withdrawals stay with you.</div></div>
+      <div class="sfc"><div class="x">NEVER</div><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2 20 3M16 7l3 3M14 9l2 2"/></svg></div><div class="h">See your keys</div><div class="p">Sign-in happens in your browser. No keys in chat.</div></div>
+      <div class="sfc"><div class="x">NEVER</div><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></div><div class="h">Turn on live trading</div><div class="p">Only you can switch your agent to real money.</div></div>
+      <div class="sfc"><div class="x">NEVER</div><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg></div><div class="h">Loosen your limits</div><div class="p">Signed on-chain caps can’t be widened from a chat.</div></div>
+    </div>
+    <div id="sfFoot">Anything Claude suggests <b>waits for your approval in Merrymen.</b></div>
+  </div></div>
+
+  <!-- S8 OUTRO -->
+  <div class="scene" id="s8"><div class="cam" id="s8cam">
+    <div id="s8logo"></div>
+    <div id="s8h">Your agent is <em>one message away.</em></div>
+    <div id="s8pill"><span class="sparkS" data-w="40"></span>Tell Claude <span class="q">“set up merrymen mcp”</span></div>
+    <div id="s8url">merrymen.dev/claude</div>
+    <div id="s8plat"><span>claude.ai</span>·<span>Claude Desktop</span>·<span>Claude mobile</span>·<span>Claude Code</span></div>
+  </div></div>
+
+  <div id="hud">
+    <div class="st" id="h1"><i></i>Open</div><div class="sep"></div>
+    <div class="st" id="h2"><i></i>Add</div><div class="sep"></div>
+    <div class="st" id="h3"><i></i>Allow</div><div class="sep"></div>
+    <div class="st" id="h4"><i></i>Ask</div>
+  </div>
+  <div id="leak"></div>
+  <div id="vig"></div>
+  <div id="grain"></div>
+  <div id="flash"></div>
+  <div id="bars"><div id="barT" style="top:0"></div><div id="barB" style="bottom:0"></div></div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const clamp=(x,a=0,b=1)=>Math.min(b,Math.max(a,x));
+const E={lin:x=>x,o2:x=>1-(1-x)*(1-x),o3:x=>1-Math.pow(1-x,3),i3:x=>x*x*x,io3:x=>x<.5?4*x*x*x:1-Math.pow(-2*x+2,3)/2,
+ oX:x=>x>=1?1:1-Math.pow(2,-10*x),iX:x=>x<=0?0:Math.pow(2,10*x-10),
+ ioX:x=>x<=0?0:x>=1?1:x<.5?Math.pow(2,20*x-10)/2:(2-Math.pow(2,-20*x+10))/2,
+ oB:x=>{const c1=1.9,c3=c1+1;return 1+c3*Math.pow(x-1,3)+c1*Math.pow(x-1,2)},
+ el:x=>x<=0?0:x>=1?1:Math.pow(2,-10*x)*Math.sin((x*10-.75)*(2*Math.PI)/3)+1};
+const P=(t,a,b,e=E.o3)=>e(clamp((t-a)/(b-a)));
+function kf(t,k){if(t<=k[0][0])return k[0][1];for(let i=1;i<k.length;i++){if(t<=k[i][0]){const[t0,v0]=k[i-1],[t1,v1,e=E.io3]=k[i];return v0+(v1-v0)*e((t-t0)/(t1-t0||1))}}return k[k.length-1][1]}
+function S(el,o){if(typeof el==='string')el=$(el);const s=el.style;
+  if('x'in o||'y'in o||'s'in o||'r'in o||'rx'in o||'ry'in o||'sx'in o||'sy'in o){
+    const {x=0,y=0,s:sc=1,r=0,rx=0,ry=0,sx=1,sy=1}=o;
+    s.transform=`${rx||ry?'perspective(1800px) ':''}translate(${x}px,${y}px) scale(${sc*sx},${sc*sy}) rotate(${r}deg)${rx?` rotateX(${rx}deg)`:''}${ry?` rotateY(${ry}deg)`:''}`}
+  if('o'in o)s.opacity=o.o;
+  if('b'in o)s.filter=o.b>0.05?`blur(${o.b}px)`:'none';
+  if('f'in o)s.filter=o.f;
+}
+// ---------- brand art ----------
+const BARS=[[280,1,324,47],[403,72,258,49],[138,137,51,54],[473,137,227,54],[742,137,50,54],[64,212,199,48],[516,212,204,48],[766,212,109,48],[0,288,126,48],[161,288,582,48],[812,288,128,48],[64,366,199,47],[518,366,202,47],[766,366,109,47],[138,436,51,48],[473,436,227,48],[742,436,51,48],[403,510,259,48],[280,582,324,47]];
+const logoSVG=(c='#a5ce1f')=>`<svg viewBox="-10 -10 960 650" width="100%" height="100%">${BARS.map(([x,y,w,h])=>`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${h/2}" fill="${c}"/>`).join('')}</svg>`;
+const SPK=[46,37,44,35,47,39,43,36,46,38,44,40];
+const sparkSVG=(c='#d97757')=>`<svg viewBox="-50 -50 100 100" width="100%" height="100%"><g stroke="${c}" stroke-linecap="round">${SPK.map((L,i)=>{const a=(i*30+(i%3)*4-4)*Math.PI/180,w=[9,7,8.5,6.5,9,7.5][i%6];return `<line x1="${Math.cos(a)*6}" y1="${Math.sin(a)*6}" x2="${(Math.cos(a)*L).toFixed(1)}" y2="${(Math.sin(a)*L).toFixed(1)}" stroke-width="${w}"/>`}).join('')}</g></svg>`;
+document.querySelectorAll('.mmlogo').forEach(e=>{const w=+e.dataset.w;e.style.cssText+=`display:inline-block;width:${w}px;height:${w*.677}px`;e.innerHTML=logoSVG()});
+document.querySelectorAll('.sparkS').forEach(e=>{const w=+e.dataset.w;e.style.cssText+=`display:inline-block;width:${w}px;height:${w}px;flex:none`;e.innerHTML=sparkSVG()});
+document.querySelectorAll('.lockico').forEach(e=>e.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>');
+$('s0logo').innerHTML=logoSVG();$('s8logo').innerHTML=logoSVG();
+$('lkmLogo').innerHTML=logoSVG();$('lkcSpark').innerHTML=sparkSVG();
+$('wordmark').innerHTML=[...'merrymen'].map(c=>`<span>${c}</span>`).join('');
+const CHK='<svg viewBox="0 0 24 24" fill="none" stroke="#0a1400" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg>';
+const PON=[['Research markets and public agents','market:read'],['See your agent’s status and settings','agents:read'],['See your portfolio and trades','portfolio:read'],['See your agent’s decisions','decisions:read'],['Talk with your agent','chat:write'],['Run backtests','jobs:run']];
+const POFF=[['Suggest trades for you to approve','trade:propose'],['Suggest setting changes for you to approve','drafts:write']];
+$('permsOn').innerHTML=PON.map(([a,b])=>`<div class="perm"><span class="cb">${CHK}</span>${a}<span class="sc">${b}</span></div>`).join('');
+$('permsOff').innerHTML=POFF.map(([a,b])=>`<div class="perm sens"><span class="cb"></span>${a}<span class="sc">${b}</span></div>`).join('');
+// particles
+let ph='';for(let i=0;i<34;i++)ph+=`<div class="part" id="pt${i}"></div>`;$('parts').innerHTML=ph;
+const PARTS=[...Array(34)].map((_,i)=>{const r=Math.sin(i*91.7)*43758.5453;const f=r-Math.floor(r);return{a:i/34*Math.PI*2+f*.3,d:260+f*300,w:24+((i*7)%5)*16,c:i%5===0?'#d97757':i%3===0?'#ecece4':'#a5ce1f'}});
+PARTS.forEach((p,i)=>{$('pt'+i).style.width=p.w+'px';$('pt'+i).style.background=p.c});
+// stream prep
+function wrapWords(el){const w=[];(function walk(n){[...n.childNodes].forEach(c=>{if(c.nodeType===3){const parts=c.textContent.split(/(\s+)/);const frag=document.createDocumentFragment();parts.forEach(p=>{if(!p)return;if(/^\s+$/.test(p)){frag.appendChild(document.createTextNode(p))}else{const s=document.createElement('span');s.textContent=p;s.style.opacity=0;frag.appendChild(s);w.push(s)}});c.replaceWith(frag)}else walk(c)})})(el);return w}
+const STR={};document.querySelectorAll('.stream').forEach(e=>STR[e.id]=wrapWords(e));
+function stream(id,t,t0,wps=16){const w=STR[id];const n=(t-t0)*wps;w.forEach((s,i)=>{const v=clamp(n-i);s.style.opacity=v;});}
+// grain tiles
+const GR=[];for(let k=0;k<6;k++){const c=document.createElement('canvas');c.width=c.height=256;const x=c.getContext('2d');const d=x.createImageData(256,256);let seed=k*9973+1;for(let i=0;i<d.data.length;i+=4){seed=(seed*16807)%2147483647;const v=seed%256;d.data[i]=d.data[i+1]=d.data[i+2]=v;d.data[i+3]=255}x.putImageData(d,0,0);GR.push(c.toDataURL())}
+// layout helper (untransformed position relative to ancestor)
+function pos(el,root){let x=0,y=0,e=el;while(e&&e!==root){x+=e.offsetLeft;y+=e.offsetTop;e=e.offsetParent}return{x,y,w:el.offsetWidth,h:el.offsetHeight,cx:x+el.offsetWidth/2,cy:y+el.offsetHeight/2}}
+
+const SC=[['s0',0,6.05],['s1',5.95,10.6],['s2',10.45,17.1],['s3',16.9,24.3],['s4',23.3,31.6],['s5',31.35,47.2],['s6',46.9,52.8],['s7',52.6,58.8],['s8',58.6,65.1]];
+function show(t){SC.forEach(([id,a,b])=>{$(id).style.display=(t>=a&&t<b)?'block':'none'})}
+function cursor(id,t,path){ // path: [[t,x,y],...]
+  const el=$(id);const x=kf(t,path.map(p=>[p[0],p[1],p[3]||E.io3])),y=kf(t,path.map(p=>[p[0],p[2],p[3]||E.io3]));
+  el.style.left=x+'px';el.style.top=y+'px';}
+function press(t,tc){ // returns press scale
+  return 1-0.07*Math.sin(Math.PI*clamp((t-tc)/0.22));}
+function ripple(id,t,tc,x,y){const p=clamp((t-tc)/0.6);const el=$(id);el.style.left=x+'px';el.style.top=y+'px';S(el,{s:1+p*3.2,o:p>0&&p<1?(1-p):0})}
+function typeInto(el,full,t,t0,cps,caret=true){const n=Math.floor(clamp((t-t0)*cps,0,full.length));const blink=caret&&(Math.floor(t*2.2)%2===0||n<full.length&&t>t0);el.innerHTML=full.slice(0,n).replace(/</g,'&lt;')+(caret&&t>=t0-0.4?`<span class="caret" style="opacity:${blink?1:0}"></span>`:'');return n}
+
+let L={};
+function measure(){
+  SC.forEach(([id])=>$(id).style.display='block');
+  // S2
+  const w1=$('w1');const b=pos($('addBtn'),w1);L.add={x:b.x+b.w*.55,y:b.y+b.h*.55};
+  const w2=$('w2');const a=pos($('addC'),w2);L.addC={x:a.cx,y:a.cy};const c=pos($('connBtn'),w2);L.conn={x:c.cx,y:c.cy};
+  const f1=pos($('f1'),w2);L.f1=f1;
+  const w3=$('w3');const al=pos($('allowBtn'),w3);L.allow={x:al.cx,y:al.cy};
+  // chat scroll targets
+  const vpH=$('convVp').offsetHeight;const conv=$('conv');
+  const bot=id=>{const e=$(id);return e.offsetTop+e.offsetHeight};
+  const SCV={};['a1p','a1d','a1q','t2','a2p','a2b','a2q'].forEach(id=>SCV[id]=Math.max(0,bot(id)+60+60-vpH));L.sc=id=>SCV[id];
+  SC.forEach(([id])=>$(id).style.display='none');
+}
+function render(t){
+  const f=Math.round(t*60);
+  show(t);
+  // ambient
+  S('g1',{x:300+Math.sin(t*.3)*200,y:100+Math.cos(t*.23)*120});
+  S('g2',{x:1200+Math.cos(t*.2)*200,y:600+Math.sin(t*.27)*140});
+  S('g3',{x:900+Math.sin(t*.17+2)*300,y:200+Math.cos(t*.31)*200,o:t>30&&t<59?0.3:1});
+  $('grain').style.backgroundImage=`url(${GR[f%6]})`;$('grain').style.backgroundPosition=`${(f*37)%256}px ${(f*71)%256}px`;
+  $('dots').style.opacity=t<10.5?0.8:t>52.5?0.8:0.35;
+  // flashes (hits)
+  const hits=[[5.98,.9],[7,.35],[8,.35],[9,.5],[10.5,.25],[28.05,.2],[31.4,.9],[53.4,.3],[58.7,.6]];
+  let fl=0;hits.forEach(([h,a])=>{const d=t-h;if(d>=0&&d<.35)fl=Math.max(fl,a*(1-d/.35)**2)});
+  S('flash',{o:fl});$('flash').style.background=t>31&&t<32?'#faf9f5':'#fff';
+  $('leak').style.opacity=Math.max(0,Math.sin(t*.7)*.25)+ (t>58.5?0.2:0);
+  // cinematic bars in intro/outro
+  const bh=kf(t,[[0,90],[5.5,90],[6,0,E.ioX],[58.6,0],[59.2,70,E.o3]]);$('barT').style.height=$('barB').style.height=bh+'px';
+  // HUD
+  const hudOn=t>10.8&&t<33.6;S('hud',{o:P(t,10.8,11.3)*(1-P(t,33.0,33.5))});$('hud').style.transform=`translateX(-50%) translateY(${(1-P(t,10.8,11.4,E.oB))*-30}px)`;
+  const stp=t<16.9?1:t<23.4?2:t<31.4?3:4;[1,2,3,4].forEach(i=>{$('h'+i).className='st'+(i===stp?' on':i<stp?' done':'')});
+  $('hud').style.display=hudOn?'flex':'none';
+
+  // ---------------- S0 INTRO ----------------
+  if(t<6.05){
+    S('sweep',{sx:P(t,.1,1.1,E.oX),o:1-P(t,1.1,1.8)});
+    const rects=$('s0logo').querySelectorAll('rect');
+    rects.forEach((r,i)=>{const d=.55+((i*7)%19)*.035;const p=P(t,d,d+.9,E.oX);r.style.transform=`translateX(${(1-p)*(i%2?260:-260)}px) scaleX(${p})`;r.style.opacity=clamp(p*3)});
+    const lx=kf(t,[[3.6,0],[4.3,-1,E.ioX]]);
+    S('s0logo',{y:kf(t,[[1.7,0],[2.4,-110,E.ioX]]),s:kf(t,[[1.7,1],[2.4,.78,E.ioX],[3.6,.78],[4.1,.55,E.ioX]]),o:1-P(t,3.7,4.0)});
+    [...$('wordmark').children].forEach((s,i)=>{const p=P(t,2.0+i*.05,2.6+i*.05,E.oX);S(s,{y:(1-p)*80,o:p*(1-P(t,3.6,3.9)),b:(1-p)*12})});
+    const tp=P(t,2.7,3.4,E.o3);S('tagline',{y:(1-tp)*20,o:tp*(1-P(t,3.6,3.9)),b:(1-tp)*10});
+    // lockup
+    const lp=P(t,3.85,4.6,E.oX);
+    S('lkm',{x:(1-lp)*-120,o:lp});S('lkc',{x:(1-lp)*120,o:lp});S('lkx',{s:.3+.7*P(t,4.1,4.6,E.oB),o:P(t,4.1,4.4),r:(1-P(t,4.1,4.6))*-90});
+    S('lkcSpark',{r:t*40,s:1+Math.sin(t*6)*.03});
+    S('lksub',{o:P(t,4.5,5.0),y:(1-P(t,4.5,5.0))*16});
+    const z=P(t,5.35,6.0,E.iX);S('s0cam',{s:1+z*4,b:z*18,o:1-z*.6});
+  }
+  // ---------------- S1 KINETIC ----------------
+  if(t>=5.95&&t<10.6){
+    const beats=[6,7,8,9];
+    ['k1','k2','k3','k4'].forEach((k,i)=>{const b0=beats[i];const end=i<3?beats[i+1]:10.3;const p=P(t,b0,b0+.3,E.oX);const on=t>=b0&&t<end;
+      S(k,{s:on?(1.35-.35*p)*(1+ (t-b0)*.025):1,o:on?p:0,b:on?(1-p)*24:0,y:i===3?-P(t,9.9,10.35,E.i3)*60:0});});
+    S('kinTop',{o:P(t,6,6.4)*(1-P(t,10.0,10.4)),y:0});
+    S('st1',{o:(t>=7&&t<7.12)||(t>=9&&t<9.1)?1:0});S('st2',{o:(t>=8&&t<8.12)||(t>=9.05&&t<9.15)?1:0});
+    const sh=(t>9&&t<9.3)?Math.sin(t*120)*6*(1-(t-9)/.3):0;
+    S('s1cam',{x:sh,s:1+P(t,10.0,10.6,E.iX)*.5,o:1-P(t,10.25,10.6),b:P(t,10.1,10.6)*14});
+    $('k4').querySelector('em').style.textShadow=`0 0 ${40*P(t,9,9.4)}px rgba(165,206,31,.6)`;
+  }
+  // ---------------- S2 STEP 1 ----------------
+  if(t>=10.45&&t<17.1){
+    const ep=P(t,10.5,11.5,E.oX);
+    S('w1',{y:(1-ep)*220,rx:(1-ep)*22,o:clamp(ep*2)});
+    const cp=P(t,10.8,11.6,E.oX);S('cap1',{x:(1-cp)*-80,o:cp});
+    $('cap1').querySelector('.capline').style.transform=`scaleX(${P(t,11.3,12.1,E.oX)})`;
+    const u='merrymen.dev/claude';$('url1').textContent=u.slice(0,Math.floor(clamp((t-11.1)*28,0,u.length)));
+    cursor('cur1',t,[[11.9,1060,760],[13.3,L.add.x,L.add.y,E.ioX]]);
+    const hov=P(t,13.1,13.4);
+    S('addBtn',{s:press(t,13.55)*(1+hov*.03)});$('addBtn').style.boxShadow=`0 0 ${50*hov}px rgba(165,206,31,${.55*hov})`;
+    S('cur1',{o:P(t,11.9,12.2)*(1-P(t,15.2,15.5)),s:press(t,13.55)});
+    ripple('rp1',t,13.55,L.add.x,L.add.y);
+    // camera: push to button then whip left
+    const zp=P(t,13.7,15.2,E.ioX);
+    const cx=700+L.add.x, cy=150+L.add.y;
+    const s=1+zp*.55; const tx=(960-cx)*zp*.9, ty=(540-cy)*zp*.9;
+    const wp=P(t,16.4,17.05,E.iX);
+    S('s2cam',{x:tx - wp*1500, y:ty, s:s, b:wp*16});
+  }
+  // ---------------- S3 STEP 2 ----------------
+  if(t>=16.9&&t<24.3){
+    const ep=P(t,16.9,17.7,E.oX);
+    S('s3cam',{x:(1-ep)*1500,b:(1-ep)*16});
+    const cp=P(t,17.3,18.0,E.oX);S('cap2',{x:(1-cp)*-80,o:cp});
+    $('cap2').querySelector('.capline').style.transform=`scaleX(${P(t,17.7,18.5,E.oX)})`;
+    const mOpen=P(t,17.8,18.3,E.oB), mClose=P(t,20.7,21.0,E.i3);
+    S('modal',{s:(.92+.08*mOpen)*(1-.06*mClose),o:clamp(mOpen*1.5)*(1-mClose),y:(1-mOpen)*20});
+    S('ov2',{o:P(t,17.7,18.1)*(1-P(t,20.7,21.1))});
+    // shimmer
+    [['sh1',18.35],['sh2',18.6]].forEach(([id,t0])=>{const p=P(t,t0,t0+.8,E.io3);S(id,{x:-200+p*900,o:p>0&&p<1?1:0})});
+    ['f1','f2'].forEach((id,i)=>{const p=P(t,18.4+i*.25,18.8+i*.25);$(id).style.borderColor=`rgba(${Math.round(220-55*p)},${Math.round(216-10*p)},${Math.round(204-173*p)},1)`;$(id).style.boxShadow=`0 0 0 ${4*p}px rgba(165,206,31,${.18*p})`});
+    const cl=P(t,18.9,19.3,E.oB);S('call2',{s:cl,o:clamp(cl*2)*(1-P(t,20.4,20.7))});
+    $('call2').style.left=(L.f1.x-270+640)+'px';$('call2').style.top=(L.f1.y-58-58)+'px';
+    // row appears after add
+    const rp=P(t,21.0,21.5,E.oX);S('mmRow',{o:rp,y:(1-rp)*-20});
+    S('addRow',{y:(1-rp)*-90});
+    cursor('cur2',t,[[18.2,900,700],[19.9,L.addC.x,L.addC.y,E.ioX],[21.2,L.addC.x,L.addC.y],[22.2,L.conn.x,L.conn.y,E.ioX]]);
+    S('cur2',{o:P(t,18.2,18.5)*(1-P(t,23.0,23.2)),s:Math.min(press(t,20.45),press(t,22.45))});
+    S('addC',{s:press(t,20.45)});S('connBtn',{s:press(t,22.45)});
+    ripple('rp2',t,t<21.5?20.45:22.45,t<21.5?L.addC.x:L.conn.x,t<21.5?L.addC.y:L.conn.y);
+    const zp=P(t,22.6,24.2,E.iX);
+    const cx=700+L.conn.x,cy=150+L.conn.y;
+    S('s3cam',{x:(1-ep)*1500+(960-cx)*zp,y:(540-cy)*zp,s:1+zp*3,b:zp*8+(1-ep)*16,o:1-P(t,23.9,24.3)});
+  }
+  // ---------------- S4 STEP 3 ----------------
+  if(t>=23.3&&t<31.6){
+    const ep=P(t,23.4,24.3,E.oX);
+    S('w3',{s:.25+.75*ep,o:clamp(ep*2),y:(1-ep)*150});
+    const cp=P(t,23.9,24.6,E.oX);S('cap3',{x:(1-cp)*-80,o:cp*(1-P(t,27.9,28.2))});
+    $('cap3').querySelector('.capline').style.transform=`scaleX(${P(t,24.3,25.1,E.oX)})`;
+    $('pairln').style.backgroundPosition=`${t*40}px 0`;
+    [...$('permsOn').children].forEach((r,i)=>{const p=P(t,24.9+i*.16,25.15+i*.16,E.oB);const cb=r.querySelector('.cb');cb.style.background=p>0?'#a5ce1f':'transparent';cb.style.borderColor=p>0?'#a5ce1f':'#3a3c33';S(cb,{s:.6+.4*p});cb.querySelector('svg').style.opacity=clamp(p)});
+    [...$('permsOff').children].forEach((r,i)=>{const p=P(t,26.0+i*.2,26.4+i*.2);r.style.background=`rgba(255,92,113,${.07*Math.sin(Math.PI*p)})`});
+    cursor('cur3',t,[[26.2,900,780],[27.6,L.allow.x,L.allow.y,E.ioX]]);
+    S('cur3',{o:P(t,26.2,26.5)*(1-P(t,28.2,28.4)),s:press(t,27.85)});
+    S('allowBtn',{s:press(t,27.85)});$('allowBtn').style.boxShadow=`0 0 ${40*P(t,27.4,27.7)}px rgba(165,206,31,.5)`;
+    ripple('rp3',t,27.85,L.allow.x,L.allow.y);
+    // window exit, success
+    const xp=P(t,28.1,28.6,E.iX);
+    S('w3',{s:(.25+.75*ep)*(1-xp*.15),o:clamp(ep*2)*(1-xp),y:(1-ep)*150,b:xp*10});
+    const rp=P(t,28.4,29.2,E.oX);
+    S('okring',{s:.6+.4*P(t,28.3,28.8,E.oB),o:P(t,28.3,28.5)});
+    $('okc').setAttribute('stroke-dashoffset',817*(1-rp));$('okp').setAttribute('stroke-dashoffset',200*(1-P(t,28.8,29.3,E.o3)));
+    $('okwrap').style.transform=`translateY(-60px)`;
+    PARTS.forEach((p,i)=>{const q=P(t,28.85,29.9,E.oX);const d=p.d*q;S('pt'+i,{x:Math.cos(p.a)*d-p.w/2,y:Math.sin(p.a)*d-60-7,r:p.a*180/Math.PI,o:q>0?(1-P(t,29.2,29.8)):0,sx:1-q*.4})});
+    const tp=P(t,29.1,29.7,E.oX);S('oktxt',{y:(1-tp)*40,o:tp,b:(1-tp)*10});
+    const zp=P(t,30.7,31.55,E.iX);S('s4cam',{s:1+zp*6,o:1-P(t,31.2,31.55),b:zp*6});
+    S('okwrap',{y:-60});
+  }
+  // ---------------- S5 CHAT ----------------
+  if(t>=31.35&&t<47.2){
+    const ep=P(t,31.4,32.3,E.oX);
+    const u1='Why hasn’t my agent traded?',u2='How did my agent do this week? Keep paper and live apart.';
+    const it=$('inputTxt');
+    if(t<32.5){it.className='ph';it.textContent='How can I help you today?'}
+    else if(t<34.55){it.className='';typeInto(it,u1,t,32.6,17)}
+    else if(t<40.2){it.className='ph';it.textContent='Reply to Claude…'}
+    else if(t<42.3){it.className='';typeInto(it,u2,t,40.3,32)}
+    else{it.className='ph';it.textContent='Reply to Claude…'}
+    S('send',{s:Math.min(press(t,34.45),press(t,42.2))});
+    $('send').style.opacity=(t>32.6&&t<34.6)||(t>40.3&&t<42.35)?1:.45;
+    const mm=P(t,32.0,32.5,E.oB);S('mmChip',{s:.8+.2*mm});$('mmChip').style.boxShadow=`0 0 0 ${6*Math.sin(Math.PI*P(t,32,32.9))}px rgba(165,206,31,.25)`;
+    // conversation blocks
+    const blk=(id,t0,dy=16)=>{const p=P(t,t0,t0+.45,E.oX);S(id,{o:p,y:(1-p)*dy})};
+    blk('u1',34.55,30);blk('a1s',34.8);blk('t1',35.2);
+    const t1s=$('t1s');t1s.innerHTML=t<36.3?`<span class="spin" style="transform:rotate(${t*540}deg)"></span>`:'✓ Done';
+    $('t1').style.borderColor=t>36.3&&t<37?'#a5ce1f':'';
+    $('a1p').style.opacity=t>36.4?1:0;stream('a1p',t,36.4,18);
+    [...$('a1d').children].forEach((r,i)=>{const p=P(t,37.4+i*.22,37.8+i*.22,E.oX);S(r,{o:p,x:(1-p)*-30})});S('a1d',{o:P(t,37.3,37.5)});
+    $('a1q').style.opacity=t>38.7?1:0;stream('a1q',t,38.7,18);
+    blk('u2',42.3,30);blk('a2s',42.55);blk('t2',42.9);
+    $('t2s').innerHTML=t<43.8?`<span class="spin" style="transform:rotate(${t*540}deg)"></span>`:'✓ Done';
+    $('a2p').style.opacity=t>43.9?1:0;stream('a2p',t,43.9,20);
+    const bp=P(t,44.5,45.0,E.oX);S('a2b',{o:bp,y:(1-bp)*20});
+    ['ch1','ch2'].forEach((id,i)=>{const e=$(id);const len=520;e.style.strokeDasharray=len;e.style.strokeDashoffset=len*(1-P(t,44.7+i*.15,45.9+i*.15,E.io3))});
+    $('a2q').style.opacity=t>45.6?1:0;stream('a2q',t,45.6,22);
+    // spark pulse
+    document.querySelectorAll('.spk').forEach(s=>{s.style.transform=`rotate(${t*60}deg) scale(${1+Math.sin(t*8)*.06})`});
+    // scroll
+    const sc=kf(t,[[36.0,0],[36.4,L.sc('a1p')],[37.3,L.sc('a1p')],[38.6,L.sc('a1d'),E.io3],[38.8,L.sc('a1q'),E.io3],[42.2,L.sc('a1q')],[42.7,L.sc('t2'),E.io3],[44.3,L.sc('a2p'),E.io3],[45.1,L.sc('a2b'),E.io3],[45.8,L.sc('a2q'),E.io3]]);
+    $('conv').style.transform=`translateY(${-sc}px)`;
+    // camera: gentle push-ins
+    const z=kf(t,[[31.4,1.25],[32.4,1.0,E.oX],[33.0,1.0],[34.3,1.22,E.io3],[35.1,1.12,E.io3],[39.8,1.12],[40.4,1.2,E.io3],[42.3,1.2],[43.0,1.08,E.io3],[46.3,1.12]]);
+    const cyv=kf(t,[[31.4,0],[33.0,0],[34.3,-300,E.io3],[35.1,-60,E.io3],[39.8,-60],[40.4,-300,E.io3],[42.3,-300],[43.0,-40,E.io3]]);
+    const xp=P(t,46.5,47.2,E.iX);
+    S('s5cam',{s:z*(1-xp*.1),y:cyv+xp*900,o:clamp(ep*1.6)*(1-xp*.6),rx:xp*-15});
+    const hp=P(t,32.3,32.9,E.oX);S('chcap',{x:(1-hp)*-60,o:hp*(1-P(t,39.4,39.8))});
+    S('app',{});
+  }
+  // ---------------- S6 TERMINAL ----------------
+  if(t>=46.9&&t<52.8){
+    const ep=P(t,46.9,47.7,E.oX);
+    S('term',{y:(1-ep)*-700,o:clamp(ep*2),rx:(1-ep)*12});
+    const tp=P(t,47.3,47.9,E.oX);S('termTitle',{o:tp,y:(1-tp)*-20});
+    const cmd='claude mcp add --transport http --scope user merrymen https://mcp.merrymen.dev/mcp';
+    let h='';
+    const n=Math.floor(clamp((t-47.7)*70,0,cmd.length));
+    const cur=`<span style="background:#a5ce1f;color:#0b0c09;opacity:${Math.floor(t*2.4)%2?1:.2}"> </span>`;
+    // wrap command manually
+    const c1=cmd.slice(0,n);let wrapAt;
+    const cw=c1.length>(wrapAt=cmd.indexOf('https'))?c1.slice(0,wrapAt)+'\n  '+c1.slice(wrapAt):c1;
+    h+=`<span class="tp">~ ❯</span> ${cw}${t<49.0?cur:''}\n`;
+    if(t>49.1)h+=`<span class="tg">✓</span> Added HTTP MCP server <b>merrymen</b> with URL:\n  https://mcp.merrymen.dev/mcp to user config\n`;
+    if(t>49.6){const c2='claude';h+=`<span class="tp">~ ❯</span> ${c2.slice(0,Math.floor(clamp((t-49.6)*20,0,6)))}\n`;}
+    if(t>50.1){const c3='/mcp';h+=`<span class="tc">&gt;</span> ${c3.slice(0,Math.floor(clamp((t-50.1)*14,0,4)))}${t<50.5?cur:''}\n`}
+    if(t>50.6){const p=P(t,50.6,50.9);h+=`<div class="tbox" style="opacity:${p}"><span class="tc">Manage MCP servers</span>\n<span class="tp">❯</span> merrymen   ${t<51.4?'<span class="tf">◌ needs authentication</span>':'<span class="tg">✔ connected</span>'}   <span class="tf">· Authenticate → Allow</span></div>`}
+    $('tbody').innerHTML=h;
+    const xp=P(t,52.2,52.8,E.iX);S('s6cam',{s:1-xp*.2,o:1-xp,b:xp*12});
+  }
+  // ---------------- S7 SAFETY ----------------
+  if(t>=52.6&&t<58.8){
+    const a=P(t,52.7,53.2,E.oX),b=P(t,53.4,53.9,E.oX);
+    S('sfa',{o:a,y:(1-a)*50,b:(1-a)*14});S('sfb',{o:b,s:1.25-.25*b,b:(1-b)*14});
+    [...$('sfGrid').children].forEach((c,i)=>{const p=P(t,54.1+i*.18,54.8+i*.18,E.oX);S(c,{o:p,y:(1-p)*90,rx:(1-p)*-25});const ic=c.querySelector('.ico');S(ic,{s:.5+.5*P(t,54.4+i*.18,54.9+i*.18,E.oB)})});
+    const fp=P(t,55.6,56.2,E.oX);S('sfFoot',{o:fp,y:(1-fp)*20});
+    const xp=P(t,58.1,58.8,E.iX);S('s7cam',{s:1+xp*.3,o:1-xp,b:xp*14});
+  }
+  // ---------------- S8 OUTRO ----------------
+  if(t>=58.6){
+    const rects=$('s8logo').querySelectorAll('rect');
+    rects.forEach((r,i)=>{const d=58.7+((i*5)%19)*.025;const p=P(t,d,d+.8,E.oX);r.style.transform=`translateX(${(1-p)*(i%2?200:-200)}px) scaleX(${p})`;r.style.opacity=clamp(p*3)});
+    const hp=P(t,59.4,60.1,E.oX);S('s8h',{o:hp,y:(1-hp)*50,b:(1-hp)*16});
+    const pp=P(t,60.3,60.9,E.oB);$('s8pill').style.transform=`translateX(-50%) scale(${.7+.3*pp})`;$('s8pill').style.opacity=clamp(pp*2);
+    const up=P(t,60.9,61.5,E.oB);$('s8url').style.transform=`translateX(-50%) scale(${.7+.3*up})`;$('s8url').style.opacity=clamp(up*2);
+    $('s8url').style.boxShadow=`0 0 ${60+Math.sin(t*3)*20}px rgba(165,206,31,${.35*up})`;
+    const lp=P(t,61.6,62.3,E.o3);S('s8plat',{o:lp,y:(1-lp)*12});
+    const out=P(t,63.9,65.0,E.io3);S('s8cam',{o:1-out,s:1+out*.04});
+    $('s8pill').querySelector('.sparkS').style.transform=`rotate(${t*45}deg)`;
+  }
+  $('vig').style.opacity=(t>31.5&&t<46.8)?0.45:1;
+  S('amb',{o:t>63.9?1-P(t,63.9,65):1});S('dots',{o:(t<10.5||t>52.5?0.8:0.35)*(t>63.9?1-P(t,63.9,65):1)});
+}
+window.DURATION=65;
+window.ready=document.fonts.ready.then(()=>{measure();render(0);return true});
+window.render=render;
+</script>
+</body></html>

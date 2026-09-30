@@ -56,7 +56,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useT } from "@/lib/i18n";
-import { telegramRow, trencherRow, type TelegramRow, type TrencherRow } from "./agent-status";
+import { shortDateTime } from "@/lib/format";
+import { heldNotice, telegramRow, trencherRow, type TelegramRow, type TrencherRow } from "./agent-status";
 import type { TelegramStatus } from "@/app/api/telegram/route";
 
 interface SettingsShape {
@@ -87,11 +88,29 @@ export function AgentStrip({ hasAgent }: { hasAgent: boolean }) {
 
   if (!hasAgent) return null;
 
+  const row = telegramRow(tg);
+  const held = heldNotice(tg, row);
   return (
     <section className="agent-strip" aria-label={t("strip.aria")}>
-      <TelegramLine row={telegramRow(tg)} />
+      {held !== null ? <HeldLine reason={held} /> : null}
+      <TelegramLine row={row} />
       <TrencherLine row={trencherRow(settings)} />
     </section>
+  );
+}
+
+/**
+ * TRADING IS HELD, said whatever the Telegram row says. The row can say it
+ * only over a working bot; an owner with none, or with one switched off, is
+ * told nowhere else (agent-status.ts heldNotice). First, because it is the
+ * thing on this strip that matters most while it lasts.
+ */
+function HeldLine({ reason }: { reason: string }) {
+  const t = useT();
+  return (
+    <Row tone="warn" label={t("strip.held.label")} value={t("strip.held.value")}
+      action={<span className="mm-hint">{t("strip.held.why", { reason })}</span>}
+    />
   );
 }
 
@@ -118,6 +137,23 @@ function TelegramLine({ row }: { row: TelegramRow }) {
           action={<Link href="/settings#telegram">{t("strip.tg.checkIt")}</Link>}
         />
       );
+    case "elsewhere":
+      /**
+       * ANOTHER AGENT HAS THIS BOT. No code: the one this agent last had is
+       * for a bot that now answers to another agent's code, and five sends of
+       * it lock the owner's chat out there. Saving the token again in
+       * Settings offers the move.
+       */
+      return (
+        <Row tone="warn" label="Telegram" value={t("strip.tg.elsewhere")}
+          action={
+            <>
+              <span className="mm-hint">{t("strip.tg.elsewhereWhy")}</span>
+              <Link href="/settings#telegram">{t("strip.tg.moveHere")}</Link>
+            </>
+          }
+        />
+      );
     case "unlinked":
       /**
        * THE ONE CARD THAT CARRIES THE CODE.
@@ -128,33 +164,74 @@ function TelegramLine({ row }: { row: TelegramRow }) {
        *
        * A null code is a WAIT, not an absence: the agent mints one on its next
        * pass after a token is saved, so saying "no code" would be a claim we
-       * cannot make about a code that is simply not minted yet.
+       * cannot make about a code that is simply not minted yet. Or, when a
+       * new bot was saved, the agent has not picked it up yet: the code on
+       * file was the old bot's and would not link this one, so none is shown.
        */
       return (
         <Row tone="warn" label="Telegram" value={row.linkCode ? t("strip.tg.ready") : t("strip.tg.startingUp")}
           action={
             row.linkCode ? (
-              <>
-                {row.botUsername ? (
-                  // Carries the code into the chat instead of asking somebody
-                  // to retype it, the way the mobile client already does.
-                  <a href={`https://t.me/${row.botUsername}?start=${row.linkCode}`} target="_blank" rel="noreferrer">
-                    {t("strip.tg.open")}
-                  </a>
-                ) : null}
-                <span className="mm-hint">{t("strip.tg.sendThis")}</span>
-                {/* A LITERAL, NOT A SENTENCE. The command is retyped verbatim
-                    into a chat, so it stays out of the translated copy and out
-                    of reach of a translator's autocorrect. */}
-                <code>/link {row.linkCode}</code>
-                <span className="mm-hint">{t("strip.tg.codeWarning")}</span>
-              </>
+              <LinkCode code={row.linkCode} botUsername={row.botUsername} />
             ) : (
-              <span className="mm-hint">{t("strip.tg.noCodeYet")}</span>
+              <span className="mm-hint">{row.linkPending ? t("strip.tg.pickingUp") : t("strip.tg.noCodeYet")}</span>
             )
           }
         />
       );
+    case "held":
+      /**
+       * TRADING IS HELD, which is not what "connected" means. In the incident
+       * behind this row the practice book would not restore, no worker ran,
+       * and this card said "✓ connected" for days. The class is the phrase
+       * the owner is told in chat too, never the restore's figures. A code
+       * stays: the hold process links chats.
+       */
+      return (
+        <Row tone="warn" label="Telegram" value={t("strip.tg.held")}
+          action={
+            <>
+              <span className="mm-hint">{t("strip.tg.heldWhy", { reason: row.reason ?? "restore error" })}</span>
+              {!row.linked && row.linkCode ? <LinkCode code={row.linkCode} botUsername={row.botUsername} /> : null}
+            </>
+          }
+        />
+      );
+    case "not-listening": {
+      /**
+       * NOTHING IS HEARING THE BOT, measured by the process meant to poll it.
+       * Each of the three has its own remedy: wait (or tell us), stop the
+       * other program, paste a new token. The code stays on an unlinked bot,
+       * with the warning: it works once the bot is heard again, and taking
+       * it away would only send the owner looking for another.
+       */
+      const value =
+        row.why === "revoked" ? t("strip.tg.revoked") : row.why === "conflict" ? t("strip.tg.conflict") : t("strip.tg.notListening");
+      const why =
+        row.why === "revoked"
+          ? t("strip.tg.revokedWhy")
+          : row.why === "conflict"
+            ? t("strip.tg.conflictWhy")
+            : row.lastOkAt !== null
+              ? t("strip.tg.notListeningSince", { when: shortDateTime(row.lastOkAt * 1000) })
+              : t("strip.tg.notListeningNever");
+      return (
+        <Row tone="warn" label="Telegram" value={value}
+          action={
+            <>
+              <span className="mm-hint">{why}</span>
+              {row.why === "revoked" ? <Link href="/settings#telegram">{t("strip.tg.newToken")}</Link> : null}
+              {!row.linked && row.linkCode ? (
+                <>
+                  <LinkCode code={row.linkCode} botUsername={row.botUsername} />
+                  <span className="mm-hint">{t("strip.tg.codeWhenBack")}</span>
+                </>
+              ) : null}
+            </>
+          }
+        />
+      );
+    }
     case "linked":
       return (
         <Row tone="ok" label="Telegram"
@@ -163,6 +240,28 @@ function TelegramLine({ row }: { row: TelegramRow }) {
         />
       );
   }
+}
+
+/** The code, the way to send it, and the warning that goes with it. Shared by every row that shows one. */
+function LinkCode({ code, botUsername }: { code: string; botUsername: string | null }) {
+  const t = useT();
+  return (
+    <>
+      {botUsername ? (
+        // Carries the code into the chat instead of asking somebody
+        // to retype it, the way the mobile client already does.
+        <a href={`https://t.me/${botUsername}?start=${code}`} target="_blank" rel="noreferrer">
+          {t("strip.tg.open")}
+        </a>
+      ) : null}
+      <span className="mm-hint">{t("strip.tg.sendThis")}</span>
+      {/* A LITERAL, NOT A SENTENCE. The command is retyped verbatim
+          into a chat, so it stays out of the translated copy and out
+          of reach of a translator's autocorrect. */}
+      <code>/link {code}</code>
+      <span className="mm-hint">{t("strip.tg.codeWarning")}</span>
+    </>
+  );
 }
 
 function TrencherLine({ row }: { row: TrencherRow }) {
@@ -209,7 +308,7 @@ function Row({
   action,
   tone,
 }: {
-  /** A product name — `Telegram`, `Trencher`. Never translated. */
+  /** A product name — `Telegram`, `Trencher`, never translated — or the translated `strip.held.label`. */
   label: string;
   value: string;
   action?: React.ReactNode;

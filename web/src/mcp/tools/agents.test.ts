@@ -119,7 +119,11 @@ test("the screens on each path exist and lead where the text says", () => {
   assert.ok(shows(you, "<strong>Wallet & permissions</strong>"));
   assert.ok(app.includes(`onStop={() => {window.location.href="/grant";}}`));
   assert.ok(shows(wallet, `<button className="btn-kill" style={{ padding: "10px 16px" }} onClick={discard}>`));
-  assert.ok(wallet.includes(`fetch("/api/grants", { method: "DELETE" })`), "discard deletes the server-side grant");
+  // Through /api/grants/discard, which removes it as DELETE /api/grants does and
+  // queues the paper reset from it (lib/start-over.ts).
+  assert.ok(wallet.includes(`fetch("/api/grants/discard", { method: "POST", keepalive: true })`), "discard deletes the server-side grant");
+  const startOver = source("web/src/app/api/grants/discard/route.ts");
+  assert.ok(startOver.includes("remove: () => getGrantStore().remove(tenant)") && startOver.includes("remove: removeSelfHostedGrant"), "on both deployments");
 
   // You → Trading limits → Edit signed limits goes to /grant; You → Settings is /settings.
   assert.ok(you.includes("<strong>Trading limits</strong>"));
@@ -139,7 +143,10 @@ test("the screens on each path exist and lead where the text says", () => {
 test("the Telegram commands named are in the bot's command list", () => {
   const help = source("worker/src/telegram/reads.ts");
   const executor = source("worker/src/telegram/executor.ts");
+  // The kill's words live in kill-confirm.ts, shared by the executor and the
+  // process that answers the bot while trading is held.
+  const killWords = source("worker/src/telegram/kill-confirm.ts");
   for (const cmd of ["/kill —", "/pause · /resume"]) assert.ok(help.includes(`"${cmd}`), cmd);
-  assert.ok(executor.includes("/confirm to kill"), "/kill asks for /confirm");
+  assert.ok(killWords.includes("/confirm to kill") && executor.includes("return killPromptText("), "/kill asks for /confirm");
   assert.ok(executor.includes(`case "kill"`) && executor.includes("if (!deps.controlEnabled)"), "kill is refused while control commands are off");
 });

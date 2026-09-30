@@ -53,6 +53,14 @@ struct SnipeScreen: View {
                             if result["matchedOn"].text == "name" { Text("Matched by name. Check the contract carefully.").foregroundStyle(.orange) }
                             NavigationLink("Review buy order", value: Route.tradeRequest(result["target"]["symbol"].text, "buy", resolvedAmount, result["target"]["address"].string))
                         }
+                    case "energy":
+                        // $MERRYMEN is the agent's energy, never a snipe: the
+                        // server says how to top it up, and nothing is placed.
+                        Card {
+                            Text("$MERRYMEN is your agent's energy").font(.headline)
+                            Text(result["say"].text)
+                            Text("No order has been placed.").foregroundStyle(.secondary)
+                        }
                     default: Text("The token could not be resolved. No order was placed.")
                     }
                 }

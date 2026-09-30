@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { wrapSqlite } from "./db";
-import { mirrorPaperCheckpoints, multipliersFrom, paperCheckpointRejection, restorePaperCheckpoint, validPaperCheckpoint } from "./paper-checkpoint";
+import { PAPER_CHECKPOINT_SCHEMA, mirrorPaperCheckpoints, multipliersFrom, paperCheckpointRejection, resetBlockedPaperBook, restorePaperCheckpoint, validPaperCheckpoint } from "./paper-checkpoint";
+import { applyLedgerSchema } from "./store";
 
 test("paper cash, inventory and basis survive a fresh child without resetting or overwriting a running book", async()=>{
   const raws=[new DatabaseSync(':memory:'),new DatabaseSync(':memory:'),new DatabaseSync(':memory:')];
@@ -393,4 +394,179 @@ test("a book that survived the restart keeps its place, and its legacy basis is 
     assert.equal(q.qty_raw, '1000000000000000000');
     assert.equal(await restorePaperCheckpoint(child!,shared!,'a'), 'local book retained', 'and once normalised, nothing more to say');
   } finally {raws.forEach(r=>r.close());}
+});
+
+/**
+ * R6, 0x516164: THE ROW A DEPLOY REJECTED, THROUGH THE MIRROR AND THE RESTORE.
+ *
+ * The owner's second login held one NVDA position, booked by today's engine:
+ * basis == shares, at a multiplier of 1.000775. A deploy carrying 912502b5
+ * judged that basis against shares × multiplier, refused the checkpoint, and
+ * the restore gate kept the tenant from starting, and its bot from answering
+ * (plan §0, step 3). basisUnits (the "current" arm) already admits it at HEAD;
+ * this pins the exact production row end to end, so a later change to the
+ * units rule cannot hold this owner again without failing here first.
+ */
+test("0x516164, THE ROW A DEPLOY REJECTED: mirrored, then restored into a fresh home, without a throw", async()=>{
+  const SHARES = 0.07197134749978654;
+  const BASIS = '71971347499786536';
+  const raws=[new DatabaseSync(':memory:'),new DatabaseSync(':memory:'),new DatabaseSync(':memory:')];
+  const [child,shared,fresh]=raws.map(wrapSqlite);
+  try {
+    for (const db of [child!,shared!,fresh!]) await db.exec(SCHEMA);
+    for (const db of [child!,shared!]) await db.prepare(`INSERT INTO positions VALUES('a','NVDA',?,?,?,13)`).run(TOKEN, BASIS, NVDA_RAW_MUL);
+    assert.equal(multipliersFrom([{symbol:'NVDA',ui_multiplier:NVDA_RAW_MUL}])('NVDA'), NVDA_NOW, 'premise: the multiplier the row was judged at');
+    // Not vacuous: the rule 912502b5 applied, basis == shares × multiplier, refuses this row.
+    assert.ok(Math.abs(Number(BASIS)/1e18 - SHARES*NVDA_NOW) > 1e-6, 'premise: the old rule would refuse it');
+    await child!.prepare(`INSERT INTO paper_book VALUES('a',987,0,1000,?,10)`).run(JSON.stringify({NVDA:{token:TOKEN,shares:SHARES}}));
+    await child!.prepare(`INSERT INTO cost_basis VALUES('a','paper','NVDA',?,'13000000',10)`).run(BASIS);
+    assert.equal(await mirrorPaperCheckpoints(child!,shared!),1,'the checkpoint is mirrored, not skipped as invalid');
+    const line = await restorePaperCheckpoint(fresh!,shared!,'a');
+    assert.match(line, /^paper cash, holdings and basis restored$/);
+    const book = await fresh!.prepare('SELECT cash_usdg, shares FROM paper_book').get() as {cash_usdg:number;shares:string};
+    assert.equal(book.cash_usdg, 987);
+    assert.equal((JSON.parse(book.shares) as Record<string,{shares:number}>).NVDA!.shares, SHARES);
+    const basis = await fresh!.prepare(`SELECT qty_raw, cost_usdg FROM cost_basis`).get() as {qty_raw:string;cost_usdg:string};
+    assert.deepEqual({...basis}, {qty_raw:BASIS,cost_usdg:'13000000'}, 'the basis comes back as it was booked');
+  } finally {raws.forEach(r=>r.close());}
+});
+
+/**
+ * A BOOK THE RESTORE REFUSES, AND THE RESET THAT GETS ITS OWNER OUT (plan §3.4).
+ *
+ * Over the real ledger schema (applyLedgerSchema), on both sides: these
+ * statements run against the shared Postgres in production, and a column name
+ * that only a hand-made table had would pass here and fail there.
+ *
+ * The account's rows are spelt as the mirror carries them, checksummed, and
+ * the reset is asked for in lowercase, as the grant may give it: the restore
+ * matches on LOWER() and so must the reset, or it would reset nothing.
+ */
+const BLOCKED = "0xAbCdEf0000000000000000000000000000000001";
+const blocked = BLOCKED.toLowerCase();
+const NVDA_TOKEN = "0x" + "4".repeat(40);
+
+async function blockedLedger(o: { markMode?: string; agentMode?: string | null } = {}) {
+  const raw = new DatabaseSync(":memory:");
+  const db = wrapSqlite(raw);
+  await applyLedgerSchema(db);
+  await db.exec(PAPER_CHECKPOINT_SCHEMA);
+  await db.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, epoch, mode)
+    VALUES (?, '0xowner', '0xsession', 4663, '{}', 1, 2, 1, ?)`).run(BLOCKED, o.agentMode === undefined ? "paper" : o.agentMode);
+  await db.prepare(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, at)
+    VALUES (?, '0', 900, 0, 110, 1010, 1, ?, 10)`).run(BLOCKED, o.markMode ?? "paper");
+  // THE FILL THAT BREAKS IT: a paper fill after the newest valuation, which is
+  // 0x542978's "paper fills are newer than the recoverable valuation".
+  await db.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, status, epoch, created_at)
+    VALUES (?, 'swap', 'NVDA', 100, 'paper', 1, 11)`).run(BLOCKED);
+  await db.prepare(`INSERT INTO positions (agent_id, symbol, token, raw_balance, ui_multiplier, price_usd, value_usdg)
+    VALUES (?, 'NVDA', ?, '2000000000000000000', '1000000000000000000', 55, 110)`).run(BLOCKED, NVDA_TOKEN);
+  await db.prepare(`INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg) VALUES (?, 'paper', 'NVDA', '2000000000000000000', '100000000')`).run(BLOCKED);
+  await db.prepare(`INSERT INTO cost_basis (agent_id, mode, symbol, qty_raw, cost_usdg) VALUES (?, 'live', 'AAPL', '1000000000000000000', '200000000')`).run(BLOCKED);
+  await db.prepare(`INSERT INTO position_floors (agent_id, mode, symbol, stop_bps, rung, why) VALUES (?, 'paper', 'NVDA', 1200, 'equity', 'graded')`).run(BLOCKED);
+  await db.prepare(`INSERT INTO position_floors (agent_id, mode, symbol, stop_bps, rung, why) VALUES (?, 'live', 'AAPL', 1200, 'equity', 'graded')`).run(BLOCKED);
+  return { raw, db };
+}
+
+const count = async (db: ReturnType<typeof wrapSqlite>, sql: string, ...args: unknown[]) =>
+  Number(((await db.prepare(sql).get(...args)) as { n: number }).n);
+const epochOf = async (db: ReturnType<typeof wrapSqlite>) =>
+  Number(((await db.prepare("SELECT epoch FROM agents").get()) as { epoch: number }).epoch);
+
+async function freshHome() {
+  const raw = new DatabaseSync(":memory:");
+  const db = wrapSqlite(raw);
+  await applyLedgerSchema(db);
+  return { raw, db };
+}
+
+test("A BOOK THE RESTORE REFUSES, STARTED OVER: the next restore has nothing to restore, and the fresh book the worker writes restores after it", async () => {
+  const shared = await blockedLedger();
+  const homes = [await freshHome(), await freshHome(), await freshHome()];
+  const [first, worker, next] = homes;
+  try {
+    await assert.rejects(restorePaperCheckpoint(first!.db, shared.db, blocked), /paper fills are newer than the recoverable valuation/, "premise: the book is blocked");
+
+    assert.deepEqual(await resetBlockedPaperBook(shared.db, blocked, 1), { ok: true, epoch: 2 });
+    assert.equal(await restorePaperCheckpoint(first!.db, shared.db, blocked), "no durable checkpoint", "nothing in the new epoch to restore, and nothing that throws");
+    assert.equal(await count(first!.db, "SELECT COUNT(*) AS n FROM paper_book"), 0, "so nothing is written: the worker seeds its own starting stake");
+
+    // HISTORY IS KEPT, and no capital crosses the boundary.
+    assert.equal(await count(shared.db, "SELECT COUNT(*) AS n FROM trades WHERE epoch = 1"), 1, "the fill that broke it is still on file");
+    assert.equal(await count(shared.db, "SELECT COUNT(*) AS n FROM equity WHERE epoch = 1"), 1, "and the valuation");
+    assert.equal(await count(shared.db, "SELECT COUNT(*) AS n FROM flows"), 0, "no capital flow is booked for a practice book");
+    // THE SNAPSHOTS A WORKER'S RESET CLEARS, cleared: the paper half only.
+    assert.equal(await count(shared.db, "SELECT COUNT(*) AS n FROM positions"), 0);
+    assert.deepEqual((await shared.db.prepare("SELECT mode, symbol FROM cost_basis").all()).map((r) => ({ ...(r as object) })), [{ mode: "live", symbol: "AAPL" }], "a live basis is another book");
+    assert.deepEqual((await shared.db.prepare("SELECT mode, symbol FROM position_floors").all()).map((r) => ({ ...(r as object) })), [{ mode: "live", symbol: "AAPL" }]);
+
+    // The worker comes up on the anchor's epoch, seeds its book, and the mirror
+    // carries the new epoch's checkpoint up over the old one.
+    await worker!.db.prepare(`INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, epoch)
+      VALUES (?, '0xowner', '0xsession', 4663, '{}', 1, 2, 2)`).run(BLOCKED);
+    await worker!.db.prepare(`INSERT INTO paper_book (agent_id, cash_usdg) VALUES (?, 1000)`).run(BLOCKED);
+    assert.equal(await mirrorPaperCheckpoints(worker!.db, shared.db), 1);
+    assert.match(await restorePaperCheckpoint(next!.db, shared.db, blocked), /^paper cash, holdings and basis restored$/);
+    const book = (await next!.db.prepare("SELECT cash_usdg, shares FROM paper_book").get()) as { cash_usdg: number; shares: string };
+    assert.deepEqual({ cash: book.cash_usdg, shares: book.shares }, { cash: 1000, shares: "{}" }, "the fresh book, not the old one");
+  } finally {
+    shared.raw.close();
+    homes.forEach((h) => h.raw.close());
+  }
+});
+
+test("A STALE observedEpoch IS A NO-OP: the book the decision was about has changed", async () => {
+  const shared = await blockedLedger();
+  try {
+    await shared.db.exec("UPDATE agents SET epoch = 2");
+    const r = await resetBlockedPaperBook(shared.db, blocked, 1);
+    assert.equal(r.ok, false);
+    assert.equal(await epochOf(shared.db), 2, "not moved again");
+    assert.equal(await count(shared.db, "SELECT COUNT(*) AS n FROM positions"), 1, "and nothing deleted");
+    assert.equal(await count(shared.db, "SELECT COUNT(*) AS n FROM cost_basis WHERE mode = 'paper'"), 1);
+  } finally {
+    shared.raw.close();
+  }
+});
+
+test("NEVER A LIVE BOOK: a live valuation, a live agent row, or no valuation at all, and nothing changes", async () => {
+  for (const [o, why] of [
+    [{ markMode: "live" }, /newest valuation is not a paper one/],
+    [{ agentMode: "live" }, /last reported the live rail/],
+  ] as const) {
+    const shared = await blockedLedger(o);
+    try {
+      const r = await resetBlockedPaperBook(shared.db, blocked, 1);
+      assert.ok(!r.ok && why.test(r.why), JSON.stringify(r));
+      assert.equal(await epochOf(shared.db), 1);
+      assert.equal(await count(shared.db, "SELECT COUNT(*) AS n FROM positions"), 1);
+      assert.equal(await count(shared.db, "SELECT COUNT(*) AS n FROM cost_basis"), 2);
+    } finally {
+      shared.raw.close();
+    }
+  }
+  const shared = await blockedLedger();
+  try {
+    await shared.db.exec("DELETE FROM equity");
+    const r = await resetBlockedPaperBook(shared.db, blocked, 1);
+    assert.ok(!r.ok && /no valuation/.test(r.why), "a book with no valuation has not shown it is a paper one");
+    assert.equal(await epochOf(shared.db), 1);
+  } finally {
+    shared.raw.close();
+  }
+});
+
+test("THE NEW EPOCH IS ONE NOTHING WAS FILED UNDER, even when rows ran ahead of the agents row", async () => {
+  // The mirror copies trades and marks before the agents row: a pass that
+  // failed between the two, then a redeploy, leaves epoch-3 rows under an
+  // agent still on 1. Reusing 2 or 3 would hand the new book old fills.
+  const shared = await blockedLedger();
+  try {
+    await shared.db.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, status, epoch, created_at)
+      VALUES (?, 'swap', 'NVDA', 5, 'paper', 3, 12)`).run(BLOCKED);
+    assert.deepEqual(await resetBlockedPaperBook(shared.db, blocked, 1), { ok: true, epoch: 4 });
+    assert.equal(await restorePaperCheckpoint((await freshHome()).db, shared.db, blocked), "no durable checkpoint");
+  } finally {
+    shared.raw.close();
+  }
 });

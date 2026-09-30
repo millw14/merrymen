@@ -149,6 +149,24 @@ export interface Snapshot {
    * strategy that went quiet on it would be inventing a refusal nobody made.
    */
   drawdown?: { bps: number; limitBps: number } | null;
+  /**
+   * TODAY'S ENERGY, when it is limiting anything: how many NEW trades this
+   * agent may still start on its own before 00:00 UTC (core energy.ts).
+   * Present only while the gate is enforcing on a low-energy agent.
+   *
+   * A HINT EXACTLY LIKE `opsHeadroom`, and read by one strategy only — the
+   * strategist, so it does not pay for a model call whose only possible answer
+   * is a buy that would be withheld. The rule itself is index.ts's hard filter,
+   * which every producer passes through; no builtin needs to read this. It
+   * never binds an exit: exit orders, stop-losses, take-profits and the
+   * owner's own orders are never withheld by energy. (The strategist's paid
+   * window itself is paced, by claimWindow — so its OWN exit decisions wait
+   * for the next window like everything else it starts.)
+   *
+   * Absent or NULL means NOT LIMITED — full energy, the gate off or observing,
+   * a fixture. That is not zero and must not be treated as zero.
+   */
+  energy?: { entriesLeft: number } | null;
   /** The grant's per-trade cap (6dp) — the ceiling for a single swap. Deposits are
    * capped at the DAILY limit instead (see policy.ts), hence the separate figure. */
   perTradeCapUsdg: bigint;
@@ -220,6 +238,16 @@ export interface Strategy {
 export function opsSpent(snap: Snapshot): boolean {
   const h = snap.opsHeadroom;
   return typeof h === "number" && Number.isFinite(h) && h <= 0;
+}
+
+/**
+ * Has today's energy allowance for new trades been MEASURED as used up? The
+ * unread and unlimited cases — absent, null, non-finite — all answer false,
+ * the same rule as `opsSpent`.
+ */
+export function energyEntriesSpent(snap: Pick<Snapshot, "energy">): boolean {
+  const left = snap.energy?.entriesLeft;
+  return typeof left === "number" && Number.isFinite(left) && left <= 0;
 }
 
 /**

@@ -229,15 +229,75 @@ export function createTickBook(): TickBook {
 }
 
 /**
+ * WHICH SUBMITTER AN ORDER GOES TO — decided by an explicit marker, never by
+ * its symbol.
+ *
+ * 'energy' is the owner's get-energy card and nothing else: the app writes
+ * `purpose: "energy"` as a FIXED value of that one command (chat-commands.ts),
+ * POST /api/orders keeps the marker only when it is exactly that string, and
+ * the ferry carries it through like any scalar. Every other order is 'trade',
+ * resolved against the watch set by address like any order.
+ *
+ * WHY NOT THE SYMBOL. This used to route every order whose symbol read
+ * MERRYMEN to the energy buy: a plain buy card the model wrote for it, a snipe
+ * that resolved to a coin with that name, an approved MCP proposal for a
+ * watched LOOKALIKE at another address. None of those cards showed the energy
+ * disclosure, and the lookalike's owner asked for one asset and would have got
+ * another — a key-unsellable one, booked as capital leaving the book. A symbol
+ * is a name anybody can launch a token under; a marker only one card writes is
+ * a statement of intent.
+ */
+export type OrderRoute = "energy" | "trade";
+
+export function orderRoute(args: Record<string, unknown> | undefined): OrderRoute {
+  return args?.purpose === "energy" ? "energy" : "trade";
+}
+
+/**
+ * WHAT AN OWNER ORDER IS FILED UNDER: the decision source and its reason.
+ *
+ * THE SOURCE IS 'chat' FOR EVERY OWNER-APPROVED ORDER — typed in the app chat,
+ * a get-energy card, or an approved MCP proposal. It is not a surface name but
+ * a class, and three readers key on it: provenance.ts maps it to
+ * owner-command, the MCP proposal's own outcome reader finds the proposal's
+ * trade by it (web services/proposals.ts orderTrade, `d.source = 'chat'`), and
+ * the inactivity sweep excludes it. Renaming it per surface would make an
+ * approved proposal's trade unfindable by the proposal that placed it.
+ *
+ * WHERE IT CAME FROM GOES IN THE REASON, read off the args the placing route
+ * wrote: POST /api/orders never keeps a `source`, and only the MCP proposal
+ * service writes `mcp-proposal`. So an approved proposal is no longer filed as
+ * "owner asked … in chat" — and an energy ask is filed as one only when it is
+ * one (see orderRoute).
+ */
+export function orderAsked(
+  args: Record<string, unknown> | undefined,
+  side: Side,
+  symbol: string,
+  usdgAmount: number,
+): { source: "chat"; reason: string } {
+  if (orderRoute(args) === "energy") {
+    return { source: "chat", reason: `owner asked to top up $${symbol} energy on the app's get-energy card — at most ${usdgAmount} USDG` };
+  }
+  if (args?.source === "mcp-proposal") {
+    return { source: "chat", reason: `owner approved a proposal to ${side} ${usdgAmount} USDG ${symbol}` };
+  }
+  return { source: "chat", reason: `owner asked to ${side} ${usdgAmount} USDG ${symbol} in chat` };
+}
+
+/**
  * Judge an order, and hand it to `submit` only if every gate passes.
  *
  * Returns `submit`'s reply untouched, or a refusal: `ok: false` with the
  * sentence the owner reads. A refusal never calls `submit`.
+ *
+ * `route` is orderRoute of the same args, decided here so the one function a
+ * test drives is the one that says where an order goes.
  */
 export async function placeOrder<R>(
   args: Record<string, unknown> | undefined,
   reads: OrderReads,
-  submit: (side: Side, symbol: string, size: number) => Promise<R>,
+  submit: (side: Side, symbol: string, size: number, route: OrderRoute) => Promise<R>,
 ): Promise<R | { ok: false; line: string }> {
   const no = (line: string) => ({ ok: false as const, line });
   // ANSWERED, NOT STARVED. The tick's unreadable-market return sits a thousand
@@ -276,5 +336,5 @@ export async function placeOrder<R>(
   if (ceiling > 0 && size > ceiling) {
     return no(`${size} USDG is over your ${ceiling} USDG limit for a chat order. Raise it in Settings if you mean it.`);
   }
-  return submit(side, symbol, size);
+  return submit(side, symbol, size, orderRoute(a));
 }

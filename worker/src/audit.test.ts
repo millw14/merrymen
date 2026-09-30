@@ -221,3 +221,76 @@ describe("reconcile", () => {
     assert.match(r.note, /nothing to reconcile/);
   });
 });
+
+/**
+ * AN ENERGY PURCHASE, AS AN AUDITOR SEES IT.
+ *
+ * The purchase is booked as an 'energy-buy' out-flow (capital leaving the book)
+ * and its trade row is fill-less: the reserve is never a position, so there is
+ * no fillSide and nothing enters grossBuyNotional. $MERRYMEN is never in
+ * positions, so the composition check is untouched. With the flow booked the
+ * envelope residual is exactly what it would be without the purchase; with the
+ * flow MISSING, equity sits below contributions by the spend with no purchase to
+ * explain it — the floor finding fires, and that is the detector for a booking a
+ * redeploy lost.
+ */
+describe("an energy purchase in the journal", () => {
+  const ME = "0x00000000000000000000000000000000000000a1";
+  const PAIR = "0x00000000000000000000000000000000000000b1";
+  const USDG = "0x0000000000000000000000000000000000000dd0";
+  const MERRYMEN = "0xa15cd06dd305269a0f48bebeb30aa3588fba7b32";
+  const TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+  const topic = (a: string) => `0x${"0".repeat(24)}${a.slice(2)}`;
+  const xfer = (token: string, from: string, to: string, v: bigint) => ({
+    address: token,
+    topics: [TRANSFER, topic(from), topic(to)],
+    data: `0x${v.toString(16).padStart(64, "0")}`,
+  });
+
+  const funded = { kind: "flow", payload: { amountUsdg: 100, direction: "in", source: "chain-log", txHash: "0xdep" } };
+  const energyFlow = {
+    kind: "flow",
+    payload: { amountUsdg: 42, direction: "out", source: "energy-buy", txHash: "0xenergy", logIndex: 3, blockNumber: 9 },
+  };
+  // The landed energy trade: no fillSide, no basis — the reserve is not a position.
+  const energyTrade = {
+    kind: "fill",
+    payload: { amountUsdg: 42, gasWei: "3450000000000", realizedPnlUsdg: null, status: "landed", txHash: "0xenergy" },
+  };
+  // 100 in, 42 set aside as energy: 58 USDG of cash, nothing held.
+  const markAfter = {
+    kind: "mark",
+    payload: { equityUsdg: 58, cashUsdg: 58, positionsUsdg: 0, vaultUsdg: 0, quarantinedCostUsdg: 0, marks: [] },
+  };
+
+  it("with the energy-buy flow booked: no envelope finding, residual zero", () => {
+    const book = reconstruct(chain([funded, energyTrade, energyFlow, markAfter]));
+    assert.equal(book.netContributionsUsdg, 58);
+    assert.equal(book.grossBuyNotionalUsdg, 0, "a fill-less energy trade is not a position purchase");
+    assert.equal(book.unanchored.length, 0, "the energy flow carries its transaction");
+    const r = reconcile(book);
+    assert.equal(r.checked, true);
+    assert.equal(r.residualUsdg, 0);
+    assert.deepEqual(r.findings, []);
+  });
+
+  it("with the flow MISSING, the floor 'arithmetic' finding fires — the detector for a lost booking", () => {
+    const r = reconcile(reconstruct(chain([funded, energyTrade, markAfter])));
+    assert.equal(r.residualUsdg, -42);
+    assert.equal(r.findings.length, 1);
+    assert.equal(r.findings[0]!.check, "arithmetic");
+    assert.match(r.findings[0]!.detail, /contributions exceed what the record can support/);
+    assert.match(r.findings[0]!.detail, /implies an unrealized LOSS of 42\.000000, but only 0\.000000 was ever spent/);
+  });
+
+  it("the flow and the fill-less trade both agree with the receipt", () => {
+    const receipt = {
+      status: "0x1",
+      logs: [xfer(USDG, ME, PAIR, 42_000_000n), xfer(MERRYMEN, PAIR, ME, 98_000n * 10n ** 18n)],
+    };
+    const check = (kind: string, payload: Record<string, unknown>) =>
+      compareRecord({ seq: 1, kind, payload, receipt, account: ME, usdgToken: USDG });
+    assert.deepEqual(check("flow", energyFlow.payload), [], "the account's USDG delta is −amountIn");
+    assert.deepEqual(check("fill", energyTrade.payload), [], "and the trade row claims no legs to contradict");
+  });
+});

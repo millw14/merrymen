@@ -283,3 +283,51 @@ describe("whether the class route would look at all — proposeClassEntries' own
     assert.equal(classRouteLooks({ paper: false, assetMode: "all", vault: undefined }), false);
   });
 });
+
+/**
+ * TODAY'S ENERGY CLOSES THE CLASS ROUTE'S ENTRIES, AND ONLY THE ENTRIES.
+ *
+ * A low-energy agent whose new trades for the UTC day are used up asks the
+ * class route for no entries — every one would be withheld — while its exits
+ * run untouched above this gate. It says nothing through the idle channel:
+ * energy has its own once-a-day notice, and a tripped breaker's reason still
+ * wins when both are true.
+ */
+describe("entriesOpen — today's energy", () => {
+  const looks = classRouteLooks({ paper: false, assetMode: "crypto", vault: CLASS_VAULT });
+  it("CLOSED: nothing proposed, and the strategy's own reason is left exactly as it was", () => {
+    assert.deepEqual(classEntryGate({ snap: snap({ drawdown: CLEAR }), routeLooks: looks, idle: underOne, entriesOpen: false }), {
+      propose: false,
+      idle: underOne,
+    });
+    assert.deepEqual(classEntryGate({ snap: snap({ drawdown: CLEAR }), routeLooks: looks, idle: undefined, entriesOpen: false }), {
+      propose: false,
+      idle: undefined,
+    });
+  });
+
+  it("A TRIPPED BREAKER STILL WINS — its reason, not energy's silence", () => {
+    assert.deepEqual(classEntryGate({ snap: snap({ drawdown: TRIPPED }), routeLooks: looks, idle: underOne, entriesOpen: false }), {
+      propose: false,
+      idle: breaker,
+    });
+  });
+
+  it("omitted or true: the existing behaviour, unchanged", () => {
+    for (const entriesOpen of [undefined, true]) {
+      assert.deepEqual(classEntryGate({ snap: snap({ drawdown: CLEAR }), routeLooks: looks, idle: underOne, ...(entriesOpen === undefined ? {} : { entriesOpen }) }), {
+        propose: true,
+        idle: underOne,
+      });
+    }
+  });
+
+  it("through idleAndClassGate: entries are never asked for, and the channel hears only the strategy", async () => {
+    const d = desk();
+    const gate = await idleAndClassGate({ channel: d.channel, agentId: AGENT, strategyName: "steady-basket", snap: snap({ drawdown: CLEAR }), routeLooks: looks, idle: underOne, modeEmptied: null, entriesOpen: false });
+    assert.deepEqual(d.said(), [["ok", renderWhy(underOne)]], "no energy line through the idle channel");
+    let calls = 0;
+    assert.deepEqual(await gate.entries(async () => (calls++, { intents: [{ kind: "swap" } as never], why: [null] })), { intents: [], why: [] });
+    assert.equal(calls, 0);
+  });
+});

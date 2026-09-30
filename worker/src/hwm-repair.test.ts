@@ -21,6 +21,7 @@ const facts = (over: Partial<TenantCapitalFacts> = {}): TenantCapitalFacts => ({
   maxDrawdownBps: 500,
   depositsUsdg: 55.701312,
   withdrawalsUsdg: 25.785344,
+  reservePurchasesUsdg: 0,
   internalMoves: 2,
   tradeLegs: 2,
   ambiguousMoves: 0,
@@ -285,5 +286,73 @@ describe("the write is expressed as raises to two monotonic totals", () => {
     const t = hwmWriteTargets(amb, { grossUsdg: 10, withdrawnUsdg: 0 });
     assert.ok("refused" in t);
     assert.match((t as { refused: string }).refused, /no proposal to apply/);
+  });
+});
+
+/**
+ * AN ENERGY PURCHASE IS CAPITAL LEAVING THE BOOK, AND THE DERIVATION AGREES.
+ *
+ * The worker books the purchase as an 'energy-buy' out-flow and lowers the peak
+ * by the spend in the same transaction. The chain classifies the same leg
+ * `reserve-out`. If this derivation treated it as a trade, the derived peak would
+ * sit above the ledger's by every purchase, "never raise" would make the repair
+ * a no-op — and a purchase whose booking was lost (a redeploy during the receipt
+ * wait) could never be repaired, which is the one case the repair is for.
+ */
+describe("energy purchases in the derivation", () => {
+  // Funded 100, bought 42 of energy, nothing lost: 58 USDG left in the book.
+  const energyTenant = (over: Partial<TenantCapitalFacts> = {}) =>
+    facts({
+      name: "Energised",
+      equityUsdg: 58,
+      depositsUsdg: 100,
+      withdrawalsUsdg: 0,
+      sweptAtCostUsdg: 0,
+      reservePurchasesUsdg: 42,
+      ratchetedProfitUsdg: 0,
+      maxEquityUsdg: 100,
+      ...over,
+    });
+
+  it("a ledger peak already lowered by the booked purchase derives the SAME peak — no change", () => {
+    const p = planHwmRepair(energyTenant({ currentHwmUsdg: 58 }));
+    assert.equal(p.netContributionsUsdg, 58, "100 in − 42 on energy");
+    assert.equal(p.derivedHwmUsdg, 58);
+    assert.equal(p.deltaUsdg, 0);
+    assert.equal(p.ambiguous, false);
+    assert.equal(p.lifetimeResultUsdg, 0, "and nothing was lost: the energy is not a loss");
+  });
+
+  it("the same tenant with the booking MISSING derives the lower peak and proposes it", () => {
+    const p = planHwmRepair(energyTenant({ currentHwmUsdg: 100 }));
+    assert.equal(p.currentDrawdownBps, 4200, "the phantom drawdown an unbooked purchase leaves");
+    assert.equal(p.derivedHwmUsdg, 58);
+    assert.equal(p.proposedHwmUsdg, 58);
+    assert.equal(p.deltaUsdg, -42);
+    assert.equal(p.proposedDrawdownBps, 0);
+    assert.match(p.reason, /100\.000000 in − 0\.000000 out − 42\.000000 spent on energy = 58\.000000/);
+  });
+
+  it("without the reserve term it could not have: the old derivation was a no-op", () => {
+    // What the repair did when the classifier called the purchase a trade.
+    const p = planHwmRepair(energyTenant({ currentHwmUsdg: 100, reservePurchasesUsdg: 0 }));
+    assert.equal(p.deltaUsdg, 0, "derived 100 ≥ 100 — 'never raise' stops it cold");
+  });
+
+  it("a real loss on top of an energy purchase still stands", () => {
+    // Same, but 8 of the remaining 58 was lost trading: equity 50. The peak
+    // comes down to 58 (the capital still in), not to 50.
+    const p = planHwmRepair(energyTenant({ currentHwmUsdg: 100, equityUsdg: 50 }));
+    assert.equal(p.proposedHwmUsdg, 58);
+    assert.equal(p.proposedDrawdownBps, 1379, "8/58 of genuine drawdown survives");
+  });
+
+  it("the report and the write evidence both name the energy bought", () => {
+    const p = planHwmRepair(energyTenant({ currentHwmUsdg: 100 }));
+    assert.ok(repairLines([p]).some((l) => /energy bought 42\.000000/.test(l)));
+    const t = hwmWriteTargets(p, { grossUsdg: 100, withdrawnUsdg: 0 });
+    assert.ok(!("refused" in t));
+    assert.match((t as { evidence: string }).evidence, /energy bought 42\.000000/);
+    assert.equal((t as { effectiveUsdg: number }).effectiveUsdg, 58);
   });
 });

@@ -163,3 +163,43 @@ describe("tooltips beside numbers", () => {
     assert.match(conceptTooltip("Per day limit"), /merrymen's own software/i);
   });
 });
+
+/**
+ * THE ENERGY CONCEPT STATES THE THROTTLE CONDITIONALLY.
+ *
+ * It reaches the web chat and Telegram whenever an owner says "energy" or asks
+ * "why are you limited" (agent-chat.ts appends conceptsFor(message); the
+ * Telegram explainTerm tool returns the same text). MERRYMEN_ENERGY_GATE is
+ * off until an operator turns it on and a self-hosted install is never gated,
+ * so a concept that stated "without it … about a tenth" as plain fact handed
+ * the model a false reason to buy $MERRYMEN — the one the tier perks and
+ * Settings already stopped giving.
+ */
+describe("the Energy concept", () => {
+  const energy = () => conceptsFor("why are you limited? what is energy")[0]!;
+
+  it("is what an owner asking why they are limited is handed", () => {
+    assert.equal(energy().term, "Energy");
+  });
+
+  it("SAYS THE GATE IS AN OPERATOR SWITCH, OFF UNTIL TURNED ON, before it states any throttle", () => {
+    const { plain } = energy();
+    const gate = plain.indexOf("only limits anything when the hosted service turns energy on");
+    const tenth = plain.indexOf("about a tenth of a standard day");
+    assert.ok(gate > 0 && tenth > gate, "the condition comes first");
+    assert.match(plain, /an operator switch, off until it is turned on; a self-hosted install is never gated/);
+    assert.match(plain, /While it is off, nothing is limited, whatever you hold\./);
+    assert.match(plain, /When it is on, with 100,000 \$MERRYMEN between your wallet and your agent's account it runs at full strength; without it, it still runs, but gets about a tenth/);
+  });
+
+  it("and its rendered form, what the model actually reads, carries the condition too", () => {
+    const rendered = renderConcepts([energy()]);
+    assert.match(rendered, /only limits anything when the hosted service turns energy on/);
+    assert.match(rendered, /only while its operator has the energy gate enforcing/);
+  });
+
+  it("no price or returns language (a take-profit is an exit, not a promise)", () => {
+    const e = energy();
+    assert.doesNotMatch(`${e.plain} ${e.because} ${e.confusable ?? ""}`, /price|returns?\b|(?<!take-)profit|invest|moon/i);
+  });
+});

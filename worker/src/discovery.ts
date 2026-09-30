@@ -26,7 +26,7 @@
 
 import type { PublicClient } from "viem";
 import { parseAbi } from "viem";
-import { CASH, type StockToken } from "../../packages/core/src/index";
+import { CASH, ENERGY_RESERVE_TOKENS, type StockToken } from "../../packages/core/src/index";
 import { poolPriceUsable, readRoutedPrice } from "./venues/pool-price";
 import { readTokenStats } from "./venues/token-stats";
 import { recentPools, resolveBitquery, type BitqueryCreds, type NewPair } from "./venues/bitquery";
@@ -128,6 +128,22 @@ export interface DiscoveryDeps {
 }
 
 /**
+ * What discovery must never surface as a coin to go and trade: what the agent
+ * already watches, and the ENERGY RESERVE on every chain. $MERRYMEN has a real
+ * pool and can trend like anything else, but it is the agent's energy, bought
+ * only by its get-energy route: surfaced here it would reach the owner as "add
+ * it in /settings and re-sign at /grant" — a re-sign that can never cover it
+ * (every signer drops it from the sealed extras) — and the web's proposals.
+ * By ADDRESS, never by symbol, which a list can spell any way it likes.
+ */
+function knownAddressesOf(known: readonly StockToken[]): Set<string> {
+  return new Set([
+    ...Object.values(ENERGY_RESERVE_TOKENS).flatMap((list) => list.map((a) => a.toLowerCase())),
+    ...known.map((t) => t.address.toLowerCase()),
+  ]);
+}
+
+/**
  * One discovery pass. Returns only genuinely new, genuinely relevant pairs.
  *
  * Every failure degrades to an empty list rather than throwing: this runs beside
@@ -138,7 +154,7 @@ export async function discoverPools(deps: DiscoveryDeps): Promise<Discovery[]> {
   const res = await recentPools(deps.creds, { sinceMinutes: deps.sinceMinutes ?? 60, limit: 25 });
   if (!res.ok || !res.data) return [];
 
-  const knownAddrs = new Set(deps.known.map((t) => t.address.toLowerCase()));
+  const knownAddrs = knownAddressesOf(deps.known);
   const candidates: { token: `0x${string}`; poolKey?: NewPair["key"] }[] = [];
   const seenThisPass = new Set<string>();
   for (const pair of res.data) {
@@ -417,7 +433,7 @@ export async function discoverPonsLaunches(deps: PonsDiscoveryDeps): Promise<Pon
   // The caller must not print it, and does not — it returns before the line.
   if (scan.failed) return { found: [], scanned: 0, failed: true, clamped: scan.clamped, skipped: 0, census };
 
-  const knownAddrs = new Set(deps.known.map((t) => t.address.toLowerCase()));
+  const knownAddrs = knownAddressesOf(deps.known);
   const minFraction = deps.minDepthFraction ?? PONS_MIN_DEPTH_FRACTION;
   const cap = deps.maxEvaluate ?? PONS_MAX_EVALUATE;
   // Newest first when the cap bites: depth arrives at birth and decays here.
@@ -668,7 +684,7 @@ export async function discoverTrending(deps: TrendingDeps): Promise<TrendingResu
   }
   const scanned = byToken.size;
 
-  const knownAddrs = new Set(deps.known.map((t) => t.address.toLowerCase()));
+  const knownAddrs = knownAddressesOf(deps.known);
   const fresh = [...byToken.values()].filter(
     (p) => !deps.seen.has(p.tokenAddress) && !knownAddrs.has(p.tokenAddress),
   );

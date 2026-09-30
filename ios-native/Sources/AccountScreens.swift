@@ -6,42 +6,54 @@ import ImageIO
 
 struct AccountScreen: View {
     @EnvironmentObject var store: AppStore
+    @EnvironmentObject var tour: TourProgress
     @State private var signOut = false
     var body: some View {
         Page {
-            LanguagePicker()
             if let error = store.sessionError { Text(error).foregroundStyle(.orange); Button("Retry session") { Task { await store.refreshSession() } } }
             if let owner = store.owner {
-                Card { Text("Signed in").font(.headline); Text(owner).font(.caption.monospaced()).textSelection(.enabled) }
+                Card(hero: true) {
+                    HStack(spacing: 8) { Image(systemName: "checkmark.seal.fill").foregroundStyle(Brand.accent).accessibilityHidden(true); Text("Signed in").font(.headline) }
+                    Text(owner).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                }.tourAnchor("profile-top")
                 Remote(path: "/api/grants") { status in
+                    ResignNotice(status: status)
                     if status["exists"].bool == true {
                         Card {
-                            Text("Your Merryman").font(.title2.bold())
-                            Metric(label: "Mode", value: status["mode"].string ?? "Unknown")
-                            if let blocker = status["liveBlocker"].string { Label(blocker.replacingOccurrences(of: "-", with: " "), systemImage: "exclamationmark.circle") }
-                            NavigationLink("Wallet & permissions", value: Route.permissions)
-                            HStack { NavigationLink("Add funds", value: Route.deposit); Spacer(); NavigationLink("Withdraw", value: Route.withdraw) }
-                            NavigationLink("Trading limits", value: Route.limits)
+                            HStack { Text("Your Merryman").font(.title2.bold()); Spacer(); Pill(text: status["mode"].string ?? "Unknown", tint: status["mode"].string == "paper" ? .orange : Brand.accent) }
+                            if let blocker = status["liveBlocker"].string { Label(blocker.replacingOccurrences(of: "-", with: " "), systemImage: "exclamationmark.circle").foregroundStyle(.orange) }
+                            HStack(spacing: 12) {
+                                NavigationLink("Add funds", value: Route.deposit).buttonStyle(PrimaryButtonStyle(fill: true))
+                                NavigationLink("Withdraw", value: Route.withdraw).buttonStyle(SecondaryButtonStyle(fill: true))
+                            }
+                            MenuRow(title: "Wallet & permissions", systemImage: "key.horizontal", route: .permissions)
+                            MenuRow(title: "Trading limits", systemImage: "gauge.with.dots.needle.33percent", route: .limits)
                         }
                         DailyUsage(grant: status["grant"])
                         Remote(path: "/api/feed") { feed in
-                            if let slug = feed["agent"]["slug"].string { NavigationLink("View public profile", value: Route.agent(slug)); ProfileImages(slug: slug) }
+                            if let slug = feed["agent"]["slug"].string { MenuRow(title: "View public profile", systemImage: "person.crop.square", route: .agent(slug)); ProfileImages(slug: slug) }
                         }
                     } else {
-                        Card { Text("Meet your next agent.").font(.title2.bold()); NavigationLink("Create agent", value: Route.create) }
-                        NavigationLink("Recover an existing account", value: Route.withdraw)
+                        Card(hero: true) { Text("Meet your next agent.").font(.title2.bold()); NavigationLink("Create agent", value: Route.create).buttonStyle(PrimaryButtonStyle(fill: true)) }
+                        MenuRow(title: "Recover an existing account", systemImage: "arrow.counterclockwise", route: .withdraw)
                     }
                 }
-                NavigationLink("Settings", value: Route.settings)
-                NavigationLink("Verify your X profile", value: Route.xProof)
-                NavigationLink("Telegram", value: Route.telegram)
-                NavigationLink("The Merry Circle", value: Route.circle)
-                Button("Sign out", role: .destructive) { signOut = true }
-            } else { SignInCard() }
-            NavigationLink("Site access", value: Route.siteAccess)
-            if store.owner == nil { NavigationLink("Recover an existing account", value: Route.withdraw) }
-            NavigationLink("Replay tour", value: Route.tour)
-            Text("merrymen · native iOS preview").font(.caption).foregroundStyle(.secondary)
+                Card {
+                    MenuRow(title: "Settings", systemImage: "gearshape", route: .settings)
+                    MenuRow(title: "Verify your X profile", systemImage: "checkmark.seal", route: .xProof)
+                    MenuRow(title: "Posting on X", systemImage: "megaphone", route: .xPosting)
+                    MenuRow(title: "Connected AI apps", systemImage: "sparkles.rectangle.stack", route: .connectedApps)
+                    MenuRow(title: "Telegram", systemImage: "paperplane", route: .telegram)
+                    MenuRow(title: "The Merry Circle", systemImage: "circle.hexagongrid", route: .circle)
+                }
+            } else { SignInCard().tourAnchor("profile-top") }
+            Card {
+                if store.owner == nil { MenuRow(title: "Recover an existing account", systemImage: "arrow.counterclockwise", route: .withdraw) }
+                MenuRow(title: "Replay tour", systemImage: "play.circle") { tour.begin(store, replay: true) }
+            }
+            LanguagePicker()
+            if store.owner != nil { Button("Sign out", role: .destructive) { signOut = true }.buttonStyle(SecondaryButtonStyle(fill: true)) }
+            Text("merrymen · native iOS preview").font(.custom(Brand.pixel, size: 12, relativeTo: .caption)).foregroundStyle(.secondary).frame(maxWidth: .infinity)
         }.confirmationDialog("Sign out of Merrymen?", isPresented: $signOut, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) { Task { await store.signOut() } }
         } message: { Text("Signing out does not stop an active agent. Use Wallet & permissions to stand it down.") }
@@ -125,6 +137,7 @@ func rawUnits(_ raw: String?, decimals: Int) -> String {
 struct PermissionsScreen: View {
     @EnvironmentObject var store: AppStore
     @State private var stop = false
+    @State private var resetPaper = false
     @State private var busy = false
     @State private var revision = 0
     var body: some View {
@@ -147,9 +160,16 @@ struct PermissionsScreen: View {
                             NavigationLink("Add funds", value: Route.deposit)
                             NavigationLink("Withdraw", value: Route.withdraw)
                         }
+                        if status["mode"].string == "paper" {
+                            Button("Restart paper book") { resetPaper = true }.buttonStyle(SecondaryButtonStyle(fill: true)).disabled(busy)
+                            Text("Paper cash goes back to the starting stake and simulated positions are cleared. Earlier paper trades stay on file but no longer count.").font(.caption).foregroundStyle(.secondary)
+                        }
                         Button("Stand down agent", role: .destructive) { stop = true }.disabled(busy)
                         Text("Stand-down removes the service's active grant. It does not withdraw assets or invalidate the existing permission on-chain.").font(.caption).foregroundStyle(.secondary)
-                    } else { Text("No active trading permission."); NavigationLink("Create agent", value: Route.create) }
+                    } else {
+                        InactiveWalletPanel(status: status) { revision += 1 }
+                        Text("No active trading permission."); NavigationLink("Create agent", value: Route.create)
+                    }
                 }.id(revision)
             }
         }.navigationTitle("Wallet & permissions")
@@ -162,5 +182,16 @@ struct PermissionsScreen: View {
                 } catch { store.notice = error.localizedDescription } }
             }
         } message: { Text("The agent will stop managing positions. This does not sell them or revoke permissions on-chain.") }
+        // The worker refuses this on the live rail, so it can only ever touch
+        // the paper book; the button is also shown only for paper agents.
+        .confirmationDialog("Restart the paper book?", isPresented: $resetPaper, titleVisibility: .visible) {
+            Button("Restart paper book", role: .destructive) {
+                guard !busy else { return }; busy = true; let owner = store.owner
+                Task { defer { busy = false }; do {
+                    _ = try await store.perform("/api/paper-reset", body: .object([:]), expectedOwner: owner)
+                    revision += 1; store.notice = "Paper reset queued. Your agent applies it on its next cycle."
+                } catch { store.notice = error.localizedDescription } }
+            }
+        } message: { Text("Cash returns to the starting stake and simulated positions are cleared. If your agent is trading real money, nothing is changed.") }
     }
 }
