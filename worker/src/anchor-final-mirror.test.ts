@@ -21,6 +21,8 @@ import { after, before, describe, it } from "node:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { Db } from "./db";
+import { HostedRecoveryRetries } from "./perps/hosted-recovery-retry";
 
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-anchor-mirror-"));
 process.env.MERRYMEN_HOME = HOME;
@@ -135,5 +137,56 @@ describe("a crash restart's anchor includes what the dead child booked since the
 
   it("A REDEPLOY LEAVES NO LEDGER: nothing to copy, and the anchor is derived as before", async () => {
     assert.equal(await finalMirrorBeforeAnchor(TENANT, shared(), path.join(HOME, "children", "0xnobody")), false);
+  });
+
+  it("a recovery backlog larger than one mirror batch is fully copied before deriving the anchor", async () => {
+    const before = sharedNet();
+    for (let n = 0; n < 601; n++) flow("in", 1, "inferred", nowSec() - 1, null, null);
+    await writeBootstrapForChild(TENANT, SMART, shared());
+    assert.equal(sharedNet(), before + 601);
+    const anchor = readAnchor(childHome(TENANT), { tenantId: SMART.toLowerCase() });
+    assert.equal(anchor.kind, "valid");
+    if (anchor.kind !== "valid" || anchor.accounting.kind !== "established") throw new Error("expected complete established anchor");
+    assert.equal(microToBigint(anchor.accounting.netContributionsUsdg), BigInt(before + 601) * U);
+  });
+
+  it("a transient per-table mirror failure retains its retry classification and the next pass resumes exactly once", async () => {
+    const before = sharedNet();
+    flow("in", 3, "inferred", nowSec() - 1, null, null);
+    const dropped = Object.assign(new Error("temporary connection loss"), { code: "ECONNRESET" });
+    const failing = (db: Db): Db => ({
+      prepare(sql) {
+        const stmt = db.prepare(sql);
+        return { ...stmt, run: async (...args) => { if (/INSERT(?: OR IGNORE)? INTO flows\b/i.test(sql)) throw dropped; return stmt.run(...args); } };
+      }, exec: sql => db.exec(sql), tx: fn => db.tx(tx => fn(failing(tx))),
+    });
+    let failure: unknown;
+    assert.equal(await finalMirrorBeforeAnchor(TENANT, failing(shared()), childHome(TENANT), error => { failure ??= error; }), false);
+    assert.equal(failure, dropped, "mirror prose must not discard the original infrastructure classification");
+    assert.equal(sharedNet(), before);
+    const retries = new HostedRecoveryRetries();
+    retries.clear(TENANT); // a successful bridge prepare clears its old failure
+    retries.fail(TENANT, SMART, failure, 0);
+    assert.equal(retries.due(TENANT, SMART, 30_000), true);
+    assert.equal(await finalMirrorBeforeAnchor(TENANT, shared()), true);
+    assert.equal(sharedNet(), before + 3);
+    assert.equal(await finalMirrorBeforeAnchor(TENANT, shared()), true);
+    assert.equal(sharedNet(), before + 3);
+  });
+
+  it("a backlog beyond the bounded drain remains retryable and completes on a later pass", async () => {
+    const before = sharedNet();
+    childRaw.exec("BEGIN");
+    for (let n = 0; n < 10_001; n++) flow("in", 1, "inferred", nowSec() - 1, null, null);
+    childRaw.exec("COMMIT");
+    let failure: unknown;
+    assert.equal(await finalMirrorBeforeAnchor(TENANT, shared(), childHome(TENANT), error => { failure ??= error; }), false);
+    assert.equal((failure as { code: string }).code, "HOSTED_MIRROR_BACKLOG");
+    assert.equal(sharedNet(), before + 10_000);
+    const retries = new HostedRecoveryRetries();
+    retries.fail(TENANT, SMART, failure, 0);
+    assert.equal(retries.due(TENANT, SMART, 30_000), true);
+    await writeBootstrapForChild(TENANT, SMART, shared());
+    assert.equal(sharedNet(), before + 10_001);
   });
 });

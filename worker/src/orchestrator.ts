@@ -113,6 +113,8 @@ import { syncChildPerpKey, type ChildPerpKeyOutcome } from "./perps/child-key";
 import { HostedStanddownSupervisor, hostedStanddownAvailable } from "./perps/hosted-standdown";
 import { HostedStanddownStore } from "./perps/hosted-standdown-store";
 import { HostedLiveCheckpointBridge } from "./perps/hosted-live-supervisor";
+import { HostedRecoveryRetries, recoverHostedChild, observeRecoveryDbErrors, recoverySnapshotView, transientHostedRecoveryError } from "./perps/hosted-recovery-retry";
+import { STANDDOWN_TABLES } from "./perps/hosted-standdown-ledger";
 import { createFleetPerpFeed } from "./perps/fleet-feed";
 import { grantPerp } from "../../packages/core/src/index";
 import { writePeersForChild } from "./peer-files";
@@ -513,6 +515,8 @@ let perpShutdown: HostedStanddownSupervisor | null = null;
 let perpShutdownTenants = new Set<string>();
 const perpStoppingChildren = new Map<string, ChildProcess>();
 const perpLiveBridges = new Map<string, HostedLiveCheckpointBridge>();
+const perpRecoveryRetries = new HostedRecoveryRetries();
+const perpRecoveryBusy = new Set<string>();
 const perpNormalMirrored = new Set<string>();
 async function reconcilePerpShutdowns(): Promise<void> {
   if (!hostedStanddownAvailable()) return;
@@ -1579,29 +1583,74 @@ function mirrorSerially<T>(tenant: string, pass: () => Promise<T>): Promise<T> {
  * per-tenant serialisation as the loop. Only reached from spawnChild, which
  * runs only when this replica holds the lease and no child of the tenant is
  * running. A redeploy leaves no file — nothing to copy, and nothing the anchor
- * could have missed from THIS container. A failure is logged and the anchor is
- * derived regardless: it is no worse than before.
+ * could have missed from THIS container. An existing ledger's financial
+ * backlog must finish before an anchor is derived; a failed or incomplete
+ * copy leaves accounting unknown, with transient failures retried safely.
  */
-export async function finalMirrorBeforeAnchor(tenant: string, shared: Db, home = childHome(tenant)): Promise<boolean> {
+export async function finalMirrorBeforeAnchor(tenant: string, shared: Db, home = childHome(tenant), onFailure?: (error: unknown) => void): Promise<boolean> {
   const handle = openChildLedger(home);
   if (!handle) return false;
   try {
+    let complete = false;
+    let mirrorErrors: unknown[] = [];
+    const observedShared = observeRecoveryDbErrors(shared, error => { mirrorErrors.push(error); });
     const r = await mirrorSerially(tenant, () => {
       const bridge = perpLiveBridges.get(tenant);
-      return bridge ? bridge.mirrorSnapshot(handle.db, child => mirrorTenant({ tenant, child, shared })) : mirrorTenant({ tenant, child: handle.db, shared });
+      const drain = async (child: Db) => {
+        const observedChild = observeRecoveryDbErrors(child, error => { mirrorErrors.push(error); });
+        let report: Awaited<ReturnType<typeof mirrorTenant>> | undefined;
+        const copied: Record<string, number> = {};
+        // Keep the pass bounded; a longer outage resumes on the next retry.
+        for (let pass = 0; pass < 20; pass++) {
+          mirrorErrors = [];
+          report = await mirrorTenant({ tenant, child: observedChild, shared: observedShared });
+          for (const [table, n] of Object.entries(report.copied)) copied[table] = (copied[table] ?? 0) + n;
+          if (Object.keys(report.failed ?? {}).length) {
+            // Optional-column probes may throw and then recover. Only a table
+            // that actually failed may schedule a recovery restart.
+            const failures = new Set(Object.values(report.failed!));
+            const errors = [...failures].map(message => mirrorErrors.find(error => error instanceof Error && error.message === message) ?? new Error(message));
+            // A simultaneous integrity refusal takes precedence over an
+            // infrastructure retry; it must not be cleared by a restart.
+            onFailure?.(errors.find(error => !transientHostedRecoveryError(error)) ?? errors[0]);
+            break;
+          }
+          complete = await financialMirrorCaughtUp(observedChild, observedShared, tenant);
+          if (complete) break;
+        }
+        return { ...report!, copied };
+      };
+      return bridge ? bridge.mirrorSnapshot(handle.db, drain) : handle.db.tx(snapshot => drain(recoverySnapshotView(snapshot)));
     });
     if (r.failed) {
       log(`${tenant}: final mirror before the anchor STALLED — ${Object.entries(r.failed).map(([k, v]) => `${k}: ${v}`).join(" | ")}`);
     }
     const counts = mirrorCountsLine(tenant, r);
     if (counts) log(`${counts} (final pass before the anchor)`);
-    return Object.keys(r.failed ?? {}).length === 0;
+    if (!complete && !Object.keys(r.failed ?? {}).length) onFailure?.(Object.assign(new Error("financial mirror backlog is still catching up"), { code: "HOSTED_MIRROR_BACKLOG" }));
+    return complete && Object.keys(r.failed ?? {}).length === 0;
   } catch (e) {
+    onFailure?.(e);
     log(`${tenant}: final mirror before the anchor failed — ${e instanceof Error ? e.message : String(e)}`);
     return false;
   } finally {
     handle.close();
   }
+}
+
+/** A successful bounded copy is not necessarily the complete financial book. */
+async function financialMirrorCaughtUp(child: Db, shared: Db, tenant: string): Promise<boolean> {
+  for (const table of ["trades", "equity", "flows", "fee_accruals", ...STANDDOWN_TABLES.filter(t => t !== "perp_accounts" && t !== "perp_positions")]) {
+    if (!(await child.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table))) continue;
+    const cursor = await shared.prepare("SELECT last_id, last_stamp FROM mirror_state WHERE tenant = ? AND table_name = ?").get(tenant, table) as { last_id: number; last_stamp: number | null } | undefined;
+    if (!table.startsWith("perp_")) {
+      if (await child.prepare(`SELECT 1 FROM ${table} WHERE id > ? LIMIT 1`).get(cursor?.last_id ?? 0)) return false;
+    } else {
+      const stamp = ["perp_fills", "perp_funding", "perp_carries"].includes(table) ? "created_at" : "updated_at";
+      if (await child.prepare(`SELECT 1 FROM ${table} WHERE ${stamp} > ? OR (${stamp} = ? AND rowid > ?) LIMIT 1`).get(cursor?.last_id ?? 0, cursor?.last_id ?? 0, cursor?.last_stamp ?? -1)) return false;
+    }
+  }
+  return true;
 }
 
 export async function writeBootstrapForChild(
@@ -1630,14 +1679,16 @@ export async function writeBootstrapForChild(
       // What the last child booked and the mirror had not yet copied — then
       // the anchor's time, AFTER that copy: every flow it carried up is dated
       // before `generatedAt`, so the new child never counts it a second time.
-      const mirrored = await finalMirrorBeforeAnchor(tenant, db);
-      if (!mirrored && perpLiveBridges.has(tenant)) throw new Error("the restored financial book has not completed its durable mirror; accounting remains unknown");
+      let mirrorFailure: unknown;
+      const mirrored = await finalMirrorBeforeAnchor(tenant, db, childHome(tenant), error => { mirrorFailure ??= error; });
+      if (!mirrored && (perpLiveBridges.has(tenant) || existsSync(path.join(childHome(tenant), "merrymen.db")))) throw mirrorFailure ?? new Error("the restored financial book has not completed its durable mirror; accounting remains unknown");
       now = Math.floor(Date.now() / 1000);
       await db.exec(RISK_PERIOD_SCHEMA);
       riskPeriod = (await readRiskPeriod(db, smartAccount)) ?? undefined;
       accounting = await deriveBootstrapAccounting(db, smartAccount, now);
     } catch (e) {
       accounting = { kind: "unknown", why: e instanceof Error ? e.message : String(e), observedAt: now };
+      if (perpLiveBridges.has(tenant)) perpRecoveryRetries.fail(tenant, smartAccount, e);
     }
   }
 
@@ -1672,8 +1723,12 @@ export async function writeBootstrapForChild(
   }
 }
 
-async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
+async function spawnChild(tenant: `0x${string}`, restarts = 0, recovering = false): Promise<void> {
   if (stopping) return;
+  if (!recovering && (perpRecoveryBusy.has(tenant) || perpRecoveryRetries.has(tenant))) return;
+  const predecessor = perpStoppingChildren.get(tenant);
+  if (predecessor && predecessor.exitCode === null && predecessor.signalCode === null) return;
+  perpStoppingChildren.delete(tenant);
   if (perpShutdownTenants.has(tenant)) return;
   perpNormalMirrored.delete(tenant);
   if (hostedStanddownAvailable()) {
@@ -1713,7 +1768,9 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     try {
       perpBridge = await HostedLiveCheckpointBridge.prepare({ shared: await makePgDb(process.env.DATABASE_URL), dek: storeDek()!,
         tenant, account: smartAccount, publicKey: perpGrant.apiPublicKey, home: childHome(tenant), healthy: () => leases.get(tenant)?.healthy() === true });
-    } catch {
+      perpRecoveryRetries.clear(tenant);
+    } catch (error) {
+      perpRecoveryRetries.fail(tenant, smartAccount, error);
       log(`${tenant}: hosted perps journal could not be restored exactly — venue sends held; spot and paper remain available`);
     }
     try {
@@ -1798,7 +1855,8 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     // was orphaned: still ticking, still hitting the RPC, invisible to the
     // watchdog, never mirrored, sharing one home and one sqlite file with its
     // own replacement. Measured: 105 spawns against 61 exits in one window.
-    if (children.get(tenant) === child) children.delete(tenant);
+    if (children.get(tenant) !== child) return;
+    children.delete(tenant);
     if (stopping) return;
     log(`${tenant} exited (${code})`);
     // A long healthy run that then dies is a fresh incident, not a crash loop.
@@ -1806,6 +1864,39 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     scheduleRestart(tenant, freshRestarts, `exit ${code}`);
   });
   log(`${tenant} spawned (pid ${proc.pid}) — tick ${tickSeconds}s, watchdog ${staleSec}s`);
+}
+
+/** Retry only failed infrastructure at arm, never a running agent's observed drift. */
+async function retryHostedPerpsRecovery(tenant: `0x${string}`): Promise<void> {
+  if (!perpRecoveryRetries.has(tenant) || perpRecoveryBusy.has(tenant) || !hostedStanddownAvailable()) return;
+  const grant = await getGrantStore().get(tenant);
+  if (!grant || !grantPerp(grant)) { perpRecoveryRetries.clear(tenant); return; }
+  const account = grant.smartAccount;
+  if (!perpRecoveryRetries.due(tenant, account)) return;
+  perpRecoveryRetries.defer(tenant);
+  perpRecoveryBusy.add(tenant);
+  try {
+    const shared = await makePgDb(process.env.DATABASE_URL!);
+    await recoverHostedChild({
+      healthy: () => !stopping && leases.get(tenant)?.healthy() === true && !perpShutdownTenants.has(tenant) && !killRequested(childHome(tenant)),
+      probe: async () => { await shared.prepare("SELECT 1").get(); },
+      stop: async () => {
+        const child = children.get(tenant), proc = child?.proc ?? perpStoppingChildren.get(tenant);
+        if (!proc || proc.exitCode !== null || proc.signalCode !== null) return true;
+        perpStoppingChildren.set(tenant, proc);
+        const exited = new Promise<boolean>(resolve => {
+          const timer = setTimeout(() => resolve(false), 5_000);
+          proc.once("exit", () => { clearTimeout(timer); if (perpStoppingChildren.get(tenant) === proc) perpStoppingChildren.delete(tenant); resolve(true); });
+        });
+        if (child) killChild(tenant); else proc.kill("SIGKILL");
+        return exited;
+      },
+      mirror: () => finalMirrorBeforeAnchor(tenant, shared),
+      restart: async () => { log(`${tenant}: retrying hosted perps recovery after a temporary storage failure`); await spawnChild(tenant, 0, true); },
+    });
+  } catch (error) {
+    perpRecoveryRetries.fail(tenant, account, error);
+  } finally { perpRecoveryBusy.delete(tenant); }
 }
 
 /** The fleet-wide tick, for a tenant whose own settings do not name one. */
@@ -1960,6 +2051,7 @@ export async function reconcile(): Promise<void> {
   await reconcilePerpShutdowns();
   tenants = tenants.filter(t => !perpShutdownTenants.has(t.toLowerCase()));
   const wanted = new Set(tenants.map((t) => t.toLowerCase()));
+  perpRecoveryRetries.retain(wanted);
 
   // A lease whose connection dropped no longer protects its tenant — Postgres
   // has released the lock and another replica may hold it. Stand the child down
@@ -1980,7 +2072,7 @@ export async function reconcile(): Promise<void> {
   // next reconcile.
   for (const tenant of tenants) {
     const lc = tenant.toLowerCase() as `0x${string}`;
-    if (children.has(lc)) continue;
+    if (children.has(lc)) { await retryHostedPerpsRecovery(lc); continue; }
     /**
      * A TENANT THE RESTART POLICY GAVE UP ON IS NOT A TENANT THAT ISN'T RUNNING.
      *
@@ -2015,6 +2107,7 @@ export async function reconcile(): Promise<void> {
       }
       leases.set(lc, lease);
     }
+    if (perpRecoveryRetries.has(lc)) { await retryHostedPerpsRecovery(lc); continue; }
     await spawnChild(lc, cool?.restarts ?? 0);
   }
   // Refresh every running child's settings.json so a tenant's config change

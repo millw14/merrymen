@@ -57,13 +57,16 @@
 "A summary every hour" = "A summary every hour";
 "A whole number from {min} to {max}." = "A whole number from {min} to {max}.";
 "above (the checkbox does that when you add it), you’ve" = "above (the checkbox does that when you add it), you’ve";
+"above your saved effective limit of {cap} USDG; no new entry in this market" = "above your saved effective limit of {cap} USDG; no new entry in this market";
 "Account" = "Cuenta";
 "add chat id…" = "add chat id…";
 "Add funds" = "Añadir fondos";
+"Add funds to your agent" = "Add funds to your agent";
 "Add funds." = "Agregar fondos.";
 "add token" = "add token";
 "Add your bot to a group and it acts like one more person there: it answers when someone calls it, joins in now and then, and remembers the chat. If someone else adds it, it stays silent until you answer Stay or Leave in your DMs. It never posts trade alerts, sizes, prices or P&L." = "Add your bot to a group and it acts like one more person there: it answers when someone calls it, joins in now and then, and remembers the chat. If someone else adds it, it stays silent until you answer Stay or Leave in your DMs. It never posts trade alerts, sizes, prices or P&L.";
 "Advanced settings" = "Advanced settings";
+"After your consent and signed permission are in place, your agent handles funding its Lighter account, registering its trading key, entries, stops and exits within your limits. It waits when a check fails or there is no eligible signal; you do not need to place each trade." = "After your consent and signed permission are in place, your agent handles funding its Lighter account, registering its trading key, entries, stops and exits within your limits. It waits when a check fails or there is no eligible signal; you do not need to place each trade.";
 "Agent connections" = "Agent connections";
 "Agent name" = "Agent name";
 "Agent settings" = "Agent settings";
@@ -90,6 +93,7 @@
 "Ask it why." = "Pregúntale por qué.";
 "asset mode" = "asset mode";
 "At {lev}x, liquidation comes before the stop plus the room before liquidation, so every open would be refused. Lower the leverage, the stop distance or the room before liquidation." = "At {lev}x, liquidation comes before the stop plus the room before liquidation, so every open would be refused. Lower the leverage, the stop distance or the room before liquidation.";
+"Automatic trading setup" = "Automatic trading setup";
 "Back" = "Atrás";
 "Balance" = "Saldo";
 "Banner" = "Banner";
@@ -128,6 +132,7 @@
 "checking…" = "checking…";
 "Choose a name and strategy, then review its wallet setup and spending limits. Creating an agent and authorizing live trading are separate steps." = "Elige un nombre y una estrategia, y luego revisa la configuración de su billetera y sus límites de gasto. Crear un agente y autorizarlo a operar con dinero real son pasos distintos.";
 "Choose language" = "Idioma";
+"Choose markets your limits can reach, or review your settings and signed per-trade limit. Limits are never raised automatically." = "Choose markets your limits can reach, or review your settings and signed per-trade limit. Limits are never raised automatically.";
 "claim one" = "claim one";
 "Claim with your $MERRYMEN wallet for AI and token discovery access. A saved Bitquery key takes priority for discovery." = "Claim with your $MERRYMEN wallet for AI and token discovery access. A saved Bitquery key takes priority for discovery.";
 "class route" = "class route";
@@ -254,6 +259,7 @@
 "mainnet RPC override" = "mainnet RPC override";
 "Manage →" = "Manage →";
 "Manual — no automatic opens" = "Manual — no automatic opens";
+"Manual is saved: no new position opens automatically. Choose an automatic rule in Markets and limits if you want your agent to trade on its own." = "Manual is saved: no new position opens automatically. Choose an automatic rule in Markets and limits if you want your agent to trade on its own.";
 "Market check interval" = "Market check interval";
 "Markets" = "Mercados";
 "Markets ({count} of up to {max})" = "Markets ({count} of up to {max})";
@@ -275,8 +281,10 @@
 "merry circle token" = "merry circle token";
 "metals" = "metals";
 "min" = "min";
+"minimum" = "minimum";
 "minimum curve depth (USDG)" = "minimum curve depth (USDG)";
 "Minimum liquidity required to use a token’s price. Lower values accept more price-manipulation risk." = "Minimum liquidity required to use a token’s price. Lower values accept more price-manipulation risk.";
+"Minimum orders at your agent's last market read (they change with price):" = "Minimum orders at your agent's last market read (they change with price):";
 "minimum pool depth (USD)" = "minimum pool depth (USD)";
 "model" = "model";
 "Model for Anthropic and screen analysis." = "Model for Anthropic and screen analysis.";
@@ -389,8 +397,10 @@
 "Ready when you are." = "Cuando quieras, empezamos.";
 "Real money raised into the curve, excluding the virtual seed it opens with. Below this, an entry is refused." = "Real money raised into the curve, excluding the virtual seed it opens with. Below this, an entry is refused.";
 "Real perpetuals also need:" = "Real perpetuals also need:";
+"Real-money perpetuals are enabled. New positions wait for the agent's checks and an eligible strategy signal." = "Real-money perpetuals are enabled. New positions wait for the agent's checks and an eligible strategy signal.";
 "Realized P&L comes from a sale compared with the cost of what was sold. Open positions have unrealized gains or losses as prices move. A buy alone has not realized a profit. Missing cost basis is not zero profit." = "El P&L realizado (ganancias y pérdidas realizadas) resulta de comparar el precio de una venta con el costo de lo vendido. Las posiciones abiertas tienen ganancias o pérdidas no realizadas a medida que se mueven los precios. Una compra por sí sola no realiza ninguna ganancia. Que falte el costo base no significa que la ganancia sea cero.";
 "Recipient" = "Destinatario";
+"Refresh perpetuals status" = "Refresh perpetuals status";
 "Required for chat and the Strategist." = "Required for chat and the Strategist.";
 "Required for real trading on Robinhood Chain. Not needed for Paper, or on the testnet." = "Required for real trading on Robinhood Chain. Not needed for Paper, or on the testnet.";
 "Required for token discovery unless you use a Merry Circle token." = "Required for token discovery unless you use a Merry Circle token.";
@@ -399,7 +409,10 @@
 "Retry" = "Reintentar";
 "Retry account sync" = "Reintentar sincronizar la cuenta";
 "Return to chat to ask about your strategy, limits or the latest decision. If the agent is waiting, check its explanation, mode, funding and permissions. Replay this walkthrough with Show me around whenever you need it." = "Vuelve al chat para preguntar por tu estrategia, tus límites o la última decisión. Si el agente está esperando, revisa su explicación, su modo, sus fondos y sus permisos. Puedes repetir este recorrido con «Ver el recorrido» cuando lo necesites.";
+"Review account trading mode" = "Review account trading mode";
 "Review changes" = "Revisar cambios";
+"Review markets and limits" = "Review markets and limits";
+"Review signed permission" = "Review signed permission";
 "Review the available cash, destination and amount before confirming a withdrawal. Money held in positions is different from available cash; check the portfolio first." = "Revisa el efectivo disponible, el destino y el monto antes de confirmar un retiro. El dinero que está en posiciones no es lo mismo que el efectivo disponible; revisa primero el portafolio.";
 "Review what the agent may trade and the permissions you are signing. Changes to signed permissions require a new wallet signature. The tutorial never signs or submits one for you." = "Revisa con qué puede operar el agente y qué permisos estás firmando. Cambiar permisos ya firmados exige una nueva firma de la billetera. Este tutorial nunca firma ni envía una por ti.";
 "Rialto integrator key" = "Rialto integrator key";
@@ -483,7 +496,10 @@
 "The Perpetuals permission: your agent has no signed permission yet." = "The Perpetuals permission: your agent has no signed permission yet.";
 "The Perpetuals permission: your signed permission couldn't be read just now." = "The Perpetuals permission: your signed permission couldn't be read just now.";
 "the saved key" = "the saved key";
+"The signed permission's expiry has not been read. The trend rule needs more than {hours} hours (7 days) remaining before a new real-money entry." = "The signed permission's expiry has not been read. The trend rule needs more than {hours} hours (7 days) remaining before a new real-money entry.";
 "the strategist looks things up before it commits" = "the strategist looks things up before it commits";
+"The trend rule needs more than {hours} hours (7 days) left on the signed permission before a new entry. About {remaining} hours remain, so it cannot open a new position. Review and re-sign a longer duration if you want to continue; existing exits remain available." = "The trend rule needs more than {hours} hours (7 days) left on the signed permission before a new entry. About {remaining} hours remain, so it cannot open a new position. Review and re-sign a longer duration if you want to continue; existing exits remain available.";
+"The trend rule only opens BTC, ETH or SOL perpetuals, and none is selected. Review your markets before expecting automatic entries." = "The trend rule only opens BTC, ETH or SOL perpetuals, and none is selected. Review your markets before expecting automatic entries.";
 "The venue is Lighter's Robinhood Chain instance, run by Lighter under its own terms. Its contracts can be upgraded without effective notice." = "The venue is Lighter's Robinhood Chain instance, run by Lighter under its own terms. Its contracts can be upgraded without effective notice.";
 "The wire in control on a public profile adds that agent’s published reasoning to your agent’s context. It does not copy trades automatically or override your own limits." = "El control «Wire in» (conectar) de un perfil público agrega el razonamiento publicado de ese agente al contexto del tuyo. No copia sus operaciones automáticamente ni anula tus propios límites.";
 "These positions stay valued at purchase cost even if they lose value, so if one goes to zero your equity will not show it and the breaker will not fire." = "These positions stay valued at purchase cost even if they lose value, so if one goes to zero your equity will not show it and the breaker will not fire.";
@@ -513,7 +529,6 @@
 "Trading mode" = "Trading mode";
 "trading permission" = "trading permission";
 "trading permissions" = "trading permissions";
-"Trading perpetuals with real money on Lighter." = "Trading perpetuals with real money on Lighter.";
 "Trading preferences" = "Trading preferences";
 "Transcription API key for voice notes. Leave blank to disable voice." = "Transcription API key for voice notes. Leave blank to disable voice.";
 "transcription key (voice)" = "transcription key (voice)";
@@ -564,6 +579,7 @@
 "You stay in control." = "El control es tuyo.";
 "Your agent can control this computer without asking for each action — running commands, typing, and opening links. It may damage files or expose private information. The destructive blocklist and the secret redaction are a" = "Your agent can control this computer without asking for each action — running commands, typing, and opening links. It may damage files or expose private information. The destructive blocklist and the secret redaction are a";
 "Your agent has no signed permission yet, so its per-trade limit isn't set." = "Your agent has no signed permission yet, so its per-trade limit isn't set.";
+"Your agent has not reported current market minimums yet. Enabling perpetuals does not mean an order is ready; it checks minimums and your limits before trading." = "Your agent has not reported current market minimums yet. Enabling perpetuals does not mean an order is ready; it checks minimums and your limits before trading.";
 "Your agent has not reported on perpetuals yet, so what it holds on Lighter, if anything, isn't known here." = "Your agent has not reported on perpetuals yet, so what it holds on Lighter, if anything, isn't known here.";
 "Your agent mints a link code on its next pass. Check back shortly." = "Your agent mints a link code on its next pass. Check back shortly.";
 "Your agent opens no position on its own. Stops and closes still run." = "Your agent opens no position on its own. Stops and closes still run.";

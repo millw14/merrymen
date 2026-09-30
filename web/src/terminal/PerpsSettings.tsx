@@ -76,6 +76,7 @@ import {
   perpsDraftDirty,
   perpsDraftProblems,
   perpsEffectiveCap,
+  perpsAutonomyReadiness,
   perpsLiveOffBody,
   perpsLiveOnBody,
   perpsNumInForce,
@@ -182,6 +183,9 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved }: Per
   const [consentOpen, setConsentOpen] = useState(false);
   const [attested, setAttested] = useState(false);
   const [draft, setDraft] = useState<PerpsDraft>(EMPTY_PERPS_DRAFT);
+  const [statusRevision, setStatusRevision] = useState(0);
+  const [readAt, setReadAt] = useState(Date.now);
+  const limitsSection = useRef<HTMLDetailsElement | null>(null);
   const consentTitle = useRef<HTMLElement | null>(null);
   const mounted = useRef(true);
   useEffect(() => {
@@ -189,24 +193,56 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved }: Per
     return () => { mounted.current = false; };
   }, []);
 
-  // The agent's report, its grant and the operator's offer, read once. The
-  // report moves on the worker's clock, not on a save here, so re-reading
-  // after a switch would only show the state before the worker's next tick.
+  // Setup continues on the worker's clock. Keep its progress visible without
+  // a page reload, including after the owner returns from re-signing.
   useEffect(() => {
     let current = true;
-    void (async () => {
+    let inFlight = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let active: AbortController | null = null;
+    const schedule = () => {
+      if (current) timer = setTimeout(() => {
+        if (document.visibilityState === "hidden") schedule();
+        else void load();
+      }, 15_000);
+    };
+    const load = async () => {
+      if (!current || inFlight) return;
+      inFlight = true;
+      if (timer) clearTimeout(timer);
+      const abort = new AbortController();
+      active = abort;
+      const deadline = setTimeout(() => abort.abort(), 10_000);
       try {
-        const res = await fetch("/api/grants", { cache: "no-store" });
-        const json: unknown = res.ok ? await res.json() : null;
-        if (current) setGrants(res.ok ? readPerpsGrant(json) : { state: "unread" });
+        const query = hosted && owner ? `?owner=${encodeURIComponent(owner)}` : "";
+        // Bound both response headers and body reading. A fresh controller on
+        // every attempt lets a timed-out request recover on the next poll.
+        const read = await Promise.race([
+          (async () => {
+            const res = await fetch(`/api/grants${query}`, { cache: "no-store", signal: abort.signal });
+            return res.ok ? readPerpsGrant(await res.json()) : { state: "unread" } as const;
+          })(),
+          new Promise<never>((_resolve, reject) => abort.signal.addEventListener("abort", () => reject(new Error("status read ended")), { once: true })),
+        ]);
+        if (current) { setGrants(read); setReadAt(Date.now()); }
       } catch {
         if (current) setGrants({ state: "unread" });
+      } finally {
+        clearTimeout(deadline);
+        active = null;
+        inFlight = false;
+        schedule();
       }
-    })();
+    };
+    void load();
+    window.addEventListener("focus", load);
     return () => {
       current = false;
+      active?.abort();
+      if (timer) clearTimeout(timer);
+      window.removeEventListener("focus", load);
     };
-  }, []);
+  }, [hosted, owner, statusRevision]);
 
   // THE CONSENT OPENS ON ITS TITLE, NOT ITS BUTTON: focus lands on the words,
   // so a repeated keypress on the switch reads the consent instead of giving it
@@ -267,6 +303,7 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved }: Per
     }
     if (!mounted.current) return false;
     setNote({ at, ok: r.ok, lines: r.lines });
+    if (r.wrote) setStatusRevision(n => n + 1);
     setBusy(null);
     return r.ok;
   }
@@ -331,13 +368,13 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved }: Per
       t("settings.perps.needs.grantUnread")
     ) : !grants.exists ? (
       <>
-        {t("settings.perps.needs.grantNone")} <Link href="/grant">{t("settings.perps.needs.resign")}</Link>
+        {t("settings.perps.needs.grantNone")} <Link href="/grant#resign">{t("settings.perps.needs.resign")}</Link>
       </>
     ) : grants.granted ? (
       t("settings.perps.needs.grantYes")
     ) : (
       <>
-        {t("settings.perps.needs.grantNo")} <Link href="/grant">{t("settings.perps.needs.resign")}</Link>
+        {t("settings.perps.needs.grantNo")} <Link href="/grant#resign">{t("settings.perps.needs.resign")}</Link>
       </>
     );
   const offer = grants.state === "read" ? grants.optIn : null;
@@ -345,7 +382,7 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved }: Per
     <div className="perps-needs">
       <b>{t("settings.perps.needs.title")}</b>
       <ul>
-        <li>{accountLive ? t("settings.perps.needs.liveTradingOn") : t("settings.perps.needs.liveTradingOff")}</li>
+        <li>{accountLive ? t("settings.perps.needs.liveTradingOn") : <>{t("settings.perps.needs.liveTradingOff")} <Link href="/settings#trading-mode">{t("settings.perps.setup.reviewMode")}</Link></>}</li>
         {grantLine !== null && <li>{grantLine}</li>}
       </ul>
       {offer === false && <p>{t("settings.perps.needs.notOffered")}</p>}
@@ -414,6 +451,14 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved }: Per
     liqBufferPct: inForce("perpsLiqBufferPct"),
   });
   const full = marketsVal.length >= PERPS_MARKETS_MAX;
+  const readiness = perpsAutonomyReadiness(values, defaults, grants, readAt);
+  const ownerHalted = grants.state === "read" && (grants.report?.entriesHalted === true ||
+    (grants.report?.entriesHalted === undefined && grants.report?.blocker === "perps-entries-halted"));
+  function reviewLimits() {
+    if (!limitsSection.current) return;
+    limitsSection.current.open = true;
+    limitsSection.current.scrollIntoView?.({ block: "start" });
+  }
 
   return (
     <>
@@ -429,10 +474,36 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved }: Per
         {statusLines.map((line, i) => (
           <div key={i}>{line}</div>
         ))}
+        {grants.state === "read" && grants.report?.blocker === "perps-no-collateral" && <p><Link href="/deposit">{t("settings.perps.setup.addFunds")}</Link></p>}
+        <button type="button" className="mm-btn" onClick={() => setStatusRevision(n => n + 1)}>{t("settings.perps.status.refresh")}</button>
       </div>
 
-      {status.kind === "report" && status.book !== null && (
-        <PerpsResume key={`${owner}:${status.book}`} owner={owner} hosted={hosted} mode={status.book} incident={status.incident} />
+      <section className="mm-hint perps-readiness" aria-label="Automatic perpetual trading">
+        <b>{t("settings.perps.setup.title")}</b>
+        <p>{t(DRIVER_LABEL[readiness.driver])}. {t(DRIVER_HINT[readiness.driver])}</p>
+        {readiness.enabled && readiness.driver !== "manual" && <p>{t("settings.perps.setup.automatic")}</p>}
+        {readiness.manual && <p role="status">{t("settings.perps.setup.manual")}</p>}
+        {readiness.strategistMismatch && <p role="status">{t("settings.perps.driver.strategistMismatch", { strategy })}</p>}
+        {readiness.noTrendMarkets && <p role="status">{t("settings.perps.setup.noTrendMarkets")}</p>}
+        {readiness.authority && <p role="status">
+          {readiness.authority === "short" ? t("settings.perps.setup.authorityShort", { hours: readiness.requiredHours, remaining: Math.floor(readiness.remainingHours ?? 0) }) : t("settings.perps.setup.authorityUnread", { hours: readiness.requiredHours })}
+          {" "}<Link href="/grant#resign">{t("settings.perps.setup.reviewGrant")}</Link>
+        </p>}
+        {readiness.enabled && <>
+          <p>{readiness.minimums.length ? t("settings.perps.setup.minimums") : t("settings.perps.setup.minimumsUnread")}</p>
+          <ul>{readiness.minimums.map(m => <li key={m.market}>
+            {m.market}: {count(m.minimumUsdg)} USDG {t("settings.perps.setup.minimum")}
+            {m.fits === false ? ` — ${t("settings.perps.setup.capShort", { cap: count(readiness.cap) })}` : ""}
+          </li>)}</ul>
+          {readiness.minimums.some(m => m.fits === false) && <p role="status">
+            {t("settings.perps.setup.minimumAction")} {" "}<Link href="/grant#resign">{t("settings.perps.setup.reviewGrant")}</Link>
+          </p>}
+        </>}
+        <button type="button" className="mm-btn" onClick={reviewLimits}>{t("settings.perps.setup.reviewLimits")}</button>
+      </section>
+
+      {ownerHalted && status.kind === "report" && status.book !== null && (
+        <PerpsResume key={`${owner}:${status.book}`} owner={owner} hosted={hosted} mode={status.book} incident={grants.state === "read" && grants.report?.incident === true} />
       )}
 
       <div className="mm-grid">
@@ -522,7 +593,7 @@ function PerpsSettingsForOwner({ values, defaults, owner, hosted, onSaved }: Per
         </div>
       )}
 
-      <details className="settings-group" id="perpetuals-limits">
+      <details className="settings-group" id="perpetuals-limits" ref={limitsSection}>
         <summary>{t("settings.perps.group")}</summary>
         <p className="mm-hint" style={{ marginTop: 0 }}>
           {t("settings.perps.groupSaves")}

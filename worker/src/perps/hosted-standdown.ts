@@ -177,6 +177,13 @@ export class HostedStanddownSupervisor {
    } else if (msg.kind === "checkpoint") {
     if (typeof msg.payload !== "string" || msg.payload.length > STANDDOWN_CHECKPOINT_MAX * 1.4) throw new Error("shutdown checkpoint too large");
     await this.store.checkpoint(run.job, Buffer.from(msg.payload, "base64"));
+   } else if (msg.kind === "close-capacity") {
+    if (typeof msg.payload !== "string" || msg.payload.length > 128) throw new Error("shutdown close capacity refused");
+    const marketId = JSON.parse(msg.payload) as number;
+    const remainingCloseAttempts = await this.store.remainingCloseAttempts(run.job, marketId);
+    if (!this.o.healthy(run.job.tenant) || !(await this.store.fence(run.job))) throw new Error("shutdown close capacity fenced");
+    if (run.proc.connected) run.proc.send({ id: msg.id, ok: true, remainingCloseAttempts });
+    return;
    } else if (msg.kind === "close-budget") {
     if (typeof msg.payload !== "string" || msg.payload.length > 1024) throw new Error("shutdown close identity refused");
     const close = JSON.parse(msg.payload) as { marketId: number; txHash: string };

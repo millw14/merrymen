@@ -20,6 +20,33 @@ and [mainnet checklist](perps-mainnet-checklist.md).
 The shared fleet feed and durable shutdown attempt budget are implemented and
 independently reviewed. The hosted deployment exercise below remains unrun.
 
+## Autonomous operation follow-up
+
+The unattended flow received an additional implementation and recovery review:
+
+- Setup polls owner-bound progress, shows the saved entry producer, and explains
+  grant lifetime and observed venue minimums before the advanced settings.
+  The normal waiting state does not show an unnecessary Resume action.
+- A temporary admission or decision-journal failure leaves an unsent trend
+  signal available for the next tick. A failed spot proposal does not interrupt
+  the independent perps route; partially produced strategist signals are cleared.
+- A repaired, exactly matching venue key is retried after the existing backoff.
+  Hosted infrastructure failures retry only after the previous worker exits and
+  its financial history is completely mirrored. Authority/history contradictions
+  still refuse trading.
+- The 24-hour idle return clock is durable and bound to the account and authority
+  epoch. Opening a position retires the old interval before broadcast. Fresh
+  funding starts a new interval; pending deposits and temporary venue setup waits
+  cannot immediately sweep that funding back out before entry. Historical rereads
+  do not keep restarting the clock.
+- Hosted shutdown retries temporary reads, cancellations, closes and withdrawals
+  within the original deadline and durable three-close-attempt budget. Earlier
+  confirmed results survive later retries; a request still does not prove arrival.
+
+These changes preserve owner consent, deliberate entry halts, signed limits,
+incident handling and the operational gates below. The standard trend producer
+does not require an AI provider; manual mode does not open positions autonomously.
+
 ## Verification evidence
 
 These are executed checks from this implementation session. Focused runs overlap;
@@ -28,8 +55,12 @@ replace the final run after all edits settle.
 
 | Check | Evidence available |
 |---|---|
-| Full repository tests | **15,648 passed, zero failures, three skipped** (15,651 tests; 177 seconds). The skips are the existing optional PostgreSQL energy/holder, partner-store and energy-release checks. The perps PostgreSQL lifecycle was exercised separately below. |
+| Full repository tests | Follow-up run: **15,686 passed, one failed, three skipped** (15,690 tests; 233 seconds). The sole failure was the existing child-exit source assertion expecting the old conditional-delete form. It was updated to require the new identity guard before both deletion and restart; that file then passed **20/20**, with no production changes afterward. The full suite was not repeated after this test-only correction. The skips are the existing optional PostgreSQL energy/holder, partner-store and energy-release checks; perps PostgreSQL was exercised separately below. |
 | Lane and live accounting regressions | 66 passed, including cap enforcement, failed-checkpoint accounting, retained real exposure, and paper/live last-known value isolation. |
+| Autonomous lane follow-up | 179 passed, including transient admission/key recovery, a durable idle interval across restarts, and withdrawal → payout → new deposit → temporary setup wait → protected entry. These use the real lane/store with a fake venue. |
+| Setup and readiness follow-up | 294 passed in the UI/core/view integration run, including owner-bound refresh, hung response recovery, saved automatic producers, grant lifetime, market minimums and owner versus operator halts. |
+| Hosted retry follow-up | Independent recovery run: 45 passed; final anchor rerun: 7 passed. Includes complete mirroring beyond 10,000 financial records, typed transient failures, shutdown retry budgets and prior outcome preservation. |
+| Proposal failure isolation | 46 focused checks passed. Independent perps decisions continue after a failed spot proposal; stale or partial strategist handoffs are cleared and existing entry gates remain active. |
 | Authority and owner status | 105 authority tests and 14 recovery/status tests passed in focused runs. |
 | Offline replay | 7 passed: shipped defaults, funding exactly once, missing funding, fees/stops, future-data refusal, binding caps and unread depth. These use fixtures. |
 | Streamed financial recovery | 13 focused stream/normal-supervisor tests passed. The shutdown/IPC implementation run passed 19 tests. |
@@ -38,9 +69,9 @@ replace the final run after all edits settle.
 | Durable payout allocation | 95 payout/on-chain-leg/accounting tests passed, including restart after partial allocation, duplicate logs, changed chain evidence, and transaction rollback. |
 | TypeScript | Final `npm run typecheck` passed for worker, web, browser and SDK; the site TypeScript check passed separately. |
 | Production build | `npm run build` completed successfully for the SDK and production Next.js app. |
-| iOS | Simulator build succeeded; 34 policy tests passed; the signing bundle `--check` matched. |
+| iOS | Earlier simulator build succeeded and 34 policy tests passed. After the autonomy changes, regenerated shared bundles and copy passed source/copy consistency, signing TypeScript, standard/Trencher/legacy signing and read-only recovery fixtures, feed, crypto and branding checks. |
 | Android | Debug unit test task succeeded: 676 tests across 69 suites, zero failures, errors or skips. |
-| PostgreSQL | Disposable local PostgreSQL lifecycle passed: cold recovery, grant revocation, shutdown checkpointing, expiry scrubbing and terminal accounting merge. This used local fixtures, not live venue execution. |
+| PostgreSQL | Disposable local PostgreSQL 17 lifecycle passed: cold recovery, grant revocation, shutdown checkpointing, expiry scrubbing and terminal accounting merge. The follow-up also verified the nullable idle clock, mirroring, current checkpoint restore and older checkpoint compatibility. This used local fixtures, not live venue execution; the cluster was stopped afterward. |
 
 Final repository checks, from the worktree root:
 

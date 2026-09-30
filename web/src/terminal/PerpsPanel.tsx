@@ -144,6 +144,7 @@ export function PerpsPanel({ perps, nowMs = Date.now(), onClose, onFlatten, busy
         <p className="desk-perps-note">
           {perps.blocker.what}
           {perps.blocker.remedy ? ` ${perps.blocker.remedy}` : ""}
+          {" "}<a href="/settings#perpetuals">Review perpetuals setup</a>
         </p>
       )}
     </section>

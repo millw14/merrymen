@@ -132,6 +132,7 @@ describe("hosted shutdown atomic custody and replay", () => {
   const { raw, db, store } = await setup(); try {
    await revokeHostedGrant(db, TENANT, DEK, { nowMs: 100_000 });
    const first = (await store.claim((await store.latest(TENANT))!.id, "first", 100_001))!;
+   assert.equal(await store.remainingCloseAttempts(first, 1, 100_002), 3);
    const book = validateStanddownLedger(emptyLedger(), ACCOUNT);
    for (let i = 1; i <= 5; i++) book.tables.perp_orders!.push({ id: `close-${i}`, agent_id: ACCOUNT, mode: "live", market_id: i === 5 ? 2 : 1, tx_hash: `hash-${i}`, tx_type: 14, tx_info: "exact-signed-close", api_key_index: 16, reduce_only: 1, effect: "close" });
    await store.checkpoint(first, encodeStanddownLedger(book), 100_002);
@@ -139,6 +140,8 @@ describe("hosted shutdown atomic custody and replay", () => {
    // Parent committed its reservation, then its ACK was lost before the child
    // knew whether a send happened. The replay keeps that same attempt.
    const next = (await store.claim(first.id, "replacement", 100_004))!;
+   await assert.rejects(store.remainingCloseAttempts(first, 1, 100_005), /fenced/);
+   assert.equal(await store.remainingCloseAttempts(next, 1, 100_005), 2);
    assert.equal(await store.reserveClose(first, { marketId: 1, txHash: "hash-2" }, 100_005), false);
    assert.equal(await store.reserveClose(next, { marketId: 1, txHash: "hash-1" }, 100_005), true);
    assert.equal(await store.reserveClose(next, { marketId: 1, txHash: "hash-2" }, 100_006), true);
@@ -147,11 +150,14 @@ describe("hosted shutdown atomic custody and replay", () => {
     store.reserveClose(next, { marketId: 1, txHash: "hash-4" }, 100_007),
    ]);
    assert.equal(attempts.filter(Boolean).length, 1);
+   assert.equal(await store.remainingCloseAttempts(next, 1, 100_008), 0);
+   assert.equal(await store.remainingCloseAttempts(next, 2, 100_008), 3);
    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM perp_standdown_closes WHERE job_id = ? AND market_id = 1").get(first.id) as { n: number }).n, 3);
    assert.equal(await store.reserveClose(next, { marketId: 2, txHash: "hash-5" }, 100_008), true, "one market cannot spend another market's budget");
    assert.equal(await store.reserveClose(next, { marketId: 2, txHash: "hash-1" }, 100_008), false);
    assert.equal(await store.reserveClose(next, { marketId: 3, txHash: "not-recorded" }, 100_008), false);
    assert.equal(await store.reserveClose(next, { marketId: 1, txHash: "hash-1" }, next.expiresAtMs), false);
+   await assert.rejects(store.remainingCloseAttempts(next, 1, next.expiresAtMs), /fenced/);
   } finally { raw.close(); }
  });
 });

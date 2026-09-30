@@ -256,7 +256,7 @@ describe("the tick's wiring below the tier", () => {
   it("BELOW THE TIER THE STRATEGY IS NOT TICKED AT ALL — never a one-sided pass over its exits", () => {
     assert.match(
       CODE,
-      /const \{ intents: proposed, why: proposedWhy, idle \}: Tick = brainOrderAccepted\s*\?\s*\{ intents: \[\], why: \[\] \}\s*:\s*await circleStrategyTick\(circleShort, async \(\) => takeTick\(await strategy\.tick\(snap\)\)\);/,
+      /const production = await produceStrategyTick\(\s*async \(\) => brainOrderAccepted\s*\?\s*\{ intents: \[\], why: \[\] \}\s*:\s*await circleStrategyTick\(circleShort, async \(\) => takeTick\(await strategy\.tick\(snap\)\)\),/,
     );
     assert.equal(CODE.split("strategy.tick(snap)").length - 1, 1, "the strategy is ticked in one place, through the gate");
     assert.doesNotMatch(CODE, /circleExitsOnly/, "the trims-only filter is gone");

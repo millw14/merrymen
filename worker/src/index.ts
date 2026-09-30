@@ -153,6 +153,7 @@ import { priceGas, wethPriceToken } from "./gas-price";
 import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus, readHolderStatusResult } from "./circle";
 import { CIRCLE_SHORT_CLASS_GATE, circleNote, circleNoteStep, circleStanding, circleStrategyTick, type CircleNoted } from "./circle-gate";
+import { produceStrategyTick } from "./strategy-production";
 import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
 import { killHosted, killRequested } from "./kill-request";
@@ -3132,6 +3133,7 @@ async function main() {
     });
   }
   let strategy = makeStrategy(cfg);
+  let failedStrategyContext: string | null = null;
 
   /** Re-read settings.json; apply what changed without a restart. */
   async function refreshConfig(): Promise<void> {
@@ -13772,9 +13774,25 @@ async function main() {
     // Do not run another discretionary strategy against the old book.
     // Below the Circle tier the strategy is not asked at all — not for its
     // trims either: half a rebalance is a liquidation (circle-gate.ts).
-    const { intents: proposed, why: proposedWhy, idle }: Tick = brainOrderAccepted
-      ? { intents: [], why: [] }
-      : await circleStrategyTick(circleShort, async () => takeTick(await strategy.tick(snap)));
+    const production = await produceStrategyTick(
+      async () => brainOrderAccepted
+        ? { intents: [], why: [] }
+        : await circleStrategyTick(circleShort, async () => takeTick(await strategy.tick(snap))),
+      () => perpLane.deliverStrategist([]),
+    );
+    const { intents: proposed, why: proposedWhy, idle } = production.tick;
+    const strategyContext = `${agentId}:${grant.grantedAt}:${strategy.name}`;
+    if (production.failed) {
+      if (failedStrategyContext !== strategyContext) {
+        failedStrategyContext = strategyContext;
+        await addEvent(agentId, "warn", "The spot strategy could not finish this review and will retry automatically. Independent routes and position protection continue under their usual checks.").catch(() => {});
+      }
+    } else {
+      if (failedStrategyContext === strategyContext) {
+        await addEvent(agentId, "ok", "The spot strategy recovered; automatic reviews have resumed.").catch(() => {});
+      }
+      failedStrategyContext = null;
+    }
 
     // ── AND WHY IT PROPOSED NOTHING ─────────────────────────────────────
     //

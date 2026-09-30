@@ -31,6 +31,7 @@ import {
   type StoredGrant,
 } from "@merrymen/core";
 import { requestOrigin, tenantOf, verifyGrantBinding } from "@/lib/auth";
+import { ownerMismatch } from "@/lib/order-owner";
 import { checkCanonicalWall } from "@/lib/canonical-wall";
 import { privyTokenOf, verifyPrivyToken } from "@/lib/privy";
 import { withReadDb } from "@/lib/ledger";
@@ -702,6 +703,9 @@ export async function GET(req: Request) {
   let grant: StoredGrant;
   if (isHostedMode()) {
     const tenant = tenantOf(req);
+    if (ownerMismatch(new URL(req.url).searchParams.get("owner"), tenant)) {
+      return NextResponse.json({ error: "The signed-in owner changed. Refresh this page before continuing." }, { status: 409, headers: NO_STORE_HEADERS });
+    }
     if (!tenant) return statusResponse({ exists: false });
     const g = await getGrantStore().get(tenant);
     if (!g) {

@@ -1099,6 +1099,7 @@ export function buildPerpsReport(
       minLiqDistanceBps: null,
       stopsMissing: held,
       incident: input.ledger.incident,
+      entriesHalted: input.ledger.entriesHalted,
     };
   }
 
@@ -1158,5 +1159,9 @@ export function buildPerpsReport(
     minLiqDistanceBps: minLiq,
     stopsMissing,
     incident: f.incident,
+    entriesHalted: input.ledger.entriesHalted,
+    entryMinimums: [...view.markets.values()]
+      .filter(m => input.settings.perpsMarkets.includes(m.key))
+      .map(m => ({ market: m.key, minNotionalMicro: m.effMinNotionalMicro.toString() })),
   };
 }

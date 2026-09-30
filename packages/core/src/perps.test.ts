@@ -1247,6 +1247,19 @@ describe("parsePerpsReport is a strict whitelist", () => {
     assert.deepEqual(parsePerpsReport(JSON.parse(JSON.stringify(full))), full);
   });
 
+  it("optional setup facts preserve old reports, whitelist fields and reject malformed minimums", () => {
+    assert.equal("entriesHalted" in parsePerpsReport(full)!, false);
+    assert.equal("entryMinimums" in parsePerpsReport(full)!, false);
+    const entryMinimums = [{ market: "BTC-PERP", minNotionalMicro: "17000000" }];
+    assert.deepEqual(parsePerpsReport({ ...full, entriesHalted: true, entryMinimums: [{ ...entryMinimums[0], apiKey: "secret" }] }),
+      { ...full, entriesHalted: true, entryMinimums });
+    for (const bad of [null, {}, [{ market: "BTC", minNotionalMicro: "1" }], [{ market: "BTC-PERP", minNotionalMicro: "0" }],
+      [{ market: "BTC-PERP", minNotionalMicro: "-1" }], [{ market: "BTC-PERP", minNotionalMicro: 1 }], [...entryMinimums, ...entryMinimums]]) {
+      assert.equal(parsePerpsReport({ ...full, entryMinimums: bad }), null);
+    }
+    assert.equal(parsePerpsReport({ ...full, entriesHalted: "false" }), null);
+  });
+
   it("drops unknown keys, top level and per position", () => {
     const raw = { ...full, secret: "x", positions: [{ ...full.positions[0], apiKey: "0xabc" }] };
     const out = parsePerpsReport(raw);

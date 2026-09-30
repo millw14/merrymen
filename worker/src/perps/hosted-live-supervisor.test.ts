@@ -12,6 +12,7 @@ import { decodeFinancialRecords, inspectFinancialStream, type FinancialChunks } 
 import { HostedLiveCheckpointBridge } from "./hosted-live-supervisor";
 import { HostedLiveCheckpointStore, HostedStanddownStore } from "./hosted-standdown-store";
 import { durableHostedPerpStore, hostedPerpSendFence } from "./hosted-live-checkpoint";
+import { recoverHostedChild } from "./hosted-recovery-retry";
 
 const TENANT = "0x00000000000000000000000000000000000000aa";
 const ACCOUNT = "0x00000000000000000000000000000000000000a1";
@@ -54,6 +55,24 @@ async function materialize(chunks:FinancialChunks) {
 
 
 describe("ordinary hosted financial recovery", () => {
+  it("a temporary initial checkpoint failure recovers a stopped child's exact newer book without owner action", async () => {
+    const f = await fixture();
+    try {
+      await spotFact(f.local, 3);
+      const unavailable: Db = { ...f.shared, tx: fn => f.shared.tx(fn), exec: sql => f.shared.exec(sql), prepare() { throw Object.assign(new Error("connection reset"), { code: "ECONNRESET" }); } };
+      await assert.rejects(HostedLiveCheckpointBridge.prepare({ shared: unavailable, dek: DEK, tenant: TENANT, account: ACCOUNT, publicKey: PUB, home: f.home, healthy: () => true }), /connection reset/);
+      await spotFact(f.local, 4); // spot/paper continued while venue sends were held
+      const expected = validateFinancialCapsule(await capture(f.local), ACCOUNT);
+      let stopped = false;
+      await recoverHostedChild({ healthy: () => true, probe: async () => { await f.shared.prepare("SELECT 1").get(); },
+        stop: async () => { stopped = true; return true; },
+        mirror: async () => { assert.equal(stopped, true); return true; },
+        restart: async () => { assert.equal(stopped, true); await f.prepare(); },
+      });
+      const store = new HostedLiveCheckpointStore(f.shared, DEK);
+      assert.deepEqual(await materialize(store.loadStream((await store.latest(TENANT, ACCOUNT))!)), expected);
+    } finally { f.close(); }
+  });
   it("cold recovery restores the exact mixed financial book and the spot suffix captured by a parent mirror", async () => {
     const f = await fixture();
     try {

@@ -727,7 +727,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
   let protectMemory: ProtectMemory = emptyProtectMemory();
   let liveProtectMemory: ProtectMemory = emptyProtectMemory();
   let protectAtMs: number | null = null;
-  /** Entries the route produced, refused or not (perp-trend: one entry per signal bar). */
+  /** Admitted, stamped entries the route attempted (perp-trend: one entry per signal bar). */
   let entryCandles = new Map<PerpKey, number>();
   let strategistIntents: PerpRouteIntent[] = [];
   let lastRefusalKey: string | null = null;
@@ -1178,7 +1178,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
   /**
    * THE CANDLE OF THE LAST ENTRY: the ledger's opens (so a restart forgets
    * nothing that was sent) merged with this process's own record of every
-   * entry the route produced, refused or not (so a refused entry is not
+   * entry execution attempted, refused or not (so a refused entry is not
    * re-proposed on every tick of the same bar).
    */
   function lastEntryOf(lastOpenAt: Map<number, number>) {
@@ -1241,7 +1241,13 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     // publicly, so its money is counted and its exposure known (rule 11).
     if (sealed === null) return side;
     const nowMs = deps.now();
-    if (side.failure !== null && (!side.failure.retryable || nowMs - side.failure.atMs < LIVE_LANE_TIMING.handleRetryMs)) return side;
+    if (side.failure !== null) {
+      if (nowMs - side.failure.atMs < LIVE_LANE_TIMING.handleRetryMs) return side;
+      // Owner repairs can make the exact sealed key usable without changing
+      // the grant. The normal keystore checks still prove mode, contents and
+      // public-key binding; an unrelated or still-broken file never retries.
+      if (!side.failure.retryable && !(side.failure.blocker === "perps-key-pending" && keyLoadable(sealed))) return side;
+    }
     let epoch = 1;
     try {
       epoch = await deps.store.getAgentEpoch(a.agentId);
@@ -1889,8 +1895,26 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     const exposure = v.knownZero ? ledgerHeld && led !== null && (led.unresolved.length > 0 || led.transfers.length > 0) : (venueExposure ?? ledgerHeld);
     if (side !== null) {
       side.exposure = exposure;
-      const flatNow = v.account !== null && !v.account.positions.some((p) => p.baseAmount !== 0n) && v.account.totalOrderCount === 0 && v.account.pendingOrderCount === 0;
-      side.flatSinceMs = flatNow ? (side.flatSinceMs ?? nowMs) : null;
+      // Keep the idle withdrawal clock in the complete financial checkpoint:
+      // a process restart must not postpone a return home for another day.
+      // Only funded, fresh, known-flat accounts with no incoming deposit or unresolved open retain
+      // it; a different venue account/epoch or malformed/future stamp starts
+      // a new 24-hour interval, and any unread/non-flat observation clears it.
+      const flatNow = v.account !== null && v.account.collateralMicro > 0n && led !== null &&
+        !v.account.positions.some((p) => p.baseAmount !== 0n) && v.account.totalOrderCount === 0 && v.account.pendingOrderCount === 0 &&
+        !led.unresolved.some(order => order.effect === "open") && !led.transfers.some(transfer => transfer.direction === "deposit");
+      try {
+        const epoch = await deps.store.getAgentEpoch(a.agentId);
+        const saved = led?.account?.flatSince ?? null;
+        const bound = saved !== null && saved.accountIndex === side.accountIndex && saved.epoch === epoch && saved.atMs > 0 && saved.atMs <= nowMs;
+        const next = flatNow ? { atMs: bound ? saved.atMs : nowMs, epoch, accountIndex: side.accountIndex } : null;
+        if (JSON.stringify(next) !== JSON.stringify(saved)) await L.store.patchPerpAccount(a.agentId, "live", { flatSince: next });
+        side.flatSinceMs = next?.atMs ?? null;
+      } catch {
+        // Failure to durably record the observation never authorizes an early
+        // withdrawal. Exits-only recovery still follows its separate rule.
+        side.flatSinceMs = null;
+      }
     }
     const active = railPre.mode === "live" || exposure;
     if (active) {
@@ -2832,15 +2856,21 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       }
     }
     // ── FREE COLLATERAL HOME once flat: at once when exits-only, after 24 h flat on a live rail ──
+    // Funding/key/reconcile readiness can temporarily refuse an otherwise
+    // enabled live rail. That wait is not an owner request to return its new
+    // deposit. Keep cancellation above tied to full readiness; only collateral
+    // timing uses the underlying consent, operator and permission eligibility.
+    const idleReturn = railOn || (r.rail.mode === "refuse" && r.rail.rule === "perp-venue-unready" &&
+      isLiveRailOn(a) && a.limits.expiresAt * 1000 > nowMs && !r.policy?.incident && !side.snap?.rec?.incident);
     const flat = !acct.positions.some((p) => p.baseAmount !== 0n) && acct.totalOrderCount === 0 && acct.pendingOrderCount === 0;
     const flatLongEnough = side.flatSinceMs !== null && nowMs - side.flatSinceMs >= LIVE_LANE_TIMING.flatWithdrawMs;
-    if (flat && acct.collateralMicro > 0n && (!railOn || flatLongEnough)) {
+    if (flat && acct.collateralMicro > 0n && (!idleReturn || flatLongEnough)) {
       try {
-        const tx = await h.executor.requestWithdraw(acct.collateralMicro, acct.collateralMicro, { initiator: "agent", reason: railOn ? "flat-24h" : "exits-only" });
+        const tx = await h.executor.requestWithdraw(acct.collateralMicro, acct.collateralMicro, { initiator: "agent", reason: idleReturn ? "flat-24h" : "exits-only" });
         if (tx.rowStatus !== "rejected" && tx.rowStatus !== "app-error") {
           await say(
             "ok",
-            `perps: ${railOn ? "the Lighter account has been flat for a day, so" : "nothing is open at Lighter any more, so"} its free ` +
+            `perps: ${idleReturn ? "the Lighter account has been flat for a day, so" : "nothing is open at Lighter any more, so"} its free ` +
               `collateral (${usdgText(acct.collateralMicro)} USDG) was asked home — it arrives after the venue's withdrawal delay and a claim.`,
           );
         }
@@ -2935,9 +2965,6 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       strategistPerpIntents: handoff,
     });
     for (const d of out.dropped) log(`strategist ${labelOf(d.intent)} dropped: ${d.why}`);
-    // THE BAR IS SPENT whether or not the entry is placed: a refused entry
-    // re-proposed on every tick of the same bar is a refusal a tick.
-    if (out.entry !== null && out.entryCandleT !== null) entryCandles.set(out.entry.market, out.entryCandleT);
     const source = out.source ?? "perp-route";
     const all: { intent: PerpRouteIntent; why: Why | null }[] = [
       ...out.exits.map((intent, i) => ({ intent, why: out.why[i] ?? null })),
@@ -2959,6 +2986,12 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
         continue;
       }
       if (entry) {
+        // Admission and the decision must succeed before this signal is spent.
+        // A temporary energy-claim race or failed journal stamp sent nothing;
+        // the next tick must be able to reconsider it against fresh gates.
+        // Once execution starts, retain the bar even for an unknown outcome;
+        // only the explicit onboarding waits below release it for another try.
+        if (out.entryCandleT !== null && draft.kind === "perp-order") entryCandles.set(draft.market, out.entryCandleT);
         const facts = await hooks.processIntentReporting(intent);
         if (!tradeConsumesSnapshot(facts?.status)) await hooks.refundEntry(claim);
         // AN ENTRY HELD BACK WHILE THE VENUE IS MADE READY KEEPS ITS BAR: the

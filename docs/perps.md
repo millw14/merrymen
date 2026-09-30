@@ -515,6 +515,40 @@ if nothing was placed. Margin deposits are produced only to fund a pending
 open (margin + 10%, within caps), never to rescue a loser; free collateral goes
 home after 24 h flat and on perps-off, kill and expiry.
 
+### Autonomous operation after setup
+
+The owner enables perpetuals and chooses an automatic producer in **Settings →
+Perpetuals**. The default trend rule needs no model provider. The `strategist`
+producer needs the LLM strategist and a configured model; `manual` produces no
+automatic entries. Real-money use additionally needs the owner's live consent,
+regional attestation, funding/gas and a signed permission that carries the
+Lighter key. Hosted rollout restrictions still apply.
+
+Settings shows the saved producer, current setup progress, observed order
+minimums and signed permission expiry. The trend rule requires more than seven
+days remaining before an entry because it can hold for seven days. A market
+whose minimum exceeds the owner's effective cap stays unavailable; selecting
+eligible markets never changes that cap. A valid setup may wait for a signal.
+
+After setup, eligible signals drive funding, key registration, leverage setup
+and protected entry automatically. The worker reconciles fills/funding, maintains
+stops, exits positions and handles withdrawal/claim progress. Temporary failures
+before admission do not consume a signal. Failed spot proposal generation leaves
+the independent perp route available, with all of its normal checks; a failed
+strategist window discards its incomplete handoff. Execution/accounting failures
+retain their existing durable recovery rules.
+
+Automatic on-chain claims require a still-valid signed permission. After kill or
+expiry, the restricted shutdown worker can request a venue withdrawal but cannot
+sign an on-chain claim. Lighter's relayer or the owner's recovery flow completes
+any remaining claim; a completed shutdown never means the funds have arrived.
+
+Owner-requested pauses, Close-all halts, expired permissions and incidents that
+require key rotation remain explicit owner actions. Automatic recovery never
+widens a limit, supplies consent, extends a permission or guesses missing
+financial history. The [mainnet checklist](perps-mainnet-checklist.md) is still
+required before claiming the live venue lifecycle has been verified.
+
 ### Surfaces
 
 - **Settings** — a "Perpetuals" section with the consent and attestation of

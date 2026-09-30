@@ -1450,7 +1450,7 @@ const PERP_POSITION_COLS = [
 ] as const;
 const PERP_ACCOUNT_COLS = [
   "agent_id", "mode", "account_index", "registered_pubkey", "retired_pubkeys", "nonce_high_water",
-  "paper_collateral_micro", "incident_json", "entries_halted", "last_venue_read_at", "last_snapshot_time",
+  "paper_collateral_micro", "incident_json", "entries_halted", "last_venue_read_at", "last_snapshot_time", "flat_since_json",
   "created_at", "updated_at",
 ] as const;
 
@@ -1919,6 +1919,7 @@ export async function mirrorPerpLedger(args: {
           incident_json: incident ?? held.incident_json ?? null,
           entries_halted: Number(r.entries_halted) === 1 || Number(held.entries_halted) === 1 ? 1 : 0,
           last_venue_read_at: pick("last_venue_read_at"),
+          flat_since_json: pick("flat_since_json"),
           last_snapshot_time:
             Math.max(Number(r.last_snapshot_time ?? 0), Number(held.last_snapshot_time ?? 0)) || null,
           updated_at: newer ? r.updated_at : held.updated_at,
@@ -1930,13 +1931,13 @@ export async function mirrorPerpLedger(args: {
             .prepare(
               `UPDATE perp_accounts SET account_index = ?, registered_pubkey = ?, retired_pubkeys = ?, nonce_high_water = ?,
                       paper_collateral_micro = ?, incident_json = ?, entries_halted = ?, last_venue_read_at = ?,
-                      last_snapshot_time = ?, updated_at = ?
+                      last_snapshot_time = ?, flat_since_json = ?, updated_at = ?
                 WHERE agent_id = ? AND mode = ?`,
             )
             .run(
               next.account_index, next.registered_pubkey, next.retired_pubkeys, next.nonce_high_water,
               next.paper_collateral_micro, next.incident_json, next.entries_halted, next.last_venue_read_at,
-              next.last_snapshot_time, next.updated_at, agent, r.mode,
+              next.last_snapshot_time, next.flat_since_json, next.updated_at, agent, r.mode,
             )).changes,
         );
       }

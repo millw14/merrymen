@@ -44,3 +44,17 @@ it("the real hosted status route only returns the authenticated owner's recovery
   assert.equal(status.perpsRecovery.state, "paused");
   assert.deepEqual(await (await GET(request(B))).json(), { exists: false });
 });
+
+
+it("an owner-bound status read refuses a changed hosted session before returning another owner's status", async () => {
+  const request = (owner: string, signedIn: `0x${string}`) => new Request(`http://localhost/api/grants?owner=${owner}`, {
+    headers: { cookie: `${SESSION_COOKIE}=${mintSession(signedIn)}` },
+  });
+  const stale = await GET(request(A, B));
+  assert.equal(stale.status, 409);
+  assert.match(stale.headers.get("cache-control") ?? "", /no-store/);
+  assert.deepEqual(await stale.json(), { error: "The signed-in owner changed. Refresh this page before continuing." });
+  const own = await GET(request(A.toUpperCase().replace("0X", "0x"), A));
+  assert.equal(own.status, 200);
+  assert.equal((await own.json()).perpsRecovery.state, "paused");
+});

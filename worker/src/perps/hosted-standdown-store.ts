@@ -179,6 +179,16 @@ export class HostedStanddownStore {
   return !!await this.db.prepare(`SELECT id FROM perp_standdown WHERE id = ? AND tenant = ? AND smart_account = ? AND generation = ? AND claimant = ?
    AND state = 'running' AND expires_at_ms > ? AND sealed_key IS NOT NULL`).get(job.id, job.tenant, job.smartAccount, job.generation, job.claimant, now);
  }
+ /** Advisory pre-sign check; reserveClose remains the atomic final send gate. */
+ async remainingCloseAttempts(job: HostedStanddownJob, marketId: number, now = Date.now()): Promise<number> {
+  if (!Number.isSafeInteger(marketId) || marketId < 0 || marketId > 65535) throw new Error("shutdown close market refused");
+  const row = await this.db.prepare(`SELECT (SELECT COUNT(*) FROM perp_standdown_closes c WHERE c.job_id = s.id AND c.market_id = ?) AS used
+   FROM perp_standdown s WHERE s.id = ? AND s.tenant = ? AND s.smart_account = ? AND s.generation = ? AND s.claimant = ?
+   AND s.state = 'running' AND s.expires_at_ms > ? AND s.sealed_key IS NOT NULL`)
+   .get(marketId, job.id, job.tenant, job.smartAccount, job.generation, job.claimant, now) as { used: number } | undefined;
+  if (!row) throw new Error("shutdown close capacity fenced");
+  return Math.max(0, 3 - Number(row.used));
+ }
  /** One job-wide budget. Exact-byte replays retain their original attempt. */
  async reserveClose(job: HostedStanddownJob, close: { marketId: number; txHash: string }, now?: number): Promise<boolean> {
   if (!Number.isSafeInteger(close.marketId) || close.marketId < 0 || typeof close.txHash !== "string" || !close.txHash.length || close.txHash.length > 256) return false;

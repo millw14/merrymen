@@ -57,13 +57,16 @@
 "A summary every hour" = "A summary every hour";
 "A whole number from {min} to {max}." = "A whole number from {min} to {max}.";
 "above (the checkbox does that when you add it), you’ve" = "above (the checkbox does that when you add it), you’ve";
+"above your saved effective limit of {cap} USDG; no new entry in this market" = "above your saved effective limit of {cap} USDG; no new entry in this market";
 "Account" = "アカウント";
 "add chat id…" = "add chat id…";
 "Add funds" = "入金";
+"Add funds to your agent" = "Add funds to your agent";
 "Add funds." = "入金する。";
 "add token" = "add token";
 "Add your bot to a group and it acts like one more person there: it answers when someone calls it, joins in now and then, and remembers the chat. If someone else adds it, it stays silent until you answer Stay or Leave in your DMs. It never posts trade alerts, sizes, prices or P&L." = "Add your bot to a group and it acts like one more person there: it answers when someone calls it, joins in now and then, and remembers the chat. If someone else adds it, it stays silent until you answer Stay or Leave in your DMs. It never posts trade alerts, sizes, prices or P&L.";
 "Advanced settings" = "Advanced settings";
+"After your consent and signed permission are in place, your agent handles funding its Lighter account, registering its trading key, entries, stops and exits within your limits. It waits when a check fails or there is no eligible signal; you do not need to place each trade." = "After your consent and signed permission are in place, your agent handles funding its Lighter account, registering its trading key, entries, stops and exits within your limits. It waits when a check fails or there is no eligible signal; you do not need to place each trade.";
 "Agent connections" = "Agent connections";
 "Agent name" = "Agent name";
 "Agent settings" = "Agent settings";
@@ -90,6 +93,7 @@
 "Ask it why." = "理由を聞いてみましょう。";
 "asset mode" = "asset mode";
 "At {lev}x, liquidation comes before the stop plus the room before liquidation, so every open would be refused. Lower the leverage, the stop distance or the room before liquidation." = "At {lev}x, liquidation comes before the stop plus the room before liquidation, so every open would be refused. Lower the leverage, the stop distance or the room before liquidation.";
+"Automatic trading setup" = "Automatic trading setup";
 "Back" = "戻る";
 "Balance" = "残高";
 "Banner" = "Banner";
@@ -128,6 +132,7 @@
 "checking…" = "checking…";
 "Choose a name and strategy, then review its wallet setup and spending limits. Creating an agent and authorizing live trading are separate steps." = "名前と戦略を選び、そのあとウォレットの設定と支出上限を確認します。エージェントを作ることと、実資金取引を許可することは、別々の手順です。";
 "Choose language" = "言語を選択";
+"Choose markets your limits can reach, or review your settings and signed per-trade limit. Limits are never raised automatically." = "Choose markets your limits can reach, or review your settings and signed per-trade limit. Limits are never raised automatically.";
 "claim one" = "claim one";
 "Claim with your $MERRYMEN wallet for AI and token discovery access. A saved Bitquery key takes priority for discovery." = "Claim with your $MERRYMEN wallet for AI and token discovery access. A saved Bitquery key takes priority for discovery.";
 "class route" = "class route";
@@ -254,6 +259,7 @@
 "mainnet RPC override" = "mainnet RPC override";
 "Manage →" = "Manage →";
 "Manual — no automatic opens" = "Manual — no automatic opens";
+"Manual is saved: no new position opens automatically. Choose an automatic rule in Markets and limits if you want your agent to trade on its own." = "Manual is saved: no new position opens automatically. Choose an automatic rule in Markets and limits if you want your agent to trade on its own.";
 "Market check interval" = "Market check interval";
 "Markets" = "マーケット";
 "Markets ({count} of up to {max})" = "Markets ({count} of up to {max})";
@@ -275,8 +281,10 @@
 "merry circle token" = "merry circle token";
 "metals" = "metals";
 "min" = "min";
+"minimum" = "minimum";
 "minimum curve depth (USDG)" = "minimum curve depth (USDG)";
 "Minimum liquidity required to use a token’s price. Lower values accept more price-manipulation risk." = "Minimum liquidity required to use a token’s price. Lower values accept more price-manipulation risk.";
+"Minimum orders at your agent's last market read (they change with price):" = "Minimum orders at your agent's last market read (they change with price):";
 "minimum pool depth (USD)" = "minimum pool depth (USD)";
 "model" = "model";
 "Model for Anthropic and screen analysis." = "Model for Anthropic and screen analysis.";
@@ -389,8 +397,10 @@
 "Ready when you are." = "準備ができたら、どうぞ。";
 "Real money raised into the curve, excluding the virtual seed it opens with. Below this, an entry is refused." = "Real money raised into the curve, excluding the virtual seed it opens with. Below this, an entry is refused.";
 "Real perpetuals also need:" = "Real perpetuals also need:";
+"Real-money perpetuals are enabled. New positions wait for the agent's checks and an eligible strategy signal." = "Real-money perpetuals are enabled. New positions wait for the agent's checks and an eligible strategy signal.";
 "Realized P&L comes from a sale compared with the cost of what was sold. Open positions have unrealized gains or losses as prices move. A buy alone has not realized a profit. Missing cost basis is not zero profit." = "実現損益は、売却した金額と、その売却分の取得価額を比べて計算します。保有中のポジションには、価格の動きに応じて含み損益が生じます。買っただけでは、利益は確定していません。取得価額が分からないことは、利益がゼロという意味ではありません。";
 "Recipient" = "送金先";
+"Refresh perpetuals status" = "Refresh perpetuals status";
 "Required for chat and the Strategist." = "Required for chat and the Strategist.";
 "Required for real trading on Robinhood Chain. Not needed for Paper, or on the testnet." = "Required for real trading on Robinhood Chain. Not needed for Paper, or on the testnet.";
 "Required for token discovery unless you use a Merry Circle token." = "Required for token discovery unless you use a Merry Circle token.";
@@ -399,7 +409,10 @@
 "Retry" = "再試行";
 "Retry account sync" = "アカウント同期を再試行";
 "Return to chat to ask about your strategy, limits or the latest decision. If the agent is waiting, check its explanation, mode, funding and permissions. Replay this walkthrough with Show me around whenever you need it." = "戦略、上限、最新の判断について聞きたいときは、チャットに戻ってください。エージェントが動かずに待っている場合は、その説明、モード、入金状況、権限を確認してください。この案内は「使い方を見る」からいつでも見直せます。";
+"Review account trading mode" = "Review account trading mode";
 "Review changes" = "変更を確認";
+"Review markets and limits" = "Review markets and limits";
+"Review signed permission" = "Review signed permission";
 "Review the available cash, destination and amount before confirming a withdrawal. Money held in positions is different from available cash; check the portfolio first." = "出金を確定する前に、利用可能な現金、送金先、金額を確認してください。ポジションに入っているお金は、利用可能な現金とは別です。先にポートフォリオを確認してください。";
 "Review what the agent may trade and the permissions you are signing. Changes to signed permissions require a new wallet signature. The tutorial never signs or submits one for you." = "エージェントが取引できる対象と、これから署名する権限の内容を確認してください。署名済みの権限を変更するには、ウォレットでの新しい署名が必要です。この案内が、あなたの代わりに署名したり送信したりすることはありません。";
 "Rialto integrator key" = "Rialto integrator key";
@@ -483,7 +496,10 @@
 "The Perpetuals permission: your agent has no signed permission yet." = "The Perpetuals permission: your agent has no signed permission yet.";
 "The Perpetuals permission: your signed permission couldn't be read just now." = "The Perpetuals permission: your signed permission couldn't be read just now.";
 "the saved key" = "the saved key";
+"The signed permission's expiry has not been read. The trend rule needs more than {hours} hours (7 days) remaining before a new real-money entry." = "The signed permission's expiry has not been read. The trend rule needs more than {hours} hours (7 days) remaining before a new real-money entry.";
 "the strategist looks things up before it commits" = "the strategist looks things up before it commits";
+"The trend rule needs more than {hours} hours (7 days) left on the signed permission before a new entry. About {remaining} hours remain, so it cannot open a new position. Review and re-sign a longer duration if you want to continue; existing exits remain available." = "The trend rule needs more than {hours} hours (7 days) left on the signed permission before a new entry. About {remaining} hours remain, so it cannot open a new position. Review and re-sign a longer duration if you want to continue; existing exits remain available.";
+"The trend rule only opens BTC, ETH or SOL perpetuals, and none is selected. Review your markets before expecting automatic entries." = "The trend rule only opens BTC, ETH or SOL perpetuals, and none is selected. Review your markets before expecting automatic entries.";
 "The venue is Lighter's Robinhood Chain instance, run by Lighter under its own terms. Its contracts can be upgraded without effective notice." = "The venue is Lighter's Robinhood Chain instance, run by Lighter under its own terms. Its contracts can be upgraded without effective notice.";
 "The wire in control on a public profile adds that agent’s published reasoning to your agent’s context. It does not copy trades automatically or override your own limits." = "公開プロフィールにある「つなぐ」を使うと、そのエージェントが公開している考えを、あなたのエージェントが参照する情報に加えられます。取引が自動でコピーされることはなく、あなたが決めた上限が上書きされることもありません。";
 "These positions stay valued at purchase cost even if they lose value, so if one goes to zero your equity will not show it and the breaker will not fire." = "These positions stay valued at purchase cost even if they lose value, so if one goes to zero your equity will not show it and the breaker will not fire.";
@@ -513,7 +529,6 @@
 "Trading mode" = "Trading mode";
 "trading permission" = "trading permission";
 "trading permissions" = "trading permissions";
-"Trading perpetuals with real money on Lighter." = "Trading perpetuals with real money on Lighter.";
 "Trading preferences" = "Trading preferences";
 "Transcription API key for voice notes. Leave blank to disable voice." = "Transcription API key for voice notes. Leave blank to disable voice.";
 "transcription key (voice)" = "transcription key (voice)";
@@ -564,6 +579,7 @@
 "You stay in control." = "主導権はあなたにあります。";
 "Your agent can control this computer without asking for each action — running commands, typing, and opening links. It may damage files or expose private information. The destructive blocklist and the secret redaction are a" = "Your agent can control this computer without asking for each action — running commands, typing, and opening links. It may damage files or expose private information. The destructive blocklist and the secret redaction are a";
 "Your agent has no signed permission yet, so its per-trade limit isn't set." = "Your agent has no signed permission yet, so its per-trade limit isn't set.";
+"Your agent has not reported current market minimums yet. Enabling perpetuals does not mean an order is ready; it checks minimums and your limits before trading." = "Your agent has not reported current market minimums yet. Enabling perpetuals does not mean an order is ready; it checks minimums and your limits before trading.";
 "Your agent has not reported on perpetuals yet, so what it holds on Lighter, if anything, isn't known here." = "Your agent has not reported on perpetuals yet, so what it holds on Lighter, if anything, isn't known here.";
 "Your agent mints a link code on its next pass. Check back shortly." = "Your agent mints a link code on its next pass. Check back shortly.";
 "Your agent opens no position on its own. Stops and closes still run." = "Your agent opens no position on its own. Stops and closes still run.";

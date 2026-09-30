@@ -44,6 +44,7 @@ import {
   liveConsentStale,
   perpMarketGroups,
   perpMarketsInForce,
+  perpsAutonomyReadiness,
   perpsDraftBody,
   perpsDraftProblems,
   perpsLiveOffBody,
@@ -113,7 +114,7 @@ const LIVE_UNREAD_REPORT = {
   stopsMissing: 1,
 };
 
-function grantsBody(over: Partial<{ perps: unknown; perpsOptIn: boolean; granted: boolean; perTradeUsdg: number; exists: boolean; mode: string }> = {}) {
+function grantsBody(over: Partial<{ perps: unknown; perpsOptIn: boolean; granted: boolean; perTradeUsdg: number; expiresAt: number; exists: boolean; mode: string }> = {}) {
   if (over.exists === false) return { exists: false, ...(over.perps !== undefined ? { perps: over.perps } : {}) };
   const granted = over.granted ?? true;
   return {
@@ -121,6 +122,7 @@ function grantsBody(over: Partial<{ perps: unknown; perpsOptIn: boolean; granted
     ...(over.mode !== undefined ? { mode: over.mode } : {}),
     grant: {
       smartAccount: ACCOUNT,
+      ...(over.expiresAt !== undefined ? { expiresAt: over.expiresAt } : {}),
       chainId: LIGHTER_ROUTE_V1.chainId,
       caps: { perTradeUsdg: over.perTradeUsdg ?? 20, dailyUsdg: 100, expiryDays: 30, maxDrawdownPct: 20, maxOpsPerDay: 50 },
       grantFeatures: granted ? [GRANT_PERP_LIGHTER] : [],
@@ -509,7 +511,7 @@ describe("the status line, from agents.perps", () => {
   it("live says real money, and counts what the venue holds", async () => {
     routes["GET /api/grants"] = () => json(grantsBody({ perps: LIVE_REPORT }));
     await shown();
-    assert.match(text(), /Trading perpetuals with real money on Lighter\./);
+    assert.ok(text().includes(EN["settings.perps.status.live"]));
     assert.match(text(), /Open positions: 2\./);
     assert.doesNotMatch(text(), /could not be read/);
   });
@@ -572,7 +574,7 @@ describe("real money is a consent, not a checkbox", () => {
     assert.equal(ui.container.querySelector('[aria-labelledby="perps-consent-title"]'), null);
     assert.equal(ui.container.querySelector<HTMLInputElement>('input[name="perpsMaxLeverage"]')?.value, "");
     assert.equal(button(SAVE)?.disabled, true);
-    assert.equal(calls.filter((c) => c.url === "/api/grants").length, 2);
+    assert.equal(calls.filter((c) => c.url.split("?")[0] === "/api/grants").length, 2);
     await press(checkbox(LIVE), "B's switch");
     assert.equal(button(CONFIRM)?.disabled, true, "B must attest independently");
     assert.match(text(), /The Perpetuals permission in the permission you signed: not included/);
@@ -736,7 +738,7 @@ describe("real money is a consent, not a checkbox", () => {
     const said = ui.container.querySelector('[aria-labelledby="perps-consent-title"]')?.textContent ?? "";
     assert.match(said, /Live trading, at the top of this page: off\. Turn it on and save\./);
     assert.match(said, /The Perpetuals permission in the permission you signed: not included\./);
-    assert.ok(ui.container.querySelector('[aria-labelledby="perps-consent-title"] a[href="/grant"]'), "a way to re-sign");
+    assert.ok(ui.container.querySelector('[aria-labelledby="perps-consent-title"] a[href="/grant#resign"]'), "a way to re-sign");
     assert.match(said, /does not offer real-money perpetuals for your agent yet/);
   });
 
@@ -901,5 +903,172 @@ describe("what the section must go on saying", () => {
     const saveFn = settings.slice(settings.indexOf("async function save()"), settings.indexOf("async function reloadView()"));
     assert.ok(saveFn.length > 0, "save() moved");
     assert.doesNotMatch(saveFn, /perps/, "the page's Save changes must not carry a perps key");
+  });
+});
+
+
+describe("automatic setup is visible, current and bound to the owner", () => {
+  const refresh = EN["settings.perps.status.refresh"];
+  const limits = EN["settings.perps.setup.reviewLimits"];
+  const report = (over: Record<string, unknown> = {}) => ({ ...LIVE_REPORT, positions: [], entriesHalted: false, venueReadAt: Date.now(), ...over });
+
+  it("shows the saved default automatic rule and waiting state without inventing a resume action", async () => {
+    stored = { ...CONSENTED, liveTradingEnabled: true };
+    routes["GET /api/grants"] = () => json(grantsBody({ perps: report(), expiresAt: Math.floor(Date.now() / 1000) + 14 * 86400 }));
+    await shown({ hosted: true });
+    const setup = ui.container.querySelector('[aria-label="Automatic perpetual trading"]')!;
+    assert.ok(setup.textContent?.includes(EN["settings.perps.driver.perpTrend"]));
+    assert.match(setup.textContent ?? "", /you do not need to place each trade/);
+    assert.ok(text().includes(EN["settings.perps.status.live"]));
+    assert.equal(button("Resume perpetual entries"), null);
+    assert.equal(writes().length, 0);
+    assert.ok(calls.some(c => c.url === `/api/grants?owner=${OWNER}`));
+    assert.equal(ui.container.querySelector<HTMLDetailsElement>("details")?.open, false);
+    await press(button(limits), "review automatic rule and limits");
+    assert.equal(ui.container.querySelector<HTMLDetailsElement>("details")?.open, true);
+    assert.equal(writes().length, 0);
+  });
+
+  it("makes a seven-day grant and unreachable signed cap visible; choosing markets never widens a limit", async () => {
+    stored = { ...CONSENTED, liveTradingEnabled: true, perpsMarkets: ["BTC-PERP", "ETH-PERP"], perpsPerTradeUsdg: 20 };
+    routes["GET /api/grants"] = () => json(grantsBody({ expiresAt: Math.floor(Date.now() / 1000) + 7 * 86400, perTradeUsdg: 10,
+      perps: report({ entryMinimums: [{ market: "BTC-PERP", minNotionalMicro: "17000000" }, { market: "ETH-PERP", minNotionalMicro: "13000000" }] }) }));
+    await shown();
+    assert.match(text(), /more than 168 hours/);
+    assert.match(text(), /BTC-PERP: 17 USDG/);
+    assert.match(text(), /above your saved effective limit of 10 USDG/);
+    assert.ok(ui.container.querySelector('a[href="/grant#resign"]'));
+    assert.equal(writes().length, 0);
+    await press(button(limits), "open limits");
+    await press(button("SOL-PERP"), "choose another market within existing limits");
+    await press(button(SAVE), "save market choice");
+    assert.equal(writes().length, 1);
+    assert.deepEqual(writes()[0].body, { owner: OWNER, perpsMarkets: ["BTC-PERP", "ETH-PERP", "SOL-PERP"] });
+    assert.equal(stored.perpsPerTradeUsdg, 20);
+    assert.equal(stored.perpsLiveConsentVersion, PERPS_LIVE_CONSENT_VERSION);
+  });
+
+  it("surfaces manual or incompatible automatic rules before the advanced fields", async () => {
+    stored = { perpsEnabled: true, perpsDriver: "manual" };
+    await shown();
+    assert.ok(ui.container.querySelector('[aria-label="Automatic perpetual trading"]')?.textContent?.includes(EN["settings.perps.setup.manual"]));
+    await press(button(limits), "review rule");
+    await choose(ui.container.querySelector<HTMLSelectElement>("select")!, "perp-trend");
+    await press(button(SAVE), "save automatic rule");
+    assert.deepEqual(writes()[0].body, { owner: OWNER, perpsDriver: "perp-trend" });
+    assert.equal(perpsAutonomyReadiness({ perpsEnabled: true, perpsMarkets: ["AAPL-PERP"] }, DEFAULTS, { state: "unread" }, Date.now()).noTrendMarkets, true);
+    assert.equal(perpsAutonomyReadiness({ perpsEnabled: true, perpsDriver: "strategist", strategy: "steady" }, DEFAULTS, { state: "unread" }, Date.now()).strategistMismatch, true);
+  });
+
+  it("refresh and returning from signing follow funding and key setup without another setting change", async () => {
+    stored = { ...CONSENTED, liveTradingEnabled: true };
+    let blocker: string | null = "perps-awaiting-deposit";
+    routes["GET /api/grants"] = () => json(grantsBody({ perps: report({ blocker }) }));
+    await shown();
+    assert.ok(text().includes(perpsBlockerText("perps-awaiting-deposit").what));
+    blocker = "perps-key-pending";
+    await press(button(refresh), "refresh setup");
+    assert.ok(text().includes(perpsBlockerText("perps-key-pending").what));
+    blocker = null;
+    await act(async () => { ui.dom.window.dispatchEvent(new ui.dom.window.Event("focus")); });
+    await until(() => !text().includes(perpsBlockerText("perps-key-pending").what), "worker completed setup");
+    assert.equal(writes().length, 0);
+    assert.equal(button("Resume perpetual entries"), null);
+  });
+
+  it("only a durable owner halt offers resume, and an incident retains the key-rotation gate", async () => {
+    let current = report({ blocker: "perps-entries-halted" });
+    routes["GET /api/grants"] = () => json(grantsBody({ perps: current }));
+    await shown();
+    assert.equal(button("Resume perpetual entries"), null);
+    assert.ok(!text().includes("Resume them on the dashboard"));
+    current = report({ blocker: "perps-entries-halted", entriesHalted: true });
+    await press(button(refresh), "refresh owner pause");
+    assert.ok(button("Resume perpetual entries"));
+    current = report({ blocker: "perps-unknown-activity", entriesHalted: true, incident: true });
+    await press(button(refresh), "refresh incident");
+    assert.equal(button("Resume perpetual entries"), null);
+    assert.match(text(), /key rotation before entries can resume/);
+    assert.equal(writes().length, 0);
+  });
+
+  it("never marks stale or unread minimums eligible, and keeps them as last-observed facts", () => {
+    const now = Date.now();
+    const raw = report({ venueReadAt: now, entryMinimums: [{ market: "BTC-PERP", minNotionalMicro: "9000000" }] });
+    const read = (extra: Record<string, unknown>) => perpsAutonomyReadiness({ perpsEnabled: true }, DEFAULTS,
+      readPerpsGrant(grantsBody({ perps: { ...raw, ...extra }, perTradeUsdg: 10 })), now);
+    assert.equal(read({}).minimums[0].fits, true);
+    for (const extra of [{ venueReadAt: now - 900001 }, { venueReadAt: null }, { collateralMicro: null }, { venueReadAt: now + 1 }]) {
+      assert.equal(read(extra).minimums[0].fits, null);
+    }
+    const invalidExpiry = readPerpsGrant(grantsBody({ expiresAt: NaN }));
+    assert.ok(invalidExpiry.state === "read" && invalidExpiry.expiresAt === null);
+    const short = readPerpsGrant(grantsBody({ expiresAt: Math.floor(now / 1000) + 168 * 3600 }));
+    assert.equal(perpsAutonomyReadiness({ perpsEnabled: true, liveTradingEnabled: false }, DEFAULTS, short, now).authority, "short");
+    assert.equal(perpsAutonomyReadiness({ perpsEnabled: true, liveTradingEnabled: false }, DEFAULTS, invalidExpiry, now).authority, null);
+    assert.equal(perpsAutonomyReadiness({ perpsEnabled: true, liveTradingEnabled: true }, DEFAULTS, invalidExpiry, now).authority, "unknown");
+  });
+
+  it("an owner switch aborts a pending read and its delayed result cannot replace the new owner's report", async () => {
+    let finishOld!: (r: Response) => void;
+    let oldSignal!: AbortSignal;
+    routes["GET /api/grants"] = (url, init) => {
+      if (url.includes(OWNER)) {
+        oldSignal = init!.signal as AbortSignal;
+        return new Promise<Response>(resolve => { finishOld = resolve; });
+      }
+      return json(grantsBody({ perps: report({ blocker: "perps-not-granted" }), granted: false }));
+    };
+    await ui.render(createElement(Harness, { owner: OWNER, hosted: true }));
+    await shown({ owner: ACCOUNT, hosted: true });
+    assert.equal(oldSignal.aborted, true);
+    assert.ok(text().includes(perpsBlockerText("perps-not-granted").what));
+    await act(async () => { finishOld(json(grantsBody({ perps: report({ entriesHalted: true, blocker: "perps-entries-halted" }) }))); });
+    await settle();
+    assert.ok(text().includes(perpsBlockerText("perps-not-granted").what));
+    assert.equal(button("Resume perpetual entries"), null);
+    assert.equal(writes().length, 0);
+  });
+
+  it("a hung response body times out and the next automatic poll recovers with a fresh signal", async () => {
+    const realTimeout = globalThis.setTimeout;
+    const timers: { delay: number; run: () => void; id: ReturnType<typeof setTimeout> }[] = [];
+    globalThis.setTimeout = ((fn: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+      if (delay === 10_000 || delay === 15_000) {
+        const run = () => fn(...args);
+        const id = realTimeout(run, 60_000);
+        timers.push({ delay, run, id });
+        return id;
+      }
+      return realTimeout(fn, delay, ...args);
+    }) as typeof setTimeout;
+    try {
+      let attempts = 0;
+      const signals: AbortSignal[] = [];
+      routes["GET /api/grants"] = (_url, init) => {
+        signals.push(init!.signal as AbortSignal);
+        return ++attempts === 1 ? { ok: true, json: () => new Promise(() => {}) } as Response : json(grantsBody({ perps: report() }));
+      };
+      await ui.render(createElement(Harness, { owner: OWNER, hosted: true }));
+      const fire = async (delay: number) => {
+        const timer = timers.filter(t => t.delay === delay).at(-1)!;
+        assert.ok(timer);
+        clearTimeout(timer.id);
+        await act(async () => { timer.run(); });
+        await settle();
+      };
+      await fire(10_000);
+      assert.ok(text().includes(EN["settings.perps.status.unread"]));
+      assert.equal(signals[0].aborted, true);
+      await fire(15_000);
+      assert.equal(attempts, 2);
+      assert.notEqual(signals[1], signals[0]);
+      assert.equal(signals[1].aborted, false);
+      assert.ok(text().includes(EN["settings.perps.status.live"]));
+      assert.equal(writes().length, 0);
+    } finally {
+      globalThis.setTimeout = realTimeout;
+      for (const timer of timers) clearTimeout(timer.id);
+    }
   });
 });

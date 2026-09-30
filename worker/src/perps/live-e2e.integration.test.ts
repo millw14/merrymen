@@ -55,7 +55,7 @@ import { provenanceOf } from "../provenance";
 import { buildOpenDraft } from "./drafts";
 import { readLighterFeed, specToJson, type LighterFeedFileMarket } from "./feed-reader";
 import { writePerpKeyFile } from "./keystore";
-import { createPerpLane, type PerpLane, type PerpLaneConfig, type PerpLaneRead } from "./lane";
+import { createPerpLane, LIVE_LANE_TIMING, type PerpLane, type PerpLaneConfig, type PerpLaneRead } from "./lane";
 import {
   LIGHTER_PRIORITY_REQUEST_TOPIC,
   perpLegCalls,
@@ -1141,5 +1141,177 @@ describe("the fake venue itself", () => {
   it("never saw a byte no ledger row held, and never failed on its own (a fake that threw would prove nothing)", () => {
     assert.deepEqual(venue.violations, []);
     assert.deepEqual(venue.errors, []);
+  });
+});
+
+describe("autonomous first entry survives temporary admission failures", () => {
+  for (const failure of ["energy-claim", "decision-write"] as const) {
+    it(`${failure} failure before execution keeps the same signal available for complete onboarding`, async () => {
+      const w = await world();
+      await w.lane.armed();
+      await w.lane.stopProtect();
+      await tick(w, { route: false });
+      const normal = hooks(w);
+      let withheld = 0;
+      await w.lane.runRoute({ ...TICK, equityUsdg: equityOf(w) }, {
+        ...normal,
+        ...(failure === "energy-claim" ? {
+          claimEntry: async () => ({ ok: false }),
+          withholdEntry: async () => { withheld++; },
+        } : { ensureDecision: async () => ({ ok: false as const, why: "temporary decision store outage" }) }),
+      });
+      assert.equal(w.legs.length, 0, "no deposit was authorized before admission and decision stamping");
+      assert.equal(liveOrders(w).length, 0);
+      if (failure === "energy-claim") assert.equal(withheld, 1);
+      else assert.equal(w.energy.claimed, w.energy.refunded, "failed decision refunded its entry claim");
+      // The next tick is still within the exact same 4h signal candle.
+      await tick(w);
+      assert.deepEqual(w.legs, [{ kind: "perp-deposit", status: "landed" }], "recovery proceeds without waiting four hours for another signal");
+      await tick(w); // credited deposit, register key
+      await tick(w); // key self-check, nonce horizon
+      await tick(w, { advanceMs: 11 * 60_000 }); // leverage
+      await tick(w); // protected entry
+      assert.equal(liveOrders(w).filter(row => row.effect === "open").length, 1);
+      assert.ok(venue.accounts.get(acctIdx(w))?.pos.get(1));
+      await tick(w); // reconciliation must not duplicate entry
+      assert.equal(liveOrders(w).filter(row => row.effect === "open").length, 1);
+      const order = liveOrders(w).find(row => row.effect === "open")!;
+      assert.deepEqual(rows("SELECT role FROM perp_order_legs WHERE order_id = ? ORDER BY client_order_index", String(order.id)).map(row => row.role), ["entry", "sl"]);
+    });
+  }
+});
+
+describe("autonomous recovery after the exact key file is restored", () => {
+  it("rechecks a repaired sealed key without a restart, while an unrelated key never resumes trading", async () => {
+    const restored = signer.generateApiKey();
+    const w = await world({ sealed: restored.publicKey });
+    w.chain.idx = w.idxOnDeposit;
+    w.chain.cash -= u(20);
+    venue.credit(w.sa, u(20), Number(w.chain.idx));
+    venue.registerKey(Number(w.chain.idx), 16, restored.publicKey);
+    await w.lane.armed();
+    await w.lane.stopProtect();
+    const blocked = await tick(w, { route: false });
+    assert.equal(blocked.report.blocker, "perps-key-pending");
+    writePerpKeyFile(HOME, signer.generateApiKey());
+    const unrelated = await tick(w, { advanceMs: 61_000, route: false });
+    assert.equal(unrelated.report.blocker, "perps-key-pending");
+    assert.equal(liveOrders(w).length, 0, "another readable private key is not authority for this grant");
+    writePerpKeyFile(HOME, restored);
+    await tick(w, { advanceMs: 61_000, route: false });
+    const ready = await tick(w, { advanceMs: 11 * 60_000, route: false });
+    assert.equal(ready.rail.mode, "live", "the matching key is verified and the existing nonce horizon still applies");
+    assert.equal((await store.getPerpAccount(w.id, "live"))?.registeredPubkey, restored.publicKey);
+    assert.equal(liveOrders(w).length, 0, "recovery itself does not open or raise leverage");
+    // Only the ordinary fresh route and all its policy checks may now trade.
+    await tick(w);
+    await tick(w);
+    assert.equal(liveOrders(w).filter(row => row.effect === "open").length, 1);
+    assert.ok(venue.accounts.get(acctIdx(w))?.pos.get(1));
+  });
+});
+
+describe("idle collateral returns after a durable full day flat", () => {
+  async function flatWorld() {
+    clock = BAR + H;
+    mark = 802_000n; venue.setMark(1, mark);
+    const w = await world(); await onboardAndOpen(w);
+    w.cfg.perpsDriver = "manual";
+    const closed = await w.lane.close("BTC-PERP"); assert.equal(closed.ok, true);
+    await tick(w, { route: false });
+    assert.equal(venue.accounts.get(acctIdx(w))!.pos.size, 0);
+    const flat = (await store.getPerpAccount(w.id, "live"))?.flatSince;
+    assert.ok(flat); return { w, flat };
+  }
+  it("survives closing and reopening the ledger and lane without shortening or restarting the 24-hour clock", async () => {
+    const { w, flat } = await flatWorld();
+    const deadline = flat.atMs + LIVE_LANE_TIMING.flatWithdrawMs;
+    await tick(w, { route: false, advanceMs: deadline - clock - 1 });
+    await pass(w);
+    assert.equal(liveOrders(w).filter(row => row.effect === "withdraw").length, 0, "one millisecond short is still too early");
+    await w.lane.stopProtect();
+    store.closeStoreForTest();
+    const cwd = process.cwd(); try { process.chdir(isolatedCwd); await store.initStore(); } finally { process.chdir(cwd); }
+    w.lane = laneFor(w, LIVE);
+    await w.lane.armed(); await w.lane.stopProtect();
+    assert.equal((await store.getPerpAccount(w.id, "live"))?.flatSince?.atMs, flat.atMs);
+    await tick(w, { route: false, advanceMs: 1 });
+    await pass(w);
+    assert.equal(liveOrders(w).filter(row => row.effect === "withdraw").length, 1, "the idle funds return without another day after redeploy");
+  });
+  it("a reopened position clears the old flat interval; malformed and future clocks authorize no immediate withdrawal", async () => {
+    const { w, flat } = await flatWorld();
+    const read = await tick(w, { route: false });
+    const draft = buildOpenDraft({ market: read.view!.markets.get("BTC-PERP")!, side: "long", notionalCapMicro: u(20), stopBps: 300, maxSlippageBps: 50, stopSlipBps: 200, liqBufferBps: 200 });
+    assert.ok(draft.ok); assert.equal((await w.lane.execute(draft.draft as PerpOrderIntent, { equityUsdg: equityOf(w), equityKnown: true })).status, "submitted");
+    await tick(w, { route: false });
+    assert.equal((await store.getPerpAccount(w.id, "live"))?.flatSince, null, "a held position retires the previous clock");
+    assert.equal((await w.lane.close("BTC-PERP")).ok, true);
+    await tick(w, { route: false });
+    const again = (await store.getPerpAccount(w.id, "live"))!.flatSince!;
+    assert.ok(again.atMs > flat.atMs);
+    await pass(w);
+    assert.equal(liveOrders(w).filter(row => row.effect === "withdraw").length, 0);
+    for (const invalid of ["broken-json", JSON.stringify({ ...again, atMs: clock + 99_000 }), JSON.stringify({ ...again, epoch: again.epoch + 1 }), JSON.stringify({ ...again, accountIndex: again.accountIndex + 1 })]) {
+      raw.prepare("UPDATE perp_accounts SET flat_since_json = ? WHERE agent_id = ? AND mode = 'live'").run(invalid, w.id);
+      await tick(w, { route: false }); await pass(w);
+      assert.equal(liveOrders(w).filter(row => row.effect === "withdraw").length, 0);
+      assert.ok((await store.getPerpAccount(w.id, "live"))!.flatSince!.atMs >= again.atMs);
+    }
+  });
+  it("an open that stops out between reads cannot revive the pre-open clock after a crash", async () => {
+    const { w, flat } = await flatWorld();
+    const read = await tick(w, { route: false, advanceMs: LIVE_LANE_TIMING.flatWithdrawMs + 1 });
+    const draft = buildOpenDraft({ market: read.view!.markets.get("BTC-PERP")!, side: "long", notionalCapMicro: u(20), stopBps: 300, maxSlippageBps: 50, stopSlipBps: 200, liqBufferBps: 200 });
+    assert.ok(draft.ok);
+    assert.equal((await w.lane.execute(draft.draft as PerpOrderIntent, { equityUsdg: equityOf(w), equityKnown: true })).status, "submitted");
+    assert.equal((await store.getPerpAccount(w.id, "live"))?.flatSince, null, "the signed open and retired clock commit atomically before broadcast");
+    // The venue fills its resting stop before the worker observes the holding.
+    mark = mark * 97n / 100n; venue.setMark(1, mark);
+    assert.equal(venue.accounts.get(acctIdx(w))!.pos.size, 0);
+    await w.lane.stopProtect(); store.closeStoreForTest();
+    const cwd = process.cwd(); try { process.chdir(isolatedCwd); await store.initStore(); } finally { process.chdir(cwd); }
+    w.lane = laneFor(w, LIVE); await w.lane.armed(); await w.lane.stopProtect();
+    await tick(w, { route: false }); await pass(w);
+    assert.equal(liveOrders(w).filter(row => row.effect === "withdraw").length, 0);
+    assert.ok((await store.getPerpAccount(w.id, "live"))!.flatSince!.atMs > flat.atMs, "flat again starts its own full day");
+  });
+  it("a new deposit after the idle return survives protect before the next entry tick", async () => {
+    const { w, flat } = await flatWorld();
+    await tick(w, { route: false, advanceMs: LIVE_LANE_TIMING.flatWithdrawMs + 1 }); await pass(w);
+    assert.equal(liveOrders(w).filter(row => row.effect === "withdraw").length, 1);
+    await tick(w, { route: false });
+    assert.equal(venue.accounts.get(acctIdx(w))!.collateral, 0n);
+    const returned = venue.makeClaimable(acctIdx(w)); w.chain.pending += returned;
+    await tick(w, { route: false });
+    w.chain.logs.push(withdrawPendingLog(w.sa, w.chain.block + 1n, returned));
+    w.chain.pending -= returned; w.chain.cash += returned; venue.complete(acctIdx(w));
+    await tick(w, { route: false });
+    assert.deepEqual(await runLeg(w, { kind: "perp-margin", direction: "deposit", target: PROXY, amountUsdg: u(12) }), { status: "landed" });
+    const funded = await tick(w, { route: false }); await pass(w);
+    assert.deepEqual(funded.rail, { mode: "refuse", rule: "perp-venue-unready" }, "the credit reconcile is a temporary wait, not disabled consent");
+    assert.equal(liveOrders(w).filter(row => row.effect === "withdraw").length, 1, "fresh funding is not swept by a previous timer or temporary readiness wait");
+    assert.ok((await store.getPerpAccount(w.id, "live"))!.flatSince!.atMs > flat.atMs);
+    const read = await tick(w, { route: false });
+    const draft = buildOpenDraft({ market: read.view!.markets.get("BTC-PERP")!, side: "long", notionalCapMicro: u(20), stopBps: 300, maxSlippageBps: 50, stopSlipBps: 200, liqBufferBps: 200 });
+    assert.ok(draft.ok);
+    assert.equal((await w.lane.execute(draft.draft as PerpOrderIntent, { equityUsdg: equityOf(w), equityKnown: true })).status, "submitted");
+    assert.ok(venue.accounts.get(acctIdx(w))!.pos.get(1), "new funding reaches its protected entry");
+  });
+  it("an incoming deposit cannot reacquire the old idle interval before it lands", async () => {
+    const { w } = await flatWorld();
+    await tick(w, { route: false, advanceMs: LIVE_LANE_TIMING.flatWithdrawMs + 1 });
+    const deposit = { agentId: w.id, mode: "live" as const, direction: "deposit" as const, amountMicro: u(1), initiator: "agent" as const, state: "submitted" as const, userOpHash: h32() };
+    await store.upsertPerpTransfer(deposit);
+    await tick(w, { route: false }); await pass(w);
+    assert.equal((await store.getPerpAccount(w.id, "live"))!.flatSince, null);
+    assert.equal(liveOrders(w).filter(row => row.effect === "withdraw").length, 0);
+    assert.equal((await store.upsertPerpTransfer(deposit)).outcome, "unchanged");
+    await tick(w, { route: false });
+    assert.equal((await store.getPerpAccount(w.id, "live"))!.flatSince, null);
+    w.cfg.perpsEnabled = false;
+    await tick(w, { route: false }); await pass(w);
+    assert.equal(liveOrders(w).filter(row => row.effect === "withdraw").length, 1, "actually switching off still returns free collateral immediately");
+    assert.equal(liveOrders(w).find(row => row.effect === "withdraw")!.reason, "exits-only");
   });
 });

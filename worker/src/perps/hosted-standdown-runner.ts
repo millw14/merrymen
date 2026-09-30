@@ -9,7 +9,7 @@ import * as ledger from "../store";
 import { createLighterApi } from "./api";
 import { openLiveHandle, type LiveHandleStore } from "./live-handle";
 import { loadSigner } from "./signer";
-import { runStanddown, type StanddownResult } from "./standdown";
+import { runStanddown, type StanddownOptions, type StanddownResult } from "./standdown";
 import { captureFinancialStream } from "./hosted-financial-stream";
 import { sendCheckpointStream } from "./hosted-checkpoint-ipc";
 
@@ -41,6 +41,40 @@ export function durableStanddownSendFence(persist: () => Promise<void>, fence: (
  return async () => { await persist(); await fence(); };
 }
 
+/** Retry incomplete work while the original deadline and durable close budget permit it. */
+export async function runHostedStanddown(o: StanddownOptions, checkpoint: () => Promise<void>, closeCapacity?: (marketId: number) => Promise<number>): Promise<StanddownResult> {
+ const sleep = o.sleep ?? (ms => new Promise<void>(resolve => setTimeout(resolve, ms)));
+ const startedAt = o.now(), closed: StanddownResult["closed"] = [];
+ let withdrawRequestedMicro: bigint | null = null;
+ const executor = { ...o.executor, place: async (...args: Parameters<StanddownOptions["executor"]["place"]>) => {
+  // This avoids signing a new nonce after all three actual sends were spent.
+  // Exact-byte replay still uses reserveClose, which deduplicates its hash.
+  if (closeCapacity && await closeCapacity(args[0].marketId) <= 0) return { status: "rejected" as const, orderRowId: "", filledBase: 0n, detail: "the shutdown close budget for this market is exhausted" };
+  return o.executor.place(...args);
+ } };
+ for (;;) {
+  const result = await runStanddown({ ...o, executor });
+  await checkpoint();
+  closed.push(...result.closed);
+  // This field describes the last confirmed request, not a sum of sends.
+  // A later read/ingest retry must not erase it or count a replay twice.
+  withdrawRequestedMicro = result.withdrawRequestedMicro ?? withdrawRequestedMicro;
+  const summary = (): StanddownResult => ({ ...result, startedAt, closed, withdrawRequestedMicro });
+  // Unsupported spot/pool assets alone cannot be unwound by this capability.
+  const incomplete = !result.ingested || result.outcome === "unreachable" ||
+   (result.outcome === "residual" && (result.residual.length > 0 || (result.ordersLeft ?? 0) > 0 || (result.venue?.collateralMicro ?? 0n) > 0n));
+  if (!incomplete || o.now() + 25_000 >= o.deadlineMs) return summary();
+  if (result.residual.length > 0) {
+   let room = false;
+   for (const position of result.residual) if (closeCapacity && await closeCapacity(position.marketId) > 0) room = true;
+   if (!room) return summary();
+  }
+  // The same absolute deadline, parent close budget and uncertain-withdrawal
+  // ledger apply to every pass; this never extends authority or resends money.
+  await sleep(15_000);
+ }
+}
+
 async function main(): Promise<void> {
  const home = merrymenHome();
  if (!process.send || !process.connected || process.env.DATABASE_URL || process.env.MERRYMEN_STORE_DEK) throw new Error("stand-down runner isolation refused");
@@ -51,20 +85,21 @@ async function main(): Promise<void> {
  process.on("disconnect", () => { wipe(); process.exit(1); });
  process.on("SIGTERM", () => { wipe(); process.exit(1); });
  let seq = 0;
- const waiting = new Map<number, { resolve: () => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+ type Ack = { id?: number; ok?: boolean; remainingCloseAttempts?: number };
+ const waiting = new Map<number, { resolve: (msg: Ack) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
  process.on("message", (raw: unknown) => {
   if (!raw || typeof raw !== "object") return;
-  const msg = raw as { id?: number; ok?: boolean };
+  const msg = raw as Ack;
   const wait = typeof msg.id === "number" ? waiting.get(msg.id) : undefined;
   if (!wait) return;
   waiting.delete(msg.id!); clearTimeout(wait.timer);
-  msg.ok === true ? wait.resolve() : wait.reject(new Error("stand-down parent refused durable authority"));
+  msg.ok === true ? wait.resolve(msg) : wait.reject(new Error("stand-down parent refused durable authority"));
  });
- const rpc = (kind: "fence" | "close-budget" | "checkpoint" | "checkpoint-begin" | "checkpoint-page" | "checkpoint-commit" | "result", payload?: string): Promise<void> => new Promise((resolve, reject) => {
+ const rpc = <T = void>(kind: "fence" | "close-capacity" | "close-budget" | "checkpoint" | "checkpoint-begin" | "checkpoint-page" | "checkpoint-commit" | "result", payload?: string, read?: (msg: Ack) => T): Promise<T> => new Promise((resolve, reject) => {
   if (!process.connected || Date.now() >= config.expiresAtMs) { reject(new Error("stand-down deadline or parent lost")); return; }
   const id = ++seq;
   const timer = setTimeout(() => { waiting.delete(id); reject(new Error("stand-down durable acknowledgement timed out")); }, Math.min(15_000, config.expiresAtMs - Date.now()));
-  waiting.set(id, { resolve, reject, timer });
+  waiting.set(id, { resolve: msg => { try { resolve(read ? read(msg) : undefined as T); } catch (error) { reject(error); } }, reject, timer });
   process.send!({ id, kind, payload });
  });
  await ledger.initStore();
@@ -112,9 +147,13 @@ async function main(): Promise<void> {
    })() });
   if (!opened.ok) throw new Error("venue shutdown handle unavailable");
   const handle = opened.handle; handle.exitReads = true;
-  const result = await runStanddown({ reason: config.reason, deadlineMs: config.expiresAtMs - 1000,
-   now: Date.now, executor: handle.standdownExecutor(async () => {}), reconcile: handle.standdownReconcile(), settings: { maxSlippageBps: 150 } });
-  await persist();
+  const result = await runHostedStanddown({ reason: config.reason, deadlineMs: config.expiresAtMs - 1000,
+   now: Date.now, executor: handle.standdownExecutor(async () => {}), reconcile: handle.standdownReconcile(), settings: { maxSlippageBps: 150 } }, persist,
+   marketId => rpc("close-capacity", JSON.stringify(marketId), msg => {
+    const remaining = msg.remainingCloseAttempts;
+    if (!Number.isSafeInteger(remaining) || remaining! < 0 || remaining! > 3) throw new Error("shutdown close capacity unread");
+    return remaining!;
+   }));
   const summary = publicStanddownResult(result);
   summary.otherAccounts = accounts.value.accounts.length - 1;
   if (accounts.value.accounts.length > 1 && summary.outcome === "done") summary.outcome = "residual";

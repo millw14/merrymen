@@ -642,7 +642,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               FIRST ON THE PAGE because it outranks everything below it. A
               strategy, a cap or a venue only matters once you know whether the
               money is real. */}
-          <div className="mm-section">{t("settings.section.tradingMode")}</div>
+          <div className="mm-section" id="trading-mode">{t("settings.section.tradingMode")}</div>
           <div className="mm-grid">
             <label className="mm-field">
               <span className="mm-label">{t("settings.label.liveTrading")}</span>

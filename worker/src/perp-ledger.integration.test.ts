@@ -773,6 +773,32 @@ describe("the paper perp book rides the checkpoint", () => {
 // ── the mirror ────────────────────────────────────────────────────────────────
 
 describe("the mirror carries the perp ledger up, forward only", () => {
+  it("new and advancing live deposits retire idle clocks, but historical rereads preserve them", async () => {
+    const id = await agent(), marker = { atMs: 123456, epoch: await store.getAgentEpoch(id), accountIndex: 22149 };
+    const transfer = { agentId: id, mode: "live" as const, direction: "deposit" as const, amountMicro: 12_000_000n, initiator: "agent" as const, userOpHash: `0x${"ed".repeat(32)}` };
+    for (const state of ["submitted", "landed", "credited"] as const) {
+      await store.patchPerpAccount(id, "live", { flatSince: marker });
+      assert.ok(["inserted", "advanced"].includes((await store.upsertPerpTransfer({ ...transfer, state })).outcome));
+      assert.equal((await store.getPerpAccount(id, "live"))!.flatSince, null);
+      await store.patchPerpAccount(id, "live", { flatSince: marker });
+      assert.equal((await store.upsertPerpTransfer({ ...transfer, state })).outcome, "unchanged");
+      assert.deepEqual((await store.getPerpAccount(id, "live"))!.flatSince, marker);
+    }
+  });
+  it("carries a bound flat clock and its atomic retirement by an opening order", async () => {
+    const id = await agent(), shared = await ledgerDb(), child = wrapSqlite(raw);
+    const marker = { atMs: 123456, epoch: await store.getAgentEpoch(id), accountIndex: 22149 };
+    await store.patchPerpAccount(id, "live", { flatSince: marker });
+    assert.equal((await mirrorTenant({ tenant: "flat-clock", child, shared: shared.db })).failed, undefined);
+    const read = () => shared.raw.prepare("SELECT flat_since_json FROM perp_accounts WHERE agent_id = ? AND mode = 'live'").get(id.toLowerCase()) as { flat_since_json: string | null };
+    assert.deepEqual(JSON.parse(read().flat_since_json!), marker);
+    await liveOpen(id, 20_000_000n);
+    assert.equal((await store.getPerpAccount(id, "live"))?.flatSince, null);
+    // The mirror's account row version has one-second resolution.
+    raw.prepare("UPDATE perp_accounts SET updated_at = updated_at + 1 WHERE agent_id = ? AND mode = 'live'").run(id.toLowerCase());
+    assert.equal((await mirrorTenant({ tenant: "flat-clock", child, shared: shared.db })).failed, undefined);
+    assert.equal(read().flat_since_json, null);
+  });
   it("copies every perp table — never the signed bytes or an incident's detail — and an unchanged ledger as nothing", async () => {
     const id = await agent();
     const acct = id.toLowerCase();

@@ -1132,7 +1132,7 @@ export function perpsBlockerText(b: PerpBlocker): { what: string; remedy: string
     case "perps-cap-below-min":
       return {
         what: "Your signed per-trade limit is below the smallest order Lighter accepts on the markets you picked.",
-        remedy: "Raise the per-trade limit when you next sign, or pick markets with a smaller minimum.",
+        remedy: "Choose markets whose minimum fits your existing limits, or use paper trading. You can review your settings and signed permission on the dashboard.",
       };
     case "perps-awaiting-deposit":
       return { what: "Waiting for the first USDG deposit to arrive at Lighter.", remedy: null };
@@ -1351,7 +1351,14 @@ export interface PerpsReport {
   minLiqDistanceBps: number | null;
   stopsMissing: number;
   incident: boolean;
+  /** Owner's durable Close-all halt, separate from the operator's entry halt. */
+  entriesHalted?: boolean;
+  /** Current worker observations for configured entry markets; absent means unreported. */
+  entryMinimums?: { market: PerpKey; minNotionalMicro: string }[];
 }
+
+/** Shared by the autonomous trend rule and owner setup readiness. */
+export const PERP_TREND_MAX_HOLD_HOURS = 168;
 
 const REPORT_MODES = ["off", "paper", "live", "refuse"] as const;
 const INT_STRING_RE = /^-?\d{1,40}$/;
@@ -1457,6 +1464,18 @@ export function parsePerpsReport(raw: unknown): PerpsReport | null {
     if (parsed === BAD) return null;
     positions.push(parsed);
   }
+  if (raw.entriesHalted !== undefined && typeof raw.entriesHalted !== "boolean") return null;
+  let entryMinimums: PerpsReport["entryMinimums"];
+  if (raw.entryMinimums !== undefined) {
+    if (!Array.isArray(raw.entryMinimums) || raw.entryMinimums.length > LIGHTER_MARKETS_V1.length) return null;
+    entryMinimums = [];
+    const seen = new Set<string>();
+    for (const item of raw.entryMinimums) {
+      if (!isRecord(item) || !isPerpKey(item.market) || seen.has(item.market) || !isIntString(item.minNotionalMicro) || BigInt(item.minNotionalMicro) <= 0n) return null;
+      seen.add(item.market);
+      entryMinimums.push({ market: item.market, minNotionalMicro: item.minNotionalMicro });
+    }
+  }
   return {
     v: 1,
     mode: raw.mode as PerpsReport["mode"],
@@ -1471,5 +1490,7 @@ export function parsePerpsReport(raw: unknown): PerpsReport | null {
     minLiqDistanceBps,
     stopsMissing: raw.stopsMissing,
     incident: raw.incident,
+    ...(raw.entriesHalted === undefined ? {} : { entriesHalted: raw.entriesHalted }),
+    ...(entryMinimums === undefined ? {} : { entryMinimums }),
   };
 }

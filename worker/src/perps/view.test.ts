@@ -650,6 +650,10 @@ describe("buildPerpsReport", () => {
     assert.equal(p.leverage, 2);
     assert.equal(p.stopTrigger, renderScaled(PAPER_STOP.trigger, 1));
     assert.equal(r.stopsMissing, 0);
+    assert.equal(r.entriesHalted, false);
+    assert.deepEqual(r.entryMinimums, [...v.markets.values()].filter(m => i.settings.perpsMarkets.includes(m.key))
+      .map(m => ({ market: m.key, minNotionalMicro: m.effMinNotionalMicro.toString() })));
+    assert.ok(r.entryMinimums!.length > 0);
     assert.equal(r.collateralMicro, PAPER_MARGIN.toString());
     assert.ok(r.minLiqDistanceBps !== null && r.minLiqDistanceBps > 4_000);
   });
@@ -670,12 +674,22 @@ describe("buildPerpsReport", () => {
     const r = buildPerpsReport(i, null, { rail: { mode: "paper" }, protectAtMs: null, lastVenueReadAtMs: NOW_MS - 300_000 });
     assert.ok(parsePerpsReport(JSON.parse(JSON.stringify(r))));
     assert.equal(r.blocker, "perps-venue-unreachable");
+    assert.equal(r.entryMinimums, undefined);
+    assert.equal(r.entriesHalted, false);
     assert.equal(r.collateralMicro, null);
     assert.equal(r.openNotionalMicro, null);
     assert.equal(r.positions.length, 1);
     assert.equal(r.positions[0]!.markPrice, null);
     assert.equal(r.stopsMissing, 1);
     assert.equal(r.venueReadAt, NOW_MS - 300_000);
+  });
+
+  it("reports the durable owner halt independently of an operator pause", () => {
+    for (const halted of [true, false]) {
+      const i = input({ ledger: ledger({ entriesHalted: halted }) });
+      const r = buildPerpsReport(i, mustView(i), { rail: { mode: "paper" }, protectAtMs: null });
+      assert.equal(r.entriesHalted, halted);
+    }
   });
 
   it("rail refusals map to their blockers", () => {

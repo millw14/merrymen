@@ -721,6 +721,7 @@ export const PERP_LEDGER_DDL: readonly string[] = [
   "ALTER TABLE equity ADD COLUMN perp_in_transit_micro TEXT",
   "ALTER TABLE equity ADD COLUMN perp_snapshot_time INTEGER",
   "ALTER TABLE equity ADD COLUMN cash_read_block INTEGER",
+  "ALTER TABLE perp_accounts ADD COLUMN flat_since_json TEXT",
 ];
 
 /**
@@ -6209,6 +6210,14 @@ async function writePerpTransferIn(
   withFn: PerpWith | undefined,
 ): Promise<{ result: PerpTransferOutcome; payload: unknown | null }> {
   const { agent, mode, direction, state, amount, initiator, id, chainId, txHash, logIndex, userOpHash, venueTxHash, paidTxHash, paidLogIndex } = v;
+  const retireIdleClock = async () => {
+    // Fresh funding is for the next entry. Retire its previous idle interval
+    // in the same transaction as each new deposit/progress fact, never on an
+    // unchanged historical reread (which would postpone return forever).
+    if (mode === "live" && direction === "deposit" && state !== "failed") {
+      await db.prepare(`UPDATE perp_accounts SET flat_since_json = NULL, updated_at = unixepoch() WHERE agent_id = ? AND mode = 'live'`).run(agent);
+    }
+  };
   const payloadOf = (rowId: string, from: PerpTransferState | null, to: PerpTransferState, row: Partial<TransferRowDb>) => ({
     amountMicro: amount,
     chainId: row.chain_id ?? chainId,
@@ -6263,6 +6272,7 @@ async function writePerpTransferIn(
       .run(rowId, agent, mode, epoch, direction, amount, initiator, state, chainId, txHash, logIndex, userOpHash,
         venueTxHash, paidTxHash, paidLogIndex);
     const moved = perpTransferMovesMoney(null, state);
+    await retireIdleClock();
     if (withFn) await withFn(db);
     return {
       result: { outcome: "inserted", id: rowId, state, journaled: moved },
@@ -6316,6 +6326,7 @@ async function writePerpTransferIn(
     return { result: { outcome: "unchanged", id: held.id, state: from }, payload: null };
   }
   const moved = perpTransferMovesMoney(from, state);
+  await retireIdleClock();
   if (withFn) await withFn(db);
   return {
     result: { outcome: "advanced", id: held.id, from, state, journaled: moved },
@@ -6702,6 +6713,12 @@ export async function insertPerpOrderSubmitted(s: PerpOrderSubmission): Promise<
         .run(id, agent, mode, epoch, signed?.accountIndex ?? null, signed?.apiKeyIndex ?? null, signed?.nonce ?? null,
           signed?.txHash ?? null, signed?.txType ?? null, signed?.txInfo ?? null, signed?.expiredAt ?? null,
           effect, s.reduceOnly ? 1 : 0, marketId, notional, decisionId, reason);
+      if (mode === "live" && effect === "open") {
+        // Retire the old flat interval before these signed bytes can be sent.
+        // A position can open and stop out between reads (or across a crash);
+        // seeing it flat again must never reuse the pre-open withdrawal clock.
+        await db.prepare(`UPDATE perp_accounts SET flat_since_json = NULL, updated_at = unixepoch() WHERE agent_id = ? AND mode = 'live'`).run(agent);
+      }
       for (const l of legs) {
         await db
           .prepare(
@@ -7350,6 +7367,16 @@ export interface PerpIncident {
   detail?: unknown;
 }
 
+/** First proven flat observation for this account and authority epoch. */
+export interface PerpFlatSince { atMs: number; epoch: number; accountIndex: number }
+function flatSinceOf(value: unknown): PerpFlatSince | null {
+  if (typeof value !== "string") return null;
+  try {
+    const x = JSON.parse(value) as PerpFlatSince;
+    if (!x || !Number.isSafeInteger(x.atMs) || x.atMs <= 0 || !Number.isSafeInteger(x.epoch) || x.epoch < 1 || !Number.isSafeInteger(x.accountIndex) || x.accountIndex < 1) return null;
+    return { atMs: x.atMs, epoch: x.epoch, accountIndex: x.accountIndex };
+  } catch { return null; }
+}
 export interface PerpAccountRow {
   agentId: string;
   mode: PerpMode;
@@ -7362,6 +7389,8 @@ export interface PerpAccountRow {
   incident: PerpIncident | null;
   entriesHalted: boolean;
   lastVenueReadAt: number | null;
+  /** Optional only for older checkpoints/test adapters; absent never proves a flat interval. */
+  flatSince?: PerpFlatSince | null;
   /** The venue snapshot's transaction_time, µs. */
   lastSnapshotTime: number | null;
   createdAt: number;
@@ -7382,6 +7411,7 @@ export interface PerpAccountPatch {
   incident?: PerpIncident | null;
   entriesHalted?: boolean;
   lastVenueReadAt?: number | null;
+  flatSince?: PerpFlatSince | null;
   /**
    * µs. Only ever RAISED: an older snapshot never replaces a newer one's time,
    * because rule 12 refuses a snapshot older than the last one used, and a
@@ -7432,6 +7462,12 @@ export async function patchPerpAccount(agentId: string, mode: PerpMode, patch: P
   }
   if (patch.entriesHalted !== undefined) set("entries_halted", patch.entriesHalted ? 1 : 0);
   if (patch.lastVenueReadAt !== undefined) set("last_venue_read_at", optSafeInt(patch.lastVenueReadAt, "last venue read"));
+  if (patch.flatSince !== undefined) {
+    if (m !== "live") throw new RangeError("perp ledger: flat withdrawal clock belongs to the live account");
+    const encoded = patch.flatSince === null ? null : JSON.stringify(patch.flatSince);
+    if (encoded !== null && flatSinceOf(encoded) === null) throw new RangeError("perp ledger: flat withdrawal clock is malformed");
+    set("flat_since_json", encoded);
+  }
   const snapshot = patch.lastSnapshotTime === undefined ? null : safeInt(patch.lastSnapshotTime, "snapshot time");
   await getDb().tx(async (db) => {
     await db.prepare(`INSERT INTO perp_accounts (agent_id, mode) VALUES (?, ?) ON CONFLICT DO NOTHING`).run(agent, m);
@@ -7504,6 +7540,7 @@ export async function getPerpAccount(agentId: string, mode: PerpMode): Promise<P
     incident,
     entriesHalted: Number(r.entries_halted) === 1,
     lastVenueReadAt: nullableNum(r.last_venue_read_at),
+    flatSince: flatSinceOf(r.flat_since_json),
     lastSnapshotTime: nullableNum(r.last_snapshot_time),
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),

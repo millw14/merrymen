@@ -68,7 +68,7 @@
  * restart forgets nothing.
  */
 
-import { PERP_TREND_UNIVERSE, leverageFromImfBp, perpOpenMarginBudgetMicro, type PerpKey, type PerpSide } from "../../../packages/core/src/perps";
+import { PERP_TREND_UNIVERSE, PERP_TREND_MAX_HOLD_HOURS, leverageFromImfBp, perpOpenMarginBudgetMicro, type PerpKey, type PerpSide } from "../../../packages/core/src/perps";
 import type { ResolvedConfig } from "../settings";
 import type { Why } from "../strategies/reasons";
 import type { PerpMarketView, PerpPositionView, PerpsView } from "../strategies/types";
@@ -90,7 +90,7 @@ export const PERP_TREND_DEFAULTS = Object.freeze({
   atrStopMult: 3,
   minStopBps: 150,
   maxPositions: 2,
-  maxHoldHours: 168,
+  maxHoldHours: PERP_TREND_MAX_HOLD_HOURS,
   cooldownAfterStrategyHours: 8,
   cooldownAfterRiskHours: 24,
   fundingHours: 8,

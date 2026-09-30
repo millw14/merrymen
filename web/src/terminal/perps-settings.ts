@@ -21,6 +21,8 @@ import {
   PERPS_LIVE_CONSENT_VERSION,
   PERPS_MARKETS_MAX,
   PERPS_NUM_BOUNDS,
+  PERP_TREND_MAX_HOLD_HOURS,
+  PERP_TREND_UNIVERSE,
   grantPerp,
   isPerpKey,
   parsePerpsReport,
@@ -33,7 +35,7 @@ import {
   type PerpsReport,
 } from "@merrymen/core";
 import { parseAmount } from "@/lib/parse-amount";
-import { perpsBookOf, type PerpsBook } from "@/lib/perps-view";
+import { PERPS_REPORT_STALE_MS, perpsBookOf, type PerpsBook } from "@/lib/perps-view";
 
 // ── the numeric fields ──────────────────────────────────────────────────
 
@@ -332,6 +334,7 @@ export type PerpsGrantRead =
       granted: boolean | null;
       /** The signed per-trade cap, USDG; null when absent or unreadable. */
       signedPerTradeUsdg: number | null;
+      expiresAt: number | null;
     };
 
 const isRecord = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
@@ -347,7 +350,7 @@ export function readPerpsGrant(json: unknown): PerpsGrantRead {
   const report = parsePerpsReport(json.perps);
   const optIn = typeof json.perpsOptIn === "boolean" ? json.perpsOptIn : null;
   const accountMode = typeof json.mode === "string" ? json.mode : null;
-  if (!json.exists) return { state: "read", exists: false, report, accountMode, optIn, granted: null, signedPerTradeUsdg: null };
+  if (!json.exists) return { state: "read", exists: false, report, accountMode, optIn, granted: null, signedPerTradeUsdg: null, expiresAt: null };
   const grant = isRecord(json.grant) ? json.grant : {};
   const features = Array.isArray(grant.grantFeatures) ? grant.grantFeatures.filter((f): f is string => typeof f === "string") : [];
   const granted =
@@ -355,7 +358,37 @@ export function readPerpsGrant(json: unknown): PerpsGrantRead {
   const caps = isRecord(grant.caps) ? grant.caps : {};
   const perTrade = caps.perTradeUsdg;
   const signedPerTradeUsdg = typeof perTrade === "number" && Number.isFinite(perTrade) && perTrade > 0 ? perTrade : null;
-  return { state: "read", exists: true, report, accountMode, optIn, granted, signedPerTradeUsdg };
+  const expiresAt = typeof grant.expiresAt === "number" && Number.isSafeInteger(grant.expiresAt) && grant.expiresAt > 0 ? grant.expiresAt : null;
+  return { state: "read", exists: true, report, accountMode, optIn, granted, signedPerTradeUsdg, expiresAt };
+}
+
+/** Readiness uses SAVED settings, never an unsaved limits preview. No setting is changed here. */
+export function perpsAutonomyReadiness(values: PerpsStored, defaults: PerpsDefaults, grant: PerpsGrantRead, nowMs: number): {
+  driver: PerpsDriver; enabled: boolean; manual: boolean; strategistMismatch: boolean; noTrendMarkets: boolean;
+  authority: "short" | "unknown" | null; remainingHours: number | null; requiredHours: number;
+  minimums: { market: string; minimumUsdg: number; fits: boolean | null }[]; cap: number | null;
+} {
+  const driver = values.perpsDriver ?? defaults.perpsDriver;
+  const enabled = values.perpsEnabled ?? defaults.perpsEnabled;
+  const live = values.liveTradingEnabled ?? defaults.liveTradingEnabled;
+  const markets = perpMarketsInForce(values, defaults);
+  const expiresAt = grant.state === "read" ? grant.expiresAt : null;
+  const remainingHours = expiresAt === null ? null : Math.max(0, (expiresAt - nowMs / 1000) / 3600);
+  const cap = perpsEffectiveCap(grant.state === "read" ? grant.signedPerTradeUsdg : null, values.perpsPerTradeUsdg ?? defaults.perpsPerTradeUsdg);
+  const report = grant.state === "read" ? grant.report : null;
+  const minimumsCurrent = report?.venueReadAt != null && report.collateralMicro !== null &&
+    nowMs >= report.venueReadAt && nowMs - report.venueReadAt <= PERPS_REPORT_STALE_MS;
+  return {
+    driver, enabled, manual: enabled && driver === "manual",
+    strategistMismatch: enabled && driver === "strategist" && (values.strategy ?? defaults.strategy) !== "llm-strategist",
+    noTrendMarkets: enabled && driver === "perp-trend" && !markets.some(m => (PERP_TREND_UNIVERSE as readonly string[]).includes(m)),
+    authority: !enabled || driver !== "perp-trend" || (!live && expiresAt === null) ? null : remainingHours === null ? "unknown" : remainingHours <= PERP_TREND_MAX_HOLD_HOURS ? "short" : null,
+    remainingHours, requiredHours: PERP_TREND_MAX_HOLD_HOURS, cap,
+    minimums: (report?.entryMinimums ?? []).filter(m => markets.includes(m.market)).map(m => {
+      const minimumUsdg = Number(m.minNotionalMicro) / 1_000_000;
+      return { market: m.market, minimumUsdg, fits: !minimumsCurrent || cap === null ? null : cap >= minimumUsdg };
+    }),
+  };
 }
 
 /**
@@ -401,7 +434,8 @@ export function perpsStatusView(read: PerpsGrantRead): PerpsStatusView {
   return {
     kind: "report",
     mode: r.mode,
-    blocker: r.blocker !== null && r.blocker !== "perps-off" ? perpsBlockerText(r.blocker) : null,
+    blocker: r.blocker !== null && r.blocker !== "perps-off"
+      ? { ...perpsBlockerText(r.blocker), ...(r.blocker === "perps-entries-halted" && r.entriesHalted === false ? { remedy: null } : {}) } : null,
     book: perpsBookOf(r, read.accountMode),
     positions: lighterUnread ? Math.max(r.positions.length, r.stopsMissing) : r.positions.length,
     lighterUnread,

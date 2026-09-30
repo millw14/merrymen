@@ -11,6 +11,18 @@ async function* split(bytes:Buffer){for(let i=0;i<bytes.length;i+=13)yield bytes
 async function bytes(db:Db){return db.tx(async tx=>{const chunks:Buffer[]=[];for await(const x of captureFinancialStream(tx,ACCOUNT))chunks.push(x);return Buffer.concat(chunks);});}
 async function addJournal(db:Db,payload='🙂'){const prev=await db.prepare('SELECT hash FROM journal ORDER BY seq DESC LIMIT 1').get() as {hash:string}|undefined;const head=prev?.hash??JOURNAL_GENESIS;await db.prepare("INSERT INTO journal(agent_id,epoch,kind,payload_json,prev_hash,hash,at) VALUES (?,1,'fill',?,?,?,100)").run(ACCOUNT,payload,head,journalHash(head,payload));}
 describe('streamed financial recovery',()=>{
+ it('preserves the bound idle clock while legacy checkpoints without the nullable column restore conservatively',async()=>{
+  const a=await fixture(),b=await fixture();try{
+   const marker=JSON.stringify({atMs:123456,epoch:1,accountIndex:123});
+   await a.db.prepare("INSERT INTO perp_accounts(agent_id,mode,flat_since_json) VALUES (?,'live',?)").run(ACCOUNT,marker);
+   await restoreFinancialStream(b.db,captureFinancialStream(a.db,ACCOUNT),ACCOUNT);
+   assert.equal((await b.db.prepare('SELECT flat_since_json FROM perp_accounts').get() as {flat_since_json:string}).flat_since_json,marker);
+   const legacy=JSON.parse((await a.db.tx(tx=>captureFinancialCapsule(tx,ACCOUNT))).toString());
+   delete legacy.tables.perp_accounts[0].flat_since_json;
+   await restoreFinancialStream(b.db,[Buffer.from(JSON.stringify(legacy))],ACCOUNT);
+   assert.equal((await b.db.prepare('SELECT flat_since_json FROM perp_accounts').get() as {flat_since_json:null}).flat_since_json,null);
+  }finally{a.raw.close();b.raw.close();}
+ });
  it('round trips complete histories beyond old row caps with bounded SQL batches and split UTF8',async()=>{
   const a=await fixture(),b=await fixture();try{
    a.raw.exec('BEGIN');const insert=a.raw.prepare("INSERT INTO equity(agent_id,eth_wei,cash_usdg,vault_usdg,equity_usdg) VALUES (?,'0',0,0,?)");for(let i=0;i<40001;i++)insert.run(ACCOUNT,i);a.raw.exec('COMMIT');await addJournal(a.db);

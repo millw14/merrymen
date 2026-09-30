@@ -78,11 +78,17 @@ describe("A2 — the exit handler only cleans up its own child", () => {
     // ticking, still hitting the RPC, invisible to the watchdog.
     // Measured: 105 spawns against 61 exits in one window.
     const src = strip(at("./orchestrator.ts"));
-    assert.match(src, /if \(children\.get\(tenant\) === child\) children\.delete\(tenant\);/);
-    // And the unconditional form must be gone from the exit path.
     const exitAt = src.indexOf('proc.on("exit"');
-    const guardAt = src.indexOf("if (children.get(tenant) === child)", exitAt);
-    assert.ok(exitAt > 0 && guardAt > exitAt, "the guard must be inside the exit handler");
+    const exitEnd = src.indexOf("\n  });", exitAt);
+    assert.ok(exitAt > 0 && exitEnd > exitAt, "the exit handler must exist");
+    const handler = src.slice(exitAt, exitEnd);
+    const identityGuard = /if \(children\.get\(tenant\) !== child\) return;/;
+    assert.match(handler, identityGuard, "an obsolete or intentionally stopped child must return immediately");
+    const guardAt = handler.search(identityGuard);
+    const deleteAt = handler.indexOf("children.delete(tenant)");
+    const restartAt = handler.indexOf("scheduleRestart(");
+    assert.ok(deleteAt > guardAt, "identity is checked before deleting the current child");
+    assert.ok(restartAt > guardAt, "identity is checked before scheduling any replacement");
     // THE RESPAWN MOVED, THE PROPERTY DID NOT. Both restart paths now go
     // through `scheduleRestart` — the watchdog used to spawn on the line after
     // its SIGKILL with no delay and no ceiling — so the check that a
