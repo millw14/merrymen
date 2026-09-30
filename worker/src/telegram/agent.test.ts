@@ -315,6 +315,37 @@ test("loop: a refused shell command surfaces to the model as REFUSED, not an exc
   assert.ok(toolMsg && toolMsg.role === "tools" && toolMsg.results[0]!.output.startsWith("REFUSED"));
 });
 
+test("loop: changing directory keeps the signed conversation prefix stable", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "mm-agent-cwd-"));
+  try {
+    const command = `"${process.execPath}" -e "process.stdout.write(process.cwd())"`;
+    const content: NonNullable<AgentTurn["anthropicContent"]> = [
+      { type: "thinking", thinking: "", signature: "bound-to-initial-prompt" },
+      { type: "tool_use", id: "cwd", name: "run", input: { command, cwd: root }, caller: { type: "direct" } },
+    ];
+    const seen: AgentMsg[][] = [];
+    const deps = makeDeps(
+      baseCfg({ capabilities: new Set(["shell"]), filesRoot: os.tmpdir(), shellAllowlist: [command] }),
+      [
+        { text: "", toolUses: [{ id: "cwd", name: "run", input: { command, cwd: root } }], anthropicContent: content },
+        { text: "done", toolUses: [] },
+      ],
+      [], seen,
+    );
+    const systems: string[] = [];
+    const turn = deps.turnFn!;
+    deps.turnFn = (creds, opts) => { systems.push(opts.system); return turn(creds, opts); };
+    await runAgentTask("Check the working directory", deps);
+    assert.equal(systems.length, 2);
+    assert.equal(systems[1], systems[0], "signed thinking is bound to the unchanged prefix");
+    assert.deepEqual(seen[1]!.find((m) => m.role === "assistant")?.anthropicContent, content);
+    const result = seen[1]!.find((m) => m.role === "tools")!.results[0]!;
+    assert.ok(result.output.includes(`working dir ${root}`), "current directory is appended as tool data");
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
 test("loop: hits the step budget and says so", async () => {
   const sent: string[] = [];
   const deps = makeDeps(
