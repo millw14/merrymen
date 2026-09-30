@@ -13,13 +13,22 @@ const poolAddress="0x5555555555555555555555555555555555555555";
 const grant={smartAccount:owner,grantFeatures:[GRANT_TRENCHER],trencherVaultAddress:vault,trencherFactoryAddress:factory} as unknown as StoredGrant;
 const pool={tokenAddress:token,poolAddress,poolId:poolAddress,priceUsd:0.01,reserveUsd:200_000,fdvUsd:1_000_000,change24hPct:5,change1hPct:1,createdAt:1000,dex:"uniswap-v3-robinhood",name:"COIN / USDG",volume24hUsd:500_000,buyers24h:50,buys24h:100,sells24h:80,
   buckets:{...emptyGeckoBuckets(),m5:{volumeUsd:1000,changePct:2,buys:10,sells:8,buyers:9,sellers:8}}} as GeckoPool;
+/**
+ * Multicall3 as the chain runs it: every call answered exactly as readContract
+ * would answer it, and a failure reported for that call alone.
+ */
+function withMulticall<C extends { readContract: (a: never) => Promise<unknown> }>(c: C) {
+  const read = c.readContract as (a: unknown) => Promise<unknown>;
+  return { ...c, multicall: async ({ contracts }: { contracts: readonly unknown[] }) =>
+    Promise.all(contracts.map(x => read(x).then(result => ({ status: "success", result }), error => ({ status: "failure", error, result: undefined })))) };
+}
 function client(over:Record<string,unknown>={}) {
-  return {getCode:async()=>"0x6000",readContract:async({functionName}: {functionName:string})=>{
+  return withMulticall({getCode:async()=>"0x6000",readContract:async({functionName}: {functionName:string})=>{
     const values:Record<string,unknown>={cash:CASH.USDG,bridge:CASH.WETH,router:UNISWAP.swapRouter02,poolFactory:UNISWAP.v3Factory,vaultFor:vault,owner,VERSION:1n,tokens:[],token0:CASH.USDG,token1:token,fee:3000,getPool:poolAddress,decimals:6,...over};
     const result=values[functionName]; if (result instanceof Error) throw result;
     if (result===undefined) throw new Error(`Unexpected read ${functionName}`);
     return result;
-  }} as unknown as PublicClient;
+  }}) as unknown as PublicClient;
 }
 test("automatic discovery verifies pool provenance and recovers held tokens without a custom list",async(t)=>{
   const prior=process.env.TRENCHER_FACTORY_CODE_HASH;
@@ -97,7 +106,7 @@ function chain(canonical: ReadonlySet<string>, reads: string[]) {
   const pools = new Map<string, string>();
   return {
     register(p: GeckoPool) { pools.set(p.poolAddress!.toLowerCase(), p.tokenAddress.toLowerCase()); },
-    client: {
+    client: withMulticall({
       getCode: async () => "0x6000",
       readContract: async ({ address, functionName, args }: { address: string; functionName: string; args?: readonly unknown[] }) => {
         const a = address.toLowerCase();
@@ -117,7 +126,7 @@ function chain(canonical: ReadonlySet<string>, reads: string[]) {
         if (result === undefined) throw new Error(`Unexpected read ${functionName}`);
         return result;
       },
-    } as unknown as PublicClient,
+    }) as unknown as PublicClient,
   };
 }
 

@@ -39,6 +39,7 @@
       "@merrymen/llm": ["../worker/src/llm.ts"],
       "@merrymen/settings": ["../worker/src/settings.ts"],
       "@merrymen/home": ["../worker/src/home.ts"],
+      "@merrymen/atomic-write": ["../worker/src/atomic-write.ts"],
       "@merrymen/db": ["../worker/src/db.ts"],
       "@merrymen/backtest": ["../worker/src/backtest.ts"],
       "@merrymen/backtest-scenario": ["../worker/src/backtest-scenario.ts"],

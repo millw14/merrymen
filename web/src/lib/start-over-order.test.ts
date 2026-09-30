@@ -73,4 +73,44 @@ describe("Start over", () => {
     // of this screen.
     assert.doesNotMatch(discard!.body!.getText(), /AbortSignal\.timeout/);
   });
+
+  it("keeps the browser grant and backup when the server refuses or cannot confirm the kill", async () => {
+    assert.ok(discard);
+    // Drive the actual handler with its component dependencies replaced by
+    // captures; no wallet keys, network or React rendering are needed.
+    const code = ts.transpileModule(discard.getText(), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    for (const outcome of ["refused", "offline", "removed", "replaced"] as const) {
+      const steps: string[] = [];
+      const errors: (string | null)[] = [];
+      let stored = { smartAccount: "0xoriginal", serialized: "original-signature" };
+      const deps: Record<string, unknown> = {
+        discarding: false,
+        funding: null,
+        grant: null,
+        loadGrant: () => stored,
+        fetch: async () => {
+          steps.push("request");
+          if (outcome === "offline") throw new Error("offline");
+          // Same account, newly signed: account comparison alone is not enough.
+          if (outcome === "replaced") stored = { ...stored, serialized: "new-signature" };
+          return new Response(JSON.stringify({ error: "The owner key could not be archived" }), { status: outcome === "refused" ? 409 : 200 });
+        },
+        clearGrant: () => steps.push("clear grant"),
+        setError: (error: string | null) => errors.push(error),
+        localStorage: { removeItem: () => steps.push("clear backup") },
+        BACKUP_KEY: "backup",
+        MAINNET: 4663,
+        PRESETS: [{ caps: {} }],
+      };
+      for (const setter of ["setDiscarding", "setRenewed", "setGrant", "setBackedUp", "setReveal", "setAck", "setMainnetAck", "setFunding", "setChainId", "setCaps", "setCapText"]) deps[setter] = () => {};
+      const handler = new Function(...Object.keys(deps), `${code}; return discard;`)(...Object.values(deps)) as () => Promise<void>;
+      await handler();
+      if (outcome === "removed") {
+        assert.deepEqual(steps, ["request", "clear grant", "clear backup"]);
+      } else {
+        assert.deepEqual(steps, ["request"], "a failed kill must keep the wallet and backup intact");
+        assert.match(errors.at(-1) ?? "", outcome === "refused" ? /could not be archived/ : outcome === "replaced" ? /newer wallet and its backup were kept/ : /could not confirm/);
+      }
+    }
+  });
 });

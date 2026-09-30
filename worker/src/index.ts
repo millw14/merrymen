@@ -25,7 +25,7 @@ import { upsertRefusal, type RefusalRow } from "./venues/refusal-rows";
 
 import { rmSync, writeFileSync } from "node:fs";
 import { grantTrencher, TRENCHER_VAULT_ABI } from "../../packages/core/src/trencher-vault";
-import { discoverTrencherUniverse } from "./trencher-discovery";
+import { TrencherPoolCache, discoverTrencherUniverse } from "./trencher-discovery";
 import { buildTrencherCalls, checkTrencherCalls, verifyTrencherCustody } from "./venues/trencher-vault";
 import { chainRead, resetRpcMeters, rpcSummaryLines } from "./rpc-meter";
 import { runShadowComparison, shadowEnabledFor, shadowLine } from "./reconcile-shadow";
@@ -154,7 +154,7 @@ import { createPaperOrderExecutor, type OrderExecutor } from "./executor-order";
 import { readHolderStatus, readHolderStatusResult } from "./circle";
 import { CIRCLE_SHORT_CLASS_GATE, circleNote, circleNoteStep, circleStanding, circleStrategyTick, type CircleNoted } from "./circle-gate";
 import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
-import { archiveCurrentGrant, grantExpired, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
+import { archiveCurrentGrant, grantExpired, grantFilePath, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
 import { hostedKillFromChat } from "./kill-request";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
 import { execModeOf, liveBlockerText, publishedMode, type ExecMode, type RefuseRule } from "./exec-mode";
@@ -170,7 +170,7 @@ import {
   type AnchorVerdict,
   type ContributionTruth,
 } from "./bootstrap-state";
-import { ensureHome, homePaths, merrymenHome } from "./home";
+import { ensureHome, homePaths, liftKillPause, merrymenHome, pauseForKeptGrant } from "./home";
 import { startupSlotMs } from "./stagger";
 import { llmText, resolveLlm } from "./llm";
 import { applyPaperIntent, paperBookPositions, type PaperPosition } from "./paper";
@@ -243,6 +243,9 @@ import {
   bundlerChainMismatch,
   connectionKey,
   resolveConfig,
+  settingsArmRefusal,
+  settingsHoldNotice,
+  settingsProblem,
   strategyKey,
   type ResolvedConfig,
 } from "./settings";
@@ -753,6 +756,10 @@ async function main() {
   let autoTrenchPending = false;
   let autoTrenchNext = 0;
   let autoTrenchBalances = new Map<string,bigint>();
+  // Pools proved canonical stay proved across passes (trencher-discovery.ts).
+  // Grant changes keep these chain facts; connection changes replace the cache
+  // because another RPC can serve a different chain or fork.
+  let trenchPoolCache = new TrencherPoolCache();
   function refreshAutoTrench() {
     if (!active || !grantTrencher(active.grant)) return;
     const context = `${active.agentId}:${active.grant.grantedAt}`;
@@ -760,13 +767,14 @@ async function main() {
     if (autoTrenchPending || Date.now()<autoTrenchNext) return;
     autoTrenchPending=true; autoTrenchNext=Date.now()+60_000;
     const current=active;
+    const poolCache=trenchPoolCache;
     // Nominated coins (Telegram groups) are verified beyond the top slice by
     // the same on-chain checks; the set is addresses only (trencher-discovery.ts).
-    void discoverTrencherUniverse(mainnetClient(),current.grant,freshTrenchTape(),{nominated:new Set(tgNominated)}).then(result=>{
-      if (autoTrenchContext===context) autoTrench=result;
+    void discoverTrencherUniverse(mainnetClient(),current.grant,freshTrenchTape(),{nominated:new Set(tgNominated),cache:trenchPoolCache}).then(result=>{
+      if (autoTrenchContext===context && trenchPoolCache===poolCache) autoTrench=result;
       // The held coins' names are read now, minutes before any exit needs one:
       // a decision never waits for the chain (decision-name.ts).
-      if (autoTrenchContext===context) warmHeldNames(coinNames, result);
+      if (autoTrenchContext===context && trenchPoolCache===poolCache) warmHeldNames(coinNames, result);
     }).catch(()=>trenchNotice(current.agentId,"Autonomous discovery could not verify its pool or custody data. Retrying; no new token authorized.")).finally(()=>{autoTrenchPending=false;});
   }
   const trenchTapeReader = new TrenchTapeReader();
@@ -3048,6 +3056,25 @@ async function main() {
   }
   let strategy = makeStrategy(cfg);
 
+  /**
+   * The run of unusable settings.json reads already told to the owner (its
+   * `since`), so it is said once rather than once a tick. settings.ts decides
+   * what is said; this delivers it, to an armed agent's feed only — a run that
+   * begins while nothing is armed is told once something is.
+   */
+  let settingsHeldTold: number | null = null;
+  async function noteSettingsHeld(): Promise<void> {
+    if (!active) {
+      // Fixed while nothing was armed: that run is over, and there is nobody
+      // to tell. Forget it, or the next arm announces a fix from long before.
+      if (!settingsProblem()) settingsHeldTold = null;
+      return;
+    }
+    const { told, event } = settingsHoldNotice(settingsProblem(), settingsHeldTold);
+    settingsHeldTold = told;
+    if (event) await addEvent(active.agentId, event.level, event.message);
+  }
+
   /** Re-read settings.json; apply what changed without a restart. */
   async function refreshConfig(): Promise<void> {
     const next = resolveConfig();
@@ -3060,6 +3087,11 @@ async function main() {
       // Cached routes were read through the OLD endpoint. Keeping them would
       // serve one chain's prices while pointed at another.
       poolPrices.reset();
+      // Replace, rather than clear: an old in-flight discovery can still write
+      // to its cache. Its result also belongs to the old connection.
+      trenchPoolCache = new TrencherPoolCache();
+      autoTrench = null;
+      autoTrenchNext = 0;
       if (active) {
         await addEvent(active.agentId, "ok", "connection settings changed — re-arming executor");
         active = null; // syncGrant re-arms with the new bundler/RPC this tick
@@ -3082,6 +3114,9 @@ async function main() {
       stratKey = nextStrat;
     }
     cfg = next;
+    // A settings.json that stopped parsing leaves `next` on the last good read;
+    // the owner is told once that their edit has not taken effect.
+    await noteSettingsHeld();
     // Adding a token in /settings is the common way this drifts — say so on the
     // next tick rather than at the next re-arm, which might never come.
     if (active) await noteTokenCoverage(active.agentId);
@@ -6370,6 +6405,27 @@ async function main() {
     // falsy, so it arms on the very next tick exactly as before.
     if (grantExpired(grant, Math.floor(Date.now() / 1000))) {
       await retireGrant(await ensureAgent(grant), grant);
+      return false;
+    }
+
+    // NOT ON SETTINGS NOBODY CHOSE. When nothing usable has been read from
+    // settings.json since this process started, `cfg` is env + defaults —
+    // paper, the default strategy, an empty Telegram allowlist — standing in
+    // for a file the owner believes is in force. Before this, a stray comma in
+    // a hand edit armed the agent on exactly that, and nothing said so. Stay
+    // unarmed and say why, once per reason, like any other arm failure; the
+    // first tick after the file is usable arms as normal. With a last good
+    // read in force this is null and the agent carries on (noteSettingsHeld).
+    const settingsRefusal = settingsArmRefusal(settingsProblem());
+    if (settingsRefusal) {
+      const agentId = await ensureAgent(grant);
+      await setAgentStatus(agentId, "error");
+      if (lastArmFailure !== settingsRefusal) {
+        lastArmFailure = settingsRefusal;
+        console.log(`[worker] NOT ARMING — ${settingsProblem()?.why ?? "settings.json is unusable"}`);
+        await addEvent(agentId, "err", settingsRefusal);
+      }
+      active = null;
       return false;
     }
 
@@ -13623,7 +13679,7 @@ async function main() {
           // killHosted leaves a request the orchestrator carries out against
           // the store. See kill-request.ts. The hold process makes the same
           // call (telegram/hold.ts), so a held tenant's owner can revoke too.
-          const r = hostedKillFromChat(merrymenHome(), homePaths.grant(), grant, Math.floor(Date.now() / 1000));
+          const r = hostedKillFromChat(merrymenHome(), grantFilePath(), grant, Math.floor(Date.now() / 1000));
           if (!r.ok || !grant) return r;
           void addEvent(
             active?.agentId ?? grant.smartAccount,
@@ -13642,8 +13698,30 @@ async function main() {
         // copy strands the funds permanently, and this path is reachable from a
         // Telegram message. The CLI and the web API have archived for months;
         // the worker was the one destructive route that did not.
-        const archived = archiveCurrentGrant();
-        rmSync(homePaths.grant(), { force: true });
+        const archive = archiveCurrentGrant();
+        // AND NOT WITHOUT ONE. A `failed` archive used to come back as the same
+        // null as "nothing to keep", and the grant was deleted anyway: on a full
+        // or read-only disk, that was the only copy of the owner key, gone for
+        // good. Trading still stops — the pause marker, which every tick and
+        // every chat trade honours — but the key stays where it is, and the
+        // owner is told why and what to do. The session key's own on-chain
+        // expiry and caps bound the agent meanwhile, as they always do.
+        if (archive.kind === "failed") {
+          const paused = pauseForKeptGrant();
+          console.log(`[kill] NOT deleting grant.json — the owner key could not be archived: ${archive.why}${paused ? "; trading paused" : "; could not pause either"}`);
+          void addEvent(
+            active?.agentId ?? grant.smartAccount,
+            "err",
+            `kill switch — the grant was NOT destroyed: ${archive.why}, and deleting grant.json without a copy would ` +
+              `lose the owner key for good. ${paused ? "Trading is paused instead." : "Trading could not be paused either."}`,
+          );
+          return { ok: false, reason: archive.why, archiveFailed: { why: archive.why, paused } };
+        }
+        // The file that was read and archived — not homePaths.grant() (grantFilePath).
+        rmSync(grantFilePath(), { force: true });
+        // A pause an earlier, refused kill left in its place has done its job.
+        liftKillPause();
+        const archived = archive.kind === "archived" ? archive.account : null;
         if (archived) {
           void addEvent(
             active?.agentId ?? archived,

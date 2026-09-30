@@ -27,6 +27,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { fsyncDirSync, writeFileAtomicSync } from "./atomic-write.mjs";
 import { banner, c, spinner, type as typeOut, withSpinner } from "./ui.mjs";
 
 // Where the PACKAGE lives (npm global dir or a checkout) — code, never data.
@@ -44,6 +45,11 @@ const STRATEGIES = path.join(HOME, "strategies");
 // a single slot, so replacing or killing a wallet archives the old one here first
 // (with its owner key) instead of stranding whatever's still funded in it.
 const GRANTS_ARCHIVE = path.join(HOME, "grants");
+// The worker's pause marker, and what it holds when a kill set it — the same
+// sentence as KILL_PAUSE_NOTE in worker/src/home.ts (grant-archive-durable.test.ts
+// holds the two equal).
+const PAUSED = path.join(HOME, "paused");
+const KILL_PAUSE_NOTE = "paused by a kill that could not archive the owner key, so it kept the grant";
 const PKG_STRATEGIES = path.join(ROOT, "strategies");
 const WELCOMED = path.join(HOME, ".welcomed");
 
@@ -214,18 +220,43 @@ async function rpcCall(url, method, params = []) {
 
 const USDG_ADDR = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"; // 6 decimals
 
-/** Copy the live grant into the archive before anything destroys it. */
+/**
+ * Copy the live grant into the archive before anything destroys it.
+ *
+ * Returns { kind: "archived", account } | { kind: "nothing" } | { kind: "failed", why },
+ * the same outcomes as worker/src/grant.ts. `failed` used to be the same null
+ * as "nothing to keep", and `kill` deleted grant.json either way.
+ *
+ * ON DISK BEFORE IT SAYS `archived`: a synced temp file renamed into place,
+ * then the archive directory synced (and its parent, when it is new). A plain
+ * write is still in the page cache when grant.json is deleted a moment later,
+ * and a power loss can keep the delete and lose the copy.
+ */
 function archiveCurrentGrant() {
+  let raw;
   try {
-    const raw = readFileSync(GRANT, "utf8");
-    const g = JSON.parse(raw.replace(/^﻿/, ""));
-    if (!g?.smartAccount) return null;
-    mkdirSync(GRANTS_ARCHIVE, { recursive: true, mode: 0o700 });
-    // Archived grant holds a plaintext OWNER KEY — owner-only perms (0600).
-    writeSecret(path.join(GRANTS_ARCHIVE, `${g.smartAccount.toLowerCase()}.json`), raw);
-    return g.smartAccount;
+    raw = readFileSync(GRANT, "utf8");
+  } catch (e) {
+    return e?.code === "ENOENT" ? { kind: "nothing" } : { kind: "failed", why: `grant.json could not be read (${e?.code ?? "unknown error"})` };
+  }
+  let account;
+  try {
+    account = JSON.parse(raw.replace(/^﻿/, ""))?.smartAccount;
   } catch {
-    return null; // nothing to keep
+    return { kind: "nothing" };
+  }
+  if (account === undefined || account === null || account === "") return { kind: "nothing" };
+  // The only thing an archive file is named from — keeps `../x` out of the path.
+  if (typeof account !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(account)) {
+    return { kind: "failed", why: "its smartAccount is not an address, so no archive can be named for it" };
+  }
+  try {
+    if (mkdirSync(GRANTS_ARCHIVE, { recursive: true, mode: 0o700 }) !== undefined) fsyncDirSync(HOME);
+    // Archived grant holds a plaintext OWNER KEY — owner-only perms (0600).
+    writeFileAtomicSync(path.join(GRANTS_ARCHIVE, `${account.toLowerCase()}.json`), raw, 0o600, { durable: true });
+    return { kind: "archived", account };
+  } catch (e) {
+    return { kind: "failed", why: `the archive could not be written (${e?.code ?? "unknown error"})` };
   }
 }
 
@@ -1071,8 +1102,41 @@ async function kill() {
   if (answer === "y" || answer === "yes") {
     // Keep the wallet + its owner key before the grant goes — killing the session
     // key must never mean losing access to funds still sitting in the account.
-    const archived = archiveCurrentGrant();
+    const archive = archiveCurrentGrant();
+    // AND NOT WITHOUT A COPY: deleting grant.json now would lose the owner key
+    // for good. Stop the trading instead (the pause marker the worker honours
+    // every tick) and keep the grant — the same rule as the Telegram /kill and
+    // the dashboard's kill switch.
+    if (archive.kind === "failed") {
+      // pauseForKeptGrant (worker/src/home.ts), which this CLI cannot import:
+      // an existing pause is left as it is, and a new one says a kill set it.
+      let paused = existsSync(PAUSED);
+      if (!paused) {
+        try {
+          writeFileSync(PAUSED, KILL_PAUSE_NOTE, "utf8");
+          paused = true;
+        } catch {
+          paused = existsSync(PAUSED);
+        }
+      }
+      bad(`grant NOT destroyed — ${archive.why}, and deleting it without a copy would lose your owner key for good.`);
+      console.log(
+        paused
+          ? dim("  Trading is paused instead. Fix ~/.merrymen/grants/ (disk space, permissions), then rerun: merrymen kill")
+          : dim("  Trading could not be paused either — stop the worker. Fix ~/.merrymen/grants/, then rerun: merrymen kill"),
+      );
+      process.exitCode = 1;
+      return;
+    }
     rmSync(GRANT, { force: true });
+    // liftKillPause: a pause an earlier, refused kill left has done its job.
+    // Only that one — a pause the owner asked for stays.
+    try {
+      if (readFileSync(PAUSED, "utf8") === KILL_PAUSE_NOTE) rmSync(PAUSED, { force: true });
+    } catch {
+      /* no marker */
+    }
+    const archived = archive.kind === "archived" ? archive.account : null;
     ok("grant destroyed — the band stands down on the next tick (on-chain expiry is the backstop)");
     if (archived) {
       console.log(

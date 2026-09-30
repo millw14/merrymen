@@ -16,7 +16,7 @@
  * and the home file doesn't, files are copied over once, so nothing is lost.
  */
 
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -78,4 +78,43 @@ export function ensureHome(): string {
   }
   ensured = true;
   return home;
+}
+
+/**
+ * What the pause marker holds when a KILL set it. A kill that could not archive
+ * the owner key keeps grant.json — deleting it would lose that key for good —
+ * and pauses instead (Telegram /kill, the web kill switch, `merrymen kill`, which
+ * keeps its own copy of this sentence). A marker holding anything else is a
+ * pause somebody asked for, and nothing here touches it.
+ */
+export const KILL_PAUSE_NOTE = "paused by a kill that could not archive the owner key, so it kept the grant";
+
+/**
+ * Pause for a kill that kept the grant. A pause already in place — the owner's,
+ * or an earlier kill's — is left exactly as it is. Returns whether trading is
+ * paused now.
+ */
+export function pauseForKeptGrant(): boolean {
+  const file = homePaths.paused();
+  if (existsSync(file)) return true;
+  try {
+    writeFileSync(file, KILL_PAUSE_NOTE, "utf8");
+    return true;
+  } catch {
+    return existsSync(file);
+  }
+}
+
+/**
+ * After a kill that DID go through: lift the pause a refused kill left, and
+ * only that one. Otherwise it outlived the grant it stood in for, and the next
+ * grant armed paused with nothing saying why.
+ */
+export function liftKillPause(): void {
+  const file = homePaths.paused();
+  try {
+    if (readFileSync(file, "utf8") === KILL_PAUSE_NOTE) rmSync(file, { force: true });
+  } catch {
+    /* no marker, or unreadable: leave it */
+  }
 }

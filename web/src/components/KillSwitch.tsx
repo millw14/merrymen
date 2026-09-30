@@ -14,12 +14,23 @@ import { clearGrant } from "@/lib/session";
  */
 export function KillSwitch() {
   const [arming, setArming] = useState(false);
-  const [state, setState] = useState<"idle" | "killing" | "done">("idle");
+  const [state, setState] = useState<"idle" | "killing" | "done" | "kept">("idle");
+  const [kept, setKept] = useState("");
 
   async function kill() {
     setState("killing");
     try {
-      await fetch("/api/grants", { method: "DELETE" });
+      const res = await fetch("/api/grants", { method: "DELETE" });
+      // THE SERVER KEPT THE GRANT: it could not archive the owner key first,
+      // so deleting it would have lost that key for good (grants route DELETE).
+      // It paused trading instead. Say so, and leave everything here as it is —
+      // "all agents killed" would be untrue, and the owner has to act.
+      if (res.status === 409) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        setKept(body?.error ?? "The grant was not deleted, because the owner key could not be archived first.");
+        setState("kept");
+        return;
+      }
     } catch {
       // Server unreachable — still stand the agent down locally. The local
       // grant is ARCHIVED rather than destroyed (see clearGrant): killing is
@@ -28,6 +39,19 @@ export function KillSwitch() {
     clearGrant();
     setState("done");
     setTimeout(() => window.location.reload(), 900);
+  }
+
+  if (state === "kept") {
+    return (
+      <>
+        <button className="killall" onClick={() => void kill()}>
+          ◉ try the kill again
+        </button>
+        <div className="killall-note" role="alert">
+          {kept}
+        </div>
+      </>
+    );
   }
 
   if (state === "done") {

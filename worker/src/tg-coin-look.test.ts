@@ -966,7 +966,9 @@ describe("index.ts wires the seams in the order that makes them safe", () => {
     assert.match(CODE, /if \(wrote && decision_id\) void maybePost\(decision_id, row\.status\);\n[\s\S]{0,400}if \(wrote\) tgNoteTradeRow\(intent, decision_id, row\.status\);/);
     assert.match(CODE, /if \(decisionId\) tgDeliver\(tgBook\.onFill\(decisionId, "dropped", paperActive\(\)\)\);/);
     assert.match(CODE, /if \(trenchBrain\.reset\(trenchContext\)\) tgDeliver\(tgBook\.reset\(\)\);\n\s+tgDeliver\(tgBook\.expire\(\)\);/);
-    assert.match(CODE, /discoverTrencherUniverse\(mainnetClient\(\),current\.grant,freshTrenchTape\(\),\{nominated:new Set\(tgNominated\)\}\)/);
+    // The nominated set still reaches discovery. The pool cache rides beside it
+    // (trencher-discovery.ts) and changes what is re-read, never what qualifies.
+    assert.match(CODE, /discoverTrencherUniverse\(mainnetClient\(\),current\.grant,freshTrenchTape\(\),\{nominated:new Set\(tgNominated\),cache:trenchPoolCache\}\)/);
   });
 
   it("the look's presence probe reads Robinhood Chain, through the governed mainnet client", () => {
