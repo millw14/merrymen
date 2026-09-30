@@ -13,7 +13,7 @@ import path from "node:path";
 /** Resolve the destination even when a symlink names a file not created yet. */
 function writeTarget(file) {
   let target = file;
-  const seen = new Set<string>();
+  const seen = new Set();
   for (;;) {
     // Relative link destinations are relative to the link's real directory,
     // including when the path to that directory itself traverses a symlink.
