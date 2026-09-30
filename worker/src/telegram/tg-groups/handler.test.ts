@@ -2087,3 +2087,60 @@ describe("hygiene", () => {
     assert.equal(tg.sends().length, 0);
   });
 });
+
+
+describe("a group job that never finishes", () => {
+  it("does not silence the group: the next addressed line is answered, and the stall is logged with its stage", async () => {
+    // Live, one job that never settled held a group's queue for hours: every
+    // later line waited behind it, and not one log line said so.
+    let hang = true;
+    make({
+      stallMs: 30,
+      sleep: async (ms) => {
+        if (hang) {
+          hang = false;
+          return new Promise<void>(() => {});
+        }
+        clock += Math.max(0, ms);
+      },
+    });
+    approveRoom();
+    groups.onMessage(msg("@pinebot hi"));
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(tg.sends().length, 0, "the first line is stuck in its typing delay");
+    groups.onMessage(msg("@pinebot you there?"));
+    // The watchdog frees the queue before this line's own send has finished:
+    // wait for the send itself, not for the queue.
+    for (let i = 0; i < 100 && tg.sends().length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(tg.sends().length, 1, JSON.stringify(logs));
+    assert.ok(logs.some((l) => /a group job ran past .* at "send: typing delay"/.test(l)), JSON.stringify(logs));
+    assert.ok(logs.some((l) => /held the chat's lock past/.test(l)), JSON.stringify(logs));
+    assert.ok(!logs.some((l) => /pinebot|you there|hi\b/.test(l.replace(/\[tg-groups\]/, ""))), "the log names stages, never what was said");
+  });
+});
+
+describe("stepping past a stuck send lock keeps Telegram's pacing", () => {
+  it("a send that goes ahead of a lock holder still waits its own pacer slot", async () => {
+    // The holder's send is slow (real time), so the lock guard lets the next
+    // line go ahead of it. The pacer slot is taken before a send, not after
+    // it lands: the second send may not go out inside the first's 3 s gap.
+    const sentAt: number[] = [];
+    const slow: FetchLike = async (url, init) => {
+      if (url.endsWith("/sendMessage")) {
+        sentAt.push(clock);
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      return tg.fetchFn(url, init);
+    };
+    make({ stallMs: 40, opts: () => ({ token: TOKEN, fetchFn: slow }) });
+    approveRoom();
+    groups.onMessage(msg("@pinebot hi"));
+    await new Promise((r) => setTimeout(r, 10));
+    groups.onMessage(msg("@pinebot yo", { fromId: BOB, fromFirstName: "Bob" }));
+    for (let i = 0; i < 150 && tg.sends().length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(tg.sends().length, 2, JSON.stringify(logs));
+    assert.ok(logs.some((l) => /held the chat's lock past/.test(l)), "the second really went ahead of the lock");
+    const [a, b] = sentAt;
+    assert.ok(a !== undefined && b !== undefined && b - a >= 3_000, `sends ${a} and ${b} are inside one pacer gap`);
+  });
+});
