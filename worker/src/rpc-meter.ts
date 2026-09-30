@@ -34,7 +34,7 @@ import {
   shouldPublish,
   type GovernorState,
 } from "./rpc-governor";
-import { PRIMARY_BUDGET_MS, endpointKey, failoverEndpoints, holdFor, verdictFor, type EndpointVerdict } from "./rpc-failover";
+import { PRIMARY_BUDGET_MS, endpointKey, failoverEndpoints, holdFor, transportUrl, verdictFor, type EndpointVerdict } from "./rpc-failover";
 
 interface MethodStat {
   calls: number;
@@ -307,12 +307,15 @@ export function chainRead(url: string | undefined, label = "read"): Transport {
       // unreachable everywhere rather than just at one URL. Read when the client
       // is built, like the URL itself; children inherit it from the orchestrator.
       const off = /^(0|off|false|no)$/i.test(process.env.MERRYMEN_RPC_FAILOVER?.trim() ?? "");
-      const next = off ? [configured] : failoverEndpoints(configured, chainDefault);
-      const prior = routes.get(configured);
+      // viem normalizes URLs before fetching (including a root trailing slash)
+      // and moves Basic credentials into a header. Register that same URL.
+      const primary = transportUrl(configured);
+      const next = off ? [primary] : failoverEndpoints(primary, chainDefault && transportUrl(chainDefault));
+      const prior = routes.get(primary);
       // ONE URL, TWO CHAINS is a misconfiguration, and its fallback would be
       // whichever chain registered last. Ambiguity gets no fallback at all —
       // the configured endpoint alone, which is where this began.
-      routes.set(configured, prior && prior.join("\n") !== next.join("\n") ? [configured] : next);
+      routes.set(primary, prior && prior.join("\n") !== next.join("\n") ? [primary] : next);
     }
     return transport(opts);
   }) as Transport;
@@ -365,7 +368,14 @@ async function governedFetch(input: string | URL | Request, init?: RequestInit):
     let res: Response | null = null;
     let failure: unknown = null;
     try {
-      res = await fetch(ep.url, { ...init, signal: last ? init?.signal : budgeted(init?.signal) });
+      // Credentials describe the configured provider, never the public RPC.
+      const headers = new Headers(init?.headers);
+      if (i > 0) {
+        headers.delete("authorization");
+        headers.delete("proxy-authorization");
+        headers.delete("cookie");
+      }
+      res = await fetch(ep.url, { ...init, headers, ...(i > 0 ? { credentials: "omit" as const } : {}), signal: last ? init?.signal : budgeted(init?.signal) });
       if (res.status === 429 || res.status === 503) {
         refused = true;
         retryAfterMs = retryAfterFrom(res.headers.get("retry-after"));

@@ -104,6 +104,18 @@ export function failoverEndpoints(configured: string | undefined, chainDefault: 
   return out;
 }
 
+/** Match viem's fetch URL: canonical URL spelling, without Basic auth userinfo. */
+export function transportUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
 function sameEndpoint(a: string, b: string): boolean {
   const norm = (u: string) => u.replace(/\/+$/, "").toLowerCase();
   return norm(a) === norm(b);

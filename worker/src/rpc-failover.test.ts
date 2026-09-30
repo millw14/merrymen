@@ -48,6 +48,7 @@ type Behaviour = "ok" | "quota" | "429" | "401" | "500" | "400" | "dead" | "hang
 const stream = { pulls: 0, cancelled: 0 };
 const behaviour = new Map<string, Behaviour>();
 const sent: string[] = [];
+const sentHeaders: Headers[] = [];
 const realFetch = globalThis.fetch;
 const realNow = Date.now;
 const realWarn = console.warn;
@@ -63,6 +64,7 @@ function answer(body: unknown): Response {
 beforeEach(() => {
   behaviour.clear();
   sent.length = 0;
+  sentHeaders.length = 0;
   stream.pulls = 0;
   stream.cancelled = 0;
   warnings = [];
@@ -72,6 +74,7 @@ beforeEach(() => {
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     sent.push(url);
+    sentHeaders.push(new Headers(init?.headers));
     const b = behaviour.get(url) ?? "ok";
     const err = (status: number, message: string) =>
       new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: status, message } }), { status, headers: { "content-type": "application/json" } });
@@ -284,6 +287,25 @@ describe("reading a refusal's body", () => {
 });
 
 describe("what failover must never do", () => {
+  it("matches viem's normalized root URL when locating the fallback", async () => {
+    const configured = "http://127.0.0.1:9";
+    behaviour.set(`${configured}/`, "quota");
+    const c = createPublicClient({ chain, transport: chainRead(configured) });
+    assert.equal(await readBlock(c), 16n);
+    assert.deepEqual(sent, [`${configured}/`, PUBLIC]);
+  });
+
+  it("keeps the primary provider's Basic credentials away from the public RPC", async () => {
+    behaviour.set(HOUSE, "quota");
+    const configured = HOUSE.replace("http://", "http://reader:private-key@");
+    const c = createPublicClient({ chain, transport: chainRead(configured) });
+    assert.equal(await readBlock(c), 16n);
+    assert.deepEqual(sent, [HOUSE, PUBLIC]);
+    assert.equal(sentHeaders[0]!.get("authorization"), `Basic ${Buffer.from("reader:private-key").toString("base64")}`);
+    assert.equal(sentHeaders[1]!.get("authorization"), null);
+    assert.ok([...warnings, ...rpcSummaryLines()].every(line => !line.includes("private-key")));
+  });
+
   it("NEVER SENDS A REQUEST TWICE TO ONE ENDPOINT, and surfaces the last refusal when both refuse", async () => {
     behaviour.set(HOUSE, "quota");
     behaviour.set(PUBLIC, "429");
