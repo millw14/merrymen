@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import {
   addressedHow,
   addressedSmallTalk,
+  asksAboutCoin,
   asksHowItIs,
   extractCaHits,
   extractCas,
@@ -826,6 +827,23 @@ describe("isQuestionShaped", () => {
   const no = ["i know what you did", "@pinebot you're cool", "pine is cooking today", "merryman lol", "@pinebot one", "", "hey"];
   for (const t of yes) it(`question: ${t}`, () => assert.equal(isQuestionShaped(t, names), true));
   for (const t of no) it(`not a question: ${JSON.stringify(t)}`, () => assert.equal(isQuestionShaped(t, names), false));
+});
+
+describe("asksAboutCoin: a reply under a coin post that asks about that coin", () => {
+  const names = ["Shogun", "@shogun_merry_bot"];
+  const yes = [
+    "wdyt about this shogun", "@shogun_merry_bot thoughts?", "shogun is it any good", "shogun you in?", "@shogun_merry_bot didnt you see",
+    "@shogun_merry_bot ??", "shogun?", "shogun this?", "shogun ape or nah?", "what do you think shogun", "shogun what about this one",
+    "shogun rate it", "shogun would you buy", "shogun worth it?", "shogun is this legit", "shogun check this out", "shogun?? wdyt",
+    "shogun what u make of this",
+  ];
+  const no = [
+    "shogun don't touch this one pls", "@shogun_merry_bot gm gm", "shogun lol", "shogun skip it", "shogun not this one",
+    "shogun how are you?", "shogun what time is it there", "shogun you there?", "shogun never buy this", "shogun thanks!",
+    "shogun ignore that", "shogun dont even look at it", "", "shogun",
+  ];
+  for (const t of yes) it(`asks: ${t}`, () => assert.equal(asksAboutCoin(t, names), true));
+  for (const t of no) it(`does not ask: ${JSON.stringify(t)}`, () => assert.equal(asksAboutCoin(t, names), false));
 });
 
 describe("isInjection", () => {

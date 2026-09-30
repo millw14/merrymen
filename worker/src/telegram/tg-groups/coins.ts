@@ -114,6 +114,14 @@ export const COIN_FLOW = {
    * second person to ask about a coin is owed the answer the first one got.
    */
   seenLineMs: HOUR,
+  /**
+   * Not in the contract: of those per-person answers, at most this many per
+   * coin per chat per seenLineMs go to people other than the owner. Eight
+   * people asking about one coin in a minute is a raid, not eight
+   * conversations: past this they are counted as reposts (one 👀, then
+   * nothing). The owner is always answered.
+   */
+  seenAskedMax: 3,
   /** An `expired` outcome is said only when a human spoke in the chat this recently. */
   expiredLiveMs: 30 * MIN,
   /**
@@ -274,6 +282,18 @@ export interface CoinPostStart {
   done: Promise<CoinPostEnd>;
 }
 
+/**
+ * Someone who asked about a post's coin while its work was still on the coin
+ * lane (CoinFlow.askedWhileWorking): who to tag if the look comes back
+ * `unknown`. Never their words.
+ */
+export interface CoinAsk {
+  senderId: number;
+  senderName: string;
+  /** True once they have run /forgetme since asking. */
+  forgotten?: () => boolean;
+}
+
 /** What the handler read off one message, for `onPost`. */
 export interface CoinPostInfo {
   senderId: number;
@@ -417,7 +437,7 @@ interface Lane {
 }
 
 /** True once the sender asked to be forgotten. A predicate that throws reads as forgotten. */
-function goneOf(m: CoinPostInfo): boolean {
+function goneOf(m: { forgotten?: () => boolean }): boolean {
   try {
     return typeof m.forgotten === "function" && m.forgotten() === true;
   } catch {
@@ -560,6 +580,14 @@ export class CoinFlow {
   private halted = false;
   /** Posts (`${chatId}:${messageId}`) whose work is on a coin lane, waiting or being worked (working()). */
   private readonly onLanes = new Set<string>();
+  /** Who asked about each of those posts meanwhile (askedWhileWorking), first asker first. */
+  private readonly askers = new Map<string, CoinAsk[]>();
+  /**
+   * When each answer from memory to someone other than the owner who asked
+   * went out, per `${chatId}:${address}` (COIN_FLOW.seenAskedMax). In memory,
+   * like seenSaidAt.
+   */
+  private readonly askedSaidAt = new Map<string, number[]>();
   /** Outcomes heard through the port and still being said, so drain() can wait for them. */
   private readonly hearing = new Set<Promise<void>>();
 
@@ -639,7 +667,10 @@ export class CoinFlow {
       }
       const key = `${chatId}:${line.messageId}`;
       this.onLanes.add(key);
-      const done = this.onLane(chatId, rank, () => this.work(chatId, line, m, cas)).finally(() => this.onLanes.delete(key));
+      const done = this.onLane(chatId, rank, () => this.work(chatId, line, m, cas)).finally(() => {
+        this.onLanes.delete(key);
+        this.askers.delete(key);
+      });
       return { owned: "handled", done };
     } catch (e) {
       this.fail("post", e);
@@ -666,6 +697,25 @@ export class CoinFlow {
    */
   working(chatId: number, messageId: number): boolean {
     return this.onLanes.has(`${chatId}:${messageId}`);
+  }
+
+  /**
+   * SOMEONE ASKED ABOUT A POST'S COIN WHILE ITS LOOK WAS STILL OUT ("wdyt
+   * about this pine" seconds after the CA). The handler answers them now, as
+   * chatter; this makes sure they also hear how the look went: a post nobody
+   * addressed whose look comes back `unknown` gets "can't pull that one up
+   * rn" tagging the first of them (still at most once per chat per
+   * COIN_FLOW.unknownLineMs), where it would otherwise be silence. A verdict
+   * is said on the post as ever. False, and nothing kept, when the post is
+   * not on the lane.
+   */
+  askedWhileWorking(chatId: number, messageId: number, ask: CoinAsk): boolean {
+    const key = `${chatId}:${messageId}`;
+    if (!this.onLanes.has(key) || !ask || !isInt(ask.senderId)) return false;
+    const list = this.askers.get(key) ?? [];
+    if (list.length < 8) list.push(ask);
+    this.askers.set(key, list);
+    return true;
   }
 
   /** One post's CAs, in order, on its chat's lane. */
@@ -695,7 +745,11 @@ export class CoinFlow {
         this.fail("post", e);
       }
     }
-    if (!this.halted && !ctx.acted && ctx.unknown && m.addressed === true) await this.cannotLook(chatId, line, m, ctx);
+    if (!this.halted && !ctx.acted && ctx.unknown) {
+      // Asked in the post itself, or by someone replying to it while its look was out.
+      const asker = m.addressed === true ? m : this.askers.get(`${chatId}:${line.messageId}`)?.find((a) => !goneOf(a));
+      if (asker) await this.cannotLook(chatId, line, asker, ctx);
+    }
     const looks = ctx.looks.length > 0 ? { looks: ctx.looks } : {};
     return ctx.acted ? { acted: true, ...looks } : { acted: false, ...(ctx.quiet ? { quiet: ctx.quiet } : {}), ...looks };
   }
@@ -768,7 +822,7 @@ export class CoinFlow {
    * per chat per COIN_FLOW.unknownLineMs; nothing is remembered, so a repost
    * gets a fresh look.
    */
-  private async cannotLook(chatId: number, line: TgLine, m: CoinPostInfo, ctx: PostCtx): Promise<void> {
+  private async cannotLook(chatId: number, line: TgLine, m: CoinAsk, ctx: PostCtx): Promise<void> {
     ctx.quiet = "coin-unknown";
     if (goneOf(m) || !this.approvedRoom(chatId) || !this.coinsOn()) return;
     const tag = isInt(m.senderId) && typeof m.senderName === "string" && m.senderName ? { id: m.senderId, name: m.senderName } : undefined;
@@ -1111,7 +1165,9 @@ export class CoinFlow {
    * asking about a coin somebody else already asked about gets the answer
    * too, not a 👀. Its answer still stamps the coin's window, so the
    * unaddressed reposts after it stay quiet; the flood rule still bounds how
-   * often one person is answered at all.
+   * often one person is answered at all, and past COIN_FLOW.seenAskedMax
+   * people other than the owner in the window, the next one asking is
+   * counted as a repost.
    */
   private async fromMemory(
     chatId: number,
@@ -1124,9 +1180,12 @@ export class CoinFlow {
     ctx: PostCtx,
   ): Promise<void> {
     const coinKey = `${chatId}:${address}`;
-    const asked = m.addressed === true && isInt(m.senderId);
-    const k = asked ? `${coinKey}:by:${m.senderId}` : coinKey;
     const t = this.d.now();
+    const owner = this.ownerIdNow();
+    const byOwner = owner !== null && m.senderId === owner;
+    const askedBefore = (this.askedSaidAt.get(coinKey) ?? []).filter((at) => !elapsed(at, t, COIN_FLOW.seenLineMs));
+    const asked = m.addressed === true && isInt(m.senderId) && (byOwner || askedBefore.length < COIN_FLOW.seenAskedMax);
+    const k = asked ? `${coinKey}:by:${m.senderId}` : coinKey;
     const prev = this.seenSaidAt.get(k);
     if (prev && !elapsed(prev.at, t, COIN_FLOW.seenLineMs)) {
       if (!prev.eyed) {
@@ -1142,6 +1201,9 @@ export class CoinFlow {
     const prevCoin = asked ? this.seenSaidAt.get(coinKey) : undefined;
     const coinMine = asked ? { at: t, eyed: prevCoin?.eyed ?? false } : undefined;
     if (coinMine) this.seenSaidAt.set(coinKey, coinMine);
+    // Counted toward the cap before the send, given back if it did not go out.
+    const counted = asked && !byOwner ? [...askedBefore, t] : undefined;
+    if (counted) this.askedSaidAt.set(coinKey, counted);
     const ok = await say(
       { kind: "coin-seen", verdict: this.seenVerdict(memo) },
       { replyTo: line.messageId, trigger: line, ...(memo.name ? { coinName: memo.name } : {}) },
@@ -1155,10 +1217,17 @@ export class CoinFlow {
         if (prevCoin) this.seenSaidAt.set(coinKey, prevCoin);
         else this.seenSaidAt.delete(coinKey);
       }
+      if (counted && this.askedSaidAt.get(coinKey) === counted) {
+        if (askedBefore.length > 0) this.askedSaidAt.set(coinKey, askedBefore);
+        else this.askedSaidAt.delete(coinKey);
+      }
     }
     // Bounded like the store's 30 chats of 60 coins: old stamps decide nothing.
     if (this.seenSaidAt.size > 512) {
       for (const [key, v] of this.seenSaidAt) if (elapsed(v.at, t, COIN_FLOW.seenLineMs)) this.seenSaidAt.delete(key);
+    }
+    if (this.askedSaidAt.size > 512) {
+      for (const [key, v] of this.askedSaidAt) if (v.every((at) => elapsed(at, t, COIN_FLOW.seenLineMs))) this.askedSaidAt.delete(key);
     }
   }
 

@@ -983,6 +983,35 @@ export function isQuestionShaped(text: string, selfNames: readonly string[] = []
   return ASKED.test(rest.join(" ")) || ASKED.test(rest.slice(1).join(" "));
 }
 
+/** Asking what it makes of a coin: "wdyt", "thoughts", "is it any good", "you in?", "didnt you see". */
+const COIN_ASK =
+  /\b(?:wdyt|wyt|thoughts?|thots|opinions?|verdict|(?:your|ur|ya) take|take on (?:it|this|that)|rate (?:it|this|that)|any good|legit|worth (?:it|a look|a bag|buying|aping|a punt)|(?:good|bad|solid) (?:one|coin|buy|entry|play|pick)|what (?:do |d )?(?:you|u|ya) (?:think|reckon|make of)|what about (?:it|this|that)|how about (?:it|this|that)|(?:would|will|should|do|did|could) (?:you|u|ya|i|we) (?:buy|ape|grab|get in|touch|take|look|check|trade)|(?:you|u|ya) in\b|(?:did|didn'?t|didnt|have|haven'?t|havent) (?:you|u|ya) (?:see|seen|look|check|catch)|(?:you|u|ya) (?:see|seen|catch) (?:it|this|that)|(?:look|check|peep)(?:ed)? (?:at )?(?:it|this|that)|this one)\b/u;
+/** Telling it NOT to act on the coin: "don't touch this one", "skip it", "not this one". */
+const COIN_STOP =
+  /\b(?:don'?t|dont|do not|never|stop|no|not)\s+(?:[\p{L}']+\s+){0,2}?(?:touch|touching|buy|buying|ape|aping|grab|get|look|trade|nominate|bother|chase)\b|\b(?:skip|ignore|avoid|leave|forget|pass on)\s+(?:it|this|that)\b|\bnot this one\b/u;
+/** At most this many words, ending in "?", read as asking about the post: "this?", "good?", "ape or nah?". */
+const COIN_ASK_SHORT_WORDS = 3;
+
+/**
+ * A REPLY UNDER A COIN POST THAT ASKS ABOUT THAT COIN, once its names, and
+ * any @handle, are gone: "wdyt about this", "thoughts?", "is it any good",
+ * "you in?", "didnt you see", a bare "??" (it was called, about the post), or
+ * a short question ("this?", "ape or nah?"). The handler reads it only for a
+ * line said to it that replies to a post carrying a coin (handler.ts
+ * repliedCoin): everything else under such a post is chatter — "gm gm", "lol",
+ * a question about something else — and so is any line telling it not to act
+ * on the coin ("don't touch this one pls", "skip it").
+ */
+export function asksAboutCoin(text: string, selfNames: readonly string[] = []): boolean {
+  if (typeof text !== "string") return false;
+  const t = norm(unnamed(text, selfNames));
+  if (COIN_STOP.test(t)) return false;
+  const words = wordsOf(t);
+  if (words.length === 0) return /[?？¿]/u.test(text);
+  if (COIN_ASK.test(t)) return true;
+  return words.length <= COIN_ASK_SHORT_WORDS && /[?？¿]\s*$/u.test(t) && addressedSmallTalk(text, selfNames) === null;
+}
+
 // ─── Insults ───────────────────────────────────────────────────────────────
 
 /**

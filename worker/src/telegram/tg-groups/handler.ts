@@ -64,6 +64,7 @@ import { CoinFlow, type CoinIntent, type CoinPostEnd, type CoinQuiet, type CoinS
 import {
   addressedHow,
   addressedSmallTalk,
+  asksAboutCoin,
   extractCaHits,
   extractCas,
   extractCashtags,
@@ -1907,33 +1908,46 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   };
 
   /**
-   * A REPLY TO A COIN POST, SAID TO IT, ASKS ABOUT THAT COIN. "wdyt about
-   * this shogun" under someone's CA names no coin in its own words, so the
-   * coin is read off the post it answers: this chat's remembered line, else
-   * the text Telegram quoted with the reply. The reply then goes through the
-   * coin flow as a post of that coin by whoever asked — claimed under the
-   * reply's own message id, so the original post's claim is untouched and a
-   * replay of the reply repeats nothing — with every rule a CA said to it
-   * gets: looked at, answered from memory, the owner ask, a nomination, "can't
-   * pull that one up rn", or silence for another chain's coin.
+   * A REPLY TO A COIN POST, SAID TO IT, THAT ASKS ABOUT THAT COIN: "wdyt
+   * about this shogun" under someone's CA names no coin in its own words, so
+   * the coin is read off the post it answers — the text Telegram quoted with
+   * the reply (the whole post), else this chat's remembered line (its first
+   * 400 characters). The reply then goes through the coin flow as a post of
+   * that coin by whoever asked — claimed under the reply's own message id, so
+   * the original post's claim is untouched and a replay of the reply repeats
+   * nothing — with every rule a CA said to it gets: looked at, answered from
+   * memory, the owner ask, a nomination, "can't pull that one up rn", or
+   * silence for another chain's coin.
    *
-   * Only a line said to it: a reply that did not call it is chatter between
-   * people. Never its own line (it never writes an address). Never a distress
-   * post's coin: "lost everything on 0x… i want to die" is a person, not a
-   * coin to look at, whoever replies to it. And not while that post is still
-   * on the coin lane (CoinFlow.working): its own answer is on its way, and
-   * "@bot didnt you see" sent while its look hangs is answered now, as
-   * chatter, rather than queued behind the look it is asking about.
+   * Only a line said to it that ASKS (detect.ts asksAboutCoin): "gm gm", a
+   * question about something else, or "don't touch this one pls" under a coin
+   * post is chatter, and a reply that did not call it is chatter between
+   * people. Never a reply to its own line (it never writes an address), and
+   * never a distress post's coin: "lost everything on 0x… i want to die" is a
+   * person, not a coin to look at, whoever replies to it.
+   *
+   * WHILE THAT POST IS STILL ON THE COIN LANE its own answer is on its way,
+   * and the reply is answered now, as chatter, rather than queued behind the
+   * look it is asking about ("@bot didnt you see" while the look hangs); the
+   * flow is told who asked (CoinFlow.askedWhileWorking), so a look that comes
+   * back `unknown` still gets them "can't pull that one up rn".
    */
   const repliedCoin = (j: LineJob): { cas: string[]; otherChain: string[]; foreignMint: boolean } | null => {
     if (j.addressed === null) return null;
+    const chatId = j.msg.chatId;
     const to = j.line.replyTo;
-    if (!isMsgId(to) || flow.working(j.msg.chatId, to)) return null;
-    const room = store.room(j.msg.chatId);
-    const remembered = room?.lines.find((l) => l.messageId === to);
+    if (!isMsgId(to)) return null;
+    const me = selfNow();
+    if (!asksAboutCoin(j.line.text, selfNamesOf(me))) return null;
+    const quote = j.msg.replyTo?.messageId === to ? j.msg.replyTo : undefined;
+    if (me && quote?.fromId === me.id) return null;
+    const remembered = store.room(chatId)?.lines.find((l) => l.messageId === to);
     if (remembered?.own) return null;
-    const quoted = j.msg.replyTo?.messageId === to ? j.msg.replyTo.text : undefined;
-    const text = remembered ? remembered.text : typeof quoted === "string" ? quoted : "";
+    if (flow.working(chatId, to)) {
+      flow.askedWhileWorking(chatId, to, { senderId: j.line.fromId, senderName: j.via ? "" : j.line.name, forgotten: () => forgotten(j) });
+      return null;
+    }
+    const text = (typeof quote?.text === "string" && quote.text) || remembered?.text || "";
     if (!text || isDistress(text)) return null;
     const hits = extractCaHits(text);
     const foreignMint = hasForeignMint(text) || hasOtherChainLink(text);

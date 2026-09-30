@@ -92,12 +92,19 @@ export const COIN_LOOK = {
    */
   poolsMs: 5_000,
   /**
-   * DexScreener's token page is given this long. It is asked only once
-   * GeckoTerminal's page could not be read (or, with the chain down too, showed
-   * nothing), and beside that page rather than after it when the chain is
-   * down, so the whole look still fits the chat side's ten seconds.
+   * DexScreener's token page is given this long (step 5b). It is asked only
+   * when GeckoTerminal's page could not be read, had not answered after
+   * dexAfterMs, or (with the chain down too) listed nothing.
    */
   dexMs: 3_000,
+  /**
+   * How long GeckoTerminal's page may go unanswered before DexScreener is
+   * asked beside it rather than after it: the two together then end by
+   * poolsMs, so a presence probe that timed out plus both indexes still fits
+   * the chat side's ten seconds (COIN_FLOW.lookMs). A page that fails at once
+   * (a cooldown) sends the look to DexScreener at once.
+   */
+  dexAfterMs: 2_000,
 } as const;
 
 /** What `within` answers when the wait ran out first. */
@@ -233,8 +240,8 @@ const CASH_SIDES: ReadonlySet<string> = new Set([CASH.USDG.toLowerCase(), CASH.W
  *    the presence signal, under the full-look allowance: pools listed there
  *    for this address make it a Robinhood Chain coin, classified from those
  *    pools exactly as in step 5; no pools there, or the page unreadable too,
- *    and DexScreener has the last word (5b, asked beside the page so the look
- *    still fits its bound); nothing there either is `unknown` (a wallet,
+ *    and DexScreener has the last word (5b); nothing there either is
+ *    `unknown` (a wallet,
  *    another chain's token and a coin nobody has traded yet all look alike to
  *    an index). Nothing is relaxed by it: a `candidate` from here is still
  *    only a nomination, and discovery still verifies its pool on chain before
@@ -252,9 +259,12 @@ const CASH_SIDES: ReadonlySet<string> = new Set([CASH.USDG.toLowerCase(), CASH.W
  *    allowance, are classified by the same rules, save one clause: it
  *    publishes no distinct-buyer count, so that clause of highVolumePools is
  *    left to the trading side, whose own tape of a nominated coin is
- *    GeckoTerminal's and screens it again before any review. No pairs there,
- *    or DexScreener failing too, is `unknown` (it lists no Pons curve, so no
- *    pairs is never `no-pool`).
+ *    GeckoTerminal's and screens it again before any review. DexScreener is
+ *    asked when the page failed, or beside it once the page has gone
+ *    COIN_LOOK.dexAfterMs unanswered, so the look still fits its bound. Only
+ *    what it can place decides: a Uniswap v3 pair (every kind of step 5) or
+ *    only v4 pairs (`v4-only`). No pairs, pairs it cannot place, or
+ *    DexScreener failing too, is `unknown`, never `no-pool` or `curve`.
  * 6. No pool known: local curve provenance, then ONE multicall probe: a Pons
  *    template → `curve`; an ERC-20 → `no-pool`; a Uniswap v3 pool → step 7;
  *    anything else → `not-token`.
@@ -369,7 +379,7 @@ export function createCoinLook(d: CoinLookReaders): (address: string) => Promise
   };
 
   /**
-   * Step 5b: DexScreener's Robinhood Chain pairs of this token, bounded
+   * DexScreener's Robinhood Chain pairs of this token, bounded
    * (COIN_LOOK.dexMs): this token's own pools, or null when there is no
    * reader or it could not be read in time. Never rejects, so it can be
    * started before it is awaited.
@@ -424,27 +434,44 @@ export function createCoinLook(d: CoinLookReaders): (address: string) => Promise
    */
   const indexOnly = async (a: string): Promise<CoinLook> => {
     if (!takeFullLook()) return UNKNOWN;
-    // Beside the page, not after it: the chain already cost its read's bound,
-    // and the look has one bound in all (COIN_FLOW.lookMs on the chat side).
-    const dex = dexOf(a);
-    const mine = await poolsOf(a);
-    if (mine !== null && mine.length > 0) return classifyPools(a, mine, Math.floor(now() / 1000), "geckoterminal");
-    const alt = await dex;
-    if (alt !== null && alt.length > 0) return classifyPools(a, alt, Math.floor(now() / 1000), "dexscreener");
-    return UNKNOWN;
+    const found = await indexed(a, true);
+    return found === null ? UNKNOWN : classifyPools(a, found.pools, Math.floor(now() / 1000), found.source);
+  };
+
+  /**
+   * Steps 5 and 5b: GeckoTerminal's page for this token and, when that page
+   * could not be read — or had not answered after COIN_LOOK.dexAfterMs, or
+   * (`emptyToo`, the chain being down) listed nothing — DexScreener's pairs.
+   * GeckoTerminal answering, even with no pools, is its answer (unless
+   * `emptyToo`); null is neither index showing this token's pools.
+   */
+  const indexed = async (a: string, emptyToo: boolean): Promise<{ pools: GeckoPool[]; source: CoinLookSource } | null> => {
+    let dex: Promise<GeckoPool[] | null> | null = null;
+    const startDex = (): Promise<GeckoPool[] | null> => (dex ??= dexOf(a));
+    let slow: ReturnType<typeof setTimeout> | undefined;
+    if (d.dexPairs) {
+      slow = setTimeout(() => void startDex(), COIN_LOOK.dexAfterMs);
+      slow.unref?.();
+    }
+    let mine: GeckoPool[] | null;
+    try {
+      mine = await poolsOf(a);
+    } finally {
+      if (slow) clearTimeout(slow);
+    }
+    if (mine !== null && (mine.length > 0 || !emptyToo)) return { pools: mine, source: "geckoterminal" };
+    const alt = await startDex();
+    return alt !== null && alt.length > 0 ? { pools: alt, source: "dexscreener" } : null;
   };
 
   /** Steps 4–7, for an address with code on Robinhood Chain. */
   const read = async (a: `0x${string}`, depth: number): Promise<CoinLook> => {
     if (!takeFullLook()) return UNKNOWN;
-    const mine = await poolsOf(a);
-    if (mine === null) {
-      // Step 5b: the page could not be read. DexScreener's pairs, or unknown —
-      // never the probe, which cannot tell "no pool" from "the index is down".
-      const alt = await dexOf(a);
-      return alt !== null && alt.length > 0 ? classifyPools(a, alt, Math.floor(now() / 1000), "dexscreener") : UNKNOWN;
-    }
-    if (mine.length > 0) return classifyPools(a, mine, Math.floor(now() / 1000), "geckoterminal");
+    // No index could show its pools: unknown — never the probe, which cannot
+    // tell "no pool" from "the index is down".
+    const found = await indexed(a, false);
+    if (found === null) return UNKNOWN;
+    if (found.pools.length > 0) return classifyPools(a, found.pools, Math.floor(now() / 1000), found.source);
     if (d.curveFor) {
       // A ledger that cannot be read, or not in time, is "not known here".
       const curve = await within(() => d.curveFor!(a), COIN_LOOK.readMs).catch(() => null);
@@ -523,6 +550,9 @@ function classifyPools(a: string, mine: readonly GeckoPool[], nowSec: number, so
   // Trencher v1 buys through a Uniswap v3 pool CONTRACT and nothing else
   // (venues/trencher-vault.ts refuses v4 routes), so that is what is looked for.
   const v3 = mine.filter((p) => p.dex === DEX_V3 && p.poolAddress !== null);
+  // A DexScreener pair it cannot place (unlabelled, another venue) is not
+  // "no pool": it says nothing, and a `no-pool` answer would be remembered.
+  if (v3.length === 0 && source === "dexscreener") return mine.every((p) => p.dex === "uniswap-v4-robinhood") ? as("v4-only") : UNKNOWN;
   if (v3.length === 0) {
     if (mine.some((p) => p.dex === PONS_CURVE_DEX)) return as("curve");
     if (mine.every((p) => p.poolAddress === null)) return as("v4-only");

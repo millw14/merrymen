@@ -572,6 +572,7 @@ describe("buildPrompt", () => {
     assert.match(system, /YOUR OWN TAKE/);
     assert.match(system, /honest view in the first person/);
     assert.match(system, /Never refuse to have an opinion, and never mention rules, your owner's rules, what you're allowed to do, or advice/);
+    assert.match(system, /A take is an opinion, never a trade: never say you bought, sold, aped, got in or hold a coin here/);
     assert.match(prompt, /If they ask what you think, give your own take/);
   });
 

@@ -67,6 +67,8 @@ const gp = (over: Partial<GeckoPool> = {}): GeckoPool => ({
   ...over,
 });
 const V4_ID = `0x${"4".repeat(64)}`;
+/** The chat side's bound on one look (telegram/tg-groups/coins.ts COIN_FLOW.lookMs). */
+const COIN_FLOW_LOOK_MS = 10_000;
 
 function readers(over: Partial<CoinLookReaders> = {}, clock = { t: NOW }) {
   const calls = { pools: 0, code: 0, probe: 0, curve: 0 };
@@ -311,7 +313,7 @@ describe("the quick look when GeckoTerminal's page cannot be read: DexScreener's
     assert.equal((await createCoinLook(g.r)(COIN)).source, "dexscreener");
   });
 
-  it("the same rules: quiet, thin, new, no v3 pool, a figure left out — only the distinct-buyer count it does not publish is not held against it", async () => {
+  it("the same rules: quiet, thin, new, v4 only, a figure left out — only the distinct-buyer count it does not publish is not held against it; a pair it cannot place is unknown, never no-pool", async () => {
     for (const [pools, want] of [
       [[dx()], "candidate"],
       [[dx({ volume24hUsd: 50_000 })], "too-quiet"],
@@ -319,7 +321,8 @@ describe("the quick look when GeckoTerminal's page cannot be read: DexScreener's
       [[dx({ buckets: emptyGeckoBuckets() })], "too-quiet"],
       [[dx({ reserveUsd: TRENCHER_FAST.minLiquidityUsd - 1 })], "too-thin"],
       [[dx({ createdAt: NOW_SEC - 60 })], "too-new"],
-      [[dx({ dex: "uniswap-robinhood" })], "no-pool"],
+      [[dx({ dex: "uniswap-robinhood" })], "unknown"],
+      [[dx({ dex: "pons-robinhood", poolAddress: null, poolId: V4_ID })], "unknown"],
       [[dx({ dex: "uniswap-v4-robinhood", poolAddress: null, poolId: V4_ID })], "v4-only"],
       [[dx({ fdvUsd: null })], "unknown"],
     ] as const) {
@@ -331,7 +334,7 @@ describe("the quick look when GeckoTerminal's page cannot be read: DexScreener's
     assert.equal((await look1({ tokenPools: cooldown, dexPairs: counted.dexPairs })).kind, "too-quiet");
   });
 
-  it("GeckoTerminal answering: DexScreener is never asked", async () => {
+  it("GeckoTerminal answering in time, chain up or down: DexScreener is not asked", async () => {
     const d = dexReader([dx()]);
     const l = await createCoinLook(readers({ dexPairs: d.dexPairs }).r)(COIN);
     assert.equal(l.source, "geckoterminal");
@@ -340,6 +343,62 @@ describe("the quick look when GeckoTerminal's page cannot be read: DexScreener's
     const probed = readers({ tokenPools: async () => [], dexPairs: e.dexPairs });
     assert.equal((await createCoinLook(probed.r)(COIN)).kind, "no-pool", "the chain answers a page that lists nothing");
     assert.equal(e.calls.dex, 0);
+    const f = dexReader([dx()]);
+    const down = readers({ getCode: declined, dexPairs: f.dexPairs });
+    assert.equal((await createCoinLook(down.r)(COIN)).source, "geckoterminal");
+    assert.equal(f.calls.dex, 0, "the chain down, the page answering: its answer");
+  });
+
+  describe("inside the chat side's ten seconds, whatever hangs", () => {
+    /** Run a look on mocked timers: when it settled, in virtual ms, and what it said. */
+    const timed = async (over: Partial<CoinLookReaders>): Promise<{ ms: number; look: CoinLook | undefined }> => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      try {
+        const look = createCoinLook(readers(over).r);
+        let got: CoinLook | undefined;
+        let at = -1;
+        void look(COIN).then((l) => {
+          got = l;
+          at = Date.now();
+        });
+        for (let t = 0; t < 20_000 && got === undefined; t += 100) {
+          for (let i = 0; i < 5; i++) await setImmediate();
+          mock.timers.tick(100);
+        }
+        for (let i = 0; i < 5 && got === undefined; i++) await setImmediate();
+        return { ms: at, look: got };
+      } finally {
+        mock.timers.reset();
+      }
+    };
+    const after = <T>(ms: number, v: T) => () => new Promise<T>((r) => setTimeout(() => r(v), ms));
+    const never = <T>() => () => new Promise<T>(() => {});
+
+    it("the chain answering slowly and the page never: DexScreener is asked beside the page, not after it", async () => {
+      const r = await timed({ getCode: after(COIN_LOOK.readMs - 100, "0x6000"), tokenPools: never(), dexPairs: after(COIN_LOOK.dexMs - 100, [dx()]) });
+      assert.equal(r.look?.source, "dexscreener");
+      assert.equal(r.look?.kind, "candidate");
+      assert.ok(r.ms < COIN_FLOW_LOOK_MS, `${r.ms} ms`);
+    });
+
+    it("the chain timing out and the page never answering: the same", async () => {
+      const r = await timed({ getCode: never(), tokenPools: never(), dexPairs: after(COIN_LOOK.dexMs - 100, [dx()]) });
+      assert.equal(r.look?.source, "dexscreener");
+      assert.ok(r.ms < COIN_FLOW_LOOK_MS, `${r.ms} ms`);
+    });
+
+    it("everything hanging: unknown, inside the bound", async () => {
+      const r = await timed({ getCode: never(), tokenPools: never(), dexPairs: never() });
+      assert.deepEqual(r.look, { kind: "unknown" });
+      assert.ok(r.ms < COIN_FLOW_LOOK_MS, `${r.ms} ms`);
+    });
+
+    it("a page slower than the head start but answering in time: its answer, not DexScreener's", async () => {
+      const f = dexReader([dx({ reserveUsd: TRENCHER_FAST.minLiquidityUsd - 1 })]);
+      const r = await timed({ tokenPools: after(COIN_LOOK.dexAfterMs + 500, [gp()]), dexPairs: f.dexPairs });
+      assert.deepEqual(r.look, { kind: "candidate", name: "FROGGY", source: "geckoterminal" });
+      assert.equal(f.calls.dex, 1, "asked beside the slow page, and not used");
+    });
   });
 
   it("DexScreener listing nothing, failing, or listing only other tokens: unknown, never no-pool, never cached", async () => {

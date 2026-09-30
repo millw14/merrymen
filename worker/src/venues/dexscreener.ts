@@ -8,7 +8,8 @@
  * a real Robinhood coin with six figures of liquidity read as `unknown`, which
  * the chat side answers with silence. DexScreener is a separate index with its
  * own quota, so it is asked only then: when GeckoTerminal's page could not be
- * read (or, with the chain down too, showed nothing).
+ * read, had not answered after two seconds (then beside it, so the look keeps
+ * its bound), or, with the chain down too, showed nothing.
  *
  * SHAPE OF THE TRUST — the same as GeckoTerminal's. Everything here is a third
  * party's claim about a market. It may decide what a chat line SAYS about a
@@ -65,8 +66,9 @@ const lower = (v: unknown): string => (typeof v === "string" ? v.toLowerCase() :
  * The venue is named the way GeckoTerminal names it only when the pair says
  * so: Uniswap, labelled v3, with a 20-byte pair contract. A v4 pair (a 32-byte
  * pool id, or labelled v4) keeps its id and has no contract, like
- * GeckoTerminal's v4 rows. Anything else keeps DexScreener's own dex id, which
- * the look reads as "not a pool trencher can buy through".
+ * GeckoTerminal's v4 rows. Anything else keeps DexScreener's own dex id, and
+ * the look reads a pair it cannot place as saying nothing (`unknown`), never
+ * as "no pool".
  */
 export function parseDexPair(raw: unknown, token: string): GeckoPool | null {
   const p = obj(raw);
@@ -132,9 +134,9 @@ export function parseDexPair(raw: unknown, token: string): GeckoPool | null {
 /**
  * The Robinhood Chain pools of `token` DexScreener lists, or null when it could
  * not be asked (a refusal, an outage, a timeout, a changed shape). An empty
- * list is an answer: DexScreener lists no Robinhood pair of it — which is also
- * what a Pons bonding-curve coin looks like there (it returns no pairs for
- * those), so an empty list is never read as "no pool".
+ * list is an answer: DexScreener lists no Robinhood pair of it — which a coin
+ * still on a bonding curve may well look like there — so an empty list is
+ * never read as "no pool".
  */
 export async function readDexTokenPairs(
   token: string,
