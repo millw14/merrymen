@@ -465,3 +465,28 @@ test("sendTx: a refusal is `refused-send`, never `rejected` — a duplicate of e
   resetLighterApiState();
   assert.equal(err(await api(fake(() => json(400, { code: 21104, message: "x" })).fn).nextNonce(22149, 16, A)).kind, "rejected");
 });
+
+test("clockSkewMs: the venue's Date minus ours, mid-second, from the last dated answer — null when unmeasured or old", async () => {
+  // Our clock runs 3.2 s behind the venue's: its Date says …:00, and its true
+  // time was somewhere in that second, so the estimate takes the middle.
+  const venueDate = Date.parse("Tue, 29 Sep 2026 16:30:00 GMT");
+  let dated = true;
+  const f = fake(() => json(200, { code: 200, nonce: 7 }, dated ? { date: new Date(venueDate).toUTCString() } : {}));
+  const a = api(f.fn);
+  assert.equal(a.clockSkewMs(), null, "nothing measured is not a skew of 0");
+  clock = venueDate - 2_700;
+  assert.ok((await a.nextNonce(22149, 16, A)).ok);
+  assert.equal(a.clockSkewMs(), 3_200);
+  // A refusal carries the venue's clock as well as an answer does.
+  const r = api(fake(() => json(503, "down", { date: new Date(venueDate).toUTCString() })).fn);
+  assert.equal((await r.nextNonce(22149, 16, A)).ok, false);
+  assert.equal(r.clockSkewMs(), 3_200);
+  // An undated answer does not erase the last measurement…
+  dated = false;
+  assert.ok((await a.nextNonce(22149, 16, A)).ok);
+  assert.equal(a.clockSkewMs(), 3_200);
+  // …but an old one is no measurement at all.
+  clock += 10 * 60_000 + 1;
+  assert.equal(a.clockSkewMs(), null);
+  assert.equal(a.clockSkewMs(60 * 60_000), 3_200);
+});

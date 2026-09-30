@@ -292,7 +292,13 @@ export interface SignContext {
   accountIndex: IntLike;
   /** The nonce reserved for this tx, committed to the high-water BEFORE this call (rule 9). */
   nonce: IntLike;
-  /** The persisted high-water the nonce was reserved against; the nonce must exceed it. */
+  /**
+   * The high-water as it stood BEFORE `nonce` was reserved (nonce.ts
+   * `previousHighWater`); the nonce must exceed it. Never the persisted value
+   * read after the reservation: that already IS the nonce (store.ts
+   * insertPerpOrderSubmitted requires high-water ≥ nonce), so it could never
+   * be exceeded.
+   */
   nonceHighWater: IntLike;
 }
 

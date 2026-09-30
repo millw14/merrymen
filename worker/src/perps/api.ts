@@ -445,6 +445,22 @@ export function createLighterApi(opts: LighterApiOptions) {
     serverDateMs: date,
   });
 
+  /**
+   * The venue's clock minus ours, from the last answer that carried a Date
+   * header. Rule 9 writes a `not-found` row off as expired only while this is
+   * measured under 5 s, and a persisted tx is re-sent only while the LATER of
+   * the two clocks is before its ExpiredAt — both need a number, and every
+   * answer already carries one.
+   */
+  let skew: { skewMs: number; atMs: number } | null = null;
+  const noteSkew = (date: number | null): void => {
+    if (date === null) return;
+    const t = now();
+    // The header is truncated to the second, so the venue's clock was
+    // somewhere in [date, date + 1 s) when it answered: take the middle.
+    skew = { skewMs: date + 500 - t, atMs: t };
+  };
+
   const trip = (by: string): number => {
     const until = now() + cooldownMs;
     // Our own brake first; the file is advice to the rest of the fleet.
@@ -521,6 +537,7 @@ export function createLighterApi(opts: LighterApiOptions) {
       };
     }
     const date = serverDate(res.headers);
+    noteSkew(date);
     const status = res.status;
 
     if (status === 429 || status === 405) {
@@ -593,6 +610,17 @@ export function createLighterApi(opts: LighterApiOptions) {
 
   return {
     budgetKey,
+
+    /**
+     * The venue's clock minus ours in ms, from the most recent answer no older
+     * than `maxAgeMs` (default 10 min), or null — unmeasured, never 0. Good to
+     * about ±0.5 s plus one-way latency (the Date header has second
+     * precision); a caller judging "under 5 s" should leave room for that.
+     */
+    clockSkewMs(maxAgeMs: number = 10 * 60_000): number | null {
+      if (skew === null || !Number.isFinite(maxAgeMs) || now() - skew.atMs > maxAgeMs) return null;
+      return skew.skewMs;
+    },
 
     /** GET /api/v1/orderBooks — the venue's market list. */
     orderBooks(flags?: RequestFlags): Promise<LighterResult<OrderBookListing[]>> {
