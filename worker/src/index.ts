@@ -4918,9 +4918,8 @@ async function main() {
     // exactly why it exists. The first shadow Brain run refused on
     // "contributions unknown" for a book that knew perfectly well.
     anchorNetContributionsUsdg = l.netContributionsUsdg;
-    // WHEN THE PARENT WROTE IT — the line between flows its figure already
-    // holds and flows this child books after (durableNetContributions).
-    anchorWrittenAtSec = verdict.kind === "valid" ? verdict.state.generatedAt : null;
+    // Exact local prefix copied into the anchor, including same-second flows.
+    anchorFlowCursor = verdict.kind === "valid" ? verdict.state.localFlowCursor ?? null : null;
 
     // DOUBT IS STICKY FOR THE LIFE OF THE PROCESS.
     //
@@ -4951,8 +4950,8 @@ async function main() {
 
   /** Contributed capital as the ORCHESTRATOR read it from durable state. */
   let anchorNetContributionsUsdg: bigint | null = null;
-  /** Unix seconds the anchor file was written (its generatedAt); null with no valid anchor. */
-  let anchorWrittenAtSec: number | null = null;
+  /** Missing on legacy anchors: their contribution suffix remains unknown. */
+  let anchorFlowCursor: import("./bootstrap-flow-cursor").BootstrapFlowCursor | null = null;
 
   /**
    * NET CONTRIBUTIONS, DURABLE FIRST, raw 6dp — the anchor's figure plus the
@@ -4968,7 +4967,7 @@ async function main() {
    * after arm. Throws when the ledger will not answer — never a guess.
    */
   async function durableNetContributions(agentId: string): Promise<bigint | null> {
-    const local = await getNetContributionsSince(agentId, anchorWrittenAtSec ?? 0);
+    const local = await getNetContributionsSince(agentId, anchorFlowCursor);
     return durableNetContributionsUsdg6({
       anchorNetUsdg6: anchorNetContributionsUsdg,
       anchorEpoch,

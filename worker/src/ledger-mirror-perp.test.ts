@@ -56,6 +56,30 @@ const base = { agent_id: A, mode: "live", epoch: 1, direction: "deposit", amount
 const sharedRow = (raw: DatabaseSync, id: string) => raw.prepare("SELECT * FROM perp_transfers WHERE id = ?").get(id) as Record<string, unknown> | undefined;
 const count = (raw: DatabaseSync, table: string) => Number((raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n);
 
+describe("perp_orders: a known send deadline only narrows", () => {
+  it("copies deadlines and keeps the minimum across later, null and older nonce-matched rows", async () => {
+    const child = perpDb(), shared = perpDb();
+    try {
+      child.raw.prepare(`INSERT INTO perp_orders
+        (id,agent_id,mode,epoch,account_index,api_key_index,nonce,status,effect,reduce_only,worst_notional_micro,send_not_after_ms,created_at,updated_at)
+        VALUES ('close',?,'live',1,123,16,1234,'submitted','close',1,'0',2000,1000,1000)`).run(A);
+      const deadline = () => shared.raw.prepare("SELECT send_not_after_ms FROM perp_orders WHERE id = 'close'").get()?.send_not_after_ms;
+      assert.deepEqual((await pass(child.db, shared.db, 1010)).failed, {});
+      assert.equal(deadline(), 2000);
+      child.raw.prepare("UPDATE perp_orders SET send_not_after_ms = 3000, updated_at = 1100").run();
+      assert.deepEqual((await pass(child.db, shared.db, 1110)).failed, {});
+      assert.equal(deadline(), 2000, "a newer row cannot extend authority");
+      child.raw.prepare("UPDATE perp_orders SET send_not_after_ms = NULL, updated_at = 1200").run();
+      assert.deepEqual((await pass(child.db, shared.db, 1210)).failed, {});
+      assert.equal(deadline(), 2000, "a legacy checkpoint cannot erase authority's limit");
+      child.raw.prepare("UPDATE perp_orders SET id = 'readopted', send_not_after_ms = 1500, updated_at = 1100").run();
+      assert.deepEqual((await pass(child.db, shared.db, 1220)).failed, {});
+      assert.equal(deadline(), 1500, "an older nonce-matched row still tightens authority");
+      assert.equal(count(shared.raw, "perp_orders"), 1);
+    } finally { child.raw.close(); shared.raw.close(); }
+  });
+});
+
 describe("perp_transfers: one contradictory row never stalls the table", () => {
   it("the review's scenario: a rebuilt child's row later learns an identity ANOTHER shared row holds", async () => {
     const shared = perpDb();

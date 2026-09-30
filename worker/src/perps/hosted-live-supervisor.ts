@@ -10,6 +10,7 @@ import { PERP_TRANSFER_RANK, PERP_LEG_RANK } from "../perp-ledger-rules";
 import { HostedLiveCheckpointStore, STANDDOWN_CHECKPOINT_MAX, type HostedLiveCheckpoint } from "./hosted-standdown-store";
 import { captureFinancialStream, inspectFinancialStream, restoreFinancialStream, validateFinancialStream, type FinancialChunks, type FinancialRow, type FinancialStreamSummary, type JournalProof } from "./hosted-financial-stream";
 import { CheckpointFrameReceiver } from "./hosted-checkpoint-ipc";
+import { OrderDeadlineFloor } from "./restore-order-deadline";
 
 const APPEND_TABLES = new Set(["trades", "flows", "fee_accruals", "perp_orders", "perp_fills", "perp_funding", "perp_carries", "perp_transfers", "perp_order_legs"]);
 const EXACT_WITHOUT_JOURNAL = new Set(["paper_book", "cost_basis", "position_floors", "trench_positions", "class_positions", "flows_quarantine"]);
@@ -48,14 +49,17 @@ export class HostedLiveCheckpointBridge {
   const store = new HostedLiveCheckpointStore(o.shared, o.dek);
   const prior = await store.latest(o.tenant, o.account);
   const raw = new DatabaseSync(path.join(o.home, "merrymen.db"));
+  let deadlines:OrderDeadlineFloor|undefined;
   try {
    const local=wrapSqlite(raw);await applyLedgerSchema(local);
+   deadlines=await OrderDeadlineFloor.create(local);
    let current:FinancialStreamSummary|null=null;
    try {current=await local.tx(tx=>inspectFinancialStream(captureFinancialStream(tx,o.account),o.account,{scope:"financial"}));}
    catch(error){if(!prior?.checkpoint)throw error;}
    if(prior?.checkpoint) {
     const pk=new Map<string,string[]>();let mismatch=false;
     const old=await inspectFinancialStream(store.loadStream(prior),o.account,{scope:"financial",onRow:async(table,row)=>{
+     if(table==="perp_orders")await deadlines!.remember(row);
      if(!current||(!APPEND_TABLES.has(table)&&!EXACT_WITHOUT_JOURNAL.has(table)&&!["perp_accounts","perp_payouts"].includes(table)))return;
      if(!pk.has(table))pk.set(table,await primaryKeys(local,table));
      const found=await matchingRow(local,table,row,pk.get(table)!);
@@ -95,11 +99,12 @@ export class HostedLiveCheckpointBridge {
     await checkMigration(o.shared,local,o.account,current.journalProof.count);
    }
    if(!o.healthy())throw new Error("hosted perps lease lost before recovery");
+   await local.tx(tx=>deadlines!.tightenLedger(tx));
    const row=await store.claim(o.tenant,o.account,o.publicKey,randomUUID());let summary:FinancialStreamSummary|undefined;
    await local.tx(tx=>store.saveStream(row,validateFinancialStream(captureFinancialStream(tx,o.account),o.account,{scope:"financial",onComplete:s=>{summary=s;}})));
    if(!o.healthy()||!(await store.fence(row)))throw new Error("hosted perps recovery was fenced");
    return new HostedLiveCheckpointBridge(store,row,summary!.journalProof,o.healthy,o.home);
-  }finally{raw.close();}
+  }finally{try{await deadlines?.close();}finally{raw.close();}}
  }
  attach(proc: ChildProcess): void {
   proc.on("message", raw => { this.tail = this.tail.then(() => this.message(proc, raw)).catch(() => {}); });

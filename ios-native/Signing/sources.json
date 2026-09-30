@@ -32,7 +32,7 @@
   "packages/core/src/mcp.ts": "a0a55ac47feee3095e801e62b1aa36afa9afcce7339153ad040d4851bfe36150",
   "packages/core/src/official-coins.ts": "f0ab6028a2507516cbc3a0e6dcdf5a682974a83db6c7ee7cb3597dbccf8118e3",
   "packages/core/src/onchain-forensics.ts": "4bf5d0d07c1d81d46b6ec6403ed305910f91ac34da4eabf46e93156650751751",
-  "packages/core/src/perps.ts": "656c2570376ad5d9e6b925eeb3e084c5cf0a473c95bfa835cd1e19d6877af603",
+  "packages/core/src/perps.ts": "6908faa28cd1ae6af07997998685e30fbb76c63a79f594e9b204350ce5f155d9",
   "packages/core/src/portfolio-snapshot.ts": "3ce24324dc955e88d978ea57e9fb7bb50505432d0e2a950e0912e54c773c38a3",
   "packages/core/src/protocols.ts": "1f8bf8f161fa96a713477db8930b3bcc0cc91a87f8442b1421a64cf2aacb91f5",
   "packages/core/src/risk-level.ts": "e80e4d7352f6611d32501a04be63038e03b803de9eb117e8debbca8af6b18123",

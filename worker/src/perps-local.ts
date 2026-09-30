@@ -70,7 +70,8 @@ export function grantPerpOf(grant: unknown): ReturnType<typeof grantPerp> {
  * So recover writes this journal; the worker does not read it yet — the lead
  * wires it into perp_accounts. Until then the worker sees the throwaway as a
  * FOREIGN key: it never re-registers over it (the safe direction) and raises
- * a venue incident the owner clears on the dashboard.
+ * a venue incident. Verified owner acknowledgement and re-enablement are not
+ * wired into the dashboard yet; re-signing alone cannot clear this state.
  *
  * Append-only — the one field ever rewritten is an entry's `seenAtVenue`,
  * filled in after the post-rotation poll (the entry itself is written the

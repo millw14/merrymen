@@ -55,6 +55,19 @@ async function materialize(chunks:FinancialChunks) {
 
 
 describe("ordinary hosted financial recovery", () => {
+  it("warm prepare cannot erase or extend an authenticated owner command deadline", async () => {
+    const f=await fixture();
+    try {
+      await f.local.prepare("UPDATE perp_orders SET send_not_after_ms=2000").run();await f.prepare();
+      const saved=async()=>{const store=new HostedLiveCheckpointStore(f.shared,DEK);return (await materialize(store.loadStream((await store.latest(TENANT,ACCOUNT))!))).tables.perp_orders![0]!.send_not_after_ms;};
+      for(const incoming of [null,3000]) {
+        await f.local.prepare("UPDATE perp_orders SET send_not_after_ms=?").run(incoming);await f.prepare();
+        assert.equal(await saved(),2000);
+        assert.equal((await f.local.prepare("SELECT send_not_after_ms FROM perp_orders").get() as {send_not_after_ms:number}).send_not_after_ms,2000);
+      }
+      await f.local.prepare("UPDATE perp_orders SET send_not_after_ms=1500").run();await f.prepare();assert.equal(await saved(),1500);
+    }finally{f.close();}
+  });
   it("a temporary initial checkpoint failure recovers a stopped child's exact newer book without owner action", async () => {
     const f = await fixture();
     try {

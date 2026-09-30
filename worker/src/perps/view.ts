@@ -422,11 +422,12 @@ function restingOf(orders: readonly VenueOrder[], marketId: number, side: PerpSi
   );
 }
 
-/** The tightest of several resting stops: the one that fires first (a long's highest trigger, a short's lowest). */
+/** The stop that fires first (a long's highest trigger, a short's lowest); equal triggers prefer the longest proven lifetime. */
 function tightest(stops: readonly VenueOrder[], side: PerpSide): VenueOrder | null {
   let best: VenueOrder | null = null;
   for (const o of stops) {
-    if (best === null || (side === "long" ? o.triggerPrice > best.triggerPrice : o.triggerPrice < best.triggerPrice)) best = o;
+    if (best === null || (side === "long" ? o.triggerPrice > best.triggerPrice : o.triggerPrice < best.triggerPrice) ||
+        (o.triggerPrice === best.triggerPrice && (expirySec(o) ?? -1) > (expirySec(best) ?? -1))) best = o;
   }
   return best;
 }
@@ -688,7 +689,12 @@ export function buildPerpsViewStrict(input: PerpsViewInput): PerpsViewBuilt | nu
         const stops = restingOf(venue.orders, p.marketId, side, "stop");
         if (recorded !== null) {
           const rec = recorded;
-          const match = stops.find((o) => o.triggerPrice === rec.trigger) ?? null;
+          // Renewal keeps the old stop until its replacement is observed.
+          // Both have the same trigger: prefer the longest proven lifetime,
+          // independent of the venue's order-list ordering, so protection can
+          // recognize the renewal and retire the expiring predecessor.
+          const match = stops.filter((o) => o.triggerPrice === rec.trigger)
+            .sort((a, b) => (expirySec(b) ?? -1) - (expirySec(a) ?? -1))[0] ?? null;
           stopState = match !== null ? "resting" : stops.length > 0 ? "other" : "missing";
           if (match !== null) {
             stopExpires = expirySec(match);

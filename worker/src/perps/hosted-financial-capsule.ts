@@ -1,5 +1,7 @@
 /** A single, encrypted recovery snapshot for the journal and every financial domain it describes. */
 import type { Db } from "../db";
+import { resetBootstrapFlowIdentity } from "../bootstrap-flow-cursor";
+import { OrderDeadlineFloor } from "./restore-order-deadline";
 import { encodeStanddownLedger, STANDDOWN_TABLES, validateJournalHistory, type StanddownLedger } from "./hosted-standdown-ledger";
 
 export const FINANCIAL_CAPSULE_TABLES = ["agents", "journal", "trades", "flows", "equity", "fee_accruals", "positions", "cost_basis", "position_floors", "trench_positions", "class_positions", "paper_book", "risk_periods", "energy_days", "decisions", "flows_quarantine", ...STANDDOWN_TABLES] as const;
@@ -45,17 +47,23 @@ export function narrowFinancialCapsule(x: FinancialCapsule): Buffer {
 export async function restoreFinancialCapsule(db: Db, bytes: Buffer, account: string): Promise<void> {
  const x = validateFinancialCapsule(bytes, account);
  await db.tx(async tx => {
+  await resetBootstrapFlowIdentity(tx);
   for (const table of FINANCIAL_CAPSULE_TABLES) {
    const columns = await tx.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
    const allowed = new Set(columns.map(c => c.name));
    // The destination is this account's child. A foreign row is never overwritten.
    if (await tx.prepare(`SELECT 1 FROM ${table} WHERE lower(${identity(table)}) <> ? LIMIT 1`).get(account.toLowerCase())) throw new Error("financial recovery found a foreign tenant's row");
+   const deadlines=table==="perp_orders"?await OrderDeadlineFloor.create(tx):undefined;
+   try {
+   if(deadlines)await deadlines.rememberLedger(account,false);
    await tx.prepare(`DELETE FROM ${table} WHERE lower(${identity(table)}) = ?`).run(account.toLowerCase());
-   for (const row of x.tables[table]!) {
+   for (const original of x.tables[table]!) {
+    const row=deadlines?await deadlines.apply(original):original;
     const keys = Object.keys(row);
     if (!keys.length || keys.some(k => !allowed.has(k))) throw new Error("financial capsule schema refused");
     await tx.prepare(`INSERT INTO ${table} (${keys.join(",")}) VALUES (${keys.map(() => "?").join(",")})`).run(...keys.map(k => row[k]));
    }
+   } finally { await deadlines?.close(); }
   }
  });
 }

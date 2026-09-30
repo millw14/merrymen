@@ -38,6 +38,7 @@ const { MIRROR_STATE_DDL, mirrorTenant } = await import("./ledger-mirror");
 const { deriveBootstrapAccounting } = await import("./bootstrap-source");
 const { readAnchor, microToBigint } = await import("./bootstrap-state");
 const { durableNetContributionsUsdg6 } = await import("./net-contributions");
+const { readBootstrapFlowTotals } = await import("./bootstrap-flow-cursor");
 const { childHome, finalMirrorBeforeAnchor, writeBootstrapForChild } = await import("./orchestrator");
 
 const TENANT = "0x00000000000000000000000000000000000a11ce" as const;
@@ -188,5 +189,50 @@ describe("a crash restart's anchor includes what the dead child booked since the
     assert.equal(retries.due(TENANT, SMART, 30_000), true);
     await writeBootstrapForChild(TENANT, SMART, shared());
     assert.equal(sharedNet(), before + 10_001);
+  });
+
+  it("the exact mirrored prefix excludes same-second old flows and includes new flows regardless of their timestamps", async () => {
+    const before = sharedNet(), fixed = nowSec(), clock = Date.now;
+    Date.now = () => fixed * 1000 + 500;
+    try {
+      flow("out", 10, "chain-log", fixed, `0x${"f1".repeat(32)}`, 1);
+      await writeBootstrapForChild(TENANT, SMART, shared());
+      const anchor = readAnchor(childHome(TENANT), { tenantId: SMART });
+      if (anchor.kind !== "valid" || anchor.accounting.kind !== "established" || !anchor.state.localFlowCursor) throw new Error("expected bound anchor");
+      const anchorNet = microToBigint(anchor.accounting.netContributionsUsdg);
+      assert.equal(anchor.state.generatedAt, fixed);
+      const net = async () => {
+        const local = await readBootstrapFlowTotals(child(), SMART, 1, anchor.state.localFlowCursor!);
+        return durableNetContributionsUsdg6({ anchorNetUsdg6: anchorNet, anchorEpoch: 1, epoch: 1,
+          localNetUsdg: local.netUsdg, localSinceAnchorUsdg: local.sinceUsdg });
+      };
+      assert.equal(await net(), BigInt(before - 10) * U, "the copied same-second withdrawal counts once");
+      flow("in", 7, "chain-log", fixed, `0x${"f2".repeat(32)}`, 1);
+      flow("in", 3, "chain-log", fixed - 60, `0x${"f3".repeat(32)}`, 1);
+      assert.equal(await net(), BigInt(before) * U, "newly booked flows are included even with older event times");
+    } finally { Date.now = clock; }
+  });
+
+  it("a cold empty home binds its first suffix to the durable accounting epoch", async () => {
+    const tenant = "0x00000000000000000000000000000000000000c1" as const;
+    const account = "0x00000000000000000000000000000000000000c2" as const;
+    const durableRaw = new DatabaseSync(":memory:"), durable = wrapSqlite(durableRaw);
+    try {
+      await applyLedgerSchema(durable); await durable.exec(MIRROR_STATE_DDL);
+      await durable.prepare("INSERT INTO agents (smart_account,owner_address,session_key_address,chain_id,caps,granted_at,expires_at,epoch,hwm_usdg) VALUES (?,?,?,4663,'{}',1,2000000000,3,50)").run(account, tenant, tenant);
+      await durable.prepare("INSERT INTO flows (agent_id,direction,amount_usdg,source,epoch,at) VALUES (?,'in',50,'inferred',3,100)").run(account);
+      await writeBootstrapForChild(tenant, account, durable);
+      const anchor = readAnchor(childHome(tenant), { tenantId: account });
+      if (anchor.kind !== "valid" || anchor.accounting.kind !== "established" || !anchor.state.localFlowCursor) throw new Error("expected cold bound anchor");
+      assert.equal(anchor.state.localFlowCursor.epoch, 3);
+      assert.equal(anchor.state.localFlowCursor.lastId, 0);
+      const localRaw = new DatabaseSync(path.join(childHome(tenant), "merrymen.db")), local = wrapSqlite(localRaw);
+      try {
+        await local.prepare("INSERT INTO flows (agent_id,direction,amount_usdg,source,epoch,at) VALUES (?,'out',7,'inferred',3,100)").run(account);
+        const totals = await readBootstrapFlowTotals(local, account, 3, anchor.state.localFlowCursor);
+        assert.equal(durableNetContributionsUsdg6({ anchorNetUsdg6: microToBigint(anchor.accounting.netContributionsUsdg), anchorEpoch: 3, epoch: 3,
+          localNetUsdg: totals.netUsdg, localSinceAnchorUsdg: totals.sinceUsdg }), 43n * U);
+      } finally { localRaw.close(); }
+    } finally { durableRaw.close(); }
   });
 });

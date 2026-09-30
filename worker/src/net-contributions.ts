@@ -17,14 +17,10 @@
  * after arm — looked like a gain or a loss of exactly its size until the child
  * respawned.
  *
- * SO: the anchor's figure plus what this child has booked SINCE the anchor
- * was written (its flows with `at` at or after the anchor's generatedAt, in the
- * anchor's epoch). A flow already in the anchor was booked by an earlier
- * process, before the parent wrote the file, so it is never counted twice.
- * And none is in NEITHER half: a flow that earlier process booked after the
- * mirror's last pass would be dated before the anchor and missing from the
- * shared sum, so the parent mirrors a dead child's ledger one last time before
- * deriving the anchor (orchestrator.ts finalMirrorBeforeAnchor).
+ * SO: the anchor's figure plus flows after the exact local ID prefix its final
+ * mirror copied, in the anchor's epoch. The cursor is bound to the local ledger
+ * and its final row; timestamps cannot distinguish two flows in one second.
+ * Legacy anchors and replaced ledgers lack a provable suffix and return unknown.
  * With no anchor figure — self-hosted, where the local ledger IS the durable
  * record, or a hosted anchor that established nothing — or once this child has
  * moved to another epoch than the anchor's, the local epoch sum answers, as
@@ -46,10 +42,11 @@ export function durableNetContributionsUsdg6(a: {
   epoch: number;
   /** Σ this epoch's local flows, USDG; null when none is on record. */
   localNetUsdg: number | null;
-  /** Σ this epoch's local flows booked at or after the anchor was written, USDG. */
-  localSinceAnchorUsdg: number;
+  /** Σ this epoch's flows after the copied prefix; null when its boundary is unproven. */
+  localSinceAnchorUsdg: number | null;
 }): bigint | null {
   if (a.anchorNetUsdg6 !== null && (a.anchorEpoch === null || a.anchorEpoch === a.epoch)) {
+    if (a.localSinceAnchorUsdg === null) return null;
     return a.anchorNetUsdg6 + usdg6(a.localSinceAnchorUsdg);
   }
   return a.localNetUsdg === null ? null : usdg6(a.localNetUsdg);

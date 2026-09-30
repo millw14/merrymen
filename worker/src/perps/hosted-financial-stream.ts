@@ -1,6 +1,8 @@
 /** Version 3 recovery stream. Memory is bounded by one record, never total history. */
 import { createHash } from "node:crypto";
 import type { Db } from "../db";
+import { resetBootstrapFlowIdentity } from "../bootstrap-flow-cursor";
+import { OrderDeadlineFloor } from "./restore-order-deadline";
 import { JOURNAL_GENESIS, journalHash } from "../store";
 import { FINANCIAL_CAPSULE_TABLES, validateFinancialCapsule } from "./hosted-financial-capsule";
 import { STANDDOWN_TABLES, validateCompleteJournal } from "./hosted-standdown-ledger";
@@ -148,17 +150,22 @@ export async function restoreFinancialStream(db:Db,chunks:FinancialChunks,accoun
 /** Internal transaction seam: caller must roll back if this rejects or is interrupted. */
 export async function restoreFinancialStreamInTx(db:Db,chunks:FinancialChunks,account:string,opts:{scope?:FinancialScope}={}):Promise<void> {
  const bound=boundAccount(account); let table="",scope:FinancialScope="financial",allowed=new Set<string>();
+ let deadlines:OrderDeadlineFloor|undefined;
+ try {
  for await(const record of decodeFinancialRecords(validateFinancialStream(chunks,account,opts))) {
-  if(record.type==="header") scope=record.scope;
+  if(record.type==="header") { scope=record.scope; if(scope==="financial")await resetBootstrapFlowIdentity(db); }
   else if(record.type==="table") {
    table=record.name;
    allowed=new Set((await db.prepare(`PRAGMA table_info(${table})`).all() as {name:string}[]).map(c=>c.name));
    if(await db.prepare(`SELECT 1 FROM ${table} WHERE lower(${identity(table)}) <> ? LIMIT 1`).get(bound))throw new Error("financial recovery found a foreign tenant row");
+   if(table==="perp_orders") { deadlines=await OrderDeadlineFloor.create(db);await deadlines.rememberLedger(bound,scope==="standdown"); }
    await db.prepare(`DELETE FROM ${table} WHERE lower(${identity(table)}) = ?${scope==="standdown"&&(STANDDOWN_TABLES as readonly string[]).includes(table)?" AND mode = 'live'":""}`).run(bound);
   } else if(record.type==="row") {
-   const keys=Object.keys(record.value);
+   const value=table==="perp_orders"?await deadlines!.apply(record.value):record.value;
+   const keys=Object.keys(value);
    if(!keys.length||keys.some(k=>!allowed.has(k)))throw new Error("financial stream schema refused");
-   await db.prepare(`INSERT INTO ${table} (${keys.join(",")}) VALUES (${keys.map(()=>"?").join(",")})`).run(...keys.map(k=>record.value[k]));
+   await db.prepare(`INSERT INTO ${table} (${keys.join(",")}) VALUES (${keys.map(()=>"?").join(",")})`).run(...keys.map(k=>value[k]));
   }
  }
+ } finally { await deadlines?.close(); }
 }

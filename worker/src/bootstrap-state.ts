@@ -106,6 +106,7 @@
  */
 
 import { validRiskPeriod, type RiskPeriod } from "./risk-period";
+import { validBootstrapFlowCursor, type BootstrapFlowCursor } from "./bootstrap-flow-cursor";
 import { readFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
 
@@ -238,6 +239,8 @@ export type BootstrapAccounting =
 
 export interface TenantBootstrapState {
   riskPeriod?: RiskPeriod;
+  /** Local flow prefix copied before deriving this anchor; absent on legacy anchors. */
+  localFlowCursor?: BootstrapFlowCursor;
   schemaVersion: number;
   /**
    * THE SMART ACCOUNT. Named `tenantId` for the file's shape, but the value is
@@ -392,6 +395,9 @@ export function classifyAnchor(
   if (o.riskPeriod !== undefined && !validRiskPeriod(o.riskPeriod, tenantId)) {
     return { kind: "malformed", why: "invalid risk period" };
   }
+  if (o.localFlowCursor !== undefined && !validBootstrapFlowCursor(o.localFlowCursor, tenantId)) {
+    return { kind: "malformed", why: "invalid local flow cursor" };
+  }
   const accounting = validAccounting(o.accounting);
   if (!accounting) return { kind: "malformed", why: "accounting block missing or incomplete" };
 
@@ -419,6 +425,7 @@ export function classifyAnchor(
       tenantId,
       generatedAt,
       accounting,
+      ...(o.localFlowCursor ? { localFlowCursor: o.localFlowCursor as BootstrapFlowCursor } : {}),
       ...(o.riskPeriod ? { riskPeriod: o.riskPeriod as RiskPeriod } : {}),
       ...(Array.isArray(o.outstandingOps) ? { outstandingOps: o.outstandingOps as readonly string[] } : {}),
     },

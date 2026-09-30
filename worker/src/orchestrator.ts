@@ -80,6 +80,7 @@ import { CASH, DEFAULT_BASKET_SYMBOLS, effectiveHolder, energyReserveTokens, isH
 import { backfillHolderClaims, childSettingsFor, lastWrittenHolder } from "./holder-claims";
 import { makePgDb, translateSchema, type Db } from "./db";
 import { BOOTSTRAP_FILE, BOOTSTRAP_SCHEMA_VERSION, type TenantBootstrapState } from "./bootstrap-state";
+import { captureBootstrapFlowCursor, ensureBootstrapFlowIdentity, type BootstrapFlowCursor } from "./bootstrap-flow-cursor";
 import { deriveBootstrapAccounting } from "./bootstrap-source";
 import { diagnoseAccounting, diagnosisLines } from "./accounting-diagnosis";
 import { planReconstruction, reconstructionLines } from "./accounting-reconstruction";
@@ -1569,7 +1570,7 @@ function mirrorSerially<T>(tenant: string, pass: () => Promise<T>): Promise<T> {
  * COPY WHAT THE LAST CHILD BOOKED BEFORE THE ANCHOR IS DERIVED FROM IT.
  *
  * The anchor's contributions come from the shared database alone, and the
- * child adds only the flows it books at or after the anchor's `generatedAt`
+ * child adds only flows after the exact local prefix copied into the anchor
  * (net-contributions.ts). The mirror runs every RECONCILE_MS, so a child that
  * booked a flow — an energy purchase, a deposit — and died inside that window
  * left it in its sqlite and nowhere else. After a crash or a watchdog restart
@@ -1587,7 +1588,7 @@ function mirrorSerially<T>(tenant: string, pass: () => Promise<T>): Promise<T> {
  * backlog must finish before an anchor is derived; a failed or incomplete
  * copy leaves accounting unknown, with transient failures retried safely.
  */
-export async function finalMirrorBeforeAnchor(tenant: string, shared: Db, home = childHome(tenant), onFailure?: (error: unknown) => void): Promise<boolean> {
+export async function finalMirrorBeforeAnchor(tenant: string, shared: Db, home = childHome(tenant), onFailure?: (error: unknown) => void, onCompleteSnapshot?: (snapshot: Db) => Promise<void>): Promise<boolean> {
   const handle = openChildLedger(home);
   if (!handle) return false;
   try {
@@ -1616,7 +1617,7 @@ export async function finalMirrorBeforeAnchor(tenant: string, shared: Db, home =
             break;
           }
           complete = await financialMirrorCaughtUp(observedChild, observedShared, tenant);
-          if (complete) break;
+          if (complete) { await onCompleteSnapshot?.(child); break; }
         }
         return { ...report!, copied };
       };
@@ -1667,6 +1668,7 @@ export async function writeBootstrapForChild(
   let now = Math.floor(Date.now() / 1000);
   let accounting: TenantBootstrapState["accounting"];
   let riskPeriod: TenantBootstrapState["riskPeriod"];
+  let localFlowCursor: BootstrapFlowCursor | undefined;
   const url = process.env.DATABASE_URL;
   if (!url) {
     // No shared database configured at all. That is a deployment fact, not a
@@ -1676,16 +1678,25 @@ export async function writeBootstrapForChild(
   } else {
     try {
       const db = shared ?? (await makePgDb(url));
-      // What the last child booked and the mirror had not yet copied — then
-      // the anchor's time, AFTER that copy: every flow it carried up is dated
-      // before `generatedAt`, so the new child never counts it a second time.
+      // Bind even an empty cold-start book before it can acquire any flows.
+      // Its identity stays local; restoring a financial capsule cannot copy it.
+      const home = childHome(tenant);
+      mkdirSync(home, { recursive: true });
+      const raw = new DatabaseSync(path.join(home, "merrymen.db"));
+      try { const local = wrapSqlite(raw); await applyLedgerSchema(local); await ensureBootstrapFlowIdentity(local); }
+      finally { raw.close(); }
+      // Capture the exact copied local prefix in the mirror's pinned snapshot.
+      // generatedAt is only freshness metadata: same-second flows straddle it.
       let mirrorFailure: unknown;
-      const mirrored = await finalMirrorBeforeAnchor(tenant, db, childHome(tenant), error => { mirrorFailure ??= error; });
+      const mirrored = await finalMirrorBeforeAnchor(tenant, db, home, error => { mirrorFailure ??= error; }, async snapshot => {
+        localFlowCursor = await captureBootstrapFlowCursor(snapshot, smartAccount);
+      });
       if (!mirrored && (perpLiveBridges.has(tenant) || existsSync(path.join(childHome(tenant), "merrymen.db")))) throw mirrorFailure ?? new Error("the restored financial book has not completed its durable mirror; accounting remains unknown");
       now = Math.floor(Date.now() / 1000);
       await db.exec(RISK_PERIOD_SCHEMA);
       riskPeriod = (await readRiskPeriod(db, smartAccount)) ?? undefined;
       accounting = await deriveBootstrapAccounting(db, smartAccount, now);
+      if (localFlowCursor && accounting.kind === "established") localFlowCursor.epoch = accounting.accountingEpoch;
     } catch (e) {
       accounting = { kind: "unknown", why: e instanceof Error ? e.message : String(e), observedAt: now };
       if (perpLiveBridges.has(tenant)) perpRecoveryRetries.fail(tenant, smartAccount, e);
@@ -1702,6 +1713,7 @@ export async function writeBootstrapForChild(
     tenantId: smartAccount.toLowerCase(),
     generatedAt: now,
     accounting,
+    ...(localFlowCursor && accounting.kind !== "unknown" ? { localFlowCursor } : {}),
     ...(riskPeriod ? { riskPeriod } : {}),
     // `outstandingOps` is deliberately NOT written. The field is reserved in
     // the schema so adding it later is not a break; populating it here would

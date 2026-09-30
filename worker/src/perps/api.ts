@@ -189,6 +189,8 @@ export class LighterApiArgumentError extends Error {
 }
 
 export interface RequestFlags {
+  /** Absolute local send deadline; checked immediately before starting HTTP. */
+  notAfterMs?: number;
   /**
    * This request serves an exit (a close, protective read, stand-down,
    * withdrawal or claim). It may spend the reserved end of the budget and is
@@ -525,6 +527,9 @@ export function createLighterApi(opts: LighterApiOptions) {
     // One signal for the request AND the body: a server that answers headers
     // promptly and then trickles the body is still a hung read.
     const signal = AbortSignal.timeout(timeoutMs);
+    if (flags.notAfterMs !== undefined && (!Number.isSafeInteger(flags.notAfterMs) || flags.notAfterMs <= 0 || now() >= flags.notAfterMs)) {
+      throw new LighterApiArgumentError("notAfterMs", "the request expired before send");
+    }
     let res: Awaited<ReturnType<LighterFetch>>;
     try {
       res = await fetchFn(url, { method: spec.method, headers, body, signal, redirect: "error" });

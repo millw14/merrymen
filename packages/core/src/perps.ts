@@ -1141,7 +1141,7 @@ export function perpsBlockerText(b: PerpBlocker): { what: string; remedy: string
     case "perps-key-mismatch":
       return {
         what: "Lighter holds a different trading key for this agent than the one you signed.",
-        remedy: "If you did not change it yourself, treat the key as compromised: replace it with your owner key using `merrymen recover`, then re-sign.",
+        remedy: "If you did not change it yourself, treat the key as compromised and use `merrymen recover` with your owner key. Perpetual trading stays halted after recovery; verified re-enablement is not available in this build.",
       };
     case "perps-venue-unreachable":
       // No remedy: it retries by itself, and resting stops at the venue keep
@@ -1157,7 +1157,7 @@ export function perpsBlockerText(b: PerpBlocker): { what: string; remedy: string
     case "perps-unknown-activity":
       return {
         what: "Lighter shows activity on the agent's account that the agent did not do. New positions are stopped and open ones are being closed.",
-        remedy: "Replace the trading key with your owner key using `merrymen recover`, then clear the alert on the dashboard.",
+        remedy: "Use `merrymen recover` with your owner key to replace the trading key and recover available funds. Perpetual trading stays halted; verified re-enablement after recovery is not available in this build.",
       };
     case "perps-entries-halted":
       return {

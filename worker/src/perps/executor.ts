@@ -125,6 +125,8 @@ export interface PerpReview {
 export interface PerpPlaceContext {
   decisionId: string | null;
   agentId: string;
+  /** Owner command expiry, absolute ms. Absent for autonomous protective exits. */
+  notAfterMs?: number;
 }
 
 export interface PerpPlaceResult {
@@ -527,6 +529,9 @@ export function createPaperPerpExecutor(opts: {
       }
       const nowMs = opts.now();
       const nonce = await store.bumpNonceHighWater(agentId, "paper", Math.max(1, Math.floor(nowMs)));
+      if (ctx.notAfterMs !== undefined && (!Number.isSafeInteger(ctx.notAfterMs) || opts.now() >= ctx.notAfterMs)) {
+        throw new PerpRefused("perp-unpriced", "the owner's request expired before the practice order could be booked");
+      }
       const marketId = intent.marketId;
       // The fill priced a moment ago IS the fill: price() walked the book this
       // call read, and reading the feed again here could pair a book with a

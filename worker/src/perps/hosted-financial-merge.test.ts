@@ -45,6 +45,15 @@ async function collect(full: Record<string, FinancialRow[]>, shutdown: Record<st
   return { rows, summary };
 }
 describe("streamed shutdown accounting merge", () => {
+  it("retains the earliest full or shutdown order deadline, including absent legacy bounds and nonce aliases", async () => {
+    for(const incoming of [null,undefined,3000,1500]) {
+      const f=fixture();
+      f.full.perp_orders![0]={...f.full.perp_orders![0]!,account_index:123,api_key_index:16,nonce:7,send_not_after_ms:2000};
+      f.shutdown.perp_orders![0]={...f.shutdown.perp_orders![0]!,account_index:123,api_key_index:16,nonce:7,...(incoming===undefined?{}:{send_not_after_ms:incoming})};
+      const result=await collect(f.full,f.shutdown);
+      assert.equal(result.rows.perp_orders!.find(r=>r.mode==="live")!.send_not_after_ms,incoming===1500?1500:2000);
+    }
+  });
   it("keeps spot and paper money, takes completed live custody and exact extended journal, and retires signed bytes", async () => {
     const f = fixture(), result = await collect(f.full, f.shutdown);
     assert.deepEqual(result.rows.agents, f.full.agents);

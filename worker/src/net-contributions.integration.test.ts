@@ -32,6 +32,8 @@ const { TRANSFER_TOPIC } = await import("./deposit-log");
 const { bookEnergyPurchase } = await import("./energy-settle");
 const { planEnergyBuy } = await import("./energy-buy");
 const { durableNetContributionsUsdg6 } = await import("./net-contributions");
+const { wrapSqlite } = await import("./db");
+const { ensureBootstrapFlowIdentity, captureBootstrapFlowCursor } = await import("./bootstrap-flow-cursor");
 type Deps = import("./energy-settle").EnergySettleDeps;
 type ReceiptLog = import("./fills").ReceiptLog;
 
@@ -61,11 +63,19 @@ function exec(sql: string, ...params: (string | number | null)[]): void {
 }
 
 /** What the anchor said, as index.ts applyAccountingAnchor keeps it. */
-const anchor: { net: bigint | null; epoch: number | null; writtenAt: number | null } = { net: null, epoch: null, writtenAt: null };
+const anchor: { net: bigint | null; epoch: number | null; writtenAt: number | null; cursor: import("./bootstrap-flow-cursor").BootstrapFlowCursor | null } = { net: null, epoch: null, writtenAt: null, cursor: null };
+async function captureAnchorCursor(): Promise<void> {
+  const db = raw();
+  try {
+    const local = wrapSqlite(db);
+    await ensureBootstrapFlowIdentity(local);
+    anchor.cursor = await local.tx(tx => captureBootstrapFlowCursor(tx, ACCOUNT));
+  } finally { db.close(); }
+}
 
 /** index.ts durableNetContributions, over the real store. */
 async function durable(): Promise<bigint | null> {
-  const local = await store.getNetContributionsSince(ACCOUNT, anchor.writtenAt ?? 0);
+  const local = await store.getNetContributionsSince(ACCOUNT, anchor.cursor);
   return durableNetContributionsUsdg6({
     anchorNetUsdg6: anchor.net,
     anchorEpoch: anchor.epoch,
@@ -128,6 +138,7 @@ async function rebuiltHostedChild(): Promise<void> {
   await store.adjustAgentHwm(ACCOUNT, 100);
   exec("UPDATE agents SET mode = 'live' WHERE smart_account = ?", ACCOUNT);
   Object.assign(anchor, { net: 100n * U, epoch: await store.getAgentEpoch(ACCOUNT), writtenAt: Math.floor(Date.now() / 1000) - 60 });
+  await captureAnchorCursor();
 }
 
 before(async () => {
@@ -160,6 +171,7 @@ describe("the hosted shape: anchor established, the child's own flows empty", ()
   it("A FLOW ALREADY IN THE ANCHOR IS NEVER COUNTED TWICE — a same-container respawn keeps the old process's rows", async () => {
     await store.addFlow({ agentId: ACCOUNT, direction: "in", amountUsdg: 100, source: "chain-log", txHash: `0x${"d1".repeat(32)}`, blockNumber: 8_000_000, logIndex: 1, mode: "live", chainId: 4663 });
     exec("UPDATE flows SET at = ?", anchor.writtenAt! - 3_600);
+    await captureAnchorCursor();
     assert.equal(await durable(), 100n * U, "the anchor already holds it");
     // A deposit this child books after arm is added.
     await store.addFlow({ agentId: ACCOUNT, direction: "in", amountUsdg: 25, source: "chain-log", txHash: `0x${"d2".repeat(32)}`, blockNumber: 8_000_100, logIndex: 1, mode: "live", chainId: 4663 });

@@ -68,10 +68,12 @@ import { hostedPerpsLiveReady } from "./hosted-readiness";
 import {
   GRANT_PERP_LIGHTER,
   LIGHTER_ROUTE_V1,
+  PERP_LEG,
   custodySentence,
   isolatedMarginMicro,
   leverageFromImfBp,
   notionalMicro,
+  perpCoi,
   perpMarketById,
   perpMarketByKey,
   perpsBlockerText,
@@ -585,7 +587,7 @@ interface LiveSide {
   /** When this side last STARTED an incident stand-down (ms); 0 = never in this process (incidentDue). */
   incidentStanddownMs: number;
   /** Venue order indexes a replacement stop of ours supersedes, per market — cancelled only once the new one reads resting. */
-  supersede: Map<number, Set<string>>;
+  supersede: Map<number, { replacementClientOrderIndex: string; orders: Set<string> }>;
   /** Non-reduce-only orders cancelled by the exits-only lane, and when (one ask a minute). */
   cancelledAt: Map<string, number>;
   /** When the venue last read flat (no position, no order), for the 24 h withdrawal. */
@@ -682,7 +684,7 @@ export interface PerpLane {
    * self-hosted result (and progress) file is written. One at a time: a
    * second call waits for the running one and shares its result.
    */
-  standdown(reason: StanddownReason, opts?: { nonce?: string }): Promise<StanddownResult | null>;
+  standdown(reason: StanddownReason, opts?: { nonce?: string; notAfterMs?: number }): Promise<StanddownResult | null>;
   /**
    * THE OWNER'S /flatten (Stage 6 surfaces): every position closed reduce-only
    * — the live stand-down with reason `flatten`, or the paper book's own
@@ -2315,7 +2317,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     intent: PerpOrderIntent | PerpMarginIntent,
     equity: { equityUsdg: bigint; equityKnown: boolean },
     base?: Omit<AgentState, "perp">,
-    opts: { agent?: PerpLaneAgent; read?: PerpLaneRead } = {},
+    opts: { agent?: PerpLaneAgent; read?: PerpLaneRead; notAfterMs?: number } = {},
   ): Promise<PerpOutcome> {
     const a = opts.agent ?? agentNow();
     if (a === null) return { status: "rejected", rejectRule: "perp-not-enabled" };
@@ -2363,9 +2365,9 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       const lr = liveRead;
       const liveHolds = lr?.view?.positions.get(intent.market) !== undefined;
       const paperHolds = r.view?.positions.get(intent.market) !== undefined;
-      if (liveHolds && !paperHolds && lr !== null) return executeLive(a, intent, stateFor, lr);
+      if (liveHolds && !paperHolds && lr !== null) return executeLive(a, intent, stateFor, lr, opts.notAfterMs);
     }
-    if (r.bookMode === "live") return executeLive(a, intent, stateFor, r);
+    if (r.bookMode === "live") return executeLive(a, intent, stateFor, r, opts.notAfterMs);
 
     const epoch = await deps.store.getAgentEpoch(a.agentId);
     const ex = executorFor(a, epoch);
@@ -2390,7 +2392,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     if (!v2.ok) return refuse(intent, v2, "reviewed");
 
     const spend = intent.effect === "open" ? reviewed.notionalUsdg : 0n;
-    const done = await reservePlaceCount(intent, spend, () => ex.place(intent, review, { decisionId: intent.decisionId ?? null, agentId: a.agentId }));
+    const done = await reservePlaceCount(intent, spend, () => ex.place(intent, review, { decisionId: intent.decisionId ?? null, agentId: a.agentId, notAfterMs: opts.notAfterMs }));
     if (!done.ok) return done.out;
     const placed = done.placed;
     lastRefusalKey = null;
@@ -2414,6 +2416,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     intent: PerpOrderIntent,
     stateFor: (read: PerpLaneRead, legs?: boolean) => Promise<AgentState>,
     r: PerpLaneRead,
+    notAfterMs?: number,
   ): Promise<PerpOutcome> {
     const side = live;
     const exit = intent.effect !== "open";
@@ -2507,7 +2510,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     const spend = intent.effect === "open" ? reviewed.notionalUsdg : 0n;
     const fresh = side.snap !== null && deps.now() - side.snap.atMs <= LIVE_LANE_TIMING.lightMaxAgeMs ? side.snap.account : null;
     const done = await reservePlaceCount(intent, spend, () =>
-      ex.place(intent, review, { decisionId: intent.decisionId ?? null, agentId: a.agentId, ...(fresh !== null ? { venue: fresh } : {}) }),
+      ex.place(intent, review, { decisionId: intent.decisionId ?? null, agentId: a.agentId, notAfterMs, ...(fresh !== null ? { venue: fresh } : {}) }),
     );
     if (!done.ok) return done.out;
     const placed = done.placed as PerpPlaceResult & { tx?: { txHash: string } };
@@ -2790,10 +2793,10 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       if (act.kind === "replace-stop") {
         try {
           const tx = await h.executor.replaceStop(act.marketId, act.side, act.trigger, act.price, { reason: `protective-stop-${act.reason}` });
-          if (act.supersedes.length > 0) {
-            const s = side.supersede.get(act.marketId) ?? new Set<string>();
+          if (act.supersedes.length > 0 && tx.rowStatus !== "rejected" && tx.rowStatus !== "app-error") {
+            const s = side.supersede.get(act.marketId)?.orders ?? new Set<string>();
             for (const o of act.supersedes) s.add(o);
-            side.supersede.set(act.marketId, s);
+            side.supersede.set(act.marketId, { replacementClientOrderIndex: perpCoi(tx.nonce, PERP_LEG.sl).toString(), orders: s });
           }
           const d = r.view?.facts.positions.get(act.market)?.decimals;
           const px = (v: bigint) => (d ? renderScaled(v, d.priceDecimals) : v.toString());
@@ -2812,7 +2815,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     }
 
     // ── A SUPERSEDED STOP GOES ONLY ONCE ITS REPLACEMENT READS RESTING ──
-    for (const [marketId, orders] of side.supersede) {
+    for (const [marketId, pending] of side.supersede) {
       if (signal.aborted) break;
       const key = perpMarketById(marketId)?.key;
       const f = key !== undefined ? r.view?.facts.positions.get(key) : undefined;
@@ -2822,14 +2825,20 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
         continue;
       }
       if (f.stopState !== "resting") continue;
+      // This pass's read may still show only the old stop, including after
+      // an accepted send. Wait for the exact replacement we signed to be
+      // the confirmed resting stop before retiring any of its predecessors.
+      const replacement = side.snap?.orders?.find((o) => o.clientOrderIndex === pending.replacementClientOrderIndex);
+      if (replacement === undefined || f.restingStopOrder !== replacement.orderIndex) continue;
+      const orders = pending.orders;
       for (const o of [...orders]) {
         if (o === f.restingStopOrder || !f.otherStopOrders.includes(o)) {
           orders.delete(o);
           continue;
         }
         try {
-          await h.executor.cancelOrder(marketId, BigInt(o), { reason: "superseded-stop" });
-          orders.delete(o);
+          const tx = await h.executor.cancelOrder(marketId, BigInt(o), { reason: "superseded-stop" });
+          if (tx.rowStatus !== "rejected" && tx.rowStatus !== "app-error") orders.delete(o);
         } catch (e) {
           log(`superseded stop ${o} not cancelled: ${errText(e)}`);
         }
@@ -3080,7 +3089,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
    * finishes; reads move to the exit budget. The owner's message is built from
    * the RESULT, through custodySentence, never a constant.
    */
-  async function standdownNow(reason: StanddownReason, nonce: string | undefined): Promise<StanddownResult | null> {
+  async function standdownNow(reason: StanddownReason, nonce: string | undefined, notAfterMs?: number): Promise<StanddownResult | null> {
     const L = deps.live;
     const side = live;
     const a = side?.agent ?? laneAgent();
@@ -3140,7 +3149,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       await say("warn", `perps: standing the Lighter positions down (${reason}) — every position is closed reduce-only before any order is cancelled.`);
       const result = await runStanddown({
         reason,
-        deadlineMs: deps.now() + 15 * 60_000,
+        deadlineMs: Math.min(nowMs + 15 * 60_000, notAfterMs ?? Infinity),
         now: deps.now,
         executor: h.standdownExecutor(async (intent, why) => {
           const r = await deps.decide(intent as TradeIntent, reason === "flatten" ? "chat" : "perp-route", why);
@@ -3241,7 +3250,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     return { pendingWithdrawalsMicro, depositsInTransitMicro, otherAccounts, withdrawalDelaySec };
   }
 
-  function standdown(reason: StanddownReason, opts: { nonce?: string } = {}): Promise<StanddownResult | null> {
+  function standdown(reason: StanddownReason, opts: { nonce?: string; notAfterMs?: number } = {}): Promise<StanddownResult | null> {
     const running = standing;
     if (running !== null) {
       // ONE AT A TIME: a second request shares the running one's result (and
@@ -3252,7 +3261,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
         return res;
       });
     }
-    const run = standdownNow(reason, opts.nonce).finally(() => {
+    const run = standdownNow(reason, opts.nonce, opts.notAfterMs).finally(() => {
       standing = null;
     });
     standing = run;
@@ -3502,7 +3511,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
         if (draft === null) return { ok: false, sentence: `${market}: the exit price could not be read; its protection stays in place.` };
         const intent = { ...draft } as PerpOrderIntent;
         await deps.decide(intent, "chat", `the owner asked to close ${market} reduce-only`);
-        const out = await executeLocked(intent, { equityUsdg: 0n, equityKnown: false }, undefined, { agent: a, read: r });
+        const out = await executeLocked(intent, { equityUsdg: 0n, equityKnown: false }, undefined, { agent: a, read: r, notAfterMs: opts.notAfterMs });
         if (out.status === "paper") {
           try {
             const held = await deps.store.getPerpPositions(a.agentId, "paper");
@@ -3561,7 +3570,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
         } catch (e) {
           log(`entries halt not stored: ${errText(e)}`);
         }
-        const res = await standdown("flatten");
+        const res = await standdown("flatten", { notAfterMs: opts.notAfterMs });
         const side = live;
         if (res === null) return { ok: false, sentence: "The Lighter positions could not be stood down." };
         const exposure = side !== null ? standdownExposure(res, await standdownExtras(a, side)) : ({ kind: "unread" } as PerpExposure);
@@ -3591,7 +3600,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
           }
           const intent = { ...draft } as PerpOrderIntent;
           await deps.decide(intent, "chat", "the owner's /flatten: close every practice position");
-          await executeLocked(intent, { equityUsdg: 0n, equityKnown: false }, undefined, { agent: a, read: r });
+          await executeLocked(intent, { equityUsdg: 0n, equityKnown: false }, undefined, { agent: a, read: r, notAfterMs: opts.notAfterMs });
         }
         // An IOC can fill only part of a close. The committed positions, not
         // a successful order result, establish whether the book is flat.

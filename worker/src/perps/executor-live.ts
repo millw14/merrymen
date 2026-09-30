@@ -164,6 +164,8 @@ export interface LivePerpExecutorOptions {
   now: () => number;
   /** The venue's clock minus ours (api.ts clockSkewMs), null when unmeasured. */
   clockSkewMs: () => number | null;
+  /** A bounded stand-down's send cutoff, scoped to this asynchronous call. */
+  sendNotAfterMs?: () => number | undefined;
   /**
    * Size and price decimals for EVERY perp market (orderBookDetails'
    * `decimals`), so a position in a market the feed does not carry is still
@@ -426,13 +428,18 @@ export async function resendPersisted(
   const disagree = bytesDisagree(row);
   if (disagree !== null) return { sent: false, why: disagree };
   const nowMs = deps.now();
+  if (row.sendNotAfterMs != null && (!Number.isSafeInteger(row.sendNotAfterMs) || row.sendNotAfterMs <= 0 || nowMs >= row.sendNotAfterMs)) {
+    return { sent: false, why: "the persisted send deadline expired or is unreadable; these bytes cannot be replayed" };
+  }
   const skew = deps.clockSkewMs();
   const latest = skew !== null && Number.isFinite(skew) && skew > 0 ? nowMs + skew : nowMs;
   if (!Number.isFinite(latest) || latest >= row.expiredAt) {
     return { sent: false, why: `past ExpiredAt ${row.expiredAt} by the later of our clock and the venue's; the row waits for its write-off` };
   }
   try {
-    const result = await deps.api.sendTx({ txType: row.txType, txInfo: row.txInfo, txHash: row.txHash }, { exit: isExitRow(row.effect, row.reduceOnly) });
+    const result = await deps.api.sendTx({ txType: row.txType, txInfo: row.txInfo, txHash: row.txHash }, {
+      exit: isExitRow(row.effect, row.reduceOnly), notAfterMs: Math.min(row.expiredAt, row.sendNotAfterMs ?? Infinity),
+    });
     return { sent: true, result };
   } catch (e) {
     // An argument guard in api.ts: thrown BEFORE sending, so nothing left.
@@ -453,6 +460,7 @@ interface Submission {
   exit: boolean;
   /** What is being signed, for the detail line. */
   what: string;
+  notAfterMs?: number;
   /**
    * A refusal judged INSIDE the send lock, before a nonce is reserved — a
    * check against our own unresolved rows, which a concurrent send could
@@ -759,9 +767,17 @@ export function createLivePerpExecutor(opts: LivePerpExecutorOptions): LivePerpE
   /** RESERVE → SIGN → PERSIST → SEND, under the send lock; then what the answer means to the row. */
   async function submit(s: Submission): Promise<LiveTxResult> {
     const sent = await serial(async () => {
+      const deadlines = [s.notAfterMs, opts.sendNotAfterMs?.()].filter((x): x is number => x !== undefined);
+      if (deadlines.some(x => !Number.isSafeInteger(x) || x <= 0)) throw malformed("the send deadline is invalid");
+      const notAfterMs = deadlines.length ? Math.min(...deadlines) : undefined;
+      const checkDeadline = () => {
+        if (notAfterMs !== undefined && opts.now() >= notAfterMs) throw unpriced("the request expired before send");
+      };
+      checkDeadline();
       if (s.guard) await s.guard();
       const c = client();
       const reserved = await nonces.next();
+      checkDeadline();
       const signed = s.sign(c, { accountIndex, nonce: reserved.nonce, nonceHighWater: reserved.previousHighWater });
       if (signed.accountIndex !== accountIndex || signed.apiKeyIndex !== apiKeyIndex || BigInt(signed.nonce) !== reserved.nonce) {
         throw new Error("the signer returned a tx for another account, key or nonce; nothing was persisted or sent");
@@ -779,6 +795,7 @@ export function createLivePerpExecutor(opts: LivePerpExecutorOptions): LivePerpE
           reason: s.reason,
           signed,
           withdraw: s.withdraw,
+          sendNotAfterMs: notAfterMs,
         });
       } catch (e) {
         // A failed write sends NOTHING (rule 9). Whatever the store threw, the
@@ -787,7 +804,12 @@ export function createLivePerpExecutor(opts: LivePerpExecutorOptions): LivePerpE
         throw new PerpNotRecorded("the ledger refused the write", signed.txHash, { cause: e });
       }
       try {
-        const result = await api.sendTx({ txType: signed.txType, txInfo: signed.txInfo, txHash: signed.txHash }, { exit: s.exit });
+        // The durable write may outlast the owner's request. Persist its
+        // deadline too, so a crash or failed resolution cannot revive it.
+        checkDeadline();
+        const result = await api.sendTx({ txType: signed.txType, txInfo: signed.txInfo, txHash: signed.txHash }, {
+          exit: s.exit, notAfterMs: Math.min(signed.expiredAt, notAfterMs ?? Infinity),
+        });
         return { id, signed, result, thrown: null };
       } catch (e) {
         // api.ts's argument guards throw BEFORE sending: nothing left.
@@ -862,7 +884,7 @@ export function createLivePerpExecutor(opts: LivePerpExecutorOptions): LivePerpE
 
   function placed(tx: LiveTxResult, what: string): LivePerpPlaceResult {
     return {
-      status: tx.rowStatus === "rejected" || tx.rowStatus === "app-error" ? "rejected" : "submitted",
+      status: tx.send.kind === "not-sent" || tx.rowStatus === "rejected" || tx.rowStatus === "app-error" ? "rejected" : "submitted",
       orderRowId: tx.orderRowId,
       nonce: tx.nonce,
       // The venue fills, on its own clock: what filled is reconcile's to
@@ -937,6 +959,7 @@ export function createLivePerpExecutor(opts: LivePerpExecutorOptions): LivePerpE
           withdraw: null,
           exit: false,
           what: `open ${o.side} ${intent.market}`,
+          notAfterMs: ctx.notAfterMs,
           // Rule 9: nothing new on a market whose last tx has no outcome yet.
           guard: async () => {
             const pending = (await unresolvedRows("nothing is opened")).filter((r) => r.marketId === marketId && r.status === "submitted");
@@ -996,6 +1019,7 @@ export function createLivePerpExecutor(opts: LivePerpExecutorOptions): LivePerpE
         withdraw: null,
         exit: true,
         what: `${effect} ${held.side} ${intent.market} (${base} of ${held.baseAmount})`,
+        notAfterMs: ctx.notAfterMs,
         sign: (c, sctx) => c.signCreateOrder({ kind: "close", marketId, isAsk, baseAmount: base, worstPrice: intent.worstPrice }, sctx),
       });
       return placed(tx, review.detail);

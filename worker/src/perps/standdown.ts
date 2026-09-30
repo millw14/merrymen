@@ -193,6 +193,8 @@ export interface StanddownAccount
 export interface StanddownCallContext {
   /** Fires at the deadline (and when the stand-down ends): an abandoned call must not go on to send. */
   signal: AbortSignal;
+  /** Absolute send cutoff, also checked synchronously when timers are delayed. */
+  deadlineMs?: number;
   reason: StanddownReason;
 }
 
@@ -562,7 +564,7 @@ export async function runStanddown(o: StanddownOptions): Promise<StanddownResult
         overall.signal.addEventListener("abort", done, { once: true });
       }));
 
-  const ctxOf = (signal: AbortSignal): StanddownCallContext => ({ signal, reason });
+  const ctxOf = (signal: AbortSignal): StanddownCallContext => ({ signal, reason, deadlineMs: sendCutoff });
 
   /** Run one call against the clock: refused when no time is left, abandoned (and aborted) when it outlives `until`. */
   async function bounded<T>(label: string, until: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -788,7 +790,7 @@ export async function runStanddown(o: StanddownOptions): Promise<StanddownResult
         signed += 1;
         sent = true;
         try {
-          const r = await bounded(`close ${run.name}`, sendBound, (signal) => executor.place(intent, { signal, reason, attempt }));
+          const r = await bounded(`close ${run.name}`, sendBound, (signal) => executor.place(intent, { ...ctxOf(signal), deadlineMs: sendBound, attempt }));
           emit({
             kind: "close",
             ok: r.status !== "rejected",

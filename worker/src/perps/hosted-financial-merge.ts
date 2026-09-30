@@ -1,5 +1,11 @@
 /** Fold a finished shutdown into its exact full financial book without loading either history. */
 import { createHash } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
+import { chmodSync, mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { wrapSqlite } from "../db";
+import { OrderDeadlineFloor } from "./restore-order-deadline";
 import { FINANCIAL_CAPSULE_TABLES } from "./hosted-financial-capsule";
 import { STANDDOWN_TABLES } from "./hosted-standdown-ledger";
 import { decodeFinancialRecords, encodeFinancialRecord, JOURNAL_KEYS, PUBLIC_AGENT_COLUMNS, validateFinancialStream,
@@ -38,6 +44,7 @@ export async function* mergeFinancialStreams(full: FinancialChunks, shutdown: Fi
   const original = new Cursor(decodeFinancialRecords(validateFinancialStream(full, account, { scope: "financial" })));
   let reduced: Cursor | undefined;
   let agent: FinancialRow | undefined;
+  let deadlineHome:string|undefined,deadlineDb:DatabaseSync|undefined,deadlines:OrderDeadlineFloor|undefined;
   try {
     await original.header("financial");
     yield encodeFinancialRecord({ type: "header", v: 3, scope: "financial", account: account.toLowerCase() });
@@ -68,6 +75,14 @@ export async function* mergeFinancialStreams(full: FinancialChunks, shutdown: Fi
         const perps = (STANDDOWN_TABLES as readonly string[]).includes(table);
         while (original.item?.type === "row") {
           const row = original.item.value;
+          if(table==="perp_orders"&&row.send_not_after_ms!=null) {
+            if(!deadlines) {
+              deadlineHome=mkdtempSync(path.join(os.tmpdir(),"merrymen-deadlines-"));chmodSync(deadlineHome,0o700);
+              const file=path.join(deadlineHome,"deadlines.db");deadlineDb=new DatabaseSync(file);chmodSync(file,0o600);
+              deadlineDb.exec("PRAGMA temp_store=FILE");deadlines=await OrderDeadlineFloor.create(wrapSqlite(deadlineDb));
+            }
+            await deadlines.remember(row);
+          }
           if (table === "agents") agent = row;
           if (!perps || row.mode !== "live") yield encodeFinancialRecord(original.item);
           await original.next();
@@ -76,7 +91,7 @@ export async function* mergeFinancialStreams(full: FinancialChunks, shutdown: Fi
           if (!reduced) throw new Error("financial merge shutdown journal missing");
           await reduced.table(table);
           while (reduced.item?.type === "row") {
-            const value = table === "perp_orders" ? { ...reduced.item.value, tx_info: null } : reduced.item.value;
+            const value = table === "perp_orders" ? { ...(deadlines?await deadlines.apply(reduced.item.value):reduced.item.value), tx_info: null } : reduced.item.value;
             yield encodeFinancialRecord({ type: "row", value }); await reduced.next();
           }
         }
@@ -88,5 +103,6 @@ export async function* mergeFinancialStreams(full: FinancialChunks, shutdown: Fi
     yield encodeFinancialRecord({ type: "end" });
   } finally {
     await Promise.allSettled([original.close(), reduced?.close()]);
+    deadlineDb?.close();if(deadlineHome)rmSync(deadlineHome,{recursive:true,force:true});
   }
 }

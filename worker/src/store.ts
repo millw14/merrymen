@@ -74,6 +74,7 @@ import {
 import { ensureHome, homePaths, merrymenHome } from "./home";
 import { wrapSqlite, makePgDb, type Db } from "./db";
 import { paperBrainCapital } from "./paper-brain-capital";
+import { readBootstrapFlowTotals, type BootstrapFlowCursor } from "./bootstrap-flow-cursor";
 export const getPaperBrainCapital = (agentId: string, epoch: number) => paperBrainCapital(getDb(), agentId, epoch);
 import { readDecisionLifecycle, type DecisionLifecycle } from "./decision-lifecycle";
 export type { DecisionLifecycle } from "./decision-lifecycle";
@@ -476,6 +477,7 @@ export const PERP_LEDGER_DDL: readonly string[] = [
      tx_type INTEGER,
      tx_info TEXT,
      expired_at INTEGER,
+     send_not_after_ms INTEGER,
      status TEXT NOT NULL,
      effect TEXT NOT NULL,
      reduce_only INTEGER NOT NULL,
@@ -722,6 +724,7 @@ export const PERP_LEDGER_DDL: readonly string[] = [
   "ALTER TABLE equity ADD COLUMN perp_snapshot_time INTEGER",
   "ALTER TABLE equity ADD COLUMN cash_read_block INTEGER",
   "ALTER TABLE perp_accounts ADD COLUMN flat_since_json TEXT",
+  "ALTER TABLE perp_orders ADD COLUMN send_not_after_ms INTEGER",
 ];
 
 /**
@@ -2603,20 +2606,16 @@ export async function getNetContributionsUsdg(agentId: string): Promise<number |
 }
 
 /**
- * The same epoch-scoped sum, and the part of it booked at or after `sinceSec` —
- * the two halves net-contributions.ts durableNetContributionsUsdg6 needs.
- *
- * `netUsdg` is exactly getNetContributionsUsdg (null when no flow is on record
- * in this epoch). `sinceUsdg` is the signed sum of this epoch's flows whose
- * `at` is at or after `sinceSec` (0 when none): on a hosted child, the flows
- * this process booked after the orchestrator wrote its accounting anchor —
- * which the anchor's own figure cannot contain.
+ * Epoch-scoped local contributions and the provable suffix after an anchor's
+ * copied flow prefix. Missing/mismatched cursors return an unknown suffix.
+ * Numeric timestamps remain available to historical non-anchor callers.
  */
 export async function getNetContributionsSince(
   agentId: string,
-  sinceSec: number,
-): Promise<{ epoch: number; netUsdg: number | null; sinceUsdg: number }> {
+  since: number | BootstrapFlowCursor | null,
+): Promise<{ epoch: number; netUsdg: number | null; sinceUsdg: number | null }> {
   const epoch = await epochOf(agentId);
+  if (typeof since !== "number") return { epoch, ...await readBootstrapFlowTotals(getDb(), agentId, epoch, since) };
   const row = (await getDb()
     .prepare(
       `SELECT COUNT(*) AS n,
@@ -2624,7 +2623,7 @@ export async function getNetContributionsSince(
               COALESCE(SUM(CASE WHEN at >= ? THEN (CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END) ELSE 0 END), 0) AS since
        FROM flows WHERE agent_id = ? AND epoch = ?`,
     )
-    .get(Math.floor(sinceSec), agentId, epoch)) as { n: number; net: number; since: number } | undefined;
+    .get(Math.floor(since), agentId, epoch)) as { n: number; net: number; since: number } | undefined;
   const n = Number(row?.n ?? 0);
   return { epoch, netUsdg: n === 0 ? null : Number(row!.net), sinceUsdg: n === 0 ? 0 : Number(row!.since) };
 }
@@ -6601,6 +6600,8 @@ export interface PerpOrderSubmission {
   worstNotionalMicro: bigint;
   decisionId?: string | null;
   reason?: string | null;
+  /** Local send authority expiry; persisted independently of the signer's ExpiredAt. */
+  sendNotAfterMs?: number | null;
   /** REQUIRED on live: the signed tx. Absent on paper, which signs nothing. */
   signed?: PerpSignedTx | null;
   /** Paper only — live legs come from `signed.clientOrderIndexes`, never a second list. */
@@ -6655,6 +6656,7 @@ export async function insertPerpOrderSubmitted(s: PerpOrderSubmission): Promise<
     const withdrawId = s.withdraw?.transferId === undefined ? null : idText(s.withdraw.transferId, "transfer id");
     const decisionId = s.decisionId ?? null;
     const reason = s.reason ?? null;
+    const sendNotAfterMs = s.sendNotAfterMs == null ? null : safeInt(s.sendNotAfterMs, "send not after (ms)", 1);
 
     let signed: {
       txType: number; txInfo: string; txHash: string; accountIndex: number; apiKeyIndex: number; nonce: number; expiredAt: number;
@@ -6707,11 +6709,11 @@ export async function insertPerpOrderSubmitted(s: PerpOrderSubmission): Promise<
       await db
         .prepare(
           `INSERT INTO perp_orders (id, agent_id, mode, epoch, account_index, api_key_index, nonce, tx_hash, tx_type, tx_info,
-                                    expired_at, status, effect, reduce_only, market_id, worst_notional_micro, decision_id, reason)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?, ?)`,
+                                    expired_at, send_not_after_ms, status, effect, reduce_only, market_id, worst_notional_micro, decision_id, reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?, ?)`,
         )
         .run(id, agent, mode, epoch, signed?.accountIndex ?? null, signed?.apiKeyIndex ?? null, signed?.nonce ?? null,
-          signed?.txHash ?? null, signed?.txType ?? null, signed?.txInfo ?? null, signed?.expiredAt ?? null,
+          signed?.txHash ?? null, signed?.txType ?? null, signed?.txInfo ?? null, signed?.expiredAt ?? null, sendNotAfterMs,
           effect, s.reduceOnly ? 1 : 0, marketId, notional, decisionId, reason);
       if (mode === "live" && effect === "open") {
         // Retire the old flat interval before these signed bytes can be sent.
@@ -6968,6 +6970,8 @@ export interface PerpOrderRow {
   txInfo: string | null;
   /** ms */
   expiredAt: number | null;
+  /** Absent on legacy rows: only the venue signature's expiry then applies. */
+  sendNotAfterMs?: number | null;
   status: PerpOrderStatus;
   effect: PerpOrderEffect;
   reduceOnly: boolean;
@@ -7016,6 +7020,7 @@ async function ordersWithLegs(db: Db, rows: Record<string, unknown>[]): Promise<
       txType: nullableNum(r.tx_type),
       txInfo: (r.tx_info as string | null) ?? null,
       expiredAt: nullableNum(r.expired_at),
+      sendNotAfterMs: r.send_not_after_ms == null ? null : Number(r.send_not_after_ms),
       status: r.status as PerpOrderStatus,
       effect: r.effect as PerpOrderEffect,
       reduceOnly: Number(r.reduce_only) === 1,

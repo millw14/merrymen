@@ -1207,7 +1207,8 @@ function checkPerpOpen(intent: PerpOrderIntent, limits: AgentLimits, state: Agen
       rule: "perp-venue-incident",
       detail:
         "Lighter shows activity on the agent's account that the agent did not do. Nothing new is opened, and open " +
-        "positions are being closed, until the key is replaced and the alert is cleared on the dashboard.",
+        "positions are being closed. Use owner recovery to secure the key and recover available funds; verified " +
+        "re-enablement of perpetual trading after recovery is not available in this build.",
     };
   }
   if (p.entriesHalted) {

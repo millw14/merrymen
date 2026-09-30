@@ -182,6 +182,11 @@ export function guardedStanddownApi(
         reduceOnly: packet?.ReduceOnly === 1 };
       const check = () => {
         if (ctx?.signal.aborted) throw new Error("the stand-down call ended before send");
+        for (const deadline of [ctx?.deadlineMs, flags?.notAfterMs]) {
+          if (deadline !== undefined && (!Number.isSafeInteger(deadline) || deadline <= 0 || d.now() >= deadline)) {
+            throw new Error("the request expired before send");
+          }
+        }
         if (d.deadlineMs !== undefined && (!Number.isFinite(d.deadlineMs) || d.now() >= d.deadlineMs)) {
           throw new Error("the stand-down job expired before send");
         }
@@ -273,6 +278,7 @@ export async function openLiveHandle(d: LiveHandleDeps): Promise<LiveHandleOpen>
     auth,
     now: d.now,
     clockSkewMs: () => d.api.clockSkewMs(),
+    sendNotAfterMs: () => sendContext.getStore()?.deadlineMs,
     decimals: () => lastDecimals,
     ...(d.executorTuning?.sleep !== undefined ? { sleep: d.executorTuning.sleep } : {}),
     ...(d.executorTuning?.txPollDelaysMs !== undefined ? { txPollDelaysMs: d.executorTuning.txPollDelaysMs } : {}),

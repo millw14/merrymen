@@ -345,6 +345,17 @@ test("sendTx is never retried, whatever comes back", async () => {
   assert.deepEqual([refused.kind, refused.kind === "refused-send" ? refused.code : null], ["refused-send", 21602]);
 });
 
+test("sendTx checks its persisted send deadline at the final HTTP boundary", async () => {
+  const f = fake(() => json(200, { code: 200, tx_hash: HASH }));
+  const a = api(f.fn);
+  for (const notAfterMs of [clock, clock - 1, NaN, Infinity, 0]) {
+    await assert.rejects(a.sendTx(TX, { exit: true, notAfterMs }), /expired before send/);
+  }
+  assert.equal(f.calls.length, 0);
+  assert.ok((await a.sendTx(TX, { exit: true, notAfterMs: clock + 1 })).ok);
+  assert.equal(f.calls.length, 1);
+});
+
 test("sendTx: an echoed hash that is not ours is ambiguous (malformed), never success", async () => {
   const f = fake(() => json(200, { code: 200, tx_hash: "43de174b14e98b35fce519602dee70feb317bc2950e49e685b5a5bc87e8d4b1eea2c598006acc8e2", predicted_execution_time_ms: 1 }));
   assert.equal(err(await api(f.fn).sendTx(TX)).kind, "malformed");

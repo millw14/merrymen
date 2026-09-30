@@ -526,9 +526,9 @@ describe("THE BOOKING (review-accounting's nine pins)", () => {
     assert.doesNotMatch(CODE, /getNetContributionsUsdg\(/, "no consumer in the child reads the local sum alone");
     assert.doesNotMatch(CODE, /\? Number\(anchorNetContributionsUsdg\)/, "nor the arm-time anchor alone");
     const helper = body("durableNetContributions");
-    assert.match(helper, /getNetContributionsSince\(agentId, anchorWrittenAtSec \?\? 0\)/);
+    assert.match(helper, /getNetContributionsSince\(agentId, anchorFlowCursor\)/);
     assert.match(helper, /anchorNetUsdg6: anchorNetContributionsUsdg,\s*anchorEpoch,/);
-    assert.match(CODE, /anchorWrittenAtSec = verdict\.kind === "valid" \? verdict\.state\.generatedAt : null;/);
+    assert.match(CODE, /anchorFlowCursor = verdict\.kind === "valid" \? verdict\.state\.localFlowCursor \?\? null : null;/);
   });
 });
 

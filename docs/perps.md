@@ -302,8 +302,12 @@ are recorded beside the constants in `packages/core/src/perps.ts`.
     runs on every account under our L1 address (withdrawals repeated as margin
     frees), foreign fills are still booked (`venue-unknown`), and the owner is
     told the key may be compromised and exactly how to rotate it with the owner
-    key. The flag clears only from the dashboard, after the key at our index is
-    no longer the sealed one. Detection is after the fact.
+    key. The required re-enablement design is an explicit owner acknowledgement
+    with verified rotation evidence, durable retirement of the old keys, and
+    replacement authority for the exact observed recovery key. This transition
+    is not wired into the dashboard or worker yet: recovery remains halted and
+    re-signing alone does not clear it. This is a live-release blocker. Detection
+    is after the fact.
 
 17. **Perps are never published in v1.** Perp decisions file under their own
     sources (`perp-route`, `perp:strategist`), which are withheld in

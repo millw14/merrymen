@@ -1431,7 +1431,7 @@ const PERP_FUNDING_COLS = [
 const PERP_CARRY_COLS = ["agent_id", "mode", "epoch", "market_id", "side", "base", "mark_price", "entry_quote_micro", "created_at"] as const;
 /** Every perp_orders column EXCEPT tx_info. */
 const PERP_ORDER_COLS = [
-  "id", "agent_id", "mode", "epoch", "account_index", "api_key_index", "nonce", "tx_hash", "tx_type", "expired_at",
+  "id", "agent_id", "mode", "epoch", "account_index", "api_key_index", "nonce", "tx_hash", "tx_type", "expired_at", "send_not_after_ms",
   "status", "effect", "reduce_only", "market_id", "worst_notional_micro", "filled_base", "filled_quote_micro",
   "decision_id", "reason", "created_at", "resolved_at", "updated_at",
 ] as const;
@@ -1701,6 +1701,15 @@ export async function mirrorPerpLedger(args: {
     updated("perp_orders", PERP_ORDER_COLS, async (db, r) => {
       const status = String(r.status);
       const rank = PERP_ORDER_RANK[status as keyof typeof PERP_ORDER_RANK] ?? -1;
+      // Authority can only become narrower, independently of outcome rank or
+      // update time. An older checkpoint can still teach us an earlier cutoff.
+      const deadlineChanges = r.send_not_after_ms == null ? 0 : Number((await db.prepare(
+        `UPDATE perp_orders SET send_not_after_ms = ?
+          WHERE agent_id = ? AND mode = ?
+            AND (id = ? OR (nonce IS NOT NULL AND account_index = ? AND api_key_index = ? AND nonce = ?))
+            AND (send_not_after_ms IS NULL OR send_not_after_ms > ?)`,
+      ).run(r.send_not_after_ms, String(r.agent_id ?? "").toLowerCase(), r.mode,
+        r.id, r.account_index ?? null, r.api_key_index ?? null, r.nonce ?? null, r.send_not_after_ms)).changes);
       // Matched by id OR by the nonce it was signed with: a row a rebuilt
       // child re-adopted under a new id is still the same signed tx, and the
       // row already here is the one to advance.
@@ -1708,7 +1717,8 @@ export async function mirrorPerpLedger(args: {
         .prepare(
           `UPDATE perp_orders
               SET status = ?, filled_base = COALESCE(?, filled_base), filled_quote_micro = COALESCE(?, filled_quote_micro),
-                  reason = COALESCE(?, reason), resolved_at = COALESCE(?, resolved_at), updated_at = ?
+                  reason = COALESCE(?, reason), resolved_at = COALESCE(?, resolved_at),
+                  updated_at = ?
             WHERE agent_id = ? AND mode = ?
               AND (id = ? OR (nonce IS NOT NULL AND account_index = ? AND api_key_index = ? AND nonce = ?))
               AND (${orderRank} < ? OR (perp_orders.status = ? AND perp_orders.updated_at < ?))`,
@@ -1718,8 +1728,8 @@ export async function mirrorPerpLedger(args: {
           String(r.agent_id ?? "").toLowerCase(), r.mode, r.id, r.account_index ?? null, r.api_key_index ?? null, r.nonce ?? null,
           rank, status, r.updated_at,
         );
-      if (Number(res.changes) > 0) return Number(res.changes);
-      return Number((await db.prepare(insertSql("perp_orders", PERP_ORDER_COLS)).run(...valuesOf(r, PERP_ORDER_COLS))).changes);
+      if (Number(res.changes) > 0) return deadlineChanges + Number(res.changes);
+      return deadlineChanges + Number((await db.prepare(insertSql("perp_orders", PERP_ORDER_COLS)).run(...valuesOf(r, PERP_ORDER_COLS))).changes);
     }),
   );
 

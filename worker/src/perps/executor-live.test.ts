@@ -20,6 +20,7 @@
  *   nonces           strictly increasing in send order, however many callers.
  */
 import assert from "node:assert/strict";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -27,7 +28,7 @@ import { DatabaseSync } from "node:sqlite";
 import { after, beforeEach, describe, it } from "node:test";
 import { LIGHTER_ROUTE_V1, PERP_LEG, isolatedLiqPrice, notionalMicro, perpCoi, type PerpKey } from "../../../packages/core/src/perps";
 import type { PerpOrderIntent } from "../policy";
-import type { LighterApiError, LighterResult, SendTxError, SendTxReceipt } from "./api";
+import type { LighterApi, LighterApiError, LighterResult, SendTxError, SendTxReceipt } from "./api";
 import { createLighterAuth } from "./auth";
 import { PerpRefused } from "./executor";
 import {
@@ -44,6 +45,8 @@ import { parseLighterFeed, specToJson, type LighterFeedFileMarket, type LighterF
 import { parseOrderBookDetails, type DepthRead, type PerpAccountPosition, type PerpAccountRead, type TxRead } from "./markets";
 import { createNonceAllocator } from "./nonce";
 import { instantiateSigner } from "./signer";
+import { guardedStanddownApi } from "./live-handle";
+import type { StanddownCallContext } from "./standdown";
 
 // ── the ledger ──────────────────────────────────────────────────────────────
 
@@ -552,6 +555,28 @@ describe("review(): the feed's fresh book, else one authenticated venue read", (
 // ── what an answer means to the row ─────────────────────────────────────────
 
 describe("sendTx answers (rule 9)", () => {
+  it("carries a persisted owner deadline through an awaited replay fence and preserves legacy semantics", async () => {
+    const s = setup({ venue: holding("long", 30n) });
+    s.f.sendAnswer = () => fail({ kind: "unavailable", status: null, retryable: true, detail: "unknown" } as const);
+    const intent = exit("long", "close", 30n), deadline = clock + 5_000;
+    const review = await s.ex.review(intent);
+    await s.ex.place(intent, review, { agentId: s.agentId, decisionId: null, notAfterMs: deadline });
+    const [row] = await store.listSubmittedPerpOrders(s.agentId, "live");
+    assert.equal(row!.sendNotAfterMs, deadline);
+    assert.ok(row!.expiredAt! > deadline, "the local owner expiry is earlier than the signed transaction expiry");
+    const guarded = guardedStanddownApi({ api: s.f.api as LighterApi, now: () => clock,
+      beforeSend: async () => { clock = deadline; } }, new AsyncLocalStorage<StanddownCallContext>());
+    const deps = { agentId: s.agentId, accountIndex: ACCOUNT, api: guarded, now: () => clock, clockSkewMs: () => skew };
+    assert.equal((await resendPersisted(deps, row!)).sent, false, "expiry during the awaited lease check still withholds bytes");
+    assert.equal(s.f.sent.length, 1);
+    assert.equal((await resendPersisted({ ...deps, api: s.f.api }, row!)).sent, false, "a restarted sender reads the stored bound");
+    for (const sendNotAfterMs of [undefined, null]) {
+      assert.equal((await resendPersisted({ ...deps, api: s.f.api }, { ...row!, sendNotAfterMs })).sent, true,
+        "genuinely legacy rows retain their original signed-expiry behavior");
+    }
+    assert.equal(s.f.sent.length, 3);
+  });
+
   it("a timeout leaves the row submitted; the re-send sends the identical persisted bytes, and never past ExpiredAt", async () => {
     const s = setup();
     s.f.sendAnswer = () => fail({ kind: "unavailable", status: null, retryable: true, detail: "POST /api/v1/sendTx timed out after 5000 ms" } as const);

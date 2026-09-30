@@ -279,6 +279,8 @@ interface World {
   cachedBudget?: { ops: number; spend: bigint };
   budgetRefreshFails?: boolean;
   checkpointRejectsAfterInsert?: boolean;
+  ownerDeadlineDelay?: { phase: "decision" | "insert"; untilMs: number };
+  rejectOrderResolution?: boolean;
 }
 
 let nextWorld = 1;
@@ -363,7 +365,14 @@ function laneFor(w: World, exec: ExecMode | (() => ExecMode)): PerpLane {
       },
     },
     events: async (level, message) => void w.events.push({ level, message }),
-    decide: (intent, source, reason, known) => decide(id, intent, source, reason, known),
+    decide: (intent, source, reason, known) => {
+      if (source === "chat" && w.ownerDeadlineDelay?.phase === "decision") {
+        clock = w.ownerDeadlineDelay.untilMs;
+        delete w.ownerDeadlineDelay;
+        writeFeed();
+      }
+      return decide(id, intent, source, reason, known);
+    },
     log: () => {},
     live: {
       home: () => HOME,
@@ -374,8 +383,17 @@ function laneFor(w: World, exec: ExecMode | (() => ExecMode)): PerpLane {
         ...store,
         insertPerpOrderSubmitted: async (...args) => {
           const row = await store.insertPerpOrderSubmitted(...args);
+          if (w.ownerDeadlineDelay?.phase === "insert") {
+            clock = w.ownerDeadlineDelay.untilMs;
+            delete w.ownerDeadlineDelay;
+            writeFeed();
+          }
           if (w.checkpointRejectsAfterInsert) throw new Error("test: checkpoint publication failed after local commit");
           return row;
+        },
+        resolvePerpOrder: (...args) => {
+          if (w.rejectOrderResolution) throw new Error("test: order resolution unavailable");
+          return store.resolvePerpOrder(...args);
         },
         perpLaneLedgerFacts: (...args) => {
           if (w.ledgerFactsUnread) throw new Error("test: live ledger facts unread");
@@ -974,6 +992,87 @@ describe("perps turned OFF with a position open", () => {
 });
 
 describe("owner exits and an entry switched off before retry", () => {
+  for (const action of ["close", "flatten"] as const) {
+    const exit = (w: World, deadline: number) => action === "close"
+      ? w.lane.close("BTC-PERP", { book: "live", notAfterMs: deadline })
+      : w.lane.flatten({ book: "live", notAfterMs: deadline });
+
+    it(`${action} keeps the owner's original deadline through delayed decision recording`, async () => {
+      clock = BAR + H;
+      const w = await world();
+      await onboardAndOpen(w);
+      const before = venue.sends.length;
+      const deadline = clock + 5_000;
+      w.ownerDeadlineDelay = { phase: "decision", untilMs: deadline + 1 };
+      const out = await exit(w, deadline);
+      assert.equal(out.ok, false, out.sentence);
+      assert.equal(venue.sends.length, before, "no signed close leaves after expiry, even before the timer fires");
+      assert.ok(venue.accounts.get(acctIdx(w))!.pos.get(1), "the position remains protected at the venue");
+    });
+
+    it(`${action} cannot replay after expiry during the durable write even if rejection cannot be saved`, async () => {
+      clock = BAR + H;
+      const w = await world();
+      await onboardAndOpen(w);
+      const before = venue.sends.length;
+      const deadline = clock + 5_000;
+      w.ownerDeadlineDelay = { phase: "insert", untilMs: deadline + 1 };
+      w.rejectOrderResolution = true;
+      const out = await exit(w, deadline);
+      assert.equal(out.ok, false, out.sentence);
+      const [pending] = (await store.listSubmittedPerpOrders(w.id, "live")).filter(r => r.effect === "close");
+      assert.ok(pending, "failed resolution leaves the persisted bytes for a later process");
+      assert.ok(pending.sendNotAfterMs! <= deadline && pending.sendNotAfterMs! > deadline - 5_000);
+      assert.equal(venue.sends.length, before);
+      w.rejectOrderResolution = false;
+      w.lane = laneFor(w, LIVE);
+      await tick(w, { route: false });
+      assert.equal(venue.sends.length, before, "a new handle cannot replay expired owner authority");
+      assert.ok(venue.accounts.get(acctIdx(w))!.pos.get(1));
+    });
+
+    it(`${action} preserves its send deadline through a crash before expiry and restores it after restart`, async () => {
+      clock = BAR + H;
+      const w = await world();
+      await onboardAndOpen(w);
+      const before = venue.sends.length;
+      const deadline = clock + 5_000;
+      w.checkpointRejectsAfterInsert = true;
+      await exit(w, deadline);
+      const pending = (await store.listSubmittedPerpOrders(w.id, "live")).filter(r => r.effect === "close");
+      assert.ok(pending.length > 0);
+      for (const row of pending) assert.ok(row.sendNotAfterMs! <= deadline && row.sendNotAfterMs! > deadline - 5_000);
+      assert.equal(venue.sends.length, before, "a failed checkpoint sends nothing");
+      w.checkpointRejectsAfterInsert = false;
+      clock = Math.max(clock, deadline + 1);
+      writeFeed();
+      w.lane = laneFor(w, LIVE);
+      await tick(w, { route: false });
+      assert.equal(venue.sends.length, before, "restart retains the original deadline even though the signature is still valid");
+      assert.ok(venue.accounts.get(acctIdx(w))!.pos.get(1));
+    });
+  }
+
+  it("a queued flatten keeps its original fifteen-minute ceiling even with a later owner deadline", async () => {
+    clock = BAR + H;
+    const w = await world();
+    await onboardAndOpen(w);
+    const before = venue.sends.length, started = clock;
+    let release!: () => void, entered!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const held = w.lane.lock.run(async () => { entered(); await new Promise<void>(resolve => { release = resolve; }); });
+    await ready;
+    const pending = w.lane.standdown("flatten", { notAfterMs: started + 30 * 60_000 });
+    clock = started + 15 * 60_000 + 1;
+    writeFeed();
+    release();
+    await held;
+    const result = await pending;
+    assert.equal(result?.deadlineMs, started + 15 * 60_000);
+    assert.equal(venue.sends.length, before, "time waiting for an in-flight operation does not renew flatten authority");
+    assert.ok(venue.accounts.get(acctIdx(w))!.pos.get(1));
+  });
+
   it("requires a book when practice and real holdings share a market, and keeps an explicit practice close in practice", async () => {
     const w = await world();
     await onboardAndOpen(w);
@@ -1208,6 +1307,39 @@ describe("autonomous recovery after the exact key file is restored", () => {
     await tick(w);
     assert.equal(liveOrders(w).filter(row => row.effect === "open").length, 1);
     assert.ok(venue.accounts.get(acctIdx(w))?.pos.get(1));
+  });
+});
+
+describe("live stop renewal", () => {
+  it("keeps the old stop until its exact replacement reads resting, then converges without further sends", async () => {
+    clock = BAR + H;
+    mark = 802_000n; venue.setMark(1, mark);
+    const w = await world(); await onboardAndOpen(w);
+    w.cfg.perpsDriver = "manual";
+    const account = venue.accounts.get(acctIdx(w))!;
+    const old = account.orders.find(o => o.type === "stop-loss" && o.status === "pending")!;
+    assert.ok(old);
+    old.expiry = clock + 6 * 86_400_000;
+
+    await tick(w, { route: false, advanceMs: 61_000 }); await pass(w);
+    const replacement = account.orders.find(o => o.type === "stop-loss" && o.orderIndex !== old.orderIndex)!;
+    assert.ok(replacement);
+    assert.equal(old.status, "pending", "sending a renewal is not confirmation that it rests");
+
+    venue.failing.add("/api/v1/accountActiveOrders");
+    try {
+      await tick(w, { route: false, advanceMs: 16_000 }); await pass(w);
+      assert.equal(old.status, "pending", "an unread order list cannot retire the old stop");
+    } finally {
+      venue.failing.delete("/api/v1/accountActiveOrders");
+    }
+    await tick(w, { route: false, advanceMs: 16_000 }); await pass(w);
+    assert.equal(old.status, "canceled");
+    assert.equal(replacement.status, "pending");
+    const sent = venue.sends.length;
+    await tick(w, { route: false, advanceMs: 61_000 }); await pass(w);
+    assert.equal(venue.sends.length, sent, "confirmed renewal ends the replacement/cancellation loop");
+    assert.equal(liveOrders(w).filter(row => row.reason === "protective-stop-expiring").length, 1);
   });
 });
 

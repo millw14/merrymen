@@ -400,6 +400,20 @@ describe("live: the venue account is the book", () => {
     assert.deepEqual(p.stop, { trigger: 22_000n, price: 21_500n, expiresAtSec: f.stopExpiresAtSec, resting: true });
   });
 
+  it("recognizes the longest-lived renewal at the recorded trigger in either venue order", () => {
+    const old = order({ orderIndex: "101", triggerPrice: 22_000n, orderExpiryMs: NOW_MS + 6 * 86_400_000 });
+    const replacement = order({ orderIndex: "103", triggerPrice: 22_000n, orderExpiryMs: NOW_MS + 28 * 86_400_000 });
+    for (const positions of [[nvdaRow], []]) {
+      for (const orders of [[old, replacement], [replacement, old]]) {
+        const renewed = mustView(liveInput({ ledger: ledger({ positions }) }, orders));
+        const f = renewed.facts.positions.get("NVDA-PERP")!;
+        assert.equal(f.restingStopOrder, "103");
+        assert.equal(f.stopExpiresAtSec, Math.floor(replacement.orderExpiryMs / 1000));
+        assert.deepEqual(f.otherStopOrders, ["101"]);
+      }
+    }
+  });
+
   it("rule 12: C, ΣM and ΣU are the one account read's; T is the ledger's in-transit", () => {
     assert.equal(v.readAtSec, Math.floor(1_790_694_641_487_929 / 1_000_000));
     const book = buildPerpBookTerm(v);
