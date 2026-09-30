@@ -49,8 +49,9 @@ has no route, so a new capture has to be decoded somewhere. The wiring that
 decides whose state is held — sign-out, a wallet switch, a Server change, the
 retired password at start — runs against the real `Repository` and cookie jar
 with `MemoryStore` and `MemoryCookies` (also in `TestKit.kt`) standing in for
-DataStore and the WebView's `CookieManager`. CI does not build this app yet,
-so run them before you push.
+DataStore and the WebView's `CookieManager`. CI's `android` job runs
+`testDebugUnitTest lintDebug assembleDebug` on every PR, including ones that
+only touch the web files the mirror tests read.
 
 **Adding an endpoint** does not touch `MerrymenApi.kt`: write it as an
 extension in your own `net/<Area>Wire.kt` over the shared plumbing,
