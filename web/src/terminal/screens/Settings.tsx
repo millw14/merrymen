@@ -18,6 +18,7 @@ import { telegramLabel, telegramRow, type TelegramRow } from "../agent-status";
 import SetupChecklist from "../SetupChecklist";
 import { count, shortDateTime } from "@/lib/format";
 import { unreadableSetting } from "@/lib/parse-amount";
+import { providerChange, providerModelChange, providerModelValue } from "@/lib/settings-llm-model";
 import { useT } from "@/lib/i18n";
 // QUARANTINED alongside /grant. A settings form is not a surface anybody shares
 // from a phone, and its ~30 fields are styled against the old sheet — so it
@@ -584,7 +585,9 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
   const prov = providers.find((p) => p.id === llmProviderVal) ?? providers[0]!;
   const providerKeyField = prov.id === "groq" ? "groqApiKey" : prov.id === "anthropic" ? "anthropicApiKey" : "llmApiKey";
   const providerKeyView = prov.id === "groq" ? view.groqApiKey : prov.id === "anthropic" ? view.anthropicApiKey : view.llmApiKey;
-  const providerModelField = prov.id === "groq" ? "groqModel" : prov.id === "anthropic" ? "llmModel" : "llmProviderModel";
+  const providerModelVal = providerModelValue({ ...view.values, ...draft }, prov.id);
+  const setProviderModel = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+    setDraft((d) => ({ ...d, ...providerModelChange(prov.id, e.target.value) }));
   const providerNeedsKey = prov.needsKey !== false;
 
   const tgEnabledVal = tgEnabled ?? view.values.telegramEnabled ?? d.telegramEnabled;
@@ -863,7 +866,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                 action={prov.keyUrl ? { href: prov.keyUrl, label: providerNeedsKey ? "get a key" : "install" } : undefined}
                 hint={hosted ? "Optional. Add your own provider for chat and the Strategist." : "Required for chat and the Strategist."}
               >
-                <select value={llmProviderVal} onChange={set("llmProvider")}>
+                <select value={llmProviderVal} onChange={(e) => setDraft((d) => ({ ...d, ...providerChange(e.target.value) }))}>
                   {providers.map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.label}
@@ -909,10 +912,13 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                   <span className="mm-loading">listing models…</span>
                 ) : availableModels.length > 0 ? (
                   <select
-                    value={v(providerModelField as keyof SettingsView["values"])}
-                    onChange={set(providerModelField)}
+                    value={providerModelVal}
+                    onChange={setProviderModel}
                   >
                     <option value="">default{prov.defaultModel ? ` (${prov.defaultModel})` : ""}</option>
+                    {providerModelVal && !availableModels.includes(providerModelVal) && (
+                      <option value={providerModelVal}>{providerModelVal} (saved; not in this provider's list)</option>
+                    )}
                     {availableModels.map((m) => (
                       <option key={m} value={m}>{m}</option>
                     ))}
@@ -921,8 +927,8 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                   <input
                     type="text"
                     placeholder={prov.defaultModel || "model id"}
-                    value={v(providerModelField as keyof SettingsView["values"])}
-                    onChange={set(providerModelField)}
+                    value={providerModelVal}
+                    onChange={setProviderModel}
                   />
                 )}
               </Field>
@@ -2077,7 +2083,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               <span className="mm-unit">{t("settings.unit.usdg")}</span>
             </Field>
             <Field label={t("settings.label.claudeVisionModel")} hint={t("settings.hint.modelForAnthropicAnd")}>
-              <input type="text" placeholder={d.llmModel} value={v("llmModel")} onChange={set("llmModel")} />
+              <input type="text" placeholder={d.llmModel} value={llmProviderVal === "anthropic" ? providerModelVal : v("llmModel")} onChange={llmProviderVal === "anthropic" ? setProviderModel : set("llmModel")} />
             </Field>
             <Field label={t("settings.label.strategistDecisionInterval")}>
               <input type="text" inputMode="numeric" placeholder={String(d.llmIntervalMin)} value={v("llmIntervalMin")} onChange={setNum("llmIntervalMin")} aria-invalid={!!numError.llmIntervalMin} />
