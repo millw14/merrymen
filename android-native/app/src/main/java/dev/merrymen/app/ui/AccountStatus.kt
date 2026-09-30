@@ -4,6 +4,7 @@ import dev.merrymen.app.data.Loaded
 import dev.merrymen.app.net.AgentGlance
 import dev.merrymen.app.net.AgentImageKind
 import dev.merrymen.app.net.ApiResult
+import dev.merrymen.app.net.FEED_MEASURED_NOT_SENT
 import dev.merrymen.app.net.Feed
 import dev.merrymen.app.net.GrantView
 import dev.merrymen.app.net.MerrymenApi
@@ -18,8 +19,10 @@ import java.util.Locale
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.doubleOrNull
 
 /**
  * WHAT HOME AND YOU MAY SAY ABOUT THE READER'S OWN ACCOUNT — the rules, with no
@@ -412,6 +415,38 @@ data class PnlLine(val usd: Double, val pct: Double, val gasUnpriced: Int) {
       if (gasUnpriced > 0) " · gas for $gasUnpriced ${if (gasUnpriced == 1) "trade" else "trades"} not priced" else ""
 }
 
+/** The numerator and denominator the owner's return is computed from. */
+data class PnlBasis(val latest: Double?, val contributed: Double?)
+
+/**
+ * WHAT THE RETURN IS MEASURED AT — web lib/feed-pnl.ts pnlBasisOf, rule for rule.
+ *
+ * [Feed.equity] keeps marks taken while flow inference was held: they are the
+ * book's value, so "equity now" reads them. A return does not. Such a mark can
+ * carry a top-up or withdrawal not booked yet, and set against the booked
+ * contributions it is the owner's own cash called profit or loss for as long
+ * as the hold lasts. So the feed sends `measured`, the newest mark not held
+ * and the contributions booked by it, and the return pairs those two.
+ *
+ *  - ABSENT ([FEED_MEASURED_NOT_SENT]) is an older server: the pairing this
+ *    always used, the newest mark over every flow.
+ *  - NULL is a book with no measured mark yet: no numerator. The
+ *    contributions stay the whole record.
+ *  - An object: its `equityUsdg` when a finite number, over its
+ *    `netContributionsUsdg` (null when nothing was booked by then).
+ */
+fun pnlBasisOf(feed: Feed): PnlBasis {
+  val m = feed.measured
+  if (m === FEED_MEASURED_NOT_SENT) return PnlBasis(latest = feed.equityNow, contributed = feed.netContributionsUsdg)
+  if (m == null || m is JsonNull) return PnlBasis(latest = null, contributed = feed.netContributionsUsdg)
+  val o = m as? JsonObject
+  return PnlBasis(latest = o.finiteNumber("equityUsdg"), contributed = o.finiteNumber("netContributionsUsdg"))
+}
+
+/** A JSON number under [key], or null for anything else — a string is not a figure. */
+private fun JsonObject?.finiteNumber(key: String): Double? =
+  (this?.get(key) as? JsonPrimitive)?.takeIf { !it.isString }?.doubleOrNull?.takeIf { it.isFinite() }
+
 /**
  * EQUITY − CONTRIBUTIONS − GAS, ONLY WHERE EVERY TERM IS EVIDENCE — lib/rank-pnl.ts's gate.
  *
@@ -436,13 +471,17 @@ data class PnlLine(val usd: Double, val pct: Double, val gasUnpriced: Int) {
  * rule would blank a true figure on every tick to catch one false one. The fix
  * is the feed saying `bookMode`, asked of the foundation; until then the web
  * (which has no mode gate at all) shows the same figure in that window.
+ *
+ * The equity and contribution terms come from [pnlBasisOf]: the feed's
+ * measured mark and what was booked by it, never a mark taken mid-hold.
  */
 fun pnlLineOf(feed: Feed, mode: String?): PnlLine? {
   if (mode != "live") return null
-  val contributed = feed.netContributionsUsdg?.takeIf { it.isFinite() && it > 0 } ?: return null
+  val basis = pnlBasisOf(feed)
+  val contributed = basis.contributed?.takeIf { it.isFinite() && it > 0 } ?: return null
   if ((feed.landed ?: 0) <= 0) return null
   if (feed.contributionsKnown != true) return null
-  val latest = feed.equityNow?.takeIf { it.isFinite() } ?: return null
+  val latest = basis.latest?.takeIf { it.isFinite() } ?: return null
   val gas = feed.gasUsdg?.takeIf { it.isFinite() } ?: return null
   val usd = latest - contributed - gas
   return PnlLine(usd = usd, pct = usd / contributed * 100, gasUnpriced = feed.gasUnpricedTrades ?: 0)

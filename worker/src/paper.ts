@@ -13,6 +13,7 @@
  * changes what "execute" means, never what is allowed.
  */
 
+import { isEnergyReserveToken } from "../../packages/core/src/index";
 import type { TradeIntent } from "./policy";
 
 export interface PaperBook {
@@ -49,6 +50,30 @@ const MULTIPLIER_ONE = 1;
 /** What `shares` is worth in tradeable units at the live multiplier. */
 export function paperUiShares(shares: number, multiplier: number): number {
   return shares * (multiplier > 0 ? multiplier : MULTIPLIER_ONE);
+}
+
+/**
+ * The paper holdings the tick VALUES: held (shares > 0) and not the energy reserve.
+ *
+ * THE RESERVE IS NEVER A POSITION, on paper exactly as on the live path — it
+ * sits outside the trading book the way ETH gas does (core energy.ts). Live
+ * gets that for free: readPositions only reads the watch set, and the watch set
+ * never holds the reserve (watchTokensFor). The paper valuation loop does NOT
+ * read the watch set; it walks the stored book, and a symbol it cannot find in
+ * the watch set is a MISSING PRICE — which holds the tick. A reserve row in a
+ * paper book would therefore have frozen the agent forever: no equity, no
+ * breaker, no strategy, and every owner order answered "book unread".
+ *
+ * DEFENSIVE, not a migration. No paper book can have bought $MERRYMEN: a paper
+ * fill refuses without a live price, $MERRYMEN has no feed, and its only depth
+ * is a v2 pair against VIRTUAL (measured, core energy.ts) while the worker had
+ * no v2 venue before energy. So this drops a row that should not exist, rather
+ * than letting its existence stop the book.
+ * By ADDRESS, case-insensitively — a coin that merely calls itself MERRYMEN
+ * elsewhere is an ordinary holding and is valued (or held) like any other.
+ */
+export function paperBookPositions(positions: readonly PaperPosition[]): PaperPosition[] {
+  return positions.filter((p) => p.shares > 0 && !isEnergyReserveToken(p.token));
 }
 
 /** What actually moved on a stock fill — the inputs cost-basis accounting needs. */

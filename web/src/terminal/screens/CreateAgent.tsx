@@ -4,7 +4,9 @@ import { useEffect, useState } from "react";
 import { ArrowLeft, ArrowRight, Check, Eye, EyeOff } from "lucide-react";
 import {
   DEFAULT_BASKET_SYMBOLS,
+  ENERGY,
   STOCK_TOKENS,
+  isEnergyReserveToken,
   isValidCustomToken,
   type CustomToken,
   isWallTooWide,
@@ -17,7 +19,7 @@ import { Face } from "../ui";
 import { SkeletonRows } from "../Skeleton";
 import { CAP_FIELD, parseAmount } from "@/lib/parse-amount";
 import type { TierView } from "@/app/api/tier/route";
-import { loadTier } from "../tier";
+import { loadTier, newAgentQualifies } from "../tier";
 import { count, decimalSeparator } from "@/lib/format";
 import { useT } from "@/lib/i18n";
 
@@ -204,15 +206,20 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
   return <section className="create-agent">
     <header className="create-heading"><button aria-label="Back" disabled={busy||step==="backup"} onClick={()=>step==="limits"?setStep("market"):step==="market"?setStep("agent"):onBack()}><ArrowLeft size={18}/></button><span>Create an agent</span></header>
     <ol className="create-steps" aria-label="Setup progress">{["Agent","Market","Limits","Backup","Ready"].map((label,i)=><li key={label} aria-current={i===index?"step":undefined}><span>{i<index?<Check size={12}/>:i+1}</span>{label}</li>)}</ol>
-    {step==="agent" && <><div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Meet your next agent.</h1><p>A name, a strategy, and room to make its own moves.</p></div><form onSubmit={e=>{e.preventDefault();if(!name.trim()){setError(t("create.errName"));return;}setError("");setStep("market");}}><label className="create-label" htmlFor="agent-name">Agent name</label><input className="create-input" id="agent-name" value={name} maxLength={24} placeholder="What should we call it?" onChange={e=>setName(e.target.value)} required/><fieldset className="create-strategies"><legend>How should it trade?</legend>{STRATEGIES.map(s=><label className={strategy===s.id?"selected":""} key={s.id}><input type="radio" name="strategy" value={s.id} checked={strategy===s.id} onChange={()=>setStrategy(s.id)}/><span><strong>{s.name}{s.circle&&<i className="tag holders" title="Runs only while you hold $MERRYMEN">holders</i>}</strong><small>{s.description}{s.circle?" Runs only while you hold $MERRYMEN — pick it now and it stays idle until you do.":""}</small></span><span className="create-radio" aria-hidden>{strategy===s.id&&<Check size={13}/>}</span></label>)}</fieldset><div className="create-example" aria-live="polite"><span>Strategy example</span><p>{EXAMPLES[strategy]}</p></div>
+    {step==="agent" && <><div className="create-intro"><Face name={name||"Your agent"} slug={null}/><h1>Meet your next agent.</h1><p>A name, a strategy, and room to make its own moves.</p></div><form onSubmit={e=>{e.preventDefault();if(!name.trim()){setError(t("create.errName"));return;}setError("");setStep("market");}}><label className="create-label" htmlFor="agent-name">Agent name</label><input className="create-input" id="agent-name" value={name} maxLength={24} placeholder="What should we call it?" onChange={e=>setName(e.target.value)} required/><fieldset className="create-strategies"><legend>How should it trade?</legend>{STRATEGIES.map(s=><label className={strategy===s.id?"selected":""} key={s.id}><input type="radio" name="strategy" value={s.id} checked={strategy===s.id} onChange={()=>setStrategy(s.id)}/><span><strong>{s.name}{s.circle&&<i className="tag holders" title="Runs only while you hold $MERRYMEN">holders</i>}</strong><small>{s.description}{s.circle?" Runs only while you hold $MERRYMEN — pick it now and it opens nothing new until you do.":""}</small></span><span className="create-radio" aria-hidden>{strategy===s.id&&<Check size={13}/>}</span></label>)}</fieldset><div className="create-example" aria-live="polite"><span>Strategy example</span><p>{EXAMPLES[strategy]}</p></div>
             {/* THE READER'S STANDING, not the rule. The badge above states the
                 requirement; this says whether THEY meet it, which is the only
                 half that decides whether to press the button. "I had to go to
                 /api/circle to check that and that's not good for normies." */}
+            {/* JUDGED ON THE WALLET ALONE. The standing counts the owner's
+                wallet and their current agent's account together, but a new
+                agent is a new, empty account — so a figure that includes the
+                old one would promise this agent tokens it will not have. And
+                an unread count is a dash, never `?? 0`. */}
             {STRATEGIES.find((x) => x.id === strategy)?.circle &&
               tier &&
               tier.why !== "sign-in" &&
-              !tier.bonusStrategies && (
+              !newAgentQualifies(tier) && (
                 <div className="create-locked" role="status">
                   <strong>This one won&apos;t run yet.</strong>
                   {tier.why === "unreadable" ? (
@@ -223,13 +230,45 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
                     </p>
                   ) : (
                     <p>
-                      You hold {count(tier.tokens ?? 0)} $MERRYMEN and this one
-                      needs {count(tier.needTokens)}. Your agent will arm, read the
-                      market and stay idle until you hold enough. Steady basket and Strategist run
-                      for everyone.
+                      Your wallet holds {count(tier.holderTokens)} $MERRYMEN and this one
+                      needs {count(tier.needTokens)}. Your agent will arm and read the
+                      market, but until you hold enough it opens nothing new and leaves its basket as it
+                      is; positions in a class vault are still closed by their own exit rules. Steady
+                      basket and Strategist run
+                      for everyone
+                      {tier.energyGate
+                        ? ` — on about a tenth of a standard day's energy below ${count(ENERGY.fullTokens)}`
+                        : ""}
+                      .
                     </p>
                   )}
                 </div>
+              )}
+            {/* WHAT A NEW AGENT DOES NOT INHERIT. $MERRYMEN in the current
+                agent's account counts toward THAT agent; it stays there, and
+                a new agent starts without it. Said here, before the owner
+                builds a second agent expecting the first one's standing. */}
+            {tier && tier.agentTokens !== null && tier.agentTokens > 0 && (
+              <p className="create-energy">
+                The {count(tier.agentTokens)} $MERRYMEN in your current agent&apos;s account stays with
+                that agent — a new agent starts without it.
+              </p>
+            )}
+            {/* AND, ON A DEPLOYMENT THAT GATES ENERGY, THE CAPACITY IT WILL
+                HAVE — said before anybody funds it, never after. */}
+            {tier &&
+              tier.energyGate &&
+              tier.why === "ok" &&
+              tier.holderTokens !== null &&
+              tier.holderTokens < ENERGY.fullTokens &&
+              !STRATEGIES.find((x) => x.id === strategy)?.circle && (
+                <p className="create-energy">
+                  Your agent runs at full energy while your wallet and its account hold{" "}
+                  {count(ENERGY.fullTokens)} $MERRYMEN between them; below that it still runs, on about a
+                  tenth of a standard day&apos;s AI reviews and new trades. Stop-losses, take-profits and your own
+                  orders are never limited; its own AI reviews — including of its open positions — are
+                  paced along with the rest.
+                </p>
               )}<button className="flow-primary" type="submit">Set trading limits <ArrowRight size={16}/></button></form></>}
     {step==="market" && <>
       {/* WHAT IT TRADES, ASKED ONCE, AT THE ONLY MOMENT IT IS FREE.
@@ -269,6 +308,8 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
           setCoinError("");
           const candidate={symbol:newCoin.symbol.trim(),address:newCoin.address.trim(),decimals:Number(newCoin.decimals)};
           if(!isValidCustomToken(candidate)){setCoinError("Needs a short symbol, a full 0x… address (42 characters) and whole-number decimals.");return;}
+          // $MERRYMEN is energy, never a coin the permission covers (every signer drops it).
+          if(isEnergyReserveToken(candidate.address)){setCoinError("That's $MERRYMEN — your agent's energy, not a coin it trades, so it isn't added here. Once your agent exists, ask it in chat to get its $MERRYMEN, or send it to the agent's account on Robinhood Chain.");return;}
           if(wizardTokens.some(t=>t.address.toLowerCase()===candidate.address.toLowerCase())){setCoinError("That address is already on the list.");return;}
           // BOTH WRITES, as everywhere else: added AND selected. The distinction
           // between "know about this" and "trade it" is real, but hiding the

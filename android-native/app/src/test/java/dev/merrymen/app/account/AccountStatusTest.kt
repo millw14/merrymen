@@ -35,6 +35,8 @@ import dev.merrymen.app.ui.usdgFromUnits
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import org.junit.Assert.assertEquals
@@ -133,6 +135,37 @@ class AccountStatusTest {
   @Test fun unpricedGasIsSaidBesideTheReturn() {
     assertEquals("-$12.00 (-12.00%) all time · gas for 2 trades not priced", pnlLineOf(book(equity = 90.0, unpriced = 2), "live")!!.text)
     assertEquals("+$28.00 (+28.00%) all time · gas for 1 trade not priced", pnlLineOf(book(unpriced = 1), "live")!!.text)
+  }
+
+  // ── the measured mark (web lib/feed-pnl.ts) ──────────────────────────────
+
+  private fun measured(equity: Double?, contributed: Double?) = buildJsonObject {
+    put("equityUsdg", if (equity == null) JsonNull else JsonPrimitive(equity))
+    put("at", JsonPrimitive("2026-09-28 10:00:00"))
+    put("netContributionsUsdg", if (contributed == null) JsonNull else JsonPrimitive(contributed))
+  }
+
+  @Test fun theReturnIsMeasuredAtTheFeedsMeasuredMarkNeverAHeldOne() {
+    // The newest mark (60) was read while a 50 withdrawal was still settling:
+    // it is the balance, and the return is the measured mark over what was booked by it.
+    val p = pnlLineOf(book(equity = 60.0).copy(measured = measured(110.0, 80.0)), "live")!!
+    assertEquals(28.0, p.usd, 1e-9)
+    assertEquals(35.0, p.pct, 1e-9)
+    assertNull("no measured mark yet: no numerator", pnlLineOf(book(equity = 60.0).copy(measured = null), "live"))
+    assertNull("nothing booked by the measured mark", pnlLineOf(book().copy(measured = measured(110.0, null)), "live"))
+    assertNull("an unreadable figure", pnlLineOf(book().copy(measured = measured(null, 80.0)), "live"))
+    assertNull("still only a live book", pnlLineOf(book().copy(measured = measured(110.0, 80.0)), "paper"))
+  }
+
+  @Test fun theWireKeepsAnAbsentMeasuredApartFromANullOne() {
+    val json = Json { ignoreUnknownKeys = true; explicitNulls = false; isLenient = true; coerceInputValues = false }
+    val head = """"source":"sqlite","equity":[{"equity_usdg":60.0}],"netContributionsUsdg":80.0,"gasUsdg":2.0,"landed":3,"contributionsKnown":true"""
+    // ABSENT is an older server: the pairing it always had, the newest mark over every flow.
+    assertEquals(-22.0, pnlLineOf(json.decodeFromString<Feed>("{$head}"), "live")!!.usd, 1e-9)
+    // PRESENT BUT NULL is a book with no measured mark yet — never the newest mark over every flow.
+    assertNull(pnlLineOf(json.decodeFromString<Feed>("{$head,\"measured\":null}"), "live"))
+    val m = json.decodeFromString<Feed>("{$head,\"measured\":{\"equityUsdg\":110.0,\"at\":\"x\",\"netContributionsUsdg\":80.0}}")
+    assertEquals(28.0, pnlLineOf(m, "live")!!.usd, 1e-9)
   }
 
   // ── the mode chip, the heartbeat and the balances ────────────────────────

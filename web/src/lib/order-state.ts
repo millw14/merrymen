@@ -21,6 +21,8 @@
  * changed its tick the slot and GET disagreed about the same row — and a
  * second order was admitted beside one GET still called queued.
  */
+// Browser-safe: chat-commands.ts, which the card bundles, imports it too.
+import { MERRYMEN_TOKEN } from "@merrymen/core";
 
 /**
  * How long after its expiry an UNCLAIMED row may still hold the one-at-a-time
@@ -241,6 +243,7 @@ export interface OrderBody {
   side?: unknown;
   symbol?: unknown;
   usdgAmount?: unknown;
+  purpose?: unknown;
 }
 
 /** A type, not an interface, so it fits the command file's flat-scalar `args`. */
@@ -248,6 +251,15 @@ export type OrderAsked = {
   side: "buy" | "sell";
   symbol: string;
   usdgAmount: number;
+  /**
+   * THE ONE MARKER THAT MAKES AN ORDER THE AGENT'S ENERGY BUY. Written only by
+   * the get-energy card, as a value the command fixes (chat-commands.ts), and
+   * kept here only when it is exactly "energy" — anything else is dropped, so
+   * no other card, and no other value, can reach the worker's energy route
+   * (worker/src/order-gate.ts orderRoute, which routes on it and never on the
+   * symbol). Absent on every other order.
+   */
+  purpose?: "energy";
 };
 
 /**
@@ -272,7 +284,20 @@ export function readOrder(body: OrderBody): { order: OrderAsked } | { error: str
   if (!Number.isFinite(usdgAmount) || usdgAmount <= 0) return { error: "that is not an amount I can trade" };
   // Rounded to cents before it is hashed, so "25" and "25.000000001" are the
   // same order rather than two — the id is the idempotency key.
-  return { order: { side, symbol, usdgAmount: Math.round(usdgAmount * 100) / 100 } };
+  const order: OrderAsked = { side, symbol, usdgAmount: Math.round(usdgAmount * 100) / 100 };
+  // THE ENERGY MARKER, exactly or not at all (see OrderAsked.purpose). A
+  // marked order is the get-energy card, which fixes a buy of $MERRYMEN — so a
+  // marked order that says anything else did not come from it, and is refused
+  // here rather than handed to a route that buys the reserve whatever the
+  // symbol said. The worker refuses the same mismatch again.
+  if (body.purpose === "energy") {
+    if (side !== "buy" || symbol !== MERRYMEN_TOKEN.symbol) {
+      // "$" + the ticker — a token's name, not a currency amount.
+      return { error: `an energy order is a buy of ${"$" + MERRYMEN_TOKEN.symbol} and nothing else` };
+    }
+    order.purpose = "energy";
+  }
+  return { order };
 }
 
 /**

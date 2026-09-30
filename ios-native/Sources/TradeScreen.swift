@@ -6,6 +6,9 @@ struct TradeScreen: View {
     @Environment(\.scenePhase) var phase
     let symbol: String
     let address: String?
+    /// get-energy's "energy" marker, or nil for every other order. With it the
+    /// side is fixed to buy and the marker rides in the body the worker routes on.
+    let purpose: String?
     @State private var side = "buy"
     @State private var amount = ""
     @FocusState private var amountFocused: Bool
@@ -18,8 +21,8 @@ struct TradeScreen: View {
     @State private var statusReady = false
     @State private var ceiling: Double?
     private var key: String { "pendingOrder.\(store.owner?.lowercased() ?? "none")" }
-    init(symbol: String, side: String = "buy", amount: String = "", address: String? = nil) {
-        self.symbol = symbol; self.address = address
+    init(symbol: String, side: String = "buy", amount: String = "", address: String? = nil, purpose: String? = nil) {
+        self.symbol = symbol; self.address = address; self.purpose = purpose
         _side = State(initialValue: ["buy", "sell"].contains(side) ? side : "buy")
         _amount = State(initialValue: amount)
     }
@@ -29,12 +32,16 @@ struct TradeScreen: View {
                 Card {
                     Text(symbol).font(.largeTitle.bold())
                     if let address { Text(address).font(.caption.monospaced()).textSelection(.enabled) }
-                    Picker("Side", selection: $side) { Text("Buy").tag("buy"); Text("Sell").tag("sell") }.pickerStyle(.segmented)
+                    if purpose == "energy" {
+                        Text("Energy for your agent — it buys the $MERRYMEN it is short of, up to this amount, and keeps it. Its key can't sell or send it.").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Picker("Side", selection: $side) { Text("Buy").tag("buy"); Text("Sell").tag("sell") }.pickerStyle(.segmented)
+                    }
                     TextField("Amount in USDG, e.g. 5.00", text: $amount).keyboardType(.decimalPad).focused($amountFocused)
                     Text("Use at most two decimal places and no thousands separators. This asks the agent to trade; it still checks the signed caps, available assets, and risk limits.").font(.caption).foregroundStyle(.secondary)
                     Button("Review order") {
                         amountFocused = false
-                        guard let owner = store.owner, let body = TradeInput.body(side: side, symbol: symbol, amount: amount, owner: owner) else { error = "Enter a valid ticker and positive amount in USDG, with at most two decimal places."; return }
+                        guard let owner = store.owner, let body = TradeInput.body(side: purpose == "energy" ? "buy" : side, symbol: symbol, amount: amount, owner: owner, purpose: purpose) else { error = "Enter a valid ticker and positive amount in USDG, with at most two decimal places."; return }
                         guard let ceiling, body["usdgAmount"].number! <= ceiling else { error = "That amount exceeds your current order ceiling."; return }
                         review = ReviewValue(value: body)
                     }.buttonStyle(PrimaryButtonStyle()).disabled(busy || attempted || !statusReady || ceiling == nil)

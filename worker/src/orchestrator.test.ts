@@ -20,7 +20,7 @@ process.env.MERRYMEN_SESSION_SECRET = "SECRET-session-never-to-a-child";
 process.env.DATABASE_URL = "postgres://SECRET-never-to-a-child";
 process.env.MERRYMEN_HOLDER_ADDRESS = "0x00000000000000000000000000000000000Wha1e";
 
-const { childHome, childEnv, fleetHaltFile, dedupeBotToken } = await import("./orchestrator");
+const { childHome, childEnv, fleetHaltFile, botWillPoll } = await import("./orchestrator");
 
 const T = "0xABCDef0000000000000000000000000000000001" as const;
 
@@ -66,28 +66,28 @@ describe("orchestrator env curation", () => {
   });
 });
 
+/**
+ * The collision guard itself — claimGate, and the pass's own de-duplication
+ * beside it — is in telegram-claims.ts now, with its tests beside it
+ * (telegram-claims.test.ts). What stays here is the rule it is built on, read
+ * through the orchestrator the way its callers read it.
+ */
 describe("telegram bot-token collision guard", () => {
-  it("the first tenant keeps a token; a second tenant sharing it is stripped", () => {
-    const seen = new Set<string>();
-    const a: any = { telegramBotToken: "111:AAA", strategy: "trencher" };
-    const b: any = { telegramBotToken: "111:AAA", strategy: "even-keel" };
-    assert.equal(dedupeBotToken(a, seen), false, "first claim keeps it");
-    assert.equal(a.telegramBotToken, "111:AAA");
-    assert.equal(dedupeBotToken(b, seen), true, "the duplicate is stripped");
-    assert.equal(b.telegramBotToken, undefined, "…so this child won't poll the same bot");
-    assert.equal(b.strategy, "even-keel", "the rest of its config is untouched");
-  });
-
-  it("distinct tokens both survive; no token is a no-op", () => {
-    const seen = new Set<string>();
-    const a: any = { telegramBotToken: "111:AAA" };
-    const b: any = { telegramBotToken: "222:BBB" };
-    const c: any = { strategy: "steady-basket" };
-    assert.equal(dedupeBotToken(a, seen), false);
-    assert.equal(dedupeBotToken(b, seen), false);
-    assert.equal(dedupeBotToken(c, seen), false);
-    assert.equal(a.telegramBotToken, "111:AAA");
-    assert.equal(b.telegramBotToken, "222:BBB");
+  it("botWillPoll resolves telegramEnabled as the child does: the file, then the env, then off", () => {
+    const prev = process.env.MERRYMEN_TELEGRAM_ENABLED;
+    try {
+      delete process.env.MERRYMEN_TELEGRAM_ENABLED;
+      assert.equal(botWillPoll({ telegramBotToken: "111:A" } as any), false);
+      assert.equal(botWillPoll({ telegramEnabled: true, telegramBotToken: "111:A" } as any), true);
+      assert.equal(botWillPoll({ telegramEnabled: true, telegramBotToken: "  " } as any), false, "no token, nothing to poll");
+      assert.equal(botWillPoll(null), false);
+      process.env.MERRYMEN_TELEGRAM_ENABLED = "true";
+      assert.equal(botWillPoll({ telegramBotToken: "111:A" } as any), true, "an env the child inherits turns it on");
+      assert.equal(botWillPoll({ telegramEnabled: false, telegramBotToken: "111:A" } as any), false, "and the file still wins");
+    } finally {
+      if (prev === undefined) delete process.env.MERRYMEN_TELEGRAM_ENABLED;
+      else process.env.MERRYMEN_TELEGRAM_ENABLED = prev;
+    }
   });
 });
 

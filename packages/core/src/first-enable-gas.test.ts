@@ -7,7 +7,7 @@ import {
   wallSignable,
   FIRST_ENABLE_GAS_MODEL,
 } from "./first-enable-gas";
-import { buildCallPermissions } from "./wall";
+import { buildCallPermissions, energyBuyFits } from "./wall";
 import type { GrantCaps } from "./grant";
 
 /**
@@ -118,6 +118,79 @@ describe("a capability costs what several tokens cost", () => {
       firstEnableEnvelope(wide).expectedBounded > 12_000_000n,
       "this shape is what the old 12,000,000 ceiling refused",
     );
+  });
+});
+
+describe("the energy buy costs what it was measured to cost, and is sealed only when it fits", () => {
+  /**
+   * 1,408 BYTES, AND NOT A BYTE MORE. One permission (224), six EQUAL rules
+   * (6 × 160 + 6 × 32) and ONE spender entry on the USDG approve (32).
+   *
+   * The figure is pinned because each of the two mistakes it would catch is a
+   * silent widening that still passes every functional test: the router joining
+   * the GLOBAL spender list (+448 on a default wall, one entry on each of the
+   * fourteen stock approves — an uncapped allowance over the book), or a w0
+   * amountIn pin (+192, redundant under the capped USDG approve).
+   */
+  it("adds exactly 1,408 stub bytes to the default wall", () => {
+    assert.equal(withTokens(0, { energyBuy: true }).stubBytes - withTokens(0).stubBytes, 1_408);
+    assert.equal(withTokens(0, { energyBuy: true }).permissions, 19, "the default 18, plus one");
+  });
+
+  it("and the cost does not grow with the basket — the router is not a spender on any token's approve", () => {
+    for (const n of [1, 5, 9]) {
+      assert.equal(
+        withTokens(n, { energyBuy: true }).stubBytes - withTokens(n).stubBytes,
+        1_408,
+        `n=${n}: a per-token cost would mean the router joined the extras' approves`,
+      );
+    }
+  });
+
+  const CLASS = {
+    ponsClassVaultAddress: "0x3fcdde6e011769ca05f0115f1543290862473216",
+    ponsClassVaultFactoryAddress: "0x48a5603712d3d4f4e6e4e1cbd4f4f5d1c9e6ab3d",
+  };
+  const TRENCHER = {
+    trencherVaultAddress: "0x" + "d".repeat(40),
+    trencherFactoryAddress: "0x" + "e".repeat(40),
+  };
+  const tokens = (n: number) => Array.from({ length: n }, (_, i) => token(i));
+  const fits = (chainId: number, deploying: boolean, opts: Record<string, unknown>) =>
+    energyBuyFits(CAPS, ME, chainId, deploying, opts as never);
+
+  it("ONLY ON 4663 — off mainnet the router is codeless and a buy would land having bought nothing", () => {
+    assert.equal(fits(4663, true, {}), true, "the default wall with no tokens has room");
+    assert.equal(fits(46630, true, {}), false, "testnet never seals it, whatever the room");
+    assert.equal(fits(46630, false, {}), false);
+    assert.equal(fits(1, true, {}), false);
+  });
+
+  it("ONLY WHEN IT FITS — a class+Trencher wall with a token has no room when deploying", () => {
+    assert.equal(fits(4663, true, { ...CLASS, ...TRENCHER, extraTokens: tokens(1) }), false);
+    // A renewal pays no CREATE2, and that is exactly the room the energy buy
+    // needs here — `deploying` is a fact about the account, not a constant.
+    assert.equal(fits(4663, false, { ...CLASS, ...TRENCHER, extraTokens: tokens(1) }), true);
+    // The hosted default (class vault sealed) keeps room for a few tokens.
+    assert.equal(fits(4663, true, { ...CLASS }), true);
+  });
+
+  it("IS the signing policy, one permission wider — never a second arithmetic", () => {
+    for (const deploying of [true, false]) {
+      for (const base of [{}, CLASS, { ...CLASS, ...TRENCHER }]) {
+        for (const n of [0, 1, 2, 3, 4, 5, 6, 7, 9]) {
+          const opts = { ...base, extraTokens: tokens(n) };
+          assert.equal(
+            fits(4663, deploying, opts),
+            wallSignable(shapeFor({ ...opts, energyBuy: true }), { deploying }).ok,
+            `n=${n} deploying=${deploying}: energyBuyFits and wallSignable disagree`,
+          );
+        }
+      }
+    }
+    // And the caller's own `energyBuy: false` cannot talk it out of measuring
+    // the wider wall — it asks about the wall WITH the permission.
+    assert.equal(fits(4663, true, { energyBuy: false }), fits(4663, true, {}));
   });
 });
 

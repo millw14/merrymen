@@ -218,8 +218,12 @@ suspend fun MerrymenApi.orderCeiling(): Double? {
  * [owner] goes in the body whenever there is one: hosted, the route refuses a
  * session that is not that owner's (409, lib/order-owner.ts OWNER_CHANGED) and
  * writes nothing. Null only self-hosted, where there is no sign-in to name.
+ *
+ * [purpose] is get-energy's fixed "energy" marker and null for every other
+ * order: the route keeps it only when it is exactly that, and the worker sends
+ * an order to the agent's energy buy on it — never on the symbol.
  */
-suspend fun MerrymenApi.postOrder(side: String, symbol: String, usdg: Double, owner: String?): RouteAnswer =
+suspend fun MerrymenApi.postOrder(side: String, symbol: String, usdg: Double, owner: String?, purpose: String? = null): RouteAnswer =
   routeAnswer(
     "/api/orders",
     "POST",
@@ -228,6 +232,7 @@ suspend fun MerrymenApi.postOrder(side: String, symbol: String, usdg: Double, ow
       put("symbol", JsonPrimitive(symbol))
       put("usdgAmount", JsonPrimitive(usdg))
       if (owner != null) put("owner", JsonPrimitive(owner))
+      if (purpose != null) put("purpose", JsonPrimitive(purpose))
     },
   )
 

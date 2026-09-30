@@ -22,20 +22,41 @@
  * three different facts with three different remedies, and only one of them is
  * about the reader. An RPC outage must never render as "you don't hold enough",
  * because somebody will go and buy more.
+ *
+ * WHOSE TOKENS COUNT: THE OWNER'S WALLET AND THEIR AGENT'S ACCOUNT, TOGETHER.
+ * The worker's Circle gate and its energy count the combined balance, so this
+ * does too — through lib/merrymen-standing.ts, which /api/circle and /api/alpha
+ * share, so that "send $MERRYMEN to my account" clears every screen at once.
+ * The agent's account counts only on Robinhood Chain and never twice; a read of
+ * EITHER half that fails is `unreadable` with every count null, because half a
+ * sum is exactly the smaller number that sends somebody to buy more.
+ *
+ * SELF-HOSTED ANSWERS TOO, from the operator's own settings file and the grant
+ * on this disk — the same two addresses their worker counts. It used to answer
+ * `ok` with no balance at all, which the desk rendered as "you hold 0".
  */
 import { NextResponse } from "next/server";
-import { erc20Abi } from "viem";
 import { createPublicClient } from "viem";
 import {
   CIRCLE_TIERS,
-  MERRYMEN_TOKEN,
   isHostedMode,
   robinhoodChain,
   tierForBalance,
 } from "@merrymen/core";
 import { webChainRead } from "@/lib/chain-read";
 import { tenantOf } from "@/lib/auth";
-import { holderWalletFor } from "@/lib/holder-wallet";
+import { holderWalletFor, type HolderWallet } from "@/lib/holder-wallet";
+import { agentAccountFor } from "@/lib/agent-account";
+import {
+  AGENT_BALANCE_TTL_MS,
+  countedAgent,
+  diskHolder,
+  energyGateOn,
+  readStanding,
+  standingTokens,
+  type BalanceCache,
+  type Standing,
+} from "@/lib/merrymen-standing";
 
 export const dynamic = "force-dynamic";
 
@@ -46,45 +67,53 @@ const CIRCLE_TIER = CIRCLE_TIERS.find((t) => t.bonusStrategies)!;
  * Same shape and the same reasoning as /api/alpha's cache: a BALANCE per
  * address, never a boolean "allowed". The tier is re-derived every request, so
  * a wallet that sold out loses its perks on its own with nothing to invalidate.
+ * The agent's account keeps a minute rather than ten: it is the balance an
+ * owner has just been told to top up, and is now watching.
  */
 const BALANCE_TTL_MS = 10 * 60_000;
-const balances = new Map<string, { at: number; raw: bigint }>();
-
-async function balanceOf(address: `0x${string}`): Promise<bigint> {
-  const key = address.toLowerCase();
-  const hit = balances.get(key);
-  if (hit && Date.now() - hit.at < BALANCE_TTL_MS) return hit.raw;
-  const client = createPublicClient({ chain: robinhoodChain, transport: webChainRead() });
-  const raw = (await client.readContract({
-    address: MERRYMEN_TOKEN.address,
-    abi: erc20Abi,
-    functionName: "balanceOf",
-    args: [address],
-  })) as bigint;
-  balances.set(key, { at: Date.now(), raw });
-  return raw;
-}
+const balances: BalanceCache = new Map();
+const agentBalances: BalanceCache = new Map();
 
 export interface TierView {
   /** "ok" | "sign-in" | "unreadable" — never a bare null that reads as zero. */
   why: "ok" | "sign-in" | "unreadable";
-  /** Whole tokens held, or null when we could not read. NEVER 0 for unread. */
+  /**
+   * Whole tokens between the owner's wallet and the agent's account, or null
+   * when we could not read. NEVER 0 for unread.
+   */
   tokens: number | null;
+  /** The owner wallet's part. A NEW agent starts with only this. */
+  holderTokens: number | null;
+  /** The agent account's part; null when it does not count (none, another chain) or was not read. */
+  agentTokens: number | null;
+  /** The agent account that was counted, or null. */
+  agentAccount: string | null;
+  /**
+   * Is the hosted energy gate enforcing? FOR COPY ONLY — never a permission.
+   * The worker reads the same switch and is the one that throttles.
+   */
+  energyGate: boolean;
   tierId: string | null;
   tierName: string | null;
   /** Does this tier run the holder-only strategies? */
   bonusStrategies: boolean;
   /** How many whole tokens the holder-only tier needs. */
   needTokens: number;
-  /** Which wallet was read, and whether it was the login or a linked one. */
+  /** Which wallet was read, and whether it was the login, a linked one, or (self-hosted) the settings file's. */
   wallet: string | null;
-  source: "login" | "linked" | null;
+  source: "login" | "linked" | "settings" | null;
 }
 
 export async function GET(req: Request) {
+  const hosted = isHostedMode();
+  const energyGate = energyGateOn(process.env.MERRYMEN_ENERGY_GATE, hosted);
   const view = (v: Partial<TierView>): TierView => ({
     why: "ok",
     tokens: null,
+    holderTokens: null,
+    agentTokens: null,
+    agentAccount: null,
+    energyGate,
     tierId: null,
     tierName: null,
     bonusStrategies: false,
@@ -94,34 +123,67 @@ export async function GET(req: Request) {
     ...v,
   });
 
-  const tenant = isHostedMode() ? tenantOf(req) : null;
-  const resolved = await holderWalletFor(tenant);
-  if (!resolved) {
-    // Hosted and signed out. Self-hosted has no session and its own settings
-    // decide, so the screen simply does not ask this question there.
-    return NextResponse.json(view({ why: isHostedMode() ? "sign-in" : "ok" }));
+  let wallet: `0x${string}` | null;
+  let source: TierView["source"];
+  let rpc: string | undefined;
+  if (hosted) {
+    let resolved: HolderWallet | null;
+    try {
+      resolved = await holderWalletFor(tenantOf(req));
+    } catch {
+      // WHOSE wallet counts could not be read (the proof or the holder
+      // claims): an unread standing, every count at its null default.
+      return NextResponse.json(view({ why: "unreadable" }));
+    }
+    // Signed out. Nothing about anybody's balance is said to nobody.
+    if (!resolved) return NextResponse.json(view({ why: "sign-in" }));
+    // A null address is a wallet another account claims (one wallet powers
+    // one agent): only the agent's own account is left to count.
+    wallet = resolved.address;
+    source = resolved.source;
+  } else {
+    // The operator's own declaration about their own wallet — the address
+    // their worker counts — and their own RPC.
+    const own = await diskHolder();
+    wallet = own.address;
+    source = own.address ? "settings" : null;
+    rpc = own.rpcMainnet;
   }
 
-  let raw: bigint;
+  let standing: Standing;
   try {
-    raw = await balanceOf(resolved.address);
+    const agent = await agentAccountFor(req, hosted);
+    if (!wallet && !countedAgent(null, agent)) {
+      // Self-hosted with no wallet named and no mainnet account: there is
+      // nothing to read, which is not the same as holding nothing.
+      return NextResponse.json(view({ why: "ok" }));
+    }
+    standing = await readStanding({
+      client: createPublicClient({ chain: robinhoodChain, transport: webChainRead(rpc) }),
+      holder: wallet,
+      agent,
+      holderCache: balances,
+      agentCache: agentBalances,
+      holderTtlMs: BALANCE_TTL_MS,
+      agentTtlMs: AGENT_BALANCE_TTL_MS,
+    });
   } catch {
-    // A fact about our read, not about their wallet.
-    return NextResponse.json(
-      view({ why: "unreadable", wallet: resolved.address, source: resolved.source }),
-    );
+    // A fact about our read, not about their wallet — and every count stays
+    // null, the combined one and both of its parts.
+    return NextResponse.json(view({ why: "unreadable", wallet, source }));
   }
 
-  const tier = tierForBalance(raw);
+  const tier = tierForBalance(standing.raw);
   return NextResponse.json(
     view({
       why: "ok",
-      tokens: Number(raw / 10n ** BigInt(MERRYMEN_TOKEN.decimals)),
+      ...standingTokens(standing),
+      agentAccount: standing.agent,
       tierId: tier.id,
       tierName: tier.name,
       bonusStrategies: tier.bonusStrategies,
-      wallet: resolved.address,
-      source: resolved.source,
+      wallet,
+      source,
     }),
   );
 }

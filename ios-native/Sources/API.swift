@@ -119,6 +119,10 @@ final class API: NSObject, URLSessionTaskDelegate {
             if !ticket.isEmpty { req.setValue([sent.header, ticket].filter { !$0.isEmpty }.joined(separator: "; "), forHTTPHeaderField: "Cookie") }
         }
         if let data { req.setValue(String(data.count), forHTTPHeaderField: "Content-Length") }
+        // The same-origin header a browser on the site sends with every write.
+        // Owner routes that refuse cross-site requests (MCP approvals and
+        // connections) check it; the session cookie still decides who acts.
+        if method != "GET" { req.setValue(Self.origin.absoluteString, forHTTPHeaderField: "Origin") }
         if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         let (responseData, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else { throw APIError(status: 0, message: "No server response.") }
@@ -134,10 +138,6 @@ final class API: NSObject, URLSessionTaskDelegate {
         return "\(c.name)=\(c.value)"
     }
     private func decode(_ responseData: Data, http: HTTPURLResponse, path: String) throws -> J {
-        if path == "/api/gate", http.statusCode == 303 {
-            guard http.value(forHTTPHeaderField: "Location") == "/" else { throw APIError(status: 401, message: "That site password was not accepted.") }
-            return .object(["ok": .bool(true)])
-        }
         let value = try? JSONDecoder().decode(J.self, from: responseData)
         guard (200..<300).contains(http.statusCode) else {
             let words = value?["errors"].array.compactMap(\.string).joined(separator: "\n") ?? ""

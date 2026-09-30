@@ -262,6 +262,18 @@ export async function runShadow(
      * Passed in for the same reason as the name: the caller holds the tape.
      */
     mcapUsd?: number | null;
+    /**
+     * MAY THIS REVIEW BE PAID FOR? Asked only once the trigger has FIRED —
+     * a quiet tick costs nothing and claims nothing — and BEFORE the fired
+     * state is saved, so a refusal leaves the cooldowns exactly as they were
+     * and the same trigger fires again the moment the allowance allows.
+     *
+     * A CALLBACK, NOT AN IMPORT. The caller (index.ts) binds it to the energy
+     * allowance; this module learns nothing about energy, stores or counters,
+     * which keeps the shadow path's import list what brain-disconnected.test.ts
+     * says it is. Absent means always yes.
+     */
+    admit?: () => Promise<boolean>;
   } = {},
 ): Promise<ShadowOutcome> {
   const idle: TriggerVerdict = { fire: false, reason: null, detail: "brain not configured", candidates: [] };
@@ -302,6 +314,17 @@ export async function runShadow(
     // cooldowns survive the next restart rather than being re-seeded forever.
     if (!stored) await saveTriggerState(i.agentId, state);
     return { ran: false, why: trigger.detail, trigger, nextReviewAt: nextReviewAt(state, i.now, options.triggers) };
+  }
+
+  // THE ALLOWANCE, CLAIMED BETWEEN THE TRIGGER AND THE SAVE. Claimed before
+  // the call for the same reason the state is saved before it — a crash
+  // costs at most one unused claim, never a second paid run. On refusal the
+  // answer is `nextReviewAt: null`, NEVER the unfired state's deadline: that
+  // deadline is already in the past (it is why the trigger fired), and a past
+  // deadline handed to nextTickDelayMs schedules the next tick one second
+  // out — an agent that asks, is refused, and asks again every second.
+  if (options.admit && !(await options.admit())) {
+    return { ran: false, why: "energy: today's reviews are paced or spent", trigger, nextReviewAt: null };
   }
 
   // THE STATE IS SAVED BEFORE THE CALL, not after.

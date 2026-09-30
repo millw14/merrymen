@@ -103,12 +103,13 @@ private fun hundredths(a: Map<String, String>, k: String): String =
  */
 val COMMANDS: Map<String, CommandSpec> = listOf(
   CommandSpec("set-strategy", Via.SETTINGS, listOf("strategy"), weighty = true) {
-    // A holder-only strategy runs only while you hold enough $MERRYMEN, so
-    // picking it can mean the agent sits idle. Saying so on the card is the
-    // difference between an informed switch and a silent stall.
+    // A holder-only strategy runs only while the owner's wallet and the
+    // agent's account hold 100,000 $MERRYMEN between them, so picking it can
+    // mean the agent sits idle. It no longer says "however well funded I am":
+    // USDG turned into $MERRYMEN with get-energy does change it.
     "Switch me to the ${arg(it, "strategy")} strategy. It changes what I trade and when." +
       if (it["strategy"] in CIRCLE_STRATEGIES) {
-        " Note: that one only runs while you hold \$MERRYMEN — below that I stay idle, however well funded I am."
+        " Note: that one only runs while your wallet and my account hold 100,000 \$MERRYMEN between them — below that I leave it idle."
       } else {
         ""
       }
@@ -209,6 +210,29 @@ val COMMANDS: Map<String, CommandSpec> = listOf(
       "If that is more than you hold I sell what is there, and if it is a coin on a bonding curve " +
       "I have to sell the whole position — I'll tell you which happened. I'll place it; my key's " +
       "limits still decide."
+  },
+  // THE ENERGY BUY. Side, symbol AND purpose are fixed, so a card can only
+  // ever buy $MERRYMEN; the model supplies nothing but the most the owner will
+  // spend, which the card states and the worker treats as a ceiling (it sizes
+  // the buy to cover the shortfall, with a margin). `purpose: "energy"` is what
+  // routes it to the agent's energy buy — the worker never routes on the
+  // symbol, so a `buy` card naming MERRYMEN stays an ordinary order — and the
+  // ORDER branch in Act.kt sends it. Mirrors web/src/lib/chat-commands.ts
+  // get-energy word for word.
+  CommandSpec(
+    "get-energy", Via.ORDER, listOf("side", "symbol", "usdgAmount", "purpose"),
+    fixed = mapOf(
+      "side" to JsonPrimitive("buy"),
+      "symbol" to JsonPrimitive("MERRYMEN"),
+      "purpose" to JsonPrimitive("energy"),
+    ),
+    weighty = true,
+  ) {
+    "Spend up to ${money(it, "usdgAmount")} of my real USDG on the \$MERRYMEN I'm short of 100,000 — " +
+      "through Uniswap on Robinhood Chain (USDG → VIRTUAL → \$MERRYMEN). I size it to cover what's missing, with a " +
+      "small margin for price movement (at least \$1.00); the pool fees and the token's own tax are paid out of the USDG. " +
+      "It stays in my account as energy; my key can't sell or send it. I'll place it — my key's limits still decide " +
+      "whether it goes through."
   },
   CommandSpec("open-deposit", Via.NAVIGATE, to = "/deposit", title = "Add funds") { "Show you where to send funds." },
   CommandSpec("open-withdraw", Via.NAVIGATE, to = "/withdraw", weighty = true, title = "Withdraw") {

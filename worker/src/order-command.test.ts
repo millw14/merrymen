@@ -112,7 +112,8 @@ describe("the receipt says what the ledger says", () => {
     // trimmed — asked and actual are now both passed and the direction derived.
     const submit = CODE.slice(CODE.indexOf("async function submitChatTrade"), CODE.indexOf("async function submitChatTransfer"));
     assert.match(submit, /if \(!partial\) sold = Number\(pos\.valueUsdg\) \/ 1e6;/);
-    assert.match(submit, /sayTradeOutcome\(outcome, side, symbol, usdgAmount, sold \?\? usdgAmount\)/);
+    // `named` is the symbol as the watch set spells it (energy-buy.ts resolveOrderToken).
+    assert.match(submit, /sayTradeOutcome\(outcome, side, named, usdgAmount, sold \?\? usdgAmount\)/);
     const curve = CODE.slice(CODE.indexOf("async function submitChatCurveTrade"), CODE.indexOf("function sayTradeOutcome"));
     assert.match(curve, /sayTradeOutcome\(outcome, side, symbol, usdgAmount, actual\)/);
     assert.match(CODE, /less than the \$\{asked\.toFixed\(2\)\} you asked for/);
@@ -146,7 +147,8 @@ describe("a verdict, not a sentence somebody reads a verdict out of", () => {
     // through rather than re-deriving one.
     const trade = CODE.slice(CODE.indexOf("async function submitChatTrade"), CODE.indexOf("async function submitChatTransfer"));
     assert.match(trade, /Promise<OrderReply>/);
-    assert.match(CODE, /return submitChatTrade\(side, symbol, size\);/);
+    // (With the order's own source and deadline — order-gate.ts orderAsked.)
+    assert.match(CODE, /return submitChatTrade\(side, symbol, size, asked\);/);
   });
 
   it("and PAPER is not a success either", () => {

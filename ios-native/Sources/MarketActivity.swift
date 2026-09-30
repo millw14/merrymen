@@ -36,13 +36,20 @@ struct MarketActivity: View {
                     if rows.isEmpty { Text("No tokens match these filters.").foregroundStyle(.secondary) }
                     Rows(values: showAll ? rows : Array(rows.prefix(8))) { row in
                         NavigationLink(value: Route.token(row["id"].text)) { Card {
-                            Metric(label: row["symbol"].text, value: tokenPrice(row["priceUsd"].number))
-                            Text(row["name"].text).font(.caption).foregroundStyle(.secondary)
+                            HStack(spacing: 12) {
+                                CoinLogo(logo: row["logo"].string, symbol: row["symbol"].text)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(row["symbol"].text).font(.headline)
+                                    Text(row["name"].text).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                                Spacer()
+                                Text(tokenPrice(row["priceUsd"].number)).monospacedDigit()
+                            }
                             HStack {
                                 if sort == "buys" { Text("Buying activity: \(row["buys"].number.map { String(Int($0)) } ?? "—")") }
                                 if sort == "held" { Text("Agents: \(row["agents"].number.map { String(Int($0)) } ?? "—")") }
                                 Spacer()
-                                if let change = row["change24hPct"].number { Text(bps(change * 100)).foregroundStyle(change < 0 ? Brand.down : Brand.accent) }
+                                if let change = row["change24hPct"].number { ReturnText(bps: change * 100, font: .caption.weight(.semibold)) }
                             }.font(.caption)
                             if row["halted"].bool == true { Text("Trading paused").foregroundStyle(.orange).font(.caption) }
                             if !row["cast"].array.isEmpty { Text("Agents: " + row["cast"].array.map { $0["name"].text }.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary) }

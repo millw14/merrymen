@@ -7,6 +7,8 @@ import {
   TRADEABLE_SYMBOLS,
   type CustomToken,
 } from "./tokens";
+// energy.ts imports only a TYPE from this file, so this is no runtime cycle.
+import { isEnergyReserveToken } from "./energy";
 
 /**
  * grantFeatures marker meaning "this signature carries the WIDE tradable set".
@@ -545,6 +547,14 @@ export function sellableAssets(grant: Pick<StoredGrant, "grantFeatures" | "grant
  * sell. `grantTokens` absent means the grant predates the field entirely — and a
  * grant signed before extras existed genuinely has no extra approve permission
  * in its call policy, so "unknown" and "none" are the same fact here.
+ *
+ * THE ENERGY RESERVE IS IN NEITHER LIST. $MERRYMEN is energy, not a token the
+ * agent trades: every signer drops it from the sealed extras
+ * (wall.ts usableExtraTokens), so no signature will ever "cover" it and the
+ * worker never watches it. Reported as uncovered it would tell an owner who
+ * listed it to "re-sign to cover MERRYMEN" — a signature that changes nothing,
+ * asked for again after every one. It is bought only by the agent's
+ * get-energy route, and nothing here is advice about it.
  */
 export function tokenCoverage(
   configured: readonly CustomToken[],
@@ -556,6 +566,7 @@ export function tokenCoverage(
   const covered: CustomToken[] = [];
   const uncovered: CustomToken[] = [];
   for (const t of configured) {
+    if (isEnergyReserveToken(t.address)) continue;
     (sellable.has(t.address.toLowerCase()) ? covered : uncovered).push(t);
   }
   return { covered, uncovered };
@@ -594,6 +605,13 @@ export function uncoveredBasketSymbols(
     ...customTokens,
   ];
   return known
-    .filter((t) => basketSymbols.includes(t.symbol) && !sellable.has(t.address.toLowerCase()))
+    .filter(
+      (t) =>
+        basketSymbols.includes(t.symbol) &&
+        !sellable.has(t.address.toLowerCase()) &&
+        // Energy, never a leg: no signature covers it, so "re-sign" would be
+        // false advice (see tokenCoverage). The worker never watches it either.
+        !isEnergyReserveToken(t.address),
+    )
     .map((t) => t.symbol);
 }

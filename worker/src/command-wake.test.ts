@@ -1094,7 +1094,7 @@ describe("what a tick may write down", () => {
       paper: async (b: { hwmUsdg: number }) => void calls.push(`paper peak ${b.hwmUsdg}`),
       risk: async (observe: number | null) => (calls.push(`risk peak observe=${observe}`), 150),
       fee: async () => void calls.push("fee + live mark"),
-      equity: async () => void calls.push("equity row"),
+      equity: async (row: { flowsHeld: boolean }) => void calls.push(row.flowsHeld ? "equity row (flows held)" : "equity row"),
     };
   }
   const ACCRUAL = { profitUsdg: 20_000_000n, newHwmUsdg: 120_000_000n };
@@ -1140,6 +1140,65 @@ describe("what a tick may write down", () => {
     assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), PEAK);
     await r.equityRow(w.equity);
     assert.deepEqual(w.calls, ["risk peak observe=null", "equity row"]);
+  });
+
+  it("A HELD FLOW LOOK accrues no fee and moves no paper or lifetime peak — its equity row is written FLAGGED (flow-inference.ts)", async () => {
+    // An op the resolver may still settle is in flight, so the cash in this
+    // equity is not split into capital and performance yet: a deposit made in
+    // the hold would be charged a fee, and counted into the lifetime peak
+    // before it is booked — then again when it is.
+    const r = tickRatchets(tickPlan("regular"), { ...BOOK, held: true });
+    const w = writers();
+    assert.equal(await r.paperPeak({ hwmUsdg: 100 }, 120, w.paper), 100);
+    await r.riskPeak(120, w.risk);
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), PEAK, "the lifetime mark does not move");
+    assert.equal(r.breakerLift(0n, PEAK, PEAK), 0n, "with no held observation, the breaker's lift does not move either");
+    await r.equityRow(w.equity);
+    assert.deepEqual(
+      w.calls,
+      ["risk peak observe=null", "equity row (flows held)"],
+      "the peak is still READ — without observing, since no held observation was given — and the valuation is written, flagged",
+    );
+    // And `held: false` is the ordinary regular tick.
+    const plain = tickRatchets(tickPlan("regular"), { ...BOOK, held: false });
+    const w2 = writers();
+    await plain.riskPeak(120, w2.risk);
+    await plain.accrue(ACCRUAL, PEAK, w2.fee);
+    await plain.equityRow(w2.equity);
+    assert.deepEqual(w2.calls, ["risk peak observe=120", "fee + live mark", "equity row"]);
+  });
+
+  it("A HELD FLOW LOOK STILL FEEDS THE BREAKER: its peaks observe the held figure — never the raw equity — and the fee's mark stays", async () => {
+    // A dropped userOp holds every look for 26 hours. Freezing the breaker's
+    // peak with the fee's let 100 → 150 → 110 read as no drawdown for a day.
+    const r = tickRatchets(tickPlan("regular"), { ...BOOK, held: true, breakerObservationUsdg: 110_000_000n });
+    const w = writers();
+    await r.riskPeak(150, w.risk);
+    assert.equal(await r.accrue(ACCRUAL, PEAK, w.fee), PEAK, "no fee, and the lifetime mark stays");
+    assert.equal(r.breakerLift(0n, PEAK, PEAK), 10_000_000n, "the breaker's peak is the mark plus what the hold saw above it");
+    assert.equal(r.breakerLift(30_000_000n, PEAK, PEAK), 30_000_000n, "a lift only ever grows from observations");
+    await r.equityRow(w.equity);
+    assert.deepEqual(w.calls, ["risk peak observe=110", "equity row (flows held)"]);
+  });
+
+  it("the held observation obeys every other guard: a command tick or a curve mark observes nothing", async () => {
+    for (const [plan, book] of [
+      [tickPlan("command"), BOOK],
+      [tickPlan("regular"), { incomplete: false, curveMarked: 1 }],
+      [tickPlan("regular"), { incomplete: true, curveMarked: 0 }],
+    ] as const) {
+      const r = tickRatchets(plan, { ...book, held: true, breakerObservationUsdg: 110_000_000n });
+      const w = writers();
+      await r.riskPeak(150, w.risk);
+      assert.equal(r.breakerLift(5n, PEAK, PEAK), 5n);
+      assert.equal(w.calls[0], "risk peak observe=null");
+    }
+  });
+
+  it("THE BREAKER'S LIFT IS ABSORBED as the lifetime mark rises past it — the breaker's peak is the higher of the two", () => {
+    const r = tickRatchets(tickPlan("regular"), BOOK);
+    assert.equal(r.breakerLift(50_000_000n, PEAK, 120_000_000n), 30_000_000n, "150 stands: 120 + 30");
+    assert.equal(r.breakerLift(50_000_000n, PEAK, 160_000_000n), 0n, "the mark is past it: nothing left to carry");
   });
 
   it("A BOOK THAT COULD NOT BE TOTALLED WRITES NO EQUITY ROW — a gap is honest, a partial total is not", async () => {

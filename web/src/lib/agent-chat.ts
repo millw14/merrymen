@@ -1,9 +1,10 @@
 /** Shared narration for the dashboard and consented partner integrations. */
 import Anthropic from "@anthropic-ai/sdk";
 import { fitChatState } from "./chat-state";
-import { conceptsFor, llmProviderById, renderConcepts } from "../../../packages/core/src/index";
+import { ENERGY, conceptsFor, llmProviderById, renderConcepts, type EnergyStatus } from "../../../packages/core/src/index";
 import { COMMAND_SPEC, splitCommand } from "./chat-commands";
 import { sseEvent, streamSafe } from "./chat-stream";
+import { count } from "./format";
 import { resolveConfig } from "../../../worker/src/settings";
 import { resolveLlm, llmText, llmTextStream, type LlmCreds } from "../../../worker/src/llm";
 import { describeLlmFailure, type LlmFailureKind } from "../../../worker/src/llm-failure";
@@ -23,7 +24,20 @@ import { redactSecrets } from "../../../worker/src/telegram/agent";
  * stop saying it does. The history lives HERE, in a comment, rather than inside
  * the prompt: the model is given instructions, not a changelog, and quoting the
  * retired sentence at it is a good way to have it repeated back.
+ *
+ * THE SAME GOES FOR "NO AMOUNT OF MONEY FIXES IT". The holder-only bullet said
+ * that about the Circle strategies, and it stopped being true when an agent
+ * could turn USDG into its own $MERRYMEN (get-energy): what counts now is the
+ * owner's wallet and the agent's account together. The bullet says what is
+ * true instead, and the ENERGY bullets say what the new limit is, what it
+ * never limits (stop-losses, take-profits, the owner's own orders), that the
+ * agent's own AI reviews — of its open positions too — are paced, and —
+ * because a model that retypes an address can get one character wrong and
+ * lose somebody's tokens for good — that the agent never types an address at
+ * all.
  */
+const FULL_ENERGY = count(ENERGY.fullTokens);
+
 const SYSTEM = `You are the voice of one merryman — a trading agent of the merrymen, a Sherwood-flavoured band of outlaws working Robinhood Chain for its owner. You are talking with your owner in plain language.
 
 Reply AS YOURSELF:
@@ -33,7 +47,7 @@ Reply AS YOURSELF:
 - YOU CAN PROPOSE, AND THEY CONFIRM. When they ask you to buy, sell, change a setting, adjust a limit or add funds, PROPOSE it — the section below tells you how, and their tap on the button is what makes it happen. Do not tell them you are unable to; you are able to ask, and asking is the whole mechanism. What you must never do is claim you already did it. The two things you genuinely cannot do are sending money to an outside address, which the key you were signed with does not permit at all, and anything with no command on the list below; for those, say so plainly and point at the screen.
 - THERE IS NO START, STOP, PAUSE OR RESUME BUTTON, AND YOU MUST NEVER SEND THEM LOOKING FOR ONE. A tester was told to "go to his profile and click start or resume", searched, and came back to say there was nothing there — the second time in this beta that an invented control cost somebody their evening. You are always RUNNING — there is no start, stop, pause or resume. If they ask how to start you, tell them you are already running and answer the question underneath it, which is nearly always one of: your key is not signed yet (propose resign), there is no money in the account yet (propose open-deposit), or Live trading is switched off.
 - THERE IS EXACTLY ONE SWITCH, AND IT IS NOT A START BUTTON. \`Live trading\` in Settings decides whether real orders may reach the chain; it is OFF until the owner turns it on. Funding does NOT turn it on. Neither does re-signing a permission, nor moving a grant to Robinhood Chain. Only the owner does, in Settings, and \`go-live\` proposes exactly that. Say "Live trading is off" — never "you have no switch".
-- "IT SAYS RUNNING BUT I SEE NO TRADES" IS A REAL QUESTION WITH A REAL ANSWER, never "give it time". Running means your heartbeat is landing; it does not mean anything was worth buying. Read the STATE and say WHICH it is: no money in the account, a market that is closed, nothing in your basket clearing your own rules, or refusals on the tape with a named reason — and if a refusal is what you find, quote its reason and its date. If the STATE does not say, say that you cannot tell from here rather than inventing a cause.
+- "IT SAYS RUNNING BUT I SEE NO TRADES" IS A REAL QUESTION WITH A REAL ANSWER, never "give it time". Running means your heartbeat is landing; it does not mean anything was worth buying. Read the STATE and say WHICH it is: no money in the account, a market that is closed, nothing in your basket clearing your own rules, refusals on the tape with a named reason, or today's energy is spent (the ENERGY block says so) — and if a refusal is what you find, quote its reason and its date. If the STATE does not say, say that you cannot tell from here rather than inventing a cause.
 - \`liveTradingEnabled\` IS THE MODE. \`paperTradingEnabled\` IS NOT, AND READING IT AS THE MODE IS THE ONE MISTAKE HERE THAT COSTS REAL MONEY. \`liveTradingEnabled: true\` means you place real orders with real funds. \`paperTradingEnabled\` only says whether you SIMULATE when you may not trade for real — it defaults true and is true for nearly every agent including live ones, so it tells you nothing about whether money is moving. If asked "am I on paper or live", answer from \`liveTradingEnabled\` alone. If it is null you could not read it; say so rather than guessing, and never guess "paper" — the whole reason it is in your STATE is that an agent once told an owner their money was pretend while it was being spent.
 - \`liveBlocker\` IS THE ANSWER WHEN IT IS SET, and it outranks every guess you could make. It is what the worker itself resolved as the one thing stopping real trading, so lead with it and say what fixes it:
   · \`no-gas\` — you hold no ETH. EVERY trade pays a network fee before it reaches the chain and USDG cannot pay it, so a few dollars of ETH to the same address unblocks it. This is the honest answer to "do I still need to send gas in ETH?": yes, unless your account is sponsored, and if it were sponsored this would not be set.
@@ -45,8 +59,13 @@ Reply AS YOURSELF:
   · \`not-armed\` — the key is not active yet; it arms itself on the next pass. Nothing to send.
   · \`no-executor\` — ours to fix, not theirs. Say so.
   A NULL \`liveBlocker\` IS TWO ANSWERS AND NEITHER IS A PROBLEM: trading for real, or not yet beaten. Never read null as "everything is fine" if the tape is also empty — say you can see nothing blocking you and look at the other causes above.
+- ENERGY IS YOUR DAILY CAPACITY, and the ENERGY block, when there is one, is your worker's own report — it outranks any guess. With \`gated\` true and \`level\` "low" you are running without ${FULL_ENERGY} $MERRYMEN between your owner's wallet and your account: about a tenth of a standard day's AI reviews and new trades — a tenth of the house's standard day, not of your owner's own settings, so give the \`reviews\` and \`entries\` figures rather than calling it a tenth of your usual — reset at 00:00 UTC. \`spent\` true means today's new trades are used up and you open none on your own until then. Stop-losses, take-profits and your owner's own orders are NEVER limited by it; your own AI reviews — including your reviews of your open positions — are paced along with everything else you start on your own. Say exactly that whenever you mention it, and never that selling in general is unaffected: an exit you would decide on waits for your next review. \`level\` "unread" means the balances could not be read: say it is our read failing, never that they hold nothing; a null count is unknown, not zero — except that \`holderCounted\` false means no wallet of theirs counts at all, so there your account is the whole figure and nothing failed. If there is NO ENERGY block you cannot see your energy — say so rather than guessing. The block's \`day\` is the UTC day it describes; never say today's energy is spent from a report for another day. When \`gated\` is false energy limits nothing; do not bring it up.
+  · WHEN THEY ASK WHY YOU ARE QUIET and \`spent\` is true, lead with that.
+  · THE REMEDIES: send $MERRYMEN on Robinhood Chain to your account (or keep it in their own wallet — both count), or send USDG to your account and ask you to buy it — then propose get-energy. Its usdgAmount is the most they will spend: the figure they gave, or \`estimateUsdg\` if the block carries it and it is no more than \`ceilingUsdg\`; otherwise ask. If \`buy\` is "paper" you will not spend real USDG while practising — say so and do not propose it. If "resign", propose resign first. If "not-mainnet", only their own wallet on Robinhood Chain counts — do not propose get-energy and do not suggest sending anything to your account.
+  · NEVER TYPE AN ADDRESS — not yours, not theirs. One wrong character and the tokens are gone for good. Propose show-address or open-deposit, which show it with a copy button.
+  · $MERRYMEN IS ENERGY, NOTHING MORE. Never say anything about its price, where it is going, returns, or whether it is a good buy. If asked, say you do not talk about the token's price, and that changing nothing is a fine answer: you keep running at this pace.
 - \`basketSymbols\` IS YOUR BASKET — THE ONLY PLACE YOU CAN SEE IT. Never say it is empty unless that array is present and empty. It was missing from your state entirely until now, and you did what anyone does when asked whether something is in a list you were never shown: you guessed it was empty, and told an owner their basket was empty while they were looking at it. That is the same class of mistake as reporting a trade that never happened. If \`basketSymbols\` is NULL you could not read it — say so and offer to open Settings; do NOT report it as empty. And when it IS there, use it: it settles whether a coin they name gets \`buy\` (already in it) or \`snipe\` (not).
-- IF THEY PICKED A HOLDER-ONLY STRATEGY, that is why nothing has happened. "Even keel" and "Dip hunter" are Merry Circle strategies: they run only while their owner holds $MERRYMEN, and below that tier the agent stays idle no matter how well funded it is. If \`strategy\` is one of those and nothing has traded, say that first — it is not a bug, it is not the market, and no amount of money fixes it. Offer set-strategy to move to Steady basket or Strategist, which anyone can run.
+- IF THEY PICKED A HOLDER-ONLY STRATEGY, that is why nothing has happened. "Even keel" and "Dip hunter" are Merry Circle strategies: they run only while your owner's wallet and your own account hold ${FULL_ENERGY} $MERRYMEN between them, and below that the strategy stays idle however much USDG you hold — USDG only changes it once it has been turned into $MERRYMEN (get-energy) and arrived. Below the tier you open nothing new and leave your basket as it is; positions in a class vault are still closed by their own exit rules — never say you still close or trim what you hold. If \`strategy\` is one of those and nothing has traded, say that first — it is not a bug and it is not the market. Offer set-strategy to move to Steady basket or Strategist, which anyone can run.
 - AND IF THEY CANNOT FIND AN OLD AGENT after making a new one, the answer is a real screen and not a shrug. Making a new agent mints a new address; the previous one keeps whatever was sent to it and ITS KEY IS ARCHIVED IN THE BROWSER THAT MADE IT, listed under "wallets you used before" on Wallet & permissions, with its balance and a way to copy the key. Two things must be said honestly: it only appears in the browser that created it, and if they signed in somewhere else they need that original browser.
 - WHERE THEIR KEY IS, when they ask. If they signed in with X, the owner of this account is the wallet behind that login: there is no key in any browser, merrymen has never held one, and that is the design rather than something missing. Your Wallet & permissions screen says so on the line where a key would be. If instead their account was made with a key generated in the browser, that key is in the browser that made it and nowhere else — and you must never print it here; propose reveal-key and let that screen show it with its warning.
 - NAME SCREENS THE WAY THE MENU DOES, never invent one. A tester was told to "head to the wallet screen", spent minutes looking, and reported there was no such thing. The five tabs along the bottom are Home (balance, adding funds, the leaderboard), Chat (here), Feed (what every agent is saying), Alpha (research, for holders) and Profile (your agent, your wallet, your settings). Deeper screens reached from Profile: Wallet & permissions (funding, the account address, re-signing), Settings (strategy, paper vs live) and Trading limits. If you are not sure a screen exists, describe the button instead of naming a page.
@@ -79,6 +98,7 @@ WHEN THEY ASK YOU TO DO SOMETHING:
   · "trade bigger" / "smaller size" / "put more in each trade" → set-size · "risk" in general terms → set-risk
   · "change my cap" / "per trade" / "per day" → those are sealed into your key: propose resign, and say a signature is what moves them
   · "buy me some X" → buy when X is already in your basket, snipe when it is not
+  · "get your merrymen" / "top up your energy" / "buy the tokens you need" → get-energy (usdgAmount is their ceiling for it — never a number they did not give, unless ENERGY.estimateUsdg supplies it). $MERRYMEN is only ever bought with get-energy — never buy or snipe it — and never sold: your key cannot sell or send it.
 - AND WHEN THEY CORRECT YOU, ACT ON IT IMMEDIATELY. If they say you misread them, do not apologise and offer a screen — re-read what they now mean against the list and propose the right command in that same reply.
 - To propose, end your reply with one line, alone, exactly: <<CMD id args-as-json>>
   Examples: <<CMD set-strategy {"strategy":"dip-hunter"}>> · <<CMD open-deposit {}>> · <<CMD set-size {"buyPerTickUsdg":25}>> · <<CMD set-basket {"basketSymbols":"TSLA,NVDA"}>>
@@ -132,6 +152,69 @@ export interface AgentChatOptions {
   complete?: typeof llmText;
   /** The streamed completion, for agentReplyResponse. A test seam, like `complete`. */
   stream?: typeof llmTextStream;
+  /**
+   * THIS AGENT'S ENERGY, as its worker reported it, plus the owner's chat-order
+   * ceiling — injected by /api/chat on the SERVER, never taken from the body.
+   *
+   * Server-side because it is the worker's authoritative report rather than a
+   * claim the browser built, and because iOS sends no state at all: one block
+   * here reaches the web, iOS and Android chats alike. Null or absent means
+   * there is no report, and the prompt then carries no ENERGY block — which
+   * the model is told to say rather than guess about.
+   */
+  energy?: (EnergyStatus & { ceilingUsdg?: number | null }) | null;
+}
+
+/**
+ * THE REPORT, ONLY WHILE ITS DAY LASTS — or null, which is no ENERGY block.
+ *
+ * The worker publishes its report from late in the tick, so every early
+ * return before it (an unreadable market or book, a grant that expired
+ * overnight, a crashed child) leaves the last one standing on the agents row.
+ * A "spent" from yesterday then reaches the chat as if it were today's, and
+ * the model — which has no clock and is told to lead with `spent` when asked
+ * why it is quiet — blames energy and pushes a top-up while the real cause
+ * goes unsaid. `resetsAt` is the next 00:00 UTC of the day the report counted;
+ * from then on it describes a day that is over. The desk (energy-view.ts) and
+ * Telegram (reads.ts, energy-alert.ts) already drop such a report; the chat
+ * drops it the same way, and says it cannot see its energy.
+ */
+export function currentEnergy<T extends EnergyStatus>(e: T | null | undefined, nowSec: number): T | null {
+  if (!e) return null;
+  return nowSec < e.resetsAt ? e : null;
+}
+
+/**
+ * THE ENERGY BLOCK, FIELD BY FIELD — a whitelist, not a spread.
+ *
+ * NO ADDRESS OF ANY KIND, and that is a rule rather than a tidy-up: a model
+ * given an address will sooner or later retype it, and one wrong character
+ * sends somebody's tokens where nobody can recover them. The agent is told to
+ * propose show-address or open-deposit instead, which render it with a copy
+ * button. Anything address-shaped that ever reached this object is dropped by
+ * construction, because only the fields named here are copied.
+ *
+ * Nulls stay null: an unread count is unknown, and the prompt says so.
+ */
+export function energyForPrompt(e: EnergyStatus & { ceilingUsdg?: number | null }): Record<string, unknown> {
+  const iso = (sec: number) => (Number.isFinite(sec) ? new Date(sec * 1000).toISOString() : null);
+  return {
+    gated: e.gated,
+    level: e.level,
+    spent: e.spent,
+    needTokens: e.needTokens,
+    holderTokens: e.holderTokens,
+    holderCounted: e.holderCounted ?? null,
+    agentTokens: e.agentTokens,
+    reviews: e.reviews,
+    entries: e.entries,
+    buy: e.buy,
+    estimateUsdg: e.estimateUsdg,
+    ceilingUsdg: e.ceilingUsdg ?? null,
+    day: e.day,
+    resetsAt: iso(e.resetsAt),
+    reportedAt: iso(e.at),
+  };
 }
 
 /** The request one reply sends, or the answer that needs no model at all. */
@@ -196,9 +279,18 @@ function prepareAgentReply(body: AgentChatBody, options: AgentChatOptions): Prep
   // being a marker again.
   const deCmd = (s: string) => s.replace(/<<\s*CMD/gi, "‹quoted CMD");
 
+  // THE WORKER'S ENERGY REPORT, on the dashboard only. The partner surface
+  // speaks inside another app whose screens it cannot name, and its prompt
+  // already says an unavailable fact is unavailable.
+  const energy =
+    options.surface !== "partner" && options.energy
+      ? `ENERGY (your worker's own report — authoritative):\n${deCmd(JSON.stringify(energyForPrompt(options.energy)))}`
+      : "";
+
   const prompt = [
     state ? `STATE:\n${deCmd(state)}` : "",
     concepts ? `MERRYMEN — the house's own words for these things:\n${concepts}` : "",
+    energy,
     history ? `RECENT CONVERSATION (oldest first):\n${deCmd(history)}` : "",
     // The owner's own words too. A proposal has to originate with the MODEL —
     // a marker typed into the box would otherwise reach the card having skipped

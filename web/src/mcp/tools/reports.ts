@@ -45,8 +45,8 @@ const iso = (sec: number) => new Date(sec * 1000).toISOString();
 
 const mark = z.object({ at: z.string(), equity_usdg: z.number(), epoch: z.number().nullable() }).nullable();
 const valuation = z.object({
-  start: mark.describe("The last valuation at or before the window opened (else the run's first inside it)"),
-  end: mark.describe("The newest valuation at or before the window closed"),
+  start: mark.describe("The last measured valuation at or before the window opened (else the run's first inside it)"),
+  end: mark.describe("The newest measured valuation at or before the window closed. A valuation taken while flow inference was held (an operation in flight, its cash not yet split into capital and result) is never one; the notes say when newer ones exist."),
   change_usdg: z.number().nullable(),
   attribution: z.object({
     flows_usdg: z.number().describe("Money the owner moved in (+) or out (−)"),

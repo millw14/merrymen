@@ -3,6 +3,9 @@ export * from "./settings";
 export * from "./llm-providers";
 export * from "./tokens";
 export * from "./token";
+// ENERGY — what $MERRYMEN is for on the hosted service: the thresholds, the
+// report the worker publishes, and the one route an agent may buy it through.
+export * from "./energy";
 export * from "./protocols";
 export * from "./official-coins";
 export * from "./abis";

@@ -276,6 +276,33 @@ describe("the room, as a reader sees it", () => {
     assert.deepEqual(opened.profile, ["shogun"]);
   });
 
+  it("A NAME IN 'WHO'S HERE' IS ITS OWN SPAN, the one the sheet lets break — the 💤 beside it, never inside", async () => {
+    // 24 wide letters (the name limit) asleep, with the 💤, was 332px in a
+    // 278px panel at 320px. The sheet wraps `.gc-who-name` (pinned under
+    // "structure"); this pins that every name in the list wears it.
+    const wide = "W".repeat(24);
+    roomAnswer = () =>
+      json({
+        source: "db",
+        messages: LINES,
+        cursor: 106,
+        start: true,
+        room: { ...ROOM, awake: 2, asleep: 2, presence: [...ROOM.presence, { slug: "wide", name: wide, state: "asleep" }] },
+      });
+    await mount();
+    await act(async () => q<HTMLButtonElement>(".gc-presence")!.click());
+    const items = Array.from(q("#gc-who")!.querySelectorAll("li"));
+    assert.equal(items.length, 4);
+    for (const li of items) {
+      const names = li.querySelectorAll(":scope > button > .gc-who-name");
+      assert.equal(names.length, 1, `one breakable name in ${li.textContent}`);
+      assert.doesNotMatch(names[0]!.textContent!, /💤/, "the mark is not part of the name");
+    }
+    const last = items.at(-1)!;
+    assert.equal(last.querySelector(".gc-who-name")!.textContent, wide);
+    assert.ok(last.querySelector(":scope > button > .gc-zz"), "the 💤 stays a sibling, so it keeps its size");
+  });
+
   it("A NAME OPENS ITS PROFILE", async () => {
     await mount();
     await act(async () => (row(101).querySelector(".gc-name button") as HTMLButtonElement).click());
@@ -931,6 +958,62 @@ describe("structure", () => {
     assert.equal(decl(held, "content"), "attr(data-meta)");
     assert.equal(decl(held, "visibility"), "hidden", "held, not drawn twice");
     assert.equal(decl(held, "font-size"), decl(one(":where(.terminal-host) .gc-meta"), "font-size"), "and exactly as wide as the time");
+  });
+
+  /**
+   * A REPLY QUOTE'S FLOOR, measured in Chromium at 320/360/375/430px (a reply
+   * "ok" to a long line, and your own reply with "Remove?" armed on a 320px
+   * phone): the quote is 150px wide from 375px up, ~111px when that armed reply
+   * leaves no more, and nothing spills out of a bubble at any width. jsdom lays
+   * nothing out, so what is pinned is the four declarations that decide it.
+   */
+  it("A REPLY QUOTE HAS A FLOOR THAT BINDS, and gives way before it spills out of its bubble", () => {
+    const quote = one(":where(.terminal-host) .gc-quote");
+    const excerpt = one(":where(.terminal-host) .gc-quote > span");
+    // ON THE QUOTE, a floor either spills (`150px` did, out of a ~110px bubble
+    // at 320px) or never binds (`min(150px, 100%)`: a percentage min-width is
+    // zero while the bubble sizes itself, which left "ok" a 66px quote).
+    assert.equal(decl(quote, "min-width"), "0", "no floor on the quote itself");
+    // THE FLOOR IS THE EXCERPT'S WIDTH: what it asks for while the bubble
+    // sizes itself. With the quote's padding and bar, about 150px.
+    const width = decl(excerpt, "width") ?? "";
+    assert.match(width, /^\d+(\.\d+)?px$/, "a fixed ask, not 0 and not a percentage");
+    const pad = (decl(quote, "padding") ?? "").split(/\s+/).map(parseFloat);
+    const [padLeft, padRight] = [pad[3] ?? pad[1] ?? pad[0]!, pad[1] ?? pad[0]!];
+    const bar = parseFloat(decl(quote, "border-left") ?? "");
+    const floor = parseFloat(width) + padLeft + padRight + bar;
+    assert.ok(floor >= 140 && floor <= 160, `a ~150px quote floor, got ${floor}px`);
+    // …AND ONCE THE BUBBLE HAS A WIDTH, the excerpt is exactly the quote's
+    // inside: `min-width` beats `width` and `max-width`, so it neither holds a
+    // squeezed bubble open nor stops short of a wide one.
+    assert.equal(decl(excerpt, "min-width"), "100%");
+    assert.equal(decl(excerpt, "max-width"), "100%");
+    // The bubble can come out narrower than it asked because every box from
+    // the row down lets it shrink.
+    assert.equal(decl(one(":where(.terminal-host) .gc-bubble"), "min-width"), "0");
+    assert.equal(decl(one(":where(.terminal-host) .gc-slide"), "display"), "flex", "the bubble is a flex item, so it shrinks");
+    assert.equal(decl(one(":where(.terminal-host) .gc-stack"), "min-width"), "0");
+    assert.equal(decl(one(":where(.terminal-host) .gc-swipe"), "max-width"), "100%");
+    // "earlier message" and "message unavailable" are not held to the floor.
+    const plain = one(":where(.terminal-host) .gc-quote.gc-quote-plain > span");
+    assert.equal(decl(plain, "width"), "auto");
+    assert.equal(decl(plain, "min-width"), "0");
+    assert.equal(decl(plain, "max-width"), "none");
+  });
+
+  it("A LONG NAME IN 'WHO'S HERE' WRAPS INSIDE THE PANEL instead of scrolling out of it", () => {
+    // 24 x "W" asleep measured 332px in a 278px panel at 320px (318 at 360,
+    // 333 at 375); with these, every name stays inside at every width.
+    const name = one(":where(.terminal-host) .gc-who-name");
+    // `anywhere`, not `break-word`: only `anywhere` lowers the name's
+    // min-content, which is what the list item's shrinking is measured against.
+    assert.equal(decl(name, "overflow-wrap"), "anywhere");
+    assert.equal(decl(name, "min-width"), "0");
+    assert.equal(decl(one(":where(.terminal-host) .gc-who li"), "min-width"), "0", "a list item shrinks below its content");
+    assert.equal(decl(one(":where(.terminal-host) .gc-who ul"), "flex-wrap"), "wrap");
+    for (const r of sheet().filter((x) => /\.gc-who(?![\w-])|\.gc-who-name/.test(x.selector))) {
+      assert.notEqual(decl(r, "white-space"), "nowrap", `${r.selector} would hold a name on one line`);
+    }
   });
 
   it("A VISITOR'S PHONE OPENS ON THE ROOM, not on the shell's sign-in card above it", () => {

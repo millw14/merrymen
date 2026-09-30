@@ -3,6 +3,7 @@ package dev.merrymen.app.net
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * THE WIRE TYPES.
@@ -51,6 +52,17 @@ data class TierView(
   val needTokens: Int = 100_000,
   val wallet: String? = null,
   val source: String? = null,
+  /**
+   * The two halves of `tokens` (web tier route, combined standing): the owner's
+   * wallet and the agent's own account. null = unread or not counted, never 0.
+   * A NEW agent starts with an empty account, so the create path reads
+   * `holderTokens`, not the combined figure.
+   */
+  val holderTokens: Int? = null,
+  val agentTokens: Int? = null,
+  val agentAccount: String? = null,
+  /** The hosted energy gate is enforcing — copy only, never a permission. */
+  val energyGate: Boolean = false,
 )
 
 @Serializable
@@ -380,6 +392,13 @@ data class EventRow(
 )
 
 /**
+ * [Feed.measured] when the feed did not send the key at all — a server from
+ * before it existed. Compared by identity; the wire only ever carries an
+ * object or null there.
+ */
+val FEED_MEASURED_NOT_SENT: JsonElement = JsonPrimitive("measured-not-sent")
+
+/**
  * /api/feed is the widest shape in the API and the one most likely to grow, so
  * it is modelled loosely on purpose: what this client renders is typed, and the
  * rest travels as raw JSON rather than as a schema that quietly goes stale.
@@ -413,6 +432,15 @@ data class Feed(
   val contributionsKnown: Boolean? = null,
   /** {hwm_usdg, accrued_fee_usdg} or null. Kept raw until a screen renders it. */
   val financials: JsonElement? = null,
+  /**
+   * WHAT THE RETURN IS MEASURED AT (web lib/feed-pnl.ts): {equityUsdg, at,
+   * netContributionsUsdg} — the newest mark of the [equity] book not taken
+   * while flow inference was held, and the contributions booked by it — or
+   * null when that book has no such mark yet. Kept raw so the key being
+   * ABSENT (an older server: the default, [FEED_MEASURED_NOT_SENT]) stays
+   * apart from NULL. Read through pnlBasisOf, never directly.
+   */
+  val measured: JsonElement? = FEED_MEASURED_NOT_SENT,
 ) {
   /** The newest mark, or null when the curve is empty. Null, never 0.0. */
   val equityNow: Double? get() = equity.lastOrNull()?.equityUsdg

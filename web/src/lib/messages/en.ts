@@ -258,6 +258,11 @@ export const EN = {
   "settings.label.allowControlCommands": "allow control commands",
   "settings.label.allowTransfers": "allow transfers",
   "settings.label.proactivePings": "proactive pings",
+  // TELEGRAM GROUPS (docs/tg-groups.md) — "Telegram groups" is the product
+  // term everywhere; the web room owns the other name.
+  "settings.label.hangOutInTelegramGroups": "Hang out in Telegram groups",
+  "settings.label.lookAtCoinsPeoplePost": "Look at coins people post",
+  "settings.label.howChattyInGroups": "How chatty in groups",
   "settings.label.enableRemoteControl": "enable remote control",
   "settings.label.capabilities": "capabilities",
   "settings.label.agentModeAgent": "🤖 agent mode · /agent",
@@ -270,6 +275,7 @@ export const EN = {
   "settings.section.agentSettings": "Agent settings",
   "settings.section.tradingBasket": "Trading basket",
   "settings.section.telegramControls": "Telegram controls",
+  "settings.section.telegramGroups": "Telegram groups",
   "settings.section.computerAccess": "Computer access",
   "settings.section.merryCircle": "Merry Circle",
   "settings.section.connections": "Connections",
@@ -287,6 +293,11 @@ export const EN = {
   "settings.hint.offTheBotCan": "Off = the bot can answer questions but not change state.",
   "settings.hint.requiresExistingTransferPermission": "\r\n                Requires existing transfer permission. Otherwise, use Withdraw in Profile.\r\n              ",
   "settings.hint.theBotMessagesYou": "The bot messages you first: trades landing, drawdown/gas/expiry warnings, price alerts, and the daily campfire report.",
+  "settings.hint.hangOutInTelegramGroups": "Add your bot to a group and it acts like one more person there: it answers when someone calls it, joins in now and then, and remembers the chat. If someone else adds it, it stays silent until you answer Stay or Leave in your DMs. It never posts trade alerts, sizes, prices or P&L.",
+  // Worded by the contract. The coin is only ever a nomination: the owner is
+  // told who decides and that no limit moves, in that order.
+  "settings.hint.lookAtCoinsPeoplePost": "Only in trencher mode. Its Brain decides and every trencher limit still applies.",
+  "settings.hint.howChattyInGroups": "How often it joins in when nobody called it. A mention, a reply to it or its name gets an answer at any level.",
   "settings.hint.theMasterSwitchOff": "The master switch. Off = every PC command is refused, regardless of the toggles below.",
   "settings.hint.clickToToggleOnly": "Click to toggle. Only enabled groups work; the rest are refused. “vision” and “voice” need extra keys below.",
   "settings.hint.sendATaskWith": "\r\n              Send a task with ",
@@ -300,6 +311,17 @@ export const EN = {
   "settings.unit.bps": "bps",
   "settings.unit.sec": "sec",
   "settings.unit.min": "min",
+  // Whether anything is hearing the bot (lib/telegram-listening.ts). Beside the
+  // link code, because the code is what an owner sends into a bot nobody reads.
+  "settings.tg.held": "Your agent isn't trading right now: its practice book couldn't be restored after a server update ({reason}). Nothing was traded or lost, and the team has been alerted.",
+  "settings.tg.notListeningSince": "Nothing has heard your bot since {when}. Anything you send it now won't be acted on; when it's back, it will tell you what arrived late.",
+  "settings.tg.notListeningNever": "Nothing has heard your bot yet. Anything you send it now won't be acted on until your agent is listening.",
+  "settings.tg.conflict": "Another program is reading this bot's messages, for example a copy of Merrymen on your computer, or a webhook. Stop it, and your agent hears the bot again.",
+  "settings.tg.revoked": "Telegram refused this bot's token. It was probably revoked in @BotFather: paste a new token below.",
+  "settings.tg.codeWhenBack": "The code works once your bot is being heard again.",
+  "settings.tg.pickingUp": "Your agent hasn't picked up this bot yet. Its link code appears here once it has; check back shortly.",
+  "settings.tg.elsewhere": "This bot is connected to another Merrymen agent, so this one doesn't read it and has no link code for it. To move it here, save its token again and confirm the move; you'll then /link again here.",
+  "settings.tg.elsewhereShort": "no link code: this bot is connected to another Merrymen agent",
 
   // ── THE CONNECTION STRIP ON HOME AND THE DESKTOP RAIL ──────────────────
   //
@@ -324,6 +346,26 @@ export const EN = {
   "strip.tg.connectedAs": "connected as @{bot}",
   "strip.tg.connected": "connected",
   "strip.tg.manage": "Manage →",
+  "strip.tg.held": "trading held",
+  "strip.tg.heldWhy": "Your practice book couldn't be restored after a server update ({reason}). Nothing was traded or lost.",
+  "strip.tg.notListening": "not listening",
+  "strip.tg.notListeningSince": "Nothing has heard your bot since {when}. Anything you send it now won't be acted on.",
+  "strip.tg.notListeningNever": "Nothing has heard your bot yet. Anything you send it now won't be acted on.",
+  "strip.tg.conflict": "another program has the bot",
+  "strip.tg.conflictWhy": "Another program is reading this bot's messages, for example a copy of Merrymen on your computer, or a webhook. Stop it, and your agent hears the bot again.",
+  "strip.tg.revoked": "token refused",
+  "strip.tg.revokedWhy": "Telegram refused this bot's token. It was probably revoked in @BotFather.",
+  "strip.tg.newToken": "Paste a new one →",
+  "strip.tg.codeWhenBack": "This code works once your bot is being heard again.",
+  "strip.tg.pickingUp": "Your agent hasn't picked up this bot yet. Its link code appears here once it has.",
+  "strip.tg.elsewhere": "connected to another agent",
+  "strip.tg.elsewhereWhy": "This bot is connected to another Merrymen agent, so this one doesn't read it.",
+  "strip.tg.moveHere": "Move it here →",
+  // Trading held, said apart from Telegram: an owner with no working bot is
+  // told nowhere else (agent-status.ts heldNotice).
+  "strip.held.label": "Trading",
+  "strip.held.value": "held",
+  "strip.held.why": "Your practice book couldn't be restored after a server update ({reason}). Nothing was traded or lost, and the team has been alerted.",
   "strip.trencher.off": "not your strategy",
   "strip.trencher.whatIsThis": "What is this? →",
   "strip.trencher.noCrypto": "on, but your asset mode is stocks only — no coins can be considered",
@@ -458,6 +500,17 @@ export const EN = {
   "settings.text.aSummaryEvery15": "A summary every 15 minutes",
   "settings.text.aSummaryEvery30": "A summary every 30 minutes",
   "settings.text.aSummaryEveryHour": "A summary every hour",
+  "settings.text.chattinessQuiet": "Quiet — mostly lurks",
+  "settings.text.chattinessNormal": "Normal — joins in now and then",
+  "settings.text.chattinessChatty": "Chatty — joins in more often",
+  // PRIVACY MODE, three states: on (the steps, with the verdict), off (it can
+  // follow the chat, and the caveat Telegram imposes), unknown (the steps, no
+  // verdict). The steps are one string so no state can show half of them.
+  "settings.text.privacyModeOn": "Privacy mode is on, so in a group your bot only hears commands and replies to its own messages — it can't join in, remember the chat or see coins people post. To change that:",
+  "settings.text.privacyModeOff": "Privacy mode is off: your bot can follow the whole chat in its groups. If it was already in a group before you turned privacy off, remove it from that group and add it back.",
+  "settings.text.privacyModeUnknown": "To let your bot follow the whole chat in a group, turn privacy mode off:",
+  "settings.text.privacyModeSteps": "@BotFather → /setprivacy → your bot → Disable, then remove the bot from the group and add it back. Making it a group admin works too.",
+  "settings.text.joinGroupsOff": "Your bot can't be added to groups right now: @BotFather → /setjoingroups → your bot → Enable.",
   "settings.text.linkCode": "link code:",
   "settings.text.send": "— send",
   "settings.text.fromTelegram": "from Telegram",

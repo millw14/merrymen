@@ -8,7 +8,7 @@ export const metadata: Metadata = {
 
 const TOC = [
   ["Getting started", [["install", "Install"], ["wallet", "Create & fund a wallet"], ["run", "Run it"], ["claude", "Use it from Claude"]]],
-  ["Telegram", [["telegram", "Set up Telegram"], ["commands", "Commands"], ["transfers", "Transfers"], ["pc-control", "PC remote control"], ["voice", "Voice & vision"], ["soul", "The soul"]]],
+  ["Telegram", [["telegram", "Set up Telegram"], ["tg-groups", "Telegram groups"], ["commands", "Commands"], ["transfers", "Transfers"], ["pc-control", "PC remote control"], ["voice", "Voice & vision"], ["soul", "The soul"]]],
   ["Trading", [["strategies", "Strategies"], ["custom", "Write your own bot"], ["virtuals", "Stream to Virtuals"]]],
   ["Reference", [["safety", "Safety model"], ["config", "Configuration"], ["troubleshooting", "Troubleshooting"], ["faq", "FAQ"]]],
 ] as const;
@@ -164,6 +164,31 @@ merrymen kill       # kill switch — destroys the grant`}
           everything”, “why did you buy that?”.
         </p>
 
+        {/* ── telegram groups ── */}
+        <h2 id="tg-groups">Telegram groups</h2>
+        <p>
+          Your merryman can hang out in a Telegram group like one more person: it answers when
+          it&apos;s called, now and then joins in, remembers the chat, and when someone posts a
+          Robinhood Chain coin it takes a look, tags them, and says whether it&apos;s in or passing.
+          Coins from other chains (Ethereum, Solana, BNB and the rest) it leaves alone. In trencher
+          mode its Brain decides and every limit still applies — a group message can put a coin in
+          front of it, never order a trade. It never posts alerts, sizes, prices or P&amp;L, or
+          anything private.
+        </p>
+        <ol>
+          <li>Add your bot to a group. It only talks in groups you added it to or approved — if someone else adds it, it stays silent and DMs you <strong>Stay</strong> / <strong>Leave</strong>.</li>
+          <li>To let it follow the chat: message <strong>@BotFather</strong> → <code className="inline">/setprivacy</code> → your bot → <strong>Disable</strong>, then remove the bot from the group and add it back. Until then it only hears commands and replies to its own messages.</li>
+          <li>Send <code className="inline">/groups</code> in your DM with the bot to see every group it knows, with <strong>Stay</strong>, <strong>Leave</strong> and <strong>Forget</strong>.</li>
+        </ol>
+        <p>
+          Turn it off, turn off <strong>Look at coins people post</strong>, or pick how chatty it is
+          under <strong>Settings → Telegram → Telegram groups</strong>. In a group,{" "}
+          <code className="inline">/forget</code> (you) wipes what it remembers of that group and{" "}
+          <code className="inline">/forgetme</code> (anyone) removes what it remembers of them. Never
+          joins in, or doesn&apos;t notice coins people post? Check privacy mode (step 2, including
+          the re-add) and that Telegram groups is on.
+        </p>
+
         {/* ── commands ── */}
         <h2 id="commands">Commands</h2>
         <table>
@@ -175,6 +200,7 @@ merrymen kill       # kill switch — destroys the grant`}
             <tr><td><code className="inline">/alert &lt;SYM&gt; &gt; &lt;price&gt;</code></td><td>one-shot price alerts · /alerts · /unalert</td></tr>
             <tr><td><code className="inline">/pause /resume · /strategy · /cap</code></td><td>steer the worker (cap only tightens)</td></tr>
             <tr><td><code className="inline">/name · /soul · /remember</code></td><td>name it, see who it is, teach it about you</td></tr>
+            <tr><td><code className="inline">/groups · /forget · /forgetme</code></td><td>your <a href="#tg-groups">Telegram groups</a> (Stay / Leave / Forget) · in a group: wipe its memory of that group · anyone in a group: drop what it remembers of them</td></tr>
             <tr><td><code className="inline">/kill</code></td><td>destroy the grant, stand the band down</td></tr>
           </tbody>
         </table>

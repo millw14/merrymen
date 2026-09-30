@@ -186,6 +186,25 @@
 :where(.terminal-host) .gc-who button:disabled {
   cursor: default;
 }
+/* A LONG NAME WRAPS INSIDE ITS PILL; it never pushes the pill out of the
+   panel. A name is up to 24 characters and needs no space (worker/src/soul.ts):
+   24 wide letters asleep, with the 💤, measured 332px in a panel 278px wide at
+   320px, and the name and the 💤 sat clipped behind a sideways scroll inside
+   the panel. Two things held it there: the name had nowhere to break, and each
+   `li`, a flex item of the wrapping list, would not shrink below its content
+   (`min-width: auto`). `overflow-wrap: anywhere`, NOT `break-word`: only
+   `anywhere` also lowers the name's min-content, which is what lets the `li`
+   (and the button in it) come down to the panel's width; the face and the 💤
+   keep their size, and a name that fits is untouched. Left-aligned: a button
+   centres its text, and a name broken in two should read on from the face. */
+:where(.terminal-host) .gc-who li {
+  min-width: 0;
+}
+:where(.terminal-host) .gc-who-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
 :where(.terminal-host) .gc-zz {
   font-size: 11px;
   opacity: 0.8;
@@ -636,18 +655,14 @@
 
 /* The quote of a reply, inside the bubble under the name: the quoted
    speaker's colour on the bar and the name, one line of what they said.
-   Tapping it goes to the original. */
+   Tapping it goes to the original. Its floor is on the excerpt below, not
+   here: see there for why a floor on the quote itself cannot work. */
 :where(.terminal-host) .gc-quote {
   display: flex;
   flex-direction: column;
   gap: 1px;
   width: 100%;
-  /* The excerpt below adds nothing to the bubble's width, so a short reply to
-     a long line is not stretched to full width by the quote alone; this floor
-     keeps enough of the excerpt to recognise — but never wider than the
-     bubble: your own reply on a 320px phone, with Reply and "Remove?" showing
-     beside it, leaves ~120px inside, and a fixed floor spilled out of it. */
-  min-width: min(150px, 100%);
+  min-width: 0;
   margin: 1px 0 5px;
   padding: 4px 9px 5px;
   border-left: 3px solid var(--gc-ink, var(--lime));
@@ -668,12 +683,36 @@
   font-weight: 600;
   color: var(--gc-ink, var(--lime));
 }
-/* `width: 0; min-width: 100%`: fills the quote, but counts for nothing when
-   the bubble works out how wide to be. */
+/* THE QUOTE'S FLOOR IS THE EXCERPT'S WIDTH — BUT ONLY WHILE THE BUBBLE SIZES
+   ITSELF. The bubble is shrink-to-fit: first it asks its content how wide it
+   would like to be, then it lays that content out at the width it got. A floor
+   has to be in the first answer and give way in the second.
+
+   `width: 129px` is the first answer: with the quote's 18px of padding and its
+   3px bar, a 150px quote, enough of the line to recognise it. Without it a
+   reply of "ok" to a long line got a 66px quote reading "This i…".
+   `min-width: 100%` and `max-width: 100%` are the second: once the bubble has
+   a width, the excerpt is exactly the quote's inside (a min-width beats both
+   the width and the max-width), wider when the reply's own words are, and
+   narrower when the bubble had to shrink — your own reply on a 320px phone,
+   with Reply and "Remove?" beside it, has room for a ~111px quote, and the
+   bubble, a flex item with `min-width: 0`, comes out that narrow in spite of
+   its ask. While the bubble sizes itself those two percentages count for
+   nothing, so they cannot undo the floor; and an excerpt longer than the
+   floor still asks for no more, so a short reply to a long line is never
+   stretched past 150px by what was said (the quoted name, one line above it,
+   still asks for its own width, as it always did).
+
+   NOT ON THE QUOTE ITSELF. `min-width: 150px` there spilled out of that
+   squeezed bubble on a 320px phone; `min(150px, 100%)` never bound at all,
+   because the quote is already `width: 100%` and, while the bubble sizes
+   itself, a percentage min-width counts as zero (CSS Sizing 3, cyclic
+   percentages). Measured in Chromium at 320, 360, 375 and 430px wide. */
 :where(.terminal-host) .gc-quote > span {
   display: block;
-  width: 0;
+  width: 129px;
   min-width: 100%;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -697,6 +736,7 @@
 :where(.terminal-host) .gc-quote.gc-quote-plain > span {
   width: auto;
   min-width: 0;
+  max-width: none;
 }
 :where(.terminal-host) .gc-quote.gc-quote-plain > svg {
   flex-shrink: 0;

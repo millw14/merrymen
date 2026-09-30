@@ -245,6 +245,55 @@ describe("what a size is allowed to be", () => {
   });
 });
 
+/**
+ * THE ENERGY MARKER — the only thing that routes an order to the energy buy.
+ *
+ * The worker used to route on the symbol, so a plain buy, a snipe or an MCP
+ * proposal naming MERRYMEN bought the reserve. It routes on `purpose` now
+ * (worker/src/order-gate.ts orderRoute), which makes this route the place the
+ * marker is either carried exactly or not at all.
+ */
+describe("the energy marker", () => {
+  const ENERGY = { side: "buy", symbol: "MERRYMEN", usdgAmount: 30 } as const;
+
+  it("IS KEPT ONLY WHEN IT IS EXACTLY 'energy' — every other value is dropped, never passed on", () => {
+    assert.deepEqual(readOrder({ ...ENERGY, purpose: "energy" }), { order: { ...ENERGY, purpose: "energy" } });
+    for (const purpose of ["Energy", "ENERGY", " energy", "trade", "", 1, true, null, undefined, { energy: true }]) {
+      assert.deepEqual(readOrder({ ...ENERGY, purpose }), { order: { ...ENERGY } }, String(purpose));
+    }
+  });
+
+  it("an ordinary order never gains one — a buy of MERRYMEN is just a buy", () => {
+    const read = readOrder({ side: "buy", symbol: "merrymen", usdgAmount: 50 });
+    assert.ok("order" in read);
+    assert.equal("purpose" in read.order, false);
+  });
+
+  it("A MARKED ORDER THAT IS NOT A BUY OF $MERRYMEN IS REFUSED — the energy route buys the reserve whatever the symbol says", () => {
+    for (const bad of [
+      { side: "sell", symbol: "MERRYMEN", usdgAmount: 30 },
+      { side: "buy", symbol: "TSLA", usdgAmount: 30 },
+      { side: "buy", symbol: "MERRYMENX", usdgAmount: 30 },
+    ]) {
+      assert.deepEqual(readOrder({ ...bad, purpose: "energy" }), { error: "an energy order is a buy of $MERRYMEN and nothing else" }, JSON.stringify(bad));
+    }
+  });
+
+  it("IT IS PART OF THE ORDER'S ID, appended only when present so every other id is unchanged", () => {
+    assert.match(CODE, /const purpose = o\.purpose \? `\|\$\{o\.purpose\}` : "";/);
+    assert.match(CODE, /\|\$\{bucket\}\$\{purpose\}`\)/);
+  });
+
+  it("AND IT IS WRITTEN WITH THE ORDER — the shared table's args carry it to the ferry", async () => {
+    const { raw, db } = ledger();
+    const read = readOrder({ ...ENERGY, purpose: "energy" });
+    assert.ok("order" in read);
+    assert.deepEqual(await placeHostedOrder(db, { agent: AGENT, id: "e1", args: { ...read.order }, expiresAt: T + WINDOW_MS, now: T }), { ok: true });
+    const row = raw.prepare("SELECT args FROM agent_commands WHERE id = 'e1'").get() as { args: string };
+    assert.equal((JSON.parse(row.args) as { purpose?: unknown }).purpose, "energy");
+  });
+});
+
 describe("what this route deliberately does NOT decide", () => {
   it("IT NEVER JUDGES WHETHER THE TRADE IS ALLOWED", () => {
     // The watch set, the grant's sellable assets, the venue and every cap live
