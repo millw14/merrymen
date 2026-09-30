@@ -417,11 +417,24 @@ export function liveBlocker(a: ExecInputs): RefuseRule {
  *   4. the account is paper                     → paper
  *   5. real perps not consented                 → perp-live-not-enabled (a
  *      choice, named ahead of every fault so an owner is never sent to repair
- *      machinery they did not ask to use)
+ *      machinery they did not ask to use). BOTH consents: the account's own
+ *      live rail (`liveTradingEnabled`, READ DIRECTLY) and `perpsLiveEnabled`.
  *   6. the operator allows paper only           → perp-operator-off
  *   7. the grant carries no perps               → perp-not-granted
  *   8. the venue account is not ready           → perp-venue-unready
  *   9. otherwise                                → live
+ *
+ * WHY liveTradingEnabled IS AN INPUT HERE AND NOT JUST `verdict.mode`. The
+ * verdict answers "may this account's SPOT trades move real money", and during
+ * the consent migration (`enforceLiveIntent: false`, the
+ * MERRYMEN_LIVE_INTENT_STAND_DOWN window) it answers yes for an owner who
+ * never turned the live rail on — `consented()` restores the old behaviour for
+ * spot on purpose. Leverage is not the old behaviour: no owner was ever
+ * trading live perps before the gate existed, so the stand-down has nobody to
+ * protect here and everybody to expose. Rule 1 says the live rail is "read
+ * directly", and amendment 8a(g) says never through consented(): an owner
+ * with a perps-live consent on file and the live rail off gets
+ * perp-live-not-enabled, stand-down or not.
  *
  * PURE AND TOTAL: exec-mode.test.ts walks every combination.
  */
@@ -442,6 +455,11 @@ export const PERPS_MODE_RULES = [
 export interface PerpsModeInputs {
   /** Settings `perpsEnabled` — paper perps, and the first half of real ones. */
   perpsEnabled: boolean;
+  /**
+   * Settings `liveTradingEnabled`, RAW — the owner's own live-rail consent,
+   * never `consented()` (which the migration stand-down satisfies). See above.
+   */
+  liveTradingEnabled: boolean;
   /** Settings `perpsLiveEnabled` — the separate real-money consent. */
   perpsLiveEnabled: boolean;
   /** perpsCeilingFor(tenant): the operator's restriction, never a grant. */
@@ -460,6 +478,9 @@ export function perpsModeOf(verdict: ExecMode, p: PerpsModeInputs): PerpsMode {
   if (p.ceiling === "off") return { mode: "refuse", rule: "perp-operator-off" };
   if (verdict.mode === "paper") return { mode: "paper" };
   // verdict.mode === "live" from here: real money, so every live term counts.
+  // The live rail first, read raw: a live verdict reached through the consent
+  // stand-down is not the owner's consent to leverage.
+  if (!p.liveTradingEnabled) return { mode: "refuse", rule: "perp-live-not-enabled" };
   if (!p.perpsLiveEnabled) return { mode: "refuse", rule: "perp-live-not-enabled" };
   if (p.ceiling !== "live") return { mode: "refuse", rule: "perp-operator-off" };
   if (!p.granted) return { mode: "refuse", rule: "perp-not-granted" };

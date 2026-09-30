@@ -254,6 +254,17 @@ export interface PerpFeedMarket {
    * convention has never been observed, so it is unread rather than guessed).
    */
   funding8h: readonly { atSec: number; ppmPerHour: number }[] | null;
+  /**
+   * EVERY settled hourly funding the file carries for this market, oldest
+   * first, exactly as parsed — the venue's rate in ppm (possibly negative,
+   * whose sign convention is unobserved) and the side that pays — or absent/
+   * null when the file carries none. Not cut to what is current: the paper
+   * venue's clock (executor.ts tick) replays each hour a position was not yet
+   * charged from here, however old, and names any hour missing from it
+   * rather than skipping it. The feed fetches this history for the perps
+   * route's universe (feed.ts HISTORY, the last 12 h).
+   */
+  fundingHistory?: readonly FeedFundingRow[] | null;
   /** Prices (and spec) fresh enough to open against: `!stale.has(marketId)`. */
   fresh: boolean;
   /** Book fresh enough for a paper fill to walk: `!staleBooks.has(marketId)`. */
@@ -533,7 +544,7 @@ export function parseLighterFeedMarket(
   key: string,
   raw: unknown,
   fileAt: number,
-): (Omit<PerpFeedMarket, "fresh" | "bookFresh" | "closed4h" | "funding8h"> & { history: FeedHistory }) | null {
+): (Omit<PerpFeedMarket, "fresh" | "bookFresh" | "closed4h" | "funding8h" | "fundingHistory"> & { history: FeedHistory }) | null {
   if (!/^\d{1,5}$/.test(key) || !isRecord(raw)) return null;
   const marketId = Number(key);
   const market = perpMarketById(marketId);
@@ -641,6 +652,7 @@ export function parseLighterFeed(raw: unknown, nowMs: number, opts: LighterFeedR
         ...m,
         closed4h: usableClosedCandles(history.candles?.rows, nowMs),
         funding8h: usableFunding8h(history.fundings?.rows, nowMs),
+        fundingHistory: history.fundings?.rows ?? null,
         fresh,
         bookFresh,
       });

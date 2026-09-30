@@ -34,11 +34,19 @@
  *
  * UNKNOWN IS NEVER ZERO (rule 11). `buildPerpsView` returns null — "perps are
  * on and Lighter could not be read" — when the feed is unread, when (with
- * markets allowed) every allowed market is missing or stale in it, when a
- * live venue account was not read, or when a held paper position's market is
- * not in the feed at all (a book that cannot be valued is not a book). A
- * stale mark on an otherwise read view is carried with `markFresh: false`:
- * the book term is then "unread" on paper, and protect.ts never closes on it.
+ * markets allowed) every allowed market is missing or stale in it AND some
+ * held market is too (or nothing is held), when a live venue account was not
+ * read, or when a held paper position's market is not in the feed at all (a
+ * book that cannot be valued is not a book). A book whose every held market
+ * reads fresh is judged by those, never by allowed markets it holds nothing
+ * in: those only block opens (`perps-venue-unreachable`). A stale mark on an
+ * otherwise read view is carried with `markFresh: false`: the book term is
+ * then "unread" on paper, and protect.ts never closes on it.
+ *
+ * `markets` IS THE ALLOWED MARKETS ∪ THE HELD ONES, each only when the feed
+ * reads it fresh: a held market the owner un-ticked is carried for its exits
+ * (its mark, its candles, its terms), never as a market an open may use —
+ * every open path gates on `perpsMarkets` itself.
  *
  * THE MODEL NEVER SEES LEVERAGE AS A CHOICE: `leverage`/`imfBp` per market are
  * core's leverageTarget of the owner's setting and the market's own minimum,
@@ -52,6 +60,7 @@ import {
   leverageTarget,
   liqDistanceBps,
   notionalMicro,
+  perpCollateralRoomMicro,
   perpMarketById,
   perpMarketByKey,
   unrealizedPnlMicro,
@@ -462,9 +471,31 @@ export function buildPerpsViewStrict(input: PerpsViewInput): PerpsViewBuilt | nu
     for (const r of ledger.positions) venueLev.set(r.marketId, { imfBp: r.imfBp, marginMode: r.marginMode });
   }
 
-  // ── markets: the owner's allowed set ∩ what the feed reads fresh ──────────
+  // ── markets: (the owner's allowed set ∪ what the book holds) ∩ fresh ─────
+  //
+  // HELD MARKETS ARE HERE WHETHER OR NOT THE OWNER STILL ALLOWS THEM. Every
+  // exit producer finds a position's market through this map — perp-trend's
+  // trend and 168 h exits, the strategist's signals and its close, the mark
+  // that bounds the close's IOC — so a position in a market the owner has
+  // un-ticked, missing from it, lost every strategic exit and was left to the
+  // venue stop alone (the review's S3-01/S3-03). Un-ticking a market stops
+  // OPENS there, never the way out: opens stay gated on perpsMarkets at every
+  // step — perp-trend's `covered`, proposalsToPerpIntents' allowed check, and
+  // policy's perp-market-not-allowed before it ever reads this map.
+  const allowedKeys = new Set<string>(settings.perpsMarkets);
+  const heldIds: number[] = [];
+  if (venue !== null) {
+    for (const p of venue.account.positions) if (p.baseAmount !== 0n && p.side !== null) heldIds.push(p.marketId);
+  } else {
+    for (const r of ledger.positions) if (r.base !== 0n && r.side !== null) heldIds.push(r.marketId);
+  }
+  const wantedKeys: string[] = [...settings.perpsMarkets];
+  for (const id of heldIds) {
+    const k = perpMarketById(id)?.key;
+    if (k !== undefined && !wantedKeys.includes(k)) wantedKeys.push(k);
+  }
   const markets = new Map<PerpKey, PerpMarketView>();
-  for (const key of settings.perpsMarkets) {
+  for (const key of wantedKeys) {
     const listed = perpMarketByKey(key);
     if (listed === null) continue;
     const fm = feed.markets.get(listed.marketId);
@@ -504,8 +535,27 @@ export function buildPerpsViewStrict(input: PerpsViewInput): PerpsViewBuilt | nu
       funding8h: fm.funding8h,
     });
   }
-  const noMarketRead = settings.perpsMarkets.length > 0 && markets.size === 0;
-  if (noMarketRead && !exitsOnly) return null;
+  // "NOTHING READ" IS JUDGED OVER THE ALLOWED MARKETS, and it does not null
+  // a view whose every held market the feed read fresh. It answers "can
+  // anything be OPENED" — with no allowed market read, nothing can, and the
+  // blocker below says so. But a book that holds positions is valued by ITS
+  // OWN markets: calling a book whose every mark was read "Lighter unread"
+  // because an allowed market it holds nothing in was not read paused equity,
+  // refused every spot buy (perp-unpriced) and blinded protect.ts over prices
+  // for markets nothing is held in — and with perps off the feed carries only
+  // the held markets, so it did so for good (the review's S3-01). A held
+  // market the feed does NOT read fresh keeps the old answer: with nothing
+  // allowed read either, the tick's view is unread (the exits lane has its
+  // own, `exitsOnly`).
+  const allowedRead = [...markets.values()].filter((mk) => allowedKeys.has(mk.key)).length;
+  const noMarketRead = settings.perpsMarkets.length > 0 && allowedRead === 0;
+  const heldAllRead =
+    heldIds.length > 0 &&
+    heldIds.every((id) => {
+      const k = perpMarketById(id)?.key;
+      return k !== undefined && markets.has(k);
+    });
+  if (noMarketRead && !exitsOnly && !heldAllRead) return null;
 
   // ── positions ─────────────────────────────────────────────────────────────
   const positions = new Map<PerpKey, PerpPositionView>();
@@ -765,19 +815,29 @@ export function buildPerpsViewStrict(input: PerpsViewInput): PerpsViewBuilt | nu
   const headroom = {
     perTradeNotionalMicro: pol.perTradeMicro,
     openNotionalLeftMicro: sub(pol.maxOpenNotionalMicro, openNotional),
-    collateralLeftMicro: sub(pol.maxCollateralMicro, committed),
+    // The cap's own room (core perpCollateralRoomMicro) — what checkPerpOpen
+    // judges a margin against and what every producer sizes to through
+    // perpOpenMarginBudgetMicro. Free cash is NOT room: it is where margin
+    // comes from, and the budget takes the smaller of the two.
+    collateralLeftMicro: perpCollateralRoomMicro(committed, pol.maxCollateralMicro),
     opensLeftToday: Math.max(0, pol.maxOpensPerDay - ledger.opensToday),
   };
   const entriesHalted = settings.perpsEntriesHalted || ledger.entriesHalted;
   const present = new Set<PerpBlocker>();
   if (incident) present.add("perps-unknown-activity");
   if (input.railBlocker) present.add(input.railBlocker);
-  if (exitsOnly && (input.feed === null || noMarketRead)) present.add("perps-venue-unreachable");
+  // No allowed market read: nothing can be opened, whether the view was built
+  // for the exits lane (live, from the account alone) or because what is held
+  // was read. The positions stay fully judged; only opens are blocked.
+  if ((exitsOnly && input.feed === null) || noMarketRead) present.add("perps-venue-unreachable");
   if (entriesHalted) present.add("perps-entries-halted");
   if (input.breakerTripped === true) present.add("breaker-tripped");
   const exp = input.grant.expiresAtSec;
   if (exp !== null && (!Number.isFinite(exp) || exp - nowSec < PERP_GRANT_EXPIRING_SEC)) present.add("perps-grant-expiring");
-  if (markets.size > 0 && [...markets.values()].every((mk) => mk.effMinNotionalMicro > pol.perTradeMicro)) present.add("perps-cap-below-min");
+  // Reachability is a question about markets an open may go to: a held market
+  // the owner un-ticked is here for its exits, and says nothing about the cap.
+  const openable = [...markets.values()].filter((mk) => allowedKeys.has(mk.key));
+  if (openable.length > 0 && openable.every((mk) => mk.effMinNotionalMicro > pol.perTradeMicro)) present.add("perps-cap-below-min");
   if (venue === null) {
     if (ledger.paperCashMicro !== undefined && ledger.paperCashMicro !== null && free <= 0n) present.add("perps-no-collateral");
   } else if (c === 0n && input.accountCashMicro !== undefined && input.accountCashMicro !== null && input.accountCashMicro < MIN_DEPOSIT_MICRO) {
@@ -929,6 +989,7 @@ function reportPosition(
   pos: PerpPositionView,
   f: PerpPositionFacts,
   mode: "paper" | "live",
+  fundingUnread: boolean,
 ): PerpsReportPosition {
   const d = f.decimals;
   let leverage: number | null;
@@ -950,7 +1011,9 @@ function reportPosition(
     unrealizedMicro: mode === "live" || f.markFresh ? pos.unrealizedMicro.toString() : null,
     // Only a stop SEEN resting is shown as one (rule 7).
     stopTrigger: f.stopState === "resting" && f.recordedStop !== null ? renderScaled(f.recordedStop.trigger, d.priceDecimals) : null,
-    fundingMicro: pos.fundingMicro.toString(),
+    // A paper position with an owed funding hour the feed does not carry has
+    // a funding total nobody can state: unread, never the partial sum.
+    fundingMicro: fundingUnread ? null : pos.fundingMicro.toString(),
   };
 }
 
@@ -969,9 +1032,17 @@ const REPORT_SYMBOL_RE = /^[A-Z0-9]{1,24}$/;
 export function buildPerpsReport(
   input: PerpsViewInput,
   view: PerpsViewBuilt | null,
-  ctx: { rail: PerpsMode; protectAtMs: number | null; accountIndex?: number | null; lastVenueReadAtMs?: number | null },
+  ctx: {
+    rail: PerpsMode;
+    protectAtMs: number | null;
+    accountIndex?: number | null;
+    lastVenueReadAtMs?: number | null;
+    /** Markets whose funding the paper venue's clock could not charge in full (executor.ts `funding-gap`): their funding is reported unread. */
+    fundingUnreadMarkets?: ReadonlySet<number>;
+  },
 ): PerpsReport {
   const rail = ctx.rail;
+  const fundingUnread = (marketId: number) => ctx.fundingUnreadMarkets?.has(marketId) === true;
   let blocker: PerpBlocker | null;
   if (rail.mode === "off") blocker = "perps-off";
   else if (rail.mode === "refuse") blocker = railRefusalBlocker(rail.rule, input.railBlocker);
@@ -1002,7 +1073,7 @@ export function buildPerpsReport(
         liqPrice: null,
         unrealizedMicro: null,
         stopTrigger: null,
-        fundingMicro: r.fundingMicro === null ? null : r.fundingMicro.toString(),
+        fundingMicro: r.fundingMicro === null || fundingUnread(r.marketId) ? null : r.fundingMicro.toString(),
       });
     }
     const held = input.ledger.positions.filter((r) => r.base !== 0n && r.side !== null).length;
@@ -1029,7 +1100,7 @@ export function buildPerpsReport(
   for (const pos of [...view.positions.values()].sort((a, b) => a.marketId - b.marketId)) {
     const f = view.facts.positions.get(pos.key);
     if (f === undefined) continue;
-    positions.push(reportPosition(pos, f, view.mode));
+    positions.push(reportPosition(pos, f, view.mode, fundingUnread(pos.marketId)));
     if (f.stopState !== "resting") stopsMissing += 1;
     if (f.markFresh && pos.liqPrice !== null && pos.markPrice > 0n) {
       const dist = liqDistanceBps({ side: pos.side, markPrice: pos.markPrice, liqPrice: pos.liqPrice });

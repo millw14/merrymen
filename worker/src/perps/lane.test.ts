@@ -86,6 +86,7 @@ function writeFeed(mark = 802_000n): void {
 const PAPER: ExecMode = { mode: "paper", rule: "live-not-enabled" };
 const CFG: PerpLaneConfig = {
   perpsEnabled: true,
+  liveTradingEnabled: false,
   perpsLiveEnabled: false,
   perpsDriver: "manual",
   perpsMarkets: ["BTC-PERP"],
@@ -176,14 +177,14 @@ async function openDraft(r: Rig): Promise<PerpOrderIntent> {
 // ── the stage's rail ────────────────────────────────────────────────────────
 
 describe("perpsRailOf — perpsModeOf, as far as this build can honour it", () => {
-  const on = { perpsEnabled: true, perpsLiveEnabled: true, ceiling: "live" as const, granted: true, venueReady: true, entriesHalted: false };
+  const on = { perpsEnabled: true, liveTradingEnabled: true, perpsLiveEnabled: true, ceiling: "live" as const, granted: true, venueReady: true, entriesHalted: false };
   it("a paper account rides paper perps exactly as perpsModeOf says", () => {
     assert.deepEqual(perpsRailOf(PAPER, on), { mode: "paper" });
     assert.deepEqual(perpsRailOf(PAPER, { ...on, ceiling: "off" }), { mode: "refuse", rule: "perp-operator-off" });
     assert.deepEqual(perpsRailOf(PAPER, { ...on, perpsEnabled: false }), { mode: "off" });
   });
   it("a live account with perps on is refused perp-live-not-yet whatever else is true — never practice perps beside a real book", () => {
-    for (const p of [on, { ...on, perpsLiveEnabled: false }, { ...on, granted: false }, { ...on, venueReady: false }, { ...on, ceiling: "paper" as const }]) {
+    for (const p of [on, { ...on, perpsLiveEnabled: false }, { ...on, liveTradingEnabled: false }, { ...on, granted: false }, { ...on, venueReady: false }, { ...on, ceiling: "paper" as const }]) {
       assert.deepEqual(perpsRailOf({ mode: "live" }, p), { mode: "refuse", rule: PERP_LIVE_NOT_YET }, JSON.stringify(p));
     }
     assert.deepEqual(perpsRailOf({ mode: "live" }, { ...on, perpsEnabled: false }), { mode: "off" }, "off stays a choice, not a refusal");
@@ -447,6 +448,23 @@ describe("the wiring in index.ts", () => {
   it("it is started from the arm (syncGrant), and a settings change can start it too", () => {
     assert.match(fn("syncGrant"), /await perpLane\.armed\(\)/);
     assert.match(fn("refreshConfig"), /perpLane\.configChanged\(\)/);
+  });
+
+  it("the arm starts it BEFORE the rest of the arm tail can throw — `active` set, then the lane, then everything else (S3-02)", () => {
+    // A throw after `active` is set leaves syncGrant's `unchanged`
+    // short-circuit true for good: the tail never runs again, so anything
+    // after the throw never happens for this arm. The loop must not be.
+    const sync = fn("syncGrant");
+    const activeSet = sync.indexOf("active = {");
+    const armed = sync.indexOf("await perpLane.armed()");
+    const firstAwaitAfter = sync.indexOf("await ", sync.indexOf("suppressedIntents.clear();"));
+    assert.ok(activeSet > 0 && armed > activeSet, `${activeSet} < ${armed}`);
+    assert.equal(armed, firstAwaitAfter, "armed() is the first await after `active` is set");
+    assert.equal(sync.indexOf("await perpLane.armed()", armed + 1), -1, "and it is called once per arm");
+    for (const later of ["refreshBudget(agentId)", "setAgentStatus(agentId, \"armed\")", "noteTokenCoverage(agentId)"]) {
+      const at = sync.indexOf(later, activeSet);
+      assert.ok(at > armed, `${later} runs after the lane is armed`);
+    }
   });
 
   it("the protective loop and the lane read nothing from the chain's market read (snapshot.ts)", () => {

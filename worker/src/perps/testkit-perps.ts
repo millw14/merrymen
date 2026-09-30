@@ -139,7 +139,9 @@ export function view(over: Partial<PerpsView> = {}, markets: PerpKey[] = ["BTC-P
   return {
     mode: "paper",
     readAtSec: NOW_SEC - 1,
-    account: { collateralMicro: 0n, freeCollateralMicro: 0n, accountValueMicro: 0n, inTransitMicro: 0n },
+    // Paper, as the lane builds it (view.ts): C = 0 and free = the paper
+    // book's cash — here the default 100 USDG bankroll.
+    account: { collateralMicro: 0n, freeCollateralMicro: u(100), accountValueMicro: 0n, inTransitMicro: 0n },
     positions: new Map(),
     markets: new Map(markets.map((k) => [k, marketView(k)])),
     unresolved: new Set(),
@@ -210,8 +212,18 @@ export const ctx = (over: Partial<TestCtx> = {}): TestCtx => ({ ...CTX, ...over 
 /**
  * checkPolicy's verdict on `intent`, with the policy state built from the same
  * view and settings the producer read: the wall the draft will actually meet.
+ *
+ * THE MONEY TOTALS COME FROM THE VIEW, as view.ts buildPerpPolicyState takes
+ * them: what is committed is the cap less the view's collateral room, and
+ * what is open is the notional cap less its headroom. Hardcoding both to 0
+ * (as this once did) judged every producer's open against an empty account,
+ * which is how a producer sizing past the collateral cap passed here while
+ * the lane refused it on every bar.
  */
 export function policyVerdict(intent: TradeIntent, v: PerpsView, s: TestSettings = settings()): Verdict {
+  const sub = (a: bigint, b: bigint) => (a > b ? a - b : 0n);
+  const maxCollateral = u(s.perpsMaxCollateralUsdg);
+  const maxOpenNotional = u(s.perpsMaxOpenNotionalUsdg);
   const markets: PerpPolicyState["markets"] = new Map(
     [...v.markets.values()].map((m) => [
       m.marketId,
@@ -249,16 +261,16 @@ export function policyVerdict(intent: TradeIntent, v: PerpsView, s: TestSettings
         markets: s.perpsMarkets,
         maxLeverage: s.perpsMaxLeverage,
         perTradeMicro: u(s.perpsPerTradeUsdg),
-        maxOpenNotionalMicro: u(s.perpsMaxOpenNotionalUsdg),
-        maxCollateralMicro: u(s.perpsMaxCollateralUsdg),
+        maxOpenNotionalMicro: maxOpenNotional,
+        maxCollateralMicro: maxCollateral,
         maxOpensPerDay: s.perpsMaxOpensPerDay,
         stopLossBps: Math.round(s.perpsStopLossPct * 100),
         stopSlipBps: s.perpsStopSlipBps,
         liqBufferBps: Math.round(s.perpsLiqBufferPct * 100),
         maxSlippageBps: s.perpsMaxSlippageBps,
       },
-      openNotionalMicro: 0n,
-      committedCollateralMicro: 0n,
+      openNotionalMicro: sub(maxOpenNotional, v.headroom.openNotionalLeftMicro),
+      committedCollateralMicro: sub(maxCollateral, v.headroom.collateralLeftMicro),
       opensToday: 0,
       positions: new Map([...v.positions.values()].map((p) => [p.marketId, { side: p.side, baseAmount: p.baseAmount }])),
       markets,

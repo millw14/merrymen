@@ -399,7 +399,7 @@ describe("stops and take-profits fire on mark into the book", () => {
   it("nothing fires on a mark we do not have; a stop into a stale book waits, while liquidation is still judged", () => {
     const unread = evaluatePaperTriggers({ book: book(92, [long()]), markets: new Map([[1, market(null, [lv(750_000, 100)])]]), nowMs: NOW, seq: 1 });
     assert.deepEqual(unread.events, []);
-    assert.deepEqual(unread.unread, [{ marketId: 1, why: "no fresh mark" }]);
+    assert.deepEqual(unread.unread, [{ marketId: 1, kind: "mark", why: "no fresh mark" }]);
     const missing = evaluatePaperTriggers({ book: book(92, [long()]), markets: new Map(), nowMs: NOW, seq: 1 });
     assert.equal(missing.unread.length, 1);
     const stale = evaluatePaperTriggers({ book: book(92, [long()]), markets: new Map([[1, market(750_000, null)]]), nowMs: NOW, seq: 1 });

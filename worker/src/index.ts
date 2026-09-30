@@ -7100,6 +7100,21 @@ async function main() {
     inFlightSpentUsdg = 0n;
     inFlightOps = 0;
     suppressedIntents.clear();
+    // THE PERP LANE, ARMED WITH THE AGENT — HERE, the first thing after
+    // `active` is set, and not at the end of this tail. Every await below
+    // (the in-flight reconcile, the energy pin, refreshBudget, the epoch,
+    // the financials, the status and event writes) can throw; one that did
+    // left `active` set, so syncGrant's `unchanged` short-circuit never ran
+    // this tail again, and the protective loop — the only thing that fires a
+    // paper stop, liquidates, or closes on liquidation proximity — was never
+    // started for this arm, however much was held (the review's S3-02).
+    // armed() forgets per-arm memory, says the rail once for this arm and
+    // starts the loop whatever the lane holds; from here it runs on its own
+    // clock — never from tick() — so pause, an unread market, a book hold,
+    // the breaker or a tick's early return cannot switch it off (rules 8,
+    // 8a; protect.ts). It reads only the ledger and the feed file, nothing
+    // the steps below produce.
+    await perpLane.armed().catch((e) => console.error("[perps] arm:", e));
     // Recover any op that landed on-chain last run but never reached the ledger,
     // BEFORE seeding — else the seed under-counts the day's spend and loosens the
     // cap. Live only (paper never touches the chain); best-effort (guarded).
@@ -7170,13 +7185,7 @@ async function main() {
     // against the current settings rather than carrying the old verdict forward.
     lastCoverageKey = null;
     await noteTokenCoverage(agentId);
-    // THE PERP LANE, ARMED WITH THE AGENT: per-arm memory forgotten, the rail
-    // said once for this arm (a live account with perps on hears why nothing
-    // opens), and the PROTECTIVE LOOP started when perps are on or the paper
-    // book holds anything. It runs on its own clock from here — never from
-    // tick() — so pause, an unread market, a book hold, the breaker or a tick's
-    // early return cannot switch it off (rules 8, 8a; protect.ts).
-    await perpLane.armed().catch((e) => console.error("[perps] arm:", e));
+    // (The perp lane was armed right after `active` was set, above.)
     return true;
   }
 

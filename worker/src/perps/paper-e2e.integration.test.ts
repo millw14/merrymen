@@ -101,6 +101,7 @@ const LIVE: ExecMode = { mode: "live" };
 function config(over: Partial<PerpLaneConfig> = {}): PerpLaneConfig {
   return {
     perpsEnabled: true,
+    liveTradingEnabled: false,
     perpsLiveEnabled: false,
     perpsDriver: "perp-trend",
     perpsMarkets: ["BTC-PERP"],
@@ -130,6 +131,8 @@ interface Account {
   inFlight: { ops: number; spend: bigint };
   energy: { claimed: number; refunded: number };
   executorsMade: number;
+  /** How often the lane read the Lighter feed file — an inactive lane never does. */
+  feedReads: number;
   cfg: PerpLaneConfig;
   exec: ExecMode;
 }
@@ -163,6 +166,7 @@ async function account(opts: { cfg?: Partial<PerpLaneConfig>; exec?: ExecMode } 
     inFlight: { ops: 0, spend: 0n },
     energy: { claimed: 0, refunded: 0 },
     executorsMade: 0,
+    feedReads: 0,
     cfg: config(opts.cfg),
     exec: opts.exec ?? PAPER,
   } as Account;
@@ -171,7 +175,10 @@ async function account(opts: { cfg?: Partial<PerpLaneConfig>; exec?: ExecMode } 
     armed: () => ({ agentId: id, smartAccount: `0xAb${hex}`, limits }),
     config: () => acct.cfg,
     execMode: () => acct.exec,
-    readFeed: (nowMs) => readLighterFeed(FEED_FILE, nowMs),
+    readFeed: (nowMs) => {
+      acct.feedReads += 1;
+      return readLighterFeed(FEED_FILE, nowMs);
+    },
     now: () => clock,
     // index.ts perpAgentState's shape: the settled counters (the same store
     // reads refreshBudget makes) plus what is in flight.
@@ -462,10 +469,167 @@ describe("the protective loop, with no tick and no route running (a paused agent
     await a.lane.stopProtect();
     assert.equal(a.lane.protecting, false);
 
+    // PERPS OFF AND NOTHING HELD: the loop runs anyway — the lane can turn on
+    // later with no arm to notice it (S3-02) — and an idle pass is a ledger
+    // read: Lighter is never read.
     const off = await account({ cfg: { perpsEnabled: false } });
     await off.lane.armed();
-    assert.equal(off.lane.protecting, false, "perps off and nothing held: no loop, and Lighter is never read");
+    assert.equal(off.lane.protecting, true, "the loop starts with every arm, whatever the lane holds");
+    // Nothing else reads this lane, so a new read is the loop's own pass.
+    const armRead = off.lane.last();
+    const t1 = Date.now();
+    while (off.lane.last() === armRead) {
+      if (Date.now() - t1 > 5_000) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.notEqual(off.lane.last(), armRead, "an idle pass ran on the loop's own timer");
+    assert.equal(off.feedReads, 0, "and never read Lighter: an inactive lane reads the ledger alone");
     assert.equal(off.lane.last()?.book, undefined, "the known zero of an agent with no perps");
+    await off.lane.stopProtect();
+  });
+
+  it("arms protection even when the lane is OFF at the arm — a live account holding a practice book, perps off — and fires its stop once execMode moves back to paper (S3-02)", async () => {
+    clock += 60_000;
+    writeFeed({ mark: 802_000n, bids: [[801_900n, 1_000n]], asks: [[802_000n, 1_000n]] });
+    const a = await account({ cfg: { perpsDriver: "manual" } });
+    const view = (await a.lane.refresh()).view!;
+    const built = buildOpenDraft({ market: view.markets.get("BTC-PERP")!, side: "long", notionalCapMicro: u(20), stopBps: 300, maxSlippageBps: 50, stopSlipBps: 200, liqBufferBps: 200 });
+    assert.ok(built.ok);
+    const intent = { ...built.draft } as PerpOrderIntent;
+    await decide(a.id, intent, "perp-route");
+    assert.equal((await a.lane.execute(intent, { equityUsdg: u(100), equityKnown: true })).status, "paper");
+    const opened = await held(a);
+    assert.ok(opened?.stopTrigger && opened.stopPrice);
+
+    // The account goes live (its owner switched the live rail on, say) and
+    // perps are switched off: the practice book is frozen, not traded — and
+    // THE ARM HAPPENS NOW, with the lane off.
+    a.cfg = { ...a.cfg, perpsEnabled: false };
+    a.exec = LIVE;
+    await a.lane.armed();
+    assert.equal(a.lane.last()?.active, false, "a live account never runs the practice book beside it");
+    assert.equal(a.lane.protecting, true, "the loop runs anyway: an arm with the lane off is still an arm");
+
+    // Back to paper (a cash read of 0, the live rail switched off — neither
+    // re-arms): the practice book is the book again, and its mark falls
+    // through the stop with the book still bidding above the stop's bound.
+    clock += 120_000;
+    writeFeed({ mark: opened.stopTrigger - 100n, bids: [[opened.stopPrice + 50n, 1_000n]], asks: [[opened.stopTrigger, 1_000n]] });
+    a.exec = PAPER;
+    const r = await a.lane.refresh(); // the tick's read notices the lane is on again
+    assert.equal(r.active, true);
+    const t0 = Date.now();
+    while ((await held(a)) !== null) {
+      if (Date.now() - t0 > 5_000) break;
+      await new Promise((res) => setTimeout(res, 20));
+    }
+    assert.equal(await held(a), null, "the resting paper stop fired on the loop's own clock — no pass was called by hand");
+    assert.ok(a.events.some((e) => /BTC-PERP stop fired/.test(e.message)), JSON.stringify(a.events));
+    await a.lane.stopProtect();
+  });
+});
+
+describe("a position held in a market the owner un-ticked, with perps off (S3-01, S3-03, S3-VIEW-HELD-MARKETS)", () => {
+  /** Open a 2x BTC long through the lane (the owner's order), then un-tick BTC and switch perps off. */
+  async function heldUnticked(cfg: Partial<PerpLaneConfig> = {}) {
+    clock += 60_000;
+    writeFeed({ mark: 802_000n, bids: [[801_900n, 1_000n]], asks: [[802_000n, 1_000n]] });
+    const a = await account({ cfg: { perpsDriver: "manual", ...cfg } });
+    const view = (await a.lane.refresh()).view!;
+    const built = buildOpenDraft({ market: view.markets.get("BTC-PERP")!, side: "long", notionalCapMicro: u(20), stopBps: 500, maxSlippageBps: 50, stopSlipBps: 200, liqBufferBps: 200 });
+    assert.ok(built.ok);
+    const intent = { ...built.draft } as PerpOrderIntent;
+    await decide(a.id, intent, "perp-route");
+    assert.equal((await a.lane.execute(intent, { equityUsdg: u(100), equityKnown: true })).status, "paper");
+    // ETH only, and perps off: the feed the lane asks for now carries BTC
+    // (held) and nothing else — ETH is not in it (lane.feedMarketIds).
+    a.cfg = { ...a.cfg, perpsMarkets: ["ETH-PERP"], perpsEnabled: false, perpsDriver: "perp-trend" };
+    assert.deepEqual(a.lane.feedMarketIds(), [1], "perps off: only what is held is carried");
+    return a;
+  }
+
+  it("the book stays READ — equity, the breaker and spot buys are not held hostage to a market nothing is held in", async () => {
+    const a = await heldUnticked();
+    const r = await a.lane.refresh();
+    assert.ok(r.view, "every held mark was read: this is not 'Lighter unread'");
+    assert.notEqual(r.book, "unread", "so spot buys are not refused perp-unpriced and equity rows keep being written");
+    assert.ok(r.view.markets.has("BTC-PERP"), "the held market is carried for its exits");
+    assert.equal(r.policy?.markets.has(1), true);
+  });
+
+  it("perp-trend's 168 h exit closes it, perps off and all", async () => {
+    const a = await heldUnticked();
+    clock += 169 * 3_600_000;
+    writeFeed({ mark: 802_000n, bids: [[801_900n, 1_000n]], asks: [[802_000n, 1_000n]] });
+    const e = await equityOf(a);
+    assert.notEqual(e.book, "unread");
+    await a.lane.runRoute({ ...TICK, equityUsdg: e.equity }, hooks(a, e.equity));
+    assert.equal(await held(a), null, "the aged exit went out and filled");
+    const raw = new DatabaseSync(path.join(process.env.MERRYMEN_HOME!, "merrymen.db"));
+    try {
+      const rows = raw.prepare("SELECT reason FROM decisions WHERE agent_id = ? ORDER BY at, rowid").all(a.id) as { reason: string | null }[];
+      assert.ok(rows.some((d) => /168|held/i.test(d.reason ?? "")), JSON.stringify(rows));
+    } finally {
+      raw.close();
+    }
+  });
+
+  it("the protective loop still judges it: P1 closes on liquidation proximity when the stop gaps", async () => {
+    const a = await heldUnticked({ perpsMaxLeverage: 10 });
+    const opened = await held(a);
+    assert.ok(opened?.stopPrice);
+    const liq = (await a.lane.refresh()).view?.positions.get("BTC-PERP")?.liqPrice;
+    assert.ok(typeof liq === "bigint" && liq > 0n);
+    clock += 120_000;
+    const mark = liq + (liq * 50n) / 10_000n;
+    const bid = mark - (mark * 50n) / 10_000n;
+    assert.ok(bid < opened.stopPrice, "the venue stop gaps");
+    writeFeed({ mark, bids: [[bid, 1_000n]], asks: [[mark, 1_000n]] });
+    await pass(a, 1);
+    assert.equal(await held(a), null, "closed by the backstop");
+    const facts = await store.perpLaneLedgerFacts(a.id, "paper", Math.floor(clock / 1000) - 86_400);
+    assert.equal(facts.lastExits.get(1)?.cause, "risk", "a protective (hard risk) exit — P1, not a liquidation");
+  });
+});
+
+describe("what the paper venue's clock could not run is said, not swallowed (R3-PAPER-FUNDING-GAP)", () => {
+  it("an owed funding hour the feed does not carry: the owner is told once, and the report shows that position's funding as unread", async () => {
+    clock += 60_000;
+    writeFeed({ mark: 802_000n, bids: [[801_900n, 1_000n]], asks: [[802_000n, 1_000n]] });
+    const a = await account({ cfg: { perpsDriver: "manual" } });
+    const view = (await a.lane.refresh()).view!;
+    const built = buildOpenDraft({ market: view.markets.get("BTC-PERP")!, side: "long", notionalCapMicro: u(20), stopBps: 500, maxSlippageBps: 50, stopSlipBps: 200, liqBufferBps: 200 });
+    assert.ok(built.ok);
+    const intent = { ...built.draft } as PerpOrderIntent;
+    await decide(a.id, intent, "perp-route");
+    assert.equal((await a.lane.execute(intent, { equityUsdg: u(100), equityKnown: true })).status, "paper");
+
+    // The worker was away for 30 hours; the feed's hourly history reaches
+    // back 8. The first hour the position owes is not in it.
+    clock += 30 * 3_600_000;
+    writeFeed({ mark: 802_000n, bids: [[801_900n, 1_000n]], asks: [[802_000n, 1_000n]] });
+    await pass(a, 1);
+    const said = () => a.events.filter((e) => /BTC-PERP's funding from .* could not be charged/.test(e.message));
+    assert.equal(said().length, 1, JSON.stringify(a.events));
+    assert.equal(said()[0]!.level, "warn");
+    await a.lane.report();
+    const row = new DatabaseSync(path.join(process.env.MERRYMEN_HOME!, "merrymen.db"));
+    try {
+      const r = parsePerpsReport(JSON.parse((row.prepare("SELECT perps FROM agents WHERE smart_account = ?").get(a.id) as { perps: string }).perps));
+      assert.ok(r);
+      assert.equal(r.positions[0]?.market, "BTC-PERP");
+      assert.equal(r.positions[0]?.fundingMicro, null, "a partial funding total is not a total: unread, never zero");
+    } finally {
+      row.close();
+    }
+    const funding = await store.readJournal(a.id, 1).then((rows) => rows.filter((x) => x.kind === "funding").length);
+    assert.equal(funding, 0, "and nothing was booked past the hour it could not charge");
+
+    // Once per episode, not once a pass.
+    clock += 15_000;
+    writeFeed({ mark: 802_000n, bids: [[801_900n, 1_000n]], asks: [[802_000n, 1_000n]] });
+    await pass(a, 2);
+    assert.equal(said().length, 1);
   });
 });
 

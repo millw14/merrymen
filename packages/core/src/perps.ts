@@ -600,6 +600,120 @@ export function isolatedMarginMicro(notional: bigint, imfBp: number): bigint {
   return ceilDiv(notional * BigInt(imfBp), BP);
 }
 
+// ── the collateral cap's arithmetic (rule 6) ────────────────────────────────
+//
+// ONE HOME FOR IT, because three places use it and they drifted. The producers
+// (perp-trend, the strategist's boundary) sized an open against free cash PLUS
+// the room under perpsMaxCollateralUsdg, while checkPerpOpen judges committed +
+// margin ≤ cap — so on paper, with the owner's cap below what paper cash could
+// fund, perp-trend proposed an open the wall refused on every signal bar (a bar
+// spent, energy claimed and refunded, a decision row and an owner refusal each
+// time). And a deposit sized to margin + 10% would, once landed, raise
+// `committed` by itself and so refuse the very open it was posted to fund,
+// stranding the USDG at the venue. The rule itself is not relaxed here — every
+// caller now asks it the same question.
+//
+// WHAT THE CAP COUNTS: committed = C + ΣM + T_in (cross collateral, isolated
+// margin, deposits in transit). An open's margin is judged as NEW commitment —
+// the state does not split free cross collateral from committed, so none of it
+// is counted free (policy.ts checkPerpOpen) — and a deposit is committed from
+// the moment it lands. Hence, with room = cap − committed:
+//   an open fits          margin ≤ room
+//   a deposit fits        deposit ≤ room
+//   a deposit-funded open deposit + margin ≤ room  (the deposit lands first;
+//                         the open is then judged with it in `committed`)
+
+/** Lighter's minimum deposit (assetConfigs(3).minDepositTicks): 1 USDG. */
+export const PERP_MIN_DEPOSIT_MICRO = 1_000_000n;
+/** A deposit funds the open's margin plus this share on top, in percent (docs/perps.md "The perps route": margin + 10%). */
+export const PERP_DEPOSIT_BUFFER_PCT = 110n;
+
+/** The room under the collateral cap: cap − committed, never negative. */
+export function perpCollateralRoomMicro(committedMicro: bigint, capMicro: bigint): bigint {
+  return capMicro > committedMicro ? capMicro - committedMicro : 0n;
+}
+
+/** checkPerpOpen's test, word for word: committed + margin ≤ cap. */
+export function perpMarginFitsCap(committedMicro: bigint, marginMicro: bigint, capMicro: bigint): boolean {
+  return marginMicro >= 0n && committedMicro + marginMicro <= capMicro;
+}
+
+/**
+ * The deposit that funds `margin` with `free` cross collateral already at the
+ * venue: ceil(margin × 1.1) − free, raised to the venue's minimum; 0 when what
+ * is there already covers margin + 10%.
+ */
+export function perpDepositForMarginMicro(marginMicro: bigint, freeMicro: bigint, minDepositMicro: bigint = PERP_MIN_DEPOSIT_MICRO): bigint {
+  if (marginMicro < 0n) throw new RangeError("perpDepositForMarginMicro: margin must be non-negative");
+  const free = freeMicro > 0n ? freeMicro : 0n;
+  const withBuffer = ceilDiv(marginMicro * PERP_DEPOSIT_BUFFER_PCT, 100n);
+  if (withBuffer <= free) return 0n;
+  const need = withBuffer - free;
+  return need < minDepositMicro ? minDepositMicro : need;
+}
+
+/**
+ * THE MOST ISOLATED MARGIN ONE OPEN MAY TAKE, by the cap's own arithmetic —
+ * what a producer sizes to (size ≤ margin budget × L, less its own slack).
+ *
+ *   paper  min(free, room). Paper margin comes out of the paper book's cash
+ *          (`free`) and counts against the cap like any margin (ΣM is in
+ *          committed); cash beyond the room is not collateral anyone allowed.
+ *   live   the larger of the two ways it can be funded:
+ *            from free cross collateral with its 10% buffer, no deposit:
+ *              ceil(1.1·M) ≤ free and M ≤ room → M ≤ min(floor(free/1.1), room)
+ *            by a deposit D(M) = max(min, ceil(1.1·M) − free), itself
+ *            committed: D + M ≤ room → M ≤ room − min and
+ *              ceil(1.1·M) + M ≤ room + free, which floor((100·(room+free) − 99)/210)
+ *              satisfies exactly (ceil(1.1·M) ≤ (110·M + 99)/100).
+ *          What the deposit may draw on (account cash, the sealed per-trade
+ *          cap, the day's spend) is depositToFund's to refuse — the open then
+ *          waits; it is never resized there.
+ */
+export function perpOpenMarginBudgetMicro(args: {
+  mode: "paper" | "live";
+  freeMicro: bigint;
+  roomMicro: bigint;
+  minDepositMicro?: bigint;
+}): bigint {
+  const free = args.freeMicro > 0n ? args.freeMicro : 0n;
+  const room = args.roomMicro > 0n ? args.roomMicro : 0n;
+  if (args.mode === "paper") return free < room ? free : room;
+  if (args.mode !== "live") throw new RangeError("perpOpenMarginBudgetMicro: mode must be paper or live");
+  const min = args.minDepositMicro ?? PERP_MIN_DEPOSIT_MICRO;
+  const fromFreeRaw = (free * 100n) / PERP_DEPOSIT_BUFFER_PCT;
+  const fromFree = fromFreeRaw < room ? fromFreeRaw : room;
+  const s = (room + free) * 100n - 99n;
+  const byBoth = s > 0n ? s / (PERP_DEPOSIT_BUFFER_PCT + 100n) : 0n;
+  const underMin = room > min ? room - min : 0n;
+  const viaDeposit = byBoth < underMin ? byBoth : underMin;
+  return fromFree > viaDeposit ? fromFree : viaDeposit;
+}
+
+/**
+ * What is left after one open of `margin` is funded — so a producer placing
+ * several opens in one window judges each against what the ones before it
+ * used. Paper: margin leaves cash (free) and joins ΣM (committed). Live: a
+ * deposit, if one is needed, lands and is committed; the margin then moves
+ * from free cross collateral into the position, which leaves committed where
+ * it was (C before, M after) — so the room falls by the deposit alone, and
+ * free by the margin less the deposit.
+ */
+export function perpCollateralAfterOpen(args: {
+  mode: "paper" | "live";
+  freeMicro: bigint;
+  roomMicro: bigint;
+  marginMicro: bigint;
+  minDepositMicro?: bigint;
+}): { freeMicro: bigint; roomMicro: bigint } {
+  const free = args.freeMicro > 0n ? args.freeMicro : 0n;
+  const room = args.roomMicro > 0n ? args.roomMicro : 0n;
+  const clamp = (x: bigint) => (x > 0n ? x : 0n);
+  if (args.mode === "paper") return { freeMicro: clamp(free - args.marginMicro), roomMicro: clamp(room - args.marginMicro) };
+  const d = perpDepositForMarginMicro(args.marginMicro, free, args.minDepositMicro);
+  return { freeMicro: clamp(free + d - args.marginMicro), roomMicro: clamp(room - d) };
+}
+
 /**
  * Isolated liquidation price, shared core. `scaledCost` is |s| × entry in
  * micro-USDG multiplied by 10^(sd+pd) — for an integer entry price that is

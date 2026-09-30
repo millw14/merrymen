@@ -51,7 +51,11 @@
  * SIZE      min(perpsPerTradeUsdg, sealed per-trade, the view's per-trade and
  *           open-notional headroom, the day's spend headroom, 0.95 × L × usable
  *           collateral, 1% of equity / stop). Under the venue minimum it idles
- *           `perp-below-min`; nothing is raised to reach it.
+ *           `perp-below-min`; nothing is raised to reach it. USABLE is core
+ *           perpOpenMarginBudgetMicro — checkPerpOpen's committed + margin ≤
+ *           cap solved for the margin (paper: min(paper cash, cap − ΣM)) —
+ *           never free cash ADDED to the room: an open sized past the cap is
+ *           an open the wall refuses on every signal bar.
  * EXIT      any of, judged on the last closed candle: a long's close under
  *           LL6 or under EMA24 (short: the mirror) → `trend`; held ≥ 168 h →
  *           `aged`. Always the whole venue position, reduce-only. Risk exits
@@ -64,7 +68,7 @@
  * restart forgets nothing.
  */
 
-import { PERP_TREND_UNIVERSE, leverageFromImfBp, type PerpKey, type PerpSide } from "../../../packages/core/src/perps";
+import { PERP_TREND_UNIVERSE, leverageFromImfBp, perpOpenMarginBudgetMicro, type PerpKey, type PerpSide } from "../../../packages/core/src/perps";
 import type { ResolvedConfig } from "../settings";
 import type { Why } from "../strategies/reasons";
 import type { PerpMarketView, PerpPositionView, PerpsView } from "../strategies/types";
@@ -428,8 +432,12 @@ export function perpTrendTick(view: PerpsView | null | undefined, s: PerpTrendSe
       continue;
     }
 
-    // SIZE: the smallest of every cap and both risk budgets.
-    const usable = view.account.freeCollateralMicro + view.headroom.collateralLeftMicro;
+    // SIZE: the smallest of every cap and both risk budgets. The collateral
+    // budget is the POLICY's arithmetic (core perpOpenMarginBudgetMicro): the
+    // margin must fit under perpsMaxCollateralUsdg on top of what is already
+    // committed AND come from money that is there. Summing free cash and the
+    // room — as this once did — sized opens the collateral cap then refused.
+    const usable = perpOpenMarginBudgetMicro({ mode: view.mode, freeMicro: view.account.freeCollateralMicro, roomMicro: view.headroom.collateralLeftMicro });
     const byCollateral = usable > 0n && m.imfBp > 0 ? (usable * BigInt(D.collateralUseBps)) / BigInt(m.imfBp) : 0n;
     const byRisk = equity > 0n ? (equity * BigInt(D.riskPerTradeBps)) / BigInt(stopBps) : 0n;
     const caps = [

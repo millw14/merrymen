@@ -37,6 +37,11 @@ import {
   restorePaperCheckpoint,
 } from "./paper-checkpoint";
 import type { PerpSignedTx } from "./store";
+import type { PerpOrderIntent } from "./policy";
+import { readFileSync } from "node:fs";
+import { createPaperPerpExecutor } from "./perps/executor";
+import { parseLighterFeed, specToJson } from "./perps/feed-reader";
+import { parseOrderBookDetails } from "./perps/markets";
 
 const scratch = mkdtempSync(path.join(os.tmpdir(), "merrymen-perp-ledger-"));
 const isolatedCwd = path.join(scratch, "cwd");
@@ -622,6 +627,80 @@ describe("the paper perp book rides the checkpoint", () => {
     assert.deepEqual(pos.map((p) => ({ ...p })), [
       { side: "short", base: "20000", allocated_margin_micro: "11500000", imf_bp: 5000, funding_hour_applied: 1_790_683_200, stop_price: "12316500", source: "paper" },
     ]);
+  });
+
+  it("a position the REAL paper engine opened is carried by the checkpoint, and restored whole into an empty child (R3-PAPER-CKPT-NULL-COLLATERAL)", async () => {
+    // The engine books under an account row bumpNonceHighWater created with
+    // paper_collateral_micro NULL; the checkpoint reads NULL collateral beside
+    // an open position as a torn book and skips the WHOLE row — cash, shares
+    // and basis too. Only the engine's own path proves the column is a read 0.
+    const id = await agent();
+    await store.getPaperBook(id, 100);
+    const btc = parseOrderBookDetails(JSON.parse(readFileSync(path.join(import.meta.dirname, "perps", "fixtures", "orderBookDetails.perp.json"), "utf8")))!.markets.get(1)!;
+    const H = 1_790_708_400;
+    let clockMs = (H - 1800) * 1000;
+    const feed = () =>
+      parseLighterFeed(
+        {
+          v: 1,
+          observedAt: clockMs - 500,
+          markets: {
+            "1": {
+              observedAt: clockMs - 1_000,
+              priceSource: "ws",
+              mark: "800000",
+              index: "800000",
+              // The hour's payment exists only once the hour has passed.
+              ...(clockMs > H * 1000 + 1_000 ? { lastFundingRatePctPerHour: "0.0012", lastFundingAt: H * 1000 + 40 } : {}),
+              status: btc.spec.status,
+              spec: specToJson(btc.spec),
+              specObservedAt: clockMs - 60_000,
+              takerFeePpm: 0,
+              makerFeePpm: 0,
+              bids: [["799900", "1000"]],
+              asks: [["800000", "1000"]],
+              bookObservedAt: clockMs - 1_000,
+              bookSource: "ws",
+            },
+          },
+        },
+        clockMs,
+      );
+    const ex = createPaperPerpExecutor({ agentId: id, epoch: () => 1, feed, store, now: () => clockMs, paperStartUsdg: 100 });
+    await ex.setLeverage!(1, 5000);
+    const open = {
+      kind: "perp-order", venue: "lighter", market: "BTC-PERP", marketId: 1, effect: "open", side: "long", reduceOnly: false,
+      baseAmount: 20n, worstPrice: 804_000n, markPrice: 800_000n, notionalUsdg: 16_080_000n, imfBp: 5000, stopTrigger: 760_000n, stopPrice: 744_800n,
+    } as PerpOrderIntent;
+    const placed = await ex.place(open, await ex.review(open), { decisionId: null, agentId: id });
+    assert.equal(placed.status, "filled");
+    // An hour's funding, so funding_hour_applied is part of what must round-trip.
+    clockMs = H * 1000 + 60_000;
+    assert.equal((await ex.tick!()).events.length, 1);
+    assert.equal((await store.getPerpAccount(id, "paper"))?.paperCollateralMicro, 0n, "the engine's book keeps a READ zero, never NULL");
+
+    const child = wrapSqlite(raw);
+    const shared = await ledgerDb();
+    await mirrorPaperCheckpoints(child, shared.db);
+    const cp = shared.raw.prepare("SELECT cash_usdg, perp_json FROM paper_checkpoints WHERE agent_id = ?").get(id) as { cash_usdg: number; perp_json: string } | undefined;
+    assert.ok(cp, "the agent's checkpoint row was mirrored — not skipped over its perp book");
+    assert.equal(paperPerpRejection(cp.perp_json), null);
+    const state = JSON.parse(cp.perp_json) as { collateral_micro: string; positions: { market_id: number; allocated_margin_micro: string; funding_hour_applied: number; stop_trigger: string }[] };
+    assert.equal(state.collateral_micro, "0");
+    assert.equal(state.positions.length, 1);
+    assert.equal(cp.cash_usdg, 92, "the margin left paper cash (8 USDG at 2x of 16)");
+
+    shared.raw.prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at) VALUES (?, 'o', 's', 4663, '{}', 0, 0)").run(id);
+    const fresh = await ledgerDb();
+    assert.match(await restorePaperCheckpoint(fresh.db, shared.db, id), /restored, with the paper perp book/);
+    const book = fresh.raw.prepare("SELECT cash_usdg FROM paper_book").get() as { cash_usdg: number };
+    assert.equal(book.cash_usdg, 92, "cash as it stood with the position open — not the pre-open 100");
+    const pos = fresh.raw.prepare("SELECT side, base, allocated_margin_micro, funding_hour_applied, stop_trigger, stop_price FROM perp_positions WHERE agent_id = ? AND mode = 'paper'").all(id.toLowerCase());
+    assert.deepEqual(pos.map((p) => ({ ...p })), [
+      { side: "long", base: "20", allocated_margin_micro: String(8_000_000 - 192), funding_hour_applied: H, stop_trigger: "760000", stop_price: "744800" },
+    ]);
+    const acct = fresh.raw.prepare("SELECT paper_collateral_micro FROM perp_accounts WHERE agent_id = ? AND mode = 'paper'").get(id.toLowerCase()) as { paper_collateral_micro: string };
+    assert.equal(acct.paper_collateral_micro, "0");
   });
 
   it("refuses a perp book it could not write back whole", () => {

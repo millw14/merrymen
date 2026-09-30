@@ -306,6 +306,12 @@ export type PerpsView = {
     inTransitMicro: bigint;
   };
   positions: ReadonlyMap<PerpKey, PerpPositionView>;
+  /**
+   * The owner's allowed markets read this tick, PLUS every market a position
+   * is held in (read fresh) — a held market the owner un-ticked is here for
+   * its EXITS (its mark bounds the close, its candles drive the trend exit).
+   * Never a licence to open: every open path gates on `perpsMarkets` itself.
+   */
   markets: ReadonlyMap<PerpKey, PerpMarketView>;
   /** Markets with a signed order whose outcome is not final — no open there. */
   unresolved: ReadonlySet<PerpKey>;

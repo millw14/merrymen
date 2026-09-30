@@ -82,6 +82,8 @@ interface Venue {
   priceAge: number;
   bookAge: number;
   lastFunding: { pct: string; atMs: number } | null;
+  /** The feed's hourly funding history (`fundings1h`); null = not carried. */
+  fundings: { t: number; pct: string; direction: "long" | "short" }[] | null;
 }
 
 let clock = T_OPEN;
@@ -97,6 +99,7 @@ beforeEach(() => {
     priceAge: 1_000,
     bookAge: 1_000,
     lastFunding: null,
+    fundings: null,
   };
 });
 
@@ -119,6 +122,10 @@ function feed(): LighterFeedRead | null {
   if (venue.lastFunding) {
     m.lastFundingRatePctPerHour = venue.lastFunding.pct;
     m.lastFundingAt = venue.lastFunding.atMs;
+  }
+  if (venue.fundings) {
+    m.fundings1h = venue.fundings.map((f) => ({ t: f.t, rate: f.pct, direction: f.direction }));
+    m.fundingsObservedAt = clock - 30_000;
   }
   return parseLighterFeed({ v: 1, observedAt: clock - 500, markets: { "1": m } }, clock);
 }
@@ -449,6 +456,57 @@ describe("tick: funding, resting children and liquidation", () => {
     const journal = await store.readJournal(id, 1);
     assert.deepEqual(journal.map((j) => j.kind), ["perp-fill", "funding", "funding"]);
     assert.deepEqual(verifyChain(journal), []);
+  });
+
+  it("every hour the worker did not see is charged, in order, from the feed's hourly history — none is booked as zero (R3-PAPER-FUNDING-GAP)", async () => {
+    // Opened at H − 30 min; the worker next looks at H + 2 h + 60 s, when the
+    // last payment market_stats reports is H + 2 h. Hours H and H + 1 h were
+    // owed too.
+    const { id, ex } = await holding();
+    clock = (H + 7200) * 1000 + 60_000;
+    venue.lastFunding = { pct: "0.0012", atMs: (H + 7200) * 1000 + 40 };
+    const blind = await ex.tick!();
+    assert.deepEqual(blind.events, [], "the owed hour H is not in the feed: nothing after it is charged either");
+    const gap = blind.unread.find((x) => x.kind === "funding-gap");
+    assert.ok(gap, JSON.stringify(blind.unread));
+    assert.equal(gap.sinceHour, H, "the gap is named from the first hour owed");
+    assert.equal(position(id)?.funding_hour_applied, H - 3600, "the high-water (the open's own hour) never moves past an uncharged hour");
+    assert.equal(rows("SELECT 1 FROM perp_funding WHERE agent_id = ?", id.toLowerCase()).length, 0);
+    assert.deepEqual((await ex.tick!()).events, [], "and a second look still charges nothing past the gap");
+
+    // The feed's hourly history arrives (it is fetched at the hour + 90 s):
+    // every owed hour is charged, oldest first, one booking each.
+    venue.fundings = [H - 3600, H, H + 3600, H + 7200].map((t) => ({ t, pct: "0.0012", direction: "long" as const }));
+    const caught = await ex.tick!();
+    assert.deepEqual(caught.events.map((e) => `${e.id}:${e.paymentMicro}`), [
+      `paper:funding:1:${H}:-192`,
+      `paper:funding:1:${H + 3600}:-192`,
+      `paper:funding:1:${H + 7200}:-192`,
+    ]);
+    assert.equal(caught.unread.filter((x) => x.kind === "funding-gap").length, 0);
+    assert.equal(position(id)?.funding_hour_applied, H + 7200);
+    assert.equal(position(id)?.allocated_margin_micro, String(8_000_000 - 3 * 192));
+    assert.equal(rows("SELECT 1 FROM perp_funding WHERE agent_id = ?", id.toLowerCase()).length, 3, "the hour before the open (H − 1 h) is not the position's");
+    assert.deepEqual((await ex.tick!()).events, [], "and each hour exactly once");
+    assert.deepEqual(verifyChain(await store.readJournal(id, 1)), []);
+  });
+
+  it("a hole in the history stops the charge at the hole: the hours before it are charged, none after it", async () => {
+    const { id, ex } = await holding();
+    clock = (H + 7200) * 1000 + 60_000;
+    venue.lastFunding = { pct: "0.0012", atMs: (H + 7200) * 1000 + 40 };
+    venue.fundings = [H, H + 7200].map((t) => ({ t, pct: "0.0012", direction: "long" as const }));
+    const t = await ex.tick!();
+    assert.deepEqual(t.events.map((e) => e.id), [`paper:funding:1:${H}`]);
+    assert.equal(t.unread.find((x) => x.kind === "funding-gap")?.sinceHour, H + 3600);
+    assert.equal(position(id)?.funding_hour_applied, H);
+    // A payer the venue names outright is charged as named: shorts paying credits this long.
+    venue.fundings = [H, H + 3600, H + 7200].map((t) => ({ t, pct: "0.0012", direction: (t === H + 3600 ? "short" : "long") as "long" | "short" }));
+    const filled = await ex.tick!();
+    assert.deepEqual(filled.events.map((e) => `${e.id}:${e.outcome}:${e.paymentMicro}`), [
+      `paper:funding:1:${H + 3600}:received:192`,
+      `paper:funding:1:${H + 7200}:paid:-192`,
+    ]);
   });
 
   it("a booked funding hour replayed straight at the ledger is a duplicate that moves nothing", async () => {

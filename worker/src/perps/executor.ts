@@ -155,10 +155,29 @@ export interface PerpTickEvent {
   cashDeltaMicro: bigint;
 }
 
+/**
+ * A market the venue's clock could not run for, and which part:
+ *   mark         no fresh mark: no child fires, no liquidation is judged
+ *   book         a child the mark crossed waits for a book fresh enough to fill
+ *   funding      the market's funding could not be read this pass (the feed is
+ *                stale or carries no payment); the hours owed are charged, in
+ *                order, as soon as it reads — nothing is skipped meanwhile
+ *   funding-gap  an hour the position owes is not in the feed at all: every
+ *                hour before it was charged, none after it is (its funding is
+ *                UNREAD from `sinceHour` on), and the hour is not assumed zero
+ */
+export interface PerpTickUnread {
+  marketId: number;
+  kind: "mark" | "book" | "funding" | "funding-gap";
+  why: string;
+  /** funding-gap: the first hour (unix s) the position owes that the feed does not carry. */
+  sinceHour?: number;
+}
+
 export interface PerpTickResult {
   events: PerpTickEvent[];
   /** Markets the venue's clock could not be run for this pass, and why — a gap, never "nothing happened". */
-  unread: { marketId: number; why: string }[];
+  unread: PerpTickUnread[];
   /** The first booking that failed; every event after it waits for the next pass. */
   failed: { marketId: number; kind: string; error: string } | null;
 }
@@ -689,59 +708,126 @@ export function createPaperPerpExecutor(opts: {
       if (loaded.book.positions.size === 0) return result;
       const read = opts.feed();
 
-      // ── funding: the hour the feed says was last paid ───────────────────
+      // ── funding: EVERY settled hour the position has not been charged ───
+      //
+      // The venue charges every hour a position is held, whether or not this
+      // worker was looking. So the clock owes each hour in
+      // (fundingHourApplied, the latest hour the feed names] — not just the
+      // latest: charging only that one and moving the high-water past the
+      // rest booked every hour this worker slept through (a laptop overnight,
+      // a restart, an hour-long feed stall) as ZERO, a paper book kinder than
+      // the venue (rules 11 and 14; the review's R3-PAPER-FUNDING-GAP).
+      //
+      //   the rates   the feed's hourly history (`fundingHistory`: rate and
+      //               paying side, per hour) and the last payment
+      //               market_stats reports (`lastFunding`, which wins for its
+      //               own hour — the one the clock has always charged)
+      //   in order    one booking per hour, oldest first, each on the book the
+      //               one before it left; a failure stops the pass there
+      //   a gap       an owed hour neither carries is NOT skipped: every hour
+      //               before it is charged, the high-water stays under it, and
+      //               the market is `funding-gap` — unread, said to the owner
+      //               by the lane — so if a later feed carries the hour (the
+      //               history is fetched at hour + 90 s, after a restart
+      //               within a minute) it is charged then, in order
+      //   the index   the feed keeps no hourly index, so each replayed hour is
+      //               valued at the index read now — an approximation, and
+      //               the only price there is
       for (const [marketId, pos] of [...loaded.book.positions].sort((a, b) => a[0] - b[0])) {
         const m = read?.markets.get(marketId);
-        if (!m || !m.fresh || m.lastFunding === null) {
-          result.unread.push({ marketId, why: "funding unread" });
+        if (!m || !m.fresh) {
+          result.unread.push({ marketId, kind: "funding", why: "funding unread" });
           continue;
         }
-        const hour = hourOf(Math.floor(m.lastFunding.atMs / 1000));
-        if (pos.fundingHourApplied !== null && hour - pos.fundingHourApplied > 3600) {
-          // The feed carries only the LAST payment; hours between it and the
-          // last one charged are replayed from /fundings at restore, and are
-          // named here rather than assumed zero.
-          result.unread.push({ marketId, why: `funding for ${(hour - pos.fundingHourApplied) / 3600 - 1} earlier hour(s) is not in the feed` });
+        const rates = new Map<number, { ratePpm: number; direction: PerpSide | null }>();
+        for (const row of m.fundingHistory ?? []) rates.set(row.atSec, { ratePpm: row.ratePpm, direction: row.direction });
+        // market_stats' own last payment is SIGNED (+ longs pay): its payer is the sign's.
+        if (m.lastFunding !== null) rates.set(hourOf(Math.floor(m.lastFunding.atMs / 1000)), { ratePpm: m.lastFunding.ratePpm, direction: null });
+        let latest: number | null = null;
+        for (const h of rates.keys()) if (latest === null || h > latest) latest = h;
+        if (latest === null) {
+          result.unread.push({ marketId, kind: "funding", why: "funding unread" });
+          continue;
         }
-        const terms = paperFundingTerms({ index: m.index, ratePpm: m.lastFunding.ratePpm, spec: m.spec });
-        const step = applyPaperFunding({
-          book: loaded.book,
-          marketId,
-          fundingHour: hour,
-          valuePerBase: terms.valuePerBase,
-          valueDecimals: terms.valueDecimals,
-          direction: terms.direction,
-          creditReceiver: terms.creditReceiver,
-          ratePpm: m.lastFunding.ratePpm,
-          spec: m.spec,
-        });
-        if (step === null || step.funding === null) continue;
-        try {
-          const booked = await store.bookPaperPerp({
-            agentId,
-            epoch: epochNow(),
-            expect: [expectOf(marketId, step.before)],
-            funding: step.funding,
-            positions: [positionWrite(marketId, step.after, pos.imfBp)],
-            cashDeltaMicro: 0n,
-          });
-          result.events.push({
-            kind: "funding",
+        let first: number;
+        if (pos.fundingHourApplied !== null) {
+          first = pos.fundingHourApplied + 3600;
+        } else if (pos.openedAtSec > 0) {
+          // The first hour a position is held AT: the one after it opened.
+          first = hourOf(pos.openedAtSec) + 3600;
+        } else {
+          // No open time (a book restored without one): which hours it was
+          // held for is not known, so only the latest is charged, and the
+          // ones before it are said to be unknown rather than zero.
+          first = latest;
+          result.unread.push({ marketId, kind: "funding", why: "the position's open time is unknown, so funding before the latest hour is not charged" });
+        }
+        for (let hour = first; hour <= latest; hour += 3600) {
+          const rate = rates.get(hour);
+          // A NEGATIVE /fundings rate has a sign convention nobody has
+          // observed on this instance: unread, never guessed (feed-reader.ts
+          // usableFunding8h's rule). market_stats' signed rate is the
+          // documented one and paperFundingTerms reads it.
+          if (rate === undefined || (rate.direction !== null && rate.ratePpm < 0)) {
+            const owed = (latest - hour) / 3600 + 1;
+            result.unread.push({
+              marketId,
+              kind: "funding-gap",
+              sinceHour: hour,
+              why:
+                `funding for ${owed} hour(s) from ${new Date(hour * 1000).toISOString()} is not in the feed` +
+                (rate === undefined ? "" : " (a negative rate, whose convention is unread)") +
+                ` — charged up to the hour before, nothing after it until the feed carries it`,
+            });
+            break;
+          }
+          const terms =
+            rate.direction === null
+              ? paperFundingTerms({ index: m.index, ratePpm: rate.ratePpm, spec: m.spec })
+              : // /fundings names the payer outright: value = index × rate, paid by
+                // `direction`, credited to the other side (not a guess — the venue said who pays).
+                { ...paperFundingTerms({ index: m.index, ratePpm: rate.ratePpm, spec: m.spec }), direction: rate.direction, creditReceiver: true };
+          const step = applyPaperFunding({
+            book: loaded.book,
             marketId,
-            id: step.funding.fundingId,
-            outcome: step.funding.paymentMicro < 0n ? "paid" : "received",
-            booked,
-            realizedMicro: 0n,
-            feeMicro: 0n,
-            paymentMicro: step.funding.paymentMicro,
-            cashDeltaMicro: 0n,
+            fundingHour: hour,
+            valuePerBase: terms.valuePerBase,
+            valueDecimals: terms.valueDecimals,
+            direction: terms.direction,
+            creditReceiver: terms.creditReceiver,
+            ratePpm: rate.direction === "short" ? -rate.ratePpm : rate.ratePpm,
+            spec: m.spec,
           });
-          // A duplicate means another pass booked this hour first: the book
-          // this pass holds is stale for it, so read it again.
-          loaded = booked === "booked" ? { ...loaded, book: step.book } : await load();
-        } catch (e) {
-          result.failed = { marketId, kind: "funding", error: e instanceof Error ? e.message : String(e) };
-          return result;
+          if (step === null || step.funding === null) continue;
+          try {
+            const booked = await store.bookPaperPerp({
+              agentId,
+              epoch: epochNow(),
+              expect: [expectOf(marketId, step.before)],
+              funding: step.funding,
+              positions: [positionWrite(marketId, step.after, pos.imfBp)],
+              cashDeltaMicro: 0n,
+            });
+            result.events.push({
+              kind: "funding",
+              marketId,
+              id: step.funding.fundingId,
+              outcome: step.funding.paymentMicro < 0n ? "paid" : "received",
+              booked,
+              realizedMicro: 0n,
+              feeMicro: 0n,
+              paymentMicro: step.funding.paymentMicro,
+              cashDeltaMicro: 0n,
+            });
+            // A duplicate means another pass booked this hour first: the book
+            // this pass holds is stale for it, so read it again — and the
+            // position's high-water with it.
+            loaded = booked === "booked" ? { ...loaded, book: step.book } : await load();
+            if (booked !== "booked") break;
+          } catch (e) {
+            result.failed = { marketId, kind: "funding", error: e instanceof Error ? e.message : String(e) };
+            return result;
+          }
         }
       }
 
@@ -759,7 +845,7 @@ export function createPaperPerpExecutor(opts: {
         });
       }
       const dry = evaluatePaperTriggers({ book: loaded.book, markets, nowMs, seq: 0 });
-      for (const u of dry.unread) if (!result.unread.some((x) => x.marketId === u.marketId && x.why === u.why)) result.unread.push(u);
+      for (const u of dry.unread) if (!result.unread.some((x) => x.marketId === u.marketId && x.why === u.why)) result.unread.push({ ...u });
       if (dry.events.length === 0) return result;
       // One nonce for the pass, taken only when something fired: every event's
       // identity is `paper:<kind>:<market>:<nonce>`, unique for the life of the

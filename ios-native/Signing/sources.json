@@ -1,7 +1,7 @@
 {
-  "ios-native/Resources/FeedEngine.js": "3c4390d440586a08fd5442e569b9cc08c22aa3053d5f89016b53ccfd3854f728",
+  "ios-native/Resources/FeedEngine.js": "67f7de182f753093e0e0e996f810b23c1face1947472a52a073e1113e1d09cbb",
   "ios-native/Resources/WalletCryptography.js": "2acd222eb726c067fefe9b18aa9af7e98c138e2f1c518c951650dfd0393ee02c",
-  "ios-native/Resources/WalletEngine.js": "1f08f4f7d98c7a04ac5097a407dd85f3d94fd2d308ceebdc5e7d33432eed237f",
+  "ios-native/Resources/WalletEngine.js": "6c8cf9283dfb322ee8b943cc748a13881d52276b83655ceea439f90054dacf1f",
   "ios-native/Resources/WalletRuntime.js": "ab934c4b8ff5fb422e2276dc30cc0eaf7696a4a31dd9c2606533d6aca95dfdd3",
   "ios-native/Signing/build.mjs": "457a8884e0f46acf5319492fb3f6c6bbe0bd26db7bdd0ad7f0f6d00e95c3d8b2",
   "ios-native/Signing/crypto-platform.js": "508224e9cb61498f7680f0321d4f003b9135fb1032cb881b09c22fe8b8f1659d",
@@ -32,7 +32,7 @@
   "packages/core/src/mcp.ts": "a0a55ac47feee3095e801e62b1aa36afa9afcce7339153ad040d4851bfe36150",
   "packages/core/src/official-coins.ts": "f0ab6028a2507516cbc3a0e6dcdf5a682974a83db6c7ee7cb3597dbccf8118e3",
   "packages/core/src/onchain-forensics.ts": "4bf5d0d07c1d81d46b6ec6403ed305910f91ac34da4eabf46e93156650751751",
-  "packages/core/src/perps.ts": "6070f104d42660b221eb0e30cfa5faff92b0875969a802f743d9fb68ba712a2b",
+  "packages/core/src/perps.ts": "54d60cdd7546352d88c536ec5930fbcb298fe6c0bffb08efe92a56835482f9a3",
   "packages/core/src/portfolio-snapshot.ts": "3ce24324dc955e88d978ea57e9fb7bb50505432d0e2a950e0912e54c773c38a3",
   "packages/core/src/protocols.ts": "1f8bf8f161fa96a713477db8930b3bcc0cc91a87f8442b1421a64cf2aacb91f5",
   "packages/core/src/risk-level.ts": "e80e4d7352f6611d32501a04be63038e03b803de9eb117e8debbca8af6b18123",

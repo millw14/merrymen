@@ -7756,6 +7756,26 @@ export async function bookPaperPerp(b: PaperPerpBooking): Promise<"booked" | "du
         .run(r.status, r.venueStatus, agent, r.role, agent, r.marketId, ...(order ? [order.id] : []));
     }
 
+    // THE PAPER BOOK'S CROSS COLLATERAL IS A READ ZERO, NOT AN ABSENT ONE.
+    // This engine draws margin straight from paper cash (ΣM lives on the
+    // rows), so its C is 0 by construction — but the account row it books
+    // under was created by bumpNonceHighWater with the column NULL, and
+    // paper-checkpoint.ts reads NULL collateral beside open positions as a
+    // torn book and refuses the WHOLE checkpoint row: spot cash, shares and
+    // basis with it. A hosted redeploy then restored the checkpoint from
+    // before the open (the position gone, its margin back in cash) or, with
+    // none for the epoch, refused to start the agent (the review's
+    // R3-PAPER-CKPT-NULL-COLLATERAL). Seeded here, in the booking's own
+    // transaction, so no committed paper position exists without it; a value
+    // already there (a restored checkpoint's) is never overwritten, and a
+    // genuinely torn book still reads as one.
+    await db
+      .prepare(
+        `INSERT INTO perp_accounts (agent_id, mode, paper_collateral_micro) VALUES (?, 'paper', '0')
+         ON CONFLICT(agent_id, mode) DO UPDATE SET paper_collateral_micro = COALESCE(perp_accounts.paper_collateral_micro, '0')`,
+      )
+      .run(agent);
+
     for (const p of b.positions) await putPerpPosition(db, { ...p, agentId: b.agentId, mode: "paper", source: "paper" });
 
     if (cashDelta !== 0n) {

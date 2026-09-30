@@ -49,6 +49,7 @@ import {
   isolatedMarginMicro,
   leverageTarget,
   notionalMicro,
+  perpMarginFitsCap,
   perpMarketByKey,
   stopBeatsLiquidation,
   type PerpKey,
@@ -1053,7 +1054,9 @@ function checkPerpDeposit(intent: PerpMarginIntent, limits: AgentLimits, state: 
       detail: "the signed permission expires within a day; nothing new goes to Lighter before the stand-down.",
     };
   }
-  if (p.committedCollateralMicro + intent.amountUsdg > p.settings.maxCollateralMicro) {
+  // core perpMarginFitsCap: the same test the producers and depositToFund
+  // size against, so what they propose is what this admits.
+  if (!perpMarginFitsCap(p.committedCollateralMicro, intent.amountUsdg, p.settings.maxCollateralMicro)) {
     return {
       ok: false,
       rule: "perp-collateral-cap",
@@ -1384,8 +1387,11 @@ function checkPerpOpen(intent: PerpOrderIntent, limits: AgentLimits, state: Agen
   // cross collateral from what is committed, so the conservative reading is
   // that none of it is free. Stricter than C + ΣM + T ≤ cap by at most this
   // one margin — the direction that refuses.
+  // The producers size to core perpOpenMarginBudgetMicro, which is this very
+  // test solved for the margin (S3-COLLATERAL-SIZING-MISMATCH): one
+  // arithmetic, so an open sized to the view's room is an open this admits.
   const margin = isolatedMarginMicro(o.notionalUsdg, o.imfBp);
-  if (p.committedCollateralMicro + margin > p.settings.maxCollateralMicro) {
+  if (!perpMarginFitsCap(p.committedCollateralMicro, margin, p.settings.maxCollateralMicro)) {
     return {
       ok: false,
       rule: "perp-collateral-cap",

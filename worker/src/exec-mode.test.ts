@@ -329,16 +329,17 @@ function* everyPerpsInput(): Generator<[ExecMode, PerpsModeInputs]> {
   const tf = [false, true];
   for (const v of VERDICTS)
     for (const perpsEnabled of tf)
-      for (const perpsLiveEnabled of tf)
-        for (const ceiling of CEILINGS)
-          for (const granted of tf)
-            for (const venueReady of tf)
-              for (const entriesHalted of tf)
-                yield [v, { perpsEnabled, perpsLiveEnabled, ceiling, granted, venueReady, entriesHalted }];
+      for (const liveTradingEnabled of tf)
+        for (const perpsLiveEnabled of tf)
+          for (const ceiling of CEILINGS)
+            for (const granted of tf)
+              for (const venueReady of tf)
+                for (const entriesHalted of tf)
+                  yield [v, { perpsEnabled, liveTradingEnabled, perpsLiveEnabled, ceiling, granted, venueReady, entriesHalted }];
 }
 const rank = (m: PerpsMode) => (m.mode === "live" ? 2 : m.mode === "paper" ? 1 : 0);
 
-test("perpsModeOf: the table is total — 480 rows, each a known shape", () => {
+test("perpsModeOf: the table is total — 960 rows, each a known shape", () => {
   let n = 0;
   for (const [v, p] of everyPerpsInput()) {
     const m = perpsModeOf(v, p);
@@ -349,7 +350,7 @@ test("perpsModeOf: the table is total — 480 rows, each a known shape", () => {
       assert.ok(allowed.includes(m.rule), `${m.rule} is not a rule perpsModeOf may name`);
     }
   }
-  assert.equal(n, 480);
+  assert.equal(n, 960);
 });
 
 test("A LIVE ACCOUNT NEVER GETS PAPER PERPS, and a paper account never gets live ones", () => {
@@ -360,9 +361,9 @@ test("A LIVE ACCOUNT NEVER GETS PAPER PERPS, and a paper account never gets live
   }
 });
 
-test("live needs every term at once: the account live, both consents, the operator, the grant and the venue", () => {
+test("live needs every term at once: the account live, every consent, the operator, the grant and the venue", () => {
   for (const [v, p] of everyPerpsInput()) {
-    const all = v.mode === "live" && p.perpsEnabled && p.perpsLiveEnabled && p.ceiling === "live" && p.granted && p.venueReady;
+    const all = v.mode === "live" && p.perpsEnabled && p.liveTradingEnabled && p.perpsLiveEnabled && p.ceiling === "live" && p.granted && p.venueReady;
     assert.equal(perpsModeOf(v, p).mode === "live", all, JSON.stringify({ v, p }));
   }
 });
@@ -390,11 +391,12 @@ test("halting entries is NOT a rail: exits and protection keep the key; checkPol
 });
 
 test("each refusal names its own reason, consent before faults", () => {
-  const on: PerpsModeInputs = { perpsEnabled: true, perpsLiveEnabled: true, ceiling: "live", granted: true, venueReady: true, entriesHalted: false };
+  const on: PerpsModeInputs = { perpsEnabled: true, liveTradingEnabled: true, perpsLiveEnabled: true, ceiling: "live", granted: true, venueReady: true, entriesHalted: false };
   const live: ExecMode = { mode: "live" };
   assert.deepEqual(perpsModeOf(live, on), { mode: "live" });
   assert.deepEqual(perpsModeOf(live, { ...on, perpsEnabled: false }), { mode: "off" });
   assert.deepEqual(perpsModeOf(live, { ...on, perpsLiveEnabled: false }), { mode: "refuse", rule: "perp-live-not-enabled" });
+  assert.deepEqual(perpsModeOf(live, { ...on, liveTradingEnabled: false }), { mode: "refuse", rule: "perp-live-not-enabled" });
   // Consent first: an owner who has not asked for real perps is not sent to
   // fix a grant or a venue they are not using.
   assert.deepEqual(perpsModeOf(live, { ...on, perpsLiveEnabled: false, granted: false, venueReady: false }), {
@@ -407,11 +409,34 @@ test("each refusal names its own reason, consent before faults", () => {
   assert.deepEqual(perpsModeOf(live, { ...on, venueReady: false }), { mode: "refuse", rule: "perp-venue-unready" });
   // A paper account practises whatever the live terms say, under any ceiling but off.
   const paper: ExecMode = { mode: "paper", rule: "live-not-enabled" };
-  assert.deepEqual(perpsModeOf(paper, { ...on, perpsLiveEnabled: false, granted: false, venueReady: false }), { mode: "paper" });
+  assert.deepEqual(perpsModeOf(paper, { ...on, liveTradingEnabled: false, perpsLiveEnabled: false, granted: false, venueReady: false }), { mode: "paper" });
   assert.deepEqual(perpsModeOf(paper, { ...on, ceiling: "paper" }), { mode: "paper" });
   assert.deepEqual(perpsModeOf(paper, { ...on, ceiling: "off" }), { mode: "refuse", rule: "perp-operator-off" });
   // A refused account's own reason is the reason — perps are not the problem.
   assert.deepEqual(perpsModeOf({ mode: "refuse", rule: "not-armed" }, on), { mode: "refuse", rule: "not-armed" });
+});
+
+test("THE CONSENT STAND-DOWN NEVER CONSENTS TO LEVERAGE: live rail off + enforceLiveIntent=false → the account is live, its perps are refused (amendment 8a(g), test 3)", () => {
+  // The migration window: the owner never turned the live rail on, and the
+  // stand-down keeps the account's SPOT trading exactly as it was — live.
+  const standDown: ExecInputs = { ...base, liveTradingEnabled: false, enforceLiveIntent: false };
+  const verdict = execModeOf(standDown);
+  assert.deepEqual(verdict, { mode: "live" }, "the stand-down restores the old spot behaviour");
+  // A perps-live consent on file does not make that an owner who asked for
+  // real-money leverage: liveTradingEnabled is read raw, never consented().
+  const perps: PerpsModeInputs = {
+    perpsEnabled: true,
+    liveTradingEnabled: standDown.liveTradingEnabled,
+    perpsLiveEnabled: true,
+    ceiling: "live",
+    granted: true,
+    venueReady: true,
+    entriesHalted: false,
+  };
+  assert.deepEqual(perpsModeOf(verdict, perps), { mode: "refuse", rule: "perp-live-not-enabled" });
+  // Only the owner's own switch opens it.
+  const consentedOwner = execModeOf({ ...standDown, liveTradingEnabled: true });
+  assert.deepEqual(perpsModeOf(consentedOwner, { ...perps, liveTradingEnabled: true }), { mode: "live" });
 });
 
 test("perpsExposureKeepsExitsLive: exits follow the VENUE, and unknown is never none (rules 8a, 11)", () => {

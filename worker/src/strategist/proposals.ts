@@ -9,7 +9,14 @@
  * touch money; only validated structure does.
  */
 
-import { baseForNotional, isPerpKey, isolatedMarginMicro, type PerpKey } from "../../../packages/core/src/perps";
+import {
+  baseForNotional,
+  isPerpKey,
+  isolatedMarginMicro,
+  perpCollateralAfterOpen,
+  perpOpenMarginBudgetMicro,
+  type PerpKey,
+} from "../../../packages/core/src/perps";
 import { buildExitDraft, buildOpenDraft, clampReduce, type PerpIntentDraft } from "../perps/drafts";
 import type { TradeIntent } from "../policy";
 import type { ResolvedConfig } from "../settings";
@@ -615,7 +622,11 @@ export function proposalsToPerpIntents(
   const touched = new Set<string>();
   let opens = 0;
   let openNotionalLeft = view.headroom.openNotionalLeftMicro;
-  let collateralLeft = view.account.freeCollateralMicro + view.headroom.collateralLeftMicro;
+  // THE COLLATERAL CAP AS POLICY JUDGES IT (core perpOpenMarginBudgetMicro):
+  // committed + margin ≤ cap, from money that is there — never free cash
+  // added to the room, which admitted opens checkPerpOpen then refused. Each
+  // accepted open spends from it as the policy will see it spent.
+  let collateral = { freeMicro: view.account.freeCollateralMicro, roomMicro: view.headroom.collateralLeftMicro };
   let spendLeft = caps.spendHeadroomMicro;
   const perTrade = [usdgMicroOf(settings.perpsPerTradeUsdg), caps.perTradeSealedMicro, caps.maxPerActionMicro, view.headroom.perTradeNotionalMicro].reduce((a, b) =>
     b < a ? b : a,
@@ -763,8 +774,9 @@ export function proposalsToPerpIntents(
       drop(p, "perp-order-malformed", `${key} carries no usable margin fraction`);
       continue;
     }
-    if (margin > collateralLeft) {
-      drop(p, "perp-collateral-cap", `its ${money(margin)} of margin is more than can be committed at Lighter`);
+    const marginBudget = perpOpenMarginBudgetMicro({ mode: view.mode, ...collateral });
+    if (margin > marginBudget) {
+      drop(p, "perp-collateral-cap", `its ${money(margin)} of margin is more than the ${money(marginBudget)} that can be committed at Lighter`);
       continue;
     }
     const built = buildOpenDraft({
@@ -786,7 +798,8 @@ export function proposalsToPerpIntents(
     touched.add(key);
     opens += 1;
     openNotionalLeft -= built.draft.notionalUsdg;
-    collateralLeft -= margin;
+    // `margin` is the asked size's, and the draft never exceeds the asked size (notionalCapMicro).
+    collateral = perpCollateralAfterOpen({ mode: view.mode, ...collateral, marginMicro: margin });
     if (spendLeft !== null) spendLeft -= built.draft.notionalUsdg;
     out.intents.push(built.draft);
     out.accepted.push(p);

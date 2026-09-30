@@ -83,6 +83,7 @@ import {
   type PerpPlaceResult,
   type PerpReview,
   type PerpTickEvent,
+  type PerpTickUnread,
 } from "./executor";
 import type { LighterFeedRead } from "./feed-reader";
 import {
@@ -140,6 +141,7 @@ export function entryCandleOf(atSec: number): number {
 export type PerpLaneConfig = Pick<
   ResolvedConfig,
   | "perpsEnabled"
+  | "liveTradingEnabled"
   | "perpsLiveEnabled"
   | "perpsDriver"
   | "perpsMarkets"
@@ -383,13 +385,13 @@ export interface PerpLane {
   deliverStrategist(intents: readonly PerpRouteIntent[]): void;
   /** One protective pass — the loop's `run`, and a test's. */
   protectPass(ctx: ProtectPassContext): Promise<void>;
-  /** Start the protective loop if the lane is (or may become) on; idempotent. */
+  /** Start the protective loop (once per process; idempotent). */
   startProtect(): void;
   stopProtect(): Promise<void>;
   readonly protecting: boolean;
-  /** A new arm: forget per-arm memory, announce the rail again, start protection when due. */
+  /** A new arm: forget per-arm memory, announce the rail again, and make sure the protective loop runs. */
   armed(): Promise<void>;
-  /** Settings changed (perpsKey moved): re-read, re-announce, start protection when due. */
+  /** Settings changed (perpsKey moved): re-read, re-announce, and make sure the protective loop runs. */
   configChanged(): Promise<void>;
   /** A paper reset: `reset` runs under the lock, then every in-memory perp fact is forgotten. */
   resetPaper<T>(reset: () => Promise<T>): Promise<T>;
@@ -423,6 +425,12 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
   let reportJson: string | null = null;
   let loop: ProtectLoop | null = null;
   let lastHeldMarkets: number[] = [];
+  /** Whether the last read found the lane on — so the moment it turns on is noticed (noteActive). */
+  let lastActive = false;
+  /** What the paper venue's clock could not run last pass, keyed per episode (noteTickUnread). */
+  let tickUnreadKeys = new Set<string>();
+  /** market_id → the first owed funding hour the feed does not carry: that position's funding is unread. */
+  let fundingGaps = new Map<number, number>();
 
   function forget(): void {
     lastRead = null;
@@ -435,6 +443,24 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     lastIdleKey = null;
     railKey = null;
     tickFailureKey = null;
+    lastActive = false;
+    tickUnreadKeys = new Set();
+    fundingGaps = new Map();
+  }
+
+  /**
+   * THE LANE TURNING ON IS A REASON TO LOOK NOW. The loop idles at a pass a
+   * minute while the lane is off; when a read (the tick's, an intent's) finds
+   * it on — a practice book that has become the account's book again because
+   * execMode moved live → paper, or perps switched on — the next pass is run
+   * at once instead of up to a minute later, and the loop's cadence (15 s
+   * while anything is held) follows from that pass's own read. It only moves
+   * the loop's clock; the pass itself still runs under the lane lock, on the
+   * loop's own timer, never inside the read that noticed.
+   */
+  function noteActive(active: boolean): void {
+    if (active && !lastActive) loop?.kick();
+    lastActive = active;
   }
 
   function agentNow(): PerpLaneAgent | null {
@@ -455,6 +481,10 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
   function railFor(a: PerpLaneAgent, cfg: PerpLaneConfig): PerpsMode {
     return perpsRailOf(deps.execMode(), {
       perpsEnabled: cfg.perpsEnabled,
+      // RAW, never the rail's consented(): the migration stand-down that keeps
+      // an unconsented account's spot trading live is not consent to leverage
+      // (exec-mode.ts perpsModeOf, amendment 8a(g)).
+      liveTradingEnabled: cfg.liveTradingEnabled,
       perpsLiveEnabled: cfg.perpsLiveEnabled,
       ceiling: perpsCeilingFor(cfg, a.smartAccount),
       granted: a.limits.perp !== undefined,
@@ -575,6 +605,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
         readAtMs: nowMs,
       };
       lastRead = r;
+      noteActive(false);
       await announceRail(r, a);
       return r;
     }
@@ -604,6 +635,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
         readAtMs: nowMs,
       };
       lastRead = r;
+      noteActive(true);
       return r;
     }
   }
@@ -638,10 +670,12 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
         readAtMs: nowMs,
       };
       lastRead = r;
+      noteActive(false);
       await announceRail(r, a);
       return r;
     }
     deps.onActive?.();
+    noteActive(true);
 
     const facts = await store.perpLaneLedgerFacts(a.agentId, "paper", nowSec - 86_400);
     const bookRow = await store.getPaperBook(a.agentId, cfg.paperStartUsdg);
@@ -715,7 +749,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     if (book === "unread" && !held) book = ZERO_BOOK;
     if (book !== "unread" && book !== undefined) lastKnownMicro = perpAccountUsdg(book);
     const policy = buildPerpPolicyState(input, view, rail);
-    const report = buildPerpsReport(input, view, { rail, protectAtMs });
+    const report = buildPerpsReport(input, view, { rail, protectAtMs, fundingUnreadMarkets: new Set(fundingGaps.keys()) });
     const r: PerpLaneRead = {
       active: true,
       bookMode,
@@ -1025,6 +1059,48 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     }
   }
 
+  /**
+   * WHAT THE PAPER VENUE'S CLOCK COULD NOT RUN, said — once per episode, not
+   * once a pass. It used to be discarded, so an owed funding hour the feed did
+   * not carry was invisible to the owner and the report alike (the review's
+   * R3-PAPER-FUNDING-GAP). A funding gap is the owner's to know (the
+   * practice book has stopped charging that position until the hour is in the
+   * feed) and makes that position's funding unread in `agents.perps`; a
+   * crossed stop waiting for a fresh book is the owner's to know too. A
+   * market with no fresh mark or funding this pass is a price outage, which
+   * P7 already alerts on at 2 and 10 minutes: logged, not announced.
+   */
+  async function noteTickUnread(unread: readonly PerpTickUnread[]): Promise<void> {
+    const seen = new Set<string>();
+    const gaps = new Map<number, number>();
+    for (const u of unread) {
+      const key = `${u.marketId}|${u.kind}|${u.sinceHour ?? ""}`;
+      seen.add(key);
+      if (u.kind === "funding-gap" && u.sinceHour !== undefined) gaps.set(u.marketId, u.sinceHour);
+      if (tickUnreadKeys.has(key)) continue;
+      const mk = perpMarketById(u.marketId)?.key ?? `market ${u.marketId}`;
+      let line: string | null = null;
+      if (u.kind === "funding-gap" && u.sinceHour !== undefined) {
+        const at = new Date(u.sinceHour * 1000).toISOString().replace(/:00\.000Z$/, " UTC").replace("T", " ");
+        line =
+          `perps (paper): ${mk}'s funding from ${at} could not be charged — the Lighter feed does not carry that hour. ` +
+          `Every hour before it was charged; nothing after it is until the feed carries it or the position closes, and ` +
+          `its funding shows as unread meanwhile rather than as zero.`;
+      } else if (u.kind === "book") {
+        line = `perps (paper): on ${mk}, ${u.why} — it is filled against the first fresh book, and the protective loop is watching the position.`;
+      }
+      log(`${mk} venue clock: ${u.kind} — ${u.why}`);
+      if (line === null) continue;
+      try {
+        await deps.events("warn", line);
+      } catch {
+        // said again next episode
+      }
+    }
+    tickUnreadKeys = seen;
+    fundingGaps = gaps;
+  }
+
   async function protectLocked(signal: AbortSignal): Promise<void> {
     const a = agentNow();
     if (a === null) return;
@@ -1055,7 +1131,11 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
         }
       }
       tickFailureKey = failKey;
-      if (t.events.some((e) => e.booked === "booked")) r = await refreshLocked();
+      const gapsBefore = [...fundingGaps].join();
+      await noteTickUnread(t.unread);
+      // Re-read after a booking — or when the funding that reads unread
+      // changed, so the report says it from this pass on.
+      if (t.events.some((e) => e.booked === "booked") || [...fundingGaps].join() !== gapsBefore) r = await refreshLocked();
     }
 
     // ── THE BACKSTOP ─────────────────────────────────────────────────────
@@ -1231,8 +1311,9 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       if (loop !== null) return;
       loop = startProtectLoop({
         // 15 s while anything is held or unread (protect.ts), 60 s with the
-        // lane off — the pass is then a ledger read that finds nothing, and
-        // runs only to notice the moment something is held again.
+        // lane off — the pass is then a ledger read that finds nothing (never
+        // a Lighter read: an inactive lane reads no feed), and runs so that
+        // the moment the lane turns on is noticed within a minute.
         intervalMs: () => (lastRead?.active ? protectCadenceMs(lastRead.view ?? null) : PROTECT_THRESHOLDS.idleIntervalMs),
         run: (ctx) => lane.protectPass(ctx),
         lock,
@@ -1249,16 +1330,26 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     },
     async armed() {
       forget();
+      // THE LOOP STARTS WITH THE FIRST ARM, WHATEVER THE LANE SAYS NOW, and
+      // before anything here can throw. It used to start only when the lane
+      // was active or perps on at that moment — but the lane can turn on
+      // later with no arm and no settings change to notice it: execMode
+      // flipping live → paper over a practice book still held (live and
+      // paper trading switches are in neither re-arm key; a cash or gas read
+      // of 0 moves the rail by itself). The paper venue's clock — its stops,
+      // take-profits, liquidation and funding — runs only inside the pass, so
+      // that book was valued and traded while nothing could fire its stop
+      // (the review's S3-02). An idle pass is one ledger read a minute.
+      lane.startProtect();
       // Not the tick's read: the route decides only on what a tick read.
       const r = await lock.run(refreshLocked, { label: "arm" });
-      if (r.active || deps.config().perpsEnabled) lane.startProtect();
       await writeReport(r);
     },
     async configChanged() {
       lastRefusalKey = null;
       lastIdleKey = null;
+      lane.startProtect();
       const r = await lock.run(refreshLocked, { label: "settings" });
-      if (r.active || deps.config().perpsEnabled) lane.startProtect();
       await writeReport(r);
     },
     async resetPaper<T>(reset: () => Promise<T>) {

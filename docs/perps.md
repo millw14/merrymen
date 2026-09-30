@@ -614,6 +614,13 @@ fingerprint, and `spec-coverage.test.ts`.
   the venue is not instantly available to spot strategies or to a kill.
 - A venue stop can be gapped through, and expires after at most 28 days; a
   worker down longer than that leaves a position without one.
+- Paper perps run only while the worker does. A paper stop, take-profit or
+  liquidation line the mark crossed and recovered from while the worker was
+  down is not replayed — the practice position survives where the venue would
+  have closed it. Missed paper funding is charged hour by hour from the feed's
+  hourly history (BTC, ETH and SOL, about the last 12 hours); an owed hour the
+  feed does not carry stops that position's funding there, and the owner is
+  told and shown it as unread rather than as zero.
 - Lighter's contracts are upgradeable with no effective notice.
 - Hosted children share an OS user, so a code-execution bug in any child could
   read another tenant's venue key; per-child isolation is a prerequisite for

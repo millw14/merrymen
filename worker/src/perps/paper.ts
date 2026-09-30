@@ -96,7 +96,14 @@
  * WHAT IS NOT MODELLED, said so it is not mistaken for modelled: the venue's
  * 300 ms taker latency (the paper IOC fills against the book as read); ADL of
  * profitable positions; the book a paper fill consumes (it is not depleted for
- * the next one); cross margin, which merrymen never uses.
+ * the next one); cross margin, which merrymen never uses; and THE TIME THE
+ * WORKER WAS NOT RUNNING. Stops, take-profits and liquidation are judged only
+ * on the mark a pass reads: a mark that crossed a stop or the liquidation
+ * line while nothing was running, and came back, leaves the paper position
+ * open where the venue would have closed it — there is no candle replay
+ * (docs/perps.md, "Honest limits"). Missed FUNDING is not in that list: every
+ * owed hour is charged from the feed's hourly history (executor.ts tick),
+ * and an hour the feed does not carry is unread, never zero.
  */
 
 import {
@@ -755,6 +762,19 @@ export interface PaperTriggerEvent {
   step: PaperStep;
 }
 
+/**
+ * A market the trigger pass could not judge, and which way: `mark` — no fresh
+ * mark, so nothing fires (the protective loop's P7 speaks for a price
+ * outage); `book` — a child the mark HAS crossed waits for a book fresh
+ * enough to fill it against (the owner is told: a stop that should have fired
+ * has not).
+ */
+export interface PaperTriggerUnread {
+  marketId: number;
+  kind: "mark" | "book";
+  why: string;
+}
+
 /** The identity of a paper venue event. */
 export function paperEventId(kind: string, marketId: number, seq: bigint | number): string {
   return `paper:${kind}:${marketId}:${seq}`;
@@ -873,17 +893,17 @@ export function evaluatePaperTriggers(args: {
   markets: ReadonlyMap<number, PaperMarketRead>;
   nowMs: number;
   seq: bigint | number;
-}): { book: PaperPerpBook; events: PaperTriggerEvent[]; unread: { marketId: number; why: string }[] } {
+}): { book: PaperPerpBook; events: PaperTriggerEvent[]; unread: PaperTriggerUnread[] } {
   let book = args.book;
   const events: PaperTriggerEvent[] = [];
-  const unread: { marketId: number; why: string }[] = [];
+  const unread: PaperTriggerUnread[] = [];
   const ids = [...book.positions.keys()].sort((a, b) => a - b);
   for (const marketId of ids) {
     let pos = book.positions.get(marketId);
     if (!pos) continue;
     const read = args.markets.get(marketId);
     if (!read || read.mark === null) {
-      unread.push({ marketId, why: "no fresh mark" });
+      unread.push({ marketId, kind: "mark", why: "no fresh mark" });
       continue;
     }
     const mark = read.mark;
@@ -891,7 +911,7 @@ export function evaluatePaperTriggers(args: {
     const takeHit = !stopHit && pos.take !== null && (pos.side === "long" ? mark >= pos.take.trigger : mark <= pos.take.trigger);
     if (stopHit || takeHit) {
       if (read.levels === null) {
-        unread.push({ marketId, why: `the ${stopHit ? "stop" : "take-profit"} fired into a book too old to fill against` });
+        unread.push({ marketId, kind: "book", why: `the ${stopHit ? "stop" : "take-profit"} fired into a book too old to fill against` });
       } else {
         const kind = stopHit ? "sl" : "tp";
         const child = (stopHit ? pos.stop : pos.take) as PaperTrigger;

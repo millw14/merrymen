@@ -39,7 +39,14 @@
  * PURE. The lane supplies the view, the settings and the brakes it measured.
  */
 
-import { isolatedMarginMicro, leverageFromImfBp, type PerpKey } from "../../../packages/core/src/perps";
+import {
+  PERP_MIN_DEPOSIT_MICRO,
+  isolatedMarginMicro,
+  leverageFromImfBp,
+  perpDepositForMarginMicro,
+  perpMarginFitsCap,
+  type PerpKey,
+} from "../../../packages/core/src/perps";
 import type { PerpsDriver } from "../../../packages/core/src/settings";
 import type { Why } from "../strategies/reasons";
 import type { PerpsView } from "../strategies/types";
@@ -219,11 +226,21 @@ export function runPerpRoute(input: PerpRouteInput): PerpRouteResult {
  *   need    = isolated margin of the open's notional at its IMF, + 10%,
  *             less the free collateral already at the venue (rounded UP)
  *   refused when it exceeds any bound: the room left under
- *             perpsMaxCollateralUsdg, the sealed per-trade cap (the wall pins
- *             the deposit's amount to it), or the day's spend headroom (a
- *             deposit is spend, rule 6) — the open then waits, it is never
- *             shrunk here (sizing is the producer's)
+ *             perpsMaxCollateralUsdg FOR THE DEPOSIT AND THE OPEN TOGETHER,
+ *             the sealed per-trade cap (the wall pins the deposit's amount to
+ *             it), or the day's spend headroom (a deposit is spend, rule 6) —
+ *             the open then waits, it is never shrunk here (sizing is the
+ *             producer's, core perpOpenMarginBudgetMicro)
  *   raised  to Lighter's 1 USDG minimum deposit when smaller, if that fits
+ *
+ * WHY TOGETHER. A landed deposit is committed (C), and checkPerpOpen judges
+ * the open's margin as new commitment on top of it: committed + deposit +
+ * margin ≤ cap. A deposit checked against the room alone would pass, land,
+ * and then be the very thing that refuses the open it was posted to fund —
+ * and every retry after it would find enough free collateral, post nothing,
+ * and be refused again, stranding the USDG at the venue (the review's
+ * S3-COLLATERAL-SIZING-MISMATCH). So nothing is deposited for an open the
+ * cap will not then admit.
  *
  * `{ amountMicro: 0n }` means the collateral already there covers it.
  */
@@ -238,13 +255,14 @@ export function depositToFund(
   } catch {
     return { ok: false, why: "the open's margin fraction is not a fraction" };
   }
-  const withBuffer = (margin * 110n + 99n) / 100n;
-  const free = view.account.freeCollateralMicro > 0n ? view.account.freeCollateralMicro : 0n;
-  if (withBuffer <= free) return { ok: true, amountMicro: 0n };
-  let amount = withBuffer - free;
-  const min = caps.minDepositMicro ?? 1_000_000n;
-  if (amount < min) amount = min;
-  if (amount > view.headroom.collateralLeftMicro) return { ok: false, why: "it would pass the most you allowed at Lighter" };
+  const amount = perpDepositForMarginMicro(margin, view.account.freeCollateralMicro, caps.minDepositMicro ?? PERP_MIN_DEPOSIT_MICRO);
+  // The room is cap − committed (view.ts headroom), so committed + deposit +
+  // margin ≤ cap is deposit + margin ≤ room — checkPerpOpen's own test
+  // (core perpMarginFitsCap) with the deposit already landed.
+  if (!perpMarginFitsCap(amount, margin, view.headroom.collateralLeftMicro)) {
+    return { ok: false, why: "the deposit and the open's margin together would pass the most you allowed at Lighter" };
+  }
+  if (amount === 0n) return { ok: true, amountMicro: 0n };
   if (amount > caps.perTradeSealedMicro) return { ok: false, why: "it is over the signed per-trade cap" };
   if (caps.spendHeadroomMicro !== null && amount > caps.spendHeadroomMicro) return { ok: false, why: "it is over what is left of today's spending" };
   return { ok: true, amountMicro: amount };
