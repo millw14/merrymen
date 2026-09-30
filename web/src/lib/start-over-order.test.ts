@@ -79,16 +79,20 @@ describe("Start over", () => {
     // Drive the actual handler with its component dependencies replaced by
     // captures; no wallet keys, network or React rendering are needed.
     const code = ts.transpileModule(discard.getText(), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-    for (const outcome of ["refused", "offline", "removed"] as const) {
+    for (const outcome of ["refused", "offline", "removed", "replaced"] as const) {
       const steps: string[] = [];
       const errors: (string | null)[] = [];
+      let stored = { smartAccount: "0xoriginal", serialized: "original-signature" };
       const deps: Record<string, unknown> = {
         discarding: false,
         funding: null,
         grant: null,
+        loadGrant: () => stored,
         fetch: async () => {
           steps.push("request");
           if (outcome === "offline") throw new Error("offline");
+          // Same account, newly signed: account comparison alone is not enough.
+          if (outcome === "replaced") stored = { ...stored, serialized: "new-signature" };
           return new Response(JSON.stringify({ error: "The owner key could not be archived" }), { status: outcome === "refused" ? 409 : 200 });
         },
         clearGrant: () => steps.push("clear grant"),
@@ -105,7 +109,7 @@ describe("Start over", () => {
         assert.deepEqual(steps, ["request", "clear grant", "clear backup"]);
       } else {
         assert.deepEqual(steps, ["request"], "a failed kill must keep the wallet and backup intact");
-        assert.match(errors.at(-1) ?? "", outcome === "refused" ? /could not be archived/ : /could not confirm/);
+        assert.match(errors.at(-1) ?? "", outcome === "refused" ? /could not be archived/ : outcome === "replaced" ? /newer wallet and its backup were kept/ : /could not confirm/);
       }
     }
   });

@@ -1059,6 +1059,7 @@ export default function GrantPage() {
     // account is read, the grant removed as DELETE /api/grants removes it,
     // then the reset queued. keepalive, so closing the tab straight after
     // pressing this still delivers the kill.
+    const discardedGrant = loadGrant();
     setDiscarding(true);
     setError(null);
     try {
@@ -1073,6 +1074,13 @@ export default function GrantPage() {
       return;
     } finally {
       setDiscarding(false);
+    }
+    // Another tab or a wallet switch can save a newer grant while the server
+    // answers. This response is not permission to clear that wallet or backup.
+    const currentGrant = loadGrant();
+    if (currentGrant?.smartAccount !== discardedGrant?.smartAccount || currentGrant?.serialized !== discardedGrant?.serialized) {
+      setError("The saved wallet changed while the kill was pending. The newer wallet and its backup were kept; check its status before trying again.");
+      return;
     }
     clearGrant();
     setRenewed(false);
