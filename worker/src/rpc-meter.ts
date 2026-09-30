@@ -32,7 +32,9 @@ import {
   end,
   freshState,
   shouldPublish,
+  type GovernorState,
 } from "./rpc-governor";
+import { PRIMARY_BUDGET_MS, endpointKey, failoverEndpoints, holdFor, verdictFor, type EndpointVerdict } from "./rpc-failover";
 
 interface MethodStat {
   calls: number;
@@ -160,7 +162,7 @@ const BATCH_WAIT_MS = 20;
  * alongside somebody else's read.
  */
 export function chainRead(url: string | undefined, label = "read"): Transport {
-  return metered(
+  const transport = metered(
     http(url, {
       /**
        * ── THE GOVERNOR SITS HERE, BELOW THE BATCHING, NOT ABOVE IT ────────
@@ -284,37 +286,123 @@ export function chainRead(url: string | undefined, label = "read"): Transport {
     }),
     label,
   );
+  /**
+   * ── AND WHERE A READ MAY GO WHEN THE CONFIGURED ENDPOINT WILL NOT SERVE IT ──
+   *
+   * Registered here because this is the one place that knows which chain the
+   * client is for: viem hands the transport the client's `chain`, and the
+   * fallback is that chain's own default endpoint — never another chain's, and
+   * never a URL from configuration. See rpc-failover.ts.
+   */
+  return ((opts: Parameters<Transport>[0]) => {
+    const chainDefault = opts?.chain?.rpcUrls.default.http[0];
+    const configured = url || chainDefault;
+    if (configured) {
+      // MERRYMEN_RPC_FAILOVER=off keeps every read on the configured endpoint —
+      // the operator's escape hatch, and how a test models a chain that is
+      // unreachable everywhere rather than just at one URL. Read when the client
+      // is built, like the URL itself; children inherit it from the orchestrator.
+      const off = /^(0|off|false|no)$/i.test(process.env.MERRYMEN_RPC_FAILOVER?.trim() ?? "");
+      const next = off ? [configured] : failoverEndpoints(configured, chainDefault);
+      const prior = routes.get(configured);
+      // ONE URL, TWO CHAINS is a misconfiguration, and its fallback would be
+      // whichever chain registered last. Ambiguity gets no fallback at all —
+      // the configured endpoint alone, which is where this began.
+      routes.set(configured, prior && prior.join("\n") !== next.join("\n") ? [configured] : next);
+    }
+    return transport(opts);
+  }) as Transport;
 }
 
 /**
- * ONE HTTP REQUEST, GOVERNED.
+ * ONE HTTP REQUEST, GOVERNED — AND SENT WHERE IT WILL BE SERVED.
  *
- * The decisions are rpc-governor.ts (pure); the clock, the randomness and the
- * shared file are here. This is the fetch viem calls once per HTTP request —
- * after batching — so everything it counts is denominated in the endpoint's own
- * units rather than in logical calls.
+ * The decisions are rpc-governor.ts and rpc-failover.ts (pure); the clock, the
+ * randomness and the shared file are here. This is the fetch viem calls once
+ * per HTTP request — after batching — so everything it counts is denominated in
+ * the endpoint's own units rather than in logical calls.
  *
  * THE STATUS IS READ HERE RATHER THAN FROM A THROWN ERROR. At this point the
  * Response has not been through viem, so a 429 is unambiguous and its
  * Retry-After is readable. The response is then returned untouched and
  * `onFetchResponse` above raises it exactly as before — this observes, it does
  * not change what any caller sees.
+ *
+ * FAILOVER, 2026-09-30. The configured endpoint's monthly quota ran out on
+ * 2026-09-28 and every child was blind for days while the chain's own public
+ * endpoint served normally. So a request the configured endpoint will not
+ * serve — quota spent, key refused, rate-limited, 5xx, unreachable, too slow —
+ * is sent to the chain's public endpoint instead (rpc-failover.ts says which,
+ * and why only that one). Each endpoint has its own governor and its own shared
+ * breaker file, so one refusing never stops the fleet asking the other.
+ *
+ * A REQUEST IS SENT TO AN ENDPOINT AT MOST ONCE. Moving a refused request to a
+ * DIFFERENT endpoint is the point; sending it back into the one that refused
+ * is the amplifier this module was written to remove, and nothing here does.
+ * With one endpoint — no house RPC configured — this is exactly the governed
+ * fetch it replaced.
  */
 async function governedFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
-  await admit();
-  let refused = false;
-  let retryAfterMs: number | null = null;
-  try {
-    const res = await fetch(input as RequestInfo, init);
-    if (res.status === 429 || res.status === 503) {
-      refused = true;
-      retryAfterMs = retryAfterFrom(res.headers.get("retry-after"));
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  const route = routes.get(url) ?? [url];
+  for (let i = 0; i < route.length; i++) {
+    const ep = endpointFor(route[i]!);
+    const last = i === route.length - 1;
+    // THE LAST ENDPOINT IS NEVER SKIPPED. With nowhere else to go, asking is
+    // the only way to find out it has recovered — and it is what one endpoint
+    // alone always did.
+    if (!last && ep.downUntil > Date.now()) continue;
+    // A breaker that is open on an endpoint with somewhere else to go is a
+    // reason to go there, not a refusal. On the last one it declines, as before.
+    if (!(await admit(ep, !last))) continue;
+    let refused = false;
+    let retryAfterMs: number | null = null;
+    let verdict: EndpointVerdict = "answer";
+    let res: Response | null = null;
+    let failure: unknown = null;
+    try {
+      res = await fetch(ep.url, { ...init, signal: last ? init?.signal : budgeted(init?.signal) });
+      if (res.status === 429 || res.status === 503) {
+        refused = true;
+        retryAfterMs = retryAfterFrom(res.headers.get("retry-after"));
+      }
+      // The body is read for one fact, and only when the status says there is
+      // one to find. It never leaves this line: see rpc-failover's verdictFor.
+      if (!res.ok) verdict = verdictFor(res.status, await res.clone().text().then((t) => t.slice(0, 4096), () => ""));
+    } catch (e) {
+      failure = e;
+      verdict = "error";
+    } finally {
+      ep.state = end(ep.state, Date.now(), LIMITS, { refused, retryAfterMs }, Math.random());
+      if (refused) publishIfNew(ep);
     }
-    return res;
-  } finally {
-    state = end(state, Date.now(), LIMITS, { refused, retryAfterMs }, Math.random());
-    if (refused) publishIfNew();
+    if (res === null) {
+      // viem's own deadline passed: the request is over, wherever it would go.
+      if (last || init?.signal?.aborted) throw failure;
+      markDown(ep, i, "error", "unreachable or too slow");
+      continue;
+    }
+    if (verdict === "answer" || last) {
+      if (i > 0) failover.served += 1;
+      else if (verdict === "answer" && res.ok) markUp(ep);
+      return res;
+    }
+    // Refused, down or broken, with somewhere else to go: this request moves on.
+    if (holdFor(verdict) > 0) markDown(ep, i, verdict, verdict === "down" ? downReason(res.status) : `HTTP ${res.status}`);
   }
+  // Unreachable: the last endpoint always returns or throws.
+  throw new Error(`${DECLINED_MARKER}: not sent — no endpoint to send it to`);
+}
+
+/** The configured endpoint's share of viem's deadline, when there is a fallback to hand the rest to. */
+function budgeted(signal: AbortSignal | null | undefined): AbortSignal {
+  const own = AbortSignal.timeout(PRIMARY_BUDGET_MS);
+  return signal ? AbortSignal.any([signal, own]) : own;
+}
+
+function downReason(status: number): string {
+  if (status === 401 || status === 402 || status === 403) return `the provider refused the key or the bill (HTTP ${status})`;
+  return "its quota for the period is spent";
 }
 
 /** `Retry-After` as milliseconds: seconds, or an HTTP date. Null when absent or unusable. */
@@ -327,47 +415,110 @@ function retryAfterFrom(v: string | null): number | null {
   return null;
 }
 
-let state = freshState(Date.now());
-const LIMITS = DEFAULT_LIMITS;
-/** Last shared value read, and when — the file is polled, not watched. */
-let sharedSeen: { until: number | null; at: number } = { until: null, at: 0 };
-/** How stale a read of the shared file may be. A breaker measured in seconds does not need better. */
-const SHARED_POLL_MS = 250;
-
-function shared(now: number): number | null {
-  if (now - sharedSeen.at < SHARED_POLL_MS) return sharedSeen.until;
-  sharedSeen = { until: readCooldown(merrymenHome()), at: now };
-  return sharedSeen.until;
+/** One endpoint a read may go to, and everything this process knows about it. */
+interface Endpoint {
+  url: string;
+  /** rpc-failover's `endpointKey`: the only name for it that is ever written down. */
+  key: string;
+  state: GovernorState;
+  /** Last shared value read, and when — the file is polled, not watched. */
+  sharedSeen: { until: number | null; at: number };
+  /** Skipped, while another endpoint can serve, until then. */
+  downUntil: number;
+  /** When it went down, while it is still down — so a long outage is reported once, not every probe. */
+  downSince: number | null;
+  /** Why, in words safe to log. */
+  downWhy: string | null;
 }
 
-function publishIfNew(): void {
-  const s = shared(Date.now());
-  if (!shouldPublish(state, s)) return;
-  publishCooldown(merrymenHome(), state.coolUntil, process.env.MERRYMEN_HOME ?? "worker");
-  sharedSeen = { until: state.coolUntil, at: Date.now() };
+const LIMITS = DEFAULT_LIMITS;
+/** How stale a read of the shared file may be. A breaker measured in seconds does not need better. */
+const SHARED_POLL_MS = 250;
+const endpoints = new Map<string, Endpoint>();
+/**
+ * The URL a client was built with → every endpoint its reads may use, in order.
+ * Filled by `chainRead`, which is the only place that knows the client's chain.
+ */
+const routes = new Map<string, string[]>();
+/** HTTP requests a fallback served since the last summary. */
+const failover = { served: 0, since: Date.now() };
+
+function endpointFor(url: string): Endpoint {
+  let ep = endpoints.get(url);
+  if (!ep) {
+    ep = { url, key: endpointKey(url), state: freshState(Date.now()), sharedSeen: { until: null, at: 0 }, downUntil: 0, downSince: null, downWhy: null };
+    endpoints.set(url, ep);
+  }
+  return ep;
 }
 
 /**
- * Hold, or refuse, until this request may go.
+ * Take this endpoint out of rotation for a while, and say so ONCE per outage.
+ *
+ * Never the URL — it carries an API key — and never the provider's words.
+ * Position in the route is what an operator needs: the configured endpoint,
+ * or a fallback.
+ */
+function markDown(ep: Endpoint, position: number, verdict: EndpointVerdict, why: string): void {
+  const now = Date.now();
+  ep.downUntil = Math.max(ep.downUntil, now + holdFor(verdict));
+  ep.downWhy = why;
+  if (ep.downSince !== null) return;
+  ep.downSince = now;
+  const who = position === 0 ? "the configured read RPC" : `read fallback #${position}`;
+  console.warn(
+    `[rpc] ${who} is unavailable (${why}) — reading from the chain's public RPC instead; ` +
+      `asking it again in ${Math.round(holdFor(verdict) / 1000)}s`,
+  );
+}
+
+function markUp(ep: Endpoint): void {
+  if (ep.downSince === null) return;
+  const mins = Math.max(1, Math.round((Date.now() - ep.downSince) / 60_000));
+  ep.downSince = null;
+  ep.downWhy = null;
+  ep.downUntil = 0;
+  console.warn(`[rpc] the configured read RPC is answering again after ~${mins}m — reads are back on it`);
+}
+
+function shared(ep: Endpoint, now: number): number | null {
+  if (now - ep.sharedSeen.at < SHARED_POLL_MS) return ep.sharedSeen.until;
+  ep.sharedSeen = { until: readCooldown(merrymenHome(), ep.key), at: now };
+  return ep.sharedSeen.until;
+}
+
+function publishIfNew(ep: Endpoint): void {
+  const s = shared(ep, Date.now());
+  if (!shouldPublish(ep.state, s)) return;
+  publishCooldown(merrymenHome(), ep.state.coolUntil, process.env.MERRYMEN_HOME ?? "worker", ep.key);
+  ep.sharedSeen = { until: ep.state.coolUntil, at: Date.now() };
+}
+
+/**
+ * Hold, or refuse, until this request may go to this endpoint.
  *
  * A REFUSAL THROWS RATHER THAN QUEUEING, and the distinction is the fix. "You
  * are going too fast" is a wait; "the endpoint told us to stop" is not
  * something waiting fixes, and holding the request would only reassemble the
  * burst a moment later. The error is shaped so `classifyRpcError` files it as
- * rate-limited, because that is what it is — and every read path above already
+ * declined, because that is what it is — and every read path above already
  * turns a failed read into `unread`, which is the honest rendering: we did not
  * ask, so we do not know. It must never become a zero.
+ *
+ * `canSkip`: there is another endpoint to try. Then an open breaker answers
+ * false — go there — instead of declining the request outright.
  */
-async function admit(): Promise<void> {
+async function admit(ep: Endpoint, canSkip: boolean): Promise<boolean> {
   for (;;) {
     const now = Date.now();
-    state = adoptShared(state, shared(now), now, LIMITS);
-    const d = decide(state, now, LIMITS);
+    ep.state = adoptShared(ep.state, shared(ep, now), now, LIMITS);
+    const d = decide(ep.state, now, LIMITS);
     if (d.act === "send") {
-      state = begin(state, now, LIMITS);
-      return;
+      ep.state = begin(ep.state, now, LIMITS);
+      return true;
     }
     if (d.act === "refuse") {
+      if (canSkip) return false;
       // THE MARKER, NOT THE WORDS. This message used to say "Too Many
       // Requests", so `classifyRpcError` filed every request the breaker
       // declined as one the ENDPOINT had refused. The meter then reported 93%
@@ -375,7 +526,7 @@ async function admit(): Promise<void> {
       // was serving 50/s cleanly — a limiter blaming the upstream for its own
       // caution, which is untunable because every symptom points away from it.
       throw new Error(
-        `${DECLINED_MARKER}: not sent — the endpoint refused this process ${state.strikes} time(s) ` +
+        `${DECLINED_MARKER}: not sent — the endpoint refused this process ${ep.state.strikes} time(s) ` +
           `in a row, holding off ${d.ms}ms. Asking again now is what caused it.`,
       );
     }
@@ -385,13 +536,19 @@ async function admit(): Promise<void> {
 
 /** Test seam: forget the governor's state between cases. */
 export function resetGovernorForTest(): void {
-  state = freshState(Date.now());
-  sharedSeen = { until: null, at: 0 };
-  // AND THE FILE, because the shared cooldown outlives the process. Forgetting
-  // it here is what makes a test measure the transport rather than the previous
-  // case's warning to the rest of the fleet — and finding that out is how the
-  // cap in `adoptShared` came to exist.
+  // AND THE FILES, because the shared cooldown outlives the process. Forgetting
+  // them here is what makes a test measure the transport rather than the
+  // previous case's warning to the rest of the fleet — and finding that out is
+  // how the cap in `adoptShared` came to exist.
+  const urls = new Set<string>([...endpoints.keys(), ...[...routes.values()].flat()]);
+  for (const u of urls) clearCooldown(merrymenHome(), endpointKey(u));
   clearCooldown(merrymenHome());
+  endpoints.clear();
+  // Routes too: they are registered when a client is built, so a case builds
+  // its clients after this — and must not inherit a previous case's route.
+  routes.clear();
+  failover.served = 0;
+  failover.since = Date.now();
 }
 
 /** One line per meter: totals, peak concurrency, and the busiest methods. */
@@ -426,6 +583,18 @@ export function rpcSummaryLines(): string[] {
           : ""),
     );
   }
+  // FAILOVER IS NOT SILENT. Once the fallback answers, callers see successful
+  // reads and the quota line above never fires — so the fleet could run on the
+  // chain's public endpoint for a month with nobody knowing the house one had
+  // stopped. This line is how they find out, every window it is happening.
+  if (failover.served > 0) {
+    const secs = Math.max(1, Math.round((Date.now() - failover.since) / 1000));
+    const why = [...endpoints.values()].map((e) => e.downWhy).find((w): w is string => !!w);
+    out.push(
+      `[rpc:failover] ${failover.served} request(s) in ${secs}s served by the chain's public RPC` +
+        (why ? ` — the configured read RPC is unavailable: ${why}` : " — the configured read RPC refused or failed them"),
+    );
+  }
   return out;
 }
 
@@ -442,6 +611,8 @@ export function resetRpcMeters(): void {
     m.peakInFlight = m.inFlight;
     m.byMethod.clear();
   }
+  failover.served = 0;
+  failover.since = Date.now();
 }
 
 /** Test seam. */
