@@ -64,12 +64,13 @@ describe("the too-wide refusal carries its own remedy", () => {
       assert.match(src, /Review custom tokens/, `${name} must offer the action`);
       assert.match(src, /href="\/settings"/, `${name} must point somewhere reachable`);
     }
-    // The re-sign screen has TWO error panels and an owner can be sitting at
-    // either; a remedy on one of them is a remedy they may never see.
+    // Create/restore, desync recovery, and an active grant's renewal all have
+    // separate panels. The actual renewal click is rendered and tested in
+    // wallet-renewal.test.ts; merely counting the first two missed this bug.
     assert.equal(
       (wallet.match(/Review custom tokens/g) ?? []).length,
-      2,
-      "both grant panels must carry it",
+      3,
+      "all three grant panels must carry it",
     );
   });
 

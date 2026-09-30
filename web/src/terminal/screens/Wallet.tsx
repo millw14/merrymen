@@ -848,6 +848,7 @@ export default function GrantPage() {
    * sealed into the signed key, so the current `customTokens` are baked in here.
    */
   const [renewing, setRenewing] = useState(false);
+  const [renewed, setRenewed] = useState(false);
   const privyOwner = usePrivyOwner();
   /**
    * CAN THIS BROWSER RE-SIGN THIS AGENT, and by which owner.
@@ -874,6 +875,8 @@ export default function GrantPage() {
   async function renewKey() {
     if (!grant || !resignBy) return;
     setError(null);
+    setRenewed(false);
+    setStatus("checking your permission…");
     setRenewing(true);
     try {
       const priorTrencher = grantTrencher(grant);
@@ -965,10 +968,13 @@ export default function GrantPage() {
       // renewed key that the server refused doesn't read as a renewed agent.
       setServerArmed(handoff.ok);
       if (!handoff.ok) setError(handoff.error ?? "the server refused the renewed grant");
+      setRenewed(handoff.ok);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStatus(null);
+      setRenewing(false);
     }
-    setRenewing(false);
   }
 
   function confirmBackup() {
@@ -2191,6 +2197,26 @@ export default function GrantPage() {
                           : "move to the testnet & re-sign"
                         : "re-sign this key (free)"}
                   </button>
+                  {renewing && <p className="field-lead" role="status">{status ?? "re-signing…"}</p>}
+                  {/* A pre-signing refusal leaves this active grant intact, so
+                      neither the create nor desync error panel is visible. */}
+                  {error && (
+                    <div className="grant-error mono" role="alert">
+                      {error}
+                      {isWallTooWide(error) && (
+                        <p>
+                          Lower spending limits do not shrink the permission list. {" "}
+                          <a href="/settings">Review custom tokens</a> and follow the changes described above.
+                          If it is too large even without custom tokens, contact support with this error.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  {renewed && !renewing && !error && (
+                    <p className="field-lead" role="status">
+                      Permission renewed. Your agent will check the new key shortly.
+                    </p>
+                  )}
                 </>
               ) : (
                 <p className="field-lead" style={{ marginTop: 12 }}>
