@@ -2118,3 +2118,29 @@ describe("a group job that never finishes", () => {
     assert.ok(!logs.some((l) => /pinebot|you there|hi\b/.test(l.replace(/\[tg-groups\]/, ""))), "the log names stages, never what was said");
   });
 });
+
+describe("stepping past a stuck send lock keeps Telegram's pacing", () => {
+  it("a send that goes ahead of a lock holder still waits its own pacer slot", async () => {
+    // The holder's send is slow (real time), so the lock guard lets the next
+    // line go ahead of it. The pacer slot is taken before a send, not after
+    // it lands: the second send may not go out inside the first's 3 s gap.
+    const sentAt: number[] = [];
+    const slow: FetchLike = async (url, init) => {
+      if (url.endsWith("/sendMessage")) {
+        sentAt.push(clock);
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      return tg.fetchFn(url, init);
+    };
+    make({ stallMs: 40, opts: () => ({ token: TOKEN, fetchFn: slow }) });
+    approveRoom();
+    groups.onMessage(msg("@pinebot hi"));
+    await new Promise((r) => setTimeout(r, 10));
+    groups.onMessage(msg("@pinebot yo", { fromId: BOB, fromFirstName: "Bob" }));
+    for (let i = 0; i < 150 && tg.sends().length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(tg.sends().length, 2, JSON.stringify(logs));
+    assert.ok(logs.some((l) => /held the chat's lock past/.test(l)), "the second really went ahead of the lock");
+    const [a, b] = sentAt;
+    assert.ok(a !== undefined && b !== undefined && b - a >= 3_000, `sends ${a} and ${b} are inside one pacer gap`);
+  });
+});

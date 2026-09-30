@@ -729,7 +729,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     // later one. Past it this send goes ahead (the pacer still spaces sends).
     // Half a job's bound: a job may spend part of its own waiting here, and a
     // stuck send must free the lock before the job waiting on it is itself
-    // given up on.
+    // given up on. Stepping past a lock whose holder is only waiting out the
+    // flood pacer (a 429's retry_after, a full minute's window) is safe: the
+    // pacer hands out one slot at a time (waitTurn), so pacing holds.
     if ((await Promise.race([prev.then(() => "done" as const), after(stallMs / 2)])) === "late") {
       stats.lockStalled += 1;
       log(`[tg-groups] a group send held the chat's lock past ${Math.round(stallMs / 2 / SEC)}s; the next one goes ahead`);
@@ -873,9 +875,18 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const waitTurn = async (chatId: number): Promise<void> => {
     for (let i = 0; i < 8; i++) {
       const w = pacer.waitMs(chatId);
-      if (w <= 0) return;
+      if (w <= 0) break;
       await sleep(w);
     }
+    // THE SLOT IS TAKEN HERE, not after the send lands. Checking the pacer
+    // and taking its slot happen with no await between them, so two sends
+    // that both wake at a window's edge cannot both pass it — which matters
+    // now that the chat's lock can be stepped past (withLock): a successor
+    // that goes ahead of a send still waiting out a 429 or a full minute
+    // waits for its own slot here, it does not share the other's. A slot
+    // taken by a send that then fails or is dropped just spaces the next one
+    // out a little more.
+    pacer.noteSent(chatId);
   };
 
   /** Still worth sending? Null when it is, else why not. Re-read at every step, because every step can take seconds. */
@@ -959,7 +970,6 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           disablePreview: true,
         });
         if (r.ok) {
-          pacer.noteSent(chatId);
           if (isMsgId(o.replyTo)) landedOn.set(msgKey(o.chatId, o.replyTo), true);
           return r.messageId !== undefined ? { chatId, messageId: r.messageId } : { chatId };
         }
@@ -1033,7 +1043,6 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         }
         const r = await setMessageReaction(opts, chatId, messageId, emoji);
         if (r.ok) {
-          pacer.noteSent(chatId);
           landedOn.set(msgKey(chatId, messageId), true);
           return true;
         }
