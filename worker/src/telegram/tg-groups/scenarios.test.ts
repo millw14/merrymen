@@ -1221,7 +1221,7 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     const replyTo = { messageId: 42, fromId: BOB, fromIsBot: false, text: `$VRAX ${CA1}` };
     await said(msg("@pinebot wdyt about $OTHER", { replyTo }));
     assert.deepEqual(port.lookCalls, [], "an explicit different coin needs its own CA");
-    assert.deepEqual(port.nominations, []);
+    assert.equal(port.nominations.length, 0);
     await said(msg("@pinebot wdyt about $VRAX", { replyTo }));
     assert.deepEqual(port.lookCalls, [CA1], "the quote explicitly associates this ticker with its CA");
     assert.deepEqual(port.nominations.map((n) => n.address), [CA1]);

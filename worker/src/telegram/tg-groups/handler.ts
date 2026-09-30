@@ -1311,7 +1311,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       ...(o.mention?.name || o.trigger?.name ? { senderName: o.mention?.name || o.trigger?.name } : {}),
       ...(o.coinName ? { coinName: o.coinName } : {}),
       bornAtMs: born,
-      ...(stillWanted ? { stillWanted } : {}),
+      stillWanted,
       miss: (why) => {
         if (why === "model-null-and-no-template") unwritten = true;
         miss(why === "not-wanted" && poster && forgottenSince(chatId, poster.fromId, seenAt) ? "forgotten" : why);
@@ -1328,7 +1328,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         miss("stale");
         return false;
       }
-      return reactTo(chatId, replyTo, "👀", { ...(stillWanted ? { stillWanted } : {}), miss });
+      return reactTo(chatId, replyTo, "👀", { stillWanted, miss });
     }
     if (sent && poster && !forgottenSince(chatId, poster.fromId, seenAt)) {
       const now = clock();
