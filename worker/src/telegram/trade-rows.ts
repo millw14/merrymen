@@ -17,7 +17,7 @@
 import type { SQLInputValue } from "node:sqlite";
 import type { PublicClient } from "viem";
 
-import type { CustomToken } from "../../../packages/core/src/index";
+import { isEnergyReserveToken, type CustomToken } from "../../../packages/core/src/index";
 import { rejectRuleLabel } from "../thesis-policy";
 import {
   isRestartCopy,
@@ -98,8 +98,35 @@ export interface TradeViewOpts {
  */
 export const UNCONFIRMED = "unconfirmed";
 
+/** The trades.kind the worker records an energy purchase under. */
+export const ENERGY_BUY_KIND = "energy-buy";
+
+/**
+ * What an energy purchase is called wherever a trade is shown.
+ *
+ * NOT the token's own ticker and never "a coin I can't name": $MERRYMEN bought
+ * for energy is capacity, not a position — it is not valued, not sold by a
+ * strategy, and pickAcquiredLeg refuses it, so a row recovered after a restart
+ * has no other name to fall back on. Saying "energy" is also what stops an
+ * owner reading it as a trade they should expect a profit or a loss from.
+ */
+export const ENERGY_LABEL = "energy ($MERRYMEN)";
+
+/**
+ * Is this row an energy purchase? The worker's own kind, or — for an older
+ * or recovered row — a non-cash leg that is the energy reserve token.
+ */
+export function isEnergyRow(r: { kind: string; sell_token?: string | null; buy_token?: string | null }): boolean {
+  return r.kind === ENERGY_BUY_KIND || isEnergyReserveToken(nonCashLeg(r));
+}
+
+/** Asked for "merrymen", "$MERRYMEN" or "energy", the energy rows answer. */
+const ENERGY_WORDS = new Set(["merrymen", "$merrymen", "energy"]);
+
 const FILLED = new Set(["landed", "paper"]);
-const REFUSED = new Set(["rejected", "reverted"]);
+// 'dropped' is here as what the owner asks "refused" for: a trade that did not
+// happen. It was sent and never executed (a later op used its nonce).
+const REFUSED = new Set(["rejected", "reverted", "dropped"]);
 
 /** Read and label recent trades, newest first. Never throws; an unreadable ledger is []. */
 export async function loadTradeViews(db: LabelDb, agentId: string, o: TradeViewOpts = {}): Promise<TradeView[]> {
@@ -111,7 +138,7 @@ export async function loadTradeViews(db: LabelDb, agentId: string, o: TradeViewO
   const where = ["agent_id = ?", "created_at >= ?"];
   const args: SQLInputValue[] = [agentId, o.since ?? 0];
   if (o.filter === "filled") where.push("status IN ('landed','paper')");
-  else if (o.filter === "refused") where.push("status IN ('rejected','reverted')");
+  else if (o.filter === "refused") where.push("status IN ('rejected','reverted','dropped')");
   const tokenAddr = o.token?.trim().toLowerCase();
   if (tokenAddr && /^0x[0-9a-f]{40}$/.test(tokenAddr)) {
     // Leg-less rows stay candidates: a restart copy's coin is only in its receipt.
@@ -146,7 +173,13 @@ export async function loadTradeViews(db: LabelDb, agentId: string, o: TradeViewO
   const views: TradeView[] = await Promise.all((o.token || (o.client && head.some(isRestartCopy)) ? kept : head).map((r) => view(db, agentId, r, own, o)));
   const wanted = o.token?.trim().toLowerCase();
   const out = wanted
-    ? views.filter((v) => v.token === wanted || v.label.toLowerCase() === wanted || v.label.toLowerCase().startsWith(`${wanted} `))
+    ? views.filter(
+        (v) =>
+          v.token === wanted ||
+          v.label.toLowerCase() === wanted ||
+          v.label.toLowerCase().startsWith(`${wanted} `) ||
+          (v.label === ENERGY_LABEL && ENERGY_WORDS.has(wanted)),
+      )
     : views;
   // A restart copy's true time can put it before rows written earlier.
   return out.sort((a, b) => b.at - a.at || b.id - a.id).slice(0, limit);
@@ -174,7 +207,12 @@ async function view(db: LabelDb, agentId: string, r: RawRow, own: readonly strin
   }
   // An equity order names its stock in `target` — the one row shape where it does.
   const equityTicker = r.kind === "equity-order" && r.target && !/^0x/i.test(r.target) ? r.target.toUpperCase() : null;
-  const lbl = token
+  // AN ENERGY PURCHASE IS NAMED FOR WHAT IT IS, by kind or by its reserve leg
+  // (a restart copy's leg comes from its receipt, above). It is only ever
+  // bought, so a leg-less row of the worker's own kind is a buy.
+  const energy = r.kind === ENERGY_BUY_KIND || isEnergyReserveToken(token);
+  if (energy && side === null && r.kind === ENERGY_BUY_KIND) side = "buy";
+  const lbl = token && !energy
     ? o.client
       ? await tokenLabel(db, agentId, token, { customTokens: o.customTokens, own, client: o.client })
       : tokenLabelSync(db, agentId, token, { customTokens: o.customTokens, own })
@@ -184,16 +222,18 @@ async function view(db: LabelDb, agentId: string, r: RawRow, own: readonly strin
     side,
     kind: r.kind,
     token,
-    label: lbl
-      ? labelText(lbl)
-      : equityTicker
-        ? equityTicker
-        : r.kind === "vault-deposit" || r.kind === "vault-withdraw"
-          ? "your savings vault"
-          : r.kind === "transfer"
-            ? "a transfer out"
-            : "a coin I can't name",
-    trusted: equityTicker ? true : (lbl?.trusted ?? false),
+    label: energy
+      ? ENERGY_LABEL
+      : lbl
+        ? labelText(lbl)
+        : equityTicker
+          ? equityTicker
+          : r.kind === "vault-deposit" || r.kind === "vault-withdraw"
+            ? "your savings vault"
+            : r.kind === "transfer"
+              ? "a transfer out"
+              : "a coin I can't name",
+    trusted: energy || equityTicker ? true : (lbl?.trusted ?? false),
     usdg: Number.isFinite(usdg as number) ? usdg : null,
     realized: r.realized_pnl_usdg,
     status: r.status,
@@ -241,6 +281,12 @@ function verb(v: TradeView): string {
 export function tradeViewLine(v: TradeView, html: boolean): string {
   const e = html ? esc : (s: string) => s;
   const coin = e(v.label);
+  // DROPPED IS NOT A PURCHASE WAITING TO CONFIRM. Left to the line below it
+  // read "⏳ bought …" for an op that can never execute.
+  if (v.status === "dropped") {
+    const what = v.side ? `${v.side} of ${coin}` : `trade in ${coin}`;
+    return `↩️ dropped: ${what}, ${e(dollars(v.usdg))} — it never reached the chain, and nothing moved · ${when(v.at)}`;
+  }
   if (v.status === "rejected" || v.status === "reverted") {
     const what = v.side ? `${v.side} of ${coin}` : `trade in ${coin}`;
     const why = v.refusal ? ` — ${e(v.refusal)}` : "";

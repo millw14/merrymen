@@ -16,3 +16,5 @@ iPadScreenshots/
 build.log
 Screenshots/
 ReviewEvidence/
+build/
+Resources/Info.plist

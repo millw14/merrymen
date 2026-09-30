@@ -36,6 +36,9 @@ import { isCircleStrategyId } from "../strategy";
 import type { TierView } from "@/app/api/tier/route";
 import { loadTier } from "../tier";
 import { count } from "@/lib/format";
+import { ENERGY_NOTICE_PREFIX, type EnergyStatus } from "@merrymen/core";
+import { energyRemedies, energyView, workerSaysFull } from "../energy-view";
+import { EnergyNote } from "../EnergyNote";
 
 /** Sentence case for a badge label that is written lower-case by design. */
 const capitalise = (w: string) => (w ? w[0]!.toUpperCase() + w.slice(1) : w);
@@ -58,6 +61,9 @@ export function Agent({
   onSettings,
   liveBlocker,
   staleBlocker,
+  energy,
+  account,
+  chainId,
 }: {
   mine: LiveMine | null;
   tokens: LiveToken[];
@@ -101,6 +107,16 @@ export function Agent({
    * re-sign. One of them did, repeatedly, and reported the product as broken.
    */
   staleBlocker?: boolean;
+  /**
+   * THIS AGENT'S ENERGY, as its worker reported it (AgentStatus.energy).
+   * Null or absent is "not said yet" — the desk then says nothing about energy
+   * rather than guessing, and never renders an unread count as 0.
+   */
+  energy?: EnergyStatus | null;
+  /** The agent's account address in full (grant.smartAccount), for the energy remedy. */
+  account?: string | null;
+  /** The grant's chain: $MERRYMEN sent to the account only counts on Robinhood Chain. */
+  chainId?: number | null;
 }) {
   const ask = chat.draft;
   const setAsk = chat.setDraft;
@@ -196,6 +212,16 @@ export function Agent({
       />
     );
   /**
+   * THE WORKER'S WORD ON ENERGY, and what the desk makes of it (energy-view.ts).
+   *
+   * `workerSaysFull` also stands the Circle banner down. /api/tier caches a
+   * balance for ten minutes; the worker reads the same combined balance every
+   * tick. Right after a top-up the two disagree, and it is the worker — the
+   * process that actually runs or idles the strategy — that is current.
+   */
+  const energyNow = energyView(energy, Date.now() / 1000);
+  const remedies = energyRemedies(energy, chainId);
+  /**
    * Has this owner chosen a strategy their tier will not run?
    *
    * Both halves have to be known: an unread tier is not a locked one, so the
@@ -204,7 +230,20 @@ export function Agent({
    * change here.
    */
   const circleLocked =
-    isCircleStrategyId(mine.glance.id) && tier !== null && tier.why !== "sign-in" && !tier.bonusStrategies;
+    isCircleStrategyId(mine.glance.id) && tier !== null && tier.why !== "sign-in" && !tier.bonusStrategies &&
+    !workerSaysFull(energy);
+  /**
+   * THE SAME SENTENCE ONCE. The worker writes one dated warn event the first
+   * time a day's allowance runs out ("Energy spent for 27 Sep (UTC): …"), and
+   * that is the newest warn in the feed for the rest of the day. While the
+   * energy panel below is already saying it, the notice slot would only repeat
+   * it — so that one notice steps aside, and every other notice still shows.
+   */
+  const notice =
+    mine.notice &&
+    !(energyNow.kind !== "none" && energyNow.spent && mine.notice.message.startsWith(ENERGY_NOTICE_PREFIX))
+      ? mine.notice
+      : null;
   const positions = positionsOf(mine);
   const trades = mine.moves
     .filter((t) => t.action === "buy" || t.action === "sell")
@@ -770,22 +809,54 @@ export function Agent({
         {circleLocked && (
           <section className="desk-circle-locked" role="status">
             <strong>
-              {strategyName(mine.glance.id)} is a Merry Circle strategy — it isn&apos;t running.
+              {strategyName(mine.glance.id)} is a Merry Circle strategy — it opens nothing new right now.
             </strong>
+            {/* THE REMEDIES, NONE OF THEM "ADD FUNDS". This used to tell the
+                owner that money was not the fix, which stopped being true the
+                day an agent could turn USDG into its own $MERRYMEN — and a
+                funded owner told otherwise is exactly who needs to hear that it
+                can be. The count is the COMBINED one, the owner's wallet and this
+                account together, and an unread one is said to be unread: never
+                `?? 0`, which rendered "you hold 0" for a balance nobody read. */}
             <p>
               {tier?.why === "unreadable"
                 ? "We couldn't read your $MERRYMEN balance just now, so this may clear on its own. That's our read failing, not your wallet."
-                : `Your agent is armed and watching, but this strategy only runs while you hold ${count(
-                    tier?.needTokens ?? 100_000,
-                  )} $MERRYMEN — you hold ${count(
-                    tier?.tokens ?? 0,
-                  )}. Adding funds won't change it. Switch to Steady basket or Strategist, which run for everyone, or hold the token.`}
+                : `Your agent is armed and watching, but this strategy only opens new trades while your wallet and my account hold ${count(
+                    tier?.needTokens ?? null,
+                  )} $MERRYMEN between them — right now ${
+                    tier?.tokens == null ? "I couldn't read how many" : count(tier.tokens)
+                  }. Until then it leaves its basket as it is; positions in a class vault are still closed by their own exit rules. Switch to Steady basket or Strategist, which run for everyone, or top up: ${
+                    remedies.sendToAgent
+                      ? `send $MERRYMEN on Robinhood Chain to my account${
+                          remedies.usdg === "ready" ? ", or send USDG there and ask me to get my $MERRYMEN" : ""
+                        }`
+                      : "keep $MERRYMEN on Robinhood Chain in your own wallet"
+                  }.`}
             </p>
+            {tier?.why !== "unreadable" && remedies.sendToAgent && (
+              <button type="button" onClick={onDeposit}>
+                Show my account address →
+              </button>
+            )}
           </section>
         )}
-        {!blocked && !circleLocked && mine.notice && (
+        {/* ENERGY, BELOW THE HARDER STOP. A Circle block outranks it — one
+            number, the same 100,000, lifts both, and the banner above already
+            names the same remedies — so the two never stack. */}
+        {!circleLocked && (
+          <EnergyNote
+            view={energyNow}
+            remedies={remedies}
+            account={account ?? null}
+            estimateUsdg={energy?.estimateUsdg ?? null}
+            onDeposit={onDeposit}
+            onAsk={() => setAsk("Get your $MERRYMEN")}
+            onResign={onResign}
+          />
+        )}
+        {!blocked && !circleLocked && notice && (
           <section className="desk-notice" role="status">
-            <p>{mine.notice.message}</p>
+            <p>{notice.message}</p>
           </section>
         )}
         <Proposals onResign={onResign} />

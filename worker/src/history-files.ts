@@ -37,6 +37,7 @@ import { getAddress } from "viem";
 
 import { isEvidencedFlow } from "../../packages/core/src/index";
 import type { Db } from "./db";
+import { heldSql, isHeld } from "./held-marks";
 import { attributeBook, bookOf, type BookFlow, type BookKey, type CarriedTail } from "./period-pnl";
 import { isRestartCopy } from "./token-label";
 
@@ -365,15 +366,27 @@ export const ACCOUNT_POINTS_MAX = 5_000;
  * spellings can each hold the same log) and practice books take none. Trade
  * times exclude the reconciler's restart copies: a copy is stamped at the
  * restart, and would claim a trade happened across the downtime.
+ *
+ * MEASURED MARKS ONLY (held-marks.ts). A mark taken while flow inference was
+ * held can carry a deposit, a withdrawal or a purchase the flows table had not
+ * booked yet. As a carried point it is a value the running attribution never
+ * explains — a continuous step counts its booked flows, not its cash — so the
+ * owner's own money lands in "trading" for the chat's "how did I do", and a
+ * book's last carried point taken mid-hold would open the seam on it. Left
+ * out, a flow booked during the hold falls in the step to the next measured
+ * mark, or rides the tail into the seam when there is none before `until`.
+ * The column is probed: a shared ledger the migration has not reached held
+ * nothing.
  */
 export async function loadAccountFromShared(shared: Db, agentId: string, since: number, until: number): Promise<HistoryAccount | null> {
   const who = spellings(agentId);
   const e = (await shared.prepare("SELECT MAX(epoch) AS e FROM agents WHERE smart_account IN (?, ?, ?)").get(...who)) as { e: unknown } | undefined;
   const epoch = num(e?.e);
   if (epoch === null) return null;
+  const held = await heldSql(shared);
   const rows = (await shared
     .prepare(
-      `SELECT at, mode, equity_usdg, cash_usdg FROM equity
+      `SELECT at, mode, equity_usdg, cash_usdg, ${held.flag()} AS held FROM equity
         WHERE agent_id IN (?, ?, ?) AND epoch = ? AND at >= ? AND at < ?
         ORDER BY at DESC, id DESC LIMIT ?`,
     )
@@ -381,6 +394,7 @@ export async function loadAccountFromShared(shared: Db, agentId: string, since: 
   const complete = rows.length < ACCOUNT_MARKS_MAX;
   const marks: { at: number; book: BookKey; equity: number; cash: number }[] = [];
   for (const r of rows.reverse()) {
+    if (isHeld(r.held)) continue;
     const at = num(r.at);
     const equity = num(r.equity_usdg);
     const cash = num(r.cash_usdg);

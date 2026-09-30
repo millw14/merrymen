@@ -126,10 +126,16 @@ const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskA
  * a second, genuinely-intended order impossible: ask for the same thing again
  * next minute and it is a new id, as it should be.
  */
-function orderId(agent: string, o: { side: string; symbol: string; usdgAmount: number }, nowMs: number): string {
+function orderId(agent: string, o: { side: string; symbol: string; usdgAmount: number; purpose?: string }, nowMs: number): string {
   const bucket = Math.floor(nowMs / 60_000);
+  // THE ENERGY MARKER IS PART OF WHAT THE ORDER IS, so it is part of its id: a
+  // get-energy card and a plain buy card with the same numbers in the same
+  // minute are two different orders, and the second must not be answered
+  // "already queued" off the first. Appended only when present, so every other
+  // order keeps the id it always had.
+  const purpose = o.purpose ? `|${o.purpose}` : "";
   return createHash("sha256")
-    .update(`${agent.toLowerCase()}|${o.side}|${o.symbol}|${o.usdgAmount}|${bucket}`)
+    .update(`${agent.toLowerCase()}|${o.side}|${o.symbol}|${o.usdgAmount}|${bucket}${purpose}`)
     .digest("hex")
     .slice(0, 32);
 }

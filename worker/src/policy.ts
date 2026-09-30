@@ -137,6 +137,31 @@ export interface AgentLimits {
    * behaviour rather than silently widening.
    */
   cashToken?: string;
+  /**
+   * THE ENERGY BUY THIS GRANT SEALED, or absent.
+   *
+   * From the GRANT and nowhere else (grantEnergyRoute: the GRANT_ENERGY marker
+   * AND chain 4663), for the reason every mirrored address here is: the wall
+   * built the permission from that marker, so it is the only record of what
+   * the chain will honour.
+   *
+   * DELIBERATELY NOT IN allowedTargets. The router is a target only for the
+   * one selector the wall pinned — swapExactTokensForTokensSupportingFee-
+   * OnTransferTokens over the frozen USDG → VIRTUAL → $MERRYMEN path into the
+   * account itself. Listing it with the other targets would let any `swap`
+   * intent name it, and the swap builder would then route that intent through
+   * a v3 router it never quoted: a mirror looser than the chain. So a `swap`
+   * aimed at it stays `target-allowlist`, and only an `energy-buy` is judged
+   * against this.
+   *
+   * ABSENT means the signature cannot buy energy at all (`energy-not-granted`).
+   */
+  energy?: {
+    /** Uniswap v2 Router02 — the one address the wall pinned the energy swap on. */
+    router: string;
+    /** The reserve token the route ends at ($MERRYMEN). */
+    token: string;
+  };
   /** Drawdown (bps from high-water mark) at which the breaker pauses the agent. */
   maxDrawdownBps: number;
   /** Unix seconds after which the session key is dead regardless of anything. */
@@ -231,6 +256,42 @@ export type TradeIntent = {
   minAmountOutRaw: bigint;
   /** USDG-equivalent size (6dp) — what the caps judge. */
   notionalUsdg: bigint;
+} | {
+  /**
+   * USDG spent buying the agent's own ENERGY ($MERRYMEN) over the one route the
+   * grant sealed (core energy.ts ENERGY_ROUTE_V1), at the owner's request.
+   *
+   * ITS OWN KIND, NOT A `swap`, for three reasons that are about safety:
+   *
+   *   BUY-ONLY. The key can never sell $MERRYMEN — it has no approve for it
+   *   anywhere in the wall — so `no-exit` would refuse every one of these, and
+   *   carving an exemption into the swap branch (the most-travelled branch in
+   *   this file) is how a looser mirror gets written by accident.
+   *
+   *   NOT A POSITION. It is never watched, never valued into equity and never
+   *   sold by a strategy; `asset-allowlist` (the watch set) and the scout
+   *   budget (unpriceable POSITIONS) are about something it is not.
+   *
+   *   CAPITAL OUT. Accounting books it as capital leaving the trading book,
+   *   not a fill — and a `swap` would fall through to the v3, Rialto or
+   *   approve-only executor arms, none of which can build this call.
+   *
+   * A new kind also makes the compiler ask every consumer that reads a
+   * notional what this means to it, which is how curve-trade was added.
+   *
+   * `target` is the v2 router; the legs are USDG → $MERRYMEN (the VIRTUAL hop
+   * is fixed by the route, not chosen here). `notionalUsdg` must EQUAL
+   * `sellAmountRaw`: the input is USDG itself, so the two are the same number
+   * and a difference could only be an intent built wrong.
+   */
+  kind: "energy-buy";
+  target: `0x${string}`;
+  sellToken: `0x${string}`;
+  buyToken: `0x${string}`;
+  /** Raw USDG (6dp) the router pulls — exactly the approve. */
+  sellAmountRaw: bigint;
+  /** The same figure, as the caps read it. */
+  notionalUsdg: bigint;
 });
 
 export type Verdict =
@@ -283,6 +344,74 @@ export interface ScoutContext {
   quarantinedUsdg: bigint;
 }
 
+/**
+ * IS THIS INTENT MONEY COMING HOME? The drawdown breaker's exit test, lifted
+ * out of checkPolicy VERBATIM so the energy gate (worker/src/energy.ts,
+ * index.ts) asks the one question the breaker asks, rather than a second copy
+ * of it that could drift. checkPolicy still assigns its `isExit` from this,
+ * on the line where the predicate always sat, so the breaker's behaviour is
+ * unchanged by construction. The narrower `isUnsizedExit` above the caps
+ * stays inline: it answers a different question (does the CHAIN size this
+ * call), and exit-caps.test.ts pins it where it is.
+ */
+export function isExitIntent(
+  intent: TradeIntent,
+  limits: Pick<AgentLimits, "cashToken" | "quoteAssets">,
+): boolean {
+  const lc = (a: string) => a.toLowerCase();
+  // AN EXIT MUST ALWAYS BE ATTEMPTABLE.
+  //
+  // The breaker is a brake on taking RISK, not a lock on the doors. Applied to
+  // every kind, it rejected the sell that would clear the position, the vault
+  // withdrawal that would pull cash back, and the transfer that would send
+  // money home — while the high-water mark only ever ratchets up, so nothing
+  // the agent could do would clear it. The account was locked in a losing
+  // position until a human re-signed a looser grant or swept it with the owner
+  // key, and the perverse escape the code actually offered was to DEPOSIT MORE
+  // (which lifts the mark and shrinks the ratio).
+  //
+  // So the same shape `no-exit` already uses: judge the direction of travel by
+  // what is being BOUGHT. Money coming home is never blocked.
+  //   • vault-withdraw → cash returning from Morpho to the account
+  //   • transfer       → to a recipient the wall already pinned at signing
+  //   • swap into USDG → the de-risking sell itself
+  // Buys stay blocked, which is the entire point of the breaker.
+  return (
+    intent.kind === "vault-withdraw" ||
+    intent.kind === "transfer" ||
+    (intent.kind === "swap" &&
+      limits.cashToken !== undefined &&
+      lc(intent.buyToken) === lc(limits.cashToken)) ||
+    (intent.kind === "equity-order" && intent.side === "sell") ||
+    // A curve trade INTO cash is a de-risking exit, judged exactly as a swap
+    // into cash is. Leaving it out would have the breaker block the one
+    // direction it should never block — getting out of a memecoin — while a
+    // drawdown is in progress, which is precisely when it matters most.
+    // ANY curve trade out of the token and back into something the grant can
+    // sell is an exit, not just one into cash. 42.8% of curves are quoted in a
+    // stock token, so the cashToken-only test blocked the exit for nearly half
+    // the venue during a drawdown -- the exact lock-in the comment above says
+    // it prevents, for the positions most likely to be causing the drawdown.
+    // ANY curve trade back into the QUOTE side is an exit, not just one into
+    // cash. 42.8% of curves are quoted in a stock token, so a cashToken-only
+    // test blocked the exit for nearly half the venue during a drawdown --
+    // the exact lock-in the comment above says it prevents, for the positions
+    // most likely to be causing the drawdown.
+    //
+    // QUOTE SIDE, NOT sellableAssets. The wall pins BOTH legs ONE_OF the same
+    // sealed list, so `assetOut is sellable` is true of every curve trade ever
+    // built, including buys -- testing it would mark the whole venue exempt and
+    // switch the breaker off exactly where the risk is highest. The real
+    // discriminator is that sellableAssets = builtinGrantTargets u grantTokens
+    // (grant.ts:344): the launched memecoin arrives as an owner-added EXTRA,
+    // while USDG and the tradeable stock tokens are BUILT IN. So trading out
+    // into a builtin is an exit and trading out into an extra is an entry.
+    (intent.kind === "curve-trade" &&
+      ((limits.cashToken !== undefined && lc(intent.assetOut) === lc(limits.cashToken)) ||
+        (limits.quoteAssets !== undefined && limits.quoteAssets.map(lc).includes(lc(intent.assetOut)))))
+  );
+}
+
 export function checkPolicy(
   intent: TradeIntent,
   limits: AgentLimits,
@@ -295,8 +424,68 @@ export function checkPolicy(
 
   const lc = (a: string) => a.toLowerCase();
   // Equity orders have no contract target — their allowlist is tickers, below.
-  if (intent.kind !== "equity-order" && !limits.allowedTargets.map(lc).includes(lc(intent.target))) {
+  // An energy buy's one target is judged in its own branch against the route
+  // the grant sealed, which is deliberately NOT in allowedTargets (see
+  // AgentLimits.energy) — so a `swap` naming the v2 router still stops here.
+  if (
+    intent.kind !== "equity-order" &&
+    intent.kind !== "energy-buy" &&
+    !limits.allowedTargets.map(lc).includes(lc(intent.target))
+  ) {
     return { ok: false, rule: "target-allowlist", detail: `target ${intent.target} not allowed` };
+  }
+
+  // ── the energy buy ──────────────────────────────────────────────────────
+  //
+  // A MIRROR OF ONE PERMISSION, rule for rule. The wall seals the swap on the
+  // router, with the path pinned USDG → VIRTUAL → $MERRYMEN and the output
+  // pinned to the account, and funds it through the ONE capped USDG approve —
+  // so the questions here are: did the grant seal it at all, is this that
+  // router, are these those legs, and is the size a size. What it does NOT ask
+  // is stated as carefully, because each would make this mirror STRICTER than
+  // the chain:
+  //
+  //   asset-allowlist (the watch set) — $MERRYMEN is never watched, by design;
+  //   no-exit — the key can never sell it, by design (recover moves it);
+  //   scout — the budget on unpriceable POSITIONS, and this is not one.
+  //
+  // The caps below it (ops, per-trade, daily) and the drawdown breaker DO apply
+  // — it is a spend, and not an exit — exactly as they would to any buy.
+  if (intent.kind === "energy-buy") {
+    if (!limits.energy) {
+      return {
+        ok: false,
+        rule: "energy-not-granted",
+        detail:
+          "this signed key has no energy route — it was signed before the energy buy existed, off Robinhood Chain, " +
+          "or without room for it. Re-sign at /grant, or send $MERRYMEN to the account directly.",
+      };
+    }
+    if (lc(intent.target) !== lc(limits.energy.router)) {
+      return { ok: false, rule: "target-allowlist", detail: `target ${intent.target} is not the sealed energy router` };
+    }
+    if (
+      limits.cashToken === undefined ||
+      lc(intent.sellToken) !== lc(limits.cashToken) ||
+      lc(intent.buyToken) !== lc(limits.energy.token)
+    ) {
+      return {
+        ok: false,
+        rule: "asset-allowlist",
+        detail: `the energy route is USDG → $MERRYMEN only; ${intent.sellToken} → ${intent.buyToken} is not it`,
+      };
+    }
+    // POSITIVITY, and the one identity this kind has: its input IS USDG, so the
+    // notional the caps judge and the amount the router pulls are one number.
+    // A difference could only be an intent built wrong — and the caps would
+    // then be judging a figure the chain never sees.
+    if (intent.sellAmountRaw <= 0n || intent.notionalUsdg !== intent.sellAmountRaw) {
+      return {
+        ok: false,
+        rule: "non-positive",
+        detail: `energy buy sized ${intent.sellAmountRaw} raw / ${intent.notionalUsdg} USDG is not a trade`,
+      };
+    }
   }
 
   if (intent.kind === "equity-order") {
@@ -542,6 +731,8 @@ export function checkPolicy(
   // The two venues that ACQUIRE an asset. Named explicitly rather than relying
   // on `scout` being undefined elsewhere: a vault movement has no notional to
   // judge, and a future kind that does should have to opt in here on purpose.
+  // `energy-buy` has not, deliberately: $MERRYMEN is never a position, so a
+  // budget on unpriceable POSITIONS has nothing to say about it.
   if (scout?.buyUnpriceable && (intent.kind === "swap" || intent.kind === "curve-trade")) {
     const verdict = scoutAllows(
       {
@@ -652,8 +843,16 @@ export function checkPolicy(
   if (intent.kind !== "vault-withdraw") {
     // Equity orders count on BOTH sides, like swaps: a sell is still an op and
     // still market exposure, and on this rail these caps are the only wall.
+    //
+    // AN ENERGY BUY is judged against the per-trade cap because that IS its
+    // on-chain ceiling: the router pulls USDG through the one USDG approve,
+    // which the wall caps LESS_THAN_OR_EQUAL perTradeUsdg — so an amount
+    // exactly at the cap passes here as it passes there.
     const notional =
-      intent.kind === "swap" || intent.kind === "equity-order" || intent.kind === "curve-trade"
+      intent.kind === "swap" ||
+      intent.kind === "equity-order" ||
+      intent.kind === "curve-trade" ||
+      intent.kind === "energy-buy"
         ? intent.notionalUsdg
         : intent.amountUsdg;
     const isDeposit = intent.kind === "vault-deposit";
@@ -696,56 +895,10 @@ export function checkPolicy(
     }
   }
 
-  // AN EXIT MUST ALWAYS BE ATTEMPTABLE.
-  //
-  // The breaker is a brake on taking RISK, not a lock on the doors. Applied to
-  // every kind, it rejected the sell that would clear the position, the vault
-  // withdrawal that would pull cash back, and the transfer that would send
-  // money home — while the high-water mark only ever ratchets up, so nothing
-  // the agent could do would clear it. The account was locked in a losing
-  // position until a human re-signed a looser grant or swept it with the owner
-  // key, and the perverse escape the code actually offered was to DEPOSIT MORE
-  // (which lifts the mark and shrinks the ratio).
-  //
-  // So the same shape `no-exit` already uses: judge the direction of travel by
-  // what is being BOUGHT. Money coming home is never blocked.
-  //   • vault-withdraw → cash returning from Morpho to the account
-  //   • transfer       → to a recipient the wall already pinned at signing
-  //   • swap into USDG → the de-risking sell itself
-  // Buys stay blocked, which is the entire point of the breaker.
-  const isExit =
-    intent.kind === "vault-withdraw" ||
-    intent.kind === "transfer" ||
-    (intent.kind === "swap" &&
-      limits.cashToken !== undefined &&
-      lc(intent.buyToken) === lc(limits.cashToken)) ||
-    (intent.kind === "equity-order" && intent.side === "sell") ||
-    // A curve trade INTO cash is a de-risking exit, judged exactly as a swap
-    // into cash is. Leaving it out would have the breaker block the one
-    // direction it should never block — getting out of a memecoin — while a
-    // drawdown is in progress, which is precisely when it matters most.
-    // ANY curve trade out of the token and back into something the grant can
-    // sell is an exit, not just one into cash. 42.8% of curves are quoted in a
-    // stock token, so the cashToken-only test blocked the exit for nearly half
-    // the venue during a drawdown -- the exact lock-in the comment above says
-    // it prevents, for the positions most likely to be causing the drawdown.
-    // ANY curve trade back into the QUOTE side is an exit, not just one into
-    // cash. 42.8% of curves are quoted in a stock token, so a cashToken-only
-    // test blocked the exit for nearly half the venue during a drawdown --
-    // the exact lock-in the comment above says it prevents, for the positions
-    // most likely to be causing the drawdown.
-    //
-    // QUOTE SIDE, NOT sellableAssets. The wall pins BOTH legs ONE_OF the same
-    // sealed list, so `assetOut is sellable` is true of every curve trade ever
-    // built, including buys -- testing it would mark the whole venue exempt and
-    // switch the breaker off exactly where the risk is highest. The real
-    // discriminator is that sellableAssets = builtinGrantTargets u grantTokens
-    // (grant.ts:344): the launched memecoin arrives as an owner-added EXTRA,
-    // while USDG and the tradeable stock tokens are BUILT IN. So trading out
-    // into a builtin is an exit and trading out into an extra is an entry.
-    (intent.kind === "curve-trade" &&
-      ((limits.cashToken !== undefined && lc(intent.assetOut) === lc(limits.cashToken)) ||
-        (limits.quoteAssets !== undefined && limits.quoteAssets.map(lc).includes(lc(intent.assetOut)))));
+  // AN EXIT MUST ALWAYS BE ATTEMPTABLE — see isExitIntent above checkPolicy,
+  // where the predicate and its reasons now live so the energy gate asks the
+  // same question the breaker does.
+  const isExit = isExitIntent(intent, limits);
 
   if (!isExit && state.highWaterMarkUsdg > 0n && state.equityKnown !== false) {
     const drawdownBps = Number(

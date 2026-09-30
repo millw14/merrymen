@@ -33,6 +33,9 @@ const SERVER_READERS = [
   "../app/api/proposals/route.ts",
   "../app/api/alpha/route.ts",
   "../app/api/circle/route.ts",
+  // Reads the owner's wallet AND the agent's account in one multicall now
+  // (merrymen-standing.ts), over the transport it builds here.
+  "../app/api/tier/route.ts",
 ] as const;
 
 /** Modules that reach the chain from the VISITOR's browser, on the visitor's own IP. */

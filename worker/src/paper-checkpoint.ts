@@ -377,3 +377,97 @@ export async function restorePaperCheckpoint(child:Db, shared:Db, account:string
   });
   return `paper cash, holdings and basis restored${saidNormalized(normalized)}`;
 }
+
+/**
+ * What a reset of a blocked book came to: the epoch it opened, or why nothing
+ * was changed. `moved` marks the one refusal that asking again can undo: the
+ * epoch changed under the decision, and the next decision reads the new one.
+ */
+export type BlockedBookReset = { ok: true; epoch: number } | { ok: false; why: string; moved?: true };
+
+/**
+ * START A PRACTICE BOOK OVER WHEN NO WORKER CAN, from the shared ledger alone.
+ *
+ * A book restorePaperCheckpoint refuses holds its tenant (orchestrator.ts
+ * spawnHolder), and a held tenant has no worker, which is the only process
+ * that could run the owner's Practice reset (index.ts runPaperReset). So the
+ * reset the owner was told to press waited for a worker that could not start.
+ * This is the same reset, done where the book's durable copy lives.
+ *
+ * WHAT THE WORKER'S RESET LEAVES IN THE SHARED LEDGER, AND SO WHAT THIS DOES.
+ * runPaperReset clears the local paper_book, positions and the paper rows of
+ * cost_basis and position_floors (store.ts resetPaperLedger), and opens the
+ * next accounting epoch with no capital flow (a paper carry is refused by
+ * admitCapitalFlow). The mirror then carries it up: the epoch by its ratchet,
+ * and the three snapshots by delete-then-insert. So, in one transaction:
+ *
+ * - `agents.epoch` moves to an epoch nothing has been filed under. Every old
+ *   trade, mark, flow and the old checkpoint stay where they are and stop
+ *   counting, which is what the epoch is for. restorePaperCheckpoint then finds
+ *   no checkpoint and no valuation in the new epoch and answers "no durable
+ *   checkpoint", the worker seeds its book at its own starting stake, and its
+ *   first mirror pass writes the new epoch's checkpoint, which the checkpoint
+ *   upsert prefers to the old one (a higher epoch always wins).
+ * - `positions`, and the PAPER rows of `cost_basis` and `position_floors`, are
+ *   deleted. Not only for the dashboard, which would go on showing the old
+ *   holdings: the worker that comes next starts in a fresh home, and the
+ *   mirror never deletes a rebuilt worker's cost basis, nor its positions
+ *   while its book is empty (ledger-mirror.ts), so nothing else would. And
+ *   the restore's upgrade path builds a book from exactly these two tables:
+ *   left behind, one missed checkpoint in the new epoch would restore the old
+ *   book's shares beside the new book's cash. A live basis is another book
+ *   (the primary key has a mode) and is never touched.
+ *
+ * "NOTHING FILED UNDER" IS NOT ALWAYS epoch + 1. The mirror copies the append-
+ * only tables before the agents row, so a pass that failed between the two,
+ * followed by a redeploy, leaves rows a step ahead of `agents.epoch`. Reusing
+ * that epoch would hand the new book an old valuation and old fills, which is
+ * the failure being recovered from. So the new epoch is one past the highest
+ * any of this account's rows carries, and never less than one past the
+ * observed one.
+ *
+ * CONDITIONAL ON THE EPOCH THE CALLER DECIDED ON: `observedEpoch` must still be
+ * the account's, or nothing changes. Whatever moved it (a worker's own reset
+ * carried up by the mirror) has changed the book this decision was about.
+ *
+ * AND ONLY A PRACTICE BOOK, asked again here, inside the transaction, of the
+ * ledger itself: the newest valuation must be a paper one, and the agent must
+ * not last have reported the live rail. The caller asks the owner's stored
+ * settings as well (held-reset.ts). Neither check relies on the other, the same
+ * rule runOrderCommand states: on a live account this would hide real history
+ * from reporting without carrying its capital across, and delete the positions
+ * real P&L is read against.
+ */
+export async function resetBlockedPaperBook(shared: Db, account: string, observedEpoch: number): Promise<BlockedBookReset> {
+  await shared.exec(PAPER_CHECKPOINT_SCHEMA);
+  return shared.tx((db) => resetBlockedPaperBookIn(db, account, observedEpoch));
+}
+
+/**
+ * resetBlockedPaperBook inside a transaction the caller already holds, so the
+ * claim of the owner's command can commit with it (held-reset.ts). The caller
+ * has run PAPER_CHECKPOINT_SCHEMA: DDL does not belong inside the transaction.
+ */
+export async function resetBlockedPaperBookIn(db: Db, account: string, observedEpoch: number): Promise<BlockedBookReset> {
+  if (!Number.isSafeInteger(observedEpoch) || observedEpoch < 1) return { ok: false, why: `no usable epoch (${String(observedEpoch)})` };
+  const agent = await db.prepare(`SELECT epoch, mode FROM agents WHERE LOWER(smart_account)=LOWER(?)`).get(account) as { epoch: number; mode: string | null } | undefined;
+  if (!agent) return { ok: false, why: "the account has no agent row" };
+  if (Number(agent.epoch) !== observedEpoch) return { ok: false, why: `the epoch moved (${observedEpoch} → ${Number(agent.epoch)})`, moved: true };
+  if (agent.mode === "live") return { ok: false, why: "the agent last reported the live rail" };
+  const mark = await db.prepare(`SELECT mode FROM equity WHERE LOWER(agent_id)=LOWER(?) ORDER BY at DESC, id DESC LIMIT 1`).get(account) as { mode: string | null } | undefined;
+  if (mark?.mode !== "paper") return { ok: false, why: mark ? `the newest valuation is not a paper one (${String(mark.mode)})` : "there is no valuation to show the book is a paper one" };
+  const top = await db.prepare(`SELECT MAX(e) AS top FROM (
+      SELECT MAX(epoch) AS e FROM equity WHERE LOWER(agent_id)=LOWER(?)
+      UNION ALL SELECT MAX(epoch) AS e FROM trades WHERE LOWER(agent_id)=LOWER(?)
+      UNION ALL SELECT MAX(epoch) AS e FROM flows WHERE LOWER(agent_id)=LOWER(?)
+      UNION ALL SELECT MAX(epoch) AS e FROM paper_checkpoints WHERE LOWER(agent_id)=LOWER(?)
+    ) filed`).get(account, account, account, account) as { top: number | string | null } | undefined;
+  const filed = Number(top?.top ?? 0);
+  const epoch = Math.max(observedEpoch, Number.isFinite(filed) ? filed : 0) + 1;
+  const moved = await db.prepare(`UPDATE agents SET epoch=? WHERE LOWER(smart_account)=LOWER(?) AND epoch=?`).run(epoch, account, observedEpoch);
+  if (Number(moved.changes) === 0) return { ok: false, why: "the epoch moved", moved: true };
+  await db.prepare(`DELETE FROM positions WHERE LOWER(agent_id)=LOWER(?)`).run(account);
+  await db.prepare(`DELETE FROM cost_basis WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).run(account);
+  await db.prepare(`DELETE FROM position_floors WHERE LOWER(agent_id)=LOWER(?) AND mode='paper'`).run(account);
+  return { ok: true, epoch };
+}

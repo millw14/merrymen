@@ -27,6 +27,16 @@ export interface ReceiptLog {
   address: string;
   topics: readonly string[];
   data: string;
+  /**
+   * WHERE the log sits, when the source carried it. Optional because the fill
+   * readers never needed it and hand-built fixtures omit it; viem receipt logs
+   * always carry all three. The energy booking needs them: a capital flow is
+   * identified by tx#logIndex, and one that cannot be identified cannot be
+   * booked exactly once (energy-accounting.ts).
+   */
+  logIndex?: number | string | bigint | null;
+  blockNumber?: bigint | number | string | null;
+  transactionHash?: string | null;
 }
 
 /** A 32-byte topic carries an address in its low 20 bytes. */

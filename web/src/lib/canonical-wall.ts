@@ -20,6 +20,15 @@
  * riding beside a rule can differ without changing those bytes, and does not
  * matter; a recipient pin, a cap, a target or an extra permission does.
  *
+ * THE ENERGY BUY HAS A MARKER AND NO SEALED ADDRESS, on purpose. GRANT_ENERGY
+ * ("energy-buy-v1") names the frozen ENERGY_ROUTE_V1 forever, so the marker plus
+ * the account IS the permission: `grantWallOptions` turns it into
+ * `energyBuy: true` and the rebuild below reproduces the router permission and
+ * the router's place in the USDG approve byte for byte. A marker over a wall
+ * without it, or the permission without the marker, fails that comparison like
+ * any other disagreement. The one thing the rebuild cannot see is the CHAIN, so
+ * that is refused explicitly: the route exists only on Robinhood Chain mainnet.
+ *
  * WHAT THE CANONICAL WALL NEVER CARRIES, whatever the grant declares: a USDG
  * `transfer` (no signer registers a withdrawal address), the Rialto target and
  * the v4 Permit2/UniversalRouter pair (both hard-off in every signer). Their
@@ -43,7 +52,10 @@ import {
   GRANT_PONS_CLASS,
   GRANT_TRENCHER,
   GRANT_V4_ADAPTER,
+  GRANT_ENERGY,
+  ENERGY_ROUTE_V1,
   TRADEABLE_V2,
+  isEnergyReserveToken,
   type StoredGrant,
 } from "@merrymen/core";
 
@@ -58,6 +70,11 @@ const ZERO = "0x0000000000000000000000000000000000000000";
  * these and only these. `v4` is in neither list's reachable output — both pin
  * `allowUniswapV4 = false` — and `transfer`, `rialto` and `multihop` are no
  * longer minted by anything.
+ *
+ * GRANT_ENERGY is minted only on 4663 and only when the wall still fits
+ * (`energyBuyFits`), from the same boolean that built the permission. It is
+ * listed here in the SAME change that lets a signer mint it: a signer shipped
+ * ahead of this list would have every new hosted grant refused.
  */
 export const CANONICAL_GRANT_FEATURES: readonly string[] = [
   TRADEABLE_V2,
@@ -65,6 +82,7 @@ export const CANONICAL_GRANT_FEATURES: readonly string[] = [
   GRANT_PONS_ADAPTER,
   GRANT_PONS_CLASS,
   GRANT_TRENCHER,
+  GRANT_ENERGY,
 ];
 
 /** A sealed address field, and the marker that must travel with it. */
@@ -234,6 +252,31 @@ function verify(grant: Record<string, unknown>): void {
   if (tokens !== undefined && (!Array.isArray(tokens) || tokens.length > 50 || tokens.some((a) => typeof a !== "string" || !ADDRESS.test(a)))) {
     refuse(400, "invalid_grant", "Invalid granted token addresses");
   }
+  // $MERRYMEN SEALED AS A TRADED TOKEN IS A SIGNER FROM BEFORE ENERGY. Every
+  // current signer drops the reserve from the sealed extras (core wall.ts
+  // usableExtraTokens), so `grantTokens` never names it; an iOS build or a tab
+  // loaded before energy shipped still seals it, with an uncapped approve that
+  // lets the key SELL the owner's energy. The rebuild below would refuse that
+  // too — as "does not implement the advertised limits", which tells the owner
+  // nothing they can act on while their grant runs out. So it is refused FIRST,
+  // by name, with the way out. Refused rather than accepted: the energy
+  // permission's safety case is that nothing in the wall can spend the reserve.
+  //
+  // THE WAY OUT IS A FRESH CLIENT, AND ONLY THAT. GET /api/settings no longer
+  // serves the reserve as a custom token (energy-reserve.ts), so any client
+  // that reads it now seals a wall without it; what still reaches here is a tab
+  // loaded before the deploy or an app build from before energy. "Remove it
+  // from your custom tokens" sent that owner to a list no screen shows any
+  // more — reloading (or updating) is what works.
+  // No trailing period: POST /api/grants appends its own sentence.
+  if ((tokens as string[] | undefined)?.some((a) => isEnergyReserveToken(a))) {
+    refuse(
+      400,
+      "invalid_wall",
+      "This page or app version is out of date: it seals $MERRYMEN as a token your agent trades, but $MERRYMEN is " +
+        "now its energy, which the agent's key may only buy. Reload the page (or update the app) and sign again",
+    );
+  }
 
   // THE MARKERS ARE AN ALLOWLIST, NOT A DENYLIST. A marker the worker reads
   // and the rebuild below does not model is a route the mirror would open over
@@ -254,6 +297,15 @@ function verify(grant: Record<string, unknown>): void {
     if ((grant[field] !== undefined) !== (features as string[]).includes(marker)) {
       refuse(400, "invalid_grant", "Permission adapter metadata does not match its feature markers");
     }
+  }
+  // THE ENERGY ROUTE IS MAINNET ADDRESSES, and the rebuild below cannot tell
+  // which chain a grant is for. On any other chain the router is codeless, a
+  // CALL to it succeeds with empty returndata, and an energy buy would "land"
+  // having bought nothing. No signer mints it there (energyBuyFits) and the
+  // worker would not honour it (grantEnergyRoute) — refused here as well, so a
+  // hand-built grant cannot store a claim the chain could never back.
+  if ((features as string[]).includes(GRANT_ENERGY) && grant.chainId !== ENERGY_ROUTE_V1.chainId) {
+    refuse(400, "invalid_grant", "The energy buy exists only on Robinhood Chain mainnet");
   }
 
   // A hash signed by the owner authenticates the submitted bytes; it does not

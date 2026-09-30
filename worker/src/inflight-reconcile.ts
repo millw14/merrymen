@@ -38,6 +38,7 @@
  */
 import { decodeEventLog, parseAbi, type Hex } from "viem";
 import { backoffMs, classifyRpcError } from "./rpc-error";
+import { isEnergyReserveToken } from "../../packages/core/src/index";
 import { netTokenDeltas, type ReceiptLog } from "./fills";
 import { ENTRYPOINT } from "../../packages/core/src/index";
 
@@ -128,6 +129,13 @@ export interface OrphanOp {
  * One rule, two callers: the orphan sweep reading an op it has just found, and
  * the backfill reading a transaction the ledger recorded long ago. Two copies of
  * this judgement would be two answers about the same receipt.
+ *
+ * NEVER THE ENERGY RESERVE. An energy purchase is a clean USDG-for-one-token
+ * receipt and would otherwise read as a buy — but the reserve is not a
+ * position: it has no cost basis, no fill, and no stop. Booked here it would
+ * count the spend twice (once as the 'energy-buy' capital flow, once as a
+ * position purchase in every fill-derived reader) and hand a stop-loss a basis
+ * for a holding no strategy may ever sell.
  */
 export function pickAcquiredLeg(
   deltas: ReadonlyMap<string, bigint>,
@@ -139,6 +147,7 @@ export function pickAcquiredLeg(
   const others = [...deltas].filter(([t, v]) => t !== usdg && v !== 0n);
   if (others.length !== 1) return null;
   const [token, delta] = others[0]!;
+  if (isEnergyReserveToken(token)) return null;
   const qtyRaw = delta < 0n ? -delta : delta;
   if (qtyRaw <= 0n) return null;
   if (usdgDelta < 0n ? delta <= 0n : delta >= 0n) return null;
@@ -422,6 +431,21 @@ export interface ResolvedOp {
   /** |USDG leg|, 6dp. 0 when unattributable, and only meaningful on success. */
   notionalUsdg6: bigint;
   attributed: boolean;
+  /**
+   * THE ACCOUNT'S OWN USDG MOVEMENT in this op, signed (a buy or a transfer
+   * home is negative), read off the same receipt as the notional. 0n when the
+   * receipt was read and moved no USDG (stock↔stock), and on a revert — which
+   * moved nothing. NULL WHEN THE RECEIPT COULD NOT BE READ: `attributed: false`
+   * cannot say which of those two it was, and flow inference must never guess
+   * a landed op's movement at zero (flow-inference.ts, rule 2).
+   */
+  usdgDelta6: bigint | null;
+  /**
+   * The block the op's UserOperationEvent is in, when the log carried one —
+   * where an energy purchase LANDED, which the buy's balance-read pin needs
+   * (index.ts lastEnergyLandedBlock). Absent when the log did not say.
+   */
+  blockNumber?: bigint;
 }
 
 /**
@@ -482,6 +506,7 @@ export async function resolveSubmittedOps(opts: {
 
     let decoded: { success: boolean } | null = null;
     let txHash = "";
+    let blockNumber: bigint | undefined;
     for (const raw of logs.logs) {
       try {
         const d = decodeEventLog({
@@ -492,6 +517,12 @@ export async function resolveSubmittedOps(opts: {
         if (String(d.args.userOpHash).toLowerCase() !== hash) continue;
         decoded = { success: Boolean(d.args.success) };
         txHash = String(raw.transactionHash).toLowerCase();
+        try {
+          const b = raw.blockNumber === undefined ? undefined : BigInt(raw.blockNumber);
+          if (b !== undefined && b > 0n) blockNumber = b;
+        } catch {
+          // an unreadable block number is just an absent one
+        }
         break;
       } catch {
         // not a UserOperationEvent we can read — keep looking
@@ -501,17 +532,144 @@ export async function resolveSubmittedOps(opts: {
 
     let notionalUsdg6 = 0n;
     let attributed = false;
+    let usdgDelta6: bigint | null = 0n;
     if (decoded.success) {
       const receiptLogs = await opts.chain.getReceiptLogs(txHash as Hex).catch(() => null);
       if (receiptLogs) {
         const usdgDelta = netTokenDeltas(receiptLogs, opts.smartAccount).get(opts.usdgToken.toLowerCase()) ?? 0n;
+        usdgDelta6 = usdgDelta;
         if (usdgDelta !== 0n) {
           notionalUsdg6 = usdgDelta < 0n ? -usdgDelta : usdgDelta;
           attributed = true;
         }
+      } else {
+        usdgDelta6 = null;
       }
     }
-    out.push({ userOpHash: hash, txHash, success: decoded.success, notionalUsdg6, attributed });
+    out.push({ userOpHash: hash, txHash, success: decoded.success, notionalUsdg6, attributed, usdgDelta6, ...(blockNumber !== undefined ? { blockNumber } : {}) });
+  }
+  return out;
+}
+
+/**
+ * How deep the op that used a stranded op's nonce must sit before the stranded
+ * one is written off. At ~10 blocks a second this is seconds — one resolver
+ * pass at most — and it keeps a proof from resting on a block a reorg could
+ * still take back (which would free the nonce, and the stranded op with it).
+ */
+export const DROP_PROOF_CONFIRMATIONS = 64n;
+
+/** A stranded op that can provably never land, and the proof. */
+export interface DroppedOp {
+  userOpHash: string;
+  /** The nonce it was signed with — and the one the chain spent on `usedBy`. */
+  nonce: bigint;
+  /** OUR OTHER op, signed with the same nonce, that the chain executed. */
+  usedBy: string;
+  /** Where `usedBy` executed. */
+  txHash: string;
+  blockNumber: bigint;
+}
+
+/**
+ * STRANDED OPS THAT CAN NEVER LAND — the one verdict resolveSubmittedOps may
+ * not reach, because "not found" is not "dropped".
+ *
+ * WHY IT IS NEEDED. A userOp the bundler dropped (evicted, or refused at the
+ * send edge, which the executor must report as unresolved) has no
+ * UserOperationEvent and never will, so its row stays 'submitted' and holds
+ * flow inference for the resolver's whole window — 26 hours in which a
+ * deposit is not booked (flow-inference.ts opsHoldInference).
+ *
+ * THE PROOF IS POSITIVE, NEVER AN ABSENCE. An ERC-4337 nonce is spent exactly
+ * once: EntryPoint v0.7 validates an op only if `nonceSequenceNumber[sender]
+ * [key]++ == seq`, and every executed op — succeeded or reverted — emits
+ * UserOperationEvent carrying the nonce it spent. So when the chain shows ANOTHER
+ * op of this account executed with the very nonce a stranded op was signed
+ * with, the stranded op's validation fails for ever (AA25): no bundler can
+ * include it, now or later. Asking only "has getNonce moved past it, and did
+ * we find no event for it" would rest the write-off on an absence — a lagging
+ * node that silently returns no logs, or a hash computed differently from the
+ * chain's, and a LANDED op would be written off with its spend released.
+ * Here a missing log can only ever leave the op as it is.
+ *
+ * THE RIVAL IS ONE OF OURS, FOUND BY ITS OWN HASH. The executor records the
+ * nonce each op is signed with (store.ts `user_op_nonce`), so the usual
+ * dropped op has a named successor: the next op the agent signed read the
+ * chain's nonce — unmoved, since the dropped op never executed — and was
+ * signed with the same one. Only such a recorded rival is asked about, by the
+ * same exact-hash lookup the resolver trusts, and its event must carry the
+ * stranded op's nonce and sit DROP_PROOF_CONFIRMATIONS deep.
+ *
+ * AND THE STRANDED OP'S OWN EVENT MUST BE PROVABLY ABSENT (a complete scan
+ * found none): belt and braces against a wrongly recorded nonce, and it leaves
+ * a late landing to resolveSubmittedOps, which settles it for what it was.
+ *
+ * Holds no signer, never re-broadcasts; an op with no recorded nonce (a row
+ * written before the column existed) or no recorded rival is never judged.
+ */
+export async function findDroppedOps(opts: {
+  chain: ReconcileChain;
+  smartAccount: `0x${string}`;
+  /**
+   * Stranded ops the resolver could not settle, each with the nonce it was
+   * signed with and the hashes of every OTHER op of ours the ledger recorded
+   * as signed with that nonce. Hashes lowercased.
+   */
+  stranded: readonly { userOpHash: string; nonce: bigint; rivals: readonly string[] }[];
+  lookbackBlocks: bigint;
+  maxSpan?: bigint;
+  log?: (m: string) => void;
+}): Promise<DroppedOp[]> {
+  const out: DroppedOp[] = [];
+  const asked = opts.stranded.filter((s) => s.rivals.some((r) => r !== s.userOpHash));
+  if (asked.length === 0) return out;
+  const head = await opts.chain.getBlockNumber();
+  const from = head > opts.lookbackBlocks ? head - opts.lookbackBlocks : 0n;
+  const account = opts.smartAccount.toLowerCase();
+  const lookup = (hash: string) =>
+    getLogsAdaptive(
+      opts.chain,
+      { address: ENTRYPOINT.v07 as `0x${string}`, topics: [USEROP_EVENT_TOPIC, hash as Hex, addressTopic(account)] },
+      from,
+      head,
+      opts.maxSpan ?? 10_000n,
+      opts.log,
+    );
+  for (const s of asked) {
+    const own = await lookup(s.userOpHash);
+    if (!own.complete || own.logs.length > 0) continue;
+    for (const rival of s.rivals) {
+      if (rival === s.userOpHash) continue;
+      // A log that came back is a fact whether or not the scan finished; an
+      // incomplete scan with none proves nothing, and nothing is concluded.
+      const found = await lookup(rival);
+      let proof: DroppedOp | null = null;
+      for (const raw of found.logs) {
+        try {
+          const d = decodeEventLog({ abi: ENTRYPOINT_ABI, topics: raw.topics as [Hex, ...Hex[]], data: raw.data });
+          if (String(d.args.userOpHash).toLowerCase() !== rival) continue;
+          if (String(d.args.sender).toLowerCase() !== account) continue;
+          if (d.args.nonce !== s.nonce) {
+            opts.log?.(
+              `${s.userOpHash.slice(0, 10)}… not written off: ${rival.slice(0, 10)}… executed with nonce ` +
+                `${d.args.nonce}, not the ${s.nonce} the ledger recorded for both`,
+            );
+            continue;
+          }
+          const block = raw.blockNumber === undefined ? null : BigInt(raw.blockNumber);
+          if (block === null || block <= 0n || head - block < DROP_PROOF_CONFIRMATIONS) continue;
+          proof = { userOpHash: s.userOpHash, nonce: s.nonce, usedBy: rival, txHash: String(raw.transactionHash).toLowerCase(), blockNumber: block };
+          break;
+        } catch {
+          // not a UserOperationEvent we can read — no proof from it
+        }
+      }
+      if (proof) {
+        out.push(proof);
+        break;
+      }
+    }
   }
   return out;
 }

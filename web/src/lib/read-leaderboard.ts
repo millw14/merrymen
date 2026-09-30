@@ -33,6 +33,7 @@ import { withReadDb } from "@/lib/ledger";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { rankPnl, type UnrankedWhy } from "@/lib/rank-pnl";
 import { isRetired } from "@/lib/retired-agent";
+import { readMeasuredMark } from "@/lib/held-marks";
 
 export interface LeaderRow {
   /** The public id. Null means no identity yet, and the row renders unlinked. */
@@ -197,6 +198,7 @@ export async function readLeaderboard(
 
         let curve: number[] = [];
         let latest: number | null = null;
+        let latestAt: number | null = null;
         try {
           const pts = (await db
             .prepare(
@@ -209,15 +211,27 @@ export async function readLeaderboard(
           // ONE SERIES, ONE BOOK. A curve that steps from a practice book's
           // 1,000 USDG to a funded book's real equity is published here beside
           // a return, on a page that ranks people.
+          //
+          // RAW, held marks included (held-marks.ts): the sparkline and the
+          // list drawdown below never divide a flow out, so a booking that
+          // lands late cannot move them, and a held mark is the value the
+          // book had.
           const vals = sameBookAsLatest(pts)
             .map((p) => Number(p.equity_usdg))
             .filter((n) => Number.isFinite(n));
-          latest = vals.length ? vals[vals.length - 1]! : null;
           // Thinned to a fixed count rather than sent whole: this is a shape,
           // not a dataset, and 200 agents × 500 points is a payload nobody
           // reads.
           const step = Math.max(1, Math.ceil(vals.length / CURVE_POINTS));
           curve = vals.filter((_, i) => i % step === 0);
+          // THE RETURN'S NUMERATOR IS THE NEWEST MEASURED MARK, not the newest
+          // mark: one taken while flow inference was held can carry a top-up
+          // or a withdrawal not booked yet, and ranks it as profit or loss for
+          // as long as the hold lasts — up to 26 hours. Its own read, because
+          // a hold that long outruns the 500 rows above.
+          const measured = await readMeasuredMark(db, account, epoch);
+          latest = measured?.equity ?? null;
+          latestAt = measured?.at ?? null;
         } catch {
           /* no equity history yet */
         }
@@ -225,15 +239,21 @@ export async function readLeaderboard(
         // Capital in, less capital out. The ARITHMETIC is never windowed, only
         // the chart is — last-minus-first over a sliding window has a "first"
         // that drifts forward, so the published number silently changes meaning.
+        //
+        // AS OF THE NUMERATOR. During a hold the measured mark is older than
+        // the flows booked since (an owner transfer that landed, a settled
+        // energy buy), and those are not in its cash: subtracting them ranks
+        // the transfer as profit. With no measured mark there is no return,
+        // and the reason is decided on every flow, as before.
         let contributed: number | null = null;
         try {
           const f = (await db
             .prepare(
               `SELECT COUNT(*) AS n,
                       COALESCE(SUM(CASE WHEN direction = 'in' THEN amount_usdg ELSE -amount_usdg END), 0) AS net
-                 FROM flows WHERE agent_id = ? AND epoch = ?`,
+                 FROM flows WHERE agent_id = ? AND epoch = ?${latestAt === null ? "" : " AND at <= ?"}`,
             )
-            .get(account, epoch)) as { n: number; net: number } | undefined;
+            .get(account, epoch, ...(latestAt === null ? [] : [latestAt]))) as { n: number; net: number } | undefined;
           contributed = !f || Number(f.n) === 0 ? null : Number(f.net);
         } catch {
           /* flows arrives with a worker migration */

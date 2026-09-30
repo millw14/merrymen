@@ -51,6 +51,19 @@ describe("the shadow path cannot reach execution", () => {
     });
   }
 
+  it("THE ENERGY ALLOWANCE REACHES THE SHADOW PATH AS A CALLBACK, NOT AN IMPORT", () => {
+    // runShadow's `admit` is bound by index.ts. If brain-shadow ever imports the
+    // energy modules or the store's counters itself, the shadow path has grown
+    // a dependency on account state that no longer shows up as one call site.
+    const code = codeOnly("brain-shadow");
+    const modules = [...code.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!);
+    for (const m of modules) {
+      assert.ok(!/(^|\/)energy(-[a-z]+)?$/.test(m), "brain-shadow imports " + m);
+    }
+    assert.doesNotMatch(code, /claimEnergy|getEnergyDay|energyPlan/);
+    assert.match(code, /admit\?: \(\) => Promise<boolean>/);
+  });
+
   it("the tick guards the shadow path and defaults to nobody", () => {
     const raw = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     assert.match(

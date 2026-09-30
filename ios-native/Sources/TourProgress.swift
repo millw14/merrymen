@@ -8,6 +8,11 @@ final class TourProgress: ObservableObject {
     @Published private(set) var done = false
     @Published private(set) var step = 0
     @Published private(set) var syncFailed = false
+    /// The tour overlay is showing.
+    @Published private(set) var active = false
+    /// Where the owner was when the tour began, restored when it ends.
+    private var origin: (Tab, [Route])?
+    private var replaying = false
     private var tenant: String?
     private var revision = 0
     private var record = Record()
@@ -41,7 +46,27 @@ final class TourProgress: ObservableObject {
         } catch { if current == revision { syncFailed = record.pending } }
     }
     func move(_ step: Int) { record.step = min(25, max(0, step)); save() }
+    func begin(_ store: AppStore, replay: Bool) {
+        guard !active else { return }
+        origin = (store.tab, store.path)
+        replaying = replay
+        if replay { record.step = 0; save() }
+        active = true
+    }
+    /// The first read can run before the session loads and start the tour for
+    /// a "new" guest; once the account's record says it is done, close an
+    /// automatic tour without recording anything. A replay stays open.
+    func settle(_ store: AppStore) {
+        if done { if active && !replaying { restore(store); active = false } }
+        else { begin(store, replay: false) }
+    }
+    private func restore(_ store: AppStore) {
+        if let origin { store.path = origin.1; store.tab = origin.0 }
+        origin = nil
+    }
     func finish(_ store: AppStore) {
+        if active { restore(store) }
+        active = false; replaying = false
         record.done = true; record.pending = tenant != nil; save()
         Task { await sync(store) }
     }

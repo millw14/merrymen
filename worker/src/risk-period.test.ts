@@ -95,3 +95,15 @@ test("bootstrap carries the persisted risk peak and rejects another account's pe
     assert.equal(classifyAnchor(JSON.stringify(state), { tenantId: account, nowSec: now }).kind, "malformed");
   } finally { raw.close(); }
 });
+
+test("a new period's baseline is never a mark taken while flow inference was held", async () => {
+  // A held mark's equity may hold a deposit not yet booked: as the baseline it
+  // would be counted once there and again when the deposit's booking raises the
+  // period's peak (adjustRiskCapital). So the fresh mark is the newest UNHELD one.
+  const { raw, db } = await fixture();
+  try {
+    await db.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, at, epoch, mode, flows_held) VALUES (?, '0', 523.669414, 0, 17.959713, 541.629127, ?, 1, 'live', 1)").run(account, now);
+    const period = await startRiskPeriod(db, account, "approved-held", "Owner approved fresh 5% risk period", now);
+    assert.equal(period.baseline_usdg, 41.629127);
+  } finally { raw.close(); }
+});

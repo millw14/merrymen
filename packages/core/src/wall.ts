@@ -5,6 +5,7 @@ import { CallPolicyVersion, ParamCondition, toCallPolicy } from "@zerodev/permis
 import { toTimestampPolicy } from "@zerodev/permissions/policies";
 import {
   UNISWAP_SWAP_ROUTER_ABI,
+  UNISWAP_V2_ENERGY_ABI,
   PERMIT2_ABI,
   UNIVERSAL_ROUTER_ABI,
   V4SELFSWAP_ABI,
@@ -15,6 +16,11 @@ import {
 import { MORPHO, RIALTO, UNISWAP } from "./protocols";
 import { CASH, STOCK_TOKENS, TRADEABLE_SYMBOLS, USDG_DECIMALS, isValidCustomToken, type CustomToken } from "./tokens";
 import { builtinGrantTargets, type GrantCaps } from "./grant";
+import { ENERGY_ROUTE_V1, GRANT_ENERGY, isEnergyReserveToken } from "./energy";
+// The deployability policy, for `energyBuyFits` below. first-enable-gas.ts
+// deliberately imports nothing (it counts permissions structurally), so this
+// is not a cycle and cannot become one without that file changing its rule.
+import { wallShape, wallSignable } from "./first-enable-gas";
 
 /**
  * THE WALL. One definition, shared by every client that can sign a grant.
@@ -354,6 +360,37 @@ export interface WallOptions extends TrencherPermission {
    * covers.
    */
   ponsAdapterAddress?: Address;
+  /**
+   * The ENERGY BUY — USDG into $MERRYMEN, delivered to this account, over the
+   * one frozen route ENERGY_ROUTE_V1 (energy.ts). CLOSED by default, like
+   * everything here.
+   *
+   * A BOOLEAN, NOT AN ADDRESS, and that is deliberate rather than an exception
+   * to the adapters above. Their addresses are per-deploy, so the grant must
+   * record which one it sealed. This route is a versioned constant: the marker
+   * GRANT_ENERGY ("energy-buy-v1") names ENERGY_ROUTE_V1 forever, and any change
+   * to it is a v2 marker, never an edit — so marker + account + the frozen
+   * literals ARE the sealed fields. `grantWallOptions` rebuilds it from the
+   * marker alone for exactly that reason.
+   *
+   * A SEPARATE OPT-IN THAT SIGNERS SEAL ONLY WHEN IT FITS, and only on chain
+   * 4663. It costs 1,408 stub bytes (six EQUAL rules plus one spender entry),
+   * about 1.25M bounded first-enable gas, and a class+Trencher wall with a
+   * token or two has no such room. So both signers ask `energyBuyFits` and seal
+   * it only when the answer is yes; an owner whose basket fills the wall signs
+   * exactly the wall they would have signed before this existed, and energy
+   * reaches that agent as $MERRYMEN sent to it directly. Sealing it
+   * unconditionally would have refused existing owners' re-signs.
+   *
+   * On any other chain the router is codeless and a CALL to it SUCCEEDS with
+   * empty returndata, so a buy would "land" having bought nothing — the class
+   * vault's trap. `energyBuyFits` answers false off 4663 and `grantEnergyRoute`
+   * refuses the marker there too.
+   *
+   * BUY-ONLY BY CONSTRUCTION: $MERRYMEN never receives an approve in this wall
+   * (usableExtraTokens drops it), so nothing here can spend it once bought.
+   */
+  energyBuy?: boolean;
 }
 
 /**
@@ -362,6 +399,16 @@ export interface WallOptions extends TrencherPermission {
  * Validated HERE, at the last point before an address becomes on-chain policy: a
  * malformed entry either bricks the grant or silently widens it. Anything already
  * covered by the built-in set is dropped so the policy carries no duplicates.
+ *
+ * THE ENERGY RESERVE IS NEVER AN EXTRA, whoever lists it. An extra gets an
+ * UNCAPPED approve to every spender and a place in `curveAssets`, where the Pons
+ * adapter's unpinnable curve and unpinned minAmountOut would let a stolen key
+ * hand the whole $MERRYMEN balance to a contract it controls for one wei. The
+ * energy permission's safety case is that the reserve has no approve anywhere in
+ * this wall — nothing here can spend it once bought — and this filter is what
+ * makes that true rather than merely usual. Dropped here, so `grantTokens`
+ * (recorded post-filter by both signers) never carries it either and the
+ * executor's rebuild stays idempotent.
  */
 export function usableExtraTokens(extraTokens: readonly CustomToken[] = []): CustomToken[] {
   const builtin = builtinGrantTargets();
@@ -369,6 +416,7 @@ export function usableExtraTokens(extraTokens: readonly CustomToken[] = []): Cus
   return extraTokens.filter((t) => {
     if (!isValidCustomToken(t)) return false;
     const key = t.address.toLowerCase();
+    if (isEnergyReserveToken(key)) return false;
     if (builtin.has(key) || seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -469,6 +517,23 @@ export function buildCallPermissions(
     classVault,
     trencherVault,
   );
+  // THE ENERGY ROUTER JOINS THE USDG APPROVE, AND ONLY THE USDG APPROVE.
+  //
+  // It must be nameable there: Router02 pulls path[0] with transferFrom, and a
+  // second USDG `approve` permission scoped to the router alone would collide
+  // with this one on Kernel's (target, selector) key — `AA23 reverted duplicate
+  // permissionHash`, the Trencher failure (wall-duplicate-permission.test.ts).
+  //
+  // It must NOT join `spenders`. That list is the ONE_OF on every stock and
+  // extra approve, which carry no amount condition; joining it would hand the
+  // router an uncapped allowance over the whole equity book. Router02 only ever
+  // pulls from msg.sender today and only the pinned selector is granted, so
+  // those allowances would be inert — by ARGUMENT, not by construction, and the
+  // day any other router selector is granted they are live. That is the Permit2
+  // trap documented above ("any one of the three alone is inert, all three is a
+  // drain"), and it would also cost 448 bytes for nothing.
+  const energy = opts.energyBuy === true;
+  const usdgSpenders: Address[] = energy ? [...spenders, ENERGY_ROUTE_V1.router as Address] : spenders;
   const extras = usableExtraTokens(opts.extraTokens);
   // Every asset this signature may hold a leg in: USDG plus everything the
   // approve permissions below cover. This is what the adapter's tokenIn and
@@ -529,12 +594,14 @@ export function buildCallPermissions(
     ...trencherPermissions(opts, smartAccount, usdgUnits(caps.perTradeUsdg)),
     {
       // approve USDG, only to the allowed spenders, only up to one trade's size.
+      // `usdgSpenders`, not `spenders`: the energy router, when sealed, is
+      // named HERE and nowhere else — see above.
       target: CASH.USDG as Address,
       valueLimit: 0n,
       abi: erc20Abi,
       functionName: "approve",
       args: [
-        { condition: ParamCondition.ONE_OF, value: spenders },
+        { condition: ParamCondition.ONE_OF, value: usdgSpenders },
         { condition: ParamCondition.LESS_THAN_OR_EQUAL, value: usdgUnits(caps.perTradeUsdg) },
       ],
     },
@@ -680,6 +747,90 @@ export function buildCallPermissions(
     // unreachable. That is a real loss of reach and it is the honest trade —
     // the alternative is shipping a hole that cannot be closed. The way back is
     // an adapter with static args (V4SelfSwap is the pattern), not this.
+    // ── the ENERGY BUY, when the signer sealed it ────────────────────────
+    //
+    // Uniswap v2 Router02 `swapExactTokensForTokensSupportingFeeOnTransferTokens`
+    // over ENERGY_ROUTE_V1: USDG → VIRTUAL → $MERRYMEN, into THIS account, and
+    // nothing else. One selector on one target; the route's addresses are the
+    // frozen literals GRANT_ENERGY names forever (energy.ts).
+    //
+    // WHY THIS PATH IS PINNABLE WHEN exactInput's WAS NOT — the paragraph above
+    // says a multi-hop path cannot be constrained, and for a PACKED `bytes`
+    // path that is true: tokens straddle words and their word index moves with
+    // the hop count. v2's path is an ABI `address[]`, a dynamic array of
+    // STATIC elements. The head holds an offset word (w2) saying where the
+    // array lives; at that offset sit its length and then one right-aligned
+    // word per address. Pin the offset (w2 = 0xa0, i.e. straight after the five
+    // head words) and the length (w5 = 3), and the three elements are forced
+    // into w6, w7 and w8 — fixed offsets, each individually EQUAL-pinnable. The
+    // call policy maps args[i] to calldata offset i*32 with no ABI arity check
+    // (@zerodev/permissions callPolicyUtils getPermissionFromABI: `offset: i *
+    // 32`, the ABI consulted only for the selector and SLICE_EQUAL), which is
+    // why this args array is NINE long for a FIVE-parameter function, exactly
+    // as exactInputSingle's is seven long for one tuple parameter.
+    //
+    // EVERY PIN IS LOAD-BEARING, and wall.test.ts refuses each counterexample
+    // against a model of CallPolicy's own check:
+    //   w2 — unpinned, the array relocates past the pins: the router reads
+    //        path from wherever w2 points while w5..w8 still hold the pinned
+    //        words, so path[2] can be anything.
+    //   w5 — 2 buys VIRTUAL; 4 appends an unpinned hop into an attacker pair.
+    //   w6 — USDG, the only asset whose approve can name this router.
+    //   w7 — VIRTUAL, which pins the intermediate PAIR: an attacker-seeded
+    //        middle pool would extract the input.
+    //   w8 — $MERRYMEN.
+    //   w3 — `to`, this account. EQUAL is FULL-word equality, so dirty high
+    //        bits are refused before the router's decoder could mask them.
+    // Router02 is solc 0.6.6 (its CBOR tail on chain), whose v1 decoder takes
+    // the array's location solely from w2 and its length from the word there.
+    // CallPolicy V0_0_4 reads `bytes32(data[4+offset : 4+offset+32])`, and an
+    // out-of-range slice reverts, so the pinned calldata is at least 292 bytes.
+    //
+    // PINNED VALUES ARE BIGINT OR HEX, NEVER DECIMAL STRINGS. The library
+    // encodes a non-hex value with `toHex`, and `toHex("160")` is the UTF-8
+    // bytes 0x313630 — a pin that matches nothing and reads as strict. Nothing
+    // type-checks it: this function returns an untyped literal and
+    // buildWallPolicies casts it `as never`.
+    //
+    // THE WORDS LEFT OPEN, and why:
+    //   w0 amountIn — bounded by the capped USDG approve, the only allowance
+    //        this wall lets the key give this router (set, never added to;
+    //        increaseAllowance is not granted). A w0 pin would be redundant,
+    //        would not bound a UserOp (a batch can repeat approve+swap), and
+    //        would cost 192 bytes — the same reasoning every swap above uses.
+    //   w1 amountOutMin — $MERRYMEN units after the token's buy tax; the
+    //        worker's floor, fenced off-chain. No single figure means anything
+    //        across prices.
+    //   w4 deadline.
+    //
+    // WHAT A STOLEN SESSION KEY GAINS, said plainly: it can turn up to
+    // perTradeUsdg of USDG per call into $MERRYMEN in THIS account, at a price
+    // it can worsen (amountOutMin is open) — the same exposure exactInputSingle
+    // already carries into attacker-seeded pools, and no wider. It cannot sell
+    // what it bought: $MERRYMEN has no approve anywhere in this wall
+    // (usableExtraTokens drops it), so the reserve is buy-only by construction.
+    // The owner key recovers it.
+    ...(energy
+      ? [
+          {
+            target: ENERGY_ROUTE_V1.router as Address,
+            valueLimit: 0n,
+            abi: UNISWAP_V2_ENERGY_ABI,
+            functionName: "swapExactTokensForTokensSupportingFeeOnTransferTokens",
+            args: [
+              null, // w0 amountIn — bounded by the capped USDG approve
+              null, // w1 amountOutMin — post-tax $MERRYMEN, the worker's floor
+              { condition: ParamCondition.EQUAL, value: 0xa0n }, // w2 offset of path — WHERE the array is read
+              self, // w3 to — this account
+              null, // w4 deadline
+              { condition: ParamCondition.EQUAL, value: 3n }, // w5 path.length
+              { condition: ParamCondition.EQUAL, value: ENERGY_ROUTE_V1.path[0] }, // w6 USDG
+              { condition: ParamCondition.EQUAL, value: ENERGY_ROUTE_V1.path[1] }, // w7 VIRTUAL
+              { condition: ParamCondition.EQUAL, value: ENERGY_ROUTE_V1.path[2] }, // w8 $MERRYMEN
+            ],
+          } as const,
+        ]
+      : []),
     // ── the V4SelfSwap adapter, when the owner opted in ──────────────────
     //
     // ONE permission, and STRICTER than the v3 routes above it. `swapExactIn`
@@ -1014,6 +1165,11 @@ export function buildWallPolicies(args: {
         ponsClassVaultFactoryAddress: args.ponsClassVaultFactoryAddress,
         trencherVaultAddress: args.trencherVaultAddress,
         trencherFactoryAddress: args.trencherFactoryAddress,
+        // The same trap a fourth time, and the most expensive one to miss: a
+        // signer would mint GRANT_ENERGY off `wallOpts.energyBuy` over a call
+        // policy with no router permission and no router in the USDG approve.
+        // The worker would build the buy, and the chain would refuse it.
+        energyBuy: args.energyBuy,
       }) as never,
     }),
   ];
@@ -1046,6 +1202,12 @@ export function buildWallPolicies(args: {
  * policy actually covers; settings record what the owner has typed since. They
  * differ exactly when someone added a token without re-signing — and sizing a
  * wall from the larger list would refuse a wall that is genuinely small.
+ *
+ * `energyBuy` FROM THE MARKER ALONE. GRANT_ENERGY is versioned over the frozen
+ * ENERGY_ROUTE_V1, so the marker plus the account IS the whole permission —
+ * there is no sealed address to read beside it, and none is needed. A rebuild
+ * that dropped it would size (and, server-side, byte-compare) a wall one
+ * permission and one spender entry narrower than the one that was signed.
  */
 export function grantWallOptions(grant: {
   grantTokens?: readonly string[];
@@ -1059,5 +1221,46 @@ export function grantWallOptions(grant: {
     extraTokens,
     allowRialto: features.has("rialto"),
     allowUniswapV4: features.has("v4"),
+    energyBuy: features.has(GRANT_ENERGY),
   };
+}
+
+/**
+ * SHOULD THIS SIGNATURE CARRY THE ENERGY BUY? Asked by both signers before
+ * they sign, and the ONLY thing that may set `WallOptions.energyBuy` to true.
+ *
+ * Two conditions, both about safety rather than preference:
+ *
+ *   - CHAIN 4663 ONLY. The route's addresses are mainnet deployments; on any
+ *     other chain the router is codeless, a CALL to it succeeds with empty
+ *     returndata, and a buy would book USDG out for $MERRYMEN that never
+ *     arrived. (grantEnergyRoute refuses the marker off 4663 as well.)
+ *   - ONLY WHEN THE WALL STILL FITS. The permission costs 1,408 stub bytes —
+ *     about 1.25M bounded first-enable gas — and a wall already near the
+ *     product maximum (class vault + Trencher + a token or two) has no such
+ *     room. Adding it there would turn an owner's re-sign into a refusal; an
+ *     owner without room signs exactly the wall they signed before this
+ *     existed, and energy reaches that agent as $MERRYMEN sent to it directly.
+ *
+ * THE SAME POLICY, NOT A COPY OF IT: `wallSignable` over `wallShape` over the
+ * real `buildCallPermissions` objects, with the caller's own options and the
+ * account's real deployment state — exactly the check the signer is about to
+ * make, one permission wider. So "fits" here and "signable" there cannot
+ * disagree, and the marker the signer mints from this boolean is the
+ * permission it built (signer-lockstep.test.ts pins that).
+ *
+ * `deploying` follows `wallSignable`'s rule: an account whose code could not be
+ * read counts as undeployed, which can only make this answer false.
+ */
+export function energyBuyFits(
+  caps: GrantCaps,
+  smartAccount: Address,
+  chainId: number,
+  deploying: boolean,
+  opts: WallOptions,
+): boolean {
+  if (chainId !== ENERGY_ROUTE_V1.chainId) return false;
+  return wallSignable(wallShape(buildCallPermissions(caps, smartAccount, { ...opts, energyBuy: true })), {
+    deploying,
+  }).ok;
 }

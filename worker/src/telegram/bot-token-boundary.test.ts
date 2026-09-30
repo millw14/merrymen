@@ -16,9 +16,10 @@
  * whichever child answered first — control of one stranger's agent handed to
  * another, silently, and looking exactly like the product working.
  *
- * AND THE GUARD BUILT FOR THIS CANNOT SEE IT. `dedupeBotToken` compares the
- * tokens in tenants' SETTINGS; a token arriving by environment is invisible to
- * it, so the one collision it exists to prevent is the one it would miss.
+ * AND THE GUARD BUILT FOR THIS CANNOT SEE IT. The bot claims (claimGate over
+ * `telegram_bot_claims`, telegram-claims.ts) are judged on the tokens in
+ * tenants' SETTINGS; a token arriving by environment is invisible to them, so
+ * the one collision they exist to prevent is the one they would miss.
  *
  * Latent when written — the variable is set nowhere in this repo and was
  * absent from the deployed environment. Stripped anyway: the cost is one line

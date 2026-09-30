@@ -2,6 +2,8 @@ import {
   CASH,
   STOCK_TOKENS,
   UNISWAP,
+  ENERGY_ROUTE_V1,
+  grantEnergyRoute,
   grantHasTransfer,
   grantPonsClassVault,
   sellableAssets,
@@ -173,6 +175,62 @@ export function runWallBattery(
         },
       ];
 
+  // THE ENERGY BUY, asked the questions THIS signature can answer — the same
+  // rule as the class route below. A grant that sealed the route proves the
+  // honest buy goes and an oversized one does not; one that did not proves the
+  // buy is refused by name. Both prove the router never became a generic swap
+  // target: it is deliberately NOT in allowedTargets.
+  const energyRoute = grantEnergyRoute(grant);
+  const energyBuy = (amount: bigint): TradeIntent => ({
+    kind: "energy-buy",
+    target: ENERGY_ROUTE_V1.router,
+    sellToken: usdgAddr,
+    buyToken: ENERGY_ROUTE_V1.path[2],
+    sellAmountRaw: amount,
+    notionalUsdg: amount,
+  });
+  const routerSwap: BatteryInput = {
+    attempt: "a generic swap aimed at the energy router (it is not a swap venue for this key)",
+    want: "rejected",
+    expectedRule: "target-allowlist",
+    intent: {
+      kind: "swap",
+      target: ENERGY_ROUTE_V1.router,
+      sellToken: usdgAddr,
+      buyToken: stock,
+      sellAmountRaw: 1n,
+      notionalUsdg: 1n,
+    },
+    state: calm,
+  };
+  const energyCases: BatteryInput[] = energyRoute
+    ? [
+        {
+          attempt: "an honest energy buy — USDG into $MERRYMEN over the sealed route",
+          want: "approved",
+          intent: energyBuy(1n),
+          state: calm,
+        },
+        {
+          attempt: `an energy buy above your ${grant.caps.perTradeUsdg} USDG per-trade cap`,
+          want: "rejected",
+          expectedRule: "per-trade-cap",
+          intent: energyBuy(usdgUnits(grant.caps.perTradeUsdg) + 1n),
+          state: calm,
+        },
+        routerSwap,
+      ]
+    : [
+        {
+          attempt: "an energy buy on a key that never sealed the energy route",
+          want: "rejected",
+          expectedRule: "energy-not-granted",
+          intent: energyBuy(1n),
+          state: calm,
+        },
+        routerSwap,
+      ];
+
   const legalSwap = (notional: bigint): TradeIntent => ({
     kind: "swap",
     target: router,
@@ -303,6 +361,8 @@ export function runWallBattery(
       state: calm,
       limits: noExitLimits,
     },
+    // ── the energy buy ──────────────────────────────────────────────────────
+    ...energyCases,
     // ── the class route ─────────────────────────────────────────────────────
     //
     // WHICH CASES RUN DEPENDS ON THE GRANT, exactly like the transfer case at

@@ -6,6 +6,9 @@ import { commandFor, commandPayload, isComplete, type CommandArg } from '../../w
 import { seedSources, withRead, liveOf, mineOf } from '../../web/src/terminal/live';
 import { positionsOf, spentToday } from '../../web/src/terminal/account';
 import { telegramRow, trencherRow } from '../../web/src/terminal/agent-status';
+import { resignPromptApplies } from '../../web/src/terminal/resign-prompt-state';
+import { setupStep } from '../../web/src/lib/can-start';
+import { approvable, bookBox, headline, TERMINAL } from '../../web/src/app/connect/approve/[id]/approve-view';
 
 export function overview(json: string): string {
   const { feed, now } = JSON.parse(json);
@@ -106,4 +109,26 @@ export function render(json: string): string {
     };
   }
   return JSON.stringify(rows.map(row));
+}
+
+// The web's "trading permission is out of date" decision. The wall release it
+// compares against is compiled into this bundle, which is built alongside the
+// wallet bundle the app signs with, so "stale" means stale for this app.
+export function resign(json: string): string {
+  const { exists, grantedAt, canSign } = JSON.parse(json);
+  return JSON.stringify(resignPromptApplies({ exists: exists ?? null, grantedAt: grantedAt ?? null, canSign: canSign === true }));
+}
+
+// The web's "Finish setting up" step, from the same /api/grants status.
+export function setup(json: string): string {
+  const { status, paper } = JSON.parse(json);
+  return JSON.stringify(status ? setupStep(status, paper === true) : null);
+}
+
+// An AI assistant's proposal, described exactly as the web approval page does:
+// the status headline, the real-money / practice box, and whether approving is
+// currently allowed. The server re-checks everything at approval regardless.
+export function approval(json: string): string {
+  const view = JSON.parse(json);
+  return JSON.stringify({ headline: headline(view), box: view.kind === 'trade' ? bookBox(view) : null, approvable: approvable(view), finished: TERMINAL.has(view.status) });
 }

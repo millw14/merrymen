@@ -659,8 +659,10 @@ suspend fun placeConfirmedOrder(
   side: String,
   symbol: String,
   usdg: Double,
+  /** get-energy's fixed marker (Commands.kt), or null for every other order. */
+  purpose: String? = null,
   words: (duplicate: Boolean) -> String,
-): Placed = scope.onItsServer { placeOnItsServer(api, scope, side, symbol, usdg, words) }
+): Placed = scope.onItsServer { placeOnItsServer(api, scope, side, symbol, usdg, purpose, words) }
 
 private suspend fun placeOnItsServer(
   api: MerrymenApi,
@@ -668,6 +670,7 @@ private suspend fun placeOnItsServer(
   side: String,
   symbol: String,
   usdg: Double,
+  purpose: String?,
   words: (duplicate: Boolean) -> String,
 ): Placed {
   if (!scope.alive()) {
@@ -677,7 +680,7 @@ private suspend fun placeOnItsServer(
   }
   // Whatever goes wrong on the way is an answer we did not get: looked up, never retried.
   val answer = try {
-    api.postOrder(side, symbol, usdg, scope.owner)
+    api.postOrder(side, symbol, usdg, scope.owner, purpose)
   } catch (e: kotlinx.coroutines.CancellationException) {
     throw e
   } catch (e: Exception) {
@@ -890,7 +893,15 @@ suspend fun runConfirmedCard(
     }
     Via.ORDER -> {
       val side = spec.fixed["side"]?.jsonPrimitive?.content ?: return
-      val symbol = args["symbol"].orEmpty().trim().uppercase()
+      // A FIXED SYMBOL WINS OVER THE MODEL'S. get-energy fixes it to MERRYMEN
+      // and its card carries only an amount; reading args alone refused it as
+      // "needs a coin", and reading args first would let a model name the coin
+      // a fixed-symbol card exists to pin.
+      val symbol = (spec.fixed["symbol"]?.jsonPrimitive?.content ?: args["symbol"]).orEmpty().trim().uppercase()
+      // THE ENERGY MARKER, from the COMMAND and never the model: only a spec
+      // that fixes it (get-energy) sends it, and it is what the worker routes
+      // the energy buy on. Every other order card sends none.
+      val purpose = spec.fixed["purpose"]?.jsonPrimitive?.content
       val usdg = amountOf(args)
       if (usdg == null || symbol.isEmpty()) {
         scope.say("agent", "That isn't an order I can place — it needs a coin and an amount — so nothing was sent.")
@@ -904,12 +915,12 @@ suspend fun runConfirmedCard(
       val found = card.found
       if (found != null) {
         val said = "${found.symbol} at ${found.short ?: found.address}."
-        placeConfirmedOrder(api, scope, side, symbol, usdg) { duplicate ->
+        placeConfirmedOrder(api, scope, side, symbol, usdg, purpose) { duplicate ->
           if (duplicate) "$said I already had that one queued, so I have not placed it twice."
           else "$said Placed, not filled — my key's limits still decide, and I will tell you which."
         }
       } else {
-        placeConfirmedOrder(api, scope, side, symbol, usdg) { duplicate ->
+        placeConfirmedOrder(api, scope, side, symbol, usdg, purpose) { duplicate ->
           if (duplicate) "That exact order is already queued — I have not placed a second one."
           else "Placed it — ${spec.say(args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which."
         }
