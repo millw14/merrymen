@@ -23,6 +23,13 @@ import { readFileSync } from "node:fs";
 
 const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 
+// AN UNREACHABLE CHAIN, NOT AN UNREACHABLE URL. Reads now fail over from the
+// configured endpoint to the chain's public one (rpc-failover.ts), so a bogus
+// URL alone no longer models "the chain would not answer" — the real public RPC
+// would answer from inside a test. These cases are about what a FAILED read
+// renders as, so failover is off for this file.
+process.env.MERRYMEN_RPC_FAILOVER = "off";
+
 describe("the read says whether it read", () => {
   it("NO ADDRESS AND NO ANSWER ARE DIFFERENT ARMS", async () => {
     const { readHolderStatusResult } = await import("./circle");

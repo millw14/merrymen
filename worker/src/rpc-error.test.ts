@@ -104,6 +104,67 @@ describe("classifyRpcError", () => {
   });
 });
 
+/**
+ * A SPENT QUOTA IS NOT A RATE LIMIT, and the fleet lost a day to the difference.
+ *
+ * From 2026-09-28 01:48 UTC the house endpoint answered every read — at any
+ * rate, from any IP — with the body below under HTTP 429. Filed as
+ * `rate-limited`, it looked like throttling to everyone reading the meter.
+ */
+const ALCHEMY_MONTHLY =
+  "Monthly capacity limit exceeded. Visit https://dashboard.alchemy.com/settings/billing to upgrade your scaling policy for continued service.";
+
+describe("classifyRpcError — a spent quota", () => {
+  it("RECOGNISES THE BODY THE HOUSE ENDPOINT ACTUALLY SENT", () => {
+    // As viem raises it on the path where the JSON-RPC error reaches it intact.
+    const e = Object.assign(new Error(`RPC Request failed.\nDetails: ${ALCHEMY_MONTHLY}`), {
+      name: "RpcRequestError",
+      details: ALCHEMY_MONTHLY,
+      shortMessage: "RPC Request failed.",
+      code: 429,
+    });
+    const v = classifyRpcError(e);
+    assert.equal(v.kind, "quota-exhausted");
+    assert.equal(v.retryable, false, "backing off does not refill a monthly quota");
+  });
+
+  it("AND THE MARKER the transport stamps when it read that body off a 429", async () => {
+    const { QUOTA_MARKER } = await import("./rpc-error");
+    const e = Object.assign(
+      new Error(`HTTP request failed. Status: 429 Too Many Requests · ${QUOTA_MARKER}: the provider says so`),
+      { status: 429 },
+    );
+    // "Too Many Requests" and a 429 status are both in there. The quota verdict
+    // must win, or this is filed as a rate limit exactly as before.
+    assert.equal(classifyRpcError(e).kind, "quota-exhausted");
+  });
+
+  it("A PER-SECOND LIMIT STAYS A RATE LIMIT, even when it says 'capacity'", () => {
+    // Alchemy's own throughput refusal. It IS a rate, and backing off is the
+    // right answer to it — reading it as a spent quota would stop the fleet
+    // retrying something that clears in a second.
+    const cups = Object.assign(
+      new Error(
+        "Your app has exceeded its compute units per second capacity. If you have retries enabled, you can safely ignore this message.",
+      ),
+      { code: 429 },
+    );
+    assert.equal(classifyRpcError(cups).kind, "rate-limited");
+    // And this chain's own public-endpoint limit, which resets in a minute.
+    assert.equal(classifyRpcError(rateLimited()).kind, "rate-limited");
+  });
+
+  it("the same fact in other providers' words", async () => {
+    const { saysQuotaExhausted } = await import("./rpc-error");
+    for (const msg of ["daily request count exceeded, request rate limited", "Quota exceeded for this project", ALCHEMY_MONTHLY]) {
+      assert.equal(saysQuotaExhausted(msg), true, msg);
+    }
+    for (const msg of ["Too Many Requests", "Rate Limit Hit, limit will reset in 60 seconds", "execution reverted"]) {
+      assert.equal(saysQuotaExhausted(msg), false, msg);
+    }
+  });
+});
+
 describe("backoffMs", () => {
   it("grows exponentially and stays under the cap", () => {
     for (let a = 0; a < 12; a++) {

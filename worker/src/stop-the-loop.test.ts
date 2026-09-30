@@ -361,7 +361,15 @@ describe("A5 — the meter is a seam, not a policy", () => {
     const code = strip(at("./rpc-meter.ts"));
     const gov = code.slice(code.indexOf("async function governedFetch("), code.indexOf("function retryAfterFrom("));
     assert.match(gov, /return res;/, "the response is still returned untouched");
-    assert.ok(!/catch/.test(gov), "and it never swallows a failure — there is no catch at all");
+    // AND IT NEVER SWALLOWS A FAILURE. This used to read "there is no catch at
+    // all", which was the same property while there was one endpoint. Failover
+    // (rpc-failover.ts) has to catch a dead configured endpoint's error in
+    // order to hand the request to the chain's public one — so the property is
+    // now stated as what happens to it: the ONLY catch records the failure, and
+    // the last endpoint's failure is thrown. rpc-failover.test.ts drives both.
+    assert.equal((gov.match(/catch/g) ?? []).length, 1, "exactly one catch, around the fetch — no others");
+    assert.match(gov, /catch \(e\) \{\s*failure = e;/, "a caught failure is kept, not dropped");
+    assert.match(gov, /if \(last \|\| init\?\.signal\?\.aborted\) throw failure;/, "and the last endpoint's failure reaches the caller");
   });
 });
 
