@@ -9,7 +9,7 @@
  * that fails the test, so nothing here can reach Telegram or a chain.
  */
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { after, before, mock, test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { getAddress, type PublicClient } from "viem";
 import { wrapSqlite, type Db } from "../db";
@@ -17,6 +17,7 @@ import { applyLedgerSchema } from "../store";
 import { TELEGRAM_STATE_DDL } from "../telegram-store";
 import { STOCK_TOKENS } from "../../../packages/core/src/tokens";
 import { ensureMcpSchema } from "./schema";
+import { TG_CALL_TIMEOUT_MS, type FetchLike } from "../telegram/api";
 import {
   ALERT_WINDOW_SEC, MAX_ATTEMPTS, PNL_NOT_STATED, QUEUE_MAX_AGE_SEC, RETRY_BACKOFF_SEC, canonicalParams, chainlinkPriceReader, estimatedCostSells, hostedRecipient,
   normalizeNotifyParams, plain, runNotifyPass, sendErrorCode, staleAfterSec, summaryPeriod, telegramSend, vouchedSells, type FeedClient, type NotifyDeps, type NotifyParams,
@@ -1070,6 +1071,76 @@ test("telegramSend: 429 retry_after is read from Telegram's description, and the
   next = reply(200, { ok: true, result: { message_id: 1 } });
   assert.deepEqual(await send(TOKEN, CHAT, "a <b> & c"), { ok: true });
   assert.equal((JSON.parse(bodies[1]!) as { text: string }).text, "a &lt;b&gt; &amp; c");
+});
+
+/** Turn the loop until `ready()` holds, bounded by the real clock (only setTimeout is mocked). */
+async function waitFor(ready: () => boolean, what: string): Promise<void> {
+  const t0 = performance.now();
+  while (!ready()) {
+    if (performance.now() - t0 > 10_000) assert.fail(`never happened: ${what}`);
+    await new Promise((r) => setImmediate(r));
+  }
+}
+function settled<T>(p: Promise<T>): { done: boolean; value?: T } {
+  const box: { done: boolean; value?: T } = { done: false };
+  void p.then((v) => {
+    box.done = true;
+    box.value = v;
+  });
+  return box;
+}
+const turns = async () => {
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+};
+
+test("telegramSend: a send that never answers is cut off by call()'s one deadline, and that deadline aborts the request itself", async () => {
+  // Through the default transport, the global fetch. telegramSend used to hand
+  // fetch a timer of its own in place of call()'s signal, so call() gave up at
+  // its deadline while the socket stayed open until the other timer fired.
+  const signals: (AbortSignal | undefined)[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((_url: string, init?: { signal?: AbortSignal }) => {
+    signals.push(init?.signal);
+    return new Promise(() => {}); // not even to its signal
+  }) as typeof fetch;
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const r = settled(telegramSend()(TOKEN, CHAT, "hello"));
+    mock.timers.tick(TG_CALL_TIMEOUT_MS - 1);
+    await turns();
+    assert.equal(r.done, false, "still inside the bound");
+    mock.timers.tick(1);
+    await waitFor(() => r.done, "the send gives up");
+    assert.deepEqual(r.value, { ok: false, reason: "request failed: timed out" });
+    assert.equal(sendErrorCode(r.value!), "network", "filed as a transport failure, retried as one");
+    assert.equal(signals.length, 1);
+    assert.equal(signals[0]?.aborted, true, "the request that never answered was told to stop at the same moment");
+  } finally {
+    mock.timers.reset();
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("telegramSend: its timeoutMs is the bound call() keeps, so a longer one is really waited for", async () => {
+  const signals: (AbortSignal | undefined)[] = [];
+  const deaf: FetchLike = (_url, init) => {
+    signals.push(init?.signal);
+    return new Promise(() => {});
+  };
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const r = settled(telegramSend({ fetchFn: deaf, timeoutMs: 30_000 })(TOKEN, CHAT, "hello"));
+    mock.timers.tick(TG_CALL_TIMEOUT_MS);
+    await turns();
+    assert.equal(r.done, false, "not cut at the default ten seconds");
+    assert.equal(signals[0]?.aborted, false);
+    mock.timers.tick(30_000 - TG_CALL_TIMEOUT_MS);
+    await waitFor(() => r.done, "the send gives up at its own bound");
+    assert.deepEqual(r.value, { ok: false, reason: "request failed: timed out" });
+    assert.equal(signals[0]?.aborted, true);
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 // Compile-time only: the orchestrator's viem client can be handed to the reader as it is.

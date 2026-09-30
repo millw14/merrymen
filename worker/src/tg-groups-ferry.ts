@@ -18,7 +18,9 @@
  *
  * A FORGET REACHES THE STORED COPY WHATEVER THE CHILD HOLDS. The child keeps
  * every /forget and /forgetme in a second file beside the memory
- * (TG_GROUPS_FORGET_FILE, store.ts). A child whose groups are held off started
+ * (TG_GROUPS_FORGET_FILE, tg-groups/forget-file.ts), and so does the hold
+ * process that answers the bot while trading is held (telegram/hold.ts),
+ * which holds no memory at all. A child whose groups are held off started
  * empty, so a forget done there erases nothing, and the sealed row, which
  * still holds the person's lines, would come back at the next restore. So
  * the requests are applied (the store's own applyForgets) wherever the
@@ -285,7 +287,7 @@ function memoOf(seen: Map<string, string>): PublishMemo {
   return m;
 }
 
-// ── forget requests (store.ts TG_GROUPS_FORGET_FILE) ────────────────────────
+// ── forget requests (forget-file.ts TG_GROUPS_FORGET_FILE) ──────────────────
 
 const NO_FORGETS = "-";
 const FORGETS_UNREADABLE = "?";
@@ -352,9 +354,10 @@ function forgotten(text: string, ops: readonly TgForgetOp[]): string | null {
  * Take away the forget file a publish has just carried: the version read,
  * and only it. It is renamed aside first, so the child's next record starts
  * a new file rather than landing in one being deleted, and whatever the child
- * appended after the read is appended back (store.ts appends too, so neither
- * write can overwrite the other). A record the child was writing just as the
- * file was taken, the child writes again itself (store.ts appendForget).
+ * appended after the read is appended back (forget-file.ts appends too, so
+ * neither write can overwrite the other). A record the child was writing just
+ * as the file was taken, the child writes again itself (forget-file.ts
+ * appendForget).
  * True when the file is gone and nothing had to be put back. Never throws.
  */
 async function clearForgets(home: string, read: ForgetsRead, log: TgGroupsLog, tenant: string): Promise<boolean> {

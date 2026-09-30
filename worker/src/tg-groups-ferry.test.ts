@@ -1424,7 +1424,11 @@ describe("the group files leave a home whose grant is gone while no child runs t
     await reconcile();
     assert.equal(existsSync(path.join(gone, TG_GROUPS_FILE_NAME)), false, "the reconcile removed the memory");
     assert.equal(existsSync(path.join(gone, TG_GROUPS_FORGET_FILE)), false);
-    assert.ok(existsSync(path.join(gone, "grant.json")), "and nothing else");
+    // The reconcile also wipes the whole home of a tenant that is neither
+    // wanted nor running here (orchestrator.ts, kill-request.ts's promise),
+    // so the memory is gone with everything else. The walk itself touches
+    // only the group files: "the walk keeps what it is told to" above.
+    assert.equal(existsSync(path.join(gone, "grant.json")), false, "the home goes with the grant");
 
     // A /kill for a tenant whose child is not running here (it crashed): the
     // three-second ferry carries it out, and the memory goes with the grant.
@@ -1542,7 +1546,12 @@ describe("the orchestrator ferries it where the contract says", () => {
     const restore = spawnFn.indexOf("await restoreTgGroupsForChild(tenant);");
     const env = spawnFn.indexOf("env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) })");
     assert.ok(restore > 0 && env > restore, "the child's env is decided after this spawn's restore");
-    assert.equal(ORCH.split("env: childEnv(").length - 1, 1, "the one spawn site");
+    // The child's, above, and the hold process's (startHolderProcess), which
+    // never opens the group store: while trading is held nothing of the
+    // groups runs at all, so there is nothing there to hold off.
+    assert.equal(ORCH.split("env: childEnv(").length - 1, 2, "the child's spawn site and the hold process's");
+    const holder = body("function startHolderProcess(");
+    assert.ok(holder.includes("HOLD_ENTRY") && holder.includes("env: childEnv(tenant)"), "the other one is the hold process");
 
     const mirror = body("async function mirrorLedgers(");
     assert.match(mirror, /if \(tgGroupsDekThisPass && !tgGroupsHeld\.has\(tenant\.toLowerCase\(\)\)\) \{\s*const published = await publishTgGroups\(\{/);
@@ -1562,7 +1571,15 @@ describe("the orchestrator ferries it where the contract says", () => {
     assert.ok(gate > 0 && publish > gate, "below the lease gate");
     assert.ok(unpublished > publish && patchAfter > unpublished, "a file that was not published still carries its requests");
     assert.ok(heldBranch > patchAfter && patchHeld > heldBranch, "a held child's requests reach the row");
-    assert.equal(ORCH.split("forgetStoredTgGroups(").length - 1, 2, "and nowhere else");
+    // And a tenant whose TRADING is held (the hold process runs, no child):
+    // nothing of its groups is published, and a request a child left in the
+    // home reaches the row all the same, under that loop's own lease gate.
+    const holders = mirror.indexOf("for (const [tenant, held] of [...holders]) {");
+    const holdersGate = mirror.indexOf("if (!lease || !lease.healthy()) continue;", holders);
+    const patchHolder = mirror.indexOf("await forgetStoredTgGroups({", holdersGate);
+    assert.ok(holders > patchHeld && holdersGate > holders && patchHolder > holdersGate, "a held tenant's requests reach the row");
+    assert.ok(mirror.indexOf("await publishTgGroups({", holders) < 0, "and nothing of a held tenant is published");
+    assert.equal(ORCH.split("forgetStoredTgGroups(").length - 1, 3, "and nowhere else");
   });
 
   test("gone with the grant, from the home: forgetTgGroups clears a home no child runs in, before it awaits anything", () => {

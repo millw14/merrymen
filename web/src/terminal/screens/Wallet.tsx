@@ -1012,13 +1012,14 @@ export default function GrantPage() {
      * child is undone within a minute — which is why this said so BEFORE the
      * click rather than letting somebody conclude the reset silently failed.
      *
-     * IT NOW ASKS THE WORKER TO DO IT. /api/paper-reset queues the one command
-     * the child can act on, and the child REFUSES IT ON THE LIVE RAIL: real
-     * positions and trades are never deleted by anything here. On paper it puts
-     * the paper cash back, drops the simulated positions, and closes the old
-     * fills into a new accounting epoch — kept on disk for forensics, counted
-     * toward nothing. Queued unconditionally because only the worker knows which
-     * rail it is on; this screen would be guessing.
+     * IT NOW ASKS THE WORKER TO DO IT. The practice reset, queued with the
+     * discard below, is the one command the child can act on, and the child
+     * REFUSES IT ON THE LIVE RAIL: real positions and trades are never deleted
+     * by anything here. On paper it puts the paper cash back, drops the
+     * simulated positions, and closes the old fills into a new accounting
+     * epoch — kept on disk for forensics, counted toward nothing. Queued
+     * unconditionally because only the worker knows which rail it is on; this
+     * screen would be guessing.
      */
     if (grant && !grant.demoOwnerPrivateKey) {
       const okToKeepHistory = window.confirm(
@@ -1033,13 +1034,24 @@ export default function GrantPage() {
       if (!okToKeepHistory) return;
     }
     clearGrant();
-    // Also destroy the worker-side handoff — otherwise the "discarded" grant
-    // stays armed and the worker keeps trading on it (kill-switch semantics).
-    void fetch("/api/grants", { method: "DELETE" }).catch(() => {});
-    // Ask the child to restart the paper book. Best-effort and
-    // unconditional: only the worker knows which rail it is on, and it refuses
-    // this outright when the agent is live, so nothing real can be cleared.
-    void fetch("/api/paper-reset", { method: "POST" }).catch(() => {});
+    // Destroy the worker-side handoff — otherwise the "discarded" grant stays
+    // armed and the worker keeps trading on it (kill-switch semantics) — AND
+    // ask for the paper book to be restarted. The reset is best-effort and
+    // unconditional: only the worker knows which rail it is on (or, while its
+    // book is held, the orchestrator, which asks the ledger), and each refuses
+    // a live agent outright, so nothing real can be cleared.
+    //
+    // ONE REQUEST, SENT NOW, WITH keepalive. The reset finds its agent through
+    // the grant this discards, so the two cannot simply be fired side by side
+    // (the DELETE won that race in production and the reset answered 401,
+    // 2026-09-21T16:24:24Z), and a DELETE held back until the reset answered
+    // was never sent at all by a tab closed in the meantime, with this page
+    // already forgetting the grant it would need to try again. The server
+    // orders the two instead (/api/grants/discard, lib/start-over.ts): the
+    // account is read, the grant removed as DELETE /api/grants removes it,
+    // then the reset queued. keepalive, so closing the tab straight after
+    // pressing this still delivers the kill.
+    void fetch("/api/grants/discard", { method: "POST", keepalive: true }).catch(() => {});
     localStorage.removeItem(BACKUP_KEY);
     setGrant(null);
     setBackedUp(false);

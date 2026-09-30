@@ -11,15 +11,15 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { resolveConfig, type ResolvedConfig } from "../../settings";
 import { getMe, type FetchLike } from "../api";
-import { startTelegram } from "../service";
+import { isPaused, setPaused, startTelegram } from "../service";
 import { ensureLinkCode, loadTelegramState, type TelegramState } from "../state";
-import { TgGroupsStore, emptyTgGroupsState } from "./store";
+import { TG_GROUPS_FORGET_FILE, TgGroupsStore, emptyTgGroupsState, parseTgForgets } from "./store";
 import type { CoinLook, CoinOutcome, NominateResult, Nomination, TgCoinsPort, TrencherReadiness } from "./types";
 
 const MIN = 60_000;
@@ -128,7 +128,7 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
     batches.push(updates);
     await waitFor(() => batches.length === 0 && calls.filter((c) => c.method === "getUpdates").length >= before + 2);
   }
-  const groupMsg = (text: string, from: { id: number; first: string }) => {
+  const groupMsg = (text: string, from: { id: number; first: string }, date = Math.floor(clock / 1000)) => {
     const mid = nextMid++;
     return {
       mid,
@@ -136,7 +136,7 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
         update_id: nextUpdate++,
         message: {
           message_id: mid,
-          date: Math.floor(clock / 1000),
+          date,
           chat: { id: CHAT, type: "supergroup", title: "frens" },
           from: { id: from.id, is_bot: false, first_name: from.first },
           text,
@@ -204,6 +204,9 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
       tgGroupsStore: store,
       tgCoins: new FakePort(),
       tgGroupsTest: { now: () => clock, rand: () => 0.99, sleep: async () => {}, env: {}, log: () => {} },
+      // The poll's own clock too: its backlog rule dates every update against
+      // when it began listening, and these updates are dated by `clock`.
+      now: () => Math.floor(clock / 1000),
     });
     stop = h.stop;
     // The owner adds it: approved, with its hello.
@@ -243,7 +246,7 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
   });
 
   it("the live code in '/link@SomeOtherBot CODE' is replaced and the owner told; the room hears nothing from us", async () => {
-    tstate = ensureLinkCode(tstate, TOKEN);
+    tstate = ensureLinkCode(tstate);
     const live = tstate.linkCode;
     const dmBefore = sendsTo(OWNER).length;
     const groupBefore = sendsTo(CHAT).length;
@@ -257,7 +260,7 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
   });
 
   it("the live code followed by more words is replaced too, and our own /link still hears 'no code needed'", async () => {
-    tstate = ensureLinkCode(tstate, TOKEN);
+    tstate = ensureLinkCode(tstate);
     const live = tstate.linkCode;
     const dmBefore = sendsTo(OWNER).length;
     const groupBefore = sendsTo(CHAT).length;
@@ -278,7 +281,7 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
       (c) => `/link x${c.toLowerCase()}y`,
     ];
     for (const shape of shapes) {
-      tstate = ensureLinkCode(tstate, TOKEN);
+      tstate = ensureLinkCode(tstate);
       const live = tstate.linkCode;
       const dmBefore = sendsTo(OWNER).length;
       await deliver(groupMsg(shape(live), { id: CAT, first: "Cat" }).update);
@@ -295,7 +298,7 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
   });
 
   it("the live code shown as a word in any group line is replaced; an ordinary line leaves it alone", async () => {
-    tstate = ensureLinkCode(tstate, TOKEN);
+    tstate = ensureLinkCode(tstate);
     const kept = tstate.linkCode;
     const quietBefore = sendsTo(OWNER).length;
     await deliver(groupMsg("anyone around? market's slow today", { id: BOB, first: "Bob" }).update);
@@ -324,7 +327,7 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
       (c) => photo(`dm the bot ${c} lol`),
     ];
     for (const shape of shapes) {
-      tstate = ensureLinkCode(tstate, TOKEN);
+      tstate = ensureLinkCode(tstate);
       const live = tstate.linkCode;
       const dmBefore = sendsTo(OWNER).length;
       await deliver(shape(live));
@@ -452,6 +455,208 @@ describe("docs/tg-groups.md Commands in groups, through the poll service", () =>
     await deliver(update);
     await waitFor(() => sendsTo(CHAT).length === groupBefore + 1);
     assert.equal(replyOf(sendsTo(CHAT).at(-1)), mid);
+  });
+
+  // ── The poll's backlog rule, in a group ──────────────────────────────────
+  //
+  // Listening began at the first poll, at T0. A line dated before it waited
+  // out a silence (a restart, a redeploy, an outage): the room has moved on,
+  // so it is dropped, not answered hours late, and none of a DM's backlog
+  // notes go to a room.
+  const BEFORE_LISTENING = Math.floor(T0 / 1000) - 3_600;
+
+  it("a group line from before the bot was listening is not answered, remembered or run, and the room hears no DM note", async () => {
+    const tradesBefore = trades.length;
+    const groupBefore = sendsTo(CHAT).length;
+    const dmBefore = sendsTo(OWNER).length;
+    const catBefore = sendsTo(CAT).length;
+    const typingBefore = typingTo(OWNER).length;
+    const lines = store.room(CHAT)?.lines.length ?? 0;
+    const late = [
+      groupMsg("zorblax, what do you think?", { id: BOB, first: "Bob" }, BEFORE_LISTENING),
+      groupMsg("/buy NVDA 5", { id: OWNER, first: "Mike" }, BEFORE_LISTENING),
+      groupMsg("/status", { id: CAT, first: "Cat" }, BEFORE_LISTENING),
+      groupMsg("/link WRONGCODE", { id: CAT, first: "Cat" }, BEFORE_LISTENING),
+      groupMsg("/buy@someotherbot NVDA 5", { id: OWNER, first: "Mike" }, BEFORE_LISTENING),
+    ];
+    await deliver(...late.map((m) => m.update));
+    await waitFor(() => sendsTo(OWNER).length === dmBefore + 1);
+    await deliver();
+    assert.equal(sendsTo(CHAT).length, groupBefore, "nothing said in the room");
+    assert.deepEqual(trades.slice(tradesBefore), [], "an order typed into the room during the silence never runs");
+    assert.equal(typingTo(OWNER).length, typingBefore, "nor is the owner's DM probed for it");
+    assert.equal(store.room(CHAT)?.lines.length ?? 0, lines, "nor remembered");
+    // The owner's /buy would have been answered in their DM, so that is where
+    // they hear it was held back: one note, as for a late /buy sent there.
+    // Another bot's command is not counted.
+    const said = sendsTo(OWNER).slice(dmBefore).map((c) => String(c.body.text));
+    assert.equal(said.length, 1, said.join("\n"));
+    assert.match(said[0]!, /^I was offline; 1 message arrived late \(oldest .+\)\. I didn't act on it/);
+    assert.equal(sendsTo(CAT).length, catBefore, "someone not on the allowlist hears nothing, in the room or their DM");
+    assert.ok(
+      !allSends().some((c) => /not authorized|reached me after|just been connected/.test(String(c.body.text))),
+      "no refusal or late-code prompt anywhere",
+    );
+  });
+
+  it("a late /pause or /kill the owner typed in the room runs in their DM, as a late DM one does, and the room hears nothing", async () => {
+    const groupBefore = sendsTo(CHAT).length;
+    const dmBefore = sendsTo(OWNER).length;
+    const catBefore = sendsTo(CAT).length;
+    assert.equal(isPaused(), false, "premise");
+    try {
+      await deliver(
+        groupMsg("/kill", { id: CAT, first: "Cat" }, BEFORE_LISTENING).update,
+        groupMsg("/pause@someotherbot", { id: OWNER, first: "Mike" }, BEFORE_LISTENING).update,
+        groupMsg("/pause", { id: OWNER, first: "Mike" }, BEFORE_LISTENING).update,
+        groupMsg("/kill@pinebot", { id: OWNER, first: "Mike" }, BEFORE_LISTENING).update,
+      );
+      await waitFor(() => sendsTo(OWNER).length === dmBefore + 2);
+      await deliver();
+      assert.equal(isPaused(), true, "a /pause typed during an outage still pauses: it only reduces risk");
+      const said = sendsTo(OWNER).slice(dmBefore).map((c) => String(c.body.text));
+      assert.equal(said.length, 2, said.join("\n"));
+      assert.match(said[0]!, /paused/);
+      assert.match(said[1]!, /confirm kill/, "a /kill still only asks, and the /confirm must be sent live");
+      assert.ok(!said.some((t) => /offline|arrived late/.test(t)), "nothing was held back, so no note");
+      assert.equal(sendsTo(CHAT).length, groupBefore, "no 'sent it to your DMs' for a late one");
+      assert.equal(sendsTo(CAT).length, catBefore, "a /kill from someone not on the allowlist reaches nobody");
+    } finally {
+      setPaused(false);
+      // The parked kill is not left for a later row's /confirm.
+      await deliver({
+        update_id: nextUpdate++,
+        message: { message_id: nextMid++, date: Math.floor(clock / 1000), chat: { id: OWNER, type: "private" }, from: { id: OWNER, is_bot: false, first_name: "Mike" }, text: "/cancel" },
+      });
+    }
+  });
+
+  it("A LATE /forgetme STILL WIPES: every /forgetme does, and a redeploy's restart is a silence", async () => {
+    const bobs = () => (store.room(CHAT)?.lines ?? []).filter((l) => l.fromId === BOB).length;
+    await deliver(groupMsg("gm frens, anyone watching NVDA today?", { id: BOB, first: "Bob" }).update);
+    await waitFor(() => bobs() > 0 && store.person(CHAT, BOB) !== undefined);
+    const said = sendsTo(CHAT).length;
+    // Another bot's /forgetme is that bot's to honour, late or live.
+    await deliver(groupMsg("/forgetme@someotherbot", { id: BOB, first: "Bob" }, BEFORE_LISTENING).update);
+    await deliver();
+    assert.ok(bobs() > 0, "another bot's command wipes nothing here");
+    await deliver(groupMsg("/forgetme", { id: BOB, first: "Bob" }, BEFORE_LISTENING).update);
+    await deliver();
+    assert.equal(bobs(), 0, "their lines are gone");
+    assert.equal(store.person(CHAT, BOB), undefined, "and so is their entry");
+    const records = parseTgForgets(readFileSync(path.join(home, TG_GROUPS_FORGET_FILE), "utf8"));
+    assert.ok(records.some((r) => r.chatId === CHAT && r.userId === BOB), "and the request is written down for the stored copy");
+    assert.equal(sendsTo(CHAT).length, said, "a late one is done, not answered: the room has moved on");
+  });
+
+  it("the owner's late /forget still wipes that group, and says nothing", async () => {
+    await deliver(groupMsg("anyone around?", { id: ANN, first: "Ann" }).update);
+    await waitFor(() => (store.room(CHAT)?.lines ?? []).some((l) => l.fromId === ANN));
+    const said = sendsTo(CHAT).length;
+    const dmBefore = sendsTo(OWNER).length;
+    // Someone else's /forget is not theirs to give.
+    await deliver(groupMsg("/forget", { id: CAT, first: "Cat" }, BEFORE_LISTENING).update);
+    await deliver();
+    assert.ok((store.room(CHAT)?.lines ?? []).some((l) => l.fromId === ANN));
+    await deliver(groupMsg("/forget", { id: OWNER, first: "Mike" }, BEFORE_LISTENING).update);
+    await deliver();
+    assert.deepEqual(store.room(CHAT)?.lines ?? [], [], "the whole chat's memory");
+    assert.equal(store.room(CHAT)?.status, "approved", "and nothing about whether it talks there");
+    assert.equal(sendsTo(CHAT).length, said, "nothing in the room");
+    assert.equal(sendsTo(OWNER).length, dmBefore, "nor in the owner's DM: a forget is not a command held back");
+  });
+
+  it("from before the switch to this agent, a /forgetme still wipes, but nothing runs and nobody is told", async () => {
+    const boundBefore = tstate.boundAt;
+    const dmBefore = sendsTo(OWNER).length;
+    const bobs = () => (store.room(CHAT)?.lines ?? []).filter((l) => l.fromId === BOB).length;
+    await deliver(groupMsg("still here", { id: BOB, first: "Bob" }).update);
+    await waitFor(() => bobs() > 0);
+    const said = sendsTo(CHAT).length;
+    try {
+      // This agent was switched onto the bot after these were sent.
+      tstate = { ...tstate, boundAt: BEFORE_LISTENING + 60 };
+      await deliver(
+        groupMsg("/pause", { id: OWNER, first: "Mike" }, BEFORE_LISTENING).update,
+        groupMsg("/buy NVDA 5", { id: OWNER, first: "Mike" }, BEFORE_LISTENING).update,
+        groupMsg("/forgetme", { id: BOB, first: "Bob" }, BEFORE_LISTENING).update,
+      );
+      await deliver();
+    } finally {
+      tstate = { ...tstate, boundAt: boundBefore };
+    }
+    assert.equal(bobs(), 0, "a wipe is nobody else's to stop");
+    assert.equal(isPaused(), false, "on a bot that served another agent, a /pause was that agent's");
+    assert.equal(sendsTo(OWNER).length, dmBefore, "and no note: holdEarly's rule");
+    assert.equal(sendsTo(CHAT).length, said);
+  });
+
+  it("a late line still gives the live code up: it is replaced, and only the owner hears why", async () => {
+    tstate = ensureLinkCode(tstate);
+    const live = tstate.linkCode;
+    const groupBefore = sendsTo(CHAT).length;
+    const dmBefore = sendsTo(OWNER).length;
+    await deliver(groupMsg(`try /link ${live}`, { id: CAT, first: "Cat" }, BEFORE_LISTENING).update);
+    await waitFor(() => sendsTo(OWNER).length === dmBefore + 1);
+    assert.notEqual(tstate.linkCode, live, "the room saw it whenever it was typed");
+    assert.match(String(sendsTo(OWNER).at(-1)?.body.text), /link code got posted/);
+    assert.equal(sendsTo(CHAT).length, groupBefore);
+    assert.ok(!tstate.linkedChats.includes(CHAT));
+  });
+
+  it("the owner adding it while nobody listened is recorded, without a hello hours late", async () => {
+    const LATE_ROOM = -1009876543210;
+    await deliver({
+      update_id: nextUpdate++,
+      my_chat_member: {
+        chat: { id: LATE_ROOM, type: "supergroup", title: "late frens" },
+        from: { id: OWNER, is_bot: false, first_name: "Mike" },
+        date: BEFORE_LISTENING,
+        old_chat_member: { status: "left" },
+        new_chat_member: { status: "member" },
+      },
+    });
+    await deliver();
+    assert.equal(store.room(LATE_ROOM)?.status, "approved", "the owner's add stands");
+    assert.deepEqual(sendsTo(LATE_ROOM), [], "and nothing is said about it now");
+    // A live line afterwards is answered as in any approved group.
+    const { mid, update } = groupMsg("zorblax, you there?", { id: BOB, first: "Bob" });
+    const withChat = { ...update, message: { ...update.message, chat: { id: LATE_ROOM, type: "supergroup", title: "late frens" } } };
+    await deliver(withChat);
+    await waitFor(() => sendsTo(LATE_ROOM).length === 1);
+    assert.equal(replyOf(sendsTo(LATE_ROOM)[0]), mid);
+  });
+
+  it("a Stay pressed on a question asked before a restart still counts: the group's buttons are durable", async () => {
+    const ASKED = -1004444444444;
+    const dmBefore = sendsTo(OWNER).length;
+    // A stranger adds it, live: pending, and the owner is asked in their DM.
+    await deliver({
+      update_id: nextUpdate++,
+      my_chat_member: {
+        chat: { id: ASKED, type: "supergroup", title: "asked" },
+        from: { id: CAT, is_bot: false, first_name: "Cat" },
+        date: Math.floor(clock / 1000),
+        old_chat_member: { status: "left" },
+        new_chat_member: { status: "member" },
+      },
+    });
+    await waitFor(() => sendsTo(OWNER).length === dmBefore + 1);
+    assert.equal(store.room(ASKED)?.status, "pending");
+    const ask = sendsTo(OWNER).at(-1)!;
+    const rows = (ask.body.reply_markup as { inline_keyboard: { text: string; callback_data?: string }[][] }).inline_keyboard;
+    const stay = rows.flat().find((b) => b.callback_data?.startsWith("tgg:stay:"))?.callback_data;
+    assert.ok(stay, "premise: the ask carries a Stay button");
+    // The press arrives on a message dated before listening began, as it does
+    // after any restart: a DM's parked question would be expired by now, this
+    // one is not.
+    await deliver({
+      update_id: nextUpdate++,
+      callback_query: { id: "q-late", data: stay, from: { id: OWNER }, message: { message_id: 1, chat: { id: OWNER }, date: BEFORE_LISTENING } },
+    });
+    await waitFor(() => store.room(ASKED)?.status === "approved");
+    const answered = calls.filter((c) => c.method === "answerCallbackQuery" && c.body.callback_query_id === "q-late");
+    assert.ok(!answered.some((c) => /expired/.test(String(c.body.text))), "not answered as expired");
   });
 });
 
