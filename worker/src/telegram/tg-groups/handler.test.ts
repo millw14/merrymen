@@ -2066,3 +2066,34 @@ describe("hygiene", () => {
     assert.equal(tg.sends().length, 0);
   });
 });
+
+
+describe("a group job that never finishes", () => {
+  it("does not silence the group: the next addressed line is answered, and the stall is logged with its stage", async () => {
+    // Live, one job that never settled held a group's queue for hours: every
+    // later line waited behind it, and not one log line said so.
+    let hang = true;
+    make({
+      stallMs: 30,
+      sleep: async (ms) => {
+        if (hang) {
+          hang = false;
+          return new Promise<void>(() => {});
+        }
+        clock += Math.max(0, ms);
+      },
+    });
+    approveRoom();
+    groups.onMessage(msg("@pinebot hi"));
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(tg.sends().length, 0, "the first line is stuck in its typing delay");
+    groups.onMessage(msg("@pinebot you there?"));
+    // The watchdog frees the queue before this line's own send has finished:
+    // wait for the send itself, not for the queue.
+    for (let i = 0; i < 100 && tg.sends().length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(tg.sends().length, 1, JSON.stringify(logs));
+    assert.ok(logs.some((l) => /a group job ran past .* at "send: typing delay"/.test(l)), JSON.stringify(logs));
+    assert.ok(logs.some((l) => /held the chat's lock past/.test(l)), JSON.stringify(logs));
+    assert.ok(!logs.some((l) => /pinebot|you there|hi\b/.test(l.replace(/\[tg-groups\]/, ""))), "the log names stages, never what was said");
+  });
+});

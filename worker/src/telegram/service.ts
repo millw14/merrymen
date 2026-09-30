@@ -173,6 +173,15 @@ const LINK_LOCKOUT_SEC = 600;
 const HISTORY_TURNS = 6; // user+assistant pairs kept per chat for follow-ups
 /** How often the cached getMe (id, username, privacy flag) is read again. */
 const SELF_REFRESH_MS = 30 * 60 * 1000;
+/**
+ * THE POLL HEARTBEAT: how many updates of each kind arrived, every few
+ * minutes when any did, and a liveness line after a long quiet. Counts only.
+ * It is what tells "no group message reaches this bot" (Telegram, privacy
+ * mode, a second poller on the token) apart from "they arrive and something
+ * after the poll drops them".
+ */
+const POLL_HEARTBEAT_MS = 5 * 60 * 1000;
+const POLL_QUIET_NOTE_MS = 30 * 60 * 1000;
 
 /**
  * Commands that read the owner's private state (docs/tg-groups.md rule 3).
@@ -298,6 +307,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
    * token never borrows the old bot's identity.
    */
   let botSelf: { token: string; bot: TgBotInfo; at: number } | null = null;
+  /** What the poll has delivered since the last heartbeat (POLL_HEARTBEAT_MS). */
+  let polled = { since: Date.now(), group: 0, dm: 0, buttons: 0, members: 0, service: 0 };
   let selfReading: Promise<void> | null = null;
   const refreshSelf = (token: string): Promise<void> => {
     if (selfReading) return selfReading;
@@ -1495,6 +1506,25 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
     else if (Date.now() - botSelf.at > SELF_REFRESH_MS) void refreshSelf(selfToken);
 
     const { messages, callbacks, members, service, nextOffset, reason } = await getUpdates({ token: cfg.telegramBotToken }, stateRef.get().offset);
+    for (const m of messages) {
+      if (isGroupMessage(m)) polled.group += 1;
+      else polled.dm += 1;
+    }
+    polled.buttons += callbacks.length;
+    polled.members += members.length;
+    polled.service += service.length;
+    {
+      const t = Date.now();
+      const total = polled.group + polled.dm + polled.buttons + polled.members + polled.service;
+      if ((total > 0 && t - polled.since >= POLL_HEARTBEAT_MS) || (total === 0 && t - polled.since >= POLL_QUIET_NOTE_MS)) {
+        console.log(
+          total > 0
+            ? `[telegram] last ${Math.round((t - polled.since) / 60_000)} min: ${total} updates (${polled.group} group messages, ${polled.dm} DMs, ${polled.buttons} buttons, ${polled.members} membership, ${polled.service} service)`
+            : `[telegram] no updates in ${Math.round((t - polled.since) / 60_000)} min (polling)`,
+        );
+        polled = { since: t, group: 0, dm: 0, buttons: 0, members: 0, service: 0 };
+      }
+    }
     if (reason) {
       if (!warnedUnreachable) {
         deps.note("warn", `Telegram: getUpdates — ${reason}`);
