@@ -126,7 +126,7 @@ const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskA
  * a second, genuinely-intended order impossible: ask for the same thing again
  * next minute and it is a new id, as it should be.
  */
-function orderId(agent: string, o: { side: string; symbol: string; usdgAmount: number; purpose?: string }, nowMs: number): string {
+function orderId(agent: string, o: { side: string; symbol: string; usdgAmount: number; purpose?: string; book?: string }, nowMs: number): string {
   const bucket = Math.floor(nowMs / 60_000);
   // THE ENERGY MARKER IS PART OF WHAT THE ORDER IS, so it is part of its id: a
   // get-energy card and a plain buy card with the same numbers in the same
@@ -134,8 +134,10 @@ function orderId(agent: string, o: { side: string; symbol: string; usdgAmount: n
   // "already queued" off the first. Appended only when present, so every other
   // order keeps the id it always had.
   const purpose = o.purpose ? `|${o.purpose}` : "";
+  const book = (o.purpose === "close-perp" || o.purpose === "flatten-perps") && o.book ? `|${o.book}` : "";
   return createHash("sha256")
     .update(`${agent.toLowerCase()}|${o.side}|${o.symbol}|${o.usdgAmount}|${bucket}${purpose}`)
+    .update(book)
     .digest("hex")
     .slice(0, 32);
 }
@@ -157,7 +159,7 @@ export async function POST(req: Request) {
   // this browser held when the request left; the chat card names the owner who
   // tapped, and another wallet signed in since (another tab can do it unseen)
   // places nothing — before the ceiling, which would be the other wallet's.
-  if (isHostedMode() && ownerMismatch((body as { owner?: unknown }).owner, tenantOf(req))) {
+  if (isHostedMode() && ownerMismatch((body as { owner?: unknown } | null)?.owner, tenantOf(req))) {
     return NextResponse.json({ error: OWNER_CHANGED }, { status: 409 });
   }
   const read = readOrder(body);

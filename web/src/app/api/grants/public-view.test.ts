@@ -204,12 +204,18 @@ describe("hosted: the real file grant store, a real session", () => {
     assertScreensStillFed(body.grant as Record<string, unknown>);
   });
 
-  it("a stored record holding a plaintext 80-hex key is refused on the way out, so nothing is shown at all", async () => {
+  it("a stored record holding a plaintext 80-hex key is refused; only the fixed recovery notice is shown", async () => {
     writeRecord(fullGrant({ demoOwnerPrivateKey: undefined, stray: STRAY_80 }));
     const res = await GET(new Request("https://app.merrymen.dev/api/grants", { headers: { cookie: cookie() } }));
     assertNoStore(res);
     const body = await scan(res, { ...SECRETS, "stray 80-hex key": STRAY_80 });
-    assert.deepEqual(body, { exists: false });
+    assert.deepEqual(body, {
+      exists: false,
+      perpsRecovery: {
+        state: "unknown",
+        message: "The live perpetual recovery status could not be checked. Spot and paper trading remain available.",
+      },
+    });
   });
 
   it("signed out: { exists: false }, no-store", async () => {
@@ -244,7 +250,7 @@ describe("perpsOptIn: offered only where the operator's ceiling for this account
     delete process.env.MERRYMEN_PERPS;
   });
 
-  it("hosted: not offered by default (paper), nor to an account off the live list; offered to one on it", async () => {
+  it("hosted: the operator allowlist cannot bypass incomplete durable journal readiness", async () => {
     process.env.MERRYMEN_HOSTED = "1";
     const tenant = privateKeyToAccount(generatePrivateKey()).address;
     const file = path.join(home, "tenants", `${tenant.toLowerCase()}.json`);
@@ -268,6 +274,6 @@ describe("perpsOptIn: offered only where the operator's ceiling for this account
     process.env.MERRYMEN_PERPS_LIVE_TENANTS = tenant;
     assert.equal((await read()).perpsOptIn, false, "the SIWE tenant is not the account");
     process.env.MERRYMEN_PERPS_LIVE_TENANTS = SMART;
-    assert.equal((await read()).perpsOptIn, true);
+    assert.equal((await read()).perpsOptIn, false, "hosted live remains code-gated until journal continuity is durable");
   });
 });

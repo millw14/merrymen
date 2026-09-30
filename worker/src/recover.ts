@@ -44,6 +44,30 @@ import {
   isValidCustomToken,
   shortAddress,
 } from "../../packages/core/src/index";
+import {
+  GOLDILOCKS_P,
+  LIGHTER_CHANGE_PUBKEY_ABI,
+  LIGHTER_OWNER_RECOVER_ABI,
+  LIGHTER_READ_ABI,
+  LIGHTER_ROUTE_V1,
+  LIGHTER_WITHDRAW_PENDING_ABI,
+  validatePerpPubKey,
+} from "../../packages/core/src/index";
+// THE VENUE PARSERS, NOT THE VENUE CLIENT. markets.ts imports nothing but
+// core, so it travels to the browser and the phones with this module; api.ts
+// (cooldown files, node:fs) does not, which is why the reads below are a
+// plain fetch rather than createLighterApi.
+import {
+  accountReadsEmpty,
+  openPositions,
+  parseAccount,
+  parseAccountsByL1Address,
+  parseApiKeys,
+  parseOrderBookDetails,
+  parseWithdrawalDelay,
+  type PerpAccountRead,
+  type PerpDecimals,
+} from "./perps/markets";
 import { userOpGasConfig } from "./gas";
 
 /** Shares are an ERC-4626 position: priced, never counted. Same reads snapshot.ts uses. */
@@ -158,6 +182,27 @@ export interface RecoverPlan {
     holdings: { token: Address; symbol: string; raw: bigint; amount: string; decimals: number }[];
     note: string | null;
   }[];
+  /**
+   * WHAT IS AT LIGHTER, which no transfer from this account can reach.
+   *
+   * Perp collateral, positions and a withdrawal waiting to be claimed live in
+   * Lighter's settlement contract and its rollup, keyed on this account — so
+   * a recovery that listed only the account's own balances would tell an
+   * owner with 900 USDG on the venue that 12 USDG was everything. Read with
+   * `eth_call` and the venue's public GETs only, so every platform that runs
+   * this module can show it (docs/perps.md, "Recover").
+   *
+   * KEPT OUT OF `unreadable` ON PURPOSE. That list gates the phone's
+   * withdrawal button (WithdrawScreen.swift disables "Review withdrawal"
+   * while it is non-empty), and a venue the phone cannot reach must not
+   * strand the USDG and ETH it can see. The venue group carries its own
+   * unread states instead; `venueStanding` is what a surface asks before it
+   * says anything is empty.
+   *
+   * Optional only for plans built by other code (tests, old callers):
+   * planRecovery always sets it, and an ABSENT venue is unknown, never none.
+   */
+  venue?: RecoverVenue;
 }
 
 export interface RecoverResult extends RecoverPlan {
@@ -496,6 +541,16 @@ export async function planRecovery(opts: {
   expectedSmartAccount?: Address;
   /** Owner-added tokens from settings. Optional — the builtin set is the floor. */
   extraTokens?: readonly unknown[];
+  /**
+   * The grant's sealed Lighter API public key, when the caller holds the grant.
+   * Used ONLY to label what sits at the key index ("the agent's key" or not);
+   * nothing is decided on it, so a caller with a pasted owner key and no grant
+   * loses a label, not a step.
+   */
+  agentPerpPubKey?: string | null;
+  /** The venue reads' fetch and base URL — test seams; production uses the global fetch and Lighter's API. */
+  venueFetch?: VenueFetch;
+  lighterApiBase?: string;
 }): Promise<RecoverPlan> {
   const publicClient = createPublicClient({ chain: opts.chain, transport: http(opts.rpcUrl) });
   const ownerAccount = ownerAccountOf(opts.owner);
@@ -513,6 +568,19 @@ export async function planRecovery(opts: {
         `Wrong owner, or the account was created with a different Kernel version.`,
     );
   }
+
+  // STARTED NOW, AWAITED LAST. The venue leg is a handful of independent
+  // reads that never throw (every failure is its own unread field), so it
+  // runs beside the token and class-vault reads instead of after them — an
+  // owner at a prompt waits for the slower of the two, not their sum.
+  const venuePromise = readRecoverVenue({
+    smartAccount: account.address,
+    chainId: opts.chain.id,
+    chainRead: lighterChainReader(publicClient),
+    agentPerpPubKey: opts.agentPerpPubKey ?? null,
+    fetch: opts.venueFetch,
+    baseUrl: opts.lighterApiBase,
+  });
 
   const tokens = sweepList(opts.chain.id, opts.extraTokens);
   const unreadable: string[] = [];
@@ -795,6 +863,7 @@ export async function planRecovery(opts: {
     classHoldings,
     classNote,
     classVaults,
+    venue: await venuePromise,
   };
 }
 
@@ -1251,5 +1320,1202 @@ export async function recoverFunds(opts: {
     skipped,
     nativeSweptWei,
     nativeReservedWei,
+  };
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE LIGHTER LEG — docs/perps.md rule 13 and "Surfaces → Recover".
+// ════════════════════════════════════════════════════════════════════════════
+//
+// An agent with perps holds money where no ERC-20 transfer reaches it: USDG
+// posted as collateral in Lighter's settlement contract, positions and orders
+// on Lighter's rollup, and a secure withdrawal waiting on the contract to be
+// claimed. All of it is keyed on this smart account, and the account's owner
+// key can act on it through L1 PRIORITY REQUESTS — calls the Kernel makes to
+// the proxy in a sudo UserOp, which Lighter's sequencer must process:
+//
+//   cancelAllOrders(idx)                 every resting order on the account
+//   changePubKey(idx, 16, throwaway)     replace the agent's API key
+//   withdraw(idx, 3, 0, amount)          a secure withdrawal of collateral
+//   withdrawPendingBalance(self, 3, x)   claim what the withdrawal left pending
+//
+// This section DISCLOSES everywhere (fetch + eth_call only, so the CLI, the
+// browser, Expo and the iOS JSContext all run it) and EXECUTES only where the
+// caller can send an owner-signed UserOp with calls to the proxy: today that is
+// `merrymen recover`. The hosted relay forwards withdrawal-shaped ERC-20
+// traffic only (web/src/lib/recovery-shape.ts), so the browser shows the
+// disclosure and names the CLI path instead of offering a button that the
+// relay would refuse.
+//
+// STATELESS. Nothing here remembers a previous run. Every visit re-reads the
+// venue and offers the NEXT step: an unwind while there are orders, a key or
+// free collateral; a claim once a withdrawal is pending on the contract. The
+// executor re-reads again before signing and refuses when what it would sign
+// is not what the owner was shown.
+//
+// WHAT IS DELIBERATELY NOT OFFERED:
+//   - Closing positions. The owner's `createOrder` priority request has no
+//     reduce-only flag and lands after a delay, so if a resting stop fires
+//     first a "close" opens a fresh, unmanaged position. It stays off until
+//     the mainnet checklist proves its semantics on this instance; until then
+//     positions are closed by the agent's own stand-down (`merrymen kill`)
+//     or end at Lighter's liquidation.
+//   - Sub-accounts. We never create them (rule 2); one existing is an
+//     incident (rule 16). They are disclosed, not unwound.
+//   - Pool shares and spot-route balances. Disclosed; not movable from here.
+
+/** The fetch the venue reads use. `typeof fetch` so a browser, Node and a test double all fit. */
+export type VenueFetch = typeof fetch;
+
+/** One field of the venue disclosure: read, or why not. A failure is never a zero standing in for one. */
+export type VenueField<T> = { read: true; value: T } | { read: false; why: string };
+
+const venueField = <T>(value: T): VenueField<T> => ({ read: true, value });
+const venueUnread = <T>(why: string): VenueField<T> => ({ read: false, why });
+
+/** One open position, as the owner is shown it. Amounts are exact; prices and sizes in the market's own decimals. */
+export interface RecoverVenuePosition {
+  /** `BTC-PERP`, or the venue's symbol for a market this build does not list (still exposure). */
+  market: string;
+  marketId: number;
+  side: "long" | "short";
+  size: string;
+  marginMode: "cross" | "isolated";
+  /** Isolated margin allocated to it (0 for cross). */
+  marginMicro: bigint;
+  unrealizedMicro: bigint;
+  /** The venue's liquidation price, or null when it reports none. */
+  liqPrice: string | null;
+  /** Orders tied to the position — its resting stop (and take-profit) at the venue. */
+  stopsResting: number;
+}
+
+/** The master account's ONE /api/v1/account snapshot, reduced to what recovery needs. */
+export interface RecoverVenueAccount {
+  /** C: cross collateral — the free balance a secure withdrawal can take (when no cross position uses it). */
+  collateralMicro: bigint;
+  /** ΣM: margin held by isolated positions. It stays with them; nothing here can move it while they are open. */
+  isolatedMarginMicro: bigint;
+  unrealizedMicro: bigint;
+  positions: RecoverVenuePosition[];
+  /** Open positions in CROSS margin — C backs them, so C is not free. */
+  crossPositions: number;
+  /**
+   * Resting and pending orders. The account's counters and the rows' can
+   * overlap, so the LARGER is kept: overstating an order count is honest,
+   * understating it is not (standdown.ts does the same).
+   */
+  orders: number;
+  poolShareCount: number;
+  /** Spot-route balances plus pending unlocks — money outside the perps account. */
+  spotBalanceCount: number;
+}
+
+/** Another Lighter account under this smart account (a sub-account). */
+export interface RecoverOtherAccount {
+  accountIndex: number;
+  /** true: holds something; false: read empty; null: could not be read. */
+  holds: boolean | null;
+  summary: string;
+}
+
+/** What sits at the route's key index (16). */
+export type RecoverKeySlot =
+  | { state: "empty" }
+  /** `agents`: equal to the grant's sealed key; null when the caller had no grant to compare with. */
+  | { state: "key"; publicKey: `0x${string}`; agents: boolean | null };
+
+/** The owner-key priority requests an unwind may carry, IN THE ORDER THEY ARE SENT. */
+export type VenueCallName = "cancelAllOrders" | "changePubKey" | "withdraw";
+
+export interface VenueUnwind {
+  kind: "unwind";
+  accountIndex: number;
+  /** In send order: cancelAllOrders → changePubKey → withdraw (see planVenueSteps). */
+  calls: VenueCallName[];
+  /** The collateral the withdraw requests, micro-USDG; 0n when there is no withdraw. */
+  withdrawMicro: bigint;
+  /**
+   * Open positions whose resting stops this unwind cancels. They stay open,
+   * with no stop, until Lighter liquidates them or someone with a key closes
+   * them. The confirmation says so and asks for a different word.
+   */
+  positionsLeftOpen: number;
+}
+
+export interface VenueClaim {
+  kind: "claim";
+  accountIndex: number;
+  /** getPendingBalance(self, 3) × tick size, micro-USDG, as read. */
+  amountMicro: bigint;
+}
+
+export type RecoverVenue =
+  /** Lighter settles on 4663 only. On any other chain there is nothing to read and nothing there. */
+  | { kind: "elsewhere"; chainId: number }
+  /** addressToAccountIndex(self) is 0: no deposit ever landed, so no venue account exists. A known none. */
+  | { kind: "none" }
+  /** The account index itself could not be read. Unknown — never none. */
+  | { kind: "unreadable"; why: string }
+  | {
+      kind: "account";
+      accountIndex: number;
+      account: VenueField<RecoverVenueAccount>;
+      otherAccounts: VenueField<{ accounts: RecoverOtherAccount[]; complete: boolean }>;
+      /** Waiting on the contract for a claim — getPendingBalance(self, 3). */
+      pendingMicro: VenueField<bigint>;
+      /** /api/v1/withdrawalDelay, seconds, read live: it moves (398 s to 1314 s observed). */
+      withdrawalDelaySec: VenueField<number>;
+      keySlot: VenueField<RecoverKeySlot>;
+      unwind: VenueUnwind | null;
+      claim: VenueClaim | null;
+      /** Why a step that might be expected is not offered. Said, never silent. */
+      notOffered: string[];
+    };
+
+/** The two contract views the venue leg needs, bound to the proxy and the never-granted read ABI. */
+export type LighterChainReader = (
+  functionName: "addressToAccountIndex" | "getPendingBalance",
+  args: readonly unknown[],
+) => Promise<unknown>;
+
+/** Bind a viem-shaped client to Lighter's proxy. Structural, so every platform's client fits. */
+export function lighterChainReader(client: { readContract: (args: never) => Promise<unknown> }): LighterChainReader {
+  return (functionName, args) =>
+    client.readContract({ address: LIGHTER_ROUTE_V1.proxy, abi: LIGHTER_READ_ABI, functionName, args } as never);
+}
+
+const UINT48_MAX = 2n ** 48n - 1n;
+const UINT64_MAX = 2n ** 64n - 1n;
+const UINT128_MAX = 2n ** 128n - 1n;
+
+function asUint(v: unknown, max: bigint): bigint | null {
+  if (typeof v === "bigint") return v >= 0n && v <= max ? v : null;
+  if (typeof v === "number" && Number.isSafeInteger(v)) return v >= 0 && BigInt(v) <= max ? BigInt(v) : null;
+  return null;
+}
+
+/** 8 s per request: an owner is waiting at a prompt, and a slow venue must become "unread", not a hang. */
+const VENUE_TIMEOUT_MS = 8_000;
+/** orderBookDetails is the largest real answer (~100 KB); ten times that. */
+const VENUE_MAX_BYTES = 1_000_000;
+/** Sub-accounts read in full, at most. We never create any; a list longer than this is an incident, disclosed as incomplete. */
+const VENUE_MAX_OTHER_ACCOUNTS = 8;
+/** The venue's code for "api key not found" — an empty key slot, on the venue's own word (onboard.ts). */
+const LIGHTER_APIKEY_NOT_FOUND = 21109;
+
+interface VenueIo {
+  fetch?: VenueFetch;
+  baseUrl?: string;
+  timeoutMs?: number;
+}
+
+/**
+ * A response body, refused rather than buffered past `max`. PORTABLE: this
+ * module runs in browsers and JSContext, so no `Buffer` (bounded-read.ts uses
+ * it) — a TextDecoder over the stream, or the plain text where there is none.
+ */
+async function readCapped(
+  res: { headers: { get(n: string): string | null }; body?: unknown; text(): Promise<string> },
+  max: number,
+): Promise<string | null> {
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > max) return null;
+  const body = res.body as
+    | { getReader(): { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<void> } }
+    | null
+    | undefined;
+  if (!body || typeof body.getReader !== "function") {
+    const text = await res.text();
+    return text.length > max ? null : text;
+  }
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let out = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    bytes += value.byteLength;
+    if (bytes > max) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    out += decoder.decode(value, { stream: true });
+  }
+  return out + decoder.decode();
+}
+
+/**
+ * One public GET to Lighter → the parsed body, or why not. Never throws, and
+ * never waits longer than the deadline.
+ *
+ * `redirect: "error"` for the reason api.ts gives, and a hand-rolled abort
+ * timer rather than AbortSignal.timeout, which not every JS runtime this
+ * module reaches has. The whole exchange — headers AND body — is also RACED
+ * against that deadline, because an abort signal is only a request: a host
+ * fetch that ignores it (a native bridge that never answers for a host its
+ * network policy blocks, say) would otherwise hang planRecovery, and with it
+ * the one screen that gets an owner's spot money out.
+ */
+async function venueGetJson(
+  io: VenueIo,
+  path: string,
+  query: Record<string, string | number>,
+): Promise<{ ok: true; status: number; body: unknown } | { ok: false; why: string }> {
+  const base = io.baseUrl ?? LIGHTER_ROUTE_V1.apiBase;
+  const qs = Object.entries(query)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+    .join("&");
+  const url = `${base}${path}${qs ? `?${qs}` : ""}`;
+  const f = io.fetch ?? (typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : undefined);
+  if (!f) return { ok: false, why: "this runtime cannot make web requests" };
+  const ctl = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<{ ok: false; why: string }>((resolve) => {
+    timer = setTimeout(() => {
+      ctl.abort();
+      resolve({ ok: false, why: "Lighter did not answer in time" });
+    }, io.timeoutMs ?? VENUE_TIMEOUT_MS);
+  });
+  const exchange = (async (): Promise<{ ok: true; status: number; body: unknown } | { ok: false; why: string }> => {
+    try {
+      const res = await f(url, { method: "GET", redirect: "error", signal: ctl.signal, headers: { accept: "application/json" } });
+      const text = await readCapped(res, VENUE_MAX_BYTES);
+      if (text === null) return { ok: false, why: "Lighter's answer was larger than any real one" };
+      try {
+        return { ok: true, status: res.status, body: JSON.parse(text) as unknown };
+      } catch {
+        return { ok: false, why: `Lighter answered HTTP ${res.status} with something that is not JSON` };
+      }
+    } catch {
+      return { ok: false, why: ctl.signal.aborted ? "Lighter did not answer in time" : "Lighter could not be reached" };
+    }
+  })();
+  try {
+    return await Promise.race([exchange, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** A GET whose body must parse, as a field. A body that does not parse is unread, never empty. */
+async function venueRead<T>(
+  io: VenueIo,
+  path: string,
+  query: Record<string, string | number>,
+  parse: (raw: unknown) => T | null,
+  what: string,
+): Promise<VenueField<T>> {
+  const got = await venueGetJson(io, path, query);
+  if (!got.ok) return venueUnread(`${what}: ${got.why}`);
+  if (got.status !== 200) return venueUnread(`${what}: Lighter answered HTTP ${got.status}`);
+  const parsed = parse(got.body);
+  return parsed === null ? venueUnread(`${what}: Lighter's answer did not parse, which is not the same as empty`) : venueField(parsed);
+}
+
+function isRecordish(x: unknown): x is Record<string, unknown> {
+  return typeof x === "object" && x !== null && !Array.isArray(x);
+}
+
+/**
+ * GET /api/v1/apikeys at (account, 16) → the slot. EMPTY ONLY ON THE VENUE'S
+ * OWN WORD (21109), exactly as onboard.ts reads it: a 200 with no key, two
+ * keys, or a key the contract would never have accepted is unread.
+ */
+export async function readVenueKeySlot(
+  accountIndex: number,
+  io: VenueIo & { agentPerpPubKey?: string | null } = {},
+): Promise<VenueField<RecoverKeySlot>> {
+  const what = `the API key at index ${LIGHTER_ROUTE_V1.apiKeyIndex}`;
+  const got = await venueGetJson(io, "/api/v1/apikeys", { account_index: accountIndex, api_key_index: LIGHTER_ROUTE_V1.apiKeyIndex });
+  if (!got.ok) return venueUnread(`${what}: ${got.why}`);
+  if (isRecordish(got.body) && got.body.code === LIGHTER_APIKEY_NOT_FOUND) return venueField({ state: "empty" });
+  if (got.status !== 200) return venueUnread(`${what}: Lighter answered HTTP ${got.status}`);
+  const keys = parseApiKeys(got.body);
+  if (keys === null || keys.length !== 1) return venueUnread(`${what}: Lighter's answer did not parse`);
+  const k = keys[0]!;
+  if (k.accountIndex !== accountIndex || k.apiKeyIndex !== LIGHTER_ROUTE_V1.apiKeyIndex) {
+    return venueUnread(`${what}: Lighter answered about another account or index`);
+  }
+  const publicKey = validatePerpPubKey(k.publicKey);
+  if (publicKey === null) return venueUnread(`${what}: Lighter answered a key the contract would not accept`);
+  const agent = io.agentPerpPubKey ? validatePerpPubKey(io.agentPerpPubKey) : null;
+  return venueField({ state: "key", publicKey, agents: agent === null ? null : agent === publicKey });
+}
+
+function venueUsdg(micro: bigint): string {
+  return `${formatUnits(micro, USDG_DECIMALS)} USDG`;
+}
+
+function venueSigned(micro: bigint): string {
+  return `${micro < 0n ? "−" : "+"}${formatUnits(micro < 0n ? -micro : micro, USDG_DECIMALS)} USDG`;
+}
+
+function plural(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** The master account read, reduced. Every open position must be scalable, or parseAccount refused the read. */
+function reduceAccount(acct: PerpAccountRead, decimals: ReadonlyMap<number, PerpDecimals>): RecoverVenueAccount | null {
+  const positions: RecoverVenuePosition[] = [];
+  for (const p of openPositions(acct)) {
+    const d = decimals.get(p.marketId);
+    if (d === undefined || p.side === null) return null;
+    positions.push({
+      market: p.key ?? p.symbol,
+      marketId: p.marketId,
+      side: p.side,
+      size: formatUnits(p.baseAmount, d.sizeDecimals),
+      marginMode: p.marginMode,
+      marginMicro: p.allocatedMarginMicro,
+      unrealizedMicro: p.unrealizedMicro,
+      liqPrice: p.liqPrice === null ? null : formatUnits(p.liqPrice, d.priceDecimals),
+      stopsResting: p.positionTiedOrderCount,
+    });
+  }
+  const rowOrders = acct.positions.reduce((n, p) => n + p.openOrderCount + p.pendingOrderCount, 0);
+  return {
+    collateralMicro: acct.collateralMicro,
+    isolatedMarginMicro: acct.isolatedMarginMicro,
+    unrealizedMicro: acct.unrealizedMicro,
+    positions,
+    crossPositions: positions.filter((p) => p.marginMode === "cross").length,
+    orders: Math.max(acct.totalOrderCount + acct.pendingOrderCount, rowOrders),
+    poolShareCount: acct.poolShareCount,
+    spotBalanceCount: acct.spotHoldings.length + acct.pendingUnlockCount,
+  };
+}
+
+/** One sub-account's summary line, from its own full read. */
+function otherSummary(acct: PerpAccountRead): string {
+  if (accountReadsEmpty(acct)) return "reads empty";
+  const parts: string[] = [];
+  const open = openPositions(acct);
+  if (open.length > 0) parts.push(plural(open.length, "open position", "open positions"));
+  if (acct.collateralMicro !== 0n) parts.push(`${venueUsdg(acct.collateralMicro)} collateral`);
+  if (acct.isolatedMarginMicro !== 0n) parts.push(`${venueUsdg(acct.isolatedMarginMicro)} isolated margin`);
+  if (acct.totalOrderCount + acct.pendingOrderCount > 0) parts.push("resting orders");
+  if (acct.poolShareCount > 0) parts.push("public-pool shares");
+  if (acct.spotHoldings.length + acct.pendingUnlockCount > 0) parts.push("spot balances");
+  return parts.length > 0 ? `holds ${parts.join(", ")}` : "holds something";
+}
+
+/**
+ * Read everything recovery can say about Lighter for `smartAccount`. NEVER
+ * THROWS: each field fails on its own into `{ read: false, why }`.
+ *
+ * The order is rule 11's: the chain first. A zero account index is a KNOWN
+ * none — no deposit ever landed — and then the venue's API is never asked
+ * anything, so an agent that never used perps costs recovery one eth_call.
+ */
+export async function readRecoverVenue(args: {
+  smartAccount: Address;
+  chainId: number;
+  chainRead: LighterChainReader;
+  agentPerpPubKey?: string | null;
+  fetch?: VenueFetch;
+  baseUrl?: string;
+  timeoutMs?: number;
+}): Promise<RecoverVenue> {
+  if (args.chainId !== LIGHTER_ROUTE_V1.chainId) return { kind: "elsewhere", chainId: args.chainId };
+  if (typeof args.smartAccount !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(args.smartAccount)) {
+    return { kind: "unreadable", why: "not an account address" };
+  }
+  const self = args.smartAccount.toLowerCase() as Address;
+  const io: VenueIo = { fetch: args.fetch, baseUrl: args.baseUrl, timeoutMs: args.timeoutMs };
+
+  let index: bigint | null;
+  try {
+    index = asUint(await args.chainRead("addressToAccountIndex", [self]), UINT48_MAX);
+  } catch {
+    return { kind: "unreadable", why: "the Lighter contract could not be read (account index)" };
+  }
+  if (index === null) return { kind: "unreadable", why: "the Lighter contract answered an account index that is not one" };
+  if (index === 0n) return { kind: "none" };
+  const accountIndex = Number(index);
+
+  const [pendingMicro, details, list, withdrawalDelaySec, keySlot] = await Promise.all([
+    args
+      .chainRead("getPendingBalance", [self, LIGHTER_ROUTE_V1.assetIndex])
+      .then((v): VenueField<bigint> => {
+        const raw = asUint(v, UINT128_MAX);
+        return raw === null
+          ? venueUnread("the Lighter contract answered a pending balance that is not one")
+          : venueField(raw * BigInt(LIGHTER_ROUTE_V1.usdgTickSize));
+      })
+      .catch((): VenueField<bigint> => venueUnread("the Lighter contract could not be read (pending balance)")),
+    venueRead(io, "/api/v1/orderBookDetails", { filter: "perp" }, parseOrderBookDetails, "Lighter's market list"),
+    venueRead(io, "/api/v1/accountsByL1Address", { l1_address: self }, (raw) => parseAccountsByL1Address(raw, self), "the accounts under this address"),
+    venueRead(io, "/api/v1/withdrawalDelay", {}, parseWithdrawalDelay, "the withdrawal delay"),
+    readVenueKeySlot(accountIndex, { ...io, agentPerpPubKey: args.agentPerpPubKey }),
+  ]);
+
+  // Decimals let an OPEN position parse. Without them a flat row still reads
+  // and an open one refuses the whole account — unread, never flat — so a
+  // failed market list costs the disclosure, not its honesty.
+  const decimals: ReadonlyMap<number, PerpDecimals> = details.read ? details.value.decimals : new Map();
+  const readAccountAt = async (idx: number): Promise<VenueField<PerpAccountRead>> => {
+    const r = await venueRead(
+      io,
+      "/api/v1/account",
+      { by: "index", value: idx },
+      (raw) => parseAccount(raw, decimals, { accountIndex: idx }),
+      `account ${idx}`,
+    );
+    if (r.read && r.value.l1Address !== self) return venueUnread(`account ${idx}: Lighter answered for a different address`);
+    if (!r.read && !details.read) return venueUnread(`${r.why} (the market list, which open positions need, could not be read either)`);
+    return r;
+  };
+
+  const masterRead = await readAccountAt(accountIndex);
+  let account: VenueField<RecoverVenueAccount>;
+  if (!masterRead.read) {
+    account = masterRead;
+  } else {
+    const reduced = reduceAccount(masterRead.value, decimals);
+    account = reduced === null ? venueUnread(`account ${accountIndex}: a position could not be scaled`) : venueField(reduced);
+  }
+
+  let otherAccounts: VenueField<{ accounts: RecoverOtherAccount[]; complete: boolean }>;
+  if (!list.read) {
+    otherAccounts = list;
+  } else {
+    const others = list.value.accounts.filter((a) => a.accountIndex !== accountIndex);
+    let complete = list.value.nextCursor === null && others.length <= VENUE_MAX_OTHER_ACCOUNTS;
+    // The contract and the venue must agree on who we are. A list that does
+    // not name the account the contract names is not a list we can finish.
+    if (!list.value.accounts.some((a) => a.accountIndex === accountIndex)) complete = false;
+    const accounts: RecoverOtherAccount[] = [];
+    for (const a of others.slice(0, VENUE_MAX_OTHER_ACCOUNTS)) {
+      const r = await readAccountAt(a.accountIndex);
+      if (r.read) {
+        accounts.push({ accountIndex: a.accountIndex, holds: !accountReadsEmpty(r.value), summary: otherSummary(r.value) });
+      } else if (a.collateralMicro !== 0n) {
+        // The list's own collateral is a definite finding even when the full read fails.
+        accounts.push({ accountIndex: a.accountIndex, holds: true, summary: `holds ${venueUsdg(a.collateralMicro)} collateral (the rest could not be read)` });
+      } else {
+        accounts.push({ accountIndex: a.accountIndex, holds: null, summary: `could not be read (${r.why})` });
+      }
+    }
+    otherAccounts = venueField({ accounts, complete });
+  }
+
+  const steps = planVenueSteps({ accountIndex, account, pendingMicro, keySlot });
+  return { kind: "account", accountIndex, account, otherAccounts, pendingMicro, withdrawalDelaySec, keySlot, ...steps };
+}
+
+/**
+ * WHICH OWNER-KEY STEPS ARE HONEST TO OFFER, from what was read. Pure.
+ *
+ * THE UNWIND IS ONE UserOp, IN THIS ORDER, and the order is the point:
+ *
+ *   1. cancelAllOrders(idx). Whatever the (possibly compromised) API key left
+ *      resting stops resting. It also cancels the stops on open positions —
+ *      which is why the confirmation names them and asks for another word.
+ *   2. changePubKey(idx, 16, throwaway). The agent's key stops working at the
+ *      venue. Lighter REFUSES a key change on an account whose cross
+ *      collateral is zero (error 21126), so this must run while C > 0 …
+ *   3. withdraw(idx, 3, 0, C) … which is why the withdrawal of free
+ *      collateral comes AFTER it. Priority requests execute in the order they
+ *      were sent, so the rotation sees the collateral still there and the
+ *      withdrawal then takes it. The other order would empty C first and the
+ *      rotation would fail at the venue, silently, after this op "succeeded".
+ *
+ * AND WHEN EACH IS LEFT OUT:
+ *   - No unwind at all while the account is unread: the rotation's 21126
+ *     precondition and the withdraw's amount would both be guesses.
+ *   - No rotation when the slot is provably empty (nothing to revoke), or
+ *     when C is zero (21126 — it would fail at the venue).
+ *   - No withdraw when C is zero, or when an open CROSS position uses C as
+ *     margin (it is not free; taking it would push that position toward
+ *     liquidation, and the venue would refuse the amount anyway).
+ *   - No cancel-only unwind over open positions: without a rotation it would
+ *     strip their stops while the key that could replace them stays live —
+ *     strictly worse than doing nothing. Cancel-only is offered when there
+ *     are orders and no positions.
+ *
+ * THE CLAIM IS ALWAYS A SEPARATE OPERATION. withdrawPendingBalance reverts
+ * when Lighter's relayer claimed first (it usually does), and a batch is
+ * atomic: a claim riding with the unwind could revert the key rotation with
+ * it.
+ */
+export function planVenueSteps(input: {
+  accountIndex: number;
+  account: VenueField<RecoverVenueAccount>;
+  pendingMicro: VenueField<bigint>;
+  keySlot: VenueField<RecoverKeySlot>;
+}): { unwind: VenueUnwind | null; claim: VenueClaim | null; notOffered: string[] } {
+  const notOffered: string[] = [];
+  let claim: VenueClaim | null = null;
+  if (input.pendingMicro.read && input.pendingMicro.value > 0n) {
+    claim = { kind: "claim", accountIndex: input.accountIndex, amountMicro: input.pendingMicro.value };
+  }
+  if (!input.account.read) {
+    notOffered.push(
+      "No unwind is offered while Lighter's account cannot be read: whether the key can be changed and how much can be withdrawn would be guesses. Run recover again.",
+    );
+    return { unwind: null, claim, notOffered };
+  }
+  const a = input.account.value;
+  const open = a.positions.length;
+  const C = a.collateralMicro;
+  const slotMayHoldKey = !input.keySlot.read || input.keySlot.value.state === "key";
+  const rotate = slotMayHoldKey && C > 0n;
+  const withdrawMicro = C > 0n && a.crossPositions === 0 ? C : 0n;
+  if (slotMayHoldKey && C <= 0n) {
+    notOffered.push(
+      `The key at index ${LIGHTER_ROUTE_V1.apiKeyIndex} cannot be changed from here: Lighter refuses a key change while the account's cross collateral is zero (error 21126).`,
+    );
+  }
+  if (C > 0n && a.crossPositions > 0) {
+    notOffered.push(
+      `The ${venueUsdg(C)} of cross collateral backs ${plural(a.crossPositions, "open cross-margin position", "open cross-margin positions")}, so it is not free and is not withdrawn.`,
+    );
+  }
+  const cancel = rotate || (a.orders > 0 && open === 0);
+  if (!rotate && open > 0 && a.orders > 0) {
+    notOffered.push(
+      "Resting orders are not cancelled: without a key change that would strip the open positions' stops while the key that could replace them stays live.",
+    );
+  }
+  const calls: VenueCallName[] = [];
+  if (cancel) calls.push("cancelAllOrders");
+  if (rotate) calls.push("changePubKey");
+  if (withdrawMicro > 0n) calls.push("withdraw");
+  const unwind: VenueUnwind | null =
+    calls.length === 0
+      ? null
+      : { kind: "unwind", accountIndex: input.accountIndex, calls, withdrawMicro, positionsLeftOpen: cancel ? open : 0 };
+  return { unwind, claim, notOffered };
+}
+
+/**
+ * Is anything at Lighter? "holds" (something is there), "nothing" (every
+ * field was READ and is empty, or there is no venue account at all) or
+ * "unknown". The question every surface asks before it says "empty": no
+ * surface may say "nothing left to recover" unless this is "nothing".
+ *
+ * A key registered over an empty account is not money, so it does not make
+ * the venue "hold" anything; the disclosure still names it.
+ */
+export function venueStanding(v: RecoverVenue | undefined | null): "nothing" | "holds" | "unknown" {
+  if (!v) return "unknown";
+  if (v.kind === "elsewhere" || v.kind === "none") return "nothing";
+  if (v.kind === "unreadable") return "unknown";
+  if (v.kind !== "account") return "unknown";
+  let holds = false;
+  let unknown = false;
+  if (v.account.read) {
+    const a = v.account.value;
+    if (a.collateralMicro !== 0n || a.isolatedMarginMicro !== 0n || a.positions.length > 0 || a.orders > 0 || a.poolShareCount > 0 || a.spotBalanceCount > 0) {
+      holds = true;
+    }
+  } else {
+    unknown = true;
+  }
+  if (v.pendingMicro.read) {
+    if (v.pendingMicro.value > 0n) holds = true;
+  } else {
+    unknown = true;
+  }
+  if (v.otherAccounts.read) {
+    if (v.otherAccounts.value.accounts.some((o) => o.holds === true)) holds = true;
+    if (!v.otherAccounts.value.complete || v.otherAccounts.value.accounts.some((o) => o.holds === null)) unknown = true;
+  } else {
+    unknown = true;
+  }
+  return holds ? "holds" : unknown ? "unknown" : "nothing";
+}
+
+/** What the executor re-derives and must match: identity, never amounts (amounts are re-read before signing). */
+export type ApprovedVenueStep =
+  | { kind: "unwind"; accountIndex: number; calls: VenueCallName[]; positionsLeftOpen: number }
+  | { kind: "claim"; accountIndex: number };
+
+/** One step, in words, for a confirmation. JSON-safe. */
+export interface VenueOfferText {
+  kind: "unwind" | "claim";
+  title: string;
+  /** What each call does, in send order. */
+  lines: string[];
+  /** What the owner must understand before typing the word. */
+  warnings: string[];
+  /** The word the CLI asks for. Different when open positions lose their stops. */
+  confirmWord: string;
+  approved: ApprovedVenueStep;
+}
+
+/**
+ * The venue group in words, JSON-safe, so the CLI child, the web panel and
+ * any future route print ONE text rather than three that drift. Every amount
+ * is exact; every unread field says it was not read and that this is not a
+ * zero.
+ */
+export interface VenueDisclosure {
+  standing: "nothing" | "holds" | "unknown";
+  accountIndex: number | null;
+  headline: string;
+  /** Grouped by custody: the account at Lighter, the contract, other accounts, the key. */
+  groups: { title: string; lines: string[] }[];
+  offers: VenueOfferText[];
+  notes: string[];
+}
+
+function shortKey(pk: string): string {
+  return `${pk.slice(0, 10)}…${pk.slice(-6)}`;
+}
+
+function delayText(d: VenueField<number>): string {
+  return d.read ? ` (Lighter's delay right now: about ${Math.max(1, Math.ceil(d.value / 60))} min, read live — it varies)` : "";
+}
+
+/**
+ * Build the disclosure. `gasWei` adds the one note that stops an unwind dead
+ * (no ETH to pay for it); omit it when unknown.
+ */
+export function venueDisclosure(v: RecoverVenue | undefined | null, opts: { gasWei?: bigint | null } = {}): VenueDisclosure {
+  const standing = venueStanding(v);
+  if (!v) {
+    return {
+      standing,
+      accountIndex: null,
+      headline: "Lighter (perpetuals) was not checked here, so whether anything is there is unknown.",
+      groups: [],
+      offers: [],
+      notes: [],
+    };
+  }
+  if (v.kind === "elsewhere") {
+    return {
+      standing,
+      accountIndex: null,
+      headline: `Lighter runs only on Robinhood Chain mainnet (${LIGHTER_ROUTE_V1.chainId}); there is nothing of it on chain ${v.chainId}.`,
+      groups: [],
+      offers: [],
+      notes: [],
+    };
+  }
+  if (v.kind === "none") {
+    return { standing, accountIndex: null, headline: "Lighter: no account has ever existed for this smart account.", groups: [], offers: [], notes: [] };
+  }
+  if (v.kind === "unreadable") {
+    return {
+      standing,
+      accountIndex: null,
+      headline: "Lighter could not be read, so what is still there is unknown.",
+      groups: [
+        {
+          title: "At Lighter",
+          lines: [`could not be read (${v.why}) — that is NOT an empty account: positions, their stops and USDG may be there`],
+        },
+      ],
+      offers: [],
+      notes: ["Run recover again when the chain answers."],
+    };
+  }
+  const groups: VenueDisclosure["groups"] = [];
+  const acct: string[] = [];
+  if (!v.account.read) {
+    acct.push(`could not be read (${v.account.why}) — that is NOT an empty account: positions, their stops and USDG may be there`);
+  } else {
+    const a = v.account.value;
+    if (a.collateralMicro !== 0n) acct.push(`${venueUsdg(a.collateralMicro)} cross collateral`);
+    if (a.isolatedMarginMicro !== 0n) acct.push(`${venueUsdg(a.isolatedMarginMicro)} isolated margin, held by the open positions below`);
+    for (const p of a.positions) {
+      const margin = p.marginMode === "isolated" ? `margin ${venueUsdg(p.marginMicro)}` : "cross margin";
+      const liq = p.liqPrice === null ? "no liquidation price reported" : `liquidation ${p.liqPrice}`;
+      const stops = p.stopsResting > 0 ? `${plural(p.stopsResting, "order", "orders")} resting on it (its stop)` : "no stop seen resting";
+      acct.push(`${p.market} ${p.side} ${p.size} · ${margin} · unrealized ${venueSigned(p.unrealizedMicro)} · ${liq} · ${stops}`);
+    }
+    if (a.orders > 0) acct.push(plural(a.orders, "resting order", "resting orders"));
+    if (a.poolShareCount > 0) acct.push(`shares in ${plural(a.poolShareCount, "public pool", "public pools")} — not movable from here`);
+    if (a.spotBalanceCount > 0) {
+      acct.push(`${plural(a.spotBalanceCount, "balance", "balances")} in Lighter's spot account or unlocking — not movable from here`);
+    }
+    if (acct.length === 0) acct.push("reads empty: no collateral, positions, orders, pool shares or spot balances");
+  }
+  groups.push({ title: `At Lighter · account ${v.accountIndex}`, lines: acct });
+
+  groups.push({
+    title: "Waiting on the Lighter contract",
+    lines: [
+      v.pendingMicro.read
+        ? v.pendingMicro.value > 0n
+          ? `${venueUsdg(v.pendingMicro.value)} claimable into this smart account`
+          : "nothing waiting to be claimed"
+        : `could not be read (${v.pendingMicro.why}) — not the same as nothing`,
+    ],
+  });
+
+  if (!v.otherAccounts.read) {
+    groups.push({ title: "Other Lighter accounts under this smart account", lines: [`could not be read (${v.otherAccounts.why}) — whether they hold anything is unknown`] });
+  } else if (v.otherAccounts.value.accounts.length > 0 || !v.otherAccounts.value.complete) {
+    const lines = v.otherAccounts.value.accounts.map((o) => `account ${o.accountIndex}: ${o.summary}`);
+    if (!v.otherAccounts.value.complete) lines.push("the venue lists more than was read here, so this list may be short");
+    lines.push("the agent never creates these; this build discloses them and does not unwind them");
+    groups.push({ title: "Other Lighter accounts under this smart account", lines });
+  }
+
+  const key = `API key at index ${LIGHTER_ROUTE_V1.apiKeyIndex}`;
+  if (!v.keySlot.read) {
+    groups.push({ title: key, lines: [`could not be read (${v.keySlot.why})`] });
+  } else if (v.keySlot.value.state === "empty") {
+    groups.push({ title: key, lines: ["no key registered"] });
+  } else {
+    const s = v.keySlot.value;
+    groups.push({
+      title: key,
+      lines: [
+        s.agents === true
+          ? `the agent's key (${shortKey(s.publicKey)}) — whoever holds it can trade this account and send its money home, until it is changed`
+          : s.agents === false
+            ? `a key that is not the agent's current one (${shortKey(s.publicKey)}) — an earlier recover's throwaway, or a key from an older grant`
+            : `a key is registered (${shortKey(s.publicKey)})`,
+      ],
+    });
+  }
+
+  const notes = [...v.notOffered];
+  notes.push(
+    v.withdrawalDelaySec.read
+      ? `Lighter's withdrawal delay right now: about ${Math.max(1, Math.ceil(v.withdrawalDelaySec.value / 60))} min (read live; it varies).`
+      : `Lighter's withdrawal delay could not be read (${v.withdrawalDelaySec.why}).`,
+  );
+  if (v.account.read && v.account.value.positions.length > 0) {
+    notes.push(
+      "Open positions cannot be closed from the owner key in this build: Lighter's on-chain createOrder has no reduce-only flag, so it stays off until the mainnet checklist proves it. The agent's own stand-down (`merrymen kill`) closes them with its key; otherwise their stops and Lighter's liquidation are what end them.",
+    );
+  }
+
+  const offers: VenueOfferText[] = [];
+  const noGas = opts.gasWei === 0n ? ["The account has no ETH to pay for this operation — send a little ETH to it first."] : [];
+  if (v.claim) {
+    offers.push({
+      kind: "claim",
+      title: "Claim what is waiting on the Lighter contract",
+      lines: [`withdrawPendingBalance — ${venueUsdg(v.claim.amountMicro)} into this smart account; it can only ever pay this account`],
+      warnings: [
+        "Anyone may make this claim and Lighter's relayer usually does it first. If it has, this operation fails, costs a little gas, and the money is already in the account.",
+        ...noGas,
+      ],
+      confirmWord: "claim",
+      approved: { kind: "claim", accountIndex: v.accountIndex },
+    });
+  }
+  if (v.unwind) {
+    const u = v.unwind;
+    const lines: string[] = [];
+    for (const c of u.calls) {
+      if (c === "cancelAllOrders") {
+        lines.push(
+          `cancelAllOrders — every resting order on account ${u.accountIndex}` +
+            (u.positionsLeftOpen > 0 ? `, INCLUDING the stops on ${plural(u.positionsLeftOpen, "open position", "open positions")}` : ""),
+        );
+      } else if (c === "changePubKey") {
+        lines.push(
+          `changePubKey — replace the API key at index ${LIGHTER_ROUTE_V1.apiKeyIndex} with a fresh key nobody holds, so the agent's key can no longer trade, cancel or withdraw`,
+        );
+      } else {
+        lines.push(
+          `withdraw — ${venueUsdg(u.withdrawMicro)} of free cross collateral, as a secure withdrawal that can only pay this smart account. ` +
+            `It waits on the Lighter contract after the delay${delayText(v.withdrawalDelaySec)}; run recover again then to claim it`,
+        );
+      }
+    }
+    const warnings: string[] = [];
+    if (u.calls.includes("changePubKey") && u.calls.includes("withdraw")) {
+      warnings.push(
+        "The withdrawal comes after the key change on purpose: Lighter refuses a key change on an account with no cross collateral (error 21126).",
+      );
+    }
+    if (u.positionsLeftOpen > 0) {
+      const a = v.account.read ? v.account.value : null;
+      warnings.push(
+        `${plural(u.positionsLeftOpen, "position stays OPEN", "positions stay OPEN")} with NO stop and no key that can close ${u.positionsLeftOpen === 1 ? "it" : "them"}: only Lighter's liquidation ends ${u.positionsLeftOpen === 1 ? "it" : "them"}` +
+          (a && a.isolatedMarginMicro > 0n ? `, and the ${venueUsdg(a.isolatedMarginMicro)} of isolated margin stays with ${u.positionsLeftOpen === 1 ? "it" : "them"}` : "") +
+          ". If the agent is still running and its key is not suspected, `merrymen kill` first closes positions with the agent's own key.",
+      );
+    }
+    if (u.calls.includes("changePubKey")) {
+      warnings.push(
+        "Changing the key does not durably revoke the agent while its session permission is valid (until the grant expires): whoever holds the grant can register the agent's key again. This build does not revoke that permission on chain.",
+      );
+    }
+    warnings.push(
+      "These are priority requests: Lighter processes them after this operation lands, and one it then refuses (if the collateral moved, say) fails there, where this operation cannot see it. Run recover again afterwards to see what is left.",
+    );
+    warnings.push(...noGas);
+    offers.push({
+      kind: "unwind",
+      title: "Unwind at Lighter with your owner key (one operation)",
+      lines,
+      warnings,
+      confirmWord: u.positionsLeftOpen > 0 ? "unwind anyway" : "unwind",
+      approved: { kind: "unwind", accountIndex: u.accountIndex, calls: [...u.calls], positionsLeftOpen: u.positionsLeftOpen },
+    });
+  }
+
+  const headline =
+    standing === "holds"
+      ? `Lighter: money or positions are still at the venue (account ${v.accountIndex}). They are NOT part of the sweep — see below.`
+      : standing === "unknown"
+        ? `Lighter could not be read in full (account ${v.accountIndex}), so what is still there is unknown — see below.`
+        : `Lighter: account ${v.accountIndex} reads empty.`;
+  return { standing, accountIndex: v.accountIndex, headline, groups, offers, notes };
+}
+
+/**
+ * A fresh Lighter API public key that NOBODY holds the private key for.
+ *
+ * Five 8-byte little-endian limbs, each a Goldilocks element (< p), not all
+ * zero — exactly what validatePerpPubKey (and the contract's changePubKey)
+ * accept. Each limb is rejection-sampled, never reduced mod p, so every
+ * canonical value is equally likely.
+ *
+ * WHY A KEY WITH NO PRIVATE KEY IS SAFE HERE, AND IS THE POINT: its only job is
+ * to occupy index 16 so the agent's key stops working. Lighter verifies L2
+ * transactions against the registered key; a key whose discrete log nobody
+ * knows can sign nothing, so nothing can ever trade, cancel or withdraw with
+ * it — a revocation, not a hand-over. Generating a real pair would need the
+ * 14 MB Go signer on every recovering device (recover.ts must stay free of it)
+ * and would leave a private key lying around to be leaked.
+ *
+ * IT IS SAMPLED TO DECODE TO A CURVE POINT, not merely to be canonical. The
+ * contract checks only that the limbs are canonical, but whether Lighter's
+ * circuit ALSO insists the key decode (ECgFp5, ecgfp5Decodes below) is
+ * unproven — and about half of random canonical values do not. That mattered
+ * more than a failed rotation: the unwind sends the key change and the
+ * withdrawal of all free cross collateral in ONE operation, the venue
+ * processes them independently, and a refused key change beside a landed
+ * withdrawal leaves cross collateral at 0 — where Lighter refuses every later
+ * key change (21126) and the agent's key stays live over the isolated
+ * positions, with no recover path left to revoke it. Every real Lighter public
+ * key decodes (the test holds this against keys the official signer made), so
+ * a throwaway drawn from the decoding half is indistinguishable in form from
+ * one: whatever the circuit checks about a key's encoding, it passes. The CLI
+ * still re-reads index 16 afterwards, and the mainnet checklist's recover
+ * drill (H2) records whether a canonical NON-decoding key is accepted.
+ *
+ * `random` is injectable for tests; the default is the platform CSPRNG.
+ */
+export function throwawayLighterKey(
+  random: (n: number) => Uint8Array = (n) => globalThis.crypto.getRandomValues(new Uint8Array(n)),
+): `0x${string}` {
+  let zero = 0;
+  // Half of canonical values decode, so 128 draws failing in a row means the
+  // source is broken (or repeating itself), not unlucky: 2^-128.
+  for (let attempt = 0; attempt < 128; attempt++) {
+    const bytes = new Uint8Array(40);
+    for (let limb = 0; limb < 5; limb++) {
+      let placed = false;
+      // p = 2^64 − 2^32 + 1, so a uniform u64 is ≥ p with probability ~2^-32;
+      // 64 draws failing in a row means the source is broken, not unlucky.
+      for (let draw = 0; draw < 64 && !placed; draw++) {
+        const b = random(8);
+        if (!(b instanceof Uint8Array) || b.length !== 8) throw new Error("throwawayLighterKey: the random source did not return 8 bytes");
+        let v = 0n;
+        for (let i = 7; i >= 0; i--) v = (v << 8n) | BigInt(b[i]!);
+        if (v < GOLDILOCKS_P) {
+          bytes.set(b, limb * 8);
+          placed = true;
+        }
+      }
+      if (!placed) throw new Error("throwawayLighterKey: the random source never produced a canonical limb");
+    }
+    const hex = `0x${Array.from(bytes, (x) => x.toString(16).padStart(2, "0")).join("")}`;
+    // validatePerpPubKey also refuses all-zero — the one canonical value that is not a key.
+    const key = validatePerpPubKey(hex);
+    if (key === null) {
+      zero++;
+      if (zero >= 16) break;
+      continue;
+    }
+    if (ecgfp5Decodes(key)) return key;
+  }
+  throw new Error(
+    zero >= 16
+      ? "throwawayLighterKey: the random source keeps producing the zero key"
+      : "throwawayLighterKey: the random source never produced a key that decodes to a curve point",
+  );
+}
+
+// ── ECgFp5: does a Lighter public key decode to a curve point? ──────────────
+
+/**
+ * GF(p^5) = GF(p)[z]/(z^5 − 3) over the Goldilocks prime, as five bigint
+ * coefficients, lowest first — the field Lighter's Schnorr keys live in
+ * (Pornin's ECgFp5; lighter-go's poseidon_crypto curve/ecgfp5). Pure BigInt:
+ * this runs wherever recover.ts does, and is only ever asked about PUBLIC keys.
+ */
+type Gfp5 = readonly [bigint, bigint, bigint, bigint, bigint];
+
+const gfMod = (x: bigint): bigint => ((x % GOLDILOCKS_P) + GOLDILOCKS_P) % GOLDILOCKS_P;
+
+function gfp5Mul(a: Gfp5, b: Gfp5): Gfp5 {
+  const c = [0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n];
+  for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) c[i + j]! += a[i]! * b[j]!;
+  // z^5 = 3: fold the high half back down.
+  return [
+    gfMod(c[0]! + 3n * c[5]!),
+    gfMod(c[1]! + 3n * c[6]!),
+    gfMod(c[2]! + 3n * c[7]!),
+    gfMod(c[3]! + 3n * c[8]!),
+    gfMod(c[4]!),
+  ];
+}
+
+function gfp5Sub(a: Gfp5, b: Gfp5): Gfp5 {
+  return [gfMod(a[0] - b[0]), gfMod(a[1] - b[1]), gfMod(a[2] - b[2]), gfMod(a[3] - b[3]), gfMod(a[4] - b[4])];
+}
+
+function gfp5Pow(a: Gfp5, e: bigint): Gfp5 {
+  let r: Gfp5 = [1n, 0n, 0n, 0n, 0n];
+  let b = a;
+  while (e > 0n) {
+    if (e & 1n) r = gfp5Mul(r, b);
+    b = gfp5Mul(b, b);
+    e >>= 1n;
+  }
+  return r;
+}
+
+/** (p^5 − 1) / 2: Euler's criterion in GF(p^5). */
+const GFP5_HALF_ORDER = (GOLDILOCKS_P ** 5n - 1n) / 2n;
+/** The curve y² = x(x² + a·x + b): a = 2, and 4b with b = 263·z. */
+const ECGFP5_A: Gfp5 = [2n, 0n, 0n, 0n, 0n];
+const ECGFP5_B4: Gfp5 = [0n, 4n * 263n, 0n, 0n, 0n];
+
+/**
+ * DOES THIS 40-BYTE KEY DECODE TO A POINT ON ECgFp5? The key is w = y/x as five
+ * little-endian 8-byte limbs (validatePerpPubKey's layout). Decoding solves
+ * x² − (w² − a)·x + b = 0, which has a root exactly when δ = (w² − a)² − 4b is
+ * a square in GF(p^5) (or w = 0, the neutral point). About half of all
+ * canonical values fail; every key the official signer makes passes.
+ */
+export function ecgfp5Decodes(pubKey: string): boolean {
+  const key = validatePerpPubKey(pubKey);
+  if (key === null) return false;
+  const hex = key.slice(2);
+  const limbs: bigint[] = [];
+  for (let l = 0; l < 5; l++) {
+    let v = 0n;
+    for (let i = 7; i >= 0; i--) v = (v << 8n) | BigInt(parseInt(hex.slice((l * 8 + i) * 2, (l * 8 + i) * 2 + 2), 16));
+    limbs.push(v);
+  }
+  const w = limbs as unknown as Gfp5;
+  const e = gfp5Sub(gfp5Mul(w, w), ECGFP5_A);
+  const delta = gfp5Sub(gfp5Mul(e, e), ECGFP5_B4);
+  if (delta.every((x) => x === 0n)) return true;
+  const chi = gfp5Pow(delta, GFP5_HALF_ORDER);
+  return chi[0] === 1n && chi[1] === 0n && chi[2] === 0n && chi[3] === 0n && chi[4] === 0n;
+}
+
+/**
+ * The unwind's calls, IN SEND ORDER, to the proxy, each with zero value.
+ * Pure, so the order — cancel, rotate, then withdraw (21126) — is testable
+ * without a chain.
+ */
+export function venueUnwindCalls(
+  u: Pick<VenueUnwind, "accountIndex" | "calls" | "withdrawMicro">,
+  freshKey: `0x${string}` | null,
+): { to: Address; value: bigint; data: `0x${string}` }[] {
+  const idx = BigInt(u.accountIndex);
+  if (idx <= 0n || idx > UINT48_MAX) throw new RangeError("venueUnwindCalls: not a Lighter account index");
+  const order: VenueCallName[] = ["cancelAllOrders", "changePubKey", "withdraw"];
+  // The order is the contract's, not the caller's: a list in any other order
+  // is refused rather than silently re-sorted, because the caller that built
+  // it believed something else would happen.
+  const want = order.filter((c) => u.calls.includes(c));
+  if (want.length !== u.calls.length || want.some((c, i) => u.calls[i] !== c)) {
+    throw new Error(`venueUnwindCalls: calls must be a subset of ${order.join(" → ")} in that order`);
+  }
+  const out: { to: Address; value: bigint; data: `0x${string}` }[] = [];
+  for (const c of u.calls) {
+    if (c === "cancelAllOrders") {
+      out.push({ to: LIGHTER_ROUTE_V1.proxy, value: 0n, data: encodeFunctionData({ abi: LIGHTER_OWNER_RECOVER_ABI, functionName: "cancelAllOrders", args: [Number(idx)] }) });
+    } else if (c === "changePubKey") {
+      const key = freshKey === null ? null : validatePerpPubKey(freshKey);
+      if (key === null) throw new Error("venueUnwindCalls: a key change needs a canonical fresh key");
+      out.push({
+        to: LIGHTER_ROUTE_V1.proxy,
+        value: 0n,
+        data: encodeFunctionData({ abi: LIGHTER_CHANGE_PUBKEY_ABI, functionName: "changePubKey", args: [Number(idx), LIGHTER_ROUTE_V1.apiKeyIndex, key] }),
+      });
+    } else {
+      // uint64 base amount; USDG's tick size is 1, so micro-USDG is the unit.
+      const amount = u.withdrawMicro / BigInt(LIGHTER_ROUTE_V1.usdgTickSize);
+      if (amount <= 0n || amount > UINT64_MAX) throw new RangeError("venueUnwindCalls: withdraw amount out of range");
+      out.push({
+        to: LIGHTER_ROUTE_V1.proxy,
+        value: 0n,
+        data: encodeFunctionData({
+          abi: LIGHTER_OWNER_RECOVER_ABI,
+          functionName: "withdraw",
+          args: [Number(idx), LIGHTER_ROUTE_V1.assetIndex, LIGHTER_ROUTE_V1.routePerps, amount],
+        }),
+      });
+    }
+  }
+  return out;
+}
+
+/** The claim's one call: withdrawPendingBalance(self, 3, amount). It always pays `self`. */
+export function venueClaimCall(self: Address, amountMicro: bigint): { to: Address; value: bigint; data: `0x${string}` } {
+  const amount = amountMicro / BigInt(LIGHTER_ROUTE_V1.usdgTickSize);
+  if (amount <= 0n || amount > UINT128_MAX) throw new RangeError("venueClaimCall: amount out of range");
+  return {
+    to: LIGHTER_ROUTE_V1.proxy,
+    value: 0n,
+    data: encodeFunctionData({ abi: LIGHTER_WITHDRAW_PENDING_ABI, functionName: "withdrawPendingBalance", args: [self, LIGHTER_ROUTE_V1.assetIndex, amount] }),
+  };
+}
+
+export interface VenueStepResult {
+  kind: "unwind" | "claim";
+  smartAccount: Address;
+  accountIndex: number;
+  calls: string[];
+  userOpHash: `0x${string}`;
+  txHash: `0x${string}`;
+  /**
+   * The fresh key now asked for at index 16. PUBLIC, and nobody holds its
+   * private key. Recorded (recover-cli writes it to perp-owner-rotations.json)
+   * so the worker can tell the owner's rotation from an attacker's.
+   */
+  rotatedTo: `0x${string}` | null;
+  /** The key that was at the index as read just before signing; null when empty or unread. */
+  replacedPubKey: `0x${string}` | null;
+  withdrawRequestedMicro: bigint;
+  claimedMicro: bigint;
+  positionsLeftOpen: number;
+}
+
+/**
+ * Execute ONE venue step — the unwind or the claim — the owner approved.
+ *
+ * Re-reads the venue, re-derives the step, and signs only when it is the one
+ * approved: the same account index and the same calls in the same order, and
+ * never MORE open positions losing their stops than the owner agreed to.
+ * Amounts are NOT pinned: they come from the fresh read, because an amount
+ * shown a minute ago that no longer exists is how a priority request fails
+ * at the venue out of sight. Every refusal happens before anything is signed.
+ */
+export async function recoverVenueStep(opts: {
+  chain: Chain;
+  owner: RecoveryOwner;
+  bundlerUrl: string;
+  rpcUrl?: string;
+  expectedSmartAccount?: Address;
+  agentPerpPubKey?: string | null;
+  approved: ApprovedVenueStep;
+  venueFetch?: VenueFetch;
+  lighterApiBase?: string;
+  /** Test seam for the throwaway key; production draws a fresh one. */
+  freshKey?: () => `0x${string}`;
+}): Promise<VenueStepResult> {
+  if (opts.owner.kind === "address") {
+    throw new Error("the Lighter unwind needs an owner that can sign: this one is address-only.");
+  }
+  if (opts.chain.id !== LIGHTER_ROUTE_V1.chainId) {
+    throw new Error(`Lighter settles on chain ${LIGHTER_ROUTE_V1.chainId}; there is nothing of it on chain ${opts.chain.id}.`);
+  }
+  const refuse = (why: string): never => {
+    throw new Error(`refusing the Lighter step: ${why}. Nothing has been signed. Run recover again so the confirmation is rebuilt from current state.`);
+  };
+  const publicClient = createPublicClient({ chain: opts.chain, transport: http(opts.rpcUrl) });
+  const ownerAccount = ownerAccountOf(opts.owner);
+  const account = await deriveKernelAccount(opts.chain, opts.rpcUrl, ownerAccount);
+  assertDerivedAccount(account.address, "that owner does not derive an account");
+  if (opts.expectedSmartAccount && account.address.toLowerCase() !== opts.expectedSmartAccount.toLowerCase()) {
+    refuse(`this owner controls ${account.address}, not the expected ${opts.expectedSmartAccount}`);
+  }
+
+  const venue = await readRecoverVenue({
+    smartAccount: account.address,
+    chainId: opts.chain.id,
+    chainRead: lighterChainReader(publicClient),
+    agentPerpPubKey: opts.agentPerpPubKey ?? null,
+    fetch: opts.venueFetch,
+    baseUrl: opts.lighterApiBase,
+  });
+  if (venue.kind !== "account") {
+    refuse(venue.kind === "unreadable" ? `Lighter could not be read (${venue.why})` : "this account has no Lighter account");
+  }
+  const v = venue as Extract<RecoverVenue, { kind: "account" }>;
+  if (v.accountIndex !== opts.approved.accountIndex) {
+    refuse(`the approved Lighter account was ${opts.approved.accountIndex}, but the contract now names ${v.accountIndex}`);
+  }
+
+  let calls: { to: Address; value: bigint; data: `0x${string}` }[];
+  let rotatedTo: `0x${string}` | null = null;
+  let withdrawRequestedMicro = 0n;
+  let claimedMicro = 0n;
+  let names: string[];
+  let positionsLeftOpen = 0;
+  if (opts.approved.kind === "claim") {
+    if (!v.claim) {
+      refuse(
+        v.pendingMicro.read
+          ? "nothing is waiting on the Lighter contract any more — Lighter's relayer has most likely claimed it into the account already"
+          : `the pending balance could not be read (${v.pendingMicro.why})`,
+      );
+    }
+    claimedMicro = v.claim!.amountMicro;
+    calls = [venueClaimCall(account.address, claimedMicro)];
+    names = ["withdrawPendingBalance"];
+  } else {
+    const approved = opts.approved;
+    const u = v.unwind;
+    if (!u) refuse(`there is no unwind to do now${v.notOffered.length ? ` (${v.notOffered.join(" ")})` : ""}`);
+    const fresh = u!;
+    if (fresh.calls.join(",") !== approved.calls.join(",")) {
+      refuse(`the approved unwind was ${approved.calls.join(" → ")}, but what is possible now is ${fresh.calls.join(" → ")}`);
+    }
+    if (fresh.positionsLeftOpen > approved.positionsLeftOpen) {
+      refuse(
+        `${fresh.positionsLeftOpen} open position(s) would now lose their stops, and the confirmation you approved named ${approved.positionsLeftOpen}`,
+      );
+    }
+    if (fresh.calls.includes("changePubKey")) rotatedTo = (opts.freshKey ?? throwawayLighterKey)();
+    calls = venueUnwindCalls(fresh, rotatedTo);
+    withdrawRequestedMicro = fresh.withdrawMicro;
+    names = [...fresh.calls];
+    positionsLeftOpen = fresh.positionsLeftOpen;
+  }
+
+  // The operation pays its own gas from the account's ETH. Finding that out
+  // from a bundler's AA21 is the confusing version of this sentence.
+  const eth = await publicClient.getBalance({ address: account.address }).catch(() => null);
+  if (eth === 0n) refuse("the account has no ETH to pay for this operation — send a little ETH to it first");
+
+  const client = createKernelAccountClient({
+    account,
+    chain: opts.chain,
+    bundlerTransport: http(opts.bundlerUrl),
+    userOperation: userOpGasConfig(publicClient, opts.bundlerUrl),
+  });
+  const userOpHash = await client.sendUserOperation({ callData: await account.encodeCalls(calls) });
+  const receipt = await client.waitForUserOperationReceipt({ hash: userOpHash });
+  if (!receipt.success) {
+    throw new Error(
+      opts.approved.kind === "claim"
+        ? `the claim reverted on-chain (${userOpHash}) — most likely Lighter's relayer claimed first and the money is already in the account; run recover again to see`
+        : `the Lighter unwind reverted on-chain (${userOpHash}); nothing reached Lighter`,
+    );
+  }
+  return {
+    kind: opts.approved.kind,
+    smartAccount: account.address,
+    accountIndex: v.accountIndex,
+    calls: names,
+    userOpHash,
+    txHash: receipt.receipt.transactionHash,
+    rotatedTo,
+    replacedPubKey: v.keySlot.read && v.keySlot.value.state === "key" ? v.keySlot.value.publicKey : null,
+    withdrawRequestedMicro,
+    claimedMicro,
+    positionsLeftOpen,
   };
 }

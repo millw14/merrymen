@@ -28,7 +28,10 @@ positions whether or not an assistant is connected.
 
 - **Inspect** your agents: status, paper or live, strategy, limits and budget,
   portfolio, positions, P&L, fees, trades with receipts, performance history,
-  paper-vs-live comparison.
+  paper-vs-live comparison, and perpetual futures on Lighter
+  (`get_perp_positions`: paper and live labelled, and "Lighter could not be
+  read" never shown as no positions). Perpetuals are read-only here: no tool
+  opens, closes or switches them on.
 - **Ask why**: recent decisions with their stored explanations and evidence,
   refusals by rule, and *why hasn't my agent traded?* (`explain_agent_inactivity`).
 - **Research markets**: search tokens by address or symbol (with duplicate and

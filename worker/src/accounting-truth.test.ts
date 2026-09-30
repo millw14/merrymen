@@ -415,9 +415,12 @@ describe("P3c — a doubt raised by watching the account is never lifted by a fi
     // asymmetry, so the call sites are pinned as well as the reducer.
     const src = strip(readFileSync(new URL("./index.ts", import.meta.url), "utf8"));
     assert.match(src, /setTruth\(foldLicence\(truth, l\)\);/);
-    // One definition, three call sites: resume-with-drift, stand-down, and a
-    // settled op whose cash movement could not be read (flow-inference.ts).
-    assert.equal((src.match(/doubtContributions\(/g) ?? []).length, 4, "one definition, three call sites");
+    // One definition, four call sites: resume-with-drift, stand-down, a
+    // settled op whose cash movement could not be read (flow-inference.ts),
+    // and a first look whose Lighter payouts could not be read (docs/perps.md
+    // rule 12 — the payout-settlement amendment's "a first look calls
+    // doubtContributions").
+    assert.equal((src.match(/doubtContributions\(/g) ?? []).length, 5, "one definition, four call sites");
     // And nothing writes contributionsKnown outside setTruth.
     const writes = src.match(/accounting\.contributionsKnown\s*=/g) ?? [];
     assert.equal(writes.length, 1, `contributionsKnown must have exactly one writer, found ${writes.length}`);

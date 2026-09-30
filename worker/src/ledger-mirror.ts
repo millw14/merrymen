@@ -1677,6 +1677,25 @@ export async function mirrorPerpLedger(args: {
   const updated = (table: string, cols: readonly string[], apply: (db: Db, r: Row) => Promise<number>) =>
     copyTable(table, cols, "updated_at", apply);
 
+  // A payout remainder only decreases. Retain exact chain identity so a
+  // restored worker cannot count a partial payment as money still in transit.
+  if (await has("perp_payouts")) await step("perp_payouts", () => updated("perp_payouts",
+    ["id", "agent_id", "mode", "epoch", "chain_id", "tx_hash", "log_index", "block_number", "amount_micro", "remaining_micro", "created_at", "updated_at"],
+    async (db, r) => {
+      const held = await db.prepare("SELECT * FROM perp_payouts WHERE agent_id = ? AND chain_id = ? AND tx_hash = ? AND log_index = ?")
+        .get(r.agent_id, r.chain_id, r.tx_hash, r.log_index) as Row | undefined;
+      if (held) {
+        if (String(held.amount_micro) !== String(r.amount_micro) || String(held.block_number) !== String(r.block_number)) throw new Error("payout allocation identity conflict");
+        const prior = BigInt(String(held.remaining_micro)), next = BigInt(String(r.remaining_micro));
+        if (next < 0n || next > BigInt(String(r.amount_micro))) throw new Error("payout remainder is invalid");
+        if (next >= prior) return 0;
+        return Number((await db.prepare("UPDATE perp_payouts SET remaining_micro = ?, updated_at = ? WHERE id = ?")
+          .run(r.remaining_micro, r.updated_at, held.id)).changes);
+      }
+      const cols = ["id", "agent_id", "mode", "epoch", "chain_id", "tx_hash", "log_index", "block_number", "amount_micro", "remaining_micro", "created_at", "updated_at"];
+      return Number((await db.prepare(insertSql("perp_payouts", cols)).run(...valuesOf(r, cols))).changes);
+    }));
+
   const orderRank = rankCaseSql("perp_orders.status", PERP_ORDER_RANK);
   await step("perp_orders", () =>
     updated("perp_orders", PERP_ORDER_COLS, async (db, r) => {

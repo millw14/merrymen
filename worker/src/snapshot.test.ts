@@ -86,3 +86,44 @@ describe("readAccountBalances — an unknown is never a zero", () => {
     assert.deepEqual(b.unread, ["eth"]);
   });
 });
+
+describe("readAccountBalances — the cash and the block it was read at are ONE read (docs/perps.md rule 12)", () => {
+  /** A client that records the aggregate it was asked for. */
+  function recording(results: CallResult[] | "throw") {
+    const asked: { contracts: { address: string; functionName: string }[] }[] = [];
+    const c = {
+      async getBalance() {
+        return 0n;
+      },
+      async multicall(args: { contracts: { address: string; functionName: string }[] }) {
+        asked.push(args);
+        if (results === "throw") throw new Error("rpc down");
+        return results;
+      },
+      async readContract() {
+        return 0n;
+      },
+    } as unknown as PublicClient;
+    return { c, asked };
+  }
+
+  it("Multicall3.getBlockNumber rides the SAME aggregate as balanceOf, last, so the cash keeps its place", async () => {
+    const { c, asked } = recording([good(usdg(42)), good(0n), good(12_345n)]);
+    const b = await readAccountBalances(c, ACCT);
+    assert.equal(b.cashUsdg, usdg(42));
+    assert.equal(b.cashReadBlock, 12_345n);
+    assert.equal(asked.length, 1, "one eth_call — one state");
+    const fns = asked[0]!.contracts.map((x) => x.functionName);
+    assert.deepEqual(fns, ["balanceOf", "balanceOf", "getBlockNumber"]);
+    assert.equal(asked[0]!.contracts[2]!.address.toLowerCase(), "0xca11bde05977b3631167028862be2a173976ca11");
+  });
+
+  it("a block that did not read is null — never a guess — and a block without a cash pins nothing", async () => {
+    assert.equal((await readAccountBalances(recording([good(usdg(42)), good(0n), bad()]).c, ACCT)).cashReadBlock, null);
+    assert.equal((await readAccountBalances(recording([good(usdg(42)), good(0n)]).c, ACCT)).cashReadBlock, null, "an aggregate that did not answer for it");
+    const noCash = await readAccountBalances(recording([bad(), good(0n), good(99n)]).c, ACCT);
+    assert.deepEqual(noCash.unread, ["cash"]);
+    assert.equal(noCash.cashReadBlock, null);
+    assert.equal((await readAccountBalances(recording("throw").c, ACCT)).cashReadBlock, null);
+  });
+});

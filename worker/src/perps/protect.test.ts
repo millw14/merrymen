@@ -422,6 +422,23 @@ describe("P7 venue unread — alerts, never a close", () => {
     assert.equal(back.memory.unreadAlerted, false);
   });
 
+  it("THE PAPER BOOK'S P7 never sends the owner to `merrymen recover`: there is no venue account behind practice positions", () => {
+    let memory = emptyProtectMemory();
+    const texts: string[] = [];
+    for (const t of [NOW, NOW + 120, NOW + 600]) {
+      const r = evaluateProtection({ view: null, nowSec: t, settings: SETTINGS, prior: memory, feedFresh: true, book: "paper" });
+      for (const a of r.actions) if (a.kind === "alert") texts.push(a.text);
+      memory = r.memory;
+    }
+    assert.equal(texts.length, 2, "the same two alerts on the same clock");
+    for (const t of texts) {
+      assert.doesNotMatch(t, /merrymen recover/, "never tells a paper owner to run recover");
+      assert.doesNotMatch(t, /owner key/);
+      assert.match(t, /practice/);
+    }
+    assert.match(texts[1]!, /nothing to recover/);
+  });
+
   it("a view older than a minute is unread, whatever it says — even a liquidation-close position", () => {
     const deadly = pos({ liqPrice: MARK - 1_000n });
     assert.deepEqual(run(mkView([deadly], { readAtSec: NOW - 61 })).actions, []);

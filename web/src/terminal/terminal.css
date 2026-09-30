@@ -8712,3 +8712,33 @@ html[lang|="ko"] .terminal-host {
 }
 :where(.terminal-host) .xpost-meta a { color: var(--tx); text-decoration: underline; text-underline-offset: 3px; }
 :where(.terminal-host) .xpost-dialog .portfolio-body p { margin: 0 0 12px; font-size: 13px; line-height: 1.6; }
+
+/* ── THE DESK'S PERPS PANEL (screens/Agent.tsx PerpsPanel) ───────────────────
+   Beside the holdings, never among them: its own block inside the portfolio
+   list, so a leveraged position never reads as a spot row. Geometry follows
+   .desk-position and .desk-cash so the list does not jump. The notes are the
+   panel's confessions (unread, stale, no stop seen) and use the neutral
+   left-border of .desk-notice, not the red of .desk-blocked — they describe
+   what we can see, and only the owner's own settings are faults. The practice
+   book dims like .is-simulated: practice working correctly, not an error. */
+:where(.terminal-host) .desk-perps { padding: 10px 0 4px; border-top: 1px solid var(--line); }
+:where(.terminal-host) .desk-perps-head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--tx-2); padding-bottom: 4px; }
+:where(.terminal-host) .desk-perps-head strong { font-weight: 600; color: var(--tx); }
+:where(.terminal-host) .desk-perps-tag { font-size: 11px; padding: 1px 7px; border: 1px solid var(--bd); border-radius: 999px; color: var(--tx-2); }
+:where(.terminal-host) .desk-perps-note { margin: 6px 0; padding: 6px 10px; border-left: 2px solid #6b6a55; font-size: 12px; line-height: 1.5; color: var(--tx-2); }
+:where(.terminal-host) .desk-perps-note.is-warn { border-left-color: color-mix(in srgb, var(--down) 60%, transparent); color: var(--tx); }
+:where(.terminal-host) .desk-perp { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+:where(.terminal-host) .desk-perp strong, :where(.terminal-host) .desk-perp small { display: block; }
+:where(.terminal-host) .desk-perp-main strong { font-size: 14px; font-weight: 600; }
+:where(.terminal-host) .desk-perp-main strong span { font-size: 12px; font-weight: 500; margin-left: 4px; }
+:where(.terminal-host) .desk-perp small { font-size: 11px; color: var(--tx-2); margin-top: 3px; overflow-wrap: anywhere; }
+:where(.terminal-host) .desk-perp-money { text-align: right; }
+:where(.terminal-host) .desk-perp-money strong { font-size: 13px; }
+:where(.terminal-host) .desk-perp-risk { grid-column: 1 / -1; }
+:where(.terminal-host) .desk-perps.is-paper .desk-perp { opacity: 0.72; }
+:where(.terminal-host) .desk-perps.is-paper .desk-perp strong { font-style: italic; font-weight: 400; }
+
+/* Custody survives deletion of the grant and spans the shell grid. */
+.perps-shutdown{grid-column:1/-1;margin:12px;padding:16px;border:1px solid var(--line);border-radius:16px}
+.desk-perps button{padding:6px 10px;border:1px solid var(--line);border-radius:8px;cursor:pointer}
+.desk-perps button:disabled{opacity:.5;cursor:default}

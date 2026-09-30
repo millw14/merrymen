@@ -160,6 +160,50 @@ export type LookVerdict =
   /** Cash moved and nothing explains it: book `deltaUsdg` (signed) as capital. */
   | { action: "infer"; deltaUsdg: bigint };
 
+/**
+ * WHAT THE PAYOUT FOLD HANDS A LOOK (docs/perps.md rule 12; perps/payouts.ts,
+ * perps/payout-look.ts). A Lighter payout arrives in SOMEONE ELSE'S
+ * transaction — the relayer's, or anyone's: withdrawPendingBalance is callable
+ * by all and always pays the owner — so no op of ours explains it, and without
+ * this a look would read it as the owner depositing capital: the peak and
+ * contributions raised by money that was the account's own margin all along.
+ * The chain says it: every WithdrawPending(owner = self, 3) on the proxy
+ * between the baseline's block and this reading's block explains exactly its
+ * own cash.
+ *
+ *   none        — addressToAccountIndex(self) read 0: no Lighter account, so
+ *                 nothing can pay this account (rule 11's known zero).
+ *   folded      — every such payout in the window, read completely.
+ *   unfoldable  — it has, or may have, a Lighter account and the window was
+ *                 not read: no cursor, no pinned block, a failed or partial
+ *                 getLogs, an unread index, a ledger write that failed.
+ *                 Unknown is never zero: the look HOLDS (a first look doubts).
+ */
+export type PayoutFold =
+  | { kind: "none" }
+  | { kind: "folded"; payouts: readonly { key: string; amountMicro: bigint }[] }
+  | { kind: "unfoldable"; why: string };
+
+/**
+ * The shift a fold makes to a baseline: every payout NOT already folded into
+ * it (`alreadyFolded`, the caller's in-process `${txHash}:${logIndex}` set —
+ * the second guard beside the cursor, so a held look followed by a settling
+ * one folds each payout once), and the keys it adds. Null when unfoldable.
+ */
+export function payoutShift(fold: PayoutFold, alreadyFolded: ReadonlySet<string>): { shiftUsdg6: bigint; keys: string[] } | null {
+  if (fold.kind === "none") return { shiftUsdg6: 0n, keys: [] };
+  if (fold.kind === "unfoldable") return null;
+  let shiftUsdg6 = 0n;
+  const keys: string[] = [];
+  for (const p of fold.payouts) {
+    if (alreadyFolded.has(p.key) || keys.includes(p.key)) continue;
+    if (typeof p.amountMicro !== "bigint" || p.amountMicro <= 0n) throw new RangeError(`payoutShift: ${p.key} is not a payout`);
+    shiftUsdg6 += p.amountMicro;
+    keys.push(p.key);
+  }
+  return { shiftUsdg6, keys };
+}
+
 export interface Look {
   /**
    * The baseline with this look's settlements folded in. The caller keeps it
@@ -192,14 +236,24 @@ export function lookAtCash(a: {
   opsInFlight: boolean;
   /** Did anything the agent recorded (recordTrade) move money in the interval? */
   writesInInterval: boolean;
+  /**
+   * Lighter payouts to this account in the interval (payoutShift): their sum
+   * joins the baseline — they explain exactly their own cash — or, NULL when
+   * they could not be read, the look holds, so a payout nobody could see is
+   * never inferred as a deposit. Absent is the look before perps: no shift.
+   */
+  payoutShiftUsdg6?: bigint | null;
 }): Look {
   const { shiftUsdg6, unread } = attributeSettlements(a.settled, a.since);
-  const baselineUsdg = a.baselineUsdg + shiftUsdg6;
+  const payouts = a.payoutShiftUsdg6;
+  const baselineUsdg = a.baselineUsdg + shiftUsdg6 + (payouts ?? 0n);
   const unattributed = a.unattributed || unread.length > 0;
   // THE HOLD FIRST. Asked after the write rule, one trade landing beside a
   // stranded op closed the interval over the op's cash and everything else in
-  // it — the ACC1 fix's masking.
-  const verdict: LookVerdict = a.opsInFlight
+  // it — the ACC1 fix's masking. An unread payout window holds for the same
+  // reason an op in flight does: cash may have moved for a reason nobody has
+  // been able to look at yet.
+  const verdict: LookVerdict = a.opsInFlight || payouts === null
     ? { action: "hold" }
     : a.writesInInterval
       ? { action: "explained", why: "ledger-write" }

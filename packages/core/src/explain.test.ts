@@ -203,3 +203,102 @@ describe("the Energy concept", () => {
     assert.doesNotMatch(`${e.plain} ${e.because} ${e.confusable ?? ""}`, /price|returns?\b|(?<!take-)profit|invest|moon/i);
   });
 });
+
+/**
+ * THE PERPETUALS CONCEPTS (docs/perps.md, "How it is built": explain.ts gains
+ * grounded concepts for leverage, liquidation price, funding, mark vs index,
+ * isolated margin, reduce-only and "at the venue").
+ *
+ * Leverage is where a general-purpose answer hurts most: "leverage" at most
+ * exchanges is an order field a trader picks, "margin" may be cross, and a
+ * close can flip a position. None of that is true here, and each entry is
+ * held to saying so, and to never telling an owner their money is home.
+ */
+describe("the perpetuals concepts", () => {
+  const PERPS_TERMS = [
+    "Leverage (perpetuals)",
+    "Liquidation price",
+    "Funding (perpetuals)",
+    "Mark price vs index price",
+    "Isolated margin",
+    "Reduce-only",
+    "At Lighter (at the venue)",
+  ];
+  /** One entry by its exact term; a missing one fails the test that asked for it. */
+  const byTerm = (term: string): Concept => {
+    const c = CONCEPTS.find((x) => x.term === term);
+    assert.ok(c, `${term} is missing`);
+    return c;
+  };
+  const perps = (): Concept[] => PERPS_TERMS.map(byTerm);
+
+  it("every one exists and cites the perps code that makes it true", () => {
+    for (const c of perps()) {
+      assert.match(c.evidence, /packages\/core\/src\/perps\.ts|worker\/src\/perps\/|worker\/src\/policy\.ts/, `${c.term}: cites no perps code`);
+      assert.ok(c.confusable && c.confusable.length > 40, `${c.term}: the confusion IS the entry for leverage words`);
+    }
+  });
+
+  const asked: Array<[string, string]> = [
+    ["what is leverage", "Leverage (perpetuals)"],
+    ["can I change the leverage on my BTC position", "Leverage (perpetuals)"],
+    ["what is my liquidation price", "Liquidation price"],
+    ["will I get liquidated", "Liquidation price"],
+    ["what is the funding rate", "Funding (perpetuals)"],
+    ["why did I pay funding on my BTC-PERP", "Funding (perpetuals)"],
+    ["what's the difference between mark price and index price", "Mark price vs index price"],
+    ["what is isolated margin", "Isolated margin"],
+    ["what does reduce-only mean", "Reduce-only"],
+    ["how do I close a perp", "Reduce-only"],
+    ["why is my money on lighter", "At Lighter (at the venue)"],
+    ["how long is the withdrawal delay", "At Lighter (at the venue)"],
+  ];
+  for (const [question, term] of asked) {
+    it(`answers: ${question}`, () => {
+      assert.equal(conceptsFor(question)[0]?.term, term, `picked ${conceptsFor(question).map((c) => c.term).join(", ")}`);
+    });
+  }
+
+  it("does not hijack the questions about funding a wallet or spot trading", () => {
+    // "funding" alone is how owners talk about depositing, and "close a
+    // position" is a spot sell too: neither may pull in a perps entry first.
+    for (const q of ["I tried to fund my wallet with USDG but it didn't arrive", "how do I put money in", "what is breaker 5%", "what does paper mean"]) {
+      const first = conceptsFor(q)[0]?.term;
+      assert.ok(first && !PERPS_TERMS.includes(first), `${q} → ${first}`);
+    }
+  });
+
+  it("states the merrymen meaning where the industry one differs", () => {
+    const leverage = byTerm("Leverage (perpetuals)");
+    const liq = byTerm("Liquidation price");
+    const funding = byTerm("Funding (perpetuals)");
+    const markIndex = byTerm("Mark price vs index price");
+    const margin = byTerm("Isolated margin");
+    const reduce = byTerm("Reduce-only");
+    const venue = byTerm("At Lighter (at the venue)");
+    assert.match(leverage.plain, /no model or chat message ever chooses it/);
+    assert.match(leverage.plain, /never above 10x/);
+    assert.match(liq.confusable!, /It is not your stop/);
+    assert.match(funding.plain, /It is not a merrymen fee/);
+    assert.match(markIndex.plain, /judged on the mark/);
+    assert.match(margin.plain, /only ever uses isolated margin/);
+    assert.match(reduce.plain, /cannot open a new position in the opposite direction/);
+    assert.match(reduce.confusable!, /does not guarantee a fill/);
+    assert.match(venue.plain, /only ever come back to your agent's own smart account/);
+    assert.match(venue.plain, /withdrawal delay/);
+  });
+
+  it("never tells an owner the money is home, or that unread means empty", () => {
+    for (const c of perps()) {
+      const all = `${c.plain} ${c.because} ${c.confusable ?? ""}`;
+      assert.doesNotMatch(all, /stays? in (your|the) smart account|funds are safe|guaranteed|risk-free/i, c.term);
+    }
+    assert.match(byTerm("At Lighter (at the venue)").confusable ?? "", /"Could not be read" is not "nothing there"/);
+  });
+
+  it("the rendered form a model reads carries the mechanism and the confusion", () => {
+    const rendered = renderConcepts(conceptsFor("what is my liquidation price"));
+    assert.match(rendered, /why: isolatedLiqPrice/);
+    assert.match(rendered, /often confused with: It is not your stop/);
+  });
+});

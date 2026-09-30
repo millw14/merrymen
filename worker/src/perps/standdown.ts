@@ -25,7 +25,8 @@
  *       attemptable, and rule 9 lets a reduce-only close be signed anew.
  *   (b) CLOSE every position: a reduce-only IOC for the FULL venue-read size,
  *       worst price within max(perpsMaxSlippageBps, 150) bps of mark, capped
- *       at 500 (the venue's 5% band). Up to three attempts per market, each
+ *       at 450 — protect.ts's own cap, inside the venue's 5% band, so the
+ *       two exits of one position are never priced by two different bounds. Up to three attempts per market, each
  *       re-priced at a fresh mark and signed only after the previous one
  *       RESOLVED — the next attempt is sized from a read that includes the
  *       last one's fills, and an ambiguous one is never stacked behind. The
@@ -112,8 +113,15 @@ export const STANDDOWN_LIMITS = Object.freeze({
   maxCloseAttempts: 3,
   /** A close's slippage is never under this (docs/perps.md Settings: "stand-down uses max(this, 150)")… */
   slipFloorBps: 150,
-  /** …and never past the venue's 5% band. */
-  slipCapBps: 500,
+  /**
+   * …and never past 4.5%: protect.ts's closeSlipCapBps, inside the venue's 5%
+   * band. The two exits of one position share one bound — a stand-down that
+   * could accept a worse fill than the protective loop would have is a
+   * stand-down that sells deeper into a gap than any other exit the owner
+   * agreed to, and 500 sat ON the band's edge, where a mark that moved
+   * between the read and the fill puts the order outside it.
+   */
+  slipCapBps: 450,
   /**
    * Kept back from sending for step (e): one account read and one reconcile.
    * Never more than a quarter of the budget, so a short deadline still sends.
@@ -138,7 +146,7 @@ export const STANDDOWN_LIMITS = Object.freeze({
   maxBudgetMs: 15 * 60_000,
 });
 
-/** A close's slippage: the owner's, floored at 150 and capped at 500 bps. Unreadable is the floor, never "no bound". */
+/** A close's slippage: the owner's, floored at 150 and capped at 450 bps. Unreadable is the floor, never "no bound". */
 export function standdownSlipBps(maxSlippageBps: number | null | undefined): number {
   const l = STANDDOWN_LIMITS;
   const s = typeof maxSlippageBps === "number" && Number.isSafeInteger(maxSlippageBps) && maxSlippageBps > 0 ? maxSlippageBps : l.slipFloorBps;
@@ -1150,14 +1158,15 @@ export function standdownLines(result: Pick<StanddownResult, "closed" | "residua
 export function standdownExposure(
   result: StanddownResult,
   extra: {
-    pendingWithdrawalsMicro: bigint;
-    depositsInTransitMicro: bigint;
+    pendingWithdrawalsMicro: bigint | null;
+    depositsInTransitMicro: bigint | null;
     otherAccounts: { count: number; valueMicro: bigint | null } | null;
     withdrawalDelaySec: number | null;
   },
 ): PerpExposure {
   const v = result.venue;
-  if (result.outcome === "unreachable" || v === null || !v.final || result.ordersLeft === null) return { kind: "unread" };
+  if (result.outcome === "unreachable" || v === null || !v.final || result.ordersLeft === null ||
+      extra.pendingWithdrawalsMicro === null || extra.depositsInTransitMicro === null) return { kind: "unread" };
   const lines = standdownLines(result);
   return {
     kind: "known",

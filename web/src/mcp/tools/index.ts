@@ -6,6 +6,7 @@
 import type { ToolDef } from "../tool";
 import { AGENT_TOOLS } from "./agents";
 import { PORTFOLIO_TOOLS } from "./portfolio";
+import { PERPS_TOOLS } from "./perps";
 import { DECISIONS_TOOLS } from "./decisions";
 import { MARKET_TOOLS } from "./market";
 import { CHAT_TOOLS } from "./chat";
@@ -22,6 +23,7 @@ import { withAppMeta } from "../apps";
 export const ALL_TOOLS: readonly ToolDef[] = withAppMeta([
   ...AGENT_TOOLS,
   ...PORTFOLIO_TOOLS,
+  ...PERPS_TOOLS,
   ...DECISIONS_TOOLS,
   ...MARKET_TOOLS,
   ...CHAT_TOOLS,

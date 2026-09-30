@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { CircleHelp } from "lucide-react";
 import { HolderLink } from "../HolderLink";
 import { XPosting } from "../XPosting";
+import { PerpsSettings } from "../PerpsSettings";
 import { AgentImageField } from "../AgentImageField";
 import { basketAfterAdd, basketNow } from "../basket";
 import { isCircleStrategyId } from "../strategy";
@@ -481,6 +482,21 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
     }
   }
 
+  /**
+   * RE-READ THE VALUES, AND ONLY THE VALUES — for a section that saved on its
+   * own (the Perpetuals switches, consent and limits). Unlike save() it clears
+   * nothing: the owner's unsaved edits elsewhere on the page stay as typed.
+   */
+  async function reloadView() {
+    try {
+      const fresh = await fetch("/api/settings");
+      if (fresh.ok) setView((await fresh.json()) as SettingsView);
+    } catch {
+      /* the screen keeps its last read; the section says what its own save did */
+    }
+    onSaved?.();
+  }
+
   if (view === null) {
     return (
       <AppShell>
@@ -665,6 +681,11 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               shows its simulated book instead. The tokens stay in the account and nothing is sold;
               they are simply left alone until you turn Live trading back on. If you want out of a
               real position, close it first and switch afterwards.
+              {/* PERPETUALS ARE THE EXCEPTION, and the sentence above would be
+                  false for them: venue state, not this switch, keeps their
+                  exits running (docs/perps.md rule 8a). Said only to an owner
+                  who has perps switched on, the only one it can concern. */}
+              {(view.values.perpsEnabled === true || view.values.perpsLiveEnabled === true) && <> {t("settings.perps.liveTradingOff")}</>}
             </p>
           )}
           {liveTradingVal && !(view.values.liveTradingEnabled ?? d.liveTradingEnabled) && (
@@ -788,6 +809,18 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
               {activeSymbols.length > 0 && " If it leaves you with nothing to buy, your agent will say so rather than going quiet."}
             </p>
           )}
+
+          {/* ── PERPETUALS (docs/perps.md rule 1, "Surfaces") ──────────────
+              With the other money switches, and its own component
+              (terminal/PerpsSettings.tsx), the XPosting precedent: its two
+              switches and the real-money consent each write the moment they
+              are given — an off must never wait on "Save changes", where an
+              unrelated bad field refuses the whole save — and its markets and
+              limits save with their own button. Nothing here reads or writes
+              this form's `draft`, and "Save changes" sends none of it.
+              `reloadView` re-reads the values without clearing the draft, so
+              switching perps off does not throw away an unsaved edit above. */}
+          <PerpsSettings values={view.values} defaults={view.defaults} owner={view.owner} hosted={hosted} onSaved={reloadView} />
 
           {/* ── ESSENTIALS ─────────────────────────────────────────────── */}
           <div className="mm-section">{t("settings.section.agentSettings")}</div>

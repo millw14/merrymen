@@ -182,12 +182,13 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
       applyFill(intent);
       ops += 1;
       executed += 1;
-      if (intent.kind === "perp-order" || intent.kind === "perp-margin") {
+      if (intent.kind === "perp-order" || intent.kind === "perp-margin" || intent.kind === "perp-key") {
         // THE PERP LANE OWNS EXECUTION; this replay only keeps the day's
         // spend the way the ledger does (store.ts getSpentTodayUsdg): an open
         // spends its notional and a deposit its amount, while a reduce, a
-        // close, a withdrawal and a claim spend nothing — counting money
-        // coming home as spend is how a replay would refuse the next exit.
+        // close, a withdrawal, a claim and a key registration spend nothing —
+        // counting money coming home as spend is how a replay would refuse
+        // the next exit.
         if (intent.kind === "perp-order" && intent.effect === "open") spentToday += intent.notionalUsdg;
         else if (intent.kind === "perp-margin" && intent.direction === "deposit") spentToday += intent.amountUsdg;
       } else if (intent.kind !== "vault-withdraw") {
@@ -202,7 +203,7 @@ export async function runBacktest(cfg: BacktestConfig, bars: readonly Bar[]): Pr
     }
 
     function applyFill(intent: TradeIntent) {
-      if (intent.kind === "perp-order" || intent.kind === "perp-margin") {
+      if (intent.kind === "perp-order" || intent.kind === "perp-margin" || intent.kind === "perp-key") {
         // Counted above, never filled here: the perp lane owns execution and
         // has its own paper engine and backtest (docs/perps.md), and no spot
         // strategy this harness replays emits a perp intent. Inventing a fill

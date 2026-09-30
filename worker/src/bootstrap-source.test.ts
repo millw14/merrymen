@@ -522,3 +522,75 @@ describe("B8 — a shared ledger the flows_held/cash_read_at migration has not r
     assert.equal(locked.kind, "unknown", "a column name in some other error is not a missing column");
   });
 });
+
+/**
+ * THE ANCHOR CARRIES THE BLOCK ITS CASH WAS READ AT (docs/perps.md rule 12;
+ * the payout-settlement amendment: "carry it in the hosted anchor as
+ * lastObservedCashBlock"). A hosted first look folds Lighter payouts from it;
+ * without it a payout that landed while the child was down reads as drift.
+ * Same row as the cash, always — and a shared ledger the `cash_read_block`
+ * migration has not reached answers exactly as it did before, without it.
+ */
+describe("B9 — lastObservedCashBlock: the same row's block, or none", () => {
+  async function ledger(o: { block?: number | null; dropColumn?: boolean }): Promise<Db> {
+    const db = wrapSqlite(new DatabaseSync(":memory:"));
+    await applyLedgerSchema(db);
+    if (o.dropColumn) await db.exec("ALTER TABLE equity DROP COLUMN cash_read_block");
+    await db.prepare(
+      `INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, hwm_usdg, epoch)
+       VALUES (?, ?, ?, 4663, '{}', 1, 2, 100, 2)`,
+    ).run(SMART.toLowerCase(), OWNER, OWNER);
+    await db.prepare(
+      `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, cash_read_at, at)
+       VALUES (?, '0', 90, 0, 0, 90, 2, 'live', 0, ?, ?)`,
+    ).run(SMART.toLowerCase(), NOW - 900, NOW - 890);
+    // The newest unheld mark — the baseline — with (or without) its block.
+    if (o.dropColumn) {
+      await db.prepare(
+        `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, cash_read_at, at)
+         VALUES (?, '0', 95, 0, 0, 95, 2, 'live', 0, ?, ?)`,
+      ).run(SMART.toLowerCase(), NOW - 600, NOW - 590);
+    } else {
+      await db.prepare(
+        `INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, positions_usdg, equity_usdg, epoch, mode, flows_held, cash_read_at, cash_read_block, at)
+         VALUES (?, '0', 95, 0, 0, 95, 2, 'live', 0, ?, ?, ?)`,
+      ).run(SMART.toLowerCase(), NOW - 600, o.block ?? null, NOW - 590);
+    }
+    return db;
+  }
+
+  it("carries the baseline row's block beside its cash", async () => {
+    const a = await deriveBootstrapAccounting(await ledger({ block: 7_654_321 }), SMART, NOW);
+    assert.equal(a.kind, "established");
+    if (a.kind !== "established") return;
+    assert.equal(a.lastObservedCashUsdg, "95000000");
+    assert.equal(a.lastObservedCashBlock, 7_654_321);
+  });
+
+  it("a row from before the block was pinned carries none — never 0", async () => {
+    const a = await deriveBootstrapAccounting(await ledger({ block: null }), SMART, NOW);
+    assert.equal(a.kind, "established");
+    if (a.kind !== "established") return;
+    assert.equal(a.lastObservedCashUsdg, "95000000");
+    assert.equal("lastObservedCashBlock" in a, false);
+  });
+
+  it("a shared ledger WITHOUT the column is still established, from the same row, with no block", async () => {
+    const a = await deriveBootstrapAccounting(await ledger({ dropColumn: true }), SMART, NOW);
+    assert.equal(a.kind, "established", a.kind === "unknown" ? a.why : "");
+    if (a.kind !== "established") return;
+    assert.equal(a.lastObservedCashUsdg, "95000000");
+    assert.equal("lastObservedCashBlock" in a, false);
+  });
+
+  it("forgives ONLY that column's absence: another failure naming it is still unknown", async () => {
+    const other = await deriveBootstrapAccounting(
+      fakeDb([], (a) => {
+        if (a.sql.includes("cash_read_block")) throw new Error("database is locked (cash_read_block)");
+      }).db,
+      SMART,
+      NOW,
+    );
+    assert.equal(other.kind, "unknown");
+  });
+});

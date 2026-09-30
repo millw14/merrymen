@@ -56,6 +56,10 @@ test("no client module imports isHostedMode — it is always false in the browse
   const partnerServerModules = new Set([
     path.join(SRC, "lib", "partner-runtime.ts"),
     path.join(SRC, "lib", "partner-store.ts"),
+    // Perps grant intake and key generation share this server helper. It
+    // imports the Node-only keystore/sealing/shutdown modules, and is reached
+    // only through API routes or the server's partner enrollment service.
+    path.join(SRC, "lib", "perp-custody.ts"),
     // The MCP server's config: read only by route handlers (/mcp, /oauth/*,
     // /.well-known/*, /api/mcp/*). It imports node:crypto-backed modules and is
     // never part of a client bundle.

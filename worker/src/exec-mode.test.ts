@@ -263,7 +263,7 @@ test("THE FORK AND THE TICK ASK THE SAME FUNCTION", () => {
   const src = readFileSync("worker/src/index.ts", "utf8");
 
   assert.match(src, /const paperActive = \(\) => execMode\(\)\.mode === "paper";/);
-  assert.match(src, /const execRail = execMode\(\);/, "the fork resolves the mode");
+  assert.match(src, /const execRail = perpLeg === "perp-claim" \? perpClaimExecMode\(execInputs\(\)\) : execMode\(\);/, "ordinary trading uses the tick's mode; only a self-recipient payout claim uses its return-home gates");
 });
 
 test("a paper tick never publishes its fabricated ETH balance", () => {
@@ -478,4 +478,35 @@ test("perpsExposureKeepsExitsLive: exits follow the VENUE, and unknown is never 
   for (const patch of [{ openPositions: 1 }, { openOrders: 1 }, { collateralMicro: 5n }, { inTransitMicro: 5n }]) {
     assert.equal(ask({ kind: "unread" }, { ...flatLedger, ...patch }), true);
   }
+});
+
+test("FUNDED INCLUDES THE VENUE (docs/perps.md rule 8a(f)): posting the last USDG as margin keeps the agent live", () => {
+  // The account's cash reads 0 because its last 25 USDG just went to Lighter
+  // as margin. Before this term the whole agent — spot included — flipped to
+  // paper or refuse on `no-cash` the moment the deposit landed.
+  const deposited: ExecInputs = { ...base, cashUsdg: 0n, perpVenueMicro: 25_000_000n };
+  assert.equal(canTradeForReal(deposited), true);
+  assert.deepEqual(execModeOf(deposited), { mode: "live" });
+  // AN UNREADABLE VENUE IS NOT AN EMPTY ONE — the rule cash already follows.
+  assert.equal(canTradeForReal({ ...base, cashUsdg: 0n, perpVenueMicro: null }), true);
+  // Broke is broke everywhere the money can be: cash read 0 AND the venue read 0.
+  const broke = { ...base, cashUsdg: 0n, perpVenueMicro: 0n };
+  assert.equal(canTradeForReal(broke), false);
+  assert.equal(execModeOf({ ...broke, paperTradingEnabled: false }).mode, "refuse");
+  // NO VENUE ACCOUNT (the chain's own 0 — every agent without perps) is no
+  // term at all: cash alone decides, exactly as it did before perps.
+  assert.equal(canTradeForReal({ ...base, cashUsdg: 0n }), false);
+  assert.equal(canTradeForReal({ ...base, cashUsdg: 0n, perpVenueMicro: undefined }), false);
+  assert.equal(canTradeForReal({ ...base, perpVenueMicro: 0n }), true, "cash alone funds it, venue empty or not");
+  // The venue never lifts a leg that is not about money.
+  assert.equal(canTradeForReal({ ...deposited, gasWei: 0n }), false, "no gas is still no gas");
+  assert.equal(canTradeForReal({ ...deposited, liveTradingEnabled: false }), false, "and consent is still consent");
+});
+
+test("index.ts passes the venue term from the live read, and none for an agent the chain says has no Lighter account", () => {
+  const src = readFileSync("worker/src/index.ts", "utf8");
+  assert.match(src, /perpVenueMicro: perpAccountIndex === 0n \? undefined : perpVenueMicro,/);
+  // Written only from a LIVE venue term, never a paper book's margin.
+  assert.match(src, /const noteLivePerpTerm = \(t: LivePerpTerm\): void => \{[\s\S]{0,200}perpVenueMicro = t\.venueMoneyMicro;/);
+  assert.match(src, /if \(liveRead\.book !== undefined\) perpVenueMicro = venueMoneyOf\(liveRead\.book\);/);
 });

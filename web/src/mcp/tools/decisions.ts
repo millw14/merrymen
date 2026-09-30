@@ -490,6 +490,8 @@ const explainInactivity = defineTool({
     const settings = await settingsReader().settingsFor(ctx.principal.tenant);
     const inputs = await ctx.ledger((db) => readInactivityInputs(db, {
       tenant: ctx.principal.tenant, account: a.account, accounts: a.accounts, grantedAt: a.grantedAt, expiresAt: a.expiresAt, settings, now, windowSec,
+      // MCP runs only on the hosted service (mcp/config.ts), whose kill closes nothing at Lighter yet.
+      hosted: true,
     }));
     const dx = diagnoseInactivity(inputs);
     const d = dx.decisions;

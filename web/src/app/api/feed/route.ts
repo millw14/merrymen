@@ -17,6 +17,8 @@ import { hostedAgentFor } from "@/lib/agent-for";
 import { identityOf as identityFrom, type FeedIdentity, type IdentitySources } from "@/lib/feed-identity";
 import { readMeasuredMark } from "@/lib/held-marks";
 import type { FeedMeasured } from "@/lib/feed-pnl";
+import { readAgentPerpsFrom } from "@/lib/agent-perps";
+import { perpsFeedOf, type FeedPerpRow, type FeedPerpsAccount } from "@/lib/perps-view";
 
 /**
  * Where identity is read from on this deploy — see lib/feed-identity.ts for
@@ -163,6 +165,29 @@ export interface FeedResponse {
   landed: number;
   /** The worker's verdict on the denominator: true, false, or null for never assessed. */
   contributionsKnown: boolean | null;
+  /**
+   * THE AGENT'S PERPETUAL POSITIONS ON LIGHTER — a SEPARATE array, never
+   * merged into `positions` (docs/perps.md rule 11: perp markets live in their
+   * own map, keyed `BTC-PERP`, never among the holdings). Built from the
+   * worker's `agents.perps` report (lib/agent-perps.ts, lib/perps-view.ts),
+   * never from a venue read of this service's own.
+   *
+   * NULL IS "NO READABLE REPORT", NEVER "NO POSITIONS": the worker has not
+   * said, or said something that is not the v1 shape. `perpsAccount` tells
+   * those apart. Each row carries `paper`, and every surface labels it.
+   *
+   * THE OWNER'S OWN FEED ONLY. This route is tenant-scoped hosted and local
+   * self-hosted; rule 17 keeps every perp position, order, fill and leverage
+   * off every public surface, and nothing public reads this.
+   */
+  perps: FeedPerpRow[] | null;
+  /**
+   * The account line beside those rows: mode, paper, what is at Lighter, the
+   * nearest liquidation, stops missing, an incident, and whether the read is
+   * current. `{state: "unreadable"}` for a report that cannot be read; null
+   * when the worker has not said anything.
+   */
+  perpsAccount: FeedPerpsAccount | null;
 }
 
 /**
@@ -189,6 +214,9 @@ async function emptyFeed(tenant: `0x${string}` | null = null): Promise<FeedRespo
     gasUnpricedTrades: 0,
     landed: 0,
     contributionsKnown: null,
+    // Nothing was read, so nothing is said — null, never an empty book.
+    perps: null,
+    perpsAccount: null,
   };
 }
 
@@ -438,6 +466,20 @@ export async function GET(req: Request) {
     } catch {
       /* the column arrives with a worker migration; unknown until it does */
     }
+    // THE PERPS, BESIDE THE BOOK AND NEVER IN IT — the worker's report for
+    // this same agent, read inside this same connection. Its own states
+    // (not said / unreadable / read) survive to the screen: an unreadable
+    // report is shown as "Lighter could not be read", never as flat.
+    //
+    // WHICH BOOK (perps-view.ts perpsBookOf): the report's `mode` is the perps
+    // rail, "off" while a practice position is still held, so the account's
+    // own book decides — its heartbeat (agents.mode, read with the report),
+    // else the book the newest equity mark was written for.
+    const perpsRead = await readAgentPerpsFrom(db, agentId);
+    const { perps, perpsAccount } = perpsFeedOf(
+      perpsRead.state === "ok" && !perpsRead.accountMode ? { ...perpsRead, accountMode: bookMode } : perpsRead,
+      Date.now(),
+    );
     return NextResponse.json({
       source: "sqlite",
       events,
@@ -452,6 +494,8 @@ export async function GET(req: Request) {
       gasUnpricedTrades,
       landed,
       contributionsKnown,
+      perps,
+      perpsAccount,
     } satisfies FeedResponse);
   });
 }

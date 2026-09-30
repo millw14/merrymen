@@ -54,6 +54,16 @@ protects account operations, not your operating system.
   time. Live Trencher and fast mode have separate opt-in settings.
 - **Audit the record.** Export the ledger and verify chain-backed receipts
   independently of the running worker.
+- **Try perpetual futures, paper first.** Your agent can trade long or short,
+  with leverage (2x by default, never more than 10x), on the markets Lighter
+  lists on Robinhood Chain — BTC, ETH, SOL, large US stocks, SPY/QQQ, gold.
+  Perpetuals are off until you turn them on in Settings, and turned on they run
+  on paper: simulated at Lighter's live prices and rules, labelled paper
+  everywhere. Real money needs live trading on, a second consent that names
+  leverage, liquidation, funding and what the wall cannot bound, and a signed
+  permission that includes perpetuals. Every position carries its own stop at
+  the venue (a simulated one on paper). On the hosted app, real-money perpetuals are not generally offered
+  yet; see [docs/perps.md](docs/perps.md).
 
 Active workers target decision reviews at intervals of no more than five
 minutes when reads complete. That is a review cadence, not a promise to trade
@@ -79,6 +89,20 @@ below.
   compromised agent cannot reach an asset you did not name or a contract you did
   not approve. It can still make bad trades inside those bounds; no wall fixes
   judgement.
+- **Perpetuals are the exception, and it is said out loud.** For perpetuals the
+  chain bounds only the deposits: each move of USDG into Lighter is capped by
+  your per-trade limit and can only credit your agent's own Lighter account,
+  and every withdrawal can only come back to your agent's own smart account.
+  Everything after that — order size, leverage, which markets, how often — is
+  enforced by merrymen's software alone, the way the broker rail already is.
+  Anyone who steals the agent's Lighter trading key can lose everything on
+  Lighter, for example by trading against an account they control; anyone who
+  steals the whole agent permission holds both keys and can first move the
+  account's USDG onto Lighter one capped deposit at a time. That is no more
+  than the same permission can already lose through swaps. The key cannot send
+  money to anyone else's account or withdraw anywhere but home. Unfamiliar
+  activity on the account stops new positions and closes open ones, but it is
+  noticed after the fact.
 - **Verifiable, not claimed.** The dashboard links every address and cap to the
   block explorer, and its **prove the wall** button fires malicious intents (an
   oversized trade, a "send everything to 0xevil" transfer, an expired key)
@@ -119,7 +143,7 @@ writer — so a bug in the writer cannot be confirmed by the reader. It returns
 **INDETERMINATE**, not PASS, when a transaction cannot be refetched: a check it
 could not run is not a check that passed.
 
-Two limits, said out loud rather than discovered:
+Three limits, said out loud rather than discovered:
 
 - **Epoch 1 is not exportable.** The rows before flow tracking existed cannot be
   reconciled against deposits, so the exportable record begins at the epoch
@@ -129,6 +153,11 @@ Two limits, said out loud rather than discovered:
   writer are independent implementations, but they read the same source, so a
   lying token would be confirmed by both. The post-buy `balanceOf` check
   (`worker/src/delivery.ts`) is what makes their agreement mean something.
+- **Perpetuals trades are the venue's word.** Fills, funding and positions on
+  Lighter happen on Lighter's own rollup and cannot be re-derived from Robinhood
+  Chain receipts. `verify` lists them as venue-attested, never as passed; only
+  the deposits and withdrawals between your account and Lighter are checked on
+  chain.
 
 ---
 
@@ -361,6 +390,16 @@ doing?", "pause everything", "send 20 USDG to 0x…", "ping me when QQQ hits 600
 | `/kill` | destroy the grant, stand the band down |
 | `/help` | the full list |
 
+**Perpetuals:** `/perps` reads positions and custody; `/positions` and `/pnl`
+also include the perpetual book. `/close <MKT-PERP>` attempts a reduce-only
+close of that whole position. A close requested in plain words waits for
+`/confirm`; `/flatten` always waits for confirmation, attempts to close all
+perpetual positions, and halts new perpetual entries until you resume them in
+Settings → Perpetuals. Closing does not promise a fill: refusals and partial
+fills are reported. The desk's Close and Close all controls open the same
+review cards as chat. Chat cannot open a perpetual position, change perpetual
+consent, or clear an incident.
+
 **It speaks first, too** (toggle in `/settings`): a ping the moment a trade lands
 or the wall turns one back; warnings when the grant nears expiry, drawdown nears
 the breaker, or gas runs low; your price alerts; and a **daily campfire report**
@@ -467,8 +506,9 @@ allow when you sign in, and you can disconnect it at any time at
 [Connected apps](https://app.merrymen.dev/connect/apps). It can suggest trades
 or setting changes only if you allowed that, and nothing happens until you
 approve each one in Merrymen. It can never move your funds, see your keys, turn
-on live trading or loosen your limits. Paper (practice) and live money are
-always reported separately. Details: [docs/mcp](docs/mcp/README.md).
+on live trading or loosen your limits. It can read perpetual positions but
+never open, close or change one, or switch perpetuals on. Paper (practice) and
+live money are always reported separately. Details: [docs/mcp](docs/mcp/README.md).
 
 ---
 
@@ -485,6 +525,24 @@ is the headless fallback):
 | `even-keel` 🏹 | Keeps the basket at equal weight — trims winners, tops up laggards — to harvest mean reversion. **Merry Circle** (holder-only) |
 | `dip-hunter` 🏹 | Concentrates each tick on the basket token furthest below its rolling high. **Merry Circle** (holder-only) |
 | `trencher` | Memecoin discovery and position management with liquidity, momentum and exit checks; live execution and fast mode require separate opt-ins |
+
+**Perpetuals run beside your strategy, not instead of it.** When they are on,
+Settings → Perpetuals picks one producer for them: `perp-trend` (the default),
+the `llm-strategist`'s perpetuals proposals, or `manual` (your own orders only).
+Leverage is never the producer's choice; it is your Settings number.
+
+`perp-trend` **is not alpha, and says so.** It is the plainest trend rule that
+fits in integers: on closed 4-hour mark-price candles for BTC, ETH and SOL, go
+long when the close breaks above the previous 12-candle high and above its
+24-candle average (short: the mirror), stop at 3 × the average true range (at
+least 1.5%), size so a stop costs at most 1% of equity, never add a
+take-profit, and exit on a 6-candle break, the average, or after 7 days. In a
+backtest over about 277 days at 1x it ended each market between x0.99 and x1.65
+with 12–24% maximum drawdown — and shifting the candle boundaries by one to
+three hours swung a market's result by up to 0.5x, so treat those numbers as
+noise, not a forecast. When the stop it needs is wider than your stop-loss
+setting it waits rather than widening it, so with a tight setting it is mostly
+idle.
 
 ### Write your own
 
@@ -586,6 +644,46 @@ pools — re-check it yourself any time:
 ```bash
 npx tsx scripts/probe-tradability.mts
 ```
+
+**Perpetuals follow the same rule, with the venue's limits said plainly.**
+
+- **Every exit is a reduce-only order at Lighter.** The venue only lets it make
+  the position smaller, so a close sent twice, or racing a stop that already
+  fired, can never flip into a new position. A close is always the whole
+  position as Lighter reports it, and no loss breaker, daily cap, per-trade cap,
+  pause or expired permission ever refuses one.
+- **A Lighter outage blocks exits.** An exit is still an order at the venue: if
+  Lighter cannot be reached, it waits and retries, and what protects the
+  position meanwhile is the stop resting at Lighter.
+- **The venue stop has limits.** Every open carries a reduce-only stop at
+  Lighter, placed before the position counts as protected. It fires on the mark
+  price and accepts a fill only within a worst price, so a fast gap through that
+  price can leave the position open; it expires after at most 28 days, and the
+  worker re-places it while it runs. If the worker is down longer than that,
+  the position has no stop, and Lighter's own liquidation is the last backstop.
+- **Money comes back only home, and not instantly.** A withdrawal from Lighter
+  can only pay your agent's own smart account, and it takes Lighter's current
+  withdrawal delay (minutes; it varies) and then a claim. On a self-hosted
+  install, stopping the agent (`merrymen kill` or the dashboard's kill switch)
+  stands perpetuals down — closes the positions, then asks for that
+  withdrawal — and tells you what is left at Lighter; it does not make the
+  withdrawal faster. `merrymen kill` refuses to let go of the agent when it
+  cannot ask for that stand-down, unless you type that you accept leaving the
+  positions open. **On a hosted service with the shutdown runner enabled, kill queues an
+  exits-only shutdown:** the worker attempts reduce-only closes and withdrawal
+  of free collateral, and reports what remains. Queued is not closed. If the
+  runner is unavailable, the confirmation says so; positions can stay at
+  Lighter with only their resting stops.
+- **`merrymen recover` can unwind it with your owner key.** From your owner key,
+  in one signed operation, it can cancel the account's orders at Lighter, replace
+  the agent's Lighter key with a fresh one (revoking the agent's), and withdraw
+  the free collateral; after the delay the claim brings it home. Lighter
+  refuses the key change while none of the account's collateral is free (every
+  USDG sitting in position margin), and recover says so rather than trying.
+  Closing a position on chain with the owner key stays off until the mainnet
+  checklist ([docs/perps-mainnet-checklist.md](docs/perps-mainnet-checklist.md))
+  proves how it behaves on this venue. An agent whose owner key is held by your Privy
+  login has no owner-key path to Lighter yet.
 
 ---
 

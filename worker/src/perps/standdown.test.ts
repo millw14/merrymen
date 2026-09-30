@@ -26,6 +26,7 @@ import {
 import type { PerpExitIntent } from "../policy";
 import type { LighterFeedRead, PerpFeedMarket } from "./feed-reader";
 import type { PerpDecimals } from "./markets";
+import { PROTECT_THRESHOLDS } from "./protect";
 import {
   STANDDOWN_LIMITS,
   STANDDOWN_WITHDRAWS,
@@ -574,11 +575,16 @@ describe("stand-down: attempts are bounded and sequential", () => {
 // ── the price ───────────────────────────────────────────────────────────────
 
 describe("stand-down: the close's price", () => {
-  it("floors the slippage at 150 bps and caps it at 500; unreadable is the floor", () => {
+  it("floors the slippage at 150 bps and caps it at 450 (protect.ts's cap, inside the venue band); unreadable is the floor", () => {
     assert.equal(standdownSlipBps(50), 150);
     assert.equal(standdownSlipBps(150), 150);
     assert.equal(standdownSlipBps(300), 300);
-    assert.equal(standdownSlipBps(900), 500);
+    assert.equal(standdownSlipBps(900), 450);
+    assert.equal(standdownSlipBps(450), 450);
+    assert.equal(standdownSlipBps(451), 450);
+    // ONE BOUND FOR EVERY EXIT OF A POSITION: the stand-down never accepts a
+    // worse fill than the protective loop's own close would.
+    assert.equal(STANDDOWN_LIMITS.slipCapBps, PROTECT_THRESHOLDS.closeSlipCapBps);
     assert.equal(standdownSlipBps(null), 150);
     assert.equal(standdownSlipBps(0), 150);
     assert.equal(standdownSlipBps(Number.NaN), 150);
@@ -762,6 +768,16 @@ describe("stand-down: resolve first, book last", () => {
 // ── what the owner is told ──────────────────────────────────────────────────
 
 describe("stand-down: the custody sentence", () => {
+  it("a flat venue with unread transfers never claims that Lighter reads empty", async () => {
+    const r = await runStanddown(opts(new FakeVenue()));
+    assert.equal(r.outcome, "done");
+    for (const unknown of [{ pendingWithdrawalsMicro: null }, { depositsInTransitMicro: null }]) {
+      const exposure = standdownExposure(r, { ...EXTRA, ...unknown });
+      assert.deepEqual(exposure, { kind: "unread" });
+      assert.doesNotMatch(custodySentence(exposure), /reads empty/);
+    }
+  });
+
   it("a clean stand-down reads empty, names what closed and the withdrawal — never 'funds stay in your smart account'", async () => {
     const v = new FakeVenue().hold({ marketId: 1, side: "long", base: 30n, margin: u(5), tied: 1 });
     const r: StanddownResult = await runStanddown(opts(v));

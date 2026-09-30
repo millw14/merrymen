@@ -42,6 +42,8 @@ import {
 } from "../../packages/core/src/index";
 import { openSecret, requireDek, sealSecret, storeDek } from "./store-crypto";
 import { openPerpKey } from "./perps/key-seal";
+import { makePgDb } from "./db";
+import { HOSTED_STANDDOWN_SCHEMA, HostedStanddownStore, revokeHostedGrant } from "./perps/hosted-standdown-store";
 import type { StoredGrant } from "../../packages/core/src/index";
 
 /** A grant safe to persist server-side: session-key-only, session key sealed. */
@@ -88,6 +90,8 @@ export interface GrantStore {
    * read-then-delete. A tie counts as covered: the grant is removed.
    */
   removeUnlessNewer(tenant: `0x${string}`, atSec: number): Promise<"removed" | "absent" | "newer">;
+  /** Hosted perps expiry uses the same atomic key retention as an explicit kill. */
+  expirePerps?(nowMs: number): Promise<void>;
 }
 
 /** Split a full grant into a persistable record, refusing anything with an owner key. */
@@ -425,6 +429,7 @@ export class PgGrantStore implements GrantStore {
              updated_at BIGINT NOT NULL
            )`,
         );
+        await c.query(HOSTED_STANDDOWN_SCHEMA);
         // THE BOOT SCAN: every grant_json as written, before this process
         // serves a single read or write. A hosted store holding a plaintext
         // Lighter key anywhere does not come up (assertNoPerpKeysAtRest).
@@ -437,15 +442,23 @@ export class PgGrantStore implements GrantStore {
   }
   async put(tenant: `0x${string}`, grant: StoredGrant): Promise<void> {
     const rec = toRecord(tenant, grant);
-    const c = await this.client();
-    await c.query(
+    await this.client();
+    const db = await makePgDb(this.url);
+    await db.tx(async tx => {
+    await tx.prepare(
       `INSERT INTO grants (tenant, chain_id, grant_json, sealed_session_key, updated_at)
-       VALUES ($1, $2, $3, $4, $5)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (tenant) DO UPDATE SET
          chain_id = EXCLUDED.chain_id, grant_json = EXCLUDED.grant_json,
          sealed_session_key = EXCLUDED.sealed_session_key, updated_at = EXCLUDED.updated_at`,
-      [rec.tenant, rec.chainId, JSON.stringify(rec.grant), rec.sealedSessionKey, rec.updatedAt],
-    );
+    ).run(rec.tenant, rec.chainId, JSON.stringify(rec.grant), rec.sealedSessionKey, rec.updatedAt);
+    // The upsert takes the grant's row lock FIRST. A concurrent kill either
+    // follows this put or commits its job before this test; it cannot slip a
+    // new normal worker beside a draining venue key.
+    if (await new HostedStanddownStore(tx, requireDek()).blocked(tenant, grant.smartAccount)) {
+      throw new Error("the previous perps shutdown is still being accounted for; try again after it finishes");
+    }
+    });
   }
   async get(tenant: `0x${string}`): Promise<StoredGrant | null> {
     const c = await this.client();
@@ -470,18 +483,19 @@ export class PgGrantStore implements GrantStore {
     return rows.map((r) => String(r.tenant) as `0x${string}`);
   }
   async remove(tenant: `0x${string}`): Promise<void> {
-    const c = await this.client();
-    await c.query(`DELETE FROM grants WHERE tenant = $1`, [tenant.toLowerCase()]);
+    await this.client();
+    await revokeHostedGrant(await makePgDb(this.url), tenant, requireDek());
   }
   async removeUnlessNewer(tenant: `0x${string}`, atSec: number): Promise<"removed" | "absent" | "newer"> {
+    await this.client();
+    return revokeHostedGrant(await makePgDb(this.url), tenant, requireDek(), { beforeSec: atSec });
+  }
+  async expirePerps(nowMs: number): Promise<void> {
     const c = await this.client();
-    const t = tenant.toLowerCase();
-    const { rows } = await c.query(`DELETE FROM grants WHERE tenant = $1 AND updated_at <= $2 RETURNING tenant`, [t, atSec]);
-    if (rows.length > 0) return "removed";
-    // Nothing deleted: either there is no row, or it was put after the kill.
-    // This read only names which — the decision was the DELETE above.
-    const left = await c.query(`SELECT 1 FROM grants WHERE tenant = $1`, [t]);
-    return left.rows.length > 0 ? "newer" : "absent";
+    const { rows } = await c.query(`SELECT tenant FROM grants WHERE grant_json->'perp' IS NOT NULL
+      AND CAST(grant_json->>'expiresAt' AS BIGINT) <= $1`, [Math.floor(nowMs / 1000)]);
+    const db = await makePgDb(this.url);
+    for (const row of rows) await revokeHostedGrant(db, String(row.tenant) as `0x${string}`, requireDek(), { nowMs, reason: "expiry", expiredOnly: true });
   }
   async tenantForAccount(smartAccount: `0x${string}`): Promise<`0x${string}` | null> {
     const c = await this.client();

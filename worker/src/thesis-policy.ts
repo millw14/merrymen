@@ -961,13 +961,6 @@ export const WITHHELD_REJECT_RULES: Readonly<Record<string, { why: string; owner
       owner: "the operator of this server has perpetuals switched off here, or allows only practice ones",
       remedy: "Nothing in your Settings changes this — it is the server operator's choice.",
     },
-    "perp-live-not-yet": {
-      why: PERP_WHY,
-      owner:
-        "this account trades for real, and real-money perpetuals are not available in this version yet — a live " +
-        "account never runs practice perps beside its real book",
-      remedy: "Nothing to do now. Practice perpetuals run while the account is on paper; real ones arrive in a later version.",
-    },
     // ── the market ───────────────────────────────────────────────────────────
     "perp-market-not-allowed": {
       why: PERP_WHY,
@@ -1083,6 +1076,44 @@ export const WITHHELD_REJECT_RULES: Readonly<Record<string, { why: string; owner
       why: PERP_WHY,
       owner: "the agent has opened as many perpetual positions in the last 24 hours as you allow",
       remedy: "Nothing to do — it frees up as the oldest opens age out. Raise the daily opens limit in Settings to allow more.",
+    },
+    // ── the live venue's own refusals (perps/executor-live.ts) ───────────────
+    "perp-leverage-busy": {
+      why: PERP_WHY,
+      owner:
+        "the leverage on that market can only be set while it has no position and no order at Lighter, and something " +
+        "is still there or still on its way",
+      remedy: "Nothing to do — the agent sets it the next time the market is flat. Closes are never blocked by this.",
+    },
+    "perp-withdraw-exceeds-free": {
+      why: PERP_WHY,
+      owner:
+        "that is more than the free collateral at Lighter — money backing an open position stays with it until the " +
+        "position closes",
+      remedy: "Nothing to do — whatever is free comes home, and the rest follows as positions close.",
+    },
+    "perp-withdraw-in-flight": {
+      why: PERP_WHY,
+      owner: "an earlier withdrawal from Lighter has no answer from the venue yet, so a second one is not asked for on top of it",
+      remedy: "Nothing to do — it clears on its own once Lighter answers the first; the money then comes home after the venue's delay.",
+    },
+    // ── the live lane's own (perps/lane.ts) ─────────────────────────────────
+    "perp-venue-refused": {
+      why: PERP_WHY,
+      owner: "Lighter refused the signed order when it was sent, so nothing was opened or closed by it",
+      remedy:
+        "Nothing to do when it is a one-off — the agent tries again on its own rules, and a position keeps the stop resting " +
+        "at the venue. If it repeats, the Perpetuals panel on the dashboard shows what Lighter said.",
+    },
+    "perp-standing-down": {
+      why: PERP_WHY,
+      owner: "the perpetual positions are being stood down right now, so nothing else is sent to Lighter until that finishes",
+      remedy: "Nothing to do — it ends on its own within fifteen minutes, and the result says what is left at Lighter.",
+    },
+    "perp-no-cash": {
+      why: PERP_WHY,
+      owner: "the open needs margin posted at Lighter first, and the account does not hold the USDG to post it",
+      remedy: "Add USDG to the agent's account, or lower the perpetuals per-trade limit in Settings.",
     },
   });
 

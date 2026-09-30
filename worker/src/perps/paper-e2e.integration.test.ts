@@ -17,7 +17,8 @@
  * Then, on a second account at 10x, the protective loop closes on
  * liquidation proximity with no tick and no route running at all (a paused
  * agent); and the loop runs on its own clock once armed. Last, a LIVE
- * account with perps on never reaches an executor.
+ * account with perps on in a process with no live venue edges never reaches
+ * an executor (the live lane itself: live-e2e.integration.test.ts).
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -633,15 +634,19 @@ describe("what the paper venue's clock could not run is said, not swallowed (R3-
   });
 });
 
-describe("a LIVE account with perps on", () => {
-  it("never reaches an executor: refuse('perp-live-not-yet'), said once per arm", async () => {
+describe("a LIVE account with perps on, in a process with no live venue edges", () => {
+  it("never reaches an executor: refused by its own reason (not granted), said once per arm — never practice perps beside it", async () => {
     writeFeed({ mark: 802_000n, bids: [[801_900n, 1_000n]], asks: [[802_000n, 1_000n]] });
-    const a = await account({ exec: LIVE, cfg: { perpsLiveEnabled: true } });
+    // Real perps consented on a live account whose grant carries no perp
+    // block: perpsModeOf says perp-not-granted, and with no live edges
+    // (lane.ts PerpLiveDeps absent) nothing at Lighter is read or signed.
+    const a = await account({ exec: LIVE, cfg: { liveTradingEnabled: true, perpsLiveEnabled: true } });
     const r = await a.lane.refresh();
-    assert.deepEqual(r.rail, { mode: "refuse", rule: "perp-live-not-yet" });
-    assert.equal(r.book, undefined, "no live perps exist in this build: the known zero, Lighter never read");
+    assert.deepEqual(r.rail, { mode: "refuse", rule: "perp-not-granted" });
+    assert.equal(r.book, undefined, "no venue account is read: the known zero");
     assert.equal(r.view, undefined);
     assert.equal(r.report.mode, "refuse");
+    assert.equal(r.report.blocker, "perps-not-granted");
 
     const open: PerpOrderIntent = {
       kind: "perp-order",
@@ -660,25 +665,21 @@ describe("a LIVE account with perps on", () => {
       stopPrice: 746_760n,
     };
     const out = await a.lane.execute(open, { equityUsdg: u(100), equityKnown: true });
-    assert.deepEqual(out, { status: "rejected", rejectRule: "perp-live-not-yet" });
+    assert.deepEqual(out, { status: "rejected", rejectRule: "perp-not-granted" });
     const close: PerpOrderIntent = { kind: "perp-order", venue: "lighter", market: "BTC-PERP", marketId: 1, effect: "close", side: "long", reduceOnly: true, baseAmount: 20n, worstPrice: 790_000n, markPrice: 802_000n, notionalUsdg: 0n };
     const outClose = await a.lane.execute(close, { equityUsdg: u(100), equityKnown: true });
     assert.equal(outClose.status, "rejected");
     await a.lane.runRoute({ ...TICK, equityUsdg: u(100) }, hooks(a, u(100)));
     await pass(a, 1);
-    assert.equal(a.executorsMade, 0, "no executor was ever built for a live account");
+    assert.equal(a.executorsMade, 0, "no paper executor is ever built for a live account (rule 14)");
     assert.equal((await store.getPerpPositions(a.id, "live", { includeFlat: true })).length, 0);
     assert.equal((await store.getPerpPositions(a.id, "paper", { includeFlat: true })).length, 0, "and never a practice book beside it");
 
-    const said = a.events.filter((e) => /real-money perpetuals are not available in this version yet/.test(e.message));
-    assert.equal(said.filter((e) => /^perpetuals are switched on/.test(e.message)).length, 1, "the rail is said once");
-    assert.ok(a.events.some((e) => /refused — perp-live-not-yet/.test(e.message)), "the refusal is the owner's to see");
+    const said = () => a.events.filter((e) => /^perpetuals are switched on, but nothing new is opened: the permission you signed does not include perpetuals/.test(e.message));
+    assert.equal(said().length, 1, "the rail is said once");
+    assert.ok(a.events.some((e) => /refused — perp-not-granted/.test(e.message)), "the refusal is the owner's to see");
     await a.lane.armed();
-    assert.equal(
-      a.events.filter((e) => /^perpetuals are switched on, but this account trades for real/.test(e.message)).length,
-      2,
-      "and said again after a new arm",
-    );
+    assert.equal(said().length, 2, "and said again after a new arm");
     await a.lane.stopProtect();
   });
 });

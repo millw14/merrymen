@@ -259,6 +259,13 @@ export interface ProtectInput {
    * is not.
    */
   feedFresh: boolean;
+  /**
+   * Which book the view is: the PAPER book has no venue account, no key and
+   * nothing `merrymen recover` could unwind, so its P7 alerts say what is
+   * true of practice positions instead (the review's paper-P7 finding: a
+   * paper owner told to run recover over a stale price file). Absent = live.
+   */
+  book?: "paper" | "live";
 }
 
 /**
@@ -279,7 +286,7 @@ export function evaluateProtection(input: ProtectInput): { actions: ProtectActio
     // except a breach, which needs two CONSECUTIVE reads, not two reads with
     // an outage between them.
     for (const [k, m] of prior.markets) markets.set(k, { ...m, firstBreachAt: null });
-    return { actions, memory: { markets, ...unreadAlerts(actions, prior, nowSec, "venue") } };
+    return { actions, memory: { markets, ...unreadAlerts(actions, prior, nowSec, "venue", input.book ?? "live") } };
   }
 
   const liqBufferBps = perpsPctToBps(settings.perpsLiqBufferPct);
@@ -514,25 +521,50 @@ export function evaluateProtection(input: ProtectInput): { actions: ProtectActio
   // P7 FOR PRICES: positions held and not one fresh mark among them is as
   // unread as the account itself, as far as acting goes.
   const pricesUnread = ordered.length > 0 && !anyMarkFresh;
-  if (pricesUnread) return { actions, memory: { markets, ...unreadAlerts(actions, prior, nowSec, "prices") } };
+  if (pricesUnread) return { actions, memory: { markets, ...unreadAlerts(actions, prior, nowSec, "prices", input.book ?? "live") } };
   return { actions, memory: { markets, unreadSince: null, unreadAlerted: false, unreadRecoverAlerted: false } };
 }
 
-/** P7's two alerts, once each per unread spell. */
+/**
+ * P7's two alerts, once each per unread spell.
+ *
+ * THE PAPER BOOK GETS ITS OWN WORDS. Its positions are practice: there is no
+ * venue account behind them, no key, and nothing `merrymen recover` can see or
+ * unwind — telling a paper owner to run it over a stale price file sends them
+ * to a tool that would report an empty Lighter account and teach them the
+ * alert is noise. What IS true of a paper book when prices go dark: its stops
+ * and liquidation are judged on the first fresh mark, and no money is at risk.
+ */
 function unreadAlerts(
   actions: ProtectAction[],
   prior: ProtectMemory,
   nowSec: number,
   what: "venue" | "prices",
+  book: "paper" | "live",
 ): Pick<ProtectMemory, "unreadSince" | "unreadAlerted" | "unreadRecoverAlerted"> {
   const t = PROTECT_THRESHOLDS;
   const since = prior.unreadSince ?? nowSec;
   let alerted = prior.unreadAlerted;
   let recover = prior.unreadRecoverAlerted;
-  const cannot = what === "venue" ? "Lighter positions cannot be read" : "Lighter's prices cannot be read";
+  const paper = book === "paper";
+  const cannot = paper
+    ? what === "venue"
+      ? "the practice perp book cannot be read"
+      : "Lighter's prices for the practice perp positions cannot be read"
+    : what === "venue"
+      ? "Lighter positions cannot be read"
+      : "Lighter's prices cannot be read";
   if (!alerted && nowSec - since >= t.unreadAlertSec) {
     alerted = true;
-    actions.push({ kind: "alert", rule: "P7", market: null, code: "perp-venue-unread", text: `${cannot}; resting venue stops still protect them.` });
+    actions.push({
+      kind: "alert",
+      rule: "P7",
+      market: null,
+      code: "perp-venue-unread",
+      text: paper
+        ? `${cannot}; their stops and liquidation are judged on the first fresh price. Nothing real is at risk.`
+        : `${cannot}; resting venue stops still protect them.`,
+    });
   }
   if (!recover && nowSec - since >= t.unreadRecoverAlertSec) {
     recover = true;
@@ -541,9 +573,11 @@ function unreadAlerts(
       rule: "P7",
       market: null,
       code: "perp-venue-unread-recover",
-      text:
-        `${cannot} for 10 minutes. Resting venue stops still protect open positions, but nothing else can act on them ` +
-        "until it reads. To see and unwind them with your owner key, run `merrymen recover`.",
+      text: paper
+        ? `${cannot} for 10 minutes. The practice positions keep their stops, which fire on the first fresh price — ` +
+          "nothing is signed and no money is at Lighter, so there is nothing to recover."
+        : `${cannot} for 10 minutes. Resting venue stops still protect open positions, but nothing else can act on them ` +
+          "until it reads. To see and unwind them with your owner key, run `merrymen recover`.",
     });
   }
   return { unreadSince: since, unreadAlerted: alerted, unreadRecoverAlerted: recover };

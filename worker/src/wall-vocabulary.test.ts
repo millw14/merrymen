@@ -52,6 +52,23 @@ function wallRules(): string[] {
     for (const q of m[0].matchAll(/"([a-z][a-z-]+)"/g)) found.add(q[1]!);
   }
   assert.ok(found.size >= 10, `expected the wall's rules, parsed ${found.size}`);
+  // THE PERP EXECUTORS REFUSE TOO, and their slugs reach the owner exactly
+  // as a policy verdict's does (lane.ts refusalOf → the owner's event line).
+  // A slug only an executor can produce is still one the owner must be told
+  // about in words — so it is held to the same "published or withheld with a
+  // reason" rule, read from the same kind of source.
+  const perpExecutorRules = new Set<string>();
+  for (const f of ["perps/executor.ts", "perps/executor-live.ts"]) {
+    for (const m of read(f).matchAll(/new PerpRefused\(\s*"([a-z][a-z-]+)"/g)) perpExecutorRules.add(m[1]!);
+  }
+  // THE LANE REFUSES BY NAME TOO (its own `refuse(intent, { rule: … })` and
+  // the onboarding plan's cannot-fund rules it passes through) — the same
+  // owner's-words rule holds for those.
+  for (const m of read("perps/lane.ts").matchAll(/rule:\s*"(perp-[a-z-]+)"/g)) perpExecutorRules.add(m[1]!);
+  for (const m of read("perps/onboard.ts").matchAll(/"(perp-(?:per-trade-cap|collateral-cap|below-min|no-cash))"/g)) perpExecutorRules.add(m[1]!);
+  assert.ok(perpExecutorRules.has("perp-withdraw-in-flight"), "sanity: the live executor's refusals were read");
+  assert.ok(perpExecutorRules.has("perp-standing-down"), "sanity: the lane's refusals were read");
+  for (const r of perpExecutorRules) found.add(r);
   return [...found].sort();
 }
 

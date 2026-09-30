@@ -56,6 +56,13 @@ test("get_agent_controls returns the controls list, and the kill switch is where
   // Hosted /kill now removes the stored grant (worker/src/kill-request.ts), so it is named as a kill switch again.
   assert.ok(kill.includes("Telegram /kill, then /confirm"), kill);
   assert.ok(!kill.includes("rather than the Telegram kill command"), kill);
+  const killEffect = AGENT_CONTROLS.find((c) => c.control === "kill switch")!.effect;
+  assert.match(killEffect, /at most 15 minutes/);
+  assert.match(killEffect, /attempt reduce-only closes/);
+  assert.match(killEffect, /cannot open new positions/);
+  assert.match(killEffect, /leave positions and collateral behind/);
+  assert.match(killEffect, /does not prove the funds have arrived home/);
+  assert.doesNotMatch(killEffect, /can no longer sign anything|deletes the stored key within seconds/);
   for (const c of AGENT_CONTROLS) {
     assert.ok(!/dashboard|→ Stop/.test(c.where), `${c.control}: no invented dashboard or Stop button (${c.where})`);
   }
@@ -119,7 +126,9 @@ test("the screens on each path exist and lead where the text says", () => {
   assert.ok(shows(you, "<strong>Wallet & permissions</strong>"));
   assert.ok(app.includes(`onStop={() => {window.location.href="/grant";}}`));
   assert.ok(shows(wallet, `<button className="btn-kill" style={{ padding: "10px 16px" }} onClick={discard}>`));
-  assert.ok(wallet.includes(`fetch("/api/grants", { method: "DELETE" })`), "discard deletes the server-side grant");
+  // …through the one kill reader, which reads the server's answer before anything local changes.
+  assert.ok(wallet.includes("await sendKill()"), "discard deletes the server-side grant");
+  assert.ok(source("web/src/lib/kill-answer.ts").includes(`fetchImpl("/api/grants", { method: "DELETE" })`), "sendKill is the DELETE");
 
   // You → Trading limits → Edit signed limits goes to /grant; You → Settings is /settings.
   assert.ok(you.includes("<strong>Trading limits</strong>"));

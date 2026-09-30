@@ -673,3 +673,46 @@ describe("settings by text — the classifier names, the code decides", () => {
     assert.match(src, /"use the brain"/);
   });
 });
+
+
+describe("perpetual owner exits", () => {
+  it("typed close is exact, and no long/short/open commands exist", () => {
+    assert.deepEqual(parseSlash("/close btc-perp"), { kind: "close", market: "BTC-PERP" });
+    assert.deepEqual(parseSlash("/perps"), { kind: "perps" });
+    for (const text of ["/close BTC", "/close BTC-PERP ETH-PERP", "/long BTC-PERP 10", "/short BTC-PERP 10", "/flatten BTC"]) assert.equal(parseSlash(text)?.kind, "unknown");
+  });
+  it("a model can only propose a close, never bypass its confirmation", async () => {
+    const d = deps();
+    d.closePerp = async (market) => { d.calls.push(`close:${market}`); return "closed"; };
+    const cmd = coerceLlmCommand({ kind: "close", symbol: "BTC-PERP", confirm: false });
+    assert.deepEqual(cmd, { kind: "close", market: "BTC-PERP", confirm: true });
+    assert.match(await executeCommand(cmd, d), /confirm/);
+    assert.deepEqual(d.calls, ["pend:close"]);
+    assert.equal(await executeCommand({ kind: "confirm" }, d), "closed");
+    assert.equal(await executeCommand({ kind: "confirm" }, d), "nothing pending to confirm.");
+    assert.deepEqual(d.calls, ["pend:close", "close:BTC-PERP"]);
+  });
+  it("typed close executes, flatten always waits and rechecks control", async () => {
+    const d = deps();
+    d.closePerp = async () => { d.calls.push("close"); return "closed"; };
+    d.flattenPerps = async () => { d.calls.push("flatten"); return "flat"; };
+    assert.equal(await executeCommand(parseSlash("/close BTC-PERP")!, d), "closed");
+    assert.match(await executeCommand(parseSlash("/flatten")!, d), /halt new perpetual entries/);
+    assert.deepEqual(d.calls, ["close", "pend:flatten"]);
+    d.controlEnabled = false;
+    assert.match(await executeCommand({ kind: "confirm" }, d), /turned off/);
+    assert.deepEqual(d.calls, ["close", "pend:flatten"]);
+  });
+  it("a cancelled or expired close-all cannot execute", async () => {
+    const d = deps();
+    let clock = 100;
+    d.now = () => clock;
+    d.flattenPerps = async () => { throw new Error("must not execute"); };
+    await executeCommand({ kind: "flatten" }, d);
+    await executeCommand({ kind: "cancel" }, d);
+    assert.match(await executeCommand({ kind: "confirm" }, d), /nothing pending/);
+    await executeCommand({ kind: "flatten" }, d);
+    clock += 91;
+    assert.match(await executeCommand({ kind: "confirm" }, d), /expired/);
+  });
+});

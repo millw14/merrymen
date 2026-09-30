@@ -776,4 +776,72 @@ export const CONCEPTS: readonly Concept[] = [
     confusable: "A Brain decision can say \"buy\" and still be a decision nothing acts on.",
     evidence: "worker/src/brain-shadow.ts:1-21, worker/src/brain-client.ts:22-25, worker/src/brain-enabled.ts:1-27, worker/src/brain-trigger.ts:57-80, worker/src/index.ts:5294-5309",
   },
+  // ── PERPETUAL FUTURES (docs/perps.md) ──────────────────────────────────────
+  //
+  // Leverage is the one place in the product where a person can lose money
+  // faster than the price moves, so the general-purpose meaning of these words
+  // is not good enough: merrymen's leverage is venue state and never a model's
+  // choice, its margin is always isolated, its exits are always reduce-only,
+  // and "at Lighter" is money that is neither lost nor home. Each entry says
+  // the merrymen meaning and cites the code that makes it true. None of them
+  // says the funds are in the smart account: with perps, that is exactly the
+  // sentence that can be false (rule 13).
+  {
+    term: "Leverage (perpetuals)",
+    aliases: ["leverage", "leveraged", "how much leverage", "times leverage", "change leverage", "max leverage"],
+    plain: "Leverage is how much bigger a perpetuals position is than the money set aside to hold it. At 2x, 10 USDG of margin holds a 20 USDG position, so a 1% price move is a 2% gain or loss on that margin, and the position's liquidation price sits closer to the entry the higher the leverage. merrymen sets it per market from your Settings — 2x unless you change it, never above 10x or the market's own maximum — and no model or chat message ever chooses it.",
+    because: "leverageTarget takes the lowest of your perpsMaxLeverage, the market's maximum and 10, and encodes it as a margin fraction rounded so the venue's leverage is never above yours; the policy refuses an open unless Lighter reads that market isolated at exactly that fraction, and the fraction is changed only while the market holds no position.",
+    confusable: "It is not a per-trade setting: leverage belongs to the market at Lighter, so a change in Settings reaches a market only once it is flat. And more leverage does not mean a bigger trade — the per-trade cap limits the position's full size — it means less margin behind the same position and a liquidation price nearer the entry.",
+    evidence: "packages/core/src/perps.ts:565-595, worker/src/policy.ts:1292-1322",
+  },
+  {
+    term: "Liquidation price",
+    aliases: ["liquidation", "liquidated", "liquidation price", "liq price", "got liquidated", "distance to liquidation", "margin call"],
+    plain: "The price at which Lighter itself closes a perpetuals position because its margin can no longer cover the loss: below the entry for a long, above it for a short, and nearer the entry the higher the leverage. If it is reached, the venue closes the position and keeps a liquidation fee of up to 1% out of what margin is left. Because each position is margined on its own, a liquidation takes that position's margin — all of it, in the worst case — and not the rest of the account.",
+    because: "isolatedLiqPrice solves margin plus unrealized P&L equals maintenance margin, rounded toward the entry so it errs early, and every open is refused unless its own stop's worst price sits at least perpsLiqBufferPct inside that estimate (stopBeatsLiquidation), with the entry taken at the order's worst possible fill.",
+    confusable: "It is not your stop. The stop is merrymen's exit and is placed earlier on purpose; the liquidation price only matters if the stop did not fill, which a fast gap through the stop's worst price can cause. Funding paid out of the margin moves it closer over time even when the price stands still.",
+    evidence: "packages/core/src/perps.ts:717-812, packages/core/src/perps.ts:1022-1059",
+  },
+  {
+    term: "Funding (perpetuals)",
+    aliases: ["funding rate", "funding fee", "funding payment", "hourly funding", "perp funding", "paid funding", "pay funding"],
+    plain: "Perpetual futures never expire, so Lighter keeps their price near the real market with a payment between traders every hour: when the rate is positive, longs pay shorts; when it is negative, shorts pay longs. It comes out of — or goes into — each open position's margin every hour the position is held, so a position can lose money while the price stands still. It is not a merrymen fee: merrymen charges nothing per perps trade.",
+    because: "fundingPaymentMicro books the hourly value times the position's size against the side Lighter names as paying, rounding a charge up and a credit down; the paper book charges every owed hour from the feed's hourly history, and an hour it could not charge is reported as unread, not as zero.",
+    confusable: "It is not a trading loss and not a fee on a trade — no order happens — which is why it can move a position toward its liquidation price on a quiet day. Lighter quotes the rate per hour, not per year.",
+    evidence: "packages/core/src/perps.ts:973-1008, worker/src/perps/paper.ts:55-65",
+  },
+  {
+    term: "Mark price vs index price",
+    aliases: ["mark price", "index price", "mark vs index", "mark and index", "why is the perp price different"],
+    plain: "A perpetuals market has two reference prices. The index is the price of the underlying asset that Lighter tracks; the mark is the price Lighter values the perpetual itself at, kept close to the index. The mark is the one that decides things for your position: its unrealized profit or loss, when its stop fires and when it is liquidated are all judged on the mark, and funding is computed from the index.",
+    because: "The market parser refuses a market whose mark_price or index_price is missing or not positive; stops and take-profits fire on mark and the paper book values and liquidates positions at mark, perp-trend reads only closed 4-hour mark candles, and a funding payment's value is index times rate.",
+    confusable: "Neither is the price an order fills at: a market order walks Lighter's order book, so every order carries a worst acceptable price and the fill can differ from both. A BTC-PERP or TSLA-PERP price can also differ from the same asset's token on Robinhood Chain — they are different markets.",
+    evidence: "worker/src/perps/markets.ts:128-190, worker/src/perps/paper.ts:66-94",
+  },
+  {
+    term: "Isolated margin",
+    aliases: ["isolated margin", "isolated", "cross margin", "allocated margin", "margin", "collateral"],
+    plain: "Margin is the USDG set aside to hold a leveraged position. merrymen only ever uses isolated margin: each position has its own margin, and a loss on it is taken from that margin alone, not from another position or the rest of your account. The margin a new position needs is its size divided by its leverage — 20 USDG at 2x needs 10 USDG — and it comes back, plus or minus the result, when the position closes.",
+    because: "isolatedMarginMicro is the position's notional times the market's margin fraction, rounded up; the policy refuses cross margin outright and refuses every open until Lighter reads that market isolated at the expected fraction, because under cross a loss draws on the whole account and the per-position liquidation price means nothing.",
+    confusable: "Margin is not the size of the position: the per-trade and open-notional caps in Settings limit the full position, and the collateral cap limits how much USDG may sit at Lighter at all. Margin posted to Lighter is at Lighter, not in your smart account, until it is withdrawn.",
+    evidence: "packages/core/src/perps.ts:596-601, worker/src/policy.ts:1292-1322",
+  },
+  {
+    term: "Reduce-only",
+    // Hyphenated words never match as single tokens (words() splits on the
+    // hyphen), so "reduce-only" is carried by the phrases people type it in.
+    aliases: ["reduce only", "reduce-only order", "reduce-only close", "reduce-only mean", "is reduce-only", "close a perp", "close my perp", "flatten", "flip my position"],
+    plain: "Every exit merrymen sends to Lighter is a reduce-only order: the venue will only let it make the position smaller, never bigger and never turn it the other way round. So even if a close is sent twice, or races a stop that already fired, it cannot open a new position in the opposite direction. A close is sized to the whole position as Lighter reports it.",
+    because: "isExitIntent counts a perp order as an exit only when it carries the reduce-only flag and says reduce or close — the flag, because that is what the venue enforces — and checkPerpExit refuses one only when it is not an exit of the position actually held: never for a cap, the loss breaker, a halt, the permission's expiry or Lighter being unread.",
+    confusable: "Reduce-only does not guarantee a fill. An exit is still an order at Lighter: it needs Lighter to be reachable and a buyer or seller within its worst price, so a venue outage or a fast gap can delay it.",
+    evidence: "worker/src/policy.ts:689-745, worker/src/policy.ts:923-990",
+  },
+  {
+    term: "At Lighter (at the venue)",
+    aliases: ["at the venue", "at lighter", "on lighter", "money on lighter", "usdg on lighter", "withdrawal delay", "lighter"],
+    plain: "\"At Lighter\" is money and positions your agent holds on Lighter, the perpetuals exchange, instead of in its own smart account: the margin behind open positions and any USDG posted there. It still counts in your balance, but it is not instantly spendable. It can only ever come back to your agent's own smart account, and a withdrawal takes Lighter's current withdrawal delay — minutes, not seconds — and then a claim before it arrives.",
+    because: "Deposits go from the smart account into Lighter's contract on Robinhood Chain and are credited to a Lighter account keyed on that same address; Lighter's secure withdrawal names no destination and its claim always pays the account it belongs to. custodySentence names what is still at Lighter — positions, orders, collateral, money on its way — instead of saying the funds are home.",
+    confusable: "\"Could not be read\" is not \"nothing there\": when Lighter cannot be read, merrymen says so rather than showing an empty book. And stopping the agent does not bring this money home at once: closing positions and withdrawing still take the delay. The account contract bounds how much USDG goes to Lighter per deposit; what happens to it once there is bounded by merrymen's software, not by the chain.",
+    evidence: "packages/core/src/perps.ts:1175-1312",
+  },
 ];

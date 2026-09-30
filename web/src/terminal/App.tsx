@@ -1,4 +1,7 @@
 "use client";
+import { perpsReviewLink } from "./perps-review-link";
+import { PerpsShutdownNotice } from "./PerpsShutdownNotice";
+import { PerpsRecoveryNotice } from "./PerpsRecoveryNotice";
 import { usePathname, useRouter } from "next/navigation";
 import { AccountEntry, FundingPanel, LimitsPanel, requestJson, type AccountState } from "./HostedControls";
 import { SignOut } from "./SignOut";
@@ -186,6 +189,18 @@ export function App() {
     // sign-in and a new agent ask for (refreshAccount, below).
     onOutcome: () => refreshAccount(),
   });
+  // Native Close-all opens the same review card. Consume the link once, after
+  // this owner's account is ready; no network write or automatic confirmation.
+  const perpsReviewOwner = useRef<string | null>(null);
+  useEffect(() => {
+    if (!chatKey || !account?.status.exists || !live.mine || chat.sending || chat.confirming || perpsReviewOwner.current === chatKey) return;
+    const review = perpsReviewLink(window.location.href);
+    if (!review) return;
+    perpsReviewOwner.current = chatKey;
+    window.history.replaceState(window.history.state, "", review.next);
+    chat.setProposal(review.proposal);
+    setChatDocked(true);
+  }, [chatKey, account?.status.exists, live.mine, chat.sending, chat.confirming, chat.setProposal]);
   // The two names the refresh loop and sign-out already clear the chat with.
   const setChatDraft = chat.setDraft;
   const setTurns = (_cleared: []) => chat.clearThread();
@@ -431,6 +446,8 @@ export function App() {
       className={ticks.length > 0 ? "app has-tape" : "app"}
       data-screen={screen.kind === "tab" ? screen.tab : screen.kind}
     >
+      <PerpsShutdownNotice status={account?.status.perpsShutdown} />
+      <PerpsRecoveryNotice status={account?.status.perpsRecovery} />
       {/* GATED IN JSX, NOT JUST IN CSS. These three were rendered on every
           device and hidden by a media query, so a phone MOUNTED the desktop
           header and the desktop rail — and with them a second `AccountEntry`,

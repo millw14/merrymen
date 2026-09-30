@@ -18,11 +18,13 @@ import {
   ACCOUNT_CUSTODY, REMAINDER_EXPLAINED, groupExposure, ledgerScope, readPerformance, readPortfolio, readTradeDetail, readTradePage,
   type Book, type BookPerformance, type BookPortfolio, type DecisionSummary, type LedgerScope, type PortfolioView, type TradeView,
 } from "@/lib/services/portfolio";
+import type { Db } from "../../../../worker/src/db";
 import type { OwnedAgent } from "../agents";
 import { McpError } from "../errors";
 import type { ResourceDef } from "../resources";
 import { defineTool, withToolRefs, type ToolContext } from "../tool";
 import { ADDRESS_ARG, AGENT_ARG, LIMIT_ARG, UNTRUSTED_NOTE, decodeCursor, encodeCursor, isCursorInt, isoOrNull, untrusted } from "./shared";
+import { perpsPortfolioLine, readPerpsReports } from "./perps";
 
 const BOOK = z.enum(["paper", "live"]);
 const MONEY_OF = z.enum(["simulated", "real"]);
@@ -175,7 +177,20 @@ function bookOut(b: BookPortfolio, now: number, fresh: number, current: Book | n
   };
 }
 
-function portfolioOut(a: OwnedAgent, v: PortfolioView, now: number, fresh: number): PortfolioOut {
+/**
+ * The agent's perpetuals as ONE warning line (perps.ts perpsPortfolioLine), or
+ * null. Perp positions live at Lighter, never in `positions` (docs/perps.md
+ * rule 11), while equity counts them (rule 12) — so a portfolio that said
+ * nothing would show leveraged exposure only as an unexplained `other_usdg`.
+ * The current account's report, else (after a kill) the newest earlier one's.
+ */
+async function perpsLineFor(db: Db, a: OwnedAgent): Promise<string | null> {
+  const account = a.account ?? a.accounts[0] ?? null;
+  if (!account) return null;
+  return perpsPortfolioLine((await readPerpsReports(db, [account])).get(account.toLowerCase()));
+}
+
+function portfolioOut(a: OwnedAgent, v: PortfolioView, now: number, fresh: number, perpsLine: string | null = null): PortfolioOut {
   return {
     agent: a.slug,
     account: a.account,
@@ -188,8 +203,8 @@ function portfolioOut(a: OwnedAgent, v: PortfolioView, now: number, fresh: numbe
     books_agree: v.books_agree,
     books: { paper: bookOut(v.paper, now, fresh, v.latest_valuation_book), live: bookOut(v.live, now, fresh, v.latest_valuation_book) },
     books_note: BOOKS_NOTE,
-    custody_note: `Positions sit in the ${ACCOUNT_CUSTODY}. Class-vault launch tokens are listed separately under the live book, at cost. savings_usdg is the Morpho savings vault; a zero there says nothing about whether any other vault is funded.`,
-    warnings: v.warnings,
+    custody_note: `Positions sit in the ${ACCOUNT_CUSTODY}. Class-vault launch tokens are listed separately under the live book, at cost. savings_usdg is the Morpho savings vault; a zero there says nothing about whether any other vault is funded.${perpsLine ? " Perpetual futures positions are not listed here (see warnings)." : ""}`,
+    warnings: perpsLine ? [...v.warnings, perpsLine] : v.warnings,
     observed_at: iso(now),
     untrusted_note: UNTRUSTED_NOTE,
   };
@@ -199,8 +214,11 @@ async function portfolioData(ctx: ToolContext, ref: string | undefined): Promise
   const a = await ctx.agent(ref);
   const now = ctx.now();
   const fresh = await freshSec(ctx);
-  const view = await ctx.ledger((db) => readPortfolio(db, scopeOf(a), { now, freshWithinSec: fresh }));
-  return portfolioOut(a, view, now, fresh);
+  const { view, perpsLine } = await ctx.ledger(async (db) => ({
+    view: await readPortfolio(db, scopeOf(a), { now, freshWithinSec: fresh }),
+    perpsLine: await perpsLineFor(db, a),
+  }));
+  return portfolioOut(a, view, now, fresh, perpsLine);
 }
 
 const getPortfolio = defineTool({
@@ -634,12 +652,14 @@ const getExposure = defineTool({
     const now = ctx.now();
     const fresh = await freshSec(ctx);
     const views = await ctx.ledger(async (db) => {
-      const out: Array<{ agent: string; view: PortfolioView }> = [];
-      for (const a of agents) out.push({ agent: a.slug, view: await readPortfolio(db, scopeOf(a), { now, freshWithinSec: fresh }) });
+      const out: Array<{ agent: string; view: PortfolioView; perpsLine: string | null }> = [];
+      for (const a of agents) out.push({ agent: a.slug, view: await readPortfolio(db, scopeOf(a), { now, freshWithinSec: fresh }), perpsLine: await perpsLineFor(db, a) });
       return out;
     });
     const grouped = groupExposure(views);
-    const warnings = views.flatMap(({ agent, view }) => view.warnings.map((w) => `${agent}: ${w}`));
+    // Perp exposure is not a token in either book (rule 11), so it is never in
+    // the shares below; each agent that has any says so in one line instead.
+    const warnings = views.flatMap(({ agent, view, perpsLine }) => [...view.warnings, ...(perpsLine ? [perpsLine] : [])].map((w) => `${agent}: ${w}`));
     if (all.length > agents.length) warnings.unshift(`Only the first ${EXPOSURE_AGENTS_MAX} of ${all.length} agents are included.`);
     for (const b of ["paper", "live"] as const) {
       const unlisted = grouped[b].agents_valued.filter((s) => !grouped[b].agents_holdings_listed.includes(s));

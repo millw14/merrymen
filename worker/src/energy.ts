@@ -328,6 +328,9 @@ export function countsAsEntry(kind: TradeIntent["kind"], isExit: boolean, sellsH
   switch (kind) {
     case "vault-deposit":
     case "perp-margin":
+    // A KEY REGISTRATION opens nothing either: like the deposit, it only
+    // readies the venue for an open, and the open is the entry.
+    case "perp-key":
       return false;
     case "swap":
     case "vault-withdraw":

@@ -111,6 +111,24 @@ export interface ExecInputs {
    */
   cashUsdg: bigint | null;
   /**
+   * USDG THE ACCOUNT HOLDS AT ITS PERP VENUE (docs/perps.md rule 8a(f)) —
+   * C + ΣM_iso + T_in + T_out at Lighter, micro — or what is known of it:
+   *
+   *   undefined — no perp venue account: addressToAccountIndex(self) read 0,
+   *               or an agent with no perps at all. Cash alone decides, which
+   *               is every agent's rail exactly as it was before perps.
+   *   null      — there is (or may be) a venue account and it is UNREAD. Not
+   *               zero: an unreadable venue is not an empty one.
+   *   bigint    — read; 0n (or less) is a read zero.
+   *
+   * WHY IT IS A TERM HERE. Posting the account's last USDG as margin moves it
+   * to Lighter, not away from the owner: with cash alone, `readAsBroke`
+   * flipped the WHOLE agent — spot included — to paper or refuse the moment a
+   * deposit landed, and a live position's own account would read as unfunded.
+   * Funded is funded wherever the account's money sits.
+   */
+  perpVenueMicro?: bigint | null;
+  /**
    * Does the signature seal a policy contract with no bytecode on this chain?
    *
    * A GRANT CAN BE DEAD ON ARRIVAL, AND NOTHING DOWNSTREAM CAN TELL. Every key
@@ -242,7 +260,11 @@ const consented = (a: ExecInputs): boolean =>
 
 /** Could this agent put a real order on-chain right now? */
 export function canTradeForReal(a: ExecInputs): boolean {
-  const readAsBroke = a.cashUsdg !== null && a.cashUsdg === 0n;
+  // BROKE MEANS BROKE EVERYWHERE THE ACCOUNT'S MONEY CAN BE (rule 8a(f)):
+  // account USDG read as 0 AND (no perp venue account OR its money read as 0).
+  // An unread venue (null) is not zero, exactly as an unread cash is not.
+  const venueReadEmpty = a.perpVenueMicro === undefined || (a.perpVenueMicro !== null && a.perpVenueMicro <= 0n);
+  const readAsBroke = a.cashUsdg !== null && a.cashUsdg === 0n && venueReadEmpty;
   // GAS IS A LEG, and it was the one missing.
   //
   // An operation that cannot pay its fee never reaches the chain, so an account

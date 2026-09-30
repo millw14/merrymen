@@ -81,7 +81,18 @@
  *                   a minute later. When the venue answers but has not yet
  *                   published the candle that just closed, it is asked again
  *                   a minute later for up to 15 min, then left until the next
- *                   close. Every candle is a venue integer at the market's
+ *                   close.
+ *                   HELD MARKETS GET THEIR FUNDING HISTORY TOO, whatever the
+ *                   universe: a paper position's venue clock charges every
+ *                   owed hour from these rows and stops at the first one it
+ *                   cannot find (executor.ts funding-gap), and a live book's
+ *                   funding is reconciled against the same hours — so a
+ *                   position in TSLA-PERP after an hour of downtime used to
+ *                   read "funding unread" until it closed. `heldMarketIds`
+ *                   names them; each costs one `fundings` read an hour (no
+ *                   candles — only perp-trend reads those), inside the same
+ *                   paced REST slot, so the fleet budget grows by at most one
+ *                   request an hour per held market. Every candle is a venue integer at the market's
  *                   price decimals, as a string, and history at a precision
  *                   the market no longer has is dropped with its books.
  *   IDLE IS SILENT  With no market in use there is no socket and no REST: the
@@ -250,6 +261,13 @@ function checkTuning(t: LighterFeedTuning): void {
 export interface LighterFeedOptions {
   /** The union of markets in use (venue market ids). Asked every marketsRefreshMs; ids outside LIGHTER_MARKETS_V1 are ignored. */
   marketIds: () => readonly number[];
+  /**
+   * The markets a book HOLDS a position in (a subset of marketIds'): their
+   * hourly funding history is fetched whether or not they are in the perps
+   * route's universe, so a held position's funding never stalls on a market
+   * perp-trend does not trade. Absent: the universe only (the old behaviour).
+   */
+  heldMarketIds?: () => readonly number[];
   /** Where the file goes: lighterFeedPath(fleetHome). */
   outPath: string;
   /** The home whose fleet cooldown file applies (api.ts lighterCooldownFile: MERRYMEN_FLEET_HOME when set, else this). */
@@ -1098,15 +1116,33 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
    * — it is at least that fresh and no fresher can be proven — and the candle
    * in progress at that moment is dropped before it is stored.
    */
+  /** Held markets as the lane last said, ids in LIGHTER_MARKETS_V1 only; a throwing or malformed answer is "none extra". */
+  function heldNow(): ReadonlySet<number> {
+    const out = new Set<number>();
+    if (opts.heldMarketIds === undefined) return out;
+    let ids: unknown;
+    try {
+      ids = opts.heldMarketIds();
+    } catch {
+      return out;
+    }
+    if (!Array.isArray(ids)) return out;
+    for (const x of ids) if (typeof x === "number" && Number.isSafeInteger(x) && perpMarketById(x) !== null) out.add(x);
+    return out;
+  }
+
   function manageHistory(t: number): void {
     if (historyInFlight || t < depthNextAt) return;
     const api = opts.api;
     let job: { id: number; kind: "candles" | "fundings"; view: PerpMarketView } | null = null;
-    for (const id of [...desired].filter((x) => HISTORY_MARKET_IDS.has(x)).sort((a, b) => a - b)) {
+    // The universe gets candles AND fundings; a held market outside it gets
+    // fundings only (see the header). Both only while in use (`desired`).
+    const held = heldNow();
+    for (const id of [...desired].filter((x) => HISTORY_MARKET_IDS.has(x) || held.has(x)).sort((a, b) => a - b)) {
       const view = specOf(id);
       if (view === null) continue; // no decimals yet: no candle could be scaled
       const h = historyOf(id, t);
-      if (api.markPriceCandles !== undefined && t >= h.candlesNextAt) {
+      if (HISTORY_MARKET_IDS.has(id) && api.markPriceCandles !== undefined && t >= h.candlesNextAt) {
         job = { id, kind: "candles", view };
         break;
       }

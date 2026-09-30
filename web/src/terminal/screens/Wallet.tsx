@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { PerpsShutdownNotice } from "../PerpsShutdownNotice";
 import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
 import { verifiedAdapter } from "@/lib/verified-adapter";
 import { MAX_USDG_UI, isWallTooWide } from "@merrymen/core";
@@ -56,6 +57,9 @@ import { conceptTooltip } from "@merrymen/core";
 import { canStart } from "@/lib/can-start";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
 import { RESIGN_ANCHOR, SIGNED_IN_EVENT, SIGNED_IN_RELOAD_KEY, shouldJumpToResign, shouldReloadAfterSignIn } from "@/lib/resign-anchor";
+import { readKillPerps } from "@/lib/perps-exposure";
+import { custodyText, killWarning } from "@/lib/perps-view";
+import { sendKill } from "@/lib/kill-answer";
 // QUARANTINED, not fixed. This page moves real money, holds owner private keys
 // and is 1,750 lines of signature and recovery logic — the last place to
 // restyle during a redesign. It keeps the sheets it was written against, and
@@ -559,6 +563,7 @@ export default function GrantPage() {
    * agent, so a choice made for one account is never signed for the next.
    */
   const [perpsOptIn, setPerpsOptIn] = useState(false);
+  const [perpsShutdown, setPerpsShutdown] = useState<unknown>(null);
   /**
    * The account the SERVER offers a new perps opt-in for (GET /api/grants
    * `perpsOptIn`, the operator's MERRYMEN_PERPS / live allowlist), lowercased,
@@ -610,8 +615,9 @@ export default function GrantPage() {
     setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
     fetch("/api/grants")
       .then((r) => (r.ok ? r.json() : { exists: false }))
-      .then((s: { exists?: boolean; gasSponsored?: boolean | null; grant?: Grant; perpsOptIn?: boolean }) => {
+      .then((s: { exists?: boolean; gasSponsored?: boolean | null; grant?: Grant; perpsOptIn?: boolean; perpsShutdown?: unknown }) => {
         setServerArmed(!!s.exists);
+        setPerpsShutdown(s.perpsShutdown ?? null);
         setPerpsOfferedFor(s.exists && s.perpsOptIn === true && s.grant?.smartAccount ? s.grant.smartAccount.toLowerCase() : null);
         // For the perpetuals box only: what the server's armed grant carries,
         // which a second browser or device cannot know any other way. The
@@ -1231,18 +1237,36 @@ export default function GrantPage() {
     setBackedUp(true);
   }
 
-  function discard() {
+  async function discard() {
     // Discarding forgets THIS wallet's keys from the browser. If it still holds
-    // funds, those funds don't move — they stay in the smart account, reachable
+    // funds, those funds don't move — the smart account keeps them, reachable
     // only with the owner key. Make the user acknowledge that before they can
     // strand money by starting over (exactly the trap that loses funded wallets).
-    if ((funding?.usdgUnits ?? 0n) > 0n) {
+    //
+    // AND WHAT IS AT LIGHTER, read at the click (docs/perps.md rule 13). This
+    // guard used to count smart-account USDG alone, so an owner whose USDG was
+    // all posted as margin got no warning at all — and discarding runs the
+    // kill, which closes perps at market, while Lighter's escape hatches
+    // (withdraw, replacing the trading key) answer only to this owner key.
+    // The sentence is core's custodySentence over the agent's own report:
+    // unread is said as unread, never as nothing there.
+    const { exposure, standsDown } = await readKillPerps();
+    const perpsWarning = exposure ? killWarning(exposure, standsDown) : null;
+    const hosted = standsDown === false;
+    const smartUsdg = (funding?.usdgUnits ?? 0n) > 0n;
+    if (smartUsdg || perpsWarning) {
       const amt = funding ? funding.usdg.toFixed(2) : "some";
       const okToDrop = window.confirm(
-        `This wallet still holds ${amt} USDG.\n\n` +
-          `Discarding it here does NOT move the funds — they stay in the smart account and can ` +
-          `only be reached with THIS wallet's owner key. Back that key up first, or sweep the ` +
-          `funds out now by running:  merrymen recover\n\n` +
+        (smartUsdg
+          ? `This wallet still holds ${amt} USDG.\n\n` +
+            `Discarding it here does NOT move that USDG — the smart account keeps it, and it can ` +
+            `only be reached with THIS wallet's owner key. Back that key up first, or sweep the ` +
+            `funds out now by running:  merrymen recover\n\n`
+          : "") +
+          (perpsWarning && exposure
+            ? `${perpsWarning}\n\n${custodyText(exposure, { hosted })}\n\n` +
+              `Unwinding anything left on Lighter yourself also needs THIS wallet's owner key — back it up first.\n\n`
+            : "") +
           `Discard anyway?`,
       );
       if (!okToDrop) return;
@@ -1287,10 +1311,49 @@ export default function GrantPage() {
       );
       if (!okToKeepHistory) return;
     }
+    // THE SERVER FIRST, AND ITS ANSWER READ, BEFORE ANYTHING HERE CHANGES
+    // (kill-switch semantics). Destroying the worker-side handoff is what stops
+    // the "discarded" grant trading; and the self-hosted server can REFUSE on
+    // purpose — a perps grant whose stand-down request could not be written is
+    // kept armed (lib/perp-kill.ts). This used to clear the browser's copy
+    // first and fire the DELETE unread, so a refusal left a discarded-looking
+    // wallet over a server grant still trading, opening perps included, and
+    // nobody was told. Now: refused → nothing changes and the reason is shown;
+    // no answer at all → the local clear is the fallback, and said to be only
+    // that; answered → its custody sentence, when there is anything at Lighter.
+    setError(null);
+    const answer = await sendKill();
+    if (answer.kind === "refused") {
+      setError(answer.error);
+      return;
+    }
+    if (answer.kind === "done") {
+      // Keep venue custody visible on this mounted page after the grant goes.
+      // A lost follow-up read cannot turn a possible venue balance into none.
+      if (exposure && exposure.kind !== "none")
+        setPerpsShutdown({ state: "unknown", result: null });
+      void fetch("/api/grants", { cache: "no-store" })
+        .then((r) => r.ok ? r.json() : null)
+        .then((s: { perpsShutdown?: unknown } | null) => {
+          if (s?.perpsShutdown) setPerpsShutdown(s.perpsShutdown);
+        }).catch(() => {});
+    }
     clearGrant();
-    // Also destroy the worker-side handoff — otherwise the "discarded" grant
-    // stays armed and the worker keeps trading on it (kill-switch semantics).
-    void fetch("/api/grants", { method: "DELETE" }).catch(() => {});
+    if (answer.kind === "unreachable") {
+      setError(
+        "couldn't reach the server, so only this browser's copy was discarded — the agent may still be armed there. " +
+          "Stop it from the kill switch once the server answers (self-hosted: `merrymen kill`).",
+      );
+    } else if (answer.kind === "unconfirmed") {
+      setError(
+        `the server did not confirm it let go of the agent${answer.error ? ` (${answer.error})` : ""}, so it may still be armed there. ` +
+          "Stop it from the kill switch (self-hosted: `merrymen kill`).",
+      );
+    } else if (exposure && exposure.kind !== "none") {
+      // What is left at Lighter, in the server's own sentence when it built
+      // one from the stand-down's result, else from the report read above.
+      window.alert(answer.custody ?? custodyText(exposure, { hosted }));
+    }
     // Ask the child to restart the paper book. Best-effort and
     // unconditional: only the worker knows which rail it is on, and it refuses
     // this outright when the agent is live, so nothing real can be cleared.
@@ -1439,6 +1502,7 @@ export default function GrantPage() {
      * not belong in the same change as adding a navigation bar.
      */
     <AppShell>
+      <PerpsShutdownNotice status={perpsShutdown} />
       <PageHeader
         title="Wallet & permissions"
         /* THE CHAIN INDICATOR MOVES, IT DOES NOT GO. Its markup and its

@@ -53,11 +53,14 @@ import {
   chainForId,
   GRANT_PERP_LIGHTER,
   grantPerp,
+  isHostedMode,
   LIGHTER_ROUTE_V1,
   type StoredGrant,
 } from "@merrymen/core";
 import { merrymenHome } from "@merrymen/home";
 import { webChainRead } from "@/lib/chain-read";
+import { hostedStanddownAvailable } from "../../../worker/src/perps/hosted-standdown";
+import { hostedPerpsLiveReady } from "../../../worker/src/perps/hosted-readiness";
 import { lighterReadFromClient, venueFlatness, type VenueFlatness } from "../../../worker/src/perps/flatness";
 import { openPerpKey } from "../../../worker/src/perps/key-seal";
 import { loadPerpPrivateKey, PerpKeystoreError } from "../../../worker/src/perps/keystore";
@@ -67,9 +70,15 @@ export type { VenueFlatness } from "../../../worker/src/perps/flatness";
 /** The store DEK (MERRYMEN_STORE_DEK), or null — re-exported so routes reach it through one door. */
 export { storeDek } from "../../../worker/src/store-crypto";
 
-/** Rule 5's sentence, verbatim — the 409 every door gives. */
+/**
+ * Rule 5's sentence — the 409 every door gives. It names only routes that
+ * exist: dashboard and Telegram offer reviewed reduce-only exits;
+ * `merrymen recover` withdraws free collateral with the owner key.
+ */
 export const PERP_NOT_FLAT_MESSAGE =
-  "your agent still has money or positions on Lighter; close them from the dashboard or run merrymen recover, then sign again";
+  "your agent still has money or positions on Lighter, and signing again now would leave them without the agent's key. " +
+  "Use Close or Close all on your agent's desk, or review a close request in Telegram. Exits can be refused or partly filled, so wait until Lighter reads empty before signing again. " +
+  "merrymen recover can request free collateral back with your owner key; a request does not confirm its return";
 
 /** A refusal in the shape every route renders: status, owner-facing words, a stable code. */
 export interface PerpRefusal {
@@ -102,6 +111,7 @@ type GrantLike = Pick<StoredGrant, "smartAccount" | "chainId" | "grantFeatures" 
  * is the grant's account, never the SIWE tenant. Server-only (reads env).
  */
 export function perpsOptInOffered(smartAccount: string | null | undefined, env: Record<string, string | undefined> = process.env): boolean {
+  if (isHostedMode() && (!hostedStanddownAvailable(env) || !hostedPerpsLiveReady())) return false;
   return perpsCeilingFor(mergeSettings({}, env), smartAccount) === "live";
 }
 

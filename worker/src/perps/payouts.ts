@@ -54,9 +54,10 @@
  *      `${txHash}:${logIndex}` so a held look followed by a settling one folds
  *      each payout once. On a scan-covered look the scan's `venue-margin` arm
  *      already explains the payout; the cursor still advances.
- *   6. rec = recordPayouts(payoutStoreFor(agent, store), fold.payouts,
- *      { carry }) — keep rec.carry in memory for the next look; alert when
- *      rec.alert.
+ *   6. rec = store.recordPerpPayouts(agent, fold.payouts): allocate the logs,
+ *      partial remainder, paid transfers and margin journal entries in one
+ *      transaction. Recover the remainder from the ledger on every look;
+ *      process memory is never the accounting authority. Alert on rec.alert.
  *   7. t = inTransit({ openTransfers: listOpenPerpTransfers(agent, 'live')
  *      (read AFTER step 6), pendingBalanceMicro: pending@N, carriedPayoutMicro:
  *      rec.carryMicro }). t.gap → rule 11 book gap: no equity row, no
@@ -337,17 +338,11 @@ const IDENTITY_TAKEN = /already another transfer's|different rows|its (amount|tx
  * `carry` MUST BE REPLACED by each result's carry, never merged: a carried
  * portion is money already counted once.
  *
- * HONEST LIMIT, the partial claim. Only a third party claiming PART of a
- * pending balance produces a carry — the relayer and onboard.ts claim whole
- * balances. A carried payout that completes nothing has no row to claim, so
- * its only record is the caller's memory: after a restart the remainder is
- * gone, and the row it part-paid stays owed until later payouts cover it
- * alone (ratchets held, the in-transit alert fires — every error downward).
- * And if a restart then re-folds from before it, it is counted afresh: a row
- * it pays early leaves T_out short — equity errs downward, and once that
- * row's money is pending on the contract the pending-balance check makes it a
- * book gap (inTransit) rather than a number. A durable per-payout record in
- * store.ts would close both; until then they are stated here.
+ * This allocator is the pure planning/writing seam. Production MUST call it
+ * through store.recordPerpPayouts (payout-ledger.ts), which supplies durable
+ * carry and commits the entire allocation with its transfer/journal writes.
+ * Using the returned carry only in process memory would overstate transit
+ * after a restart and is not a valid live integration.
  */
 export async function recordPayouts(
   store: PayoutStore,

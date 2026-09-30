@@ -36,7 +36,7 @@
  * Robinhood RPC) is gated on an end-to-end run before any funded deploy, exactly
  * like the Postgres store: this file is correct by test, proven by that run.
  */
-import { decodeEventLog, parseAbi, type Hex } from "viem";
+import { decodeEventLog, parseAbi, toEventSelector, type Hex } from "viem";
 import { backoffMs, classifyRpcError } from "./rpc-error";
 import { isEnergyReserveToken } from "../../packages/core/src/index";
 import { netTokenDeltas, type ReceiptLog } from "./fills";
@@ -49,6 +49,58 @@ const ENTRYPOINT_ABI = parseAbi([
 
 /** Topic0 of UserOperationEvent — precomputed so the filter needs no client. */
 const USEROP_EVENT_TOPIC = "0x49628fd1471006c1482da88028e9ce4dbb080b815c9b0344d39e5a8e6ec1419f";
+/** Topic0 of EntryPoint v0.7's BeforeExecution() — emitted once, between validation and the first op's execution. */
+const BEFORE_EXECUTION_TOPIC = toEventSelector("BeforeExecution()").toLowerCase();
+
+/** A log's position, or null when it carries none that reads as a non-negative safe integer. */
+function positionOf(v: unknown): number | null {
+  let n: number | null = null;
+  if (typeof v === "number") n = v;
+  else if (typeof v === "bigint") n = v <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(v) : null;
+  else if (typeof v === "string" && /^(?:0x[0-9a-fA-F]+|\d+)$/.test(v)) n = Number(v);
+  return n !== null && Number.isSafeInteger(n) && n >= 0 ? n : null;
+}
+
+/**
+ * ONE OP'S OWN LOGS, cut out of its bundle's transaction receipt — or null
+ * when that cannot be done exactly.
+ *
+ * A bundle is one transaction carrying many senders' operations, and a
+ * receipt is the whole transaction's. Reading a perp leg off it (perps/legs.ts
+ * perpLegOfReceipt) must never read ANOTHER sender's deposit to this account as
+ * ours. EntryPoint v0.7 executes the ops in order after one BeforeExecution(),
+ * and each op's execution logs are followed by its own UserOperationEvent — so
+ * this op's logs are exactly those strictly between the EntryPoint's previous
+ * boundary (BeforeExecution, or the op before's UserOperationEvent) and this
+ * op's event. Any log without a readable position, no boundary before it, or
+ * an event position not in the receipt: null, and the caller treats the op as
+ * unreadable rather than guessing which logs are whose.
+ */
+export function opLogsOf(receiptLogs: readonly ReceiptLog[], userOpEventLogIndex: number | null): ReceiptLog[] | null {
+  if (userOpEventLogIndex === null) return null;
+  const positioned: { l: ReceiptLog; i: number }[] = [];
+  for (const l of receiptLogs) {
+    const i = positionOf(l.logIndex);
+    if (i === null) return null;
+    positioned.push({ l, i });
+  }
+  const entryPoint = (ENTRYPOINT.v07 as string).toLowerCase();
+  const own = positioned.find(
+    (p) => p.i === userOpEventLogIndex && p.l.address.toLowerCase() === entryPoint && String(p.l.topics[0] ?? "").toLowerCase() === USEROP_EVENT_TOPIC,
+  );
+  if (own === undefined) return null;
+  let boundary = -1;
+  for (const p of positioned) {
+    if (p.i >= userOpEventLogIndex || p.l.address.toLowerCase() !== entryPoint) continue;
+    const t0 = String(p.l.topics[0] ?? "").toLowerCase();
+    if ((t0 === USEROP_EVENT_TOPIC || t0 === BEFORE_EXECUTION_TOPIC) && p.i > boundary) boundary = p.i;
+  }
+  if (boundary < 0) return null;
+  return positioned
+    .filter((p) => p.i > boundary && p.i < userOpEventLogIndex)
+    .sort((a, b) => a.i - b.i)
+    .map((p) => p.l);
+}
 
 /** A raw log as returned by an eth_getLogs, narrowed to what the reconciler reads. */
 export interface RawLog {
@@ -110,6 +162,13 @@ export interface OrphanOp {
    * arrived are the same evidence the live path books from, on the same receipt.
    */
   acquired: { token: string; qtyRaw: bigint; side: "buy" | "sell" } | null;
+  /**
+   * THIS OP'S OWN LOGS (opLogsOf), for a reader that must know what the op
+   * DID rather than what its bundle did — the perp branch reads a margin leg
+   * off them (perps/legs.ts). Null when the receipt could not be read or the
+   * op's logs could not be told from its bundle's.
+   */
+  opLogs: ReceiptLog[] | null;
 }
 
 /**
@@ -407,8 +466,10 @@ export async function findOrphanOps(opts: {
     let notionalUsdg6 = 0n;
     let attributed = false;
     let acquired: OrphanOp["acquired"] = null;
+    let opLogs: ReceiptLog[] | null = null;
     const receiptLogs = await chain.getReceiptLogs(txHash).catch(() => null);
     if (receiptLogs) {
+      opLogs = opLogsOf(receiptLogs, positionOf(raw.logIndex));
       const deltas = netTokenDeltas(receiptLogs, smartAccount);
       const usdgDelta = deltas.get(usdgToken.toLowerCase()) ?? 0n;
       if (usdgDelta !== 0n) {
@@ -418,7 +479,7 @@ export async function findOrphanOps(opts: {
       const leg = pickAcquiredLeg(deltas, usdgToken);
       acquired = leg && { token: leg.token, qtyRaw: leg.qtyRaw, side: leg.side };
     }
-    orphans.push({ userOpHash, txHash: String(txHash).toLowerCase(), notionalUsdg6, attributed, acquired });
+    orphans.push({ userOpHash, txHash: String(txHash).toLowerCase(), notionalUsdg6, attributed, acquired, opLogs });
   }
   return orphans;
 }
@@ -446,6 +507,12 @@ export interface ResolvedOp {
    * (index.ts lastEnergyLandedBlock). Absent when the log did not say.
    */
   blockNumber?: bigint;
+  /**
+   * THIS OP'S OWN LOGS on a success (opLogsOf) — what the perp branch reads a
+   * margin leg off. Null on a revert, an unreadable receipt, or logs that
+   * could not be told from the rest of the bundle's.
+   */
+  opLogs: ReceiptLog[] | null;
 }
 
 /**
@@ -507,6 +574,7 @@ export async function resolveSubmittedOps(opts: {
     let decoded: { success: boolean } | null = null;
     let txHash = "";
     let blockNumber: bigint | undefined;
+    let eventLogIndex: number | null = null;
     for (const raw of logs.logs) {
       try {
         const d = decodeEventLog({
@@ -517,6 +585,7 @@ export async function resolveSubmittedOps(opts: {
         if (String(d.args.userOpHash).toLowerCase() !== hash) continue;
         decoded = { success: Boolean(d.args.success) };
         txHash = String(raw.transactionHash).toLowerCase();
+        eventLogIndex = positionOf(raw.logIndex);
         try {
           const b = raw.blockNumber === undefined ? undefined : BigInt(raw.blockNumber);
           if (b !== undefined && b > 0n) blockNumber = b;
@@ -533,9 +602,11 @@ export async function resolveSubmittedOps(opts: {
     let notionalUsdg6 = 0n;
     let attributed = false;
     let usdgDelta6: bigint | null = 0n;
+    let opLogs: ReceiptLog[] | null = null;
     if (decoded.success) {
       const receiptLogs = await opts.chain.getReceiptLogs(txHash as Hex).catch(() => null);
       if (receiptLogs) {
+        opLogs = opLogsOf(receiptLogs, eventLogIndex);
         const usdgDelta = netTokenDeltas(receiptLogs, opts.smartAccount).get(opts.usdgToken.toLowerCase()) ?? 0n;
         usdgDelta6 = usdgDelta;
         if (usdgDelta !== 0n) {
@@ -546,7 +617,7 @@ export async function resolveSubmittedOps(opts: {
         usdgDelta6 = null;
       }
     }
-    out.push({ userOpHash: hash, txHash, success: decoded.success, notionalUsdg6, attributed, usdgDelta6, ...(blockNumber !== undefined ? { blockNumber } : {}) });
+    out.push({ userOpHash: hash, txHash, success: decoded.success, notionalUsdg6, attributed, usdgDelta6, opLogs, ...(blockNumber !== undefined ? { blockNumber } : {}) });
   }
   return out;
 }

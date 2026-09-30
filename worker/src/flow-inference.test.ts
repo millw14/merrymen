@@ -11,6 +11,7 @@ import {
   heldBreakerObservationUsdg,
   lookAtCash,
   opsHoldInference,
+  payoutShift,
   settlementDelta,
   STRANDED_RESOLVE_WINDOW_SEC,
   wroteSince,
@@ -149,5 +150,33 @@ describe("heldBreakerObservationUsdg — what a held look may still show the bre
     const queued = [s(900, -5n * U), s(1_000, -10n * U), s(1_100, null)];
     assert.equal(expectedCashUsdg({ cashUsdg: 100n * U, since: 1_000 }, queued), 90n * U);
     assert.equal(expectedCashUsdg(null, queued), null);
+  });
+});
+
+describe("LIGHTER PAYOUTS IN A LOOK (docs/perps.md rule 12): each explains exactly its own cash", () => {
+  const P = (key: string, micro: bigint) => ({ key, amountMicro: micro });
+  const look = { baselineUsdg: 100_000_000n, since: 0, unattributed: false, settled: [] as Settlement[], opsInFlight: false, writesInInterval: false };
+
+  it("a folded payout joins the baseline, so only the residual is inferred", () => {
+    const shift = payoutShift({ kind: "folded", payouts: [P("0xa:1", 10_000_000n)] }, new Set());
+    assert.deepEqual(shift, { shiftUsdg6: 10_000_000n, keys: ["0xa:1"] });
+    const l = lookAtCash({ ...look, cashUsdg: 110_000_000n, payoutShiftUsdg6: shift!.shiftUsdg6 });
+    assert.deepEqual(l.verdict, { action: "infer", deltaUsdg: 0n });
+    assert.equal(l.baselineUsdg, 110_000_000n);
+  });
+
+  it("an UNREADABLE window holds — never an inference across it — and moves nothing into the baseline", () => {
+    assert.equal(payoutShift({ kind: "unfoldable", why: "getLogs failed" }, new Set()), null);
+    const l = lookAtCash({ ...look, cashUsdg: 110_000_000n, payoutShiftUsdg6: null });
+    assert.deepEqual(l.verdict, { action: "hold" });
+    assert.equal(l.baselineUsdg, 100_000_000n);
+  });
+
+  it("a payout already folded (the in-process key set) is never folded again; no Lighter account shifts nothing", () => {
+    const again = payoutShift({ kind: "folded", payouts: [P("0xa:1", 10_000_000n), P("0xb:2", 5_000_000n)] }, new Set(["0xa:1"]));
+    assert.deepEqual(again, { shiftUsdg6: 5_000_000n, keys: ["0xb:2"] });
+    assert.deepEqual(payoutShift({ kind: "none" }, new Set()), { shiftUsdg6: 0n, keys: [] });
+    // Absent is the look before perps, byte for byte.
+    assert.deepEqual(lookAtCash({ ...look, cashUsdg: 130_000_000n }).verdict, { action: "infer", deltaUsdg: 30_000_000n });
   });
 });

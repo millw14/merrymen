@@ -98,10 +98,37 @@ import type { ReactNode } from "react";
  * (types.ts Nomination, via TgCoinsPort.nominate); the Brain's input is the
  * same market signals any tape coin gets, never the chat, sender or message.
  *
+ * Perpetual futures (docs/perps.md) — WORDING PENDING MILLA'S REVIEW, like
+ * the contract's own "Decisions that need Milla" (holding a venue key the wall
+ * does not bound, and the custody wording that follows from it). Paper perps
+ * send Lighter nothing about anyone: the fleet feed reads public market data
+ * only (worker/src/perps/feed.ts, the public API client). Real-money perps:
+ * the Lighter account is keyed on the agent's smart account (rule 2); the
+ * worker sends signed orders, cancels, leverage changes and withdrawals,
+ * registers the API public key, and authenticates its reads with short-lived
+ * auth tokens (worker/src/perps/api.ts, auth.ts), all from the worker's IP.
+ * Hosted, keygen returns the private key sealed with the DEK
+ * (web/src/app/api/perps/keygen, worker/src/perps/key-seal.ts), the grant
+ * store keeps it sealed, and the orchestrator writes `perp-key.json` (0600)
+ * into the child home (worker/src/perps/child-key.ts); self-hosted it lives in
+ * `perp-keys/` (worker/src/perps/keystore.ts). Hosted kill/expiry removes the
+ * grant and retains only the sealed venue key in a separate shutdown job,
+ * with a 15-minute use deadline (hosted-standdown-store.ts). Its runner is
+ * exits-only; completion/expiry removes the sealed key and working files.
+ * Expiry cleanup requires a running service, so the privacy text distinguishes
+ * the enforced use deadline from delayed physical cleanup during an outage.
+ * Results and encrypted ledger checkpoints retain execution provenance, not
+ * a key or a signed grant (hosted-standdown-ledger.ts). The key can withdraw
+ * only to the agent's account, but whoever holds it can trade the money away
+ * to an account they control (rule 4), so it is never described as unable to
+ * send money anywhere. Lighter publishes
+ * every account's positions by index or L1 address (the venue table, "Public
+ * data"); merrymen withholds perps from every public surface (rule 17).
+ *
  * The date is fixed, not `new Date()`: a policy's date says when its words
  * last changed, and a build-time date claimed a new policy on every deploy.
  */
-const LAST_UPDATED = "September 29, 2026";
+const LAST_UPDATED = "September 30, 2026";
 
 const CONNECTED_APPS = "https://app.merrymen.dev/connect/apps";
 
@@ -152,7 +179,10 @@ export function PrivacyPolicyDoc() {
           agent&apos;s Telegram bot to a Telegram group, it also keeps a short memory of what is
           said there, including by the group&apos;s other members. The key that owns your
           account never reaches us. Some of what your agent does is public by design, including
-          its recent buys and sells and the group chat room (section 2). The{" "}
+          its recent buys and sells and the group chat room (section 2). If you turn on
+          real-money perpetual futures, we also hold your agent&apos;s trading key for the Lighter
+          exchange, encrypted, and Lighter shows your agent&apos;s positions there publicly
+          (sections 5 and 6). The{" "}
           <strong>self-hosted software</strong> runs on your own machine and sends us nothing,
           unless you choose Merrymen&apos;s optional holder gateway for its language model or
           token discovery (section 9). We do not sell personal data, and there is no advertising
@@ -209,6 +239,18 @@ export function PrivacyPolicyDoc() {
             contract that trade names, up to your per-trade limit.
           </li>
           <li>
+            If you turn on real-money perpetual futures: your agent&apos;s trading key for Lighter,
+            the perpetuals exchange (section 5). The copy in our database is encrypted, and while
+            your agent runs the hosted worker keeps a decrypted working copy, as for the session key
+            (section 7). Unlike the session key, what this key does at Lighter is not checked by your
+            account contract: it can trade, and so lose, everything your agent holds at Lighter. It
+            cannot transfer money to another owner or withdraw it anywhere but your
+            agent&apos;s own account, but it can move money among sub-accounts under that same
+            owner or buy public-pool shares. Whoever holds it can also hand money to someone else
+            by trading against an account they control. Our encrypted copy, and the hosted
+            worker&apos;s working copy, are copies of this key.
+          </li>
+          <li>
             Your agent&apos;s account address on Robinhood Chain, and a holder wallet address if you
             link one for the Merry Circle.
           </li>
@@ -220,8 +262,10 @@ export function PrivacyPolicyDoc() {
           <li>
             Trades with their on-chain receipts, your agent&apos;s decisions and the reasons it
             gave, refused trades, positions, cost basis, balances and equity over time, deposits and
-            withdrawals it saw, and the fees accrued. Paper (practice) and live records are kept
-            apart.
+            withdrawals it saw, and the fees accrued. If your agent trades perpetual futures, also
+            its orders, fills, funding payments, positions and the money it moved to and from
+            Lighter, and a status report of what it holds there. Paper (practice) and live records
+            are kept apart.
           </li>
         </ul>
         <p><em>Why:</em> so you can see what your agent did and why, and so it can keep to its limits and budget.</p>
@@ -464,6 +508,11 @@ export function PrivacyPolicyDoc() {
             If you connect an X account for posting, the posts your agent makes there, under that
             account, for as long as they stay on X.
           </li>
+          <li>
+            If your agent trades perpetual futures: that it uses leverage, and, for a ranked live
+            agent, an equity curve that counts the money it holds at Lighter. We never publish its
+            perpetual positions, orders or trades, but Lighter does (section 6).
+          </li>
         </ul>
         <p>
           Keeping your book private, the default, hides your agent&apos;s trade sizes, its dollar
@@ -481,7 +530,10 @@ export function PrivacyPolicyDoc() {
             browser, and you were asked to save a copy as your recovery key. It never reaches our
             servers, so we cannot withdraw your funds from your account (the session key we hold can
             only trade; section 7), and we cannot recover the key for you. Section 8 says how you
-            withdraw.
+            withdraw. If you turned on real-money perpetuals, the Lighter trading key we hold is
+            different: it cannot withdraw anywhere but your agent&apos;s own account, but it can
+            trade away what your agent holds at Lighter, including to an account someone else
+            controls (sections 5 and 7).
           </li>
           <li><strong>Your chat in the Merrymen app</strong>, which your browser keeps.</li>
           <li><strong>The watchlist you keep with the star on a token page</strong>, which your browser keeps.</li>
@@ -493,6 +545,8 @@ export function PrivacyPolicyDoc() {
           rows={[
             ["Your sign-in identity, agent settings and trading record", "As long as your account exists. Nothing deletes them automatically; ask and we will delete them (records on the blockchain excepted)."],
             ["Your trading permission (the encrypted session key)", "Until you discard it on Wallet & permissions or stop your agent with Telegram /kill; the hosted worker's decrypted working copy is deleted then too. On chain, it stops working at the expiry date you signed."],
+            ["Your agent's Lighter trading key, if you turned on real-money perpetual futures (encrypted)", "While your agent is armed. When you stop it or its permission expires, the hosted service retains an encrypted copy for a temporary shutdown job with a use deadline no more than 15 minutes later. A separate worker may decrypt it only to attempt closes, cancel orders that can safely be removed and request collateral back to your agent's account; it cannot open new positions. The shutdown copy and working files are deleted on completion or deadline cleanup. If the service is unavailable, cleanup may run later; the software still refuses use after the deadline. Deleting our copies does not revoke the key at Lighter: it remains valid there until replaced with your owner authority (merrymen recover)."],
+            ["Your agent's perpetual futures record: orders, fills, funding, positions, money moved to and from Lighter, and shutdown status and results", "As long as your account exists, with the rest of your trading record. Encrypted execution checkpoints are also kept so interrupted work can be reconciled without repeating a financial operation; shutdown checkpoints are cleared after their records reach the ledger. These checkpoints contain neither the trading key nor the signed permission."],
             ["Telegram bot token and ids", "Until you remove them from your settings or ask us to delete them."],
             ["Telegram chat with your agent", "The latest 40 messages in each chat."],
             ["Your agent's memory of a Telegram group it is in: recent messages with their senders' display names and Telegram ids, a summary, notes on people, and the coins posted", "The latest 60 messages in each group, none older than 14 days. The coins posted there and what your agent decided, 14 days. The summary and the notes on people (up to 40 per group), while your bot stays in the group. At most 30 groups: to make room, a group your bot was removed from goes first, then one still waiting for your answer, the quietest first; a group you approved or told it to leave is dropped only to make room for one you added it to or wrote in yourself. Kept in your agent's working files and, encrypted, in our database, so a redeploy of the hosted worker does not clear it. All of it is deleted when you discard the trading permission or stop your agent with /kill; a group's memory at once with /forget in the group or Forget in /groups; one person's messages and note, and their name and Telegram id on the coins they posted, when they send /forgetme there (with the summary, if it names them)."],
@@ -538,6 +592,7 @@ export function PrivacyPolicyDoc() {
             [provider("Financial Modeling Prep and Robinhood's image server (cdn.robinhood.com)", "Company and token logos, which your browser loads directly when the Merrymen app shows them"), "Your IP address and the logo requested, as any site you load an image from sees. A few token logos come instead from the image address Blockscout lists for that token, which your browser loads the same way."],
             [provider("Robinhood Chain's public RPC (rpc.mainnet.chain.robinhood.com) and Blockscout, from your browser", "Chain reads the Merrymen app makes in your browser (creating your agent's account, the wallet screen, withdrawing), and this website's dashboard and watch pages"), "Your IP address and the account addresses and transactions being looked up, including an address you paste into this website."],
             [provider("Alchemy", "Access to Robinhood Chain"), "Chain reads and transactions, including your agent's public account address."],
+            [provider("Lighter (lighter.xyz)", "The perpetual futures exchange on Robinhood Chain, only if you turn perpetuals on"), "For practice (paper) perpetuals, nothing about you: our servers read Lighter's public prices, order books and funding rates. For real-money perpetuals: your agent's account address, which its Lighter account is tied to; every order, cancellation, leverage change and withdrawal request your agent signs; the public half of your agent's Lighter trading key; the short-lived sign-in tokens the worker uses to read the account; and the IP address of the worker sending them (ours, on the hosted service). Lighter shows every account's positions, trades, leverage, collateral and liquidation prices to anyone who has the account's number or its address, and its public trade record names the account on each trade. We do not publish your perpetuals, but we cannot make them private at Lighter. Lighter handles the rest under its own terms."],
             [provider("Pimlico", "Submitting your agent's transactions to the chain"), "Your agent's signed transactions, which become public on the chain."],
             [provider("Railway", "Hosting the app, the trading worker and the database"), "Everything the hosted service stores, as our infrastructure provider."],
             [provider("Vercel", "Hosting this website"), "Standard request logs."],
@@ -557,7 +612,9 @@ export function PrivacyPolicyDoc() {
         <p>
           Your agent&apos;s account address, its balances and every transaction it makes are
           recorded on Robinhood Chain, a public blockchain. Anyone can read them, and neither we nor
-          anyone else can delete them.
+          anyone else can delete them. If your agent trades real-money perpetual futures, its
+          positions and trades at Lighter are public in the same way: Lighter publishes them by
+          account, and the account leads back to your agent&apos;s address (section 5).
         </p>
 
         <h2 id="security">7 · Security</h2>
@@ -586,6 +643,19 @@ export function PrivacyPolicyDoc() {
             is a genuine launchpad curve. Your daily operations limit and daily budget are enforced
             by our software, not by the contract.
           </li>
+          <li>
+            If you turn on real-money perpetual futures, your agent&apos;s Lighter trading key is
+            encrypted the same way, and the hosted worker keeps a decrypted working copy beside the
+            session key&apos;s. Stopping the agent removes that ordinary working copy; the temporary
+            shutdown worker may keep its own copy under the deadline in section 4. Your account contract limits how much USDG each
+            deposit can move to Lighter and makes sure it can only come back to your agent&apos;s
+            account, but it does not check the trades this key makes at Lighter: those are limited by
+            our software, and anyone who stole the key could trade away what your agent holds there,
+            including to an account of their own. The
+            hosted workers of different agents run under one operating-system user, so a flaw that
+            let code run in one could read another&apos;s key; separating them is a condition for
+            offering real-money perpetuals to everyone.
+          </li>
           <li>OAuth codes, access and refresh tokens and client secrets are stored only as SHA-256 hashes.</li>
           <li>Everything travels over HTTPS.</li>
         </ul>
@@ -603,7 +673,16 @@ export function PrivacyPolicyDoc() {
             over” deletes the copy of your trading permission the hosted worker uses (or send{" "}
             <code className="inline">/kill</code>, then <code className="inline">/confirm</code>, to
             your Telegram bot). The signed permission itself stops working on chain at the expiry
-            date you signed. Stopping your agent does not move your funds; withdraw them as below.
+            date you signed. Stopping your agent does not move the funds in your account; withdraw
+            them as below. If it holds perpetual positions at Lighter, the hosted service queues
+            the temporary shutdown described in section 4. It attempts reduce-only closes and
+            requests available collateral back to your agent&apos;s account. The self-hosted
+            software makes those attempts through its local worker. A close can realize a loss;
+            partial fills, refusals or an unavailable venue can leave positions and collateral
+            behind. Stops are not deliberately removed from positions that remain open. Check the
+            shutdown result and Withdraw even after the agent is removed: a withdrawal request
+            still requires Lighter&apos;s delay and a claim, and a finished shutdown does not prove
+            the funds have arrived home.
           </li>
           <li>
             <strong>Withdraw your funds.</strong> If you signed in with X or email, the key that owns
@@ -693,6 +772,12 @@ export function PrivacyPolicyDoc() {
             deletion.
           </li>
           <li><strong>A transcription provider</strong>, if you enable voice: your voice notes are sent to the endpoint you configure.</li>
+          <li>
+            <strong>Lighter</strong>, if you turn on perpetual futures: its public prices and order
+            books, and for real-money perpetuals what section 5 lists, from your machine&apos;s IP
+            address. The Lighter trading key stays in that directory
+            (<code className="inline">perp-keys/</code>), readable only by you.
+          </li>
         </ul>
         <p>
           We are not a party to those exchanges and do not receive copies of them. Each provider&apos;s

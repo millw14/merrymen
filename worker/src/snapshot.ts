@@ -25,6 +25,10 @@ const VAULT_READS = parseAbi([
   "function balanceOf(address) view returns (uint256)",
   "function convertToAssets(uint256 shares) view returns (uint256)",
 ]);
+/** Multicall3's own view of the block the aggregate executes in. */
+const MULTICALL3_READS = parseAbi(["function getBlockNumber() view returns (uint256)"]);
+/** The canonical Multicall3 deployment — the one viem's `multicall` aggregates through on both Robinhood chains. */
+const MULTICALL3_CANONICAL = "0xcA11bde05977b3631167028862bE2a173976CA11";
 
 let mainnet = createPublicClient({ chain: robinhoodChain, transport: chainRead(undefined) });
 
@@ -223,6 +227,16 @@ export interface AccountBalances {
    * every last-minus-first P&L reader, permanently.
    */
   unread: string[];
+  /**
+   * THE BLOCK `cashUsdg` WAS READ AT (inclusive: the state after block N) —
+   * Multicall3.getBlockNumber() in the SAME aggregate as balanceOf, so the
+   * two are one eth_call against one state (docs/perps.md rule 12; the
+   * payout-settlement amendment: an eth_call "at" a height a lagging node may
+   * not have is not the same guarantee). Lighter payouts are folded between
+   * two such blocks. Null when the block could not be read with the cash —
+   * never a guess, and never paired with a cash from another call.
+   */
+  cashReadBlock?: bigint | null;
 }
 
 export async function readAccountBalances(
@@ -236,11 +250,15 @@ export async function readAccountBalances(
     return 0n;
   });
 
+  const multicall3 = (client.chain?.contracts?.multicall3?.address ?? MULTICALL3_CANONICAL) as `0x${string}`;
   const results = await client
     .multicall({
       contracts: [
         { address: CASH.USDG as `0x${string}`, abi: ERC20_READS, functionName: "balanceOf", args: [account] },
         { address: MORPHO.steakhouseUsdgVault as `0x${string}`, abi: VAULT_READS, functionName: "balanceOf", args: [account] },
+        // LAST, so the two reads above keep their places: the block this very
+        // aggregate executed in — the cash's block, not a neighbour's.
+        { address: multicall3, abi: MULTICALL3_READS, functionName: "getBlockNumber" },
       ],
     })
     .catch(() => null);
@@ -250,8 +268,14 @@ export async function readAccountBalances(
   // as a SUCCESSFUL call returning 0, which is why absence has to be signalled
   // separately rather than inferred from the number.
   let cashUsdg = 0n;
-  if (results?.[0]?.status === "success") cashUsdg = results[0].result as bigint;
-  else unread.push("cash");
+  let cashReadBlock: bigint | null = null;
+  if (results?.[0]?.status === "success") {
+    cashUsdg = results[0].result as bigint;
+    // Only beside a cash that was READ: a block with no cash pins nothing.
+    if (results[2]?.status === "success" && typeof results[2].result === "bigint" && results[2].result > 0n) {
+      cashReadBlock = results[2].result;
+    }
+  } else unread.push("cash");
 
   let shares = 0n;
   let sharesKnown = false;
@@ -278,7 +302,7 @@ export async function readAccountBalances(
     else vaultUsdg = assets as bigint;
   }
 
-  return { ethWei, cashUsdg, vaultUsdg, unread };
+  return { ethWei, cashUsdg, vaultUsdg, unread, cashReadBlock };
 }
 
 /** What a custody contract holds for this account, per token. */

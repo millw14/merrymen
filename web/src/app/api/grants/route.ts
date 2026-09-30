@@ -2,7 +2,9 @@
  * Dev-mode grant handoff + agent status.
  * POST: browser saves a signed grant → .data/grant.json (worker picks it up).
  * GET: full agent status — grant, live balances from the grant chain, worker heartbeat.
- * DELETE: discard the grant file (localStorage cleared client-side).
+ * DELETE: discard the grant file (localStorage cleared client-side). Self-hosted,
+ *   a grant carrying perps first gets a stand-down request the worker runs
+ *   (lib/perp-kill.ts), and the answer carries the custody sentence.
  * Replaced by Supabase (encrypted, per-user) once persistence lands.
  */
 
@@ -24,6 +26,7 @@ import {
   publicGrantView,
   type Derivation,
   type EnergyStatus,
+  type PerpsReport,
   type PublicGrantView,
   type StoredGrant,
 } from "@merrymen/core";
@@ -32,9 +35,16 @@ import { checkCanonicalWall } from "@/lib/canonical-wall";
 import { privyTokenOf, verifyPrivyToken } from "@/lib/privy";
 import { withReadDb } from "@/lib/ledger";
 import { readAgentEnergy } from "@/lib/agent-energy";
+import { readAgentPerps, readAgentPerpsRead } from "@/lib/agent-perps";
+import { standDownForKill } from "@/lib/perp-kill";
+import { custodyText, grantMentionsPerps, perpExposureOfReport } from "@/lib/perps-view";
 import { getGrantStore } from "@merrymen/grant-store";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
+import { hostedStanddownAvailable } from "../../../../../worker/src/perps/hosted-standdown";
+import { HostedStanddownStore } from "../../../../../worker/src/perps/hosted-standdown-store";
+import { makePgDb } from "../../../../../worker/src/db";
+import { readHostedPerpsRecovery, unknownHostedPerpsRecovery, type HostedPerpsRecoveryNotice } from "../../../../../worker/src/hosted-perps-recovery";
 import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
 import {
@@ -168,6 +178,33 @@ export interface AgentStatus {
    * about perps a grant already carries — those are carried whatever this is.
    */
   perpsOptIn?: boolean;
+  /**
+   * THIS AGENT'S PERPS — `agents.perps`, the worker's own report (core
+   * PerpsReport), read by lib/agent-perps.ts and parsed by core's whitelist.
+   *
+   * REPORTED BY THE WORKER, never computed here: the worker is the one process
+   * that holds the Lighter key and reads the venue, and this service must
+   * never read an account's positions itself (docs/perps.md "Surfaces").
+   *
+   * NULL IS "NOT SAID OR UNREADABLE", NEVER "NO POSITIONS" (rule 11). The
+   * mobile banner keys on this: anything but a report reading no exposure
+   * keeps "Leveraged positions on Lighter…" or "Lighter could not be read…"
+   * on screen, and a kill or discard sentence built from null for a grant
+   * carrying the perps marker says Lighter is unread (lib/perps-view.ts).
+   * Money is micro-USDG as decimal strings; no key of any kind is in it — the
+   * parser drops every field the v1 shape does not name.
+   */
+  perps?: PerpsReport | null;
+  /**
+   * DOES THIS SERVER'S KILL QUEUE A PERPETUALS SHUTDOWN? Self-hosted writes
+   * the local request; hosted requires shared storage and the sealed-key
+   * supervisor. This is a capability, never a claim that positions are flat
+   * or collateral has returned. Surfaces separately render perpsShutdown.
+   */
+  perpsStanddownOnKill?: boolean;
+  /** Authenticated status only, with no grant, ciphertext or venue key. */
+  perpsShutdown?: { state: string; expiresAtMs: number; smartAccount: string; result: Record<string, unknown> | null };
+  perpsRecovery?: HostedPerpsRecoveryNotice;
 }
 
 export async function POST(req: Request) {
@@ -584,14 +621,70 @@ export async function DELETE(req: Request) {
     // — the server never held the owner key to begin with.
     const tenant = tenantOf(req);
     if (!tenant) return NextResponse.json({ error: "not signed in" }, { status: 401 });
+    // PgGrantStore.remove atomically revokes the session grant and queues the
+    // sealed venue-only key with an immutable deadline. This response says
+    // queued, never closed: only the authenticated shutdown result can say so.
+    let custody: string | null = null;
+    try {
+      const g = await getGrantStore().get(tenant);
+      // Bounded: the kill must not wait on a custody sentence. No answer in
+      // time is no sentence, and clients fall back to their own last read.
+      custody = g
+        ? await Promise.race([
+            perpsHostedKillCustody(g),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 3_000).unref?.()),
+          ])
+        : null;
+    } catch {
+      custody = null;
+    }
     await getGrantStore().remove(tenant);
-    return NextResponse.json({ ok: true });
+    const perpsShutdown = await shutdownStatus(tenant);
+    return NextResponse.json({ ok: true, ...(custody === null ? {} : { custody }), standdown: null, ...(perpsShutdown ? { perpsShutdown } : {}) });
+  }
+  // ── STAND THE PERPS DOWN FIRST (docs/perps.md rule 13) ──────────────────
+  //
+  // BEFORE the archive, because the archive is what takes the grant — and with
+  // it the worker's knowledge of the account and its Lighter key — away. A
+  // grant that mentions perps gets a stand-down request in the home, and this
+  // waits a short while for the worker's result (lib/perp-kill.ts). A request
+  // that cannot be written stops the kill here, with the grant untouched: the
+  // agent is still running and still protecting what it holds, which is
+  // better than an archived key and positions nobody was asked to close.
+  //
+  // A grant.json that cannot be parsed is asked about by what it mentions: one
+  // naming the perps marker is treated as a perps grant, because the stand-down
+  // is exits only and asking for one that is not needed costs nothing.
+  let stored: unknown = null;
+  try {
+    const raw = await readFile(GRANT_FILE, "utf8");
+    try {
+      stored = JSON.parse(raw) as unknown;
+    } catch {
+      stored = raw.includes(GRANT_PERP_LIGHTER) ? { grantFeatures: [GRANT_PERP_LIGHTER] } : null;
+    }
+  } catch {
+    // no grant.json: nothing armed, nothing at a venue that this kill can ask about
+  }
+  const account = (stored as { smartAccount?: unknown } | null)?.smartAccount;
+  // The report AND the account's own book (agents.mode): a practice position
+  // held while practice perps are off is reported under rail "off", and only
+  // the book says it is practice (perps-view.ts perpsBookOf).
+  const read = isAddr(account) ? await readAgentPerpsRead(account) : null;
+  const report = read?.state === "ok" ? read.report : null;
+  const accountMode = read?.state === "ok" ? (read.accountMode ?? null) : null;
+  const perps = await standDownForKill({ home: DATA_DIR, grant: stored, report, accountMode });
+  if (!perps.ok) {
+    return NextResponse.json({ error: perps.error, ownerFacing: true }, { status: 503 });
   }
   // The kill switch destroys the session key, NOT the wallet — archive it so the
   // owner key survives and the funds stay reachable.
   await archiveCurrentGrant();
   await rm(GRANT_FILE, { force: true });
-  return NextResponse.json({ ok: true });
+  // WHERE THE MONEY IS, in the one sentence that is never a constant: built
+  // from the stand-down's result when the worker answered, else from its last
+  // report, and saying so (core custodySentence).
+  return NextResponse.json({ ok: true, custody: perps.custody, standdown: perps.standdown });
 }
 
 /**
@@ -611,7 +704,11 @@ export async function GET(req: Request) {
     const tenant = tenantOf(req);
     if (!tenant) return statusResponse({ exists: false });
     const g = await getGrantStore().get(tenant);
-    if (!g) return statusResponse({ exists: false });
+    if (!g) {
+      const perpsShutdown = await shutdownStatus(tenant);
+      const perpsRecovery = await recoveryStatus(tenant);
+      return statusResponse({ exists: false, ...(perpsShutdown ? { perpsShutdown } : {}), ...(perpsRecovery ? { perpsRecovery } : {}) });
+    }
     grant = g;
   } else {
     try {
@@ -692,6 +789,10 @@ export async function GET(req: Request) {
   // report is the child's own and lives only on the agents row, on both
   // deployments. Best effort: an unreadable report is null, never an error.
   const energy = await readAgentEnergy(grant.smartAccount);
+  // PERPS THE SAME WAY, for the same reason: the report lives only on the
+  // agents row, on both deployments, so its read sits outside the heartbeat
+  // branch too. Best effort: unreadable is null, never an error and never [].
+  const perps = await readAgentPerps(grant.smartAccount);
 
   // NEVER ECHO KEY MATERIAL, BY CONSTRUCTION: the grant goes out through core's
   // publicGrantView, an ALLOWLIST. This used to be a denylist spread
@@ -710,6 +811,59 @@ export async function GET(req: Request) {
     liveBlocker,
     energy,
     perpsOptIn: perpsOptInOffered(grant.smartAccount),
+    perps,
+    perpsStanddownOnKill: !isHostedMode() || hostedStanddownAvailable(),
   };
+  if (isHostedMode()) {
+    const tenant = tenantOf(req);
+    const perpsRecovery = tenant ? await recoveryStatus(tenant, grant.smartAccount) : null;
+    if (perpsRecovery) status.perpsRecovery = perpsRecovery;
+  }
   return statusResponse(status);
+}
+
+async function recoveryStatus(tenant: string, account?: string): Promise<HostedPerpsRecoveryNotice | null> {
+  try {
+    return await withReadDb((db) => db ? readHostedPerpsRecovery(db, tenant, account) : Promise.resolve(unknownHostedPerpsRecovery()));
+  } catch {
+    return unknownHostedPerpsRecovery();
+  }
+}
+
+/**
+ * THE HOSTED KILL'S CUSTODY SENTENCE, for a grant about to be removed: what
+ * the agent's last report says is at Lighter (core custodySentence, never a
+ * constant), prefixed — when there is anything there, or may be — with the
+ * plain fact that this kill closed nothing. The owner's recover path is the
+ * hosted one (perps-view.ts HOSTED_RECOVER_PATH). Null for an agent with
+ * nothing at Lighter and no perps marker: the kill says what it always said.
+ */
+async function perpsHostedKillCustody(grant: StoredGrant): Promise<string | null> {
+  const read = await readAgentPerpsRead(grant.smartAccount);
+  const exposure =
+    read.state === "unreadable"
+      ? ({ kind: "unread" } as const)
+      : perpExposureOfReport(read.state === "ok" ? read.report : null, {
+          grantMentionsPerps: grantMentionsPerps(grant),
+          nowMs: Date.now(),
+          accountMode: read.state === "ok" ? read.accountMode : null,
+        });
+  if (exposure.kind === "none") return null;
+  return (
+    (hostedStanddownAvailable()
+      ? "A temporary venue-only shutdown is being queued for up to 15 minutes. Closing and withdrawal are not confirmed; resting stops stay until each position reads flat. "
+      : "This server cannot run a hosted venue shutdown; open positions retain only their resting stops. ") + custodyText(exposure, { hosted: true })
+  );
+}
+
+async function shutdownStatus(tenant: `0x${string}`): Promise<AgentStatus["perpsShutdown"] | undefined> {
+  if (!hostedStanddownAvailable()) return undefined;
+  const store = new HostedStanddownStore(await makePgDb(process.env.DATABASE_URL!), storeDek()!);
+  await store.init();
+  const job = await store.latest(tenant);
+  if (!job) return undefined;
+  // Every field is allowlisted. In particular the encrypted checkpoint and
+  // sealed venue key never reach status, even after the grant is gone.
+  return { state: job.state, expiresAtMs: job.expiresAtMs, smartAccount: job.smartAccount,
+    result: job.resultJson ? JSON.parse(job.resultJson) as Record<string, unknown> : null };
 }

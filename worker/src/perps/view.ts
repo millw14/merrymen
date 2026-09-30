@@ -964,6 +964,18 @@ export function buildPerpBookTerm(view: PerpsViewBuilt | null): Exclude<PerpBook
   return view === null ? "unread" : view.facts.book;
 }
 
+/**
+ * The blocker a rail implies before any venue is read — the report's words
+ * for a lane that holds nothing (lane.ts flat reads), from the same mapping
+ * buildPerpsReport uses, so a flat live account's report names the reason
+ * (not granted, live perps off, the account not live…) instead of none.
+ */
+export function railBlockerOf(rail: PerpsMode, railBlocker?: PerpBlocker | null): PerpBlocker | null {
+  if (rail.mode === "off") return "perps-off";
+  if (rail.mode === "refuse") return railRefusalBlocker(rail.rule, railBlocker);
+  return null;
+}
+
 /** How a rail refusal reads as a PerpBlocker. operator-off has no owner remedy and no blocker (null). */
 function railRefusalBlocker(rule: string, railBlocker: PerpBlocker | null | undefined): PerpBlocker | null {
   switch (rule) {
@@ -974,10 +986,6 @@ function railRefusalBlocker(rule: string, railBlocker: PerpBlocker | null | unde
     case "perp-venue-unready":
       return railBlocker ?? "perps-venue-unreachable";
     case "perp-operator-off":
-      return null;
-    // The build, not the owner (lane.ts perpsRailOf): no owner remedy exists
-    // until live perps ship, so no blocker is shown — the rail says refuse.
-    case "perp-live-not-yet":
       return null;
     default:
       // The account's own RefuseRule: the account is not trading for real.

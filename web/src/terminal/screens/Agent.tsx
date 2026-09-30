@@ -3,7 +3,7 @@ import { Proposals } from "../Proposals";
 import { TrencherAnnouncement } from "../TrencherAnnouncement";
 import { blockerAdvice } from "@/lib/live-blocker";
 import { badgeOf } from "@/lib/thesis-badge";
-import { commandFor, commandPayload, type CommandArg } from "@/lib/chat-commands";
+import { commandFor, commandPayload, isComplete, type CommandArg } from "@/lib/chat-commands";
 import { fetchOpenOrder, followWindowMs, routeAnswer, serverPlacedAt, SNIPE_LOOKUP_MS } from "../order-follow";
 import type { ChatContext, ChatController, ConfirmScope } from "../chat-controller";
 import { chatChips, fillParts, receiptParts, refocusAfterSend } from "../chat-thread";
@@ -24,7 +24,8 @@ import {
   spentToday,
   type ChatMessage,
 } from "../account";
-import { ageOf, money, pctPts, type LiveMine, type LiveToken } from "../live";
+import { ageOf, money, pctPts, type DeskPerps, type LiveMine, type LiveToken } from "../live";
+import { PerpsPanel, perpsDeskCount, perpsMoneyLabel } from "../PerpsPanel";
 import { strategyName } from "../strategy";
 import { Coin, Empty, Face } from "../ui";
 import { NameChip } from "../NameChip";
@@ -245,6 +246,22 @@ export function Agent({
       ? mine.notice
       : null;
   const positions = positionsOf(mine);
+  /**
+   * THE PERPS, BESIDE THE HOLDINGS AND NEVER AMONG THEM (docs/perps.md rule
+   * 11, and "Surfaces": the desk's perps panel and its "At Lighter" row).
+   *
+   * Shown whenever there is anything to say — a position, money at the venue,
+   * a report that could not be read — and never for the known zero of an
+   * agent not using perps. The counts below include them, because "0
+   * positions" over an open leveraged position is the one sentence this
+   * screen must never print; an unreadable report says so beside the count
+   * rather than being counted as nothing.
+   */
+  const perps: DeskPerps | null = mine.perps ?? null;
+  const perpsShown = perps !== null && (perps.read === "unreadable" || perps.active);
+  // An unread venue counts what was last held, never fewer (perpsDeskCount).
+  const perpCount = perpsDeskCount(perps);
+  const positionCount = positions.length + perpCount.count;
   const trades = mine.moves
     .filter((t) => t.action === "buy" || t.action === "sell")
     .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
@@ -383,7 +400,7 @@ export function Agent({
    */
   const confirm = () => chat.confirm(async (proposal, on) => {
     const cmd = commandFor(proposal.id);
-    if (!cmd) return;
+    if (!cmd || !isComplete(cmd, proposal.args)) return;
     try {
       if (cmd.via === "navigate") {
         window.location.href = cmd.to!;
@@ -476,7 +493,9 @@ export function Agent({
         await placeOrder(on, commandPayload(cmd, proposal.args), (duplicate) =>
           duplicate
             ? `That exact order is already queued — I have not placed a second one.`
-            : `Placed it — ${cmd.say(proposal.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
+            : cmd.id === "close-perp" || cmd.id === "flatten-perps"
+              ? `Queued — ${cmd.say(proposal.args)} I will tell you what the worker reports.`
+              : `Placed it — ${cmd.say(proposal.args)} It is with my key now; the limits you signed decide whether it goes through, and I will tell you which.`,
         );
         return;
       }
@@ -628,8 +647,9 @@ export function Agent({
         {
           <div className="agent-portfolio-meta">
             <span>
-              {positions.length}{" "}
-              {positions.length === 1 ? "position" : "positions"}
+              {positionCount}{" "}
+              {positionCount === 1 ? "position" : "positions"}
+              {perpCount.suffix}
             </span>
             {mine.glance.cashUsd != null && (
               <span>{money(mine.glance.cashUsd)} cash</span>
@@ -678,7 +698,7 @@ export function Agent({
                 aria-pressed={view === "positions"}
                 onClick={() => setView("positions")}
               >
-                Positions · {positions.length}
+                Positions · {positionCount}
               </button>
               <button
                 type="button"
@@ -694,8 +714,11 @@ export function Agent({
             </div>
             {view === "positions" ? (
               <>
+                {/* "No positions" is a claim about the whole book, so it is
+                    only made when the perps panel has nothing to say; beside
+                    perps (or an unread Lighter) it narrows to what it knows. */}
                 {positions.length === 0 && (
-                  <Empty compact kind="positions" title="No positions reported yet."/>
+                  <Empty compact kind="positions" title={perpsShown ? "No spot positions reported yet." : "No positions reported yet."}/>
                 )}
                 {positions.map((p) => {
                   const token = tokens.find(
@@ -727,6 +750,9 @@ export function Agent({
                     </button>
                   );
                 })}
+                {perpsShown && perps && <PerpsPanel perps={perps} busy={running || chat.sending}
+                  onClose={(market) => { setPending({ id: "close-perp", args: { symbol: market, ...(perps.book ? { book: perps.book } : {}) } }); portfolio.current?.close(); scrollLatest(); }}
+                  onFlatten={() => { setPending({ id: "flatten-perps", args: perps.book ? { book: perps.book } : {} }); portfolio.current?.close(); scrollLatest(); }} />}
                 <div className={mine.autonomy.simulated ? "desk-cash is-simulated" : "desk-cash"}>
                   <span>{mine.autonomy.moneyLabel}</span>
                   <strong>{money(mine.glance.cashUsd ?? null)}</strong>
@@ -735,6 +761,18 @@ export function Agent({
                   <div className="desk-cash">
                     <span>In vaults</span>
                     <strong>{money(mine.glance.vaultUsd)}</strong>
+                  </div>
+                )}
+                {/* WHAT IS AT LIGHTER — rule 12's perp account value, which the
+                    worker counts in the balance above; without this row, USDG
+                    posted as margin would be in the headline and missing from
+                    the list under it. Unread is "Not read", never $0.00; the
+                    practice book is labelled and dimmed like the paper cash,
+                    and a book the report does not place is not called real. */}
+                {perpsShown && perps && (
+                  <div className={perps.paper ? "desk-cash is-simulated" : "desk-cash"}>
+                    <span>{perpsMoneyLabel(perps)}</span>
+                    <strong>{perps.atLighterUsd === null ? "Not read" : money(perps.atLighterUsd)}</strong>
                   </div>
                 )}
               </>
@@ -978,8 +1016,14 @@ export function Agent({
             aria-label="Confirm this action"
           >
             <p className="desk-confirm-say">{commandFor(pending.id)!.say(pending.args)}</p>
+            {(pending.id === "close-perp" || pending.id === "flatten-perps") && pending.args.book !== "paper" && pending.args.book !== "live" && (
+              <fieldset disabled={running}><legend>Which perpetual book do you want to close?</legend>
+                <button type="button" onClick={() => setPending({ ...pending, args: { ...pending.args, book: "paper" } })}>Paper practice</button>{" "}
+                <button type="button" onClick={() => setPending({ ...pending, args: { ...pending.args, book: "live" } })}>Real money at Lighter</button>
+              </fieldset>
+            )}
             <div className="desk-confirm-row">
-              <button type="button" onClick={confirm} disabled={running}>
+              <button type="button" onClick={confirm} disabled={running || !isComplete(commandFor(pending.id)!, pending.args)}>
                 {running ? "Doing it…" : commandFor(pending.id)!.via === "navigate" ? "Take me there" : "Yes, do it"}
               </button>
               <button

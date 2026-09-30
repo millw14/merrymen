@@ -28,6 +28,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import { banner, c, spinner, type as typeOut, withSpinner } from "./ui.mjs";
+import { writeKillStanddownRequest } from "./standdown-request.mjs";
 
 // Where the PACKAGE lives (npm global dir or a checkout) — code, never data.
 import { installService, serviceLogTail, serviceStatus, uninstallService } from "./service.mjs";
@@ -55,6 +56,12 @@ const BUILTINS = ["steady-basket", "weekend-gap", "llm-strategist"];
 const CIRCLE_STRATEGIES = ["even-keel", "dip-hunter"];
 // tsx worker entry that rebuilds the Kernel account and sweeps it (merrymen recover).
 const RECOVER_CLI = path.join(ROOT, "worker", "src", "recover-cli.ts");
+// tsx worker entry for the perps half of status / doctor / kill: the stand-down
+// request and its wait, the signer check, the worker's perps report.
+const PERPS_CLI = path.join(ROOT, "worker", "src", "perps-cli.ts");
+// The grant's perps marker (core GRANT_PERP_LIGHTER). Only decides whether to ASK
+// the helper; the helper re-checks the whole perp block with core's grantPerp.
+const GRANT_PERP_LIGHTER = "perp-lighter-v1";
 const EXPLORER = {
   4663: "https://robinhoodchain.blockscout.com",
   46630: "https://explorer.testnet.chain.robinhood.com",
@@ -74,6 +81,88 @@ function readJson(file) {
     return JSON.parse(readFileSync(file, "utf8").replace(/^﻿/, ""));
   } catch {
     return null;
+  }
+}
+
+/**
+ * Does this grant have anything to do with perps on Lighter? INCLUSIVE, like
+ * the web's grantMentionsPerps: the marker OR a perp block, whether or not
+ * core's strict grantPerp accepts it. The answer only ever makes a kill MORE
+ * careful — it asks the worker to stand down, which is exits only and costs
+ * nothing when not needed — so a half-formed block must count. A grant
+ * without either never pays for a tsx start.
+ */
+function grantCarriesPerps(g) {
+  if (!g || typeof g !== "object") return false;
+  if (Array.isArray(g.grantFeatures) && g.grantFeatures.includes(GRANT_PERP_LIGHTER)) return true;
+  return typeof g.perp === "object" && g.perp !== null;
+}
+
+/** The worker heartbeat is fresh (the same 90 s rule doctor and status use). */
+function workerAlive() {
+  const hb = readJson(HEARTBEAT);
+  return !!hb && Math.floor(Date.now() / 1000) - hb.at < 90;
+}
+
+/**
+ * Run perps-cli.ts and collect its one `__RESULT__` line, relaying each
+ * `__PROGRESS__` line as it arrives (the stand-down wait streams its steps).
+ * Never throws: a helper that cannot start is `{ result: null }`, and every
+ * caller says what that means rather than guessing.
+ */
+function runPerpsHelper(args, { onProgress } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      const bin = path.join(ROOT, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
+      if (!existsSync(bin)) return resolve({ code: 1, result: null, error: "tsx is not installed (npm install)" });
+      child = toolSpawn(bin, [PERPS_CLI, ...args], { cwd: ROOT, env: process.env });
+    } catch (e) {
+      return resolve({ code: 1, result: null, error: e instanceof Error ? e.message : String(e) });
+    }
+    let buf = "";
+    let result = null;
+    const take = (line) => {
+      if (line.startsWith("__PROGRESS__")) {
+        try {
+          onProgress?.(line.slice("__PROGRESS__".length));
+        } catch {
+          /* a printer must not end the wait */
+        }
+      } else if (line.startsWith("__RESULT__")) {
+        try {
+          result = JSON.parse(line.slice("__RESULT__".length));
+        } catch {
+          /* leave null — the caller treats it as no answer */
+        }
+      }
+    };
+    child.stdout.on("data", (d) => {
+      buf += String(d);
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        take(buf.slice(0, i).replace(/\r$/, ""));
+        buf = buf.slice(i + 1);
+      }
+    });
+    child.stderr.on("data", () => {}); // tsx noise; the result line is the contract
+    child.on("error", (e) => resolve({ code: 1, result: null, error: e.message }));
+    child.on("exit", (code) => {
+      if (buf) take(buf);
+      resolve({ code: code ?? 1, result });
+    });
+  });
+}
+
+/** Print helper lines ({ level, text }) in this CLI's own colours. */
+function printLines(lines) {
+  for (const l of Array.isArray(lines) ? lines : []) {
+    const text = String(l?.text ?? "");
+    if (l?.level === "ok") ok(text);
+    else if (l?.level === "warn") warn(text);
+    else if (l?.level === "bad") bad(text);
+    else if (l?.level === "dim") console.log(`  ${dim(text)}`);
+    else console.log(`  ${text}`);
   }
 }
 
@@ -771,6 +860,22 @@ async function doctor() {
 
   existsSync(DB) ? ok("ledger present (~/.merrymen/merrymen.db)") : warn("no ledger yet — appears after the worker's first tick");
 
+  // PERPS (docs/perps.md, Surfaces → CLI): only when this install has any — a
+  // grant carrying them, or paper perps switched on. The helper checks the
+  // pinned signer (hashes + known-answer test, offline), whether Lighter
+  // answers, the account index, the key at index 16 against the grant's sealed
+  // key, and what the worker last reported. Each is its own line.
+  if (grantCarriesPerps(grant) || s.perpsEnabled === true) {
+    const spP = spinner("checking the Lighter leg (signer, venue, key)");
+    const r = await runPerpsHelper(["doctor"]);
+    if (r.result?.ok) {
+      spP.succeed("perps checked");
+      printLines(r.result.lines);
+    } else {
+      spP.fail(`perps could not be checked${r.result?.error || r.error ? ` — ${r.result?.error ?? r.error}` : ""}`);
+    }
+  }
+
   const custom = await listCustom();
   const strategy = s.strategy ?? "steady-basket";
   if (BUILTINS.includes(strategy)) ok(`strategy: ${strategy} (builtin)`);
@@ -914,6 +1019,14 @@ async function status() {
     db.close();
   } catch {
     console.log(dim("  no ledger yet"));
+  }
+  // PERPS: the worker's own report (agents.perps), read-only — the same one
+  // the dashboard reads. Unread is said as unread; paper is labelled paper.
+  const settings = readJson(SETTINGS) ?? {};
+  if (grant?.smartAccount && (grantCarriesPerps(grant) || settings.perpsEnabled === true)) {
+    const r = await runPerpsHelper(["status", grant.smartAccount]);
+    if (r.result?.ok) printLines(r.result.lines);
+    else warn(`perps: could not read the worker's report${r.result?.error || r.error ? ` (${r.result?.error ?? r.error})` : ""} — unknown, not zero`);
   }
   console.log();
 }
@@ -1065,10 +1178,93 @@ async function kill() {
     warn("no grant to call in — the band's already home");
     return;
   }
+  // A grant.json that does not parse is asked about by what it mentions, as
+  // the web kill does: naming the perps marker makes it a perps grant.
+  let grant = readJson(GRANT);
+  if (grant === null) {
+    try {
+      if (readFileSync(GRANT, "utf8").includes(GRANT_PERP_LIGHTER)) grant = { grantFeatures: [GRANT_PERP_LIGHTER] };
+    } catch {
+      /* unreadable: nothing it mentions */
+    }
+  }
+  const perps = grantCarriesPerps(grant);
   const p = makePrompter();
-  const answer = (await p.ask(`  ${red("CALL THE BAND HOME")} — destroy the grant? The worker halts on its next tick. [y/N]: `)).trim().toLowerCase();
-  p.close();
+  // The prompter reads the owner's answers to BOTH questions below; an input
+  // that ends (a pipe, a closed terminal) answers "" — never a hang, never yes.
+  let inputClosed = false;
+  p.rl.on("close", () => (inputClosed = true));
+  const askOrEmpty = (q) =>
+    inputClosed
+      ? (console.log(`${q}${dim("(no input to read — taken as no)")}`), Promise.resolve(""))
+      : new Promise((res) => {
+          p.rl.once("close", () => res(""));
+          p.ask(q).then(res);
+        });
+  const answer = (
+    await askOrEmpty(
+      `  ${red("CALL THE BAND HOME")} — destroy the grant? The worker halts on its next tick.` +
+        `${perps ? " Its Lighter perps are stood down first." : ""} [y/N]: `,
+    )
+  )
+    .trim()
+    .toLowerCase();
   if (answer === "y" || answer === "yes") {
+    // PERPS: ASK THE WORKER FIRST, THEN LET GO OF THE GRANT (docs/perps.md rule
+    // 13). The request is written while grant.json still exists, because the
+    // worker is the only process holding the Lighter key, and it must still
+    // know the account when it reads the request.
+    //
+    // A REQUEST THAT CANNOT BE WRITTEN STOPS THE KILL — the same policy as the
+    // web kill (web/src/lib/perp-kill.ts) and writeStanddownRequest's
+    // contract. Archiving anyway used to take the key and the account away
+    // from the one process that could close the positions, leaving them
+    // guarded only by stops that expire. So: the helper first; if it cannot
+    // (no tsx, a crash, a perp block core refuses) the CLI writes the small
+    // request file itself (cli/standdown-request.mjs), so the stand-down never
+    // depends on tsx starting; and only if THAT fails is the owner asked, in a
+    // typed phrase, whether to let go of the agent without one.
+    let standdown = null;
+    if (perps) {
+      const req = await runPerpsHelper(["standdown-request"]);
+      if (req.result?.ok && req.result.nonce) {
+        standdown = req.result;
+        ok("stand-down requested — the worker closes Lighter positions with its own key");
+      } else {
+        const helperWhy = req.result?.error ?? req.error ?? "no answer";
+        let direct = null;
+        let directWhy = null;
+        try {
+          direct = writeKillStanddownRequest(HOME);
+        } catch (e) {
+          directWhy = e instanceof Error ? e.message : String(e);
+        }
+        if (direct) {
+          standdown = { nonce: direct, smartAccount: grant?.smartAccount ?? null };
+          ok(`stand-down requested — the worker closes Lighter positions with its own key ${dim(`(written by the CLI: the helper said ${helperWhy})`)}`);
+        } else {
+          bad(`could not ask the worker to stand the perps down (helper: ${helperWhy}; direct write: ${directWhy}).`);
+          console.log(
+            `  ${dim("Nothing has been stopped. The grant is kept, so the agent still runs and keeps the stops on its Lighter positions in place.")}`,
+          );
+          console.log(
+            `  ${dim("Destroying it now would leave any positions open at Lighter with only their resting stops (they expire after at most 28 days), and nothing here to close them.")}`,
+          );
+          const forced = (await askOrEmpty(`  Type ${bold("kill anyway")} to destroy the grant without a stand-down, or press Enter to keep it: `))
+            .trim()
+            .toLowerCase();
+          if (forced !== "kill anyway") {
+            p.close();
+            console.log(dim("  kept the grant — fix the error above and run merrymen kill again, or unwind Lighter with your owner key: merrymen recover"));
+            process.exitCode = 1;
+            return;
+          }
+          warn("destroying the grant WITHOUT a stand-down, as you typed — any Lighter positions keep only their resting stops.");
+          console.log(`  ${dim("unwind Lighter with your owner key:")} ${bold("merrymen recover")}`);
+        }
+      }
+    }
+    p.close();
     // Keep the wallet + its owner key before the grant goes — killing the session
     // key must never mean losing access to funds still sitting in the account.
     const archived = archiveCurrentGrant();
@@ -1079,9 +1275,46 @@ async function kill() {
         `  ${dim("wallet archived — funds stay reachable:")} ${bold("merrymen wallets")} ${dim("·")} ${bold("merrymen recover")}`,
       );
     }
+    if (standdown) await waitForStanddown(standdown.nonce, grant?.smartAccount ?? standdown.smartAccount ?? "");
   } else {
+    p.close();
     console.log(dim("  stayed the hand — nothing touched"));
   }
+}
+
+/**
+ * The CLI's half of the stand-down: wait up to 120 s, print each step as the
+ * worker reports it, then the custody sentence built from the RESULT — never a
+ * fixed "your funds are safe". No worker, no wait: say so and name recover.
+ */
+async function waitForStanddown(nonce, account) {
+  if (!workerAlive()) {
+    warn("no worker is running (no heartbeat in 90s), so nothing is standing the Lighter perps down right now.");
+    console.log(
+      `  ${dim("any positions on Lighter keep their resting stops. To see and unwind them with your owner key:")} ${bold("merrymen recover")}`,
+    );
+    return;
+  }
+  console.log(dim("\n  waiting for the worker's stand-down (up to 2 minutes)…"));
+  const r = await runPerpsHelper(["standdown-wait", nonce, account, "120000"], {
+    onProgress: (line) => console.log(dim(`    ${line}`)),
+  });
+  if (!r.result?.ok) {
+    bad(`could not follow the stand-down${r.result?.error || r.error ? ` (${r.result?.error ?? r.error})` : ""}.`);
+    console.log(`  ${dim("check")} ${bold("merrymen status")}${dim(", or unwind Lighter with your owner key:")} ${bold("merrymen recover")}`);
+    return;
+  }
+  if (r.result.result === null) {
+    // NOT "done". The request is still pending; the worker may finish it.
+    warn("the stand-down has not reported after 2 minutes — it may still be running, and nothing here says it is done.");
+    console.log(`  ${dim("check")} ${bold("merrymen status")}${dim(", or unwind Lighter with your owner key:")} ${bold("merrymen recover")}`);
+    return;
+  }
+  const o = r.result.result;
+  if (o.outcome === "done") ok("stand-down finished");
+  else if (o.outcome === "residual") warn("stand-down finished with something still on Lighter");
+  else bad("stand-down ran, but Lighter could not be read at the end");
+  console.log(`  ${r.result.custody}`);
 }
 
 // ───────────────────────────────────────────────────────────────── recover ──
@@ -1092,12 +1325,17 @@ async function kill() {
  * logged — so it can't leak into `ps` or shell history. Human progress streams
  * from the child's stderr; the one machine result line comes back on stdout.
  */
-function runRecoverChild(mode, { ownerKey, to, chainId, expect }) {
+function runRecoverChild(mode, { ownerKey, to, chainId, expect, perpPubKey, approved }) {
   return new Promise((resolve) => {
     const env = {
       ...process.env,
       MERRYMEN_RECOVER_OWNER_KEY: ownerKey,
       MERRYMEN_RECOVER_EXPECT: expect || "",
+      // PUBLIC (a Lighter API public key): labels the key slot, decides nothing.
+      MERRYMEN_RECOVER_PERP_PUBKEY: perpPubKey || "",
+      // The identity of the one Lighter step the owner typed the word for; the
+      // child re-reads the venue and refuses unless it is still that step.
+      MERRYMEN_RECOVER_VENUE_APPROVED: approved ? JSON.stringify(approved) : "",
     };
     const child = toolSpawn(localBin("tsx"), [RECOVER_CLI, mode, to, String(chainId)], { cwd: ROOT, env });
     let out = "";
@@ -1116,6 +1354,72 @@ function runRecoverChild(mode, { ownerKey, to, chainId, expect }) {
       resolve({ code: code ?? 1, result });
     });
   });
+}
+
+/**
+ * NOT "nothing to recover" while Lighter holds something or was not read in
+ * full: perp collateral, positions and a pending claim are this account's
+ * money, in a custody no transfer from it can reach. The venue group itself
+ * was printed above by the child.
+ */
+function venueNotEmpty(account, standing) {
+  warn(`nothing to sweep in ${account} itself.`);
+  console.log(
+    dim(
+      standing === "holds"
+        ? "  But Lighter still holds something for it (listed above) — that is NOT nothing to recover. Run this again after each step."
+        : "  But Lighter could not be read in full (above) — this is NOT a claim that nothing is left. Run this again.",
+    ),
+  );
+}
+
+/**
+ * Offer the Lighter steps the plan found (docs/perps.md, "Recover"), one at a
+ * time, each behind its own typed word — the `sweep` confirmation's style.
+ *
+ * The child built the words; this prints them grouped as the owner must read
+ * them: what each call does, in send order, then what the owner must
+ * understand (positions left without stops, the 21126 ordering, that a key
+ * change does not revoke the session permission). An unwind that strips open
+ * positions' stops asks for a different word. Returns whether anything ran.
+ */
+async function offerVenueSteps(p, venue, ctx) {
+  const offers = Array.isArray(venue?.offers) ? venue.offers : [];
+  let ran = false;
+  for (const o of offers) {
+    console.log();
+    warn(`${o.title} — read this before confirming:`);
+    for (const line of o.lines ?? []) console.log(`  ${bold(line)}`);
+    for (const w of o.warnings ?? []) console.log(`  ${yellow("!")} ${w}`);
+    console.log(dim("  real and irreversible. Everything this frees can only ever come back to your smart account.\n"));
+    const word = String(o.confirmWord ?? "").toLowerCase();
+    const typed = (await p.ask(`  type ${bold(word)} to confirm, or press Enter to skip: `)).trim().toLowerCase();
+    if (!word || typed !== word) {
+      console.log(dim("  skipped — nothing sent to Lighter."));
+      continue;
+    }
+    console.log(dim("\n  signing with your owner key…\n"));
+    const r = await runRecoverChild(o.kind === "claim" ? "venue-claim" : "venue-unwind", { ...ctx, approved: o.approved });
+    if (!r.result?.ok) {
+      bad(`the Lighter step didn't go through${r.result?.error ? ` — ${r.result.error}` : ""}. Nothing else was touched.`);
+      // The remaining offers were approved against the same read; stop here and
+      // let a fresh run rebuild them.
+      break;
+    }
+    ran = true;
+    const base = EXPLORER[ctx.chainId] ?? EXPLORER[4663];
+    ok(`${(r.result.calls ?? []).join(" → ")} landed — ${base}/tx/${r.result.txHash}`);
+    if (r.result.rotatedTo) {
+      console.log(`  ${dim("fresh key at index 16 (public — nobody holds its private key):")} ${r.result.rotatedTo}`);
+      if (r.result.journal) {
+        console.log(dim(`  recorded in ${path.join(HOME, r.result.journal)}, so the key change is on file for the worker`));
+      }
+    }
+    if (BigInt(r.result.withdrawRequestedMicro ?? "0") > 0n) {
+      console.log(dim("  the withdrawal waits out Lighter's delay, then sits on the contract — run merrymen recover again then to claim it."));
+    }
+  }
+  return ran;
 }
 
 /**
@@ -1147,21 +1451,36 @@ async function recover() {
   // every archived one (replaced/killed wallets are kept with their key). A picker
   // across ALL of them lets you recover a wallet that isn't the currently-armed
   // one — e.g. an old funded wallet you switched away from.
+  // The grant's Lighter PUBLIC key travels with each candidate so the plan can
+  // say whether the key at the venue is still the agent's. Public, never a secret.
+  let perpPubKey = "";
   const candidates = [];
   if (grant && /^0x[0-9a-fA-F]{64}$/.test(grant.demoOwnerPrivateKey ?? "")) {
-    candidates.push({ key: grant.demoOwnerPrivateKey, account: grant.smartAccount, chainId: grant.chainId || 4663, active: true });
+    candidates.push({
+      key: grant.demoOwnerPrivateKey,
+      account: grant.smartAccount,
+      chainId: grant.chainId || 4663,
+      active: true,
+      perp: grant.perp?.apiPublicKey ?? "",
+    });
   }
   for (const g of await archivedWallets()) {
     if (
       /^0x[0-9a-fA-F]{64}$/.test(g.demoOwnerPrivateKey ?? "") &&
       !candidates.some((c) => c.account?.toLowerCase() === g.smartAccount.toLowerCase())
     ) {
-      candidates.push({ key: g.demoOwnerPrivateKey, account: g.smartAccount, chainId: g.chainId || 4663, active: false });
+      candidates.push({
+        key: g.demoOwnerPrivateKey,
+        account: g.smartAccount,
+        chainId: g.chainId || 4663,
+        active: false,
+        perp: g.perp?.apiPublicKey ?? "",
+      });
     }
   }
 
   if (candidates.length === 1) {
-    ({ key: ownerKey, account: expect, chainId } = candidates[0]);
+    ({ key: ownerKey, account: expect, chainId, perp: perpPubKey } = candidates[0]);
     ok(`recovering ${expect.slice(0, 10)}… on chain ${chainId} ${dim("(owner key read from disk)")}`);
   } else if (candidates.length > 1) {
     console.log(`  ${green("✓")} ${candidates.length} wallets on this machine ${dim("(owner key on disk)")}:`);
@@ -1171,7 +1490,7 @@ async function recover() {
     const pick = (await p.ask(`  which to recover? 1-${candidates.length}, or Enter to paste a different key: `)).trim();
     const idx = Number(pick) - 1;
     if (pick && Number.isInteger(idx) && candidates[idx]) {
-      ({ key: ownerKey, account: expect, chainId } = candidates[idx]);
+      ({ key: ownerKey, account: expect, chainId, perp: perpPubKey } = candidates[idx]);
       ok(`using ${expect.slice(0, 10)}… ${dim("(owner key read from disk — never typed)")}`);
     }
   }
@@ -1215,12 +1534,34 @@ async function recover() {
   }
 
   console.log(dim("\n  reading what the account holds…\n"));
-  const plan = await runRecoverChild("plan", { ownerKey, to, chainId, expect });
+  const ctx = { ownerKey, to, chainId, expect, perpPubKey };
+  let plan = await runRecoverChild("plan", ctx);
   if (!plan.result || plan.result.ok !== true) {
     p.close();
     bad(`couldn't read the account${plan.result?.error ? ` — ${plan.result.error}` : ""}.`);
     return;
   }
+
+  // ── THE LIGHTER LEG FIRST ────────────────────────────────────────────────
+  //
+  // The child has already printed the venue group (stderr, above). Its steps
+  // are offered before the sweep because a claim lands USDG in the account,
+  // which the sweep then moves on — so a step that ran is followed by a fresh
+  // read, and the sweep is confirmed against what is there NOW (stateless:
+  // every visit re-reads and offers the next step).
+  if (await offerVenueSteps(p, plan.result.venue, ctx)) {
+    console.log(dim("\n  reading the account again…\n"));
+    const again = await runRecoverChild("plan", ctx);
+    if (!again.result || again.result.ok !== true) {
+      p.close();
+      bad(`couldn't re-read the account${again.result?.error ? ` — ${again.result.error}` : ""}. Run merrymen recover again.`);
+      return;
+    }
+    plan = again;
+  }
+  const venue = plan.result.venue ?? null;
+  // Absent (an older child) is unknown, never nothing.
+  const venueStanding = venue?.standing ?? "unknown";
   const balances = plan.result.balances ?? [];
   // Native ETH counts as something to recover. It did not used to: an account
   // funded with ETH and no tokens — exactly what the fund instructions ask for —
@@ -1257,6 +1598,19 @@ async function recover() {
         ]
       : []);
   const classHoldings = classVaults.flatMap((v) => v.holdings ?? []);
+  // NOTHING TO SWEEP IS NOT NOTHING TO RECOVER while Lighter holds something
+  // or was not read in full — checked here, ahead of the unreadable branch
+  // below, which keeps its own wording for a balance the chain would not give.
+  if (
+    balances.length === 0 &&
+    heldWei === 0n &&
+    classHoldings.length === 0 &&
+    (plan.result.unreadable ?? []).length === 0 &&
+    venueStanding !== "nothing"
+  ) {
+    p.close();
+    return venueNotEmpty(plan.result.smartAccount, venueStanding);
+  }
   // A BALANCE WE COULD NOT READ IS NOT A ZERO, and this is the one place that
   // forgot. The child already refuses to say "empty" when anything was
   // unreadable — recover-cli writes "that is NOT a zero balance. Check the RPC
@@ -1319,6 +1673,14 @@ async function recover() {
     console.log();
     console.log(`  ${bold("SMART ACCOUNT")} ${dim(plan.result.smartAccount)}`);
     for (const line of accountParts) console.log(`  ${bold(line)}`);
+  }
+  // WHAT THIS SWEEP DOES NOT MOVE. Lighter's custody is a different contract
+  // and a different operation; a confirmation that stayed silent about it
+  // would read as the whole account.
+  if (venueStanding !== "nothing") {
+    console.log();
+    console.log(`  ${bold("NOT IN THIS SWEEP — LIGHTER")}`);
+    console.log(`  ${dim(venue?.headline ?? "Lighter could not be read, so what is there is unknown.")}`);
   }
   console.log();
   console.log(`  ${bold("DESTINATION")}`);

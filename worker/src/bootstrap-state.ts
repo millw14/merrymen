@@ -87,6 +87,13 @@
  *                                null → planFirstObservation → the downtime
  *                                drift baseline; null means no reading, which
  *                                yields no drift claim rather than a zero one
+ *   lastObservedCashBlock        that same row's `cash_read_block` → optional
+ *                                non-negative integer → the hosted first
+ *                                look's Lighter payout cursor (docs/perps.md
+ *                                rule 12): payouts after it explain the
+ *                                downtime's cash; absent means none on record,
+ *                                and a first look with a Lighter account then
+ *                                doubts rather than folds
  *   accountingEpoch              durable agents row → integer → setAgentEpoch,
  *                                MAX() → the child files its rows in the epoch
  *                                the rest of the system is reading
@@ -194,6 +201,13 @@ export type BootstrapAccounting =
       carryNote?: string;
       /** Cash at the newest durable observation — the baseline for a downtime delta. */
       lastObservedCashUsdg: MicroUsdgString | null;
+      /**
+       * THE BLOCK THAT CASH WAS READ AT (its equity row's `cash_read_block`):
+       * the hosted first look's Lighter payout cursor (docs/perps.md rule 12).
+       * Optional so an anchor from before the column still parses; absent is
+       * "not on record", never block 0.
+       */
+      lastObservedCashBlock?: number;
       accountingEpoch: number;
       /** Unix seconds of the newest durable row this was derived from. */
       observedAt: number;
@@ -305,6 +319,12 @@ function validAccounting(a: unknown): BootstrapAccounting | null {
   if (o.anchoredContributionsUsdg !== undefined && !isMicro(o.anchoredContributionsUsdg)) return null;
   if (o.unanchoredFlowCount !== undefined && !Number.isInteger(o.unanchoredFlowCount)) return null;
   if (o.carryNote !== undefined && typeof o.carryNote !== "string") return null;
+  if (
+    o.lastObservedCashBlock !== undefined &&
+    (typeof o.lastObservedCashBlock !== "number" || !Number.isSafeInteger(o.lastObservedCashBlock) || o.lastObservedCashBlock < 0)
+  ) {
+    return null;
+  }
 
   return {
     kind: "established",
@@ -319,6 +339,7 @@ function validAccounting(a: unknown): BootstrapAccounting | null {
     ...(o.unanchoredFlowCount === undefined ? {} : { unanchoredFlowCount: o.unanchoredFlowCount as number }),
     ...(o.carryNote === undefined ? {} : { carryNote: o.carryNote as string }),
     lastObservedCashUsdg: (o.lastObservedCashUsdg as MicroUsdgString | null) ?? null,
+    ...(o.lastObservedCashBlock === undefined ? {} : { lastObservedCashBlock: o.lastObservedCashBlock as number }),
     accountingEpoch: o.accountingEpoch,
     observedAt,
   };
@@ -460,6 +481,8 @@ export interface AccountingLicence {
   highWaterWithdrawnUsdg: bigint | null;
   /** Cash at the newest durable observation — the downtime baseline. */
   lastObservedCashUsdg: bigint | null;
+  /** The block that cash was read at — the hosted first look's payout cursor. Null when none is on record. */
+  lastObservedCashBlock: bigint | null;
   /** The durable accounting epoch, adopted so this child files its rows in the right one. */
   accountingEpoch: number | null;
   why: string;
@@ -484,6 +507,7 @@ export function accountingLicence(verdict: AnchorVerdict, opts: { hosted: boolea
     highWaterMarkUsdg: null,
     highWaterWithdrawnUsdg: null,
     lastObservedCashUsdg: null,
+    lastObservedCashBlock: null,
     accountingEpoch: null,
     why: "",
   };
@@ -552,6 +576,8 @@ export function accountingLicence(verdict: AnchorVerdict, opts: { hosted: boolea
     highWaterWithdrawnUsdg:
       a.highWaterWithdrawnUsdg === undefined ? null : microToBigint(a.highWaterWithdrawnUsdg),
     lastObservedCashUsdg: a.lastObservedCashUsdg === null ? null : microToBigint(a.lastObservedCashUsdg),
+    // Only beside a cash reading: a block with no cash bounds nothing.
+    lastObservedCashBlock: a.lastObservedCashUsdg === null || a.lastObservedCashBlock === undefined ? null : BigInt(a.lastObservedCashBlock),
     accountingEpoch: a.accountingEpoch,
     why: provenContributions
       ? `resuming from durable state observed ${observed}; every flow is evidenced${carry}`

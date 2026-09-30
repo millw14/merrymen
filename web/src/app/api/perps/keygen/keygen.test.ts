@@ -112,6 +112,9 @@ describe("hosted", () => {
   before(() => {
     process.env.MERRYMEN_HOSTED = "1";
     process.env.MERRYMEN_STORE_DEK = DEK.toString("base64");
+    // Admission requires shared custody storage. Keygen only seals a key and
+    // does not connect to this synthetic database address.
+    process.env.DATABASE_URL = "postgres://127.0.0.1:1/never-connected";
     // Rollout Phase 2 for ACCOUNT: the operator has opened live perps and
     // allowlisted it. Without both, hosted keygen mints nothing (below).
     process.env.MERRYMEN_PERPS = "live";
@@ -169,14 +172,14 @@ describe("hosted", () => {
     assert.ok(!existsSync(home) || !readdirSync(home).includes("perp-keys"), "hosted keygen writes no key file");
   });
 
-  it("no DEK: 503 by name, and no key is made", async () => {
+  it("no DEK: hosted custody is not offered, and no key is made", async () => {
     newHome("hosted-nodek");
     delete process.env.MERRYMEN_STORE_DEK;
     try {
       const res = await post({ smartAccount: ACCOUNT }, cookieFor(privateKeyToAccount(generatePrivateKey()).address));
-      assert.equal(res.status, 503);
+      assert.equal(res.status, 403);
       assertNoStore(res);
-      assert.equal(((await res.json()) as { code?: string }).code, "perp-key-store-unavailable");
+      assert.equal(((await res.json()) as { code?: string }).code, "perp-not-offered");
     } finally {
       process.env.MERRYMEN_STORE_DEK = DEK.toString("base64");
     }

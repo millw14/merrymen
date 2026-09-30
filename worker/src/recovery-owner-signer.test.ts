@@ -119,7 +119,9 @@ describe("the construction cannot drift between planning and signing", () => {
       1,
       "and so must the validator",
     );
-    assert.equal((RECOVER_CODE.match(/deriveKernelAccount\(/g) ?? []).length, 3, "one definition, two callers");
+    // Three callers since the Lighter leg: the plan, the sweep, and the venue
+    // step (recoverVenueStep) — each deriving through this one function.
+    assert.equal((RECOVER_CODE.match(/deriveKernelAccount\(/g) ?? []).length, 4, "one definition, three callers");
   });
 
   it("no index, salt or address override is passed — the SDK defaults are the contract", () => {
@@ -140,16 +142,16 @@ describe("the construction cannot drift between planning and signing", () => {
     // assumed to be the same.
     assert.equal(
       (RECOVER_CODE.match(/expectedSmartAccount &&/g) ?? []).length,
-      2,
-      "the expected-account guard must fire on both paths",
+      3,
+      "the expected-account guard must fire on every path that derives: plan, sweep and the Lighter step",
     );
   });
 
   it("the derivation refuses a zero address on both paths", () => {
     assert.equal(
       (RECOVER_CODE.match(/assertDerivedAccount\(/g) ?? []).length,
-      2,
-      "a sweep aimed at the zero address would be a signed transaction to nothing",
+      3,
+      "a sweep aimed at the zero address would be a signed transaction to nothing — on every path that derives",
     );
   });
 });

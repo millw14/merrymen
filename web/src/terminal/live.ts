@@ -17,6 +17,7 @@ import {
 } from "@/lib/format";
 import { loadTokenQuotes, applyTokenQuotes, type TokenQuote } from "./quotes";
 import { STOCK_TOKENS } from "@merrymen/core";
+import { PERPS_REPORT_STALE_MS, type FeedPerpRow, type FeedPerpsAccount } from "@/lib/perps-view";
 import { rejectRuleLabel } from "@merrymen/thesis";
 import { parseStrategy, strategyLabel, type StrategyGlance } from "./strategy";
 import { whyLine } from "./why";
@@ -296,6 +297,17 @@ export interface LiveMine {
    * said so, and null when that could not be read. See positionsOf.
    */
   positions?: {symbol:string;valueUsd:number;stale:boolean;costUsd:number|null;costFromQuote:boolean|null;pnlPct:number|null;floorBps:number|null;floorWhy:string|null}[];
+  /**
+   * THE AGENT'S PERPETUALS ON LIGHTER, beside `positions` and never in them
+   * (docs/perps.md rule 11) — see DeskPerps.
+   *
+   * THREE ANSWERS, AND NONE OF THEM IS "EMPTY" BY DEFAULT:
+   *   undefined  the server did not say (a feed from before perps)
+   *   null       the worker has not reported its perps
+   *   DeskPerps  the report, or `read: "unreadable"` for one that could not
+   *              be read — which every surface says is unknown, never flat
+   */
+  perps?: DeskPerps | null;
   name: string;
   /**
    * Where /api/feed read the name: "settings", "ledger", or "fallback" when it
@@ -312,6 +324,155 @@ export interface LiveMine {
   thesis: string | null;
   moves: Thesis[];
   glance: StrategyGlance;
+}
+
+/** One perp position on the desk, from /api/feed `perps` (lib/perps-view.ts FeedPerpRow). */
+export interface DeskPerpRow {
+  market: string;
+  side: "long" | "short";
+  /** The practice book. Labelled wherever it is shown. */
+  paper: boolean;
+  size: string;
+  entry: string;
+  mark: string | null;
+  leverage: number | null;
+  marginUsd: number;
+  liqPrice: string | null;
+  liqDistancePct: number | null;
+  unrealisedUsd: number | null;
+  stopTrigger: string | null;
+  fundingUsd: number | null;
+}
+
+/**
+ * THE AGENT'S PERPS AS THE DESK AND THE CHAT SEE THEM — the worker's report,
+ * carried, never inferred.
+ *
+ * `read: "unreadable"` is the report the web could not read: the rows are
+ * empty because nothing was READ, and the desk says "Lighter could not be
+ * read", never "no positions". With `read: "ok"`, `venueRead` false means the
+ * worker could not read Lighter (its rows are the ledger's last record, with
+ * no mark), and `stale` means its read is older than PERPS_REPORT_STALE_MS.
+ */
+export interface DeskPerps {
+  read: "ok" | "unreadable";
+  mode: "off" | "paper" | "live" | "refuse" | null;
+  /**
+   * Which money this is (lib/perps-view.ts perpsBookOf): "paper", "live", or
+   * null when the report does not say — which is never drawn as real money at
+   * Lighter. `paper` is `book === "paper"`.
+   */
+  book: "paper" | "live" | null;
+  paper: boolean;
+  /** Worth a panel: false only for the known zero of an agent not using perps. */
+  active: boolean;
+  rows: DeskPerpRow[];
+  venueRead: boolean;
+  /** Epoch ms of the worker's read, or null. */
+  venueReadAt: number | null;
+  stale: boolean;
+  /** C + ΣM + ΣU + in transit (rule 12); null when any term is unread. */
+  atLighterUsd: number | null;
+  minLiqDistancePct: number | null;
+  stopsMissing: number;
+  incident: boolean;
+  blocker: { what: string; remedy: string | null } | null;
+}
+
+/**
+ * THE FEED'S PERPS, AS THE DESK HOLDS THEM. Absent fields stay absent (an
+ * older server said nothing); a null pair is "not reported"; anything
+ * malformed is unreadable, never an empty book.
+ */
+export function deskPerpsOf(feed: Pick<Feed, "perps" | "perpsAccount">, nowMs: number): DeskPerps | null | undefined {
+  if (feed.perpsAccount === undefined && feed.perps === undefined) return undefined;
+  const acct = feed.perpsAccount;
+  if (acct === null || acct === undefined) return feed.perps == null ? null : unreadablePerps();
+  if (typeof acct !== "object" || acct.state !== "ok" || !Array.isArray(feed.perps)) return unreadablePerps();
+  const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+  const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const mode = acct.mode === "off" || acct.mode === "paper" || acct.mode === "live" || acct.mode === "refuse" ? acct.mode : null;
+  // THE BOOK, AS THE SERVER PLACED IT. A server from before `book` sent only
+  // `paper`, whose false meant "rail not paper" — the bug that drew practice
+  // money as real — so without `book` only an explicit paper or a live rail
+  // is placed; anything else is not said.
+  const book: DeskPerps["book"] =
+    acct.book === "paper" || acct.book === "live"
+      ? acct.book
+      : acct.book === null
+        ? null
+        : acct.paper === true
+          ? "paper"
+          : mode === "live"
+            ? "live"
+            : null;
+  const rows: DeskPerpRow[] = [];
+  for (const r of feed.perps) {
+    // One row the desk cannot draw makes the whole list unknown: a leveraged
+    // position quietly missing is the lie this panel exists to prevent.
+    const market = str(r?.market);
+    const size = str(r?.size);
+    const entry = str(r?.entry_price);
+    const margin = num(r?.margin_usdg);
+    if (!r || !market || (r.side !== "long" && r.side !== "short") || !size || !entry || margin === null) {
+      return unreadablePerps();
+    }
+    rows.push({
+      market,
+      side: r.side,
+      // Every row is the account's book: one report is one book.
+      paper: book === "paper",
+      size,
+      entry,
+      mark: str(r.mark_price),
+      leverage: num(r.leverage),
+      marginUsd: margin,
+      liqPrice: str(r.liq_price),
+      liqDistancePct: num(r.liq_distance_pct),
+      unrealisedUsd: num(r.unrealized_usdg),
+      stopTrigger: str(r.stop_trigger),
+      fundingUsd: num(r.funding_usdg),
+    });
+  }
+  const readAt = num(acct.venue_read_at);
+  const blockerWhat = str(acct.blocker_text);
+  return {
+    read: "ok",
+    mode,
+    book,
+    paper: book === "paper",
+    active: acct.active !== false || rows.length > 0,
+    rows,
+    venueRead: acct.venue_read === true,
+    venueReadAt: readAt,
+    // The server's verdict, or this browser's clock if the answer has sat on
+    // screen since — a kept answer ages whoever last looked at it.
+    stale: acct.stale === true || (readAt !== null && nowMs - readAt > PERPS_REPORT_STALE_MS),
+    atLighterUsd: num(acct.at_lighter_usdg),
+    minLiqDistancePct: num(acct.min_liq_distance_pct),
+    stopsMissing: num(acct.stops_missing) ?? 0,
+    incident: acct.incident === true,
+    blocker: blockerWhat ? { what: blockerWhat, remedy: str(acct.blocker_remedy) } : null,
+  };
+}
+
+function unreadablePerps(): DeskPerps {
+  return {
+    read: "unreadable",
+    mode: null,
+    book: null,
+    paper: false,
+    active: true,
+    rows: [],
+    venueRead: false,
+    venueReadAt: null,
+    stale: false,
+    atLighterUsd: null,
+    minLiqDistancePct: null,
+    stopsMissing: 0,
+    incident: false,
+    blocker: null,
+  };
 }
 
 /**
@@ -1162,6 +1323,11 @@ export function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
         floorWhy: typeof p.stop_floor_why === "string" && p.stop_floor_why ? p.stop_floor_why : null,
       };
     }),
+    // THE PERPS, ON THEIR OWN KEY. Never folded into `positions` above: the
+    // desk's holdings list, its weights and the chat's cost questions are
+    // about spot holdings, and a leveraged position is a different thing that
+    // must be named as one.
+    perps: deskPerpsOf(feed, Date.now()),
     chg24: latest !== null && dayAgo !== null ? latest - dayAgo : null,
     mode,
     thesis: mineTheses[0]?.reason ?? null,
@@ -1484,4 +1650,12 @@ interface Feed {
   }[];
   equity?: { equity_usdg: number; cash_usdg?: number; vault_usdg?: number; at?: string }[];
   positions?: {symbol:string; value_usdg:number; price_stale?:number; cost_usdg?:number|null; cost_from_quote?:boolean|null; stop_floor_bps?:number|null; stop_floor_why?:string|null}[];
+  /**
+   * The perps, beside `positions` and never in them (api/feed/route.ts).
+   * Optional because an older server does not send them, and absent is
+   * "not said" — deskPerpsOf keeps the three answers apart. Typed loosely on
+   * the way in: it is JSON from another service, vetted field by field there.
+   */
+  perps?: (Partial<FeedPerpRow> | null)[] | null;
+  perpsAccount?: (Partial<Extract<FeedPerpsAccount, { state: "ok" }>> & { state?: string }) | null;
 }

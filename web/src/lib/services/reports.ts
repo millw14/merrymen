@@ -41,6 +41,8 @@ import { OP_KEY, readEvidencedSells } from "../profile-trades";
 import { readDeskPositions } from "../desk-positions";
 import { heldSql } from "../held-marks";
 import { readAgentStatus, type AgentStatusView } from "./agent-status";
+import { readAgentPerpsFrom } from "../agent-perps";
+import { killedCustodyText } from "../perps-view";
 import { readTradeSpelling } from "./portfolio";
 import { explanationOf, FILL_KINDS } from "./decisions";
 import type { SettingsView } from "./settings-view";
@@ -226,6 +228,8 @@ export interface SummaryInput {
   now: number;
   permissionExpiresAt: number | null;
   settings: SettingsView | null;
+  /** The hosted service (MCP runs only there): a killed agent's custody line names the hosted recover path. */
+  hosted?: boolean;
 }
 
 /** Marks read to attribute one book's change. A week at the fastest tick (15 s) is ~40k. */
@@ -683,7 +687,14 @@ export async function readReportSummary(db: Db, input: SummaryInput, clean: Text
     items.push({ action: "Sign a trading permission in Merrymen to start the agent.", because: "no-permission" });
   } else {
     status = await readAgentStatus(db, input.currentAccount, input.settings, now);
-    if (status.status === "killed") blockers.push({ kind: "status", code: "killed", text: "The kill switch is on: the agent can no longer sign anything. Funds stay in the owner's smart account.", owner_can_fix: false });
+    // WHERE THE MONEY IS AFTER A KILL comes from the agent's own perps report
+    // through core's custodySentence (docs/perps.md rule 13) — never the
+    // constant this used to append, which sent the money home while
+    // leveraged positions or collateral could still be on Lighter.
+    if (status.status === "killed") {
+      const custody = killedCustodyText(await readAgentPerpsFrom(db, input.currentAccount), now * 1000, { hosted: input.hosted === true });
+      blockers.push({ kind: "status", code: "killed", text: `The kill switch is on: the agent can no longer sign anything.${custody ? ` ${custody}` : ""}`, owner_can_fix: false });
+    }
     if (status.status === "error") blockers.push({ kind: "status", code: "error", text: "The agent could not arm its trading key.", owner_can_fix: false });
     if ((status.status === "active" || status.status === "armed") && status.freshness.worker_fresh === false && status.freshness.heartbeat_at !== null) {
       blockers.push({ kind: "worker", code: "worker-stale", text: `The agent's worker has not reported since ${iso(status.freshness.heartbeat_at)}.`, owner_can_fix: false });

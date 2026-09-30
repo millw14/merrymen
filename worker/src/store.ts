@@ -88,6 +88,12 @@ import { admitCapitalFlow, tradingModeOf, type TradingMode } from "./paper-bound
 import { DERIVED_ID } from "./thesis-policy";
 // The coin's name a fill is stored with — see fillSymbolOfRow.
 import { fillSymbolFor, nonCashLeg } from "./token-label";
+// The live reconciler's two statements store.ts had no writer for (an adopted
+// venue order, the recorded-nonce probe) — wired below on the store's own
+// connection, so the reconciler's store interface is this module.
+import { insertAdoptedPerpOrderRow, perpNonceRecordedRow, type AdoptedPerpOrderInput } from "./perps/reconcile-ledger";
+import { bookPayoutsAtomically, PERP_PAYOUT_SCHEMA } from "./perps/payout-ledger";
+import type { Payout, RecordPayoutsResult } from "./perps/payouts";
 
 let driver: Db | null = null;
 /** The sqlite handle behind `driver`. Kept ONLY so closeStoreForTest() can release
@@ -694,6 +700,7 @@ export const PERP_LEDGER_DDL: readonly string[] = [
      PRIMARY KEY (agent_id, mode, epoch, market_id)
    )`,
   "CREATE INDEX IF NOT EXISTS perp_carries_created ON perp_carries (created_at)",
+  ...PERP_PAYOUT_SCHEMA.split(";").filter(s => s.trim()),
   // ── THE VENUE IN EQUITY (rule 12) ─────────────────────────────────────────
   //
   // perpAccountUsdg = C + ΣM_iso + ΣU + T, each term recorded beside the total
@@ -3522,7 +3529,17 @@ async function fillSymbolOfRow(row: TradeRow): Promise<string | null> {
  * the settled counters directly and raises a durable alarm instead of letting
  * the reservation release drop it.
  */
-export async function addTrade(row: TradeRow): Promise<boolean> {
+export async function addTrade(
+  row: TradeRow,
+  /**
+   * `with` — writes that must commit WITH this row or not at all, inside its
+   * transaction (and after it, so they see it): an on-chain perp leg's
+   * perp_transfers row and its `margin` journal entry (perpTransferWith). A
+   * throw from it rolls the row back and this returns false, exactly like any
+   * failed write. Absent, every row is written as it always was.
+   */
+  opts: { with?: (db: Db) => Promise<void> } = {},
+): Promise<boolean> {
   try {
     const epoch = await epochOf(row.agent_id);
     // Before any write, and outside the journal's transaction: two reads at most.
@@ -3640,8 +3657,16 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
         row.user_op_nonce ?? null,
       );
     };
+    const withFn = opts.with;
     if (!moved) {
-      await writeRow(getDb());
+      if (withFn) {
+        await getDb().tx(async (tx) => {
+          await writeRow(tx);
+          await withFn(tx);
+        });
+      } else {
+        await writeRow(getDb());
+      }
       return true;
     }
     await journaled(
@@ -3672,7 +3697,12 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
         txHash: row.tx_hash ?? null,
         userOpHash: row.user_op_hash ?? null,
       },
-      writeRow,
+      withFn
+        ? async (tx) => {
+            await writeRow(tx);
+            await withFn(tx);
+          }
+        : writeRow,
     );
     return true;
   } catch (e) {
@@ -6123,6 +6153,176 @@ interface TransferRowDb {
   paid_log_index: number | null;
 }
 
+/** A transfer's inputs, validated and canonicalised once — before any transaction opens. */
+interface ParsedPerpTransfer {
+  agent: string;
+  mode: PerpMode;
+  direction: PerpTransferDirection;
+  state: PerpTransferState;
+  amount: string;
+  initiator: PerpTransferInitiator;
+  id: string | null;
+  chainId: number | null;
+  txHash: string | null;
+  logIndex: number | null;
+  userOpHash: string | null;
+  venueTxHash: string | null;
+  paidTxHash: string | null;
+  paidLogIndex: number | null;
+}
+
+function parsePerpTransfer(t: PerpTransferInput): ParsedPerpTransfer {
+  const agent = perpAgent(t.agentId);
+  const mode = perpMode(t.mode);
+  const direction = oneOf(t.direction, PERP_TRANSFER_DIRECTIONS, "transfer direction");
+  const state = oneOf(t.state, PERP_TRANSFER_STATES, "transfer state");
+  if (!perpTransferStateFits(direction, state)) throw new RangeError(`perp ledger: a ${direction} is never '${state}'`);
+  const amount = intText(t.amountMicro, "transfer amount", { min: 1n });
+  const initiator = oneOf(t.initiator, PERP_TRANSFER_INITIATORS, "initiator");
+  const id = t.id === undefined ? null : idText(t.id, "transfer id");
+  const chainId = optSafeInt(t.chainId, "chain id", 1);
+  const txHash = t.txHash === null || t.txHash === undefined ? null : hashText(t.txHash, "tx hash", { prefixed: true, hexLen: 64 });
+  const logIndex = optSafeInt(t.logIndex, "log index");
+  // A tx hash is unique only within a chain: an identity without its chain is
+  // no identity, and NULLs are distinct in the unique index, which would then
+  // admit the same log twice.
+  if (txHash !== null && chainId === null) throw new RangeError("perp ledger: a transfer's tx hash needs its chain id");
+  const userOpHash = t.userOpHash === null || t.userOpHash === undefined ? null : hashText(t.userOpHash, "user op hash", { prefixed: true, hexLen: 64 });
+  const venueTxHash = t.venueTxHash === null || t.venueTxHash === undefined ? null : hashText(t.venueTxHash, "venue tx hash", { prefixed: false });
+  const paidTxHash = t.paidTxHash === null || t.paidTxHash === undefined ? null : hashText(t.paidTxHash, "paid tx hash", { prefixed: true, hexLen: 64 });
+  const paidLogIndex = optSafeInt(t.paidLogIndex, "paid log index");
+  return { agent, mode, direction, state, amount, initiator, id, chainId, txHash, logIndex, userOpHash, venueTxHash, paidTxHash, paidLogIndex };
+}
+
+/**
+ * THE WRITE ITSELF, in a transaction the caller holds: find the row by any
+ * identity, insert or advance it, and say whether the step moved money (the
+ * `margin` journal payload, or null). upsertPerpTransfer wraps it in its own
+ * transaction with the journal entry; perpTransferWith runs it INSIDE a trades
+ * row's settlement (addTrade `with`), so an on-chain leg's trades row and its
+ * margin row commit together or not at all.
+ */
+async function writePerpTransferIn(
+  db: Db,
+  epoch: number,
+  v: ParsedPerpTransfer,
+  withFn: PerpWith | undefined,
+): Promise<{ result: PerpTransferOutcome; payload: unknown | null }> {
+  const { agent, mode, direction, state, amount, initiator, id, chainId, txHash, logIndex, userOpHash, venueTxHash, paidTxHash, paidLogIndex } = v;
+  const payloadOf = (rowId: string, from: PerpTransferState | null, to: PerpTransferState, row: Partial<TransferRowDb>) => ({
+    amountMicro: amount,
+    chainId: row.chain_id ?? chainId,
+    direction,
+    from,
+    initiator: row.initiator ?? initiator,
+    logIndex: row.log_index ?? logIndex,
+    mode,
+    paidLogIndex: row.paid_log_index ?? paidLogIndex,
+    paidTxHash: row.paid_tx_hash ?? paidTxHash,
+    to,
+    transferId: rowId,
+    txHash: row.tx_hash ?? txHash,
+    userOpHash: row.user_op_hash ?? userOpHash,
+    venueTxHash: row.venue_tx_hash ?? venueTxHash,
+  });
+
+  const cols = `id, direction, amount_micro, initiator, state, chain_id, tx_hash, log_index, user_op_hash,
+                venue_tx_hash, paid_tx_hash, paid_log_index`;
+  const found = new Map<string, TransferRowDb>();
+  const look = async (sql: string, ...args: unknown[]) => {
+    const r = (await db.prepare(`SELECT ${cols} FROM perp_transfers WHERE agent_id = ? AND mode = ? AND ${sql}`).get(agent, mode, ...args)) as
+      | TransferRowDb
+      | undefined;
+    if (r) found.set(r.id, r);
+  };
+  if (id !== null) {
+    const any = (await db.prepare(`SELECT agent_id, mode FROM perp_transfers WHERE id = ?`).get(id)) as
+      | { agent_id: string; mode: string }
+      | undefined;
+    if (any && (any.agent_id !== agent || any.mode !== mode)) {
+      return { result: { outcome: "refused", id, why: "that id belongs to another agent or rail" }, payload: null };
+    }
+    await look("id = ?", id);
+  }
+  if (chainId !== null && txHash !== null && logIndex !== null) await look("chain_id = ? AND tx_hash = ? AND log_index = ?", chainId, txHash, logIndex);
+  if (venueTxHash !== null) await look("venue_tx_hash = ?", venueTxHash);
+  if (userOpHash !== null) await look("user_op_hash = ?", userOpHash);
+  if (found.size > 1) {
+    return { result: { outcome: "refused", id, why: `its identities name ${found.size} different rows` }, payload: null };
+  }
+  const held = [...found.values()][0];
+
+  if (held === undefined) {
+    const rowId = id ?? randomUUID();
+    await db
+      .prepare(
+        `INSERT INTO perp_transfers (id, agent_id, mode, epoch, direction, amount_micro, initiator, state, chain_id,
+                                     tx_hash, log_index, user_op_hash, venue_tx_hash, paid_tx_hash, paid_log_index)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(rowId, agent, mode, epoch, direction, amount, initiator, state, chainId, txHash, logIndex, userOpHash,
+        venueTxHash, paidTxHash, paidLogIndex);
+    const moved = perpTransferMovesMoney(null, state);
+    if (withFn) await withFn(db);
+    return {
+      result: { outcome: "inserted", id: rowId, state, journaled: moved },
+      payload: moved ? payloadOf(rowId, null, state, {}) : null,
+    };
+  }
+
+  // The row it names must be the row described: a different direction or
+  // amount is not a later state of this transfer, it is another transfer.
+  if (held.direction !== direction) return { result: { outcome: "refused", id: held.id, why: `it is a ${held.direction}` }, payload: null };
+  if (held.amount_micro !== amount) {
+    return { result: { outcome: "refused", id: held.id, why: `its amount is ${held.amount_micro}, not ${amount}` }, payload: null };
+  }
+  // An identity, once written, is the row's for good: filled when empty,
+  // never replaced. A different value is a different transfer.
+  let learns = false;
+  for (const [name, a, b] of [
+    ["chain id", held.chain_id, chainId],
+    ["tx hash", held.tx_hash, txHash],
+    ["log index", held.log_index, logIndex],
+    ["user op", held.user_op_hash, userOpHash],
+    ["venue tx", held.venue_tx_hash, venueTxHash],
+    ["paid tx", held.paid_tx_hash, paidTxHash],
+    ["paid log index", held.paid_log_index, paidLogIndex],
+  ] as const) {
+    if (b === null) continue;
+    if (a === null || a === undefined) {
+      learns = true;
+      continue;
+    }
+    if (String(a) !== String(b)) {
+      return { result: { outcome: "refused", id: held.id, why: `its ${name} is ${String(a)}, not ${String(b)}` }, payload: null };
+    }
+  }
+  const from = held.state as PerpTransferState;
+  const forward = PERP_TRANSFER_RANK[state] > (PERP_TRANSFER_RANK[from] ?? Number.POSITIVE_INFINITY);
+  // A re-read that adds nothing writes nothing — not even updated_at, which
+  // the mirror's cursor reads.
+  if (!forward && !learns) return { result: { outcome: "unchanged", id: held.id, state: from }, payload: null };
+  const res = await db
+    .prepare(
+      `UPDATE perp_transfers
+          SET state = ?, chain_id = COALESCE(chain_id, ?), tx_hash = COALESCE(tx_hash, ?),
+              log_index = COALESCE(log_index, ?), user_op_hash = COALESCE(user_op_hash, ?),
+              venue_tx_hash = COALESCE(venue_tx_hash, ?), paid_tx_hash = COALESCE(paid_tx_hash, ?),
+              paid_log_index = COALESCE(paid_log_index, ?), updated_at = unixepoch()
+        WHERE id = ? AND state = ?`,
+    )
+    .run(forward ? state : from, chainId, txHash, logIndex, userOpHash, venueTxHash, paidTxHash, paidLogIndex, held.id, from);
+  if (!forward || Number(res.changes) === 0) {
+    return { result: { outcome: "unchanged", id: held.id, state: from }, payload: null };
+  }
+  const moved = perpTransferMovesMoney(from, state);
+  if (withFn) await withFn(db);
+  return {
+    result: { outcome: "advanced", id: held.id, from, state, journaled: moved },
+    payload: moved ? payloadOf(held.id, from, state, held) : null,
+  };
+}
+
 /**
  * WRITE OR ADVANCE ONE MARGIN TRANSFER, and journal `margin` on every step
  * that moved money (perp-ledger-rules.ts perpTransferMovesMoney).
@@ -6144,151 +6344,44 @@ export async function upsertPerpTransfer(
   t: PerpTransferInput,
   opts: { with?: PerpWith } = {},
 ): Promise<PerpTransferOutcome> {
-  const agent = perpAgent(t.agentId);
-  const mode = perpMode(t.mode);
-  const direction = oneOf(t.direction, PERP_TRANSFER_DIRECTIONS, "transfer direction");
-  const state = oneOf(t.state, PERP_TRANSFER_STATES, "transfer state");
-  if (!perpTransferStateFits(direction, state)) throw new RangeError(`perp ledger: a ${direction} is never '${state}'`);
-  const amount = intText(t.amountMicro, "transfer amount", { min: 1n });
-  const initiator = oneOf(t.initiator, PERP_TRANSFER_INITIATORS, "initiator");
-  const id = t.id === undefined ? null : idText(t.id, "transfer id");
-  const chainId = optSafeInt(t.chainId, "chain id", 1);
-  const txHash = t.txHash === null || t.txHash === undefined ? null : hashText(t.txHash, "tx hash", { prefixed: true, hexLen: 64 });
-  const logIndex = optSafeInt(t.logIndex, "log index");
-  // A tx hash is unique only within a chain: an identity without its chain is
-  // no identity, and NULLs are distinct in the unique index, which would then
-  // admit the same log twice.
-  if (txHash !== null && chainId === null) throw new RangeError("perp ledger: a transfer's tx hash needs its chain id");
-  const userOpHash = t.userOpHash === null || t.userOpHash === undefined ? null : hashText(t.userOpHash, "user op hash", { prefixed: true, hexLen: 64 });
-  const venueTxHash = t.venueTxHash === null || t.venueTxHash === undefined ? null : hashText(t.venueTxHash, "venue tx hash", { prefixed: false });
-  const paidTxHash = t.paidTxHash === null || t.paidTxHash === undefined ? null : hashText(t.paidTxHash, "paid tx hash", { prefixed: true, hexLen: 64 });
-  const paidLogIndex = optSafeInt(t.paidLogIndex, "paid log index");
-
-  const payloadOf = (rowId: string, from: PerpTransferState | null, to: PerpTransferState, row: Partial<TransferRowDb>) => ({
-    amountMicro: amount,
-    chainId: row.chain_id ?? chainId,
-    direction,
-    from,
-    initiator: row.initiator ?? initiator,
-    logIndex: row.log_index ?? logIndex,
-    mode,
-    paidLogIndex: row.paid_log_index ?? paidLogIndex,
-    paidTxHash: row.paid_tx_hash ?? paidTxHash,
-    to,
-    transferId: rowId,
-    txHash: row.tx_hash ?? txHash,
-    userOpHash: row.user_op_hash ?? userOpHash,
-    venueTxHash: row.venue_tx_hash ?? venueTxHash,
-  });
-
+  const v = parsePerpTransfer(t);
   try {
-    return await perpJournaled<PerpTransferOutcome>(t.agentId, "margin", async (db, epoch) => {
-      const cols = `id, direction, amount_micro, initiator, state, chain_id, tx_hash, log_index, user_op_hash,
-                    venue_tx_hash, paid_tx_hash, paid_log_index`;
-      const found = new Map<string, TransferRowDb>();
-      const look = async (sql: string, ...args: unknown[]) => {
-        const r = (await db.prepare(`SELECT ${cols} FROM perp_transfers WHERE agent_id = ? AND mode = ? AND ${sql}`).get(agent, mode, ...args)) as
-          | TransferRowDb
-          | undefined;
-        if (r) found.set(r.id, r);
-      };
-      if (id !== null) {
-        const any = (await db.prepare(`SELECT agent_id, mode FROM perp_transfers WHERE id = ?`).get(id)) as
-          | { agent_id: string; mode: string }
-          | undefined;
-        if (any && (any.agent_id !== agent || any.mode !== mode)) {
-          return { result: { outcome: "refused", id, why: "that id belongs to another agent or rail" }, payload: null };
-        }
-        await look("id = ?", id);
-      }
-      if (chainId !== null && txHash !== null && logIndex !== null) await look("chain_id = ? AND tx_hash = ? AND log_index = ?", chainId, txHash, logIndex);
-      if (venueTxHash !== null) await look("venue_tx_hash = ?", venueTxHash);
-      if (userOpHash !== null) await look("user_op_hash = ?", userOpHash);
-      if (found.size > 1) {
-        return { result: { outcome: "refused", id, why: `its identities name ${found.size} different rows` }, payload: null };
-      }
-      const held = [...found.values()][0];
-
-      if (held === undefined) {
-        const rowId = id ?? randomUUID();
-        await db
-          .prepare(
-            `INSERT INTO perp_transfers (id, agent_id, mode, epoch, direction, amount_micro, initiator, state, chain_id,
-                                         tx_hash, log_index, user_op_hash, venue_tx_hash, paid_tx_hash, paid_log_index)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(rowId, agent, mode, epoch, direction, amount, initiator, state, chainId, txHash, logIndex, userOpHash,
-            venueTxHash, paidTxHash, paidLogIndex);
-        const moved = perpTransferMovesMoney(null, state);
-        if (opts.with) await opts.with(db);
-        return {
-          result: { outcome: "inserted", id: rowId, state, journaled: moved },
-          payload: moved ? payloadOf(rowId, null, state, {}) : null,
-        };
-      }
-
-      // The row it names must be the row described: a different direction or
-      // amount is not a later state of this transfer, it is another transfer.
-      if (held.direction !== direction) return { result: { outcome: "refused", id: held.id, why: `it is a ${held.direction}` }, payload: null };
-      if (held.amount_micro !== amount) {
-        return { result: { outcome: "refused", id: held.id, why: `its amount is ${held.amount_micro}, not ${amount}` }, payload: null };
-      }
-      // An identity, once written, is the row's for good: filled when empty,
-      // never replaced. A different value is a different transfer.
-      let learns = false;
-      for (const [name, a, b] of [
-        ["chain id", held.chain_id, chainId],
-        ["tx hash", held.tx_hash, txHash],
-        ["log index", held.log_index, logIndex],
-        ["user op", held.user_op_hash, userOpHash],
-        ["venue tx", held.venue_tx_hash, venueTxHash],
-        ["paid tx", held.paid_tx_hash, paidTxHash],
-        ["paid log index", held.paid_log_index, paidLogIndex],
-      ] as const) {
-        if (b === null) continue;
-        if (a === null || a === undefined) {
-          learns = true;
-          continue;
-        }
-        if (String(a) !== String(b)) {
-          return { result: { outcome: "refused", id: held.id, why: `its ${name} is ${String(a)}, not ${String(b)}` }, payload: null };
-        }
-      }
-      const from = held.state as PerpTransferState;
-      const forward = PERP_TRANSFER_RANK[state] > (PERP_TRANSFER_RANK[from] ?? Number.POSITIVE_INFINITY);
-      // A re-read that adds nothing writes nothing — not even updated_at, which
-      // the mirror's cursor reads.
-      if (!forward && !learns) return { result: { outcome: "unchanged", id: held.id, state: from }, payload: null };
-      const res = await db
-        .prepare(
-          `UPDATE perp_transfers
-              SET state = ?, chain_id = COALESCE(chain_id, ?), tx_hash = COALESCE(tx_hash, ?),
-                  log_index = COALESCE(log_index, ?), user_op_hash = COALESCE(user_op_hash, ?),
-                  venue_tx_hash = COALESCE(venue_tx_hash, ?), paid_tx_hash = COALESCE(paid_tx_hash, ?),
-                  paid_log_index = COALESCE(paid_log_index, ?), updated_at = unixepoch()
-            WHERE id = ? AND state = ?`,
-        )
-        .run(forward ? state : from, chainId, txHash, logIndex, userOpHash, venueTxHash, paidTxHash, paidLogIndex, held.id, from);
-      if (!forward || Number(res.changes) === 0) {
-        return { result: { outcome: "unchanged", id: held.id, state: from }, payload: null };
-      }
-      const moved = perpTransferMovesMoney(from, state);
-      if (opts.with) await opts.with(db);
-      return {
-        result: { outcome: "advanced", id: held.id, from, state, journaled: moved },
-        payload: moved ? payloadOf(held.id, from, state, held) : null,
-      };
-    });
+    return await perpJournaled<PerpTransferOutcome>(t.agentId, "margin", (db, epoch) => writePerpTransferIn(db, epoch, v, opts.with));
   } catch (e) {
     // The one write failure that is an ANSWER rather than a fault: an identity
     // this row was about to take is already another row's. Everything else is
     // a failed write, and throws.
     const msg = e instanceof Error ? e.message : String(e);
     if (/UNIQUE constraint|duplicate key value/i.test(msg) || (e as { code?: unknown }).code === "23505") {
-      return { outcome: "refused", id, why: "an identity it names is already another transfer's" };
+      return { outcome: "refused", id: v.id, why: "an identity it names is already another transfer's" };
     }
     throw e;
   }
+}
+
+/**
+ * A MARGIN ROW THAT COMMITS WITH ITS TRADES ROW — for addTrade `with` (the
+ * no-trades-rows amendment: an on-chain leg's `margin` entry "is written in
+ * the same db.tx as the trades row's settlement, and only on a real insert").
+ *
+ * Runs writePerpTransferIn inside the trades row's transaction and appends the
+ * `margin` journal entry there when the step moved money — never on a re-read
+ * that moved nothing. A REFUSAL THROWS, and with it the trades row's write
+ * rolls back: a margin row that contradicts what the ledger holds (another
+ * amount, another identity) is not something to settle beside. The caller
+ * (index.ts recordTrade) then keeps the op counted and the row `submitted`
+ * for the resolver, and the owner is told — a contradiction someone has to
+ * look at, never a guess booked into the journal. Inputs are validated here,
+ * before the transaction opens, so a malformed one never gets that far.
+ */
+export function perpTransferWith(t: PerpTransferInput): (db: Db) => Promise<void> {
+  const v = parsePerpTransfer(t);
+  return async (db) => {
+    const { epoch, journalAs } = await perpBookingOf(db, t.agentId);
+    const { result, payload } = await writePerpTransferIn(db, epoch, v, undefined);
+    if (result.outcome === "refused") throw new Error(`perp transfer refused: ${result.why}`);
+    if (payload !== null) await appendJournalRow(db, journalAs, epoch, "margin", payload);
+  };
 }
 
 /**
@@ -6304,6 +6397,23 @@ export async function listOpenPerpTransfers(agentId: string, mode: PerpMode): Pr
     )
     .all(perpAgent(agentId), perpMode(mode))) as Record<string, unknown>[];
   return rows.map(transferRowOf);
+}
+
+/** Payout identities, carry, paid transfers and margin journal entries commit together. */
+export async function recordPerpPayouts(agentId: string, payouts: readonly Payout[]): Promise<RecordPayoutsResult> {
+  const agent = perpAgent(agentId);
+  return bookPayoutsAtomically(getDb(), agent, payouts, {
+    epoch: async tx => (await perpBookingOf(tx, agentId)).epoch,
+    owed: async tx => ((await tx.prepare(`SELECT * FROM perp_transfers WHERE agent_id = ? AND mode = 'live'
+      AND direction = 'withdraw' AND state IN ('submitted', 'executed') ORDER BY created_at ASC, id ASC`)
+      .all(agent)) as Record<string, unknown>[]).map(transferRowOf),
+    upsert: async (tx, t) => {
+      const { epoch, journalAs } = await perpBookingOf(tx, agentId);
+      const { result, payload } = await writePerpTransferIn(tx, epoch, parsePerpTransfer({ ...t, agentId: agent, mode: "live" }), undefined);
+      if (payload !== null) await appendJournalRow(tx, journalAs, epoch, "margin", payload);
+      return result;
+    },
+  });
 }
 
 export interface PerpTransferRow {
@@ -6914,6 +7024,22 @@ async function ordersWithLegs(db: Db, rows: Record<string, unknown>[]): Promise<
  * resolves at arm and every tick, and what keeps a second nonce from being
  * signed for an intent while its row is ambiguous.
  */
+/**
+ * ADOPT A VENUE ORDER THE LEDGER LOST (docs/perps.md rule 10; perps/reconcile-ledger.ts
+ * says why an adopted row is its own writer): a tx the venue shows on our key
+ * that no row of ours records — after a hosted wipe, typically. Keyed on the
+ * nonce, so a re-adoption finds the row and writes nothing, and a row of our
+ * own at that nonce always wins.
+ */
+export function insertAdoptedPerpOrder(a: AdoptedPerpOrderInput): Promise<{ id: string; outcome: "inserted" | "exists" }> {
+  return insertAdoptedPerpOrderRow(getDb(), a);
+}
+
+/** Is this nonce on (account, key) one this ledger recorded signing? Rule 16's check (a); perps/reconcile-ledger.ts. */
+export function perpNonceRecorded(agentId: string, accountIndex: number, apiKeyIndex: number, nonce: number | bigint): Promise<boolean> {
+  return perpNonceRecordedRow(getDb(), agentId, accountIndex, apiKeyIndex, nonce);
+}
+
 export async function listSubmittedPerpOrders(agentId: string, mode: PerpMode): Promise<PerpOrderRow[]> {
   const db = getDb();
   const rows = (await db
@@ -7794,6 +7920,55 @@ export async function bookPaperPerp(b: PaperPerpBooking): Promise<"booked" | "du
       }
     }
     return "booked";
+  });
+}
+
+/**
+ * PAPER COLLATERAL A RESTORE FOLDED, BACK INTO PAPER CASH — once the paper
+ * perp book is flat (the review's R3-FOLDED-PAPER-COLLATERAL).
+ *
+ * The upgrade-path restore (paper-checkpoint.ts) closes a paper perp book it
+ * cannot rebuild at the mark and keeps its value as perp_accounts
+ * .paper_collateral_micro. The paper engine never uses that figure — it funds
+ * every open from paper_book cash and returns margin to cash on every close
+ * (rule 14: paper keeps no collateral at a venue) — so, left there, it was
+ * money counted in equity that nothing could spend, and the view counted it
+ * as COMMITTED at the venue, which refused practice opens under the
+ * collateral cap for collateral that did not exist anywhere. Returning it to
+ * cash is the one reading under which both are right: equity is unchanged
+ * (C moves into cash) and the cap judges only margin the book really holds.
+ *
+ * ONE TRANSACTION, AND ONLY WHILE FLAT: no paper position with a size and no
+ * paper order unresolved — the same moment a real venue would let free
+ * collateral be withdrawn. Returns what moved (0n when nothing did). The
+ * caller holds the lane lock (a paper_book read-modify-write).
+ */
+export async function returnFoldedPaperCollateral(agentId: string): Promise<bigint> {
+  const agent = perpAgent(agentId);
+  return getDb().tx(async (db) => {
+    const row = (await db
+      .prepare(`SELECT paper_collateral_micro FROM perp_accounts WHERE agent_id = ? AND mode = 'paper'`)
+      .get(agent)) as { paper_collateral_micro: string | null } | undefined;
+    if (row === undefined || row.paper_collateral_micro === null) return 0n;
+    const c = textInt(row.paper_collateral_micro);
+    if (c === null) throw new Error("perp ledger: the paper collateral is unreadable");
+    if (c <= 0n) return 0n;
+    const held = await db
+      .prepare(`SELECT 1 AS n FROM perp_positions WHERE agent_id = ? AND mode = 'paper' AND side IS NOT NULL AND base NOT IN ('0', '') LIMIT 1`)
+      .get(agent);
+    if (held !== undefined && held !== null) return 0n;
+    const open = await db
+      .prepare(`SELECT 1 AS n FROM perp_orders WHERE agent_id = ? AND mode = 'paper' AND status IN ('submitted', 'executed') LIMIT 1`)
+      .get(agent);
+    if (open !== undefined && open !== null) return 0n;
+    const res = await db
+      .prepare(`UPDATE paper_book SET cash_usdg = cash_usdg + ?, updated_at = unixepoch() WHERE LOWER(agent_id) = LOWER(?)`)
+      .run(Number(c) / 1e6, agentId);
+    if (Number(res.changes) !== 1) throw new RangeError("perp ledger: there is no single paper book to return the folded collateral to");
+    await db
+      .prepare(`UPDATE perp_accounts SET paper_collateral_micro = '0', updated_at = unixepoch() WHERE agent_id = ? AND mode = 'paper'`)
+      .run(agent);
+    return c;
   });
 }
 

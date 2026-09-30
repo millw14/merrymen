@@ -182,7 +182,12 @@ describe("a NEW opt-in is the operator's to offer; a carry-forward never is", ()
       assert.equal(perpsOptInOffered(A, {}), false, "hosted default is paper: no opt-in (Rollout Phase 1)");
       assert.equal(perpsOptInOffered(A, { MERRYMEN_PERPS: "paper" }), false);
       assert.equal(perpsOptInOffered(A, { MERRYMEN_PERPS: "live" }), false, "hosted live with nobody allowlisted");
-      assert.equal(perpsOptInOffered(A, { MERRYMEN_PERPS: "live", MERRYMEN_PERPS_LIVE_TENANTS: A.toLowerCase() }), true);
+      assert.equal(perpsOptInOffered(A, { MERRYMEN_PERPS: "live", MERRYMEN_PERPS_LIVE_TENANTS: A.toLowerCase() }), false, "allowlisting alone cannot bypass missing durable hosted shutdown");
+      const ready = { MERRYMEN_PERPS: "live", MERRYMEN_PERPS_LIVE_TENANTS: A.toLowerCase(), DATABASE_URL: "postgres://test", MERRYMEN_STORE_DEK: Buffer.alloc(32, 7).toString("base64") };
+      assert.equal(perpsOptInOffered(A, ready), true, "implemented durable recovery permits the explicitly allowlisted opt-in");
+      assert.equal(perpsOptInOffered(A, { ...ready, MERRYMEN_PERPS: "paper" }), false, "capability cannot override the operator ceiling");
+      assert.equal(perpsOptInOffered(OTHER_ACCOUNT, ready), false, "capability cannot grant another account live access");
+      assert.equal(perpsOptInOffered(A, { ...ready, MERRYMEN_STORE_DEK: "invalid" }), false, "capability requires sealed-key custody");
       assert.equal(perpsOptInOffered(OTHER_ACCOUNT, { MERRYMEN_PERPS: "live", MERRYMEN_PERPS_LIVE_TENANTS: A }), false, "another account is not on the list");
       assert.equal(perpsOptInOffered(null, { MERRYMEN_PERPS: "live", MERRYMEN_PERPS_LIVE_TENANTS: A }), false);
       delete process.env.MERRYMEN_HOSTED;

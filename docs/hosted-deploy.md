@@ -440,6 +440,56 @@ dashboard, the iOS Telegram screen and the site docs repeat:
 > plain member of a group it talks in sends them. Leave `/setjoingroups`
 > enabled (BotFather's default) or the bot cannot be added to a group at all.
 
+### Perpetual futures (paper by default hosted; live only by allowlist)
+
+An owner can let their agent trade perpetual futures on Lighter's Robinhood
+Chain instance (contract: [docs/perps.md](perps.md)). Owners turn perps on in
+Settings; these variables only ever **restrict** what an owner may turn on.
+Nothing here can switch perps on for anyone, and none of it is a setting an
+owner can see or change.
+
+| variable | where | value |
+|---|---|---|
+| `MERRYMEN_PERPS` | **both** `web` and `orchestrator` | `off` · `paper` · `live`. Unset hosted means `paper` (practice only; the house operates no live Lighter orders); unset self-hosted means `live`. Anything it does not recognise reads as `off` — a typo in a switch that takes capability away must not hand it back. `web` reads it to decide whether to offer the opt-in and mint a Lighter key (`/api/perps/keygen` answers 403 otherwise); children inherit the orchestrator's value. Keep the two equal |
+| `MERRYMEN_PERPS_LIVE_TENANTS` | **both** | Only read with `MERRYMEN_PERPS=live`. A comma-separated list of agent **smart accounts** (`grant.smartAccount` — never the SIWE sign-in wallet, which is a different address); an entry that is not an address is dropped. Hosted, an account not on it stays on paper. Empty means nobody. Phase 2 of the rollout; do not name anyone before [the mainnet checklist](perps-mainnet-checklist.md) has passed and both mobile apps show the perps banner. Hosted live admission also requires the built-in journal-continuity capability; an environment variable cannot bypass it. Hosted kill/expiry atomically revokes the session grant and retains only the sealed venue key with a use deadline no more than 15 minutes later; completion or expiry cleanup scrubs it when the supervisor runs. A separate exits-only child attempts reduce-only closes and withdrawal under the tenant lease and a durable pre-send checkpoint. Partial, expired, unreadable or inaccessible subaccount custody stays residual/unknown; a queued shutdown never means funds are home |
+| `MERRYMEN_HALT_PERP_ENTRIES` *(optional)* | `orchestrator` | `1`: no perp opens for any tenant; exits, the protective loop, stand-downs, withdrawals and claims keep running. Only an empty value, `0`, `false`, `no` or `off` means not halted — any other spelling halts. Children read it at spawn, so it takes effect when Railway restarts the service on the variable change (seconds). This is the lever to reach for first in a perps incident (below) |
+| `MERRYMEN_LIGHTER_VENDOR_DIR` *(optional)* | `orchestrator` | A directory holding `lighter-signer.wasm` and `wasm_exec.js`. Unset, the signer is found at `worker/vendor/lighter/`, which the image carries (`COPY . .`; `.dockerignore` does not exclude it). Both files are hash-checked before a byte runs, and a known-answer test must pass, whatever the path; an override that points at the wrong place fails closed (live perps stay unarmed) rather than falling back to another copy. Paper never loads the signer |
+
+> **The signer.** `merrymen doctor` (or the orchestrator's first live arm)
+> reports whether both files match their pinned hashes and the known-answer
+> test passes. Record its memory and signing latency in a hosted child before
+> Phase 2 (checklist A1).
+>
+> **The Lighter key, hosted.** For a tenant on the live list, `/api/perps/keygen`
+> returns the private key sealed under `MERRYMEN_STORE_DEK`; the grant store
+> keeps it sealed, and the orchestrator decrypts it and writes
+> `perp-key.json` (0600) into that tenant's child home beside `grant.json`.
+> The child never holds the DEK. Rotating the DEK therefore has to re-seal
+> these as well as session keys. Hosted children share one OS user, so a
+> code-execution bug in one could read another tenant's key; per-child
+> isolation is a prerequisite for general availability (Phase 3).
+>
+> **The fleet feed file.** Lighter's public market data (prices, books,
+> funding, 4-hour mark candles) reaches every perps consumer through ONE file,
+> `lighter-feed.json`, in the fleet home — the orchestrator's `MERRYMEN_HOME`,
+> which `childEnv` passes to every child as `MERRYMEN_FLEET_HOME`. One process
+> writes it atomically from a single WebSocket (with a paced REST fallback);
+> children only read it and never open a Lighter socket of their own, because
+> every child falling back to the venue at once is the per-IP stampede the
+> file exists to prevent. Data older than 30 s is unread for opens, and a book
+> older than 10 s is not one a paper fill may walk; unread refuses opens
+> (`perp-unpriced`) and never closes anything. A 429 or 405 from Lighter writes
+> `lighter-cooldown.json` beside it, which every process honours.
+> The orchestrator starts one publisher when a running child's perpetuals
+> settings or a held position needs market data. It unions the configured
+> markets and held markets, including funding history for held positions;
+> paper consumers use the same feed. `MERRYMEN_PERPS=off` removes configured
+> entry markets while held positions remain subscribed. `FLEET_HALT` and
+> orchestrator shutdown stop the publisher; clearing the halt starts it again
+> when needed. The public client shares the fleet cooldown file. Check with
+> `ls -l "$MERRYMEN_HOME/lighter-feed.json"` in the orchestrator container:
+> absent, or older than 30 s, means no perps opens anywhere on that fleet.
+
 ## 5. Create the two services
 Both build from the same repo + `Dockerfile`. The image is role-by-variable: its
 `CMD` runs `npm run ${MERRYMEN_START:-start:web}`, and `railway.json` sets no
@@ -535,3 +585,90 @@ trading. Disconnecting app access leaves the owner's worker and grant in place.
 - **Keep web at ONE replica.** Auth nonces are in-memory; multiple web replicas would let a nonce replay across them. Multi-replica needs the KV-backed nonce store (B4/Railway hardening).
 - **Single orchestrator replica.** The per-tenant Postgres advisory lease (so two orchestrators never both trade a tenant) is Phase B; run exactly one orchestrator until it lands.
 - **Testnet only.** Before real funds: the mainnet re-audit + a two-funded-tenant testnet run (see `docs/hosted-platform-plan.md`).
+
+## 8. Halting the fleet (`FLEET_HALT`) while perps are open
+
+`touch "$MERRYMEN_HOME/FLEET_HALT"` in the orchestrator container stands
+every child down and spawns none until the file is removed. With live
+perpetuals on the fleet that stops more than trading: it stops each agent's
+protective loop, its reduce-only exits and any stand-down in progress. What
+protects an open position while the fleet is halted is only the stop resting
+at Lighter — which a fast gap can pass through, and which expires after at
+most 28 days. Nothing tells the owners: the orchestrator logs the halt and
+sends no message.
+
+1. **If the trouble is perps opening, do not use FLEET_HALT.** Set
+   `MERRYMEN_HALT_PERP_ENTRIES=1` on the orchestrator instead: no perp opens
+   anywhere, while exits, the protective loop, stand-downs and withdrawals
+   keep running.
+2. **Before a FLEET_HALT, list the tenants with open live perps**, from the
+   shared Postgres. What the venue last showed (the live cache, mirrored):
+
+   ```sql
+   SELECT p.agent_id, p.market_id, p.side, p.base, p.stop_trigger,
+          to_timestamp(p.updated_at) AS as_of
+     FROM perp_positions p
+    WHERE p.mode = 'live' AND p.side IS NOT NULL AND p.base <> '0'
+    ORDER BY p.agent_id, p.market_id;
+   ```
+
+   and every agent whose own report says something is, or may be, REAL money
+   at Lighter — positions, collateral, money in transit, or figures it could
+   not read (`null` is unread, never zero). The report's `mode` is the perps
+   rail, not the book: a practice position held while practice perps are off
+   reports `mode: "off"` with no account index, so the book is the report's
+   `live` mode, an account index, or else the agent's own `agents.mode`
+   (web/src/lib/perps-view.ts perpsBookOf). An unread live report can carry no
+   account index, so the index is not a filter:
+
+   ```sql
+   WITH r AS (
+     SELECT smart_account, mode AS book, perps::jsonb AS p
+       FROM agents
+      WHERE perps IS NOT NULL
+        AND pg_input_is_valid(perps, 'jsonb')   -- Postgres 16+; see below
+   )
+   SELECT smart_account, book,
+          p->>'mode'            AS rail,
+          p->>'accountIndex'    AS account_index,
+          p->'positions'        AS positions,
+          p->>'collateralMicro' AS collateral_micro,
+          p->>'inTransitMicro'  AS in_transit_micro,
+          p->>'stopsMissing'    AS stops_missing,
+          p->>'incident'        AS incident
+     FROM r
+    WHERE p->>'mode' <> 'paper'
+      AND (p->>'mode' = 'live' OR p->>'accountIndex' IS NOT NULL OR COALESCE(book, '') <> 'paper')
+      AND (jsonb_array_length(p->'positions') > 0
+           OR COALESCE(p->>'collateralMicro', '?') <> '0'
+           OR COALESCE(p->>'inTransitMicro', '?') <> '0'
+           OR COALESCE(p->>'stopsMissing', '0') <> '0'
+           OR p->>'incident' = 'true');
+   ```
+
+   A row whose `perps` is not valid JSON is unknown, not empty — list those
+   too: `SELECT smart_account FROM agents WHERE perps IS NOT NULL AND NOT
+   pg_input_is_valid(perps, 'jsonb');`. On Postgres older than 16 there is no
+   `pg_input_is_valid`, and a plain `perps::jsonb` cast aborts the WHOLE query
+   on the first such row, not just that row: run the first query without the
+   `pg_input_is_valid` line and, if it fails on a cast, find the bad row by
+   hand before trusting any list. Map each smart account to its owner with
+   `SELECT tenant FROM grants WHERE lower(grant_json->>'smartAccount') = lower('<account>')`.
+3. **Tell each owner on the list** through their own bot or by email, before
+   the halt if you can: their agent is halted with leveraged positions open at
+   Lighter, protected only by the stops resting there, and nothing will manage
+   those positions until the halt lifts. **Do not tell them they can close
+   positions with `merrymen recover`: they cannot.** Closing a position with
+   the owner key stays off until the mainnet checklist proves it. `merrymen
+   recover` can revoke the agent's Lighter key and withdraw free collateral,
+   but its unwind cancels every resting order first — including the stops on
+   positions it leaves open — so during a halt, running it strips the only
+   protection those positions have. For almost every owner the right advice is
+   to wait for the halt to lift; an owner who suspects the key itself is
+   compromised is the exception, and should be told exactly that trade-off.
+4. **Keep it short, and check on the way out.** When the file is removed and
+   the children are back, every listed agent's report must show a fresh
+   `protectAt` and `stopsMissing` of 0 within a minute or two; anything else is
+   an agent to look at by hand.
+
+> **Hosted recovery accounting.** The parent encrypts a tenant/account-bound, paged snapshot of the exact audit journal and its spot, vault, energy, paper and perps financial tables. It acknowledges that snapshot before each external perps send and captures the same SQLite snapshot before periodic/final mirrors. A cold child restores those domains together. Capture, IPC, storage, validation and restore stream fixed-size pages (512 KiB) and bounded SQL batches; there is no total-history row or byte cutoff. Individual serialized records are limited to 8 MiB, and the legacy v1/v2 adapter is limited to 32 MiB; unsupported old snapshots refuse live perps with an owner-visible recovery notice. Full new histories are never accumulated in RAM or sent as one IPC message. Unsupported or unverifiable old histories refuse live perps; they are never reconstructed from shared totals. On kill, only venue rows and journal continuity enter the temporary runner. The runner has no session grant, database credentials, DEK, strategy or UserOp sender. Keys and signed replay bytes retire at completion or the immutable deadline; accounting evidence remains until its final mirror succeeds. General availability still requires per-child OS isolation and the live checklist.

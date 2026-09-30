@@ -23,6 +23,7 @@
  */
 // Browser-safe: chat-commands.ts, which the card bundles, imports it too.
 import { MERRYMEN_TOKEN } from "@merrymen/core";
+import { readPerpExitOrder } from "../../../worker/src/perps/owner-order";
 
 /**
  * How long after its expiry an UNCLAIMED row may still hold the one-at-a-time
@@ -244,6 +245,7 @@ export interface OrderBody {
   symbol?: unknown;
   usdgAmount?: unknown;
   purpose?: unknown;
+  book?: unknown;
 }
 
 /** A type, not an interface, so it fits the command file's flat-scalar `args`. */
@@ -259,7 +261,8 @@ export type OrderAsked = {
    * (worker/src/order-gate.ts orderRoute, which routes on it and never on the
    * symbol). Absent on every other order.
    */
-  purpose?: "energy";
+  purpose?: "energy" | "close-perp" | "flatten-perps";
+  book?: "paper" | "live";
 };
 
 /**
@@ -272,6 +275,9 @@ export type OrderAsked = {
  * assets and every cap live in the worker, which decides again.
  */
 export function readOrder(body: OrderBody): { order: OrderAsked } | { error: string } {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { error: "order must be an object" };
+  const exit = readPerpExitOrder(body as Record<string, unknown>);
+  if (exit) return exit;
   const side = body.side === "buy" || body.side === "sell" ? body.side : null;
   if (!side) return { error: "that is neither a buy nor a sell" };
   const symbol = typeof body.symbol === "string" ? body.symbol.trim().toUpperCase() : "";

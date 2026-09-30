@@ -119,7 +119,7 @@ import { grantHasDeadRateLimit } from "./session-account";
 import { isExpired, queuedCommandIds, runTickCommand, unlessLate, type CommandOutcome, type FileCommand, type LateOrder } from "./command-files";
 import { expiredOrderReceipt, ledgerFactsOf, orderReceipt, orderSubject, type LedgerFacts, type OrderVerdict } from "./order-receipt";
 import { COMMAND_WAKE_EVERY_MS, createCommandClock, createLiveTrades, createOrderInFlight, drainOnTick, livePeaksStale, tickPlan, tickRatchets, writeHeartbeat, type MarkBook } from "./command-wake";
-import { createTickBook, orderAsked, orderReadsOf, placeOrder, type StatedReads } from "./order-gate";
+import { createTickBook, orderAsked, orderReadsOf, orderRoute, placeOrder, type StatedReads } from "./order-gate";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import { provenanceOf, type Provenance } from "./provenance";
@@ -157,7 +157,7 @@ import { tradeFeeUsdg, accrueAboveHwm } from "./fees";
 import { archiveCurrentGrant, grantExpired, grantKey, loadArmableGrant, loadGrantFile } from "./grant";
 import { killHosted, killRequested } from "./kill-request";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
-import { execModeOf, liveBlockerText, publishedMode, type ExecMode, type RefuseRule } from "./exec-mode";
+import { execModeOf, liveBlockerText, publishedMode, type ExecInputs, type ExecMode, type RefuseRule } from "./exec-mode";
 import { limitsFromGrant } from "./limits";
 import {
   accountingLicence,
@@ -226,7 +226,7 @@ import {
   sayEnergyPlan,
   usdgText,
 } from "./energy-buy";
-import { attributeSettlements, expectedCashUsdg, heldBreakerObservationUsdg, lookAtCash, opsHoldInference, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC, wroteSince, type Settlement } from "./flow-inference";
+import { attributeSettlements, expectedCashUsdg, heldBreakerObservationUsdg, lookAtCash, opsHoldInference, payoutShift, settlementDelta, STRANDED_RESOLVE_WINDOW_SEC, wroteSince, type PayoutFold, type Settlement } from "./flow-inference";
 import { durableNetContributionsUsdg6 } from "./net-contributions";
 import { bookEnergyPurchase, energyLandedBlockAtArm, isEnergyIntent, isEnergyRow, settleEnergyLanding, settleTransferLanding, type EnergySettleDeps } from "./energy-settle";
 import { bookCapitalFlow, energyBuysInFlight, hasFlowForTx, newestLandedEnergyBuy } from "./store";
@@ -244,16 +244,58 @@ import {
 import {
   bookPaperPerp,
   bumpNonceHighWater,
+  getNonceHighWater,
   getPerpAccount,
+  getPerpOrder,
   getPerpPositions,
+  insertAdoptedPerpOrder,
+  insertPerpFill,
+  insertPerpFunding,
+  insertPerpOrderSubmitted,
   listSubmittedPerpOrders,
+  patchPerpAccount,
   perpLaneLedgerFacts,
+  perpNonceRecorded,
+  perpOrderByCoi,
+  resolvePerpOrder,
+  returnFoldedPaperCollateral,
   setAgentPerps,
+  setPerpPositions,
+  updatePerpLegStatus,
+  upsertPerpPosition,
 } from "./store";
-import { createPerpFeedHost, createPerpLane, isHostedChildProcess, type PerpLaneStore } from "./perps/lane";
+import { createPerpFeedHost, createPerpLane, isHostedChildProcess, type PerpLaneStore, type PerpLiveStore } from "./perps/lane";
+// THE LIVE LIGHTER EDGES the lane holds the key with (perps/live-handle.ts):
+// the hash-pinned, KAT-checked signer, loaded lazily — only a live account
+// with the perp block ever reaches it (paper never loads the WASM).
+import { loadSigner } from "./perps/signer";
 import { lighterFeedPath, readLighterFeed } from "./perps/feed-reader";
 import { startLighterFeed } from "./perps/feed";
 import { createLighterApi } from "./perps/api";
+import type { Db } from "./db";
+import type { CarriedPayout, InTransit } from "./perps/payouts";
+import { runPayoutStep } from "./perps/payout-look";
+import { livePerpTerm, venueMoneyOf, type LivePerpTerm } from "./perps/live-term";
+import { claimDue } from "./perps/onboard";
+import { durableHostedPerpStore, hostedPerpSendFence } from "./perps/hosted-live-checkpoint";
+// THE ON-CHAIN PERP LEGS (deposit, key registration, claim) on the UserOp
+// rail: what is signed, what landed, and the margin row beside the trades row.
+import {
+  isPerpLegKind,
+  perpClaimExecMode,
+  perpLegCalls,
+  perpLegKind,
+  perpLegLandedTransfer,
+  perpLegMismatch,
+  perpLegOfReceipt,
+  perpLegOrphan,
+  perpLegResolution,
+  perpLegSubmittedTransfer,
+  readLighterAccountIndex,
+  readLighterPendingAt,
+  type PerpLegReading,
+} from "./perps/legs";
+import { LIGHTER_ROUTE_V1, grantPerp, type PerpKey } from "../../packages/core/src/index";
 import {
   bundlerChainMismatch,
   connectionKey,
@@ -519,6 +561,10 @@ import {
   getAgentFinancials,
   getRiskPeriodPeak,
   listOpenPerpTransfers,
+  perpTransferWith,
+  upsertPerpTransfer,
+  recordPerpPayouts,
+  lastKnownCashReadBlock,
   restoreRiskPeriod,
   hasChainFlow,
   accountingHistoryAuditable,
@@ -832,13 +878,20 @@ async function main() {
    * exec-mode.ts. Everything that used to call paperActive() still does; it is
    * now derived from the same answer the fork acts on, so the two cannot drift.
    */
-  const execMode = (): ExecMode =>
-    execModeOf({
+  const execInputs = (): ExecInputs =>
+    ({
       armed: !!active,
       executor: !!active?.executor,
       chainId: active?.grant.chainId ?? 0,
       // The reconciler's reading once it exists; before that, the rail's own.
       cashUsdg: lastCashUsdg ?? railCashUsdg,
+      // FUNDED INCLUDES THE VENUE (docs/perps.md rule 8a(f)): the USDG this
+      // account holds at Lighter, from the last live read. No Lighter account
+      // on chain (the known 0 every agent without perps reads) is no term at
+      // all — cash alone decides, as it always did; an account whose venue is
+      // unread is not an empty one (null). So posting the last USDG as margin
+      // does not flip the whole agent, spot included, to paper.
+      perpVenueMicro: perpAccountIndex === 0n ? undefined : perpVenueMicro,
       // Read on BOTH rails now — see the note at the assignment. Live-only made
       // this a latch, and a latch on a leg of the rail predicate is an agent
       // that can never come back.
@@ -859,6 +912,7 @@ async function main() {
       // False only during the migration that populates the field above.
       enforceLiveIntent: cfg.enforceLiveIntent,
     });
+  const execMode = (): ExecMode => execModeOf(execInputs());
   const paperActive = () => execMode().mode === "paper";
 
   // ── TELEGRAM GROUPS: THE ONE DOOR FROM A GROUP INTO TRADING ─────────────
@@ -3191,7 +3245,56 @@ async function main() {
     perpLaneLedgerFacts,
     getAgentEpoch,
     setAgentPerps,
+    returnFoldedPaperCollateral,
+    patchPerpAccount,
   };
+  /**
+   * THE LIVE SIDE'S LEDGER — every writer the live executor, the reconciler,
+   * the nonce allocator and the stand-down book through: store.ts's own, so a
+   * live venue fact is written with its journal entry exactly as the tests
+   * write it.
+   */
+  const perpLiveStore: PerpLiveStore = durableHostedPerpStore({
+    insertPerpOrderSubmitted,
+    resolvePerpOrder,
+    updatePerpLegStatus,
+    upsertPerpTransfer,
+    listSubmittedPerpOrders,
+    perpOrderByCoi,
+    insertPerpFill: (f) => insertPerpFill(f),
+    insertPerpFunding: (f) => insertPerpFunding(f),
+    listOpenPerpTransfers,
+    setPerpPositions,
+    getPerpPositions,
+    getPerpAccount,
+    patchPerpAccount,
+    bumpNonceHighWater,
+    getNonceHighWater,
+    insertAdoptedPerpOrder,
+    perpNonceRecorded,
+    getPerpOrder,
+    perpLaneLedgerFacts,
+    upsertPerpPosition,
+  });
+  /**
+   * ONE ADDRESS-KEYED LIGHTER CLIENT PER L1 ADDRESS — its request budget is
+   * the venue's per-address one (api.ts), so two clients for one address
+   * would each think they had the whole 60/min. The public client is the
+   * feed's kind: reads a key-less account can make.
+   */
+  const perpApis = new Map<string, ReturnType<typeof createLighterApi>>();
+  const perpApiFor = (smartAccount: string) => {
+    const k = smartAccount.toLowerCase();
+    let c = perpApis.get(k);
+    if (c === undefined) {
+      c = createLighterApi({ home: merrymenHome(), budgetKey: k });
+      perpApis.set(k, c);
+    }
+    return c;
+  };
+  let perpPublicApi: ReturnType<typeof createLighterApi> | null = null;
+  /** The agent the lane's owner lines go to — the armed one, or the last armed while the lane holds its key past a kill. */
+  let perpEventsAgent: string | null = null;
   /**
    * ONE LIGHTER FEED PER SELF-HOSTED PROCESS, started the first time the lane
    * is on (lane.ts createPerpFeedHost). A hosted child never starts one: it
@@ -3203,6 +3306,10 @@ async function main() {
     start: () =>
       startLighterFeed({
         marketIds: () => perpLane.feedMarketIds(),
+        // Funding history for every HELD market, not only perp-trend's
+        // universe: a position's funding never stalls on a market the route
+        // does not trade (feed.ts header).
+        heldMarketIds: () => perpLane.heldMarketIds(),
         outPath: lighterFeedPath(merrymenHome()),
         home: merrymenHome(),
         // THE PUBLIC CLIENT: market data never bills a tenant's L1 bucket.
@@ -3213,7 +3320,11 @@ async function main() {
   });
   const perpLane = createPerpLane({
     store: perpStore,
-    armed: () => (active ? { agentId: active.agentId, smartAccount: active.grant.smartAccount, limits: active.limits } : null),
+    armed: () => {
+      if (!active) return null;
+      perpEventsAgent = active.agentId;
+      return { agentId: active.agentId, smartAccount: active.grant.smartAccount, limits: active.limits };
+    },
     config: () => cfg,
     execMode: () => execMode(),
     readFeed: (nowMs) => readLighterFeed(lighterFeedPath(merrymenHome()), nowMs),
@@ -3231,10 +3342,54 @@ async function main() {
         inFlightSpentUsdg -= spend;
       },
       refresh: () => (active ? refreshBudget(active.agentId) : Promise.resolve()),
+      // recordTrade's fail-closed conversion (lane.ts reservePlaceCount): a
+      // booking whose settled re-read failed keeps its op and spend counted.
+      keep: (spend) => {
+        settledOps += 1;
+        settledSpentUsdg += spend;
+      },
     },
-    events: (level, message) => (active ? addEvent(active.agentId, level, message) : Promise.resolve()),
+    // THE DAY'S COUNTERS UNDER THE LANE LOCK (R3-OPS-CAP-STALE-BASE): the
+    // same two figures processIntentLocked's `state` read before the lock.
+    counters: () => ({ spentTodayUsdg: spentToday(), opsToday: opsTodayCount() }),
+    events: (level, message) => {
+      const id = active?.agentId ?? perpEventsAgent;
+      return id ? addEvent(id, level, message) : Promise.resolve();
+    },
     decide: (intent, source, reason, known) => ensureDecision(intent, source, reason, known),
     onActive: () => perpFeed.ensure(),
+    /**
+     * THE LIVE VENUE (docs/perps.md rules 5, 8a, 9–13, 16; perps/lane.ts):
+     * the lane holds the Lighter key in a handle of its own — not in
+     * `active`, which a kill or an expiry clears while a position may still
+     * be open — and reads, signs and stands down through these edges. The
+     * chain facts are this file's (the account index read on chain, the
+     * tick's cash, the payout step's transit); the term is applied back
+     * through noteLivePerpTerm at the tick.
+     */
+    live: {
+      home: () => merrymenHome(),
+      loadSigner: () => loadSigner(),
+      api: (smartAccount) => perpApiFor(smartAccount),
+      publicApi: () => (perpPublicApi ??= createLighterApi({ home: merrymenHome(), budgetKey: "public" })),
+      store: perpLiveStore,
+      beforeSend: (agentId) => hostedPerpSendFence(agentId),
+      accountIndex: () => perpAccountIndex,
+      cashMicro: () => perpCashMicro,
+      transit: () => perpTransit,
+      // livePerpTermOf's composition, with the transit the lane hands in (this
+      // tick's perpTransit, less a first deposit it found already credited).
+      term: (account, transit) => livePerpTerm({ account, transit }),
+      keyLegInFlight: async () => {
+        const id = active?.agentId ?? perpEventsAgent;
+        if (!id) return null;
+        try {
+          return (await listSubmittedOps(id)).some((o) => o.kind === "perp-key");
+        } catch {
+          return null;
+        }
+      },
+    },
   });
 
   /**
@@ -3381,6 +3536,64 @@ async function main() {
           if (settled.settled === "booked") capitalPeakDirty = true;
           capitalBooked = settled.settled === "booked" || settled.settled === "already";
         }
+        // ── A PERP LEG: SETTLED FROM THE PROXY'S OWN EVENT, OR NOT AT ALL ──
+        //
+        // The row already names its leg (perp-deposit / perp-key /
+        // perp-claim); the receipt must SHOW it — the proxy's Deposit(self),
+        // the changePubKey request from self, or WithdrawPending(self), in
+        // this op's own logs (inflight-reconcile.ts opLogsOf), never the
+        // bundle's. A receipt that cannot be read, or cut to this op, or that
+        // shows anything else, leaves the row `submitted` — still counted,
+        // still holding inference — for the next pass (rule 9: never
+        // guessed). A LANDED deposit moves its perp_transfers row to `landed`
+        // and a REVERTED one to `failed`, each in the same db.tx as this
+        // row's settlement (store.ts perpTransferWith). A claim's money is
+        // recognised by payouts.ts from the chain — the payout fold explains
+        // it — so a claim's settlement explains NOTHING on its own:
+        // settlementDelta's answer for an op whose money is booked elsewhere
+        // (capitalBooked false → 0n), never the payout a second time (the
+        // baseline would take it twice and the residual read as a withdrawal
+        // of it). A deposit's own receipt movement is its whole explanation.
+        let perpWith: ((db: Db) => Promise<void>) | undefined;
+        if (isPerpLegKind(row.kind)) {
+          const grant = active?.grant;
+          if (!grant || grant.smartAccount.toLowerCase() !== smartAccount.toLowerCase()) {
+            console.log(`[reconcile] ${row.kind} ${r.userOpHash.slice(0, 10)}… left submitted — no armed grant for ${smartAccount}`);
+            continue;
+          }
+          // A revert's deposit margin row, found by our UserOp: its amount is
+          // the row's own, never re-derived. Unreadable → the next pass asks
+          // again; the op stays counted meanwhile.
+          let submittedTransferMicro: bigint | null = null;
+          if (!r.success) {
+            try {
+              const open = await listOpenPerpTransfers(agentId, "live");
+              submittedTransferMicro =
+                open.find((t) => t.userOpHash !== null && t.userOpHash.toLowerCase() === r.userOpHash.toLowerCase())?.amountMicro ?? null;
+            } catch (e) {
+              console.log(`[reconcile] ${row.kind} ${r.userOpHash.slice(0, 10)}… left submitted — perp transfers unreadable (${e instanceof Error ? e.message : String(e)})`);
+              continue;
+            }
+          }
+          const res = perpLegResolution({
+            kind: row.kind,
+            success: r.success,
+            opLogs: r.opLogs,
+            receiptUsdgDelta6: r.usdgDelta6,
+            account: smartAccount,
+            chainId: grant.chainId,
+            userOpHash: r.userOpHash,
+            txHash: r.txHash,
+            submittedTransferMicro,
+          });
+          if (!res.settle) {
+            console.log(`[reconcile] ${row.kind} ${r.userOpHash.slice(0, 10)}… left submitted — ${res.why}`);
+            continue;
+          }
+          if (row.kind === "perp-claim" && r.success) capitalBooked = false;
+          if (res.transfer !== null) perpWith = perpTransferWith({ ...res.transfer, agentId, mode: "live" });
+          if (r.success && row.kind === "perp-deposit") perpAccountIndexStale = true;
+        }
         // THE SETTLEMENT EXPLAINS ONLY ITS OWN CASH (flow-inference.ts, rule 2).
         // It used to move `ledgerWrites`, which closed the WHOLE held interval
         // as explained — a deposit made while the op was stranded was never
@@ -3397,7 +3610,7 @@ async function main() {
           settlementsQueued.add(r.userOpHash);
           settlementQueue.push({ userOpHash: r.userOpHash, createdAt: row.createdAt, usdgDelta6: explains.usdgDelta6 });
         }
-        await addTrade({
+        const settledRow = await addTrade({
           agent_id: agentId,
           kind: row.kind as TradeRow["kind"],
           target: row.target,
@@ -3412,7 +3625,19 @@ async function main() {
           tx_hash: r.txHash,
           status: r.success ? "landed" : "reverted",
           ...(r.success ? { basis_source: "receipt" as const } : { reject_rule: "reverted on-chain (resolved)" }),
-        });
+        }, perpWith === undefined ? undefined : { with: perpWith });
+        // A PERP LEG WHOSE MARGIN ROW THE LEDGER REFUSED stays `submitted`
+        // (the transaction rolled both back) — said once per pass, so a
+        // contradiction between the ledger and the chain is looked at.
+        if (!settledRow && perpWith !== undefined) {
+          await addEvent(
+            agentId,
+            "err",
+            `a Lighter ${row.kind.replace(/^perp-/, "")} (${r.userOpHash.slice(0, 10)}…) ${r.success ? "landed" : "reverted"}, but its ` +
+              `margin row could not be written beside it — it stays counted as in flight until someone looks.`,
+          );
+          continue;
+        }
         await addEvent(
           agentId,
           "warn",
@@ -3598,8 +3823,64 @@ async function main() {
         }
       }
       if (orphans.length === 0) return;
+      // OUR OWN PERP LEGS STILL `submitted` — the resolver above left them
+      // because their receipt did not prove the leg. The sweep sees the same
+      // ops (a submitted row is not "known"), and its safe default would
+      // rewrite such a row to `swap` and strand its margin row `submitted` —
+      // holding every ratchet for good. So an unproven one is left to the
+      // resolver's next pass, exactly as it found it.
+      const perpSubmitted = new Set(
+        (await listSubmittedOps(agentId)).filter((r) => isPerpLegKind(r.kind)).map((r) => r.userOpHash.toLowerCase()),
+      );
 
       for (const o of orphans) {
+        // ── A PERP LEG THE LEDGER NEVER RECORDED ─────────────────────────
+        //
+        // Named by the proxy's own event in THIS op's logs (never its
+        // bundle's): Deposit(to = self) is a `perp-deposit`, the changePubKey
+        // request from self a `perp-key`, WithdrawPending(owner = self) a
+        // `perp-claim` — each with target the proxy, no token legs and no
+        // basis (the no-trades-rows amendment). A deposit gets its
+        // perp_transfers row `landed` (identified by its Deposit log) in the
+        // same db.tx, so the margin it put at the venue is in transit until
+        // credited and never unaccounted for; a claim's money is payouts.ts's.
+        // Anything the logs cannot prove — unreadable, not cut to this op,
+        // ambiguous — stays the safe default below.
+        const orphanChainId = active?.grant.smartAccount.toLowerCase() === smartAccount.toLowerCase() ? active.grant.chainId : null;
+        const perpOrphan = orphanChainId === null ? null : perpLegOrphan(o, smartAccount, orphanChainId);
+        if (perpOrphan !== null) {
+          const leg = perpOrphan;
+          const amountMicro = leg.amountMicro;
+          const wrote = await addTrade(
+            {
+              agent_id: agentId,
+              kind: leg.kind,
+              target: LIGHTER_ROUTE_V1.proxy,
+              amount_usdg: usdgNum(amountMicro),
+              user_op_hash: o.userOpHash,
+              tx_hash: o.txHash,
+              status: "landed",
+              basis_source: "receipt",
+            },
+            leg.transfer === null ? undefined : { with: perpTransferWith({ ...leg.transfer, agentId, mode: "live" }) },
+          );
+          if (wrote && leg.kind === "perp-deposit") perpAccountIndexStale = true;
+          await addEvent(
+            agentId,
+            wrote ? "warn" : "err",
+            wrote
+              ? `reconciled a Lighter ${leg.kind.replace(/^perp-/, "")} the ledger had no row for (${o.userOpHash.slice(0, 10)}…` +
+                  `${leg.kind === "perp-key" ? "" : `, ${fmt(amountMicro)} USDG`}) — booked from its receipt, ` +
+                  `counted toward today's ops${leg.kind === "perp-deposit" ? " and spend" : ""}`
+              : `found an unrecorded Lighter ${leg.kind.replace(/^perp-/, "")} (${o.userOpHash.slice(0, 10)}…) but could not ` +
+                  `write its reconciliation rows — it stays uncounted; will retry next arm`,
+          );
+          continue;
+        }
+        if (perpSubmitted.has(o.userOpHash.toLowerCase())) {
+          console.log(`[reconcile] ${o.userOpHash.slice(0, 10)}… is our own Lighter leg, still unproven by its receipt — left for the resolver`);
+          continue;
+        }
         // 'swap' is the dominant and the SAFE default kind: it counts toward the
         // cap (unlike 'vault-withdraw', the only exempted kind), so a reconciled
         // op can only ever over-count spend, never under-count — the safe
@@ -3713,7 +3994,17 @@ async function main() {
     // `grant` rides along so the flow classifier can be told which contracts
     // hold this account's own assets — without it a class buy pairs with
     // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
-    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
+    scan: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant } | undefined,
+    /**
+     * THIS TICK'S LIGHTER PAYOUTS (perps/payout-look.ts) and the block the
+     * cash was read at. Every WithdrawPending(self, 3) since the baseline's
+     * block explains exactly its own cash (rule 12) — folded into whichever
+     * baseline this look judges against BEFORE lookAtCash or the first
+     * look's plan, so a payout is never inferred as the owner's deposit. An
+     * unreadable window holds the steady state and doubts a first look;
+     * nothing is ever inferred across it.
+     */
+    payouts: { fold: PayoutFold; block: bigint | null },
   ): Promise<"held" | "settled"> => {
     const record = async (
       deltaUsdg: bigint,
@@ -3940,6 +4231,9 @@ async function main() {
       // accounting is in this branch, so it is worth being exact about what
       // changed and why.
       //
+      // (Lighter payouts since the durable reading's block — or the anchor's
+      // — are folded in below exactly as the steady state folds them.)
+      //
       // THE OLD TEST WAS `equityUsdg > 0n && highWaterMarkUsdg === 0n`, read as
       // "money is here and no peak is on record, so this money just arrived".
       // In self-hosted mode that is sound: the database outlives the process, so
@@ -3985,6 +4279,11 @@ async function main() {
       const hostedLook = accounting.openingBalanceLicence !== "self-hosted-local";
       const prior = hostedLook ? null : await lastKnownCashReading(agentId);
       const earlierLanded = prior === null ? [] : await landedOpsBetween(agentId, prior.at, processStartedSec + 1);
+      // THE PAYOUTS SINCE THE READING THIS LOOK JUDGES AGAINST — the
+      // restart's durable reading, or the hosted anchor (payout-look.ts took
+      // its cursor from the same one). Null: they could not be read, and a
+      // first look then DOUBTS rather than guesses (below).
+      const payoutsSince = payoutShift(payouts.fold, foldedPayouts);
       const settled = takeSettlements();
       // A FIRST LOOK THAT THROWS (a flow row that did not land) is asked again
       // next tick, from the same durable reading — so it must find the same
@@ -3993,6 +4292,12 @@ async function main() {
         // THE SAME SHIFT, for the hosted resume: what the arm's resolver settled
         // explains its own movement across the downtime, so it is not drift.
         const anchorShift = attributeSettlements(settled, anchorObservedAtSec);
+        // AND EVERY LIGHTER PAYOUT SINCE THE ANCHOR'S BLOCK (rule 12): a payout
+        // that landed while the child was down — a kill's stand-down paid
+        // home, say — is margin coming home, not drift (the payout-settlement
+        // amendment, test b). It shifts the anchor exactly as a settlement
+        // does: by its own cash, and nothing else.
+        anchorShift.shiftUsdg6 += payoutsSince?.shiftUsdg6 ?? 0n;
         const plan = planFirstObservation({
           licence: accounting.openingBalanceLicence,
           equityUsdg,
@@ -4004,6 +4309,26 @@ async function main() {
         if (plan.action === "resume-clean" || plan.action === "resume-with-drift") {
           await doubtUnreadSettlements(agentId, anchorShift.unread);
         }
+        // A LIGHTER ACCOUNT WHOSE PAYOUTS COULD NOT BE READ across the
+        // window this look spans: nothing about that window is inferred and
+        // contributions are marked unknown. Only a look that JUDGES AGAINST A
+        // BASELINE spans a window — a hosted resume from the anchor's cash, a
+        // self-hosted restart from its durable reading — so each of those two
+        // asks this below; an opening balance compares against nothing, and
+        // stands.
+        const payoutsUnread = payoutsSince === null && payouts.fold.kind === "unfoldable";
+        const doubtUnreadPayouts = async () => {
+          doubtContributions(`Lighter payouts since the last reading could not be read`);
+          await addEvent(
+            agentId,
+            "warn",
+            `couldn't read the Lighter payouts to this account since its last reading (${payouts.fold.kind === "unfoldable" ? payouts.fold.why : "unread"}) — ` +
+              `so no change in its cash across that window is booked as a deposit or a withdrawal, and contributions are marked ` +
+              `unknown (no performance fee) until the ledger can price it.`,
+          );
+        };
+        const payoutsDoubt = payoutsUnread && (plan.action === "resume-clean" || plan.action === "resume-with-drift") && anchorCashUsdg !== null;
+        if (payoutsDoubt) await doubtUnreadPayouts();
         if (plan.action === "legacy-local") {
           // SELF-HOSTED KEEPS THE ORIGINAL BEHAVIOUR, unchanged, because the
           // premise it rests on is true here: the ledger is on a real disk that
@@ -4013,6 +4338,9 @@ async function main() {
           // the reasoning was ever wrong on its own terms.
           if (equityUsdg > 0n && highWaterMarkUsdg === 0n) {
             await record(equityUsdg, "opening balance");
+          } else if (prior !== null && payoutsUnread) {
+            // Nothing across the downtime is inferred: its payouts are unread.
+            await doubtUnreadPayouts();
           } else if (prior !== null) {
             // THE STEADY STATE'S OWN LOOK, across the restart, against the last
             // durable reading: every op the resolver settled since that reading
@@ -4030,6 +4358,9 @@ async function main() {
               cashUsdg,
               opsInFlight: false,
               writesInInterval: ledgerWrites > 0 || wroteSince(earlierLanded, settlementsQueued),
+              // Every payout since the reading's block: margin home while the
+              // worker was down is not "changed while stopped" (test a).
+              payoutShiftUsdg6: payoutsSince?.shiftUsdg6 ?? 0n,
             });
             await doubtUnreadSettlements(agentId, l.unread);
             if (l.verdict.action === "infer") await record(l.verdict.deltaUsdg, "changed while the worker was stopped");
@@ -4038,7 +4369,7 @@ async function main() {
           // THE ONLY PATH THAT BOOKS A CONTRIBUTION HERE, and it runs only when
           // the orchestrator READ durable state and found none.
           if (plan.amountUsdg > 0n) await record(plan.amountUsdg, "opening balance");
-        } else if (plan.action === "resume-with-drift") {
+        } else if (plan.action === "resume-with-drift" && !payoutsDoubt) {
           doubtContributions(`cash moved across the downtime window and nothing could price it`);
           await addEvent(
             agentId,
@@ -4064,6 +4395,11 @@ async function main() {
       // resolver may still settle is in flight; fold every settlement's own
       // movement into the baseline; then a ledger write explains the interval,
       // or the residual — what no settlement explains — is booked.
+      // THE PAYOUTS SINCE THE BASELINE'S BLOCK (rule 12): each explains
+      // exactly its own cash, so their sum joins the baseline before the
+      // residual is judged — a payout landing between one balance read and
+      // the next is never a deposit (test d). Unreadable: the look holds.
+      const payoutsSince = payoutShift(payouts.fold, foldedPayouts);
       const l = lookAtCash({
         baselineUsdg: lastCashUsdg,
         since: baselineSince,
@@ -4072,14 +4408,27 @@ async function main() {
         cashUsdg,
         opsInFlight,
         writesInInterval: ledgerWrites !== ledgerWritesAtSnapshot,
+        payoutShiftUsdg6: payoutsSince === null ? null : payoutsSince.shiftUsdg6,
       });
       // KEPT WHETHER OR NOT THE LOOK HOLDS: a settled op's movement is
       // explained for good. A throw from record() below leaves it folded, so
       // the retry sees the same residual, not the op's cash a second time.
       lastCashUsdg = l.baselineUsdg;
       baselineUnattributed = l.unattributed;
+      // AND SO ARE THE PAYOUTS: the baseline now holds them, so the cursor
+      // moves to this block and their keys are spent — a held look followed
+      // by a settling one folds each payout once (test e). Unread, both stay
+      // where they were and the next look reads the same window again.
+      if (payoutsSince !== null) {
+        for (const k of payoutsSince.keys) foldedPayouts.add(k);
+        payoutCursor = payouts.block;
+      }
       await doubtUnreadSettlements(agentId, l.unread);
       if (l.verdict.action === "hold") {
+        if (payoutsSince === null && payouts.fold.kind === "unfoldable") {
+          console.log(`[flows] Lighter payouts unread (${payouts.fold.why}) — not inferring a flow from this cash change; baseline kept`);
+          return "held";
+        }
         // THE BASELINE IS KEPT, and so is the write snapshot: the interval
         // stays open until the op settles. The caller accrues no fee and moves
         // no lifetime peak on this tick (tickRatchets `held`) — a deposit made
@@ -4095,6 +4444,13 @@ async function main() {
     baselineSince = listedAt;
     baselineUnattributed = false;
     ledgerWritesAtSnapshot = ledgerWrites;
+    // THE BASELINE IS THIS READING, and its block the payout cursor — on a
+    // scan-covered look too, where the scan's venue-margin arm has already
+    // explained any payout (the cursor only advances). Every payout the fold
+    // read is in this cash, so its key is spent.
+    const absorbed = payoutShift(payouts.fold, foldedPayouts);
+    if (absorbed !== null) for (const k of absorbed.keys) foldedPayouts.add(k);
+    payoutCursor = payouts.block;
     return opsInFlight ? "held" : "settled";
   };
 
@@ -4163,10 +4519,11 @@ async function main() {
     // `grant` rides along so the flow classifier can be told which contracts
     // hold this account's own assets — without it a class buy pairs with
     // nothing and books as a withdrawal. See ClassifyInput.custodyAddresses.
-    scan?: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant },
+    scan: { chain: ReconcileChain; smartAccount: `0x${string}`; grant?: StoredGrant } | undefined,
+    payouts: { fold: PayoutFold; block: bigint | null },
   ): Promise<"held" | "settled"> => {
     try {
-      return await reconcileFlows(agentId, cashUsdg, equityUsdg, scan);
+      return await reconcileFlows(agentId, cashUsdg, equityUsdg, scan, payouts);
     } catch (e) {
       console.log(
         `[flows] reconcile aborted (${e instanceof Error ? e.message : String(e)}) — the scan cursor and the ` +
@@ -4178,6 +4535,100 @@ async function main() {
       return "held";
     }
   };
+  /**
+   * THE PAYOUT STEP OF A LIVE TICK (docs/perps.md rule 12; perps/payout-look.ts
+   * says the order). After the block-pinned balance read and BEFORE the perp
+   * term and the flow look, which both read its answer: the payouts since the
+   * baseline's block (the fold), the ledger booked from them, and T_in/T_out
+   * with the pending balance at the same block (`perpTransit`).
+   *
+   * THE CURSOR is the block of the cash the coming look judges against: the
+   * in-memory baseline's (`payoutCursor`), or — on a first look — the durable
+   * reading's (self-hosted) or the anchor's (hosted). Never another's.
+   */
+  const livePayoutStep = async (
+    agentId: string,
+    client: ReturnType<typeof createPublicClient>,
+    grant: StoredGrant,
+    block: bigint | null,
+  ): Promise<PayoutFold> => {
+    const account = grant.smartAccount.toLowerCase() as `0x${string}`;
+    // THE GATE, on chain: read at arm, after a deposit of ours lands, and at
+    // most hourly while it reads 0 or unread. A failed re-read keeps what was
+    // known — an index never returns to 0 — and is asked again next tick.
+    const nowMs = Date.now();
+    if (perpAccountIndexStale || ((perpAccountIndex === null || perpAccountIndex === 0n) && nowMs - perpAccountIndexReadAtMs > 3_600_000)) {
+      const idx = await readLighterAccountIndex(client, account, grant.chainId);
+      perpAccountIndexReadAtMs = nowMs;
+      if (idx !== null) {
+        perpAccountIndex = idx;
+        perpAccountIndexStale = false;
+      }
+    }
+    let cursor: bigint | null;
+    if (lastCashUsdg !== null) cursor = payoutCursor;
+    else if (accounting.openingBalanceLicence !== "self-hosted-local") cursor = anchorCashBlock;
+    else {
+      const b = await lastKnownCashReadBlock(agentId);
+      cursor = b === null ? null : BigInt(b);
+    }
+    const chain = makeReconcileChain(client);
+    const step = await runPayoutStep({
+      agentId,
+      account,
+      accountIndex: perpAccountIndex,
+      cursor,
+      block,
+      getLogs: (a) => chain.getLogs(a),
+      store: { listOpenPerpTransfers, recordPerpPayouts },
+      pendingAt: (n) => readLighterPendingAt(client, account, grant.chainId, n),
+      carry: payoutCarry,
+      log: (m) => console.log(`[payouts] ${m}`),
+    });
+    payoutCarry = step.carry;
+    perpTransit = { block: step.block, transit: step.transit, pendingBalanceMicro: step.pendingBalanceMicro };
+    if (step.fold.kind === "unfoldable") console.log(`[payouts] not folded this tick — ${step.fold.why}`);
+    const rec = step.recorded;
+    if (rec !== null) {
+      for (const p of rec.paid) console.log(`[payouts] withdrawal ${p.transferId} paid home by ${p.by}`);
+      for (const r of rec.refused) console.log(`[payouts] a payout's booking was refused (${r.by}): ${r.why}`);
+      // MONEY HOME NOBODY ASKED FOR: an owner's recover, or a stand-down whose
+      // request row was lost. Margin coming home — booked initiator `owner`,
+      // never capital — and said to the owner, who is the one who can know.
+      if (rec.alert) {
+        await addEvent(
+          agentId,
+          "warn",
+          rec.excessMicro > 0n
+            ? `Lighter paid ${fmt(rec.excessMicro)} USDG home to this account that no withdrawal of the agent's asked for — ` +
+                `a recover with the owner key, or a stand-down whose request was lost. It is your margin coming home, ` +
+                `booked as such, not as a deposit.`
+            : `a Lighter payout to this account could not be matched to the ledger's withdrawals — it is held as margin ` +
+                `coming home, and nothing is booked as capital until it is.`,
+        ).catch(() => {});
+      }
+    }
+    return step.fold;
+  };
+  /**
+   * THE LIVE PERP TERM, SET FROM ONE VENUE READ — the hook the perp lane
+   * calls when it reads the live Lighter account (perps/live-term.ts
+   * livePerpTerm; docs/perps.md rules 11, 12, 8a(f)). One assignment for the
+   * three figures every reader takes from it: the equity term (`perpBook`),
+   * the last known venue money (`perpLastKnownMicro`, what perp-unpriced
+   * judges an outage against) and the money AT the venue canTradeForReal
+   * counts (`perpVenueMicro`). An unread term keeps the last known figures —
+   * it is a gap, not a zero.
+   */
+  const noteLivePerpTerm = (t: LivePerpTerm): void => {
+    perpBook = t.book;
+    if (t.valueMicro !== null) perpLiveLastKnownMicro = t.valueMicro;
+    perpLastKnownMicro = perpLiveLastKnownMicro;
+    perpVenueMicro = t.venueMoneyMicro;
+  };
+  /** The live perp term from one venue account read and this tick's payout step — what the lane passes to noteLivePerpTerm. */
+  const livePerpTermOf = (account: Parameters<typeof livePerpTerm>[0]["account"]): LivePerpTerm =>
+    livePerpTerm({ account, transit: perpTransit?.transit ?? null });
   let highWaterMarkUsdg = 0n;
   let riskHighWaterMarkUsdg: bigint | null = null;
   /**
@@ -4223,8 +4674,9 @@ async function main() {
    *
    * ASSIGNED BY THE TICK ALONE, from the perp lane's read (perps/lane.ts):
    * on paper in the SAME hold of the lane's lock as the paper cash it is
-   * added to (readWithBook), on live from the lane's refresh (the known zero
-   * in this build — no live perps exist yet). A protective pass or an intent
+   * added to (readWithBook), on live from the lane's refresh (its reconcile
+   * pass's ONE account read, through noteLivePerpTerm; the known zero with no
+   * Lighter account under our address). A protective pass or an intent
    * re-reads the book for itself and never writes this, so a tick's equity is
    * never one read's cash beside another read's margin. (Typed by assertion
    * so the compiler does not narrow a not-yet-assigned `let` to its
@@ -4233,6 +4685,8 @@ async function main() {
   let perpBook = undefined as PerpBookTerm;
   /** C + ΣM + ΣU + T at the last venue read that succeeded (micro-USDG); null before any. */
   let perpLastKnownMicro = null as bigint | null;
+  /** The real venue's last read, preserved separately while the tick reads paper. */
+  let perpLiveLastKnownMicro = null as bigint | null;
   /** Whether the owner has been told about the current Lighter outage — once per outage, like `notedUnpriced`. */
   let perpUnreadNoted = false;
   /**
@@ -4313,6 +4767,59 @@ async function main() {
   let settlementQueue: Settlement[] = [];
   /** Every op this process queued a settlement for — a retried row write never shifts twice. */
   const settlementsQueued = new Set<string>();
+  // ── LIGHTER PAYOUTS, FOLDED BETWEEN BLOCK-PINNED READS (rule 12) ─────────
+  //
+  // perps/payout-look.ts runs once per live tick; these are its memory.
+  //
+  /**
+   * addressToAccountIndex(self): 0n = no Lighter account (the known zero every
+   * agent without perps reads — Lighter is then never asked about), null =
+   * unread. Read ON CHAIN at arm, so a payout after the perps marker is gone
+   * (a recover, a revoked grant) is still seen, and again after a deposit of
+   * ours lands (perpAccountIndexStale) — the one way it leaves 0 under our
+   * hand — and at most hourly while it reads 0 or unread, for the ways it
+   * leaves 0 under someone else's.
+   */
+  let perpAccountIndex: bigint | null = null;
+  let perpAccountBinding: string | null = null;
+  let perpAccountIndexReadAtMs = 0;
+  let perpAccountIndexStale = true;
+  /**
+   * THE BLOCK `lastCashUsdg` WAS READ AT — the payout cursor. It advances to
+   * each look's block N whether the look holds, is scan-covered or settles
+   * (a held look folds its payouts into the baseline it keeps); a look whose
+   * payouts could not be read keeps it where it was, so the next look reads
+   * the same window again. Null until a look with a pinned block sets it: a
+   * first look takes the durable reading's (store.ts lastKnownCashReadBlock)
+   * or the hosted anchor's (`anchorCashBlock`).
+   */
+  let payoutCursor: bigint | null = null;
+  /** `${txHash}:${logIndex}` of every payout folded into a baseline this process — the second guard beside the cursor. */
+  const foldedPayouts = new Set<string>();
+  /** recordPayouts' carry: part of a payout home that completed no request yet. Replaced each step, never merged. */
+  let payoutCarry: CarriedPayout[] = [];
+  /**
+   * The last payout step's T_in/T_out and pending balance at its block — what
+   * the live perp term's in-transit figure is built from (perps/live-term.ts)
+   * and what holds the ratchets while anything is pending (rule 12c). Null
+   * when it could not be established: a book gap for a live term.
+   */
+  let perpTransit: { block: bigint | null; transit: InTransit | null; pendingBalanceMicro: bigint | null } | null = null;
+  /**
+   * USDG AT THE VENUE as the last live read saw it (C + ΣM + T), for
+   * canTradeForReal (rule 8a(f)): null = unread or not yet read. Only a LIVE
+   * venue read writes it (noteLivePerpTerm) — a paper book's margin is not
+   * money anywhere.
+   */
+  let perpVenueMicro: bigint | null = null;
+  /**
+   * USDG IN THE SMART ACCOUNT at the live tick's balance read, micro — what
+   * the perp lane's onboarding plan sizes a margin deposit against
+   * (onboard.ts planDeposit: never more than is there). Null until a live
+   * tick read it.
+   */
+  let perpCashMicro: bigint | null = null;
+  let perpClaimReadAtMs = 0;
   /**
    * WHAT THIS PROCESS IS ENTITLED TO CLAIM ABOUT THE OWNER'S CAPITAL.
    *
@@ -4359,6 +4866,14 @@ async function main() {
    * books.
    */
   let anchorObservedAtSec: number | null = null;
+  /**
+   * THE BLOCK the anchor's cash was read at (bootstrap-state.ts
+   * lastObservedCashBlock) — a hosted first look's payout cursor. Null when
+   * the anchor carries none (older than the column, or a mark from before
+   * the block was pinned): a first look with a Lighter account then doubts
+   * rather than folds.
+   */
+  let anchorCashBlock: bigint | null = null;
   /** The peak the anchor says was already reached, restored into the local store. */
   let anchorHwmUsdg: bigint | null = null;
   /** Σ withdrawals the shared row already counts. Null means the anchor read none. */
@@ -4387,6 +4902,7 @@ async function main() {
     anchorHwmUsdg = l.highWaterMarkUsdg;
     anchorHwmWithdrawnUsdg = l.highWaterWithdrawnUsdg;
     anchorCashUsdg = l.lastObservedCashUsdg;
+    anchorCashBlock = l.lastObservedCashBlock;
     anchorObservedAtSec = verdict.kind === "valid" ? verdict.accounting.observedAt : null;
     anchorEpoch = l.accountingEpoch;
     // THE DURABLE CONTRIBUTION FIGURE, kept for anything that has to describe
@@ -6004,11 +6520,17 @@ async function main() {
       return {
         ok: false,
         line: `expired — this was placed for a market ${late}s ago and I will not fill it into a different one. Ask again if you still want it.`,
-        ...(cmd.kind === "trade" ? { receipt: expiredOrderReceipt(cmd.args) } : {}),
+        ...(cmd.kind === "trade" && !isPerpExitCommand(cmd) ? { receipt: expiredOrderReceipt(cmd.args) } : {}),
       };
     }
     if (cmd.kind === "selftest") return runSelftestProbe("dashboard");
     if (cmd.kind === "paper-reset") return runPaperReset();
+    if (cmd.kind === "resume-perps") {
+      const mode = cmd.args?.mode;
+      if (mode !== "paper" && mode !== "live") return { ok: false, line: "Choose the perpetual book to resume." };
+      const result = await perpLane.resumeEntries(mode, { notAfterMs: cmd.expiresAt });
+      return { ok: result.ok, line: result.sentence };
+    }
     if (cmd.kind === "trade") return orderOutcome(cmd, await runOrderCommand(cmd, reads));
     return { ok: false, line: `unknown command '${cmd.kind}'` };
   }
@@ -6021,8 +6543,14 @@ async function main() {
    * figures it may print and the two states that get none.
    */
   function orderOutcome(cmd: FileCommand, reply: OrderReply): CommandOutcome {
+    if (isPerpExitCommand(cmd)) return { ok: reply.ok, line: reply.line };
     const receipt = orderReceipt(orderSubject(cmd.args), reply.verdict);
     return { ok: reply.ok, line: reply.line, ...(receipt ? { receipt } : {}) };
+  }
+
+  function isPerpExitCommand(cmd: FileCommand): boolean {
+    const route = orderRoute(cmd.args);
+    return route === "close-perp" || route === "flatten-perps";
   }
 
   /**
@@ -6116,6 +6644,11 @@ async function main() {
       cmd.args,
       orderReadsOf(reads, { paused: isPaused(), ceilingUsdg: cfg.telegramMaxActionUsdg }),
       async (side, symbol, size, route) => {
+        if (route === "close-perp" || route === "flatten-perps") {
+          const opts = { notAfterMs: cmd.expiresAt, book: cmd.args?.book as "paper" | "live" };
+          const result = route === "close-perp" ? await perpLane.close(symbol as PerpKey, opts) : await perpLane.flatten(opts);
+          return { ok: result.ok, line: result.sentence };
+        }
         // And from here the wall decides. submitChatTrade reports what the
         // LEDGER said, so this returns a verdict about a trade that really
         // happened or really did not.
@@ -6448,6 +6981,10 @@ async function main() {
     const key = grantKey(grant);
     if (key === retiredGrantKey) return;
     retiredGrantKey = key;
+    // GRANT EXPIRY STANDS THE PERPS DOWN (rule 13) with the key the lane still
+    // holds; opens already stopped 24 h before (policy perp-grant-expiring).
+    // Once per retirement, never awaited.
+    void perpLane.grantEnded("expiry").catch((e) => console.error("[perps] expiry stand-down:", e));
     console.log("[expiry] session key expired — agent retired");
     await addEvent(agentId, "warn", "session key expired — agent retired (grant a new key to redeploy)");
   }
@@ -6498,6 +7035,11 @@ async function main() {
           "KILL SWITCH — grant discarded, session key destroyed; trading halted",
         );
         active = null;
+        // THE PERPS STAND DOWN WITH THE LIGHTER KEY THE LANE STILL HOLDS
+        // (rule 13): the request file the kill left first gets its turn, then
+        // the lane stands down itself. Never awaited — it may take minutes,
+        // and the tick must not wait on a venue.
+        void perpLane.grantEnded("kill").catch((e) => console.error("[perps] kill stand-down:", e));
       }
       return false;
     }
@@ -7061,6 +7603,25 @@ async function main() {
       }
     }
 
+    // Every cached venue/payout fact belongs to one chain + smart account.
+    // armed() below reads the lane before the new chain index has returned.
+    const nextPerpBinding = `${grant.chainId}:${grant.smartAccount.toLowerCase()}`;
+    if (perpAccountBinding !== nextPerpBinding) {
+      perpAccountBinding = nextPerpBinding;
+      perpAccountIndex = null;
+      perpAccountIndexReadAtMs = 0;
+      perpAccountIndexStale = true;
+      perpTransit = null;
+      perpVenueMicro = null;
+      perpCashMicro = null;
+      perpClaimReadAtMs = 0;
+      perpBook = "unread";
+      perpLastKnownMicro = null;
+      perpLiveLastKnownMicro = null;
+      payoutCursor = null;
+      payoutCarry = [];
+      foldedPayouts.clear();
+    }
     active = {
       grant,
       agentId,
@@ -7119,6 +7680,21 @@ async function main() {
     // BEFORE seeding — else the seed under-counts the day's spend and loosens the
     // cap. Live only (paper never touches the chain); best-effort (guarded).
     if (executor) await reconcileInFlightAtArm(agentId, client, grant.smartAccount as `0x${string}`);
+    // THE LIGHTER GATE, ONCE AT ARM, ON CHAIN (docs/perps.md rules 11, 12):
+    // addressToAccountIndex(self). 0 is the known "no Lighter account" — the
+    // payout fold, the pending read and the venue term of canTradeForReal
+    // are then skipped, and the account is exactly what it was before perps.
+    // After the reconcile above, which may have settled a deposit of ours.
+    // A failed read leaves it stale, and the next live tick asks again.
+    perpAccountIndexStale = true;
+    {
+      const idx = await readLighterAccountIndex(client, grant.smartAccount.toLowerCase() as `0x${string}`, grant.chainId);
+      perpAccountIndexReadAtMs = Date.now();
+      if (idx !== null) {
+        perpAccountIndex = idx;
+        perpAccountIndexStale = false;
+      }
+    }
     // THE ENERGY BUY'S BALANCE PIN, seeded from the ledger — after the resolver
     // above, which ratchets it for any purchase it just settled. A restart after
     // a landed purchase must not let the next ask read a node still behind that
@@ -7227,6 +7803,8 @@ async function main() {
     // and a claim spend nothing; an open and a deposit do.
     if (intent.kind === "perp-order") return intent.reduceOnly === true;
     if (intent.kind === "perp-margin") return intent.direction !== "deposit";
+    // A key registration moves no money at all: nothing to hold as spend.
+    if (intent.kind === "perp-key") return true;
     const out = tokenLegs(intent).buy_token;
     return out !== undefined && out.toLowerCase() === (CASH.USDG as string).toLowerCase();
   }
@@ -7244,7 +7822,7 @@ async function main() {
     // order moves no ERC-20, and a margin leg's one token (USDG) is the route's,
     // not a leg a producer chose. The perp lane owns execution and writes its
     // own tables (docs/perps.md, "the trades boundary").
-    if (intent.kind === "perp-order" || intent.kind === "perp-margin") return {};
+    if (intent.kind === "perp-order" || intent.kind === "perp-margin" || intent.kind === "perp-key") return {};
     return {};
   }
 
@@ -7293,6 +7871,9 @@ async function main() {
     if (intent.kind === "perp-margin") {
       return { action: `perp-${intent.direction}`, sizeUsdg: usdgNum(intent.amountUsdg) };
     }
+    // `perp-key` — withheld from every public surface by its action word
+    // (thesis-policy.ts: `perp-…`), and sized at nothing because it moves none.
+    if (intent.kind === "perp-key") return { action: "perp-key", sizeUsdg: 0 };
     return { action: intent.kind, sizeUsdg: usdgNum(intent.amountUsdg) };
   }
 
@@ -7750,7 +8331,7 @@ async function main() {
     // and an unread mark is refused by the perp branch itself (market-inactive,
     // perp-unpriced) — there is no unpriceable token to budget. The perp lane
     // owns execution; named so no perp intent is read for a buy token.
-    if (intent.kind === "perp-order" || intent.kind === "perp-margin") return undefined;
+    if (intent.kind === "perp-order" || intent.kind === "perp-margin" || intent.kind === "perp-key") return undefined;
     const buyToken =
       intent.kind === "swap" ? intent.buyToken : intent.kind === "curve-trade" ? intent.assetOut : null;
     if (!buyToken) return undefined;
@@ -7986,7 +8567,13 @@ async function main() {
     // Every trade this intent writes — approved, rejected, paper, landed, reverted —
     // carries the same decision link, so the ledger is joinable to the reasoning.
     // Writing the row is also the moment a reservation becomes settled fact.
-    const recordTrade = async (row: TradeRow) => {
+    const recordTrade = async (
+      row: TradeRow,
+      // A PERP LEG'S MARGIN ROW, committed with this row or not at all
+      // (store.ts addTrade `with`, perpTransferWith). A write that throws is a
+      // row that did not land, and takes the fail-closed path below.
+      opts?: { with?: (db: Db) => Promise<void> },
+    ) => {
       // What actually happened, for callers that must not mistake "did not
       // throw" for "worked". processIntent absorbs EVERY failure — a policy
       // rejection, no-route, no-gas, a bundler refusal, an on-chain revert all
@@ -8003,7 +8590,11 @@ async function main() {
       // them back as a receipt (order-receipt.ts), and a receipt read from this
       // row and a sentence read from it cannot disagree about what happened.
       lastTradeOutcome = ledgerFactsOf(row);
-      const wrote = await addTrade({ ...row, decision_id });
+      // A PERP LEG IS NEVER NARRATED (rule 17): its decision files under a
+      // `perp-…` action word (describeIntent), which thesis-policy.ts withholds
+      // from every post, and no group ever nominated it — so the two readers
+      // below answer it with silence.
+      const wrote = await addTrade({ ...row, decision_id }, opts);
       /**
        * AND THEN THE AGENT SAYS WHAT IT MAKES OF IT.
        *
@@ -8083,7 +8674,11 @@ async function main() {
       // read (view.ts buildPerpPolicyState) — on every intent, so no perp
       // intent is ever judged against its absence. A perp intent is re-judged
       // below against a FRESH read taken under the lane's lock.
-      perp: perpLane.policyState(),
+      // An on-chain onboarding leg (a margin deposit, a key registration) is
+      // judged with the venue's own readiness assumed — those legs are what
+      // make it ready (perps/lane.ts policyStateFor); every other intent
+      // against the rail as it stands.
+      perp: perpLane.policyStateFor(intent),
       nowSec: Math.floor(Date.now() / 1000),
     };
     // ── PERPS: THE PERP LANE OWNS EXECUTION (docs/perps.md; perps/lane.ts) ──
@@ -8097,14 +8692,30 @@ async function main() {
     // releases (recordTrade's order, with a finally on every exit). The rail
     // is decided INSIDE, from execMode() as it stands now — never a rail
     // computed before this intent reached the chain (the broker lane's
-    // consent-fork lesson above): a live account resolves to
-    // `perp-live-not-yet` and no live executor exists to be reached. A
+    // consent-fork lesson above): a live account reaches the live executor
+    // only once every link of the venue is proven (lane.ts header). A
     // refusal is the owner's (events, once per change) and never a `trades`
     // row: that table is the public tape, which a perp never reaches
     // (rule 17). What happened comes back as this intent's own facts, so an
     // energy claim is refunded when nothing was placed.
-    if (intent.kind === "perp-order" || intent.kind === "perp-margin") {
+    //
+    // EXCEPT THE THREE ON-CHAIN LEGS (rule 9's last sentence: "on-chain legs
+    // ride the existing UserOp rail, which already works this way"). A margin
+    // deposit, a claim and a key registration are UserOps through the wall, so
+    // they go on below with every other EVM kind — the policy, the rail fork,
+    // the gas pre-flight, the reservation, the durable `submitted` row before
+    // broadcast, the resolver and the orphan sweep — as trades rows of their
+    // own kinds (perps/legs.ts). Only a margin WITHDRAW, an L2 request signed
+    // with the API key, stays with the lane.
+    const perpLeg = perpLegKind(intent);
+    if (intent.kind === "perp-order" || (intent.kind === "perp-margin" && perpLeg === null)) {
       lastTradeOutcome = await perpLane.execute(intent, { equityUsdg, equityKnown }, state);
+      return;
+    }
+    // The claim producer can run beside a queued owner command. Check again
+    // inside the UserOp serial chain: an uncertain claim is never replayed.
+    if (perpLeg === "perp-claim" && (await listSubmittedOps(agentId)).some((row) => row.kind === "perp-claim")) {
+      lastTradeOutcome = { status: "rejected", rejectRule: "perp-claim-in-flight" };
       return;
     }
     const verdict = checkPolicy(intent, limits, state, await scoutContextFor(intent));
@@ -8114,11 +8725,26 @@ async function main() {
       intent.kind === "curve-trade" ||
       intent.kind === "energy-buy"
         ? intent.notionalUsdg
-        : intent.amountUsdg;
+        : intent.kind === "perp-key"
+          ? 0n
+          : intent.amountUsdg;
     // trades.target is NOT NULL and EVM-shaped; the ticker is the honest analog
     // on the broker rail. Step 5's schema work gives broker rows their own
     // columns — until then the ticker in `target` keeps the tape readable.
-    const tradeTarget = intent.kind === "equity-order" ? intent.ticker : intent.target;
+    // A PERP LEG'S TARGET IS THE PROXY, always the route's (the
+    // no-trades-rows amendment): a claim and a key registration carry no
+    // target of their own, and a deposit's was held to the sealed proxy.
+    const tradeTarget =
+      intent.kind === "perp-margin" || intent.kind === "perp-key"
+        ? LIGHTER_ROUTE_V1.proxy
+        : intent.kind === "equity-order"
+          ? intent.ticker
+          : intent.target;
+    // THE ROW'S KIND. The intent's own for every EVM kind; for a perp leg its
+    // trades kind — `perp-deposit`, `perp-claim`, `perp-key` — never
+    // `perp-margin`, which names two legs and a withdrawal that is no row at
+    // all, and never `transfer` (a landed transfer is booked as money home).
+    const rowKind: string = perpLeg ?? intent.kind;
 
     // ── ALREADY REFUSED, FOR A REASON RETRYING CANNOT FIX ────────────────
     // Read AFTER checkPolicy so the tape's ordering does not change: a trade
@@ -8137,7 +8763,7 @@ async function main() {
     if (suppressed && verdict.ok) {
       await recordTrade({
         agent_id: agentId,
-        kind: intent.kind,
+        kind: rowKind,
         target: tradeTarget,
         amount_usdg: usdgNum(notional),
         status: "rejected",
@@ -8156,7 +8782,7 @@ async function main() {
       if (notice.line) await addEvent(agentId, "warn", notice.line);
       await recordTrade({
         agent_id: agentId,
-        kind: intent.kind,
+        kind: rowKind,
         target: tradeTarget,
         amount_usdg: usdgNum(notional),
         status: "rejected",
@@ -8205,7 +8831,7 @@ async function main() {
         await addEvent(agentId, "warn", `order review refused: ${reason}`);
         await recordTrade({
           agent_id: agentId,
-          kind: intent.kind,
+          kind: rowKind,
           target: tradeTarget,
           amount_usdg: usdgNum(notional),
           status: "rejected",
@@ -8224,7 +8850,7 @@ async function main() {
         );
         await recordTrade({
           agent_id: agentId,
-          kind: intent.kind,
+          kind: rowKind,
           target: tradeTarget,
           amount_usdg: usdgNum(review.notionalUsdg),
           status: "rejected",
@@ -8268,7 +8894,7 @@ async function main() {
           : null;
         await recordTrade({
           agent_id: agentId,
-          kind: intent.kind,
+          kind: rowKind,
           target: tradeTarget,
           amount_usdg: usdgNum(review.notionalUsdg),
           status: "paper",
@@ -8299,7 +8925,7 @@ async function main() {
     // as paper and zeroed their balances. Three modes, no fourth: with paper
     // trading off, a wrong-chain or empty account previously fell THROUGH this
     // block to the live rail and built a swap against a dead chain.
-    const execRail = execMode();
+    const execRail = perpLeg === "perp-claim" ? perpClaimExecMode(execInputs()) : execMode();
     // ── THE ENERGY BUY RUNS ONLY ON THE LIVE RAIL ──────────────────────────
     //
     // BEFORE the refuse and paper arms, because neither can hold it. A paper
@@ -8314,12 +8940,36 @@ async function main() {
     if (intent.kind === "energy-buy" && execRail.mode !== "live") {
       await recordTrade({
         agent_id: agentId,
-        kind: intent.kind,
+        kind: rowKind,
         target: tradeTarget,
         ...tokenLegs(intent),
         amount_usdg: usdgNum(notional),
         status: "rejected",
         reject_rule: "energy-needs-live",
+      });
+      return;
+    }
+    // ── THE ON-CHAIN PERP LEGS RIDE THE LIVE USEROP RAIL, OR NONE ─────────
+    //
+    // BEFORE the refuse and paper arms, like the energy buy, because neither
+    // can hold one: a paper account's perps keep no collateral at a venue —
+    // margin moves with each paper fill (rule 14) — so a deposit, a claim or a
+    // key registration has nothing to simulate, and a simulated one would put
+    // a margin move on the ledger that no chain saw. Refused with the
+    // account's own reason for not being live, and a row, like every refusal.
+    //
+    // A claim's rail above ignores entry consent and spot cash only (rule
+    // 8a). It still needs the sealed unexpired grant, a working executor and
+    // chain, gas and the exact self-recipient fence. It is never simulated.
+    if (perpLeg !== null && execRail.mode !== "live") {
+      console.log(`[policy] approved ${rowKind} — not executed (${execRail.mode}: ${execRail.rule})`);
+      await recordTrade({
+        agent_id: agentId,
+        kind: rowKind,
+        target: tradeTarget,
+        amount_usdg: usdgNum(notional),
+        status: "rejected",
+        reject_rule: execRail.rule,
       });
       return;
     }
@@ -8333,7 +8983,7 @@ async function main() {
       // reason is how the original hole stayed invisible.
       await recordTrade({
         agent_id: agentId,
-        kind: intent.kind,
+        kind: rowKind,
         target: tradeTarget,
         ...tokenLegs(intent),
         amount_usdg: usdgNum(notional),
@@ -8381,8 +9031,8 @@ async function main() {
         await addEvent(agentId, "warn", `paper fill refused: ${fill.reason}`);
         await recordTrade({
           agent_id: agentId,
-          kind: intent.kind,
-          target: intent.target,
+          kind: rowKind,
+          target: tradeTarget,
           amount_usdg: usdgNum(notional),
           status: "rejected",
           reject_rule: `paper: ${fill.reason}`,
@@ -8428,8 +9078,8 @@ async function main() {
         }
         await recordTrade({
           agent_id: agentId,
-          kind: intent.kind,
-          target: intent.target,
+          kind: rowKind,
+          target: tradeTarget,
           ...tokenLegs(intent),
           amount_usdg: usdgNum(notional),
           status: "paper",
@@ -8449,7 +9099,7 @@ async function main() {
     if (!executor) {
       await recordTrade({
         agent_id: agentId,
-        kind: intent.kind,
+        kind: rowKind,
         target: tradeTarget,
         ...tokenLegs(intent),
         amount_usdg: usdgNum(notional),
@@ -8486,7 +9136,7 @@ async function main() {
       );
       await recordTrade({
         agent_id: agentId,
-        kind: intent.kind,
+        kind: rowKind,
         target: tradeTarget,
         ...tokenLegs(intent),
         amount_usdg: usdgNum(notional),
@@ -8515,6 +9165,22 @@ async function main() {
     let submittedRow = false;
     try {
       let exec: ExecutionResult;
+      // What a perp leg's receipt proved (perps/legs.ts perpLegOfReceipt) —
+      // set by its arm, read by the landed row below.
+      let perpLanded: PerpLegReading | null = null;
+      /**
+       * A MARGIN DEPOSIT IS A perp_transfers ROW BEFORE IT IS SENT (the
+       * margin-in-transit amendment, 12a), in the SAME transaction as the
+       * pre-broadcast trades row below and under the same UserOp hash — so a
+       * failed write stops both and sends nothing, and after a crash the
+       * resolver finds the deposit by the hash it already keys on.
+       * `submitted` moves no money and journals nothing. Nothing for any other
+       * kind: a claim's money is payouts.ts's, a key registration moves none.
+       */
+      const perpSubmittedWith = (userOpHash: string): { with: (db: Db) => Promise<void> } | undefined => {
+        const t = intent.kind === "perp-margin" || intent.kind === "perp-key" ? perpLegSubmittedTransfer(intent, userOpHash) : null;
+        return t === null ? undefined : { with: perpTransferWith({ ...t, agentId, mode: "live" }) };
+      };
       /**
        * Every op goes out through here, so the durable pre-broadcast write
        * cannot be forgotten at one of the seven call sites.
@@ -8541,7 +9207,7 @@ async function main() {
         onSubmitted: async (userOpHash, op) => {
           const wrote = await addTrade({
             agent_id: agentId,
-            kind: intent.kind,
+            kind: rowKind,
             target: tradeTarget,
             ...tokenLegs(intent),
             amount_usdg: usdgNum(notional),
@@ -8552,7 +9218,7 @@ async function main() {
             status: "submitted",
             decision_id,
             ...sim,
-          });
+          }, perpSubmittedWith(userOpHash));
           // A FAILED WRITE NOW STOPS THE OPERATION, and that is only possible
           // because this hook moved ahead of the send. It used to run after,
           // where the honest note was that a failed write "is not fatal — the
@@ -8639,8 +9305,8 @@ async function main() {
           await addEvent(agentId, "warn", `no Uniswap route for ${intent.buyToken} — swap skipped${hopHint}`);
           await recordTrade({
             agent_id: agentId,
-            kind: intent.kind,
-            target: intent.target,
+            kind: rowKind,
+            target: tradeTarget,
             sell_token: intent.sellToken,
             buy_token: intent.buyToken,
             amount_usdg: usdgNum(notional),
@@ -8691,8 +9357,8 @@ async function main() {
           await addEvent(agentId, "warn", `${verdict.detail} (${intent.buyToken})`);
           await recordTrade({
             agent_id: agentId,
-            kind: intent.kind,
-            target: intent.target,
+            kind: rowKind,
+            target: tradeTarget,
             sell_token: intent.sellToken,
             buy_token: intent.buyToken,
             amount_usdg: usdgNum(notional),
@@ -8818,8 +9484,8 @@ async function main() {
             );
             await recordTrade({
               agent_id: agentId,
-              kind: intent.kind,
-              target: intent.target,
+              kind: rowKind,
+              target: tradeTarget,
               ...tokenLegs(intent),
               amount_usdg: usdgNum(notional),
               status: "rejected",
@@ -8871,8 +9537,8 @@ async function main() {
           // siblings in this same try (no-route, no-quote) already do it.
           await recordTrade({
             agent_id: agentId,
-            kind: intent.kind,
-            target: intent.target,
+            kind: rowKind,
+            target: tradeTarget,
             sell_token: intent.sellToken,
             buy_token: intent.buyToken,
             amount_usdg: usdgNum(notional),
@@ -8896,8 +9562,8 @@ async function main() {
           await addEvent(agentId, "warn", `Rialto quote refused: ${reason} — swap skipped`);
           await recordTrade({
             agent_id: agentId,
-            kind: intent.kind,
-            target: intent.target,
+            kind: rowKind,
+            target: tradeTarget,
             sell_token: intent.sellToken,
             buy_token: intent.buyToken,
             amount_usdg: usdgNum(notional),
@@ -8931,8 +9597,8 @@ async function main() {
           );
           await recordTrade({
             agent_id: agentId,
-            kind: intent.kind,
-            target: intent.target,
+            kind: rowKind,
+            target: tradeTarget,
             sell_token: intent.sellToken,
             buy_token: intent.buyToken,
             amount_usdg: usdgNum(notional),
@@ -8974,8 +9640,8 @@ async function main() {
             await addEvent(agentId, "warn", `${verdict.detail} (${intent.buyToken}, via Rialto)`);
             await recordTrade({
               agent_id: agentId,
-              kind: intent.kind,
-              target: intent.target,
+              kind: rowKind,
+              target: tradeTarget,
               sell_token: intent.sellToken,
               buy_token: intent.buyToken,
               amount_usdg: usdgNum(notional),
@@ -9051,8 +9717,8 @@ async function main() {
           );
           await recordTrade({
             agent_id: agentId,
-            kind: intent.kind,
-            target: intent.target,
+            kind: rowKind,
+            target: tradeTarget,
             sell_token: intent.sellToken,
             buy_token: intent.buyToken,
             amount_usdg: usdgNum(notional),
@@ -9095,6 +9761,66 @@ async function main() {
           },
           { to: MORPHO.steakhouseUsdgVault as `0x${string}`, value: 0n, data },
         ]);
+      } else if (intent.kind === "perp-margin" || intent.kind === "perp-key") {
+        // ── THE ON-CHAIN PERP LEGS: DEPOSIT, CLAIM, KEY REGISTRATION ──────
+        //
+        // Beside the vault deposit because they are the same shape: calls
+        // through the wall, the durable `submitted` row written before the
+        // send (the hook above — never re-sent; the resolver settles it), and
+        // the landed row below. What is theirs alone is decided in
+        // perps/legs.ts, and in this order:
+        //
+        //   1. THE CALLS, from onboard.ts's builders — proxy, token, asset and
+        //      route from the frozen route, the key from the grant, and (for a
+        //      registration) the account index read from the CHAIN just now,
+        //      which must be the one the producer planned on.
+        //   2. THE FENCE, the matching final-fence lane, ALWAYS and before
+        //      anything is signed: the bytes are the canonical encoding of
+        //      exactly these terms, or nothing is sent.
+        //   3. THE RECEIPT: the proxy's own event for this leg, in this op's
+        //      own logs, matching what was signed. A receipt that does not
+        //      show it THROWS — the catch below leaves the op `submitted`,
+        //      still counted, for the resolver, which settles it from the
+        //      chain or leaves it; nothing is booked on a guess.
+        const perpGrant = grantPerp(active.grant);
+        let chainAccountIndex: bigint | null | undefined;
+        if (intent.kind === "perp-key") {
+          chainAccountIndex = await readLighterAccountIndex(chainClient, executor.address as `0x${string}`, active.grant.chainId);
+        }
+        const built = perpLegCalls(intent, {
+          perp: perpGrant,
+          account: executor.address as `0x${string}`,
+          chainAccountIndex,
+        });
+        if (!built.ok) {
+          releaseBudget();
+          await addEvent(
+            agentId,
+            built.rule.startsWith("fence-") ? "err" : "warn",
+            `refused to sign a Lighter ${built.kind.replace(/^perp-/, "")}: ${built.detail}. Nothing was sent.` +
+              (built.rule.startsWith("fence-")
+                ? ` This is a merrymen fault — the calldata did not match the step that was approved.`
+                : ""),
+          );
+          await recordTrade({
+            agent_id: agentId,
+            kind: rowKind,
+            target: tradeTarget,
+            amount_usdg: usdgNum(notional),
+            status: "rejected",
+            reject_rule: built.rule,
+          });
+          return;
+        }
+        exec = await send(built.calls);
+        // A DEPOSIT THAT LANDED may have just CREATED the Lighter account:
+        // the gate is re-read before the next payout step.
+        if (built.kind === "perp-deposit") perpAccountIndexStale = true;
+        perpLanded = perpLegOfReceipt(exec.logs, executor.address, active.grant.chainId);
+        const mismatch = perpLegMismatch(intent, perpLanded, perpGrant?.apiPublicKey ?? null);
+        if (mismatch !== null) {
+          throw new Error(`the ${built.kind} landed but its receipt does not show it: ${mismatch}`);
+        }
       } else if (intent.kind === "vault-withdraw") {
         const data = encodeFunctionData({
           abi: VAULT_ABI,
@@ -9132,7 +9858,7 @@ async function main() {
           await addEvent(agentId, "warn", say);
           await recordTrade({
             agent_id: agentId,
-            kind: intent.kind,
+            kind: rowKind,
             target: tradeTarget,
             ...tokenLegs(intent),
             amount_usdg: usdgNum(notional),
@@ -9502,7 +10228,7 @@ async function main() {
           // goes first and the release stays where the invariant expects it.
           await recordTrade({
             agent_id: agentId,
-            kind: intent.kind,
+            kind: rowKind,
             target: tradeTarget,
             ...tokenLegs(intent),
             amount_usdg: usdgNum(notional),
@@ -9630,8 +10356,8 @@ async function main() {
           releaseBudget();
           await recordTrade({
             agent_id: agentId,
-            kind: intent.kind,
-            target: intent.target,
+            kind: rowKind,
+            target: tradeTarget,
             ...tokenLegs(intent),
             amount_usdg: usdgNum(notional),
             status: "rejected",
@@ -9647,8 +10373,8 @@ async function main() {
           releaseBudget();
           await recordTrade({
             agent_id: agentId,
-            kind: intent.kind,
-            target: intent.target,
+            kind: rowKind,
+            target: tradeTarget,
             ...tokenLegs(intent),
             amount_usdg: usdgNum(notional),
             status: "rejected",
@@ -9664,8 +10390,8 @@ async function main() {
           releaseBudget();
           await recordTrade({
             agent_id: agentId,
-            kind: intent.kind,
-            target: intent.target,
+            kind: rowKind,
+            target: tradeTarget,
             ...tokenLegs(intent),
             amount_usdg: usdgNum(notional),
             status: "rejected",
@@ -9693,8 +10419,8 @@ async function main() {
           await addEvent(agentId, "warn", `${impactVerdict.detail} ($MERRYMEN energy)`);
           await recordTrade({
             agent_id: agentId,
-            kind: intent.kind,
-            target: intent.target,
+            kind: rowKind,
+            target: tradeTarget,
             ...tokenLegs(intent),
             amount_usdg: usdgNum(notional),
             status: "rejected",
@@ -9735,8 +10461,8 @@ async function main() {
           );
           await recordTrade({
             agent_id: agentId,
-            kind: intent.kind,
-            target: intent.target,
+            kind: rowKind,
+            target: tradeTarget,
             ...tokenLegs(intent),
             amount_usdg: usdgNum(notional),
             status: "rejected",
@@ -9783,14 +10509,21 @@ async function main() {
       // operator reading the log, or an owner reading their event feed, saw a
       // trading agent. Nothing was traded.
       const isProbe = intent.kind === "swap" && intent.sellToken === intent.buyToken;
-      const what = isProbe ? "pipeline probe" : intent.kind;
+      const what = isProbe ? "pipeline probe" : rowKind;
       console.log(`[execute] ${what} landed: ${txHash}`);
       await addEvent(
         agentId,
         "ok",
         isProbe
           ? `pipeline probe landed — an approve that proves the wall, the bundler and the paymaster. No asset changed hands: ${txHash}`
-          : `${intent.kind} landed (${fmt(notional)} USDG): ${txHash}`,
+          : perpLeg !== null
+            ? // A MARGIN MOVE, NEVER "BOUGHT" (the no-trades-rows amendment).
+              perpLeg === "perp-deposit"
+              ? `posted ${fmt(notional)} USDG of margin to Lighter: ${txHash}`
+              : perpLeg === "perp-claim"
+                ? `claimed ${fmt(notional)} USDG home from Lighter: ${txHash}`
+                : `registered the agent's trading key at Lighter: ${txHash}`
+            : `${intent.kind} landed (${fmt(notional)} USDG): ${txHash}`,
       );
 
       // ── DID IT ACTUALLY ARRIVE? ──────────────────────────────────────────
@@ -9976,10 +10709,22 @@ async function main() {
         );
         if (energyBooked === "booked") capitalPeakDirty = true;
       }
+      // A LANDED DEPOSIT'S MARGIN ROW moves `submitted → landed` — identified
+      // by the proxy's Deposit log as well as our UserOp — in the SAME db.tx
+      // as this trades row's settlement, with its `margin` journal entry
+      // written once, on the real transition (store.ts perpTransferWith). A
+      // claim's money is its WithdrawPending, which payouts.ts recognises from
+      // the chain; a key registration moved none. A write the ledger refuses
+      // takes recordTrade's fail-closed path: the op stays counted and the
+      // owner is told.
+      const perpLandedTransfer =
+        perpLanded !== null && perpLanded.kind === "leg"
+          ? perpLegLandedTransfer(perpLanded.leg, { userOpHash: exec.userOpHash, txHash, chainId: active.grant.chainId })
+          : null;
       await recordTrade({
         agent_id: agentId,
-        kind: intent.kind,
-        target: intent.target,
+        kind: rowKind,
+        target: tradeTarget,
         ...tokenLegs(intent),
         amount_usdg: usdgNum(notional),
         tx_hash: txHash,
@@ -10019,12 +10764,17 @@ async function main() {
         // AND NEITHER IS AN ENERGY PURCHASE: the owner's USDG set aside as the
         // agent's own capacity, booked as capital leaving the book — not
         // turnover, and never charged as it.
-        ...(intent.kind === "transfer" || isEnergyIntent(intent)
+        //
+        // NOR A PERP LEG (the no-trades-rows amendment's fee row): posting
+        // margin, claiming it home and registering a key are the owner's money
+        // moving between the account and the venue, not turnover. Any fee on
+        // perps is decided on `perp_fills`, never here (PERP_TRADE_FEE_BPS).
+        ...(perpLeg !== null || intent.kind === "transfer" || isEnergyIntent(intent)
           ? {}
           : { trade_fee_usdg: usdgNum(tradeFeeUsdg(notional, cfg.tradeFeeBps)) }),
         ...sim,
         ...(booked ?? {}),
-      });
+      }, perpLandedTransfer === null ? undefined : { with: perpTransferWith({ ...perpLandedTransfer, agentId, mode: "live" }) });
       // A transfer is the one intent that moves money OUT of the account, so it
       // is a flow, not a trade — the only outbound flow we know exactly, with a
       // tx hash, because we signed it ourselves. Without this the owner taking
@@ -10119,7 +10869,7 @@ async function main() {
         );
         await recordTrade({
           agent_id: agentId,
-          kind: intent.kind,
+          kind: rowKind,
           target: tradeTarget,
           ...tokenLegs(intent),
           amount_usdg: usdgNum(notional),
@@ -10135,7 +10885,7 @@ async function main() {
         await addEvent(agentId, "warn", `${intent.kind} refused before signing: ${msg.slice(0, 300)}`);
         await recordTrade({
           agent_id: agentId,
-          kind: intent.kind,
+          kind: rowKind,
           target: tradeTarget,
           ...tokenLegs(intent),
           amount_usdg: usdgNum(notional),
@@ -10169,7 +10919,7 @@ async function main() {
         );
         await recordTrade({
           agent_id: agentId,
-          kind: intent.kind,
+          kind: rowKind,
           target: tradeTarget,
           ...tokenLegs(intent),
           amount_usdg: usdgNum(notional),
@@ -10317,8 +11067,8 @@ async function main() {
       }
       await recordTrade({
         agent_id: agentId,
-        kind: intent.kind,
-        target: intent.target,
+        kind: rowKind,
+        target: tradeTarget,
         ...tokenLegs(intent),
         amount_usdg: usdgNum(notional),
         // Resolves the pre-broadcast row in place when there is one — a revert
@@ -10534,6 +11284,31 @@ async function main() {
     }, "paper peak");
   }
 
+  /** A return-home claim does not depend on the strategy, spot prices or entry consent. */
+  async function recoverPerpPayout(): Promise<void> {
+    const a = active;
+    const nowMs = Date.now();
+    if (a === null || grantPerp(a.grant) === null || a.grant.chainId !== LIGHTER_ROUTE_V1.chainId ||
+        grantExpired(a.grant, Math.floor(nowMs / 1000)) || perpClaimExecMode(execInputs()).mode !== "live" ||
+        nowMs - perpClaimReadAtMs < 60_000) return;
+    perpClaimReadAtMs = nowMs;
+    // Every unread dependency throws/returns null before an intent exists.
+    if ((await listSubmittedOps(a.agentId)).some((row) => row.kind === "perp-claim")) return;
+    const withdrawals = (await listOpenPerpTransfers(a.agentId, "live")).filter((row) => row.direction === "withdraw");
+    if (withdrawals.length === 0) return;
+    const block = await a.client.getBlockNumber();
+    const pending = await readLighterPendingAt(a.client, a.grant.smartAccount.toLowerCase() as `0x${string}`, a.grant.chainId, block);
+    if (pending === null || pending <= 0n) return;
+    const delay = await (perpPublicApi ??= createLighterApi({ home: merrymenHome(), budgetKey: "public" })).withdrawalDelay();
+    const amount = claimDue({ pendingBalanceMicro: pending, pendingSinceSec: Math.min(...withdrawals.map((row) => row.createdAt)),
+      withdrawalDelaySec: delay.ok ? delay.value : null, nowSec: Math.floor(Date.now() / 1000) });
+    if (amount === null || active !== a) return;
+    const intent: TradeIntent = { kind: "perp-margin", direction: "claim", amountUsdg: amount };
+    const stamped = await ensureDecision(intent, "perp-route", "return a delayed Lighter payout to this smart account");
+    if (!stamped.ok || active !== a) return;
+    await processIntentReporting(intent, 0n, false);
+  }
+
   async function tick() {
     // A COMMAND TICK is this same tick with its producers left out: the same
     // grant sync, the same market read, the same book read and equity — the
@@ -10565,6 +11340,7 @@ async function main() {
     await refreshConfig();
     const armed = await syncGrant();
     await observeRailCash();
+    await recoverPerpPayout().catch((e) => console.error("[perps] payout claim deferred:", e instanceof Error ? e.message : "read failed"));
 
     if (active && grantTrencher(active.grant)) {
       refreshTrenchTape(); refreshAutoTrench();
@@ -10717,6 +11493,14 @@ async function main() {
     }
     if (paper) autoTrenchBalances.clear();
     let balances: { ethWei: bigint; cashUsdg: bigint; vaultUsdg: bigint };
+    /**
+     * The block the live cash was read at (snapshot.ts readAccountBalances:
+     * Multicall3.getBlockNumber in the same aggregate as balanceOf) — the
+     * payout fold's upper bound this tick and the equity row's
+     * `cash_read_block`, the next look's cursor. Null on paper, or when the
+     * block could not be read with the cash.
+     */
+    let cashReadBlock: bigint | null = null;
     let positions: Position[];
     // Symbols the account HOLDS but couldn't be valued this tick (feed/multiplier
     // read failed). Valuing them at 0 would crater equity and can trip the drawdown
@@ -10885,6 +11669,7 @@ async function main() {
           : Promise.resolve({ balances: new Map<string, bigint>(), unread: classUnread }),
       ]);
       balances = bal;
+      cashReadBlock = bal.cashReadBlock ?? null;
       positions = posRead.positions;
       missingPrice = posRead.missingPrice;
       unpricedByDesign = posRead.unpricedByDesign;
@@ -11252,15 +12037,44 @@ async function main() {
       quarantine.totalCostUsdg + curveCostUsdg + lastClassCostUsdg - classCostInQuarantine;
 
     const unknownCost = quarantine.holdings.filter((h) => h.costUsdg === 0n).map((h) => h.symbol);
-    // A LIVE BOOK'S PERP HALF. No live perps exist in this build (perps/lane.ts
-    // perpsRailOf: a live account with perps on is refused `perp-live-not-yet`),
-    // so the lane reads nothing and this is the known zero of an agent with
-    // no perps — while the read still says why nothing opens, for the report.
-    // (The paper book's half was read with its cash, above.)
+    // A LIVE BOOK'S PERP HALF (perps/lane.ts): with a Lighter account under
+    // our L1 address the lane reconciles the venue (outside its lock) and
+    // builds the term from that pass's ONE account read; with none (index 0)
+    // it is the known zero of an agent with no perps, and Lighter is never
+    // read. (The paper book's half was read with its cash, above.)
+    //
+    // THE PAYOUT STEP COMES FIRST (docs/perps.md rule 12; livePayoutStep): its
+    // T_in/T_out and pending balance at this tick's block are what the live
+    // perp term's in-transit figure is built from, and its fold is what the
+    // flow look below folds — both from the same block-pinned cash.
+    let payoutFold: PayoutFold = { kind: "none" };
     if (!paper) {
+      try {
+        payoutFold = await livePayoutStep(agentId, client, grant, cashReadBlock);
+      } catch (e) {
+        // A caller bug in the step, never a read (those come back unfoldable):
+        // unknown, so the look holds and the transit is unread.
+        console.log(`[payouts] step failed (${e instanceof Error ? e.message : String(e)}) — this tick's look holds`);
+        payoutFold = { kind: "unfoldable", why: "the payout step failed" };
+        perpTransit = { block: cashReadBlock, transit: null, pendingBalanceMicro: null };
+      }
+      // The cash the onboarding plan may post as margin: this tick's read.
+      perpCashMicro = balances.cashUsdg;
       const liveRead = await perpLane.refresh();
-      perpBook = liveRead.book;
-      perpLastKnownMicro = liveRead.lastKnownMicro;
+      if (liveRead.liveTerm !== undefined) {
+        // THE LIVE VENUE, READ (perps/lane.ts): the term from its ONE account
+        // read and this tick's transit, applied through the one hook — the
+        // equity term, the last known venue money and canTradeForReal's
+        // venue money together (rule 8a(f), 11, 12).
+        noteLivePerpTerm(liveRead.liveTerm);
+      } else {
+        perpBook = liveRead.book;
+        perpLiveLastKnownMicro = liveRead.lastKnownMicro;
+        perpLastKnownMicro = perpLiveLastKnownMicro;
+        // THE MONEY AT THE VENUE, from the same read (rule 8a(f)): what
+        // canTradeForReal counts beside cash. Only a live term writes it.
+        if (liveRead.book !== undefined) perpVenueMicro = venueMoneyOf(liveRead.book);
+      }
     }
     // agents.perps, from this tick's read (lane.ts: written only on a change).
     await perpLane.report().catch(() => {});
@@ -11619,6 +12433,8 @@ async function main() {
               grant,
             }
           : undefined,
+        // This tick's Lighter payouts and the block the cash was read at.
+        { fold: payoutFold, block: cashReadBlock },
       );
       // A HELD LOOK ACCRUES NO FEE AND MOVES NO LIFETIME PEAK. While an op the
       // resolver may still settle is in flight, this equity's cash is not yet
@@ -11647,10 +12463,19 @@ async function main() {
       // The venue read's own transit term holds too: T > 0 is money the lane
       // found between the two places (a pending balance on the contract
       // included), whether or not a row of ours names it yet.
+      //
+      // AND SO DOES A PENDING BALANCE ON THE CONTRACT at this tick's block
+      // (rule 12c: getPendingBalance(self, 3)@N > 0 holds) — money that has
+      // left the venue and not reached the account, whatever the rows say;
+      // with a Lighter account, a pending balance nobody could read holds too.
+      const pendingHeld =
+        perpAccountIndex !== 0n && perpTransit !== null && (perpTransit.pendingBalanceMicro === null || perpTransit.pendingBalanceMicro > 0n);
       let transitHeld: boolean;
       try {
         transitHeld =
-          (perpRead?.inTransitMicro ?? 0n) > 0n || (await listOpenPerpTransfers(agentId, "live")).length > 0;
+          pendingHeld ||
+          (perpRead?.inTransitMicro ?? 0n) > 0n ||
+          (await listOpenPerpTransfers(agentId, "live")).length > 0;
       } catch (e) {
         console.log(`[account] perp transfers unreadable (${e instanceof Error ? e.message : String(e)}) — ratchets held this tick`);
         transitHeld = true;
@@ -11837,6 +12662,9 @@ async function main() {
         flowsHeld,
         // WHEN ITS CASH WAS READ, which is what a restart's `since` must be.
         cashReadAt: cashReadAtSec,
+        // AND AT WHICH BLOCK (rule 12): the restart's and the hosted anchor's
+        // payout cursor. Live only — a paper book was read from no chain.
+        ...(!paper && cashReadBlock !== null ? { cashReadBlock } : {}),
         // WHICH BOOK THIS MARK IS OF. `balances` is the paper ledger above and
         // the chain below, and until now the row said nothing about which — so
         // an agent that practised at 1,000 USDG and then went live wrote one
@@ -14015,6 +14843,9 @@ async function main() {
     submitTrade: (side: "buy" | "sell", symbol: string, usdg: number) =>
       submitChatTrade(side, symbol, usdg).then((r) => r.line),
     submitTransfer: submitChatTransfer,
+    readPerps: async () => { await perpLane.refresh(); return perpLane.ownerReport(); },
+    closePerp: async (market) => (await perpLane.close(market)).sentence,
+    flattenPerps: async () => (await perpLane.flatten()).sentence,
     onNameChange: (name) => {
       if (active) void setAgentName(active.agentId, name);
     },
@@ -14281,6 +15112,13 @@ async function main() {
     } catch (e) {
       console.error("[command-wake]", e);
     }
+    // THE SELF-HOSTED STAND-DOWN REQUESTS (docs/perps.md rule 13;
+    // perps/standdown-files.ts), on the same 2 s path: a kill writes
+    // standdown-request-<nonce>.json BEFORE archiving the grant, and the
+    // lane runs it with the key it still holds and writes the result the CLI
+    // waits on. Never awaited here — a stand-down may run for minutes, and
+    // the lane keeps one at a time itself.
+    void perpLane.pollStanddownRequests().catch((e) => console.error("[perps] stand-down requests:", e));
   }, COMMAND_WAKE_EVERY_MS).unref();
 
   // ── DON'T ALL WAKE AT ONCE ──────────────────────────────────────────

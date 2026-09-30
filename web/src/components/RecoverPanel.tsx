@@ -1,9 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { listSavedWallets, loadGrant } from "@/lib/session";
 import { isAddr, normalizeAddr } from "@/lib/address";
-import { planFromBrowser, sweepFromBrowser, redact, type BrowserWallet } from "@/lib/recover-client";
+import {
+  planFromBrowser,
+  sweepFromBrowser,
+  redact,
+  venueFromBrowser,
+  type BrowserWallet,
+  type VenueDisclosure,
+} from "@/lib/recover-client";
 import { usePrivyOwner, type PrivyOwner } from "@/terminal/usePrivyOwner";
 
 /**
@@ -57,6 +64,11 @@ interface Ctx {
   }[];
   /** Labels whose balance could not be READ. Never conflate with "not held". */
   unreadable?: string[];
+  /**
+   * The Lighter group, when the server sends it. Absent is "not checked", which
+   * is unknown — never "nothing at Lighter"; the panel then reads it itself.
+   */
+  venue?: VenueDisclosure;
   error?: string;
   /** The server's explanation. Was returned, parsed, and never rendered. */
   detail?: string;
@@ -90,6 +102,8 @@ interface PlanRes {
   nativeReserveWei?: string;
   /** Labels whose balance could not be READ. Never conflate with "not held". */
   unreadable?: string[];
+  /** The Lighter group (see Ctx.venue). Absent is not checked, never nothing. */
+  venue?: VenueDisclosure;
   error?: string;
 }
 interface SweepRes {
@@ -141,6 +155,7 @@ export function RecoverPanelView({
    * engine, so every production render is unchanged.
    */
   planFn = planFromBrowser,
+  venueFn = venueFromBrowser,
 }: {
   initialOwnerKey?: string;
   /**
@@ -152,6 +167,8 @@ export function RecoverPanelView({
    */
   privyOwner: PrivyOwner | null;
   planFn?: typeof planFromBrowser;
+  /** Injected for the same reason as `planFn`: the venue read wants a chain and Lighter. */
+  venueFn?: typeof venueFromBrowser;
 }) {
   const [open, setOpen] = useState(false);
   const [ctx, setCtx] = useState<Ctx | null>(null);
@@ -165,6 +182,8 @@ export function RecoverPanelView({
   const [busy, setBusy] = useState<null | "checking" | "sweeping">(null);
   const [result, setResult] = useState<SweepRes | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** The Lighter group read by THIS browser, for plans the server sent without one. */
+  const [readVenue, setReadVenue] = useState<{ key: string; venue: VenueDisclosure } | null>(null);
 
   async function expand() {
     setOpen(true);
@@ -219,6 +238,7 @@ export function RecoverPanelView({
         ownerAccount: privyOwner.account,
         chainId: saved?.chainId ?? chainId,
         grantTokens: (saved as { grantTokens?: string[] } | null)?.grantTokens,
+        perpPublicKey: perpKeyFor(account),
       };
     }
     const key = ownerKey.trim();
@@ -240,7 +260,22 @@ export function RecoverPanelView({
       ownerKey: key as `0x${string}`,
       chainId: saved.chainId ?? chainId,
       grantTokens: (saved as { grantTokens?: string[] }).grantTokens,
+      perpPublicKey: perpKeyFor(saved.smartAccount),
     };
+  }
+
+  /**
+   * The current grant's Lighter PUBLIC key, when it is for this account. Only
+   * a label for the venue's key slot; a missing one costs the label, not a step.
+   */
+  function perpKeyFor(account: string): string | null {
+    try {
+      const g = loadGrant() as { smartAccount?: string; perp?: { apiPublicKey?: unknown } } | null;
+      if (!g || (g.smartAccount ?? "").toLowerCase() !== account.toLowerCase()) return null;
+      return typeof g.perp?.apiPublicKey === "string" ? g.perp.apiPublicKey : null;
+    } catch {
+      return null;
+    }
   }
 
   async function checkInBrowser() {
@@ -287,6 +322,11 @@ export function RecoverPanelView({
         // Same reason `unreadable` exists at all: absence and ignorance are
         // different facts, and the panel cannot tell them apart without this.
         unreadable: b.unreadable,
+        // LIGHTER, in words. Carried explicitly for the reason every field
+        // above is: an object literal restating the plan is exactly where a
+        // part of it gets dropped, and "empty" over a funded venue account is
+        // the failure this whole panel keeps being fixed for.
+        venue: b.venueText,
       } as unknown as PlanRes);
       // The one thing that stops a sweep dead, said BEFORE they press it.
       if (b.needsGas) {
@@ -298,6 +338,12 @@ export function RecoverPanelView({
       setError(redact(e, w.ownerKey));
     }
     setBusy(null);
+  }
+
+  /** The confirm dialog's Lighter line — empty only when the venue READ as holding nothing. */
+  function lighterNotInSweep(): string {
+    if (venueStanding === "nothing") return "";
+    return `\n\nNOT in this sweep — Lighter: ${venue?.headline ?? "Lighter (perpetuals) was not checked here, so whether anything is there is unknown."}`;
   }
 
   async function sweepInBrowser() {
@@ -345,7 +391,8 @@ export function RecoverPanelView({
         `Sweep ${list} to ${normalizeAddr(to)}?\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.` +
           (alsoHeld
             ? `\n\nNOT in this sweep: ${alsoHeld}, held in another of your class vaults. Run this again afterwards to move it.`
-            : ""),
+            : "") +
+          lighterNotInSweep(),
       )
     ) {
       return;
@@ -459,8 +506,47 @@ export function RecoverPanelView({
     return { recoverable: fmt(wei), reserve: fmt(BigInt(plan?.nativeReserveWei ?? "0")) };
   })();
 
-  // A vault holding is something to recover, so it cannot be "empty" either.
-  const empty = known && balances.length === 0 && classHoldings.length === 0 && unreadable.length === 0;
+  /**
+   * THE LIGHTER GROUP: from the plan, else from the server's context, else as
+   * this browser read it for a server plan that came without one. Undefined
+   * means NOT CHECKED — unknown, and so never allowed to read as "nothing".
+   */
+  const venueKey = smartAccount ? `${smartAccount.toLowerCase()}:${activeChain}` : "";
+  const venue: VenueDisclosure | undefined =
+    plan?.venue ?? ctx?.venue ?? (readVenue && readVenue.key === venueKey ? readVenue.venue : undefined);
+  const needVenueRead = known && !clientSide && !!smartAccount && !plan?.venue && !ctx?.venue;
+  useEffect(() => {
+    // SELF-HOSTED ONLY: the hosted path's plan already carries the venue. The
+    // read needs the account's ADDRESS and nothing else, so no key is involved.
+    if (!needVenueRead || !smartAccount || (readVenue && readVenue.key === venueKey)) return;
+    let live = true;
+    venueFn(smartAccount as `0x${string}`, activeChain, perpKeyFor(smartAccount))
+      .then((v) => {
+        if (live) setReadVenue({ key: venueKey, venue: v });
+      })
+      .catch(() => {
+        /* never throws by contract; if it did, the venue stays "not checked" */
+      });
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needVenueRead, venueKey]);
+  const venueStanding = venue?.standing;
+
+  // Nothing sweepable, every balance read, and Lighter holds something or could
+  // not be read: NOT "empty". The venue group says what is there.
+  const venueOnly =
+    known &&
+    balances.length === 0 &&
+    classHoldings.length === 0 &&
+    !ethLeg &&
+    unreadable.length === 0 &&
+    venue !== undefined &&
+    venueStanding !== "nothing";
+  // A vault holding is something to recover, so it cannot be "empty" either —
+  // and nor can native ETH the engine would move, or anything at Lighter.
+  const empty = known && balances.length === 0 && classHoldings.length === 0 && !ethLeg && unreadable.length === 0 && !venueOnly;
   const blind = known && balances.length === 0 && classHoldings.length === 0 && unreadable.length > 0;
 
   async function sweep() {
@@ -494,6 +580,11 @@ export function RecoverPanelView({
         `  reserve remaining on the account approximately ${ethLeg.reserve} ETH`,
         "",
       );
+    }
+    // AND WHAT IT DOES NOT MOVE: Lighter is another custody and another
+    // operation, and a confirmation silent about it reads as the whole account.
+    if (venueStanding !== "nothing") {
+      lines.push("NOT IN THIS SWEEP — LIGHTER", `  ${venue?.headline ?? "Lighter (perpetuals) was not checked here."}`, "");
     }
     lines.push("DESTINATION", `  ${normalizeAddr(to)}`);
     const list =
@@ -648,7 +739,21 @@ export function RecoverPanelView({
               )}
 
               {empty ? (
-                <p className="recover-sub">This account is empty — nothing to recover.</p>
+                <>
+                  <p className="recover-sub">
+                    {venue
+                      ? "This account is empty — nothing to recover."
+                      : "Nothing to sweep in this account. Lighter (perpetuals) has not been checked yet, so this is not a claim that nothing is left there."}
+                  </p>
+                  {venue && <VenueSection venue={venue} privyOwned={!!privyOwner} />}
+                </>
+              ) : venueOnly ? (
+                /* NOT "empty": the account itself holds nothing to sweep, but
+                   Lighter holds something for it, or could not be read. */
+                <>
+                  <p className="recover-sub">Nothing to sweep in the account itself.</p>
+                  <VenueSection venue={venue!} privyOwned={!!privyOwner} />
+                </>
               ) : blind ? (
                 /* NOT "empty". Every balance read failed, which is a different
                    fact — and telling someone their account is empty because an
@@ -696,6 +801,15 @@ export function RecoverPanelView({
                       <span className="mono">{ethLeg.recoverable}</span> ETH recoverable, leaving about{" "}
                       <span className="mono">{ethLeg.reserve}</span> ETH on the account to pay for the
                       withdrawal itself.
+                    </p>
+                  )}
+                  {venue ? (
+                    <VenueSection venue={venue} privyOwned={!!privyOwner} />
+                  ) : (
+                    <p className="recover-sub">
+                      {needVenueRead
+                        ? "Lighter (perpetuals): checking…"
+                        : "Lighter (perpetuals) was not checked here, so whether anything is there is unknown."}
                     </p>
                   )}
 
@@ -746,5 +860,76 @@ export function RecoverPanelView({
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * THE LIGHTER GROUP, read-only (docs/perps.md, "Recover").
+ *
+ * Grouped by custody like the rest of the panel, from the engine's own words
+ * (`venueDisclosure`), so this screen and `merrymen recover` say the same
+ * thing. An account that never had a venue leg shows nothing here.
+ *
+ * NO UNWIND BUTTON, and the reason is stated rather than hidden: this site's
+ * withdrawal relay carries token transfers and class-vault sweeps only, so
+ * Lighter's priority requests (cancel, key change, withdraw, claim) would be
+ * refused by it. The owner-key path that exists is the CLI. A Privy-owned
+ * account has no key to take there, and is told so plainly.
+ */
+function VenueSection({ venue, privyOwned }: { venue: VenueDisclosure; privyOwned: boolean }) {
+  if (venue.groups.length === 0 && venue.offers.length === 0) {
+    return venue.standing === "nothing" ? null : <p className="recover-sub">{venue.headline}</p>;
+  }
+  return (
+    <>
+      <p className="recover-sub">
+        <strong>Lighter</strong> · perpetuals · {venue.headline}
+      </p>
+      {venue.groups.map((g) => (
+        <div key={g.title}>
+          <p className="recover-sub">
+            <strong>{g.title}</strong>
+          </p>
+          <div className="recover-holdings mono">
+            {g.lines.map((line, i) => (
+              <span key={i} className="recover-hold">
+                {line}
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
+      {venue.notes.map((n, i) => (
+        <p key={i} className="recover-sub">
+          {n}
+        </p>
+      ))}
+      {venue.offers.length > 0 && (
+        <>
+          <p className="recover-warn">
+            {privyOwned
+              ? "This account uses an embedded wallet, so there is no key to take to the command line. Review Close or Close all on the desk to request a reduce-only exit. A hosted shutdown can also request exits when its runner is available; check the shutdown result for positions or collateral that remain. While the agent runs, its worker maintains the resting stops."
+              : "Your owner key can unwind this at Lighter, but not from this page: this site's withdrawal relay only carries token transfers, so it cannot send Lighter's requests. Run `merrymen recover` with your owner key and a bundler key; it shows each step below and asks before sending it."}
+          </p>
+          {venue.offers.map((o) => (
+            <div key={o.kind}>
+              <p className="recover-sub">
+                <strong>{o.title}</strong>
+              </p>
+              <ul className="recover-sub">
+                {o.lines.map((line, i) => (
+                  <li key={`l${i}`}>{line}</li>
+                ))}
+                {o.warnings.map((w, i) => (
+                  <li key={`w${i}`}>
+                    <b>!</b> {w}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </>
+      )}
+    </>
   );
 }

@@ -1,3 +1,5 @@
+import { readPerpsText } from "./perps";
+import type { PerpKey, PerpsReport } from "../../../packages/core/src/perps";
 /**
  * Telegram poll service — the merryman's always-on ear.
  *
@@ -134,6 +136,9 @@ export interface TelegramServiceDeps {
   readDepth: (symbol: string) => Promise<string>;
   /** Build a bounded TradeIntent and route it through processIntent. */
   submitTrade: (side: "buy" | "sell", symbol: string, usdg: number) => Promise<string>;
+  readPerps?: () => Promise<PerpsReport | null>;
+  closePerp?: (market: PerpKey) => Promise<string>;
+  flattenPerps?: () => Promise<string>;
   /** Build a bounded transfer intent and route it through processIntent. */
   submitTransfer: (to: `0x${string}`, usdg: number) => Promise<string>;
   /** Delete the grant (kill switch). */
@@ -185,6 +190,7 @@ const SELF_REFRESH_MS = 30 * 60 * 1000;
 const PRIVATE_READS: ReadonlySet<string> = new Set([
   "status",
   "positions",
+  "perps",
   "pnl",
   "trades",
   "wallet",
@@ -520,9 +526,10 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       grantHasTransfer: deps.grantHasTransfer(),
       reads: {
         status: () => readStatus(statusCtx()),
-        positions: () => readPositions(statusCtx().agentId),
+        positions: async () => `${readPositions(statusCtx().agentId)}\n\n${await readPerpsText(deps.readPerps)}`,
+        perps: () => readPerpsText(deps.readPerps),
         depth: (symbol: string) => deps.readDepth(symbol),
-        pnl: () => readPnl(statusCtx().agentId),
+        pnl: async () => `${readPnl(statusCtx().agentId)}\n\n${await readPerpsText(deps.readPerps)}`,
         // Names from the ledger first, then the chain — including the coin in a
         // row re-recorded after a restart, which only its receipt still knows.
         trades: () => readTrades(statusCtx().agentId, tradeLookup(cfg)),
@@ -628,6 +635,8 @@ export function startTelegram(deps: TelegramServiceDeps): { stop: () => void } {
       },
       link: linkDep,
       trade: deps.submitTrade,
+      closePerp: deps.closePerp,
+      flattenPerps: deps.flattenPerps,
       transfer: async (to, usdg) => {
         deps.note("warn", `Telegram: transfer ${usdg} USDG → ${to} confirmed by chat ${msg.chatId}`);
         return deps.submitTransfer(to, usdg);

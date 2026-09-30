@@ -68,6 +68,8 @@ interface EquityRow {
   cash_usdg: number | string | null;
   /** When the cash was read: `cash_read_at`, or the row's `at` before that existed. */
   read_at: number | string | null;
+  /** The block the cash was read at (`cash_read_block`) — absent before the column, null before the block was pinned. */
+  cash_read_block?: number | string | null;
 }
 interface CountRow {
   n: number | string | null;
@@ -106,6 +108,23 @@ export function missingHeldColumns(e: unknown): boolean {
  * read before them, and a held mark cannot slip in through it.
  */
 async function cashBaseline(shared: Db, agentId: string): Promise<EquityRow | undefined> {
+  // THE SAME ROW'S BLOCK, when the ledger has the column (docs/perps.md rule
+  // 12: the hosted first look folds Lighter payouts after it). A shared
+  // ledger the `cash_read_block` migration has not reached answers without
+  // it — exactly the query below, and exactly the row it always read.
+  try {
+    return (await shared
+      .prepare(
+        "SELECT cash_usdg, COALESCE(cash_read_at, at) AS read_at, cash_read_block FROM equity " +
+          "WHERE LOWER(agent_id) = ? AND COALESCE(flows_held, 0) = 0 ORDER BY at DESC, id DESC LIMIT 1",
+      )
+      .get(agentId)) as EquityRow | undefined;
+  } catch (e) {
+    if (!missingCashBlockColumn(e)) {
+      if (missingHeldColumns(e)) return preHeldCashBaseline(shared, agentId);
+      throw e;
+    }
+  }
   try {
     return (await shared
       .prepare(
@@ -115,10 +134,29 @@ async function cashBaseline(shared: Db, agentId: string): Promise<EquityRow | un
       .get(agentId)) as EquityRow | undefined;
   } catch (e) {
     if (!missingHeldColumns(e)) throw e;
-    return (await shared
-      .prepare("SELECT cash_usdg, at AS read_at FROM equity WHERE LOWER(agent_id) = ? ORDER BY at DESC, id DESC LIMIT 1")
-      .get(agentId)) as EquityRow | undefined;
+    return preHeldCashBaseline(shared, agentId);
   }
+}
+
+/** Only the `cash_read_block` column missing — the one absence the block read forgives (missingHeldColumns' contract). */
+function missingCashBlockColumn(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  if (!/\bcash_read_block\b/.test(e.message)) return false;
+  return /no such column/i.test(e.message) || (e as { code?: unknown }).code === "42703";
+}
+
+/** The pre-`flows_held`/`cash_read_at` ledger's query (see cashBaseline). */
+async function preHeldCashBaseline(shared: Db, agentId: string): Promise<EquityRow | undefined> {
+  return (await shared
+    .prepare("SELECT cash_usdg, at AS read_at FROM equity WHERE LOWER(agent_id) = ? ORDER BY at DESC, id DESC LIMIT 1")
+    .get(agentId)) as EquityRow | undefined;
+}
+
+/** A row's `cash_read_block` as a non-negative safe integer, or null (absent, null or malformed — none on record). */
+function cashBlockOf(v: number | string | null | undefined): number | null {
+  if (v === null || v === undefined) return null;
+  const n = typeof v === "number" ? v : /^\d{1,16}$/.test(v) ? Number(v) : Number.NaN;
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
 const num = (v: number | string | null | undefined): number => {
@@ -301,6 +339,12 @@ export async function deriveBootstrapAccounting(
       // record" and "the account held nothing" are different claims, and the
       // child branches on which one it got.
       lastObservedCashUsdg: hasCashReading ? bigintToMicro(usdgRealToMicro(num(equity?.cash_usdg))) : null,
+      // AND THE BLOCK IT WAS READ AT, when that row pinned one: the hosted
+      // first look's Lighter payout cursor (rule 12). Omitted — never 0 —
+      // when it did not.
+      ...(hasCashReading && cashBlockOf(equity?.cash_read_block) !== null
+        ? { lastObservedCashBlock: cashBlockOf(equity?.cash_read_block)! }
+        : {}),
       accountingEpoch: epoch,
       observedAt,
       ...(carryNote === null ? {} : { carryNote }),

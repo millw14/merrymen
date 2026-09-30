@@ -1,3 +1,4 @@
+import { parsePerpsNotifyState, type PerpsNotifyState } from "./perps-notifier";
 /**
  * Telegram runtime state, persisted at ~/.merrymen/telegram.json:
  *   - the getUpdates offset (so a restart doesn't replay old messages)
@@ -89,6 +90,8 @@ export interface TelegramState {
   messageCount: number;
   /** Highest trades.id already pushed to the owner chat. -1 = not initialized. */
   lastNotifiedTradeId: number;
+  /** Perps fill cursor and alert episodes, bound to account and linked owner. */
+  perpsNotify?: PerpsNotifyState | null;
   /** Unix seconds of the last batched trade summary (quiet mode). */
   lastTradeDigestAt: number;
   /**
@@ -176,6 +179,7 @@ export function loadTelegramState(): TelegramState {
         : [],
       messageCount: typeof s.messageCount === "number" ? s.messageCount : 0,
       lastNotifiedTradeId: typeof s.lastNotifiedTradeId === "number" ? s.lastNotifiedTradeId : -1,
+      perpsNotify: parsePerpsNotifyState(s.perpsNotify),
       lastTradeDigestAt: typeof s.lastTradeDigestAt === "number" ? s.lastTradeDigestAt : 0,
       lastRemedyRule: typeof s.lastRemedyRule === "string" ? s.lastRemedyRule : null,
       firedAlerts: s.firedAlerts && typeof s.firedAlerts === "object" ? (s.firedAlerts as Record<string, number>) : {},

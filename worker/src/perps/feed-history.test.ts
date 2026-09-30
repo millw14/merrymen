@@ -308,7 +308,7 @@ function api(opts: { candles?: (a: CandleArgs, at: number) => LighterResult<{ re
   return { api: a, calls, bind: (c: Clock) => (clock = c) };
 }
 
-async function boot(ids: number[], at: number, apiOpts: Parameters<typeof api>[0] = {}) {
+async function boot(ids: number[], at: number, apiOpts: Parameters<typeof api>[0] = {}, held?: number[]) {
   const clock = new Clock(at);
   const socks = sockets();
   const fa = api(apiOpts);
@@ -316,6 +316,7 @@ async function boot(ids: number[], at: number, apiOpts: Parameters<typeof api>[0
   const logs: string[] = [];
   const feed = startLighterFeed({
     marketIds: () => ids,
+    ...(held !== undefined ? { heldMarketIds: () => held } : {}),
     outPath: OUT,
     home: FLEET,
     api: fa.api,
@@ -392,6 +393,29 @@ test("writer: only the route's universe markets in use get history, and a client
 
   const g = await boot([1], CAPTURED, { history: false });
   assert.equal(g.feed.snapshot().markets["1"]!.closed4h, undefined);
+  g.feed.stop();
+});
+
+test("writer: a HELD market outside the universe gets its hourly fundings (never candles), so its funding never stalls", async () => {
+  // TSLA-PERP held, BTC-PERP allowed: the held one's funding hours are read
+  // once an hour like the universe's, and nothing asks for its candles.
+  const f = await boot([16, 1], CAPTURED, {}, [16]);
+  await f.clock.advance(10_000);
+  assert.deepEqual(new Set(f.calls.candles.map((c) => c.args.marketId)), new Set([1]), "candles: the universe only");
+  assert.deepEqual(new Set(f.calls.fundings.map((c) => c.args.marketId)), new Set([1, 16]), "fundings: the universe and what is held");
+  const tsla = f.feed.snapshot().markets["16"];
+  if (tsla !== undefined) assert.ok(tsla.fundings1h && tsla.fundings1h.length > 0, "written into the held market's entry");
+  const before = f.calls.fundings.filter((c) => c.args.marketId === 16).length;
+  const nextHour = (Math.floor(CAPTURED / 3_600_000) + 1) * 3_600_000;
+  await f.clock.advance(nextHour + 80_000 - f.clock.t);
+  assert.equal(f.calls.fundings.filter((c) => c.args.marketId === 16).length, before, "and not again inside the hour");
+  await f.clock.advance(20_000);
+  assert.equal(f.calls.fundings.filter((c) => c.args.marketId === 16).length, before + 1, "once more just after the next hour");
+  f.feed.stop();
+  // Not held any more: back to the universe only.
+  const g = await boot([16, 1], CAPTURED, {}, []);
+  await g.clock.advance(10_000);
+  assert.deepEqual(new Set(g.calls.fundings.map((c) => c.args.marketId)), new Set([1]));
   g.feed.stop();
 });
 

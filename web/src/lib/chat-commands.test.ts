@@ -396,7 +396,7 @@ describe("the two commands that spend money", () => {
     // the same rail, with the same card and the same click (see below).
     assert.deepEqual(
       CHAT_COMMANDS.filter((c) => c.via === "order").map((c) => c.id).sort(),
-      ["buy", "get-energy", "sell"],
+      ["buy", "close-perp", "flatten-perps", "get-energy", "sell"],
     );
   });
 });
@@ -428,7 +428,7 @@ describe("get-energy", () => {
       const payload = commandPayload(commandFor(id)!, { symbol: "MERRYMEN", query: "merrymen", usdgAmount: 30, purpose: "energy" });
       assert.equal("purpose" in payload, false, id);
     }
-    const carriers = CHAT_COMMANDS.filter((c) => (c.writes ?? []).includes("purpose")).map((c) => c.id);
+    const carriers = CHAT_COMMANDS.filter((c) => c.fixed?.purpose === "energy").map((c) => c.id);
     assert.deepEqual(carriers, ["get-energy"]);
   });
 

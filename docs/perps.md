@@ -252,6 +252,11 @@ are recorded beside the constants in `packages/core/src/perps.ts`.
     the same receipt, and payouts (which arrive in Lighter's relayer
     transactions) are recognised from `WithdrawPending(owner = self, 3)` logs
     between block-pinned reads, never from an in-memory registration.
+    A partial payout's allocation and remainder are durable in `perp_payouts`,
+    committed in the same transaction as paid transfers and their margin
+    journal entries. Restarting after the cash cursor passed that payout must
+    preserve the remainder deducted from T_out. A missing legacy allocation
+    is unread transit, never a guessed zero remainder.
 
 13. **Kill and expiry stand the perps down, with the Lighter key only, and never
     remove a stop from an open position.** Order: close each position with a
@@ -397,6 +402,8 @@ are recorded beside the constants in `packages/core/src/perps.ts`.
   venue after a wipe, the venue-delta identity check, and incident detection
   (rule 16).
 - `payouts.ts` — block-pinned payout recognition for flow inference (rule 12).
+- `payout-ledger.ts` — atomic payout identities and partial allocations, carried
+  through hosted checkpoints and mirrors so a restart cannot overstate transit.
 - `onboard.ts` — the on-chain legs through the UserOp rail, each with its own
   final-fence lane: deposit, read the account index, register the sealed key
   (only if the slot is empty, holds a key this agent registered, or holds an
@@ -526,7 +533,13 @@ home after 24 h flat and on perps-off, kill and expiry.
   10 min, incidents, and a funding line in the daily report. `/positions` and
   `/pnl` include perps, or say Lighter could not be read.
 - **Web chat cards** — `close-perp` and `flatten-perps`, routed by a fixed
-  `purpose` marker through the owner-order queue.
+  `purpose` marker through the owner-order queue. Both carry an explicit
+  `book` (`paper` or `live`) that the confirmation names and the worker
+  checks. The native `/agent?perps=flatten&book=live` (or
+  `perps=close&market=BTC-PERP&book=live`) handoff only opens that review;
+  an omitted book requires a choice before confirmation. Dashboard Settings
+  clears the flatten halt through a separate owner-bound `resume-perps`
+  request, never through chat; an incident still requires key rotation.
 - **MCP** — read-only `get_perp_positions` (portfolio.read); no perp tool moves
   funds or opens.
 - **CLI** — `status` and `doctor` show perps (signer hash, venue reachability,
@@ -618,9 +631,10 @@ fingerprint, and `spec-coverage.test.ts`.
   liquidation line the mark crossed and recovered from while the worker was
   down is not replayed — the practice position survives where the venue would
   have closed it. Missed paper funding is charged hour by hour from the feed's
-  hourly history (BTC, ETH and SOL, about the last 12 hours); an owed hour the
-  feed does not carry stops that position's funding there, and the owner is
-  told and shown it as unread rather than as zero.
+  hourly history (every held market, plus BTC, ETH and SOL for the route —
+  about the last 12 hours); an owed hour the feed does not carry stops that
+  position's funding there, and the owner is told and shown it as unread
+  rather than as zero.
 - Lighter's contracts are upgradeable with no effective notice.
 - Hosted children share an OS user, so a code-execution bug in any child could
   read another tenant's venue key; per-child isolation is a prerequisite for

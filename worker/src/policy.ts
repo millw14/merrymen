@@ -478,6 +478,35 @@ export type TradeIntent = {
   kind: "perp-margin";
   direction: "withdraw" | "claim";
   amountUsdg: bigint;
+} | {
+  /**
+   * REGISTERING THE SEALED API KEY at the agent's Lighter account —
+   * `changePubKey(accountIndex, 16, sealedKey)` through the wall (docs/perps.md
+   * rule 3; perps/onboard.ts `register-key`). HOUSEKEEPING, and its own kind
+   * rather than a `perp-margin` direction or a `transfer`, for three reasons:
+   *
+   *   it moves no money. A `perp-margin` member carries `amountUsdg` and every
+   *     reader of that kind sums it; a registration dressed as a zero-amount
+   *     margin move is one refactor away from being counted as spend, or as a
+   *     withdrawal home (the breaker's exit test keys on direction).
+   *   it is neither an exit nor an entry. The breaker's `isExitIntent` and the
+   *     energy gate's `countsAsEntry` are `never`-defaulted switches, so a
+   *     kind of its own is PLACED there by a decision, not by falling through.
+   *   its trades row is `perp-key` (store.ts getSpentTodayUsdg excludes it
+   *     from spend and counts it as an op), and the intent's kind is the row's.
+   *   Never `transfer`: index.ts books a landed transfer as the owner taking
+   *     money home (the no-trades-rows amendment).
+   *
+   * NO KEY AND NO TARGET: the key is the grant's sealed one and the target the
+   * route's proxy (perps/legs.ts perpLegCalls takes both from the grant), so no
+   * producer can name either. `accountIndex` is what the producer read on
+   * chain (addressToAccountIndex(self)); index.ts reads it again before signing
+   * and refuses a disagreement — the index comes from the chain, never from a
+   * producer's word.
+   */
+  kind: "perp-key";
+  /** addressToAccountIndex(self) as the producer read it — ≥ 1; re-read before signing. */
+  accountIndex: number;
 });
 
 /** The perp order shapes, narrowed — for the perp lane and the policy branch below. */
@@ -485,6 +514,7 @@ export type PerpOrderIntent = Extract<TradeIntent, { kind: "perp-order" }>;
 export type PerpOpenIntent = Extract<TradeIntent, { kind: "perp-order"; effect: "open" }>;
 export type PerpExitIntent = Extract<TradeIntent, { kind: "perp-order"; reduceOnly: true }>;
 export type PerpMarginIntent = Extract<TradeIntent, { kind: "perp-margin" }>;
+export type PerpKeyIntent = Extract<TradeIntent, { kind: "perp-key" }>;
 
 export type Verdict =
   | { ok: true }
@@ -709,6 +739,12 @@ export function isExitIntent(
     // is money GOING there and stays under every brake.
     case "perp-margin":
       return intent.direction === "withdraw" || intent.direction === "claim";
+    // A KEY REGISTRATION BRINGS NOTHING HOME. It only makes the venue account
+    // tradeable, so it stays under the breaker like the deposit it follows —
+    // and nothing an owner needs to get OUT waits on it: a position can only
+    // exist once the key is registered, and every exit signs with that key.
+    case "perp-key":
+      return false;
     case "curve-trade":
       break;
     default: {
@@ -851,17 +887,6 @@ function perpRailRefusal(p: PerpPolicyState, limits: AgentLimits): Verdict | nul
           rule: "perp-operator-off",
           detail: "the operator of this server has perpetuals switched off here, so nothing new is opened.",
         };
-      // THE BUILD, NOT THE OWNER (perps/lane.ts perpsRailOf): real-money perps
-      // are not wired yet, so a live account with perps on trades none — and
-      // never runs practice perps beside its real book (rule 14) either.
-      case "perp-live-not-yet":
-        return {
-          ok: false,
-          rule: "perp-live-not-yet",
-          detail:
-            "this account trades for real, and real-money perpetuals are not available in this version yet — a live " +
-            "account never runs practice perps beside its real book, so nothing is opened on Lighter.",
-        };
       default:
         return {
           ok: false,
@@ -980,6 +1005,66 @@ function checkPerpMarginHome(intent: PerpMarginIntent, limits: AgentLimits, stat
   }
   return { ok: true };
 }
+
+/**
+ * A KEY REGISTRATION — the mirror of the wall's changePubKey permission (rule
+ * 3: the key index and the sealed key pinned EQUAL, the account index open).
+ * Returns null when the shared brakes (expiry, ops, perp-unpriced, breaker)
+ * should judge it next; it has no amount, so no per-call or daily cap does.
+ *
+ * WHAT IT REFUSES, and why each: a rail that is not live (the key changes the
+ * REAL venue account — the paper book has none), no sealed route on the grant
+ * (the wall has no changePubKey to mirror), an account index that is not one
+ * (the contract's uint48, and 0 is "no account yet": a registration before the
+ * first deposit lands reverts), and the incident flag — a key at our index we
+ * did not put there is exactly what registering over would undo evidence of
+ * (rule 16; onboard.ts refuses `key-foreign` for the same reason).
+ */
+function checkPerpKey(intent: PerpKeyIntent, limits: AgentLimits, state: AgentState): Verdict | null {
+  const p = state.perp;
+  if (!p) {
+    return {
+      ok: false,
+      rule: "perp-not-enabled",
+      detail: "perpetuals are off for this agent, so no trading key is registered at Lighter.",
+    };
+  }
+  const rail = perpRailRefusal(p, limits);
+  if (rail) return rail;
+  if (p.mode !== "live") {
+    return {
+      ok: false,
+      rule: "perp-live-not-enabled",
+      detail: "registering a trading key changes the agent's real Lighter account, and this agent's perpetuals are paper.",
+    };
+  }
+  if (!limits.perp) {
+    return {
+      ok: false,
+      rule: "perp-not-granted",
+      detail: "the signed permission has no key registration at Lighter. Re-sign at /grant with perpetuals included.",
+    };
+  }
+  const idx = (intent as { accountIndex?: unknown }).accountIndex;
+  if (typeof idx !== "number" || !Number.isSafeInteger(idx) || idx < 1 || idx > PERP_MAX_ACCOUNT_INDEX) {
+    return {
+      ok: false,
+      rule: "perp-order-malformed",
+      detail: `${String(idx)} is not a Lighter account index, so there is no account to register the key on.`,
+    };
+  }
+  if (p.incident) {
+    return {
+      ok: false,
+      rule: "perp-venue-incident",
+      detail: "Lighter shows activity on the agent's account that the agent did not do, so no key is registered over it.",
+    };
+  }
+  return null;
+}
+
+/** uint48 — the contract's account-index type. */
+const PERP_MAX_ACCOUNT_INDEX = 2 ** 48 - 1;
 
 /**
  * A MARGIN DEPOSIT — the mirror of the wall's deposit permission, plus the
@@ -1414,7 +1499,8 @@ function checkPerpOpen(intent: PerpOrderIntent, limits: AgentLimits, state: Agen
  * The perp branch: a final verdict, or null for an entry that passed every
  * perp rule and now meets the shared brakes. Exits never return null.
  */
-function checkPerpIntent(intent: PerpOrderIntent | PerpMarginIntent, limits: AgentLimits, state: AgentState): Verdict | null {
+function checkPerpIntent(intent: PerpOrderIntent | PerpMarginIntent | PerpKeyIntent, limits: AgentLimits, state: AgentState): Verdict | null {
+  if (intent.kind === "perp-key") return checkPerpKey(intent, limits, state);
   if (intent.kind === "perp-margin") {
     if (intent.direction === "withdraw" || intent.direction === "claim") return checkPerpMarginHome(intent, limits, state);
     if (intent.direction === "deposit") return checkPerpDeposit(intent, limits, state);
@@ -1438,7 +1524,7 @@ export function checkPolicy(
   // needs a close and a withdrawal most). Exits get their final verdict now;
   // an open or a deposit that passes its own rules falls through to the shared
   // brakes below, expiry included, exactly as any other entry does.
-  if (intent.kind === "perp-order" || intent.kind === "perp-margin") {
+  if (intent.kind === "perp-order" || intent.kind === "perp-margin" || intent.kind === "perp-key") {
     const perpVerdict = checkPerpIntent(intent, limits, state);
     if (perpVerdict !== null) return perpVerdict;
   }
@@ -1460,6 +1546,7 @@ export function checkPolicy(
     intent.kind !== "energy-buy" &&
     intent.kind !== "perp-order" &&
     intent.kind !== "perp-margin" &&
+    intent.kind !== "perp-key" &&
     !limits.allowedTargets.map(lc).includes(lc(intent.target))
   ) {
     return { ok: false, rule: "target-allowlist", detail: `target ${intent.target} not allowed` };
@@ -1878,7 +1965,11 @@ export function checkPolicy(
   // The old mirror capped deposits at the per-trade limit, so a large idle-cash
   // sweep (e.g. 80 USDG with a 30-USDG per-trade cap) was rejected every tick
   // while the chain would have accepted it.
-  if (intent.kind !== "vault-withdraw") {
+  // A KEY REGISTRATION IS OUT OF THIS BLOCK beside vault-withdraw: it moves no
+  // USDG, so no per-call amount or daily spend can describe it, and a day
+  // already spent must not read as a reason the key cannot be registered. It
+  // still met the ops cap above — it is a UserOp, and store.ts counts it as one.
+  if (intent.kind !== "vault-withdraw" && intent.kind !== "perp-key") {
     // Equity orders count on BOTH sides, like swaps: a sell is still an op and
     // still market exposure, and on this rail these caps are the only wall.
     //

@@ -162,8 +162,58 @@ export function positionFigures(p: { detail: string; pnl: number | null }): {
  * rule the desk applies (positionsOf), so the chat cannot state a "+20%" the
  * panel beside it withholds. `costConfirmed` says which case it is.
  */
-export function chatPositionsOf(mine: LiveMine) {
-  return (mine.positions ?? []).map((p) => {
+/** One spot holding as the chat model is handed it. */
+export interface ChatSpotPosition {
+  symbol: string;
+  valueUsd: number;
+  costUsd: number | null;
+  costConfirmed: boolean | null;
+  unrealisedPct: number | null;
+  priceStale: boolean;
+  stopLossBps: number | null;
+  stopWhy: string | null;
+}
+
+/** One perp position as the chat model is handed it — see chatPerpsOf. */
+export interface ChatPerpFields {
+  kind: "perp";
+  side: "long" | "short";
+  /** Practice (true), real (false), or null when the report does not say which — never guessed. */
+  paper: boolean | null;
+  size: string;
+  entryPrice: string;
+  markPrice: string | null;
+  leverage: number | null;
+  marginUsd: number;
+  unrealisedUsd: number | null;
+  liquidationPrice: string | null;
+  liquidationDistancePct: number | null;
+  stopTrigger: string | null;
+  fundingUsd: number | null;
+  note: string;
+}
+
+/** What the perps account line adds: the money in the perps book, beside the positions. */
+export interface ChatPerpsAccountFields {
+  /** Rule 12's perpAccountUsdg in whole USD; null when a term of it was not read. */
+  atLighterUsd: number | null;
+}
+
+/** The fields a row of another kind does not carry, said as absent so any row can be asked for them. */
+type Absent<T> = { [K in keyof T]?: undefined };
+
+export type ChatPosition =
+  | (ChatSpotPosition & Absent<ChatPerpFields> & Absent<ChatPerpsAccountFields>)
+  | (Absent<Omit<ChatSpotPosition, "symbol">> & ChatPerpFields & { symbol: string } & Absent<ChatPerpsAccountFields>)
+  | (Absent<ChatSpotPosition> &
+      Absent<Omit<ChatPerpFields, "kind" | "note">> &
+      Absent<ChatPerpsAccountFields> & { kind: "perps-unread"; venue: "Lighter"; note: string })
+  | (Absent<ChatSpotPosition> &
+      Absent<Omit<ChatPerpFields, "kind" | "note" | "paper">> &
+      ChatPerpsAccountFields & { kind: "perps-account"; venue: "Lighter"; paper: boolean | null; note: string });
+
+export function chatPositionsOf(mine: LiveMine): ChatPosition[] {
+  const spot: ChatPosition[] = (mine.positions ?? []).map((p) => {
     const confirmed = p.costUsd !== null && p.costFromQuote === false;
     return {
       symbol: p.symbol,
@@ -181,4 +231,128 @@ export function chatPositionsOf(mine: LiveMine) {
       stopWhy: p.floorWhy,
     };
   });
+  return [...spot, ...chatPerpsOf(mine.perps)];
+}
+
+/**
+ * THE PERPS, AS THE CHAT MODEL IS HANDED THEM — so an agent holding a 3x short
+ * never tells its owner it holds nothing but cash (docs/perps.md rule 11).
+ *
+ * Each row says what it is in its own words (`kind`, `note`), because the
+ * system prompt was written for spot holdings and a leveraged position read
+ * as one — a value, a cost, a % — is the wrong thing to reason from. Same
+ * honesty as the spot rows: a null is "not read", never 0; the practice book
+ * says `paper`; a book the report does not place says `paper: null` and that
+ * it is not known which; a stale or unread venue read says so on every row.
+ *
+ * UNKNOWN IS A ROW, NOT A SILENCE. Leaving the list without perps when the
+ * model cannot see them is the "I hold nothing" this exists to stop, so it is
+ * handed a `perps-unread` line when the report could not be read at all, AND
+ * when the report says Lighter (or the practice book) could not be read —
+ * even with no position listed, which is exactly what a restart during an
+ * outage reports (live positions are re-read at arm, never seeded). When
+ * fewer positions are listed than were last recorded, it says how many more.
+ *
+ * MONEY AT LIGHTER WITH NO POSITION IS STILL MONEY. A flat account with
+ * collateral at the venue, or margin in transit, is handed as a
+ * `perps-account` line with the amount (null said as not read), so "what do I
+ * have" is not answered from the smart account alone.
+ *
+ * A report the worker has not written (null/undefined) adds nothing: that is
+ * an agent that has not said it uses perps, and the model is told nothing
+ * about them rather than something invented.
+ */
+export function chatPerpsOf(perps: LiveMine["perps"]): ChatPosition[] {
+  if (!perps) return [];
+  if (perps.read === "unreadable") {
+    return [
+      {
+        kind: "perps-unread",
+        venue: "Lighter",
+        note: "Your perpetual futures on Lighter could not be read. You may hold leveraged positions there: never say you hold nothing — say you cannot see them right now.",
+      },
+    ];
+  }
+  const paper: boolean | null = perps.book === null ? null : perps.book === "paper";
+  const out: ChatPosition[] = [];
+  if (!perps.venueRead) {
+    // The worker's own count of what it last held (stopsMissing counts every
+    // held position when it could not look), against what it could list.
+    const recorded = Math.max(perps.rows.length, perps.stopsMissing);
+    const unlisted = recorded - perps.rows.length;
+    const where = paper === true ? "Your practice (paper) perpetuals book" : "Lighter";
+    out.push({
+      kind: "perps-unread",
+      venue: "Lighter",
+      note:
+        `${where} could not be read just now, so what is held there now is unknown. ` +
+        (perps.rows.length > 0
+          ? "The positions listed are the last recorded ones, with no current mark or P&L. "
+          : "") +
+        (unlisted > 0
+          ? `${unlisted} position${unlisted === 1 ? " was" : "s were"} held at the last record and ${unlisted === 1 ? "is" : "are"} not listed here. `
+          : "") +
+        (paper === null ? "Whether they are practice or real positions is not stated. " : "") +
+        "Never say you hold nothing there — say you cannot see it right now.",
+    });
+  }
+  const when = !perps.venueRead
+    ? "Lighter could not be read, so this is the last recorded position, with no current mark"
+    : perps.stale
+      ? "Its last read is stale, so it may have changed since"
+      : null;
+  for (const r of perps.rows) {
+    const rowPaper: boolean | null = paper === null ? null : r.paper;
+    out.push({
+      kind: "perp" as const,
+      symbol: r.market,
+      side: r.side,
+      paper: rowPaper,
+      size: r.size,
+      entryPrice: r.entry,
+      markPrice: r.mark,
+      leverage: r.leverage,
+      marginUsd: r.marginUsd,
+      unrealisedUsd: r.unrealisedUsd,
+      liquidationPrice: r.liqPrice,
+      liquidationDistancePct: r.liqDistancePct,
+      stopTrigger: r.stopTrigger,
+      fundingUsd: r.fundingUsd,
+      note:
+        `${rowPaper === true ? "A PRACTICE (paper) " : "A "}${r.side} leveraged perpetual future on Lighter — not a holding in the smart account. ` +
+        (rowPaper === null ? "Whether it is a practice (paper) or a real-money position is not stated: do not call it either. " : "") +
+        `Its margin can be lost if the mark reaches the liquidation price. ` +
+        // Only a stop SEEN resting reaches the report (worker perps/view.ts), so
+        // a null is "none seen", which the model must not round up to "protected".
+        (r.stopTrigger === null
+          ? "No resting stop was seen for it."
+          : rowPaper === true
+            ? "Its practice stop is simulated by the agent."
+            : "Its stop was seen resting at the venue.") +
+        (when ? ` ${when}.` : ""),
+    });
+  }
+  // WHAT IS IN THE PERPS BOOK, when there is anything to say about it: a
+  // known non-zero amount, or one that could not be summed. A zero is the
+  // known empty book and says nothing; an unread venue already has its line.
+  if (perps.active && perps.venueRead && perps.atLighterUsd !== 0) {
+    const amount = perps.atLighterUsd === null ? null : Math.round(perps.atLighterUsd * 100) / 100;
+    const what =
+      paper === true
+        ? "Practice (paper) money in the perpetuals book — simulated, not real money"
+        : paper === false
+          ? "Money at Lighter (collateral, position margin, unrealised P&L and transfers in transit) — part of the agent's equity, not in the smart account"
+          : "Money in the perpetuals book at Lighter — whether it is practice or real money is not stated";
+    out.push({
+      kind: "perps-account",
+      venue: "Lighter",
+      paper,
+      atLighterUsd: amount,
+      note:
+        amount === null
+          ? `${what}. Its total could not be read (a figure in it was not read): it is unknown, not zero.`
+          : `${what}: ${amount.toFixed(2)} USD${perps.stale ? ", at a read that is now stale" : ""}.`,
+    });
+  }
+  return out;
 }

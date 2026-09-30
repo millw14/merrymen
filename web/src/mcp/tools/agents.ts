@@ -255,7 +255,14 @@ const FIXED_CONTROLS = [
   // orchestrator restored it from the grant store. It now leaves a kill
   // request that the orchestrator carries out against the store, as the web
   // page's DELETE does (worker/src/kill-request.ts).
-  { control: "kill switch", where: "Merrymen → You → Wallet & permissions (/grant) → 'discard & start over', or Telegram /kill, then /confirm (only while Settings → Advanced settings → Telegram controls → 'allow control commands' is on)", effect: "Removes the stored trading key so the agent can no longer sign anything. The Telegram command stops the agent on its next tick; the server deletes the stored key within seconds and confirms it in the owner's Telegram chat. Funds stay in the owner's smart account. Starting over on the web page also restarts a paper book; live positions and trades are never deleted.", available_here: false },
+  //
+  // NOT "funds stay in the owner's smart account", unconditionally: with
+  // perpetuals, money and leveraged positions sit at Lighter, and that
+  // sentence is reserved for an agent with nothing there (docs/perps.md rule
+  // 13, core custodySentence). This list is static and per connection, not per
+  // agent, so it says what is true of every agent: what is in the smart
+  // account stays, what is at Lighter stays there until closed and withdrawn.
+  { control: "kill switch", where: "Merrymen → You → Wallet & permissions (/grant) → 'discard & start over', or Telegram /kill, then /confirm (only while Settings → Advanced settings → Telegram controls → 'allow control commands' is on)", effect: "Removes the active trading permission and stops new trading. The Telegram command requests this on the agent's next tick; check its confirmation. Funds in the owner's smart account stay there. For perpetuals at Lighter, the hosted service queues a separate shutdown job with a venue-key use deadline of at most 15 minutes. That worker can attempt reduce-only closes and request available collateral back to the agent's account; it cannot open new positions. Partial fills, refusals or an unavailable venue can leave positions and collateral behind. Stops are not deliberately removed from positions still open. Check the shutdown result and Withdraw: a withdrawal reaches the smart account only after Lighter's delay and a claim, and a completed shutdown does not prove the funds have arrived home. Starting over on the web page also restarts a paper book; live positions and trades are never deleted.", available_here: false },
   { control: "live trading on/off", where: "Merrymen → You → Settings (/settings) → 'live trading'", effect: "Off means no real orders; the agent practises on paper if paper trading is on. Only the owner can turn it on.", available_here: false },
   { control: "limits (per trade, per day, drawdown, expiry)", where: "Merrymen → You → Trading limits → 'Edit signed limits' (re-sign on Wallet & permissions, /grant)", effect: "Changing a signed limit requires a new owner signature.", available_here: false },
 ];

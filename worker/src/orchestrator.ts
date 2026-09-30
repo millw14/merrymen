@@ -69,6 +69,8 @@ import { fileURLToPath } from "node:url";
 import { merrymenHome } from "./home";
 import { getGrantStore } from "./grant-store";
 import { KILL_DONE_TEXT, honourKillRequest, killRequested, type KillOutcome } from "./kill-request";
+import { hostedStanddownConfirmation } from "./perps/hosted-standdown-status";
+import { writeHostedPerpsRecovery } from "./hosted-perps-recovery";
 import { hostedRecipient, telegramSend } from "./mcp/notify";
 import { getIdentityStore } from "./identity-store";
 import { getSettingsStore } from "./settings-store";
@@ -108,6 +110,11 @@ import {
 } from "./tg-groups-ferry";
 import { storeDek } from "./store-crypto";
 import { syncChildPerpKey, type ChildPerpKeyOutcome } from "./perps/child-key";
+import { HostedStanddownSupervisor, hostedStanddownAvailable } from "./perps/hosted-standdown";
+import { HostedStanddownStore } from "./perps/hosted-standdown-store";
+import { HostedLiveCheckpointBridge } from "./perps/hosted-live-supervisor";
+import { createFleetPerpFeed } from "./perps/fleet-feed";
+import { grantPerp } from "../../packages/core/src/index";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
 import { addressesOf, makeBuilderDesk, type BuilderDesk } from "./builder-pass";
@@ -502,6 +509,47 @@ export function adoptChildForTest(
  * switch), when its lease goes unhealthy, or on shutdown.
  */
 const leases = new Map<string, TenantLease>();
+let perpShutdown: HostedStanddownSupervisor | null = null;
+let perpShutdownTenants = new Set<string>();
+const perpStoppingChildren = new Map<string, ChildProcess>();
+const perpLiveBridges = new Map<string, HostedLiveCheckpointBridge>();
+const perpNormalMirrored = new Set<string>();
+async function reconcilePerpShutdowns(): Promise<void> {
+  if (!hostedStanddownAvailable()) return;
+  if (!perpShutdown) perpShutdown = new HostedStanddownSupervisor({
+    db: await makePgDb(process.env.DATABASE_URL!), dek: storeDek()!, home: merrymenHome(), normalHome: childHome,
+    healthy: tenant => leases.get(tenant)?.healthy() === true,
+    acquire: async tenant => {
+      const held = leases.get(tenant);
+      if (held?.healthy()) return true;
+      if (held) { if (children.has(tenant)) killChild(tenant); await releaseLease(tenant); }
+      const lease = await acquireTenantLease(tenant);
+      if (!lease) return false;
+      leases.set(tenant, lease); return lease.healthy();
+    },
+    stopNormal: async tenant => {
+      if (perpNormalMirrored.has(tenant) && !children.has(tenant) && !perpStoppingChildren.has(tenant)) return true;
+      const child = children.get(tenant);
+      const proc = child?.proc ?? perpStoppingChildren.get(tenant);
+      if (proc && proc.exitCode === null && proc.signalCode === null) {
+        perpStoppingChildren.set(tenant, proc);
+        const stopped = new Promise<boolean>(resolve => {
+          const timer = setTimeout(() => resolve(false), 5_000);
+          proc.once("exit", () => { clearTimeout(timer); perpStoppingChildren.delete(tenant); resolve(true); });
+        });
+        if (child) killChild(tenant); else proc.kill("SIGKILL");
+        if (!(await stopped)) return false;
+      }
+      // Preserve the normal child's last spot and perps books before reducing
+      // its home to a venue-only capsule. A failed mirror is retried later.
+      if (!existsSync(path.join(childHome(tenant), "merrymen.db"))) return true;
+      const mirrored = await finalMirrorBeforeAnchor(tenant, await makePgDb(process.env.DATABASE_URL!));
+      if (mirrored) perpNormalMirrored.add(tenant);
+      return mirrored;
+    }, log,
+  });
+  perpShutdownTenants = await perpShutdown.reconcile();
+}
 let stopping = false;
 
 function log(msg: string): void {
@@ -1538,13 +1586,16 @@ export async function finalMirrorBeforeAnchor(tenant: string, shared: Db, home =
   const handle = openChildLedger(home);
   if (!handle) return false;
   try {
-    const r = await mirrorSerially(tenant, () => mirrorTenant({ tenant, child: handle.db, shared }));
+    const r = await mirrorSerially(tenant, () => {
+      const bridge = perpLiveBridges.get(tenant);
+      return bridge ? bridge.mirrorSnapshot(handle.db, child => mirrorTenant({ tenant, child, shared })) : mirrorTenant({ tenant, child: handle.db, shared });
+    });
     if (r.failed) {
       log(`${tenant}: final mirror before the anchor STALLED — ${Object.entries(r.failed).map(([k, v]) => `${k}: ${v}`).join(" | ")}`);
     }
     const counts = mirrorCountsLine(tenant, r);
     if (counts) log(`${counts} (final pass before the anchor)`);
-    return true;
+    return Object.keys(r.failed ?? {}).length === 0;
   } catch (e) {
     log(`${tenant}: final mirror before the anchor failed — ${e instanceof Error ? e.message : String(e)}`);
     return false;
@@ -1579,7 +1630,8 @@ export async function writeBootstrapForChild(
       // What the last child booked and the mirror had not yet copied — then
       // the anchor's time, AFTER that copy: every flow it carried up is dated
       // before `generatedAt`, so the new child never counts it a second time.
-      await finalMirrorBeforeAnchor(tenant, db);
+      const mirrored = await finalMirrorBeforeAnchor(tenant, db);
+      if (!mirrored && perpLiveBridges.has(tenant)) throw new Error("the restored financial book has not completed its durable mirror; accounting remains unknown");
       now = Math.floor(Date.now() / 1000);
       await db.exec(RISK_PERIOD_SCHEMA);
       riskPeriod = (await readRiskPeriod(db, smartAccount)) ?? undefined;
@@ -1622,6 +1674,12 @@ export async function writeBootstrapForChild(
 
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
+  if (perpShutdownTenants.has(tenant)) return;
+  perpNormalMirrored.delete(tenant);
+  if (hostedStanddownAvailable()) {
+    const pending = await new HostedStanddownStore(await makePgDb(process.env.DATABASE_URL!), storeDek()!).latest(tenant);
+    if (pending && (!pending.mirrored || pending.state === "pending" || pending.state === "running")) return;
+  }
   // The advisory lease is a precondition, taken by reconcile() before the FIRST
   // spawn and held across restarts — so this path (including the crash-restart
   // that re-enters here) never re-acquires it, which would open a window for
@@ -1648,6 +1706,22 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     await forgetTgGroups(tenant);
     return;
   }
+  let perpBridge: HostedLiveCheckpointBridge | null = null;
+  const storedForPerps = await getGrantStore().get(tenant);
+  const perpGrant = storedForPerps ? grantPerp(storedForPerps) : null;
+  if (perpGrant && process.env.DATABASE_URL) {
+    try {
+      perpBridge = await HostedLiveCheckpointBridge.prepare({ shared: await makePgDb(process.env.DATABASE_URL), dek: storeDek()!,
+        tenant, account: smartAccount, publicKey: perpGrant.apiPublicKey, home: childHome(tenant), healthy: () => leases.get(tenant)?.healthy() === true });
+    } catch {
+      log(`${tenant}: hosted perps journal could not be restored exactly — venue sends held; spot and paper remain available`);
+    }
+    try {
+      await writeHostedPerpsRecovery(await makePgDb(process.env.DATABASE_URL), { tenant, account: smartAccount, ok: perpBridge !== null });
+    } catch { log(`${tenant}: hosted perps recovery status could not be published`); }
+  }
+  if (perpBridge) perpLiveBridges.set(tenant, perpBridge);
+  else perpLiveBridges.delete(tenant);
   // The settings the child will actually read, so the watchdog can size its
   // patience to the tick that child will actually run. `tickSeconds` resolves
   // file-before-env (settings.ts), and the file is what we just wrote.
@@ -1696,8 +1770,10 @@ async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
     process.execPath,
     [`--max-old-space-size=${CHILD_MAX_OLD_SPACE_MB}`, "--import", "tsx", WORKER_ENTRY],
     // Groups held off when the restore above could not put them back.
-    { cwd: ROOT, env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) }), stdio: ["ignore", "pipe", "pipe"] },
+    { cwd: ROOT, env: childEnv(tenant, { tgGroupsOff: tgGroupsHeld.has(tenant.toLowerCase()) }), stdio: ["ignore", "pipe", "pipe", "ipc"] },
   );
+  perpBridge?.attach(proc);
+  if (perpBridge) perpLiveBridges.set(tenant, perpBridge);
   const child: Child = { proc, tenant, smartAccount, startedAt: Date.now(), restarts, staleSec, firstBeatSec };
   children.set(tenant, child);
   const tag = `[${tenant.slice(0, 8)}]`;
@@ -1780,7 +1856,11 @@ let confirmKillDone = async (tenant: `0x${string}`): Promise<void> => {
       log(`${tenant}: Telegram kill done, but there is no linked owner chat to confirm it to`);
       return;
     }
-    const sent = await telegramSend()(to.botToken, to.chatId, KILL_DONE_TEXT);
+    const shutdown = storeDek() ? await new HostedStanddownStore(await makePgDb(url), storeDek()!).latest(tenant) : null;
+    const text = shutdown
+      ? hostedStanddownConfirmation(shutdown)
+      : KILL_DONE_TEXT;
+    const sent = await telegramSend()(to.botToken, to.chatId, text);
     if (!sent.ok) log(`${tenant}: Telegram kill done, but the confirmation did not send — ${sent.reason ?? "unknown"}`);
   } catch (e) {
     log(`${tenant}: Telegram kill done, but the confirmation did not send — ${e instanceof Error ? e.message : String(e)}`);
@@ -1850,6 +1930,8 @@ export async function honourPendingKills(): Promise<void> {
 export async function reconcile(): Promise<void> {
   if (stopping) return;
   const store = getGrantStore();
+  // Expiry must survive a child crash too, and uses the same atomic key custody as kill.
+  await store.expirePerps?.(Date.now());
   let tenants: `0x${string}`[];
   // Before the listing is asked for: the group-memory sweep below judges only
   // rows written before this, never one a newer grant's child has published.
@@ -1875,6 +1957,8 @@ export async function reconcile(): Promise<void> {
     kept.push(tenant);
   }
   tenants = kept;
+  await reconcilePerpShutdowns();
+  tenants = tenants.filter(t => !perpShutdownTenants.has(t.toLowerCase()));
   const wanted = new Set(tenants.map((t) => t.toLowerCase()));
 
   // A lease whose connection dropped no longer protects its tenant — Postgres
@@ -1955,6 +2039,7 @@ export async function reconcile(): Promise<void> {
   // Stop (and forget) any running child whose grant is gone — the kill switch.
   for (const tenant of [...children.keys()]) {
     if (!wanted.has(tenant)) {
+      if (perpShutdownTenants.has(tenant)) continue;
       log(`${tenant} grant removed — standing it down`);
       killChild(tenant);
       try {
@@ -1977,7 +2062,7 @@ export async function reconcile(): Promise<void> {
   // exited. Holding a lease for a tenant we won't arm would block another replica
   // (or a later re-arm) for no reason.
   for (const tenant of [...leases.keys()]) {
-    if (!wanted.has(tenant)) await releaseLease(tenant);
+    if (!wanted.has(tenant) && !perpShutdownTenants.has(tenant)) await releaseLease(tenant);
   }
 }
 
@@ -5563,7 +5648,10 @@ async function mirrorLedgers(): Promise<void> {
     const handle = openChildLedger(childHome(tenant));
     if (!handle) continue;
     try {
-      const r = await mirrorSerially(tenant, () => mirrorTenant({ tenant, child: handle.db, shared }));
+      const r = await mirrorSerially(tenant, () => {
+      const bridge = perpLiveBridges.get(tenant);
+      return bridge ? bridge.mirrorSnapshot(handle.db, child => mirrorTenant({ tenant, child, shared })) : mirrorTenant({ tenant, child: handle.db, shared });
+    });
       // The link code and any chat the owner just linked. Not part of the
       // ledger — it is a file, not a table — but it needs the same ferry and
       // the same lease: only the replica that owns this child may speak for it.
@@ -6002,8 +6090,27 @@ export async function runOrchestrator(): Promise<void> {
   // this very deploy just cleared. It runs from the loop instead — see
   // COHORT_VET_AFTER_PASSES.
 
+  const perpFeed = createFleetPerpFeed({
+    home: merrymenHome(), halted: () => stopping || haltRequested(), log,
+    readTargets: async () => {
+      const settings: MerrymenSettings[] = [];
+      for (const tenant of children.keys()) {
+        try { settings.push(JSON.parse(readFileSync(path.join(childHome(tenant), "settings.json"), "utf8")) as MerrymenSettings); }
+        catch { /* A child whose settings are unread cannot request new markets. */ }
+      }
+      const heldMarketIds: number[] = [];
+      if (process.env.DATABASE_URL) {
+        const shared = await makePgDb(process.env.DATABASE_URL);
+        const rows = await shared.prepare("SELECT DISTINCT market_id FROM perp_positions WHERE base <> '0'").all() as { market_id: number }[];
+        for (const row of rows) heldMarketIds.push(row.market_id);
+      }
+      return { settings, heldMarketIds };
+    },
+  });
   const stop = () => {
     stopping = true;
+    perpFeed.stop();
+    perpShutdown?.stopAll();
     log("stopping — calling the whole fleet home");
     for (const child of children.values()) child.proc.kill("SIGTERM");
     // Release every advisory lease so a restarting replica can take over at once
@@ -6036,12 +6143,17 @@ export async function runOrchestrator(): Promise<void> {
   for (;;) {
     if (stopping) return;
     if (haltRequested()) {
+      await perpFeed.refresh();
+      // A fleet entry halt must not suspend already-revoked venue custody or
+      // extend a sealed shutdown key's TTL. These children have no strategy.
+      await getGrantStore().expirePerps?.(Date.now());
+      await reconcilePerpShutdowns();
       if (children.size > 0 || leases.size > 0) {
         log("FLEET_HALT present — standing every child down and releasing leases");
         for (const t of [...children.keys()]) killChild(t);
         // Release leases too: if only THIS replica is halted, another may take
         // the tenants over; if the whole fleet is halted, releasing is harmless.
-        for (const t of [...leases.keys()]) await releaseLease(t);
+        for (const t of [...leases.keys()]) if (!perpShutdownTenants.has(t)) await releaseLease(t);
       }
     } else {
       /**
@@ -6072,6 +6184,7 @@ export async function runOrchestrator(): Promise<void> {
       await reconcile();
       watchdog();
       await mirrorLedgers();
+      await perpFeed.refresh();
       startHistoryRepair();
       // AFTER the mirror, because the mirror is what tells the desk which
       // symbols the fleet actually holds. Its own TTL decides whether this

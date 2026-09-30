@@ -1,3 +1,4 @@
+import { notifyPerps, perpFundingLine } from "./perps-notifier";
 /**
  * Proactive notifier — the merryman speaks first.
  *
@@ -597,6 +598,21 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       }
     }
 
+    // Booked perps fills and report warnings go to the linked owner only.
+    // Kept outside the spot DB block: an unread ledger still starts its warning.
+    if (agentId) {
+      const perpsDb = openRO();
+      try {
+        await notifyPerps({ db: perpsDb, agent: agentId, owner: chatId, nowSec: now(),
+          enabled: cfg.perpsEnabled || cfg.perpsLiveEnabled, liqBufferPct: cfg.perpsLiqBufferPct,
+          previous: deps.stateRef.get().perpsNotify,
+          save: (perpsNotify) => deps.stateRef.set({ ...deps.stateRef.get(), perpsNotify }),
+          send: async (line) => (await sendMessage({ token }, chatId, line)).ok,
+        });
+      } catch { /* a failed read/send retries next pass without advancing the cursor */ }
+      finally { perpsDb?.close(); }
+    }
+
     // ── condition alerts (deduped per episode) ─────────────────────────────
     const inputs = deps.getAlertInputs();
     const fire = async (key: string, message: string): Promise<void> => {
@@ -912,7 +928,10 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
     // The DIGEST keeps its grant gate — a trading report about a wallet you
     // don't have is noise.
     if (dueToday && inputs.grantExpiresAt !== null) {
-      const report = readReport(deps.buildStatusContext());
+      const fundingDb = openRO();
+      let funding: string;
+      try { funding = perpFundingLine(fundingDb, agentId, now()); } finally { fundingDb?.close(); }
+      const report = `${readReport(deps.buildStatusContext())}\n\n${funding}`;
       /**
        * THE DAY IN WORDS, ABOVE THE DAY IN NUMBERS.
        *

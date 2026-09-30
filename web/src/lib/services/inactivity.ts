@@ -41,6 +41,8 @@ import {
   type RefusalBucket, type RuleFamily, type Scalar, type WindowTrade,
 } from "./decisions";
 import type { SettingsView } from "./settings-view";
+import { readAgentPerpsFrom } from "../agent-perps";
+import { killedCustodyText, type PerpsReportRead } from "../perps-view";
 
 // ── inputs ───────────────────────────────────────────────────────────────────
 
@@ -182,6 +184,17 @@ export interface InactivityInputs {
   railNotice: RailNotice | null;
   pause: { state: "paused" | "resumed"; at: number } | null;
   killAt: number | null;
+  /**
+   * The agent's own perps report (lib/agent-perps.ts), for what a killed
+   * agent's line says about Lighter. Optional: absent is "not read here", and
+   * the line then makes no claim about where the money is.
+   */
+  perps?: PerpsReportRead;
+  /**
+   * Hosted: the killed agent's custody line names the hosted recover path
+   * (perps-view.ts HOSTED_RECOVER_PATH). Absent is self-hosted's CLI path.
+   */
+  hosted?: boolean;
   expiryNoticeAt: number | null;
   /** mirror_state.updated_at for this owner; "unavailable" when the table cannot be read. */
   mirrorUpdatedAt: number | null | "unavailable";
@@ -267,6 +280,12 @@ export async function readInactivityInputs(db: Db, a: {
   settings: SettingsView | null;
   now: number;
   windowSec: number;
+  /**
+   * The hosted service (the MCP tools, which run only there — mcp/config.ts):
+   * a killed agent's custody line names the hosted recover path. Passed by
+   * the caller because isHostedMode() is only trusted in route handlers.
+   */
+  hosted?: boolean;
 }): Promise<InactivityInputs> {
   const acc = normAccounts(a.accounts);
   const current = a.account ? a.account.toLowerCase() : null;
@@ -411,6 +430,8 @@ export async function readInactivityInputs(db: Db, a: {
     railNotice: railRow ? parseRailNotice(String(railRow.message), Number(railRow.created_at)) : null,
     pause,
     killAt,
+    perps: current ? await readAgentPerpsFrom(db, current) : { state: "not-said" },
+    hosted: a.hosted === true,
     expiryNoticeAt,
     mirrorUpdatedAt,
   };
@@ -495,6 +516,17 @@ function wei(v: string | null): bigint | null {
 }
 
 /** The judgement: every check, then the one cause that best explains the silence. Pure. */
+/**
+ * WHERE THE MONEY IS AFTER A KILL, from the agent's own perps report through
+ * core's custodySentence (docs/perps.md rule 13) — never the constant this
+ * line used to carry, which sent the money home while positions or collateral
+ * could still be on Lighter. No report read: no claim either way.
+ */
+function killedCustodySuffix(i: InactivityInputs): string {
+  const s = killedCustodyText(i.perps ?? { state: "not-said" }, i.now * 1000, { hosted: i.hosted === true });
+  return s ? ` ${s}` : "";
+}
+
 export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
   const row = i.agentRow;
   const s = i.settings;
@@ -534,7 +566,7 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
     } else if (pendingGrant && (status === "killed" || status === "expired" || status === "error")) {
       add({ category: "permission", status: "warning", kind: "permission_pending", summary: `A new permission was signed at ${iso(i.permission.grantedAt)}, after the worker's last report; it is picked up on the worker's next tick.`, observed, threshold, recorded_at: i.permission.grantedAt, since: i.permission.grantedAt });
     } else if (status === "killed") {
-      add({ category: "permission", status: "blocking", kind: "not_permitted", summary: "The kill switch was used: the stored trading key was removed, so the agent cannot sign anything. Funds stay in your smart account.", observed, threshold, recorded_at: i.killAt ?? beat, since: i.killAt, remedy: ["Sign a new trading permission at /grant to start the agent again."] });
+      add({ category: "permission", status: "blocking", kind: "not_permitted", summary: `The kill switch was used: the stored trading key was removed, so the agent cannot sign anything.${killedCustodySuffix(i)}`, observed, threshold, recorded_at: i.killAt ?? beat, since: i.killAt, remedy: ["Sign a new trading permission at /grant to start the agent again."] });
     } else if (expired || status === "expired") {
       const at = expired ? i.permission.expiresAt : (i.expiryNoticeAt ?? row?.expires_at ?? null);
       add({ category: "permission", status: "blocking", kind: "not_permitted", summary: `The signed trading permission expired at ${iso(at)}, so the agent cannot trade.`, observed, threshold, recorded_at: at, since: at, remedy: [resign] });

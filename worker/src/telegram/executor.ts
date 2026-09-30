@@ -20,6 +20,8 @@ import { WALLET_TEXT } from "./reads";
  * original transfer-only store so a pending PC action and a pending transfer
  * share one per-chat slot (the latest ask wins). */
 export type PendingAction =
+  | { kind: "close"; market: `${string}-PERP`; expiresAt: number }
+  | { kind: "flatten"; expiresAt: number }
   | { kind: "transfer"; to: `0x${string}`; usdg: number; expiresAt: number }
   | { kind: "shell"; cmd: string; expiresAt: number }
   | { kind: "getfile"; path: string; expiresAt: number }
@@ -80,10 +82,11 @@ export interface CommandDeps {
     /** `/wallet` — leads with the account address. Optional so existing hosts and
      *  fixtures that predate it keep the old static signpost. */
     wallet?(): string;
-    positions(): string;
+    positions(): string | Promise<string>;
+    perps?(): string | Promise<string>;
     /** Liquidity depth for one ticker — a chain read, so always async. */
     depth(symbol: string): Promise<string>;
-    pnl(): string;
+    pnl(): string | Promise<string>;
     trades(): string | Promise<string>;
     report(): string | Promise<string>;
     why(): string | Promise<string>;
@@ -110,6 +113,8 @@ export interface CommandDeps {
   link(code: string): { ok: boolean; reason?: string };
   /** Build a bounded TradeIntent and route it through processIntent → policy wall. */
   trade(side: "buy" | "sell", symbol: string, usdg: number): Promise<string>;
+  closePerp?(market: `${string}-PERP`): Promise<string>;
+  flattenPerps?(): Promise<string>;
   /** Build a bounded transfer intent and route it through processIntent → policy wall. */
   transfer(to: `0x${string}`, usdg: number): Promise<string>;
   /** Pending-confirm store, bound to this chat by the service. */
@@ -197,6 +202,8 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       return deps.reads.status();
     case "positions":
       return deps.reads.positions();
+    case "perps":
+      return deps.reads.perps?.() ?? "Perpetuals could not be read here. Check the dashboard; this does not mean the account is empty.";
     case "depth":
       return deps.reads.depth(cmd.symbol);
     case "pnl":
@@ -241,6 +248,17 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       const reply = await deps.trade(cmd.kind, cmd.symbol, usdg);
       return reply + note;
     }
+    case "close": {
+      if (!deps.closePerp) return "Perpetual closes are unavailable here — nothing was sent.";
+      if (!cmd.confirm) return deps.closePerp(cmd.market);
+      deps.setPending({ kind: "close", market: cmd.market, expiresAt: now() + CONFIRM_TTL_SEC });
+      return `⚠️ Close the whole <b>${esc(cmd.market)}</b> perpetual position with a reduce-only order. This can close real money at Lighter; if both paper and real positions exist I will refuse and ask you to use the dashboard. It may fill partly or be refused. /confirm (${CONFIRM_TTL_SEC}s) or /cancel.`;
+    }
+    case "flatten": {
+      if (!deps.flattenPerps) return "Perpetual close-all is unavailable here — nothing was sent.";
+      deps.setPending({ kind: "flatten", expiresAt: now() + CONFIRM_TTL_SEC });
+      return `⚠️ Close all perpetual positions (including real money at Lighter) and halt new perpetual entries until you resume them in the dashboard. Exits can be refused or fill partly; stops keep running until flat. /confirm (${CONFIRM_TTL_SEC}s) or /cancel.`;
+    }
     case "transfer": {
       if (!deps.transferEnabled) {
         return "🔒 transfers from chat are off. Turn on “allow transfers” for Telegram in the dashboard first.";
@@ -282,7 +300,7 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
           deps.clearPending();
           return "🔒 transfers were turned off before you confirmed — nothing moved.";
         }
-      } else if (p.kind === "setting") {
+      } else if (p.kind === "setting" || p.kind === "close" || p.kind === "flatten") {
         if (!deps.controlEnabled) {
           deps.clearPending();
           return "🔒 control was turned off before you confirmed — nothing changed.";
@@ -304,6 +322,10 @@ export async function executeCommand(cmd: Command, deps: CommandDeps): Promise<s
       }
       deps.clearPending();
       switch (p.kind) {
+        case "close":
+          return deps.closePerp?.(p.market) ?? "Perpetual closes are unavailable here — nothing was sent.";
+        case "flatten":
+          return deps.flattenPerps?.() ?? "Perpetual close-all is unavailable here — nothing was sent.";
         case "transfer":
           return await deps.transfer(p.to, p.usdg);
         case "shell":

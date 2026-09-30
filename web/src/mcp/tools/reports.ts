@@ -170,6 +170,8 @@ const getSummary = defineTool({
     const settings = await settingsReader().settingsFor(ctx.principal.tenant);
     const s = await ctx.ledger((db) => readReportSummary(db, {
       accounts: a.accounts, currentAccount: a.account, since, until: now, now, permissionExpiresAt: a.expiresAt, settings,
+      // MCP runs only on the hosted service (mcp/config.ts): the hosted recover path is the one to name.
+      hosted: true,
     }, clean));
     const live = s.live;
     const paper = s.paper;

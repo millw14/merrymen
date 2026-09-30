@@ -431,6 +431,24 @@ const REGISTRY: ChatCommand[] = [
       `It stays in my account as energy; my key can't sell or send it. I'll place it — my key's limits still decide ` +
       `whether it goes through.`,
   },
+  {
+    id: "close-perp",
+    via: "order",
+    writes: ["side", "symbol", "usdgAmount", "purpose", "book"],
+    fixed: { side: "sell", usdgAmount: 0, purpose: "close-perp" },
+    weighty: true,
+    say: (a) => `Close the whole ${a.book === "paper" ? "paper" : a.book === "live" ? "real-money" : "(choose paper or real-money)"} ${String(a.symbol).toUpperCase()} perpetual position, using a reduce-only order. ` +
+      `I'll place it; it may fill partly or be refused. Other positions and new entries stay as they are.`,
+  },
+  {
+    id: "flatten-perps",
+    via: "order",
+    writes: ["side", "symbol", "usdgAmount", "purpose", "book"],
+    fixed: { side: "sell", symbol: "ALL-PERPS", usdgAmount: 0, purpose: "flatten-perps" },
+    weighty: true,
+    say: (a) => `Close all ${a.book === "paper" ? "paper" : a.book === "live" ? "real-money" : "(choose paper or real-money)"} perpetual positions and halt new perpetual entries until you resume them in the dashboard. ` +
+      `I'll attempt reduce-only exits; a refusal or partial fill can leave positions open. Protective stops keep running until flat.`,
+  },
   // ── the ones that only take you somewhere ────────────────────────────────
   {
     id: "open-deposit",
@@ -614,6 +632,7 @@ export const COMMAND_SPEC = CHAT_COMMANDS.map((c) => {
  * unsure: ask, rather than guess.
  */
 export function isComplete(cmd: ChatCommand, args: Record<string, CommandArg>): boolean {
+  if ((cmd.id === "close-perp" || cmd.id === "flatten-perps") && args.book !== "paper" && args.book !== "live") return false;
   return modelArgsFor(cmd).every((k) => k in args && args[k] !== "" && args[k] !== null);
 }
 

@@ -262,6 +262,9 @@ describe("exit and entry predicates for every kind", () => {
       { i: withdraw, exit: true, entry: false },
       { i: claim, exit: true, entry: false },
     ],
+    // Housekeeping: brings nothing home, opens nothing (policy.ts isExitIntent,
+    // energy.ts countsAsEntry).
+    "perp-key": [{ i: { kind: "perp-key", accountIndex: 22149 }, exit: false, entry: false }],
   } satisfies Record<TradeIntent["kind"], { i: TradeIntent; exit: boolean; entry: boolean }[]>;
 
   for (const [kind, rows] of Object.entries(TABLE)) {
@@ -576,6 +579,31 @@ describe("money coming home and money going out", () => {
     assert.equal(ask(deposit(), state({}, perp({ entriesHalted: true }))), "perp-entries-halted");
     assert.equal(ask(deposit(), state({}, perp({ grantExpiresAtSec: NOW + 60 }))), "perp-grant-expiring");
     assert.equal(ask(deposit(u(10)), state({}, perp({ committedCollateralMicro: u(25) }))), "perp-collateral-cap");
+  });
+});
+
+describe("a key registration: housekeeping through the wall, neither spend nor exit", () => {
+  const register = (accountIndex = 22149): TradeIntent => ({ kind: "perp-key", accountIndex });
+
+  it("on a live rail with the sealed route it passes — with no amount, so no per-call cap or daily spend can refuse it", () => {
+    assert.equal(ask(register()), "ok");
+    assert.equal(ask(register(), state({ spentTodayUsdg: u(1000) })), "ok", "a day already spent is no reason the key cannot be registered");
+  });
+
+  it("it meets the brakes a UserOp that is not an exit meets: the ops cap, the breaker, a dark venue, the key's expiry", () => {
+    assert.equal(ask(register(), state({ opsToday: 10 })), "ops-cap");
+    assert.equal(ask(register(), state(TRIPPED)), "drawdown-breaker");
+    assert.equal(ask(register(), state({ perpVenueUnread: true, perpLastKnownMicro: null })), "perp-unpriced");
+    assert.equal(ask(register(), state({ nowSec: NOW + 60 * DAY })), "expiry");
+  });
+
+  it("and the contract's own: a live rail, the sealed route, an account index that is one, and no incident", () => {
+    assert.equal(ask(register(), state({}, null)), "perp-not-enabled");
+    assert.equal(ask(register(), state({}, perp({ mode: "paper" }))), "perp-live-not-enabled", "the paper book has no venue account");
+    assert.equal(ask(register(), state({}, perp({ mode: "refuse", refuseRule: "perp-venue-unready" }))), "perp-venue-unready");
+    assert.equal(ask(register(), state(), limits({ perp: undefined })), "perp-not-granted");
+    for (const bad of [0, -1, 1.5, 2 ** 48]) assert.equal(ask(register(bad)), "perp-order-malformed", String(bad));
+    assert.equal(ask(register(), state({}, perp({ incident: true }))), "perp-venue-incident", "never registered over a key someone else put there");
   });
 });
 

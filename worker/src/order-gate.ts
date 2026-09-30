@@ -1,3 +1,5 @@
+import { readPerpExitOrder } from "./perps/owner-order";
+
 /**
  * AN OWNER'S OWN BUY OR SELL, AS THE PROCESS THAT HOLDS THE KEY JUDGES IT.
  *
@@ -247,10 +249,10 @@ export function createTickBook(): TickBook {
  * is a name anybody can launch a token under; a marker only one card writes is
  * a statement of intent.
  */
-export type OrderRoute = "energy" | "trade";
+export type OrderRoute = "energy" | "trade" | "close-perp" | "flatten-perps";
 
 export function orderRoute(args: Record<string, unknown> | undefined): OrderRoute {
-  return args?.purpose === "energy" ? "energy" : "trade";
+  return args?.purpose === "energy" || args?.purpose === "close-perp" || args?.purpose === "flatten-perps" ? args.purpose : "trade";
 }
 
 /**
@@ -300,6 +302,13 @@ export async function placeOrder<R>(
   submit: (side: Side, symbol: string, size: number, route: OrderRoute) => Promise<R>,
 ): Promise<R | { ok: false; line: string }> {
   const no = (line: string) => ({ ok: false as const, line });
+  // Explicit reduce-only exits use the perps lane's fresh book and authority.
+  // Spot reads, pause and entry spending limits must never strand an exit.
+  const exit = readPerpExitOrder(args ?? {});
+  if (exit) {
+    if ("error" in exit) return no(exit.error);
+    return submit(exit.order.side, exit.order.symbol, 0, exit.order.purpose);
+  }
   // ANSWERED, NOT STARVED. The tick's unreadable-market return sits a thousand
   // lines above the regular drain, so an order on such a tick used to be
   // skipped until it expired. It drains there now, with this flag set, and is

@@ -33,19 +33,37 @@
  *
  * Those are ADDRESSES ONLY — the grant carries no symbol and no decimals — and
  * they are passed on as exactly that (see `grantExtraTokens`).
+ *
+ * LIGHTER IS DISCLOSED HERE AND UNWOUND ELSEWHERE (docs/perps.md, "Recover").
+ * The plan carries the venue group — perp collateral, positions, a pending
+ * claim, the key at index 16 — read with eth_call and Lighter's public GETs,
+ * which answer browsers (`access-control-allow-origin: *`). The owner-key
+ * unwind is NOT offered from the browser, and not by choice: this origin's
+ * relay forwards withdrawal-shaped ERC-20 transfers and class-vault sweeps
+ * only (recovery-shape.ts, `isRecoveryShape`), so every Lighter priority
+ * request — cancelAllOrders, changePubKey, withdraw, withdrawPendingBalance —
+ * would be refused there. A button that the relay refuses is worse than an
+ * honest sentence, so the panel shows the disclosure and names
+ * `merrymen recover`. Widening the relay is a separate, reviewed change.
  */
 
 import { privateKeyToAccount } from "viem/accounts";
-import type { LocalAccount } from "viem";
+import { createPublicClient, http, type LocalAccount } from "viem";
 import { robinhoodChain, robinhoodTestnet } from "@merrymen/core";
 import {
+  lighterChainReader,
   ownerFromPrivateKey,
   ownerFromSigner,
   planRecovery,
+  readRecoverVenue,
   recoverFunds,
+  venueDisclosure,
   type RecoverPlan,
   type RecoveryOwner,
+  type VenueDisclosure,
 } from "@merrymen/recover";
+
+export type { VenueDisclosure };
 
 export interface BrowserWallet {
   smartAccount: `0x${string}`;
@@ -62,6 +80,12 @@ export interface BrowserWallet {
   chainId: number;
   /** Addresses the grant covers, used as the sweep list. */
   grantTokens?: readonly string[];
+  /**
+   * The grant's sealed Lighter API PUBLIC key, when this browser holds the
+   * grant. A label for the venue's key slot ("the agent's key" or not) and
+   * nothing else — never a secret, never a decision.
+   */
+  perpPublicKey?: string | null;
 }
 
 /**
@@ -153,6 +177,12 @@ export async function getRecoveryTicket(w: BrowserWallet): Promise<void> {
 export interface BrowserPlan extends RecoverPlan {
   /** True when the account cannot pay for its own withdrawal. */
   needsGas: boolean;
+  /**
+   * The Lighter group in words (recover.ts `venueDisclosure`): JSON-safe, the
+   * same text the CLI prints. `standing` is what the panel asks before it ever
+   * says "empty" — anything but "nothing" means it must not.
+   */
+  venueText: VenueDisclosure;
 }
 
 /**
@@ -180,8 +210,39 @@ export async function planFromBrowser(w: BrowserWallet): Promise<BrowserPlan> {
     // fails loudly instead of sweeping a stranger's empty account.
     expectedSmartAccount: w.smartAccount,
     extraTokens: grantExtraTokens(w.grantTokens),
+    agentPerpPubKey: w.perpPublicKey ?? null,
   })) as RecoverPlan;
-  return { ...plan, needsGas: plan.gasWei === 0n };
+  return {
+    ...plan,
+    needsGas: plan.gasWei === 0n,
+    venueText: venueDisclosure(plan.venue, { gasWei: plan.unreadable.includes("eth") ? null : plan.gasWei }),
+  };
+}
+
+/**
+ * The Lighter group for an account, from its ADDRESS alone — no owner, no key.
+ *
+ * For the self-hosted panel, whose plan comes from `/api/recover` (the server
+ * holds the owner key) and does not carry the venue: everything the venue
+ * group needs is public — `addressToAccountIndex` and `getPendingBalance` by
+ * eth_call, the account and its key slot by Lighter's public GETs — so the
+ * browser reads it directly rather than trusting a server to relay it. Never
+ * throws: every failure is an unread field, and unread is never empty.
+ */
+export async function venueFromBrowser(
+  smartAccount: `0x${string}`,
+  chainId: number,
+  perpPublicKey?: string | null,
+): Promise<VenueDisclosure> {
+  const chain = chainOf(chainId);
+  const client = createPublicClient({ chain, transport: http() });
+  const venue = await readRecoverVenue({
+    smartAccount,
+    chainId: chain.id,
+    chainRead: lighterChainReader(client),
+    agentPerpPubKey: perpPublicKey ?? null,
+  });
+  return venueDisclosure(venue);
 }
 
 /**
