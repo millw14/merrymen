@@ -88,3 +88,42 @@ test("a missing equity table throws, so the caller says unread instead of drawin
   try { await assert.rejects(readEquityCloses(wrapSqlite(raw), "a", 1)); }
   finally { raw.close(); }
 });
+
+test("a mark taken while flow inference was held is never a close; the newest mark still comes back, flagged, because it names the book", async () => {
+  // store.ts `flows_held`: a held row's cash can carry a movement the flows
+  // table has not booked yet, so the growth index read over it dips (or
+  // spikes) until the booking lands, and the drawdown keeps the dip. The
+  // hour's close is its last MEASURED reading; an hour with none has no close.
+  const raw = new DatabaseSync(":memory:");
+  const db = wrapSqlite(raw);
+  try {
+    await db.exec(`CREATE TABLE equity (id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, equity_usdg REAL NOT NULL,
+      at INTEGER NOT NULL, epoch INTEGER NOT NULL DEFAULT 1, mode TEXT, flows_held INTEGER)`);
+    const rows: [id: number, at: number, equity: number, held: number | null][] = [
+      [1, T0 + 10, 100, null], // written before the column: not held
+      [2, T0 + 1_800, 101, 0], // hour 0's measured close
+      [3, T0 + 3_000, 90, 1], // held, and later in hour 0
+      [4, T0 + H + 100, 95, 1], // hour 1 was held throughout
+      [5, T0 + 2 * H + 10, 100, 0], // hour 2's measured close
+      [6, T0 + 2 * H + 50, 92, 1], // the newest mark, held
+    ];
+    for (const [id, at, equity, held] of rows) {
+      await db.prepare("INSERT INTO equity (id, agent_id, equity_usdg, at, epoch, mode, flows_held) VALUES (?, 'a', ?, ?, 1, 'live', ?)").run(id, equity, at, held);
+    }
+    const r = await readEquityCloses(db, "a", 1);
+    assert.equal(r.complete, true);
+    assert.deepEqual(r.marks.map((m) => [m.at, m.equity_usdg, m.held]), [
+      [T0 + 10, 100, false],
+      [T0 + 1_800, 101, false],
+      [T0 + 2 * H + 10, 100, false],
+      [T0 + 2 * H + 50, 92, true],
+    ]);
+    // A cap counts measured closes only: the flagged newest mark rides on top.
+    const capped = await readEquityCloses(db, "a", 1, 3);
+    assert.equal(capped.complete, true, "three measured closes fit a cap of three");
+    assert.equal(capped.marks.length, 4);
+    const short = await readEquityCloses(db, "a", 1, 2);
+    assert.equal(short.complete, false);
+    assert.deepEqual(short.marks.map((m) => m.at), [T0 + 1_800, T0 + 2 * H + 10, T0 + 2 * H + 50]);
+  } finally { raw.close(); }
+});

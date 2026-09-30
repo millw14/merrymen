@@ -56,6 +56,10 @@ test("no client module imports isHostedMode — it is always false in the browse
   const partnerServerModules = new Set([
     path.join(SRC, "lib", "partner-runtime.ts"),
     path.join(SRC, "lib", "partner-store.ts"),
+    // The MCP server's config: read only by route handlers (/mcp, /oauth/*,
+    // /.well-known/*, /api/mcp/*). It imports node:crypto-backed modules and is
+    // never part of a client bundle.
+    path.join(SRC, "mcp", "config.ts"),
   ]);
   const offenders = walk(SRC)
     .filter((f) => !f.startsWith(apiDir)) // route handlers are server-side

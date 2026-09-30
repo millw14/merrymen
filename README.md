@@ -17,6 +17,9 @@ merrymen in the [hosted app](https://app.merrymen.dev) or on your own machine.
 Create an agent, choose its markets and limits, and follow its decisions,
 positions and trade outcomes from the dashboard or Telegram.
 
+**Use it from Claude:** tell Claude “set up merrymen mcp”, or add it in one
+click: <https://merrymen.dev/claude> (hosted Merrymen).
+
 The account contract enforces the permissions sealed into its session key:
 allowed calls and assets, per-call limits and expiry. The worker adds daily
 budgets, drawdown checks and operation limits. These are different enforcement
@@ -319,6 +322,28 @@ parse → validate → policy wall → signed grant discipline as the strategist
 There's an obvious **Chat on Telegram** button right on the dashboard (topbar +
 a card) so you don't have to hunt for it.
 
+**Bring it into your Telegram groups.** Your merryman can hang out in a group
+like one more person: it answers when it's called, now and then joins in,
+remembers the chat, and when someone posts a coin it takes a look, tags them,
+and says whether it's in or passing (in trencher mode, its Brain decides and
+every limit still applies — a group message can nominate a coin, never order a
+trade). It never posts alerts, sizes, prices or P&L, and nothing private.
+
+```
+4. Add your bot to a group — it only talks in groups you added it to or approved
+   (anyone else adds it → it stays silent and DMs you Stay / Leave)
+5. To let it follow the chat: @BotFather → /setprivacy → your bot → Disable,
+   then remove the bot from the group and add it back
+   (until then it only hears commands and replies to its own messages)
+6. /groups in your DM with the bot → every group it knows, with Stay · Leave · Forget
+```
+
+Turn it off, turn off "Look at coins people post", or pick how chatty it is in
+`/settings` → Telegram → Telegram groups. `/forget` in a group (you) wipes what
+it remembers of that group; `/forgetme` (anyone) removes theirs. (These are
+your own Telegram groups, not the hosted app's public group chat room.) The
+full rules: [`docs/tg-groups.md`](docs/tg-groups.md).
+
 Commands work bare; with an Anthropic key, plain English does too ("how are we
 doing?", "pause everything", "send 20 USDG to 0x…", "ping me when QQQ hits 600",
 "why did you buy that?"). Voice notes work as well.
@@ -332,6 +357,7 @@ doing?", "pause everything", "send 20 USDG to 0x…", "ping me when QQQ hits 600
 | `/alert <SYM> > <price>` `/alerts` `/unalert <n>` | one-shot price alerts |
 | `/pause` `/resume` · `/strategy <name>` · `/cap <usdg>` | steer the worker (cap only tightens) |
 | `/name <name>` · `/soul` · `/remember <fact>` | name it, see who it is, teach it about you |
+| `/groups` · `/forget` · `/forgetme` | your Telegram groups (Stay / Leave / Forget) · in a group: wipe its memory of that group · anyone in a group: drop what it remembers of them |
 | `/kill` | destroy the grant, stand the band down |
 | `/help` | the full list |
 
@@ -403,6 +429,46 @@ days), with milestone messages and a tone that warms to match. Memory is
 passes the closed enum and the policy wall, and the memory sanitizer refuses
 anything address-, key-, or code-shaped, so a poisoned note can't smuggle a
 recipient into a prompt.
+
+---
+
+## 5 · Use your merryman from Claude
+
+Hosted Merrymen has an MCP server, so Claude (and Codex, Cursor, VS Code, …)
+can work with your agent: check its status, trades and portfolio, explain why
+it has or hasn't traded, research tokens, and prepare trades or setting changes
+for you to approve.
+
+**Set it up:** tell Claude “set up merrymen mcp”, or add it in one click:
+<https://merrymen.dev/claude>. Other assistants:
+<https://app.merrymen.dev/connect/mcp>. Setup instructions written for AI
+assistants: <https://merrymen.dev/llms.txt>.
+
+In **Claude Code**, from a terminal, either add the server:
+
+```bash
+claude mcp add --transport http --scope user merrymen https://mcp.merrymen.dev/mcp
+```
+
+or install the plugin **instead** (it includes the server and adds
+`/merrymen:status`, `/merrymen:why`, `/merrymen:portfolio`, `/merrymen:week`
+and `/merrymen:token`; choose one route, not both):
+
+```bash
+claude plugin marketplace add https://github.com/millw14/merrymen.git
+claude plugin install merrymen@merrymen
+```
+
+Then, in Claude Code, type `/mcp`, choose the Merrymen entry, choose
+Authenticate and click Allow.
+
+**What it can and cannot do:** it sees only the agent and the permissions you
+allow when you sign in, and you can disconnect it at any time at
+[Connected apps](https://app.merrymen.dev/connect/apps). It can suggest trades
+or setting changes only if you allowed that, and nothing happens until you
+approve each one in Merrymen. It can never move your funds, see your keys, turn
+on live trading or loosen your limits. Paper (practice) and live money are
+always reported separately. Details: [docs/mcp](docs/mcp/README.md).
 
 ---
 
@@ -523,28 +589,58 @@ npx tsx scripts/probe-tradability.mts
 
 ---
 
-## $MERRYMEN — the Merry Circle
+## $MERRYMEN — energy and the Merry Circle
 
-merrymen is **free and open to everyone**, whether you hold the token or not. Holding
-**$MERRYMEN** (on Robinhood Chain — [the token page](https://merrymen.dev/token)) just adds
-holder perks — it buys *access*, never the product. **Utility only: no price, no returns, no
-buyback/burn.**
+**$MERRYMEN** (on Robinhood Chain — [the token page](https://merrymen.dev/token)) is an agent's
+**energy**. **Utility only: no price, no returns, no buyback/burn.** Nothing here says anything
+about what the token is worth.
 
-Paste the wallet you hold $MERRYMEN in into the dashboard's **Merry Circle** panel (or set
-`holderAddress` in `/settings`). merrymen reads that balance **read-only** — it never asks for or
-touches the wallet's keys — and sets your tier:
+**Energy (hosted service).** An agent runs at full strength while **your wallet and the agent's
+own account hold 100,000 $MERRYMEN between them**. Below that it still runs, on about **a tenth**
+of a normal day: a tenth of a standard day's paid AI reviews (paced across the day) and of the
+new trades it opens on its own — a house figure, not a tenth of your own preset — resetting at
+**00:00 UTC**. **Stop-losses, take-profits and orders you place
+yourself are never limited** — an allowance on new work is never a lock on the doors — but the
+agent's own AI reviews, including of its open positions, are paced with everything else it starts
+on its own, so an exit the AI would decide waits for its next review. When
+today's allowance is used, the agent tells you once (dashboard, and Telegram if linked), with its
+account address and what it would cost to top up. The gate is an operator switch,
+`MERRYMEN_ENERGY_GATE` (`observe`, then `1`), and is **never on for a self-hosted install**.
+
+Two ways to top up:
+
+1. **Send $MERRYMEN** on Robinhood Chain to the agent's account (or keep it in your own linked
+   wallet — both count).
+2. **Send USDG and ask the agent in chat to "get its $MERRYMEN".** You confirm a card stating the
+   most it may spend; it sizes the buy to **cover the shortfall, with a small margin for price
+   movement (at least $1.00)**, over one pinned route (Uniswap v2, USDG → VIRTUAL → $MERRYMEN) —
+   the pool fees and the token's own tax are paid out of the USDG — one trade at a time, inside your
+   signed per-trade and daily caps.
+   The permission for this is sealed into your key when you sign (re-sign once, free, if your key
+   predates it) and it is **buy-only**: the key can turn USDG into $MERRYMEN in its own account
+   and can never sell or send it. It moves out only with your owner key (`merrymen recover` /
+   Withdraw). Paper-mode agents do not spend real USDG on energy — send $MERRYMEN instead, or turn
+   on Live trading first. The purchase is booked as capital set aside, not as a trading loss.
+
+One wallet powers one account: a linked holder wallet counts for the first merrymen account that
+proved it.
+
+**The Merry Circle.** Link a wallet that holds $MERRYMEN by signature in **Settings → Merry
+Circle** (the wallet is only ever read — it never becomes a spend key). The same combined balance —
+your wallet plus your agent's account — sets your tier:
 
 | tier | hold | perk |
 |---|---|---|
 | 🌱 **Villager of Sherwood** | 10k+ | **10% off** the platform performance fee · badge · 1× roadmap vote |
-| 🏹 **Merry Man** | 100k+ | **25% off** · the bonus strategy pack (`even-keel`, `dip-hunter`) · 3× vote |
+| 🏹 **Merry Man** | 100k+ | **full energy** · **25% off** · the bonus strategy pack (`even-keel`, `dip-hunter`) · 3× vote |
 | 👑 **Lord of Sherwood** | 1M+ | **50% off** — the lowest we offer · every bonus strategy · 10× vote |
 
 The fee discount is real: merrymen's performance fee is only ever taken on profit above your
 high-water mark, and your tier lowers it in the **actual accrual** (shown live in the panel), not
 just in the copy. Holders also steer the roadmap — which tokens join the basket, which strategies
 ship — weighted by tier ([governance](https://merrymen.dev/governance)). Thresholds live in
-[`packages/core/src/token.ts`](./packages/core/src/token.ts).
+[`packages/core/src/token.ts`](./packages/core/src/token.ts); energy's contract is
+[`packages/core/src/energy.ts`](./packages/core/src/energy.ts).
 
 ---
 

@@ -1,5 +1,5 @@
 import { createPublicClient, http, erc20Abi, type Hex } from "viem";
-import { CASH, STOCK_TOKENS } from "../../packages/core/src/index";
+import { CASH, STOCK_TOKENS, isEnergyReserveToken } from "../../packages/core/src/index";
 import { netTokenDeltas } from "./fills";
 import { pickAcquiredLeg } from "./inflight-reconcile";
 import type { Db } from "./db";
@@ -32,8 +32,12 @@ export async function repairHistoricalFills(db:Db, rpcUrl:string, clientOverride
       stage='receipt-read';
       const receipt=await client.getTransactionReceipt({hash:row.tx_hash});
       if(receipt.status!=='success'){unavailableBecause('receipt-not-successful');continue;}
-      const fill=pickAcquiredLeg(netTokenDeltas(receipt.logs,row.agent_id),CASH.USDG);
-      if(!fill){unavailableBecause('no-unambiguous-account-swap');continue;}
+      const deltas=netTokenDeltas(receipt.logs,row.agent_id);
+      const fill=pickAcquiredLeg(deltas,CASH.USDG);
+      // An energy purchase is not a fill: the reserve is capital set aside, booked
+      // as an 'energy-buy' flow, never a position (see pickAcquiredLeg). Named
+      // for what it is rather than lumped in with receipts that were unclear.
+      if(!fill){unavailableBecause([...deltas].some(([t,v])=>v!==0n&&isEnergyReserveToken(t))?'energy-reserve':'no-unambiguous-account-swap');continue;}
       books.set(`${row.agent_id.toLowerCase()}:${fill.token}`,{account:row.agent_id,token:fill.token as Hex});
       const known=STOCK_TOKENS.find(t=>t.address.toLowerCase()===fill.token.toLowerCase());
       const symbol=known?.symbol ?? await client.readContract({address:fill.token as Hex,abi:erc20Abi,functionName:'symbol'}).catch(()=>null);

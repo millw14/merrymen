@@ -40,8 +40,18 @@ export function classEntryGate(input: {
   routeLooks: boolean;
   /** The strategy's own idle reason, if it gave one. */
   idle: Why | null | undefined;
+  /**
+   * TODAY'S ENERGY still allows a new trade (worker/src/energy.ts). False only
+   * while the gate is enforcing on a low-energy agent whose new trades for the
+   * UTC day are used up; absent means yes, which is every existing caller.
+   *
+   * It closes the ENTRIES and says nothing of its own: the owner hears about
+   * energy once a day through its own dated notice, not through the idle
+   * channel, which would restate a non-breaker warning every ten minutes.
+   */
+  entriesOpen?: boolean;
 }): { propose: boolean; idle: Why | null | undefined } {
-  if (!breakerTripped(input.snap)) return { propose: true, idle: input.idle };
+  if (!breakerTripped(input.snap)) return { propose: input.entriesOpen !== false, idle: input.idle };
   // TRIPPED, THE BREAKER'S REASON WINS over any other a strategy gave. Not
   // every builtin ranks it first: even-keel says its feeds are stale, and
   // dip-hunter that the cash is short of one buy or the day's count is spent,
@@ -77,8 +87,15 @@ export async function idleAndClassGate(input: {
   idle: Why | null | undefined;
   /** modeEmptiedFact, for this tick. */
   modeEmptied: string | null;
+  /** See classEntryGate. Absent means yes. */
+  entriesOpen?: boolean;
 }): Promise<{ entries(propose: () => Promise<Tick>): Promise<Tick> }> {
-  const gate = classEntryGate({ snap: input.snap, routeLooks: input.routeLooks, idle: input.idle });
+  const gate = classEntryGate({
+    snap: input.snap,
+    routeLooks: input.routeLooks,
+    idle: input.idle,
+    ...(input.entriesOpen === undefined ? {} : { entriesOpen: input.entriesOpen }),
+  });
   await input.channel.tell({
     agentId: input.agentId,
     strategyName: input.strategyName,
@@ -88,7 +105,8 @@ export async function idleAndClassGate(input: {
   });
   return {
     // Not while the breaker is tripped: every class entry is a buy the wall
-    // would refuse. The exits are never withheld.
+    // would refuse. Nor once today's energy for new trades is used up. The
+    // exits are never withheld.
     entries: async (propose) => (gate.propose ? propose() : { intents: [], why: [] }),
   };
 }

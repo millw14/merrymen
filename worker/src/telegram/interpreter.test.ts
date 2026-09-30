@@ -49,6 +49,15 @@ describe("parseSlash — pure slash parser", () => {
     assert.deepEqual(parseSlash("/link ABC123"), { kind: "link", code: "ABC123" });
   });
 
+  it("/start with a payload is a deep link carrying the code; bare /start is help", () => {
+    // t.me/<bot>?start=<code> arrives as "/start <code>". The service links an
+    // unlisted chat with it and shows a linked one help (service.ts handle).
+    assert.deepEqual(parseSlash("/start NTE49D"), { kind: "start", payload: "NTE49D" });
+    assert.deepEqual(parseSlash("/start@merryman_bot NTE49D"), { kind: "start", payload: "NTE49D" });
+    assert.deepEqual(parseSlash("/start"), { kind: "help" });
+    assert.deepEqual(parseSlash("/start   "), { kind: "help" });
+  });
+
   it("strips /cmd@BotName suffixes (group chats)", () => {
     assert.deepEqual(parseSlash("/status@merryman_bot"), { kind: "status" });
   });
@@ -250,6 +259,15 @@ describe("executeCommand — code disposes", () => {
     assert.deepEqual(d.calls, []);
   });
 
+  it("/start <payload> reaching the executor is help, and never a link attempt", async () => {
+    // Only an allowlisted chat gets here with a payload: the service turns an
+    // unlisted chat's payload into /link before the executor sees it. A linked
+    // owner tapping the dashboard's deep link again must not spend a guess.
+    const d = deps();
+    assert.equal(await executeCommand({ kind: "start", payload: "WRONG1" }, d), "HELP");
+    assert.deepEqual(d.calls, []);
+  });
+
   it("control commands are blocked when control is off", async () => {
     const d = deps({ controlEnabled: false });
     const r = await executeCommand({ kind: "pause" }, d);
@@ -298,6 +316,40 @@ describe("executeCommand — code disposes", () => {
     const done = await executeCommand({ kind: "confirm" }, d);
     assert.ok(d.calls.includes("kill"));
     assert.match(done, /KILL SWITCH/);
+  });
+
+  it("SELF-HOSTED KILL WORDING IS UNCHANGED: the owner key is archived on this machine", async () => {
+    const d = deps({ kill: () => ({ ok: true, archived: "0xabc" }) });
+    const asked = await executeCommand({ kind: "kill" }, d);
+    assert.match(asked, /~\/\.merrymen\/grants\//);
+    const done = await executeCommand({ kind: "confirm" }, d);
+    assert.match(done, /grant destroyed/);
+    assert.match(done, /merrymen recover/);
+  });
+
+  it("HOSTED KILL PROMISES NO ARCHIVE: the server never held the owner key", async () => {
+    // Hosted, grant.json holds only the session key and there is no CLI to
+    // run on the server. The self-hosted wording promised both.
+    const d = deps({ hosted: true, kill: () => ({ ok: true, archived: null, revocation: "queued" }) });
+    const asked = await executeCommand({ kind: "kill" }, d);
+    assert.match(asked, /confirm kill/i);
+    assert.doesNotMatch(asked, /merrymen recover|~\/\.merrymen\/grants/);
+    assert.match(asked, /server never held your owner key/);
+    const done = await executeCommand({ kind: "confirm" }, d);
+    assert.match(done, /KILL SWITCH/);
+    // It is NOT yet gone from the store when this is sent, so it must not say
+    // so. The server says it with a ✅ once it is.
+    assert.doesNotMatch(done, /destroyed|archived|revoked/);
+    assert.match(done, /deleting your stored grant now; you'll get a ✅/);
+    assert.match(done, /No ✅ within a few minutes\? Revoke it in the dashboard/);
+  });
+
+  it("a hosted kill that could not be recorded says the key may come back, and where to stop it for good", async () => {
+    const d = deps({ hosted: true, kill: () => ({ ok: true, archived: null, revocation: "failed" }) });
+    await executeCommand({ kind: "kill" }, d);
+    const done = await executeCommand({ kind: "confirm" }, d);
+    assert.match(done, /only half done/);
+    assert.match(done, /Wallet &amp; permissions → discard &amp; start over/);
   });
 
   it("kill is refused at confirm time if control was turned off in between", async () => {

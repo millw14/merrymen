@@ -23,58 +23,24 @@
  * reaches a live agent's history.
  */
 import { NextResponse } from "next/server";
-import { merrymenHome } from "@merrymen/home";
 import { isHostedMode } from "@merrymen/core";
-import { writeCommand } from "@merrymen/command-files";
-import { withReadDb } from "@/lib/ledger";
 import { hostedAgentFor, diskAgent } from "@/lib/agent-for";
+import { queuePaperReset } from "@/lib/start-over";
 
 export const dynamic = "force-dynamic";
 
 const agentFor = (req: Request) => (isHostedMode() ? hostedAgentFor(req) : diskAgent());
 
+/**
+ * The practice reset on its own, as the iOS and Android apps ask for it. The
+ * web's Start over does not come here: it discards the grant as well, and the
+ * reset has to be queued from the grant before it goes, so it asks
+ * /api/grants/discard to do both (lib/start-over.ts).
+ */
 export async function POST(req: Request) {
   const agent = await agentFor(req);
   if (!agent) return NextResponse.json({ error: "not signed in" }, { status: 401 });
-
-  // Minted here, never accepted from the caller: an id a client chooses is an
-  // id a client can collide with somebody else's.
-  const id = crypto.randomUUID();
-
-  // Self-hosted shares one MERRYMEN_HOME with the worker, so the file goes
-  // straight into the directory the worker drains — no table, no ferry.
-  if (!isHostedMode()) {
-    try {
-      writeCommand(merrymenHome(), { id, kind: "paper-reset", at: Date.now() });
-      return NextResponse.json({ id, queued: true });
-    } catch (e) {
-      return NextResponse.json(
-        { error: `couldn't queue it: ${e instanceof Error ? e.message : String(e)}` },
-        { status: 503 },
-      );
-    }
-  }
-
-  const ok = await withReadDb(async (db) => {
-    if (!db) return false;
-    try {
-      await db
-        .prepare("INSERT INTO agent_commands (id, agent_id, kind, created_at) VALUES (?, ?, ?, ?)")
-        .run(id, agent, "paper-reset", Date.now());
-      return true;
-    } catch {
-      return false;
-    }
-  });
-
-  if (!ok) {
-    return NextResponse.json(
-      {
-        error:
-          "couldn't queue it — the ledger is unreachable, which usually means this agent's worker has never run",
-      },
-      { status: 503 },
-    );
-  }
-  return NextResponse.json({ id, queued: true });
+  const queued = await queuePaperReset(isHostedMode(), agent);
+  if (!queued.ok) return NextResponse.json({ error: queued.error }, { status: 503 });
+  return NextResponse.json({ id: queued.id, queued: true });
 }

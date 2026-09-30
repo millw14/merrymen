@@ -240,6 +240,44 @@ describe("loadAccountFromShared", () => {
     assert.deepEqual(acct.tail, [{ book: "live", evidenced: 7, unevidenced: 0 }]);
   });
 
+  /**
+   * A mark taken while flow inference was held (store.ts `flows_held`) can
+   * carry an owner's withdrawal the flows table has not booked yet. Carried as
+   * the book's last point, the chat judged the seam from it: the withdrawal
+   * booked after it was "money taken out" AND the same 50 came back as
+   * unexplained, and with no reading after the restart it was a trading loss.
+   */
+  it("never carries a mark taken mid-hold: a withdrawal still settling rides the tail instead", async () => {
+    const build = async (dropColumn: boolean) => {
+      const { raw, db } = await ledger();
+      if (dropColumn) raw.exec("ALTER TABLE equity DROP COLUMN flows_held");
+      raw
+        .prepare("INSERT INTO agents (smart_account, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, epoch) VALUES (?, 'o', 's', 4663, '{}', 0, 0, 2)")
+        .run(A);
+      const m = (at: number, equity: number, cash: number, held: number) =>
+        dropColumn
+          ? raw.prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', ?, 0, ?, ?, 2, 'live')").run(A, cash, equity, at)
+          : raw
+              .prepare("INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode, flows_held) VALUES (?, '0', ?, 0, ?, ?, 2, 'live', ?)")
+              .run(A, cash, equity, at, held);
+      m(T0, 100, 60, 0);
+      m(T0 + 60, 100, 60, 0);
+      m(T0 + 120, 50, 10, 1); // the owner took 50 out; the look that saw it held
+      raw
+        .prepare("INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, log_index, source, at, epoch) VALUES (?, 'out', 50, '0xw', 0, 'chain-log', ?, 2)")
+        .run(A, T0 + 150);
+      const acct = (await loadAccountFromShared(db, A, T0 - 86_400, T0 + 200))!;
+      raw.close();
+      return acct;
+    };
+    const acct = await build(false);
+    assert.deepEqual(acct.points.map((p) => [p.at - T0, p.equity, p.flows]), [[0, 100, 0], [60, 100, 0]], "the held mark is not a point");
+    assert.deepEqual(acct.tail, [{ book: "live", evidenced: -50, unevidenced: 0 }], "the withdrawal is carried to the seam, where the cash shows it");
+    // A shared ledger the migration has not reached held nothing: every mark comes, as before.
+    const old = await build(true);
+    assert.deepEqual(old.points.map((p) => p.at - T0), [0, 120]);
+  });
+
   it("round-trips through the file, and a malformed account costs only the account", async () => {
     const { acct } = await account();
     const home = mkdtempSync(path.join(os.tmpdir(), "merrymen-histacct-"));

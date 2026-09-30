@@ -23,6 +23,8 @@ const GITHUB = "https://github.com/millw14/merrymen";
  * hosted", offering exactly one of those.
  */
 const HOSTED_APP = "https://app.merrymen.dev";
+/** The MCP server address, as public/llms.txt and /claude give it. */
+const MCP_SERVER = "https://mcp.merrymen.dev/mcp";
 
 /**
  * The beta testers' room — an open Telegram invite. Anyone with the link joins,
@@ -143,7 +145,11 @@ export default function Home() {
               <Link href="/api" className="btn btn-ghost btn-lg">Build with Merrymen <Icon name="arrow" size={16}/></Link>
             </div>
             <p className="hero-meta">RUN IT HOSTED. SELF-HOST IT. MAKE IT YOURS.</p>
-            <div className="hero-bottom-links"><Link href="/docs">Read the docs ↗</Link><a href={GITHUB}>Explore the source ↗</a></div>
+            <div className="hero-bottom-links" style={{ flexWrap: "wrap", rowGap: 10 }}><Link href="/docs">Read the docs ↗</Link><Link href="/claude">Use it in Claude ↗</Link><a href={GITHUB}>Explore the source ↗</a></div>
+            {/* Plain words on purpose: an assistant asked to "connect merrymen mcp" reads this page first, and a link title alone did not tell it there is an MCP server. */}
+            <p className="hero-mcp">
+              <strong>Merrymen MCP server:</strong> connect Claude, Claude Code, ChatGPT, Cursor and other AI assistants to your agent at <code>{MCP_SERVER}</code>. <Link href="/claude">Set it up in one click</Link> · <a href="/llms.txt">instructions for AI assistants</a>
+            </p>
           </div>
           <AgentPreview />
         </div>
@@ -197,10 +203,11 @@ export default function Home() {
             <p>
               No strategist, Telegram message, or voice note ever constructs calldata, moves funds,
               or touches your PC without passing a closed, typed command set and — for money — the
-              on-chain policy wall. Trades pass caps enforced by the account contract. Transfers are
-              amount-capped and confirm-gated. PC actions are off by default, allowlisted, and
-              confirmed. A prompt-injected “send everything to 0xevil” can at worst produce a
-              confirmation card you will see and cancel.
+              on-chain policy wall. Trades pass caps enforced by the account contract. Transfers out
+              through chat are refused — a wallet signed today carries no transfer permission, so a
+              prompt-injected “send everything to 0xevil” is turned back and nothing moves. Money
+              comes home with your owner key. PC actions are off by default, allowlisted, and
+              confirmed.
             </p>
             <p>
               And you don&apos;t take our word for it: your dashboard shows the account contract,
@@ -284,11 +291,11 @@ export default function Home() {
               <h3>Run the whole band from your phone.</h3>
               <p>
                 Link a bot and chat with your merryman in plain English or slash commands. Check the
-                book, trade, transfer with a confirm, set price alerts, get a daily report — all
+                book, trade, set price alerts, get a daily report — all
                 inside the same permission walls. It even speaks first.
               </p>
               <ul className="feature-list">
-                {["“how are we doing?” · “pause everything”", "Trade pings, drawdown & gas warnings, daily digest", "Transfers are triple-guarded and always confirmed", "Voice notes work too"].map((t) => (
+                {["“how are we doing?” · “pause everything”", "Trade pings, drawdown & gas warnings, daily digest", "No sending money out from chat — that’s your owner key’s job", "Voice notes work too"].map((t) => (
                   <li key={t}>{t}</li>
                 ))}
               </ul>

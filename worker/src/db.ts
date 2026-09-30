@@ -192,7 +192,10 @@ interface PgPoolLike extends PgQueryable {
   connect(): Promise<PgClientLike>;
 }
 interface PgClientLike extends PgQueryable {
-  release(): void;
+  /** Back to the pool; given an error, the pool closes the connection instead (pg-pool's release(err)). */
+  release(err?: Error): void;
+  on?(event: "error", listener: (e: unknown) => void): unknown;
+  removeListener?(event: "error", listener: (e: unknown) => void): unknown;
 }
 
 /** Params sqlite bound loosely, made safe for pg's stricter serializer: bigints as
@@ -202,7 +205,11 @@ function coerceParams(params: unknown[]): unknown[] {
 }
 
 class PgDb implements Db {
-  constructor(private q: PgQueryable) {}
+  constructor(
+    private q: PgQueryable,
+    /** For a connection pinned from a pool (sessionLock), the pool's own Db: see rootDb. */
+    readonly root?: PgDb,
+  ) {}
   prepare(sql: string): Stmt {
     const text = translateQuery(sql);
     const q = this.q;
@@ -249,6 +256,155 @@ class PgDb implements Db {
       client.release();
     }
   }
+  /** withAdvisoryLock's Postgres half: see there. */
+  async sessionLock<T>(cls: number, key: number, deadline: number, fn: (db: Db) => Promise<T>, held: () => void): Promise<T> {
+    const pool = this.q as PgPoolLike;
+    if (typeof pool.connect !== "function") throw new Error("an advisory session lock is taken on a pool, not inside a transaction");
+    for (let pause = 20; ; pause = Math.min(pause * 2, 250)) {
+      const client = await pool.connect();
+      let got = false;
+      try {
+        const r = await client.query("SELECT pg_try_advisory_lock($1::int, $2::int) AS ok", [cls, key]);
+        got = r.rows[0]?.ok === true;
+      } catch (e) {
+        // Closed, not pooled: the lock may have been taken before the answer was lost.
+        client.release(e instanceof Error ? e : new Error(String(e)));
+        throw e;
+      }
+      if (got) {
+        held();
+        return this.holding(client, cls, key, fn);
+      }
+      client.release();
+      if (Date.now() + pause > deadline) throw new LockBusyError();
+      await new Promise((r) => setTimeout(r, pause));
+    }
+  }
+  private async holding<T>(client: PgClientLike, cls: number, key: number, fn: (db: Db) => Promise<T>): Promise<T> {
+    // The pool listens for a connection's errors only while it is idle. Held
+    // here while `fn` awaits other things, a connection the server drops would
+    // otherwise emit an error nobody handles, and that ends the process; with
+    // this, the statements on it fail instead, and it is closed below.
+    const quiet = () => {};
+    client.on?.("error", quiet);
+    try {
+      return await fn(new PgDb(client, this));
+    } finally {
+      let broken: Error | undefined;
+      try {
+        await client.query("SELECT pg_advisory_unlock($1::int, $2::int)", [cls, key]);
+      } catch (e) {
+        broken = e instanceof Error ? e : new Error(String(e));
+      }
+      client.removeListener?.("error", quiet);
+      // A connection that could not say it let go is closed, never pooled: a
+      // session lock goes with its connection, and a pooled one would keep it.
+      client.release(broken);
+    }
+  }
+}
+
+/** The lock was still held elsewhere when the wait ran out. */
+export class LockBusyError extends Error {
+  constructor() {
+    super("the lock is held elsewhere; try again");
+    this.name = "LockBusyError";
+  }
+}
+
+/** Per Db, per lock: the tail of this process's queue for it. */
+const queued = new WeakMap<object, Map<string, Promise<void>>>();
+
+/**
+ * ONE HOLDER AT A TIME, ACROSS PROCESSES, OF THE LOCK (cls, key), WHILE `fn`
+ * RUNS — and `fn`'s statements go through the Db it is handed.
+ *
+ * On Postgres that is a SESSION-level advisory lock, the two-int form, on one
+ * connection checked out of the pool for the whole of `fn`, and the Db handed
+ * to `fn` runs its statements on that same connection, one at a time and each
+ * committed as it runs (no transaction: nobody waits on a row it wrote).
+ * Everything `fn` does through the database takes that one connection, so a
+ * pool full of holders can never be a pool full of holders each waiting for a
+ * second connection. The lock is TRIED, never waited on with a connection
+ * held: a caller that finds it taken gives the connection back and tries again
+ * shortly, until `waitMs` has passed, and then gets LockBusyError. A process
+ * that dies holding it closes the connection, and Postgres lets go.
+ *
+ * Within this process callers queue first (a caller that gives up keeps its
+ * place only until the one before it is done), so a burst from one process
+ * holds one connection, not one each. On sqlite, and any Db that is not a
+ * Postgres pool, that queue is the whole lock: one process by construction.
+ */
+export async function withAdvisoryLock<T>(db: Db, cls: number, key: number, fn: (db: Db) => Promise<T>, waitMs = 15_000): Promise<T> {
+  const deadline = Date.now() + waitMs;
+  const name = `${cls}:${key}`;
+  let queue = queued.get(db);
+  if (!queue) queued.set(db, (queue = new Map()));
+  let counts = waiting.get(db);
+  if (!counts) waiting.set(db, (counts = new Map()));
+  const ahead = queue.get(name) ?? Promise.resolve();
+  let leave!: () => void;
+  const left = new Promise<void>((r) => (leave = r));
+  // The next caller's turn: once the one ahead of this one is done AND this
+  // one has left. A caller that gives up leaves at once, so whoever is next
+  // still waits for the holder, never for somebody who has gone.
+  const tail = ahead.then(() => left);
+  queue.set(name, tail);
+  counts.set(name, (counts.get(name) ?? 0) + 1);
+  let isWaiting = true;
+  const stopWaiting = () => {
+    if (!isWaiting) return;
+    isWaiting = false;
+    const n = (counts.get(name) ?? 1) - 1;
+    if (n > 0) counts.set(name, n);
+    else counts.delete(name);
+  };
+  try {
+    if (!(await settlesBy(ahead, deadline))) throw new LockBusyError();
+    if (db instanceof PgDb) return await db.sessionLock(cls, key, deadline, fn, stopWaiting);
+    stopWaiting();
+    return await fn(db);
+  } finally {
+    stopWaiting();
+    leave();
+    if (queue.get(name) === tail) queue.delete(name);
+  }
+}
+
+/** True once `p` settles, false if `deadline` comes first. */
+async function settlesBy(p: Promise<void>, deadline: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p.then(() => true),
+      new Promise<boolean>((r) => {
+        timer = setTimeout(() => r(false), Math.max(0, deadline - Date.now()));
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Per Db, per lock: callers in this process that want it and do not hold it yet. */
+const waiting = new WeakMap<object, Map<string, number>>();
+
+/**
+ * How many callers in this process are waiting for the lock: queued behind
+ * another here, or (Postgres) trying it while another process holds it. For a
+ * test to wait on, never for code to decide by.
+ */
+export function advisoryLockWaitersForTest(db: Db, cls: number, key: number): number {
+  return waiting.get(db)?.get(`${cls}:${key}`) ?? 0;
+}
+
+/**
+ * The Db a connection pinned by withAdvisoryLock was taken from, or `db`
+ * itself: what per-database memos (a table made once) are keyed on, so each
+ * pinned connection does not count as a database of its own.
+ */
+export function rootDb(db: Db): Db {
+  return db instanceof PgDb && db.root ? db.root : db;
 }
 
 /**

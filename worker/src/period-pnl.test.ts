@@ -230,4 +230,20 @@ describe("accountSeries across a restart", () => {
     assert.ok(lp.kind === "change" && lp.also === null, "a mark from before modes were recorded is not 'the other book'");
     assert.equal(periodChange([], 0).kind, "none");
   });
+
+  it("a caller that left out held readings still names the book: the newest reading's, never the series' tail", () => {
+    // Measured readings only (held-marks.ts): the account's newest reading was
+    // a held one in the practice book, so the book is practice and it has no
+    // measured reading yet — the real-money points are not its.
+    const series = accountSeries({
+      carried: [],
+      carriedTail: [],
+      local: [{ at: 100, equity: 40, cash: 40, book: "live" }, { at: 200, equity: 41, cash: 40, book: "live" }],
+      localFlows: [],
+      tradeTimes: none,
+    });
+    assert.equal(periodChange(series, 0, "paper").kind, "none");
+    const live = periodChange(series, 0, "live");
+    assert.ok(live.kind === "change" && live.close.at === 200 && live.change === 1);
+  });
 });

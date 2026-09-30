@@ -291,6 +291,40 @@ describe("account shapes", () => {
     assert.equal(p.contributionsAfterUsdg, 0);
     assert.equal(p.pnlPublishableAfter, false, "net zero is not a denominator");
   });
+
+  it("an energy purchase is proposed as the worker's 'energy-buy' row, and the worker's own row is kept", () => {
+    // Funded 100, bought 42 of energy. The reserve is capital that left the
+    // book — not a withdrawal, not a trade — and the worker books it under
+    // 'energy-buy' on the same tx#logIndex this proposes, so the insert is a
+    // no-op where it already exists.
+    const p = planFor(
+      LIVE,
+      "live",
+      [
+        { direction: "in", amountRaw: "100000000", kind: "capital-in" },
+        { direction: "out", amountRaw: "42000000", kind: "reserve-out" },
+      ],
+      [
+        { id: 1, agent_id: LIVE, epoch: 1, direction: "in", amount_usdg: 100, source: "inferred" },
+        { id: 2, agent_id: LIVE, epoch: 1, direction: "out", amount_usdg: 42, source: "energy-buy", tx_hash: "0x2" },
+      ],
+      58,
+    );
+    assert.equal(p.chainGrossInUsdg, 100);
+    assert.equal(p.chainGrossOutUsdg, 0, "not a withdrawal");
+    assert.equal(p.chainReserveUsdg, 42);
+    assert.equal(p.chainNetUsdg, 58, "in − out − reserve");
+    assert.deepEqual(
+      p.insert.map((r) => [r.direction, r.amountUsdg, r.source]),
+      [
+        ["in", 100, "chain-log"],
+        ["out", 42, "energy-buy"],
+      ],
+    );
+    assert.deepEqual(p.quarantine.map((q) => q.id), [1], "the worker's energy-buy row is evidence, never quarantined");
+    assert.equal(p.contributionsAfterUsdg, 58);
+    assert.equal(p.contributionsKnownAfter, true);
+  });
 });
 
 // ── THE PAPER FILL, AS THE CLASSIFIER SEES IT ──────────────────────────────

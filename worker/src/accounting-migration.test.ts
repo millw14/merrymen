@@ -229,6 +229,7 @@ describe("the migration, against the rows that are actually there", () => {
       navUsdg: null,
       chainGrossInUsdg: 10,
       chainGrossOutUsdg: 0,
+      chainReserveUsdg: 0,
       chainNetUsdg: 10,
       chainTradeLegs: 4,
       chainAmbiguous: 0,

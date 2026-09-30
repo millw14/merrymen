@@ -14,49 +14,101 @@ import kotlinx.coroutines.flow.map
 private val Context.sessionStore by preferencesDataStore("merrymen-session")
 
 /**
+ * WHAT [dev.merrymen.app.data.Repository] NEEDS FROM THE DEVICE'S STORED
+ * SESSION, and nothing else.
+ *
+ * An interface for the same reason [OriginSource] is one: Session needs a
+ * Context for its DataStore, and the wiring worth testing — sign-out running
+ * every forget hook, a start dropping the retired password, a Server change
+ * ending the wallet's turn — is Repository's, not DataStore's. A JVM test
+ * implements this over plain fields and drives the real Repository.
+ */
+interface SessionStore : OriginSource {
+  /** The stored origin, as it changes. */
+  val origin: Flow<String>
+
+  /** What a blank Server field restores: the build's default origin. */
+  val fallbackOrigin: String
+
+  /** Store an origin [checkOrigin] passed. Only a checked one: see [OriginCheck]. */
+  suspend fun setOrigin(checked: OriginCheck.Ok)
+
+  /** Delete the site password an older build stored. Idempotent. */
+  suspend fun dropRetiredGatePassword()
+
+  /**
+   * Whether the retired mm_gate cookie has been expired in the WebView's store
+   * on this install. Repository.bootstrap does that once, not on every start:
+   * it wakes the WebView on the main thread for a cookie that is gone after the
+   * first time.
+   */
+  suspend fun webViewGateExpired(): Boolean
+
+  /** Record that it has. Survives sign-out: sign-out empties the WebView's store anyway. */
+  suspend fun markWebViewGateExpired()
+
+  /**
+   * Whether a handoff on this install has written the session into the
+   * WebView's store httpOnly even though the store already held that value.
+   * Repository.seedWebView does that once, to replace the copy an older build
+   * wrote there without HttpOnly; after it, the same value is left alone.
+   */
+  suspend fun webViewSessionReseeded(): Boolean
+
+  /** Record that it has. Survives sign-out, for the same reason as [markWebViewGateExpired]. */
+  suspend fun markWebViewSessionReseeded()
+
+  /** Sign-out: forget the stored session, keep the origin. */
+  suspend fun clearSession()
+}
+
+/**
  * WHAT THIS INSTALL KNOWS ABOUT ITS SERVER, AND ABOUT BEING LET IN.
  *
- * Three things, and they are deliberately different kinds of secret:
+ * Two things, and they are deliberately different kinds of secret:
  *
  *   ORIGIN — not a secret at all. A build input with a default, so pointing the
  *   app at a laptop or a staging deploy is a setting rather than a rebuild.
  *
- *   COOKIES — the session. `mm_gate` opens the "not yet" door, and the SIWE
- *   session cookie is the thing that makes /api/settings answer about YOU. Both
- *   are bearer credentials for this account, which is why they live here and
- *   not in a log line.
+ *   COOKIES — the session. The SIWE session cookie is the thing that makes
+ *   /api/settings answer about YOU. It is a bearer credential for this account,
+ *   which is why it lives here and not in a log line.
  *
- *   GATE PASSWORD — shared, low-value, and stored only so a cold start does not
- *   ask for it again. It is a doorknob, not a lock: one password for everyone,
- *   checked at the edge with no session. Storing it does not weaken anything
- *   that was strong, and the repo says so in as many words.
+ * There used to be a third, the shared site password, stored so a cold start
+ * did not ask for it again. The server stopped asking on 2026-09-16 (46c852d1);
+ * see [dropRetiredGatePassword].
  */
-class Session(private val context: Context) {
+class Session(private val context: Context) : SessionStore, CookieBlob {
 
   private object Keys {
     val ORIGIN = stringPreferencesKey("origin")
     val COOKIES = stringPreferencesKey("cookies")
-    val GATE = stringPreferencesKey("gate")
+    /** The retired site password. Read by nothing; only ever deleted. */
+    val RETIRED_GATE = stringPreferencesKey("gate")
     val TENANT = stringPreferencesKey("tenant")
     val WATCHLIST = stringSetPreferencesKey("watchlist")
     val WELCOMED = androidx.datastore.preferences.core.booleanPreferencesKey("welcomed")
+    /** The retired mm_gate cookie is gone from the WebView's store; see [webViewGateExpired]. */
+    val WEBVIEW_GATE_EXPIRED = androidx.datastore.preferences.core.booleanPreferencesKey("webview-gate-expired")
+    /** The session has been rewritten httpOnly in the WebView's store once; see [webViewSessionReseeded]. */
+    val WEBVIEW_SESSION_RESEEDED = androidx.datastore.preferences.core.booleanPreferencesKey("webview-session-reseeded")
   }
 
   /**
    * Whether the welcome page has been past ONCE on this device.
    *
    * A startup page, not a wall: it shows on a cold start until the reader signs
-   * in or chooses to go on as a guest, then never again. The gate is already the
-   * one thing that stops you at the door; this is an introduction, so it must
-   * not become a second gate. Signing in also sets it (the reader has plainly
-   * seen it), and it is device-local like the watchlist — nothing about a first
-   * visit belongs in anyone's ledger.
+   * in or chooses to go on as a guest, then never again. It is an
+   * introduction, so it must not become a gate. Signing in also sets it (the
+   * reader has plainly seen it), and it is device-local like the watchlist —
+   * nothing about a first visit belongs in anyone's ledger.
    */
   val welcomed: Flow<Boolean> = context.sessionStore.data.map { it[Keys.WELCOMED] == true }
   suspend fun welcomedNow(): Boolean = welcomed.first()
   suspend fun setWelcomed() = context.sessionStore.edit { it[Keys.WELCOMED] = true }
 
-  val origin: Flow<String> = context.sessionStore.data.map { it[Keys.ORIGIN] ?: defaultOrigin }
+  override val origin: Flow<String> = context.sessionStore.data.map { it[Keys.ORIGIN] ?: defaultOrigin }
+  override val fallbackOrigin: String get() = defaultOrigin
   val tenant: Flow<String?> = context.sessionStore.data.map { it[Keys.TENANT] }
 
   /**
@@ -85,13 +137,15 @@ class Session(private val context: Context) {
     }
   }
 
-  suspend fun originNow(): String = origin.first()
+  override suspend fun originNow(): String = origin.first()
 
-  suspend fun setOrigin(value: String) {
-    // Normalised once, here, so every caller can concatenate a path without
-    // wondering whether it will produce a double slash.
-    val trimmed = value.trim().removeSuffix("/")
-    context.sessionStore.edit { it[Keys.ORIGIN] = trimmed.ifEmpty { defaultOrigin } }
+  /**
+   * Only an origin [checkOrigin] accepted reaches the store — the type says so.
+   * It used to take the raw field, trimmed, and a scheme-less address stored
+   * here crashed every launch that followed.
+   */
+  override suspend fun setOrigin(checked: OriginCheck.Ok) {
+    context.sessionStore.edit { it[Keys.ORIGIN] = checked.origin }
   }
 
   suspend fun setTenant(value: String?) =
@@ -99,24 +153,44 @@ class Session(private val context: Context) {
       if (value == null) p.remove(Keys.TENANT) else p[Keys.TENANT] = value
     }
 
-  suspend fun gatePassword(): String? = context.sessionStore.data.first()[Keys.GATE]
+  /**
+   * DELETE THE SITE PASSWORD AN OLDER BUILD STORED.
+   *
+   * It was a shared beta password, kept so a cold start could re-open the door.
+   * The door is gone, so keeping it only means a secret sits on the device with
+   * nothing left to use it; a stored credential nobody reads is still a
+   * credential. Idempotent: after the first run there is nothing to remove.
+   */
+  override suspend fun dropRetiredGatePassword() {
+    if (context.sessionStore.data.first()[Keys.RETIRED_GATE] == null) return
+    context.sessionStore.edit { it.remove(Keys.RETIRED_GATE) }
+  }
 
-  suspend fun setGatePassword(value: String?) =
-    context.sessionStore.edit { p ->
-      if (value.isNullOrBlank()) p.remove(Keys.GATE) else p[Keys.GATE] = value
-    }
+  override suspend fun webViewGateExpired(): Boolean = context.sessionStore.data.first()[Keys.WEBVIEW_GATE_EXPIRED] == true
 
-  suspend fun cookiesRaw(): String? = context.sessionStore.data.first()[Keys.COOKIES]
+  override suspend fun markWebViewGateExpired() {
+    context.sessionStore.edit { it[Keys.WEBVIEW_GATE_EXPIRED] = true }
+  }
 
-  suspend fun setCookiesRaw(value: String) =
+  override suspend fun webViewSessionReseeded(): Boolean = context.sessionStore.data.first()[Keys.WEBVIEW_SESSION_RESEEDED] == true
+
+  override suspend fun markWebViewSessionReseeded() {
+    context.sessionStore.edit { it[Keys.WEBVIEW_SESSION_RESEEDED] = true }
+  }
+
+  override suspend fun cookiesRaw(): String? = context.sessionStore.data.first()[Keys.COOKIES]
+
+  override suspend fun setCookiesRaw(value: String) {
     context.sessionStore.edit { it[Keys.COOKIES] = value }
+  }
 
-  /** Sign-out: forget the session, keep the origin and the doorknob. */
-  suspend fun clearSession() =
+  /** Sign-out: forget the session, keep the origin. */
+  override suspend fun clearSession() {
     context.sessionStore.edit { p: MutablePreferences ->
       p.remove(Keys.COOKIES)
       p.remove(Keys.TENANT)
     }
+  }
 
   companion object {
     var defaultOrigin: String = dev.merrymen.app.BuildConfig.DEFAULT_ORIGIN

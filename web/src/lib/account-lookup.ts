@@ -100,7 +100,7 @@ const shortReason = (e: unknown) => {
 /** Read one address directly — no derivation, no assumptions about what it is. */
 export async function readAddress(chain: Chain, address: Address): Promise<Reading> {
   const client = clientFor(chain);
-  const tokens = sweepList();
+  const tokens = sweepList(chain.id);
   const unreadable: string[] = [];
 
   const deployed = await client

@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { dedicatedMcpHost, mcpHostLanding } from "@/mcp/landing";
 
 /**
  * The dashboard has NO login and can move real funds (/api/recover sweeps to any
@@ -68,14 +69,30 @@ function hostAllowed(hostHeader: string | null): boolean {
  */
 const HOSTED = ["1", "true", "yes"].includes((process.env.MERRYMEN_HOSTED ?? "").trim().toLowerCase());
 
+/**
+ * The dedicated MCP domain (mcp.merrymen.dev), when there is one. It is the
+ * same web service as the app, so without a word from here a browser that
+ * opens it gets the whole terminal, signed out, and a client given the bare
+ * domain gets HTML (mcp/landing.ts has the full story). Derived from
+ * configuration once, the way HOSTED is and as config.ts derives it, never
+ * from the Host header. Null when hosted MCP has no second domain, which is
+ * every self-hosted install: then nothing below touches a page.
+ */
+const MCP_HOST = dedicatedMcpHost({
+  MERRYMEN_OAUTH_ISSUER: process.env.MERRYMEN_OAUTH_ISSUER,
+  MERRYMEN_PUBLIC_ORIGIN: process.env.MERRYMEN_PUBLIC_ORIGIN,
+  MERRYMEN_MCP_RESOURCE_URL: process.env.MERRYMEN_MCP_RESOURCE_URL,
+}, HOSTED);
+
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   // ── the two API guards, unchanged and still API-only ────────────────────
   //
-  // Scoped explicitly even though the matcher is API-only, because the scoping
-  // is the load-bearing part: applying the host allowlist to a PAGE would newly
-  // refuse a self-hosted install reached over a LAN or a domain.
+  // Scoped explicitly, and the scoping is the load-bearing part (the matcher
+  // now reaches pages too, for the MCP domain below): applying the host
+  // allowlist to a PAGE would newly refuse a self-hosted install reached over
+  // a LAN or a domain.
   const isApi = pathname.startsWith("/api/");
   if (isApi) {
     if (!HOSTED && !hostAllowed(req.headers.get("host"))) {
@@ -85,23 +102,47 @@ export function middleware(req: NextRequest) {
     if (site && site !== "same-origin" && site !== "none") {
       return new NextResponse("blocked: cross-site request to the local API", { status: 403 });
     }
+    return NextResponse.next();
+  }
+
+  // ── pages on the dedicated MCP domain, and nowhere else ────────────────
+  //
+  // One header read and one string comparison on any other host, and nothing
+  // at all self-hosted: that is what keeps matching every page affordable.
+  // The query is as Next hands it to middleware (its URL parser rewrites a
+  // 127.0.0.1 anywhere in it to localhost; see mcp/oauth/deps.ts). Harmless
+  // for a page; /oauth/*, where it would matter, is never redirected.
+  if (MCP_HOST) {
+    const landing = mcpHostLanding(MCP_HOST, { method: req.method, headers: req.headers, pathname, search: req.nextUrl.search });
+    if (landing) {
+      const res = NextResponse.redirect(landing.location, landing.status);
+      // The answer depends on request headers (a page load or a client), so
+      // no cache may hand one caller's redirect to the other; a 308 is
+      // otherwise cacheable by default.
+      res.headers.set("Cache-Control", "no-store");
+      return res;
+    }
   }
 
   return NextResponse.next();
 }
 
 /**
- * The API, and nothing else.
+ * The API, plus pages for the dedicated MCP domain.
  *
  * This file guards /api/* against DNS rebinding and cross-site POSTs. It once
  * also rendered a password holding page, which is why the matcher reached
- * pages at all; that is gone and the matcher is back to what the guards
- * actually need.
+ * pages at all; that is gone. Pages are matched again for one reason only:
+ * a browser (or a client given the bare domain) on the MCP host is sent where
+ * it can do something (mcp/landing.ts). Matching is by path because a matcher
+ * cannot read runtime configuration; the host check is in the function.
  */
 export const config = {
-  // API ONLY. Pages were matched solely to render the holding page, which is
-  // gone; the two guards below it are and always were API-only, so matching
-  // a page now would run a Host allowlist over ordinary navigation and newly
-  // refuse a self-hosted install reached over a LAN.
-  matcher: ["/api/:path*"],
+  // The two guards are and always were API-only (the isApi check above, not
+  // this list, is what scopes them): running the Host allowlist over ordinary
+  // navigation would newly refuse a self-hosted install reached over a LAN.
+  // The page pattern skips what the MCP host must serve untouched anyway, so
+  // assets and the MCP endpoints never pay for a middleware call: Next's
+  // files, the endpoint, OAuth, discovery and anything with a file extension.
+  matcher: ["/api/:path*", "/((?!api/|_next/|mcp(?:/|$)|oauth/|\\.well-known/|.*\\.[A-Za-z0-9]+$).*)"],
 };

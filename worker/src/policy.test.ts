@@ -942,3 +942,118 @@ describe("cap refusals are written for the person who has to read them", () => {
     assert.match(detail, /re-sign/);
   });
 });
+
+/**
+ * THE ENERGY BUY — a mirror of ONE permission, and no stricter than it.
+ *
+ * The wall seals the v2 swap on the router with the path pinned and the input
+ * funded through the one USDG approve, capped LESS_THAN_OR_EQUAL perTradeUsdg.
+ * So an honest buy at exactly the cap must pass here, a `swap` naming the
+ * router must still be refused (the router is not in allowedTargets), and the
+ * rules about POSITIONS — the watch set, the exit, the scout budget — must not
+ * reach it at all.
+ */
+describe("energy-buy", () => {
+  const V2 = "0x5555555555555555555555555555555555555555" as const;
+  const MERRY = "0x6666666666666666666666666666666666666666" as const;
+  const energyLimits = (over: Partial<AgentLimits> = {}): AgentLimits =>
+    limits({ cashToken: USDG, energy: { router: V2, token: MERRY }, sellableAssets: [USDG, AAPL], ...over });
+  const buy = (over: Partial<Extract<TradeIntent, { kind: "energy-buy" }>> = {}): TradeIntent => ({
+    kind: "energy-buy",
+    target: V2,
+    sellToken: USDG,
+    buyToken: MERRY,
+    sellAmountRaw: 10_000_000n,
+    notionalUsdg: 10_000_000n,
+    ...over,
+  });
+
+  it("approves an honest buy on a grant that sealed the route", () => {
+    assert.deepEqual(checkPolicy(buy(), energyLimits(), state()), { ok: true });
+  });
+
+  it("the router is NOT in allowedTargets, and a generic swap aimed at it stays target-allowlist", () => {
+    const l = energyLimits();
+    assert.ok(!l.allowedTargets.map((a) => a.toLowerCase()).includes(V2));
+    const v = checkPolicy(swap({ target: V2, buyToken: AAPL }), l, state());
+    assert.equal(!v.ok && v.rule, "target-allowlist");
+    // Even a swap INTO the reserve over the sealed router is not an energy buy.
+    const w = checkPolicy(swap({ target: V2, buyToken: MERRY }), l, state());
+    assert.equal(!w.ok && w.rule, "target-allowlist");
+  });
+
+  it("no route on the grant → energy-not-granted, whatever else is true", () => {
+    const v = checkPolicy(buy(), limits({ cashToken: USDG }), state());
+    assert.equal(!v.ok && v.rule, "energy-not-granted");
+    assert.match(!v.ok ? v.detail : "", /Re-sign at \/grant, or send \$MERRYMEN to the account directly/);
+  });
+
+  it("any other target → target-allowlist, case-insensitively", () => {
+    assert.equal((checkPolicy(buy({ target: ROUTER }), energyLimits(), state()) as { rule: string }).rule, "target-allowlist");
+    const upper = V2.toUpperCase().replace("0X", "0x") as `0x${string}`;
+    assert.deepEqual(checkPolicy(buy({ target: upper }), energyLimits(), state()), { ok: true });
+  });
+
+  it("the wrong sell or buy leg → asset-allowlist", () => {
+    for (const bad of [buy({ sellToken: AAPL }), buy({ buyToken: AAPL }), buy({ buyToken: USDG }), buy({ sellToken: MERRY, buyToken: USDG })]) {
+      const v = checkPolicy(bad, energyLimits(), state());
+      assert.equal(!v.ok && v.rule, "asset-allowlist");
+    }
+    // No cash token to judge the sell leg by is a refusal, not a pass.
+    const v = checkPolicy(buy(), energyLimits({ cashToken: undefined }), state());
+    assert.equal(!v.ok && v.rule, "asset-allowlist");
+  });
+
+  it("refuses a non-positive size, and a notional that is not the raw input", () => {
+    for (const bad of [
+      buy({ sellAmountRaw: 0n, notionalUsdg: 0n }),
+      buy({ sellAmountRaw: -1n, notionalUsdg: -1n }),
+      buy({ sellAmountRaw: 10_000_000n, notionalUsdg: 9_999_999n }),
+      buy({ sellAmountRaw: 10_000_000n, notionalUsdg: 1n }),
+    ]) {
+      const v = checkPolicy(bad, energyLimits(), state());
+      assert.equal(!v.ok && v.rule, "non-positive");
+    }
+  });
+
+  it("THE MIRROR IS NOT STRICTER: exactly the per-trade cap (the approve's LTE bound) passes; one unit over does not", () => {
+    const cap = 50_000_000n;
+    assert.deepEqual(checkPolicy(buy({ sellAmountRaw: cap, notionalUsdg: cap }), energyLimits(), state()), { ok: true });
+    const v = checkPolicy(buy({ sellAmountRaw: cap + 1n, notionalUsdg: cap + 1n }), energyLimits(), state());
+    assert.equal(!v.ok && v.rule, "per-trade-cap");
+  });
+
+  it("daily-cap and ops-cap apply — it is a spend", () => {
+    const d = checkPolicy(buy(), energyLimits(), state({ spentTodayUsdg: 495_000_000n }));
+    assert.equal(!d.ok && d.rule, "daily-cap");
+    assert.deepEqual(checkPolicy(buy({ sellAmountRaw: 5_000_000n, notionalUsdg: 5_000_000n }), energyLimits(), state({ spentTodayUsdg: 495_000_000n })), { ok: true });
+    const o = checkPolicy(buy(), energyLimits(), state({ opsToday: 48 }));
+    assert.equal(!o.ok && o.rule, "ops-cap");
+  });
+
+  it("the drawdown breaker applies — it is not an exit", () => {
+    const v = checkPolicy(buy(), energyLimits(), state({ highWaterMarkUsdg: 1_000_000_000n, equityUsdg: 850_000_000n }));
+    assert.equal(!v.ok && v.rule, "drawdown-breaker");
+  });
+
+  it("the scout budget does NOT apply, even flagged unpriceable with a zero budget", () => {
+    const scout = {
+      limits: { enabled: false, budgetUsdg: 0n, perTokenUsdg: 0n },
+      buyUnpriceable: true,
+      existingCostUsdg: 0n,
+      quarantinedUsdg: 0n,
+    };
+    assert.deepEqual(checkPolicy(buy(), energyLimits(), state(), scout), { ok: true });
+  });
+
+  it("no-exit does NOT apply while $MERRYMEN is absent from sellableAssets, nor asset-allowlist from the watch set", () => {
+    const l = energyLimits({ sellableAssets: [USDG], allowedAssets: [USDG] });
+    assert.ok(!l.sellableAssets!.includes(MERRY) && !l.allowedAssets.includes(MERRY));
+    assert.deepEqual(checkPolicy(buy(), l, state()), { ok: true });
+  });
+
+  it("the key's expiry still comes first", () => {
+    const v = checkPolicy(buy(), energyLimits(), state({ nowSec: NOW + 86_401 }));
+    assert.equal(!v.ok && v.rule, "expiry");
+  });
+});

@@ -623,6 +623,38 @@ export interface MerrymenSettings {
   /** Local hour (0-23) after which the daily campfire report is sent. */
   telegramDigestHour?: number;
 
+  // ── Telegram groups (docs/tg-groups.md) ────────────────────────────────
+  //
+  // "Telegram groups", never the web room's name: that one is the public room
+  // (docs/groupchat.md) and a worker file spelling it fails the room's
+  // boundary test. All three are DASHBOARD-ONLY — a group is reached by anyone
+  // in it, so none of them is chat-settable (setting-spec.ts
+  // DASHBOARD_ONLY.telegramGroups) — and none is secret, house-owned or
+  // hosted-forbidden: how the owner's own bot behaves in the owner's own
+  // groups is the owner's decision.
+  /**
+   * Hang out in the Telegram groups its bot is in: answer when called, now and
+   * then join in, remember each chat. Off = silent in every group; it still
+   * records being added and removed, so turning it back on works.
+   *
+   * ON by default, because the bot is only ever in a group someone added it
+   * to, and one the owner did not add it to stays silent until the owner
+   * answers Stay / Leave. An owner who added their bot to a group expects it to
+   * speak there.
+   */
+  telegramGroupsEnabled?: boolean;
+  /**
+   * Look at coins people post in its Telegram groups. Only in trencher mode.
+   * A posted address is a NOMINATION, never an order: the Brain decides, the
+   * trencher entry path sizes, and every trencher limit plus the group
+   * nomination caps still apply (docs/tg-groups.md rule 1). Off = it never
+   * looks, and says nothing about coins.
+   */
+  telegramGroupCoinsEnabled?: boolean;
+  /** How often it joins a Telegram group conversation unprompted. Being called
+   * (a mention, a reply, its name) is answered whatever this says. */
+  telegramGroupsChattiness?: TelegramGroupsChattiness;
+
   // ── remote control · your PC (OpenClaw-style — all OFF by default) ──────
   /** MASTER switch for PC control. Off = no screenshot/app/file/shell command runs. */
   telegramPcControlEnabled?: boolean;
@@ -653,6 +685,15 @@ export interface MerrymenSettings {
   /** Max model↔tool steps per /agent task (runaway brake). */
   telegramAgentMaxSteps?: number;
 }
+
+/**
+ * How much a Merryman joins in unprompted in its Telegram groups, quietest
+ * first. One list for every reader — the worker's resolver, the settings
+ * route's validation and the dashboard's select — so a fourth level cannot be
+ * accepted by one and silently resolved to the default by another.
+ */
+export const TELEGRAM_GROUPS_CHATTINESS = ["quiet", "normal", "chatty"] as const;
+export type TelegramGroupsChattiness = (typeof TELEGRAM_GROUPS_CHATTINESS)[number];
 
 /** Keys whose values must never be echoed back to a browser. */
 export const SECRET_SETTING_KEYS = [
@@ -911,6 +952,13 @@ export const SETTINGS_DEFAULTS = {
   telegramNotifyEnabled: true,
   telegramNotifyEveryMin: 0,
   telegramDigestHour: 18,
+  // Telegram groups: on, on, normal (docs/tg-groups.md "Settings"). Neither
+  // switch moves money by itself — a coin posted in a group reaches trading
+  // only in trencher mode, and only as a nomination the Brain and every
+  // existing trencher limit still judge.
+  telegramGroupsEnabled: true,
+  telegramGroupCoinsEnabled: true,
+  telegramGroupsChattiness: "normal" as TelegramGroupsChattiness,
   telegramPcControlEnabled: false,
   telegramCapabilities: [] as string[],
   telegramFilesRoot: "",

@@ -354,3 +354,76 @@ describe("the canary's real movements", () => {
     );
   });
 });
+
+/**
+ * THE ENERGY PURCHASE IS NEVER BOOKED BY THIS SCANNER.
+ *
+ * The worker books it at landing, from its receipt, with both peaks in one
+ * transaction. This scanner's caller moves the peak whenever `addFlow` returns
+ * true, and `addFlow` returns true on a duplicate — so if the scanner ALSO
+ * booked the leg, the flow row would dedupe and the peak would still come down
+ * twice. The case that matters is the one where `tradeTxHashes` misses the
+ * purchase (it is recency-bounded, and empty between landing and the landed
+ * row), so that is the fixture: the purchase is NOT in it.
+ */
+describe("an energy purchase is not capital to the scanner", () => {
+  const PAIR_A = "0x00000000000000000000000000000000000000b1";
+  const PAIR_B = "0x00000000000000000000000000000000000000b2";
+  const VIRTUAL = "0xc6911796042b15d7fa4f6cde69e245ddcd3d9c31";
+  const MERRYMEN = "0xa15cd06dd305269a0f48bebeb30aa3588fba7b32";
+  const TX = "0xe0e0";
+
+  const USDG_OUT = transferLog({ from: ACCT, to: PAIR_A, value: 42_000_000n, txHash: TX, blockNumber: 700, logIndex: 5 });
+  const OTHER_LEGS = [
+    transferLog({ from: PAIR_A, to: PAIR_B, value: 9n * 10n ** 19n, txHash: TX, blockNumber: 700, logIndex: 6, token: VIRTUAL }),
+    transferLog({ from: PAIR_B, to: MERRYMEN, value: 2n * 10n ** 21n, txHash: TX, blockNumber: 700, logIndex: 7, token: MERRYMEN }),
+    transferLog({ from: PAIR_B, to: ACCT, value: 98n * 10n ** 21n, txHash: TX, blockNumber: 700, logIndex: 8, token: MERRYMEN }),
+  ];
+  const DEPOSIT = transferLog({ from: OTHER, to: ACCT, value: 100_000_000n, txHash: "0xfund2", blockNumber: 699, logIndex: 0 });
+
+  it("with the reserve named, the purchase NOT in tradeTxHashes returns no flow and does not throw", async () => {
+    const lines: string[] = [];
+    const flows = await findTransferFlows({
+      chain: fakeChain([DEPOSIT, USDG_OUT], 1000n, OTHER_LEGS),
+      smartAccount: ACCT,
+      usdgToken: USDG,
+      fromBlock: 0n,
+      toBlock: 1000n,
+      knownKeys: new Set<string>(),
+      tradeTxHashes: new Set<string>(), // the miss
+      chainId: 4663,
+      log: (m) => lines.push(m),
+    });
+    assert.deepEqual(flows.map((f) => f.txHash), ["0xfund2"], "the deposit is booked, the purchase is not");
+    assert.ok(lines.some((l) => /reserve-out/.test(l)), "and the log says what it saw");
+  });
+
+  it("the chain defaults to mainnet, where the reserve exists", async () => {
+    const lines: string[] = [];
+    const flows = await scan([USDG_OUT], { chain: fakeChain([USDG_OUT], 1000n, OTHER_LEGS), log: (m) => lines.push(m) });
+    assert.equal(flows.length, 0);
+    assert.ok(lines.some((l) => /reserve-out/.test(l)));
+  });
+
+  it("on a chain with no reserve the same legs are a trade — still not capital", async () => {
+    const lines: string[] = [];
+    const flows = await scan([USDG_OUT], {
+      chain: fakeChain([USDG_OUT], 1000n, OTHER_LEGS),
+      chainId: 46630,
+      log: (m) => lines.push(m),
+    });
+    assert.equal(flows.length, 0);
+    assert.ok(lines.some((l) => /trade-out/.test(l)));
+  });
+
+  it("PIN: the scanner books exactly capital-in || capital-out, never reserve-out", async () => {
+    // Widening this condition would make the scanner a second booker of the
+    // energy purchase. The comment beside it says why; this says it didn't move.
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./deposit-log.ts", import.meta.url), "utf8");
+    const booking = src.match(/if \(v\.kind === [^)]*\) \{\n\s*out\.push\(/g) ?? [];
+    assert.equal(booking.length, 1, "one booking condition");
+    assert.match(booking[0]!, /^if \(v\.kind === "capital-in" \|\| v\.kind === "capital-out"\) \{/);
+    assert.doesNotMatch(src.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, ""), /kind === "reserve-out"/);
+  });
+});

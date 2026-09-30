@@ -47,6 +47,67 @@ describe("proposeSettingChange — a question, never a change", () => {
     assert.match((p as { text: string }).text, /dashboard/);
   });
 
+  it("posting on X is dashboard-only: the warning naming the X account is shown there, never in a chat", () => {
+    const text =
+      "I can't turn posting on X on or off from chat. That's done only in Settings → Posting on X, on the dashboard or in the app, where you can also skip a post before it goes out.";
+    for (const [setting, value] of [["xPosting", "on"], ["post on X", "yes"], ["twitter", "on"], ["tweets", "off"], ["posting on x", "off"], ["posting on x", ""]] as const) {
+      const p = proposeSettingChange(setting, value, ctx);
+      assert.deepEqual(p, { kind: "reply", text, button: "dashboard" }, setting);
+    }
+  });
+
+  it("the X reply answers an owner trying to STOP posting too: off as well as on, the app as well as the dashboard", () => {
+    // The owner most likely to type "tweets off" is one whose Merryman just
+    // posted something they did not like; a reply that only says how posting
+    // is switched ON reads as if the command worked, or as if it was off.
+    const p = proposeSettingChange("tweets", "off", ctx) as { kind: string; text: string };
+    assert.equal(p.kind, "reply");
+    assert.match(p.text, /\bon or off\b/);
+    assert.match(p.text, /can't .* from chat/);
+    assert.match(p.text, /dashboard/);
+    assert.match(p.text, /\bapp\b/);
+  });
+
+  it("Telegram groups are dashboard-only: every way of naming them gets the Settings button, never a question", () => {
+    // A group is a chat anyone in it can type into, and "look at coins people
+    // post" is the switch a group's coin nominations come through — so none of
+    // the three is changed by text (docs/tg-groups.md "Settings").
+    const text =
+      "Telegram groups are switched in Settings → Telegram on the dashboard (or Settings in the app): whether I hang out in groups, whether I look at coins people post there, and how chatty I am. Anyone in a group can talk to me, so none of that changes by text.";
+    for (const [setting, value] of [
+      ["telegramGroups", "off"],
+      ["group chats", "off"],
+      ["Group chat", "on"],
+      ["groups", "off"],
+      ["GC", "quiet"],
+      ["telegram groups", "on"],
+      ["telegram-groups", ""],
+      ["chattiness", "chatty"],
+      ["group coins", "off"],
+      // The real keys too: `/set telegramGroupsChattiness chatty` must not
+      // fall through to the generic list, which reads as "no such setting".
+      ["telegramGroupsEnabled", "off"],
+      ["telegramGroupCoinsEnabled", "on"],
+      ["telegramGroupsChattiness", "chatty"],
+    ] as const) {
+      const p = proposeSettingChange(setting, value, ctx);
+      assert.deepEqual(p, { kind: "reply", text, button: "dashboard" }, `${setting} ${value}`);
+    }
+  });
+
+  it("the Telegram groups reply names all three dials, and says why it is not a text change", () => {
+    const p = proposeSettingChange("groups", "less chatty", ctx) as { kind: string; text: string };
+    assert.equal(p.kind, "reply");
+    assert.match(p.text, /Settings → Telegram/);
+    assert.match(p.text, /hang out in groups/);
+    assert.match(p.text, /coins people post/);
+    assert.match(p.text, /how chatty/);
+    assert.match(p.text, /\bapp\b/);
+    assert.match(p.text, /Anyone in a group can talk to me/);
+    // No web-room name in the reply: "Telegram groups" is the product term.
+    assert.doesNotMatch(p.text, /group ?chat/i);
+  });
+
   it("an out-of-range value is refused with the reason, and nothing is parked", () => {
     const p = proposeSettingChange("strategistStopLossBps", "250%", ctx);
     assert.equal(p.kind, "reply");
@@ -89,6 +150,14 @@ describe("resolveSettingName — /set takes words, not keys", () => {
     assert.equal(resolveSettingName("notifications"), "telegram", "all notifications is dashboard-only");
     assert.equal(resolveSettingName("trade messages"), "telegramNotifyEveryMin", "fewer trade pings is batching");
     assert.equal(resolveSettingName("liveTrading"), "liveTrading");
+    assert.equal(resolveSettingName("Post on X"), "xPosting");
+    assert.equal(resolveSettingName("x-posting"), "xPosting");
+    assert.equal(resolveSettingName("Twitter"), "xPosting");
+    for (const words of ["group chats", "groups", "gc", "telegram groups", "Telegram Groups", "telegramGroups", "telegramGroupsChattiness"]) {
+      assert.equal(resolveSettingName(words), "telegramGroups", words);
+    }
+    // The broader Telegram words keep their own meanings.
+    assert.equal(resolveSettingName("telegram"), "telegram");
     assert.equal(resolveSettingName("colour of the sky"), null);
   });
 

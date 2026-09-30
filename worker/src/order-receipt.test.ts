@@ -166,3 +166,33 @@ describe("the facts are lifted off the row that was written, and nothing is adde
     assert.deepEqual(ledgerFactsOf({ status: "rejected", reject_rule: "ops-cap" }), { status: "rejected", rejectRule: "ops-cap" });
   });
 });
+
+describe("the energy buy's receipt", () => {
+  // The get-energy card places {side:'buy', symbol:'MERRYMEN', usdgAmount: the
+  // owner's MOST for this ask}; the worker spends only what the chain says is
+  // missing, under every cap. The receipt must print what the ROW says moved —
+  // the chunk actually bought — never the order's ceiling.
+  const MERRY = "0xa15cd06dd305269a0f48bebeb30aa3588fba7b32";
+  const energy = orderSubject({ side: "buy", symbol: "MERRYMEN", usdgAmount: 25 });
+
+  it("a landed energy buy is FILLED with the reserve token and the row's own amount, not the order's max", () => {
+    const facts = ledgerFactsOf({ status: "landed", tx_hash: TX, sell_token: USDG, buy_token: MERRY, amount_usdg: 7.25 });
+    assert.deepEqual(orderReceipt(energy, ledger(facts)), {
+      status: "filled",
+      side: "buy",
+      symbol: "MERRYMEN",
+      token: MERRY,
+      usdgActual: 7.25,
+      txHash: TX,
+      rejectRule: null,
+    });
+  });
+
+  it("refused on the live rule, it is REFUSED with the rule; in flight, there is no receipt at all", () => {
+    const refused = orderReceipt(energy, ledger(ledgerFactsOf({ status: "rejected", reject_rule: "energy-needs-live", sell_token: USDG, buy_token: MERRY })));
+    assert.equal(refused?.status, "refused");
+    assert.equal(refused?.rejectRule, "energy-needs-live");
+    assert.equal(refused?.usdgActual, null);
+    assert.equal(orderReceipt(energy, ledger({ status: "submitted", rejectRule: "unsettled-after-submit" })), undefined);
+  });
+});

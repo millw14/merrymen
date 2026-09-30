@@ -689,6 +689,14 @@ export const CONCEPTS: readonly Concept[] = [
     evidence: "worker/src/strategies/dip-hunter.ts:1-9, worker/src/strategies/dip-hunter.ts:25-57, worker/src/strategies/registry.ts:252-260",
   },
   {
+    term: "Energy",
+    aliases: ["energy", "low energy", "energy spent", "daily allowance", "why are you limited", "a tenth", "get your merrymen"],
+    plain: "Energy is how much your agent may do on its own each day, and it only limits anything when the hosted service turns energy on — an operator switch, off until it is turned on; a self-hosted install is never gated. While it is off, nothing is limited, whatever you hold. When it is on, with 100,000 $MERRYMEN between your wallet and your agent's account it runs at full strength; without it, it still runs, but gets about a tenth of a standard day's AI reviews and new trades (a house figure, not a tenth of your own settings), resetting at 00:00 UTC. Stop-losses, take-profits and orders you place yourself are never limited; your agent's own AI reviews — including of its open positions — are paced along with everything else it starts on its own.",
+    because: "Only on the hosted service, and only while its operator has the energy gate enforcing, the worker counts paid reviews and the new trades it starts on its own per UTC day, and stops new autonomous work at the allowance; an exit is judged by the same rule the policy wall uses and never counts as a new trade, but the AI review that would decide one is a paid review like any other and is paced.",
+    confusable: "It is not the per-day spending cap sealed into your key — that one limits dollars and only your signature changes it.",
+    evidence: "packages/core/src/energy.ts:1-60",
+  },
+  {
     term: "llm-strategist",
     aliases: ["ai strategy", "the llm one", "model-driven", "strategist"],
     plain: "A strategy that lets an AI model have an opinion — but only an opinion. It doesn't ask the model on every price tick. It asks at spaced check-ins, 30 minutes apart by default, and in between it does nothing at all.",

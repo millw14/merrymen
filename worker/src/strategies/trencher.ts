@@ -396,6 +396,19 @@ export function exitSize(
   return { amount: (raw * asked) / available, notional: asked };
 }
 
+/**
+ * Was the holding a buy lands on only dust — worth under one micro-USDG at the
+ * buy's own fill price? The Trencher never adds to a real position, so a buy
+ * onto dust is a fresh entry and must not inherit the old entry's clock: the
+ * stale `entry_sec` would read a brand-new position as hours old and sell it on
+ * the next tick as past its window. Priced from the fill itself, so no lookup
+ * can disagree with it.
+ */
+export function buysOntoDust(prevQtyRaw: bigint, fillQtyRaw: bigint, fillCashUsdg: bigint): boolean {
+  if (prevQtyRaw <= 0n || fillQtyRaw <= 0n || fillCashUsdg <= 0n) return false;
+  return (prevQtyRaw * fillCashUsdg) / fillQtyRaw <= 0n;
+}
+
 export interface TrencherDeps {
   /** When required, no rule-based entry may bypass a fresh Brain approval. */
   brainRequired?: boolean;
@@ -440,6 +453,8 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
       // ── exits first, always ────────────────────────────────────────────
       const openNow = await deps.open();
       const unpriceable = deps.unpriceable?.() ?? new Set<string>();
+      // Positions whose whole priced value rounds to nothing (see below).
+      const dust = new Set<string>();
       for (const pos of openNow) {
         const held = snap.holdings.get(pos.symbol);
         // A HELD-BUT-UNPRICEABLE position is the case this loop used to drop,
@@ -453,6 +468,19 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
         if (!held || held.rawBalance <= 0n) {
           if (!stillUnpriceable || pos.qtyRaw <= 0n) continue;
         }
+        const raw = pos.custodyVault ? pos.qtyRaw : held?.rawBalance ?? pos.qtyRaw;
+        const available = held && pos.custodyVault && held.rawBalance > 0n ? held.valueUsdg * raw / held.rawBalance : held?.valueUsdg ?? pos.costUsdg;
+        // A PRICED SLIVER WORTH NOTHING IS NOT A POSITION. A sell sized at 0 USDG
+        // is refused by the wall as `non-positive`, and the next tick asks again:
+        // measured 2026-09-25, a 4e13-raw DELTA remainder valued at 0 USDG was
+        // re-proposed every ~15s for 29 hours, and because it still counted as
+        // held, the desk could not re-enter DELTA — its only candidate — for the
+        // whole of it. Nothing is lost by not selling it: there is no cash in it.
+        // Unpriceable positions are untouched — "no price" is not "worth zero".
+        if (held && held.rawBalance > 0n && !stillUnpriceable && available <= 0n) {
+          dust.add(pos.symbol);
+          continue;
+        }
         const quote = snap.prices.get(pos.symbol);
         const verdict = shouldExit(
           pos,
@@ -465,8 +493,6 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
         );
         const brain = !verdict.exit && quote && !quote.stale ? deps.brainOrder?.(pos.symbol, pos.token, quote.price8, true) : null;
         if (!verdict.exit && brain?.side !== "sell") continue;
-        const raw = pos.custodyVault ? pos.qtyRaw : held?.rawBalance ?? pos.qtyRaw;
-        const available = held && pos.custodyVault && held.rawBalance > 0n ? held.valueUsdg * raw / held.rawBalance : held?.valueUsdg ?? pos.costUsdg;
         const brainNotional = brain ? BigInt(Math.round(brain.usdgAmount * 1e6)) : available;
         // Never a leftover: a partial that would strand a sliver sells it all (exitSize).
         const { amount, notional } = exitSize(raw, available, brainNotional < available ? brainNotional : available, verdict.exit);
@@ -507,7 +533,7 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
       if (brake) return intents.length === 0 ? { intents, why, idle: brake } : { intents, why };
 
       // ── entries, only with what's left ─────────────────────────────────
-      const heldSymbols = new Set(openNow.map((p) => p.symbol));
+      const heldSymbols = new Set(openNow.map((p) => p.symbol).filter((s) => !dust.has(s)));
       for (const c of await deps.candidates()) {
         if (heldSymbols.has(c.symbol)) continue;
         if (snap.pausedTokens.has(c.token.toLowerCase())) continue;

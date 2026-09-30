@@ -3,6 +3,7 @@ import { AgentStrip } from "./AgentStrip";
 import Link from "next/link";
 import { useWatchlist } from "./watchlist";
 import { useGroupChatSupported } from "./groupchat";
+import { CONNECT_ASSISTANT_HREF, useConnectAssistantOffered } from "./assistant-connect";
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -55,6 +56,8 @@ export function DesktopHeader({
   const closeAccountMenu = () => { if(accountMenu.current) accountMenu.current.open = false; };
   // The desktop's way into the group chat; hidden where the install has no room.
   const room = useGroupChatSupported();
+  // The way into /connect/mcp; hidden on a self-hosted install, which has none.
+  const assistants = useConnectAssistantOffered();
   return (
     <header className="desktop-header">
       <button
@@ -101,6 +104,7 @@ export function DesktopHeader({
             <Link href="/settings">Settings</Link>
             <Link href="/grant">Wallet & permissions</Link>
             <Link href="/limits">Trading limits</Link>
+            {assistants && <Link href={CONNECT_ASSISTANT_HREF}>Connect to Claude</Link>}
             {!hasAgent && <Link href="/create">Create an agent</Link>}
           </nav>
         </details>

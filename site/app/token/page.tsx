@@ -3,15 +3,17 @@ import Link from "next/link";
 import { TokenCA } from "@/components/TokenCA";
 
 export const metadata: Metadata = {
-  title: "$MERRYMEN — the Merry Circle",
+  title: "$MERRYMEN — energy and the Merry Circle",
   description:
-    "What holding $MERRYMEN does: a lower platform fee, a holder tier, a vote on the roadmap, and a bonus strategy pack. Utility only — merrymen stays free and open.",
+    "What holding $MERRYMEN does: full daily energy for a hosted agent, a lower platform fee, a holder tier, a vote on the roadmap, and a bonus strategy pack. Utility only.",
 };
 
 /**
- * Utility only. No price, no returns, no buyback/burn — the token buys perks and
- * access, never the product. Tier numbers mirror packages/core/src/token.ts
- * (the single source of truth the dashboard reads on-chain); keep them in sync.
+ * Utility only. No price, no returns, no buyback/burn. On the hosted service the
+ * token buys CAPACITY (energy) as well as perks — say so plainly (token.ts
+ * STANCE). Tier numbers mirror packages/core/src/token.ts and energy's
+ * packages/core/src/energy.ts (the single sources of truth the dashboard reads
+ * on-chain); keep them in sync.
  */
 const TIERS = [
   {
@@ -51,17 +53,33 @@ export default function TokenPage() {
   return (
     <div className="wrap" style={{ maxWidth: 820, padding: "40px 24px 80px" }}>
       <article className="doc-body">
-        <h1>The Merry Circle</h1>
+        <h1>Energy and the Merry Circle</h1>
         <p className="doc-lead">
           What <strong>$MERRYMEN</strong> does — and, just as importantly, what it doesn&apos;t.
         </p>
 
         <div className="callout">
-          <strong>merrymen is free and open to everyone, whether you hold or not.</strong> The token
-          buys <em>perks</em> — a lower fee, a badge, a vote, bonus strategies — never the product
-          itself. There is no price talk, no promise of returns, no buyback or burn here. Just
+          <strong>$MERRYMEN is your agent&apos;s energy.</strong> When the hosted service gates energy (an
+          operator switch, off until it is turned on), an agent runs at full strength while your wallet
+          and its own account hold 100,000 $MERRYMEN between them.
+          Without it, it still runs — on about a tenth of a normal day of paid AI reviews and new trades
+          it opens on its own, resetting at 00:00 UTC. Stop-losses, take-profits and your own orders are
+          never limited; its own AI reviews, including of its open positions, are paced with the rest.
+          merrymen stays open source and self-hostable, and a self-hosted install is
+          never gated. There is no price talk, no promise of returns, no buyback or burn here. Just
           utility you can verify on-chain.
         </div>
+
+        <h2>Energy: how to top up</h2>
+        <p>
+          Send $MERRYMEN on Robinhood Chain to your agent&apos;s account (or keep it in your own linked
+          wallet — both count). Or send the agent USDG and ask it in chat to get its $MERRYMEN: you
+          confirm the most it may spend, and it sizes the buy to cover what is missing, with a small
+          margin for price movement (at least $1.00), over one pinned Uniswap route (USDG → VIRTUAL →
+          $MERRYMEN), inside the limits you signed. The pool fees and the token&apos;s own tax are paid
+          out of the USDG. Its key can buy $MERRYMEN into its
+          own account and can never sell or send it; only your owner key moves it out.
+        </p>
 
         <h2>The one that matters: a lower fee</h2>
         <p>
