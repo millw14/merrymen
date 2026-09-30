@@ -106,6 +106,8 @@ export interface TgRoom {
   /** "one at a time lol" / "drop the ca" once per hour. */
   lastCapLineAtMs?: number;
   lastDropCaAtMs?: number;
+  /** "can't pull that one up rn": an addressed CA whose look failed, once per 10 minutes. */
+  lastCoinUnknownAtMs?: number;
   /** Welcomes today. */
   welcomes?: { day: string; n: number };
   /** Model calls this hour for this chat: {hour (UTC YYYY-MM-DDTHH), n}. */

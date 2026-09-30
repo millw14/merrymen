@@ -49,6 +49,15 @@ describe("parseSlash — pure slash parser", () => {
     assert.deepEqual(parseSlash("/link ABC123"), { kind: "link", code: "ABC123" });
   });
 
+  it("/start with a payload is a deep link carrying the code; bare /start is help", () => {
+    // t.me/<bot>?start=<code> arrives as "/start <code>". The service links an
+    // unlisted chat with it and shows a linked one help (service.ts handle).
+    assert.deepEqual(parseSlash("/start NTE49D"), { kind: "start", payload: "NTE49D" });
+    assert.deepEqual(parseSlash("/start@merryman_bot NTE49D"), { kind: "start", payload: "NTE49D" });
+    assert.deepEqual(parseSlash("/start"), { kind: "help" });
+    assert.deepEqual(parseSlash("/start   "), { kind: "help" });
+  });
+
   it("strips /cmd@BotName suffixes (group chats)", () => {
     assert.deepEqual(parseSlash("/status@merryman_bot"), { kind: "status" });
   });
@@ -247,6 +256,15 @@ describe("executeCommand — code disposes", () => {
     const d = deps();
     assert.equal(await executeCommand({ kind: "status" }, d), "STATUS");
     assert.equal(await executeCommand({ kind: "pnl" }, d), "PNL");
+    assert.deepEqual(d.calls, []);
+  });
+
+  it("/start <payload> reaching the executor is help, and never a link attempt", async () => {
+    // Only an allowlisted chat gets here with a payload: the service turns an
+    // unlisted chat's payload into /link before the executor sees it. A linked
+    // owner tapping the dashboard's deep link again must not spend a guess.
+    const d = deps();
+    assert.equal(await executeCommand({ kind: "start", payload: "WRONG1" }, d), "HELP");
     assert.deepEqual(d.calls, []);
   });
 

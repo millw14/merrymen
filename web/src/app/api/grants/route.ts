@@ -8,11 +8,10 @@
 
 import { webChainRead } from "@/lib/chain-read";
 import { readGrantBalancesFrom, type GrantBalances } from "@/lib/grant-balances";
-import { mkdir, readFile, rm } from "node:fs/promises";
-import path from "node:path";
+import { mkdir, readFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
-import { fsyncDir, writeFileAtomic } from "@merrymen/atomic-write";
-import { homePaths, liftKillPause, merrymenHome, pauseForKeptGrant } from "@merrymen/home";
+import { writeFileAtomic } from "@merrymen/atomic-write";
+import { homePaths, merrymenHome } from "@merrymen/home";
 import { createPublicClient } from "viem";
 import {
   accountsMatch,
@@ -35,68 +34,15 @@ import { getIdentityStore } from "@merrymen/identity-store";
 import { getSettingsStore } from "@merrymen/settings-store";
 import { ledgerHasAgent, mintAndNameAgent } from "@/lib/first-name";
 import { deriveKernelAccountAddress } from "@/lib/derive-account";
+import { archiveCurrentGrant, GrantArchiveError, removeSelfHostedGrant } from "@/lib/grant-archive";
 
 const DATA_DIR = merrymenHome();
 const GRANT_FILE = homePaths.grant();
 const HEARTBEAT_FILE = homePaths.heartbeat();
-const ARCHIVE_DIR = homePaths.grantsArchive();
 
-/** A well-formed 0x EVM address — the ONLY thing we ever build an archive filename
- * from. Rejecting anything else keeps `smartAccount` from smuggling path separators
- * (../, absolute paths) into archiveCurrentGrant's `${addr}.json`. */
+/** A well-formed 0x EVM address. The archive (lib/grant-archive.ts) keeps its own
+ * copy of this check, since it builds a filename from the address. */
 const isAddr = (v: unknown): v is `0x${string}` => typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v);
-
-/**
- * Copy whatever grant.json currently holds into the archive, keyed by its smart
- * account, BEFORE we overwrite or delete it.
- *
- * grant.json is a single slot: creating a second wallet (or hitting the kill
- * switch) used to destroy the previous grant — and with it the ONLY on-disk copy
- * of that wallet's owner key, permanently stranding any funds still in it. This
- * is the safety net.
- *
- * ON DISK BEFORE IT SAYS `archived`: a synced temp file renamed into place, the
- * archive directory synced after it (and its parent when it is new). A plain
- * write is still in the page cache when grant.json is replaced a moment later,
- * and a power loss on a filesystem with delayed allocation can keep that
- * replace and lose the copy. A same-account copy is replaced whole, never
- * truncated in place.
- *
- * Never throws. `failed` means a grant was there and no durable copy exists —
- * what that costs is the caller's decision (POST arms anyway; DELETE does not).
- */
-async function archiveCurrentGrant(): Promise<
-  { kind: "archived"; account: string } | { kind: "nothing" } | { kind: "failed"; why: string }
-> {
-  let raw: string;
-  try {
-    raw = await readFile(GRANT_FILE, "utf8");
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    return code === "ENOENT" ? { kind: "nothing" } : { kind: "failed", why: `grant.json could not be read (${code ?? "unknown error"})` };
-  }
-  let account: unknown;
-  try {
-    account = (JSON.parse(raw.replace(/^\ufeff/, "")) as Partial<StoredGrant> | null)?.smartAccount;
-  } catch {
-    return { kind: "nothing" }; // not a grant — nothing to file it under
-  }
-  if (account === undefined || account === null || account === "") return { kind: "nothing" };
-  // Never derive a path from a malformed address — but a grant that names one
-  // is still a grant, and it was not kept.
-  if (!isAddr(account)) return { kind: "failed", why: "its smartAccount is not an address, so no archive can be named for it" };
-  try {
-    // mkdir returns the first directory it had to create, or undefined.
-    if ((await mkdir(ARCHIVE_DIR, { recursive: true, mode: 0o700 })) !== undefined) await fsyncDir(path.dirname(ARCHIVE_DIR));
-    // One file per wallet, named by its address. Re-arming the same wallet just
-    // refreshes its archive copy; a different wallet gets its own file. It holds
-    // a plaintext OWNER KEY — owner-only (0600), set before it is visible.
-    await writeFileAtomic(path.join(ARCHIVE_DIR, `${account.toLowerCase()}.json`), raw, 0o600, { durable: true });
-    return { kind: "archived", account };
-  } catch (e) {
-    return { kind: "failed", why: `the archive could not be written (${(e as NodeJS.ErrnoException).code ?? "unknown error"})` };
-  }
-}
 
 export interface AgentStatus {
   exists: boolean;
@@ -490,29 +436,14 @@ export async function DELETE(req: Request) {
     await getGrantStore().remove(tenant);
     return NextResponse.json({ ok: true });
   }
-  // The kill switch destroys the session key, NOT the wallet — archive it so the
-  // owner key survives and the funds stay reachable.
-  const kept = await archiveCurrentGrant();
-  if (kept.kind === "failed") {
-    // AND NOT WITHOUT A COPY. Deleting grant.json now would lose the owner key
-    // for good. Trading stops anyway — the pause marker the worker honours on
-    // every tick — and the grant stays until it can be kept. Same rule as the
-    // worker's Telegram /kill and `merrymen kill`.
-    const paused = pauseForKeptGrant();
-    return NextResponse.json(
-      {
-        error:
-          `The grant was NOT deleted: ${kept.why}, and deleting it without a copy would lose your owner key for good. ` +
-          (paused ? "Trading is paused instead. " : "Trading could not be paused either — stop the worker. ") +
-          "Fix ~/.merrymen/grants/ (disk space, permissions), then try again.",
-        paused,
-      },
-      { status: 409 },
-    );
+  // The kill switch destroys the session key, NOT the wallet — archived first.
+  // The web's Start over removes it the same way, from /api/grants/discard.
+  try {
+    await removeSelfHostedGrant();
+  } catch (e) {
+    if (e instanceof GrantArchiveError) return NextResponse.json({ error: e.message, paused: e.paused }, { status: 409 });
+    throw e;
   }
-  await rm(GRANT_FILE, { force: true });
-  // A pause an earlier, refused kill left in its place has done its job.
-  liftKillPause();
   return NextResponse.json({ ok: true });
 }
 

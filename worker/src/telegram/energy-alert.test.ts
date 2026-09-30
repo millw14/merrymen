@@ -201,7 +201,7 @@ describe("through the real notifier", () => {
     }) as typeof fetch;
     mock.timers.enable({ apis: ["setTimeout"] });
     let state = {
-      offset: 0, chatSettings: null, linkCode: "", linkRound: 0, ownerId: 4242, linkedAt: null, linkedChats: [],
+      offset: 0, chatSettings: null, linkCode: "", linkRound: 0, ownerId: 4242, linkedAt: null, linkedChats: [], linkedChatAt: {},
       messageCount: 0, lastNotifiedTradeId: 0, lastTradeDigestAt: 0, lastRemedyRule: null, firedAlerts: {} as Record<string, number>,
       signWatch: null, lastDigestDate: "", lastJournalDate: "", priceAlerts: [], reminders: [], watchers: [], nextId: 1,
     };

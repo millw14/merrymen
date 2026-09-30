@@ -44,6 +44,8 @@ const CLI_HELPER = source("../../cli/atomic-write.mjs");
 const GRANT = source("./grant.ts");
 const INDEX = source("./index.ts");
 const ROUTE = source("../../web/src/app/api/grants/route.ts");
+const WEB_ARCHIVE = source("../../web/src/lib/grant-archive.ts");
+const DISCARD = source("../../web/src/app/api/grants/discard/route.ts");
 const CLI = source("../../cli/bin.mjs");
 
 /** From `head` to the end of its top-level function. */
@@ -174,7 +176,7 @@ describe("every archiver writes through the durable helper", () => {
   });
 
   it("the web route's archiveCurrentGrant", () => {
-    const fn = body(ROUTE, "async function archiveCurrentGrant(");
+    const fn = body(WEB_ARCHIVE, "export async function archiveCurrentGrant(");
     assert.doesNotMatch(fn, IN_PLACE_WRITE);
     assert.match(fn, /await writeFileAtomic\(path\.join\(ARCHIVE_DIR, `\$\{account\.toLowerCase\(\)\}\.json`\), raw, 0o600, \{ durable: true \}\);/);
     assert.match(fn, /await fsyncDir\(path\.dirname\(ARCHIVE_DIR\)\)/);
@@ -196,14 +198,15 @@ describe("grant.json changes only after the archive — and a kill without one d
     assert.match(post, /if \(kept\.kind === "failed"\) \{\s*console\.error\(/);
   });
 
-  it("web DELETE: archive, then remove; a failed archive pauses, answers 409, and removes nothing", () => {
-    const del = body(ROUTE, "export async function DELETE(");
-    const refusal = del.slice(del.indexOf('if (kept.kind === "failed") {'));
-    before_(del, "const kept = await archiveCurrentGrant();", "await rm(GRANT_FILE, { force: true });", "archive first");
-    before_(refusal, "const paused = pauseForKeptGrant();", "await rm(GRANT_FILE", "paused before anything else");
-    before_(refusal, "return NextResponse.json(", "await rm(GRANT_FILE", "the refusal returns before the delete");
-    assert.match(refusal, /\{ status: 409 \}/);
-    before_(refusal, "await rm(GRANT_FILE, { force: true });", "liftKillPause();", "a kill that went through lifts the pause a refused one left");
+  it("both web kill routes use the shared archive refusal before deleting or queuing a reset", () => {
+    const remove = body(WEB_ARCHIVE, "export async function removeSelfHostedGrant(");
+    before_(remove, "const kept = await archiveCurrentGrant();", "await rm(homePaths.grant(), { force: true });", "archive first");
+    before_(remove, 'if (kept.kind === "failed") throw new GrantArchiveError(kept.why, pauseForKeptGrant());', "await rm(homePaths.grant()", "refuse and pause before deleting");
+    before_(remove, "await rm(homePaths.grant(), { force: true });", "liftKillPause();", "lift only a kill's pause after removal");
+    for (const route of [ROUTE, DISCARD]) {
+      assert.match(route, /removeSelfHostedGrant/);
+      assert.match(route, /if \(e instanceof GrantArchiveError\) return NextResponse\.json\(\{ error: e\.message, paused: e\.paused \}, \{ status: 409 \}\);/);
+    }
   });
 
   it("the worker's Telegram /kill: archive, then remove the SAME file; a failed archive pauses and returns first", () => {

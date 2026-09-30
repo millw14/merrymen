@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { describe, it } from "node:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { describe, it, mock } from "node:test";
 import {
   BOT_COMMANDS,
+  TG_CALL_TIMEOUT_MS,
   answerCallbackQuery,
   editMessageText,
   esc,
@@ -11,6 +14,7 @@ import {
   getUpdates,
   leaveChat,
   sendChatAction,
+  sendDocument,
   sendMessage,
   setMessageReaction,
   setMyCommands,
@@ -36,8 +40,36 @@ describe("getMe", () => {
     const f = fakeFetch(200, OK({ id: 42, username: "merryman_bot", is_bot: true }));
     const { bot, reason } = await getMe({ token: "123:abc", fetchFn: f });
     assert.equal(reason, undefined);
-    assert.deepEqual(bot, { id: 42, username: "merryman_bot" });
+    assert.deepEqual(bot, { id: 42, username: "merryman_bot", isBot: true });
     assert.match(f.lastUrl!, /\/bot123:abc\/getMe$/);
+  });
+
+  it("says when the answer is not a bot's, so no other method's answer can pass for getMe's", async () => {
+    // getChat on a private chat answers {id, username, type}: an id and a
+    // username, and no is_bot. A bot claim asks for isBot.
+    const f = fakeFetch(200, OK({ id: 111, username: "victimbot", type: "private" }));
+    const { bot } = await getMe({ token: "123:abc", fetchFn: f });
+    assert.equal(bot?.isBot, false);
+  });
+
+  it("NEVER SENDS A TOKEN THAT COULD STEER THE URL, whatever the far end would answer", async () => {
+    // Resolved by the URL parser, these become calls on the sender's own bot,
+    // or a download of a file they uploaded to it, whose answer carries the
+    // id they chose.
+    for (const token of [
+      "111:x/../../bot222:own/getChat?chat_id=111&z=",
+      "111:x/../../file/bot222:own/documents/file_0.json#",
+      "111:x?y",
+      "111:x#y",
+      "111:x%2F..",
+      "111:x y",
+    ]) {
+      const f = fakeFetch(200, OK({ id: 111, username: "victimbot", is_bot: true }));
+      const { bot, reason } = await getMe({ token, fetchFn: f });
+      assert.equal(bot, null, token);
+      assert.match(reason!, /not a bot token/);
+      assert.equal(f.lastUrl, undefined, `${token}: nothing was sent`);
+    }
   });
 
   it("degrades on ok:false (bad token)", async () => {
@@ -54,6 +86,15 @@ describe("getMe", () => {
     const { bot, reason } = await getMe({ token: "x", fetchFn: boom });
     assert.equal(bot, null);
     assert.match(reason!, /ENOTFOUND/);
+  });
+
+  it("a refusal carries Telegram's code; no answer carries none, so the two are never confused", async () => {
+    const refused = fakeFetch(401, { ok: false, error_code: 401, description: "Unauthorized" });
+    assert.deepEqual(await getMe({ token: "123:abc", fetchFn: refused }), { bot: null, reason: "Unauthorized", errorCode: 401 });
+    const boom: FetchLike = async () => {
+      throw new Error("ECONNRESET");
+    };
+    assert.deepEqual(await getMe({ token: "123:abc", fetchFn: boom }), { bot: null, reason: "request failed: ECONNRESET" });
   });
 });
 
@@ -134,7 +175,7 @@ describe("getUpdates", () => {
     assert.equal(messages.length, 1);
     assert.equal(messages[0]!.text, "hi");
     assert.deepEqual(callbacks, [
-      { updateId: 40, id: "cbq-1", chatId: 555, fromId: 555, fromUsername: "alice", messageId: 77, data: "mm:ok:ab12" },
+      { updateId: 40, id: "cbq-1", chatId: 555, fromId: 555, fromUsername: "alice", messageId: 77, data: "mm:ok:ab12", date: 0 },
     ]);
     assert.equal(nextOffset, 42);
   });
@@ -351,7 +392,7 @@ describe("setMyCommands", () => {
  * surface-or-hide consciously. This is what caught /depth going missing.
  */
 const HIDDEN_ALIASES = new Set([
-  "start", // Telegram convention; /help covers it
+  "start", // Telegram convention and the deep-link carrier (/start <code>); /help covers the bare form
   "grant", "restore", "recover", "reconnect", "fund", // wallet signpost synonyms
   "book", // positions
   "liquidity", "levels", // depth
@@ -503,6 +544,293 @@ describe("a refused request keeps Telegram's reason", () => {
   });
 });
 
+describe("every update carries when it was sent", () => {
+  it("a message has Telegram's date, and 0 when it came without one", async () => {
+    const f = fakeFetch(
+      200,
+      OK([
+        { update_id: 1, message: { text: "/status", date: 1_790_000_000, chat: { id: 5 }, from: { id: 5 } } },
+        { update_id: 2, message: { text: "hi", chat: { id: 5 }, from: { id: 5 } } },
+      ]),
+    );
+    const { messages } = await getUpdates({ token: "t", fetchFn: f }, 1);
+    assert.deepEqual(
+      messages.map((m) => m.date),
+      [1_790_000_000, 0],
+    );
+  });
+
+  it("a press has the date of the message its button sits on, and 0 when Telegram gives none", async () => {
+    const press = (id: number, date?: number) => ({
+      update_id: id,
+      callback_query: {
+        id: `cb${id}`,
+        data: "mm:ok:1",
+        from: { id: 5 },
+        message: { message_id: 9, chat: { id: 5 }, ...(date === undefined ? {} : { date }) },
+      },
+    });
+    const f = fakeFetch(200, OK([press(1, 1_790_000_100), press(2), press(3, 0)]));
+    const { callbacks } = await getUpdates({ token: "t", fetchFn: f }, 1);
+    assert.deepEqual(
+      callbacks.map((c) => c.date),
+      [1_790_000_100, 0, 0],
+    );
+  });
+});
+
+describe("every request is bounded", () => {
+  /** A fetch that records what it was handed and never answers — not even to its signal. */
+  const deaf = () => {
+    const seen: { signal?: AbortSignal }[] = [];
+    const f: FetchLike = (_url, init) => {
+      seen.push({ signal: init?.signal });
+      return new Promise(() => {});
+    };
+    return { f, seen };
+  };
+  const settled = <T>(p: Promise<T>) => {
+    const box: { done: boolean; value?: T } = { done: false };
+    void p.then((v) => {
+      box.done = true;
+      box.value = v;
+    });
+    return box;
+  };
+  const flush = async () => {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  };
+  /**
+   * Turn the loop until `ready()` holds. The upload loads node:fs and node:path
+   * by dynamic import before it reaches fetch, and on Node 22 under tsx's loader
+   * that takes real time, not a count of turns: CI's five were not enough, so
+   * the result was read before the upload had even started. Bounded by the real
+   * clock (only setTimeout is mocked here) so a state that never comes fails.
+   */
+  const waitFor = async (ready: () => boolean, what: string) => {
+    const t0 = performance.now();
+    while (!ready()) {
+      if (performance.now() - t0 > 10_000) assert.fail(`never happened: ${what}`);
+      await new Promise((r) => setImmediate(r));
+    }
+  };
+
+  it("hands fetch an AbortSignal, on GET and POST alike", async () => {
+    const seen: (AbortSignal | undefined)[] = [];
+    const f: FetchLike = async (_url, init) => {
+      seen.push(init?.signal);
+      return { ok: true, status: 200, json: async () => OK({ id: 1, username: "b", message_id: 1 }) };
+    };
+    await getMe({ token: "1:a", fetchFn: f });
+    await getUpdates({ token: "1:a", fetchFn: f }, 0);
+    await sendMessage({ token: "1:a", fetchFn: f }, 5, "hi");
+    assert.equal(seen.length, 3);
+    for (const s of seen) assert.ok(s instanceof AbortSignal, "every call carries a signal");
+    assert.ok(seen.every((s) => !s!.aborted), "and a call that answered in time is not aborted");
+  });
+
+  it(`a getUpdates that never answers comes back with a reason at its long-poll window plus ${TG_CALL_TIMEOUT_MS / 1000}s — 35s by default`, async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const { f, seen } = deaf();
+      const r = settled(getUpdates({ token: "1:a", fetchFn: f }, 7));
+      mock.timers.tick(34_999);
+      await flush();
+      assert.equal(r.done, false, "still inside the window");
+      mock.timers.tick(1);
+      await flush();
+      assert.equal(r.done, true, "abandoned at 35s, though the fetch ignored its signal");
+      assert.equal(r.value!.reason, "request failed: timed out");
+      assert.equal(r.value!.errorCode, undefined, "no code: the poll loop backs it off as a plain failure");
+      assert.equal(r.value!.nextOffset, 7, "and the offset is kept, so nothing is skipped");
+      assert.equal(seen[0]!.signal!.aborted, true, "the request itself was told to stop");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it(`any other method gets TG_CALL_TIMEOUT_MS, ${TG_CALL_TIMEOUT_MS / 1000} seconds`, async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const { f } = deaf();
+      const r = settled(sendMessage({ token: "1:a", fetchFn: f }, 5, "hi"));
+      mock.timers.tick(TG_CALL_TIMEOUT_MS - 1);
+      await flush();
+      assert.equal(r.done, false);
+      mock.timers.tick(1);
+      await flush();
+      assert.deepEqual(r.value, { ok: false, reason: "request failed: timed out" });
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("an upload gets 60 seconds, since it carries the file itself", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "merrymen-upload-"));
+    const file = path.join(dir, "report.txt");
+    writeFileSync(file, "hello");
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const { f, seen } = deaf();
+      const r = settled(sendDocument({ token: "1:a", fetchFn: f }, 5, file));
+      await waitFor(() => seen.length === 1, "the upload reaches fetch");
+      mock.timers.tick(59_999);
+      await flush();
+      assert.equal(r.done, false, "still inside the window");
+      mock.timers.tick(1);
+      await waitFor(() => r.done, "the upload gives up");
+      assert.deepEqual(r.value, { ok: false, reason: "request failed: timed out" });
+      assert.equal(seen[0]!.signal!.aborted, true);
+    } finally {
+      mock.timers.reset();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a caller's timeoutMs can raise an upload's 60 seconds, never cut it short", async () => {
+    // One TelegramOpts serves JSON calls and uploads alike: a bound set short
+    // to keep calls quick must not cut every photo and document to it.
+    const dir = mkdtempSync(path.join(os.tmpdir(), "merrymen-upload-"));
+    const file = path.join(dir, "report.txt");
+    writeFileSync(file, "hello");
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      for (const [timeoutMs, gives] of [
+        [20, 60_000],
+        [90_000, 90_000],
+      ] as const) {
+        const { f, seen } = deaf();
+        const r = settled(sendDocument({ token: "1:a", fetchFn: f, timeoutMs }, 5, file));
+        await waitFor(() => seen.length === 1, `the upload reaches fetch (timeoutMs ${timeoutMs})`);
+        mock.timers.tick(gives - 1);
+        await flush();
+        assert.equal(r.done, false, `timeoutMs ${timeoutMs}: still inside ${gives} ms`);
+        mock.timers.tick(1);
+        await waitFor(() => r.done, `timeoutMs ${timeoutMs}: the upload gives up at ${gives} ms`);
+        assert.deepEqual(r.value, { ok: false, reason: "request failed: timed out" });
+        assert.equal(seen[0]!.signal!.aborted, true);
+      }
+    } finally {
+      mock.timers.reset();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a body that never finishes arriving is bounded too", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const f: FetchLike = async () => ({ ok: true, status: 200, json: () => new Promise(() => {}) });
+      const r = settled(getMe({ token: "1:a", fetchFn: f }));
+      mock.timers.tick(TG_CALL_TIMEOUT_MS);
+      await flush();
+      assert.equal(r.done, true);
+      assert.equal(r.value!.reason, "request failed: timed out");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("a caller's own timeoutMs bounds a call, and every request it cut is aborted", async () => {
+    // A group send runs under its chat's lock: a call that never answered held
+    // every later line of that chat (tg-groups/handler.ts).
+    const { f, seen } = deaf();
+    const opts = { token: "123:abc", fetchFn: f, timeoutMs: 20 };
+    assert.deepEqual(await sendMessage(opts, -100, "hi"), { ok: false, reason: "request failed: timed out" });
+    assert.equal((await sendChatAction(opts, -100, "typing")).ok, false);
+    assert.equal((await setMessageReaction(opts, -100, 5, "👀")).ok, false);
+    assert.equal(seen.length, 3);
+    assert.ok(seen.every((s) => s.signal?.aborted === true), "every request was aborted");
+  });
+
+  it("an answer in time is not cut short, and nothing is left waiting", async () => {
+    const f = fakeFetch(200, OK({ message_id: 9 }));
+    assert.deepEqual(await sendMessage({ token: "t", fetchFn: f, timeoutMs: 5_000 }, -100, "hi"), { ok: true, messageId: 9 });
+  });
+});
+
+describe("a refusal keeps what the poll loop backs off on", () => {
+  it("a 429 carries its retry_after and code", async () => {
+    const f = fakeFetch(429, {
+      ok: false,
+      error_code: 429,
+      description: "Too Many Requests: retry after 7",
+      parameters: { retry_after: 7 },
+    });
+    const r = await getUpdates({ token: "t", fetchFn: f }, 3);
+    assert.equal(r.retryAfter, 7);
+    assert.equal(r.errorCode, 429);
+    assert.match(r.reason!, /Too Many Requests/);
+    assert.equal(r.nextOffset, 3);
+  });
+
+  it("a revoked token is a 401, a second poller a 409", async () => {
+    const revoked = await getUpdates({ token: "t", fetchFn: fakeFetch(401, { ok: false, error_code: 401, description: "Unauthorized" }) }, 0);
+    assert.equal(revoked.errorCode, 401);
+    assert.equal(revoked.retryAfter, undefined);
+    const conflict = await getUpdates(
+      {
+        token: "t",
+        fetchFn: fakeFetch(409, {
+          ok: false,
+          error_code: 409,
+          description: "Conflict: terminated by other getUpdates request; make sure that only one bot instance is running",
+        }),
+      },
+      0,
+    );
+    assert.equal(conflict.errorCode, 409);
+  });
+
+  it("the HTTP status stands in when the body has no error_code", async () => {
+    const r = await getUpdates({ token: "t", fetchFn: fakeFetch(502, null) }, 0);
+    assert.equal(r.errorCode, 502);
+    assert.equal(r.reason, "HTTP 502");
+  });
+
+  it("a network failure has a reason and no code", async () => {
+    const r = await getUpdates({ token: "t", fetchFn: async () => { throw new TypeError("fetch failed"); } }, 0);
+    assert.match(r.reason!, /fetch failed/);
+    assert.equal(r.errorCode, undefined);
+  });
+
+  it("an answer that is not a list of updates is a failure, never a clean empty poll", async () => {
+    const r = await getUpdates({ token: "t", fetchFn: fakeFetch(200, OK({ not: "a list" })) }, 4);
+    assert.ok(r.reason);
+    assert.equal(r.nextOffset, 4);
+  });
+
+  it("a 429 whose retry_after survives only in the description still backs the poll off (one reading, shared with the sends)", async () => {
+    const r = await getUpdates({ token: "t", fetchFn: fakeFetch(429, { ok: false, error_code: 429, description: "Too Many Requests: retry after 12" }) }, 3);
+    assert.equal(r.retryAfter, 12);
+    assert.equal(r.errorCode, 429);
+    const zero = await getUpdates({ token: "t", fetchFn: fakeFetch(429, { ok: false, error_code: 429, description: "x", parameters: { retry_after: 0 } }) }, 3);
+    assert.equal(zero.retryAfter, undefined, "a retry_after of 0 asks for no wait");
+  });
+
+  it("a group send is bounded like any other, and a refusal inside the bound keeps retry_after and the new chat id", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const f: FetchLike = () => new Promise(() => {});
+      let done: unknown;
+      void sendMessage({ token: "1:a", fetchFn: f }, -1001, "hi", { replyToMessageId: 5, messageThreadId: 7 }).then((v) => (done = v));
+      mock.timers.tick(TG_CALL_TIMEOUT_MS);
+      for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+      assert.deepEqual(done, { ok: false, reason: "request failed: timed out" });
+    } finally {
+      mock.timers.reset();
+    }
+    const moved = await sendMessage(
+      {
+        token: "1:a",
+        fetchFn: fakeFetch(400, { ok: false, error_code: 400, description: "Bad Request: group chat was upgraded to a supergroup chat", parameters: { migrate_to_chat_id: -1002 } }),
+      },
+      -1001,
+      "hi",
+    );
+    assert.equal(moved.migrateToChatId, -1002);
+  });
+});
+
 // ─── Telegram groups (docs/tg-groups.md) ──────────────────────────────────
 
 type Call = { url: string; body: Record<string, unknown> | null };
@@ -569,6 +897,7 @@ describe("getUpdates — group messages", () => {
         fromUsername: "ann",
         text: caption,
         voiceFileId: undefined,
+        date: 1_790_000_000,
         messageId: 91,
         dateSec: 1_790_000_000,
         chatType: "supergroup",
@@ -639,7 +968,7 @@ describe("getUpdates — group messages", () => {
     assert.deepEqual(messages[1]!.entities, []);
   });
 
-  it("a private message parses exactly as before — the legacy shape has exactly the old keys", async () => {
+  it("a private message parses exactly as before — the legacy shape has exactly the old keys, plus its date", async () => {
     const f = fakeFetch(
       200,
       OK([
@@ -649,11 +978,13 @@ describe("getUpdates — group messages", () => {
     );
     const { messages, members, service } = await getUpdates({ token: "t", fetchFn: f }, 100);
     assert.deepEqual(messages, [
-      { updateId: 100, chatId: 555, fromId: 555, fromUsername: "alice", text: "/status", voiceFileId: undefined },
-      { updateId: 101, chatId: 555, fromId: 555, fromUsername: undefined, text: "", voiceFileId: "v1" },
+      { updateId: 100, chatId: 555, fromId: 555, fromUsername: "alice", text: "/status", voiceFileId: undefined, date: 0 },
+      { updateId: 101, chatId: 555, fromId: 555, fromUsername: undefined, text: "", voiceFileId: "v1", date: 0 },
     ]);
+    // `date` is always there (0 when Telegram sent none): the poll loop's
+    // backlog rule reads it on every message. Nothing else is added.
     for (const m of messages) {
-      assert.deepEqual(Object.keys(m).sort(), ["chatId", "fromId", "fromUsername", "text", "updateId", "voiceFileId"]);
+      assert.deepEqual(Object.keys(m).sort(), ["chatId", "date", "fromId", "fromUsername", "text", "updateId", "voiceFileId"]);
     }
     assert.deepEqual(members, []);
     assert.deepEqual(service, []);
@@ -684,6 +1015,7 @@ describe("getUpdates — group messages", () => {
         fromUsername: "alice",
         text: "hi",
         voiceFileId: undefined,
+        date: 1_700_000_000,
         messageId: 12,
         dateSec: 1_700_000_000,
         chatType: "private",
@@ -995,7 +1327,7 @@ describe("getUpdates — my_chat_member", () => {
   it("a failed poll returns empty members and service, keeping the offset", async () => {
     const f = fakeFetch(502, null);
     const r = await getUpdates({ token: "t", fetchFn: f }, 9);
-    assert.deepEqual(r, { messages: [], callbacks: [], members: [], service: [], nextOffset: 9, reason: "HTTP 502" });
+    assert.deepEqual(r, { messages: [], callbacks: [], members: [], service: [], nextOffset: 9, reason: "HTTP 502", errorCode: 502 });
   });
 });
 
@@ -1216,7 +1548,7 @@ describe("getMe — group flags", () => {
   it("exposes can_join_groups and can_read_all_group_messages", async () => {
     const f = fakeFetch(200, OK({ id: 42, is_bot: true, first_name: "Pine", username: "pine_bot", can_join_groups: true, can_read_all_group_messages: false, supports_inline_queries: false }));
     const { bot } = await getMe({ token: "t", fetchFn: f });
-    assert.deepEqual(bot, { id: 42, username: "pine_bot", firstName: "Pine", canJoinGroups: true, canReadAllGroupMessages: false });
+    assert.deepEqual(bot, { id: 42, username: "pine_bot", isBot: true, firstName: "Pine", canJoinGroups: true, canReadAllGroupMessages: false });
   });
 
   it("privacy off reads as true", async () => {

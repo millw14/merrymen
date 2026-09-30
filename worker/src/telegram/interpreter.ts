@@ -83,6 +83,13 @@ export function stripThinkingBlock(text: string): string {
 
 export type Command =
   | { kind: "link"; code: string }
+  /**
+   * `/start <payload>`: what Telegram sends when a t.me/<bot>?start=<code> deep
+   * link is opened, which is how the apps offer the link code. From a chat not
+   * on the allowlist the payload is a /link code (service.ts); from one on it,
+   * this is help. A bare /start is plain help.
+   */
+  | { kind: "start"; payload: string }
   | { kind: "help" }
   /** Wallet actions live in the local dashboard, never in chat — this points there. */
   | { kind: "wallet" }
@@ -208,6 +215,7 @@ export function parseSlash(text: string): Command | null {
     case "link":
       return { kind: "link", code: arg };
     case "start":
+      return arg ? { kind: "start", payload: arg } : { kind: "help" };
     case "help":
       return { kind: "help" };
     // Wallet actions belong to the local dashboard (the owner key must never

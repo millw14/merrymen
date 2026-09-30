@@ -281,8 +281,12 @@ describe("the child does not re-arm", () => {
     assert.match(sync, /const grant = loadArmableGrant\(\);/);
     assert.doesNotMatch(sync, /loadGrantFile\(\)/, "syncGrant must not read the raw file");
     const kill = src.slice(src.indexOf("    kill: () => {"), src.indexOf("// ARCHIVE FIRST.", src.indexOf("    kill: () => {")));
-    // grantFilePath(): the file loadGrantFile read, so the kill removes the copy that would arm.
-    assert.match(kill, /if \(isHostedMode\(\)\) \{[\s\S]*killHosted\(merrymenHome\(\), grantFilePath\(\)/);
+    // Through hostedKillFromChat, which the hold process calls as well, and
+    // which is killHosted once there is a grant to kill.
+    assert.match(kill, /if \(isHostedMode\(\)\) \{[\s\S]*hostedKillFromChat\(merrymenHome\(\), grantFilePath\(\)/);
+    const kr = readFileSync(new URL("./kill-request.ts", import.meta.url), "utf8");
+    const fromChat = kr.slice(kr.indexOf("export function hostedKillFromChat("), kr.indexOf("\n}", kr.indexOf("export function hostedKillFromChat(")));
+    assert.match(fromChat, /return killHosted\(home, grantFile, grant, nowSec\);/);
   });
 });
 

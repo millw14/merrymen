@@ -16,6 +16,17 @@
  * /kill (rule 7). Only bookkeeping that must be in order with the next update
  * (room status, the line itself) happens before returning.
  *
+ * AND NO READ ON THE CHAT'S QUEUE. A coin look reads the chain and
+ * GeckoTerminal; the queue runs one line at a time, so a look awaited there
+ * held every later line of that chat, and an owner asking "didnt you see?"
+ * went unanswered until the answer was stale. The coin flow owns a CA line as
+ * soon as it has decided so (coins.ts `begin`) and does the reads on its own
+ * per-chat lane; the queue moves on to the next line at once.
+ *
+ * AN ADDRESSED LINE THAT GETS NOTHING SAYS WHY, to the operator: one log line,
+ * "[tg-groups] addressed line got nothing (<code>)", with a stable code
+ * (`Quiet`) and never the text, a name, an id or an address.
+ *
  * NEVER THROWS, AND NEVER SAYS WHY. Every method catches everything. A failure
  * of any kind is at most one log line naming the stage and the error's class —
  * never message text, a name, a title or an address — and in the group it is
@@ -49,7 +60,7 @@ import {
   type TgServiceMessage,
 } from "../api";
 import type { StateRef } from "../state";
-import { CoinFlow, type CoinIntent, type CoinSpeakOpts } from "./coins";
+import { CoinFlow, type CoinIntent, type CoinQuiet, type CoinSpeakOpts } from "./coins";
 import {
   addressedHow,
   addressedSmallTalk,
@@ -81,7 +92,18 @@ import {
   tgGroupsPerDay,
   type TgModel,
 } from "./model";
-import { CHATTINESS, REACTION_FOR, SendPacer, decide, typingDelayMs, type PaceDecision, type PaceInput } from "./pacing";
+import {
+  CHATTINESS,
+  FLOOD_WINDOW_MS,
+  REACTION_FOR,
+  ROAST_WINDOW_MS,
+  SendPacer,
+  decide,
+  isFlooded,
+  typingDelayMs,
+  type PaceDecision,
+  type PaceInput,
+} from "./pacing";
 import { TG_LIMITS, utcDay, type TgGroupsStore } from "./store";
 import type { Chattiness, TgCoinMemo, TgCoinsPort, TgLine, TgPerson, TgRoom } from "./types";
 import { mentionFor, say, type SpeakCtx, type TgIntent } from "./voice";
@@ -134,19 +156,11 @@ const SWEEP_MS = 5 * MIN;
 const PRUNE_EVERY_MS = HOUR;
 /** How long a resolved model is trusted before settings are read again. */
 const MODEL_RECHECK_MS = MIN;
-/**
- * The flood and roast windows pacing.ts reads. Mirrored, not imported: pacing
- * keeps them private because it only ever READS the windows; this file is the
- * one that opens and extends them after a line lands.
- */
-const FLOOD_WINDOW_MS = 2 * MIN;
-const ROAST_WINDOW_MS = 30 * MIN;
-/**
- * Pacing's flood rule, answers per person per window, mirrored for the coin
- * flow's lines: pacing never sees those (the coin flow owns a CA line), so
- * without it one person posting a dozen CAs got a tagged reply to each.
- */
-const FLOOD_ANSWERS = 3;
+// The flood and roast windows, and the flood rule itself (FLOOD_ANSWERS per
+// person per window, never the owner), are pacing.ts's: imported, not
+// mirrored. Pacing reads the windows; this file opens and extends them after
+// a line lands, and holds the coin flow's lines to the same rule (pacing
+// never sees those: the coin flow owns a CA line).
 /**
  * What a tag shows when the sender's display name is not something the
  * agent would say. The tag's id still pings the right person; only the words
@@ -155,11 +169,24 @@ const FLOOD_ANSWERS = 3;
 const NEUTRAL_TAG = "fren";
 /** At most this many lines waiting per chat. Past it, new chatter is remembered but not answered. */
 const MAX_QUEUED = 40;
+/**
+ * A GROUP JOB THAT NEVER FINISHES MUST NOT SILENCE THE GROUP. Every job and
+ * every send is bounded where it is written, but a single missed bound — a
+ * provider that holds a connection open, an await on something that never
+ * settles — used to hold the chat's serial queue (or its send lock) for good:
+ * live, a group went silent for hours with not one log line, because every
+ * later line waited behind it. Past this long the queue moves on without it
+ * and the log names the step it was stuck at.
+ */
+const JOB_STALL_MS = 60 * SEC;
+/** How often the handler says what it has seen (content-free counts). */
+const HEARTBEAT_MS = 5 * MIN;
 /** In-memory books (reply targets, topics, stamps) are bounded like the store is. */
 const LRU_MAX = 2_000;
 
 /** Callback data this file owns. Short on purpose: Telegram caps it at 64 bytes. */
 const CB_PREFIX = "tgg:";
+/** The hold process reads presses by the same pattern (held-groups.ts GROUP_PRESS_RE). */
 const CB_RE = /^tgg:(stay|leave|forget):(-?\d{1,20})$/;
 
 /** Intents that report on a coin already decided: never stale, never blocked by "one reply per message". */
@@ -254,6 +281,15 @@ export interface TgGroupsDeps {
   hosted?: boolean;
   /** Waits (typing, a person's pace, a flood pause). Injectable so tests need not wait. */
   sleep?: (ms: number) => Promise<void>;
+  /** How long a group job or send may hold its chat (JOB_STALL_MS). Injectable so tests need not wait a minute. */
+  stallMs?: number;
+  /**
+   * What bounds a read (the coin look, coins.ts COIN_FLOW.lookMs): resolves
+   * once `ms` have passed. Real time when absent — never `sleep`, which a test
+   * fakes by jumping its clock. Injectable so a test can end a look that never
+   * answers.
+   */
+  timer?: (ms: number) => Promise<void>;
   /** Operator log (console by default). The same rule as `note`: no content. */
   log?: (s: string) => void;
 }
@@ -266,21 +302,93 @@ export interface TgGroupsDeps {
  */
 export type TgCommandNotice = "dm-sent" | "dm-first" | "done-no-dm" | "private-refused" | "owner-only" | "link-here";
 
+/**
+ * WHY AN ADDRESSED LINE GOT NOTHING — no line, no reaction. The one log line
+ * that says so carries this code and nothing else ("[tg-groups] addressed
+ * line got nothing (flood)"), so an operator can tell a flood from a failed
+ * read from a refused send without the text, a name, an id or an address.
+ *
+ * - `off`: the feature is off (the operator's switch, the owner's setting, a
+ *   handler that stopped). `room-not-approved`: the room is not one it talks
+ *   in. `no-token`: no bot token to send with.
+ * - `flood`, `shushed`, `roast-cap`, `kind-recent`, `bot`: pacing said so.
+ * - `burst`: a newer line of the same person's burst is the one answered.
+ * - `stale`: it waited past STALE_MS to go out.
+ * - `forgotten`: they ran /forgetme (or the owner /forget) meanwhile.
+ * - `already-answered`: the message already had its one reply.
+ * - `not-wanted`: the reason to send went away while it was typing.
+ * - `model-null-and-no-template`: no line could be written that the gate
+ *   admits (no model or its line refused, and no template passed either).
+ * - `send-failed`: Telegram refused it, or did not answer.
+ * - the coin flow's codes (coins.ts CoinQuiet), `coin-unknown` among them: a
+ *   CA whose look could not be made, and "can't pull that one up rn" was not
+ *   due; `coin-silent` when the flow gave no reason.
+ */
+type Quiet =
+  | CoinQuiet
+  | "off"
+  | "room-not-approved"
+  | "no-token"
+  | "flood"
+  | "shushed"
+  | "roast-cap"
+  | "kind-recent"
+  | "bot"
+  | "burst"
+  | "stale"
+  | "forgotten"
+  | "already-answered"
+  | "not-wanted"
+  | "model-null-and-no-template"
+  | "send-failed"
+  | "coin-silent"
+  | "skipped";
+
+/** Pacing's skip reasons for an addressed line, as Quiet codes. */
+function quietOfSkip(why: string): Quiet {
+  switch (why) {
+    case "flood":
+    case "shushed":
+    case "roast-cap":
+    case "kind-recent":
+    case "bot":
+      return why;
+    case "not-approved":
+      return "room-not-approved";
+    default:
+      return "skipped";
+  }
+}
+
 export interface TgGroups {
   /** A group line anyone typed (never a slash command: those are the service's). */
   onMessage(msg: TgMessage): void;
-  /** The bot's own membership changed (my_chat_member). */
-  onMember(u: TgMemberUpdate): void;
+  /**
+   * The bot's own membership changed (my_chat_member). `late`: the update
+   * waited out a silence, or reached the bot before this agent did (the
+   * service's backlog rule). Its membership is recorded all the same, but
+   * nothing is said in the group: no hello lands hours after the add.
+   */
+  onMember(u: TgMemberUpdate, o?: { late?: boolean }): void;
   /** A join, a leave or a supergroup migration. */
   onService(s: TgServiceMessage): void;
-  /** True when the press was one of this file's (`tgg:`), answered or refused. */
-  onCallback(cb: TgCallback): Promise<boolean>;
+  /**
+   * True when the press was one of this file's (`tgg:`), answered or refused.
+   * `late`: pressed while trading was held and kept for this process
+   * (telegram/held-groups.ts). It does what it did then, but its query is long
+   * gone, so it is not answered; the question is still edited to the outcome.
+   */
+  onCallback(cb: TgCallback, o?: { late?: boolean }): Promise<boolean>;
   /** The owner's /groups, in their DM `chatId`. */
   groupsCommand(chatId: number): Promise<void>;
-  /** The owner's /forget in a group: that chat's memory and nothing else. */
-  forgetChat(chatId: number, messageId?: number): void;
-  /** Anyone's /forgetme: their lines and note in that chat. */
-  forgetMe(chatId: number, userId: number, messageId?: number): Promise<void>;
+  /**
+   * The owner's /forget in a group: that chat's memory and nothing else.
+   * `late` (the service's backlog rule): wiped all the same, and nothing is
+   * said in the room.
+   */
+  forgetChat(chatId: number, messageId?: number, o?: { late?: boolean }): void;
+  /** Anyone's /forgetme: their lines and note in that chat. `late` as for forgetChat. */
+  forgetMe(chatId: number, userId: number, messageId?: number, o?: { late?: boolean }): Promise<void>;
   /** The casual group line after a slash command (see TgCommandNotice). Rate-limited here. */
   commandNotice(chatId: number, messageId: number | undefined, fromId: number, what: TgCommandNotice, threadId?: number): Promise<void>;
   /**
@@ -417,6 +525,8 @@ interface Outgoing {
   ownerAddressed: boolean;
   /** Re-checked right before the send: a newer burst line, a chat that moved on. */
   stillWanted?: () => boolean;
+  /** Told why, when the line is not sent (see Quiet). */
+  miss?: (why: Quiet) => void;
 }
 
 interface SpeakOpts {
@@ -431,6 +541,8 @@ interface SpeakOpts {
   stillWanted?: () => boolean;
   /** An ambient line waits like someone who has been reading (pacing.ts typingDelayMs). */
   ambient?: boolean;
+  /** Told why, when nothing is sent (see Quiet). */
+  miss?: (why: Quiet) => void;
 }
 
 // ─── The handler ───────────────────────────────────────────────────────────
@@ -444,6 +556,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const clock = typeof d.now === "function" ? d.now : Date.now;
   const rand = typeof d.rand === "function" ? d.rand : Math.random;
   const sleep = typeof d.sleep === "function" ? d.sleep : defaultSleep;
+  const stallMs = typeof d.stallMs === "number" && Number.isFinite(d.stallMs) && d.stallMs > 0 ? d.stallMs : JOB_STALL_MS;
   const env = (): Record<string, string | undefined> => d.env ?? process.env;
   const hosted = typeof d.hosted === "boolean" ? d.hosted : safeHosted();
   const pacer = new SendPacer(clock);
@@ -457,6 +570,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
   };
   const fail = (stage: string, e: unknown): void => log(`[tg-groups] ${stage} failed (${errName(e)})`);
+  /** An addressed line ended with nothing said or set on it: the code, never the content (see Quiet). */
+  const quietLine = (why: Quiet): void => log(`[tg-groups] addressed line got nothing (${why})`);
   const note = (level: "ok" | "warn", msg: string): void => {
     try {
       d.note(level, msg);
@@ -509,6 +624,19 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const forgottenAt = new Lru<string, number>(LRU_MAX);
   /** The one 👀 per person per flood window that stands in for coin lines past the flood. */
   const floodEyedAt = new Lru<string, number>(LRU_MAX);
+  /**
+   * Messages something landed on (`${chatId}:${messageId}`): a line replying
+   * to it, or a reaction on it. Read only by the diagnostic line: an addressed
+   * post the coin flow answered with a 👀 did get something.
+   */
+  const landedOn = new Lru<string, true>(LRU_MAX);
+  /** Why a coin line for a message did not go out, as this file saw it (the flow only knows "not sent"). */
+  const coinMissed = new Lru<string, Quiet>(LRU_MAX);
+  /**
+   * Messages said TO it (`${chatId}:${messageId}`): a coin line for one that
+   * cannot be written gets a 👀 on the post instead of nothing (coinSpeak).
+   */
+  const askedIn = new Lru<string, true>(LRU_MAX);
   /** When the age limits were last applied (PRUNE_EVERY_MS). */
   let prunedAt = -Infinity;
 
@@ -525,6 +653,24 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   };
 
   const queues = new Map<number, { tail: Promise<void>; size: number }>();
+  /** Where each chat's running job is (a stage name, never content), and since when. */
+  const running = new Map<number, { stage: string; since: number }>();
+  const stageOf = (chatId: number, stage: string): void => {
+    const r = running.get(chatId);
+    if (r) r.stage = stage;
+  };
+  /**
+   * Counts since the last heartbeat. Content-free: what arrived and why a
+   * line went nowhere, so the log can tell "no messages reach the bot" from
+   * "they arrive and are dropped here" from "a job is stuck".
+   */
+  const stats = { lines: 0, addressed: 0, noSelf: 0, noRoom: 0, blocked: 0, notApproved: 0, off: 0, dropped: 0, stalled: 0, lockStalled: 0 };
+  /** Resolves after ms, or never holds the process open. */
+  const after = (ms: number): Promise<"late"> =>
+    new Promise((r) => {
+      const t = setTimeout(() => r("late"), ms);
+      t.unref?.();
+    });
   /**
    * Run `job` after every earlier job of this chat. Serial per chat, so the
    * room is read and written in order; parallel across chats. Returns the
@@ -532,11 +678,31 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    */
   const enqueue = (chatId: number, job: () => Promise<void>, opts: { force?: boolean } = {}): Promise<void> | null => {
     const q = queues.get(chatId) ?? { tail: Promise.resolve(), size: 0 };
-    if (!opts.force && q.size >= MAX_QUEUED) return null;
+    if (!opts.force && q.size >= MAX_QUEUED) {
+      stats.dropped += 1;
+      return null;
+    }
     q.size += 1;
     const next = q.tail
       .then(async () => {
-        if (!stopped) await job();
+        if (stopped) return;
+        running.set(chatId, { stage: "start", since: clock() });
+        // The job keeps running if it outlives the bound (it cannot be
+        // cancelled), but the chat's next line no longer waits for it; its
+        // own rejection, whenever it comes, is still caught and logged.
+        const work = Promise.resolve()
+          .then(job)
+          .catch((e) => fail("line", e));
+        track(work);
+        const done = await Promise.race([work.then(() => "done" as const), after(stallMs)]);
+        if (done === "late") {
+          stats.stalled += 1;
+          // No longer waited for by anyone, drain() included: a job that
+          // never settles must not hold a shutdown either.
+          inflight.delete(work);
+          log(`[tg-groups] a group job ran past ${Math.round(stallMs / SEC)}s at "${running.get(chatId)?.stage ?? "?"}"; the chat moves on without it`);
+        }
+        running.delete(chatId);
       })
       .catch((e) => fail("line", e))
       .finally(() => {
@@ -559,7 +725,17 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     });
     const chained = prev.then(() => mine);
     locks.set(chatId, chained);
-    await prev;
+    // The same bound as a job: a send that never ended must not hold every
+    // later one. Past it this send goes ahead (the pacer still spaces sends).
+    // Half a job's bound: a job may spend part of its own waiting here, and a
+    // stuck send must free the lock before the job waiting on it is itself
+    // given up on. Stepping past a lock whose holder is only waiting out the
+    // flood pacer (a 429's retry_after, a full minute's window) is safe: the
+    // pacer hands out one slot at a time (waitTurn), so pacing holds.
+    if ((await Promise.race([prev.then(() => "done" as const), after(stallMs / 2)])) === "late") {
+      stats.lockStalled += 1;
+      log(`[tg-groups] a group send held the chat's lock past ${Math.round(stallMs / 2 / SEC)}s; the next one goes ahead`);
+    }
     try {
       return await fn();
     } finally {
@@ -621,6 +797,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   /** May it say anything in this chat right now? Approved, switched on, and not stopped. */
   const canTalk = (chatId: number, cfg: ResolvedConfig | null = cfgNow()): boolean =>
     featureOn(cfg) && store.room(chatId)?.status === "approved";
+  /** Why it may not talk in this chat right now, or null when it may (canTalk, with its reason). */
+  const talkWhy = (chatId: number, cfg: ResolvedConfig | null = cfgNow()): Quiet | null =>
+    !featureOn(cfg) ? "off" : store.room(chatId)?.status !== "approved" ? "room-not-approved" : null;
   const shushedNow = (room: TgRoom | undefined, now: number): boolean => typeof room?.shushedUntilMs === "number" && room.shushedUntilMs > now;
   const chattiness = (cfg: ResolvedConfig | null): Chattiness => {
     const c = cfg?.telegramGroupsChattiness;
@@ -696,28 +875,45 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
   const waitTurn = async (chatId: number): Promise<void> => {
     for (let i = 0; i < 8; i++) {
       const w = pacer.waitMs(chatId);
-      if (w <= 0) return;
+      if (w <= 0) break;
       await sleep(w);
     }
+    // THE SLOT IS TAKEN HERE, not after the send lands. Checking the pacer
+    // and taking its slot happen with no await between them, so two sends
+    // that both wake at a window's edge cannot both pass it — which matters
+    // now that the chat's lock can be stepped past (withLock): a successor
+    // that goes ahead of a send still waiting out a 429 or a full minute
+    // waits for its own slot here, it does not share the other's. A slot
+    // taken by a send that then fails or is dropped just spaces the next one
+    // out a little more.
+    pacer.noteSent(chatId);
   };
 
-  /** Still worth sending? Re-read at every step, because every step can take seconds. */
-  const stillOk = (o: Outgoing, chatId: number): boolean => {
-    if (stopped) return false;
-    const cfg = cfgNow();
-    if (!canTalk(chatId, cfg)) return false;
+  /** Still worth sending? Null when it is, else why not. Re-read at every step, because every step can take seconds. */
+  const whyNot = (o: Outgoing, chatId: number): Quiet | null => {
+    if (stopped) return "off";
+    const cannot = talkWhy(chatId);
+    if (cannot) return cannot;
     const now = clock();
-    if (!o.followUp && now - o.bornAtMs > STALE_MS) return false;
+    if (!o.followUp && now - o.bornAtMs > STALE_MS) return "stale";
     // Quiet means quiet: only the answer to being told so, the owner calling
     // it, and the kind line go out. Someone in distress is answered whoever
     // told it to shush (pacing: "always, shushed or not").
-    if (o.intent.kind !== "shushed" && o.intent.kind !== "kind" && !o.ownerAddressed && shushedNow(store.room(chatId), now)) return false;
+    if (o.intent.kind !== "shushed" && o.intent.kind !== "kind" && !o.ownerAddressed && shushedNow(store.room(chatId), now)) return "shushed";
     try {
-      if (o.stillWanted && !o.stillWanted()) return false;
+      if (o.stillWanted && !o.stillWanted()) return "not-wanted";
     } catch {
-      return false;
+      return "not-wanted";
     }
-    return true;
+    return null;
+  };
+  /** Tell the line's caller why it was not sent. */
+  const missed = (o: { miss?: (why: Quiet) => void }, why: Quiet): void => {
+    try {
+      o.miss?.(why);
+    } catch {
+      /* a diagnostic hook that throws has nothing to add */
+    }
   };
 
   const htmlOf = (o: Outgoing): string => {
@@ -742,23 +938,39 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       let threadId = o.threadId;
       let migrated = false;
       const opts = optsNow();
-      if (!opts || !stillOk(o, chatId)) return null;
+      if (!opts) {
+        missed(o, "no-token");
+        return null;
+      }
+      const early = whyNot(o, chatId);
+      if (early) {
+        missed(o, early);
+        return null;
+      }
       try {
+        stageOf(o.chatId, "send: typing");
         await sendChatAction(opts, chatId, "typing", threadId);
       } catch (e) {
         fail("typing", e);
       }
+      stageOf(o.chatId, "send: typing delay");
       await sleep(typingDelayMs(o.text, false, rand));
       for (let attempt = 0; attempt < 4; attempt++) {
+        stageOf(o.chatId, "send: flood pacer");
         await waitTurn(chatId);
-        if (!stillOk(o, chatId)) return null;
+        const late = whyNot(o, chatId);
+        if (late) {
+          missed(o, late);
+          return null;
+        }
+        stageOf(o.chatId, "send: message");
         const r = await sendMessage(opts, chatId, htmlOf(o), {
           ...(isMsgId(replyTo) ? { replyToMessageId: replyTo } : {}),
           ...(isMsgId(threadId) ? { messageThreadId: threadId } : {}),
           disablePreview: true,
         });
         if (r.ok) {
-          pacer.noteSent(chatId);
+          if (isMsgId(o.replyTo)) landedOn.set(msgKey(o.chatId, o.replyTo), true);
           return r.messageId !== undefined ? { chatId, messageId: r.messageId } : { chatId };
         }
         if (typeof r.retryAfterSec === "number") {
@@ -780,9 +992,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           threadId = undefined;
           continue;
         }
-        log(`[tg-groups] send failed (${r.reason ? "refused" : "no answer"})`);
+        // "request failed: …" is the transport (a dead network, a call past
+        // api.ts TG_CALL_TIMEOUT_MS), not Telegram saying no.
+        log(`[tg-groups] send failed (${r.reason && !/^request failed/.test(r.reason) ? "refused" : "no answer"})`);
+        missed(o, "send-failed");
         return null;
       }
+      missed(o, "send-failed");
       return null;
     });
 
@@ -791,7 +1007,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     chatId: number,
     messageId: number,
     emoji: string,
-    o: { ownerAddressed?: boolean; stillWanted?: () => boolean } = {},
+    o: { ownerAddressed?: boolean; stillWanted?: () => boolean; miss?: (why: Quiet) => void } = {},
   ): Promise<boolean> => {
     if (!isMsgId(messageId)) return false;
     const wanted = (): boolean => {
@@ -801,24 +1017,43 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         return false;
       }
     };
+    /** Null when it may react now, else why not. */
+    const why = (): Quiet | null => (stopped ? "off" : (talkWhy(chatId) ?? (wanted() ? null : "not-wanted")));
     return withLock(chatId, async () => {
       const opts = optsNow();
-      if (!opts || stopped || !canTalk(chatId) || !wanted()) return false;
-      if (emoji !== REACTION_FOR.shush[0] && !o.ownerAddressed && shushedNow(store.room(chatId), clock())) return false;
+      if (!opts) {
+        missed(o, "no-token");
+        return false;
+      }
+      const early = why();
+      if (early) {
+        missed(o, early);
+        return false;
+      }
+      if (emoji !== REACTION_FOR.shush[0] && !o.ownerAddressed && shushedNow(store.room(chatId), clock())) {
+        missed(o, "shushed");
+        return false;
+      }
       for (let attempt = 0; attempt < 3; attempt++) {
         await waitTurn(chatId);
-        if (!canTalk(chatId) || !wanted()) return false;
+        const late = why();
+        if (late) {
+          missed(o, late);
+          return false;
+        }
         const r = await setMessageReaction(opts, chatId, messageId, emoji);
         if (r.ok) {
-          pacer.noteSent(chatId);
+          landedOn.set(msgKey(chatId, messageId), true);
           return true;
         }
         if (typeof r.retryAfterSec === "number") {
           pauseFor(r.retryAfterSec);
           continue;
         }
+        missed(o, "send-failed");
         return false;
       }
+      missed(o, "send-failed");
       return false;
     });
   };
@@ -922,14 +1157,24 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * so, its label checked by tagLabel. Returns where it landed, or null.
    */
   const speak = async (chatId: number, intent: TgIntent, o: SpeakOpts = {}): Promise<{ chatId: number; messageId?: number } | null> => {
-    if (!canTalk(chatId)) return null;
+    const cannot = talkWhy(chatId);
+    if (cannot) {
+      missed(o, cannot);
+      return null;
+    }
     const born = typeof o.bornAtMs === "number" ? o.bornAtMs : clock();
     const followUp = FOLLOW_UPS.has(intent.kind);
     const ctx = speakCtx(chatId, o);
-    if (!ctx) return null;
+    if (!ctx) {
+      missed(o, "room-not-approved");
+      return null;
+    }
     const m = modelNow();
     const text = await say(intent, ctx, m, m ? gate : null);
-    if (!text) return null;
+    if (!text) {
+      missed(o, "model-null-and-no-template");
+      return null;
+    }
     if (o.ambient) {
       // Someone joining in has been reading for a while (5–40 s on top of typing).
       const reading = typingDelayMs(text, true, rand) - typingDelayMs(text, false, rand);
@@ -949,6 +1194,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       followUp,
       ownerAddressed: o.ownerAddressed === true,
       ...(o.stillWanted ? { stillWanted: o.stillWanted } : {}),
+      ...(o.miss ? { miss: o.miss } : {}),
     });
     if (!sent) return null;
     // A migrated chat has no message the old reply id means.
@@ -984,11 +1230,12 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
 
   // ─── The coin flow ───────────────────────────────────────────────────────
 
-  /** Pacing's flood rule for one person: FLOOD_ANSWERS answers inside the window. */
-  const flooded = (chatId: number, userId: number): boolean => {
-    const w = store.person(chatId, userId)?.answers;
-    return !!w && Number.isFinite(w.count) && w.count >= FLOOD_ANSWERS && clock() - w.sinceMs < FLOOD_WINDOW_MS;
-  };
+  /**
+   * Pacing's flood rule for one person (pacing.ts isFlooded): FLOOD_ANSWERS
+   * answers inside the window, and never the owner. The owner is known here by
+   * id alone: an anonymous admin or a channel post never carries the owner's.
+   */
+  const flooded = (chatId: number, userId: number): boolean => isFlooded(store.person(chatId, userId), userId === ownerId(), clock());
 
   /** Past the flood: one 👀 on their post per window, then nothing. */
   const floodEyes = async (chatId: number, userId: number, messageId: number | undefined): Promise<void> => {
@@ -1005,25 +1252,40 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     const t: TgIntent = intent;
     const followUp = FOLLOW_UPS.has(t.kind);
     const replyTo = o.replyTo;
+    // Why this post's line did not go out, for the diagnostic line: the flow
+    // only hears "not sent".
+    const miss = (why: Quiet): void => {
+      if (!followUp && isMsgId(replyTo)) coinMissed.set(msgKey(chatId, replyTo), why);
+    };
     // THE PERSON THIS LINE ANSWERS: whoever posted the line it is about. An
     // outcome is the coin's report, minutes later, not a new answer to them.
     const poster = !followUp && o.trigger && !o.trigger.own && isUserId(o.trigger.fromId) ? o.trigger : undefined;
     const seenAt = poster ? ((isMsgId(poster.messageId) ? received.get(msgKey(chatId, poster.messageId)) : undefined) ?? poster.atMs) : 0;
     if (poster) {
-      if (forgottenSince(chatId, poster.fromId, seenAt)) return false;
-      // A coin line is an answer like any other: past three to one person in
-      // two minutes, the CA gets a 👀 at most, as pacing's flood gives chatter
-      // silence. One shill posting CAs is not owed a reply to each.
+      if (forgottenSince(chatId, poster.fromId, seenAt)) {
+        miss("forgotten");
+        return false;
+      }
+      // A coin line is an answer like any other: past the flood for one
+      // person (six in two minutes, never the owner), the CA gets a 👀 at
+      // most, as pacing's flood gives chatter silence. One shill posting CAs
+      // is not owed a reply to each.
       if (flooded(chatId, poster.fromId)) {
         await floodEyes(chatId, poster.fromId, replyTo);
+        miss("flood");
         return false;
       }
     }
     // An outcome replies to the post again by design (the ack came first); an
     // immediate line takes the message's one reply, and a second is dropped.
-    if (!followUp && !reserveReply(chatId, replyTo)) return false;
+    if (!followUp && !reserveReply(chatId, replyTo)) {
+      miss("already-answered");
+      return false;
+    }
     const born = followUp ? clock() : (isMsgId(replyTo) ? received.get(msgKey(chatId, replyTo)) : undefined) ?? clock();
     const threadId = isMsgId(replyTo) ? threads.get(msgKey(chatId, replyTo)) : undefined;
+    const stillWanted = poster ? () => !forgottenSince(chatId, poster.fromId, seenAt) : undefined;
+    let unwritten = false;
     const sent = await speak(chatId, t, {
       ...(replyTo !== undefined ? { replyTo } : {}),
       ...(threadId !== undefined ? { threadId } : {}),
@@ -1032,9 +1294,25 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       ...(o.mention?.name || o.trigger?.name ? { senderName: o.mention?.name || o.trigger?.name } : {}),
       ...(o.coinName ? { coinName: o.coinName } : {}),
       bornAtMs: born,
-      ...(poster ? { stillWanted: () => !forgottenSince(chatId, poster.fromId, seenAt) } : {}),
+      ...(stillWanted ? { stillWanted } : {}),
+      miss: (why) => {
+        if (why === "model-null-and-no-template") unwritten = true;
+        miss(why === "not-wanted" && poster && forgottenSince(chatId, poster.fromId, seenAt) ? "forgotten" : why);
+      },
     });
     if (!sent && !followUp) releaseReply(chatId, replyTo);
+    // NO LINE FOR A POST THAT ASKED IT: a 👀 on the post, never silence. Only
+    // when no line could be written (every template too like its recent own
+    // lines, a model's line refused): a flood, a shush, a stale post or a
+    // refused send keep their own answer, which is nothing. It stands for the
+    // line, so the flow hears that something went out.
+    if (!sent && unwritten && !followUp && isMsgId(replyTo) && askedIn.has(msgKey(chatId, replyTo))) {
+      if (clock() - born > STALE_MS) {
+        miss("stale");
+        return false;
+      }
+      return reactTo(chatId, replyTo, "👀", { ...(stillWanted ? { stillWanted } : {}), miss });
+    }
     if (sent && poster && !forgottenSince(chatId, poster.fromId, seenAt)) {
       const now = clock();
       store.upsertPerson(sent.chatId, {
@@ -1060,6 +1338,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     dashboardUrl: () => d.dashboardBase(),
     now: clock,
     log,
+    ...(typeof d.timer === "function" ? { timer: d.timer } : {}),
   });
   flow.start();
 
@@ -1181,14 +1460,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
   };
 
-  const approve = (chatId: number, byId: number | undefined, why: string): void => {
+  const approve = (chatId: number, byId: number | undefined, why: string, quiet = false): void => {
     const was = store.room(chatId)?.status;
     store.setStatus(chatId, "approved", byId);
     if (was !== "approved") note("ok", `Telegram groups: ${why} — talking there`);
     enqueue(
       chatId,
       async () => {
-        await sayHello(chatId);
+        // Quiet: an add that reached the bot late (onMember). The privacy
+        // steps go to the owner's DM, so they are still due.
+        if (!quiet) await sayHello(chatId);
         await privacyHint(chatId);
       },
       { force: true },
@@ -1268,6 +1549,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     repliedTo.deleteWhere((k) => k.startsWith(prefix));
     fadedAt.deleteWhere((k) => k.startsWith(prefix));
     lastAddressed.deleteWhere((k) => k.startsWith(prefix));
+    landedOn.deleteWhere((k) => k.startsWith(prefix));
+    coinMissed.deleteWhere((k) => k.startsWith(prefix));
+    askedIn.deleteWhere((k) => k.startsWith(prefix));
   };
 
   // ─── The memory pass ─────────────────────────────────────────────────────
@@ -1449,10 +1733,20 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     return true;
   };
 
-  /** Act on pacing's decision. Books are kept only after a line or reaction actually landed. */
-  const act = async (dec: PaceDecision, j: LineJob): Promise<void> => {
+  /**
+   * Act on pacing's decision. Books are kept only after a line or reaction
+   * actually landed. Null when something landed; else why nothing did (Quiet).
+   */
+  const act = async (dec: PaceDecision, j: LineJob): Promise<Quiet | null> => {
     const chatId = j.msg.chatId;
     const messageId = j.line.messageId;
+    // Why the line, or the reaction, did not go out: the send path says.
+    let lost: Quiet = "send-failed";
+    const miss = (why: Quiet): void => {
+      lost = why;
+    };
+    /** `lost`, with "not-wanted" read as the reason it stopped being wanted. */
+    const whyLost = (): Quiet => (lost !== "not-wanted" ? lost : forgotten(j) ? "forgotten" : j.addressed !== null && burstPassed(chatId, j) ? "burst" : "not-wanted");
     // Re-read right before the send: a newer line of the burst, or the sender
     // asking to be forgotten while this was typing, and it is not sent.
     const wanted = (): boolean => !forgotten(j) && (j.addressed === null || !burstPassed(chatId, j));
@@ -1464,20 +1758,21 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       bornAtMs: j.bornAtMs,
       ownerAddressed: j.isOwner && j.addressed !== null,
       stillWanted: wanted,
+      miss,
     };
     switch (dec.act) {
       case "skip":
-        return;
+        return quietOfSkip(dec.why);
       case "react": {
-        if (!reserveReply(chatId, messageId)) return;
-        const ok = await reactTo(chatId, messageId, dec.emoji, { ownerAddressed: reply.ownerAddressed === true, stillWanted: () => !forgotten(j) });
+        if (!reserveReply(chatId, messageId)) return "already-answered";
+        const ok = await reactTo(chatId, messageId, dec.emoji, { ownerAddressed: reply.ownerAddressed === true, stillWanted: () => !forgotten(j), miss });
         if (!ok) {
           releaseReply(chatId, messageId);
-          return;
+          return whyLost();
         }
         // An unprompted reaction is half an ambient line; a 🤡 or 🥱 in answer is not ambient.
         if (j.addressed === null) countAmbient(chatId, 0.5, false);
-        return;
+        return null;
       }
       case "shush": {
         const now = clock();
@@ -1487,17 +1782,19 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           const until = now + (j.isOwner ? OWNER_SHUSH_MS : SHUSH_MS);
           r.shushedUntilMs = Math.max(r.shushedUntilMs ?? 0, until);
         });
-        if (!reserveReply(chatId, messageId)) return;
+        if (!reserveReply(chatId, messageId)) return "already-answered";
         // The "ok ok" answers even a line a newer one followed; not one from
         // someone forgotten since (the quiet above still holds).
         const stillAsked = (): boolean => !forgotten(j);
         if (roll() < SHUSH_REACT_ODDS) {
-          if (!(await reactTo(chatId, messageId, REACTION_FOR.shush[0], { stillWanted: stillAsked }))) releaseReply(chatId, messageId);
-          return;
+          if (await reactTo(chatId, messageId, REACTION_FOR.shush[0], { stillWanted: stillAsked, miss })) return null;
+          releaseReply(chatId, messageId);
+          return whyLost();
         }
         const sent = await speak(chatId, { kind: "shushed" }, { ...reply, stillWanted: stillAsked });
-        if (!sent && !(await reactTo(chatId, messageId, REACTION_FOR.shush[0], { stillWanted: stillAsked }))) releaseReply(chatId, messageId);
-        return;
+        if (sent || (await reactTo(chatId, messageId, REACTION_FOR.shush[0], { stillWanted: stillAsked, miss }))) return null;
+        releaseReply(chatId, messageId);
+        return whyLost();
       }
       default:
         break;
@@ -1535,29 +1832,30 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           bornAtMs: j.bornAtMs,
           ambient: true,
           stillWanted: () => !forgotten(j) && newerHumanLines(chatId, messageId) < NEWER_LINES_DROP,
+          miss,
         };
         replyOpts = dec.topic === "question" || j.deferred === true ? { ...base, replyTo: messageId } : base;
         break;
       }
       default:
-        return;
+        return "skipped";
     }
 
-    if (!reserveReply(chatId, messageId)) return;
+    if (!reserveReply(chatId, messageId)) return "already-answered";
     const sent = await speak(chatId, intent, replyOpts);
     if (!sent) {
       releaseReply(chatId, messageId);
-      return;
+      return whyLost();
     }
     const at = sent.chatId;
     switch (dec.act) {
       case "answer":
       case "kind":
         noteAnswered(at, j, false);
-        return;
+        return null;
       case "roast":
         noteAnswered(at, j, true);
-        return;
+        return null;
       case "smalltalk":
         noteAnswered(at, j, false);
         // A gm said to it by name is its greeting to them for the day: the
@@ -1565,10 +1863,10 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         if ((dec.what === "gm" || dec.what === "gn") && !forgotten(j)) {
           store.upsertPerson(at, { id: j.line.fromId, name: j.line.name, greetedDay: utcDay(clock()) });
         }
-        return;
+        return null;
       case "greet": {
         // Forgotten while the greeting was out: no entry comes back for them.
-        if (forgotten(j)) return;
+        if (forgotten(j)) return null;
         store.upsertPerson(at, {
           id: j.line.fromId,
           name: j.line.name,
@@ -1577,24 +1875,32 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         });
         // A greeting in words unasked is an ambient line (pacing.ts), so a gm thread cannot blow the day's cap.
         if (j.addressed === null) countAmbient(at, 1, true);
-        return;
+        return null;
       }
       case "ambient":
         if (ambient) countAmbient(at, 1, true);
-        return;
+        return null;
       default:
-        return;
+        return null;
     }
   };
 
   /** ONE LINE, off the poll loop: the coin flow first, then pacing, then the words. */
   const processLine = async (j: LineJob): Promise<void> => {
+    const why = await lineOutcome(j);
+    // Only a line said TO it is owed an explanation in the log.
+    if (why !== null && j.addressed !== null) quietLine(why);
+  };
+
+  /** processLine's work. Null when something landed or is still on its way (the coin lane); else why nothing will. */
+  const lineOutcome = async (j: LineJob): Promise<Quiet | null> => {
     const chatId = j.msg.chatId;
     let cfg = cfgNow();
-    if (!canTalk(chatId, cfg)) return;
+    const cannot = talkWhy(chatId, cfg);
+    if (cannot) return cannot;
     // Queued before the sender (or the whole chat) was forgotten: nothing
     // more happens for this line, not a claim, not a word, not a counter.
-    if (forgotten(j)) return;
+    if (forgotten(j)) return "forgotten";
     const text = j.line.text;
 
     // DISTRESS BEFORE COINS. "lost everything on 0x… i want to die" is a
@@ -1612,7 +1918,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       const foreignMint = hasForeignMint(text) || hasOtherChainLink(text);
       const cashtags = extractCashtags(text);
       if (cas.length > 0 || foreignMint || cashtags.length > 0) {
-        const r = await flow.onPost(chatId, j.line, {
+        stageOf(chatId, "coin flow");
+        const post = await flow.begin(chatId, j.line, {
           senderId: j.line.fromId,
           // Nobody to tag behind an anonymous admin or a channel: the tag would name the chat's placeholder.
           senderName: j.via ? "" : j.line.name,
@@ -1622,18 +1929,35 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           foreignMint,
           cashtags,
           addressed: j.addressed !== null,
+          // Its lines go out within STALE_MS of the line arriving or not at
+          // all (whyNot): a post still waiting on the coin lane past that is
+          // not looked at, and a look is cut to fit.
+          replyByMs: j.bornAtMs + STALE_MS,
           forgotten: () => forgotten(j),
         });
-        // The coin flow owns the message: nothing else is said about it.
-        if (r === "handled") return;
+        // The coin flow owns the message: nothing else is said about it. Its
+        // looks and lines run on the chat's coin lane (coins.ts), OFF this
+        // queue: the next line here is read now, not after the reads.
+        if (post.owned === "handled") {
+          const key = msgKey(chatId, j.line.messageId);
+          track(
+            post.done.then((end) => {
+              if (j.addressed === null || end.acted || landedOn.has(key)) return;
+              quietLine(coinMissed.get(key) ?? end.quiet ?? "coin-silent");
+            }),
+          );
+          return null;
+        }
       }
     }
 
     const now = clock();
-    if (now - j.bornAtMs > STALE_MS || forgotten(j)) return;
+    if (now - j.bornAtMs > STALE_MS) return "stale";
+    if (forgotten(j)) return "forgotten";
     cfg = cfgNow();
     const room = store.room(chatId);
-    if (!room || !canTalk(chatId, cfg)) return;
+    const lost = talkWhy(chatId, cfg);
+    if (!room || lost) return lost ?? "room-not-approved";
     const signals = signalsOf(text, room, j.addressed);
 
     // A QUESTION TO THE ROOM is looked at again in a minute: pacing can only
@@ -1652,12 +1976,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           enqueue(chatId, () => processLine({ ...j, deferred: true, bornAtMs: clock() }));
         })(),
       );
-      return;
+      return null;
     }
 
-    if (j.addressed !== null && burstPassed(chatId, j)) return;
+    if (j.addressed !== null && burstPassed(chatId, j)) return "burst";
 
     const m = modelNow();
+    stageOf(chatId, "decide");
     const dec = decide({
       room,
       line: j.line,
@@ -1670,8 +1995,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       hasModel: m !== null && gate.available(chatId),
       signals,
     });
-    if ((dec.act === "skip" || dec.act === "react") && j.addressed === null && (await maybeFadedAgain(j, cfg))) return;
-    await act(dec, j);
+    if ((dec.act === "skip" || dec.act === "react") && j.addressed === null && (await maybeFadedAgain(j, cfg))) return null;
+    stageOf(chatId, `act: ${dec.act}`);
+    return act(dec, j);
   };
 
   // ─── The owner's /groups and its buttons ─────────────────────────────────
@@ -1746,7 +2072,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
   };
 
-  const forgetChat = (chatId: number, messageId?: number): void => {
+  const forgetChat = (chatId: number, messageId?: number, o?: { late?: boolean }): void => {
     try {
       recordForget(chatId, "*");
       if (!store.room(chatId)) return;
@@ -1754,6 +2080,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       store.forgetChat(chatId);
       forgetInMemory(chatId);
       note("ok", "Telegram groups: the owner wiped one group's memory");
+      // A late request is done, not answered: the room has moved on.
+      if (o?.late === true) return;
       enqueue(
         chatId,
         async () => {
@@ -1810,6 +2138,33 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
 
   const sweepTimer = setInterval(() => void track(sweep()), SWEEP_MS);
   sweepTimer.unref?.();
+  /**
+   * THE HEARTBEAT: what the handler has seen in the last few minutes, when it
+   * has seen anything or is holding something. Counts and stage names only.
+   */
+  const heartbeat = (): void => {
+    try {
+      const t = clock();
+      let oldest: { stage: string; since: number } | null = null;
+      for (const r of running.values()) if (!oldest || r.since < oldest.since) oldest = r;
+      const queued = [...queues.values()].reduce((n, q) => n + q.size, 0);
+      const busy = oldest ? `, oldest job ${Math.round((t - oldest.since) / SEC)}s at "${oldest.stage}"` : "";
+      const any = Object.values(stats).some((n) => n > 0) || queued > 0;
+      if (any) {
+        log(
+          `[tg-groups] last ${Math.round(HEARTBEAT_MS / MIN)} min: ${stats.lines} group lines (${stats.addressed} to me), ` +
+            `skipped: ${stats.notApproved} room not approved, ${stats.off} switched off, ${stats.noRoom} no room, ${stats.blocked} blocked, ${stats.noSelf} before I knew who I am; ` +
+            `${stats.dropped} dropped (queue full), ${stats.stalled} jobs past ${Math.round(stallMs / SEC)}s and ${stats.lockStalled} sends past ${Math.round(stallMs / 2 / SEC)}s; ` +
+            `${queued} queued${busy}`,
+        );
+      }
+      for (const k of Object.keys(stats) as (keyof typeof stats)[]) stats[k] = 0;
+    } catch (e) {
+      fail("heartbeat", e);
+    }
+  };
+  const heartbeatTimer = setInterval(heartbeat, HEARTBEAT_MS);
+  heartbeatTimer.unref?.();
   // The boot line: which model writes group lines (names only).
   try {
     modelNow();
@@ -1823,11 +2178,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         if (stopped || !msg || typeof msg !== "object") return;
         const chatId = msg.chatId;
         if (typeof chatId !== "number" || !isTgGroup(msg.chatType, chatId)) return;
+        stats.lines += 1;
         const cfg = cfgNow();
         const from = typeof msg.fromId === "number" && !fromBot(msg) ? { fromId: msg.fromId, via: viaChat(msg) } : undefined;
         const room = knownRoom(chatId, { title: msg.chatTitle, kind: msg.chatType, isForum: msg.isForum }, cfg, from);
-        if (!room) return;
+        if (!room) {
+          stats.noRoom += 1;
+          return;
+        }
         if (room.status === "blocked") {
+          stats.blocked += 1;
           // The owner said leave; a line proves it is back. Leave again, once per process.
           if (!releft.has(chatId) && featureOn(cfg)) {
             releft.add(chatId);
@@ -1837,7 +2197,17 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         }
         // Everything below is a group line or a memory write: the operator's
         // switch, the owner's setting and the room's status each stop it.
-        if (!featureOn(cfg) || room.status !== "approved") return;
+        if (!featureOn(cfg) || room.status !== "approved") {
+          if (featureOn(cfg)) stats.notApproved += 1;
+          else stats.off += 1;
+          // Said to it where it may not talk: the operator hears why, never what.
+          const me = selfNow();
+          const said = typeof msg.text === "string" ? msg.text.trim() : "";
+          if (me && said && !said.startsWith("/") && !fromBot(msg) && msg.fromId !== me.id && addressedHow(msg, me) !== null) {
+            quietLine(featureOn(cfg) ? "room-not-approved" : "off");
+          }
+          return;
+        }
         const messageId = msg.messageId;
         if (!isMsgId(messageId)) return;
         const text = typeof msg.text === "string" ? msg.text : "";
@@ -1881,7 +2251,14 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
         const threadId = msg.isTopicMessage === true && isMsgId(msg.messageThreadId) ? msg.messageThreadId : undefined;
         if (threadId !== undefined) threads.set(key, threadId);
         const addressed = me ? addressedHow(msg, me) : null;
-        if (addressed !== null) lastAddressed.set(`${chatId}:${msg.fromId}`, { messageId, atMs: now });
+        // Without getMe's answer nothing can be addressed to it: counted, so
+        // "every mention is ignored" shows up as what it is.
+        if (!me) stats.noSelf += 1;
+        if (addressed !== null) {
+          stats.addressed += 1;
+          lastAddressed.set(`${chatId}:${msg.fromId}`, { messageId, atMs: now });
+          askedIn.set(key, true);
+        }
         maybeMemoryPass(chatId);
 
         const job: LineJob = { msg, line, addressed, isOwner, via, bornAtMs: now, seenAtMs: now, ...(threadId !== undefined ? { threadId } : {}) };
@@ -1894,7 +2271,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       }
     },
 
-    onMember(u: TgMemberUpdate): void {
+    onMember(u: TgMemberUpdate, o?: { late?: boolean }): void {
       try {
         if (stopped || !u || typeof u !== "object" || typeof u.chatId !== "number") return;
         if (u.chatType !== "group" && u.chatType !== "supergroup") return;
@@ -1956,7 +2333,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           enqueue(chatId, () => privacyHint(chatId), { force: true });
         }
         if (byOwner) {
-          if (room.status !== "approved" || added) approve(chatId, u.fromId, "added to a group by the owner");
+          if (room.status !== "approved" || added) approve(chatId, u.fromId, "added to a group by the owner", o?.late === true);
           return;
         }
         if (!added) return; // a promotion or a restriction by someone else changes nothing
@@ -1967,7 +2344,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
           return;
         }
         if (linked) {
-          approve(chatId, u.fromId, "added to a group the owner linked");
+          approve(chatId, u.fromId, "added to a group the owner linked", o?.late === true);
           return;
         }
         // A new pending spell asks afresh (setStatus clears the old ask), and
@@ -2033,12 +2410,13 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       }
     },
 
-    async onCallback(cb: TgCallback): Promise<boolean> {
+    async onCallback(cb: TgCallback, o?: { late?: boolean }): Promise<boolean> {
       try {
         if (!cb || typeof cb.data !== "string" || !cb.data.startsWith(CB_PREFIX)) return false;
         const opts = optsNow();
         if (!opts) return true;
         const answer = async (text: string): Promise<void> => {
+          if (o?.late === true) return;
           try {
             await answerCallbackQuery(opts, cb.id, text);
           } catch (e) {
@@ -2136,7 +2514,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
 
     forgetChat,
 
-    async forgetMe(chatId: number, userId: number, messageId?: number): Promise<void> {
+    async forgetMe(chatId: number, userId: number, messageId?: number, o?: { late?: boolean }): Promise<void> {
       try {
         if (!Number.isSafeInteger(userId)) return;
         // The "done 🫡" is as old as the request: a backlog of them goes stale
@@ -2166,7 +2544,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
             { flush: true },
           );
         }
-        if (!canTalk(chatId)) return;
+        // A late request (the service's backlog rule) is wiped all the same,
+        // and nothing is said: the room has moved on.
+        if (o?.late === true || !canTalk(chatId)) return;
         // The words at most once per person per chat per FORGOT_ME_EVERY_MS;
         // a second /forgetme inside it is wiped all the same, silently.
         const k = `forgetme:${chatId}:${userId}`;
@@ -2282,8 +2662,11 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     sweep,
 
     async drain(): Promise<void> {
-      for (let i = 0; i < 1_000 && inflight.size > 0; i++) {
+      // The coin flow's lanes and the outcomes it is saying are its own
+      // books; their lines are tracked here once they reach speak.
+      for (let i = 0; i < 1_000 && (inflight.size > 0 || !flow.idle()); i++) {
         await Promise.allSettled([...inflight]);
+        await flow.drain();
       }
     },
 
@@ -2291,6 +2674,7 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       try {
         stopped = true;
         clearInterval(sweepTimer);
+        clearInterval(heartbeatTimer);
         flow.stop();
       } catch (e) {
         fail("stop", e);

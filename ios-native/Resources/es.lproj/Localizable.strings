@@ -70,6 +70,8 @@
 "Amount spread across the Steady Basket." = "Amount spread across the Steady Basket.";
 "An active book is reviewed at least every five minutes, subject to available reads and budget." = "An active book is reviewed at least every five minutes, subject to available reads and budget.";
 "and select Autonomous Trencher. It is available only after the verified vault deployment is configured. Without that permission, the existing route can trade only individually authorized tokens. Brain must be connected and the recorded portfolio must pass its accounting checks. For real trades, enable live trading and “let trencher trade for real” explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not guaranteed." = "and select Autonomous Trencher. It is available only after the verified vault deployment is configured. Without that permission, the existing route can trade only individually authorized tokens. Brain must be connected and the recorded portfolio must pass its accounting checks. For real trades, enable live trading and “let trencher trade for real” explicitly. Volatile coins can move beyond exit thresholds before a fill; timing and prices are not guaranteed.";
+"another program has the bot" = "another program has the bot";
+"Another program is reading this bot's messages, for example a copy of Merrymen on your computer, or a webhook. Stop it, and your agent hears the bot again." = "Another program is reading this bot's messages, for example a copy of Merrymen on your computer, or a webhook. Stop it, and your agent hears the bot again.";
 "Any OpenAI-compatible endpoint, e.g. https://your-host/v1" = "Any OpenAI-compatible endpoint, e.g. https://your-host/v1";
 "Anyone who has this code can control your agent — do not share or screenshot it." = "Anyone who has this code can control your agent — do not share or screenshot it.";
 "Anything you already hold stays priced, valued and sellable — including its stop-loss and take-profit. This only changes what your agent may" = "Anything you already hold stays priced, valued and sellable — including its stop-loss and take-profit. This only changes what your agent may";
@@ -128,6 +130,7 @@
 "Connect →" = "Connect →";
 "connected" = "connected";
 "connected as @{bot}" = "connected as @{bot}";
+"connected to another agent" = "connected to another agent";
 "connection" = "connection";
 "Connections" = "Connections";
 "Continue" = "Continuar";
@@ -182,6 +185,7 @@
 "h" = "h";
 "Hang out in Telegram groups" = "Hang out in Telegram groups";
 "Hard strategist ceiling per proposed trade — beneath the grant caps." = "Hard strategist ceiling per proposed trade — beneath the grant caps.";
+"held" = "held";
 "Holdings" = "Posiciones";
 "Home" = "Inicio";
 "Home carries the leaderboard and the markets. Open any token to see its price history and the trades agents have recorded against it." = "En Inicio están el ranking y los mercados. Abre cualquier token para ver su historial de precios y las operaciones que los agentes registraron sobre él.";
@@ -233,17 +237,24 @@
 "model" = "model";
 "Model for Anthropic and screen analysis." = "Model for Anthropic and screen analysis.";
 "model id" = "model id";
+"Move it here →" = "Move it here →";
 "Name" = "Nombre";
 "Names /open may launch. Full https:// URLs open without an allowlist." = "Names /open may launch. Full https:// URLs open without an allowlist.";
 "needs a short symbol, a full 0x… address (42 chars) and whole-number decimals" = "needs a short symbol, a full 0x… address (42 chars) and whole-number decimals";
 "Network" = "Red";
 "Next" = "Siguiente";
 "No link code yet. Your agent mints one on its next pass with this token set — check back shortly." = "No link code yet. Your agent mints one on its next pass with this token set — check back shortly.";
+"no link code: this bot is connected to another Merrymen agent" = "no link code: this bot is connected to another Merrymen agent";
 "no linked chats yet" = "no linked chats yet";
 "Normal — joins in now and then" = "Normal — joins in now and then";
+"not listening" = "not listening";
 "not set" = "not set";
 "not set up" = "not set up";
 "not your strategy" = "not your strategy";
+"Nothing has heard your bot since {when}. Anything you send it now won't be acted on; when it's back, it will tell you what arrived late." = "Nothing has heard your bot since {when}. Anything you send it now won't be acted on; when it's back, it will tell you what arrived late.";
+"Nothing has heard your bot since {when}. Anything you send it now won't be acted on." = "Nothing has heard your bot since {when}. Anything you send it now won't be acted on.";
+"Nothing has heard your bot yet. Anything you send it now won't be acted on until your agent is listening." = "Nothing has heard your bot yet. Anything you send it now won't be acted on until your agent is listening.";
+"Nothing has heard your bot yet. Anything you send it now won't be acted on." = "Nothing has heard your bot yet. Anything you send it now won't be acted on.";
 "Nothing your agent does costs real money while this is off. Funding the account does NOT turn it on, and neither does re-signing your permission: this switch is the only thing that does." = "Nothing your agent does costs real money while this is off. Funding the account does NOT turn it on, and neither does re-signing your permission: this switch is the only thing that does.";
 "off — allowlist only" = "off — allowlist only";
 "off — no coin is bought unless you listed it" = "off — no coin is bought unless you listed it";
@@ -275,6 +286,7 @@
 "Paper trades use a practice book. Live trading needs funding and the required wallet permissions. Check the mode shown on your agent before expecting real buys or sells." = "Las operaciones de práctica usan un libro simulado. Operar con dinero real requiere fondos y los permisos de billetera necesarios. Revisa el modo que muestra tu agente antes de esperar compras o ventas reales.";
 "Paper trading · recommended" = "Práctica · recomendada";
 "Paper trading: simulated fills at live market prices, and no real orders. This is a setting, not a different network — your agent stays on Robinhood Chain either way, and you can turn on Live trading any time in Settings, without a new signature." = "Operaciones de práctica: ejecuciones simuladas a precios de mercado en tiempo real, sin órdenes reales. Es un ajuste, no una red distinta: tu agente sigue en Robinhood Chain en ambos casos, y puedes activar la opción de operar con dinero real cuando quieras desde Ajustes, sin volver a firmar.";
+"Paste a new one →" = "Paste a new one →";
 "Per day" = "Por día";
 "per entry (USDG)" = "per entry (USDG)";
 "Per trade" = "Por operación";
@@ -367,12 +379,15 @@
 "Telegram" = "Telegram";
 "Telegram controls" = "Telegram controls";
 "Telegram groups" = "Telegram groups";
+"Telegram refused this bot's token. It was probably revoked in @BotFather: paste a new token below." = "Telegram refused this bot's token. It was probably revoked in @BotFather: paste a new token below.";
+"Telegram refused this bot's token. It was probably revoked in @BotFather." = "Telegram refused this bot's token. It was probably revoked in @BotFather.";
 "test connection" = "test connection";
 "testnet RPC override" = "testnet RPC override";
 "That one won’t run yet." = "That one won’t run yet.";
 "The bot messages you first: trades landing, drawdown/gas/expiry warnings, price alerts, and the daily campfire report." = "The bot messages you first: trades landing, drawdown/gas/expiry warnings, price alerts, and the daily campfire report.";
 "The budget is the risk control here" = "The budget is the risk control here";
 "The class route is on but the size is" = "The class route is on but the size is";
+"The code works once your bot is being heard again." = "The code works once your bot is being heard again.";
 "The drawdown breaker cannot protect this money." = "The drawdown breaker cannot protect this money.";
 "The live profile headline measures net return on contributed capital. Its chart adjusts for cash flows over the displayed history. Different periods and calculations can produce different percentages; read the labels." = "La cifra principal del perfil de dinero real mide el rendimiento neto sobre el capital aportado. Su gráfico se ajusta por las entradas y salidas de dinero del historial que se muestra. Periodos y cálculos distintos pueden dar porcentajes distintos; lee las etiquetas.";
 "The master switch. Off = every PC command is refused, regardless of the toggles below." = "The master switch. Off = every PC command is refused, regardless of the toggles below.";
@@ -382,6 +397,9 @@
 "The wire in control on a public profile adds that agent’s published reasoning to your agent’s context. It does not copy trades automatically or override your own limits." = "El control «Wire in» (conectar) de un perfil público agrega el razonamiento publicado de ese agente al contexto del tuyo. No copia sus operaciones automáticamente ni anula tus propios límites.";
 "These positions stay valued at purchase cost even if they lose value, so if one goes to zero your equity will not show it and the breaker will not fire." = "These positions stay valued at purchase cost even if they lose value, so if one goes to zero your equity will not show it and the breaker will not fire.";
 "Theses" = "Tesis";
+"This bot is connected to another Merrymen agent, so this one doesn't read it and has no link code for it. To move it here, save its token again and confirm the move; you'll then /link again here." = "This bot is connected to another Merrymen agent, so this one doesn't read it and has no link code for it. To move it here, save its token again and confirm the move; you'll then /link again here.";
+"This bot is connected to another Merrymen agent, so this one doesn't read it." = "This bot is connected to another Merrymen agent, so this one doesn't read it.";
+"This code works once your bot is being heard again." = "This code works once your bot is being heard again.";
 "This is remote control of your computer." = "This is remote control of your computer.";
 "This is where you ask your agent to explain a decision in its own words. There is a first question waiting in the box — send it whenever you like." = "Aquí le pides a tu agente que explique una decisión con sus propias palabras. Hay una primera pregunta lista en el cuadro de texto: envíala cuando quieras.";
 "This lets Telegram touch this computer." = "This lets Telegram touch this computer.";
@@ -389,6 +407,7 @@
 "to buy or sell" = "to buy or sell";
 "to halt it." = "to halt it.";
 "To let your bot follow the whole chat in a group, turn privacy mode off:" = "To let your bot follow the whole chat in a group, turn privacy mode off:";
+"token refused" = "token refused";
 "token saved, but switched off" = "token saved, but switched off";
 "token saved, not verified yet" = "token saved, not verified yet";
 "Tokens" = "Tokens";
@@ -397,7 +416,9 @@
 "trade the platform coin list" = "trade the platform coin list";
 "Trade this one too — add it to the trading basket, not just the watch list." = "Trade this one too — add it to the trading basket, not just the watch list.";
 "Trades" = "Operaciones";
+"Trading" = "Trading";
 "Trading basket" = "Trading basket";
+"trading held" = "trading held";
 "Trading mode" = "Trading mode";
 "trading permission" = "trading permission";
 "trading permissions" = "trading permissions";
@@ -439,6 +460,9 @@
 "You do not need to enter token contracts for Autonomous Trencher. Enable its permission when renewing your key. The new route supports verified Uniswap v3 pools; ungraduated bonding curves use a separate route." = "You do not need to enter token contracts for Autonomous Trencher. Enable its permission when renewing your key. The new route supports verified Uniswap v3 pools; ungraduated bonding curves use a separate route.";
 "You stay in control." = "El control es tuyo.";
 "Your agent can control this computer without asking for each action — running commands, typing, and opening links. It may damage files or expose private information. The destructive blocklist and the secret redaction are a" = "Your agent can control this computer without asking for each action — running commands, typing, and opening links. It may damage files or expose private information. The destructive blocklist and the secret redaction are a";
+"Your agent hasn't picked up this bot yet. Its link code appears here once it has; check back shortly." = "Your agent hasn't picked up this bot yet. Its link code appears here once it has; check back shortly.";
+"Your agent hasn't picked up this bot yet. Its link code appears here once it has." = "Your agent hasn't picked up this bot yet. Its link code appears here once it has.";
+"Your agent isn't trading right now: its practice book couldn't be restored after a server update ({reason}). Nothing was traded or lost, and the team has been alerted." = "Your agent isn't trading right now: its practice book couldn't be restored after a server update ({reason}). Nothing was traded or lost, and the team has been alerted.";
 "Your agent mints a link code on its next pass. Check back shortly." = "Your agent mints a link code on its next pass. Check back shortly.";
 "Your agent places real orders on Robinhood Chain with the funds in its account. Turn this off and it goes back to practising immediately — no signature needed either way." = "Your agent places real orders on Robinhood Chain with the funds in its account. Turn this off and it goes back to practising immediately — no signature needed either way.";
 "Your agent, your boundaries." = "Tu agente, tus límites.";
@@ -446,3 +470,5 @@
 "Your bot can't be added to groups right now: @BotFather → /setjoingroups → your bot → Enable." = "Your bot can't be added to groups right now: @BotFather → /setjoingroups → your bot → Enable.";
 "Your link code appears here once a token is saved." = "Your link code appears here once a token is saved.";
 "Your Merryman tracks active memecoin pools with at least $100,000 in daily volume, 20 distinct buyers, recent activity and both buys and sells. Brain reviews eligible coins in the background about once a minute; execution and exit checks run every 15 seconds. New buys need a fresh Brain approval. Brain can also sell early. The fast profile attempts exits at −10%, +20%, or after 30 minutes, even while Brain is unavailable. Liquidity loss can trigger an earlier exit." = "Your Merryman tracks active memecoin pools with at least $100,000 in daily volume, 20 distinct buyers, recent activity and both buys and sells. Brain reviews eligible coins in the background about once a minute; execution and exit checks run every 15 seconds. New buys need a fresh Brain approval. Brain can also sell early. The fast profile attempts exits at −10%, +20%, or after 30 minutes, even while Brain is unavailable. Liquidity loss can trigger an earlier exit.";
+"Your practice book couldn't be restored after a server update ({reason}). Nothing was traded or lost, and the team has been alerted." = "Your practice book couldn't be restored after a server update ({reason}). Nothing was traded or lost, and the team has been alerted.";
+"Your practice book couldn't be restored after a server update ({reason}). Nothing was traded or lost." = "Your practice book couldn't be restored after a server update ({reason}). Nothing was traded or lost.";

@@ -23,9 +23,57 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { closeSync, fchmodSync, fsyncSync, openSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { open, realpath, rename, rm, type FileHandle } from "node:fs/promises";
+import { closeSync, fchmodSync, fsyncSync, lstatSync, openSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { lstat, open, readlink, realpath, rename, rm, type FileHandle } from "node:fs/promises";
 import path from "node:path";
+
+/** Resolve the destination even when a symlink names a file not created yet. */
+function writeTarget(file: string): string {
+  let target = file;
+  const seen = new Set<string>();
+  for (;;) {
+    // Relative link destinations are relative to the link's real directory,
+    // including when the path to that directory itself traverses a symlink.
+    target = path.join(realpathSync(path.dirname(target)), path.basename(target));
+    if (seen.has(target) || seen.size >= 40) {
+      throw Object.assign(new Error(`Too many symbolic links: ${file}`), { code: "ELOOP" });
+    }
+    seen.add(target);
+    let stat;
+    try {
+      stat = lstatSync(target);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return target;
+      throw e;
+    }
+    if (!stat.isSymbolicLink()) return target;
+    target = path.resolve(path.dirname(target), readlinkSync(target));
+  }
+}
+
+/** Resolve the destination even when a symlink names a file not created yet. */
+async function writeTargetAsync(file: string): Promise<string> {
+  let target = file;
+  const seen = new Set<string>();
+  for (;;) {
+    // Relative link destinations are relative to the link's real directory,
+    // including when the path to that directory itself traverses a symlink.
+    target = path.join(await realpath(path.dirname(target)), path.basename(target));
+    if (seen.has(target) || seen.size >= 40) {
+      throw Object.assign(new Error(`Too many symbolic links: ${file}`), { code: "ELOOP" });
+    }
+    seen.add(target);
+    let stat;
+    try {
+      stat = await lstat(target);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return target;
+      throw e;
+    }
+    if (!stat.isSymbolicLink()) return target;
+    target = path.resolve(path.dirname(target), await readlink(target));
+  }
+}
 
 /**
  * The temp file for `target`: beside it, so the rename never crosses a
@@ -144,12 +192,7 @@ export function writeFileAtomicSync(file: string, data: string, mode = 0o600, op
   // THROUGH A SYMLINK, NOT OVER IT. writeFileSync followed a link to the file
   // it names; rename would replace the link itself with a regular file, and a
   // self-hosted owner who keeps settings.json elsewhere would lose the link.
-  let target = file;
-  try {
-    target = realpathSync(file);
-  } catch {
-    // Not there yet (or a dangling link): create it at the name given.
-  }
+  const target = writeTarget(file);
   const tmp = tempPathFor(target);
   let fd: number | null = null;
   let created = false;
@@ -205,12 +248,7 @@ export function writeFileAtomicSync(file: string, data: string, mode = 0o600, op
  */
 export async function writeFileAtomic(file: string, data: string, mode = 0o600, opts: AtomicWriteOptions = {}): Promise<void> {
   // Through a symlink, not over it — see writeFileAtomicSync.
-  let target = file;
-  try {
-    target = await realpath(file);
-  } catch {
-    // Not there yet (or a dangling link): create it at the name given.
-  }
+  const target = await writeTargetAsync(file);
   const tmp = tempPathFor(target);
   let fh: FileHandle | null = null;
   let created = false;

@@ -300,6 +300,27 @@ export function killHosted(
 }
 
 /**
+ * A HOSTED /kill, CONFIRMED IN CHAT, from whichever process answers the bot.
+ *
+ * That is the trading child (index.ts) and, while a tenant's trading is held,
+ * the hold process (telegram/hold.ts). The owner must be able to revoke from
+ * either, and the two must do exactly the same thing, so both call this. A
+ * home with no grant file left says whether that is because a kill already
+ * took it.
+ */
+export function hostedKillFromChat(
+  home: string,
+  grantFile: string,
+  grant: Pick<StoredGrant, "smartAccount" | "serialized"> | null,
+  nowSec: number,
+): HostedKillResult | { ok: false; reason: string } {
+  if (!grant) {
+    return { ok: false, reason: killRequested(home) ? "already killed — the server is removing the grant" : "no grant" };
+  }
+  return killHosted(home, grantFile, grant, nowSec);
+}
+
+/**
  * Seconds after the kill during which a stored grant still counts as covered.
  *
  * `killedAt` is read from this container's clock, and `updatedAt` from the

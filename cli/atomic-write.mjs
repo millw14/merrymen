@@ -7,8 +7,32 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { closeSync, fchmodSync, fsyncSync, openSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, fchmodSync, fsyncSync, lstatSync, openSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+
+/** Resolve the destination even when a symlink names a file not created yet. */
+function writeTarget(file) {
+  let target = file;
+  const seen = new Set<string>();
+  for (;;) {
+    // Relative link destinations are relative to the link's real directory,
+    // including when the path to that directory itself traverses a symlink.
+    target = path.join(realpathSync(path.dirname(target)), path.basename(target));
+    if (seen.has(target) || seen.size >= 40) {
+      throw Object.assign(new Error(`Too many symbolic links: ${file}`), { code: "ELOOP" });
+    }
+    seen.add(target);
+    let stat;
+    try {
+      stat = lstatSync(target);
+    } catch (e) {
+      if (e?.code === "ENOENT") return target;
+      throw e;
+    }
+    if (!stat.isSymbolicLink()) return target;
+    target = path.resolve(path.dirname(target), readlinkSync(target));
+  }
+}
 
 /** Windows' transient refusal to rename over a file held open elsewhere — retried briefly (see the original). */
 export const RENAME_RETRY_MS = [10, 20, 40, 80, 160, 320, 640];
@@ -50,12 +74,7 @@ export function fsyncDirSync(dir) {
  */
 export function writeFileAtomicSync(file, data, mode = 0o600, opts = {}) {
   // Through a symlink, not over it.
-  let target = file;
-  try {
-    target = realpathSync(file);
-  } catch {
-    // Not there yet (or a dangling link): create it at the name given.
-  }
+  const target = writeTarget(file);
   // Same directory (rename never crosses a filesystem); pid AND random.
   const tmp = path.join(path.dirname(target), `${path.basename(target)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
   let fd = null;
