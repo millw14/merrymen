@@ -17,6 +17,8 @@ import { makeDipHunter, type DipHunterConfig } from "./dip-hunter";
 import { makeTrencher, TRENCHER_DEFAULTS, TRENCHER_FAST, type Candidate, type OpenPosition } from "./trencher";
 import type { Strategy } from "./types";
 import type { TrenchBrainOrder } from "../trencher-brain";
+import type { PerpBoundarySettings } from "../strategist/proposals";
+import type { PerpRouteIntent } from "../perps/route";
 
 /** Free, open strategies — available to everyone. */
 const FREE_STRATEGIES = ["steady-basket", "weekend-gap", "llm-strategist", "trencher"] as const;
@@ -89,6 +91,15 @@ export interface StrategyBuildOpts {
      * Research instead of one-shot. Present only when the owner turned it on
      * AND there is a model to run it — see makeLlmStrategist's `desk`.
      */
+    /**
+     * PERPETUALS, when the owner made the strategist their perps driver —
+     * see makeLlmStrategist's `perps`. Forwarded ONLY with a real model: the
+     * null driver proposes nothing, so it must not be offered perps either.
+     */
+    perps?: {
+      settings: () => PerpBoundarySettings;
+      deliver: (intents: PerpRouteIntent[]) => void;
+    };
     desk?: {
       recall: () => Promise<string>;
       basisFor?: (symbol: string) => Promise<string | null>;
@@ -316,6 +327,10 @@ export function buildStrategy(name: string, opts: StrategyBuildOpts): Strategy {
       // nothing and costs nothing; claiming for it would spend a low-energy
       // agent's reviews on silence.
       ...(driver !== nullDriver && opts.llm.claimWindow ? { claimWindow: opts.llm.claimWindow } : {}),
+      // Perps ride a real model only (docs/perps.md "The perps route"): with
+      // the null driver nothing is proposed, and the lane resolves a
+      // `strategist` perps driver to `manual`.
+      ...(driver !== nullDriver && opts.llm.perps ? { perps: opts.llm.perps } : {}),
       // The desk needs a real model: with the null driver there is nothing to
       // research WITH, and a loop around no provider is just a slower no-op.
       ...(opts.llm.desk && opts.llm.creds

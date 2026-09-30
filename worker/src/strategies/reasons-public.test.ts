@@ -74,6 +74,60 @@ const EVERY: Every = {
     { code: "class-exit", symbol: "T3139F043B88", cause: "cliff", heldSec: 7_200, graduationBps: 9_100, proceedsRaw: C },
     { code: "class-exit", symbol: "T3139F043B88", cause: "clock", heldSec: 21_600, graduationBps: null, proceedsRaw: C },
   ],
+  // Perps are never published (docs/perps.md rule 17), and their public
+  // register is held to the same rule anyway — plus no leverage and no side.
+  "perp-open": [
+    { code: "perp-open", market: "BTC-PERP", side: "long", leverage: 2, stopPct: 5 },
+    { code: "perp-open", market: "ANTHROPIC-PERP", side: "short", leverage: 2.99, stopPct: 1.5 },
+  ],
+  "perp-exit": (["trend", "aged", "funding", "market", "session", "owner", "venue-take"] as const).map((cause) => ({
+    code: "perp-exit" as const,
+    market: "ANTHROPIC-PERP" as const,
+    side: "short" as const,
+    cause,
+  })),
+  "perp-risk-exit": (
+    [
+      "venue-stop",
+      "stop-breached",
+      "stop-missing",
+      "liq-proximity",
+      "liq-inside-stop",
+      "funding-bleed",
+      "market-status",
+      "unknown-activity",
+      "stand-down",
+      "kill",
+      "expiry",
+    ] as const
+  ).map((cause) => ({ code: "perp-risk-exit" as const, market: "ANTHROPIC-PERP" as const, side: "long" as const, cause })),
+  "perp-signal-unread": [
+    { code: "perp-signal-unread", market: null },
+    { code: "perp-signal-unread", market: "ETH-PERP" },
+  ],
+  "perp-no-signal": [
+    { code: "perp-no-signal", markets: 1 },
+    { code: "perp-no-signal", markets: 3 },
+  ],
+  "perp-market-not-covered": [{ code: "perp-market-not-covered", market: "TSLA-PERP" }],
+  "perp-too-volatile": [{ code: "perp-too-volatile", market: "SOL-PERP", stopPct: 6.5, maxStopPct: 5 }],
+  "perp-below-min": [{ code: "perp-below-min", market: "BTC-PERP", minRaw: 16_620_000n, capRaw: B }],
+  "perp-cooldown": (["strategy", "stop", "risk", "forced"] as const).map((after) => ({
+    code: "perp-cooldown" as const,
+    market: "ETH-PERP" as const,
+    hours: after === "strategy" ? 8 : 24,
+    after,
+  })),
+  "perp-funding-against": [{ code: "perp-funding-against", market: "BTC-PERP", side: "long" }],
+  "perp-max-positions": [
+    { code: "perp-max-positions", max: 1 },
+    { code: "perp-max-positions", max: 2 },
+  ],
+  "perp-order-unresolved": [{ code: "perp-order-unresolved", market: "BTC-PERP" }],
+  "perp-grant-expiring": [
+    { code: "perp-grant-expiring", withinHours: 24 },
+    { code: "perp-grant-expiring", withinHours: 168 },
+  ],
 };
 const ALL: Why[] = Object.values(EVERY).flat();
 

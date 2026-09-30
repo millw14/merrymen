@@ -95,6 +95,25 @@ describe("provenance is recorded, and never claims more than it knows", () => {
     assert.equal(provenanceOf("class-route", "class-enter"), "deterministic-strategy");
   });
 
+  it("perps: a risk exit is hard-risk-exit, a view changing is not, and venue-forced is never inferred", () => {
+    // docs/perps.md: the stop filling at the venue, the protective loop and a
+    // stand-down fire whatever the strategy wanted; a trend or owner close and
+    // a take-profit child filling claim less.
+    assert.equal(provenanceOf("perp-route", "perp-risk-exit"), "hard-risk-exit");
+    assert.equal(provenanceOf("perp:strategist", "perp-risk-exit"), "hard-risk-exit");
+    assert.equal(provenanceOf("perp-route", "perp-exit"), "deterministic-strategy");
+    assert.equal(provenanceOf("perp-route", "perp-open"), "deterministic-strategy");
+    // A liquidation, ADL or settlement fill has no intent and no Why: the
+    // reconcile that books it says `venue-forced` itself. Nothing here may
+    // guess it — a guessed "the venue did it" would excuse our own exits.
+    for (const source of ["perp-route", "perp:strategist", "brain", "chat", "strategy:even-keel", ""]) {
+      for (const why of [undefined, null, "perp-risk-exit", "perp-exit", "stop-floor", "venue-forced"]) {
+        assert.notEqual(provenanceOf(source, why), "venue-forced", `${source}/${String(why)}`);
+      }
+    }
+    assert.ok(isProvenance("venue-forced"), "a row the reconcile writes with it must read back");
+  });
+
   it("a risk exit outranks the source, even on the Brain rail", () => {
     // If Brain ever proposes an exit the machine would have taken anyway, the
     // fact that it was forced is the more important one.
@@ -114,6 +133,7 @@ describe("provenance is recorded, and never claims more than it knows", () => {
       "owner-command",
       "peer-triggered-research",
       "hard-risk-exit",
+      "venue-forced",
     ]);
     for (const k of PROVENANCE_KINDS) assert.ok(isProvenance(k), k);
     for (const bad of ["", "BRAIN", "model", null, undefined, 1]) assert.equal(isProvenance(bad), false, String(bad));

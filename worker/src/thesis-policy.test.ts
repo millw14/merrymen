@@ -21,12 +21,20 @@ import { wrapSqlite } from "./db";
 import { readPeerTheses } from "./peer-theses";
 import {
   LANDED_STATUSES,
+  PUBLISHABLE_SOURCES,
+  PUBLISHABLE_STRATEGIES,
+  WITHHELD_PERP_SOURCES,
+  WITHHELD_REJECT_RULES,
+  ownerRejectRuleLabel,
   outcomeOf,
   publicationNarrowing,
   publishableThesis,
   readerHead,
+  rejectRuleLabel,
+  rejectRuleRemedy,
   type ThesisRow,
 } from "./thesis-policy";
+import { readFileSync } from "node:fs";
 
 describe("a coin's name is printed as it was typed", () => {
   const head = (display_name: string) => {
@@ -174,3 +182,72 @@ describe("a peer's landed trade is not buried under refusals the gate drops", ()
     }
   });
 });
+
+/**
+ * PERPS ARE NEVER PUBLISHED IN v1 (docs/perps.md rule 17).
+ *
+ * Pinned the way the strategist's own absence is pinned (strategist-publish
+ * .test.ts): by the SOURCES being absent from every publishable list, and by
+ * the gate refusing a perp row even when one arrives under a publishable key —
+ * because Lighter's public tape is keyed by account, and one published "open
+ * BTC long" with a timestamp is the agent's venue account and its live
+ * liquidation price for anyone who looks.
+ */
+describe("perps are withheld from every public surface", () => {
+  it("THE PERP SOURCES ARE ABSENT from the policy and from the strategy list — change both or neither", () => {
+    assert.deepEqual([...WITHHELD_PERP_SOURCES], ["perp-route", "perp:strategist"]);
+    for (const source of WITHHELD_PERP_SOURCES) {
+      assert.ok(!PUBLISHABLE_SOURCES.includes(source), `${source} must never be publishable`);
+    }
+    for (const s of PUBLISHABLE_SOURCES) assert.ok(!/perp/i.test(s), `${s} names perps and is publishable`);
+    for (const s of PUBLISHABLE_STRATEGIES as readonly string[]) assert.ok(!/perp/i.test(s), `strategy ${s} names perps`);
+  });
+
+  const ok: ThesisRow = {
+    agent_id: "0xabc",
+    name: "Shogun",
+    source: "brain",
+    action: "hold",
+    symbol: "TSLA",
+    reason: "Flow is two-sided and the book is deep enough.",
+    said: 1,
+    last_at: 1,
+    first_at: 1,
+    mode: "live",
+  };
+
+  it("the fixture publishes — so each refusal below is the perp rule and nothing else", () => {
+    assert.ok(publishableThesis(ok));
+  });
+
+  it("a perp row is dropped by source, by market key or by action — whichever it carries", () => {
+    for (const source of [...WITHHELD_PERP_SOURCES, "strategy:perp-trend"]) {
+      assert.equal(publishableThesis({ ...ok, source }), null, source);
+    }
+    // Filed under a PUBLISHABLE source by mistake: still never published.
+    assert.equal(publishableThesis({ ...ok, symbol: "BTC-PERP" }), null, "a -PERP market key");
+    for (const action of ["open-long", "open-short", "reduce-long", "close-short", "perp-deposit", "perp-withdraw", "perp-claim"]) {
+      assert.equal(publishableThesis({ ...ok, source: "strategist", action }), null, action);
+    }
+  });
+
+  it("every perp refusal policy.ts can return is withheld — with the owner's words and a remedy, no public label", () => {
+    const src = readFileSync(new URL("./policy.ts", import.meta.url), "utf8");
+    const perpRules = new Set<string>();
+    for (const m of src.matchAll(/rule:\s*[^,}\n]*/g)) {
+      for (const q of m[0].matchAll(/"(perp-[a-z-]+)"/g)) perpRules.add(q[1]!);
+    }
+    assert.ok(perpRules.size >= 20, `expected the perp rules, parsed ${perpRules.size}`);
+    for (const rule of perpRules) {
+      assert.ok(Object.prototype.hasOwnProperty.call(WITHHELD_REJECT_RULES, rule), `${rule} is not withheld`);
+      assert.equal(rejectRuleLabel(rule), null, `${rule} must have no public sentence`);
+      assert.ok(ownerRejectRuleLabel(rule), `${rule} needs the owner's words`);
+      assert.ok(rejectRuleRemedy(rule), `${rule} needs a remedy`);
+    }
+    // And the perpsModeOf rules, which reach an open through the rail.
+    for (const rule of ["perp-live-not-enabled", "perp-not-granted", "perp-venue-unready", "perp-operator-off"]) {
+      assert.ok(perpRules.has(rule), `${rule} must be a literal policy.ts returns`);
+    }
+  });
+});
+

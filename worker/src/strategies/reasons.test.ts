@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { renderWhy, type Why } from "./reasons";
+import { publishesIdle, renderWhy, type Why } from "./reasons";
 
 /**
  * These strings go on a PUBLIC page, under an agent's name, next to somebody's
@@ -156,3 +156,96 @@ describe("a stale feed says WHICH kind of stale it is", () => {
     }
   });
 });
+
+/**
+ * PERPETUALS (docs/perps.md). Never published in v1 — but the sentence is
+ * written before anyone knows who reads it back, so both registers are held to
+ * the file's rules anyway, on the LONGEST market key the frozen table has.
+ */
+describe("the perp reasons", () => {
+  const M = "ANTHROPIC-PERP" as const;
+  const PERP: Why[] = [
+    { code: "perp-open", market: M, side: "long", leverage: 2, stopPct: 5 },
+    { code: "perp-open", market: M, side: "short", leverage: 3.33, stopPct: 1.5 },
+    ...(["trend", "aged", "funding", "market", "session", "owner", "venue-take"] as const).map(
+      (cause): Why => ({ code: "perp-exit", market: M, side: "short", cause }),
+    ),
+    ...(
+      [
+        "venue-stop",
+        "stop-breached",
+        "stop-missing",
+        "liq-proximity",
+        "liq-inside-stop",
+        "funding-bleed",
+        "market-status",
+        "unknown-activity",
+        "stand-down",
+        "kill",
+        "expiry",
+      ] as const
+    ).map((cause): Why => ({ code: "perp-risk-exit", market: M, side: "long", cause })),
+    { code: "perp-signal-unread", market: null },
+    { code: "perp-signal-unread", market: M },
+    { code: "perp-no-signal", markets: 3 },
+    { code: "perp-market-not-covered", market: M },
+    { code: "perp-too-volatile", market: M, stopPct: 12.5, maxStopPct: 25 },
+    { code: "perp-below-min", market: M, minRaw: 123_456_789_000n, capRaw: 100_000_000_000n },
+    { code: "perp-cooldown", market: M, hours: 24, after: "forced" },
+    { code: "perp-funding-against", market: M, side: "short" },
+    { code: "perp-max-positions", max: 5 },
+    { code: "perp-order-unresolved", market: M },
+    { code: "perp-grant-expiring", withinHours: 168 },
+  ];
+
+  it("every sentence, both registers, is under the /why truncation point and reads as prose", () => {
+    for (const w of PERP) {
+      for (const who of ["owner", "public"] as const) {
+        const s = renderWhy(w, who);
+        assert.ok(s.length > 20 && s.length < 220, `${w.code} (${who}) is ${s.length}: ${s}`);
+        assert.doesNotMatch(s, /undefined|NaN|\[object|\?x|\?%|\s{2}/, `${w.code} (${who}): ${s}`);
+      }
+    }
+  });
+
+  it("never promises anything — no profit, gain, win, will, should, expect", () => {
+    for (const w of PERP) {
+      for (const who of ["owner", "public"] as const) {
+        const s = renderWhy(w, who);
+        assert.doesNotMatch(s, /\b(?:profits?|gains?|wins?|will|should|expects?|guarantee[ds]?)\b/i, `${w.code}: ${s}`);
+        assert.doesNotMatch(s, /!/, `${w.code}: ${s}`);
+      }
+    }
+  });
+
+  it("THE PUBLIC REGISTER NAMES NO SIZE, NO LEVERAGE AND NO SIDE — only the market and the owner's own percentages", () => {
+    for (const w of PERP) {
+      const pub = renderWhy(w, "public");
+      assert.doesNotMatch(pub, /\d(?:\.\d+)?\s*[x×]\b/, `${w.code} published a leverage: ${pub}`);
+      assert.doesNotMatch(pub, /\b(?:long|short)\b/i, `${w.code} published the side: ${pub}`);
+      assert.doesNotMatch(pub, /USDG|\d[\d,]*\.\d{2}\b/, `${w.code} published a figure of the book: ${pub}`);
+      if ("market" in w && w.market) assert.ok(pub.includes(w.market), `${w.code} lost its market: ${pub}`);
+    }
+  });
+
+  it("the owner is told the leverage and the side", () => {
+    const own = renderWhy({ code: "perp-open", market: "BTC-PERP", side: "short", leverage: 3.33, stopPct: 1.5 });
+    assert.match(own, /short on BTC-PERP at 3\.33x/);
+    assert.match(own, /1\.5%/);
+  });
+
+  it("a risk exit and a view changing do not read the same", () => {
+    const risk = renderWhy({ code: "perp-risk-exit", market: "BTC-PERP", side: "long", cause: "venue-stop" });
+    const view = renderWhy({ code: "perp-exit", market: "BTC-PERP", side: "long", cause: "trend" });
+    assert.notEqual(risk, view);
+    assert.match(risk, /rule, not a view/i);
+  });
+
+  it("NO PERP REASON IS EVER A PUBLIC POST (rule 17) — publishesIdle is false for every perp code", () => {
+    for (const w of PERP) assert.equal(publishesIdle(w), false, w.code);
+    // …and the rest of the idle channel is untouched.
+    assert.equal(publishesIdle({ code: "ops-spent" }), true);
+    assert.equal(publishesIdle({ code: "breaker-tripped", limitBps: 1_000 }), false);
+  });
+});
+

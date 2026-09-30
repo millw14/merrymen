@@ -38,6 +38,8 @@
  * one of these mid-word.
  */
 
+import type { PerpKey } from "../../../packages/core/src/perps";
+
 /** USDG is 6dp. Two decimals is what every other surface shows. */
 function usdg(raw: bigint): string {
   const neg = raw < 0n;
@@ -66,6 +68,22 @@ function pct(bps: number): string {
  */
 function pctWhole(bps: number): string {
   return String(Math.round(bps / 100));
+}
+
+/**
+ * A percentage already IN percent (a perp stop distance: 5, 1.5), one decimal
+ * where it earns its place — the same shape `pct` prints from bps, so the
+ * owner's and the public sentence carry the identical figure.
+ */
+function perpPct(p: number): string {
+  if (!Number.isFinite(p)) return "?";
+  return Number.isInteger(p) ? String(p) : p.toFixed(1);
+}
+
+/** Leverage as the contract displays it (floor(1_000_000 / imfBp) / 100): 2, 2.99 — never rounded up. */
+function perpLev(l: number): string {
+  if (!Number.isFinite(l) || l <= 0) return "?";
+  return String(Math.floor(l * 100) / 100);
 }
 
 /**
@@ -332,7 +350,102 @@ export type Why =
       graduationBps: number | null;
       /** USDG the sell is quoted to return, raw 6dp. */
       proceedsRaw: bigint;
-    };
+    }
+  // ── PERPETUALS (docs/perps.md) ────────────────────────────────────────────
+  //
+  // NEVER PUBLISHED IN v1 (rule 17): perp decisions file under `perp-route` and
+  // `perp:strategist`, which thesis-policy.ts withholds, and `publishesIdle` is
+  // false for every perp code. The PUBLIC register below exists anyway,
+  // because this sentence is written before anyone knows who reads it back —
+  // and it names no size, no leverage and no margin, only the market, the side
+  // and the stop's distance. The owner's copy says the leverage too.
+  //
+  // `market` is a PerpKey from LIGHTER_MARKETS_V1 — the route's own table,
+  // never a model's spelling — which is what keeps these publishable-by-type
+  // like every other code here.
+  /**
+   * OPENING A POSITION, with its stop already at the venue. `leverage` is the
+   * DISPLAY figure (floor(1_000_000 / imfBp) / 100 — never overstated); the
+   * stop is a price distance in percent, the number the owner set.
+   */
+  | { code: "perp-open"; market: PerpKey; side: "long" | "short"; leverage: number; stopPct: number }
+  /**
+   * CLOSING ONE BECAUSE THE STRATEGY OR THE OWNER CHOSE TO — a view changing,
+   * not a rule firing. `venue-take` is the take-profit child filling at the
+   * venue, which is the plan working rather than a risk cut.
+   *
+   *   trend    — the close went back through the channel or the EMA
+   *   aged     — held as long as the strategy holds one
+   *   funding  — funding turned against the side
+   *   market   — the market went reduce-only or inactive
+   *   session  — the underlying's session is closing (equity perps)
+   *   owner    — the owner's /close or the dashboard
+   *   venue-take — the resting take-profit filled
+   */
+  | {
+      code: "perp-exit";
+      market: PerpKey;
+      side: "long" | "short";
+      cause: "trend" | "aged" | "funding" | "market" | "session" | "owner" | "venue-take";
+    }
+  /**
+   * THE MACHINE CUT IT — a risk exit, whatever the strategy wanted
+   * (provenance.ts: `hard-risk-exit`).
+   *
+   *   venue-stop       — the resting stop filled at the venue
+   *   stop-breached    — mark crossed the stop twice and it had not filled
+   *   stop-missing     — no stop could be kept resting under the position
+   *   liq-proximity    — mark came within the buffer of liquidation
+   *   liq-inside-stop  — liquidation moved inside the stop
+   *   funding-bleed    — funding ate past the owner's tolerance
+   *   market-status    — the venue stopped the market
+   *   unknown-activity — the venue showed activity we did not sign (rule 16)
+   *   stand-down       — /flatten or perps switched off
+   *   kill             — the agent was killed
+   *   expiry           — the grant is expiring
+   */
+  | {
+      code: "perp-risk-exit";
+      market: PerpKey;
+      side: "long" | "short";
+      cause:
+        | "venue-stop"
+        | "stop-breached"
+        | "stop-missing"
+        | "liq-proximity"
+        | "liq-inside-stop"
+        | "funding-bleed"
+        | "market-status"
+        | "unknown-activity"
+        | "stand-down"
+        | "kill"
+        | "expiry";
+    }
+  // ── why the perps route opened nothing (Tick.idle) ─────────────────────
+  //
+  // Each sentence is stable while its cause is: the idle channel speaks once
+  // per CHANGE of sentence, so nothing here carries a figure that moves every
+  // tick (a funding rate, a countdown) — only limits and settings.
+  /** Lighter's marks, candles or account could not be read. `market` null = the whole venue. */
+  | { code: "perp-signal-unread"; market: PerpKey | null }
+  /** Every market the route covers was read, and none signalled. */
+  | { code: "perp-no-signal"; markets: number }
+  /** An allowed market the route's universe does not cover (perp-trend: BTC, ETH, SOL). */
+  | { code: "perp-market-not-covered"; market: PerpKey }
+  /** The stop the market's volatility needs is wider than the owner's most. */
+  | { code: "perp-too-volatile"; market: PerpKey; stopPct: number; maxStopPct: number }
+  /** The venue's smallest order is above what the signed caps allow. */
+  | { code: "perp-below-min"; market: PerpKey; minRaw: bigint; capRaw: bigint }
+  /** Waiting out the pause after an exit. `hours` is the rule's length, not a countdown. */
+  | { code: "perp-cooldown"; market: PerpKey; hours: number; after: "strategy" | "stop" | "risk" | "forced" }
+  /** The side it would take is the one paying funding, past the route's limit. */
+  | { code: "perp-funding-against"; market: PerpKey; side: "long" | "short" }
+  /** Already holding as many positions as the route allows. */
+  | { code: "perp-max-positions"; max: number }
+  /** An order on this market has no final outcome yet (rule 9). */
+  | { code: "perp-order-unresolved"; market: PerpKey }
+  /** The grant has less life left than a position needs; `withinHours` is the rule's threshold. */
+  | { code: "perp-grant-expiring"; withinHours: number };
 
 /**
  * The ONLY producer of a published strategy reason.
@@ -578,6 +691,108 @@ export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
         ? `${out} — it is close enough to graduating that the vault would soon not be able to sell it at all`
         : `${out} — ${Math.round(w.heldSec / 3600)}h is as long as I hold one of these`;
     }
+    // ── PERPETUALS ─────────────────────────────────────────────────────────
+    //
+    // THE PUBLIC REGISTER NAMES THE MARKET AND NOTHING ABOUT THE POSITION: no
+    // size, no leverage, not even the side — "the position" stands in for "the
+    // long". Perps are never published in v1 (rule 17), and a sentence that
+    // said "a 5x short" beside a timestamp would locate the account on
+    // Lighter's public tape for anybody who read it. Percentages that are the
+    // owner's own settings (a stop distance) stay, as everywhere in this file.
+    case "perp-open":
+      return own
+        ? `opening a ${w.side} on ${w.market} at ${perpLev(w.leverage)}x — its stop rests at Lighter ${perpPct(w.stopPct)}% ` +
+            `from the mark, placed in the same order, so it is never open without one`
+        : `opening a position on ${w.market} — its stop rests at the venue ${perpPct(w.stopPct)}% from the mark, ` +
+            `placed in the same order, so it is never open without one`;
+    case "perp-exit": {
+      const what = own ? `the ${w.side} on ${w.market}` : `the position on ${w.market}`;
+      switch (w.cause) {
+        case "trend":
+          return `closing ${what} — the price went back through the trend the entry was taken on`;
+        case "aged":
+          return `closing ${what} — held for the whole window I give one of these`;
+        case "funding":
+          return `closing ${what} — funding turned against it, and holding it means paying that every hour`;
+        case "market":
+          return `closing ${what} — the venue stopped taking new positions on that market`;
+        case "session":
+          return `closing ${what} — the underlying market is about to shut, and a gap at the reopen can jump straight past a stop`;
+        case "owner":
+          return own ? `closing ${what} — you asked for it` : `closing ${what} — its owner asked for it`;
+        case "venue-take":
+          return `${what} reached its target — the take order resting at the venue filled`;
+      }
+      // Exhaustive over the causes; a cause this build does not know says only what is certain.
+      return `closing ${what}`;
+    }
+    case "perp-risk-exit": {
+      const what = own ? `the ${w.side} on ${w.market}` : `the position on ${w.market}`;
+      const rule = ` A rule, not a view`;
+      switch (w.cause) {
+        case "venue-stop":
+          return `the stop guarding ${what} fired at the venue — it was placed with the entry, and it did its job.${rule}`;
+        case "stop-breached":
+          return `closing ${what} — the mark crossed its stop twice and the stop had not filled.${rule}`;
+        case "stop-missing":
+          return `closing ${what} — its stop could not be kept resting at the venue, and no position stays open without one.${rule}`;
+        case "liq-proximity":
+          return `closing ${what} — the mark came within the safety buffer of its liquidation price.${rule}`;
+        case "liq-inside-stop":
+          return `closing ${what} — its liquidation price moved inside its stop, so the stop no longer protected it.${rule}`;
+        case "funding-bleed":
+          return `closing ${what} — the funding paid on it passed what a position is allowed to bleed.${rule}`;
+        case "market-status":
+          return `closing ${what} — the venue changed the market's status, so it goes while it still can.${rule}`;
+        case "unknown-activity":
+          return `closing ${what} — the venue showed activity on the account that the agent did not sign, so everything there is being closed`;
+        case "stand-down":
+          return `closing ${what} — perpetuals are standing down, and every position is closed first`;
+        case "kill":
+          return `closing ${what} — the agent was stopped, and its positions at the venue are closed first`;
+        case "expiry":
+          return `closing ${what} — the signed permission is expiring, and no position is left open past it`;
+      }
+      return `closing ${what}.${rule}`;
+    }
+    case "perp-signal-unread":
+      return w.market === null
+        ? `no perp opened — Lighter could not be read this tick, so there is nothing to act on. Closes and stops still run`
+        : `no perp opened — ${w.market}'s prices could not be read this tick, so there is nothing to act on. Closes and stops still run`;
+    case "perp-no-signal":
+      return `no perp opened — none of the ${w.markets} ${w.markets === 1 ? "market" : "markets"} I follow gave an entry signal, which is most of the time`;
+    case "perp-market-not-covered":
+      return own
+        ? `${w.market} is in your perp markets, but the strategy I run on perps does not follow it, so nothing opens there on its own`
+        : `${w.market} is allowed, but the strategy it runs on perps does not follow it, so nothing opens there on its own`;
+    case "perp-too-volatile":
+      return (
+        `no ${w.market} perp opened — its swings need a stop ${perpPct(w.stopPct)}% away, past the ` +
+        `${perpPct(w.maxStopPct)}% most ${own ? "you set" : "allowed"}. Waiting is the rule, not widening the stop`
+      );
+    case "perp-below-min":
+      return own
+        ? `no ${w.market} perp opened — Lighter's smallest order there is ${usdg(w.minRaw)} USDG and the signed caps allow ` +
+            `${usdg(w.capRaw)}. Raise the per-trade cap at /grant, or pick another market`
+        : `no ${w.market} perp opened — the venue's smallest order there is above what the signed caps allow`;
+    case "perp-cooldown": {
+      const after =
+        w.after === "stop" ? "a stop" : w.after === "risk" ? "a risk exit" : w.after === "forced" ? "a forced close at the venue" : "an exit";
+      return `not opening ${w.market} again yet — a ${w.hours}h pause follows ${after}, so one exit is never straight away the next entry`;
+    }
+    case "perp-funding-against":
+      return own
+        ? `no ${w.side} on ${w.market} — funding is running against that side, and holding it would mean paying every hour`
+        : `no perp opened on ${w.market} — funding is running against the side it would take`;
+    case "perp-max-positions":
+      return `no perp opened — already holding ${w.max} ${w.max === 1 ? "position" : "positions"}, the most held at once`;
+    case "perp-order-unresolved":
+      return `nothing new on ${w.market} — an order there has no final answer from the venue yet, and nothing is signed on top of it`;
+    case "perp-grant-expiring":
+      return (
+        `no perp opened — the signed permission has under ${w.withinHours} hours left, less than a position needs` +
+        (own ? `. Re-sign at /grant to keep going` : ``)
+      );
     default: {
       const exhaustive: never = w;
       return exhaustive;
@@ -597,5 +812,10 @@ export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
  * through the event.
  */
 export function publishesIdle(w: Why): boolean {
+  // NO PERP REASON IS EVER A POST (docs/perps.md rule 17). Even "nothing
+  // opened" says the agent trades perps, and the venue's public tape turns
+  // that plus a timestamp into the account. By prefix, so a perp code added
+  // later is withheld until someone decides otherwise — the safe direction.
+  if (w.code.startsWith("perp-")) return false;
   return w.code !== "breaker-tripped";
 }

@@ -2,7 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { TRADEABLE_CHAIN_ID } from "./preflight";
-import { execModeOf, canTradeForReal, type ExecInputs, type ExecMode } from "./exec-mode";
+import {
+  PERPS_MODE_RULES,
+  canTradeForReal,
+  execModeOf,
+  perpsExposureKeepsExitsLive,
+  perpsModeOf,
+  type ExecInputs,
+  type ExecMode,
+  type PerpsMode,
+  type PerpsModeInputs,
+} from "./exec-mode";
+import type { PerpExposure } from "../../packages/core/src/perps";
 
 /**
  * PAPER IS A CAPABILITY, and this is the function that decides it.
@@ -295,4 +306,151 @@ test("a curve trade with no adapter leaves a row, not just an event", () => {
   // trade came of it" — true, and silent about the one fact that explains it.
   const src = readFileSync("worker/src/index.ts", "utf8");
   assert.match(src, /reject_rule: "no-curve-adapter"/);
+});
+
+// ── perpetuals: one rail, derived from the account's, never beside it ──────
+
+/**
+ * THE WHOLE TRUTH TABLE, asked of the real function: every account verdict
+ * shape × every perps flag × every operator ceiling. 5 × 2⁵ × 3 = 480 rows.
+ * Asserted as the contract's INVARIANTS rather than as a copy of the code's
+ * if-chain, because a copy agrees with the code by construction — the
+ * invariants are what docs/perps.md rules 1 and 14 actually say.
+ */
+const VERDICTS: ExecMode[] = [
+  { mode: "live" },
+  { mode: "paper", rule: "live-not-enabled" },
+  { mode: "paper", rule: "no-cash" },
+  { mode: "refuse", rule: "not-armed" },
+  { mode: "refuse", rule: "no-cash" },
+];
+const CEILINGS = ["off", "paper", "live"] as const;
+function* everyPerpsInput(): Generator<[ExecMode, PerpsModeInputs]> {
+  const tf = [false, true];
+  for (const v of VERDICTS)
+    for (const perpsEnabled of tf)
+      for (const perpsLiveEnabled of tf)
+        for (const ceiling of CEILINGS)
+          for (const granted of tf)
+            for (const venueReady of tf)
+              for (const entriesHalted of tf)
+                yield [v, { perpsEnabled, perpsLiveEnabled, ceiling, granted, venueReady, entriesHalted }];
+}
+const rank = (m: PerpsMode) => (m.mode === "live" ? 2 : m.mode === "paper" ? 1 : 0);
+
+test("perpsModeOf: the table is total — 480 rows, each a known shape", () => {
+  let n = 0;
+  for (const [v, p] of everyPerpsInput()) {
+    const m = perpsModeOf(v, p);
+    n++;
+    assert.ok(["off", "paper", "live", "refuse"].includes(m.mode));
+    if (m.mode === "refuse") {
+      const allowed: (string | null)[] = [...PERPS_MODE_RULES, v.mode !== "live" ? v.rule : null];
+      assert.ok(allowed.includes(m.rule), `${m.rule} is not a rule perpsModeOf may name`);
+    }
+  }
+  assert.equal(n, 480);
+});
+
+test("A LIVE ACCOUNT NEVER GETS PAPER PERPS, and a paper account never gets live ones", () => {
+  for (const [v, p] of everyPerpsInput()) {
+    const m = perpsModeOf(v, p);
+    if (v.mode === "live") assert.notEqual(m.mode, "paper", JSON.stringify(p));
+    if (v.mode !== "live") assert.notEqual(m.mode, "live", JSON.stringify(p));
+  }
+});
+
+test("live needs every term at once: the account live, both consents, the operator, the grant and the venue", () => {
+  for (const [v, p] of everyPerpsInput()) {
+    const all = v.mode === "live" && p.perpsEnabled && p.perpsLiveEnabled && p.ceiling === "live" && p.granted && p.venueReady;
+    assert.equal(perpsModeOf(v, p).mode === "live", all, JSON.stringify({ v, p }));
+  }
+});
+
+test("off means the owner never turned perps on — and only that", () => {
+  for (const [v, p] of everyPerpsInput()) {
+    assert.equal(perpsModeOf(v, p).mode === "off", !p.perpsEnabled);
+  }
+});
+
+test("THE OPERATOR ONLY RESTRICTS: lowering the ceiling never widens the rail", () => {
+  for (const [v, p] of everyPerpsInput()) {
+    if (p.ceiling !== "live") continue;
+    const live = rank(perpsModeOf(v, p));
+    const paper = rank(perpsModeOf(v, { ...p, ceiling: "paper" }));
+    const off = rank(perpsModeOf(v, { ...p, ceiling: "off" }));
+    assert.ok(off <= paper && paper <= live, JSON.stringify({ v, p, live, paper, off }));
+  }
+});
+
+test("halting entries is NOT a rail: exits and protection keep the key; checkPolicy refuses the open", () => {
+  for (const [v, p] of everyPerpsInput()) {
+    assert.deepEqual(perpsModeOf(v, { ...p, entriesHalted: true }), perpsModeOf(v, { ...p, entriesHalted: false }));
+  }
+});
+
+test("each refusal names its own reason, consent before faults", () => {
+  const on: PerpsModeInputs = { perpsEnabled: true, perpsLiveEnabled: true, ceiling: "live", granted: true, venueReady: true, entriesHalted: false };
+  const live: ExecMode = { mode: "live" };
+  assert.deepEqual(perpsModeOf(live, on), { mode: "live" });
+  assert.deepEqual(perpsModeOf(live, { ...on, perpsEnabled: false }), { mode: "off" });
+  assert.deepEqual(perpsModeOf(live, { ...on, perpsLiveEnabled: false }), { mode: "refuse", rule: "perp-live-not-enabled" });
+  // Consent first: an owner who has not asked for real perps is not sent to
+  // fix a grant or a venue they are not using.
+  assert.deepEqual(perpsModeOf(live, { ...on, perpsLiveEnabled: false, granted: false, venueReady: false }), {
+    mode: "refuse",
+    rule: "perp-live-not-enabled",
+  });
+  assert.deepEqual(perpsModeOf(live, { ...on, ceiling: "paper" }), { mode: "refuse", rule: "perp-operator-off" });
+  assert.deepEqual(perpsModeOf(live, { ...on, ceiling: "off" }), { mode: "refuse", rule: "perp-operator-off" });
+  assert.deepEqual(perpsModeOf(live, { ...on, granted: false }), { mode: "refuse", rule: "perp-not-granted" });
+  assert.deepEqual(perpsModeOf(live, { ...on, venueReady: false }), { mode: "refuse", rule: "perp-venue-unready" });
+  // A paper account practises whatever the live terms say, under any ceiling but off.
+  const paper: ExecMode = { mode: "paper", rule: "live-not-enabled" };
+  assert.deepEqual(perpsModeOf(paper, { ...on, perpsLiveEnabled: false, granted: false, venueReady: false }), { mode: "paper" });
+  assert.deepEqual(perpsModeOf(paper, { ...on, ceiling: "paper" }), { mode: "paper" });
+  assert.deepEqual(perpsModeOf(paper, { ...on, ceiling: "off" }), { mode: "refuse", rule: "perp-operator-off" });
+  // A refused account's own reason is the reason — perps are not the problem.
+  assert.deepEqual(perpsModeOf({ mode: "refuse", rule: "not-armed" }, on), { mode: "refuse", rule: "not-armed" });
+});
+
+test("perpsExposureKeepsExitsLive: exits follow the VENUE, and unknown is never none (rules 8a, 11)", () => {
+  const empty: Extract<PerpExposure, { kind: "known" }> = {
+    kind: "known",
+    collateralMicro: 0n,
+    openPositions: 0,
+    openOrders: 0,
+    pendingWithdrawalsMicro: 0n,
+    depositsInTransitMicro: 0n,
+    poolShareCount: 0,
+    spotBalanceCount: 0,
+    otherAccounts: { count: 0, valueMicro: 0n },
+    withdrawalDelaySec: null,
+  };
+  const ask = (venue: PerpExposure, ledger: Parameters<typeof perpsExposureKeepsExitsLive>[0]["ledger"] = null) =>
+    perpsExposureKeepsExitsLive({ venue, ledger });
+
+  assert.equal(ask({ kind: "none" }), false, "no venue leg at all: nothing to keep running");
+  assert.equal(ask(empty), false, "read, and provably empty");
+  // Each kind of exposure, alone, keeps the lane on.
+  for (const patch of [
+    { openPositions: 1 },
+    { openOrders: 1 },
+    { collateralMicro: 1n },
+    { pendingWithdrawalsMicro: 1n },
+    { depositsInTransitMicro: 1n },
+    { poolShareCount: 1 },
+    { spotBalanceCount: 1 },
+    { otherAccounts: { count: 1, valueMicro: null } },
+    { otherAccounts: null },
+  ] as Partial<typeof empty>[]) {
+    assert.equal(ask({ ...empty, ...patch }), true, JSON.stringify(patch, (_k, v) => (typeof v === "bigint" ? String(v) : v)));
+  }
+  // Unread: the ledger decides, and an unreadable ledger is unknown.
+  const flatLedger = { openPositions: 0, openOrders: 0, collateralMicro: 0n, inTransitMicro: 0n };
+  assert.equal(ask({ kind: "unread" }, null), true, "venue AND ledger unread: the doors stay open");
+  assert.equal(ask({ kind: "unread" }, flatLedger), false);
+  for (const patch of [{ openPositions: 1 }, { openOrders: 1 }, { collateralMicro: 5n }, { inTransitMicro: 5n }]) {
+    assert.equal(ask({ kind: "unread" }, { ...flatLedger, ...patch }), true);
+  }
 });

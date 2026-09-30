@@ -30,6 +30,8 @@
  * refused by `asset-allowlist`, the same as anything else.
  *
  * On top of that, and BEFORE any of it, this module refuses:
+ *   • any perpetual market (a symbol ending `-PERP`) — Brain does not propose
+ *     perps in v1 (docs/perps.md rule 15)
  *   • an agent the owner has not explicitly named in MERRYMEN_BRAIN_LIVE
  *   • a hold, or a decision whose word and number disagree
  *   • a size that is not a finite positive number
@@ -116,6 +118,16 @@ export function orderFromDecision(
   d: BrainDecision,
   limits: { maxUsdg: number; minUsdg?: number },
 ): BrainOrderVerdict {
+  // BRAIN DOES NOT TRADE PERPS IN v1 (docs/perps.md rule 15). FIRST, before
+  // the word, the size or the gate: a perp key reaching here is a Brain build
+  // that knows something this worker does not, and the only answer is no.
+  // Its schema, clamps and focus are spot-shaped — a short opened from flat
+  // would be clamped to a one-micro "sell" — and a perp order is never a
+  // `{side, symbol, usdgAmount}` a spot path can carry. The ticker check below
+  // would refuse the hyphen anyway; this says why, by name, in any case.
+  if (/-PERP$/i.test(String(d.symbol ?? "").trim())) {
+    return { ok: false, why: `${String(d.symbol).trim()} is a perpetual market; Brain does not trade perps` };
+  }
   if (d.action === "hold") return { ok: false, why: "held" };
   if (d.gate_verdict === "refuse" || d.gate_verdict === "downgrade-to-hold") {
     return { ok: false, why: "the portfolio gate did not permit an order" };

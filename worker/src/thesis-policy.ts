@@ -405,6 +405,37 @@ export const TRADED_ONLY_SOURCES = ["class-route"] as const;
 const TRADED_ONLY: ReadonlySet<string> = new Set<string>(TRADED_ONLY_SOURCES);
 
 /**
+ * THE PERPS SOURCES — NEVER PUBLISHABLE IN v1 (docs/perps.md rule 17).
+ *
+ * Every perp decision files under one of these and never under the shared
+ * `strategist`, `brain` or `brain-shadow` keys, which ARE publishable: a model
+ * that proposed "open BTC long" under `strategist` would publish it with a
+ * timestamp, and Lighter's public tape — keyed by account, carrying each
+ * fill's time, size and leverage — would turn that into the agent's venue
+ * account and its live liquidation price for anyone who looked.
+ *
+ * WITHHELD BY ABSENCE, the mechanism every other source here uses: neither key
+ * is in SOURCE_POLICY and neither strategy is in PUBLISHABLE_STRATEGIES, so
+ * `publishableThesis` drops them without being told to — and it is told to
+ * anyway, below, because an absence is only as good as the next person to
+ * tidy the map. thesis-policy.test.ts pins both, the way the strategist's own
+ * absence is pinned.
+ */
+export const WITHHELD_PERP_SOURCES = ["perp-route", "perp:strategist"] as const;
+
+/**
+ * Is this row about perpetuals at all — by its source, its market key or its
+ * action? Any one is enough: a perp decision filed under a publishable source
+ * by mistake still carries a `-PERP` symbol and an `open-long`-shaped action.
+ */
+function isPerpRow(row: Pick<ThesisRow, "source" | "symbol" | "action">): boolean {
+  if (row.source && (row.source.startsWith("perp") || row.source.startsWith("strategy:perp"))) return true;
+  if (row.symbol && /-PERP$/i.test(row.symbol)) return true;
+  if (row.action && /^(?:(?:open|reduce|close)-(?:long|short)|perp-[a-z-]+)$/.test(row.action)) return true;
+  return false;
+}
+
+/**
  * The trade statuses `outcomeOf` calls "landed" — a fill on chain, or on the
  * paper book. Exported for the SQL half of the gate below; outcomeOf keeps its
  * own two arms because the two say different sentences, and thesis-policy.test
@@ -879,16 +910,179 @@ export const REJECT_RULES: readonly string[] = Object.freeze(Object.keys(R));
  * withheld WITH A REASON", and holds every entry to an owner sentence, a
  * remedy, and no public label.
  */
+/**
+ * Why every perp rule is withheld: one reason, stated once, because it is one
+ * decision (docs/perps.md rule 17) — not twenty-four that happen to agree.
+ */
+const PERP_WHY =
+  "a perp rule (rule 17): perps are never published in v1, and a refusal naming one would say the account trades " +
+  "perps just as surely as a fill would.";
+
 export const WITHHELD_REJECT_RULES: Readonly<Record<string, { why: string; owner: string; remedy: string }>> =
   Object.freeze({
     "perp-unpriced": {
-      why: "a perp rule (rule 17): published, it would say the account trades perps.",
+      why: PERP_WHY,
       owner:
         "Lighter could not be read, and money was at the venue when it last was, so nothing new is opened until it " +
         "reads again — exits still go out",
       remedy:
         "Nothing to do if it clears within a few minutes. If it lasts, close your Lighter positions from the Perpetuals " +
         "panel on the dashboard — closes are never blocked by this.",
+    },
+    // ── the perps rail (exec-mode.ts perpsModeOf) ────────────────────────────
+    "perp-not-enabled": {
+      why: PERP_WHY,
+      owner: "perpetuals are off for this agent, so nothing is opened on Lighter",
+      remedy: "Turn perpetuals on in Settings, under Perpetuals, on the dashboard — chat and Telegram cannot.",
+    },
+    "perp-live-not-enabled": {
+      why: PERP_WHY,
+      owner:
+        "this account trades for real and real-money perpetuals are not switched on, so it does not trade them — a " +
+        "live account never runs practice perps beside its real book",
+      remedy: "Switch on real perpetuals in Settings, under Perpetuals, on the dashboard, once you have read what they can lose.",
+    },
+    "perp-not-granted": {
+      why: PERP_WHY,
+      owner: "the permission you signed does not include perpetuals",
+      remedy: "Re-sign your trading permission at /grant with perpetuals included — it is free.",
+    },
+    "perp-venue-unready": {
+      why: PERP_WHY,
+      owner:
+        "the agent's Lighter account is not ready yet — its first deposit, account number or trading key is still " +
+        "being set up, or Lighter could not be reached",
+      remedy:
+        "Nothing to do if it clears within a few minutes. If it lasts, the Perpetuals panel on the dashboard shows which " +
+        "step is waiting.",
+    },
+    "perp-operator-off": {
+      why: PERP_WHY,
+      owner: "the operator of this server has perpetuals switched off here, or allows only practice ones",
+      remedy: "Nothing in your Settings changes this — it is the server operator's choice.",
+    },
+    "perp-live-not-yet": {
+      why: PERP_WHY,
+      owner:
+        "this account trades for real, and real-money perpetuals are not available in this version yet — a live " +
+        "account never runs practice perps beside its real book",
+      remedy: "Nothing to do now. Practice perpetuals run while the account is on paper; real ones arrive in a later version.",
+    },
+    // ── the market ───────────────────────────────────────────────────────────
+    "perp-market-not-allowed": {
+      why: PERP_WHY,
+      owner: "that perpetual market is not one of the markets you allowed",
+      remedy: "Add it to your perpetual markets in Settings, under Perpetuals, if you want the agent to trade it.",
+    },
+    "perp-market-inactive": {
+      why: PERP_WHY,
+      owner: "Lighter is not taking new positions on that market right now, or its terms could not be read",
+      remedy: "Nothing to do — it clears when the market is open again. Closes are never blocked by this.",
+    },
+    // ── the account-wide stops ───────────────────────────────────────────────
+    "perp-venue-incident": {
+      why: PERP_WHY,
+      owner:
+        "Lighter shows activity on the agent's account that the agent did not sign, so every open is refused and open " +
+        "positions are being closed",
+      remedy:
+        "Treat the trading key as compromised: replace it with your owner key using `merrymen recover`, then clear the " +
+        "alert on the dashboard.",
+    },
+    "perp-entries-halted": {
+      why: PERP_WHY,
+      owner: "new perpetual positions are paused — closes and stops still run",
+      remedy: "Resume them on the dashboard, under Perpetuals, when you are ready.",
+    },
+    "perp-grant-expiring": {
+      why: PERP_WHY,
+      owner: "your signed permission expires within a day, so no new perpetual positions are opened — closes and stops still run",
+      remedy: "Re-sign your trading permission at /grant.",
+    },
+    // ── what is already there ────────────────────────────────────────────────
+    "perp-add-to-position": {
+      why: PERP_WHY,
+      owner: "there is already a position on that market, and an open never adds to one or flips it",
+      remedy: "Nothing to do. Close the position from the Perpetuals panel first if you want a fresh one.",
+    },
+    "perp-close-in-flight": {
+      why: PERP_WHY,
+      owner: "an order on that market has no final answer from Lighter yet, so nothing new is signed on top of it",
+      remedy: "Nothing to do — it clears on its own as soon as Lighter answers.",
+    },
+    "perp-no-position": {
+      why: PERP_WHY,
+      owner: "there was no position on that market to close",
+      remedy: "Nothing to do — the Perpetuals panel on the dashboard shows what is open.",
+    },
+    "perp-side-mismatch": {
+      why: PERP_WHY,
+      owner: "the close named the wrong side of the position, so it was refused rather than read as a new position",
+      remedy: "Close it from the Perpetuals panel on the dashboard, which always names the side held.",
+    },
+    // ── leverage, the stop and the order's shape ─────────────────────────────
+    "perp-leverage-unset": {
+      why: PERP_WHY,
+      owner:
+        "Lighter does not yet hold that market at the leverage you set, with its margin kept separate — it is set " +
+        "only while the market has no position",
+      remedy: "Nothing to do — the agent sets it on its own the next time the market is flat.",
+    },
+    "perp-leverage-mismatch": {
+      why: PERP_WHY,
+      owner: "the leverage on that order is not the one you set, or not the one Lighter holds for the market",
+      remedy:
+        "Nothing to do — no model ever chooses leverage. A new leverage setting applies the next time the market has no " +
+        "position.",
+    },
+    "perp-stop-required": {
+      why: PERP_WHY,
+      owner: "every open carries its own stop at Lighter, and this one's stop was missing or out of place",
+      remedy:
+        "Nothing to do when the agent proposed it — it never opens without a stop. An order of your own needs a stop " +
+        "inside your stop-loss setting.",
+    },
+    "perp-stop-inside-liquidation": {
+      why: PERP_WHY,
+      owner: "at that leverage Lighter could liquidate the position before its stop fills",
+      remedy: "Lower the leverage or the stop-loss distance in Settings, under Perpetuals, so the stop sits well inside liquidation.",
+    },
+    "perp-order-malformed": {
+      why: PERP_WHY,
+      owner: "the perpetual order was not shaped as one Lighter could take safely, so it was refused before anything was signed",
+      remedy: "Nothing to do — it is a fault in how the order was built, not something you set, and nothing was sent.",
+    },
+    // ── the perp caps (rule 6: exposure, not margin) ─────────────────────────
+    "perp-below-min": {
+      why: PERP_WHY,
+      owner:
+        "that is smaller than Lighter's smallest order on the market (or its 1 USDG minimum deposit), and no cap is " +
+        "stretched to reach it",
+      remedy:
+        "Raise the per-trade cap at /grant or the perpetuals per-trade limit in Settings, or pick a market with a " +
+        "smaller minimum.",
+    },
+    "perp-per-trade-cap": {
+      why: PERP_WHY,
+      owner: "that position is bigger than the most one perpetual open may be, measured on its full size rather than its margin",
+      remedy:
+        "Raise the perpetuals per-trade limit in Settings, or the signed per-trade cap at /grant (that one needs a " +
+        "re-sign), if you want bigger positions.",
+    },
+    "perp-open-notional-cap": {
+      why: PERP_WHY,
+      owner: "that would take the total open across your perpetuals past your limit",
+      remedy: "Raise the open-positions limit in Settings, under Perpetuals, or wait for a position to close.",
+    },
+    "perp-collateral-cap": {
+      why: PERP_WHY,
+      owner: "that would put more USDG at Lighter than the most you allowed there",
+      remedy: "Raise the most-at-Lighter limit in Settings, under Perpetuals, if you mean to.",
+    },
+    "perp-max-opens": {
+      why: PERP_WHY,
+      owner: "the agent has opened as many perpetual positions in the last 24 hours as you allow",
+      remedy: "Nothing to do — it frees up as the oldest opens age out. Raise the daily opens limit in Settings to allow more.",
     },
   });
 
@@ -1164,6 +1358,12 @@ export function publishableThesis(row: ThesisRow): PublicThesis | null {
   if (row.agent_id && row.agent_id.toLowerCase().startsWith("rh:")) return null;
   const name = (row.name ?? "").trim();
   if (!name) return null;
+
+  // ── perps ─────────────────────────────────────────────────────────────────
+  // NEVER, WHATEVER THE SOURCE SAYS (docs/perps.md rule 17). Checked before the
+  // source map so a perp row that reached a publishable key by mistake still
+  // goes nowhere; see WITHHELD_PERP_SOURCES.
+  if (isPerpRow(row)) return null;
 
   // ── source ────────────────────────────────────────────────────────────────
   const policy = row.source ? SOURCE_POLICY[row.source] : undefined;

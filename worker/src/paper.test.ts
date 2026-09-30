@@ -217,3 +217,27 @@ describe("the energy buy is never simulated", () => {
     assert.equal(r.fill, undefined);
   });
 });
+
+describe("perps never touch the spot paper book", () => {
+  it("every perp intent is refused by name — the perp lane owns execution and its own paper engine", () => {
+    const perps: TradeIntent[] = [
+      {
+        kind: "perp-order", venue: "lighter", market: "BTC-PERP", marketId: 1, effect: "open", side: "short",
+        reduceOnly: false, baseAmount: 23n, worstPrice: 825_850n, markPrice: 830_000n, notionalUsdg: 19_090_000n,
+        imfBp: 5_000, stopTrigger: 871_500n, stopPrice: 888_930n,
+      },
+      {
+        kind: "perp-order", venue: "lighter", market: "BTC-PERP", marketId: 1, effect: "close", side: "long",
+        reduceOnly: true, baseAmount: 23n, worstPrice: 817_550n, markPrice: 830_000n, notionalUsdg: 19_090_000n,
+      },
+      { kind: "perp-margin", direction: "deposit", target: ROUTER, amountUsdg: 10_000_000n },
+      { kind: "perp-margin", direction: "withdraw", amountUsdg: 10_000_000n },
+    ];
+    for (const intent of perps) {
+      const r = applyPaperIntent(intent, book(), [], OPTS);
+      assert.equal(r.ok, false, intent.kind);
+      assert.equal(r.ok ? null : r.reason, "handled by the perp lane");
+      assert.deepEqual(r.book, book(), "the spot book is untouched");
+    }
+  });
+});

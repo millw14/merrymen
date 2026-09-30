@@ -138,6 +138,14 @@ describe("every rule the wall can return has been looked at", () => {
     for (const m of battery.matchAll(/expectedRule:\s*"([a-z][a-z-]+)"/g)) {
       const rule = m[1]!;
       if (Object.prototype.hasOwnProperty.call(UNPUBLISHED, rule)) continue;
+      // THE BATTERY IS READ BY ITS OWNER, not the public: the perp rules it
+      // pins are withheld from the public register (docs/perps.md rule 17) and
+      // still need words, which for them are the OWNER's — held to a sentence
+      // and a remedy by the test above. Words are the requirement, either way.
+      if (Object.prototype.hasOwnProperty.call(WITHHELD_REJECT_RULES, rule)) {
+        assert.ok(ownerRejectRuleLabel(rule), `the battery expects ${rule}; its owner has no words for it`);
+        continue;
+      }
       assert.ok(REJECT_RULES.includes(rule), `the battery expects ${rule}; the vocabulary has no words for it`);
     }
   });

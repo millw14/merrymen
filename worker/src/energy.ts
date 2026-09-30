@@ -312,9 +312,39 @@ export function enforcedCap(plan: EnergyPlan, field: "reviews" | "entries", nowS
  * is housekeeping, reversible, and would otherwise spend a two-entry day on
  * parking cash. Nor does a curve SALE out of a leg the book holds, back into
  * that leg's own quote (`sellsHeld`, from sellsHeldLeg below).
+ *
+ * PERPS (docs/perps.md rule 8): an OPEN is an entry — it is the new risk the
+ * gate exists to ration. A reduce, a close, a withdrawal and a claim are
+ * exits by the breaker's own test and never reach the switch. A margin
+ * DEPOSIT is never an entry either, on the vault-deposit precedent: it only
+ * funds an open, and the open it funds is the entry — counting both would
+ * spend two of a low-energy day's entries on one position.
+ *
+ * A SWITCH WITH A `never` DEFAULT, so a kind added to TradeIntent does not
+ * compile until someone decides what it is to the gate.
  */
 export function countsAsEntry(kind: TradeIntent["kind"], isExit: boolean, sellsHeld = false): boolean {
-  return !isExit && !sellsHeld && kind !== "vault-deposit";
+  if (isExit || sellsHeld) return false;
+  switch (kind) {
+    case "vault-deposit":
+    case "perp-margin":
+      return false;
+    case "swap":
+    case "vault-withdraw":
+    case "transfer":
+    case "equity-order":
+    case "curve-trade":
+    case "energy-buy":
+    case "perp-order":
+      return true;
+    default: {
+      // A kind nobody has placed is claimed like an entry: the gate rations
+      // risk, and something unknown is not known to carry none.
+      const unplaced: never = kind;
+      void unplaced;
+      return true;
+    }
+  }
 }
 
 /** A curve leg the book holds: the curve it trades on and the quote it sells back into, lowercase. */

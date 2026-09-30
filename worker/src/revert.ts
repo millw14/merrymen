@@ -484,8 +484,20 @@ export function suppressionLegs(
     | { kind: "swap"; sellToken: string; buyToken: string }
     | { kind: "curve-trade"; assetIn: string; assetOut: string }
     | { kind: "energy-buy"; sellToken: string; buyToken: string }
+    | { kind: "perp-order"; marketId: number; reduceOnly: boolean }
+    | { kind: "perp-margin"; direction: string }
     | { kind: string },
 ): [string | undefined, string | undefined] {
+  // PERPS: THE PERP LANE OWNS EXECUTION, and no perp intent is suppressed by
+  // an EVM revert class. These keys exist so that if one ever is, it is scoped
+  // like a curve pair rather than to the whole venue: an order by its MARKET,
+  // and — the part that matters — by whether it opens or exits. A suppressed
+  // open must never silence the close of the same market (rule 8: an exit is
+  // always attemptable), so the two can never share a key.
+  if (intent.kind === "perp-order" && "marketId" in intent) {
+    return [`market-${intent.marketId}`, intent.reduceOnly ? "exit" : "open"];
+  }
+  if (intent.kind === "perp-margin" && "direction" in intent) return [intent.direction, undefined];
   if (intent.kind === "swap" && "sellToken" in intent) return [intent.sellToken, intent.buyToken];
   // The energy buy has legs too, and one route: a non-retryable revert on it
   // (a tax the token's owner raised past the floor, a pair drained) suppresses

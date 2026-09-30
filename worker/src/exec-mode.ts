@@ -45,6 +45,7 @@ import { TRADEABLE_CHAIN_ID } from "./preflight";
 export type { RefuseRule } from "../../packages/core/src/autonomy";
 export { liveBlockerText } from "../../packages/core/src/autonomy";
 import type { RefuseRule } from "../../packages/core/src/autonomy";
+import type { PerpExposure } from "../../packages/core/src/perps";
 
 export type ExecMode =
   /**
@@ -375,3 +376,150 @@ export function liveBlocker(a: ExecInputs): RefuseRule {
   return "no-cash";
 }
 
+
+// ── perpetuals (docs/perps.md rules 1, 8a, 14) ──────────────────────────────
+
+/**
+ * THE PERPS RAIL — derived from the account's rail, never beside it.
+ *
+ * WHY NOT A SECOND RAIL. The header of this file is about two definitions of
+ * paper that disagreed, and a perps book with its own idea of paper would be a
+ * third. So there is exactly one answer to "is this account real or practice"
+ * — `execModeOf` — and perps ride it:
+ *
+ *   paper account → paper perps (the paper book's cash is the collateral; the
+ *                   breaker, budget rail and high-water mark are the account's
+ *                   own paper ones, unchanged);
+ *   live account  → live perps, or a REFUSAL that names why — NEVER paper. A
+ *                   live account has no simulated perps pot, no second breaker
+ *                   and no second budget rail; an owner who wants to practise
+ *                   perps puts the account on paper. The two per-feature live
+ *                   gates already here (energy's `energy-needs-live`, trencher's
+ *                   live flag) refuse in a non-matching rail rather than
+ *                   simulate, and this is the third.
+ *
+ * THE OPERATOR ONLY RESTRICTS (rule 1): `MERRYMEN_PERPS=off|paper|live` can
+ * take a rail away, never grant one. `paper` lets a paper account practise and
+ * refuses a live one; `off` refuses both. Nothing here can promote an account.
+ *
+ * IT DECIDES OPENS (and deposits) ONLY. Exits follow the venue, not this: see
+ * `perpsExposureKeepsExitsLive` below. That is why `entriesHalted` does NOT
+ * change the answer — halting entries is not a rail. The rail is what exits and
+ * protect.ts sign with and what a paper book keeps simulating stops on, and a
+ * halt that flipped it to `refuse` would stop exactly the machinery the halt
+ * promises keeps running. checkPolicy refuses the open (`perp-entries-halted`)
+ * and the report names the blocker; the rail stays what it is.
+ *
+ * ORDER, most fundamental first, on liveBlocker's precedent:
+ *   1. the owner never turned perps on          → off (not a refusal: a choice)
+ *   2. the account itself is refused            → the account's own rule
+ *   3. the operator has perps off               → perp-operator-off
+ *   4. the account is paper                     → paper
+ *   5. real perps not consented                 → perp-live-not-enabled (a
+ *      choice, named ahead of every fault so an owner is never sent to repair
+ *      machinery they did not ask to use)
+ *   6. the operator allows paper only           → perp-operator-off
+ *   7. the grant carries no perps               → perp-not-granted
+ *   8. the venue account is not ready           → perp-venue-unready
+ *   9. otherwise                                → live
+ *
+ * PURE AND TOTAL: exec-mode.test.ts walks every combination.
+ */
+export type PerpsMode =
+  | { mode: "off" }
+  | { mode: "paper" }
+  | { mode: "live" }
+  | { mode: "refuse"; rule: string };
+
+/** The rules perpsModeOf adds beside the account's own RefuseRule. */
+export const PERPS_MODE_RULES = [
+  "perp-live-not-enabled",
+  "perp-not-granted",
+  "perp-venue-unready",
+  "perp-operator-off",
+] as const;
+
+export interface PerpsModeInputs {
+  /** Settings `perpsEnabled` — paper perps, and the first half of real ones. */
+  perpsEnabled: boolean;
+  /** Settings `perpsLiveEnabled` — the separate real-money consent. */
+  perpsLiveEnabled: boolean;
+  /** perpsCeilingFor(tenant): the operator's restriction, never a grant. */
+  ceiling: "off" | "paper" | "live";
+  /** grantPerp(grant) !== null — the wall sealed the perp route. */
+  granted: boolean;
+  /** Deposit landed, account index read, sealed key registered at our index, venue reachable. */
+  venueReady: boolean;
+  /** MERRYMEN_HALT_PERP_ENTRIES / the owner's /flatten. Deliberately not a rail — see above. */
+  entriesHalted: boolean;
+}
+
+export function perpsModeOf(verdict: ExecMode, p: PerpsModeInputs): PerpsMode {
+  if (!p.perpsEnabled) return { mode: "off" };
+  if (verdict.mode === "refuse") return { mode: "refuse", rule: verdict.rule };
+  if (p.ceiling === "off") return { mode: "refuse", rule: "perp-operator-off" };
+  if (verdict.mode === "paper") return { mode: "paper" };
+  // verdict.mode === "live" from here: real money, so every live term counts.
+  if (!p.perpsLiveEnabled) return { mode: "refuse", rule: "perp-live-not-enabled" };
+  if (p.ceiling !== "live") return { mode: "refuse", rule: "perp-operator-off" };
+  if (!p.granted) return { mode: "refuse", rule: "perp-not-granted" };
+  if (!p.venueReady) return { mode: "refuse", rule: "perp-venue-unready" };
+  return { mode: "live" };
+}
+
+/**
+ * DOES THE LIVE VENUE ACCOUNT KEEP THE EXITS-ONLY LANE RUNNING? (rule 8a)
+ *
+ * Venue state, not the spot rail, decides whether perp exits run. Whenever the
+ * live Lighter account shows positions, orders, collateral, pool shares, other
+ * accounts or money in transit — or cannot be read as showing none — the
+ * exits-only lane (reconcile, protect.ts, owner closes, stand-down, withdrawal
+ * and claim) runs with the live key, WHATEVER perpsModeOf, execModeOf,
+ * liveTradingEnabled, perpsLiveEnabled, perpsEnabled, pause or grant expiry
+ * say. It never opens, deposits, raises leverage or adds margin.
+ *
+ * The reason is the one the mixed-mode review found: depositing the account's
+ * last USDG to Lighter reads as `no-cash` and moves the account to paper or
+ * refuse while real leveraged positions stay open at the venue. Keying the
+ * protective loop on the mode would orphan exactly those positions.
+ *
+ * UNKNOWN IS NEVER NONE (rule 11). An unread venue falls back to the LEDGER,
+ * as the contract says; a ledger that could not be read either is unknown, and
+ * unknown keeps the lane running — the lane only ever makes exposure smaller,
+ * and its first act is to read the venue.
+ */
+export function perpsExposureKeepsExitsLive(x: {
+  /** The last venue read of the LIVE Lighter account (core perps.ts PerpExposure). */
+  venue: PerpExposure;
+  /**
+   * What the perp ledger holds for the live venue account, consulted ONLY when
+   * the venue is unread. null = the ledger could not be read either.
+   */
+  ledger: {
+    openPositions: number;
+    openOrders: number;
+    collateralMicro: bigint;
+    inTransitMicro: bigint;
+  } | null;
+}): boolean {
+  const v = x.venue;
+  if (v.kind === "none") return false;
+  if (v.kind === "known") {
+    return (
+      v.openPositions > 0 ||
+      v.openOrders > 0 ||
+      v.collateralMicro !== 0n ||
+      v.pendingWithdrawalsMicro !== 0n ||
+      v.depositsInTransitMicro !== 0n ||
+      v.poolShareCount > 0 ||
+      v.spotBalanceCount > 0 ||
+      v.otherAccounts === null ||
+      v.otherAccounts.count > 0
+    );
+  }
+  // Unread (or a shape this build does not know): the ledger decides, and an
+  // unreadable ledger is unknown, which keeps the doors open.
+  const l = x.ledger;
+  if (l === null) return true;
+  return l.openPositions > 0 || l.openOrders > 0 || l.collateralMicro !== 0n || l.inTransitMicro !== 0n;
+}

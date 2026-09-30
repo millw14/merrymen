@@ -9,6 +9,7 @@
  * index.ts now hands this the intent's description, what the producer knows,
  * and the one namer (decision-name.ts), and writes what comes back.
  */
+import { isPerpKey } from "../../packages/core/src/perps";
 import { provenanceOf, type Provenance } from "./provenance";
 import type { DecisionRow } from "./store";
 
@@ -51,7 +52,12 @@ export async function intentDecisionRow(args: {
     // AND THE BUY'S NAME WHEN THE TAPE HAS FORGOTTEN THE COIN, or the coin's
     // own contract's when a redeploy wiped the buy (decision-name.ts). A name
     // is display only: one that fails costs the name, never the trade.
-    displayName = await args.name(args.agentId, symbol ?? "");
+    //
+    // A PERP MARKET IS NAMED BY ITS KEY, and the namer is never asked: it
+    // resolves coins from the tape, the watch list and the chain, and
+    // `BTC-PERP` is none of those — it is a market on Lighter, whose key is
+    // already its whole name. The perp lane owns execution; this only labels.
+    displayName = symbol !== undefined && isPerpKey(symbol) ? symbol : await args.name(args.agentId, symbol ?? "");
   } catch {
     displayName = null;
   }

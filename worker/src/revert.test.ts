@@ -454,6 +454,24 @@ describe("suppression survives the round trip, for every kind that has legs", ()
     assert.equal(suppressionKey("vault-deposit", ...suppressionLegs(intents[2])), "vault-deposit:->");
   });
 
+  it("PERPS: keyed by kind and market, and an open NEVER shares a key with the close of the same market", () => {
+    // docs/perps.md rule 8: an exit is always attemptable. A suppressed open
+    // silencing the close of the same market would lock the door the rule
+    // promises is open.
+    const key = (i: { kind: "perp-order"; marketId: number; reduceOnly: boolean }) =>
+      suppressionKey(i.kind, ...suppressionLegs(i));
+    const openBtc = key({ kind: "perp-order", marketId: 1, reduceOnly: false });
+    const closeBtc = key({ kind: "perp-order", marketId: 1, reduceOnly: true });
+    const openEth = key({ kind: "perp-order", marketId: 0, reduceOnly: false });
+    assert.notEqual(openBtc, closeBtc);
+    assert.notEqual(openBtc, openEth);
+    assert.equal(openBtc, key({ kind: "perp-order", marketId: 1, reduceOnly: false }), "what is written is what is read");
+    assert.equal(
+      suppressionKey("perp-margin", ...suppressionLegs({ kind: "perp-margin", direction: "deposit" })),
+      "perp-margin:deposit->",
+    );
+  });
+
   it("THE ENERGY BUY NAMES ITS LEGS, and its key never collides with a swap over the same tokens", () => {
     // Legs, not `energy-buy:->`: a suppression is scoped to its pair like every
     // other kind that has one. And the kind is in the key, so a non-retryable
