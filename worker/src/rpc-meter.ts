@@ -271,8 +271,12 @@ export function chainRead(url: string | undefined, label = "read"): Transport {
            * and nothing the provider wrote. A body that cannot be read changes
            * nothing: the status is still raised exactly as before.
            */
-          const body = await response.text().catch(() => "");
-          const quota = saysQuotaExhausted(body.slice(0, 4096));
+          // BOUNDED, and only for a 4xx: a spent quota is a client-error
+          // answer, and a 5xx page is somebody else's HTML of any size. The
+          // prefix reader stops at 4KB and cancels the stream, so an endless or
+          // enormous body costs this process nothing (review on #201).
+          const body = response.status >= 400 && response.status < 500 ? await bodyPrefix(response) : "";
+          const quota = saysQuotaExhausted(body);
           const e = new Error(
             `HTTP request failed. Status: ${response.status}` +
               (response.status === 429 ? " Too Many Requests" : "") +
@@ -368,7 +372,9 @@ async function governedFetch(input: string | URL | Request, init?: RequestInit):
       }
       // The body is read for one fact, and only when the status says there is
       // one to find. It never leaves this line: see rpc-failover's verdictFor.
-      if (!res.ok) verdict = verdictFor(res.status, await res.clone().text().then((t) => t.slice(0, 4096), () => ""));
+      // Bounded, and 4xx only — see `bodyPrefix`. The CLONE is read, so the
+      // response viem receives is untouched.
+      if (!res.ok) verdict = verdictFor(res.status, res.status >= 400 && res.status < 500 ? await bodyPrefix(res.clone()) : "");
     } catch (e) {
       failure = e;
       verdict = "error";
@@ -387,7 +393,10 @@ async function governedFetch(input: string | URL | Request, init?: RequestInit):
       else if (verdict === "answer" && res.ok) markUp(ep);
       return res;
     }
-    // Refused, down or broken, with somewhere else to go: this request moves on.
+    // Refused, down or broken, with somewhere else to go: this request moves on
+    // — and lets go of the answer it is not using, or its connection stays
+    // tied up until the collector gets round to it.
+    discard(res);
     if (holdFor(verdict) > 0) markDown(ep, i, verdict, verdict === "down" ? downReason(res.status) : `HTTP ${res.status}`);
   }
   // Unreachable: the last endpoint always returns or throws.
@@ -413,6 +422,51 @@ function retryAfterFrom(v: string | null): number | null {
   const at = Date.parse(v);
   if (Number.isFinite(at)) return Math.max(0, Math.min(at - Date.now(), 300_000));
   return null;
+}
+
+/** Release a response nobody will read. Never throws. */
+function discard(res: Response): void {
+  void res.body?.cancel().catch(() => {});
+}
+
+/** How much of a refusal's body is ever read. The phrase that matters is in the first line. */
+const BODY_PREFIX_BYTES = 4096;
+
+/**
+ * AT MOST THE FIRST FEW KILOBYTES OF A BODY, then the stream is cancelled.
+ *
+ * `response.text()` buffers and decodes the WHOLE body before anything can
+ * slice it, so an endless error stream or a decompression bomb from any
+ * configured endpoint could hold this process's memory hostage. This reads
+ * chunk by chunk and stops once it has enough. Never throws: a body that cannot
+ * be read says nothing, and the status is still raised as before.
+ */
+async function bodyPrefix(res: Response, max = BODY_PREFIX_BYTES): Promise<string> {
+  const reader = res.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let n = 0;
+  try {
+    while (n < max) {
+      const { value, done } = await reader.read();
+      if (done || !value) break;
+      chunks.push(value);
+      n += value.byteLength;
+    }
+  } catch {
+    /* unreadable says nothing */
+  } finally {
+    void reader.cancel().catch(() => {});
+  }
+  const all = new Uint8Array(Math.min(n, max));
+  let at = 0;
+  for (const c of chunks) {
+    if (at >= all.length) break;
+    const take = c.subarray(0, all.length - at);
+    all.set(take, at);
+    at += take.length;
+  }
+  return new TextDecoder().decode(all);
 }
 
 /** One endpoint a read may go to, and everything this process knows about it. */

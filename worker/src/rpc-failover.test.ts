@@ -43,7 +43,9 @@ const otherChain = defineChain({
 });
 const MONTHLY = "Monthly capacity limit exceeded. Visit https://dashboard.alchemy.com/settings/billing to upgrade your scaling policy for continued service.";
 
-type Behaviour = "ok" | "quota" | "429" | "401" | "500" | "400" | "dead" | "hang";
+type Behaviour = "ok" | "quota" | "429" | "401" | "500" | "400" | "dead" | "hang" | "endless-quota" | "500-unreadable";
+/** What happened to the bodies of the two streaming behaviours. */
+const stream = { pulls: 0, cancelled: 0 };
 const behaviour = new Map<string, Behaviour>();
 const sent: string[] = [];
 const realFetch = globalThis.fetch;
@@ -61,6 +63,8 @@ function answer(body: unknown): Response {
 beforeEach(() => {
   behaviour.clear();
   sent.length = 0;
+  stream.pulls = 0;
+  stream.cancelled = 0;
   warnings = [];
   skew = 0;
   Date.now = () => realNow() + skew;
@@ -77,6 +81,22 @@ beforeEach(() => {
     if (b === "500") return new Response("upstream exploded", { status: 500 });
     if (b === "400") return err(400, "invalid request");
     if (b === "dead") throw new TypeError("fetch failed");
+    if (b === "endless-quota" || b === "500-unreadable") {
+      // A body that never ends: the quota JSON, then filler forever. Reading
+      // it whole would never return; the 500 one fails any read outright.
+      const enc = new TextEncoder();
+      let first = true;
+      const body = new ReadableStream<Uint8Array>({
+        pull(ctl) {
+          stream.pulls += 1;
+          if (b === "500-unreadable") throw new Error("a body nobody should read");
+          ctl.enqueue(enc.encode(first ? JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: 429, message: MONTHLY } }) : "x".repeat(65_536)));
+          first = false;
+        },
+        cancel() { stream.cancelled += 1; },
+      }, { highWaterMark: 0 }); // pull only what is actually read — no prefetch to miscount
+      return new Response(body, { status: b === "500-unreadable" ? 500 : 429, headers: { "content-type": "application/json" } });
+    }
     if (b === "hang") {
       return new Promise<Response>((_, reject) => {
         init?.signal?.addEventListener("abort", () => reject(init.signal!.reason ?? new Error("aborted")));
@@ -232,6 +252,34 @@ describe("a house RPC that will not serve", () => {
     } finally {
       Math.random = realRandom;
     }
+  });
+});
+
+describe("reading a refusal's body", () => {
+  it("AN ENDLESS BODY IS READ ONLY AS FAR AS THE VERDICT, then cancelled", async () => {
+    behaviour.set(HOUSE, "endless-quota");
+    const c = house();
+    assert.equal(await readBlock(c), 16n, "classified as a spent quota and served by the fallback");
+    assert.deepEqual(sent, [HOUSE, PUBLIC]);
+    // The quota line, then at most a filler chunk or two: bounded, not "all of it".
+    assert.ok(stream.pulls <= 4, `read ${stream.pulls} chunks of a body that never ends`);
+    assert.ok(stream.cancelled >= 1, "and the stream was let go");
+  });
+
+  it("and so is one with nowhere to fail over to — the caller still hears it was a spent quota", async () => {
+    behaviour.set(HOUSE, "endless-quota");
+    const alone = createPublicClient({ transport: chainRead(HOUSE) }); // no chain: no fallback
+    const e = await readBlock(alone).then(() => null, (err: unknown) => err);
+    assert.equal(classifyRpcError(e).kind, "quota-exhausted");
+    assert.ok(stream.pulls <= 4, `read ${stream.pulls} chunks`);
+  });
+
+  it("A 5xx BODY IS NEVER READ — it is somebody else's error page, of any size", async () => {
+    behaviour.set(HOUSE, "500-unreadable");
+    const c = house();
+    assert.equal(await readBlock(c), 16n);
+    assert.deepEqual(sent, [HOUSE, PUBLIC]);
+    assert.equal(stream.pulls, 0);
   });
 });
 
