@@ -31,6 +31,7 @@ Rules for this directory:
 | `fundings.1.json` | `GET /api/v1/fundings?market_id=1&resolution=1h&…` — 4 hourly rows | 2026-09-29 16:05 |
 | `fundings.2.json` | `GET /api/v1/fundings?market_id=2&resolution=1h&…` — 48 hourly rows | 2026-09-29 16:05 |
 | `markPriceCandles.1.1h.json` | candle rows from `GET /api/v1/markPriceCandles?market_id=1&resolution=1h&start_timestamp=…&end_timestamp=…&count_back=500` (the spike's `fetch.py`), the last 120 BTC rows. The rows are verbatim; `fetch.py` kept only the `c` array, so the `{"code":200,"r":"1h","c":[…]}` envelope is re-assembled around them in the endpoint's documented shape | 2026-09-29 15:43 |
+| `markPriceCandles.1.4h.json` | `GET /api/v1/markPriceCandles?market_id=1&resolution=4h&start_timestamp=1788558587&end_timestamp=1790718587&count_back=150` (BTC), one read-only GET, verbatim with its envelope. 150 rows on the 4 h grid; the LAST (`t` 1790712000000) was the candle still in progress at capture — the one perp-trend must drop. Rows carry an extra `sc` (sample count) the parser ignores. Used by `feed-history.test.ts` and `perp-trend.test.ts` | 2026-09-29 21:49:47 |
 | `tx.1d806b89.json` | `GET /api/v1/tx?by=hash&value=1d806b89…` — CreateOrder with SkipNonce; signer known-answer vector 1 | 2026-09-29 15:45 |
 | `tx.43de174b.json` | `GET /api/v1/tx?by=hash&value=43de174b…` — CreateOrder without attributes; signer known-answer vector 2 | 2026-09-29 15:42 |
 | `recentTrades.1.json` | `GET /api/v1/recentTrades?market_id=1` — its first trade is `tx.43de174b`'s fill (account 26085, ask, taker) | 2026-09-29 15:42 |

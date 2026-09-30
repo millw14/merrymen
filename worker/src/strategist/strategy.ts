@@ -8,11 +8,27 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { liqDistanceBps, type PerpKey } from "../../../packages/core/src/perps";
+import type { PerpRouteIntent } from "../perps/route";
 import type { TradeIntent } from "../policy";
-import { breakerIdle, energyEntriesSpent, type Snapshot, type Strategy, type Tick } from "../strategies/types";
+import { breakerIdle, energyEntriesSpent, type PerpsView, type Snapshot, type Strategy, type Tick } from "../strategies/types";
 import type { Why } from "../strategies/reasons";
-import { parseProposals, proposalsToIntents, type ProposedAction, type StrategistUniverse, type ValidationResult } from "./proposals";
-import type { ProposalDriver, Signals } from "./driver";
+import {
+  PERP_STOP_FLOOR_PCT,
+  parsePerpProposals,
+  parseProposals,
+  perpActionLabel,
+  proposalsToIntents,
+  proposalsToPerpIntents,
+  type PerpBoundaryCaps,
+  type PerpBoundarySettings,
+  type PerpProposal,
+  type PerpValidationResult,
+  type ProposedAction,
+  type StrategistUniverse,
+  type ValidationResult,
+} from "./proposals";
+import { nullDriver, perpKeysOf, type PerpSignals, type ProposalDriver, type Signals } from "./driver";
 import { runDesk, type DeskLink, type DeskPeer, type DeskWorld } from "./desk";
 import type { LlmCreds } from "../llm";
 
@@ -21,7 +37,8 @@ import type { LlmCreds } from "../llm";
  * agent_id and persists it, so this module stays DB-free and unit-testable. */
 export interface StrategistDecision {
   id: string;
-  source: "strategist";
+  /** `perp:strategist` for perp actions — withheld from publication (docs/perps.md rule 17). */
+  source: "strategist" | "perp:strategist";
   strategy: string;
   provider?: string;
   model?: string;
@@ -102,6 +119,31 @@ export interface LlmStrategistConfig {
   provider?: string;
   model?: string;
   /**
+   * PERPETUALS, WHEN THE OWNER MADE THE STRATEGIST THEIR PERPS DRIVER
+   * (docs/perps.md, "The perps route"; rule 15).
+   *
+   * Offered in a window ONLY when all of: this is present, the driver is a
+   * real model (never the null driver), `perpsEnabled`, `perpsDriver ===
+   * "strategist"`, and Lighter was read (`snap.perps` is a view). Otherwise the
+   * Signals, the tool schema and the system prompt are exactly today's.
+   *
+   * The survivors of proposalsToPerpIntents are journaled here under
+   * `perp:strategist` and handed to the perps route through `deliver` — they
+   * are NOT returned as this strategy's intents: the route alone orders perp
+   * exits before the one entry and keeps one writer per book.
+   */
+  perps?: {
+    /** Re-read every window. */
+    settings: () => PerpBoundarySettings;
+    /**
+     * This window's survivors, decisionIds stamped — a ONE-SHOT handoff: the
+     * lane passes them to runPerpRoute on this tick and then clears them, so
+     * they are never re-sent on the ticks between windows. Called on every
+     * window that offered perps, with [] when nothing survived.
+     */
+    deliver: (intents: PerpRouteIntent[]) => void;
+  };
+  /**
    * RESEARCH INSTEAD OF GUESSING.
    *
    * When present the window runs a bounded tool loop — the model can pull
@@ -130,11 +172,92 @@ export interface LlmStrategistConfig {
   };
 }
 
+/**
+ * Does model prose talk about perps? In a window that offered them, a spot
+ * reason or a thesis that does would carry perps into a PUBLISHED row (rule
+ * 17), so it is kept private instead. Deliberately broad — "short-term" trips
+ * it, and the cost of that is one private row, not a leak.
+ */
+export function mentionsPerps(text: string): boolean {
+  return /-PERP\b|\bperp|\bleverag|\bliquidat|\bshort(?:s|ed|ing)?\b|\bfunding\b|\blighter\b|\bmargin\b/i.test(text);
+}
+
 /** Two decimals is plenty for a dollar figure the model reasons about, and it
  * keeps long floats out of a prompt with a fixed token budget. */
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-function buildSignals(snap: Snapshot, universe: StrategistUniverse, at: Date, stopLossBps = 0): Signals {
+/** A venue integer price as a decimal, for a model to read (never sent back: the boundary rebuilds from integers). */
+function priceNum(p: bigint, priceDecimals: number): number {
+  return Number(p) / 10 ** priceDecimals;
+}
+
+/**
+ * The perp block of Signals for a window that offers perps. Markets are the
+ * owner's allowed ones that were read, plus any market a position is held in
+ * (an owner who un-ticks a market while holding it keeps its exit). Numbers
+ * and enums only — no market ids, no venue integers, no addresses.
+ */
+export function buildPerpSignals(
+  view: PerpsView,
+  settings: PerpBoundarySettings,
+  maxPerOpenMicro: bigint,
+  nowSec: number,
+): PerpSignals {
+  const usd = (micro: bigint) => round2(Number(micro) / 1e6);
+  const allowed = new Set<string>(settings.perpsMarkets);
+  const markets: PerpSignals["markets"] = [];
+  for (const m of view.markets.values()) {
+    if (!allowed.has(m.key) && !view.positions.has(m.key)) continue;
+    markets.push({
+      key: m.key,
+      mark: priceNum(m.markPrice, m.spec.priceDecimals),
+      index: m.indexPrice === null ? null : priceNum(m.indexPrice, m.spec.priceDecimals),
+      fundingPctPerHour: m.fundingPpmPerHour === null ? null : m.fundingPpmPerHour / 10_000,
+      status: m.status,
+      leverage: m.leverage,
+      minOrderUsdg: usd(m.effMinNotionalMicro),
+    });
+  }
+  const positions: PerpSignals["positions"] = [];
+  for (const p of view.positions.values()) {
+    const m = view.markets.get(p.key);
+    const pd = m?.spec.priceDecimals;
+    if (pd === undefined) continue; // a position whose market was not read has no prices to show; protect.ts reads it itself
+    let dist: number | null = null;
+    try {
+      const bps = liqDistanceBps({ side: p.side, markPrice: p.markPrice, liqPrice: p.liqPrice });
+      dist = bps === null ? null : bps / 100;
+    } catch {
+      dist = null;
+    }
+    positions.push({
+      key: p.key,
+      side: p.side,
+      notionalUsdg: usd(p.notionalMicro),
+      entry: priceNum(p.entryPrice, pd),
+      mark: priceNum(p.markPrice, pd),
+      unrealizedPnlUsdg: usd(p.unrealizedMicro),
+      liqPrice: p.liqPrice === null ? null : priceNum(p.liqPrice, pd),
+      liqDistancePct: dist,
+      stopPrice: p.stop !== null && p.stop.resting ? priceNum(p.stop.trigger, pd) : null,
+      fundingUsdg: usd(p.fundingMicro),
+      heldHours: Math.max(0, Math.floor((nowSec - p.openedAtSec) / 3600)),
+    });
+  }
+  return {
+    collateralUsdg: usd(view.account.collateralMicro),
+    freeCollateralUsdg: usd(view.account.freeCollateralMicro),
+    openNotionalLeftUsdg: usd(view.headroom.openNotionalLeftMicro > 0n ? view.headroom.openNotionalLeftMicro : 0n),
+    maxPerOpenUsdg: usd(maxPerOpenMicro > 0n ? maxPerOpenMicro : 0n),
+    minStopPct: PERP_STOP_FLOOR_PCT,
+    maxStopPct: settings.perpsStopLossPct,
+    opensLeftToday: Math.max(0, view.headroom.opensLeftToday),
+    markets,
+    positions,
+  };
+}
+
+function buildSignals(snap: Snapshot, universe: StrategistUniverse, at: Date, stopLossBps = 0, perps?: PerpSignals): Signals {
   // ── WHAT THE MODEL IS ALLOWED TO NAME ─────────────────────────────────
   //
   // BOTH VENUES, and it used to be one. `tradableSymbols` and the price list
@@ -211,6 +334,9 @@ function buildSignals(snap: Snapshot, universe: StrategistUniverse, at: Date, st
         }));
       return rows.length > 0 ? { depth: rows } : {};
     })(),
+    // LAST, and only when offered: every key above keeps its place, so a
+    // window without perps serialises exactly as it always has.
+    ...(perps ? { perps } : {}),
   };
 }
 
@@ -240,21 +366,80 @@ export function capEntries(
   proposals: readonly ProposedAction[],
   universe: StrategistUniverse,
   snap: Snapshot,
-): ValidationResult & { kept: readonly ProposedAction[]; withheld: number } {
+): ValidationResult & { kept: readonly ProposedAction[]; withheld: number };
+export function capEntries(
+  proposals: readonly ProposedAction[],
+  universe: StrategistUniverse,
+  snap: Snapshot,
+  perps: PerpEntryInput,
+): ValidationResult & { kept: readonly ProposedAction[]; withheld: number; perp: PerpValidationResult & { kept: readonly PerpProposal[]; withheld: number } };
+export function capEntries(
+  proposals: readonly ProposedAction[],
+  universe: StrategistUniverse,
+  snap: Snapshot,
+  perps?: PerpEntryInput,
+): ValidationResult & { kept: readonly ProposedAction[]; withheld: number; perp?: PerpValidationResult & { kept: readonly PerpProposal[]; withheld: number } } {
   const left = snap.energy?.entriesLeft;
   const cap = typeof left === "number" && Number.isFinite(left) ? Math.max(0, Math.floor(left)) : null;
   let kept = proposals;
   let withheld = 0;
+  let spot: ValidationResult;
   for (;;) {
     const v = proposalsToIntents(kept, universe, snap);
-    if (cap === null) return { ...v, kept, withheld };
     // accepted[i] IS the proposal object that produced intents[i], so identity
     // names exactly the extras and nothing else.
-    const extra = new Set(v.accepted.filter((a) => a.action === "buy").slice(cap));
-    if (extra.size === 0) return { ...v, kept, withheld };
+    const extra = cap === null ? new Set<ProposedAction>() : new Set(v.accepted.filter((a) => a.action === "buy").slice(cap));
+    if (extra.size === 0) {
+      spot = v;
+      break;
+    }
     kept = kept.filter((a) => !extra.has(a));
     withheld += extra.size;
   }
+  if (!perps) return { ...spot, kept, withheld };
+
+  // ── A PERP OPEN IS AN ENTRY TOO ─────────────────────────────────────────
+  //
+  // Counted against the SAME allowance, after the spot buys the model put
+  // first, and by the same rule: validate, then withhold the extras by
+  // identity and validate again, so a withheld open never keeps the collateral
+  // or open-size room a later open is judged against. Keyed on
+  // effect === "open", never on a word: a perp short is not a "buy" and is
+  // still a new position. Reduces and closes are exits and never counted. The
+  // window's action slots are shared with spot: what spot used, opens cannot.
+  const spotBuys = spot.accepted.filter((a) => a.action === "buy").length;
+  const perpCap = cap === null ? null : Math.max(0, cap - spotBuys);
+  const slots = Math.max(0, universe.maxActionsPerTick - spot.intents.length);
+  // The day's spend is one pot: what the kept spot buys will spend is not
+  // there for a perp open (an open's notional counts against dailyUsdg, rule 6).
+  let spotSpend = 0n;
+  for (let i = 0; i < spot.intents.length; i++) {
+    const it = spot.intents[i];
+    if (spot.accepted[i]?.action === "buy" && it !== undefined && "notionalUsdg" in it) spotSpend += it.notionalUsdg;
+  }
+  const spend = perps.caps.spendHeadroomMicro;
+  const caps: PerpBoundaryCaps = {
+    ...perps.caps,
+    spendHeadroomMicro: spend === null ? null : spend > spotSpend ? spend - spotSpend : 0n,
+    maxOpens: perps.caps.maxOpens === undefined ? slots : Math.min(perps.caps.maxOpens, slots),
+  };
+  let pKept: readonly PerpProposal[] = perps.proposals;
+  let pWithheld = 0;
+  for (;;) {
+    const v = proposalsToPerpIntents(pKept, perps.view, perps.settings, caps);
+    const extra = perpCap === null ? new Set<PerpProposal>() : new Set(v.accepted.filter((a) => a.effect === "open").slice(perpCap));
+    if (extra.size === 0) return { ...spot, kept, withheld, perp: { ...v, kept: pKept, withheld: pWithheld } };
+    pKept = pKept.filter((a) => !extra.has(a));
+    pWithheld += extra.size;
+  }
+}
+
+/** The perp half of a window, for capEntries. */
+export interface PerpEntryInput {
+  proposals: readonly PerpProposal[];
+  view: PerpsView | null | undefined;
+  settings: PerpBoundarySettings;
+  caps: PerpBoundaryCaps;
 }
 
 export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
@@ -415,7 +600,21 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       // every window for as long as the breaker stays tripped.
       const brake = breakerIdle(snap);
       const braked: Tick | null = brake ? { intents: [], why: [], idle: brake } : null;
-      if (braked && snap.holdings.size === 0) return braked;
+
+      // ── PERPS, WHEN THIS STRATEGIST DRIVES THEM ─────────────────────────
+      //
+      // Offered only with a real model, perps on, the strategist as the perps
+      // driver, and Lighter READ. Unread is not offered: a close cannot be
+      // sized off a position nobody read, and protect.ts is what acts in the
+      // dark. And FLAT means flat on both books: an agent holding only a perp
+      // must still be asked under the breaker or on a spent day — it may want
+      // to close, and the breaker is a brake on taking risk, never a lock on
+      // the doors.
+      const perpSettings = cfg.perps && cfg.driver !== nullDriver ? cfg.perps.settings() : null;
+      const perpView =
+        perpSettings !== null && perpSettings.perpsEnabled && perpSettings.perpsDriver === "strategist" && snap.perps ? snap.perps : null;
+      const flat = snap.holdings.size === 0 && !(perpView !== null && perpView.positions.size > 0);
+      if (braked && flat) return braked;
 
       if (lastDecisionAt !== null && t - lastDecisionAt < cfg.decisionIntervalMs) return braked ?? [];
 
@@ -431,7 +630,7 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       // nothing is stamped and the next tick asks again; the claim is a counter
       // read, so asking is free. Below the floor and the ceiling on purpose:
       // those are exits and never wait on an allowance.
-      if (energyEntriesSpent(snap) && snap.holdings.size === 0) return braked ?? [];
+      if (energyEntriesSpent(snap) && flat) return braked ?? [];
       if (cfg.claimWindow && !(await cfg.claimWindow())) return braked ?? [];
       lastDecisionAt = t;
 
@@ -476,13 +675,26 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
           : {}),
       };
 
-      const signals = buildSignals(snap, universeNow, new Date(t), cfg.stopLossBps ?? 0);
+      // The perp block, sized to the same ceilings the boundary will hold the
+      // answer to. Offered only if it names at least one market.
+      let perpSignals: PerpSignals | undefined;
+      if (perpView !== null && perpSettings !== null) {
+        const ceil = [BigInt(Math.round(perpSettings.perpsPerTradeUsdg * 1e6)), snap.perTradeCapUsdg, universeNow.maxPerActionUsdg, perpView.headroom.perTradeNotionalMicro].reduce(
+          (a, b) => (b < a ? b : a),
+        );
+        const ps = buildPerpSignals(perpView, perpSettings, ceil, Math.floor(t / 1000));
+        if (perpKeysOf(ps).length > 0) perpSignals = ps;
+      }
+      const perpsOffered = perpSignals !== undefined;
+
+      const signals = buildSignals(snap, universeNow, new Date(t), cfg.stopLossBps ?? 0, perpSignals);
 
       // THE VIEW, when the desk ran. Empty on the one-shot path, and empty
       // whenever the desk failed to finish — an unfinished session is not a
       // decision and must not be published as one.
       let thesis = "";
       let actions: import("./proposals").ProposedAction[];
+      let perpActions: PerpProposal[] = [];
       let malformed = 0;
 
       if (cfg.desk) {
@@ -493,6 +705,29 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
         // future window with the book as it looked when the worker booted.
         const world: DeskWorld = {
           async lookUp(symbol: string) {
+            // A PERP KEY IS ANSWERED FROM THE PERP BOOK, never as a spot symbol
+            // ("you hold none of it" about a leveraged position is false).
+            if (/-PERP$/i.test(symbol)) {
+              const ps = signals.perps;
+              if (!ps) return `${symbol}: a perpetual market, not a spot symbol — perps are not yours to act on this window`;
+              const m = ps.markets.find((x) => x.key === symbol);
+              const pos = ps.positions.find((x) => x.key === symbol);
+              const lines = [`${symbol} (perpetual on Lighter):`];
+              lines.push(
+                m
+                  ? `  mark ${m.mark}, ${m.status}, leverage ${m.leverage}x (the owner's setting), smallest order ${m.minOrderUsdg} USDG, ` +
+                      (m.fundingPctPerHour === null ? `funding not read` : `funding ${m.fundingPctPerHour}%/h (positive: longs pay)`)
+                  : `  not one of the markets offered this window`,
+              );
+              lines.push(
+                pos
+                  ? `  you hold a ${pos.side} of ${pos.notionalUsdg} USDG from ${pos.entry}, P&L ${pos.unrealizedPnlUsdg} USDG, ` +
+                      `liquidation ${pos.liqPrice ?? "none"}${pos.liqDistancePct === null ? "" : ` (${pos.liqDistancePct}% away)`}, ` +
+                      `stop ${pos.stopPrice ?? "NOT seen resting"}, funding ${pos.fundingUsdg} USDG, held ${pos.heldHours}h`
+                  : `  you hold no position there`,
+              );
+              return lines.join("\n");
+            }
             const p = signals.prices.find((x) => x.symbol === symbol);
             const h = signals.holdings.find((x) => x.symbol === symbol);
             const d = signals.depth?.find((x) => x.symbol === symbol);
@@ -528,6 +763,7 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
           note,
         });
         actions = r.actions;
+        perpActions = perpsOffered ? r.perpActions : [];
         thesis = r.thesis;
         note("ok", `desk: ${r.steps} model call(s), ${actions.length} action(s) proposed`);
       } else {
@@ -542,6 +778,13 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
         actions = parsed.actions;
         malformed = parsed.malformed;
         if (malformed > 0) note("warn", `strategist emitted ${malformed} malformed action(s) — dropped`);
+        // Read only when OFFERED: perpActions invented in a window without
+        // them are something nobody asked for.
+        if (perpsOffered) {
+          const pp = parsePerpProposals(raw);
+          perpActions = pp.actions;
+          if (pp.malformed > 0) note("warn", `strategist emitted ${pp.malformed} malformed perp action(s) — dropped`);
+        }
       }
 
       // HOLDING UNDER THE BREAKER, the model was asked because it may want to
@@ -559,9 +802,27 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       // are withheld here, counted in the same note, never journaled.
       const energySpent = energyEntriesSpent(snap);
       const allowed = brake || energySpent ? actions.filter((a) => a.action !== "buy") : actions;
-      const capped = capEntries(allowed, universeNow, snap);
-      const withheld = actions.length - allowed.length + capped.withheld;
+      // A perp OPEN is a new position whatever its side — keyed on the effect,
+      // never on the word "buy". Reduces and closes are exits: never withheld.
+      const allowedPerp = brake || energySpent ? perpActions.filter((a) => a.effect !== "open") : perpActions;
+      const capped: ValidationResult & {
+        kept: readonly ProposedAction[];
+        withheld: number;
+        perp?: PerpValidationResult & { kept: readonly PerpProposal[]; withheld: number };
+      } =
+        perpsOffered && perpSettings !== null
+          ? capEntries(allowed, universeNow, snap, {
+              proposals: allowedPerp,
+              view: perpView,
+              settings: perpSettings,
+              caps: { perTradeSealedMicro: snap.perTradeCapUsdg, maxPerActionMicro: universeNow.maxPerActionUsdg, spendHeadroomMicro: snap.spendHeadroomUsdg },
+            })
+          : capEntries(allowed, universeNow, snap);
+      const perp = capped.perp ?? null;
+      const perpWithheld = perpActions.length - allowedPerp.length + (perp?.withheld ?? 0);
+      const withheld = actions.length - allowed.length + capped.withheld + perpWithheld;
       const { intents, accepted, rejected } = capped;
+      const routeIntents: PerpRouteIntent[] = perp ? perp.intents.map((d) => ({ ...d })) : [];
 
       // Journal the decision BEFORE the intent leaves for the policy wall: every
       // survivor gets a decisionId stamped onto its intent (so the resulting trade
@@ -576,10 +837,36 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
           if (!intent || !a) continue; // parallel arrays — invariant, but keep TS + runtime safe
           const id = randomUUID();
           intent.decisionId = id;
-          await cfg.onDecision({ ...base, id, symbol: a.symbol, action: a.action, size_usdg: a.sizeUsdg, reason: a.reason });
+          // In a window that offered perps, a spot reason that talks about them
+          // would carry perps into a published row (rule 17): kept private.
+          const reason = perpsOffered && mentionsPerps(a.reason) ? "" : a.reason;
+          await cfg.onDecision({ ...base, id, symbol: a.symbol, action: a.action, size_usdg: a.sizeUsdg, reason });
         }
         for (const r of rejected) {
           await cfg.onDecision({ ...base, id: randomUUID(), dropped_rule: r });
+        }
+        // THE PERP DECISIONS, under their own withheld source (rule 17): the
+        // action is open-long / close-short…, never buy or sell; the symbol is
+        // the market key; the size is the notional the boundary built.
+        if (perp) {
+          const pbase = { ...base, source: "perp:strategist" as const };
+          for (let i = 0; i < routeIntents.length; i++) {
+            const intent = routeIntents[i];
+            const a = perp.accepted[i];
+            if (!intent || !a) continue;
+            const id = randomUUID();
+            intent.decisionId = id;
+            await cfg.onDecision({ ...pbase, id, symbol: intent.market, action: perpActionLabel(intent), size_usdg: Number(intent.notionalUsdg) / 1e6, reason: a.reason });
+          }
+          for (const d of perp.dropped) {
+            await cfg.onDecision({
+              ...pbase,
+              id: randomUUID(),
+              symbol: d.proposal.market,
+              action: `${d.proposal.effect}-${d.proposal.side}`,
+              dropped_rule: `${d.why}: ${d.detail}`,
+            });
+          }
         }
         // THE VIEW ITSELF, as its own row.
         //
@@ -590,20 +877,38 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
         // the row that lets it speak without trading, and it carries no symbol
         // or action because it is about the book, not about one name.
         if (thesis) {
-          await cfg.onDecision({ ...base, id: randomUUID(), reason: thesis });
+          // A view that talks about perps is the owner's, not the public's.
+          const src = perpsOffered && mentionsPerps(thesis) ? ("perp:strategist" as const) : base.source;
+          await cfg.onDecision({ ...base, source: src, id: randomUUID(), reason: thesis });
         }
       }
+      // To the perps route — once, this tick; the route orders them.
+      if (perpsOffered && cfg.perps) cfg.perps.deliver(routeIntents);
 
       if (thesis) note("ok", `strategist: ${thesis}`);
       if (withheld > 0) {
         note(
           "ok",
-          brake
-            ? `strategist: ${withheld} buy proposal(s) withheld — the drawdown breaker is tripped; sells still run`
-            : `strategist: ${withheld} buy proposal(s) withheld — today's energy for new trades is used up; sells still run`,
+          perpWithheld === 0
+            ? brake
+              ? `strategist: ${withheld} buy proposal(s) withheld — the drawdown breaker is tripped; sells still run`
+              : `strategist: ${withheld} buy proposal(s) withheld — today's energy for new trades is used up; sells still run`
+            : brake
+              ? `strategist: ${withheld} new position(s) withheld — the drawdown breaker is tripped; sells and perp closes still run`
+              : `strategist: ${withheld} new position(s) withheld — today's energy for new trades is used up; sells and perp closes still run`,
         );
       }
       for (const r of rejected) note("warn", `strategist proposal dropped: ${r}`);
+      for (const d of perp?.dropped ?? []) {
+        note("warn", `strategist perp proposal dropped: ${d.proposal.effect}-${d.proposal.side} ${d.proposal.market} — ${d.detail}`);
+      }
+      for (let i = 0; i < routeIntents.length; i++) {
+        const it = routeIntents[i];
+        const a = perp?.accepted[i];
+        if (it && a) {
+          note("ok", `strategist: ${perpActionLabel(it)} ${it.market} ${(Number(it.notionalUsdg) / 1e6).toFixed(2)} USDG${a.reason ? ` — ${a.reason}` : ""}`);
+        }
+      }
       // What was KEPT — a withheld buy is announced only as a count, above.
       for (const a of capped.kept) {
         if (a.action !== "hold" && a.reason) {
@@ -633,11 +938,15 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       // UNDER THE BREAKER the reason is the breaker, thesis or not: that is why
       // nothing went out, and it is the owner's sentence only (publishesIdle),
       // so it cannot be the second public row for one silence.
+      //
+      // PERPS NEVER REACH THIS COUNT (rule 17): `model-held` publishes, and a
+      // count that included perp actions would say the account trades them. A
+      // window whose only output went to the perps route says nothing here.
       const held = actions.filter((a) => a.action === "hold").length;
       const idle: Why | undefined =
         intents.length === 0 && brake
           ? brake
-          : intents.length === 0 && !thesis && (actions.length > 0 || rejected.length > 0)
+          : intents.length === 0 && !thesis && routeIntents.length === 0 && (actions.length > 0 || rejected.length > 0)
             ? { code: "model-held", held, considered: actions.length, dropped: rejected.length }
             : undefined;
       return idle ? { intents, why: intents.map(() => null), idle } : intents;

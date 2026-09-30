@@ -35,6 +35,14 @@
  *                      null for anything stale, so the fail-closed path is the
  *                      short one to write. Options can only TIGHTEN these
  *                      limits: a caller asking for 60 s gets 30.
+ *   HISTORY IS A THIRD The perps route's closed 4 h candles and hourly
+ *   CLOCK              fundings are handed out only while CURRENT at the
+ *                      reader's own clock (usableClosedCandles,
+ *                      usableFunding8h): a candle that has not closed yet is
+ *                      dropped, a run with a gap is cut at the gap, fewer than
+ *                      100 contiguous candles is null, and so is a history the
+ *                      writer stopped refreshing. Null is "unread", which opens
+ *                      nothing — it is never "a quiet market".
  */
 
 import { readFileSync, statSync } from "node:fs";
@@ -79,6 +87,46 @@ export interface FeedSpecJson {
 export type FeedLevelJson = [price: string, size: string];
 
 /**
+ * One CLOSED 4 h mark-price candle: `t` is its OPEN time in ms (the venue's own
+ * `t`), prices are venue integers at the market's price decimals, as strings.
+ */
+export interface FeedCandleJson {
+  t: number;
+  o: string;
+  h: string;
+  l: string;
+  c: string;
+}
+
+/**
+ * One SETTLED hourly funding payment as `/api/v1/fundings` renders it: `t` in
+ * unix SECONDS (on the hour), `rate` percent per hour with ≤ 4 dp, `direction`
+ * the side that PAYS.
+ */
+export interface FeedFundingJson {
+  t: number;
+  rate: string;
+  direction: "long" | "short";
+}
+
+/** The candle width perp-trend reads (docs/perps.md, the perps route). */
+export const FEED_CANDLE_MS = 14_400_000;
+/** How many closed candles a signal needs, contiguous (the perps route: ≥ 100). */
+export const FEED_MIN_CANDLES = 100;
+/** The most the file carries per market: count_back 150 minus the one in progress, with room. */
+export const FEED_MAX_CANDLES = 500;
+/** Hourly fundings the route averages (the perps route: the last 8). */
+export const FEED_FUNDING_HOURS = 8;
+/**
+ * How long after the NEXT candle closes the last one still counts as current.
+ * The writer refreshes at close + 60 s; this absorbs a retry or two and a slow
+ * venue. Past it, the candles are a signal from a market that has moved on.
+ */
+export const FEED_CANDLE_GRACE_MS = 15 * 60_000;
+/** The same for the hourly fundings, refreshed at the hour + 90 s. */
+export const FEED_FUNDING_GRACE_SEC = 15 * 60;
+
+/**
  * One market as the file carries it. Every venue number is an INTEGER at the
  * market's own precision (price × 10^priceDecimals, size × 10^sizeDecimals),
  * written as a decimal string. Each part carries its own observation time,
@@ -116,6 +164,19 @@ export interface LighterFeedFileMarket {
   /** ms: when this book was last known current. */
   bookObservedAt: number;
   bookSource: "ws" | "rest";
+  /**
+   * CLOSED 4 h mark candles, oldest first — only for the perps route's
+   * universe (PERP_TREND_UNIVERSE) while in use, and never the one in
+   * progress: every `t + 4h` is at or before `candlesObservedAt`. Absent when
+   * not fetched. Present only together with `candlesObservedAt`.
+   */
+  closed4h?: FeedCandleJson[];
+  /** ms: when those candles were fetched (the moment the request went out). */
+  candlesObservedAt?: number;
+  /** The last settled hourly fundings, oldest first; with `fundingsObservedAt`. */
+  fundings1h?: FeedFundingJson[];
+  /** ms: when those fundings were fetched. */
+  fundingsObservedAt?: number;
 }
 
 export interface LighterFeedFile {
@@ -173,6 +234,26 @@ export interface PerpFeedMarket {
   asks: DepthLevel[];
   bookObservedAt: number;
   bookSource: "ws" | "rest";
+  /**
+   * CLOSED 4 h mark candles a signal may be read from, oldest first, or NULL.
+   *
+   * Null unless ALL of: the file carries them; at least FEED_MIN_CANDLES of
+   * them, closed as of the reader's clock, form a contiguous run spaced
+   * exactly FEED_CANDLE_MS ending at the last one; and the last one is still
+   * current (the next candle closed less than FEED_CANDLE_GRACE_MS ago). Only
+   * that contiguous run is handed out, so paper, live and tests read the same
+   * window. Null is `perp-signal-unread` — never "no history", and never a
+   * reason to synthesize candles from tick samples.
+   */
+  closed4h: readonly { t: number; o: bigint; h: bigint; l: bigint; c: bigint }[] | null;
+  /**
+   * The last FEED_FUNDING_HOURS settled hourly fundings, oldest first, SIGNED
+   * in parts per million per hour — positive means longs pay (the sign
+   * PerpMarketView uses) — or NULL: not carried, fewer than eight, not
+   * contiguous hours, the latest too old, or a negative venue rate (whose sign
+   * convention has never been observed, so it is unread rather than guessed).
+   */
+  funding8h: readonly { atSec: number; ppmPerHour: number }[] | null;
   /** Prices (and spec) fresh enough to open against: `!stale.has(marketId)`. */
   fresh: boolean;
   /** Book fresh enough for a paper fill to walk: `!staleBooks.has(marketId)`. */
@@ -315,6 +396,132 @@ function parseSide(raw: unknown, dir: "bids" | "asks"): DepthLevel[] | null {
   return out;
 }
 
+// ── candle and funding history ──────────────────────────────────────────────
+
+export type FeedCandle = { t: number; o: bigint; h: bigint; l: bigint; c: bigint };
+/** A settled hourly payment as the file carried it: the venue's rate in ppm (it may be negative — unread downstream) and the paying side. */
+export type FeedFundingRow = { atSec: number; ratePpm: number; direction: "long" | "short" };
+
+/** What a market entry's history parsed to. Currency is judged at read time, not here. */
+export interface FeedHistory {
+  candles: { observedAt: number; rows: FeedCandle[] } | null;
+  fundings: { observedAt: number; rows: FeedFundingRow[] } | null;
+}
+
+/** The most hourly fundings an entry may carry (a day and a half; the route reads eight). */
+const FEED_MAX_FUNDINGS = 48;
+
+/**
+ * `closed4h` + `candlesObservedAt`, strictly, or BAD. Both absent is "not
+ * fetched" (null). Every candle is on the 4 h grid, strictly after the one
+ * before, CLOSED as of the fetch (`t + 4h ≤ candlesObservedAt`), with high and
+ * low bounding open and close — the rules parseMarkCandles held the venue to,
+ * held again because this file is writable by every hosted child.
+ */
+function parseCandles(raw: Record<string, unknown>, fileAt: number): FeedHistory["candles"] | "bad" {
+  const hasRows = "closed4h" in raw;
+  const hasAt = "candlesObservedAt" in raw;
+  if (!hasRows && !hasAt) return null;
+  if (hasRows !== hasAt) return "bad";
+  const observedAt = intIn(raw.candlesObservedAt, 1, fileAt);
+  if (observedAt === null || !Array.isArray(raw.closed4h) || raw.closed4h.length > FEED_MAX_CANDLES) return "bad";
+  const rows: FeedCandle[] = [];
+  let prev = -1;
+  for (const x of raw.closed4h) {
+    if (!isRecord(x)) return "bad";
+    const t = intIn(x.t, 0, Number.MAX_SAFE_INTEGER);
+    const o = posInt(x.o);
+    const h = posInt(x.h);
+    const l = posInt(x.l);
+    const c = posInt(x.c);
+    if (t === null || o === null || h === null || l === null || c === null) return "bad";
+    if (t % FEED_CANDLE_MS !== 0 || t <= prev || t + FEED_CANDLE_MS > observedAt) return "bad";
+    if (h < o || h < c || h < l || l > o || l > c) return "bad";
+    prev = t;
+    rows.push({ t, o, h, l, c });
+  }
+  return { observedAt, rows };
+}
+
+/** `fundings1h` + `fundingsObservedAt`, strictly, or BAD; both absent is null. */
+function parseFundingRows(raw: Record<string, unknown>, fileAt: number): FeedHistory["fundings"] | "bad" {
+  const hasRows = "fundings1h" in raw;
+  const hasAt = "fundingsObservedAt" in raw;
+  if (!hasRows && !hasAt) return null;
+  if (hasRows !== hasAt) return "bad";
+  const observedAt = intIn(raw.fundingsObservedAt, 1, fileAt);
+  if (observedAt === null || !Array.isArray(raw.fundings1h) || raw.fundings1h.length > FEED_MAX_FUNDINGS) return "bad";
+  const rows: FeedFundingRow[] = [];
+  let prev = -1;
+  for (const x of raw.fundings1h) {
+    if (!isRecord(x)) return "bad";
+    const atSec = intIn(x.t, 1, Math.floor(observedAt / 1000));
+    const ratePpm = pctToPpm(x.rate);
+    if (atSec === null || ratePpm === null) return "bad";
+    if (x.direction !== "long" && x.direction !== "short") return "bad";
+    if (atSec % 3600 !== 0 || atSec <= prev) return "bad";
+    prev = atSec;
+    rows.push({ atSec, ratePpm, direction: x.direction });
+  }
+  return { observedAt, rows };
+}
+
+/**
+ * The candles a signal may be read from at `nowMs`, or null — the rule behind
+ * PerpFeedMarket.closed4h, exported so the route (perp-trend.ts) holds its own
+ * input to it again at its own clock rather than trusting whoever built the
+ * view.
+ *
+ *   CLOSED AT THIS CLOCK  a candle with t + 4h > now is the one in progress;
+ *                         a signal read off it is a signal from the future.
+ *   CURRENT               the last closed candle must be the latest one that
+ *                         could be: once the NEXT candle has closed more than
+ *                         FEED_CANDLE_GRACE_MS ago, this history is stale.
+ *   CONTIGUOUS            the run ending at the last candle, each exactly
+ *                         FEED_CANDLE_MS after the one before, and at least
+ *                         FEED_MIN_CANDLES long. Only that run is returned: a
+ *                         gap means the venue skipped bars (a halt), and an
+ *                         EMA carried across one is an average of two markets.
+ */
+export function usableClosedCandles<T extends { t: number }>(rows: readonly T[] | null | undefined, nowMs: number): T[] | null {
+  if (!rows || !Number.isFinite(nowMs)) return null;
+  const closed = rows.filter((r) => Number.isSafeInteger(r.t) && r.t + FEED_CANDLE_MS <= nowMs);
+  const last = closed[closed.length - 1];
+  if (last === undefined) return null;
+  if (nowMs >= last.t + 2 * FEED_CANDLE_MS + FEED_CANDLE_GRACE_MS) return null;
+  let start = closed.length - 1;
+  while (start > 0) {
+    const prev = closed[start - 1] as T;
+    const cur = closed[start] as T;
+    if (cur.t - prev.t !== FEED_CANDLE_MS) break;
+    start--;
+  }
+  const run = closed.slice(start);
+  return run.length >= FEED_MIN_CANDLES ? run : null;
+}
+
+/**
+ * The last FEED_FUNDING_HOURS hourly fundings, signed (+ = longs pay), or null
+ * — the rule behind PerpFeedMarket.funding8h. Eight contiguous hours, the
+ * latest no older than two hours and the grace, and no negative venue rate
+ * (its sign convention is unobserved: unread, never guessed).
+ */
+export function usableFunding8h(rows: readonly FeedFundingRow[] | null | undefined, nowMs: number): { atSec: number; ppmPerHour: number }[] | null {
+  if (!rows || !Number.isFinite(nowMs) || rows.length < FEED_FUNDING_HOURS) return null;
+  const nowSec = Math.floor(nowMs / 1000);
+  const last8 = rows.slice(rows.length - FEED_FUNDING_HOURS);
+  const last = last8[last8.length - 1] as FeedFundingRow;
+  if (last.atSec > nowSec || nowSec >= last.atSec + 2 * 3600 + FEED_FUNDING_GRACE_SEC) return null;
+  const out: { atSec: number; ppmPerHour: number }[] = [];
+  for (let i = 0; i < last8.length; i++) {
+    const r = last8[i] as FeedFundingRow;
+    if (r.ratePpm < 0) return null;
+    if (i > 0 && r.atSec - (last8[i - 1] as FeedFundingRow).atSec !== 3600) return null;
+    out.push({ atSec: r.atSec, ppmPerHour: r.direction === "long" ? r.ratePpm : -r.ratePpm });
+  }
+  return out;
+}
+
 /**
  * One market entry of a file stamped `fileAt`, parsed strictly, or null.
  * Freshness is not judged here (see parseLighterFeed). Exported so the WRITER
@@ -322,7 +529,11 @@ function parseSide(raw: unknown, dir: "bids" | "asks"): DepthLevel[] | null {
  * refuses, rather than writing a file that one venue glitch would make
  * unreadable for every market.
  */
-export function parseLighterFeedMarket(key: string, raw: unknown, fileAt: number): Omit<PerpFeedMarket, "fresh" | "bookFresh"> | null {
+export function parseLighterFeedMarket(
+  key: string,
+  raw: unknown,
+  fileAt: number,
+): (Omit<PerpFeedMarket, "fresh" | "bookFresh" | "closed4h" | "funding8h"> & { history: FeedHistory }) | null {
   if (!/^\d{1,5}$/.test(key) || !isRecord(raw)) return null;
   const marketId = Number(key);
   const market = perpMarketById(marketId);
@@ -371,7 +582,13 @@ export function parseLighterFeedMarket(key: string, raw: unknown, fileAt: number
   // A crossed book is a price no one could have traded at (markets.ts's parseDepth rule).
   if (bestBid !== undefined && bestAsk !== undefined && bestBid.price >= bestAsk.price) return null;
 
+  // History is optional; present-and-wrong is still wrong, like funding above.
+  const candles = parseCandles(raw, fileAt);
+  const fundings = parseFundingRows(raw, fileAt);
+  if (candles === "bad" || fundings === "bad") return null;
+
   return {
+    history: { candles, fundings },
     marketId,
     key: market.key,
     symbol: market.symbol,
@@ -413,13 +630,20 @@ export function parseLighterFeed(raw: unknown, nowMs: number, opts: LighterFeedR
     const stale = new Set<number>();
     const staleBooks = new Set<number>();
     for (const [key, value] of Object.entries(raw.markets)) {
-      const m = parseLighterFeedMarket(key, value, observedAt);
-      if (m === null) return null;
+      const parsed = parseLighterFeedMarket(key, value, observedAt);
+      if (parsed === null) return null;
+      const { history, ...m } = parsed;
       const fresh = nowMs - m.observedAt <= maxOpenMs && nowMs - m.specObservedAt <= maxSpecMs;
       const bookFresh = nowMs - m.bookObservedAt <= maxBookMs;
       if (!fresh) stale.add(m.marketId);
       if (!bookFresh) staleBooks.add(m.marketId);
-      markets.set(m.marketId, { ...m, fresh, bookFresh });
+      markets.set(m.marketId, {
+        ...m,
+        closed4h: usableClosedCandles(history.candles?.rows, nowMs),
+        funding8h: usableFunding8h(history.fundings?.rows, nowMs),
+        fresh,
+        bookFresh,
+      });
     }
     return { observedAt, markets, stale, staleBooks };
   } catch {

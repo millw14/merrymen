@@ -46,7 +46,8 @@
  * be turned on without a per-agent key or an interval that respects that.
  */
 import { llmAgentTurn, type AgentMsg, type AgentTurn, type LlmCreds, type ToolSpec } from "../llm";
-import type { Signals } from "./driver";
+import { PERP_SYSTEM, perpActionsSchema, perpKeysOf, type Signals } from "./driver";
+import { parsePerpProposals, type PerpProposal } from "./proposals";
 
 /** A page the model may ask for, by index. Assembled from on-chain metadata. */
 export interface DeskLink {
@@ -106,6 +107,12 @@ export interface DeskAction {
 
 export interface DeskResult {
   actions: DeskAction[];
+  /**
+   * The perp actions submitted, shape-checked (parsePerpProposals) — empty
+   * unless the window offered perps (Signals.perps). They go through
+   * proposalsToPerpIntents exactly as the one-shot driver's do.
+   */
+  perpActions: PerpProposal[];
   /**
    * The agent's view, in its own words — the thing that makes a hold worth
    * hearing. Empty when the model submitted nothing.
@@ -207,7 +214,28 @@ const SUBMIT_TOOL: ToolSpec = {
   },
 };
 
-function researchTools(world: DeskWorld, links: DeskLink[], peers: DeskPeer[]): ToolSpec[] {
+/**
+ * submit_view for one window: today's tool, plus an optional `perpActions`
+ * property when the window offers perps. Never in `required`.
+ */
+function submitToolFor(signals: Signals): ToolSpec {
+  const keys = signals.perps ? perpKeysOf(signals.perps) : [];
+  if (keys.length === 0) return SUBMIT_TOOL;
+  const schema = SUBMIT_TOOL.schema as { properties: Record<string, unknown> } & Record<string, unknown>;
+  return { ...SUBMIT_TOOL, schema: { ...schema, properties: { ...schema.properties, perpActions: perpActionsSchema(keys) } } };
+}
+
+/**
+ * The system prompt and tools for one desk session. A window without perps is
+ * EXACTLY today's (strategist/perp-boundary.test.ts pins its hash); one with them carries the perp
+ * paragraph and the `perpActions` property.
+ */
+export function deskRequest(signals: Signals, world: DeskWorld, links: DeskLink[], peers: DeskPeer[]): { system: string; tools: ToolSpec[] } {
+  const perps = signals.perps !== undefined && perpKeysOf(signals.perps).length > 0;
+  return { system: perps ? `${SYSTEM}\n\n${PERP_SYSTEM}` : SYSTEM, tools: researchTools(world, links, peers, submitToolFor(signals)) };
+}
+
+function researchTools(world: DeskWorld, links: DeskLink[], peers: DeskPeer[], submit: ToolSpec = SUBMIT_TOOL): ToolSpec[] {
   const tools: ToolSpec[] = [
     {
       name: "look_up",
@@ -259,7 +287,7 @@ function researchTools(world: DeskWorld, links: DeskLink[], peers: DeskPeer[]): 
       },
     });
   }
-  tools.push(SUBMIT_TOOL);
+  tools.push(submit);
   return tools;
 }
 
@@ -318,7 +346,8 @@ export async function runDesk(opts: {
 }): Promise<DeskResult> {
   const links = opts.links ?? [];
   const peers = opts.peers ?? [];
-  const tools = researchTools(opts.world, links, peers);
+  const { system, tools } = deskRequest(opts.signals, opts.world, links, peers);
+  const perpsOffered = system !== SYSTEM;
   const maxSteps = Math.max(1, Math.min(opts.maxSteps ?? 4, 12));
   // COMPACT, not pretty-printed. The scout learned this the expensive way: a
   // two-space indent was costing roughly half its prompt budget.
@@ -360,20 +389,23 @@ export async function runDesk(opts: {
     let turn: AgentTurn;
     try {
       turn = await (opts.turn ?? llmAgentTurn)(opts.creds, {
-        system: SYSTEM,
+        system,
         messages,
         tools,
         maxTokens: opts.maxTokens ?? 1200,
       });
     } catch (e) {
       opts.note?.("warn", `desk: the model could not be reached — ${e instanceof Error ? e.message : String(e)}`);
-      return { actions: [], thesis: "", steps, refused };
+      return { actions: [], perpActions: [], thesis: "", steps, refused };
     }
 
     const submit = turn.toolUses.find((t) => t.name === "submit_view");
     if (submit) {
       return {
         actions: parseActions(submit.input.actions),
+        // Only when offered: a model that invents perpActions in a window
+        // without them has proposed something nobody asked for.
+        perpActions: perpsOffered ? parsePerpProposals(submit.input).actions : [],
         thesis: cap(submit.input.thesis, THESIS_MAX),
         steps,
         refused,
@@ -384,7 +416,7 @@ export async function runDesk(opts: {
       // It answered in prose without finishing. One nudge, then we take nothing —
       // a model that will not use the tool is not a model to act on.
       opts.note?.("warn", "desk: the model stopped without submitting a view");
-      return { actions: [], thesis: "", steps, refused };
+      return { actions: [], perpActions: [], thesis: "", steps, refused };
     }
 
     messages.push({ role: "assistant", text: turn.text, toolUses: turn.toolUses });
@@ -428,5 +460,5 @@ export async function runDesk(opts: {
   // Out of steps without a view. Taking no action is the only safe reading of
   // that — a half-finished investigation is not a decision.
   opts.note?.("warn", `desk: ran out of steps (${maxSteps}) before submitting a view`);
-  return { actions: [], thesis: "", steps, refused };
+  return { actions: [], perpActions: [], thesis: "", steps, refused };
 }

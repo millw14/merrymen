@@ -9,8 +9,11 @@
  * touch money; only validated structure does.
  */
 
+import { baseForNotional, isPerpKey, isolatedMarginMicro, type PerpKey } from "../../../packages/core/src/perps";
+import { buildExitDraft, buildOpenDraft, clampReduce, type PerpIntentDraft } from "../perps/drafts";
 import type { TradeIntent } from "../policy";
-import type { Snapshot } from "../strategies/types";
+import type { ResolvedConfig } from "../settings";
+import type { PerpsView, Snapshot } from "../strategies/types";
 import {
   curveBuyOut,
   curveSellOut,
@@ -119,6 +122,15 @@ export function proposalsToIntents(
       continue;
     }
     if (p.action === "hold") continue;
+
+    // A PERP KEY IS NEVER A SPOT SYMBOL (docs/perps.md rule 11). "TSLA-PERP"
+    // cannot resolve to a leg today — spot maps are keyed by bare symbol — and
+    // this says so by name, so no future leg source can make a perp proposal
+    // spelled buy/sell into a swap. Perps travel only as perpActions.
+    if (/-PERP$/i.test(p.symbol)) {
+      rejected.push(`#${i} ${p.symbol}: a perp market is not a spot symbol — perps are proposed as perpActions`);
+      continue;
+    }
 
     if (!Number.isFinite(p.sizeUsdg) || p.sizeUsdg <= 0) {
       rejected.push(`#${i} ${p.symbol}: size ${p.sizeUsdg} is not a positive number`);
@@ -486,4 +498,348 @@ export function parseProposals(raw: unknown): { actions: ProposedAction[]; malfo
     }
   }
   return { actions, malformed };
+}
+
+// ── perpetuals: what a model may hand the perps route ───────────────────────
+//
+// docs/perps.md rule 15: THE MODEL PROPOSES, DETERMINISTIC CODE DISPOSES. A
+// perp proposal names a market KEY, an effect, the side, a notional in USDG
+// and — for an open — a stop distance. Never a leverage (it is venue state
+// set from the owner's perpsMaxLeverage, rule 6), a market id, a price
+// integer, a key or an address; the schema has no field any of those fit in.
+// A short is a SIDE, never spelled "sell".
+//
+// OPENS ARE REFUSED, NEVER REPAIRED. An open outside the owner's markets,
+// without a stop, with a stop outside [PERP_STOP_FLOOR_PCT, perpsStopLossPct],
+// under the venue minimum or over any cap, on a market already holding a
+// position or an unresolved order, is dropped with its reason — not moved to
+// the nearest thing that would pass. A model that asked for 60 USDG on a 25
+// USDG cap asked for something else, and quietly sending 25 would be the
+// boundary choosing a trade nobody proposed.
+//
+// EXITS ARE CLAMPED, NEVER REFUSED FOR SIZE (rule 8). A reduce is cut to the
+// venue-read position, raised to the venue minimum, and a remainder under the
+// minimum becomes a close; a close is always the whole venue-read size. What
+// an exit IS still held to is being an exit: a position must be held there,
+// on the side named — a close naming the wrong side is refused
+// (`perp-side-mismatch`), never reinterpreted, because reinterpreting it is
+// how a close becomes an open.
+
+/** One perp action as a model proposes it. */
+export interface PerpProposal {
+  /** A key of LIGHTER_MARKETS_V1, e.g. "BTC-PERP". */
+  market: PerpKey;
+  effect: "open" | "reduce" | "close";
+  /** For an open, the side to take; for a reduce or close, the side HELD. */
+  side: "long" | "short";
+  /** USDG. An open's size (its full notional, not its margin); a reduce's size; ignored for a close. */
+  notionalUsdg: number;
+  /** An open's stop distance from the entry, percent. Required for an open; ignored otherwise. */
+  stopPct?: number;
+  /** The model's reasoning — logged for the human, never parsed, never trusted. */
+  reason: string;
+}
+
+/**
+ * The narrowest stop a model may ask for, in percent. A stop tighter than one
+ * percent on a 4 h-volatile crypto perp is a stop that fires on noise, and a
+ * model asking for one is buying a guaranteed loss. Settings keep
+ * perpsStopLossPct ≥ this (its bounds are 1–25), so the range is never empty.
+ */
+export const PERP_STOP_FLOOR_PCT = 1;
+
+/** The settings the boundary reads. */
+export type PerpBoundarySettings = Pick<
+  ResolvedConfig,
+  | "perpsEnabled"
+  | "perpsDriver"
+  | "perpsMarkets"
+  | "perpsPerTradeUsdg"
+  | "perpsStopLossPct"
+  | "perpsStopSlipBps"
+  | "perpsMaxSlippageBps"
+  | "perpsLiqBufferPct"
+  | "perpsTakeProfitPct"
+>;
+
+/** The ceilings the caller measured this window. */
+export interface PerpBoundaryCaps {
+  /** The grant's sealed per-trade cap, micro-USDG. */
+  perTradeSealedMicro: bigint;
+  /** The strategist ceiling on what one action may spend (llmMaxActionUsdg), micro-USDG. */
+  maxPerActionMicro: bigint;
+  /** Today's spend headroom, micro-USDG; null = not read (then it does not bind here; the wall's daily cap still does). */
+  spendHeadroomMicro: bigint | null;
+  /** New positions this window may still add (maxActionsPerTick less the spot actions kept). Exits never count. */
+  maxOpens?: number;
+}
+
+export interface PerpValidationResult {
+  /** Survivors, fully built. accepted[i] produced intents[i]. */
+  intents: PerpIntentDraft[];
+  accepted: PerpProposal[];
+  /** Every refusal: the proposal, a rule slug, and the reason in words. */
+  dropped: { proposal: PerpProposal; why: string; detail: string }[];
+}
+
+const usdgMicroOf = (v: number) => BigInt(Math.round(v * 1e6));
+const money = (micro: bigint) => `${(Number(micro) / 1e6).toFixed(2)} USDG`;
+
+/**
+ * Validate a model's perp proposals against this window's venue read and the
+ * owner's settings, building survivors into perp-order intents (no
+ * decisionId: the strategist journals them under `perp:strategist`).
+ *
+ * NOTHING UNLESS THE STRATEGIST IS THE DRIVER. One writer per book: under
+ * `perp-trend` or `manual` every proposal is dropped, whatever it says.
+ * Nothing either when Lighter was not read: an exit sized off a position
+ * nobody read is a guess.
+ */
+export function proposalsToPerpIntents(
+  proposals: readonly PerpProposal[],
+  view: PerpsView | null | undefined,
+  settings: PerpBoundarySettings,
+  caps: PerpBoundaryCaps,
+): PerpValidationResult {
+  const out: PerpValidationResult = { intents: [], accepted: [], dropped: [] };
+  const drop = (proposal: PerpProposal, why: string, detail: string) => out.dropped.push({ proposal, why, detail });
+  if (settings.perpsDriver !== "strategist") {
+    for (const p of proposals) drop(p, "perp-not-driver", "the perps driver is not the strategist, so it proposes no perp actions");
+    return out;
+  }
+  if (!view) {
+    for (const p of proposals) drop(p, "perp-unpriced", "Lighter could not be read this window");
+    return out;
+  }
+  const allowed = new Set<string>(settings.perpsMarkets);
+  const touched = new Set<string>();
+  let opens = 0;
+  let openNotionalLeft = view.headroom.openNotionalLeftMicro;
+  let collateralLeft = view.account.freeCollateralMicro + view.headroom.collateralLeftMicro;
+  let spendLeft = caps.spendHeadroomMicro;
+  const perTrade = [usdgMicroOf(settings.perpsPerTradeUsdg), caps.perTradeSealedMicro, caps.maxPerActionMicro, view.headroom.perTradeNotionalMicro].reduce((a, b) =>
+    b < a ? b : a,
+  );
+
+  for (const p of proposals) {
+    const key = p.market;
+    if (!isPerpKey(key)) {
+      drop(p, "perp-market-not-allowed", `${String(key)} is not a perp market`);
+      continue;
+    }
+    if (touched.has(key)) {
+      drop(p, "perp-duplicate", `one action per market per window; ${key} already has one`);
+      continue;
+    }
+    const m = view.markets.get(key);
+
+    if (p.effect === "reduce" || p.effect === "close") {
+      const pos = view.positions.get(key);
+      if (pos === undefined || pos.baseAmount <= 0n) {
+        drop(p, "perp-no-position", `nothing is held on ${key}`);
+        continue;
+      }
+      if (p.side !== pos.side) {
+        drop(p, "perp-side-mismatch", `the ${key} position is ${pos.side}; an exit names the side held`);
+        continue;
+      }
+      if (m === undefined) {
+        drop(p, "perp-unpriced", `${key}'s mark could not be read this window`);
+        continue;
+      }
+      let effect: "reduce" | "close" = "close";
+      let base = pos.baseAmount;
+      if (p.effect === "reduce") {
+        const n = p.notionalUsdg;
+        if (Number.isNaN(n) || typeof n !== "number") {
+          drop(p, "non-positive", `a reduce of ${String(n)} USDG is not a size`);
+          continue;
+        }
+        let requested: bigint;
+        if (!Number.isFinite(n) || n > 1e12) requested = pos.baseAmount;
+        else if (n <= 0) requested = 1n; // raised to the venue minimum below
+        else {
+          try {
+            requested = baseForNotional(usdgMicroOf(n), m.markPrice, m.spec, "floor");
+          } catch {
+            requested = 1n;
+          }
+          if (requested <= 0n) requested = 1n;
+        }
+        const c = clampReduce(pos, requested, m);
+        if (c === null) {
+          drop(p, "perp-no-position", `nothing is held on ${key}`);
+          continue;
+        }
+        effect = c.effect;
+        base = c.baseAmount;
+      }
+      const draft = buildExitDraft({ market: m, position: pos, effect, baseAmount: base, maxSlippageBps: settings.perpsMaxSlippageBps });
+      if (draft === null) {
+        drop(p, "perp-unpriced", `${key}'s mark cannot bound an exit this window`);
+        continue;
+      }
+      touched.add(key);
+      out.intents.push(draft);
+      out.accepted.push(p);
+      continue;
+    }
+
+    if (p.effect !== "open") {
+      drop(p, "perp-order-malformed", `"${String(p.effect)}" is not an effect`);
+      continue;
+    }
+    // ── an open: every rule, in the order an owner would ask them ──────
+    if (!settings.perpsEnabled) {
+      drop(p, "perp-not-enabled", "perpetuals are off for this agent");
+      continue;
+    }
+    if (!allowed.has(key)) {
+      drop(p, "perp-market-not-allowed", `${key} is not one of the perp markets the owner allowed`);
+      continue;
+    }
+    if (m === undefined) {
+      drop(p, "perp-unpriced", `${key}'s terms could not be read this window`);
+      continue;
+    }
+    if (m.status !== "active") {
+      drop(p, "perp-market-inactive", `${key} is ${m.status} at the venue`);
+      continue;
+    }
+    if (view.opensBlocked !== null) {
+      drop(p, "perp-opens-blocked", `no new positions right now (${view.opensBlocked})`);
+      continue;
+    }
+    if (view.positions.has(key)) {
+      drop(p, "perp-add-to-position", `there is already a ${view.positions.get(key)!.side} ${key} position; an open never adds to one or flips it`);
+      continue;
+    }
+    if (view.unresolved.has(key)) {
+      drop(p, "perp-order-unresolved", `an order on ${key} has no final outcome yet`);
+      continue;
+    }
+    if (caps.maxOpens !== undefined && opens >= caps.maxOpens) {
+      drop(p, "max-actions", `no more new positions this window`);
+      continue;
+    }
+    if (p.side !== "long" && p.side !== "short") {
+      drop(p, "perp-order-malformed", `"${String(p.side)}" is not a side`);
+      continue;
+    }
+    const stopPct = p.stopPct;
+    if (typeof stopPct !== "number" || !Number.isFinite(stopPct)) {
+      drop(p, "perp-stop-required", "every open carries a stop distance");
+      continue;
+    }
+    if (stopPct < PERP_STOP_FLOOR_PCT || stopPct > settings.perpsStopLossPct) {
+      drop(p, "perp-stop-out-of-range", `a ${stopPct}% stop is outside ${PERP_STOP_FLOOR_PCT}–${settings.perpsStopLossPct}%`);
+      continue;
+    }
+    if (typeof p.notionalUsdg !== "number" || !Number.isFinite(p.notionalUsdg) || p.notionalUsdg <= 0 || p.notionalUsdg > 1e12) {
+      drop(p, "non-positive", `${String(p.notionalUsdg)} USDG is not a size`);
+      continue;
+    }
+    const want = usdgMicroOf(p.notionalUsdg);
+    if (want > perTrade) {
+      drop(p, "perp-per-trade-cap", `${money(want)} is over the ${money(perTrade)} most one new position may be`);
+      continue;
+    }
+    if (want > openNotionalLeft) {
+      drop(p, "perp-open-notional-cap", `${money(want)} is over the ${money(openNotionalLeft > 0n ? openNotionalLeft : 0n)} of open size left`);
+      continue;
+    }
+    if (spendLeft !== null && want > spendLeft) {
+      drop(p, "daily-cap", `${money(want)} is over what is left of today's spending`);
+      continue;
+    }
+    if (want < m.effMinNotionalMicro) {
+      drop(p, "perp-below-min", `${money(want)} is under Lighter's ${money(m.effMinNotionalMicro)} minimum on ${key}`);
+      continue;
+    }
+    let margin: bigint;
+    try {
+      margin = isolatedMarginMicro(want, m.imfBp);
+    } catch {
+      drop(p, "perp-order-malformed", `${key} carries no usable margin fraction`);
+      continue;
+    }
+    if (margin > collateralLeft) {
+      drop(p, "perp-collateral-cap", `its ${money(margin)} of margin is more than can be committed at Lighter`);
+      continue;
+    }
+    const built = buildOpenDraft({
+      market: m,
+      side: p.side,
+      notionalCapMicro: want,
+      stopBps: Math.round(stopPct * 100),
+      maxSlippageBps: settings.perpsMaxSlippageBps,
+      stopSlipBps: settings.perpsStopSlipBps,
+      liqBufferBps: Math.round(settings.perpsLiqBufferPct * 100),
+      takeProfitBps: Math.round(settings.perpsTakeProfitPct * 100),
+    });
+    if (!built.ok) {
+      if (built.rule === "perp-below-min") drop(p, "perp-below-min", `under Lighter's ${money(built.minMicro)} minimum on ${key}`);
+      else if (built.rule === "perp-stop-inside-liquidation") drop(p, "perp-stop-inside-liquidation", `a ${stopPct}% stop would fill after the venue liquidates at this leverage`);
+      else drop(p, "perp-order-malformed", built.detail);
+      continue;
+    }
+    touched.add(key);
+    opens += 1;
+    openNotionalLeft -= built.draft.notionalUsdg;
+    collateralLeft -= margin;
+    if (spendLeft !== null) spendLeft -= built.draft.notionalUsdg;
+    out.intents.push(built.draft);
+    out.accepted.push(p);
+  }
+  return out;
+}
+
+/**
+ * Shape-check a model's `perpActions` (read off the tool input) into
+ * PerpProposals; junk is dropped, never repaired. ABSENT is not malformed —
+ * the field is optional in the schema and most windows have nothing to do on
+ * perps. A market that is not a key of LIGHTER_MARKETS_V1 is junk here; an
+ * allowed-or-not key is the boundary's to judge (and journal).
+ */
+export function parsePerpProposals(raw: unknown): { actions: PerpProposal[]; malformed: number } {
+  if (!raw || typeof raw !== "object") return { actions: [], malformed: 0 };
+  const list = (raw as { perpActions?: unknown }).perpActions;
+  if (list === undefined) return { actions: [], malformed: 0 };
+  if (!Array.isArray(list)) return { actions: [], malformed: 1 };
+  const actions: PerpProposal[] = [];
+  let malformed = 0;
+  for (const a of list) {
+    if (!a || typeof a !== "object") {
+      malformed += 1;
+      continue;
+    }
+    const o = a as Record<string, unknown>;
+    const market = o.market;
+    const effect = o.effect;
+    const side = o.side;
+    if (
+      !isPerpKey(market) ||
+      (effect !== "open" && effect !== "reduce" && effect !== "close") ||
+      (side !== "long" && side !== "short") ||
+      typeof o.notionalUsdg !== "number" ||
+      (o.stopPct !== undefined && typeof o.stopPct !== "number")
+    ) {
+      malformed += 1;
+      continue;
+    }
+    actions.push({
+      market,
+      effect,
+      side,
+      notionalUsdg: o.notionalUsdg,
+      ...(typeof o.stopPct === "number" ? { stopPct: o.stopPct } : {}),
+      reason: typeof o.reason === "string" ? o.reason.trim().slice(0, 300) : "",
+    });
+  }
+  return { actions, malformed };
+}
+
+/** The decision-row action for a perp intent: open-long, reduce-short, close-long… never buy or sell. */
+export function perpActionLabel(i: Pick<PerpIntentDraft, "effect" | "side">): string {
+  return `${i.effect}-${i.side}`;
 }

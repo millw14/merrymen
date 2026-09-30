@@ -63,6 +63,27 @@
  *                   reset once a connection has stayed up a minute; the first
  *                   connect is jittered too, so a fleet restart is not a
  *                   thundering herd.
+ *   HISTORY, AT     The perps route (perp-trend) reads CLOSED 4 h mark candles
+ *   THE CLOSE       and the last eight hourly fundings, and no child may fetch
+ *                   them itself (a paper child makes no Lighter request at all).
+ *                   So for the markets in use that are in PERP_TREND_UNIVERSE
+ *                   — three at most — this fetches `markPriceCandles`
+ *                   (resolution 4h, count_back 150, start/end in SECONDS, both
+ *                   required: the venue answers 400 without them) once per
+ *                   candle, at its close + 60 s, and `fundings` (1h) once an
+ *                   hour, at the hour + 90 s: at most three candle requests per
+ *                   4 h and three funding requests per hour when healthy. The
+ *                   candle still in progress (t + 4h > the request time) is
+ *                   dropped here, before anything is written — the venue
+ *                   always returns it last. History requests share the REST
+ *                   depth pacing (one per depthSpacingMs between them), wait
+ *                   out any fleet cooldown, and retry a failure no sooner than
+ *                   a minute later. When the venue answers but has not yet
+ *                   published the candle that just closed, it is asked again
+ *                   a minute later for up to 15 min, then left until the next
+ *                   close. Every candle is a venue integer at the market's
+ *                   price decimals, as a string, and history at a precision
+ *                   the market no longer has is dropped with its books.
  *   IDLE IS SILENT  With no market in use there is no socket and no REST: the
  *                   feed never contacts Lighter on behalf of nobody.
  *   AN ATOMIC FILE  Every 2 s (the contract: ≤ 5 s), tmp file then rename, so
@@ -80,15 +101,49 @@
 
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { LIGHTER_ROUTE_V1, parseDecimalToScaled, perpMarketById, type PerpMarket, type PerpMarketSpec } from "../../../packages/core/src/index";
+import {
+  LIGHTER_ROUTE_V1,
+  PERP_TREND_UNIVERSE,
+  parseDecimalToScaled,
+  perpMarketById,
+  perpMarketByKey,
+  type PerpMarket,
+  type PerpMarketSpec,
+} from "../../../packages/core/src/index";
 import { readLighterCooldown, type LighterApi } from "./api";
-import { FEED_BOOK_LEVELS, LIGHTER_FEED_VERSION, parseLighterFeedMarket, specToJson, type FeedLevelJson, type LighterFeedFile, type LighterFeedFileMarket } from "./feed-reader";
-import type { DepthLevel, DepthRead, OrderBookDetailsRead, PerpDecimals, PerpMarketView } from "./markets";
+import {
+  FEED_BOOK_LEVELS,
+  FEED_CANDLE_MS,
+  FEED_MAX_CANDLES,
+  FEED_MIN_CANDLES,
+  LIGHTER_FEED_VERSION,
+  parseLighterFeedMarket,
+  specToJson,
+  type FeedCandleJson,
+  type FeedFundingJson,
+  type FeedLevelJson,
+  type LighterFeedFile,
+  type LighterFeedFileMarket,
+} from "./feed-reader";
+import type { DepthLevel, DepthRead, FundingRow, MarkCandle, OrderBookDetailsRead, PerpDecimals, PerpMarketView } from "./markets";
 
 // ── injectable edges ────────────────────────────────────────────────────────
 
-/** The slice of api.ts the feed uses. It must be the "public" client: a token would count against someone's L1 address. */
-export type LighterFeedApi = Pick<LighterApi, "budgetKey" | "orderBookDetails" | "orderBookOrders">;
+/**
+ * The slice of api.ts the feed uses. It must be the "public" client: a token
+ * would count against someone's L1 address. The two history reads are
+ * optional so a client without them (a test double, an old wiring) simply
+ * carries no candles — which the route reads as `perp-signal-unread`, never as
+ * a quiet market.
+ */
+export type LighterFeedApi = Pick<LighterApi, "budgetKey" | "orderBookDetails" | "orderBookOrders"> &
+  Partial<Pick<LighterApi, "markPriceCandles" | "fundings">>;
+
+/** The markets whose history the feed fetches: the perps route's universe, by venue id. */
+const HISTORY_MARKET_IDS: ReadonlySet<number> = new Set(
+  PERP_TREND_UNIVERSE.map((k) => perpMarketByKey(k)?.marketId).filter((x): x is number => x !== undefined),
+);
+const HOUR_MS = 3_600_000;
 
 /**
  * The slice of the WHATWG WebSocket the feed uses — Node 22's global
@@ -158,6 +213,16 @@ export const LIGHTER_FEED_DEFAULTS = Object.freeze({
   maxMessageChars: 8_000_000,
   /** A snapshot side larger than this is refused. */
   maxLevelsPerSide: 50_000,
+  /** 4 h candles asked per history read: the one in progress plus ≥ FEED_MIN_CANDLES closed. */
+  candleCountBack: 150,
+  /** ≥ 60_000: candles are re-read this long after each 4 h close (the contract: close + 60 s). */
+  candleRefreshLagMs: 60_000,
+  /** ≥ 60_000: hourly fundings are re-read this long after each hour. */
+  fundingRefreshLagMs: 90_000,
+  /** ≥ 60_000: a failed history read, or one that came back without the period that just closed, waits this long. */
+  historyRetryMs: 60_000,
+  /** How long after a close the feed keeps asking for a period the venue has not published yet. */
+  historyLagWindowMs: 900_000,
 });
 
 export type LighterFeedTuning = { -readonly [K in keyof typeof LIGHTER_FEED_DEFAULTS]: number };
@@ -177,6 +242,9 @@ function checkTuning(t: LighterFeedTuning): void {
   if (t.depthSpacingMs < 3_000) bad("depthSpacingMs must be ≥ 3000 (REST depth ≤ 20 per minute)");
   if (t.depthOrders > 250) bad("depthOrders must be ≤ 250 (the endpoint's limit)");
   if (t.reconnectMaxMs < t.reconnectBaseMs) bad("reconnectMaxMs must be ≥ reconnectBaseMs");
+  if (t.candleCountBack <= FEED_MIN_CANDLES || t.candleCountBack >= FEED_MAX_CANDLES) bad(`candleCountBack must be in ${FEED_MIN_CANDLES + 1}..${FEED_MAX_CANDLES - 1}`);
+  if (t.candleRefreshLagMs < 60_000 || t.fundingRefreshLagMs < 60_000) bad("history refresh lags must be ≥ 60000 (the period must have closed at the venue)");
+  if (t.historyRetryMs < 60_000) bad("historyRetryMs must be ≥ 60000");
 }
 
 export interface LighterFeedOptions {
@@ -432,9 +500,28 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
   /** Global, so the ≤ 100/min pacing holds across reconnects. */
   let lastPacedSendAt = -Infinity;
 
+  /** Also the fleet REST pacing slot the history reads share (≤ one REST read per depthSpacingMs between them). */
   let depthNextAt = t0;
   let depthInFlight = false;
   let depthCursor = 0;
+
+  /** Per universe market in use: the last candle and funding reads, and when each is next due. */
+  interface MarketHistory {
+    candles: { at: number; rows: MarkCandle[]; priceDecimals: number } | null;
+    fundings: { at: number; rows: FundingRow[] } | null;
+    candlesNextAt: number;
+    fundingsNextAt: number;
+  }
+  const history = new Map<number, MarketHistory>();
+  let historyInFlight = false;
+  const historyOf = (id: number, t: number): MarketHistory => {
+    let h = history.get(id);
+    if (h === undefined) {
+      h = { candles: null, fundings: null, candlesNextAt: t, fundingsNextAt: t };
+      history.set(id, h);
+    }
+    return h;
+  };
 
   let localCooldownUntil = 0;
   let seenCooldownUntil: number | null = null;
@@ -773,6 +860,7 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
     else if (emptySince === null) emptySince = t;
     for (const id of [...held.keys()]) if (!desired.has(id)) held.delete(id);
     for (const id of [...rest.keys()]) if (!desired.has(id)) rest.delete(id);
+    for (const id of [...history.keys()]) if (!desired.has(id)) history.delete(id);
   }
 
   function manageSocket(t: number): void {
@@ -935,6 +1023,14 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
                 if (v === undefined || !sameDecimals(h.decimals, decimalsOf(v.spec))) map.delete(id);
               }
             }
+            // Nor are candles: every integer in them is at the old scale. Re-read now.
+            for (const [id, h] of history) {
+              const v = r.value.markets.get(id);
+              if (h.candles !== null && (v === undefined || v.spec.priceDecimals !== h.candles.priceDecimals)) {
+                h.candles = null;
+                h.candlesNextAt = t2;
+              }
+            }
           },
           (e: unknown) => {
             detailsInFlight = false;
@@ -944,6 +1040,8 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
         );
       }
     }
+
+    manageHistory(t);
 
     // REST depth only while the socket has been down a while — and never during a cooldown.
     const wsDown = conn === null || conn.connectedAt === null;
@@ -993,7 +1091,152 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
     );
   }
 
+  /**
+   * THE ROUTE'S HISTORY: one read at a time, for the first universe market in
+   * use whose candles (then fundings) are due, in the REST pacing slot depth
+   * uses, never in a cooldown. Each answer is stamped with when it was ASKED
+   * — it is at least that fresh and no fresher can be proven — and the candle
+   * in progress at that moment is dropped before it is stored.
+   */
+  function manageHistory(t: number): void {
+    if (historyInFlight || t < depthNextAt) return;
+    const api = opts.api;
+    let job: { id: number; kind: "candles" | "fundings"; view: PerpMarketView } | null = null;
+    for (const id of [...desired].filter((x) => HISTORY_MARKET_IDS.has(x)).sort((a, b) => a - b)) {
+      const view = specOf(id);
+      if (view === null) continue; // no decimals yet: no candle could be scaled
+      const h = historyOf(id, t);
+      if (api.markPriceCandles !== undefined && t >= h.candlesNextAt) {
+        job = { id, kind: "candles", view };
+        break;
+      }
+      if (api.fundings !== undefined && t >= h.fundingsNextAt) {
+        job = { id, kind: "fundings", view };
+        break;
+      }
+    }
+    if (job === null) return;
+    const cool = coolingUntil(t);
+    if (cool > 0) {
+      depthNextAt = Math.max(depthNextAt, cool);
+      return;
+    }
+    const { id, kind } = job;
+    const started = t;
+    const endSec = Math.floor(started / 1000);
+    historyInFlight = true;
+    depthNextAt = t + tune.depthSpacingMs;
+    const fail = (why: string) => {
+      historyInFlight = false;
+      const h = history.get(id);
+      if (h !== undefined) {
+        if (kind === "candles") h.candlesNextAt = now() + tune.historyRetryMs;
+        else h.fundingsNextAt = now() + tune.historyRetryMs;
+      }
+      log(`history-${kind}-${id}`, `${kind} for market ${id} not read (${why}); retrying in ${tune.historyRetryMs} ms`);
+    };
+
+    if (kind === "candles") {
+      const priceDecimals = job.view.spec.priceDecimals;
+      let p: ReturnType<NonNullable<LighterFeedApi["markPriceCandles"]>>;
+      try {
+        p = (api.markPriceCandles as NonNullable<LighterFeedApi["markPriceCandles"]>)({
+          marketId: id,
+          resolution: "4h",
+          startSec: endSec - tune.candleCountBack * (FEED_CANDLE_MS / 1000),
+          endSec,
+          countBack: tune.candleCountBack,
+          priceDecimals,
+        });
+      } catch (e) {
+        fail(`threw: ${e instanceof Error ? e.message : String(e)}`);
+        return;
+      }
+      p.then(
+        (r) => {
+          if (stopped) return;
+          if (!r.ok) {
+            if (r.error.kind === "rate-limited") localCooldownUntil = Math.max(localCooldownUntil, now() + r.error.retryAfterMs);
+            fail(`${r.error.kind}: ${r.error.detail}`);
+            return;
+          }
+          if (r.value.resolution !== "4h") {
+            fail(`answered resolution ${r.value.resolution}, not 4h`);
+            return;
+          }
+          historyInFlight = false;
+          const h = history.get(id);
+          if (h === undefined) return; // the market left the set meanwhile
+          // The one in progress is always last; a signal read off it is from the future.
+          const closed = r.value.candles.filter((c) => c.tMs + FEED_CANDLE_MS <= started).slice(-(FEED_MAX_CANDLES - 1));
+          h.candles = { at: started, rows: closed, priceDecimals };
+          const periodStart = Math.floor(started / FEED_CANDLE_MS) * FEED_CANDLE_MS;
+          const lastT = closed[closed.length - 1]?.tMs ?? -Infinity;
+          const lagging = lastT < periodStart - FEED_CANDLE_MS;
+          h.candlesNextAt =
+            lagging && started < periodStart + tune.historyLagWindowMs ? now() + tune.historyRetryMs : periodStart + FEED_CANDLE_MS + tune.candleRefreshLagMs;
+        },
+        (e: unknown) => fail(`rejected: ${e instanceof Error ? e.message : String(e)}`),
+      );
+      return;
+    }
+
+    let p: ReturnType<NonNullable<LighterFeedApi["fundings"]>>;
+    try {
+      p = (api.fundings as NonNullable<LighterFeedApi["fundings"]>)({ marketId: id, resolution: "1h", startSec: endSec - 12 * 3600, endSec, countBack: 12 });
+    } catch (e) {
+      fail(`threw: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    p.then(
+      (r) => {
+        if (stopped) return;
+        if (!r.ok) {
+          if (r.error.kind === "rate-limited") localCooldownUntil = Math.max(localCooldownUntil, now() + r.error.retryAfterMs);
+          fail(`${r.error.kind}: ${r.error.detail}`);
+          return;
+        }
+        if (r.value.resolution !== "1h") {
+          fail(`answered resolution ${r.value.resolution}, not 1h`);
+          return;
+        }
+        historyInFlight = false;
+        const h = history.get(id);
+        if (h === undefined) return;
+        const rows = r.value.fundings.filter((f) => f.timestampSec * 1000 <= started).slice(-24);
+        h.fundings = { at: started, rows };
+        const hourStart = Math.floor(started / HOUR_MS) * HOUR_MS;
+        const lastMs = (rows[rows.length - 1]?.timestampSec ?? -Infinity) * 1000;
+        const lagging = lastMs < hourStart;
+        h.fundingsNextAt = lagging && started < hourStart + tune.historyLagWindowMs ? now() + tune.historyRetryMs : hourStart + HOUR_MS + tune.fundingRefreshLagMs;
+      },
+      (e: unknown) => fail(`rejected: ${e instanceof Error ? e.message : String(e)}`),
+    );
+  }
+
   // ── the file ────────────────────────────────────────────────────────────
+
+  /** A venue funding rate (ppm per hour) back in the file's unit: percent with 4 dp. */
+  const pct4 = (ppm: number): string => {
+    const a = Math.abs(ppm);
+    return `${ppm < 0 ? "-" : ""}${Math.floor(a / 10_000)}.${String(a % 10_000).padStart(4, "0")}`;
+  };
+
+  /** The history fields for one market's entry, at the precision it is being written at; {} when there is none. */
+  function historyFields(id: number, priceDecimals: number): Pick<LighterFeedFileMarket, "closed4h" | "candlesObservedAt" | "fundings1h" | "fundingsObservedAt"> {
+    const h = history.get(id);
+    const out: Pick<LighterFeedFileMarket, "closed4h" | "candlesObservedAt" | "fundings1h" | "fundingsObservedAt"> = {};
+    if (h === undefined) return out;
+    if (h.candles !== null && h.candles.priceDecimals === priceDecimals && h.candles.rows.length > 0) {
+      out.closed4h = h.candles.rows.map((c): FeedCandleJson => ({ t: c.tMs, o: c.open.toString(), h: c.high.toString(), l: c.low.toString(), c: c.close.toString() }));
+      out.candlesObservedAt = h.candles.at;
+    }
+    if (h.fundings !== null && h.fundings.rows.length > 0) {
+      out.fundings1h = h.fundings.rows.map((f): FeedFundingJson => ({ t: f.timestampSec, rate: pct4(f.ratePpm), direction: f.direction }));
+      out.fundingsObservedAt = h.fundings.at;
+    }
+    return out;
+  }
 
   /** The freshest book we can stand behind for a market, or null. */
   function bookFor(id: number, dec: PerpDecimals): HeldBook | null {
@@ -1061,7 +1304,16 @@ export function startLighterFeed(opts: LighterFeedOptions): LighterFeedHandle {
         };
         // Held to the reader's own rules: ONE entry the reader refuses makes it
         // refuse the whole file, so a venue glitch on one market (a 40-digit
-        // price) must cost that market, not every market in the fleet.
+        // price) must cost that market, not every market in the fleet. And a
+        // glitch in its HISTORY costs only the history: the market's prices
+        // and book are still written, and the route reads no candles.
+        const hist = historyFields(id, view.spec.priceDecimals);
+        const withHistory: LighterFeedFileMarket = { ...entry, ...hist };
+        if (parseLighterFeedMarket(String(id), withHistory, t) !== null) {
+          markets[String(id)] = withHistory;
+          continue;
+        }
+        if (Object.keys(hist).length > 0) log(`invalid-history-${id}`, `market ${id}'s candles or fundings failed the reader's checks; written without them`);
         if (parseLighterFeedMarket(String(id), entry, t) === null) {
           log(`invalid-${id}`, `market ${id}'s entry failed the reader's checks; left out of the file`);
           continue;
