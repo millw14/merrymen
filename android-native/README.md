@@ -96,7 +96,11 @@ from `ANDROID_VERSION` in `site/app/page.tsx` and `site/app/app/page.tsx`.
 
 **The key.** `app/build.gradle.kts` signs a release with the key named in
 `~/.merrymen-release/keystore.properties` (or `-Pmerrymen.signing=<file>`, or
-`$MERRYMEN_SIGNING`). Without that file `assembleRelease` builds an unsigned
+`$MERRYMEN_SIGNING`). Overrides are checked in that order and must name an
+existing file; a missing or blank override fails instead of using another key.
+Relative override paths start at `android-native/`, and relative `storeFile`
+paths start at the properties file's directory. Without an override or the
+default file, `assembleRelease` builds an unsigned
 APK, which is what CI and every other machine get. The key made for 0.2.0 is
 RSA 4096, alias `merrymen`, certificate SHA-256
 `56:55:00:66:31:A5:37:12:01:FD:DD:91:CB:6E:08:29:67:14:96:5B:58:52:D9:76:29:2C:47:23:2C:29:0C:B3`.

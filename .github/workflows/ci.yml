@@ -220,6 +220,10 @@ jobs:
       # Unit tests, lint (errors fail the build; warnings do not) and a debug
       # APK, so a manifest or resource merge that only packaging catches is
       # caught here too. The runner image ships the Android SDK.
+      - name: Verify release signing configuration
+        working-directory: android-native
+        run: bash test-signing-config.sh
+
       - name: Test, lint and build
         working-directory: android-native
         run: ./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug

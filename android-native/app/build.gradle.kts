@@ -23,11 +23,19 @@ plugins {
  * exactly what they did before. Losing this key means no sideloaded install
  * can ever be updated in place again, so it is backed up, never committed.
  */
-val signingFile: File? = listOfNotNull(
-  project.findProperty("merrymen.signing") as String?,
-  System.getenv("MERRYMEN_SIGNING"),
-  "${System.getProperty("user.home")}/.merrymen-release/keystore.properties",
-).map(::File).firstOrNull { it.isFile }
+val signingOverride = project.findProperty("merrymen.signing") as String?
+  ?: System.getenv("MERRYMEN_SIGNING")
+// An explicit choice must fail closed, never silently select a different key.
+// Root-relative paths also work when Gradle is launched from another directory.
+val signingFile: File? = if (signingOverride != null) {
+  require(signingOverride.isNotBlank()) { "The signing-properties path must not be blank" }
+  rootProject.file(signingOverride).absoluteFile.normalize().also {
+    require(it.isFile) { "The requested signing-properties file does not exist: $it" }
+  }
+} else {
+  File(System.getProperty("user.home"), ".merrymen-release/keystore.properties")
+    .absoluteFile.normalize().takeIf { it.isFile }
+}
 val signingKeys: Properties? = signingFile?.let { f -> Properties().apply { f.inputStream().use(::load) } }
 
 android {
