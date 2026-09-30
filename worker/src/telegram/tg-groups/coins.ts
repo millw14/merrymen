@@ -194,6 +194,8 @@ export interface CoinSpeakOpts {
   trigger?: TgLine;
   /** The coin's casual display name, never address-shaped. */
   coinName?: string;
+  /** Rechecked through typing and send waits when the tagged asker is not the trigger's author. */
+  stillWanted?: () => boolean;
 }
 
 export interface CoinFlowDeps {
@@ -830,7 +832,7 @@ export class CoinFlow {
       chatId,
       "lastCoinUnknownAtMs",
       (r, t) => elapsed(r.lastCoinUnknownAtMs, t, COIN_FLOW.unknownLineMs),
-      () => this.say(chatId, { kind: "coin-unknown" }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}) }, ctx),
+      () => this.say(chatId, { kind: "coin-unknown" }, { replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), stillWanted: () => !goneOf(m) }, ctx),
     );
   }
 

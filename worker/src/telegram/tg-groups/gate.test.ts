@@ -441,15 +441,25 @@ describe("claim: a trade it never made, in chatter", () => {
     ["banter", "just grabbed some lol"],
     ["roast", "i sold that one before you even woke up"],
     ["answer", "i've got a bag of it"],
+    ["answer", "I hold this one"],
+    ["answer", "I own this coin"],
+    ["banter", "i still hold it"],
+    ["banter", "i already own some"],
+    ["roast", "i do hold that token"],
+    ["roast", "i own a bag of it"],
   ]);
   passes([
     ["answer", "i'd take a small bite tbh"],
     ["answer", "would ape if the pool was deeper"],
     ["answer", "haven't looked at it yet"],
     ["banter", "in this economy? lol"],
+    ["answer", "i would hold off for now"],
+    ["answer", "i don't own it"],
+    ["banter", "i own my mistakes"],
     ["buy", "grabbed a little on paper, liked the buyers", { paper: true }],
     ["fade", "got out of that one, it ran out of steam"],
     ["coin", "already got some 🤝"],
+    ["coin", "i hold this one"],
   ]);
 });
 

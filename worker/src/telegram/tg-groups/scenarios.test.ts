@@ -1102,7 +1102,7 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
       msg(text, { fromId: from, fromFirstName: name, replyTo: { messageId: post.messageId!, fromId: BOB, fromIsBot: false } });
     const first = under("@pinebot wdyt", ANN, "Ann");
     const second = under("pine is it any good", CAT, "Cat");
-    const third = under("@pinebot so?", OWNER, "Milla");
+    const third = under("@pinebot this?", OWNER, "Milla");
     for (const m of [first, second, third]) await said(m);
     assert.deepEqual(port.lookCalls, [CA1], "no new look: the memo answers");
     assert.deepEqual(tg.sends(CHAT).slice(1).map(replyOf), [first, second, third].map((m) => m.messageId), "each one who asked, answered");
@@ -1138,7 +1138,13 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     const post = msg(CA1, { fromId: BOB, fromFirstName: "Bob" });
     await said(post);
     const under = (text: string, over: Partial<TgMessage> = {}) => msg(text, { replyTo: { messageId: post.messageId!, fromId: BOB, fromIsBot: false }, ...over });
-    const lines = [under("pine don't touch this one pls", { fromId: OWNER, fromFirstName: "Milla" }), under("@pinebot gm gm"), under("@pinebot how's your day going", { fromId: CAT, fromFirstName: "Cat" })];
+    const lines = [
+      under("pine don't touch this one pls", { fromId: OWNER, fromFirstName: "Milla" }),
+      under("@pinebot gm gm"),
+      under("@pinebot how's your day going", { fromId: CAT, fromFirstName: "Cat" }),
+      under("@pinebot who won?", { fromId: OWNER, fromFirstName: "Milla" }),
+      under("@pinebot where next?", { fromId: OWNER, fromFirstName: "Milla" }),
+    ];
     for (const m of lines) await said(m);
     assert.deepEqual(port.lookCalls, [CA1], "none of them looked at the coin again");
     assert.equal(port.nominations.length, 0);
@@ -1207,6 +1213,71 @@ describe("docs/tg-groups.md Scenarios, through the group handler", () => {
     assert.match(String(s[1]?.body.text), new RegExp(`^<a href="tg://user\\?id=${OWNER}">Milla</a> `), "tagging who asked, not who posted");
     assert.match(plain(String(s[1]?.body.text)), /can't|won't|not loading|blank/);
     assert.equal(port.nominations.length, 0);
+  });
+
+  it("…a different ticker in a reply never nominates the quoted coin; the matching ticker can use its quoted CA", async () => {
+    make();
+    approve();
+    const replyTo = { messageId: 42, fromId: BOB, fromIsBot: false, text: `$VRAX ${CA1}` };
+    await said(msg("@pinebot wdyt about $OTHER", { replyTo }));
+    assert.deepEqual(port.lookCalls, [], "an explicit different coin needs its own CA");
+    assert.deepEqual(port.nominations, []);
+    await said(msg("@pinebot wdyt about $VRAX", { replyTo }));
+    assert.deepEqual(port.lookCalls, [CA1], "the quote explicitly associates this ticker with its CA");
+    assert.deepEqual(port.nominations.map((n) => n.address), [CA1]);
+  });
+
+  it("…the asker runs /forgetme while the failed-look response is typing under someone else's post: no tag or line is sent", async () => {
+    let releaseLook!: (look: CoinLook) => void;
+    let sawLook!: () => void;
+    const lookStarted = new Promise<void>((resolve) => { sawLook = resolve; });
+    let sawReply!: () => void;
+    const replySent = new Promise<void>((resolve) => { sawReply = resolve; });
+    let sawTyping!: () => void;
+    const typingStarted = new Promise<void>((resolve) => { sawTyping = resolve; });
+    let releaseTyping!: () => void;
+    const typingHeld = new Promise<void>((resolve) => { releaseTyping = resolve; });
+    let holdTyping = false;
+    const fetchTg = tg.fetchFn;
+    tg.fetchFn = async (url, init) => {
+      const result = await fetchTg(url, init);
+      if (url.endsWith("/sendMessage")) sawReply();
+      return result;
+    };
+    make({
+      timer: () => new Promise<void>(() => {}),
+      sleep: async (ms) => {
+        if (holdTyping) {
+          holdTyping = false;
+          sawTyping();
+          await typingHeld;
+        }
+        clock += Math.max(0, ms);
+      },
+    });
+    approve();
+    port.look = (address) => {
+      port.lookCalls.push(address);
+      sawLook();
+      return new Promise<CoinLook>((resolve) => { releaseLook = resolve; });
+    };
+    const post = msg(CA1, { fromId: BOB, fromFirstName: "Bob" });
+    groups.onMessage(post);
+    await lookStarted;
+    const ask = msg("wdyt about this pine", { replyTo: { messageId: post.messageId!, fromId: BOB, fromIsBot: false } });
+    groups.onMessage(ask);
+    await replySent;
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), [ask.messageId], "the immediate chatter already answered the asker");
+    holdTyping = true;
+    releaseLook({ kind: "unknown" });
+    await typingStarted;
+    await groups.forgetMe(CHAT, ANN, undefined, { late: true });
+    releaseTyping();
+    await groups.drain();
+    assert.deepEqual(tg.sends(CHAT).map(replyOf), [ask.messageId], "the later response cannot publish the forgotten asker's tag");
+    assert.equal(store.person(CHAT, ANN), undefined);
+    assert.ok(!store.room(CHAT)!.lines.some((line) => line.fromId === ANN));
+    assert.deepEqual(port.nominations, []);
   });
 
   it("every coin post has its log line, and the heartbeat counts coin posts", async () => {

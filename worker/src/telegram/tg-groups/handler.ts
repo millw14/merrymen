@@ -1299,7 +1299,9 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
     const born = followUp ? clock() : (isMsgId(replyTo) ? received.get(msgKey(chatId, replyTo)) : undefined) ?? clock();
     const threadId = isMsgId(replyTo) ? threads.get(msgKey(chatId, replyTo)) : undefined;
-    const stillWanted = poster ? () => !forgottenSince(chatId, poster.fromId, seenAt) : undefined;
+    // A delayed failed look may tag someone who asked under another person's
+    // post. Both people's forget requests must cancel it through the send wait.
+    const stillWanted = () => (!poster || !forgottenSince(chatId, poster.fromId, seenAt)) && (!o.stillWanted || o.stillWanted());
     let unwritten = false;
     const sent = await speak(chatId, t, {
       ...(replyTo !== undefined ? { replyTo } : {}),
@@ -1943,11 +1945,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     if (me && quote?.fromId === me.id) return null;
     const remembered = store.room(chatId)?.lines.find((l) => l.messageId === to);
     if (remembered?.own) return null;
+    const text = (typeof quote?.text === "string" && quote.text) || remembered?.text || "";
+    // An explicit ticker can name another coin. Bind it to the quote only
+    // when that same ticker occurs there; otherwise ask for its own CA.
+    const askedTags = extractCashtags(j.line.text);
+    const quotedTags = extractCashtags(text);
+    if (askedTags.some((tag) => !quotedTags.includes(tag))) return null;
     if (flow.working(chatId, to)) {
       flow.askedWhileWorking(chatId, to, { senderId: j.line.fromId, senderName: j.via ? "" : j.line.name, forgotten: () => forgotten(j) });
       return null;
     }
-    const text = (typeof quote?.text === "string" && quote.text) || remembered?.text || "";
     if (!text || isDistress(text)) return null;
     const hits = extractCaHits(text);
     const foreignMint = hasForeignMint(text) || hasOtherChainLink(text);
@@ -1995,8 +2002,8 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       let foreignMint = hasForeignMint(text) || hasOtherChainLink(text);
       let cashtags = extractCashtags(text);
       // No coin in its own words, said to it, under a coin post: it asks about
-      // that post's coin (repliedCoin). A ticker beside it ("wdyt $vrax") is
-      // the same coin, not a reason for "drop the ca".
+      // that post's coin (repliedCoin). A ticker can refer to it only when
+      // the quoted post names the same ticker.
       const asked = cas.length === 0 && !foreignMint ? repliedCoin(j) : null;
       if (asked) {
         ({ cas, otherChain, foreignMint } = asked);

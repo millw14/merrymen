@@ -482,6 +482,7 @@ function dodgeRefusal(r: Readings): boolean {
  * own kinds, never through this one.
  */
 const TRADE_CLAIM: readonly RegExp[] = [
+  /\bi\s+(?:(?:already|still|currently|also|do)\s+)*(?:hold|own)\s+(?:it|this|that|some|coins?|tokens?|(?:a|the|my)\s+(?:bag|position|stake|coins?|tokens?))\b/,
   /\b(?:i|i'?ve|ive|i have)\s+(?:just\s+|already\s+|also\s+)?(?:bought|aped|grabbed|sold|dumped|picked up|loaded up|scooped|bagged|snagged|took profits?|exited|went in|got in)\b/,
   /(?:^|[.!?,;:—–]\s*)(?:(?:lol|ngl|tbh|ok|okay|yeah|yep|welp|already|just)[\s,]+)*(?:bought|aped|grabbed|scooped|bagged|snagged|sold)\s+(?:in|into|it|this|that|some|a (?:little|bit|bag|few)|more)\b/,
   /\b(?:i'?m|im|i am)\s+(?:already\s+|still\s+|so\s+)?(?:holding|buying|selling|long|aping|loaded|bagged up)\b/,

@@ -205,12 +205,15 @@ the reply's own message id — with every rule a CA said to it gets: an answer
 from memory, a fresh look, the owner ask, a nomination, "can't pull that one
 up rn", or silence for another chain's coin. Everything else under a coin
 post is chatter: a reply that does not call it, "gm gm", a question about
-something else, and anything telling it not to act ("don't touch this one
-pls", "skip it"). Never a distress post's coin. While that post is still on
+something else (including "who won?" or "where next?"), and anything telling
+it not to act ("don't touch this one pls", "skip it"). An explicit ticker in
+the reply uses the quoted CA only when the quote names that same ticker;
+otherwise it asks for the ticker's own CA. Never a distress post's coin. While that post is still on
 the coin lane its own answer is on its way: the reply is answered now, as
 chatter ("@bot didnt you see" while its look hangs), and the flow is told who
 asked, so a look that comes back `unknown` gets them "can't pull that one up
 rn" on the post (tagged, once per chat per 10 minutes) instead of silence.
+If the asker uses `/forgetme` while that response is pending, it is cancelled.
 
 **Its own take.** Asked what it thinks ("wdyt", "thoughts?", "is this
 good?"), it answers with its own first-person view — whether it would go for

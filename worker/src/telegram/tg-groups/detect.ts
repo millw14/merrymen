@@ -989,8 +989,12 @@ const COIN_ASK =
 /** Telling it NOT to act on the coin: "don't touch this one", "skip it", "not this one". */
 const COIN_STOP =
   /\b(?:don'?t|dont|do not|never|stop|no|not)\s+(?:[\p{L}']+\s+){0,2}?(?:touch|touching|buy|buying|ape|aping|grab|get|look|trade|nominate|bother|chase)\b|\b(?:skip|ignore|avoid|leave|forget|pass on)\s+(?:it|this|that)\b|\bnot this one\b/u;
-/** At most this many words, ending in "?", read as asking about the post: "this?", "good?", "ape or nah?". */
+/** A short question still needs a reference to the coin: "this?", "it?", "ape or nah?". */
 const COIN_ASK_SHORT_WORDS = 3;
+const COIN_ASK_SHORT_REF: ReadonlySet<string> = new Set(["this", "that", "it", "coin", "token", "ape", "buy"]);
+const COIN_ASK_SHORT_VOCAB: ReadonlySet<string> = new Set([
+  ...COIN_ASK_SHORT_REF, "one", "is", "a", "any", "good", "bad", "solid", "legit", "safe", "or", "nah", "yes", "no",
+]);
 
 /**
  * A REPLY UNDER A COIN POST THAT ASKS ABOUT THAT COIN, once its names, and
@@ -1009,7 +1013,11 @@ export function asksAboutCoin(text: string, selfNames: readonly string[] = []): 
   const words = wordsOf(t);
   if (words.length === 0) return /[?？¿]/u.test(text);
   if (COIN_ASK.test(t)) return true;
-  return words.length <= COIN_ASK_SHORT_WORDS && /[?？¿]\s*$/u.test(t) && addressedSmallTalk(text, selfNames) === null;
+  return words.length <= COIN_ASK_SHORT_WORDS
+    && words.some((word) => COIN_ASK_SHORT_REF.has(word))
+    && words.every((word) => COIN_ASK_SHORT_VOCAB.has(word))
+    && /[?？¿]\s*$/u.test(t)
+    && addressedSmallTalk(text, selfNames) === null;
 }
 
 // ─── Insults ───────────────────────────────────────────────────────────────
