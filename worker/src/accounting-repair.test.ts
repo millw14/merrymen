@@ -123,6 +123,78 @@ const netOf = async (db: Db, account: string) =>
     ).net,
   );
 
+test("a halt after the first account prevents the next account's transaction", async () => {
+  const db = await freshDb();
+  await seedAgent(db, A);
+  await seedAgent(db, B);
+  const plans = await Promise.all([
+    plan({ smartAccount: A, insert: [row({ txHash: TX, logIndex: 1 })] }),
+    plan({ smartAccount: B, insert: [row({ agentId: B, txHash: TX2, logIndex: 1 })] }),
+  ].map((p) => snapshotPlan(db, p)));
+  const untouched = await db.prepare("SELECT * FROM agents WHERE smart_account = ?").get(B);
+  let halted = false;
+  let transactions = 0;
+  const observed: Db = {
+    prepare: (sql) => db.prepare(sql), exec: (sql) => db.exec(sql),
+    tx: (fn) => { transactions++; return db.tx(fn); },
+  };
+  const result = await runRepair(observed, plans, { ...COMMIT, accounts: [A.toLowerCase(), B] }, CHAIN,
+    (r) => { if (r.account === A && r.stage === "recomputed") halted = true; },
+    () => halted ? "FLEET_HALT is present" : null,
+  );
+  assert.deepEqual(result.map((r) => r.stage), ["recomputed", "failed"]);
+  assert.match(result[1]!.why, /repair cancelled: FLEET_HALT/);
+  assert.equal(transactions, 1, "the second account never opens a transaction after halt");
+  assert.equal(await netOf(db, A), 10, "the completed valid transaction remains committed");
+  assert.equal(await countFlows(db, B), 0);
+  assert.deepEqual(await db.prepare("SELECT * FROM agents WHERE smart_account = ?").get(B), untouched);
+});
+
+for (const phase of ["catalogue read", "transaction acquisition", "row lock"] as const) {
+  test(`a halt during ${phase} refuses before the account's first mutation`, async () => {
+    const db = await freshDb();
+    await seedAgent(db, A);
+    const p = await snapshotPlan(db, plan({ smartAccount: A, insert: [row({ txHash: TX, logIndex: 1 })] }));
+    const before = await db.prepare("SELECT * FROM agents WHERE smart_account = ?").get(A);
+    let halted = false;
+    let transactions = 0;
+    const reads = (inner: Db): Db => ({
+      prepare: (sql) => {
+        const stmt = inner.prepare(sql);
+        return {
+          ...stmt,
+          get: async (...params) => {
+            const result = await stmt.get(...params);
+            if ((phase === "catalogue read" && sql.includes("FROM sqlite_master")) ||
+                (phase === "row lock" && sql.includes("SELECT epoch, chain_id FROM agents"))) halted = true;
+            return result;
+          },
+        };
+      },
+      exec: (sql) => inner.exec(sql), tx: (fn) => inner.tx(fn),
+    });
+    const observed: Db = {
+      ...reads(db),
+      tx: (fn) => {
+        transactions++;
+        return db.tx(async (tx) => {
+          if (phase === "transaction acquisition") halted = true;
+          return fn(reads(tx));
+        });
+      },
+    };
+    const result = await repairAccount(observed, p, COMMIT, CHAIN,
+      () => halted ? "orchestrator is stopping" : null);
+    assert.equal(result.stage, "failed", result.why);
+    assert.match(result.why, /repair cancelled: orchestrator is stopping/);
+    assert.equal(transactions, phase === "catalogue read" ? 0 : 1);
+    assert.equal(await countFlows(db, A), 0, "no receipt was inserted");
+    assert.deepEqual(await db.prepare("SELECT * FROM flows_quarantine").all(), []);
+    assert.deepEqual(await db.prepare("SELECT * FROM agents WHERE smart_account = ?").get(A), before,
+      "quality and risk state remain unchanged after rollback");
+  });
+}
+
 // ── 1. THE SAME TRANSFER IMPORTED TWICE ────────────────────────────────────
 
 test("the same transfer imported twice leaves one row and one contribution", async () => {

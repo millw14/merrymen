@@ -38,6 +38,10 @@ import { EVIDENCED_FLOW_SOURCES } from "./accounting-scope";
 
 export type RepairMode = "dry-run" | "verify-only" | "commit";
 
+/** Re-read operator shutdown/halt state at mutation boundaries, never capture it
+ * once for a batch. Returning a reason refuses this account without committing. */
+export type RepairCommitRefusal = () => string | null;
+
 export interface RepairOptions {
   /** DRY RUN IS THE DEFAULT. Mutation requires saying so. */
   mode: RepairMode;
@@ -185,6 +189,7 @@ export async function repairAccount(
   plan: AccountPlan,
   opts: RepairOptions,
   chainId: number,
+  commitRefusal?: RepairCommitRefusal,
 ): Promise<AccountRepairResult> {
   const base: AccountRepairResult = {
     account: plan.smartAccount,
@@ -234,11 +239,18 @@ export async function repairAccount(
 
   const now = Math.floor(Date.now() / 1000);
   try {
+    const checkCommitAllowed = () => {
+      const reason = commitRefusal?.();
+      if (reason) throw new Error(`repair cancelled: ${reason}`);
+    };
     // Detect the engine OUTSIDE the transaction. A failed sqlite catalogue
     // probe aborts a Postgres transaction even when JavaScript catches it.
     const index = await inspectChainIdentityIndex(db);
     if (!index.valid) throw new Error("flows_chain_identity unique index is not present with the required definition");
+    checkCommitAllowed();
     return await db.tx(async (tx) => {
+      // Acquiring a connection or entering the transaction may have waited.
+      checkCommitAllowed();
       if (!(await inspectChainIdentityIndex(tx, index.dialect)).valid) {
         throw new Error("flows_chain_identity changed before the repair transaction");
       }
@@ -289,6 +301,9 @@ export async function repairAccount(
       // ON CONFLICT DO NOTHING against the partial unique index makes a re-run a
       // no-op rather than a doubled deposit. The index is the guarantee; this
       // clause only decides how the collision is reported.
+      // The catalogue/row locks above can wait too. A halt during those reads
+      // must roll this transaction back before its first mutation.
+      checkCommitAllowed();
       let inserted = 0;
       for (const r of inserts) {
         const res = await tx
@@ -516,6 +531,7 @@ export async function runRepair(
   opts: RepairOptions,
   chainId: number,
   onResult?: (r: AccountRepairResult) => void,
+  commitRefusal?: RepairCommitRefusal,
 ): Promise<AccountRepairResult[]> {
   const out: AccountRepairResult[] = [];
 
@@ -562,7 +578,7 @@ export async function runRepair(
   }
 
   for (const plan of plans) {
-    const r = await repairAccount(db, plan, opts, chainId);
+    const r = await repairAccount(db, plan, opts, chainId, commitRefusal);
     out.push(r);
     onResult?.(r);
     // A FAILURE stops the batch; a BLOCKED account does not. Blocked means the

@@ -7341,8 +7341,9 @@ async function runRepairIfAsked(shared: Db, plans: readonly AccountPlan[]): Prom
   }
 
   const chainId = Number(process.env.MERRYMEN_CHAIN_ID ?? 4663);
-  const results = await runRepair(shared, plans, opts, chainId, (r) =>
-    log(`repair| ${r.account.slice(0, 10)} ${r.stage} — ${r.why}`),
+  const results = await runRepair(shared, plans, opts, chainId,
+    (r) => log(`repair| ${r.account.slice(0, 10)} ${r.stage} — ${r.why}`),
+    () => stopping || haltRequested() ? "orchestrator is stopping or FLEET_HALT is present" : null,
   );
   for (const line of repairLines(opts.runId, opts.mode, results)) log(`repair| ${line}`);
 }
