@@ -72,13 +72,18 @@ sell-approve permission is sealed into the signature (the no-exit rule).
 
 ## Step 4 — Re-sign on mainnet
 
-- Open `/grant` → **restore a funded wallet** tab for the owner of the
-  **existing account you intend to renew**.
-- Click the **mainnet · 4663** pill and tick the acknowledgement.
-- Restore your backed-up owner key and use **check this wallet**. Compare the
-  displayed owner address and derived smart-account address with **your own
-  existing account records**. Stop if either differs. No address in this
-  runbook is a substitute for that comparison.
+- Open the existing agent's **Wallet** panel and check its displayed owner and
+  smart-account addresses against **your own existing account records**. Stop
+  if either differs. No address in this runbook substitutes for that comparison.
+- For a legacy owner-key account, use **re-sign this key (free)** while the
+  original owner key is available in this browser. If the browser no longer
+  holds it, restore your backed-up key into the **same existing account** and
+  check both addresses before proceeding.
+- For a Privy-owned account, stay signed in as its owner and use the same
+  **re-sign this key (free)** control. The embedded wallet signs through the
+  login; there is no owner key to paste or restore.
+- Select **mainnet · 4663** and acknowledge the chain before signing. Confirm
+  that the Wallet panel still shows the intended existing smart account.
 - Review the proposed token scope, per-trade and daily caps, expiry, and
   other limits against your current strategy and intended exposure. Do not
   increase a limit merely to clear a rejection.
