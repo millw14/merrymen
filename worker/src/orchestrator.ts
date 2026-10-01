@@ -105,6 +105,7 @@ import { planReconstruction, reconstructionLines } from "./accounting-reconstruc
 import type { AccountPlan } from "./accounting-reconstruction";
 import { accountPreviewLines, previewRequested, rosterLines, runPreview } from "./accounting-preview";
 import { parseRepairOptions, repairLines, runRepair } from "./accounting-repair";
+import { accountingCommitRefusal, accountingHoldTenants, accountingTenantHeld, runAccountingReconstructionAtStartup } from "./accounting-maintenance";
 import { decomposeGas, gasAuditLines, type GasOp } from "./gas-audit";
 import { cohortLines, vetCandidate, type CandidateVerdictDetail } from "./cohort-vetting";
 import { datasetLines, viewRun } from "./brain-dataset";
@@ -354,6 +355,7 @@ function nextRung(child: Child, aliveUntilMs: number): number {
  */
 function scheduleRestart(tenant: `0x${string}`, restarts: number, why: string): void {
   if (stopping) return;
+  if (accountingTenantHeld(tenant)) return;
   if (restarts > MAX_RESTARTS) {
     gaveUpUntil.set(tenant, { until: Date.now() + GIVE_UP_COOLOFF_MS, restarts });
     log(
@@ -875,6 +877,13 @@ let lastRosterLog: { active: number; expired: number; at: number } | null = null
 let lastCapacityLog: { deferred: number; at: number } | null = null;
 /** Includes children already removed by the watchdog or another stand-down. */
 const exitingChildren = new Map<string, Set<ChildProcess>>();
+
+/** A repair must not act beside any local incarnation, including one still exiting. */
+const accountingMaintenanceLocalState = (tenant: string) => ({
+  processPresent: children.has(tenant) || holders.has(tenant) || spawning.has(tenant) ||
+    restartPending.has(tenant) || exitingChildren.has(tenant) || retiringExpired.has(tenant) || leaseLossDraining.has(tenant),
+  localHomePresent: existsSync(childHome(tenant)),
+});
 
 function log(msg: string): void {
   console.log(`[orchestrator] ${msg}`);
@@ -2441,6 +2450,7 @@ export async function writeBootstrapForChild(
  */
 function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | null {
   if (stopping) return "the fleet is being called home";
+  if (accountingTenantHeld(tenant)) return "operator accounting maintenance holds this tenant";
   if (haltRequested()) return "FLEET_HALT is present";
   if (retiringExpired.has(tenant)) return "the expired grant's previous process is still retiring";
   if (leaseLossDraining.has(tenant)) return "the previous child is still exiting after lease loss";
@@ -2453,6 +2463,7 @@ function lateSpawnRefusal(tenant: `0x${string}`, lease: TenantLease): string | n
 
 async function spawnChild(tenant: `0x${string}`, restarts = 0): Promise<void> {
   if (stopping) return;
+  if (accountingTenantHeld(tenant)) return;
   if (retiringExpired.has(tenant)) return;
   // ONE SPAWN PER TENANT AT A TIME, claimed here, before the first await.
   // Checking `children` is not enough: this function awaits a dozen times
@@ -2868,6 +2879,7 @@ async function spawnHolder(
   lease: TenantLease,
   honour: HeldHonour | null,
 ): Promise<void> {
+  if (accountingTenantHeld(tenant)) return;
   // BEFORE the hold process starts, like a child's: it reads this same
   // telegram.json, and a link restored after it is polling would be read from
   // a file it has already replaced with an unlinked default.
@@ -3104,6 +3116,7 @@ function scheduleHoldRetry(held: Holder, cls: string): void {
  * refuse, which would leave the bot unanswered until the next pass.
  */
 function holdMayLeave(tenant: `0x${string}`): boolean {
+  if (accountingTenantHeld(tenant)) return false;
   const lease = leases.get(tenant);
   return !stopping && !haltRequested() && !retiringExpired.has(tenant) && !!lease && lease.healthy() && !killRequested(childHome(tenant));
 }
@@ -3703,6 +3716,7 @@ export async function reconcile(): Promise<void> {
   // also run before remote reads: a broken grant-store connection cannot keep
   // a child whose lease was lost alive indefinitely.
   standDownLostLeasesNow();
+  const accountingHolds = accountingHoldTenants(process.env);
   const store = getGrantStore();
   let tenants: `0x${string}`[];
   let expiresAtByTenant: Map<string, number | null>;
@@ -3738,6 +3752,15 @@ export async function reconcile(): Promise<void> {
   }
   tenants = kept;
   const wanted = new Set(tenants.map((t) => t.toLowerCase()));
+  // Remain wanted: a maintenance hold must not revoke the grant or wipe its
+  // home. A fresh held deployment starts no process for these tenants. Also
+  // stand down a local incarnation if a hold is introduced during a test or
+  // by an in-process operator; its retained state will refuse repair commit.
+  for (const tenant of accountingHolds) {
+    cancelRestart(tenant);
+    killChild(tenant);
+    standDownHolder(tenant);
+  }
   await retireExpiredGrants(tenants, expiresAtByTenant, nowSec);
   // A stored but expired key is still wanted for revocation, home and Telegram
   // memory cleanup. It cannot sign another operation, so it does not need an
@@ -3768,6 +3791,7 @@ export async function reconcile(): Promise<void> {
   let capacityDeferred = 0;
   for (const tenant of eligibleToSpawn) {
     const lc = tenant.toLowerCase() as `0x${string}`;
+    if (accountingHolds.has(lc)) continue;
     if (retiringExpired.has(lc) || leaseLossDraining.has(lc) || exitingChildren.has(lc)) continue;
     // A spawn still preparing is a child about to be running, not one that
     // isn't: a restart timer, usually, got here first. See `spawning`. And a
@@ -3845,6 +3869,7 @@ export async function reconcile(): Promise<void> {
   // nothing, and the press is still owed its early look on the next pass.
   const asked = await heldResetsAsked([...holders.values()].filter((h) => eligible.has(h.tenant) && !retiringExpired.has(h.tenant)).map((h) => h.smartAccount));
   for (const held of [...holders.values()]) {
+    if (accountingHolds.has(held.tenant)) { pressLeaving(held); continue; }
     // A HOLD PROCESS TOLD TO STOP THAT HAS NOT GONE, by a handover or a
     // stand-down: killed again, once a pass, and nothing else done for its
     // tenant, stood down or not, until its exit is seen.
@@ -7070,6 +7095,7 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
     // is — no chain history, no rows to remove, nothing to do — recorded rather
     // than absent.
     const tenantByAccount = new Map<string, string>();
+    const ambiguousAccounts = new Set<string>();
     const byAccount = new Map<string, Record<string, unknown>>();
     /** account → the class vault holding its assets, for the classifier. */
     const custodyVaults = new Map<string, readonly string[]>();
@@ -7086,6 +7112,8 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
           log(`recon| tenant ${tenant} holds a grant with no smart account — it cannot be planned`);
           continue;
         }
+        const previousTenant = tenantByAccount.get(acct.toLowerCase());
+        if (previousTenant && previousTenant.toLowerCase() !== tenant.toLowerCase()) ambiguousAccounts.add(acct.toLowerCase());
         tenantByAccount.set(acct.toLowerCase(), tenant);
         // FROM THE GRANT, which is the only place a class vault can honestly
         // come from: it is CREATE2-salted with one smart account, so there is no
@@ -7116,8 +7144,22 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
       `recon| roster: ${agents.length} account(s) — ${ledgerAgents.length} from the ledger, ` +
         `${rosterOnly} from the grant store with no ledger row · grant store read ${rosterRead}`,
     );
+    const repairOptions = parseRepairOptions(process.env);
+    if (repairOptions?.mode === "commit") {
+      const refusal = !rosterRead ? "grant roster unreadable" :
+        repairOptions.accounts.some((account) => ambiguousAccounts.has(account)) ? "selected account resolves to multiple tenants" : accountingCommitRefusal({
+        ...repairOptions,
+        plans: agents.map((agent) => ({
+          smartAccount: String(agent.smart_account),
+          tenant: tenantByAccount.get(String(agent.smart_account).toLowerCase()) ?? null,
+        })),
+        env: process.env,
+        localState: accountingMaintenanceLocalState,
+      });
+      if (refusal) { log(`repair| refusing commit before reconstruction: ${refusal}`); return; }
+    }
     const flows = (await shared
-      .prepare("SELECT id, agent_id, epoch, direction, amount_usdg, source, tx_hash, at FROM flows")
+      .prepare("SELECT id, agent_id, epoch, direction, amount_usdg, source, tx_hash, chain_id, block_number, log_index, at FROM flows")
       .all()) as unknown as Record<string, unknown>[];
     const equityRows = (await shared
       .prepare("SELECT agent_id, epoch, equity_usdg, at FROM equity ORDER BY agent_id, epoch, at DESC, id DESC")
@@ -7187,6 +7229,7 @@ async function runReconstructionDryRunIfAsked(): Promise<void> {
       usdgToken,
       fromBlock: 0n,
       toBlock: head,
+      includeCapitalTimestamps: true,
       // WITHOUT THIS EVERY CLASS BUY READS AS A WITHDRAWAL.
       //
       // A class buy moves USDG account→vault and the token curve→vault, so the
@@ -7285,12 +7328,28 @@ async function runRepairIfAsked(shared: Db, plans: readonly AccountPlan[]): Prom
     return;
   }
 
+  const maintenanceRefusal = accountingCommitRefusal({
+    ...opts, plans, env: process.env, localState: accountingMaintenanceLocalState,
+  });
+  if (maintenanceRefusal) {
+    log(`repair| refusing commit: ${maintenanceRefusal}`);
+    return;
+  }
+  if (opts.mode === "commit" && (stopping || haltRequested())) {
+    log("repair| refusing commit: orchestrator is stopping or FLEET_HALT is present");
+    return;
+  }
+
   const chainId = Number(process.env.MERRYMEN_CHAIN_ID ?? 4663);
-  const results = await runRepair(shared, plans, opts, chainId, (r) =>
-    log(`repair| ${r.account.slice(0, 10)} ${r.stage} — ${r.why}`),
+  const results = await runRepair(shared, plans, opts, chainId,
+    (r) => log(`repair| ${r.account.slice(0, 10)} ${r.stage} — ${r.why}`),
+    () => stopping || haltRequested() ? "orchestrator is stopping or FLEET_HALT is present" : null,
   );
   for (const line of repairLines(opts.runId, opts.mode, results)) log(`repair| ${line}`);
 }
+
+/** Test seam: exercise the actual operator entry point with an isolated ledger. */
+export { runRepairIfAsked as runAccountingRepairForTest };
 
 
 // ── THE NEWS DESK ──────────────────────────────────────────────────────────
@@ -8319,10 +8378,13 @@ export async function runOrchestrator(): Promise<void> {
     log("MERRYMEN_HOSTED is not set — the orchestrator only runs in hosted mode. Refusing to start.");
     process.exit(1);
   }
+  // Validate the complete operator list before any diagnosis, mutation or
+  // child starts. A malformed entry must never silently drop from a hold.
+  const accountingHolds = accountingHoldTenants(process.env);
+  if (accountingHolds.size) log(`accounting maintenance holds ${accountingHolds.size} named tenant(s); grants and ledger remain stored; old deployment removal must be verified separately before commit`);
   setTenantLeaseLossHandler(standDownLostLeasesNow);
   log(`starting — home ${merrymenHome()}, worker ${WORKER_ENTRY}`);
   await runAccountingDiagnosisIfAsked();
-  await runReconstructionDryRunIfAsked();
   await runGasAuditIfAsked();
   // The cohort report is NOT here. It reads `positions`, which the mirror
   // empties and refills per agent, so at startup it would be reading a table
@@ -8357,6 +8419,16 @@ export async function runOrchestrator(): Promise<void> {
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
+
+  // A held target has no child here. Its potentially long historical scan
+  // must not delay unrelated tenants. Install shutdown handling first, and
+  // recheck shutdown/hold/fresh-state at the commit boundary inside the job.
+  await runAccountingReconstructionAtStartup({
+    heldTenants: accountingHolds,
+    reconstruct: runReconstructionDryRunIfAsked,
+    onError: (error) => log(`accounting reconstruction failed — ${error instanceof Error ? error.message : String(error)}`),
+  });
+  if (stopping) return;
 
   // ORDERS ON THEIR OWN CLOCK, beside the reconcile loop below rather than
   // inside it: that loop's pass is only as fast as its slowest step.

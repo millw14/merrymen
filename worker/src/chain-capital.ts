@@ -78,6 +78,8 @@ export interface CapitalMovement {
   txHash: string;
   blockNumber: number;
   logIndex: number;
+  /** Confirmed block time, populated only when reconstruction requests it. */
+  at?: number;
   direction: "in" | "out";
   /** Base units, decimal string. Never a float. */
   amountRaw: string;
@@ -166,6 +168,8 @@ export async function scanFleetCapital(
      * byte-identical to before.
      */
     reserveTokens?: readonly string[];
+    /** Historical receipt insertion requires the actual capital-transfer block time. */
+    includeCapitalTimestamps?: boolean;
     log?: (m: string) => void;
   },
 ): Promise<Map<string, AccountCapital>> {
@@ -363,8 +367,39 @@ export async function scanFleetCapital(
     }
   }
 
+  const blockTimes = new Map<number, number | null>();
   for (const entry of result.values()) {
     entry.movements.sort((a, b) => a.blockNumber - b.blockNumber || a.logIndex - b.logIndex);
+    if (args.includeCapitalTimestamps && entry.complete) {
+      for (const movement of entry.movements) {
+        if (!["capital-in", "capital-out", "reserve-out"].includes(movement.classification.kind)) continue;
+        if (!blockTimes.has(movement.blockNumber)) {
+          let at: number | null = null;
+          try {
+            const block = await rpc("eth_getBlockByNumber", [`0x${movement.blockNumber.toString(16)}`, false]) as
+              { number?: unknown; timestamp?: unknown } | null;
+            if (typeof block?.number !== "string" || typeof block.timestamp !== "string" ||
+                !/^0x[0-9a-f]+$/i.test(block.number) || !/^0x[0-9a-f]+$/i.test(block.timestamp) ||
+                BigInt(block.number) !== BigInt(movement.blockNumber)) throw new Error("wrong or unreadable block");
+            const value = Number(BigInt(block.timestamp));
+            if (!Number.isSafeInteger(value) || value <= 0) throw new Error("invalid block time");
+            at = value;
+          } catch {
+            // An unread block must not be replaced by the time of this repair.
+          }
+          blockTimes.set(movement.blockNumber, at);
+        }
+        const at = blockTimes.get(movement.blockNumber)!;
+        if (at === null) {
+          entry.complete = false;
+          const note = `unreadable capital timestamp at block ${movement.blockNumber}`;
+          entry.notes.push(note);
+          args.log?.(`${entry.account} ${note} — reconstruction is incomplete`);
+        } else {
+          movement.at = at;
+        }
+      }
+    }
     entry.totals = totalCapital(
       entry.movements.map((m) => ({ amountRaw: m.amountRaw, classification: m.classification })),
     );

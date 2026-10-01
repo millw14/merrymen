@@ -21,8 +21,8 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { wrapSqlite, type Db } from "./db";
 import { applyLedgerSchema } from "./store";
-import { repairAccount, runRepair, parseRepairOptions, type RepairOptions } from "./accounting-repair";
-import type { AccountPlan, ProposedFlowRow } from "./accounting-reconstruction";
+import { repairAccount, runRepair, hasChainIdentityIndex, parseRepairOptions, type RepairOptions } from "./accounting-repair";
+import { FLOW_SNAPSHOT_COLUMNS, flowFingerprintOf, type AccountPlan, type ProposedFlowRow } from "./accounting-reconstruction";
 
 const CHAIN = 4663;
 const A = "0x3E34E58e1E1b52A6cbE2Bd7C6e0C1B1e1e1e1e1e";
@@ -62,6 +62,7 @@ const row = (over: Partial<ProposedFlowRow> & { txHash: string; logIndex: number
   amountRaw: "10000000",
   source: "chain-log",
   blockNumber: 100,
+  at: 1000,
   ...over,
 });
 
@@ -95,6 +96,18 @@ const plan = (over: Partial<AccountPlan> & { smartAccount: string }): AccountPla
 
 const COMMIT: RepairOptions = { mode: "commit", runId: "test-run", resume: false, accounts: [] };
 
+/** Existing scenarios represent a fresh operator plan on every run. Stale-plan
+ * cases below capture explicitly and call the unwrapped mutation. */
+async function snapshotPlan(db: Db, p: AccountPlan): Promise<AccountPlan> {
+  const rows = await db.prepare(`SELECT ${FLOW_SNAPSHOT_COLUMNS} FROM flows WHERE agent_id = ?`).all(p.smartAccount);
+  return { ...p, flowFingerprint: flowFingerprintOf(rows as Record<string, unknown>[]) };
+}
+const repairFreshAccount = async (db: Db, p: AccountPlan, opts: RepairOptions, chainId: number) =>
+  repairAccount(db, await snapshotPlan(db, p), opts, chainId);
+const runFreshRepair = async (db: Db, plans: readonly AccountPlan[], opts: RepairOptions, chainId: number) =>
+  runRepair(db, await Promise.all(plans.map((p) => snapshotPlan(db, p))), opts, chainId);
+
+
 const countFlows = async (db: Db, account: string) =>
   Number(((await db.prepare("SELECT COUNT(*) AS n FROM flows WHERE agent_id = ?").get(account)) as { n: number }).n);
 
@@ -110,6 +123,78 @@ const netOf = async (db: Db, account: string) =>
     ).net,
   );
 
+test("a halt after the first account prevents the next account's transaction", async () => {
+  const db = await freshDb();
+  await seedAgent(db, A);
+  await seedAgent(db, B);
+  const plans = await Promise.all([
+    plan({ smartAccount: A, insert: [row({ txHash: TX, logIndex: 1 })] }),
+    plan({ smartAccount: B, insert: [row({ agentId: B, txHash: TX2, logIndex: 1 })] }),
+  ].map((p) => snapshotPlan(db, p)));
+  const untouched = await db.prepare("SELECT * FROM agents WHERE smart_account = ?").get(B);
+  let halted = false;
+  let transactions = 0;
+  const observed: Db = {
+    prepare: (sql) => db.prepare(sql), exec: (sql) => db.exec(sql),
+    tx: (fn) => { transactions++; return db.tx(fn); },
+  };
+  const result = await runRepair(observed, plans, { ...COMMIT, accounts: [A.toLowerCase(), B] }, CHAIN,
+    (r) => { if (r.account === A && r.stage === "recomputed") halted = true; },
+    () => halted ? "FLEET_HALT is present" : null,
+  );
+  assert.deepEqual(result.map((r) => r.stage), ["recomputed", "failed"]);
+  assert.match(result[1]!.why, /repair cancelled: FLEET_HALT/);
+  assert.equal(transactions, 1, "the second account never opens a transaction after halt");
+  assert.equal(await netOf(db, A), 10, "the completed valid transaction remains committed");
+  assert.equal(await countFlows(db, B), 0);
+  assert.deepEqual(await db.prepare("SELECT * FROM agents WHERE smart_account = ?").get(B), untouched);
+});
+
+for (const phase of ["catalogue read", "transaction acquisition", "row lock"] as const) {
+  test(`a halt during ${phase} refuses before the account's first mutation`, async () => {
+    const db = await freshDb();
+    await seedAgent(db, A);
+    const p = await snapshotPlan(db, plan({ smartAccount: A, insert: [row({ txHash: TX, logIndex: 1 })] }));
+    const before = await db.prepare("SELECT * FROM agents WHERE smart_account = ?").get(A);
+    let halted = false;
+    let transactions = 0;
+    const reads = (inner: Db): Db => ({
+      prepare: (sql) => {
+        const stmt = inner.prepare(sql);
+        return {
+          ...stmt,
+          get: async (...params) => {
+            const result = await stmt.get(...params);
+            if ((phase === "catalogue read" && sql.includes("FROM sqlite_master")) ||
+                (phase === "row lock" && sql.includes("SELECT epoch, chain_id FROM agents"))) halted = true;
+            return result;
+          },
+        };
+      },
+      exec: (sql) => inner.exec(sql), tx: (fn) => inner.tx(fn),
+    });
+    const observed: Db = {
+      ...reads(db),
+      tx: (fn) => {
+        transactions++;
+        return db.tx(async (tx) => {
+          if (phase === "transaction acquisition") halted = true;
+          return fn(reads(tx));
+        });
+      },
+    };
+    const result = await repairAccount(observed, p, COMMIT, CHAIN,
+      () => halted ? "orchestrator is stopping" : null);
+    assert.equal(result.stage, "failed", result.why);
+    assert.match(result.why, /repair cancelled: orchestrator is stopping/);
+    assert.equal(transactions, phase === "catalogue read" ? 0 : 1);
+    assert.equal(await countFlows(db, A), 0, "no receipt was inserted");
+    assert.deepEqual(await db.prepare("SELECT * FROM flows_quarantine").all(), []);
+    assert.deepEqual(await db.prepare("SELECT * FROM agents WHERE smart_account = ?").get(A), before,
+      "quality and risk state remain unchanged after rollback");
+  });
+}
+
 // ── 1. THE SAME TRANSFER IMPORTED TWICE ────────────────────────────────────
 
 test("the same transfer imported twice leaves one row and one contribution", async () => {
@@ -117,13 +202,13 @@ test("the same transfer imported twice leaves one row and one contribution", asy
   await seedAgent(db, A);
   const p = plan({ smartAccount: A, insert: [row({ txHash: TX, logIndex: 5 })] });
 
-  const first = await repairAccount(db, p, COMMIT, CHAIN);
+  const first = await repairFreshAccount(db, p, COMMIT, CHAIN);
   assert.equal(first.stage, "recomputed");
   assert.equal(first.inserted, 1);
   assert.equal(await netOf(db, A), 10);
 
   // The SECOND run is the whole test: a full repeat, not a resume.
-  const second = await repairAccount(db, p, { ...COMMIT, runId: "test-run-2" }, CHAIN);
+  const second = await repairFreshAccount(db, p, { ...COMMIT, runId: "test-run-2" }, CHAIN);
   assert.equal(second.stage, "recomputed");
   assert.equal(second.inserted, 0, "the index refused the duplicate rather than the code noticing it");
   assert.equal(await countFlows(db, A), 1);
@@ -169,11 +254,11 @@ test("one transaction carrying several logs keeps every log, and only once", asy
     contributionsAfterUsdg: 14,
   });
 
-  const first = await repairAccount(db, p, COMMIT, CHAIN);
+  const first = await repairFreshAccount(db, p, COMMIT, CHAIN);
   assert.equal(first.inserted, 2, "the log index is part of the identity, so both survive");
   assert.equal(await netOf(db, A), 14);
 
-  const second = await repairAccount(db, p, { ...COMMIT, runId: "r2" }, CHAIN);
+  const second = await repairFreshAccount(db, p, { ...COMMIT, runId: "r2" }, CHAIN);
   assert.equal(second.inserted, 0);
   assert.equal(await countFlows(db, A), 2);
   assert.equal(await netOf(db, A), 14);
@@ -191,8 +276,8 @@ test("one transaction touching two accounts books it for both", async () => {
   const pa = plan({ smartAccount: A, insert: [row({ agentId: A, txHash: TX, logIndex: 1 })] });
   const pb = plan({ smartAccount: B, insert: [row({ agentId: B, txHash: TX, logIndex: 2 })] });
 
-  assert.equal((await repairAccount(db, pa, COMMIT, CHAIN)).inserted, 1);
-  assert.equal((await repairAccount(db, pb, COMMIT, CHAIN)).inserted, 1);
+  assert.equal((await repairFreshAccount(db, pa, COMMIT, CHAIN)).inserted, 1);
+  assert.equal((await repairFreshAccount(db, pb, COMMIT, CHAIN)).inserted, 1);
   assert.equal(await netOf(db, A), 10);
   assert.equal(await netOf(db, B), 10);
 
@@ -210,8 +295,8 @@ test("one transaction touching two accounts books it for both", async () => {
     insert: [row({ agentId: A, txHash: TX2, logIndex: 1 })],
     contributionsAfterUsdg: 20,
   });
-  await repairAccount(db, pb2, { ...COMMIT, runId: "r2" }, CHAIN);
-  await repairAccount(db, pa2, { ...COMMIT, runId: "r2" }, CHAIN);
+  await repairFreshAccount(db, pb2, { ...COMMIT, runId: "r2" }, CHAIN);
+  await repairFreshAccount(db, pa2, { ...COMMIT, runId: "r2" }, CHAIN);
   assert.equal(await countFlows(db, A), 2);
   assert.equal(await countFlows(db, B), 2);
 });
@@ -240,14 +325,14 @@ test("a restart midway leaves finished accounts done and untouched accounts unto
 
   // The "restart" is the process ending after A and before B — which is exactly
   // what a Railway redeploy does — so B is simply never called.
-  await repairAccount(db, pa, COMMIT, CHAIN);
+  await repairFreshAccount(db, pa, COMMIT, CHAIN);
   assert.equal(await netOf(db, A), 10, "A is repaired");
   assert.equal(await netOf(db, B), 40, "B still holds its untouched legacy row");
 
-  // The new process re-runs the WHOLE fleet with --resume.
-  const results = await runRepair(
+  // The new process rebuilds its plans from the current rows before --resume.
+  const results = await runFreshRepair(
     db,
-    [pa, pb],
+    [{ ...pa, quarantine: [] }, pb],
     // BOTH NAMED. A commit with no named accounts is refused, so a fleet pass
     // spells out what it is repairing — including on a resume.
     { ...COMMIT, resume: true, runId: "r2", accounts: [A.toLowerCase(), B.toLowerCase()] },
@@ -265,9 +350,9 @@ test("an account whose evidence is all present and whose legacy rows are gone is
   const db = await freshDb();
   await seedAgent(db, A);
   const p = plan({ smartAccount: A, insert: [row({ txHash: TX, logIndex: 1 })] });
-  await repairAccount(db, p, COMMIT, CHAIN);
+  await repairFreshAccount(db, p, COMMIT, CHAIN);
 
-  const again = await repairAccount(db, p, { ...COMMIT, resume: true, runId: "r2" }, CHAIN);
+  const again = await repairFreshAccount(db, p, { ...COMMIT, resume: true, runId: "r2" }, CHAIN);
   assert.equal(again.stage, "already-repaired");
   assert.equal(again.inserted, 0);
 });
@@ -290,12 +375,13 @@ test("re-running after a partial success converges instead of accumulating", asy
     contributionsAfterUsdg: 15,
   });
 
-  const r1 = await repairAccount(db, p, COMMIT, CHAIN);
+  const r1 = await repairFreshAccount(db, p, COMMIT, CHAIN);
   assert.equal(r1.inserted, 2);
   assert.equal(r1.quarantined, 2);
   assert.equal(await netOf(db, A), 15);
 
-  const r2 = await repairAccount(db, p, { ...COMMIT, runId: "r2" }, CHAIN);
+  const r2 = await repairFreshAccount(db, { ...p, quarantine: [] }, { ...COMMIT, runId: "r2" }, CHAIN);
+  assert.equal(r2.stage, "recomputed");
   assert.equal(r2.inserted, 0);
   assert.equal(r2.quarantined, 0, "the legacy rows are already in quarantine, not moved a second time");
   assert.equal(await countFlows(db, A), 2);
@@ -322,7 +408,7 @@ test("a failed verification quarantines NOTHING for that account", async () => {
     )
     .run(A, TX, CHAIN);
 
-  const r = await repairAccount(
+  const r = await repairFreshAccount(
     db,
     plan({
       smartAccount: A,
@@ -345,7 +431,7 @@ test("quarantine is reversible — every column needed to put the row back is ca
   const db = await freshDb();
   await seedAgent(db, A);
   const id = await seedInferred(db, A, "out", 59_000);
-  await repairAccount(
+  await repairFreshAccount(
     db,
     plan({
       smartAccount: A,
@@ -385,7 +471,7 @@ test("a run that fails partway does not commit its own inserts", async () => {
     )
     .run(A, TX2, CHAIN);
 
-  const r = await repairAccount(
+  const r = await repairFreshAccount(
     db,
     plan({
       smartAccount: A,
@@ -439,7 +525,7 @@ test("a dry run writes nothing", async () => {
   const db = await freshDb();
   await seedAgent(db, A);
   const id = await seedInferred(db, A, "in", 1000);
-  const r = await repairAccount(
+  const r = await repairFreshAccount(
     db,
     plan({
       smartAccount: A,
@@ -461,7 +547,7 @@ test("--account limits the mutation to one smart account", async () => {
   const pa = plan({ smartAccount: A, insert: [row({ agentId: A, txHash: TX, logIndex: 1 })] });
   const pb = plan({ smartAccount: B, insert: [row({ agentId: B, txHash: TX2, logIndex: 1 })] });
 
-  const results = await runRepair(db, [pa, pb], { ...COMMIT, accounts: [A.toLowerCase()] }, CHAIN);
+  const results = await runFreshRepair(db, [pa, pb], { ...COMMIT, accounts: [A.toLowerCase()] }, CHAIN);
   assert.equal(results[0]!.stage, "recomputed");
   assert.equal(results[1]!.stage, "skipped-not-selected");
   assert.equal(await countFlows(db, A), 1);
@@ -472,7 +558,7 @@ test("a blocked account is skipped rather than half-corrected", async () => {
   const db = await freshDb();
   await seedAgent(db, A);
   const id = await seedInferred(db, A, "in", 1000);
-  const r = await repairAccount(
+  const r = await repairFreshAccount(
     db,
     plan({
       smartAccount: A,
@@ -501,7 +587,7 @@ test("runRepair stops at the first failure instead of pressing on", async () => 
   const pa = plan({ smartAccount: A, insert: [row({ agentId: A, txHash: TX, logIndex: 1 })] });
   const pb = plan({ smartAccount: B, insert: [row({ agentId: B, txHash: TX2, logIndex: 1 })] });
 
-  const results = await runRepair(db, [pa, pb], COMMIT, CHAIN);
+  const results = await runFreshRepair(db, [pa, pb], COMMIT, CHAIN);
   assert.equal(results.length, 1);
   assert.equal(results[0]!.stage, "failed");
   assert.equal(await countFlows(db, B), 0);
@@ -518,7 +604,7 @@ test("a ledger that moved since the preview rolls the repair back", async () => 
   // live tick, a second operator. The operator approved 10, not 60.
   await seedInferred(db, A, "in", 50);
 
-  const r = await repairAccount(db, p, COMMIT, CHAIN);
+  const r = await repairFreshAccount(db, p, COMMIT, CHAIN);
   assert.equal(r.stage, "failed");
   assert.match(r.why, /the table changed since the plan was built/);
   assert.equal(await countFlows(db, A), 1, "only the row that appeared; the repair backed out");
@@ -527,7 +613,7 @@ test("a ledger that moved since the preview rolls the repair back", async () => 
 test("quality is recomputed in the same transaction as the rows it describes", async () => {
   const db = await freshDb();
   await seedAgent(db, A);
-  const r = await repairAccount(
+  const r = await repairFreshAccount(
     db,
     plan({ smartAccount: A, insert: [row({ txHash: TX, logIndex: 1 })] }),
     COMMIT,
@@ -599,7 +685,7 @@ test("an energy-buy the worker already booked is a no-op insert, verifies, and k
     contributionsAfterUsdg: 58,
   });
 
-  const r = await repairAccount(db, p, COMMIT, CHAIN);
+  const r = await repairFreshAccount(db, p, COMMIT, CHAIN);
   assert.equal(r.stage, "recomputed", r.why);
   assert.equal(r.inserted, 1, "only the deposit was new");
   assert.equal(r.insertsAlreadyPresent, 1, "the worker's energy row collided on the identity index");
@@ -615,7 +701,7 @@ test("verify-only confirms an existing worker energy-buy row against the plan", 
   const db = await freshDb();
   await seedAgent(db, A);
   await seedWorkerEnergyRow(db, A);
-  const v = await repairAccount(db, plan({ smartAccount: A, insert: [energyRow()] }), { ...COMMIT, mode: "verify-only" }, CHAIN);
+  const v = await repairFreshAccount(db, plan({ smartAccount: A, insert: [energyRow()] }), { ...COMMIT, mode: "verify-only" }, CHAIN);
   assert.equal(v.stage, "verified", v.why);
   assert.equal(v.insertsAlreadyPresent, 1);
 });
@@ -631,7 +717,7 @@ test("an energy purchase whose booking was LOST is restored as an energy-buy row
     insert: [row({ txHash: TX, logIndex: 0, amountUsdg: 100, amountRaw: "100000000" }), energyRow()],
     contributionsAfterUsdg: 58,
   });
-  const r = await repairAccount(db, p, COMMIT, CHAIN);
+  const r = await repairFreshAccount(db, p, COMMIT, CHAIN);
   assert.equal(r.stage, "recomputed", r.why);
   assert.equal(r.inserted, 2);
   const e = (await db.prepare("SELECT source, direction, amount_usdg FROM flows WHERE log_index = 3").get()) as Record<string, unknown>;
@@ -650,7 +736,7 @@ test("the same identity held under ANOTHER source fails verification, and nothin
     quarantine: [{ id: legacy, direction: "in", amountUsdg: 100, source: "inferred", reason: "superseded" }],
     contributionsAfterUsdg: -42,
   });
-  const r = await repairAccount(db, p, COMMIT, CHAIN);
+  const r = await repairFreshAccount(db, p, COMMIT, CHAIN);
   assert.equal(r.stage, "failed");
   assert.match(r.why, /is source 'chain-log', not energy-buy/);
   assert.equal(await countFlows(db, A), 2, "the inferred row is still there");
@@ -661,4 +747,137 @@ test("the unevidenced count reads the ONE evidenced list, not a hard-coded copy"
   assert.doesNotMatch(src, /source IN \('chain-log','epoch-carry'\)/, "a second copy of the list drifts");
   assert.match(src, /EVIDENCED_FLOW_SOURCES\.map/);
   assert.doesNotMatch(src, /VALUES \([^)]*'chain-log'/, "the INSERT binds the proposed source");
+});
+
+// ── A PLAN IS BOUND TO THE COMPLETE PRE-REPAIR ACCOUNT ─────────────────────
+
+test("a stable 299 USDG receipt repair preserves contributions, peak and signed caps", async () => {
+  const db = await freshDb();
+  await seedAgent(db, A);
+  await db.prepare("UPDATE agents SET hwm_usdg = 349.365984, caps = ? WHERE smart_account = ?")
+    .run('{"maxDrawdownBps":500}', A);
+  await db.prepare(`INSERT INTO flows
+    (agent_id,direction,amount_usdg,tx_hash,block_number,log_index,source,epoch,chain_id,at)
+    VALUES (?,'in',49.145575,?,100,1,'chain-log',1,?,1234)`).run(A, TX, CHAIN);
+  const originalReceipt = await db.prepare(`SELECT ${FLOW_SNAPSHOT_COLUMNS} FROM flows WHERE tx_hash = ?`).get(TX);
+  const id = await seedInferred(db, A, "in", 299);
+  const p = await snapshotPlan(db, plan({
+    smartAccount: A,
+    insert: [row({ txHash: TX, logIndex: 1, amountUsdg: 49.145575, amountRaw: "49145575" }),
+      row({ txHash: TX2, logIndex: 2, amountUsdg: 299, amountRaw: "299000000", at: 2000 })],
+    quarantine: [{ id, direction: "in", amountUsdg: 299, source: "inferred", reason: "receipt recovered" }],
+    existingTotalUsdg: 348.145575, contributionsAfterUsdg: 348.145575,
+  }));
+  const result = await repairAccount(db, p, COMMIT, CHAIN);
+  assert.equal(result.stage, "recomputed");
+  assert.equal(result.inserted, 1);
+  assert.equal(result.quarantined, 1);
+  assert.equal(await netOf(db, A), 348.145575);
+  assert.deepEqual(await db.prepare(`SELECT ${FLOW_SNAPSHOT_COLUMNS} FROM flows WHERE tx_hash = ?`).get(TX),
+    originalReceipt, "the existing receipt is byte-for-byte unchanged, including its original time");
+  assert.equal((await db.prepare("SELECT at FROM flows WHERE tx_hash = ?").get(TX2) as { at: number }).at,
+    2000, "the replacement receipt uses its confirmed historical block time, not the repair time");
+  assert.deepEqual({ ...await db.prepare("SELECT hwm_usdg, caps, contributions_known FROM agents WHERE smart_account = ?").get(A) as object },
+    { hwm_usdg: 349.365984, caps: '{"maxDrawdownBps":500}', contributions_known: 1 });
+  const fresh = await snapshotPlan(db, { ...p, quarantine: [] });
+  const again = await repairAccount(db, fresh, { ...COMMIT, resume: true }, CHAIN);
+  assert.equal(again.stage, "already-repaired");
+  assert.equal(await countFlows(db, A), 2);
+});
+
+test("commit and resume both refuse a stale epoch before writing any flow", async () => {
+  for (const resume of [false, true]) {
+    const db = await freshDb();
+    await seedAgent(db, A);
+    const p = await snapshotPlan(db, plan({ smartAccount: A, insert: [row({ txHash: TX, logIndex: 1 })] }));
+    await db.prepare("UPDATE agents SET epoch = 2 WHERE smart_account = ?").run(A);
+    const result = await repairAccount(db, p, { ...COMMIT, resume }, CHAIN);
+    assert.equal(result.stage, "failed");
+    assert.match(result.why, /epoch or chain changed/);
+    assert.equal(await countFlows(db, A), 0);
+  }
+});
+
+test("offsetting new flows invalidate a captured plan even when net contributions are unchanged", async () => {
+  const db = await freshDb();
+  await seedAgent(db, A);
+  const p = await snapshotPlan(db, plan({ smartAccount: A, insert: [row({ txHash: TX, logIndex: 1 })] }));
+  await seedInferred(db, A, "in", 7);
+  await seedInferred(db, A, "out", 7);
+  const result = await repairAccount(db, p, COMMIT, CHAIN);
+  assert.equal(result.stage, "failed");
+  assert.match(result.why, /flow rows changed/);
+  assert.equal(await countFlows(db, A), 2);
+  assert.equal(await netOf(db, A), 0);
+});
+
+test("changing a captured flow timestamp invalidates the plan without changing its net", async () => {
+  const db = await freshDb();
+  await seedAgent(db, A);
+  const id = await seedInferred(db, A, "in", 10);
+  const p = await snapshotPlan(db, plan({ smartAccount: A, insert: [row({ txHash: TX, logIndex: 1 })],
+    quarantine: [{ id, direction: "in", amountUsdg: 10, source: "inferred", reason: "recovered" }] }));
+  await db.prepare("UPDATE flows SET at = 123 WHERE id = ?").run(id);
+  const result = await repairAccount(db, p, COMMIT, CHAIN);
+  assert.equal(result.stage, "failed");
+  assert.match(result.why, /flow rows changed/);
+  assert.equal(await countFlows(db, A), 1);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM flows_quarantine").get() as { n: number }).n, 0);
+});
+
+test("quarantine cannot use another account's row even with a valid fingerprint for this account", async () => {
+  const db = await freshDb();
+  await seedAgent(db, A);
+  await seedAgent(db, B);
+  const id = await seedInferred(db, B, "in", 10);
+  const p = await snapshotPlan(db, plan({ smartAccount: A, insert: [row({ txHash: TX, logIndex: 1 })],
+    quarantine: [{ id, direction: "in", amountUsdg: 10, source: "inferred", reason: "wrong account" }] }));
+  const result = await repairAccount(db, p, COMMIT, CHAIN);
+  assert.equal(result.stage, "failed");
+  assert.match(result.why, /does not match this account/);
+  assert.equal(await countFlows(db, A), 0);
+  assert.equal(await countFlows(db, B), 1);
+});
+
+test("commit refuses a legacy plan without a fingerprint while its dry run remains available", async () => {
+  const db = await freshDb();
+  await seedAgent(db, A);
+  const p = plan({ smartAccount: A, insert: [row({ txHash: TX, logIndex: 1 })] });
+  assert.equal((await repairAccount(db, p, { ...COMMIT, mode: "dry-run" }, CHAIN)).stage, "would-mutate");
+  const result = await repairAccount(db, p, COMMIT, CHAIN);
+  assert.equal(result.stage, "failed");
+  assert.match(result.why, /no complete flow fingerprint/);
+  assert.equal(await countFlows(db, A), 0);
+});
+
+test("the same index name is insufficient without the exact unique identity and predicate", async () => {
+  for (const definition of [
+    "CREATE INDEX flows_chain_identity ON flows (chain_id,agent_id,tx_hash,log_index) WHERE tx_hash IS NOT NULL AND log_index IS NOT NULL",
+    "CREATE UNIQUE INDEX flows_chain_identity ON flows (chain_id,agent_id,tx_hash) WHERE tx_hash IS NOT NULL AND log_index IS NOT NULL",
+    "CREATE UNIQUE INDEX flows_chain_identity ON flows (chain_id,agent_id,tx_hash,log_index) WHERE tx_hash IS NOT NULL AND log_index IS NOT NULL AND epoch = 2",
+    "CREATE UNIQUE INDEX flows_chain_identity ON agents (smart_account)",
+  ]) {
+    const db = await freshDb();
+    await seedAgent(db, A);
+    await db.exec("DROP INDEX flows_chain_identity");
+    await db.exec(definition);
+    assert.equal(await hasChainIdentityIndex(db), false, definition);
+    const p = await snapshotPlan(db, plan({ smartAccount: A, insert: [row({ txHash: TX, logIndex: 1 })] }));
+    const result = await repairAccount(db, p, COMMIT, CHAIN);
+    assert.equal(result.stage, "failed");
+    assert.match(result.why, /required definition/);
+    assert.equal(await countFlows(db, A), 0);
+  }
+});
+
+test("new receipts with missing or invalid historical timestamps refuse before any writes", async () => {
+  for (const at of [undefined, 0, Number.NaN, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    const db = await freshDb();
+    await seedAgent(db, A);
+    const p = await snapshotPlan(db, plan({ smartAccount: A, insert: [row({ txHash: TX, logIndex: 1, at })] }));
+    const result = await repairAccount(db, p, COMMIT, CHAIN);
+    assert.equal(result.stage, "failed");
+    assert.match(result.why, /no verified historical timestamp/);
+    assert.equal(await countFlows(db, A), 0);
+  }
 });
