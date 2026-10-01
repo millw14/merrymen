@@ -3,10 +3,11 @@ import Module, { createRequire } from "node:module";
 import { afterEach, before, beforeEach, describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import React, { act } from "react";
-import { bindingMessage, WALL_TOO_WIDE, type GrantCaps, type StoredGrant } from "@merrymen/core";
-import type { SavedWallet } from "@/lib/session";
+import { bindingMessage, buildCallPermissions, firstEnableEnvelope, wallShape, wallSignable, type GrantCaps, type StoredGrant } from "@merrymen/core";
+import type { MintOptions, SavedWallet } from "@/lib/session";
 import { JSDOM } from "jsdom";
 import { privateKeyToAccount } from "viem/accounts";
+import type { LocalAccount } from "viem";
 import type { PrivyOwner } from "./usePrivyOwner";
 import { needsPermissionReplacement } from "@/lib/permission-replacement";
 import { loadRecoveryGrants } from "@/lib/saved-grant-binding";
@@ -27,8 +28,11 @@ const grant = {
   grantTokens: [],
   grantFeatures: [],
 } as unknown as StoredGrant;
-const tooWide = `${WALL_TOO_WIDE}: installing it would need about 15,980,519 gas against a limit of 14,000,000. You have 20 custom tokens; the most that fits with the features you have enabled is 17. Remove at least 3 custom tokens, then sign again.`;
-let renew: (options: { caps: GrantCaps; onStatus: (status: string) => void; chainId?: number; expectAccount?: string }) => Promise<unknown>;
+const fixtureAddress = (n: number) => `0x${n.toString(16).padStart(40, "0")}` as `0x${string}`;
+const trencherFactory = fixtureAddress(600);
+let renew: (options: MintOptions) => Promise<unknown>;
+let preflight: (owner: LocalAccount, options: MintOptions) => Promise<void>;
+let preflightCalls = 0;
 type RevocationWallet = { ownerKey?: string; smartAccount: string; chainId: number };
 let revoke: (wallet: RevocationWallet) => Promise<unknown>;
 let revokeWallets: RevocationWallet[] = [];
@@ -63,6 +67,7 @@ before(async () => {
     if (parent?.filename === walletPath) {
       if (id === "next/link") return ({ children, ...props }: React.ComponentProps<"a">) => React.createElement("a", props, children);
       if (id === "@/terminal/usePrivyOwner") return { usePrivyOwner: () => privyOwner };
+      if (id === "@/lib/trencher-permission") return { TRENCHER_FACTORY: trencherFactory };
       if (id === "@/lib/verified-adapter") return { verifiedAdapter: async () => undefined };
       if (id === "@/lib/revoke-client") return { revokeFromBrowser: async (wallet: RevocationWallet) => { revokeCalls++; revokeWallets.push(wallet); return revoke(wallet); } };
       if (id === "@/lib/stop-agent") return { stopAgent: (expectedTenant?: string | null) => { stopCalls++; return stop(expectedTenant); } };
@@ -73,6 +78,7 @@ before(async () => {
         isPrivyOwned: (g: StoredGrant | null) => g?.binding?.version === "privy-did-owner-v1",
         previewOwnerAccount: (key: string, chainId: number) => previewOwner(key, chainId),
         readFunding: async () => ({ gasWei: 1n, usdgUnits: 71_580_000n, usdg: 71.58 }),
+        preflightAgentGrant: (owner: LocalAccount, options: MintOptions) => { preflightCalls++; return preflight(owner, options); },
         createPrivyOwnedWallet: (_owner: unknown, _did: unknown, options: Parameters<typeof renew>[0]) => { mintCalls++; return renew(options); },
         restoreAgentWallet: (key: unknown, options: Parameters<typeof renew>[0]) => { mintCalls++; restoredKeys.push(key); return renew(options); },
       };
@@ -96,10 +102,12 @@ beforeEach(() => {
   revokeWallets = [];
   restoredKeys = [];
   mintCalls = 0;
+  preflightCalls = 0;
   stopCalls = 0;
   revoke = async () => ({ transactionHash: `0x${"4".repeat(64)}` });
   previewOwner = async () => ({ smartAccount: address, owner: address });
   stop = async () => {};
+  preflight = async () => {};
   renew = async () => { throw new Error("Unexpected signing request"); };
   Object.defineProperty(ui.dom.window.HTMLElement.prototype, "scrollIntoView", { configurable: true, value() {} });
   localStorage.setItem("merrymen.grant.backedup.v1", "1");
@@ -153,6 +161,36 @@ async function type(input: HTMLInputElement, value: string) {
     setter.call(input, value);
     input.dispatchEvent(new ui.dom.window.Event("input", { bubbles: true }));
   });
+}
+
+function useRenewalOwner(kind: "legacy" | "Privy") {
+  const owner = privateKeyToAccount(grant.demoOwnerPrivateKey as `0x${string}`);
+  activeGrant = { ...grant, owner: owner.address };
+  if (kind === "Privy") {
+    const did = "did:privy:renewal-preflight";
+    privyOwner = { account: owner, did };
+    activeGrant = {
+      ...activeGrant,
+      demoOwnerPrivateKey: undefined,
+      binding: { version: "privy-did-owner-v1", did, nonce: "prior-binding", ownerSignature: `0x${"0".repeat(130)}` },
+    };
+  }
+  return owner;
+}
+
+function storageSnapshot() {
+  return Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)!)
+    .sort().map(key => [key, localStorage.getItem(key)]);
+}
+
+function assertExistingPermissionKept(before: ReturnType<typeof storageSnapshot>) {
+  assert.equal(stopCalls, 0, "preflight refusal must not stop the active worker");
+  assert.equal(revokeCalls, 0, "preflight refusal must not request on-chain revocation");
+  assert.equal(mintCalls, 0, "preflight refusal must not ask for a replacement signature");
+  assert.equal(needsPermissionReplacement(activeGrant), false, "the existing permission must remain re-armable");
+  assert.deepEqual(storageSnapshot(), before, "recovery storage and replacement markers must remain unchanged");
+  assert.doesNotMatch(ui.container.textContent!, /Earlier permissions were revoked/);
+  assert.doesNotMatch(ui.container.textContent!, /this wallet isn't active/);
 }
 
 describe("the funded wallet's re-sign control", () => {
@@ -401,10 +439,51 @@ describe("the funded wallet's re-sign control", () => {
     assert.match(ui.container.textContent!, /this wallet isn't active/);
   });
 
-  it("shows a refused renewal beside the pressed button, with the exact smaller-permission remedy", async () => {
-    renew = async () => { throw new Error(tooWide); };
+  for (const kind of ["legacy", "Privy"] as const) it(`${kind} renewal refuses a real oversized class + Trencher + v4 wall before replacing the active grant`, async () => {
+    const owner = useRenewalOwner(kind);
+    const tokens = [1, 2, 3].map(n => ({ symbol: `T${n}`, address: fixtureAddress(n + 100), decimals: 18 }));
+    activeGrant = {
+      ...activeGrant,
+      grantFeatures: ["pons-class", "trencher-vault-v1"],
+      grantTokens: tokens.map(token => token.address),
+      ponsClassVaultAddress: fixtureAddress(400),
+      ponsClassVaultFactoryAddress: fixtureAddress(500),
+      trencherFactoryAddress: trencherFactory,
+      trencherVaultAddress: fixtureAddress(700),
+    };
+    localStorage.setItem("merrymen.grant.v1", JSON.stringify({ ...activeGrant, serialized: "existing recoverable permission" }));
+    const fetch = globalThis.fetch;
+    globalThis.fetch = (input, init) => String(input) === "/api/settings"
+      ? Promise.resolve(json({ values: { customTokens: tokens, basketSymbols: [], v4AdapterAddress: fixtureAddress(800), ponsClassVaultFactory: fixtureAddress(500) } }))
+      : fetch(input, init);
+    let tooWide = "";
+    preflight = async (signer, options) => {
+      assert.equal(signer.address, owner.address);
+      assert.equal(options.expectAccount, address);
+      assert.deepEqual(options.extraTokens, tokens);
+      assert.equal(options.v4AdapterAddress, fixtureAddress(800));
+      assert.equal(options.ponsClassVaultFactory, fixtureAddress(500));
+      assert.equal(options.trencherFactory, trencherFactory);
+      const shapeWith = (count: number, v4 = true) => wallShape(buildCallPermissions(options.caps, address, {
+        extraTokens: options.extraTokens!.slice(0, count),
+        ponsClassVaultAddress: fixtureAddress(400),
+        ponsClassVaultFactoryAddress: options.ponsClassVaultFactory,
+        trencherVaultAddress: fixtureAddress(700),
+        trencherFactoryAddress: options.trencherFactory,
+        ...(v4 ? { v4AdapterAddress: options.v4AdapterAddress } : {}),
+      }) as never);
+      assert.equal(shapeWith(3, false).permissions, 27, "the existing pre-v4 wall matches the production shape");
+      const shape = shapeWith(3);
+      assert.equal(firstEnableEnvelope(shape, { deploying: false }).expectedBounded, 15_749_392n);
+      const verdict = wallSignable(shape, { deploying: false, basket: { count: tokens.length, shapeWith } });
+      assert.equal(verdict.ok, false, "the real wall sizing gate must refuse this renewal");
+      if (verdict.ok) throw new Error("fixture unexpectedly fits");
+      tooWide = verdict.why;
+      throw new Error(tooWide);
+    };
     await ui.render(React.createElement(Wallet));
     await acknowledge("I authorize revoking");
+    const before = storageSnapshot();
     await ui.click("revoke earlier permissions & re-sign");
     const panel = ui.container.querySelector("#resign")!;
     assert.ok(panel, "the current wallet stays open after a pre-signing refusal");
@@ -414,9 +493,87 @@ describe("the funded wallet's re-sign control", () => {
     assert.equal(alert.querySelector("a")?.getAttribute("href"), "/settings");
     assert.match(alert.textContent!, /Review custom tokens/);
     assert.match(ui.container.textContent!, /71\.58/);
-    assert.match(ui.container.textContent!, /this wallet isn't active/);
-    assert.match(ui.container.textContent!, /Earlier permissions were revoked/);
+    assert.match(alert.textContent!, /kept your existing permission unchanged/i);
+    assert.equal(preflightCalls, 1);
+    assertExistingPermissionKept(before);
   });
+
+  for (const kind of ["legacy", "Privy"] as const) it(`${kind} renewal completes preflight before stopping and signs only after the revocation receipt`, async () => {
+    const owner = useRenewalOwner(kind);
+    const checked = deferred<void>();
+    const receipt = deferred<unknown>();
+    const events: string[] = [];
+    let checkedOptions: MintOptions | undefined;
+    preflight = async (signer, options) => {
+      assert.equal(signer.address, owner.address);
+      checkedOptions = options;
+      events.push("preflight start");
+      await checked.promise;
+      events.push("preflight passed");
+    };
+    stop = async () => {
+      events.push("stop");
+      assert.equal(needsPermissionReplacement(activeGrant), true, "after preflight, the marker still precedes the stop");
+      assert.equal(loadRecoveryGrants().length, 1, "public recovery inputs are saved before the stop");
+    };
+    revoke = async () => {
+      events.push("revoke requested");
+      const result = await receipt.promise;
+      events.push("revocation confirmed");
+      return result;
+    };
+    renew = async options => {
+      events.push("mint fresh grant");
+      assert.equal(options, checkedOptions, "the reviewed settings are passed to the fresh signing operation");
+      assert.equal(events.at(-2), "revocation confirmed", "nothing signed during preflight can be reused after invalidation");
+      return { local: { ...activeGrant, sessionKeyAddress: fixtureAddress(900) }, handoff: { ok: true } };
+    };
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    const before = storageSnapshot();
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.deepEqual(events, ["preflight start"]);
+    assertExistingPermissionKept(before);
+    await act(async () => { checked.resolve(); });
+    assert.deepEqual(events, ["preflight start", "preflight passed", "stop", "revoke requested"]);
+    assert.equal(mintCalls, 0, "revocation requested without a confirmed receipt must not mint");
+    await act(async () => { receipt.resolve({ transactionHash: `0x${"4".repeat(64)}` }); });
+    assert.deepEqual(events, ["preflight start", "preflight passed", "stop", "revoke requested", "revocation confirmed", "mint fresh grant"]);
+    assert.equal(preflightCalls, 1);
+    assert.equal(mintCalls, 1);
+    assert.match(ui.container.textContent!, /Permission renewed/);
+  });
+
+  const failedSettings = [
+    ["network failure", async () => { throw new Error("settings offline"); }],
+    ["HTTP failure", async () => json({ values: { customTokens: [] } }, 503)],
+    ["error body", async () => json({ error: "settings unavailable" })],
+    ["malformed JSON", async () => new Response("not JSON", { status: 200 })],
+    ["missing values", async () => json({})],
+  ] as const;
+  for (const kind of ["legacy", "Privy"] as const) for (const [failure, response] of failedSettings) {
+    it(`${kind} renewal keeps its grant on fresh settings ${failure} instead of using the mount-time adapter`, async () => {
+      useRenewalOwner(kind);
+      localStorage.setItem("merrymen.grant.v1", JSON.stringify({ ...activeGrant, serialized: "old signed permission" }));
+      const fetch = globalThis.fetch;
+      let settingsReads = 0;
+      globalThis.fetch = (input, init) => {
+        if (String(input) !== "/api/settings") return fetch(input, init);
+        settingsReads++;
+        return settingsReads === 1
+          ? Promise.resolve(json({ values: { customTokens: [], basketSymbols: [], v4AdapterAddress: fixtureAddress(801) } }))
+          : response();
+      };
+      await ui.render(React.createElement(Wallet));
+      await acknowledge("I authorize revoking");
+      const before = storageSnapshot();
+      await ui.click("revoke earlier permissions & re-sign");
+      assert.equal(settingsReads, 2, "renewal requires a fresh settings response");
+      assert.equal(preflightCalls, 0, "stale mounted settings must not reach preflight or signing");
+      assert.match(ui.container.querySelector('#resign [role="alert"]')?.textContent ?? "", /Could not refresh your trading settings/);
+      assertExistingPermissionKept(before);
+    });
+  }
 
   it("shows signing progress, then confirms only a server-accepted renewal", async () => {
     const done = deferred<unknown>();

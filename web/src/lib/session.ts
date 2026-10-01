@@ -270,7 +270,8 @@ async function prepareGrantCore(
    */
   ponsClassVaultFactory?: `0x${string}`,
   trencherFactory?: `0x${string}`,
-): Promise<Grant> {
+  preflightOnly = false,
+): Promise<Grant | null> {
   // Testnet is the sandbox; mainnet (4663) is real funds — the UI gates that
   // choice behind an explicit consent step. Note: the call-policy addresses
   // below (UNISWAP/RIALTO/MORPHO/USDG) are MAINNET deployments — the wall is
@@ -330,10 +331,6 @@ async function prepareGrantCore(
     entryPoint,
     kernelVersion,
   });
-
-  const sessionPrivateKey = generatePrivateKey();
-  const sessionAccount = privateKeyToAccount(sessionPrivateKey);
-  const sessionSigner = await toECDSASigner({ signer: sessionAccount });
 
   // THE ACCOUNT ADDRESS, BEFORE THE WALL — because the wall now pins value to
   // it. The Kernel address derives from the SUDO validator alone; the
@@ -621,6 +618,15 @@ async function prepareGrantCore(
     ...wallOpts,
   });
 
+  // Renewal checks the exact same wall before stopping or revoking anything.
+  // Return no prepared grant: key generation, nonce reads and owner signing
+  // must run afresh only after the revocation receipt is confirmed.
+  if (preflightOnly) return null;
+
+  const sessionPrivateKey = generatePrivateKey();
+  const sessionAccount = privateKeyToAccount(sessionPrivateKey);
+  const sessionSigner = await toECDSASigner({ signer: sessionAccount });
+
   const permissionValidator = await toPermissionValidator(publicClient, {
     entryPoint,
     kernelVersion,
@@ -806,6 +812,7 @@ async function mintGrant(
     ownerSigner, caps, onStatus, chainId, extraTokens, v4AdapterAddress,
     ponsAdapterAddress, hostedAs, expectAccount, ponsClassVaultFactory, trencherFactory,
   );
+  if (!grant) throw new Error("Grant preparation returned no signed permission.");
 
   // HOSTED: prove this account belongs to the signed-in wallet before offering
   // it. The owner key was generated right here, so `owner` can never equal the
@@ -1197,11 +1204,25 @@ export interface MintOptions {
  */
 export type PrepareAgentOptions = Omit<MintOptions, "hostedAs">;
 
+/** Check a renewal's canonical wall without signing, saving, or handing it off. */
+export async function preflightAgentGrant(owner: LocalAccount, o: MintOptions): Promise<void> {
+  if (!owner || !/^0x[0-9a-fA-F]{40}$/.test(owner.address) || typeof owner.signMessage !== "function") {
+    throw new Error("An explicit wallet signer is required to check a Merryman permission.");
+  }
+  if (!o.expectAccount) throw new Error("A renewal preflight requires the existing account address.");
+  await prepareGrantCore(
+    { account: owner, binding: "external-owner" },
+    o.caps, o.onStatus, o.chainId ?? robinhoodChain.id, o.extraTokens ?? [],
+    o.v4AdapterAddress, o.ponsAdapterAddress, undefined, o.expectAccount,
+    o.ponsClassVaultFactory, o.trencherFactory, true,
+  );
+}
+
 export async function prepareAgentGrant(owner: LocalAccount, o: PrepareAgentOptions): Promise<StoredGrant> {
   if (!owner || !/^0x[0-9a-fA-F]{40}$/.test(owner.address) || typeof owner.signMessage !== "function") {
     throw new Error("An explicit wallet signer is required to prepare a Merryman.");
   }
-  return prepareGrantCore(
+  const grant = await prepareGrantCore(
     { account: owner, binding: "external-owner" },
     o.caps,
     o.onStatus,
@@ -1214,6 +1235,8 @@ export async function prepareAgentGrant(owner: LocalAccount, o: PrepareAgentOpti
     o.ponsClassVaultFactory,
     o.trencherFactory,
   );
+  if (!grant) throw new Error("Grant preparation returned no signed permission.");
+  return grant;
 }
 
 export async function createAgentWallet(o: MintOptions): Promise<MintedGrant> {

@@ -38,6 +38,7 @@ import {
   isPrivyOwned,
   loadGrant,
   previewOwnerAccount,
+  preflightAgentGrant,
   readFunding,
   refusalMessage,
   restoreAgentWallet,
@@ -1038,6 +1039,7 @@ export default function GrantPage() {
         (chainId === MAINNET && grant.chainId !== MAINNET && !mainnetAck)) return;
     let stopped = false;
     let revoked = false;
+    let preflightPassed = false;
     setError(null);
     setRenewed(false);
     setStatus("checking your permission…");
@@ -1062,36 +1064,42 @@ export default function GrantPage() {
       // address in /settings — and the mount-time fetch predates that save, so
       // re-signing from stale state silently sealed a wall WITHOUT the thing
       // they just added, with nothing failing until the first no-exit reject.
-      let freshTokens = customTokens;
-      let freshAdapter = v4Adapter;
-      let freshPons = ponsAdapter;
-      // Re-read at CLICK time like its siblings. The mount fetch predates
-      // anything the owner just saved, and re-signing from stale state seals a
-      // wall without the thing they added thirty seconds ago.
-      let freshClassFactory = classFactory;
+      let freshTokens: CustomToken[];
+      let freshAdapter: `0x${string}` | undefined;
+      let freshPons: `0x${string}` | undefined;
+      let freshClassFactory: `0x${string}` | undefined;
       try {
-        const r = await fetch("/api/settings");
-        if (r.ok) {
-          const v = (await r.json()) as {
-            values?: { customTokens?: unknown[]; v4AdapterAddress?: string; ponsAdapterAddress?: string; ponsClassVaultFactory?: string };
-          };
-          freshTokens = (v?.values?.customTokens ?? []).filter(isValidCustomToken) as CustomToken[];
-          const a = v?.values?.v4AdapterAddress;
-          freshAdapter = typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a) ? (a as `0x${string}`) : undefined;
-          const pa = v?.values?.ponsAdapterAddress;
-          freshPons = typeof pa === "string" && /^0x[0-9a-fA-F]{40}$/.test(pa) ? (pa as `0x${string}`) : undefined;
-          // Same missing assignment as the mount fetch. The variable and the
-          // comment above it were both already here; only the line that fills
-          // it was not, so a renewal could never add a class vault either.
-          const cf = v?.values?.ponsClassVaultFactory;
-          freshClassFactory = typeof cf === "string" && /^0x[0-9a-fA-F]{40}$/.test(cf) ? (cf as `0x${string}`) : undefined;
-          setCustomTokens(freshTokens);
-          setV4Adapter(freshAdapter);
-          setPonsAdapter(freshPons);
-          setClassFactory(freshClassFactory);
+        const r = await fetch("/api/settings", { cache: "no-store" });
+        if (!r.ok) throw new Error("settings unavailable");
+        const body: unknown = await r.json();
+        if (!body || typeof body !== "object" || !("values" in body) ||
+            !body.values || typeof body.values !== "object" || Array.isArray(body.values)) {
+          throw new Error("invalid settings response");
         }
+        const v = body.values as Record<string, unknown>;
+        if (v.customTokens !== undefined &&
+            (!Array.isArray(v.customTokens) || !v.customTokens.every(isValidCustomToken))) {
+          throw new Error("invalid custom tokens");
+        }
+        const addressSetting = (value: unknown): `0x${string}` | undefined => {
+          if (value === undefined || value === "") return undefined;
+          if (typeof value !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(value)) {
+            throw new Error("invalid adapter settings");
+          }
+          return value as `0x${string}`;
+        };
+        freshTokens = (v.customTokens ?? []) as CustomToken[];
+        freshAdapter = addressSetting(v.v4AdapterAddress);
+        freshPons = addressSetting(v.ponsAdapterAddress);
+        freshClassFactory = addressSetting(v.ponsClassVaultFactory);
+        setCustomTokens(freshTokens);
+        setV4Adapter(freshAdapter);
+        setPonsAdapter(freshPons);
+        setClassFactory(freshClassFactory);
       } catch {
-        /* unreachable settings: sign with what the page already had, as before */
+        // An unavailable response is not an empty settings record: signing
+        // stale mount state could silently leave out the adapter just saved.
+        throw new Error("Could not refresh your trading settings. Retry when settings are available.");
       }
       // The SELECTED chain and the CURRENT caps — not the old grant's. The old
       // behaviour reused grant.chainId and grant.caps, so renewing while the
@@ -1121,6 +1129,13 @@ export default function GrantPage() {
          */
         expectAccount: grant.smartAccount as `0x${string}`,
       };
+      // Check the canonical replacement before any persistent mutation, stop,
+      // or revocation. This produces no key/signature to reuse after revoking.
+      await preflightAgentGrant(
+        resignBy === "privy" ? privyOwner!.account : privateKeyToAccount(grant.demoOwnerPrivateKey as `0x${string}`),
+        options,
+      );
+      preflightPassed = true;
       // Invalidate first: a new grant signed before this receipt would carry
       // the old enable nonce and be invalidated along with the old permission.
       // Preserve only public recovery inputs for an adopted second-browser grant.
@@ -1149,7 +1164,7 @@ export default function GrantPage() {
       setRenewalAck(false);
     } catch (e) {
       if (stopped) setServerArmed(false);
-      setError(`${revoked ? "Earlier permissions were revoked, but a replacement was not activated. " : stopped ? "The service accepted the stop request. " : ""}${e instanceof Error ? e.message : String(e)}`);
+      setError(`${revoked ? "Earlier permissions were revoked, but a replacement was not activated. " : stopped ? "The service accepted the stop request. " : !preflightPassed ? "This attempt kept your existing permission unchanged. " : ""}${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setStatus(null);
       setRenewing(false);
@@ -2499,8 +2514,8 @@ export default function GrantPage() {
                   </button>
                   </fieldset>
                   {renewing && <p className="field-lead" role="status">{status ?? "re-signing…"}</p>}
-                  {/* A pre-signing refusal leaves this active grant intact, so
-                      neither the create nor desync error panel is visible. */}
+                  {/* A preflight refusal leaves the prior permission unchanged,
+                      including any earlier pending revocation/recovery state. */}
                   {error && (
                     <div className="grant-error mono" role="alert">
                       {error}
@@ -2508,7 +2523,8 @@ export default function GrantPage() {
                         <p>
                           Lower spending limits do not shrink the permission list. {" "}
                           <a href="/settings">Review custom tokens</a> and follow the changes described above.
-                          If it is too large even without custom tokens, contact support with this error.
+                          If it is too large even without custom tokens, the selected trading routes
+                          need a narrower permission; contact support before changing those routes.
                         </p>
                       )}
                     </div>
