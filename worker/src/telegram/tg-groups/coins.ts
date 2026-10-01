@@ -1075,8 +1075,16 @@ export class CoinFlow {
     // nothing is ever said from it and a repost gets a fresh look. A look
     // that could not be made is noted: an addressed post whose looks all
     // failed gets "can't pull that one up rn" (cannotLook), never a verdict.
+    // A partial index snapshot can still answer an explicit research question;
+    // it never makes the unknown classification eligible for nomination or a memo.
     if (look.kind === "unknown") {
       ctx.unknown = true;
+      if (m.addressed === true && asksAboutCoin(line.text) && look.research) {
+        const tag = tagSender();
+        await say({ kind: "public-fact", fact: { kind: "coin", look, nowMs: d.now() } }, {
+          replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...(look.name ? { coinName: look.name } : {}),
+        });
+      }
       return hush("coin-unknown");
     }
     if (NOT_A_COIN_HERE.has(look.kind)) return hush("coin-not-here");
