@@ -24,11 +24,10 @@ import { DEFAULT_LOCALE, LOCALE_COOKIE, normalizeLocale } from "@/lib/locale";
  * Spanish would hand React two different sentences for the same node, and React
  * would resolve that by replacing the text the reader is already looking at.
  *
- * SCOPED TO `(app)` RATHER THAN THE ROOT LAYOUT, which is why `/connect`,
- * `/lookup` and the redirect routes are untouched and still static. What became
- * dynamic is the app shell, which sits behind a sign-in and is not a page
- * anybody links to. The render reaches no database — `mounted.test.ts` proves
- * that by walking the import graph — so the cost is CPU, not a round trip.
+ * This cookie read only supplies the terminal locale. The root layout now
+ * also reads the request's CSP nonce, so all rendered documents are dynamic.
+ * The render reaches no database — `mounted.test.ts` proves that by walking
+ * the import graph — so the cost is CPU, not a round trip.
  *
  * The `<html lang>` attribute is NOT set from here. It is still written by the
  * inline script in the root layout, before the first paint, so the font stacks

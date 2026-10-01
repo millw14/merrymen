@@ -14,8 +14,10 @@ const saved = Object.fromEntries(
 
 let home: string;
 let GET: (req: Request) => Promise<Response>;
+let DELETE: (req: Request) => Promise<Response>;
 let auth: typeof import("@/lib/auth");
 const asked: string[] = [];
+const removed: string[] = [];
 
 before(async () => {
   home = mkdtempSync(path.join(tmpdir(), "mm-grant-tenant-"));
@@ -32,7 +34,8 @@ before(async () => {
     asked.push(tenant);
     return null;
   });
-  ({ GET } = await import("./route"));
+  mock.method(grants.getGrantStore(), "remove", async (tenant: string) => { removed.push(tenant); });
+  ({ GET, DELETE } = await import("./route"));
 });
 
 after(() => {
@@ -43,7 +46,7 @@ after(() => {
   }
   rmSync(home, { recursive: true, force: true });
 });
-beforeEach(() => { asked.length = 0; });
+beforeEach(() => { asked.length = 0; removed.length = 0; });
 
 it("binds an empty hosted grant response to the tenant authenticated by the cookie", async () => {
   for (const tenant of [A, B]) {
@@ -61,4 +64,17 @@ it("binds a signed-out hosted response to null without reading any grant", async
   const response = await GET(new Request(`${ORIGIN}/api/grants`));
   assert.deepEqual(await response.json(), { exists: false, tenant: null });
   assert.deepEqual(asked, []);
+});
+
+it("a stop cannot remove a different tenant after a login switches", async () => {
+  const request = (expectedTenant: unknown) => new Request(`${ORIGIN}/api/grants`, {
+    method: "DELETE", headers: { cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(B)}`, "content-type": "application/json" },
+    body: JSON.stringify({ expectedTenant }),
+  });
+  for (const expected of [A, null, 42]) {
+    assert.equal((await DELETE(request(expected))).status, 409);
+    assert.deepEqual(removed, []);
+  }
+  assert.equal((await DELETE(request(B))).status, 200);
+  assert.deepEqual(removed, [B]);
 });

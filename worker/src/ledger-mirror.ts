@@ -99,6 +99,7 @@ const LOG_TABLES = [
       // note on the agents upsert.
       "epoch",
       "created_at",
+      "budget_settled_at",
     ],
   },
   // `positions_usdg` is part of the equity identity (cash + vault + positions +
@@ -392,10 +393,28 @@ export async function mirrorTenant(args: {
   const failed: Record<string, string> = {};
   const restarted: Record<string, { was: number }> = {};
   let hasMore = false;
+  let budgetSettlementColumn: boolean | undefined;
+  const hasBudgetSettlement = async () => {
+    if (budgetSettlementColumn !== undefined) return budgetSettlementColumn;
+    try {
+      await child.prepare("SELECT budget_settled_at FROM trades LIMIT 0").all();
+      return (budgetSettlementColumn = true);
+    } catch (e) {
+      // A rolling deploy can still have children on the old schema. Only a
+      // specifically missing column permits the legacy timestamp fallback.
+      if (e instanceof Error && /\bbudget_settled_at\b/.test(e.message) &&
+          (/no such column/i.test(e.message) || (e as { code?: unknown }).code === "42703")) {
+        return (budgetSettlementColumn = false);
+      }
+      throw e;
+    }
+  };
 
   // ── append-only tables ────────────────────────────────────────────────────
-  for (const { table, cols, stamp, probe } of LOG_TABLES) {
+  for (const { table, cols: declaredCols, stamp, probe } of LOG_TABLES) {
     try {
+      const cols = table === "trades" && !await hasBudgetSettlement()
+        ? declaredCols.filter((column) => column !== "budget_settled_at") : declaredCols;
       const mark = (await shared
         .prepare(`SELECT last_id, last_stamp FROM mirror_state WHERE tenant = ? AND table_name = ?`)
         .get(tenant, table)) as { last_id: number; last_stamp: number | null } | undefined;
@@ -711,16 +730,18 @@ export async function mirrorTenant(args: {
   // the child has none (COALESCE); status and the outcome itself still move,
   // and only ever from `submitted`.
   try {
+    const hasSettlement = await hasBudgetSettlement();
     const resolved = (await child
       .prepare(
         `SELECT agent_id, user_op_hash, tx_hash, status, reject_rule, decision_id,
                 fill_side, fill_qty_raw, fill_price_usd, realized_pnl_usdg, basis_source,
-                gas_wei, sponsored_gas_wei, gas_usdg, gas_units, fill_cash_usdg, fill_symbol
+                gas_wei, sponsored_gas_wei, gas_usdg, gas_units, fill_cash_usdg, fill_symbol${hasSettlement ? ", budget_settled_at" : ""}
            FROM trades
-          WHERE user_op_hash IS NOT NULL AND status <> 'submitted' AND created_at > ?
+          WHERE user_op_hash IS NOT NULL AND status <> 'submitted'
+            AND (created_at > ?${hasSettlement ? " OR budget_settled_at > ?" : ""})
           ORDER BY id DESC LIMIT ?`,
       )
-      .all(nowSec - RESYNC_WINDOW_SEC, RESYNC_LIMIT)) as Record<string, unknown>[];
+      .all(nowSec - RESYNC_WINDOW_SEC, ...(hasSettlement ? [nowSec - RESYNC_WINDOW_SEC] : []), RESYNC_LIMIT)) as Record<string, unknown>[];
     if (resolved.length) {
       let n = 0;
       await shared.tx(async (db) => {
@@ -734,7 +755,7 @@ export async function mirrorTenant(args: {
                              sponsored_gas_wei = COALESCE(?, sponsored_gas_wei),
                              gas_usdg = COALESCE(?, gas_usdg), gas_units = COALESCE(?, gas_units),
                              fill_cash_usdg = COALESCE(?, fill_cash_usdg),
-                             fill_symbol = COALESCE(?, fill_symbol)
+                             fill_symbol = COALESCE(?, fill_symbol)${hasSettlement ? ", budget_settled_at = COALESCE(?, budget_settled_at)" : ""}
             WHERE agent_id IN (?, ?, ?) AND user_op_hash IN (?, ?) AND status = 'submitted'`,
         );
         for (const r of resolved) {
@@ -744,6 +765,7 @@ export async function mirrorTenant(args: {
             r.realized_pnl_usdg ?? null, r.basis_source ?? null, r.gas_wei ?? null,
             r.sponsored_gas_wei ?? null, r.gas_usdg ?? null, r.gas_units ?? null, r.fill_cash_usdg ?? null,
             r.fill_symbol ?? null,
+            ...(hasSettlement ? [r.budget_settled_at ?? null] : []),
             ...spellingsOf(r),
           );
           // RunResult.changes is part of the Db contract — node:sqlite reports

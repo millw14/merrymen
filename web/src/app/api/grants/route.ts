@@ -435,6 +435,12 @@ export async function DELETE(req: Request) {
     // — the server never held the owner key to begin with.
     const tenant = tenantOf(req);
     if (!tenant) return NextResponse.json({ error: "not signed in" }, { status: 401 });
+    // A tab can switch logins while the owner's stop request is in flight.
+    const body = await req.json().catch(() => null) as { expectedTenant?: unknown } | null;
+    if (body?.expectedTenant !== undefined &&
+        (typeof body.expectedTenant !== "string" || body.expectedTenant.toLowerCase() !== tenant.toLowerCase())) {
+      return NextResponse.json({ error: "The signed-in account changed. Check the account before stopping it." }, { status: 409 });
+    }
     await getGrantStore().remove(tenant);
     return NextResponse.json({ ok: true });
   }

@@ -117,6 +117,13 @@ describe("what the MCP domain serves itself is never redirected, even for a brow
     const cross = mw.middleware(req("https://mcp.test/api/grants", { method: "POST", headers: { "sec-fetch-site": "cross-site" } }));
     assert.equal(cross.status, 403);
   });
+
+  it("hosted APIs compare Origin to the configured public origin even when Fetch Metadata is missing", () => {
+    assert.equal(mw.middleware(req("http://backend:3100/api/settings", { method: "PUT", host: "app.test", headers: { origin: "https://app.test" } })).status, 200);
+    for (const origin of ["https://attacker.test", "null", "http://backend:3100"]) {
+      assert.equal(mw.middleware(req("http://backend:3100/api/settings", { method: "PUT", host: "app.test", headers: { origin } })).status, 403, origin);
+    }
+  });
 });
 
 describe("every other host behaves exactly as before", () => {
@@ -208,7 +215,7 @@ describe("a page load is told apart from a client", () => {
   });
 });
 
-describe("the matcher, compiled by Next itself, reaches pages and the API but not files or MCP endpoints", () => {
+describe("the matcher, compiled by Next itself, reaches pages and the API but not framework or MCP endpoints", () => {
   // Next internals, on purpose: the function tests above never pass through the
   // matcher, and a matcher that silently stopped reaching "/" would undo the
   // whole fix with every test green. If Next moves these files, update the paths.
@@ -226,11 +233,18 @@ describe("the matcher, compiled by Next itself, reaches pages and the API but no
   });
 
   it("runs for the API and for pages, the root included", () => {
-    for (const p of ["/api/grants", "/api/mcp/health", "/", "/feed", "/connect/mcp", "/connect/app", "/oauth", "/mcpx"]) assert.equal(runs(p), true, p);
+    for (const p of ["/api/grants", "/api/mcp/health", "/", "/feed", "/connect/mcp", "/connect/app", "/oauth", "/mcpx", "/a/alice.eth", "/connect/approve/id.js", "/robots.txt"]) assert.equal(runs(p), true, p);
   });
 
-  it("does not run for Next's files, static files or the MCP and OAuth endpoints", () => {
-    for (const p of ["/_next/static/chunks/app.js", "/_next/image", "/icon-192.png", "/mcp-icon.svg", "/sw.js", "/manifest.webmanifest", "/robots.txt",
+  it("lets exact public assets through unchanged on the dedicated MCP domain", () => {
+    for (const p of ["/icon-192.png", "/mcp-icon.svg", "/sw.js", "/manifest.webmanifest", "/llms.txt"]) {
+      assert.equal(runs(p), true, p);
+      untouched(mw.middleware(page(`https://mcp.test${p}`)), p);
+    }
+  });
+
+  it("does not run for Next's files or the MCP and OAuth endpoints", () => {
+    for (const p of ["/_next/static/chunks/app.js", "/_next/image",
       "/mcp", "/mcp/x", "/mcp/directory", "/oauth/token", "/oauth/authorize", "/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-protected-resource/mcp/directory", "/.well-known/oauth-authorization-server"]) {
       assert.equal(runs(p), false, p);
     }

@@ -1,66 +1,43 @@
 import { createPublicClient, http } from "viem";
-import { robinhoodChain, robinhoodTestnet, PONS_SELFTRADE_ABI } from "@merrymen/core";
+import { robinhoodChain, robinhoodTestnet, PONS_SELF_TRADE } from "@merrymen/core";
 
+/** Only an explicitly selected, supported deployment may become a token spender. */
 export async function verifiedAdapter(
   address: `0x${string}` | undefined,
   chainId: number,
   onStatus: (s: string) => void,
 ): Promise<`0x${string}` | undefined> {
   if (!address) return undefined;
-  onStatus("checking the curve adapter before sealing it…");
-  const chain = chainId === robinhoodTestnet.id ? robinhoodTestnet : robinhoodChain;
+  const chain = chainId === robinhoodTestnet.id ? robinhoodTestnet : chainId === robinhoodChain.id ? robinhoodChain : null;
+  const supported = PONS_SELF_TRADE[chainId];
+  if (!chain || !supported || address.toLowerCase() !== supported.toLowerCase()) {
+    throw new Error(
+      `The curve adapter ${address} is not a supported deployment on chain ${chainId}. ` +
+        "Nothing was signed. Clear the curve adapter setting or select the supported deployment for this network.",
+    );
+  }
+
+  onStatus("checking the supported curve adapter deployment…");
   const client = createPublicClient({ chain, transport: http() });
-
-  let code: string;
   try {
-    code = (await client.getCode({ address })) ?? "0x";
-  } catch (e) {
-    throw new Error(
-      `Could not check the curve adapter ${address} on ${chain.name}: ${
-        e instanceof Error ? e.message : String(e)
-      }. Refusing to seal an address nobody has verified — it would become an approved spender for every token in this grant.`,
-    );
-  }
-  if (!code || code === "0x") {
-    throw new Error(
-      `No contract at ${address} on ${chain.name}. That is usually an address from the other chain, ` +
-        `a typo, or a deploy that never happened. Sealing it would make it an approved spender for every ` +
-        `token in this grant, so nothing is signed. Fix it at /settings and try again.`,
-    );
-  }
-
-  // SHAPE CHECK. A live contract at the right address on the right chain can
-  // still be the wrong contract entirely, and check 1 cannot tell.
-  try {
-    await client.readContract({
-      address,
-      abi: PONS_SELFTRADE_ABI,
-      functionName: "tradeExactIn",
-      args: [
-        "0x0000000000000000000000000000000000000000",
-        "0x0000000000000000000000000000000000000000",
-        "0x0000000000000000000000000000000000000000",
-        0n,
-        0n,
-        0n,
-      ],
-    });
-  } catch (e) {
-    // A REVERT IS A PASS. The call is deliberately invalid — zero addresses, zero
-    // amount, a deadline in 1970 — so the real adapter MUST reject it. What we
-    // are testing is that it rejected it as that function rather than failing to
-    // find one. viem reports a missing function differently from a revert, and
-    // only the former disqualifies the address.
-    const msg = e instanceof Error ? e.message : String(e);
-    if (/does not exist|not found|returned no data|function.*selector/i.test(msg)) {
-      throw new Error(
-        `The contract at ${address} on ${chain.name} is not a PonsSelfTrade adapter — it has no ` +
-          `tradeExactIn function. Sealing it would make the wrong contract an approved spender for every ` +
-          `token in this grant, so nothing is signed.`,
-      );
+    if (await client.getChainId() !== chainId) {
+      throw new Error("The RPC answered for a different network.");
     }
+    const code = await client.getCode({ address });
+    if (typeof code !== "string" || !/^0x(?:[0-9a-f]{2})+$/i.test(code)) {
+      throw new Error("No readable contract code exists at the supported address.");
+    }
+  } catch (error) {
+    throw new Error(
+      `Could not check the curve adapter deployment on ${chain.name}: ${error instanceof Error ? error.message : String(error)} ` +
+        "Nothing was signed. Try again when this network can be verified.",
+    );
   }
 
-  onStatus("curve adapter verified.");
-  return address;
+  // Identity comes from the reviewed per-chain registry. An arbitrary contract
+  // can mimic tradeExactIn or revert from fallback, so a deliberately invalid
+  // call is not evidence of identity. No runtime hash is published for this
+  // deployment; do not present a shape probe as bytecode verification.
+  onStatus("supported curve adapter deployment checked.");
+  return supported.toLowerCase() as `0x${string}`;
 }

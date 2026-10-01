@@ -29,6 +29,7 @@ import { TrencherPoolCache, discoverTrencherUniverse } from "./trencher-discover
 import { buildTrencherCalls, checkTrencherCalls, verifyTrencherCustody } from "./venues/trencher-vault";
 import { chainRead, resetRpcMeters, rpcSummaryLines } from "./rpc-meter";
 import { runShadowComparison, shadowEnabledFor, shadowLine } from "./reconcile-shadow";
+import { transferBudgetRefusal } from "./transfer-budget";
 import {
   createPublicClient,
   encodeFunctionData,
@@ -7935,6 +7936,28 @@ async function main() {
     // columns — until then the ticker in `target` keeps the tape readable.
     const tradeTarget = intent.kind === "equity-order" ? intent.ticker : intent.target;
 
+    // This check belongs inside the intent queue, beside the grant's caps.
+    // A caller-side read lets two confirmed transfers both see the old spend
+    // before either enters the queue. Submitted rows keep their charge when
+    // the receipt is unknown; the queue holds the reservation until that row
+    // exists, or execution proves that nothing was sent.
+    if (verdict.ok && intent.kind === "transfer") {
+      const spent = await getTransferredTodayUsdg(agentId).catch(() => Number.NaN);
+      const refusal = transferBudgetRefusal(intent.amountUsdg, spent, cfg.telegramTransferDailyUsdg);
+      if (refusal) {
+        await addEvent(agentId, "warn", refusal);
+        await recordTrade({
+          agent_id: agentId,
+          kind: intent.kind,
+          target: tradeTarget,
+          amount_usdg: usdgNum(notional),
+          status: "rejected",
+          reject_rule: "transfer-daily-cap",
+        });
+        return;
+      }
+    }
+
     // ── ALREADY REFUSED, FOR A REASON RETRYING CANNOT FIX ────────────────
     // Read AFTER checkPolicy so the tape's ordering does not change: a trade
     // that breaks a cap should still say so, because that is the more useful
@@ -13375,12 +13398,6 @@ async function main() {
     // applies; the book's latest state is what it goes to the wall with.
     const book = tickBook.latest();
     if (book.equityUsdg === 0n) return "🐎 the band is still saddling up (first tick pending) — try again in a minute.";
-    // Worker-side daily transfer budget, on top of the grant's per-trade/daily
-    // caps (checkPolicy) and the on-chain transfer amount cap.
-    const transferredToday = await getTransferredTodayUsdg(active.agentId);
-    if (transferredToday + usdgAmount > cfg.telegramTransferDailyUsdg) {
-      return `🧢 that would blow the daily transfer budget (${cfg.telegramTransferDailyUsdg} USDG/day, ${transferredToday.toFixed(2)} already sent today). Raise it in the dashboard if you mean it.`;
-    }
     const intent: TradeIntent = {
       kind: "transfer",
       target: CASH.USDG as `0x${string}`,
@@ -13389,8 +13406,13 @@ async function main() {
     };
     const stamped = await ensureDecision(intent, "chat", `owner asked to transfer ${usdgAmount} USDG to ${to} in chat`);
     if (!stamped.ok) return `Transfer refused: ${stamped.why}.`;
-    await processIntent(intent, book.equityUsdg, book.reads.equityKnown);
-    return `📤 transfer submitted — ${usdgAmount} USDG to ${to.slice(0, 6)}…${to.slice(-4)}. Watch /trades for the result (it still passes the policy wall).`;
+    const outcome = await processIntentReporting(intent, book.equityUsdg, book.reads.equityKnown);
+    const destination = `${usdgAmount} USDG to ${to.slice(0, 6)}…${to.slice(-4)}`;
+    if (outcome?.status === "landed") return `📤 transferred ${destination}.`;
+    if (outcome?.status === "submitted") return `📤 transfer submitted — ${destination}. Its outcome is still pending; check /trades before trying again.`;
+    if (outcome?.status === "paper") return `📝 simulated transfer — ${destination}. No real funds moved.`;
+    if (outcome?.rejectRule === "transfer-daily-cap") return "🧢 transfer refused: the daily transfer allowance is exhausted or could not be verified. Pending transfers also count toward this limit.";
+    return `Transfer was not confirmed${outcome?.rejectRule ? ` (${outcome.rejectRule})` : ""}. Check /trades for the result before trying again.`;
   }
 
   /**

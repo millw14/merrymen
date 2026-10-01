@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -16,6 +16,10 @@ import {
   type AgentRunDeps,
 } from "./agent";
 import type { AgentMsg, AgentTurn, LlmCreds, ToolSpec } from "../llm";
+
+// macOS's temp directory may itself be a symlink. These fixtures exercise
+// files inside a real root; symlink escape refusals have their own PC tests.
+const temporaryRoot = (prefix: string) => realpathSync(mkdtempSync(path.join(os.tmpdir(), prefix)));
 
 // ── destructive-command detector ─────────────────────────────────────────────
 
@@ -215,7 +219,7 @@ test("containsSecret detects a laundered secret file's bytes", () => {
 });
 
 test("send_file scans the WHOLE file — a secret past the old 200KB window is refused", async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "mm-agent-"));
+  const root = temporaryRoot("mm-agent-");
   try {
     // secret sits AFTER 200KB of padding — the old head-only scan would miss it
     const laundered = "x".repeat(250_000) + "\nkey=AIzaSyD-ExAmPlEkEyVaLuE1234567890abcd\n";
@@ -267,7 +271,7 @@ function makeDeps(cfg: AgentConfig, turns: AgentTurn[], sent: string[], seen?: A
 }
 
 test("loop: streams text, executes tools, stops when the model stops", async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "mm-agent-"));
+  const root = temporaryRoot("mm-agent-");
   try {
     writeFileSync(path.join(root, "hello.txt"), "hi");
     const sent: string[] = [];
@@ -316,7 +320,7 @@ test("loop: a refused shell command surfaces to the model as REFUSED, not an exc
 });
 
 test("loop: changing directory keeps the signed conversation prefix stable", async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "mm-agent-cwd-"));
+  const root = temporaryRoot("mm-agent-cwd-");
   try {
     const command = `"${process.execPath}" -e "process.stdout.write(process.cwd())"`;
     const content: NonNullable<AgentTurn["anthropicContent"]> = [
@@ -384,7 +388,7 @@ test("loop: no armed tools → honest refusal, no model call", async () => {
 });
 
 test("loop: file write + read round-trip inside the root; secrets path refused", async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "mm-agent-"));
+  const root = temporaryRoot("mm-agent-");
   try {
     const sent: string[] = [];
     const seen: AgentMsg[][] = [];

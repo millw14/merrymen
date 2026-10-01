@@ -81,7 +81,23 @@ describe("what is refused, and with which answer", () => {
 
   it("refuses bytes that are not an image", async () => {
     const r = await normaliseImage(new Uint8Array([1, 2, 3, 4]), "avatar");
-    assert.equal(r.ok === false && r.refusal, "unreadable");
+    assert.equal(r.ok === false && r.refusal, "unsupported-format");
+  });
+
+  it("rejects unsupported containers before attempting native metadata parsing", async () => {
+    // Deliberately truncated: a native parser would fail as unreadable. The
+    // allowlist must refuse the format without reaching that parser at all.
+    for (const bytes of [
+      Buffer.from("00000020667479706176696600000000", "hex"),
+      Buffer.from("GIF89a"),
+      Buffer.from("49492a00", "hex"),
+    ]) {
+      assert.deepEqual(await normaliseImage(bytes, "avatar"), { ok: false, refusal: "unsupported-format" });
+    }
+  });
+
+  it("still rejects corrupt content with an allowed format signature", async () => {
+    assert.deepEqual(await normaliseImage(Buffer.from([0xff, 0xd8, 0xff]), "avatar"), { ok: false, refusal: "unreadable" });
   });
 
   it("refuses an empty body", async () => {

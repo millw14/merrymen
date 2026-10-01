@@ -3689,6 +3689,10 @@ export async function honourPendingKills(): Promise<void> {
 /** Bring the running set in line with the store: spawn new tenants, stop killed ones. */
 export async function reconcile(): Promise<void> {
   if (stopping) return;
+  // The socket handler normally does this immediately. Its retry path must
+  // also run before remote reads: a broken grant-store connection cannot keep
+  // a child whose lease was lost alive indefinitely.
+  standDownLostLeasesNow();
   const store = getGrantStore();
   let tenants: `0x${string}`[];
   let expiresAtByTenant: Map<string, number | null>;

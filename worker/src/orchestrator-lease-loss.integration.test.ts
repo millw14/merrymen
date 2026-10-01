@@ -160,3 +160,32 @@ it("continues standing down the shard when one child refuses SIGTERM", () => {
   first.emit("exit", 0, "SIGKILL");
   second.emit("exit", 0, "SIGTERM");
 });
+
+it("retries lease-loss shutdown before an unavailable grant-store read", async () => {
+  const tenant = "0x0000000000000000000000000000000000000a1b" as const;
+  const old = new FakeProc();
+  adoptChildForTest(tenant, ACCOUNT, old, {
+    tenant,
+    backend: "postgres",
+    healthy: () => false,
+    async release() {},
+  });
+  const store = getGrantStore();
+  const fail = async () => {
+    assert.deepEqual(old.signals, ["SIGTERM"], "shutdown happened before entering the database await");
+    throw new Error("simulated grant-store outage");
+  };
+  const previousExpiries = store.listTenantExpiries;
+  const previousTenants = store.listTenants;
+  if (previousExpiries) store.listTenantExpiries = fail;
+  else store.listTenants = fail;
+  try {
+    await reconcile();
+    assert.equal(hasLeaseForTest(tenant), false);
+    assert.deepEqual(old.signals, ["SIGTERM"]);
+  } finally {
+    store.listTenantExpiries = previousExpiries;
+    store.listTenants = previousTenants;
+    old.emit("exit", 0, "SIGTERM");
+  }
+});

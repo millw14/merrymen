@@ -135,7 +135,7 @@ describe("the backup gate gets the copy with the key", () => {
     // The renew site branches on which owner can sign — an owner key or a Privy
     // embedded wallet — so the destructure sits above the branch rather than on
     // each arm. Matched on the destructure itself for that reason.
-    const sites = [...GRANT_PAGE_SRC.matchAll(/const \{ ([^}]*) \} =\s*\n?\s*(?:await )?(?:resignBy|createAgentWallet|restoreAgentWallet|createPrivyOwnedWallet)/g)];
+    const sites = [...GRANT_PAGE_SRC.matchAll(/const \{ ([^}]*) \} =\s*\n?\s*(?:await )?(?:chainId|resignBy|createAgentWallet|restoreAgentWallet|createPrivyOwnedWallet)/g)];
     assert.ok(sites.length >= 3, `expected the mint call sites, found ${sites.length}`);
     for (const [, destructured] of sites) {
       assert.match(destructured, /local:/, "a mint result must be read as the LOCAL copy — it is the one with the key");

@@ -76,7 +76,7 @@ test("A PRIVY-OWNED GRANT HAS NO OWNER KEY ANYWHERE — and the trade-off is sta
   // disappearing. There is no localStorage key to destroy on a kill, which
   // removes that whole class of irreversible loss — and equally means merrymen
   // cannot sweep such an account from a backed-up key, because none exists.
-  // Recovery for a Privy-owned Merryman is signer-based and NOT yet built, so
+  // Recovery for a Privy-owned Merryman is signer-based, so
   // the code must say so where somebody will read it.
   const at = SESSION.indexOf("export async function createPrivyOwnedWallet");
   assert.notEqual(at, -1, "the privy-owned mint path must exist");
@@ -85,7 +85,7 @@ test("A PRIVY-OWNED GRANT HAS NO OWNER KEY ANYWHERE — and the trade-off is sta
   // would make this assertion fail on a reflow rather than on a real change.
   const doc = SESSION.slice(Math.max(0, at - 1400), at).replace(/\s*\*\s*/g, " ").replace(/\s+/g, " ");
   assert.match(doc, /no key for merrymen to hold/i);
-  assert.match(doc, /NOT yet built/i, "the recovery gap must be stated, not implied");
+  assert.match(doc, /same wallet signer in RecoverPanel/i, "the supported signer-based recovery path is stated");
 });
 
 test("the archive helper is keyed by account, so a kill cannot clobber another wallet", () => {
@@ -108,7 +108,8 @@ test("the kill switch does not tell the user their wallet is gone", () => {
     /destroy the local key/,
     "the kill path must no longer describe itself as destroying the key",
   );
-  assert.match(kill, /recovery key is kept/, "and must say the money is still reachable");
+  assert.doesNotMatch(kill, /clearGrant\(/, "stopping cannot remove the grant or owner recovery data");
+  assert.match(kill, /recovery access (?:is |are )?kept|recovery key is kept/i, "and must say the money is still reachable");
 });
 
 test("AN ABSENT KEY IS NOT AN UNREADABLE KEY — the screens tell each truth", () => {

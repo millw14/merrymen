@@ -580,6 +580,10 @@ const SQLITE_ALTERS: string[] = [
     // resolver's whole 26-hour window. NULL on every row written before this,
     // and on rows that never had an operation: those are never judged dropped.
     "ALTER TABLE trades ADD COLUMN user_op_nonce TEXT",
+    // A submitted operation can land days after its first row. Preserve that
+    // submission timestamp for provenance, but start its rolling budget window
+    // when settlement is observed. Direct/legacy fills use created_at.
+    "ALTER TABLE trades ADD COLUMN budget_settled_at INTEGER",
     // Where a Pons launch actually trades. A pre-graduation token has NO pool
     // at all — it lives on its own bonding curve — so without this the token is
     // recorded and then unreachable: there is no tier-scan fallback the way
@@ -3111,7 +3115,8 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
                     sim_gas = ?, decision_id = ?, fill_side = ?, fill_qty_raw = ?, fill_price_usd = ?,
                     realized_pnl_usdg = ?, basis_source = ?, order_id = ?, settlement_status = ?,
                     gas_wei = ?, fill_slippage_bps = ?, fill_cash_usdg = ?, gas_usdg = ?, gas_units = ?,
-                    fill_symbol = COALESCE(?, fill_symbol)
+                    fill_symbol = COALESCE(?, fill_symbol),
+                    budget_settled_at = CASE WHEN ? = 'landed' THEN unixepoch() ELSE budget_settled_at END
               WHERE agent_id = ? AND user_op_hash = ? AND status = 'submitted'`,
           )
           .run(
@@ -3143,6 +3148,7 @@ export async function addTrade(row: TradeRow): Promise<boolean> {
             // COALESCE: a resolution that knows no name (a stranded op resolved
             // from its receipt) keeps the one the placeholder was written with.
             fillSymbol,
+            row.status,
             row.agent_id,
             row.user_op_hash,
           );
@@ -3451,16 +3457,17 @@ function railFilter(rail: BudgetRail): { sql: string; params: readonly string[] 
 }
 
 /**
- * Executed-op count on one rail in the trailing 24h — seeds the ops-cap counter
- * across restarts, and (since the counter no longer only ever climbs) re-reads
- * it as ops age out of the window.
+ * Settled-op count in the trailing 24h, plus every unresolved live operation.
+ * A pending operation never releases its slot merely because it is old; when
+ * it lands, its 24h window starts at observed settlement, not submission.
  */
 export async function getOpsToday(agentId: string, rail: BudgetRail = "live"): Promise<number> {
   const { sql, params } = railFilter(rail);
   const row = await getDb()
     .prepare(
       `SELECT COUNT(*) AS n FROM trades
-       WHERE agent_id = ? AND status IN (${sql}) AND created_at > unixepoch() - 86400`,
+       WHERE agent_id = ? AND status IN (${sql})
+         AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)`,
     )
     .get(agentId, ...params) as { n: number } | undefined;
   return row?.n ?? 0;
@@ -3500,20 +3507,20 @@ export async function setAgentName(agentId: string, name: string): Promise<void>
   }
 }
 
-/** Sum of landed chat transfers in the trailing 24h — the transfer sub-budget. */
+/** Pending transfers reserve allowance until resolved; settled spend rolls for 24h. */
 export async function getTransferredTodayUsdg(agentId: string): Promise<number> {
   const row = await getDb()
     .prepare(
       `SELECT COALESCE(SUM(amount_usdg), 0) AS spent FROM trades
-       WHERE agent_id = ? AND status = 'landed' AND kind = 'transfer'
-         AND created_at > unixepoch() - 86400`,
+       WHERE agent_id = ? AND status IN ('landed', 'submitted') AND kind = 'transfer'
+         AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)`,
     )
     .get(agentId) as { spent: number } | undefined;
   return row?.spent ?? 0;
 }
 
 /**
- * Sum of spend on one rail in the trailing 24h — seeds the daily-cap counter.
+ * Settled spend in the trailing 24h plus unresolved live reservations.
  * Same rail split as getOpsToday, and for the same reason: simulated spend must
  * not consume a real allowance.
  */
@@ -3535,7 +3542,7 @@ export async function getSpentTodayUsdg(
     .prepare(
       `SELECT COALESCE(SUM(amount_usdg), 0) AS spent FROM trades
        WHERE agent_id = ? AND status IN (${sql}) AND kind != 'vault-withdraw'${sells}
-         AND created_at > unixepoch() - 86400`,
+         AND (status = 'submitted' OR COALESCE(budget_settled_at, created_at) > unixepoch() - 86400)`,
     )
     .get(agentId, ...params, ...(cashToken ? [cashToken.toLowerCase()] : [])) as { spent: number } | undefined;
   return row?.spent ?? 0;

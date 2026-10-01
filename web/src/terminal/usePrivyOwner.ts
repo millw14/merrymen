@@ -3,10 +3,10 @@
 /**
  * THE PRIVY EMBEDDED WALLET, AS A KERNEL OWNER — or null.
  *
- * Null means "not a Privy session", and every caller treats that as "use the
- * browser-generated owner key exactly as before". That is what keeps an
- * existing Merryman on its existing owner: a legacy user who links a DID still
- * gets null here, because their tenant is not this wallet.
+ * Null means no usable embedded signer. New mainnet creation must wait for
+ * one; it must not generate a browser-held owner as a fallback. Existing
+ * wallets choose their signer from their recorded ownership binding, so a
+ * legacy owner remains responsible for the same account after linking a DID.
  *
  * A LOCAL ACCOUNT, NOT AN EIP-1193 PROVIDER. `toViemAccount` returns a viem
  * LocalAccount with a fixed address. Handing ZeroDev the raw provider instead
@@ -69,9 +69,8 @@ export function usePrivyOwner(): PrivyOwner | null {
         if (live) setOwner({ account: account as unknown as LocalAccount, did });
       })
       .catch(() => {
-        // No owner rather than a wrong one. The caller falls back to the
-        // browser-key path, which refuses loudly rather than deriving an
-        // account from a signer it could not build.
+        // No owner rather than a wrong one. New mainnet creation refuses until
+        // the embedded signer is ready; existing recovery stays on its owner.
         if (live) setOwner(null);
       });
     return () => {

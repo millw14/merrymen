@@ -556,6 +556,24 @@ describe("the ledger mirror", () => {
     assert.equal(await count(shared, "trades"), 6, "and nothing was duplicated");
   });
 
+  it("mirrors a late settlement with its fresh budget timestamp and original submission time", async () => {
+    const child = seedChild();
+    const shared = mem(DEST);
+    await child.exec("ALTER TABLE trades ADD COLUMN budget_settled_at INTEGER");
+    await shared.exec("ALTER TABLE trades ADD COLUMN budget_settled_at INTEGER");
+    const now = Math.floor(Date.now() / 1000);
+    const submitted = now - 7 * 86400;
+    await child.prepare(`INSERT INTO trades (agent_id, kind, target, amount_usdg, user_op_hash, status, epoch, created_at)
+      VALUES ('0xagent','transfer','0xt',50,'0xlate','submitted',2,?)`).run(submitted);
+    await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+    await child.prepare("UPDATE trades SET status = 'landed', tx_hash = '0xtx', budget_settled_at = ? WHERE user_op_hash = '0xlate'").run(now);
+    const result = await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now });
+    assert.equal(result.copied.trades_resolved, 1);
+    const row = await shared.prepare("SELECT status, created_at, budget_settled_at FROM trades WHERE user_op_hash = '0xlate'").get() as Record<string, unknown>;
+    assert.deepEqual({ ...row }, { status: "landed", created_at: submitted, budget_settled_at: now });
+    assert.equal((await mirrorTenant({ tenant: "0xten", child, shared, nowSec: now + 60 })).copied.trades_resolved, undefined);
+  });
+
   it("KEEPS EVERY DECISION — the tape is not a top-500 sample any more", async () => {
     // decisions used to copy `ORDER BY at DESC LIMIT 500` with no cursor, so a
     // child that wrote more than a batch between passes lost the overflow

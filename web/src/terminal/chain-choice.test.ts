@@ -96,7 +96,7 @@ describe("the re-sign button's promise reaches the screen it opens", () => {
     // real money, which is a worse bug than the one being fixed.
     assert.match(
       SRC,
-      /disabled=\{renewing \|\| \(chainId === MAINNET && grant\.chainId !== MAINNET && !mainnetAck\)\}/,
+      /disabled=\{renewing \|\| securityBusy \|\| !renewalAck \|\| \(chainId === MAINNET && grant\.chainId !== MAINNET && !mainnetAck\)\}/,
       "the acknowledgement gate must survive",
     );
     assert.match(SRC, /checked=\{chainId !== grant\.chainId\}/, "and the move stays visible as a tick");

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import ts from "typescript";
-import { prepareAgentGrant } from "./session";
+import { createAgentWallet, prepareAgentGrant } from "./session";
 
 const source = ts.createSourceFile("session.ts", readFileSync(new URL("./session.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
 function body(name: string): ts.Block {
@@ -48,5 +48,16 @@ describe("embedded grant preparation shares the permission wall without dashboar
 
   it("rejects a missing signer before any RPC or signature work", async () => {
     await assert.rejects(prepareAgentGrant(null as never, {} as never), /explicit wallet signer/);
+  });
+
+  it("refuses a new browser-held owner on mainnet before generating or persisting a key", async () => {
+    let statusUpdates = 0;
+    for (const chainId of [undefined, 4663, 1]) {
+      await assert.rejects(createAgentWallet({
+        chainId,
+        onStatus: () => { statusUpdates += 1; },
+      } as unknown as Parameters<typeof createAgentWallet>[0]), /embedded or external owner wallet/);
+    }
+    assert.equal(statusUpdates, 0, "refusal must precede minting and all side effects");
   });
 });

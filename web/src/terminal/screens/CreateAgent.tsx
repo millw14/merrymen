@@ -11,10 +11,10 @@ import {
   type CustomToken,
   isWallTooWide,
 } from "@merrymen/core";
-import { createAgentWallet, createPrivyOwnedWallet, isPrivyOwned, loadGrant, type Grant, type GrantCaps } from "@/lib/session";
+import { createPrivyOwnedWallet, isPrivyOwned, loadGrant, type Grant, type GrantCaps } from "@/lib/session";
 import { usePrivyOwner } from "@/terminal/usePrivyOwner";
 import { verifiedAdapter } from "@/lib/verified-adapter";
-import { requestJson, RetryButton, SignIn, type AccountState } from "../HostedControls";
+import { requestJson, RetryButton, SignIn, PRIVY_BETA, type AccountState } from "../HostedControls";
 import { fetchAccountForSession } from "../account-session";
 import { Face } from "../ui";
 import { SkeletonRows } from "../Skeleton";
@@ -130,8 +130,13 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
     : <section className="create-agent"><SkeletonRows rows={3} label="Loading your account"/></section>;
   if(account.session.hosted && !account.session.address)return <section className="create-agent"><h1>Meet your next agent.</h1><p>Sign in to create an agent and keep its portfolio with your account.</p><SignIn onDone={onSignedIn}/></section>;
   if(account.status.exists && !grant)return <section className="create-agent"><h1>Your agent is already set up.</h1><p>Open your agent to view its portfolio, or manage its wallet on this device.</p><button className="flow-primary" onClick={onDone}>Open agent</button><a href="/grant">Manage existing wallet</a></section>;
+  // This wizard always creates a mainnet account, including in paper mode.
+  // Do not write settings or generate a key while the protected signer is
+  // unavailable. Existing grants keep their backup, renew and recovery paths.
+  if(!grant&&!privyOwner)return <section className="create-agent"><h1>Use a protected signing wallet.</h1><p>New mainnet agents require a Privy wallet so their owner key is not stored in this browser.</p>{PRIVY_BETA?<><p>Sign in with X or email, then wait for your signing wallet to become ready.</p><SignIn onDone={onSignedIn}/><RetryButton retrying={retrying} onRetry={onRefresh}/></>:<p>Protected wallet sign-in is not enabled on this installation. Enable it before creating a mainnet agent, or use testnet from Wallet &amp; permissions.</p>}<a href="/grant">Manage an existing wallet or use testnet</a></section>;
   async function create() {
     if(busy || grant || !account)return;
+    if(!privyOwner){setError("Your signing wallet is not ready. Sign in with X or email and try again.");return;}
     // WAS `validAmount`, which took a dot decimal and nothing else — while the
     // field above is `inputMode="decimal"`, which renders a COMMA key on a
     // Spanish, German, French, Portuguese, Turkish or Indonesian keyboard. The
@@ -191,10 +196,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,onRefres
       // The PARSED values, not `Number(trade)`. The raw string is what the
       // owner typed, and `Number("10,50")` is NaN while `Number("1.000")` is 1.
       const mintOptions={caps:{...INITIAL_CAPS,perTradeUsdg:perTrade.value,dailyUsdg:perDay.value},chainId:4663,extraTokens:[...((settings.values.customTokens??[]) as CustomToken[]),...wizardTokens].filter(isValidCustomToken) as CustomToken[],v4AdapterAddress:address(settings.values.v4AdapterAddress),ponsAdapterAddress:pons,ponsClassVaultFactory:address(settings.values.ponsClassVaultFactory),hostedAs:account?.session.hosted ? account.session.address as `0x${string}` : undefined,onStatus:setStatus};
-      // WHO OWNS THIS MERRYMAN. A Privy session owns it with the embedded
-      // wallet it signed in with; everything else keeps the browser-generated
-      // key. Same Kernel, same wall, same session key either way.
-      const result=privyOwner ? await createPrivyOwnedWallet(privyOwner.account,privyOwner.did,mintOptions) : await createAgentWallet(mintOptions);
+      const result=await createPrivyOwnedWallet(privyOwner.account,privyOwner.did,mintOptions);
       setGrant(result.local);setArmed(result.handoff.ok);setStep("backup");setStatus("");
       if(!result.handoff.ok)setError(result.handoff.error ?? "Your wallet was created, but the service could not activate your agent. Save its recovery key before retrying.");
     }catch(e){setError(e instanceof Error ? e.message : "Could not create your agent. Try again.");}

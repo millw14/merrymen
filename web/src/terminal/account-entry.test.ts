@@ -102,6 +102,15 @@ describe("the account entry", () => {
 });
 
 describe("the create screen", () => {
+  it("does not offer new mainnet creation before a protected signer is ready", async () => {
+    const account: AccountState = { session: { hosted: true, address: `0x${"a".repeat(40)}` }, status: { exists: false } };
+    const html = await create({ account });
+    assert.match(text(html), /Use a protected signing wallet/);
+    assert.match(text(html), /owner key is not stored in this browser/);
+    assert.match(html, /href="\/grant"/);
+    assert.doesNotMatch(html, /id="agent-name"|Set trading limits/);
+  });
+
   it("does not offer creation from a stale no-agent result", async () => {
     const stale: AccountState = { session: { hosted: true, address: `0x${"a".repeat(40)}` }, status: { exists: false } };
     const html = await create({ account: stale, accountFailed: true });

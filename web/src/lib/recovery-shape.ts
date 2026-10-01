@@ -34,6 +34,7 @@
  */
 
 import { decodeAbiParameters, decodeFunctionData, erc20Abi, type Hex } from "viem";
+import { KERNEL_REVOCATION_ABI } from "./permission-revocation";
 
 /** Kernel v3 `execute(bytes32,bytes)`. */
 const EXECUTE_ABI = [
@@ -51,6 +52,31 @@ const EXECUTE_ABI = [
 
 /** `executeUserOp(PackedUserOperation,bytes32)` — the hook-enabled wrapper's selector. */
 const EXECUTE_USER_OP_SELECTOR = "0x8dd7712f";
+
+/**
+ * The only non-withdrawal owner operation the recovery relay carries. One
+ * self-call, no value, and no batch/try/delegate execution mode. The ticket's
+ * account supplies the target; caller-provided metadata cannot widen it.
+ */
+export function permissionRevocationNonce(callData: Hex, smartAccount: `0x${string}`): number | null {
+  try {
+    const decoded = decodeFunctionData({ abi: EXECUTE_ABI, data: callData });
+    const [mode, execution] = decoded.args;
+    if (mode !== `0x${"00".repeat(32)}`) return null;
+    // packed address + value + invalidateNonce selector + one ABI word
+    if (execution.length !== 2 + (20 + 32 + 4 + 32) * 2) return null;
+    if (`0x${execution.slice(2, 42)}`.toLowerCase() !== smartAccount.toLowerCase()) return null;
+    if (BigInt(`0x${execution.slice(42, 106)}`) !== 0n) return null;
+    const call = decodeFunctionData({ abi: KERNEL_REVOCATION_ABI, data: `0x${execution.slice(106)}` });
+    return call.functionName === "invalidateNonce" && call.args[0] > 0 ? call.args[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isPermissionRevocationShape(callData: Hex, smartAccount: `0x${string}`): boolean {
+  return permissionRevocationNonce(callData, smartAccount) !== null;
+}
 
 const BATCH_TUPLE = [
   {

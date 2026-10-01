@@ -50,29 +50,21 @@ const nextConfig = {
     return [{ source: "/leaderboard", destination: "/home", permanent: false }];
   },
   async headers() {
-    // The MCP consent and Connected apps pages grant and revoke access to an
-    // owner's agent; they must never render inside another site's frame
-    // (clickjacking an "Allow" click).
-    //
-    // /connect/x is X's OAuth callback: it arrives with the authorization
-    // code in its query. no-referrer is the load-bearing header there — the
-    // page scrubs its URL on load, but anything fetched before that must not
-    // carry the code to another host in a Referer.
-    const noFrame = [
+    // Every dashboard screen can expose owner actions, not only /connect.
+    // Nonce-based script policy is added by middleware to rendered documents;
+    // static assets and protocol responses receive these baseline protections.
+    // MCP App HTML is transported inside JSON and keeps its own sandbox CSP.
+    const browserHeaders = [
       { key: "X-Frame-Options", value: "DENY" },
-      { key: "Content-Security-Policy", value: "frame-ancestors 'none'" },
+      { key: "Content-Security-Policy", value: "frame-ancestors 'none'; object-src 'none'; base-uri 'none'" },
+      { key: "X-Content-Type-Options", value: "nosniff" },
       { key: "Referrer-Policy", value: "no-referrer" },
     ];
-    return [{ source: "/sdk/merrymen-browser.js", headers: [
+    return [{ source: "/:path*", headers: browserHeaders },
+    { source: "/sdk/merrymen-browser.js", headers: [
       { key: "Access-Control-Allow-Origin", value: "*" },
       { key: "Cache-Control", value: "public, max-age=300" },
-    ] },
-    { source: "/connect/app", headers: noFrame },
-    { source: "/connect/apps", headers: noFrame },
-    { source: "/connect/mcp", headers: noFrame },
-    { source: "/connect/approve/:id", headers: noFrame },
-    { source: "/connect/export/:id", headers: noFrame },
-    { source: "/connect/x", headers: noFrame }];
+    ] }];
   },
   experimental: {
     externalDir: true,

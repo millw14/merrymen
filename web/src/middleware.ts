@@ -1,8 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { dedicatedMcpHost, mcpHostLanding } from "@/mcp/landing";
+import { documentPolicy } from "@/lib/browser-security";
 
 /**
- * The dashboard has NO login and can move real funds (/api/recover sweeps to any
+ * The self-hosted dashboard has NO login and can move real funds (/api/recover sweeps to any
  * address; /api/grants is the kill switch; /api/settings repoints the bundler).
  * Binding to localhost does NOT protect it: a web page you visit can fire
  * cross-origin requests at http://localhost:3100 from your own browser (CSRF),
@@ -13,11 +14,10 @@ import { dedicatedMcpHost, mcpHostLanding } from "@/mcp/landing";
  *      literal. DNS rebinding needs a PUBLIC domain name in the Host header, so
  *      this kills it, while still allowing the explicit MERRYMEN_HOST=0.0.0.0 LAN
  *      opt-in (reached via a private IP like 192.168.x.x).
- *   2. Cross-site block — reject requests whose Sec-Fetch-Site is cross-site or
- *      same-site (a different site the browser labels as such). same-origin (the
- *      dashboard itself) and none (a top-level navigation, or a non-browser client
- *      like curl on your own machine) are allowed. Modern browsers always send
- *      this header, and an attacker page cannot forge it to "same-origin".
+ *   2. Cross-site block — check Origin independently of Fetch Metadata. Browsers
+ *      omit Sec-Fetch-Site for ordinary private-LAN HTTP URLs, so its absence
+ *      cannot authenticate a request. Referer is the fallback for older browsers;
+ *      headerless non-browser clients still meet each route's own authorization.
  *
  * Without this, a single unauthenticated cross-origin POST drains the account.
  */
@@ -84,10 +84,68 @@ const MCP_HOST = dedicatedMcpHost({
   MERRYMEN_MCP_RESOURCE_URL: process.env.MERRYMEN_MCP_RESOURCE_URL,
 }, HOSTED);
 
+/** The browser's actual origin, preserving 127.0.0.1 (Next normalizes its URL). */
+function apiOrigin(req: NextRequest): string | null {
+  try {
+    if (HOSTED && process.env.MERRYMEN_PUBLIC_ORIGIN) return new URL(process.env.MERRYMEN_PUBLIC_ORIGIN.trim()).origin;
+    const url = new URL(req.url);
+    const host = req.headers.get("host");
+    if (host) url.host = host;
+    return url.origin;
+  } catch { return null; }
+}
+
+function crossSiteApi(req: NextRequest): boolean {
+  const site = req.headers.get("sec-fetch-site");
+  if (site && site !== "same-origin" && site !== "none") return true;
+  const expected = apiOrigin(req);
+  const origin = req.headers.get("origin");
+  // "null" origins (sandboxed documents, file URLs) are not a trusted origin.
+  if (origin !== null) return !expected || origin !== expected;
+  const referer = req.headers.get("referer");
+  if (referer !== null) {
+    try { return !expected || new URL(referer).origin !== expected; }
+    catch { return true; }
+  }
+  const unsafe = !["GET", "HEAD", "OPTIONS"].includes(req.method);
+  const browser = site !== null || req.headers.has("sec-fetch-mode") || req.headers.has("sec-fetch-dest");
+  return unsafe && browser && site !== "same-origin";
+}
+
+// Exact public files/text endpoints only. A dotted agent name or approval identifier still
+// renders a document, so a generic file-extension exclusion is unsafe here.
+const STATIC_ASSETS = new Set([
+  "/sw.js", "/sdk/merrymen-browser.js", "/offline.html", "/manifest.webmanifest", "/llms.txt",
+  "/favicon.ico", "/favicon.svg", "/logo.svg", "/og.png", "/mcp-icon.svg", "/mcp-icon-512.png",
+  "/icon-192.png", "/icon-512.png", "/icon-maskable-192.png", "/icon-maskable-512.png",
+  "/apple-touch-icon.png", "/merrymenlogo.png", "/atmos/sherwood-night.webp",
+  ...["DMSans-latin.woff2", "DMSans-latin-ext.woff2", "DMSans-OFL.txt",
+    "GeistPixel-latin.woff2", "GeistPixel-latin-ext.woff2", "Geist-numerals.woff2", "Geist-OFL.txt",
+    "Inter-latin.woff2", "Inter-latin-ext.woff2", "Inter-vietnamese.woff2", "Inter-cyrillic.woff2", "Inter-OFL.txt",
+    "NotoSansThai-thai.woff2", "NotoSansThai-OFL.txt", "README.md"].map(name => `/fonts/${name}`),
+]);
+
+function documentResponse(req: NextRequest): NextResponse {
+  // These routes have their own protocol, not Next document scripts. The
+  // matcher excludes them too; retain that boundary when invoked directly.
+  if (/^\/(?:_next|mcp|oauth|\.well-known)(?:\/|$)/.test(req.nextUrl.pathname) || STATIC_ASSETS.has(req.nextUrl.pathname)) return NextResponse.next();
+  const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
+  const policy = documentPolicy(nonce, { development: process.env.NODE_ENV === "development", hosted: HOSTED });
+  const headers = new Headers(req.headers);
+  headers.set("x-nonce", nonce);
+  // Next reads the request policy and nonces its framework and hydration
+  // scripts. Overwrite caller-supplied values; neither is trusted input.
+  headers.set("Content-Security-Policy", policy);
+  const response = NextResponse.next({ request: { headers } });
+  response.headers.set("Content-Security-Policy", policy);
+  response.headers.set("Cache-Control", "private, no-store, max-age=0");
+  return response;
+}
+
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // ── the two API guards, unchanged and still API-only ────────────────────
+  // ── the API guards ─────────────────────────────────────────────────────
   //
   // Scoped explicitly, and the scoping is the load-bearing part (the matcher
   // now reaches pages too, for the MCP domain below): applying the host
@@ -98,17 +156,18 @@ export function middleware(req: NextRequest) {
     if (!HOSTED && !hostAllowed(req.headers.get("host"))) {
       return new NextResponse("blocked: unexpected Host header (possible DNS-rebinding)", { status: 403 });
     }
-    const site = req.headers.get("sec-fetch-site");
-    if (site && site !== "same-origin" && site !== "none") {
+    if (crossSiteApi(req)) {
       return new NextResponse("blocked: cross-site request to the local API", { status: 403 });
     }
     return NextResponse.next();
   }
 
+  if (STATIC_ASSETS.has(pathname)) return NextResponse.next();
+
   // ── pages on the dedicated MCP domain, and nowhere else ────────────────
   //
-  // One header read and one string comparison on any other host, and nothing
-  // at all self-hosted: that is what keeps matching every page affordable.
+  // The redirect is only for the configured MCP host. Other document requests
+  // continue to the nonce policy below.
   // The query is as Next hands it to middleware (its URL parser rewrites a
   // 127.0.0.1 anywhere in it to localhost; see mcp/oauth/deps.ts). Harmless
   // for a page; /oauth/*, where it would matter, is never redirected.
@@ -124,25 +183,22 @@ export function middleware(req: NextRequest) {
     }
   }
 
-  return NextResponse.next();
+  return documentResponse(req);
 }
 
 /**
  * The API, plus pages for the dedicated MCP domain.
  *
- * This file guards /api/* against DNS rebinding and cross-site POSTs. It once
- * also rendered a password holding page, which is why the matcher reached
- * pages at all; that is gone. Pages are matched again for one reason only:
- * a browser (or a client given the bare domain) on the MCP host is sent where
- * it can do something (mcp/landing.ts). Matching is by path because a matcher
- * cannot read runtime configuration; the host check is in the function.
+ * APIs receive DNS-rebinding/CSRF checks; pages receive fresh script nonces
+ * and the configured MCP-host landing redirect. Protocol endpoints and files
+ * keep their own content policy and never receive document script nonces.
  */
 export const config = {
   // The two guards are and always were API-only (the isApi check above, not
   // this list, is what scopes them): running the Host allowlist over ordinary
   // navigation would newly refuse a self-hosted install reached over a LAN.
-  // The page pattern skips what the MCP host must serve untouched anyway, so
-  // assets and the MCP endpoints never pay for a middleware call: Next's
-  // files, the endpoint, OAuth, discovery and anything with a file extension.
-  matcher: ["/api/:path*", "/((?!api/|_next/|mcp(?:/|$)|oauth/|\\.well-known/|.*\\.[A-Za-z0-9]+$).*)"],
+  // Protocol/framework namespaces retain their own policies. Exact public
+  // assets are excluded inside middleware; dotted application routes and
+  // unknown paths still receive document nonces, including 404 documents.
+  matcher: ["/api/:path*", "/((?!api/|_next/|mcp(?:/|$)|oauth/|\\.well-known/).*)"],
 };
