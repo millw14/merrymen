@@ -172,6 +172,21 @@ describe("vendor JSON into our schema", () => {
 });
 
 describe("the fetch, and the token that must not escape it", () => {
+  it("refuses malformed 200 pages and crypto rows instead of certifying a quiet market", async () => {
+    for (const data of [{}, { data: {} }, { data: [] },
+      { data: [{ title: "missing entity and publication" }], meta: { returned: 1, page: 1 } },
+      { data: [], meta: { returned: 10, page: 1 } },
+      { data: [], meta: { returned: 0 } }]) {
+      const result = await fetchMarketauxNews({ apiKey: KEY, symbols: ["CC:ETH"], asOf: NOW,
+        fetchImpl: (async () => new Response(JSON.stringify(data), { headers: { "content-type": "application/json" } })) as unknown as typeof fetch });
+      assert.equal(result.ok, false);
+      assert.equal(result.ok === false && result.failure, "unreadable");
+    }
+    const quiet = await fetchMarketauxNews({ apiKey: KEY, symbols: ["CC:ETH"], asOf: NOW,
+      fetchImpl: (async () => new Response(JSON.stringify({ meta: { returned: 0, page: 1 }, data: [] }),
+        { headers: { "content-type": "application/json" } })) as unknown as typeof fetch });
+    assert.deepEqual(quiet, { ok: true, items: [], asked: ["CC:ETH"] });
+  });
   it("refuses without a token and never makes a request", async () => {
     let called = 0;
     const r = await fetchMarketauxNews({
@@ -260,6 +275,22 @@ describe("the fetch, and the token that must not escape it", () => {
     assert.equal(r.ok, false);
     assert.ok(!(r.ok === false ? r.detail : "").includes(KEY), "the token was in the answer and must not be in ours");
     assert.match(r.ok === false ? r.detail : "", /\*\*\*/);
+  });
+
+  it("SECURITY: a successful article echoing the token cannot enter tenant research", async () => {
+    for (const echoed of [
+      article({ title: `A headline containing ${KEY}` }),
+      article({ description: `A summary containing ${KEY}` }),
+      article({ source: `wire-${KEY}` }),
+      article({ uuid: `story-${KEY}` }),
+      article({ url: `https://example.com/story?api_token=${encodeURIComponent(KEY)}` }),
+    ]) {
+      const r = await fetchMarketauxNews({ apiKey: KEY, symbols: ["TSLA"], asOf: NOW,
+        fetchImpl: (async () => new Response(JSON.stringify(payload([echoed])), {
+          headers: { "content-type": "application/json" },
+        })) as unknown as typeof fetch });
+      assert.deepEqual(r, { ok: false, failure: "unreadable", detail: "provider echoed a credential in its article page", asked: ["TSLA"] });
+    }
   });
 
   it("SECURITY: a thrown error carrying the URL is scrubbed too", async () => {

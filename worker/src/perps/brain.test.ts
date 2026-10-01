@@ -19,7 +19,8 @@ function fixture(key: "BTC-PERP" | "ETH-PERP" | "SOL-PERP" = "BTC-PERP", halfSpr
   markets.set(c.market, { ...m, closed4h: history, bestBid: m.markPrice - halfSpread, bestAsk: m.markPrice + halfSpread });
   const feed = { markets: new Map([[c.marketId, { fresh: true, bookFresh: true, takerFeePpm: 100,
     bids: [{ price: m.markPrice - halfSpread, baseAmount: 10000000n }], asks: [{ price: m.markPrice + halfSpread, baseAmount: 10000000n }] }]]) } as unknown as LighterFeedRead;
-  const args = { agentId: "agent-a", runId: "run-a", nowMs: NOW_SEC * 1000, context: "settings-grant-a", view: { ...v, markets }, candidate: c, candleT: trend.entryCandleT!, feed };
+  const args = { agentId: "agent-a", runId: "run-a", nowMs: NOW_SEC * 1000, context: "settings-grant-a", view: { ...v, markets }, candidate: c, candleT: trend.entryCandleT!, feed,
+    news: { status: "no-articles" as const, checked_at_ms: NOW_SEC * 1000 - 60_000, items: [] } };
   const request = buildPerpsBrainRequest(args); assert.ok(request);
   return { args, request, candidate: c, mark: m.markPrice };
 }
@@ -90,6 +91,15 @@ describe("MerrymenBrain perps binding and measured material", () => {
       { depth_ratio: 1.24 }, { index_price: String(BigInt(r.index_price) / 2n) },
       { candidate: { ...r.candidate, stop_bps: r.candidate.stop_bps + 1 } }])
       assert.equal(brainMarketStillQualified(r, { ...r, ...over }), false, JSON.stringify(over));
+  });
+  it("news coverage is required and a fresh article or stale check invalidates a pending approval", () => {
+    const f = fixture(), r = f.request;
+    assert.equal(brainMarketStillQualified(r, { ...r, news: { status: "stale", checked_at_ms: r.news.checked_at_ms, items: [] } }), false);
+    assert.equal(validatePerpsBrainResponse(approval({ ...r, news: { status: "not-fetched", checked_at_ms: 0, items: [] } }),
+      { ...r, news: { status: "not-fetched", checked_at_ms: 0, items: [] } }, r.as_of_ms), null);
+    const next = { ...r, news: { status: "ok" as const, checked_at_ms: r.as_of_ms, items: [{ id: "1", source: "Publisher",
+      published_at_ms: r.as_of_ms, headline: "Risk event", summary: null, relevance: .9, sentiment: -.8 }] } };
+    assert.equal(brainMarketStillQualified(r, next), false, "news changing during a model call needs a fresh review");
   });
   it("cannot widen numeric market guards with invented response volatility", () => {
     const { request: r } = fixture();
@@ -231,7 +241,9 @@ describe("background perps Brain review", () => {
 });
 
 it("HTTP client is authenticated, response-bounded and keeps its deadline through a stalled body", async () => {
-  const f = fixture(); const request = { ...f.request, as_of_ms: Date.now(), expires_at_ms: Date.now() + PERPS_BRAIN_TTL_MS };
+  const f = fixture(); const now = Date.now();
+  const request = { ...f.request, as_of_ms: now, expires_at_ms: now + PERPS_BRAIN_TTL_MS,
+    news: { ...f.request.news, checked_at_ms: now } };
   let hits = 0;
   const server = createServer((req, res) => { hits++; assert.equal(req.url, "/v1/perps/decide"); assert.equal(req.headers.authorization, "Bearer test-token"); res.writeHead(200, { "content-type": "application/json" }); res.write('{"ok":true'); });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
@@ -245,7 +257,8 @@ it("HTTP client is authenticated, response-bounded and keeps its deadline throug
 
 it("HTTP failures, adversarial payloads and decompressed byte limits fail closed without poisoning the next review", async () => {
   const f = fixture(), now = Date.now();
-  const request = { ...f.request, as_of_ms: now, expires_at_ms: now + PERPS_BRAIN_TTL_MS };
+  const request = { ...f.request, as_of_ms: now, expires_at_ms: now + PERPS_BRAIN_TTL_MS,
+    news: { ...f.request.news, checked_at_ms: now } };
   let mode = "good", hits = 0;
   const oversized = JSON.stringify({ ok: true, decision: { ...approval(request), features: { text: "🔥".repeat(40_000) } } });
   const server = createServer((req, res) => {

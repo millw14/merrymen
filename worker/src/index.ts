@@ -274,6 +274,7 @@ import { createPerpFeedHost, createPerpLane, isHostedChildProcess, type PerpLane
 // with the perp block ever reaches it (paper never loads the WASM).
 import { loadSigner } from "./perps/signer";
 import { brainFingerprint, requestPerpsBrain } from "./perps/brain";
+import { perpsNewsFromResearch } from "./perps/news";
 import { lighterFeedPath, readLighterFeed } from "./perps/feed-reader";
 import { startLighterFeed } from "./perps/feed";
 import { createLighterApi } from "./perps/api";
@@ -3371,6 +3372,7 @@ async function main() {
       configKey: () => brainFingerprint({ url: cfg.brainUrl, token: cfg.brainToken }),
       admit: claimReview,
       review: (request) => requestPerpsBrain({ url: cfg.brainUrl ?? "", token: cfg.brainToken ?? "" }, request),
+      news: (market, asOfMs) => perpsNewsFromResearch(readResearch(merrymenHome()), market, asOfMs),
       record: async (recording) => {
         const { request, response } = recording;
         const evidence = JSON.stringify(recording);

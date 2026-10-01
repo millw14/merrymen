@@ -127,6 +127,8 @@ export interface PerpPlaceContext {
   agentId: string;
   /** Owner command expiry, absolute ms. Absent for autonomous protective exits. */
   notAfterMs?: number;
+  /** Internal final veto used by a Brain-approved open; never persisted or sent. */
+  beforeCommit?: () => void | Promise<void>;
 }
 
 export interface PerpPlaceResult {
@@ -528,6 +530,7 @@ export function createPaperPerpExecutor(opts: {
         throw new PerpRefused("perp-order-malformed", "the order is not the one that was reviewed");
       }
       const nowMs = opts.now();
+      if (intent.effect === "open") await ctx.beforeCommit?.();
       const nonce = await store.bumpNonceHighWater(agentId, "paper", Math.max(1, Math.floor(nowMs)));
       if (ctx.notAfterMs !== undefined && (!Number.isSafeInteger(ctx.notAfterMs) || opts.now() >= ctx.notAfterMs)) {
         throw new PerpRefused("perp-unpriced", "the owner's request expired before the practice order could be booked");
@@ -590,6 +593,7 @@ export function createPaperPerpExecutor(opts: {
           positions: step.after === null ? [] : [positionWrite(marketId, step.after, o.imfBp)],
           cashDeltaMicro: step.cashDeltaMicro,
         };
+        await ctx.beforeCommit?.();
         const id = await book(booking);
         return {
           status,

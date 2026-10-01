@@ -16,9 +16,72 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { chooseSymbols, makeNewsDesk, newsFailureLine, planNewsWindow } from "./research-pass";
+import { certifiedPerpsCheckedAt, chooseSymbols, makeNewsDesk, newsFailureLine, planNewsWindow, planPerpsNewsAsk } from "./research-pass";
+import { perpsNewsFromResearch } from "./perps/news";
+import type { ResearchFile } from "./research-files";
 
 const NOW = 1_788_600_000;
+
+describe("single-entity crypto news coverage", () => {
+  it("retains direct BTC stories after three 100-row paid pages evict them from the shared cache", async () => {
+    let calls = 0;
+    const symbols = ["CC:BTC", "CC:ETH", "CC:SOL"];
+    const desk = makeNewsDesk({ apiKey: "test", dailyLimit: 10_000, articlesPerRequest: 100, windowSec: 300,
+      fetchImpl: (async (url: string) => {
+        const symbol = new URL(url).searchParams.get("symbols")!;
+        const when = NOW + calls++ * 300;
+        const data = Array.from({ length: 100 }, (_, i) => ({ uuid: `${symbol}-${i}`, title: `${symbol} story ${i}`,
+          url: `https://example.com/${symbol}/${i}`, published_at: new Date((when - 60) * 1000).toISOString(),
+          source: "Publisher", entities: [{ symbol, match_score: 80, sentiment_score: .1 }] }));
+        return new Response(JSON.stringify({ meta: { returned: data.length, page: 1 }, data }),
+          { headers: { "content-type": "application/json" } });
+      }) as unknown as typeof fetch });
+    const checked: Record<string, number> = {};
+    for (let i = 0; i < 3; i++) {
+      const at = NOW + i * 300, symbol = symbols[i]!;
+      const result = await desk.refresh([symbol], at);
+      assert.equal(result.fetched, true);
+      Object.assign(checked, certifiedPerpsCheckedAt(checked, [symbol], desk.state().askedAt, true));
+    }
+    const state = desk.state();
+    assert.equal(state.items.some(it => it.symbols.includes("CC:BTC")), false, "shared cache evicted all 100 BTC rows");
+    assert.equal(state.perpsDirect["CC:BTC"]!.items.length, 8);
+    const now = (NOW + 600) * 1000;
+    const research: ResearchFile = { at: NOW + 600, news: { asked: state.asked, askedAt: state.askedAt,
+      perpsCheckedAt: checked, perpsDirect: state.perpsDirect, fetchedAt: state.fetchedAt,
+      failure: state.failure, items: state.items }, builders: [] };
+    const btc = perpsNewsFromResearch(research, "BTC-PERP", now);
+    assert.equal(btc.status, "ok");
+    assert.equal(btc.items.length, 8);
+  });
+  it("rotates BTC, ETH and SOL singly while reserving the fourth request for equities", () => {
+    const opts = { perps: ["CC:BTC", "CC:ETH", "CC:SOL"], heldEquities: ["TSLA"],
+      equities: ["TSLA", "NVDA"], maxSymbols: 3, asOf: NOW, ttlSec: 960 };
+    const asks = Array.from({ length: 8 }, (_, attemptIndex) => planPerpsNewsAsk({ ...opts, attemptIndex }));
+    assert.deepEqual(asks, [["CC:BTC"], ["CC:ETH"], ["CC:SOL"], ["TSLA", "NVDA"],
+      ["CC:BTC"], ["CC:ETH"], ["CC:SOL"], ["TSLA", "NVDA"]]);
+    assert.ok(asks.filter(a => a[0]?.startsWith("CC:")).every(a => a.length === 1));
+  });
+  it("asks all selected equities at their turn and preserves the preexisting plan when no perps are enabled", () => {
+    const opts = { perps: [], heldEquities: ["TSLA"], equities: ["TSLA", "NVDA"],
+      maxSymbols: 3, asOf: NOW, ttlSec: 960, attemptIndex: 0 };
+    assert.deepEqual(planPerpsNewsAsk(opts), ["TSLA", "NVDA"]);
+  });
+  it("never certifies quiet ETH from a BTC-dominated multi-symbol page or failed single request", () => {
+    const askedAt = { "CC:BTC": NOW, "CC:ETH": NOW };
+    assert.deepEqual(certifiedPerpsCheckedAt({}, ["CC:BTC", "CC:ETH"], askedAt, true), {});
+    assert.deepEqual(certifiedPerpsCheckedAt({}, ["CC:ETH"], askedAt, false), {});
+    assert.deepEqual(certifiedPerpsCheckedAt({}, ["CC:BTC"], askedAt, true), { "CC:BTC": NOW });
+  });
+  it("rotates all four held equities through three slots across reserved equity windows", () => {
+    const held = ["A", "B", "C", "D"];
+    const opts = { perps: ["CC:BTC", "CC:ETH", "CC:SOL"], heldEquities: held,
+      equities: held, maxSymbols: 3, asOf: NOW, ttlSec: 960 };
+    const equityAsks = [3, 7, 11, 15].map(attemptIndex => planPerpsNewsAsk({ ...opts, attemptIndex }));
+    assert.deepEqual(new Set(equityAsks.flat()), new Set(held));
+    assert.notDeepEqual(equityAsks[0], equityAsks[1]);
+  });
+});
 
 /** A fetch that answers with `n` stories about the first symbol it was asked. */
 function answering(rows: number, onCall?: (url: string) => void): typeof fetch {

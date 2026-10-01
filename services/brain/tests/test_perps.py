@@ -1,8 +1,6 @@
 """Real exported market engine + bounded committee, with zero paid model calls."""
 from __future__ import annotations
 
-import asyncio
-import copy
 import json
 import time
 
@@ -31,7 +29,12 @@ def request(side="long", **changes):
         "market": "BTC-PERP", "as_of_ms": now, "expires_at_ms": now + 120_000,
         "candidate": {"side": side, "bar_t": latest, "stop_bps": 300}, "candles": rows,
         "mark_price": rows[-1]["c"], "index_price": rows[-1]["c"], "spread_bps": 1, "taker_fee_bps": 1,
-        "slippage_bps": 1, "funding_ppm_per_hour": 0, "depth_ratio": 3, **changes,
+        "slippage_bps": 1, "funding_ppm_per_hour": 0, "depth_ratio": 3,
+        "news": {"status": "ok", "checked_at_ms": now, "items": [{
+            "id": "story-1", "source": "example-news", "published_at_ms": now - 30_000,
+            "headline": "Reported market update", "summary": "A dated story about the market.",
+            "relevance": 0.8, "sentiment": 0.1,
+        }]}, **changes,
     })
 
 
@@ -60,6 +63,10 @@ async def test_real_engine_and_three_lenses_preserve_forecast_and_candidate(side
     llm = FakeLlm()
     out = await review_perps(req, llm, numerical)
     assert len(llm.calls) == 3
+    supplied = json.loads(llm.calls[0]["user"])
+    assert supplied["news"]["status"] == "ok"
+    assert supplied["news"]["items"][0]["headline"] == "Reported market update"
+    assert "api_token" not in llm.calls[0]["user"]
     assert out["action"] == side
     assert out["forecast"] == numerical["forecast"]
     assert out["strategy_version"] == STRATEGY_VERSION
@@ -106,7 +113,7 @@ async def test_expiry_during_a_model_call_is_not_renewed(monkeypatch, tmp_path):
 @pytest.mark.parametrize("mutation", [
     lambda r: r.update(extra="execute"), lambda r: r.update(market="DOGE-PERP"),
     lambda r: r.update(depth_ratio=float("nan")), lambda r: r["candidate"].update(leverage=100),
-    lambda r: r.update(candles=r["candles"][:99]),
+    lambda r: r.update(candles=r["candles"][:99]), lambda r: r.pop("news"),
 ])
 def test_http_contract_rejects_unexpected_authority_and_bad_evidence(mutation):
     raw = request().model_dump()

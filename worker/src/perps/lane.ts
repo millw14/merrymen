@@ -147,6 +147,7 @@ import {
 import type { ReconcileResult } from "./reconcile";
 import { runPerpRoute, type PerpRouteIntent } from "./route";
 import { brainFingerprint, buildPerpsBrainRequest, brainMarketStillQualified, PerpsBrainReview, validatePerpsBrainResponse, PERPS_BRAIN_MAX_DRIFT_BPS, type PerpsBrainApproval, type PerpsBrainRequest, type PerpsBrainRecording, type PerpsBrainResponse } from "./brain";
+import { perpsNewsAvailable, type PerpsNewsEvidence } from "./news";
 import { runStanddown, standdownExposure, standdownStepLine, type StanddownReason, type StanddownResult } from "./standdown";
 import { readPendingStanddownRequests, writeStanddownProgress, writeStanddownResult } from "./standdown-files";
 import {
@@ -386,6 +387,8 @@ export interface PerpLaneDeps {
     configKey: () => string;
     admit: () => Promise<boolean>;
     review: (request: PerpsBrainRequest) => Promise<PerpsBrainResponse | null>;
+    /** Reads the orchestrator's per-symbol news observation at decision time. */
+    news?: (market: string, asOfMs: number) => PerpsNewsEvidence;
     /** Must journal before an approval becomes available; index.ts verifies the insert. */
     record?: (recording: PerpsBrainRecording) => Promise<void>;
   };
@@ -2384,15 +2387,26 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     // Approval remains bound after queue/DB waits. Its deadline is persisted by
     // the executor, so a submitted row cannot replay after research expires.
     const brainPermit = brainPermits.get(intent);
+    let beforeBrainSend: (() => void) | undefined;
     if (brainPermit !== undefined && intent.kind === "perp-order" && intent.effect === "open") {
       const mark = r.view?.markets.get(intent.market)?.markPrice;
       const reference = BigInt(brainPermit.request.mark_price);
       const drift = mark === undefined ? reference : mark > reference ? mark - reference : reference - mark;
-      const currentEvidence = r.view ? buildPerpsBrainRequest({ agentId: a.agentId, context: brainPermit.context, nowMs: deps.now(), view: r.view,
-        candidate: intent as import("./drafts").PerpOpenDraft, candleT: brainPermit.request.candidate.bar_t, feed: r.feed ?? null }) : null;
+      const evidenceNowMs = deps.now();
+      const currentEvidence = r.view ? buildPerpsBrainRequest({ agentId: a.agentId, context: brainPermit.context, nowMs: evidenceNowMs, view: r.view,
+        candidate: intent as import("./drafts").PerpOpenDraft, candleT: brainPermit.request.candidate.bar_t, feed: r.feed ?? null,
+        news: deps.brain?.news?.(intent.market, evidenceNowMs) }) : null;
       if (!currentEvidence || !brainMarketStillQualified(brainPermit.request, currentEvidence, brainPermit.response) || brainContext(a) !== brainPermit.context || !validatePerpsBrainResponse(brainPermit.response, brainPermit.request, deps.now()) ||
           mark === undefined || drift * 10_000n > reference * BigInt(PERPS_BRAIN_MAX_DRIFT_BPS))
         return refuse(intent, { rule: "perp-brain-expired", detail: "the Brain review is no longer current; the next entry needs a fresh review" }, "brain");
+      beforeBrainSend = () => {
+        const now = deps.now(), currentAgent = agentNow();
+        const news = deps.brain?.news?.(intent.market, now);
+        if (!currentAgent || currentAgent.agentId !== a.agentId || brainContext(currentAgent) !== brainPermit.context ||
+            !validatePerpsBrainResponse(brainPermit.response, brainPermit.request, now) ||
+            !news || !perpsNewsAvailable(news, now) || brainFingerprint(news) !== brainFingerprint(brainPermit.request.news))
+          throw new PerpRefused("perp-brain-expired", "the Brain's news review changed or expired before send; this entry needs a fresh review");
+      };
       opts = { ...opts, notAfterMs: Math.min(opts.notAfterMs ?? Infinity, brainPermit.request.expires_at_ms) };
     }
     const stateFor = async (read: PerpLaneRead, legs = false): Promise<AgentState> => ({
@@ -2435,9 +2449,9 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       const lr = liveRead;
       const liveHolds = lr?.view?.positions.get(intent.market) !== undefined;
       const paperHolds = r.view?.positions.get(intent.market) !== undefined;
-      if (liveHolds && !paperHolds && lr !== null) return executeLive(a, intent, stateFor, lr, opts.notAfterMs);
+      if (liveHolds && !paperHolds && lr !== null) return executeLive(a, intent, stateFor, lr, opts.notAfterMs, beforeBrainSend);
     }
-    if (r.bookMode === "live") return executeLive(a, intent, stateFor, r, opts.notAfterMs);
+    if (r.bookMode === "live") return executeLive(a, intent, stateFor, r, opts.notAfterMs, beforeBrainSend);
 
     const epoch = await deps.store.getAgentEpoch(a.agentId);
     const ex = executorFor(a, epoch);
@@ -2462,7 +2476,11 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     if (!v2.ok) return refuse(intent, v2, "reviewed");
 
     const spend = intent.effect === "open" ? reviewed.notionalUsdg : 0n;
-    const done = await reservePlaceCount(intent, spend, () => ex.place(intent, review, { decisionId: intent.decisionId ?? null, agentId: a.agentId, notAfterMs: opts.notAfterMs }));
+    const done = await reservePlaceCount(intent, spend, () => {
+      beforeBrainSend?.();
+      return ex.place(intent, review, { decisionId: intent.decisionId ?? null, agentId: a.agentId, notAfterMs: opts.notAfterMs,
+        ...(beforeBrainSend ? { beforeCommit: beforeBrainSend } : {}) });
+    });
     if (!done.ok) return done.out;
     const placed = done.placed;
     lastRefusalKey = null;
@@ -2487,6 +2505,7 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
     stateFor: (read: PerpLaneRead, legs?: boolean) => Promise<AgentState>,
     r: PerpLaneRead,
     notAfterMs?: number,
+    beforeBrainSend?: () => void,
   ): Promise<PerpOutcome> {
     const side = live;
     const exit = intent.effect !== "open";
@@ -2579,9 +2598,11 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
 
     const spend = intent.effect === "open" ? reviewed.notionalUsdg : 0n;
     const fresh = side.snap !== null && deps.now() - side.snap.atMs <= LIVE_LANE_TIMING.lightMaxAgeMs ? side.snap.account : null;
-    const done = await reservePlaceCount(intent, spend, () =>
-      ex.place(intent, review, { decisionId: intent.decisionId ?? null, agentId: a.agentId, notAfterMs, ...(fresh !== null ? { venue: fresh } : {}) }),
-    );
+    const done = await reservePlaceCount(intent, spend, () => {
+      beforeBrainSend?.();
+      return ex.place(intent, review, { decisionId: intent.decisionId ?? null, agentId: a.agentId, notAfterMs,
+        ...(fresh !== null ? { venue: fresh } : {}), ...(beforeBrainSend ? { beforeCommit: beforeBrainSend } : {}) });
+    });
     if (!done.ok) return done.out;
     const placed = done.placed as PerpPlaceResult & { tx?: { txHash: string } };
     if (placed.status === "rejected") {
@@ -3052,8 +3073,10 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
       const candidate = runPerpRoute({ ...routeInput, driver: "perp-trend" });
       if (candidate.entry?.effect === "open" && candidate.entryCandleT !== null && r.view) {
         const market = r.view.markets.get(candidate.entry.market);
-        const request = buildPerpsBrainRequest({ agentId: a.agentId, context, nowMs: deps.now(), view: r.view,
-          candidate: candidate.entry, candleT: candidate.entryCandleT, feed: r.feed ?? null });
+        const evidenceNowMs = deps.now();
+        const request = buildPerpsBrainRequest({ agentId: a.agentId, context, nowMs: evidenceNowMs, view: r.view,
+          candidate: candidate.entry, candleT: candidate.entryCandleT, feed: r.feed ?? null,
+          news: deps.brain?.news?.(candidate.entry.market, evidenceNowMs) });
         if (market && request) approval = brainReview.take(context, candidate.entry, candidate.entryCandleT, market.markPrice, request);
         if (approval === null) {
           const B = deps.brain;
@@ -3061,13 +3084,17 @@ export function createPerpLane(deps: PerpLaneDeps): PerpLane {
           if (!B?.configured()) note("MerrymenBrain is not configured; new entries wait while stops and trend exits continue.");
           else {
             if (request === null) note("MerrymenBrain needs current candles, funding and executable depth before reviewing an entry.");
+            else if (!perpsNewsAvailable(request.news, request.as_of_ms))
+              note(`MerrymenBrain needs fresh ${candidate.entry.market} news coverage before reviewing a new entry (${request.news.status}).`);
             else brainReview.launch(context, request, candidate.entry, async () => {
               if (!await B.admit() || brainContext(a) !== context) return null;
               const response = await B.review(request);
               if (B.record) {
                 if (!r.feed?.source) return null;
                 const sourceFrame = { atMs: request.as_of_ms, feed: r.feed.source };
-                await B.record({ context, sourceFrame, sourceFrameSha256: brainFingerprint(sourceFrame), request, response, candidateNotionalMicro: candidate.entry!.notionalUsdg.toString(), completedAtMs: deps.now() });
+                await B.record({ context, sourceFrame, sourceFrameSha256: brainFingerprint(sourceFrame),
+                  sourceNews: request.news, sourceNewsSha256: brainFingerprint(request.news),
+                  request, response, candidateNotionalMicro: candidate.entry!.notionalUsdg.toString(), completedAtMs: deps.now() });
               }
               return response;
             }, note);

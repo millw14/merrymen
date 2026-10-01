@@ -47,7 +47,7 @@ import { describeCreds, groupChatCreds } from "./groupchat/voice";
 import { makeXPoster, xpostSetup, type XPoster, type XPostSetup } from "./orchestrator-xpost";
 // The fleet's default trading model, so the room can say when its own model is
 // the same one (see groupChatModelWarning).
-import { SETTINGS_DEFAULTS as GROUPCHAT_FLEET_DEFAULTS } from "../../packages/core/src/index";
+import { SETTINGS_DEFAULTS } from "../../packages/core/src/index";
 
 let historyRepairStarted = false;
 function startHistoryRepair(): void {
@@ -120,8 +120,9 @@ import { createFleetPerpFeed } from "./perps/fleet-feed";
 import { grantPerp } from "../../packages/core/src/index";
 import { writePeersForChild } from "./peer-files";
 import { writeResearchForChild } from "./research-files";
+import { perpsNewsSymbolsForSettings } from "./perps/news";
 import { addressesOf, makeBuilderDesk, type BuilderDesk } from "./builder-pass";
-import { makeNewsDesk, type NewsDesk } from "./research-pass";
+import { certifiedPerpsCheckedAt, makeNewsDesk, planPerpsNewsAsk, type NewsDesk } from "./research-pass";
 import { peerThesesForSlugs, readPeerTheses } from "./peer-theses";
 import type { PublicThesis } from "./thesis-policy";
 import { ACCOUNTING_FIXED_AT, applyLedgerSchema } from "./store";
@@ -1160,6 +1161,10 @@ async function writeSettingsForChild(
       tenant.toLowerCase(),
       equitySymbols(settings?.basketSymbols ?? [...DEFAULT_BASKET_SYMBOLS]),
     );
+    // The perps Brain examines BTC/ETH/SOL, which Marketaux indexes under
+    // CC-prefixed cryptocurrency entities. Ask only for an enabled Brain lane's
+    // selected markets; the child never sees the paid API key.
+    tenantPerpBrainSymbols.set(tenant.toLowerCase(), perpsNewsSymbolsForSettings(settings));
     // THE GROUP CHAT'S PUBLIC PROFILE, projected here because this is the one
     // place the sealed settings are already open every pass — a second read
     // would double the decrypting SELECTs. chatProfileOf keeps a publishable
@@ -5340,6 +5345,8 @@ async function runRepairIfAsked(shared: Db, plans: readonly AccountPlan[]): Prom
 const tenantWatchSymbols = new Map<string, string[]>();
 /** Equity symbols each tenant actually holds. Read off the child ledger. */
 const tenantHeldSymbols = new Map<string, string[]>();
+/** Marketaux cryptocurrency entities for enabled perps Brain lanes. */
+const tenantPerpBrainSymbols = new Map<string, string[]>();
 /**
  * Symbols the fleet reasoned about in the last day, newest first.
  *
@@ -5349,6 +5356,10 @@ const tenantHeldSymbols = new Map<string, string[]>();
 let fleetReasonedSymbols: string[] = [];
 /** Built on first use so a deployment with no token still logs why. */
 let fleetNewsDesk: NewsDesk | null = null;
+/** Advances only on a real provider attempt, so skipped clock passes do not skip a crypto symbol. */
+let fleetNewsAttempt = 0;
+/** A batch page cannot establish a quiet crypto tape; only single-symbol success can. */
+let perpsSingleCheckedAt: Record<string, number> = {};
 
 /**
  * Coin CONTRACTS each tenant cares about, held first. Refreshed on the mirror.
@@ -5581,9 +5592,10 @@ async function runBuilderPass(): Promise<void> {
 /**
  * Refresh the fleet's news, then materialise each child's slice of it.
  *
- * NEVER FATAL AND NEVER BLOCKING. External research is additional evidence: a
- * provider outage must leave the fleet trading exactly as it did before the
- * feature existed, which is the same contract `writePeersFor` holds.
+ * NEVER FATAL AND NEVER BLOCKING. A provider outage cannot stop the protective
+ * loop. The perps Brain waits on new entries after its last exact-symbol check
+ * ages beyond two hours; an unrelated later failed fetch does not erase an
+ * earlier fresh check for that market.
  *
  * The write happens on EVERY pass, not only when a fetch did. A child restarted
  * by a deploy comes up with no research file at all, and the desk it would then
@@ -5609,14 +5621,15 @@ async function runNewsPass(): Promise<void> {
       log(`news: ${fleetNewsDesk.plan().why}`);
     }
 
-    // HELD BEFORE WATCHED. "Should I trim what I own" is a question with a
-    // position behind it; "is this worth opening" is one of twenty-five
-    // candidates. When the allowance cannot cover both, the first wins.
+    // Perps Brain markets receive single-symbol windows; an equity window
+    // every fourth request still prioritizes held names over watch names.
     const held: string[] = [];
+    const perps: string[] = [];
     const watch: string[] = [];
     for (const tenant of children.keys()) {
       const key = tenant.toLowerCase();
       held.push(...(tenantHeldSymbols.get(key) ?? []));
+      perps.push(...(tenantPerpBrainSymbols.get(key) ?? []));
       watch.push(...(tenantWatchSymbols.get(key) ?? []));
     }
     // THINKING ABOUT IT BEATS MERELY BEING ALLOWED TO TRADE IT. Held names
@@ -5626,18 +5639,22 @@ async function runNewsPass(): Promise<void> {
     // rest of the watch universe, which is only a list of what is permitted.
     const reasoned = fleetReasonedSymbols;
     const now = Math.floor(Date.now() / 1000);
-    // HELD NAMES ARE PASSED TWICE, ON PURPOSE. Once in the priority list and
-    // once as the set that keeps its slots: the rotation is anchored on the
-    // clock, so before this the "held before watched" ordering above survived
-    // only while everything fitted. The fleet held TSLA and the desk asked
-    // about GOOGL, AMZN and NVDA.
-    const r = await fleetNewsDesk.refresh([...held, ...reasoned, ...watch], now, held);
+    // A batched crypto page can be filled by one market, so only a successful
+    // single-symbol request can certify quiet news for that market.
+    const selected = planPerpsNewsAsk({ perps, heldEquities: held, equities: [...held, ...reasoned, ...watch],
+      maxSymbols: fleetNewsDesk.plan().maxSymbols, asOf: now, ttlSec: fleetNewsDesk.plan().ttlSec,
+      attemptIndex: fleetNewsAttempt });
+    const r = await fleetNewsDesk.refresh(selected, now, selected);
     if (r.log) log(r.log);
+    if (r.log) fleetNewsAttempt++;
 
     const state = fleetNewsDesk.state();
+    perpsSingleCheckedAt = certifiedPerpsCheckedAt(perpsSingleCheckedAt, selected, state.askedAt, r.fetched);
+    for (const [symbol, checkedAt] of Object.entries(perpsSingleCheckedAt))
+      if (now - checkedAt > 86_400) delete perpsSingleCheckedAt[symbol];
     for (const tenant of children.keys()) {
       const key = tenant.toLowerCase();
-      const mine = new Set([...(tenantHeldSymbols.get(key) ?? []), ...(tenantWatchSymbols.get(key) ?? [])]);
+      const mine = new Set([...(tenantHeldSymbols.get(key) ?? []), ...(tenantWatchSymbols.get(key) ?? []), ...(tenantPerpBrainSymbols.get(key) ?? [])]);
       try {
         writeResearchForChild(childHome(tenant), {
           at: now,
@@ -5647,6 +5664,9 @@ async function runNewsPass(): Promise<void> {
             // the items so the desk's not-fetched/quiet distinction stays true
             // per tenant rather than only fleet-wide.
             asked: state.asked.filter((s) => mine.has(s)),
+            askedAt: Object.fromEntries(Object.entries(state.askedAt).filter(([s]) => mine.has(s))),
+            perpsCheckedAt: Object.fromEntries(Object.entries(perpsSingleCheckedAt).filter(([s]) => mine.has(s))),
+            perpsDirect: Object.fromEntries(Object.entries(state.perpsDirect).filter(([s]) => mine.has(s))),
             fetchedAt: state.fetchedAt,
             failure: state.failure,
             items: state.items.filter((it) => it.symbols.some((s) => mine.has(s))),
@@ -6009,7 +6029,7 @@ export function groupChatModelWarning(
   // Said in so many words already — describeCreds names the fleet key it shares.
   if (env.MERRYMEN_GROUPCHAT_SHARE_HOUSE_KEY === "1") return null;
   if (!env.GROQ_API_KEY?.trim()) return null;
-  const fleetModel = env.MERRYMEN_GROQ_MODEL?.trim() || GROUPCHAT_FLEET_DEFAULTS.groqModel;
+  const fleetModel = env.MERRYMEN_GROQ_MODEL?.trim() || SETTINGS_DEFAULTS.groqModel;
   if (creds.model.trim().toLowerCase() !== fleetModel.toLowerCase()) return null;
   return (
     `groupchat: WARNING — the room's model ${creds.model} is the fleet's trading model. Groq rate-limits per ` +

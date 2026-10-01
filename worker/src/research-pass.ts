@@ -34,7 +34,7 @@
  */
 
 import { fetchMarketauxNews, type NewsFetchFailure } from "./research/marketaux";
-import { NEWS_WINDOW_SEC, dedupeNews, type NewsItem } from "./research/news";
+import { NEWS_WINDOW_SEC, dedupeNews, selectNews, type NewsItem } from "./research/news";
 
 /**
  * How many stories the desk keeps.
@@ -160,6 +160,46 @@ export function chooseSymbols(
   return [...first, ...slice(rest, opts.maxSymbols - first.length)];
 }
 
+/**
+ * Marketaux pages are shared across requested entities: a page full of BTC
+ * cannot establish that ETH was quiet. Crypto windows therefore ask exactly
+ * one symbol. Every fourth attempted window serves the existing equity desk.
+ * The orchestrator advances `attemptIndex` only when a fetch was attempted,
+ * so a pass inside the rate-limit interval does not skip a market.
+ */
+export function planPerpsNewsAsk(args: {
+  perps: readonly string[]; heldEquities: readonly string[]; equities: readonly string[];
+  maxSymbols: number; asOf: number; ttlSec: number; attemptIndex: number;
+}): string[] {
+  const requested = new Set(args.perps);
+  const perps = ["CC:BTC", "CC:ETH", "CC:SOL"].filter(symbol => requested.has(symbol));
+  const equities = [...new Set(args.equities.filter(Boolean))];
+  const index = Math.max(0, Math.floor(args.attemptIndex));
+  if (perps.length && (!equities.length || index % 4 !== 3)) {
+    const cryptoIndex = equities.length ? Math.floor(index / 4) * 3 + index % 4 : index;
+    return [perps[cryptoIndex % perps.length]!];
+  }
+  // `chooseSymbols` rotates by its clock window. Equity gets only every
+  // fourth attempt, so use the equity-attempt ordinal; wall windows 3,7,11
+  // would otherwise repeat the same slice forever for some universe sizes.
+  const equityRotationClock = perps.length ? Math.floor(index / 4) * args.ttlSec : args.asOf;
+  return chooseSymbols(equities, { maxSymbols: args.maxSymbols, asOf: equityRotationClock,
+    ttlSec: args.ttlSec, alwaysAsk: args.heldEquities });
+}
+
+/** Only a successful, single-entity crypto page certifies a quiet perps symbol. */
+export function certifiedPerpsCheckedAt(
+  previous: Readonly<Record<string, number>>, selected: readonly string[],
+  askedAt: Readonly<Record<string, number>>, fetched: boolean,
+): Record<string, number> {
+  const out = { ...previous };
+  const symbol = selected.length === 1 ? selected[0] : null;
+  const stamp = symbol ? askedAt[symbol] : undefined;
+  if (fetched && symbol && /^CC:(BTC|ETH|SOL)$/.test(symbol) && Number.isSafeInteger(stamp) && stamp! > 0)
+    out[symbol] = stamp!;
+  return out;
+}
+
 /** What the desk holds right now, and how it came to hold it. */
 export interface NewsDeskState {
   /** Unix seconds of the last SUCCESSFUL answer. 0 when there has never been one. */
@@ -191,6 +231,8 @@ export interface NewsDeskState {
   askedAt: Record<string, number>;
   failure: string | null;
   items: NewsItem[];
+  /** Independent bounded crypto evidence survives evictions from the shared 200-row stock cache. */
+  perpsDirect: Record<string, { items: NewsItem[]; hadRows: boolean }>;
 }
 
 /**
@@ -263,7 +305,7 @@ const dayKey = (asOf: number): string => new Date(asOf * 1000).toISOString().sli
  */
 export function makeNewsDesk(cfg: NewsDeskConfig): NewsDesk {
   const plan = planNewsWindow(cfg.dailyLimit, cfg.articlesPerRequest, cfg.windowSec);
-  let state: NewsDeskState = { fetchedAt: 0, asked: [], askedAt: {}, failure: null, items: [] };
+  let state: NewsDeskState = { fetchedAt: 0, asked: [], askedAt: {}, failure: null, items: [], perpsDirect: {} };
   let ledger = { day: "", used: 0 };
   let lastAttemptAt = 0;
 
@@ -271,7 +313,8 @@ export function makeNewsDesk(cfg: NewsDeskConfig): NewsDesk {
 
   return {
     plan: () => plan,
-    state: () => ({ ...state, asked: [...state.asked], askedAt: { ...state.askedAt }, items: [...state.items] }),
+    state: () => ({ ...state, asked: [...state.asked], askedAt: { ...state.askedAt }, items: [...state.items],
+      perpsDirect: Object.fromEntries(Object.entries(state.perpsDirect).map(([s, v]) => [s, { items: [...v.items], hadRows: v.hadRows }])) }),
 
     async refresh(wanted, asOf, alwaysAsk) {
       // ATTEMPTS ARE RATE-LIMITED, NOT SUCCESSES. Keying the window on
@@ -331,6 +374,7 @@ export function makeNewsDesk(cfg: NewsDeskConfig): NewsDesk {
           asked: coveredSymbols(askedAt),
           failure: r.failure,
           items: state.items,
+          perpsDirect: state.perpsDirect,
         };
         return {
           fetched: false,
@@ -378,12 +422,20 @@ export function makeNewsDesk(cfg: NewsDeskConfig): NewsDesk {
       // request, still the same daily ledger. Nothing here spends more budget;
       // it stops discarding what the budget already bought.
       const askedAt = retainAsked(state.askedAt, r.asked, asOf, NEWS_WINDOW_SEC);
+      const crypto = r.asked.length === 1 && /^CC:(BTC|ETH|SOL)$/.test(r.asked[0]!) ? r.asked[0]! : null;
+      const perpsDirect = { ...state.perpsDirect };
+      if (crypto) perpsDirect[crypto] = {
+        items: selectNews(fresh, { symbol: crypto, asOf, limit: 8 }),
+        hadRows: r.items.length > 0,
+      };
+      for (const symbol of Object.keys(perpsDirect)) if (!(symbol in askedAt)) delete perpsDirect[symbol];
       state = {
         fetchedAt: asOf,
         askedAt,
         asked: coveredSymbols(askedAt),
         failure: null,
         items: fresh.slice(0, NEWS_CACHE_MAX),
+        perpsDirect,
       };
       return {
         fetched: true,

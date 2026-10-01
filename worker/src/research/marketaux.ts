@@ -14,13 +14,10 @@
  * cannot be added later that forgets to do it: the normaliser is the only route
  * in, and it sanitises unconditionally.
  *
- * THE KEY NEVER LEAVES THIS PROCESS. It is read from the environment by the
- * ORCHESTRATOR, which is the only component that calls `fetchMarketauxNews`,
- * and `CHILD_SECRET_STRIP` removes it from every child's environment — so a
- * tenant worker, the Brain service, a persisted decision and a prompt all
- * cannot contain it, because none of them ever holds it. `scrub` below is the
- * belt to that braces: a vendor that echoes the token back inside an error
- * message must not put it into our logs.
+ * THE KEY STAYS AT THE ADAPTER BOUNDARY. The orchestrator alone reads it and
+ * `CHILD_SECRET_STRIP` removes it from tenant environments. A provider can
+ * echo request data in either an error or a successful article, so this
+ * adapter also checks the bounded response before any item is persisted.
  *
  * WHAT IS DELIBERATELY NOT TAKEN. The full article body is available from this
  * provider and is not requested. A prompt is not the place for a scraped
@@ -190,9 +187,21 @@ export function normalizeMarketaux(
   return out.sort((a, b) => b.publishedAt - a.publishedAt);
 }
 
+/** Raw and URL-encoded spellings cover error URLs and successful article fields. */
+function tokenForms(key: string): string[] {
+  return [...new Set([key, encodeURIComponent(key), new URLSearchParams({ token: key }).toString().slice(6)].filter(Boolean))];
+}
+
 /** Never let a token that a vendor echoed back reach a log line. */
 function scrub(text: string, key: string): string {
-  return key ? text.split(key).join("***") : text;
+  return tokenForms(key).reduce((out, form) => out.split(form).join("***"), text);
+}
+
+/** A successful 200 page may echo the token in an article; discard that page. */
+function echoesToken(payload: unknown, key: string): boolean {
+  if (!key) return false;
+  const raw = JSON.stringify(payload);
+  return tokenForms(key).some(form => raw.includes(form) || raw.toLowerCase().includes(form.toLowerCase()));
 }
 
 /**
@@ -271,7 +280,32 @@ export async function fetchMarketauxNews(args: {
       const message = typeof err.message === "string" ? err.message : "unspecified";
       return { ok: false, failure: "vendor-error", detail: scrub(message.slice(0, 200), args.apiKey), asked };
     }
-    return { ok: true, items: normalizeMarketaux(body.value, { asOf: args.asOf, wantSymbols: asked }), asked };
+    const page = body.value as { data?: unknown } | null;
+    if (!page || typeof page !== "object" || !Array.isArray(page.data))
+      return { ok: false, failure: "unreadable", detail: "provider response has no article array", asked };
+    if (echoesToken(page, args.apiKey))
+      return { ok: false, failure: "unreadable", detail: "provider echoed a credential in its article page", asked };
+    const cryptoOnly = asked.length === 1 && /^CC:(BTC|ETH|SOL)$/.test(asked[0]!);
+    if (cryptoOnly) {
+      const meta = (page as { meta?: unknown }).meta;
+      const returned = meta && typeof meta === "object" && !Array.isArray(meta)
+        ? (meta as { returned?: unknown }).returned : undefined;
+      const pageNumber = meta && typeof meta === "object" && !Array.isArray(meta)
+        ? (meta as { page?: unknown }).page : undefined;
+      // Marketaux's /news/all response documents both fields. Without them a
+      // truncated 200 body containing `data: []` is not evidence of a quiet tape.
+      if (!Number.isSafeInteger(returned) || returned !== page.data.length || pageNumber !== 1)
+        return { ok: false, failure: "unreadable", detail: "crypto news page metadata contradicts its articles", asked };
+    }
+    const items = normalizeMarketaux(page, { asOf: args.asOf, wantSymbols: asked });
+    // A single-entity crypto page is used to certify a genuinely quiet tape.
+    // If any returned row could not be matched and normalized, treating the
+    // remaining empty list as "no articles" would grant false authority to a
+    // malformed or off-target 200 response. Equity's existing best-effort
+    // article selection remains unchanged.
+    if (cryptoOnly && items.length !== page.data.length)
+      return { ok: false, failure: "unreadable", detail: "crypto news page has unreadable or unrelated rows", asked };
+    return { ok: true, items, asked };
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);
     return { ok: false, failure: "unreachable", detail: scrub(detail.slice(0, 200), args.apiKey), asked };

@@ -140,7 +140,7 @@ interface Account {
   exec: ExecMode;
 }
 
-async function account(opts: { cfg?: Partial<PerpLaneConfig>; exec?: ExecMode; brain?: PerpLaneDeps["brain"] } = {}): Promise<Account> {
+async function account(opts: { cfg?: Partial<PerpLaneConfig>; exec?: ExecMode; brain?: PerpLaneDeps["brain"]; onPaperReview?: () => void } = {}): Promise<Account> {
   const hex = (nextAccount++).toString(16).padStart(38, "0");
   const id = await store.ensureAgent({
     smartAccount: `0xAb${hex}`,
@@ -175,7 +175,8 @@ async function account(opts: { cfg?: Partial<PerpLaneConfig>; exec?: ExecMode; b
   } as Account;
   const deps: PerpLaneDeps = {
     store,
-    brain: opts.brain,
+    brain: opts.brain ? { ...opts.brain,
+      news: opts.brain.news ?? ((_market, asOfMs) => ({ status: "no-articles", checked_at_ms: asOfMs, items: [] })) } : undefined,
     armed: () => ({ agentId: id, smartAccount: `0xAb${hex}`, limits }),
     config: () => acct.cfg,
     execMode: () => acct.exec,
@@ -211,7 +212,12 @@ async function account(opts: { cfg?: Partial<PerpLaneConfig>; exec?: ExecMode; b
     decide: (intent, source, reason, known) => decide(id, intent, source, reason, known),
     paperExecutor: (o) => {
       acct.executorsMade += 1;
-      return createPaperPerpExecutor(o);
+      const executor = createPaperPerpExecutor(o);
+      return opts.onPaperReview ? { ...executor, review: async intent => {
+        const result = await executor.review(intent);
+        opts.onPaperReview?.();
+        return result;
+      } } : executor;
     },
     log: () => {},
   };
@@ -716,6 +722,24 @@ function approvedBrain(r: PerpsBrainRequest): PerpsBrainResponse {
 const flushBrain = () => new Promise<void>(resolve => setImmediate(resolve));
 
 describe("MerrymenBrain route through the real paper lane and ledger", () => {
+  it("waits without a model call or new trade when the paid news desk is stale or failed", async () => {
+    for (const status of ["not-fetched", "fetch-failed", "stale"] as const) {
+      clock = T_LAST + H4 + 3_600_000;
+      writeFeed({ mark: 802_000n, bids: [[802_000n, 1000n]], asks: [[802_010n, 1000n]], candles: breakout("BTC-PERP", 2_000n, 200n, 220) });
+      let reviews = 0;
+      const a = await account({ cfg: { perpsDriver: "brain" }, brain: { configured: () => true,
+        configKey: () => "test", admit: async () => true,
+        news: () => ({ status, checked_at_ms: 0, items: [] }),
+        review: async request => { reviews++; return approvedBrain(request); } } });
+      const start = await equityOf(a);
+      await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, hooks(a, start.equity));
+      await flushBrain();
+      assert.equal(reviews, 0, status);
+      assert.equal(await held(a), null, status);
+      assert.equal(a.energy.claimed, 0, status);
+      await a.lane.stopProtect();
+    }
+  });
   it("protects while research is pending, then journals and executes one unchanged capped candidate", async () => {
     clock = T_LAST + H4 + 3_600_000;
     writeFeed({ mark: 802_000n, bids: [[802_000n, 1000n]], asks: [[802_010n, 1000n]], candles: breakout("BTC-PERP", 2_000n, 200n, 220) });
@@ -763,6 +787,28 @@ describe("MerrymenBrain route through the real paper lane and ledger", () => {
       const result = await h.processIntentReporting(i); refusal = result.rejectRule; return result;
     } });
     assert.equal(refusal, "perp-brain-expired"); assert.equal(await held(a), null); assert.equal(a.energy.refunded, 1);
+  });
+  it("refuses a Brain open when news changes after venue review but before paper booking", async () => {
+    clock = T_LAST + H4 + 3_600_000;
+    writeFeed({ mark: 802_000n, bids: [[802_000n, 1000n]], asks: [[802_010n, 1000n]], candles: breakout("BTC-PERP", 2_000n, 200n, 220) });
+    let changed = false;
+    const a = await account({ cfg: { perpsDriver: "brain" }, onPaperReview: () => { changed = true; }, brain: {
+      configured: () => true, configKey: () => "test", admit: async () => true,
+      news: (_market, asOfMs) => changed
+        ? { status: "ok", checked_at_ms: asOfMs, items: [{ id: "late-btc", source: "wire", published_at_ms: asOfMs - 60_000,
+          headline: "Material BTC story after review", summary: null, relevance: 1, sentiment: -0.8 }] }
+        : { status: "no-articles", checked_at_ms: asOfMs, items: [] },
+      review: async request => approvedBrain(request),
+    } });
+    const start = await equityOf(a), h = hooks(a, start.equity);
+    await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, h);
+    await flushBrain();
+    assert.equal(changed, false, "research remained the same through Brain approval");
+    await a.lane.runRoute({ ...TICK, equityUsdg: start.equity }, h);
+    assert.equal(changed, true, "the paper venue changed news after its review");
+    assert.equal(await held(a), null, "the final news guard prevents booking");
+    assert.equal(a.energy.refunded, 1);
+    assert.deepEqual(a.inFlight, { ops: 0, spend: 0n });
   });
   it("a saved settings change discards an outstanding approval", async () => {
     clock = T_LAST + H4 + 3_600_000;

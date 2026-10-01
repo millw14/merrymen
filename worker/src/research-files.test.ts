@@ -86,6 +86,15 @@ describe("the research file round trip", () => {
     assert.match(v.news!, /Tesla deliveries beat estimates/);
   });
 
+  it("retains only valid per-symbol crypto check stamps", () => {
+    const h = home();
+    writeResearchForChild(h, file({ asked: ["CC:BTC"], askedAt: { "CC:BTC": NOW },
+      perpsCheckedAt: { "CC:BTC": NOW, "CC:ETH": -1, "TSLA": NOW } }));
+    const back = readResearch(h);
+    assert.deepEqual(back.news.askedAt, { "CC:BTC": NOW });
+    assert.deepEqual(back.news.perpsCheckedAt, { "CC:BTC": NOW });
+  });
+
   it("a write replaces the previous window rather than appending to it", () => {
     const h = home();
     writeResearchForChild(h, file());
@@ -130,6 +139,7 @@ describe("every kind of absence is an empty desk, never a throw", () => {
       }),
     );
     const back = readResearch(h);
+    assert.equal(back.news.invalidItems, true, "perps can distinguish dropped rows from a quiet provider answer");
     assert.deepEqual(back.news.asked, ["TSLA"], "non-strings are not symbols");
     assert.equal(back.news.failure, null, "an empty failure string is not a failure");
     assert.equal(back.news.items.length, 1, "only the row that is actually a story survives");

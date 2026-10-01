@@ -885,6 +885,37 @@ describe("replaceStop: a standalone position-tied stop", () => {
 // ── nonces and order ────────────────────────────────────────────────────────
 
 describe("sends are serialised in nonce order", () => {
+  it("rechecks Brain evidence after the durable row and blocks an open before send when it changes", async () => {
+    const s = setup();
+    const intent = openLong();
+    const review = await s.ex.review(intent);
+    let checks = 0;
+    const placed = await s.ex.place(intent, review, {
+      agentId: s.agentId, decisionId: null, venue: s.f.venue,
+      beforeCommit: () => {
+        checks++;
+        if (checks === 2) throw new PerpRefused("perp-brain-expired", "news changed after signing");
+      },
+    });
+    assert.equal(checks, 2, "once inside the send lock, then again after the ledger write");
+    assert.equal(s.f.sent.length, 0, "no transaction reached Lighter");
+    assert.equal(placed.tx.send.kind, "not-sent");
+    assert.equal(orderRows(s.agentId)[0]?.status, "rejected", "the unsent row cannot replay after a crash");
+  });
+
+  it("keeps protective exits independent of the Brain entry news guard", async () => {
+    const s = setup({ venue: holding("long", 30n) });
+    const intent = exit("long", "close", 30n);
+    const review = await s.ex.review(intent);
+    const placed = await s.ex.place(intent, review, {
+      agentId: s.agentId, decisionId: null, venue: s.f.venue,
+      beforeCommit: () => { throw new Error("entry-only guard must not run on an exit"); },
+    });
+    assert.equal(s.f.sent.length, 1);
+    assert.equal(s.f.sent[0]?.exit, true);
+    assert.notEqual(placed.tx.send.kind, "not-sent");
+  });
+
   it("our own unresolved rows are judged inside the send lock: of two concurrent opens or withdrawals, one is signed", async () => {
     const s = setup();
     const intent = openLong();

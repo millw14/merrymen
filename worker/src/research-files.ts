@@ -52,11 +52,19 @@ export interface ResearchFile {
      * remove, and one array of strings is what separates them.
      */
     asked: string[];
+    /** Last successful ask per symbol. The global fetchedAt cannot date an individual symbol. */
+    askedAt?: Record<string, number>;
+    /** Crypto coverage certified by a successful single-symbol provider query. */
+    perpsCheckedAt?: Record<string, number>;
+    /** Last direct crypto answer, retained separately from the shared 200-story cache. */
+    perpsDirect?: Record<string, { items: NewsItem[]; hadRows: boolean }>;
     /** Unix seconds of the last SUCCESSFUL answer. 0 when there has never been one. */
     fetchedAt: number;
     /** Null when the last fetch succeeded, otherwise a short reason. */
     failure: string | null;
     items: NewsItem[];
+    /** Reader detected rows that could not be trusted; perps must not call that a quiet tape. */
+    invalidItems?: boolean;
   };
   /**
    * What a builder directory said about the coins in THIS tenant's universe.
@@ -118,13 +126,38 @@ export function readResearch(home: string): ResearchFile {
     const f = raw as Partial<ResearchFile>;
     const news = f.news;
     if (!news || typeof news !== "object") return EMPTY_RESEARCH;
+    const validItems = Array.isArray(news.items) ? news.items.filter(isNewsItem) : [];
+    let invalidItems = !Array.isArray(news.items) || validItems.length !== news.items.length;
+    const perpsDirect: NonNullable<ResearchFile["news"]["perpsDirect"]> = {};
+    if (news.perpsDirect !== undefined) {
+      if (!news.perpsDirect || typeof news.perpsDirect !== "object" || Array.isArray(news.perpsDirect)) invalidItems = true;
+      else for (const [symbol, answer] of Object.entries(news.perpsDirect)) {
+        if (!/^CC:(BTC|ETH|SOL)$/.test(symbol) || !answer || typeof answer !== "object" ||
+            typeof answer.hadRows !== "boolean" || !Array.isArray(answer.items) || answer.items.length > 8) {
+          invalidItems = true; continue;
+        }
+        const items = answer.items.filter(isNewsItem);
+        if (items.length !== answer.items.length) invalidItems = true;
+        perpsDirect[symbol] = { items, hadRows: answer.hadRows };
+      }
+    }
     return {
       at: Number(f.at) || 0,
       news: {
         asked: Array.isArray(news.asked) ? news.asked.filter((s) => typeof s === "string") : [],
+        ...(news.askedAt && typeof news.askedAt === "object" && !Array.isArray(news.askedAt)
+          ? { askedAt: Object.fromEntries(Object.entries(news.askedAt).filter(([symbol, at]) =>
+              /^[A-Z0-9:.]{1,24}$/.test(symbol) && Number.isSafeInteger(at) && typeof at === "number" && at > 0)) }
+          : {}),
+        ...(news.perpsCheckedAt && typeof news.perpsCheckedAt === "object" && !Array.isArray(news.perpsCheckedAt)
+          ? { perpsCheckedAt: Object.fromEntries(Object.entries(news.perpsCheckedAt).filter(([symbol, at]) =>
+              /^CC:(BTC|ETH|SOL)$/.test(symbol) && Number.isSafeInteger(at) && typeof at === "number" && at > 0)) }
+          : {}),
+        ...(news.perpsDirect !== undefined ? { perpsDirect } : {}),
         fetchedAt: Number(news.fetchedAt) || 0,
         failure: typeof news.failure === "string" && news.failure ? news.failure : null,
-        items: Array.isArray(news.items) ? news.items.filter(isNewsItem) : [],
+        items: validItems,
+        ...(invalidItems ? { invalidItems: true } : {}),
       },
       // ABSENT IS EMPTY, NOT INVALID. A file written by an orchestrator that
       // predates the builder desk has no `builders` key at all, and a reader

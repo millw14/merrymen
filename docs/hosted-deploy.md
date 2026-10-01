@@ -111,9 +111,10 @@ Then on the **orchestrator**:
 > Raise `MERRYMEN_LLM_INTERVAL_MIN` with it — the scout consumed an entire
 > day's shared token allowance on 2026-08-31 and took user chat down with it.
 
-### The news desk (optional)
+### The news desk (required for MerrymenBrain perps entries)
 
-External news for the equity instruments the fleet holds and watches. The
+External news for the equity instruments the fleet holds and watches and for
+BTC, ETH and SOL when a tenant selects the MerrymenBrain perps driver. The
 orchestrator fetches, caches and materialises it into each child's home; a child
 never calls the provider and never holds the token.
 
@@ -123,6 +124,21 @@ never calls the provider and never holds the token.
 | `MERRYMEN_MARKETAUX_DAILY_LIMIT` *(optional)* | requests the plan allows per day, default `100` |
 | `MERRYMEN_MARKETAUX_LIMIT` *(optional)* | articles one request may return, default `3` (the free tier's ceiling) |
 | `MERRYMEN_MARKETAUX_WINDOW_SEC` *(optional)* | refresh interval; derived from the allowance when unset |
+
+Set the daily request and article limits to the paid plan's actual allowance;
+the defaults describe the free tier. The perps review requires a recent query
+for the exact cryptocurrency entity and refuses new entries when the feed is
+unconfigured, unqueried or stale, including after failed requests leave no
+fresh exact-market check. A successful single-entity query with zero articles
+is recorded as quiet only when the retained 24-hour evidence also has no
+relevant articles. The shared budget rotates three crypto requests and one
+equity request when both desks are active. The existing stop
+and exit loops continue.
+
+Deploy the Brain service and orchestrator in a coordinated window. During a
+mixed-version rollout, the perps request schemas reject each other and new
+MerrymenBrain entries pause; protective exits continue. Verify both services
+are on the news-aware version before expecting new Brain entries.
 
 > **Put the key on the orchestrator and nowhere else.** `CHILD_SECRET_STRIP`
 > removes it at fork, alongside the DEK, the session secret and `DATABASE_URL`,

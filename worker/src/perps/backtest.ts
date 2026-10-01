@@ -11,6 +11,7 @@ import { perpTrendTick, type PerpTrendCtx, type PerpTrendResult } from "./perp-t
 import { emptyProtectMemory, evaluateProtection } from "./protect";
 import { applyPaperOpen, applyPaperClose, applyPaperReduce, applyPaperFunding, evaluatePaperTriggers, paperFundingTerms, paperPerpTerms, simulateTakerFill, type PaperPerpBook, type PaperStep } from "./paper";
 import type { PerpIntentDraft } from "./drafts";
+import type { PerpsNewsEvidence } from "./news";
 import type { PerpsView } from "../strategies/types";
 import { createReplayTradeTracker, replayTradeMetrics } from "./replay-metrics";
 export interface PerpsReplayConfig {
@@ -26,6 +27,8 @@ export interface PerpsReplayConfig {
 export interface PerpsReplayFrame {
   atMs: number;
   feed: unknown;
+  /** Independently captured news observation at this frame; absent means no entry approval. */
+  news?: { market: string; evidence: PerpsNewsEvidence };
 }
 /** Offline producers receive only the current frame and causal account state. */
 export interface PerpsReplayProducer {
@@ -46,6 +49,7 @@ export const REPLAY_LIMITS = [
   "Funding uses the index from the replay snapshot that books it, not a historical hourly index.",
   "No live signing, deposits, withdrawals, outages, ADL or venue liquidation queue are simulated.",
   "Tail positions remain open and marked; no end-of-run sale or annualized return is invented.",
+  "A recorded Brain approval needs a news observation at the execution frame; feed-only captures cannot prove unchanged news.",
 ] as const;
 function positive(v: number, name: string, integer = false): number {
   if (!Number.isFinite(v) || v <= 0 || v > 100000000 || (integer && !Number.isSafeInteger(v)))

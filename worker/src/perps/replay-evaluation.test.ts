@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { runPerpsReplay, type PerpsReplayProducer } from "./backtest";
-import { buildPerpsBrainRequest, perpsBrainEstimatedCostBps, PERPS_BRAIN_STRATEGY_VERSION, type PerpsBrainRequest, type PerpsBrainResponse } from "./brain";
+import { brainFingerprint, buildPerpsBrainRequest, perpsBrainEstimatedCostBps, PERPS_BRAIN_STRATEGY_VERSION, type PerpsBrainRequest, type PerpsBrainResponse } from "./brain";
 import { mergeBrainSourceFrames, recordedBrainProducer, verifiedBrainRunIds, type RecordedPerpsBrainDecision } from "./replay-brain";
 import { captureFeedSample, framesFromRecording, parseFeedRecording, recordPublicFeed, replayFrameHash } from "./replay-recorder";
 import { evaluatePerpsWalkForward, type ReplayEvaluationPlan } from "./replay-evaluation";
@@ -19,6 +19,7 @@ const version = PERPS_BRAIN_STRATEGY_VERSION;
 const config = { initialCashUsdg: 100, settings: { perpsMarkets: ["BTC-PERP" as const] } };
 function frame(atMs = start, mark = 805000n) {
   const f = replayTestFrame(atMs, mark);
+  f.news = { market: "BTC-PERP", evidence: { status: "no-articles", checked_at_ms: start, items: [] } };
   // Thirty three-bar, non-overlapping analogs require a full 100-bar
   // feature warmup plus ninety outcome bars.
   (f.feed as LighterFeedFile).markets["1"]!.closed4h = breakout("BTC-PERP", 5000n, 200n, 190)
@@ -28,10 +29,11 @@ function frame(atMs = start, mark = 805000n) {
 function decision(atMs = start): RecordedPerpsBrainDecision {
   let request: PerpsBrainRequest | null = null;
   const context = "recorded-context";
+  const news = { status: "no-articles" as const, checked_at_ms: start, items: [] };
   runPerpsReplay(config, [frame(atMs)], { id: "capture", tick({ frame, feed, view, trend }) {
     assert.ok(view && trend.entry && trend.entryCandleT !== null);
     request = buildPerpsBrainRequest({ agentId: "0x1111111111111111111111111111111111111111", runId: "recorded-run", nowMs: frame.atMs,
-      context, view, candidate: trend.entry, candleT: trend.entryCandleT, feed });
+      context, view, candidate: trend.entry, candleT: trend.entryCandleT, feed, news });
     return { ...trend, entry: null, entryCandleT: null };
   } });
   assert.ok(request);
@@ -46,7 +48,8 @@ function decision(atMs = start): RecordedPerpsBrainDecision {
       mean_net_bps: 20, mean_lower_95_bps: 5, cost_bps: perpsBrainEstimatedCostBps(r), calibrated: false },
     committee: ["bull", "bear", "risk"].map(lens => ({ lens, verdict: "accept", reason: "Synthetic acceptance for boundary tests" })),
   };
-  return { sourceFrameSha256: replayFrameHash(frame(atMs)), context, request: r, response, completedAtMs: atMs + 5_000 };
+  return { sourceFrameSha256: replayFrameHash(frame(atMs)), sourceNews: news, sourceNewsSha256: brainFingerprint(news),
+    context, request: r, response, completedAtMs: atMs + 5_000 };
 }
 
 test("recorded approval waits for a later frame after completion and uses that frame's price", () => {
@@ -77,6 +80,13 @@ test("source, run, market, candle, response version and completion expiry are bi
     const r = runPerpsReplay(config, [frame(), frame(start + 6_000), frame(start + 121_000)], recordedBrainProducer([d], version));
     assert.equal(r.events.filter(e => e.kind === "open").length, 0);
   }
+  const newsTamper = decision(); newsTamper.sourceNewsSha256 = "0".repeat(64);
+  assert.throws(() => recordedBrainProducer([newsTamper], version), /malformed/);
+  const newsSwap = decision(); newsSwap.sourceNews = { status: "not-fetched", checked_at_ms: 0, items: [] };
+  newsSwap.sourceNewsSha256 = brainFingerprint(newsSwap.sourceNews);
+  assert.throws(() => recordedBrainProducer([newsSwap], version), /malformed/);
+  const legacy = decision(); delete (legacy as Partial<RecordedPerpsBrainDecision>).sourceNews;
+  assert.throws(() => recordedBrainProducer([legacy], version), /malformed/);
   assert.throws(() => recordedBrainProducer([decision(), decision()], version), /duplicate/);
   const duplicateTime = decision(); duplicateTime.request.run_id = "other-run";
   assert.throws(() => recordedBrainProducer([decision(), duplicateTime], version), /request clocks/);
@@ -87,6 +97,16 @@ test("HOLD, missing approval and changed market never fall back to an ungated en
   assert.equal(runPerpsReplay(config, [frame(), frame(start + 6_000)], recordedBrainProducer([d], version)).tailPositions.length, 0);
   assert.equal(runPerpsReplay(config, [frame(), frame(start + 6_000)], recordedBrainProducer([], version)).tailPositions.length, 0);
   assert.equal(runPerpsReplay(config, [frame(), frame(start + 6_000, 810000n)], recordedBrainProducer([decision()], version)).tailPositions.length, 0);
+});
+
+test("an execution frame with changed or missing news cannot replay a recorded approval", () => {
+  const changed = frame(start + 6_000);
+  changed.news = { market: "BTC-PERP", evidence: { status: "ok", checked_at_ms: start + 6_000,
+    items: [{ id: "breaking", source: "Publisher", published_at_ms: start + 5_000,
+      headline: "Breaking exchange news", summary: null, relevance: .9, sentiment: -.8 }] } };
+  assert.equal(runPerpsReplay(config, [frame(), changed], recordedBrainProducer([decision()], version)).tailPositions.length, 0);
+  const absent = frame(start + 6_000); delete absent.news;
+  assert.equal(runPerpsReplay(config, [frame(), absent], recordedBrainProducer([decision()], version)).tailPositions.length, 0);
 });
 
 test("an impossible overlapping review cannot resurrect an old approval after a newer HOLD", () => {

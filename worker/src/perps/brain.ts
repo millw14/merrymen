@@ -6,6 +6,7 @@ import type { BrainConfig } from "../brain-client";
 import type { PerpsView } from "../strategies/types";
 import type { PerpOpenDraft } from "./drafts";
 import type { LighterFeedRead, LighterFeedFile } from "./feed-reader";
+import { perpsNewsAvailable, type PerpsNewsEvidence } from "./news";
 
 export const PERPS_BRAIN_STRATEGY_VERSION = "merrymenbrain-perps-analogs-v1";
 export const PERPS_BRAIN_TTL_MS = 120_000;
@@ -20,6 +21,7 @@ export interface PerpsBrainRequest {
   mark_price: string; index_price: string;
   spread_bps: number; taker_fee_bps: number; slippage_bps: number;
   funding_ppm_per_hour: number; depth_ratio: number;
+  news: PerpsNewsEvidence;
 }
 export interface PerpsBrainResponse {
   schema_version: "perps-1"; run_id: string; agent_id: string; snapshot_id: string;
@@ -40,6 +42,7 @@ export type PerpsBrainBuildArgs = {
   agentId: string; runId?: string; nowMs: number; context: string;
   view: PerpsView; candidate: PerpOpenDraft; candleT: number;
   feed: LighterFeedRead | null;
+  news?: PerpsNewsEvidence;
 };
 /** Canonical key ordering so recording/replay does not depend on JSON insertion order. */
 export function brainFingerprint(value: unknown): string {
@@ -103,6 +106,7 @@ export function buildPerpsBrainRequest(a: PerpsBrainBuildArgs): PerpsBrainReques
     slippage_bps: Math.max(buyImpact, sellImpact),
     funding_ppm_per_hour: m.fundingPpmPerHour,
     depth_ratio: Number(depthMicro * 1_000_000n / c.notionalUsdg) / 1_000_000,
+    news: a.news ?? { status: "not-fetched" as const, checked_at_ms: 0, items: [] },
   };
   if (Object.values(body).some(v => typeof v === "number" && !Number.isFinite(v))) return null;
   return { ...body, run_id: a.runId ?? randomUUID(), snapshot_id: brainFingerprint({ context: a.context, candidate: c, evidence: body }) };
@@ -192,6 +196,8 @@ export interface PerpsBrainRecording {
   context: string;
   sourceFrame: { atMs: number; feed: LighterFeedFile };
   sourceFrameSha256: string;
+  sourceNews: PerpsNewsEvidence;
+  sourceNewsSha256: string;
   request: PerpsBrainRequest;
   response: PerpsBrainResponse | null;
   candidateNotionalMicro: string;
@@ -206,6 +212,8 @@ export function brainMarketStillQualified(reviewed: PerpsBrainRequest, current: 
   if (atr === null) return false;
   const currentCost = cost(current);
   return reviewed.market === current.market && reviewed.candidate.side === current.candidate.side && reviewed.candidate.bar_t === current.candidate.bar_t &&
+    perpsNewsAvailable(reviewed.news, reviewed.as_of_ms) && perpsNewsAvailable(current.news, current.as_of_ms) &&
+    brainFingerprint(reviewed.news) === brainFingerprint(current.news) &&
     brainFingerprint(reviewed.candles) === brainFingerprint(current.candles) &&
     current.candidate.stop_bps <= reviewed.candidate.stop_bps && currentCost <= .15 * current.candidate.stop_bps &&
     currentCost <= cost(reviewed) + 1e-9 && current.depth_ratio >= 1.25 &&

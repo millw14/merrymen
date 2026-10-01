@@ -1,12 +1,17 @@
 /** A recorded response may veto the causal trend candidate, never invent an order. */
-import { buildPerpsBrainRequest, validatePerpsBrainResponse, brainMarketStillQualified, PERPS_BRAIN_MAX_DRIFT_BPS,
+import { brainFingerprint, buildPerpsBrainRequest, validatePerpsBrainResponse, brainMarketStillQualified, PERPS_BRAIN_MAX_DRIFT_BPS,
   type PerpsBrainRequest, type PerpsBrainResponse } from "./brain";
 import type { PerpOpenDraft } from "./drafts";
 import type { PerpsReplayFrame, PerpsReplayProducer } from "./backtest";
 import { canonicalJson, replayFrameHash } from "./replay-recorder";
+import type { PerpsNewsEvidence } from "./news";
+import { perpsNewsAvailable } from "./news";
 
 export interface RecordedPerpsBrainDecision {
   sourceFrameSha256: string;
+  /** Exact per-symbol news observation recorded before the model call. */
+  sourceNews: PerpsNewsEvidence;
+  sourceNewsSha256: string;
   /** Supplied by the live decision journal; merged into a sampled timeline by the CLI. */
   sourceFrame?: PerpsReplayFrame;
   /** Exact runtime context fingerprint used by the request builder. */
@@ -23,7 +28,10 @@ export function recordedBrainProducer(records: readonly RecordedPerpsBrainDecisi
     const r = record.request;
     if (!r || typeof r.run_id !== "string" || !r.run_id || ids.has(r.run_id) ||
         typeof r.agent_id !== "string" || typeof record.context !== "string" || !record.context ||
-        !/^[0-9a-f]{64}$/.test(record.sourceFrameSha256) || !r.candidate ||
+        !/^[0-9a-f]{64}$/.test(record.sourceFrameSha256) ||
+        !/^[0-9a-f]{64}$/.test(record.sourceNewsSha256) ||
+        !record.sourceNews || brainFingerprint(record.sourceNews) !== record.sourceNewsSha256 ||
+        canonicalJson(record.sourceNews) !== canonicalJson(r.news) || !r.candidate ||
         !Number.isSafeInteger(r.as_of_ms) || !Number.isSafeInteger(r.expires_at_ms) ||
         !Number.isSafeInteger(record.completedAtMs) || record.completedAtMs < r.as_of_ms || r.expires_at_ms <= r.as_of_ms)
       throw new Error("malformed or duplicate recorded Brain run");
@@ -57,7 +65,7 @@ export function recordedBrainProducer(records: readonly RecordedPerpsBrainDecisi
         row.observed = true;
         const expected = view && trend.entry && trend.entryCandleT !== null ? buildPerpsBrainRequest({
           agentId: r.agent_id, runId: r.run_id, nowMs: frame.atMs, context: record.context,
-          view, candidate: trend.entry, candleT: trend.entryCandleT, feed,
+          view, candidate: trend.entry, candleT: trend.entryCandleT, feed, news: record.sourceNews,
         }) : null;
         if (replayFrameHash(frame) !== record.sourceFrameSha256 || !expected || canonicalJson(expected) !== canonicalJson(r)) {
           row.consumed = true;
@@ -79,13 +87,16 @@ export function recordedBrainProducer(records: readonly RecordedPerpsBrainDecisi
       else if (!candidate || !original || trend.entryCandleT !== r.candidate.bar_t || candidate.market !== r.market ||
           candidate.side !== r.candidate.side || candidate.notionalUsdg > original.notionalUsdg || candidate.imfBp < original.imfBp)
         refusal = "current-candidate-changed";
+      else if (frame.news?.market !== r.market || !perpsNewsAvailable(frame.news.evidence, frame.atMs) ||
+               brainFingerprint(frame.news.evidence) !== brainFingerprint(record.sourceNews))
+        refusal = "news-observation-unavailable-or-changed";
       else {
         const mark = view?.markets.get(candidate.market)?.markPrice ?? 0n, old = BigInt(r.mark_price);
         const drift = mark > old ? mark - old : old - mark;
         if (mark <= 0n || old <= 0n || drift * 10_000n > old * BigInt(PERPS_BRAIN_MAX_DRIFT_BPS)) refusal = "market-drift";
         else {
           const current = view ? buildPerpsBrainRequest({ agentId: r.agent_id, runId: r.run_id, nowMs: frame.atMs, context: record.context,
-            view, candidate, candleT: trend.entryCandleT!, feed }) : null;
+            view, candidate, candleT: trend.entryCandleT!, feed, news: frame.news.evidence }) : null;
           if (!current || !brainMarketStillQualified(r, current, answer!)) refusal = "market-economics-changed";
         }
       }

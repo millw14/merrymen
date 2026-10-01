@@ -116,9 +116,10 @@ Add `strategyVersion` and `brainDecisions` to the replay input:
 }
 ```
 
-Each decision artifact has `sourceFrameSha256`, the original runtime `context`
-fingerprint, full `request`, full `response` (or null on failure), and
-`completedAtMs`. Preserve **every** review, including HOLD and failures. Empty
+Each decision artifact has `sourceFrameSha256`, `sourceNews`,
+`sourceNewsSha256`, the original runtime `context` fingerprint, full `request`,
+full `response` (or null on failure), and `completedAtMs`. Preserve **every**
+review, including HOLD and failures. Empty
 decisions produce no Brain entries. Do not reconstruct a request using a later
 feed: the source frame must be the exact feed and account state used when the
 request began, with `frame.atMs === request.as_of_ms`. A separately polling
@@ -127,6 +128,13 @@ original decision frame in the replay timeline as well. The live decision journa
 stores this as `sourceFrame` beside the request/response. The CLI merges supplied
 `sourceFrame` artifacts into the sampled timeline, verifies their hashes and
 refuses conflicting observations at the same timestamp.
+
+A later execution frame also needs an independently observed
+`news: { "market": "BTC-PERP", "evidence": { ... } }` snapshot for that market.
+The adapter checks that it is fresh and unchanged from the reviewed news.
+Feed-only recordings lack this observation and therefore refuse Brain opens;
+they cannot establish a news-aware trade outcome. An attached news snapshot is
+only as trustworthy as its capture process; a hash alone does not prove origin.
 
 The adapter rebuilds the request from the source frame and the replay's causal,
 risk-sized candidate, then verifies the snapshot hash, account, run, market and

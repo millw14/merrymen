@@ -467,6 +467,8 @@ interface Submission {
    * otherwise slip past between the check and the signature.
    */
   guard?: () => Promise<void>;
+  /** Final lane veto immediately before transport after the durable row exists. */
+  beforeSendGuard?: () => void | Promise<void>;
   sign: (client: LighterSignerClient, ctx: SignContext) => SignedLighterTx;
 }
 
@@ -807,6 +809,8 @@ export function createLivePerpExecutor(opts: LivePerpExecutorOptions): LivePerpE
         // The durable write may outlast the owner's request. Persist its
         // deadline too, so a crash or failed resolution cannot revive it.
         checkDeadline();
+        await s.beforeSendGuard?.();
+        checkDeadline();
         const result = await api.sendTx({ txType: signed.txType, txInfo: signed.txInfo, txHash: signed.txHash }, {
           exit: s.exit, notAfterMs: Math.min(signed.expiredAt, notAfterMs ?? Infinity),
         });
@@ -964,7 +968,9 @@ export function createLivePerpExecutor(opts: LivePerpExecutorOptions): LivePerpE
           guard: async () => {
             const pending = (await unresolvedRows("nothing is opened")).filter((r) => r.marketId === marketId && r.status === "submitted");
             if (pending.length > 0) throw new PerpRefused("perp-close-in-flight", `a ${pending[0]?.effect ?? "tx"} on ${intent.market} has no outcome yet`);
+            await ctx.beforeCommit?.();
           },
+          beforeSendGuard: ctx.beforeCommit,
           // ONE grouped tx (rule 7): OTO [IOC entry, SL], or OTOCO with the
           // take. The children are BaseAmount 0 and reduce-only — the venue
           // sizes them to what the entry actually filled — and expire
