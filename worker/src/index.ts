@@ -257,6 +257,7 @@ import { customStrategiesDir, resolveStrategyFile } from "./strategies/custom";
 import type { Holding, Snapshot, Strategy, Tick } from "./strategies/types";
 import { isPaused, startTelegram } from "./telegram/service";
 import { TgGroupsStore } from "./telegram/tg-groups/store";
+import { readPublicTradesToday } from "./tg-trade-facts";
 import { takeHeldGroupUpdates } from "./telegram/held-groups";
 import { NOMINATE, NominationBook, trencherReadiness } from "./trencher-nominate";
 import { COIN_LOOK, chainTokenProbe, claimGroupEntry, createCoinLook, createTgCoinsPort, groupExitOf, reviewedDecisionOf, type GroupEntryClaim } from "./tg-coin-look";
@@ -13692,6 +13693,7 @@ async function main() {
     // as an address and nothing else.
     tgGroupsStore,
     tgCoins,
+    tgFacts: { tradesToday: () => readPublicTradesToday(buildStatusContext().agentId, Math.floor(Date.now() / 1000)) },
     // What the hold process kept about groups while this tenant's trading was
     // held (telegram/held-groups.ts), in this home: applied at the first poll.
     heldGroupUpdates: () => takeHeldGroupUpdates(merrymenHome()),

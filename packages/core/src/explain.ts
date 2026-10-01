@@ -665,6 +665,13 @@ export const CONCEPTS: readonly Concept[] = [
     evidence: "worker/src/store.ts:754",
   },
   {
+    term: "P&L image / trade history",
+    aliases: ["pnl image", "p&l image", "pnl card", "print trade", "download pnl", "trade history", "what did you trade"],
+    plain: "On your agent's web Trades screen, a verified completed live sell has a P&L image button. Open it to preview, Download PNG or Print. Pending, refused, paper and unverified results do not get a live P&L card. Chat answers about completed trades and their reasons read the same operation ledger rather than treating a proposal as a fill.",
+    because: "The image route scopes the trade to the signed-in owner's current run and requires measured sale proceeds and evidenced cost basis. Read-only chat facts share the operation deduplication and basis replay used by the web.",
+    evidence: "web/src/terminal/SwapsTable.tsx:161, web/src/terminal/PnlCardDialog.tsx:1, web/src/app/api/pnl/route.ts:1, worker/src/chat-trades.ts:1",
+  },
+  {
     term: "steady-basket",
     aliases: ["steady basket", "dca", "default strategy", "the boring one"],
     plain: "This is the default setting, and there's no AI in it — it follows fixed rules. On a regular schedule it spends a set amount of your cash (25 USDG by default) buying the stock tokens you picked, split by the percentages you gave them. Cash you aren't using sits in a savings vault instead of doing nothing: anything above a cushion it keeps on hand (50 USDG by default) gets moved there, and it pulls money back out when it needs it to buy.",
@@ -770,10 +777,18 @@ export const CONCEPTS: readonly Concept[] = [
   },
   {
     term: "shadow",
-    aliases: ["brain", "shadow mode", "brain decision", "a merryman thinks", "shadow brain"],
-    plain: "Brain is the part that reasons about your agent. Right now it runs in shadow: it thinks, writes down a decision and the reasoning behind it, and then nothing is bought or sold. A shadow decision never becomes a trade — the trading code and the thinking code are not connected to each other at all, so this cannot be switched on by accident.",
-    because: "does not import proposalsToIntents, checkPolicy, simulate or the executor, and nothing it returns is shaped like an intent — execution is disconnected by ABSENCE, so connecting it later is an added import someone must review rather than a flag someone can flip.",
+    aliases: ["shadow mode", "shadow decision", "shadow brain"],
+    plain: "A shadow Brain decision is a recorded opinion. It can say buy or sell, but that shadow decision does not execute a trade. A completed trade must have its own recorded fill.",
+    because: "The shadow module records decisions separately from execution. Other explicitly enabled Brain paths can submit proposals, but still use the existing execution and risk checks.",
     confusable: "A Brain decision can say \"buy\" and still be a decision nothing acts on.",
     evidence: "worker/src/brain-shadow.ts:1-21, worker/src/brain-client.ts:22-25, worker/src/brain-enabled.ts:1-27, worker/src/brain-trigger.ts:57-80, worker/src/index.ts:5294-5309",
+  },
+  {
+    term: "Brain / group coin research",
+    aliases: ["brain", "brain decision", "coin research", "group coins", "without tagging", "without a tag", "why did you buy"],
+    plain: "Brain evaluates supported coin candidates and records its decision. In an approved Telegram group, a posted contract address can nominate a coin even without a tag, when Telegram delivers the post. A quick market screen is research, not a buy decision. Any buy still needs the configured trading path, owner permission and all existing limits; it is only announced after a completed live or explicitly labeled paper fill.",
+    because: "Group text passes only a validated address into nomination. The normal Brain review, entry sizing, execution checks and durable operation claims remain in force. Telegram privacy mode must be disabled with the bot re-added, or the bot must be an admin, to receive ordinary group posts.",
+    confusable: "A positive quick screen or a casual acknowledgement does not mean the agent bought it. Dated public market snapshots do not prove a token is safe.",
+    evidence: "worker/src/tg-coin-look.ts:1, worker/src/trencher-nominate.ts:1, worker/src/telegram/tg-groups/coins.ts:1, worker/src/index.ts:902",
   },
 ];

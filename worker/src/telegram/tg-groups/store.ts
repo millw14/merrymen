@@ -279,6 +279,17 @@ function parseCoin(v: unknown): TgCoinMemo | null {
   const decisionId = label(v.decisionId, DECISION_ID_CHARS);
   if (decisionId) memo.decisionId = decisionId;
   if (v.paper === true) memo.paper = true;
+  if (Array.isArray(v.notes)) {
+    let used = 0;
+    const notes: string[] = [];
+    for (const raw of v.notes.slice(0, 12)) {
+      const text = typeof raw === "string" ? label(raw, 400) : "";
+      if (!text || /[\p{N}\p{Sc}%@]|0x[0-9a-f]/iu.test(text) || used + text.length > 400) continue;
+      notes.push(text);
+      used += text.length;
+    }
+    if (notes.length) memo.notes = notes;
+  }
   if (v.exitSaid === true) memo.exitSaid = true;
   return memo;
 }

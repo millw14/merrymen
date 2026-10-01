@@ -148,6 +148,8 @@ export interface AgentReply {
 }
 export interface AgentChatOptions {
   surface?: "dashboard" | "partner";
+  /** Read-only server facts, already formatted without a model or command marker. */
+  factualReply?: string;
   credentials?: () => LlmCreds | null;
   complete?: typeof llmText;
   /** The streamed completion, for agentReplyResponse. A test seam, like `complete`. */
@@ -230,6 +232,7 @@ type Prepared =
 function prepareAgentReply(body: AgentChatBody, options: AgentChatOptions): Prepared {
   const message = typeof body.message === "string" ? body.message.slice(0, 2000).trim() : "";
   if (!message) return { early: { reply: null, why: "empty" } };
+  if (options.factualReply !== undefined) return { early: { reply: options.factualReply } };
   // WHOLE ENTRIES, NEVER A PREFIX. A blind slice cut mid-object and handed the
   // model malformed JSON with no marker, which it answered from anyway. See
   // lib/chat-state.ts for the trace.

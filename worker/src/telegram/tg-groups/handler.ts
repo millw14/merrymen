@@ -9,6 +9,8 @@
  * store plus memory.ts. This file decides nothing those modules decide. It
  * reads the update, keeps the books (who added it, what was said, who got an
  * answer), and sends — typing, a person's pace, Telegram's flood limits.
+ * Addressed factual questions read narrowly typed public evidence through
+ * read-only ports; facts.ts formats it without a model or owner money.
  *
  * NEVER ON THE POLL LOOP'S TIME. Every `on*` method returns at once: the work
  * goes onto a per-chat serial queue, so a slow model, a slow coin look or a
@@ -21,7 +23,8 @@
  * held every later line of that chat, and an owner asking "didnt you see?"
  * went unanswered until the answer was stale. The coin flow owns a CA line as
  * soon as it has decided so (coins.ts `begin`) and does the reads on its own
- * per-chat lane; the queue moves on to the next line at once.
+ * per-chat lane; addressed follow-up reads are detached too. The queue moves
+ * on to the next line at once.
  *
  * AN ADDRESSED LINE THAT GETS NOTHING SAYS WHY, to the operator: one log line,
  * "[tg-groups] addressed line got nothing (<code>)", with a stable code
@@ -84,6 +87,7 @@ import {
   type SmallTalk,
 } from "./detect";
 import { admitTgLine } from "./gate";
+import { publicCoinReason, publicFactRequest, type PublicFactRequest } from "./facts";
 import { applyMemoryPass, memoryPass, needsMemoryPass } from "./memory";
 import {
   describeTgGroupsModel,
@@ -106,7 +110,7 @@ import {
   type PaceInput,
 } from "./pacing";
 import { TG_LIMITS, utcDay, type TgGroupsStore } from "./store";
-import type { Chattiness, TgCoinMemo, TgCoinsPort, TgLine, TgPerson, TgRoom } from "./types";
+import type { Chattiness, CoinLook, TgCoinMemo, TgCoinsPort, TgGroupFactsPort, TgLine, TgPerson, TgPublicFact, TgRoom } from "./types";
 import { mentionFor, say, type SpeakCtx, type TgIntent } from "./voice";
 
 // ─── The numbers ───────────────────────────────────────────────────────────
@@ -266,6 +270,8 @@ export interface TgGroupsDeps {
   getCfg: () => ResolvedConfig;
   stateRef: StateRef;
   port: () => TgCoinsPort | null;
+  /** A read-only projection of this agent's fills. No raw owner ledger rows. */
+  facts?: () => TgGroupFactsPort | null;
   /** getMe's id and username, plus the soul name; null until getMe answered. */
   self: () => BotSelf | null;
   /** getMe's can_read_all_group_messages: false means privacy mode is on; null unknown. */
@@ -1341,13 +1347,14 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     return sent !== null;
   };
 
+  const coinFactsOn = (): boolean => {
+    const cfg = cfgNow();
+    return featureOn(cfg) && cfg?.telegramGroupCoinsEnabled === true;
+  };
   const flow = new CoinFlow({
     store,
     port: portNow,
-    coinsEnabled: () => {
-      const cfg = cfgNow();
-      return featureOn(cfg) && cfg?.telegramGroupCoinsEnabled === true;
-    },
+    coinsEnabled: coinFactsOn,
     ownerId,
     speak: (chatId, intent, o) => track(coinSpeak(chatId, intent, o)),
     react: (chatId, messageId, emoji) => track(reactTo(chatId, messageId, emoji)),
@@ -1859,6 +1866,26 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
 
     if (!reserveReply(chatId, messageId)) return "already-answered";
+    if (dec.act === "answer" && dec.mood !== "injection" && dec.mood !== "bot-question") {
+      const request = publicFactRequest(j.line.text, selfNamesOf(selfNow())) ?? repliedTradeRequest(j);
+      const context = coinContext(j);
+      const coinQuestion = asksAboutCoin(j.line.text, selfNamesOf(selfNow())) || /\b(?:why|how come)\b/iu.test(j.line.text);
+      const wantedFact = request || (context && coinQuestion);
+      // Slow reads use a detached lane: another line, the owner's commands
+      // and this chat's subsequent questions continue while evidence loads.
+      if (wantedFact && !isInjection(j.line.text)) {
+        const coinOnly = !request;
+        if (coinOnly && !coinFactsOn()) { releaseReply(chatId, messageId); return "coin-off"; }
+        const factualOpts = coinOnly ? { ...replyOpts, stillWanted: () => wanted() && coinFactsOn() } : replyOpts;
+        track((async () => {
+          const fact = request ? await requestedFact(request, chatId) : await coinFact(context!);
+          const sent = await speak(chatId, { kind: "public-fact", fact }, factualOpts);
+          if (sent) noteAnswered(sent.chatId, j, false);
+          else { releaseReply(chatId, messageId); if (j.addressed !== null) quietLine(whyLost()); }
+        })());
+        return null;
+      }
+    }
     const sent = await speak(chatId, intent, replyOpts);
     if (!sent) {
       releaseReply(chatId, messageId);
@@ -1902,6 +1929,113 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
     }
   };
 
+  /**
+   * Bind a reply to the coin it actually answered, including our own ack or
+   * outcome. All message ids and memos come from this chat only. Never choose
+   * the last coin globally: two groups, or two concurrent coins, must not mix.
+   */
+  const coinContext = (j: LineJob): { address: string; memo?: TgCoinMemo } | null => {
+    if (j.addressed === null) return null;
+    const stored = store.room(j.msg.chatId);
+    if (!stored) return null;
+    const room = freshView(stored, clock());
+    const tags = extractCashtags(j.line.text);
+    const requestedName = /\b(?:about|take on|thoughts on|wdyt(?: about)?)\s+\$?([a-z][a-z0-9]{1,15})\b/iu.exec(j.line.text)?.[1];
+    const explicit = requestedName && !/^(?:this|that|it|one|coin|token|you|u|the|a|i|is)$/iu.test(requestedName) ? requestedName.toUpperCase() : null;
+    const matchesAsk = (memo: TgCoinMemo): boolean => (!tags.length || tags.every((tag) => tag === memo.name?.toUpperCase())) && (!explicit || explicit === memo.name?.toUpperCase());
+    const named = room.coins.filter((c) => c.name && matchesAsk(c) && new RegExp(`(?<![\\p{L}\\p{N}])${c.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}])`, "iu").test(j.line.text));
+    if (named.length === 1) return { address: named[0]!.address, memo: named[0] };
+    if (named.length > 1) return null;
+    let id = j.line.replyTo;
+    const seen = new Set<number>();
+    for (let depth = 0; isMsgId(id) && depth < 8; depth++) {
+      if (seen.has(id)) break;
+      seen.add(id);
+      const memo = room.coins.find((c) => c.messageId === id);
+      if (memo) return matchesAsk(memo) ? { address: memo.address, memo } : null;
+      const line = room.lines.find((l) => l.messageId === id);
+      const quote = depth === 0 && j.msg.replyTo?.messageId === id ? j.msg.replyTo : undefined;
+      const text = line?.text ?? quote?.text ?? "";
+      if (isDistress(text)) return null;
+      if (!line?.own && quote?.fromId !== selfNow()?.id) {
+        const hits = extractCaHits(text).filter((h) => h.chain !== "other");
+        if (hits.length === 1 && !tags.length && !explicit && !hasOtherChainLink(text) && !hasForeignMint(text)) return { address: hits[0]!.address };
+      }
+      if (!line) break;
+      id = line.replyTo;
+    }
+    // A name-only question must name one unambiguous coin remembered HERE.
+    return null;
+  };
+
+  /** A bare "why?" below the public trade summary reloads the same records. */
+  const repliedTradeRequest = (j: LineJob): PublicFactRequest | null => {
+    if (j.addressed === null || !/\b(?:why|how come)\b/iu.test(j.line.text)) return null;
+    const stored = store.room(j.msg.chatId);
+    if (!stored) return null;
+    const room = freshView(stored, clock());
+    let id = j.line.replyTo;
+    const seen = new Set<number>();
+    for (let depth = 0; isMsgId(id) && depth < 8; depth++) {
+      if (seen.has(id)) break;
+      seen.add(id);
+      const line = room.lines.find((l) => l.messageId === id);
+      if (!line) return null;
+      if (!line.own) {
+        const request = publicFactRequest(line.text, selfNamesOf(selfNow()));
+        return request?.kind === "trades" ? { ...request, why: true } : null;
+      }
+      id = line.replyTo;
+    }
+    return null;
+  };
+
+  /** Time-box a read without holding the per-chat queue. Late evidence is ignored. */
+  const readFact = async <T>(read: () => Promise<T>): Promise<T | null> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const expired = d.timer ? d.timer(10 * SEC).then(() => null) : new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), 10 * SEC);
+        timer.unref?.();
+      });
+      return await Promise.race([Promise.resolve().then(read), expired]);
+    } catch (e) {
+      fail("public facts", e);
+      return null;
+    } finally { if (timer) clearTimeout(timer); }
+  };
+
+  const requestedFact = async (request: PublicFactRequest, chatId: number): Promise<TgPublicFact> => {
+    if (request.kind === "calculation") return request.fact;
+    if (request.kind === "site") return request;
+    const data = await readFact(async () => d.facts?.()?.tradesToday() ?? null);
+    if (!data) return { kind: "unavailable", topic: "trades" };
+    const stored = store.room(chatId);
+    const memos = stored ? freshView(stored, clock()).coins : [];
+    // A name can be reused, and the same coin can be bought for a different
+    // reason later. Only the exact recorded decision may supply its public
+    // outcome rationale. No raw owner decision text enters this projection.
+    const trades = request.why ? data.trades.map((trade) => {
+      if (trade.side !== "buy" || !trade.decisionId) return trade;
+      const memo = memos.find((c) => c.verdict === "bought" && c.decisionId === trade.decisionId && (c.paper === true) === trade.paper);
+      const reason = memo && publicCoinReason(memo.notes);
+      return reason ? { ...trade, why: reason } : trade;
+    }) : data.trades;
+    return { kind: "trades", data: { ...data, trades }, why: request.why, ...(request.symbol ? { symbol: request.symbol } : {}), ...(request.side ? { side: request.side } : {}) };
+  };
+
+  const coinFact = async (context: { address: string; memo?: TgCoinMemo }): Promise<TgPublicFact> => {
+    const look = await readFact<CoinLook>(async () => coinFactsOn() ? portNow()?.look(context.address) ?? { kind: "unknown" } : { kind: "unknown" });
+    if (!look) return { kind: "unavailable", topic: "coin" };
+    const memo = context.memo;
+    const reviewed = memo?.decisionId && (memo.verdict === "bought" || memo.verdict === "passed" || memo.verdict === "skipped") ? {
+      verdict: memo.verdict,
+      ...(memo.paper ? { paper: true } : {}),
+      ...(memo.notes ? { notes: memo.notes } : {}),
+    } : undefined;
+    return { kind: "coin", look: { ...look, ...(look.name ? {} : memo?.name ? { name: memo.name } : {}) }, nowMs: clock(), ...(reviewed ? { reviewed } : {}) };
+  };
+
   /** ONE LINE, off the poll loop: the coin flow first, then pacing, then the words. */
   const processLine = async (j: LineJob): Promise<void> => {
     const why = await lineOutcome(j);
@@ -1914,25 +2048,26 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
    * about this shogun" under someone's CA names no coin in its own words, so
    * the coin is read off the post it answers — the text Telegram quoted with
    * the reply (the whole post), else this chat's remembered line (its first
-   * 400 characters). The reply then goes through the coin flow as a post of
-   * that coin by whoever asked — claimed under the reply's own message id, so
-   * the original post's claim is untouched and a replay of the reply repeats
-   * nothing — with every rule a CA said to it gets: looked at, answered from
-   * memory, the owner ask, a nomination, "can't pull that one up rn", or
-   * silence for another chain's coin.
+   * 400 characters). This is the fallback for a coin not yet remembered here:
+   * it goes through the coin flow, claimed under the reply's own message id,
+   * with the usual look, readiness, nomination and replay checks. An explicit
+   * follow-up about a remembered coin uses coinContext and the detached
+   * factual lane instead, with dated public evidence and no new nomination.
    *
    * Only a line said to it that ASKS (detect.ts asksAboutCoin): "gm gm", a
    * question about something else, or "don't touch this one pls" under a coin
    * post is chatter, and a reply that did not call it is chatter between
-   * people. Never a reply to its own line (it never writes an address), and
-   * never a distress post's coin: "lost everything on 0x… i want to die" is a
-   * person, not a coin to look at, whoever replies to it.
+   * people. Replies to its own acknowledgement or outcome are resolved by
+   * coinContext, which follows this chat's reply chain. Never a distress
+   * post's coin: "lost everything on 0x… i want to die" is a person, not a
+   * coin to look at, whoever replies to it.
    *
    * WHILE THAT POST IS STILL ON THE COIN LANE its own answer is on its way,
-   * and the reply is answered now, as chatter, rather than queued behind the
-   * look it is asking about ("@bot didnt you see" while the look hangs); the
-   * flow is told who asked (CoinFlow.askedWhileWorking), so a look that comes
-   * back `unknown` still gets them "can't pull that one up rn".
+   * and this helper records who asked (CoinFlow.askedWhileWorking) without
+   * starting another nomination. The detached factual lane can join the
+   * existing bounded read; other conversation continues while evidence loads.
+   * A timeout gives an honest unavailable answer, and the original coin flow
+   * can also report its failed look to the asker, subject to forget checks.
    */
   const repliedCoin = (j: LineJob): { cas: string[]; otherChain: string[]; foreignMint: boolean } | null => {
     if (j.addressed === null) return null;
@@ -2001,15 +2136,16 @@ export function createTgGroups(d: TgGroupsDeps): TgGroups {
       // or v4 pair. The flow owns the line and says nothing.
       let foreignMint = hasForeignMint(text) || hasOtherChainLink(text);
       let cashtags = extractCashtags(text);
+      const rememberedAsk = cas.length === 0 && !foreignMint && j.addressed !== null && asksAboutCoin(text, selfNamesOf(selfNow())) && !!coinContext(j)?.memo;
       // No coin in its own words, said to it, under a coin post: it asks about
       // that post's coin (repliedCoin). A ticker can refer to it only when
       // the quoted post names the same ticker.
-      const asked = cas.length === 0 && !foreignMint ? repliedCoin(j) : null;
+      const asked = !rememberedAsk && cas.length === 0 && !foreignMint ? repliedCoin(j) : null;
       if (asked) {
         ({ cas, otherChain, foreignMint } = asked);
         cashtags = [];
       }
-      if (cas.length > 0 || foreignMint || cashtags.length > 0) {
+      if (!rememberedAsk && (cas.length > 0 || foreignMint || cashtags.length > 0)) {
         stageOf(chatId, "coin flow");
         const post = await flow.begin(chatId, j.line, {
           senderId: j.line.fromId,

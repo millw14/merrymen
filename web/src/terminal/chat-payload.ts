@@ -1,11 +1,9 @@
 /**
  * WHAT THE CHAT MODEL IS TOLD ABOUT THE BOOK — built here, sent by Agent.tsx.
  *
- * The chat is stateless on the server: the browser holds the book and sends it,
- * and the system prompt tells the model to ground every number in it. So this
- * object IS what the agent knows about its own money when an owner asks. It was
- * assembled inline in the screen, where no test could run it, and every rule
- * about it was pinned by reading the screen's source for a substring.
+ * The browser supplies a recent display snapshot for conversation. Questions
+ * about executed trades and their reasons are separately read from the ledger
+ * on the server, so a short or stale browser tape cannot answer for today's book.
  */
 import { chatPositionsOf } from "./account";
 import type { LiveMine } from "./live";
@@ -47,9 +45,15 @@ export const tapeFor = (moves: LiveMine["moves"]) =>
     .slice(0, TAPE_SHOWN)
     .map((m) => ({
       at: m.at,
+      tradeId: m.tradeId ?? null,
       action: m.action,
       symbol: m.symbol,
+      displayName: m.displayName ?? null,
+      paper: m.paper,
+      reason: m.reason?.slice(0, 400) ?? null,
+      // Requested size is not proof of executed cash. The server lookup checks receipts.
       sizeUsdg: m.sizeUsdg,
+      realizedPnlUsdg: m.realizedVouched ? m.realizedPnlUsdg ?? null : null,
       outcome: m.outcome,
       outcomeText: m.outcomeText,
     }));

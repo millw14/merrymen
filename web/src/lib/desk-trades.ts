@@ -18,6 +18,7 @@
 import type { Db } from "../../../worker/src/db";
 import { distinctTrades, OP_COPY_REACH_SEC, tradeOpKey } from "./distinct-trades";
 import { OP_KEY, readEvidencedSells } from "./profile-trades";
+import { inferredTradeSide } from "../../../worker/src/chat-trades";
 
 export interface DeskTradeRow {
   /** Canonical ledger row for an owner-only P&L image lookup. */
@@ -120,6 +121,11 @@ export async function readDeskTrades(
       )
       .all(account, ...runArg, sinceSec, limit)) as unknown as DeskTradeRow[];
   }
+  // A completed operation's recorded pair can identify its side on older
+  // fills. Share that inference with chat; a decision's intent never supplies it.
+  rows = rows.map(r => (r.status === "landed" || r.status === "paper")
+    ? { ...r, fill_side: inferredTradeSide(r) }
+    : r);
   // WHICH REALIZED FIGURES ARE MEASUREMENTS, per book, against that book's own
   // fills. A replay that cannot run vouches for nothing: the figure is still
   // carried, and the desk prints no dollars beside it.

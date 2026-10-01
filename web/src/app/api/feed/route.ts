@@ -96,6 +96,8 @@ export interface PositionRow {
   stop_floor_why?: string | null;
 }
 export interface TradeRecord {
+  /** Canonical owner-only ledger row, absent on an older feed. */
+  id?: number;
   kind: string;
   sell_token: string | null;
   buy_token: string | null;
@@ -115,6 +117,8 @@ export interface TradeRecord {
   action?: string | null;
   reason?: string | null;
   realized_pnl_usdg?: number | null;
+  /** True only when the shared basis replay vouches for this completed sell. */
+  realized_vouched?: boolean;
 }
 export interface AgentFinancials {
   hwm_usdg: number;

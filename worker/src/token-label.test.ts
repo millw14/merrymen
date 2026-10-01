@@ -27,7 +27,7 @@ function ledger(): DatabaseSync {
   db.exec(`
     CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, kind TEXT, target TEXT, sell_token TEXT, buy_token TEXT,
       amount_usdg REAL, fill_cash_usdg REAL, fill_side TEXT, realized_pnl_usdg REAL, status TEXT, reject_rule TEXT, tx_hash TEXT,
-      decision_id TEXT, created_at INTEGER);
+      decision_id TEXT, created_at INTEGER, user_op_hash TEXT, basis_source TEXT, fill_qty_raw TEXT);
     CREATE TABLE decisions (id TEXT PRIMARY KEY, agent_id TEXT, symbol TEXT, display_name TEXT, at INTEGER);
     CREATE TABLE discovered_pools (address TEXT PRIMARY KEY, symbol TEXT);
     CREATE TABLE positions (agent_id TEXT, symbol TEXT, token TEXT);
@@ -189,7 +189,7 @@ describe("the trade list the owner reads", () => {
     const db = ledger();
     db.prepare("INSERT INTO discovered_pools (address, symbol) VALUES (?, 'CASHCAT')").run(CASHCAT);
     db.prepare(
-      "INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, fill_cash_usdg, fill_side, realized_pnl_usdg, status, created_at) VALUES (?, 'swap', ?, ?, ?, 5, 5.025718, 'sell', 0.025718, 'landed', 1790118605)",
+      "INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, fill_cash_usdg, fill_side, realized_pnl_usdg, status, basis_source, fill_qty_raw, created_at) VALUES (?, 'swap', ?, ?, ?, 5, 5.025718, 'sell', 0.025718, 'landed', 'receipt', '100', 1790118605)",
     ).run(AGENT, VAULT, CASHCAT, CASH.USDG);
     const [v] = await loadTradeViews(db, AGENT, {});
     assert.match(tradeViewLine(v!, false), /✅ sold CASHCAT for \$5\.03 \(\+\$0\.03\)/);
@@ -231,7 +231,7 @@ describe("review fixes", () => {
     db.prepare("INSERT INTO trades (agent_id, kind, target, amount_usdg, status, created_at) VALUES (?, 'equity-order', 'aapl', 5, 'paper', 2)").run(AGENT);
     const views = await loadTradeViews(db, AGENT, {});
     const lines = views.map((v) => tradeViewLine(v, false)).join("\n");
-    assert.match(lines, /moved cash into your savings vault for \$50\.00/);
+    assert.match(lines, /moved cash into your savings vault for an unknown amount/);
     assert.match(lines, /AAPL/);
     assert.doesNotMatch(lines, /can't name/);
   });

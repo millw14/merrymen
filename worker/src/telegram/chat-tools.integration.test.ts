@@ -18,7 +18,7 @@ process.env.MERRYMEN_HOME = HOME;
 process.env.MERRYMEN_HOSTED = "1";
 
 const { closeStoreForTest, initStore, addTrade, addEvent, addDecision, newDecisionId, addEquity } = await import("../store");
-const { toolByName } = await import("./chat-tools");
+const { toolByName, answerTradeQuestion } = await import("./chat-tools");
 const { CASH } = await import("../../../packages/core/src/index");
 const { DatabaseSync } = await import("node:sqlite");
 const { homePaths } = await import("../home");
@@ -47,12 +47,16 @@ async function run(name: string, input: Record<string, unknown> = {}, who: strin
 
 before(async () => {
   initStore();
+  const active=new DatabaseSync(homePaths.db());
+  for(const owner of [SHOGUN,"0x000000000000000000000000000000000000ca01"])
+    active.prepare("INSERT OR IGNORE INTO agents(smart_account,owner_address,session_key_address,chain_id,caps,granted_at,expires_at,epoch) VALUES (?,'o','s',4663,'{}',0,9999999999,1)").run(owner);
+  active.close();
   const d1 = newDecisionId();
   await addDecision({ id: d1, agent_id: SHOGUN, source: "brain", symbol: "CASHCAT", action: "buy", size_usdg: 5, reason: "SHOGUN_REASON fresh launch with real buyers" });
-  await addTrade({ agent_id: SHOGUN, kind: "swap", target: "0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d", sell_token: USDG, buy_token: CASHCAT, amount_usdg: 5, fill_side: "buy", fill_cash_usdg: 5, status: "landed", tx_hash: "0xaa", decision_id: d1 });
+  await addTrade({ agent_id: SHOGUN, kind: "swap", target: "0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d", sell_token: USDG, buy_token: CASHCAT, amount_usdg: 5, fill_side: "buy", fill_cash_usdg: 5, fill_qty_raw:"100", basis_source:"receipt", status: "landed", tx_hash: "0xaa", decision_id: d1 });
   const d2 = newDecisionId();
   await addDecision({ id: d2, agent_id: SHOGUN, source: "brain", symbol: "CASHCAT", action: "sell", size_usdg: 5, reason: "took the small gain" });
-  await addTrade({ agent_id: SHOGUN, kind: "swap", target: "0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d", sell_token: CASHCAT, buy_token: USDG, amount_usdg: 5, fill_side: "sell", fill_cash_usdg: 5.025718, realized_pnl_usdg: 0.025718, status: "landed", tx_hash: "0xbb", decision_id: d2 });
+  await addTrade({ agent_id: SHOGUN, kind: "swap", target: "0x2ca2b5bd3b6635d630419c57a13c6b6a856ec96d", sell_token: CASHCAT, buy_token: USDG, amount_usdg: 5, fill_side: "sell", fill_cash_usdg: 5.025718, realized_pnl_usdg: 0.025718, fill_qty_raw:"100", basis_source:"receipt", status: "landed", tx_hash: "0xbb", decision_id: d2 });
   await addEvent(SHOGUN, "ok", "Scanning 12 tokens on the launchpad… Trading is paused.");
   await addEquity(SHOGUN, { mode: "live", ethWei: 0n, cashUsdg: 20, vaultUsdg: 0, positionsUsdg: 0, equityUsdg: 20.03 });
   // The other tenant — none of this may ever appear in Shogun's answers.
@@ -71,7 +75,7 @@ after(() => {
 describe("the lookups answer with names, and truthfully", () => {
   it("list_trades names the coin and the side — the question Shogun couldn't answer", async () => {
     const out = await run("list_trades");
-    assert.match(out, /sold CASHCAT for \$5\.03 \(\+\$0\.03\)/);
+    assert.match(out, /sold CASHCAT for \$5\.03 measured cash; realized \+\$0\.03/);
     assert.match(out, /bought CASHCAT for \$5\.00/);
     assert.doesNotMatch(out, /swap 5\.00 USDG/);
   });
@@ -164,4 +168,47 @@ describe("review fixes on a real ledger", () => {
     assert.match(out, /CASHCAT — bought .* \(cost unknown\)/, "a recovered position is held, cost unknown");
     assert.doesNotMatch(out, /USDG — bought/, "the vault's own cash row is not a coin");
   });
+});
+
+it("obvious history and why answers come from the exact executed trade without a model",async()=> {
+  const today=await answerTradeQuestion("what did you trade today?",ctx(SHOGUN));
+  assert.match(today!,/since 00:00 UTC/);assert.match(today!,/sold CASHCAT for \$5\.03/);assert.match(today!,/bought CASHCAT for \$5\.00/);
+  const why=await answerTradeQuestion("why did you sell CASHCAT?",ctx(SHOGUN));
+  assert.match(why!,/took the small gain/);assert.doesNotMatch(why!,/fresh launch/);
+  assert.equal(await answerTradeQuestion("why should I buy PRISM?",ctx(SHOGUN)),null,"a research question is not a historical trade question");
+});
+
+it("an explicit ticker or contract scopes every history/why form to that owner's coin",async()=> {
+  const owner="0x000000000000000000000000000000000000fa01";
+  const prism="0x20024e485c0b22b42855589700721b2832000000";
+  const db=new DatabaseSync(homePaths.db());
+  db.prepare("INSERT INTO agents(smart_account,owner_address,session_key_address,chain_id,caps,granted_at,expires_at,epoch) VALUES (?,'o','s',4663,'{}',0,9999999999,1)").run(owner);
+  db.close();
+  for(const [who,token,symbol,reason,cash] of [
+    [owner,prism,"PRISM","PRISM_EXACT_REASON liquidity and buyers checked",3],
+    [owner,CASHCAT,"CASHCAT","UNRELATED_COIN_REASON",4],
+    [OTHER,prism,"PRISM","FOREIGN_PRISM_REASON",77],
+  ] as const){
+    const decision=newDecisionId();
+    await addDecision({id:decision,agent_id:who,source:"brain",symbol,action:"buy",size_usdg:cash,reason});
+    await addTrade({agent_id:who,kind:"swap",target:"0xrouter",sell_token:USDG,buy_token:token,amount_usdg:cash,fill_side:"buy",fill_cash_usdg:cash,fill_qty_raw:"100",basis_source:"receipt",status:"landed",decision_id:decision});
+  }
+  const clock=new DatabaseSync(homePaths.db());
+  clock.prepare("UPDATE trades SET created_at=? WHERE agent_id IN (?,?)").run(NOW,owner,OTHER);
+  clock.close();
+  for(const question of ["show trades for $PRISM today",`show trades for ${prism.toUpperCase().replace("0X","0x")} today`,"what did you trade today for $PRISM?"]){
+    const out=await answerTradeQuestion(question,ctx(owner));
+    assert.match(out!,/bought PRISM for \$3\.00/);
+    assert.doesNotMatch(out!,/CASHCAT|FOREIGN_PRISM_REASON|\$77\.00/,question);
+  }
+  for(const question of ["why did you trade today for $PRISM?",`why did you buy today, ${prism}?`]){
+    const out=await answerTradeQuestion(question,ctx(owner));
+    assert.match(out!,/PRISM_EXACT_REASON/);
+    assert.doesNotMatch(out!,/CASHCAT|UNRELATED_COIN_REASON|FOREIGN_PRISM_REASON/,question);
+  }
+  const all=await answerTradeQuestion("show trades today",ctx(owner));
+  assert.match(all!,/bought PRISM/);assert.match(all!,/bought CASHCAT/);
+  const missing=await answerTradeQuestion("show trades for $MISSING today",ctx(owner));
+  assert.match(missing!,/can't see any matching confirmed trades/);
+  assert.doesNotMatch(missing!,/bought PRISM|bought CASHCAT/);
 });

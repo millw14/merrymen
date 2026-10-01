@@ -6,6 +6,7 @@ import { agentReplyResponse, currentEnergy, type AgentChatBody } from "@/lib/age
 import { diskAgent, hostedAgentFor } from "@/lib/agent-for";
 import { readAgentEnergy } from "@/lib/agent-energy";
 import { ceilingFor } from "@/lib/order-ceiling";
+import { ledgerChatReply } from "@/lib/chat-ledger-facts";
 
 export const dynamic = "force-dynamic";
 
@@ -48,6 +49,7 @@ export async function POST(req: Request) {
   // the worker may not have published since (currentEnergy) — so it is no
   // report, and the model says it cannot see its energy instead of blaming it.
   const account = hosted ? await hostedAgentFor(req) : await diskAgent();
+  const factualReply = await ledgerChatReply(body, account, Math.floor(Date.now() / 1000));
   const report = currentEnergy(account ? await readAgentEnergy(account) : null, Math.floor(Date.now() / 1000));
   const energy = report
     ? { ...report, ceilingUsdg: await ceilingFor(req, hosted).catch(() => null) }
@@ -57,5 +59,5 @@ export async function POST(req: Request) {
   // the one JSON answer it always got. See agentReplyResponse for what may be
   // shown before the reply is complete — nothing of a command marker, ever.
   const stream = /text\/event-stream/i.test(req.headers.get("accept") ?? "");
-  return agentReplyResponse(body, { stream, signal: req.signal }, { energy });
+  return agentReplyResponse(body, { stream, signal: req.signal }, { energy, factualReply });
 }

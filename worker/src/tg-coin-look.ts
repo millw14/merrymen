@@ -222,9 +222,11 @@ const CASH_SIDES: ReadonlySet<string> = new Set([CASH.USDG.toLowerCase(), CASH.W
  * THE QUICK LOOK — `(address) => CoinLook`, cheapest first, every read bounded
  * (COIN_LOOK.readMs, COIN_LOOK.poolsMs) so a look always settles.
  *
- * 1. FREE: its own wallet or vault, cash, the energy reserve, a stock token,
- *    a coin it already holds. Answered every time, never cached, so a coin
- *    bought since the last look is `held` and not a stale `candidate`.
+ * 1. FREE: its own wallet or vault, cash, the energy reserve, a stock token.
+ *    Holding classification is also read every time, so a coin bought since
+ *    the last look is `held` and not a stale `candidate`. Its public market
+ *    snapshot may be refreshed under the same full-look allowance below,
+ *    without chain probes; that refresh can never nominate another buy.
  * 2. CACHED: a definite answer from the last 30 minutes.
  * 3. ON ROBINHOOD CHAIN AT ALL? ONE getCode on Robinhood Chain, before any
  *    GeckoTerminal request, under its own allowance (COIN_LOOK.maxProbes;
@@ -489,7 +491,37 @@ export function createCoinLook(d: CoinLookReaders): (address: string) => Promise
   /** Steps 1–7 for one lowercased, well-formed address. `depth` 1 is a pool's coin, which never resolves again. */
   const lookAt = async (a: string, depth: number): Promise<CoinLook> => {
     const quick = free(a);
-    if (quick) return quick;
+    if (quick) {
+      if (quick.kind !== "held") return quick;
+      // Holding authority remains a local read. Public market observations
+      // can use the dated cache or one capped index refresh after a restart
+      // or expiry; they never turn a holding into a fresh candidate.
+      const prior = cache.get(a);
+      if (prior?.look.research && now() - prior.at < COIN_LOOK.cacheMs) return { ...quick, research: { ...prior.look.research } };
+      const stillHeld = (market: CoinLook): CoinLook => {
+        const latest = free(a);
+        if (!latest) return market;
+        return latest.kind === "held" && market.research ? { ...latest, research: { ...market.research } } : latest;
+      };
+      const joining = pending.get(a);
+      if (joining) return stillHeld(await joining);
+      if (!takeFullLook()) return quick;
+      const job = indexed(a, true)
+        .then((found) => found ? classifyPools(a, found.pools, Math.floor(now() / 1000), found.source) : UNKNOWN)
+        .catch(() => UNKNOWN)
+        .then((market) => {
+          // Cache the public screen, never held authority: selling the coin
+          // while this read is pending must not leave a stale held answer.
+          if (market.kind !== "unknown") {
+            if (cache.size >= COIN_LOOK.cacheMax) cache.delete(cache.keys().next().value!);
+            cache.set(a, { look: market, at: now() });
+          }
+          return market;
+        })
+        .finally(() => pending.delete(a));
+      pending.set(a, job);
+      return stillHeld(await job);
+    }
     const t = now();
     const hit = cache.get(a);
     if (hit && t - hit.at < COIN_LOOK.cacheMs) {
@@ -546,7 +578,15 @@ function busyPools(v3: readonly GeckoPool[], source: CoinLookSource): GeckoPool[
 
 function classifyPools(a: string, mine: readonly GeckoPool[], nowSec: number, source: CoinLookSource): CoinLook {
   const name = displayName(a, mine);
-  const as = (kind: CoinKind): CoinLook => (name ? { kind, name, source } : { kind, source });
+  // A look may be used to answer an explicit research question too. Keep a
+  // snapshot of ONE pool's public index figures alongside its classification;
+  // these claims never size an order or replace the tick's on-chain reads.
+  // Prefer the very pool the screen judged once it has selected one below.
+  let researchPool = [...mine].sort((x, y) => (y.reserveUsd ?? -1) - (x.reserveUsd ?? -1))[0];
+  const as = (kind: CoinKind): CoinLook => {
+    const research = researchPool ? publicPoolResearch(researchPool, nowSec, source) : undefined;
+    return { kind, ...(name ? { name } : {}), source, ...(research ? { research } : {}) };
+  };
   // Trencher v1 buys through a Uniswap v3 pool CONTRACT and nothing else
   // (venues/trencher-vault.ts refuses v4 routes), so that is what is looked for.
   const v3 = mine.filter((p) => p.dex === DEX_V3 && p.poolAddress !== null);
@@ -561,8 +601,9 @@ function classifyPools(a: string, mine: readonly GeckoPool[], nowSec: number, so
   const busy = busyPools(v3, source);
   if (busy.length === 0) return as("too-quiet");
   const best = busy[0]!;
+  researchPool = best;
   // A figure the index left out is a look that could not be made, not a pass.
-  if (best.reserveUsd === null || best.fdvUsd === null || best.createdAt === null || best.createdAt > nowSec) return UNKNOWN;
+  if (best.reserveUsd === null || best.fdvUsd === null || best.createdAt === null || best.createdAt > nowSec) return as("unknown");
   const c: Candidate = {
     symbol: addressSymbol(a),
     token: a as `0x${string}`,
@@ -580,6 +621,25 @@ function classifyPools(a: string, mine: readonly GeckoPool[], nowSec: number, so
   if (c.liquidityUsd < TRENCHER_FAST.minLiquidityUsd || c.fdvUsd < TRENCHER_FAST.minFdvUsd) return as("too-thin");
   if (c.ageSec < TRENCHER_FAST.minAgeSec) return as("too-new");
   return UNKNOWN;
+}
+
+/** Public observations only, with their original observation time kept by the cache. */
+function publicPoolResearch(p: GeckoPool, nowSec: number, source: CoinLookSource): NonNullable<CoinLook["research"]> | undefined {
+  if (source !== "geckoterminal" && source !== "dexscreener") return undefined;
+  const nonnegative = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
+  const count = (v: unknown): v is number => nonnegative(v) && Number.isSafeInteger(v);
+  return {
+    source,
+    observedAtMs: nowSec * 1000,
+    ...(nonnegative(p.priceUsd) ? { priceUsd: p.priceUsd } : {}),
+    ...(nonnegative(p.reserveUsd) ? { liquidityUsd: p.reserveUsd } : {}),
+    ...(nonnegative(p.fdvUsd) ? { fdvUsd: p.fdvUsd } : {}),
+    ...(nonnegative(p.volume24hUsd) ? { volume24hUsd: p.volume24hUsd } : {}),
+    ...(typeof p.change24hPct === "number" && Number.isFinite(p.change24hPct) && p.change24hPct >= -100 ? { priceChange24hPct: p.change24hPct } : {}),
+    ...(count(p.buys24h) ? { buys24h: p.buys24h } : {}),
+    ...(count(p.sells24h) ? { sells24h: p.sells24h } : {}),
+    ...(nonnegative(p.createdAt) && p.createdAt <= nowSec ? { ageMinutes: (nowSec - p.createdAt) / 60 } : {}),
+  };
 }
 
 /** Pons template metadata getter — the selector venues/pons-meta.ts reads. */

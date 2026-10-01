@@ -8,10 +8,11 @@
  * process, so this env override never leaks into other suites.
  */
 import assert from "node:assert/strict";
-import { after, describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 const HOME = mkdtempSync(path.join(os.tmpdir(), "merrymen-dec-"));
 process.env.MERRYMEN_HOME = HOME;
@@ -20,8 +21,12 @@ const { closeStoreForTest, initStore, addDecision, addTrade, newDecisionId, getB
   await import("./store");
 const { readWhyEvidence, readPnl } = await import("./telegram/reads");
 const { applyFill } = await import("./basis");
+const { CASH,STOCK_TOKENS }=await import("../../packages/core/src/index");
+const TSLA=STOCK_TOKENS.find(t=>t.symbol==="TSLA")!.address;
 
 const AGENT = "0x000000000000000000000000000000000000a9e7";
+const {homePaths}=await import("./home");
+before(async()=>{await initStore();const active=new DatabaseSync(homePaths.db());active.prepare("INSERT OR IGNORE INTO agents(smart_account,owner_address,session_key_address,chain_id,caps,granted_at,expires_at,epoch) VALUES (?,'o','s',4663,'{}',0,9999999999,1)").run(AGENT);active.close();});
 
 after(() => {
   closeStoreForTest();
@@ -75,7 +80,7 @@ describe("decisions substrate — /why joins the trade to its own decision", () 
     await setBasis(AGENT, "paper", SYM, buy.basis);
     await addTrade({
       agent_id: AGENT, kind: "swap", target: "0x0000000000000000000000000000000000000002",
-      amount_usdg: 200, status: "paper",
+      amount_usdg: 200, fill_cash_usdg:200,sell_token:CASH.USDG,buy_token:TSLA,status: "paper",
       fill_side: "buy", fill_qty_raw: (2n * SHARE).toString(), fill_price_usd: 100, basis_source: "paper",
     });
     const afterBuy = await getBasis(AGENT, "paper", SYM);
@@ -89,7 +94,7 @@ describe("decisions substrate — /why joins the trade to its own decision", () 
     assert.equal(sell.realizedUsdg, usdg6(50));
     await addTrade({
       agent_id: AGENT, kind: "swap", target: "0x0000000000000000000000000000000000000002",
-      amount_usdg: 150, status: "paper",
+      amount_usdg: 150, fill_cash_usdg:150,sell_token:TSLA,buy_token:CASH.USDG,status: "paper",
       fill_side: "sell", fill_qty_raw: SHARE.toString(), fill_price_usd: 150,
       realized_pnl_usdg: 50, basis_source: "paper",
     });

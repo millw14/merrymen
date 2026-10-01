@@ -199,7 +199,7 @@ describe("/api/chat injects it on the server", () => {
     assert.match(ROUTE, /readAgentEnergy\(/);
     assert.match(ROUTE, /hosted \? await hostedAgentFor\(req\) : await diskAgent\(\)/, "the caller cannot name the agent");
     assert.match(ROUTE, /ceilingFor\(req, hosted\)/);
-    assert.match(ROUTE, /agentReplyResponse\(body, \{ stream, signal: req\.signal \}, \{ energy \}\)/);
+    assert.match(ROUTE, /agentReplyResponse\(body, \{ stream, signal: req\.signal \}, \{ energy, factualReply \}\)/);
   });
 
   it("AND ONLY WHILE ITS DAY LASTS — a stale report is no ENERGY block", () => {

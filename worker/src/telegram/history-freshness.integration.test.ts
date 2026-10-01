@@ -24,6 +24,8 @@ const { toolByName, openToolSession } = await import("./chat-tools");
 const { carriedHistory } = await import("./history-overlay");
 const { writeHistoryFile, HISTORY_FILE } = await import("../history-files");
 const { CASH } = await import("../../../packages/core/src/index");
+const { DatabaseSync } = await import("node:sqlite");
+const { homePaths } = await import("../home");
 type TradeHistory = import("../history-files").TradeHistory;
 
 const SHOGUN = "0x05a198a677fbcd8f5c168d397fa7ef5eb6d65487";
@@ -61,6 +63,11 @@ function history(symbol: string, at: number): TradeHistory {
 
 before(() => {
   initStore();
+  // The carried rows belong to a known active run, just as in the worker.
+  // Without this metadata a modern ledger must refuse to guess run one.
+  const db = new DatabaseSync(homePaths.db());
+  db.prepare("INSERT INTO agents(smart_account,owner_address,session_key_address,chain_id,caps,granted_at,expires_at,epoch) VALUES (?,'o','s',4663,'{}',0,9999999999,1)").run(SHOGUN);
+  db.close();
 });
 
 after(() => {
@@ -98,10 +105,12 @@ describe("carried history freshness", () => {
     try {
       const first = await toolByName("list_trades")!.run({ since_hours: 720 }, c);
       assert.match(first, /OLDNAME/);
+      assert.match(first, /executed amount not verified/, "refreshing history does not vouch its archived cash figure");
       // The orchestrator's re-read after its startup repair; the ledger itself is untouched.
       writeHistoryFile(HOME, history("NEWNAME", NOW - 86_400 + 1));
       const second = await toolByName("list_trades")!.run({ since_hours: 720 }, c);
       assert.match(second, /NEWNAME/);
+      assert.match(second, /executed amount not verified/);
       assert.doesNotMatch(second, /OLDNAME/);
     } finally {
       session.close();

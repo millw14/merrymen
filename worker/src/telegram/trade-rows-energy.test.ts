@@ -76,7 +76,7 @@ describe("/trades and the chat's lookups", () => {
     assert.equal(v!.label, ENERGY_LABEL);
     assert.equal(v!.side, "buy");
     assert.equal(v!.trusted, true);
-    assert.match(tradeViewLine(v!, false), /^✅ bought energy \(\$MERRYMEN\) for \$5\.00 · /);
+    assert.match(tradeViewLine(v!, false), /^✅ bought energy \(\$MERRYMEN\) for an unknown amount · /);
   });
 
   it("a leg-less energy-buy row is still named, and still a buy", async () => {
