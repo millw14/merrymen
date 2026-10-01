@@ -3,7 +3,8 @@ import { describe, it } from "node:test";
 import { encodeCallDataEpV07 } from "@zerodev/sdk";
 import { encodeFunctionData, type Hex } from "viem";
 import { invalidatePermissions, KERNEL_REVOCATION_ABI, nextRevocationNonce, type PendingRevocation, type RevocationIO } from "./permission-revocation";
-import { isPermissionRevocationShape } from "./recovery-shape";
+import { isPermissionRevocationShape, permissionRevocationNonce } from "./recovery-shape";
+import { sdkRevocationCall } from "./permission-revocation-fixture";
 
 const HASH = `0x${"12".repeat(32)}` as Hex;
 const TX = `0x${"34".repeat(32)}` as Hex;
@@ -113,7 +114,12 @@ describe("owner permission revocation", () => {
 
 describe("revocation relay scope", () => {
   const data = encodeFunctionData({ abi: KERNEL_REVOCATION_ABI, functionName: "invalidateNonce", args: [8] });
-  it("accepts the installed SDK's single self-call encoding", async () => {
+  it("accepts the installed account SDK's raw self-call, as sent by renewal", async () => {
+    const callData = await sdkRevocationCall(ACCOUNT, 2);
+    assert.equal(callData, `0x1f1b92e3${"0".repeat(63)}2`, "the real account encoder skips execute for a self-call");
+    assert.equal(permissionRevocationNonce(callData, ACCOUNT), 2);
+  });
+  it("retains the wrapped single self-call encoding", async () => {
     const callData = await encodeCallDataEpV07([{ to: ACCOUNT, value: 0n, data }]);
     assert.equal(isPermissionRevocationShape(callData, ACCOUNT), true);
   });
@@ -129,5 +135,15 @@ describe("revocation relay scope", () => {
     // bytes32 mode starts immediately after the execute selector; byte 1 is execution type.
     const tryMode = `${encoded.slice(0, 12)}01${encoded.slice(14)}` as Hex;
     assert.equal(isPermissionRevocationShape(tryMode, ACCOUNT), false);
+    assert.equal(isPermissionRevocationShape(`${encoded}00`, ACCOUNT), false, "outer trailing bytes are not canonical either");
+  });
+  it("rejects malformed or noncanonical direct calls without widening the selector allowlist", () => {
+    for (const bad of [
+      `${data}00`, data.slice(0, -2), `${data.slice(0, -1)}g`,
+      `0x1f1b92e3${"0".repeat(64)}`,
+      `0x1f1b92e3${"0".repeat(55)}100000000`,
+      `0x095ea7b3${"0".repeat(63)}2`,
+      encodeFunctionData({ abi: KERNEL_REVOCATION_ABI, functionName: "currentNonce" }),
+    ]) assert.equal(isPermissionRevocationShape(bad as Hex, ACCOUNT), false, bad);
   });
 });

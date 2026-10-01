@@ -33,7 +33,7 @@
  * wall.
  */
 
-import { decodeAbiParameters, decodeFunctionData, erc20Abi, type Hex } from "viem";
+import { decodeAbiParameters, decodeFunctionData, encodeFunctionData, erc20Abi, type Hex } from "viem";
 import { KERNEL_REVOCATION_ABI } from "./permission-revocation";
 
 /** Kernel v3 `execute(bytes32,bytes)`. */
@@ -55,20 +55,40 @@ const EXECUTE_USER_OP_SELECTOR = "0x8dd7712f";
 
 /**
  * The only non-withdrawal owner operation the recovery relay carries. One
- * self-call, no value, and no batch/try/delegate execution mode. The ticket's
- * account supplies the target; caller-provided metadata cannot widen it.
+ * self-call, no value, and no batch/try/delegate execution mode. Kernel's SDK
+ * emits a direct invalidateNonce call for a single call to the account itself;
+ * the wrapped execute form remains supported for older saved operations.
+ * A direct call targets the UserOperation sender, so the relay MUST bind that
+ * sender to the ticket before asking this parser (as the journal does too).
  */
 export function permissionRevocationNonce(callData: Hex, smartAccount: `0x${string}`): number | null {
   try {
+    const direct = directRevocationNonce(callData);
+    if (direct !== null) return direct;
     const decoded = decodeFunctionData({ abi: EXECUTE_ABI, data: callData });
     const [mode, execution] = decoded.args;
     if (mode !== `0x${"00".repeat(32)}`) return null;
+    // ABI decoders tolerate trailing bytes and noncanonical dynamic offsets.
+    // Only the exact encoding the SDK builds belongs on this narrow relay.
+    if (encodeFunctionData({ abi: EXECUTE_ABI, functionName: "execute", args: [mode, execution] }).toLowerCase() !== callData.toLowerCase()) return null;
     // packed address + value + invalidateNonce selector + one ABI word
     if (execution.length !== 2 + (20 + 32 + 4 + 32) * 2) return null;
     if (`0x${execution.slice(2, 42)}`.toLowerCase() !== smartAccount.toLowerCase()) return null;
     if (BigInt(`0x${execution.slice(42, 106)}`) !== 0n) return null;
-    const call = decodeFunctionData({ abi: KERNEL_REVOCATION_ABI, data: `0x${execution.slice(106)}` });
-    return call.functionName === "invalidateNonce" && call.args[0] > 0 ? call.args[0] : null;
+    return directRevocationNonce(`0x${execution.slice(106)}`);
+  } catch {
+    return null;
+  }
+}
+
+/** Exactly one positive uint32 argument: no other selector or extra bytes. */
+function directRevocationNonce(data: Hex): number | null {
+  if (!/^0x[0-9a-fA-F]{72}$/.test(data)) return null;
+  try {
+    const call = decodeFunctionData({ abi: KERNEL_REVOCATION_ABI, data });
+    if (call.functionName !== "invalidateNonce" || call.args[0] <= 0) return null;
+    const canonical = encodeFunctionData({ abi: KERNEL_REVOCATION_ABI, functionName: "invalidateNonce", args: [call.args[0]] });
+    return canonical.toLowerCase() === data.toLowerCase() ? call.args[0] : null;
   } catch {
     return null;
   }
