@@ -73,7 +73,8 @@ describe("a Privy agent can re-sign at all", () => {
     // has, by design — so the cohort CreateAgent mints had no re-sign path.
     assert.match(WALLET, /const resignBy: "owner-key" \| "privy" \| null/);
     assert.match(WALLET, /isPrivyOwned\(grant\) && privyOwner/);
-    assert.match(WALLET, /if \(!grant \|\| !resignBy \|\| renewing \|\| securityBusy \|\| !renewalAck \|\|/);
+    assert.match(WALLET, /if \(!grant \|\| !resignBy \|\| renewing \|\| securityBusy \|\| !renewalAck \|\| capsInputInvalid \|\|/,
+      "both owner types remain eligible, but invalid limits, missing consent or concurrent operations cannot sign");
     assert.match(WALLET, /createPrivyOwnedWallet\(privyOwner!\.account, privyOwner!\.did, options\)/);
   });
 

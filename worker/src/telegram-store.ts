@@ -47,6 +47,7 @@
 
 import type { Db } from "./db";
 import type { PollHealth } from "./telegram/state";
+import { conditionAlertTimes, restoredConditionAlerts } from "./telegram/condition-alert-state";
 
 export const TELEGRAM_STATE_DDL = `
   CREATE TABLE IF NOT EXISTS tenant_telegram (
@@ -62,6 +63,31 @@ export interface TenantTelegram {
   linkCode: string | null;
   ownerId: number | null;
   linkedAt: number | null;
+  /** Internal mirror input only; ordinary readTenantTelegram never returns it. */
+  firedAlerts?: Record<string, number>;
+}
+
+// Added independently of the link columns so an older schema still restores links.
+// The recipient sits inside the same value as its cooldowns: a partial publish
+// that changes owner_id cannot make the previous owner's alerts suppress theirs.
+export const TELEGRAM_CONDITION_ALERTS_DDL = "ALTER TABLE tenant_telegram ADD COLUMN condition_alerts TEXT";
+
+export async function readTenantConditionAlerts(db: Db, tenant: string, ownerId: number | null): Promise<Record<string, number>> {
+  try {
+    const row = await db.prepare("SELECT condition_alerts FROM tenant_telegram WHERE tenant = ?")
+      .get(tenant.toLowerCase()) as { condition_alerts: string | null } | undefined;
+    return restoredConditionAlerts(JSON.parse(row?.condition_alerts ?? "null"), ownerId);
+  } catch {
+    // A missing migration or unreadable optional state must not lose the link.
+    return {};
+  }
+}
+
+export async function publishTenantConditionAlerts(db: Db, tenant: string, state: TenantTelegram): Promise<void> {
+  const ownerId = Number.isSafeInteger(state.ownerId) && state.ownerId !== null && state.ownerId > 0 ? state.ownerId : null;
+  const value = ownerId === null ? null : JSON.stringify({ ownerId, firedAlerts: conditionAlertTimes(state.firedAlerts) });
+  await db.prepare("UPDATE tenant_telegram SET condition_alerts = ? WHERE tenant = ? AND (owner_id = ? OR (owner_id IS NULL AND ? = 1))")
+    .run(value, tenant.toLowerCase(), state.ownerId, state.ownerId === null ? 1 : 0);
 }
 
 /**
@@ -235,7 +261,7 @@ export const TELEGRAM_LIVENESS_DDL: readonly string[] = [
 
 /**
  * EVERYTHING THE ORCHESTRATOR NEEDS OF tenant_telegram, IN ONE PLACE: the
- * table, then hold_notified, then the liveness columns. The mirror pass runs
+ * table, hold_notified, the liveness columns and condition cooldowns. The mirror pass runs
  * it on its own clock and sendHoldNotice runs it before a notice
  * (orchestrator.ts), and telegram-fix.postgres.test.ts races it, so the
  * sequence a boot issues is the sequence that is tested.
@@ -250,7 +276,7 @@ export const TELEGRAM_LIVENESS_DDL: readonly string[] = [
 export async function ensureTelegramSchema(db: Db): Promise<unknown[]> {
   await db.exec(TELEGRAM_STATE_DDL);
   const failed: unknown[] = [];
-  for (const ddl of [TELEGRAM_HOLD_NOTIFIED_DDL, ...TELEGRAM_LIVENESS_DDL]) {
+  for (const ddl of [TELEGRAM_HOLD_NOTIFIED_DDL, ...TELEGRAM_LIVENESS_DDL, TELEGRAM_CONDITION_ALERTS_DDL]) {
     try {
       await db.exec(ddl);
     } catch (e) {
@@ -321,13 +347,15 @@ export async function publishTelegramLiveness(db: Db, tenant: string, l: TenantT
 
 /**
  * PUBLISH ONE TENANT'S ROW: the code and the owner, then the liveness
- * columns, in two statements.
+ * columns and optional condition cooldowns, in independent statements.
  *
  * The first throws as it always did. The second's failure is RETURNED, not
  * thrown: if these columns are missing (an ALTER that could not run), the
  * code and the owner must still be published, and they would not be if one
  * statement carried both. The web reads a row without them the old way
  * (web lib/telegram-runtime.ts TELEGRAM_RUNTIME_LEGACY_SQL).
+ * Cooldowns also fail independently: an unavailable migration must not drop
+ * a link or claim that a bot's successful polling failed.
  */
 export async function publishTelegramRuntime(
   db: Db,
@@ -336,12 +364,20 @@ export async function publishTelegramRuntime(
   liveness: TenantTelegramLiveness,
 ): Promise<Error | null> {
   await publishTenantTelegram(db, tenant, state);
+  let failed: Error | null = null;
   try {
     await publishTelegramLiveness(db, tenant, liveness);
-    return null;
   } catch (e) {
-    return e instanceof Error ? e : new Error(String(e));
+    failed = e instanceof Error ? e : new Error(String(e));
   }
+  if (state.firedAlerts !== undefined) {
+    try {
+      await publishTenantConditionAlerts(db, tenant, state);
+    } catch (e) {
+      failed ??= e instanceof Error ? e : new Error(String(e));
+    }
+  }
+  return failed;
 }
 
 /**

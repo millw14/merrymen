@@ -735,6 +735,11 @@ export default function GrantPage() {
   const [capText, setCapText] = useState<Partial<Record<keyof GrantCaps, string>>>({});
   const [capError, setCapError] = useState("");
   const capShown = (k: keyof GrantCaps) => capText[k] ?? String(caps[k]);
+  // Validate every displayed cap, including an invalid legacy grant loaded
+  // untouched. Raw edits also cannot renew using a last-valid hidden number.
+  const capsInputInvalid = (Object.keys(CAP_FIELDS) as (keyof GrantCaps)[]).some(key =>
+    !parseAmount(capShown(key), CAP_FIELDS[key]).ok,
+  );
   const set = (k: keyof GrantCaps) => (e: React.ChangeEvent<HTMLInputElement>) => {
     const raw = e.target.value;
     setCapText((t) => ({ ...t, [k]: raw }));
@@ -1029,7 +1034,7 @@ export default function GrantPage() {
   }
 
   async function renewKey() {
-    if (!grant || !resignBy || renewing || securityBusy || !renewalAck ||
+    if (!grant || !resignBy || renewing || securityBusy || !renewalAck || capsInputInvalid ||
         (chainId === MAINNET && grant.chainId !== MAINNET && !mainnetAck)) return;
     let stopped = false;
     let revoked = false;
@@ -2369,7 +2374,21 @@ export default function GrantPage() {
                         <span className="field-unit">days</span>
                       </span>
                     </label>
+                    <label className="field">
+                      <span className="field-label">drawdown limit</span>
+                      <span className="field-input">
+                        <input type="text" inputMode="numeric" value={capShown("maxDrawdownPct")}
+                          onChange={set("maxDrawdownPct")} disabled={renewing}
+                          aria-invalid={!parseAmount(capShown("maxDrawdownPct"), CAP_FIELDS.maxDrawdownPct).ok} />
+                        <span className="field-unit">%</span>
+                      </span>
+                      <small>
+                        New buys pause when drawdown is at or above this percentage below the account&apos;s recorded peak. Selling remains allowed by this limit.
+                        Raising it allows a larger loss before buys pause; it does not recover losses or reset the peak. Choose a whole percentage from 1 to 50.
+                      </small>
+                    </label>
                   </div>
+                  {capsInputInvalid && <p className="grant-cap-error" role="alert">{capError || "Enter valid limits before signing."}</p>}
                   {/*
                     MOVING A KEY BETWEEN CHAINS, as a first-class action.
 
@@ -2468,7 +2487,7 @@ export default function GrantPage() {
                     className="grant-btn"
                     style={{ marginTop: 10, width: "100%" }}
                     onClick={() => void renewKey()}
-                    disabled={renewing || securityBusy || !renewalAck || (chainId === MAINNET && grant.chainId !== MAINNET && !mainnetAck)}
+                    disabled={renewing || securityBusy || !renewalAck || capsInputInvalid || (chainId === MAINNET && grant.chainId !== MAINNET && !mainnetAck)}
                   >
                     {renewing
                       ? "re-signing…"

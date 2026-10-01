@@ -910,6 +910,12 @@ test("describeRule, classifyEvent and parseRailNotice keep their vocabularies", 
   assert.equal(weird.key, "unrecognised");
   assert.equal(weird.detail_withheld, true);
   assert.equal(describeRule(null, "landed"), null);
+  const drawdown = describeRule("drawdown-breaker", "rejected")!.remedy!;
+  assert.match(drawdown, /drawdown is at or above the signed limit/);
+  assert.match(drawdown, /Drawdown must fall below that limit/);
+  assert.match(drawdown, /\/grant#resign/);
+  assert.match(drawdown, /Renewing it unchanged does not clear/);
+  assert.doesNotMatch(drawdown, /wider|higher|exits still run/);
   // A failed Brain run is counted from its decision row; the event is reported apart.
   assert.equal(classifyEvent("brain unreachable: fetch failed"), "brain_failure");
   assert.equal(classifyEvent("strategist driver failed: 401"), "provider_failure");

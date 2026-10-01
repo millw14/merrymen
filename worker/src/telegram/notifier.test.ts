@@ -210,20 +210,18 @@ test("a TRIPPED breaker gets its own message, not the same warning as 2.5%", () 
   assert.match(warn, /drawdown warning/);
 });
 
-test("the halt message says what CLEARS it, because waiting does not", () => {
-  // The high-water mark is a one-way ratchet on equity (`setAgentHwm` is
-  // MAX(hwm, ?)), so sitting still never lowers the reference. An owner told
-  // only "you are in drawdown" will reasonably wait for a recovery that the
-  // arithmetic does not provide.
+test("the halt message describes recovery inside the signed limit without recommending a wider one", () => {
   const block = NOTIFIER.slice(NOTIFIER.indexOf("drawdown-halted:"));
   const body = block.slice(0, block.indexOf("`,\n        );"));
   assert.match(body, /high-water mark/, "names the reference");
-  assert.match(body, /\/grant/, "re-signing a wider limit");
-  assert.match(body, /ratchets up/, "and why waiting alone is not a remedy");
-  assert.match(body, /[Nn]othing is broken/, "correct behaviour must not read as a fault");
+  assert.match(body, /\/grant#resign/, "where the owner can review the current limit");
+  assert.match(body, /Drawdown must fall below/, "policy clears strictly inside the cap");
+  assert.match(body, /full recovery to the high-water mark is not required/);
+  assert.match(body, /Renewing an unchanged limit does not clear/);
+  assert.doesNotMatch(body, /re-signing a wider|Nothing is broken|exits are unaffected/);
   // Exits are exempt in policy.ts, so the message must not claim trading has
   // stopped outright — an owner who believes they cannot sell may panic.
-  assert.match(body, /still SELL|exits are unaffected/i, "selling is still allowed and must be said");
+  assert.match(body, /drawdown rule still permits SELL attempts/, "exemption is only from this rule, not a guarantee of execution");
 });
 
 test("the halt key carries the cap, so re-signing and still halting re-alerts", () => {

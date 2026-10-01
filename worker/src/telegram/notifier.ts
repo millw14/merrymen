@@ -6,7 +6,7 @@
  * OWNER's chat (the /link claimant):
  *   - trade pings the moment a row lands in the trades table
  *   - condition alerts: grant expiring, drawdown nearing the breaker, low gas —
- *     deduped per episode so one bad hour doesn't spam
+ *     rate limited to one reminder per six hours
  *   - user price alerts (one-shot, crossing-edge triggered; prices are pushed
  *     in from the tick via publishPrices — the notifier never reads the chain)
  *   - the daily campfire report at the configured hour
@@ -45,7 +45,7 @@ import { bookAddresses } from "../custody";
 import { mainnetClient } from "../snapshot";
 import { labelText, nonCashLeg, sideOf, tokenLabel } from "../token-label";
 import { ENERGY_BUY_KIND, ENERGY_LABEL, dollars, isEnergyRow } from "./trade-rows";
-import type { StateRef, Watcher } from "./state";
+import { tokenTagOf, type StateRef, type Watcher } from "./state";
 
 /**
  * The energy fields (`energy`, `energyAccount`, `energyChainId`,
@@ -125,6 +125,7 @@ export interface NotifierDeps {
 const LOOP_GAP_MS = 15_000;
 const IDLE_GAP_MS = 30_000;
 const CONDITION_COOLDOWN_SEC = 6 * 3600;
+const CONDITION_RETRY_SEC = 30 * 60;
 /** How soon a sign prompt Telegram refused is tried again. */
 const SIGN_RETRY_SEC = 30 * 60;
 const LOW_GAS_WEI = 500_000_000_000_000n; // 0.0005 native — a few trades left
@@ -502,6 +503,7 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
   let latestPrices: Map<string, number> = new Map();
   /** A refused energy alert, and when it may be tried again (energy-alert.ts). In memory: a restart just tries now. */
   let energyRetry: { key: string; at: number } | null = null;
+  const conditionRetry = new Map<string, number>();
 
   const pass = async (): Promise<void> => {
     const cfg = deps.getCfg();
@@ -619,13 +621,28 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       }
     }
 
-    // ── condition alerts (deduped per episode) ─────────────────────────────
+    // ── condition alerts (six-hour reminders) ──────────────────────────────
     const inputs = deps.getAlertInputs();
+    const conditionRecipientCurrent = () => {
+      const currentCfg = deps.getCfg();
+      return !stopped && deps.stateRef.get().ownerId === chatId
+        && currentCfg.telegramEnabled && currentCfg.telegramNotifyEnabled
+        && currentCfg.telegramBotToken === token;
+    };
     const fire = async (key: string, message: string): Promise<void> => {
+      if (!conditionRecipientCurrent()) return;
       const st = deps.stateRef.get();
       const last = st.firedAlerts[key] ?? 0;
       if (now() - last < CONDITION_COOLDOWN_SEC) return;
-      await sendMessage({ token }, chatId, message);
+      const retryKey = `${tokenTagOf(token)}:${chatId}:${key}`;
+      if (now() < (conditionRetry.get(retryKey) ?? 0)) return;
+      const sent = await sendMessage({ token }, chatId, message);
+      if (!conditionRecipientCurrent()) return;
+      if (!sent.ok) {
+        conditionRetry.set(retryKey, now() + CONDITION_RETRY_SEC);
+        return;
+      }
+      conditionRetry.delete(retryKey);
       // THE KEY ONLY, NEVER THE MESSAGE. An alert that fires invisibly cannot
       // be verified by anyone: asked whether an owner had actually been told,
       // there was nothing to look at but the absence of a complaint. The key
@@ -636,6 +653,7 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
       // the old copy back would undo it, and a rolled-back offset makes
       // Telegram deliver the same messages, and run the same commands, twice.
       const fresh = deps.stateRef.get();
+      if (fresh.ownerId !== chatId) return;
       deps.stateRef.set({ ...fresh, firedAlerts: { ...fresh.firedAlerts, [key]: now() } });
     };
 
@@ -723,11 +741,9 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
     // the only thing its owner ever saw was the same "drawdown warning" they
     // had already read at 2.5%.
     //
-    // The halt message must also say what CLEARS it, because the answer is not
-    // obvious: the high-water mark is a one-way ratchet on equity, so waiting
-    // does nothing on its own — either equity recovers past the mark, or the
-    // cap is re-signed higher. Exits are exempt throughout, which is why this
-    // says "buying" and not "trading".
+    // Match policy.ts: a drawdown strictly below the signed limit clears this
+    // rule; full recovery to the peak is not required. Renewing the same cap
+    // cannot clear it, and the alert must not recommend relaxing risk limits.
     if (inputs.drawdownBps !== null && inputs.breakerBps !== null && inputs.breakerBps > 0) {
       if (inputs.drawdownBps >= inputs.breakerBps) {
         await fire(
@@ -736,10 +752,11 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
           `drawdown-halted:${inputs.breakerBps}`,
           `🛑 I have <b>stopped buying</b>. You are ${(inputs.drawdownBps / 100).toFixed(1)}% below your high-water mark ` +
             `and your breaker trips at ${(inputs.breakerBps / 100).toFixed(1)}% — so every entry I propose is being turned back, ` +
-            `and will be until this clears. Nothing is broken; this is the drawdown limit doing its job. ` +
-            `I can still SELL, so exits are unaffected. Two things clear it: equity recovering back above the ` +
-            `high-water mark, or re-signing a wider drawdown limit at the dashboard <b>/grant</b>. ` +
-            `Waiting alone will not — the high-water mark only ever ratchets up.`,
+            `and will be until this clears. This drawdown rule still permits SELL attempts. ` +
+            `Drawdown must fall below ${(inputs.breakerBps / 100).toFixed(1)}% for this blocker to clear; ` +
+            `full recovery to the high-water mark is not required. ` +
+            `Review your signed drawdown limit: ${esc(dashboardBase())}/grant#resign. ` +
+            `Renewing an unchanged limit does not clear the drawdown. If the recorded balances look wrong, ask support to check the accounting.`,
         );
       } else if (inputs.drawdownBps >= inputs.breakerBps / 2) {
         await fire(

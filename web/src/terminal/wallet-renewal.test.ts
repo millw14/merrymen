@@ -3,7 +3,7 @@ import Module, { createRequire } from "node:module";
 import { afterEach, before, beforeEach, describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import React, { act } from "react";
-import { bindingMessage, WALL_TOO_WIDE, type StoredGrant } from "@merrymen/core";
+import { bindingMessage, WALL_TOO_WIDE, type GrantCaps, type StoredGrant } from "@merrymen/core";
 import type { SavedWallet } from "@/lib/session";
 import { JSDOM } from "jsdom";
 import { privateKeyToAccount } from "viem/accounts";
@@ -21,14 +21,14 @@ const grant = {
   sessionKeyAddress: `0x${"2".repeat(40)}`,
   demoOwnerPrivateKey: `0x${"3".repeat(64)}`,
   chainId: 4663,
-  caps: { perTradeUsdg: 50, dailyUsdg: 500, expiryDays: 14, maxDrawdownPct: 10, maxOpsPerDay: 48 },
+  caps: { perTradeUsdg: 50, dailyUsdg: 500, expiryDays: 14, maxDrawdownPct: 5, maxOpsPerDay: 48 },
   grantedAt: Math.floor(Date.now() / 1000),
   expiresAt: Math.floor(Date.now() / 1000) + 14 * 86_400,
   grantTokens: [],
   grantFeatures: [],
 } as unknown as StoredGrant;
 const tooWide = `${WALL_TOO_WIDE}: installing it would need about 15,980,519 gas against a limit of 14,000,000. You have 20 custom tokens; the most that fits with the features you have enabled is 17. Remove at least 3 custom tokens, then sign again.`;
-let renew: (options: { onStatus: (status: string) => void; chainId?: number; expectAccount?: string }) => Promise<unknown>;
+let renew: (options: { caps: GrantCaps; onStatus: (status: string) => void; chainId?: number; expectAccount?: string }) => Promise<unknown>;
 type RevocationWallet = { ownerKey?: string; smartAccount: string; chainId: number };
 let revoke: (wallet: RevocationWallet) => Promise<unknown>;
 let revokeWallets: RevocationWallet[] = [];
@@ -103,6 +103,7 @@ beforeEach(() => {
   revoke = async () => ({ transactionHash: `0x${"4".repeat(64)}` });
   previewOwner = async () => ({ smartAccount: address, owner: address });
   stop = async () => {};
+  renew = async () => { throw new Error("Unexpected signing request"); };
   Object.defineProperty(ui.dom.window.HTMLElement.prototype, "scrollIntoView", { configurable: true, value() {} });
   localStorage.setItem("merrymen.grant.backedup.v1", "1");
   globalThis.fetch = async (input) => {
@@ -134,7 +135,156 @@ async function enterRestoreKey(key = grant.demoOwnerPrivateKey!) {
   return input;
 }
 
+function renewalButton(): HTMLButtonElement {
+  const button = [...ui.container.querySelectorAll<HTMLButtonElement>("#resign button")]
+    .find(button => button.textContent?.trim() === "revoke earlier permissions & re-sign");
+  assert.ok(button, "the permission renewal action is available");
+  return button;
+}
+
+function renewalInput(label: string): HTMLInputElement {
+  const field = [...ui.container.querySelectorAll("#resign .field")]
+    .find(element => element.querySelector(".field-label")?.textContent === label);
+  const input = field?.querySelector("input");
+  assert.ok(input, `renewal field ${label}`);
+  return input;
+}
+
+async function type(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(ui.dom.window.HTMLInputElement.prototype, "value")!.set!;
+  await act(async () => {
+    setter.call(input, value);
+    input.dispatchEvent(new ui.dom.window.Event("input", { bubbles: true }));
+  });
+}
+
 describe("the funded wallet's re-sign control", () => {
+  for (const [key, label] of [
+    ["maxDrawdownPct", "drawdown limit"],
+    ["perTradeUsdg", "most it can spend on one trade"],
+    ["dailyUsdg", "most it can spend in a day"],
+    ["expiryDays", "auto-expire the agent after"],
+    ["maxOpsPerDay", "most trades per day"],
+  ] as const) {
+    it(`blocks an untouched zero ${key} from a legacy grant until its owner corrects it`, async () => {
+      activeGrant = { ...grant, caps: { ...grant.caps, [key]: 0 } };
+      let signedCaps: GrantCaps | undefined;
+      renew = async ({ caps }) => {
+        signedCaps = structuredClone(caps);
+        return { local: { ...activeGrant, caps }, handoff: { ok: true } };
+      };
+      await ui.render(React.createElement(Wallet));
+      await acknowledge("I authorize revoking");
+      assert.equal(renewalInput(label).value, "0", "the loaded limit is displayed without automatic repair");
+      assert.equal(renewalButton().disabled, true);
+      assert.ok(ui.container.querySelector('#resign [role="alert"]'));
+      await ui.click("revoke earlier permissions & re-sign");
+      assert.equal(signedCaps, undefined, "an untouched invalid cap must never reach the signer");
+      assert.equal(stopCalls, 0, "invalid caps must not stop the current permission");
+      assert.equal(revokeCalls, 0, "invalid caps must not spend fees revoking the current permission");
+      await type(renewalInput(label), String(grant.caps[key]));
+      assert.equal(signedCaps, undefined, "the owner's correction still requires an explicit signature");
+      assert.equal(renewalButton().disabled, false);
+      await ui.click("revoke earlier permissions & re-sign");
+      assert.deepEqual(signedCaps, grant.caps, "only the owner-corrected cap changes");
+    });
+  }
+
+  it("requires an explicit value for a missing legacy cap instead of inserting a default", async () => {
+    const legacyCaps: Partial<GrantCaps> = { ...grant.caps };
+    delete legacyCaps.maxOpsPerDay;
+    activeGrant = { ...grant, caps: legacyCaps as GrantCaps };
+    let signedCaps: GrantCaps | undefined;
+    renew = async ({ caps }) => {
+      signedCaps = structuredClone(caps);
+      return { local: { ...activeGrant, caps }, handoff: { ok: true } };
+    };
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    assert.equal(renewalButton().disabled, true);
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.equal(signedCaps, undefined);
+    assert.equal(stopCalls, 0);
+    assert.equal(revokeCalls, 0);
+    await type(renewalInput("most trades per day"), "24");
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.deepEqual(signedCaps, { ...grant.caps, maxOpsPerDay: 24 });
+  });
+
+  it("shows and preserves the existing 5% drawdown limit when renewing without changes", async () => {
+    let signedCaps: GrantCaps | undefined;
+    renew = async ({ caps }) => {
+      signedCaps = structuredClone(caps);
+      return { local: { ...grant, caps }, handoff: { ok: true } };
+    };
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    assert.equal(renewalInput("drawdown limit").value, "5");
+    assert.match(ui.container.querySelector("#resign")!.textContent!, /at or above/);
+    assert.match(ui.container.querySelector("#resign")!.textContent!, /Raising it allows a larger loss/);
+    assert.equal(signedCaps, undefined, "loading the form never signs");
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.deepEqual(signedCaps, grant.caps);
+    await ui.click("Edit permissions again");
+    assert.equal(renewalInput("drawdown limit").value, "5");
+  });
+
+  it("shows an explicit owner's drawdown edit before signing exactly that choice", async () => {
+    let signedCaps: GrantCaps | undefined;
+    renew = async ({ caps }) => {
+      signedCaps = structuredClone(caps);
+      return { local: { ...grant, caps }, handoff: { ok: true } };
+    };
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    await type(renewalInput("drawdown limit"), "8");
+    assert.equal(signedCaps, undefined, "editing does not sign or submit");
+    assert.match(ui.container.querySelector("#resign")!.textContent!, /breaker 5 % → 8 %/);
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.deepEqual(signedCaps, { ...grant.caps, maxDrawdownPct: 8 });
+    assert.match(ui.container.textContent!, /Permission renewed/);
+  });
+
+  it("refuses blank, non-numeric, fractional, zero and over-maximum drawdown edits", async () => {
+    let signs = 0;
+    renew = async ({ caps }) => {
+      signs++;
+      return { local: { ...grant, caps }, handoff: { ok: true } };
+    };
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    for (const invalid of ["", "oops", "5.5", "0", "51"]) {
+      await type(renewalInput("drawdown limit"), invalid);
+      assert.equal(renewalInput("drawdown limit").value, invalid, "raw text stays visible");
+      assert.equal(renewalInput("drawdown limit").getAttribute("aria-invalid"), "true");
+      const button = renewalButton();
+      assert.equal(button.disabled, true, `cannot sign invalid ${JSON.stringify(invalid)}`);
+      assert.ok(ui.container.querySelector('#resign [role="alert"]'));
+      await ui.click("revoke earlier permissions & re-sign");
+      assert.equal(signs, 0, "never substitutes the previous valid number into a signature");
+      assert.equal(stopCalls, 0, "invalid edits do not stop the existing permission");
+      assert.equal(revokeCalls, 0, "invalid edits do not prompt revocation or spend fees");
+    }
+    await type(renewalInput("drawdown limit"), "4");
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.equal(signs, 1, "a valid lower owner-chosen limit can be signed");
+  });
+
+  it("keeps an invalid limit blocked when another field receives a valid edit", async () => {
+    let signs = 0;
+    renew = async () => { signs++; return { local: grant, handoff: { ok: true } }; };
+    await ui.render(React.createElement(Wallet));
+    await acknowledge("I authorize revoking");
+    await type(renewalInput("drawdown limit"), "51");
+    await type(renewalInput("most it can spend on one trade"), "25");
+    assert.equal(renewalButton().disabled, true);
+    assert.ok(ui.container.querySelector('#resign [role="alert"]'));
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.equal(signs, 0);
+    assert.equal(stopCalls, 0);
+    assert.equal(revokeCalls, 0);
+  });
+
   it("does not call a 500 response a discarded wallet, and recovers on retry", async () => {
     let unavailable = true;
     savedWallets = [{ smartAccount: address, owner: address, chainId: 4663,

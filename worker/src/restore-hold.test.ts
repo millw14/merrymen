@@ -24,6 +24,7 @@ import { describe, it } from "node:test";
 import ts from "typescript";
 import { wrapSqlite } from "./db";
 import {
+  TELEGRAM_CONDITION_ALERTS_DDL,
   TELEGRAM_HOLD_NOTIFIED_DDL,
   TELEGRAM_LIVENESS_DDL,
   TELEGRAM_STATE_DDL,
@@ -513,12 +514,17 @@ describe("the durable notice record", () => {
     try {
       assert.deepEqual(await ensureTelegramSchema(db), [], "a fresh database: the table and every column, nothing failed");
       const cols = (raw.prepare("PRAGMA table_info(tenant_telegram)").all() as { name: string }[]).map((c) => c.name);
-      for (const c of ["hold_notified", "bot_id", "poll_ok_at", "poll_err", "poll_err_at", "child_state"]) assert.ok(cols.includes(c), c);
+      for (const c of ["hold_notified", "bot_id", "poll_ok_at", "poll_err", "poll_err_at", "child_state", "condition_alerts"]) assert.ok(cols.includes(c), c);
       await db.prepare("INSERT INTO tenant_telegram (tenant, owner_id, updated_at) VALUES (?, ?, 0)").run("0xabc", 4242);
       // sqlite's ADD COLUMN has no IF NOT EXISTS: each ALTER fails, and is handed back, not thrown.
       const again = await ensureTelegramSchema(db);
-      assert.equal(again.length, 1 + TELEGRAM_LIVENESS_DDL.length);
+      const migrations = [TELEGRAM_HOLD_NOTIFIED_DDL, ...TELEGRAM_LIVENESS_DDL, TELEGRAM_CONDITION_ALERTS_DDL];
+      assert.equal(again.length, migrations.length);
       assert.ok(again.every((e) => /duplicate column/i.test(String(e))), again.map(String).join("; "));
+      for (const ddl of migrations) {
+        const column = /ADD COLUMN (\w+)/.exec(ddl)?.[1];
+        assert.ok(column && again.some((e) => String(e).includes(column)), `duplicate-column result for ${column}`);
+      }
       assert.equal((raw.prepare("SELECT COUNT(*) AS n FROM tenant_telegram").get() as { n: number }).n, 1, "and the rows survive it");
     } finally {
       raw.close();

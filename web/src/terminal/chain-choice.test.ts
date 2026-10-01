@@ -96,8 +96,8 @@ describe("the re-sign button's promise reaches the screen it opens", () => {
     // real money, which is a worse bug than the one being fixed.
     assert.match(
       SRC,
-      /disabled=\{renewing \|\| securityBusy \|\| !renewalAck \|\| \(chainId === MAINNET && grant\.chainId !== MAINNET && !mainnetAck\)\}/,
-      "the acknowledgement gate must survive",
+      /disabled=\{renewing \|\| securityBusy \|\| !renewalAck \|\| capsInputInvalid \|\| \(chainId === MAINNET && grant\.chainId !== MAINNET && !mainnetAck\)\}/,
+      "fee consent, cap validation, operation locking and real-funds acknowledgment must survive",
     );
     assert.match(SRC, /checked=\{chainId !== grant\.chainId\}/, "and the move stays visible as a tick");
   });
