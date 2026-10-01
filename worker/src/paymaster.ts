@@ -110,9 +110,24 @@ export interface Sponsor {
   };
 }
 
+/** A missing paymaster would make viem prepare a self-paid operation. */
+function sponsoredFields(r: Record<string, unknown>, final: boolean) {
+  if (typeof r.paymaster !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(r.paymaster) || /^0x0{40}$/i.test(r.paymaster)) {
+    throw new SponsorRefused("sponsor-refused", "the gas sponsor returned no valid paymaster. Refusing to charge the owner's ETH instead.");
+  }
+  // An estimation stub may contain empty bytes. Pimlico's final verifying
+  // paymaster response must include its authorisation, including on isFinal.
+  if (typeof r.paymasterData !== "string" || !/^0x(?:[0-9a-fA-F]{2})*$/.test(r.paymasterData) || (final && r.paymasterData === "0x")) {
+    throw new SponsorRefused("sponsor-refused", "the gas sponsor returned invalid or missing sponsorship data. Nothing will be sent.");
+  }
+  return { paymaster: r.paymaster as `0x${string}`, paymasterData: r.paymasterData as `0x${string}` };
+}
+
 /** Build the sponsor. `url` is Pimlico's — the same endpoint as the bundler. */
-export function createSponsor(opts: { url: string; policyId?: string }): Sponsor {
-  const pm = createPaymasterClient({ transport: http(opts.url) });
+export function createSponsor(opts: { url: string; policyId?: string; credentials?: RequestCredentials }): Sponsor {
+  const pm = createPaymasterClient({
+    transport: http(opts.url, opts.credentials ? { fetchOptions: { credentials: opts.credentials } } : undefined),
+  });
 
   const clamp = (label: string, v: bigint): bigint => {
     if (v > PAYMASTER_GAS_MAX) {
@@ -141,11 +156,11 @@ export function createSponsor(opts: { url: string; policyId?: string }): Sponsor
     }
     const verification = asBigint(r.paymasterVerificationGasLimit) ?? PAYMASTER_VERIFICATION_GAS;
     const postOp = asBigint(r.paymasterPostOpGasLimit) ?? PAYMASTER_POSTOP_GAS;
+    const sponsored = sponsoredFields(r, r.isFinal === true);
     // BOTH fields, ALWAYS present. Either one missing sends viem back to the
     // bundler for a fresh estimate of both, and the numbers stop being ours.
     return {
-      paymaster: r.paymaster,
-      paymasterData: r.paymasterData,
+      ...sponsored,
       paymasterVerificationGasLimit: clamp("paymasterVerificationGasLimit", verification),
       paymasterPostOpGasLimit: clamp("paymasterPostOpGasLimit", postOp),
       ...(r.isFinal === true ? { isFinal: true as const } : {}),
@@ -168,9 +183,9 @@ export function createSponsor(opts: { url: string; policyId?: string }): Sponsor
     }
     const verification = asBigint(r.paymasterVerificationGasLimit);
     const postOp = asBigint(r.paymasterPostOpGasLimit);
+    const sponsored = sponsoredFields(r, true);
     return {
-      paymaster: r.paymaster,
-      paymasterData: r.paymasterData,
+      ...sponsored,
       ...(verification === undefined
         ? {}
         : { paymasterVerificationGasLimit: clamp("paymasterVerificationGasLimit", verification) }),

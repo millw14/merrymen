@@ -148,14 +148,14 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
                   try WalletCryptography.call("recoverAddress", .object(["hex": .string(hex), "signature": .string(signature)])).lowercased() == identity.lowercased() else { throw fail("The login wallet changed during authorization.") }
             return .string(signature)
         case "signMessage", "signTypedData":
-            guard !["plan", "preview"].contains(operation), args["address"].text.lowercased() == signingOwner.lowercased() else { throw fail("This operation cannot request that signature.") }
+            guard args["address"].text.lowercased() == signingOwner.lowercased() else { throw fail("This operation cannot request that signature.") }
             if !identity.isEmpty { try await store.verifyOwner(identity) }
             guard callID == runID else { throw fail("Wallet operation closed.") }
             if op == "signMessage" {
                 let hex = args["hex"].text
                 guard WalletSignaturePolicy.permitsPersonalSign(hex: hex, operation: operation, owner: signingOwner, did: did, expectedAccount: account, nonce: challengeNonce) else { throw fail("The wallet challenge does not match the action you reviewed.") }
             } else {
-                guard operation != "reconcile" else { throw fail("Receipt checks cannot sign spending permissions.") }
+                guard !["preview", "plan", "reconcile"].contains(operation) else { throw fail("Balance and fee checks cannot sign spending permissions.") }
                 let chain = args["typedData"]["domain"]["chainId"]
                 guard chain.number == 4663 || chain.string == "4663" else { throw fail("The signature names the wrong network.") }
             }

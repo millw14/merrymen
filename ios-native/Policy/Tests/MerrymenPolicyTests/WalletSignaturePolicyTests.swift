@@ -20,10 +20,25 @@ final class WalletSignaturePolicyTests: XCTestCase {
         func permits(_ text: String) -> Bool {
             WalletSignaturePolicy.permitsPersonalSign(hex: "0x" + text.utf8.map { String(format: "%02x", $0) }.joined(), operation: "reconcile", owner: owner, did: "did:privy:test", expectedAccount: owner, nonce: "test_nonce")
         }
-        let message = ["https://app.merrymen.dev — withdraw from your merrymen account.", "", "This proves you control the owner key so the site will relay your withdrawal.", "It moves no funds by itself and grants no permissions: the withdrawal itself", "is a separate operation you sign next.", "", "URI: https://app.merrymen.dev", "Nonce: test_nonce"].joined(separator: "\n")
+        let message = ["https://app.merrymen.dev — recover your merrymen account.", "", "This proves you control the owner key so the site can relay withdrawals and permission revocations.", "It moves no funds by itself and grants no permissions: each operation", "is a separate operation you sign next.", "", "URI: https://app.merrymen.dev", "Nonce: test_nonce"].joined(separator: "\n")
         XCTAssertTrue(permits(message))
         XCTAssertFalse(permits(message.replacingOccurrences(of: "test_nonce", with: "other_nonce")))
         XCTAssertFalse(permits("Approve my spending request"))
         XCTAssertFalse(WalletSignaturePolicy.permitsPersonalSign(hex: "0x" + String(repeating: "01", count: 32), operation: "reconcile", owner: owner, did: "did:privy:test", expectedAccount: owner, nonce: nil))
+    }
+
+    func testRecoveryPlanCanProveOwnershipWithoutSigningSpending() {
+        let owner = "0x1111111111111111111111111111111111111111"
+        let message = ["https://app.merrymen.dev — recover your merrymen account.", "", "This proves you control the owner key so the site can relay withdrawals and permission revocations.", "It moves no funds by itself and grants no permissions: each operation", "is a separate operation you sign next.", "", "URI: https://app.merrymen.dev", "Nonce: fee_check"].joined(separator: "\n")
+        for operation in ["preview", "plan"] {
+            func permits(_ text: String) -> Bool {
+                WalletSignaturePolicy.permitsPersonalSign(hex: "0x" + text.utf8.map { String(format: "%02x", $0) }.joined(), operation: operation, owner: owner, did: "", expectedAccount: owner, nonce: "fee_check")
+            }
+            XCTAssertTrue(permits(message))
+            XCTAssertFalse(permits(message.replacingOccurrences(of: "fee_check", with: "other")))
+            XCTAssertFalse(permits(message.replacingOccurrences(of: "app.merrymen.dev", with: "evil.test")))
+            XCTAssertFalse(permits("Approve the withdrawal"))
+            XCTAssertFalse(WalletSignaturePolicy.permitsPersonalSign(hex: "0x" + String(repeating: "01", count: 32), operation: operation, owner: owner, did: "", expectedAccount: owner, nonce: "fee_check"))
+        }
     }
 }

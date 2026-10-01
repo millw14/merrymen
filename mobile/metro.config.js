@@ -22,7 +22,8 @@ const base = config.resolver.resolveRequest;
  */
 const CORE = path.resolve(__dirname, "..", "packages", "core");
 const WORKER = path.resolve(__dirname, "..", "worker");
-config.watchFolders = [...(config.watchFolders ?? []), CORE, WORKER];
+const WEB = path.resolve(__dirname, "..", "web");
+config.watchFolders = [...(config.watchFolders ?? []), CORE, WORKER, WEB];
 config.resolver.extraNodeModules = {
   ...config.resolver.extraNodeModules,
   "@merrymen/core": path.join(CORE, "src"),

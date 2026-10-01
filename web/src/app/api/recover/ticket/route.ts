@@ -20,16 +20,16 @@
  *
  * WHAT THIS DELIBERATELY DOES NOT PROVE: that the account has ever existed on
  * this deployment. A stranger can generate keypairs in a loop and mint tickets
- * for accounts nobody has funded. That is why the relay tiers its quota on
- * whether we have actually SEEN the account rather than trusting the ticket
- * alone — the ticket bounds WHOSE operation may be relayed, not how much of the
- * house's bundler allowance a stranger may spend.
+ * for accounts nobody has funded. Sponsorship therefore checks whether we have
+ * actually SEEN the account rather than trusting the ticket alone. It requires
+ * durable account history plus the house policy;
+ * the ticket by itself never entitles its holder to sponsored gas.
  */
 
 import { NextResponse } from "next/server";
 import { createPublicClient, http, recoverMessageAddress } from "viem";
 import { consumeChallengeNonce, issueChallengeNonce, requestOrigin } from "@/lib/auth";
-import { deriveKernelAccountAddress } from "@/lib/derive-account";
+import { deriveKernelRecoveryAccount } from "@/lib/derive-account";
 import { mintTicket, recoveryChallengeMessage, TICKET_TTL_MS } from "@/lib/recovery-ticket";
 import {
   PONS_CLASS_VAULT_FACTORY,
@@ -97,10 +97,24 @@ export async function POST(req: Request) {
   // 0x0000...0000 would send a recovery sweep at an account nobody owns — the
   // relay's `sender === ticket.smartAccount` check would even pass for it.
   let smartAccount: `0x${string}`;
+  let sponsorship: import("@/lib/recovery-ticket").Ticket["sponsorship"];
   try {
-    const derived = await deriveKernelAccountAddress(owner, chainId);
+    const derived = await deriveKernelRecoveryAccount(owner, chainId);
     if (!derived.ok) return NextResponse.json({ error: derived.why }, { status: 502 });
     smartAccount = derived.address;
+    if (derived.factory && derived.factoryData) {
+      const accounts = [smartAccount];
+      // A destination account can be undeployed during migration. Its owner's
+      // source account is the durable enrollment proof, even after a kill.
+      for (const otherChain of KNOWN_CHAINS) {
+        if (otherChain === chainId) continue;
+        try {
+          const other = await deriveKernelRecoveryAccount(owner, otherChain);
+          if (other.ok && !accounts.some((a) => a.toLowerCase() === other.address.toLowerCase())) accounts.push(other.address);
+        } catch { /* Missing family proof declines sponsorship, never owner-funded recovery. */ }
+      }
+      sponsorship = { owner, factory: derived.factory, factoryData: derived.factoryData, accounts };
+    }
   } catch {
     return NextResponse.json({ error: "could not derive the account for that owner" }, { status: 502 });
   }
@@ -161,7 +175,7 @@ export async function POST(req: Request) {
   // so no other site can cause it to be sent; and short-lived by the ticket's
   // own expiry, which is what actually bounds it.
   const res = NextResponse.json({ smartAccount, expiresInMs: TICKET_TTL_MS });
-  res.cookies.set("merrymen_recovery", mintTicket({ smartAccount, chainId, classVaults }), {
+  res.cookies.set("merrymen_recovery", mintTicket({ smartAccount, chainId, classVaults, sponsorship }), {
     httpOnly: true,
     secure: true,
     sameSite: "strict",

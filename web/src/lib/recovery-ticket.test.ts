@@ -15,6 +15,16 @@ before(() => {
 });
 
 describe("recovery tickets", () => {
+  it("binds the owner, canonical deployment and migration family inside the HMAC", () => {
+    const sponsorship = { owner: ACCOUNT, factory: ACCOUNT, factoryData: "0x1234" as const, accounts: [ACCOUNT] };
+    const token = mintTicket({ smartAccount: ACCOUNT, chainId: 4663, classVaults: [], sponsorship });
+    assert.deepEqual(readTicket(token)?.sponsorship, sponsorship);
+    for (const patch of [{ owner: "0x1111111111111111111111111111111111111111" }, { factoryData: "0x1235" }, { accounts: [] }]) {
+      const parts = token.split(".");
+      parts[4] = Buffer.from(JSON.stringify({ ...sponsorship, ...patch })).toString("base64url");
+      assert.equal(readTicket(parts.join(".")), null);
+    }
+  });
   it("round-trips the account and chain it was minted for", () => {
     const t = readTicket(mintTicket({ smartAccount: ACCOUNT, chainId: 4663, classVaults: [] }));
     assert.ok(t);

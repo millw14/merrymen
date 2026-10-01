@@ -15,11 +15,15 @@ public enum WalletNetworkPolicy {
             if method == "GET", url.path == "/api/auth/challenge" { return url }
             if method == "POST", url.path == "/api/grants" { return url }
         }
-        if ["withdraw", "reconcile"].contains(operation) {
+        if ["preview", "plan", "withdraw", "reconcile"].contains(operation) {
             if url.path == "/api/recover/ticket", ["GET", "POST"].contains(method) { return url }
+            if url.path == "/api/bundler/4663", method == "GET", rpcMethod == nil { return url }
             let relayReads = ["eth_chainId", "eth_getUserOperationReceipt", "eth_getUserOperationByHash", "eth_estimateUserOperationGas", "pimlico_getUserOperationGasPrice"]
-            if url.path == "/api/bundler/4663", method == "POST", let rpcMethod,
-               relayReads.contains(rpcMethod) || (operation == "withdraw" && rpcMethod == "eth_sendUserOperation") { return url }
+            let sponsorMethods = ["pm_getPaymasterStubData", "pm_getPaymasterData"]
+            if url.path == "/api/bundler/4663", method == "POST", let rpcMethod {
+                if ["withdraw", "reconcile"].contains(operation), relayReads.contains(rpcMethod) { return url }
+                if operation == "withdraw", rpcMethod == "eth_sendUserOperation" || sponsorMethods.contains(rpcMethod) { return url }
+            }
         }
         return nil
     }

@@ -203,3 +203,21 @@ describe("the Energy concept", () => {
     assert.doesNotMatch(`${e.plain} ${e.because} ${e.confusable ?? ""}`, /price|returns?\b|(?<!take-)profit|invest|moon/i);
   });
 });
+
+describe("the sponsored trading concept", () => {
+  const sponsored = () => conceptsFor("gas sponsored").find((c) => c.term === "its trading fees are covered")!;
+
+  it("explains separate owner fee checks without requiring ETH for recovery", () => {
+    const concept = sponsored();
+    assert.ok(concept);
+    assert.match(concept.plain, /does not need ETH.*buy and sell/);
+    assert.match(concept.plain, /Withdrawal and permission changes check fee coverage separately before you sign/);
+    assert.match(concept.plain, /trading status alone does not confirm it/);
+    assert.doesNotMatch(`${concept.plain} ${concept.confusable ?? ""}`, /NOT covered|only needed to withdraw|withdraw.*needs.*ETH/i);
+  });
+
+  it("keeps the separate fee checks in the explanation supplied to chat", () => {
+    assert.match(renderConcepts([sponsored()]), /Withdrawal and permission changes check fee coverage separately/);
+    assert.match(renderConcepts([sponsored()]), /Trading fee coverage does not establish fee coverage for a separate owner operation/);
+  });
+});

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { TRENCHER_FACTORY } from "@/lib/trencher-permission";
 import { verifiedAdapter } from "@/lib/verified-adapter";
-import { revokeFromBrowser } from "@/lib/revoke-client";
+import { preflightRevocationFromBrowser, revokeFromBrowser } from "@/lib/revoke-client";
 import { stopAgent } from "@/lib/stop-agent";
 import { markPermissionForReplacement, needsPermissionReplacement } from "@/lib/permission-replacement";
 import { loadRecoveryGrants, saveRecoveryGrant, trustedSavedGrant } from "@/lib/saved-grant-binding";
@@ -913,6 +913,10 @@ export default function GrantPage() {
       };
       // The preview account is immutable for this operation; a changed input
       // cannot revoke one wallet and then sign for another.
+      if (previousGrant && previousGrant.chainId !== selectedChain) {
+        await preflightRevocationFromBrowser({ ownerKey, smartAccount: expectedAccount, chainId: previousGrant.chainId });
+      }
+      await preflightRevocationFromBrowser({ ownerKey, smartAccount: expectedAccount, chainId: selectedChain });
       if (previousGrant) {
         saveRecoveryGrant(previousGrant);
         markPermissionForReplacement(previousGrant);
@@ -1135,6 +1139,8 @@ export default function GrantPage() {
         resignBy === "privy" ? privyOwner!.account : privateKeyToAccount(grant.demoOwnerPrivateKey as `0x${string}`),
         options,
       );
+      await preflightRevocationFromBrowser(ownerWallet());
+      if (chainId !== grant.chainId) await preflightRevocationFromBrowser(ownerWallet(chainId));
       preflightPassed = true;
       // Invalidate first: a new grant signed before this receipt would carry
       // the old enable nonce and be invalidated along with the old permission.
@@ -1504,7 +1510,7 @@ export default function GrantPage() {
           <p>Stopping this service needs no wallet signature. Revocation is a separate owner-authorized transaction on {chainLabel(grant.chainId)} that invalidates earlier session keys, including copies. Your account and recovery access stay available.</p>
           <button className="copy-btn" disabled={securityBusy || renewing} onClick={() => void stopOrRevoke(false)}>Stop agent now</button>
           {resignBy ? <>
-            <label className="ack-row" style={{ marginTop: 12 }}><input type="checkbox" checked={revokeAck} disabled={securityBusy || renewing} onChange={e => setRevokeAck(e.target.checked)} /><span>I understand revocation uses ETH for network fees on this network and stops all earlier permissions for this account.</span></label>
+            <label className="ack-row" style={{ marginTop: 12 }}><input type="checkbox" checked={revokeAck} disabled={securityBusy || renewing} onChange={e => setRevokeAck(e.target.checked)} /><span>I understand this revokes all earlier permissions for this account on this network. Merrymen covers the network fees.</span></label>
             <button className="grant-btn" disabled={securityBusy || renewing || !revokeAck} onClick={() => void stopOrRevoke(true)}>{securityBusy ? "Checking…" : "Stop & revoke on-chain"}</button>
           </> : <p>Sign in as the owner or restore the recovery key to revoke on-chain. You can still stop the service now.</p>}
           {securityMessage && <p role="status">{securityMessage}</p>}
@@ -1855,20 +1861,19 @@ export default function GrantPage() {
                   This signs the limits shown above — <b>{caps.perTradeUsdg} USDG</b> a trade,{" "}
                   <b>{caps.dailyUsdg}</b> a day, key for <b>{caps.expiryDays} days</b>. Your old
                   limits lived in the key you lost, so nothing can read them back; set them here
-                  if they mattered. Revocation spends ETH for network fees; it does not move your trading balances.
+                  if they mattered. Merrymen covers the revocation fees. Your trading balances stay on their current networks.
                 </p>
                 {preview && <div className="grant-note" data-restore-funding style={{ marginTop: 12 }}>
-                  <b>ETH for revocation fees</b>
+                  <b>Network fees covered by Merrymen</b>
                   <p>Restore revokes earlier permissions on {restoreNetworks.length > 1 ? "both networks below, starting with the current network" : "the network below"} before signing a replacement. Fund this same account address on {restoreNetworks.length > 1 ? "each network" : "this network"}:</p>
                   <code style={{ display: "block", overflowWrap: "anywhere" }}>{preview.smartAccount}</code>
-                  <CopyBtn value={preview.smartAccount} label="copy restore funding address" />
+                  <CopyBtn value={preview.smartAccount} label="copy account address" />
                   <ul>{restoreNetworks.map(network => <li key={network}>
-                    <b>{network === MAINNET ? "Robinhood Chain" : "Robinhood Chain testnet"} ({network})</b>: send {network === TESTNET ? "testnet ETH" : "ETH"} for network fees.
+                    <b>{network === MAINNET ? "Robinhood Chain" : "Robinhood Chain testnet"} ({network})</b>: Merrymen covers the network fees.
                   </li>)}</ul>
-                  {restoreNetworks.includes(TESTNET) && <p><a href={FAUCET_URL} target="_blank" rel="noreferrer">Get testnet ETH from the faucet ↗</a>, then send it to the account above on testnet.</p>}
-                  <p>Balances do not move between networks. Revocation needs ETH even when trading gas is sponsored; an empty destination account also needs ETH. If you see AA21 or an insufficient-funds error, fund the named network and retry here.</p>
+                  <p>Balances stay on their current networks. Gas coverage is checked before replacement starts, including for an empty destination account. If coverage is unavailable, retry once the service restores it.</p>
                 </div>}
-                <label className="ack-row"><input type="checkbox" checked={restoreRevocationAck} disabled={status !== null} onChange={e => setRestoreRevocationAck(e.target.checked)} /><span>I understand restore first stops the service and revokes earlier permissions on {restoreNetworks.map(network => network === MAINNET ? "Robinhood Chain (4663)" : "Robinhood Chain testnet (46630)").join(" and ")}. The account needs ETH for network fees on {restoreNetworks.length > 1 ? "both networks" : "this network"} before a new permission can be signed.</span></label>
+                <label className="ack-row"><input type="checkbox" checked={restoreRevocationAck} disabled={status !== null} onChange={e => setRestoreRevocationAck(e.target.checked)} /><span>I understand restore first stops the service and revokes earlier permissions on {restoreNetworks.map(network => network === MAINNET ? "Robinhood Chain (4663)" : "Robinhood Chain testnet (46630)").join(" and ")}. Merrymen covers the network fees on {restoreNetworks.length > 1 ? "both networks" : "this network"} before a new permission can be signed.</span></label>
                 <button
                   className="grant-btn"
                   onClick={() => void onRestore()}
@@ -1976,7 +1981,7 @@ export default function GrantPage() {
                 you re-sign — buying something it can&apos;t sell back would leave you holding a
                 position with no way out, and no cap protects you from that.
                 <br />
-                Review and renew your permission below; network fees apply to revoking earlier keys.
+                Review and renew your permission below. Merrymen covers the fees for revoking earlier keys.
                 {watchedNotTraded.length > 0 && (
                   /* AND WHAT RE-SIGNING WILL NOT FIX. Coverage and selection are
                      two different gates; this panel only ever spoke about the
@@ -2101,9 +2106,7 @@ export default function GrantPage() {
                     : grantIsTestnet
                       ? "testnet network fees"
                       : gasSponsored
-                        // Not 'needed to deploy + trade': it is needed for neither.
-                        // The one thing it IS still needed for is the way out.
-                        ? "covered — only needed to withdraw later"
+                        ? "trading fees covered; recovery coverage checked when requested"
                         : "needed to deploy + trade"}
                 </span>
               </div>
@@ -2343,7 +2346,7 @@ export default function GrantPage() {
                 </section>
               ) : <>
               <b>Renew your permission.</b> First, stop the service and revoke earlier permissions on-chain; then sign a replacement with the limits below. Your account address stays the same.
-              <p>Revocation uses ETH for network fees. When moving networks, it runs on both the current and selected networks. Trading stays stopped if revocation or the replacement fails; your recovery access is kept.</p>
+              <p>Merrymen covers the revocation fees. When moving networks, it runs on both the current and selected networks. Trading stays stopped if revocation or the replacement fails; your recovery access is kept.</p>
               <p>The replacement uses today&apos;s permission rules. Review the network, assets, and limits before continuing. The owner key bypasses these limits and must stay private.</p>
               {resignBy ? (
                 <>
@@ -2485,19 +2488,19 @@ export default function GrantPage() {
                     under the checkbox that enables it.
                   */}
                   <div className="grant-note" data-renewal-funding style={{ marginTop: 12 }}>
-                    <b>ETH for revocation fees</b>
-                    <p>Before continuing, fund this same account address on {chainId !== grant.chainId ? "each network below" : "this network"}:</p>
+                    <b>Network fees covered by Merrymen</b>
+                    <p>Merrymen requests gas coverage for this account on {chainId !== grant.chainId ? "each network below" : "this network"}:</p>
                     <code style={{ display: "block", overflowWrap: "anywhere" }}>{grant.smartAccount}</code>
-                    <CopyBtn value={grant.smartAccount} label="copy revocation funding address" />
+                    <CopyBtn value={grant.smartAccount} label="copy account address" />
                     <ul>
                       {[grant.chainId, ...(chainId !== grant.chainId ? [chainId] : [])].map(network => <li key={network}>
-                        <b>{network === MAINNET ? "Robinhood Chain" : "Robinhood Chain testnet"} ({network})</b>: send {network === TESTNET ? "testnet ETH" : "ETH"} for network fees.
+                        <b>{network === MAINNET ? "Robinhood Chain" : "Robinhood Chain testnet"} ({network})</b>: Merrymen covers the network fees.
                       </li>)}
                     </ul>
-                    {(grant.chainId === TESTNET || chainId === TESTNET) && <p><a href={FAUCET_URL} target="_blank" rel="noreferrer">Get testnet ETH from the faucet ↗</a>, then send it to the account above on testnet.</p>}
-                    <p>Balances do not move between networks. Revocation needs ETH even when trading gas is sponsored; an empty account on the destination network also needs ETH. If you see AA21 or an insufficient-funds error, fund the named network and retry here.</p>
+
+                    <p>Balances stay on their current networks. Gas coverage is checked before replacement starts, including for an empty destination account. If coverage is unavailable, retry once the service restores it.</p>
                   </div>
-                  <label className="ack-row" style={{ marginTop: 12 }}><input type="checkbox" checked={renewalAck} onChange={e => setRenewalAck(e.target.checked)} /><span>I authorize revoking earlier permissions on-chain before signing the replacement and understand network fees apply.</span></label>
+                  <label className="ack-row" style={{ marginTop: 12 }}><input type="checkbox" checked={renewalAck} onChange={e => setRenewalAck(e.target.checked)} /><span>I authorize revoking earlier permissions on-chain before signing the replacement. Merrymen covers the network fees.</span></label>
                   <button
                     className="grant-btn"
                     style={{ marginTop: 10, width: "100%" }}

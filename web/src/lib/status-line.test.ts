@@ -297,15 +297,14 @@ test("UNSPONSORED, the same refusal still stops everything", () => {
   assert.equal(l.tone, "stuck");
 });
 
-test("both sponsored arms carry the withdrawal caveat", () => {
-  // Sponsorship covers TRADING. The recovery path pays its own way out of the
-  // balance it is sweeping, so an owner told they need no ETH at all could trade
-  // happily and then find they cannot get their money out. The arm shown to
-  // someone with no capital yet is the one shown to the newest owner, and it was
-  // the arm that did not say so.
+test("both sponsored arms distinguish trading coverage from owner operation checks", () => {
+  // Trading sponsorship in a heartbeat neither requires owner-paid recovery
+  // nor proves that withdrawal and permission operations will be sponsored.
   const withCash = statusLine({ ...base, hasGas: false, gasSponsored: true, cashUsdg: 318 });
   const noCash = statusLine({ ...base, hasGas: false, gasSponsored: true, cashUsdg: 0 });
   for (const l of [withCash, noCash]) {
-    assert.match(l.next, /move money back out|moving money back out/i, `missing caveat: ${l.next}`);
+    assert.match(l.headline, /trading fees are covered/i);
+    assert.match(l.next, /withdrawal and permission changes check fee coverage separately before you sign/i);
+    assert.doesNotMatch(l.next, /still needs.*ETH|only to.*move money|withdrawal.*fees are covered/i);
   }
 });

@@ -135,7 +135,13 @@ describe("every derivation call site routes through the guard", () => {
   it("the server-side deriver returns a Derivation, never a bare address", () => {
     const src = read("web/src/lib/derive-account.ts");
     assert.match(src, /Promise<Derivation>/, "deriveKernelAccountAddress must return a result type");
-    assert.match(src, /return derivationOf\(account\.address\)/);
+    assert.match(src, /const derived = derivationOf\(account\.address\);/);
+    assert.match(src, /if \(!derived\.ok\) return derived;/, "a failed derivation must be returned before deployment metadata is added");
+    const classify = src.indexOf("const derived = derivationOf(account.address)");
+    const refuse = src.indexOf("if (!derived.ok) return derived;", classify);
+    const returned = src.indexOf("return { ...derived, factory, factoryData };", classify);
+    assert.ok(classify >= 0 && refuse > classify && returned > refuse, "only a successful guarded result can receive recovery metadata");
+    assert.match(src, /return deriveKernelRecoveryAccount\(owner, chainId\);/, "the ordinary address deriver must share the recovery guard");
     assert.doesNotMatch(src, /return account\.address;/, "a bare address would skip the zero check");
   });
 

@@ -18,6 +18,7 @@ export default defineConfig({
     alias: {
       "@": path.resolve(__dirname, "src"),
       "@merrymen/core": path.resolve(__dirname, "..", "packages", "core", "src", "index.ts"),
+      "@merrymen/recover": path.resolve(__dirname, "..", "worker", "src", "recover.ts"),
     },
   },
   test: {

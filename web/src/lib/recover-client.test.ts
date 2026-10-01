@@ -16,9 +16,11 @@
  * it calls, and a stubbed fetch is the one seam that reaches it.
  */
 import assert from "node:assert/strict";
-import { after, before, describe, it } from "node:test";
-import { encodeErrorResult, encodeFunctionResult, formatUnits, parseAbi } from "viem";
-import { planFromBrowser, sweepFromBrowser, type BrowserWallet } from "./recover-client";
+import { after, before, beforeEach, describe, it } from "node:test";
+import { encodeErrorResult, encodeFunctionResult, formatUnits, parseAbi, toFunctionSelector } from "viem";
+import { formatUserOperation, getUserOperationHash, type RpcUserOperation } from "viem/account-abstraction";
+import { preflightRevocationFromBrowser, revokeFromBrowser } from "./revoke-client";
+import { ownerGasError, planFromBrowser, sweepFromBrowser, type BrowserWallet } from "./recover-client";
 
 /** A throwaway owner key. The derived account comes from the stub below. */
 const OWNER_KEY = ("0x" + "31".repeat(32)) as `0x${string}`;
@@ -38,22 +40,42 @@ const UINT8 = parseAbi(["function f() view returns (uint8)"]);
 const SEL = { getSenderAddress: "0x9b249f69", balanceOf: "0x70a08231", decimals: "0x313ce567", getNonce: "0x35567e1a" };
 const hex = (n: bigint) => `0x${n.toString(16)}`;
 
-const submitted: { callData?: string }[] = [];
+const submitted: RpcUserOperation<"0.7">[] = [];
+const sentHashes = new Set<string>();
+const receiptReads: string[] = [];
+const storage = new Map<string, string>();
+let activeChain = 4663;
+const PAYMASTER = "0x0000000000000000000000000000000000001234";
+let gasSponsored = true;
+let sponsorRefuses = false;
+let quoteCount = 0;
+let nativeBalance = 0n;
 const balanceReads = new Set<string>();
 
 /** One JSON-RPC answer, for the chain and the bundler relay alike. */
 function answer(method: string, params: unknown[]): { result?: unknown; error?: unknown } {
   if (method === "eth_sendUserOperation") {
-    submitted.push(params[0] as { callData?: string });
-    return { result: `0x${"ab".repeat(32)}` };
+    submitted.push(params[0] as typeof submitted[number]);
+    const hash = getUserOperationHash({ userOperation: formatUserOperation(params[0] as RpcUserOperation<"0.7">), chainId: activeChain,
+      entryPointAddress: "0x0000000071727De22E5E9d8BAf0edAc6f37da032", entryPointVersion: "0.7" });
+    sentHashes.add(hash);
+    return { result: hash };
+  }
+  if (method === "pm_getPaymasterStubData" || method === "pm_getPaymasterData") {
+    if (sponsorRefuses || !gasSponsored) return { error: { code: -32000, message: "paymaster sponsorship refused by policy" } };
+    const data = method === "pm_getPaymasterData" ? `0x${(++quoteCount).toString(16).padStart(2, "0")}` : "0x";
+    return { result: { paymaster: PAYMASTER, paymasterData: data === "0x1" ? "0x01" : data,
+      paymasterVerificationGasLimit: hex(100_000n), paymasterPostOpGasLimit: hex(50_000n) } };
   }
   if (method === "eth_estimateUserOperationGas") {
     return { result: { preVerificationGas: hex(60_000n), verificationGasLimit: hex(300_000n), callGasLimit: hex(400_000n) } };
   }
   if (method === "eth_getUserOperationReceipt") {
+    receiptReads.push(String(params[0]));
+    if (!sentHashes.has(String(params[0]))) return { result: null };
     return {
       result: {
-        userOpHash: `0x${"ab".repeat(32)}`, sender: ACCOUNT, nonce: "0x0", actualGasCost: "0x1", actualGasUsed: "0x1",
+        userOpHash: params[0], sender: ACCOUNT, nonce: "0x0", actualGasCost: "0x1", actualGasUsed: "0x1",
         success: true, logs: [],
         receipt: {
           transactionHash: `0x${"cd".repeat(32)}`, blockHash: `0x${"ef".repeat(32)}`, blockNumber: "0x1",
@@ -69,9 +91,9 @@ function answer(method: string, params: unknown[]): { result?: unknown; error?: 
     const tier = { maxFeePerGas: "0x2", maxPriorityFeePerGas: "0x1" };
     return { result: { slow: tier, standard: tier, fast: tier } };
   }
-  if (method === "eth_chainId") return { result: hex(4663n) };
+  if (method === "eth_chainId") return { result: hex(BigInt(activeChain)) };
   if (method === "eth_getCode") return { result: "0x" };
-  if (method === "eth_getBalance") return { result: "0x0" };
+  if (method === "eth_getBalance") return { result: hex(nativeBalance) };
   if (method === "eth_gasPrice") return { result: hex(1_000_000_000n) };
   if (method === "eth_maxPriorityFeePerGas") return { result: "0x1" };
   if (method === "eth_getLogs") return { result: [] };
@@ -107,6 +129,7 @@ function answer(method: string, params: unknown[]): { result?: unknown; error?: 
       if (to === MEME) return { result: encodeFunctionResult({ abi: UINT8, result: 9 }) };
       return { error: { code: 3, message: "execution reverted" } };
     }
+    if (data.startsWith(toFunctionSelector("validNonceFrom()"))) return { result: encodeFunctionResult({ abi: UINT256, result: 2n }) };
     if (data.startsWith(SEL.getNonce)) return { result: encodeFunctionResult({ abi: UINT256, result: 0n }) };
     // Every other call is a transfer simulation: it succeeds, returning nothing.
     return { result: "0x" };
@@ -123,18 +146,23 @@ before(() => {
   // The page's origin, which `relayUrl` builds the bundler relay from. Without
   // one it is a relative URL, which only a browser can resolve.
   g.window = { location: { origin: "https://app.merrymen.test" } };
+  globalThis.localStorage = { getItem: (k: string) => storage.get(k) ?? null, setItem: (k: string, v: string) => { storage.set(k, v); }, removeItem: (k: string) => { storage.delete(k); } } as Storage;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.includes("/api/bundler/46630") || url.includes("rpc.testnet.chain")) activeChain = 46630;
+    else if (url.includes("/api/bundler/4663") || url.includes("rpc.mainnet.chain")) activeChain = 4663;
     // The relay ticket: a challenge to sign, then the account the server derived.
     if (url.endsWith("/api/recover/ticket")) {
       return init?.method === "POST" ? json({ smartAccount: ACCOUNT }) : json({ nonce: "n", message: "recover" });
     }
+    if (url.includes("/api/bundler/") && !init?.body) return json({ gasSponsored, sponsorshipEnabled: gasSponsored, reason: gasSponsored ? null : "Merrymen gas coverage is unavailable." });
     const parsed = JSON.parse(String(init?.body ?? (input as Request).body)) as unknown;
     const batch = (Array.isArray(parsed) ? parsed : [parsed]) as { id: number; method: string; params: unknown[] }[];
     const out = batch.map(({ id, method, params }) => ({ jsonrpc: "2.0", id, ...answer(method, params ?? []) }));
     return json(Array.isArray(parsed) ? out : out[0]);
   }) as typeof fetch;
 });
+beforeEach(() => { gasSponsored = true; sponsorRefuses = false; submitted.length = 0; quoteCount = 0; nativeBalance = 0n; storage.clear(); sentHashes.clear(); receiptReads.length = 0; activeChain = 4663; });
 after(() => {
   globalThis.fetch = realFetch;
   delete g.window;
@@ -184,5 +212,113 @@ describe("grantTokens reach the browser recovery", () => {
       "and the result must report both as moved",
     );
     assert.ok(result.txHash);
+    assert.equal(submitted[0]!.paymaster?.toLowerCase(), PAYMASTER);
+    assert.notEqual(submitted[0]!.paymasterData, "0x", "a real final quote must be signed for the zero-ETH account");
+  });
+});
+
+
+describe("owner gas coverage", () => {
+  it("plans a zero-ETH account as covered and reserves no fee ETH", async () => {
+    const plan = await planFromBrowser(wallet);
+    assert.equal(plan.gasSponsored, true);
+    assert.equal(plan.needsGas, false);
+    assert.equal(plan.nativeReserveWei, 0n);
+  });
+  it("plans the whole native balance when coverage is enabled", async () => {
+    nativeBalance = 1_000_000_000_000_000n;
+    const plan = await planFromBrowser(wallet);
+    assert.equal(plan.nativeRecoverableWei, nativeBalance);
+    assert.equal(plan.nativeReserveWei, 0n);
+  });
+  it("still shows balances but refuses a withdrawal when house coverage is unavailable", async () => {
+    gasSponsored = false;
+    const plan = await planFromBrowser(wallet);
+    assert.equal(plan.gasSponsored, false);
+    assert.ok(plan.balances.some(b => b.address.toLowerCase() === MEME));
+    await assert.rejects(sweepFromBrowser(wallet, DESTINATION), /gas coverage is unavailable/);
+    assert.equal(submitted.length, 0);
+  });
+  it("does not self-pay even with ETH when the paymaster refuses", async () => {
+    nativeBalance = 10n ** 18n;
+    sponsorRefuses = true;
+    await assert.rejects(sweepFromBrowser(wallet, DESTINATION), /Merrymen could not obtain gas coverage/);
+    assert.equal(submitted.length, 0);
+  });
+  it("maps the screenshot's AA21 error to a clear service failure", () => {
+    const text = ownerGasError(new Error("AA21 insufficient prefund Request Arguments: callData: 0xabcdef factoryData: 0x1234"));
+    assert.match(text, /Merrymen could not obtain gas coverage/);
+    assert.doesNotMatch(text, /callData|factoryData/);
+  });
+});
+
+
+describe("sponsored permission revocations", () => {
+  it("preflights both networks without broadcasting or signing an operation", async () => {
+    const { privateKeyToAccount } = await import("viem/accounts");
+    const signer = privateKeyToAccount(OWNER_KEY);
+    const signedMessages: unknown[] = [];
+    const ownerAccount = { ...signer, signMessage: async (p: Parameters<typeof signer.signMessage>[0]) => {
+      signedMessages.push(p.message); return signer.signMessage(p);
+    } };
+    for (const chainId of [46630, 4663]) await preflightRevocationFromBrowser({ ...wallet, chainId, ownerAccount });
+    assert.equal(submitted.length, 0);
+    assert.equal(storage.size, 0);
+    assert.deepEqual(signedMessages, ["recover", "recover"], "only the fee eligibility proof is signed before approval");
+    assert.equal(quoteCount, 2, "both networks must obtain an actual final quote");
+  });
+  it("revokes a zero-ETH account on each network with owner-signed sponsorship", async () => {
+    for (const chainId of [46630, 4663]) {
+      const result = await revokeFromBrowser({ ...wallet, chainId }, () => {});
+      assert.equal(result.validNonceFrom, 2);
+    }
+    assert.equal(submitted.length, 2);
+    for (const op of submitted) {
+      assert.equal(op.paymaster?.toLowerCase(), PAYMASTER);
+      assert.notEqual(op.paymasterData, "0x");
+      assert.match(op.signature, /^0x[0-9a-f]{130}$/i);
+    }
+    assert.equal(storage.size, 0, "confirmed revocations clear the saved operation");
+  });
+  it("refuses before saving or broadcasting when Pimlico declines coverage", async () => {
+    sponsorRefuses = true;
+    await assert.rejects(preflightRevocationFromBrowser(wallet), /No revocation was submitted/);
+    await assert.rejects(revokeFromBrowser(wallet, () => {}), /Merrymen could not obtain gas coverage/);
+    assert.equal(submitted.length, 0);
+    assert.equal(storage.size, 0);
+  });
+  it("refreshes sponsorship for a saved fee replacement while preserving the nonce and revocation", async () => {
+    await revokeFromBrowser(wallet, () => {});
+    const original = submitted[0]!;
+    const oldHash = [...sentHashes][0]!;
+    const journalKey = `merrymen.permission-revocation.v1.${wallet.chainId}.${wallet.smartAccount.toLowerCase()}`;
+    storage.set(journalKey, JSON.stringify({ hash: oldHash, nonce: 2, operation: original }));
+    sentHashes.clear(); submitted.length = 0; receiptReads.length = 0;
+    const before = quoteCount;
+    await revokeFromBrowser(wallet, () => {});
+    assert.equal(quoteCount, before + 1, "fee changes require fresh final sponsorship");
+    assert.equal(receiptReads[0], oldHash, "check the old receipt before preparing a replacement");
+    const replacement = submitted[0]!;
+    assert.equal(replacement.nonce, original.nonce);
+    assert.equal(replacement.callData, original.callData);
+    assert.notEqual(replacement.paymasterData, original.paymasterData);
+    assert.ok(BigInt(replacement.maxFeePerGas) > BigInt(original.maxFeePerGas));
+    assert.equal(storage.size, 0);
+  });
+  it("uses an already-confirmed saved receipt without buying a replacement quote", async () => {
+    await revokeFromBrowser(wallet, () => {});
+    const original = submitted[0]!;
+    const oldHash = [...sentHashes][0]!;
+    storage.set(`merrymen.permission-revocation.v1.${wallet.chainId}.${wallet.smartAccount.toLowerCase()}`,
+      JSON.stringify({ hash: oldHash, nonce: 2, operation: original }));
+    submitted.length = 0;
+    gasSponsored = false;
+    const before = quoteCount;
+    await preflightRevocationFromBrowser(wallet);
+    assert.equal(quoteCount, before, "a confirmed saved revocation needs no new coverage during preflight either");
+    const result = await revokeFromBrowser(wallet, () => {});
+    assert.equal(result.userOpHash, oldHash);
+    assert.equal(quoteCount, before);
+    assert.equal(submitted.length, 0);
   });
 });

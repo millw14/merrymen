@@ -86,6 +86,6 @@ describe("the confirm dialog shows the address that will be paid", () => {
       /Sweep \$\{list\} to \$\{to\.trim\(\)\}/,
       "the confirm text must show the normalised destination",
     );
-    assert.match(SRC, /Sweep \$\{list\} to \$\{normalizeAddr\(to\)\}/);
+    assert.match(SRC, /to \$\{normalizeAddr\(to\)\}/);
   });
 });

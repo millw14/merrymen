@@ -46,8 +46,8 @@ describe("recovery reaches the class vault at all", () => {
     // finds the prose and reads it as the code.
     assert.match(
       RECOVER,
-      /if \(plan\.balances\.length === 0 && nativeSweptWei === 0n && plan\.classHoldings\.length === 0\)/,
-      "the early return must consider the vault before claiming nothing to recover",
+      /if \(plan\.balances\.length === 0 && nativeSweptWei === 0n && plan\.classVaults\.every\(\(v\) => v\.holdings\.length === 0\) && !opts\.approvedClass\)/,
+      "the early return must consider every vault and must revalidate an approved class intent before claiming nothing to recover",
     );
     // ACROSS EVERY VAULT, now that an account can have two. Counting only the
     // primary one would print "this account is empty" over a full second vault

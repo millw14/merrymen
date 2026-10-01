@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { explorerFor } from "@merrymen/core";
 import { listSavedWallets, loadGrant } from "@/lib/session";
 import { isAddr, normalizeAddr } from "@/lib/address";
 import { planFromBrowser, sweepFromBrowser, redact, type BrowserWallet } from "@/lib/recover-client";
@@ -62,6 +63,9 @@ interface Ctx {
   detail?: string;
   /** Hosted: the server cannot sweep, the browser must. */
   clientSide?: boolean;
+  gasSponsored?: boolean;
+  nativeRecoverableWei?: string;
+  nativeReserveWei?: string;
 }
 interface PlanRes {
   smartAccount: string;
@@ -88,6 +92,7 @@ interface PlanRes {
   /** The ETH leg: what would move, and what stays to pay for the move. */
   nativeRecoverableWei?: string;
   nativeReserveWei?: string;
+  gasSponsored?: boolean;
   /** Labels whose balance could not be READ. Never conflate with "not held". */
   unreadable?: string[];
   error?: string;
@@ -259,6 +264,7 @@ export function RecoverPanelView({
         smartAccount: b.smartAccount,
         ownerAddress: b.ownerAddress,
         chainId: w.chainId,
+        explorer: explorerFor(w.chainId),
         // TokenBalance already carries the display string as `amount`, and the
         // panel renders exactly that shape — so pass it through rather than
         // rebuilding it and losing `note` along the way.
@@ -284,14 +290,15 @@ export function RecoverPanelView({
         // silently omitted it.
         nativeRecoverableWei: String(b.nativeRecoverableWei),
         nativeReserveWei: String(b.nativeReserveWei),
+        gasSponsored: b.gasSponsored,
         // Same reason `unreadable` exists at all: absence and ignorance are
         // different facts, and the panel cannot tell them apart without this.
         unreadable: b.unreadable,
-      } as unknown as PlanRes);
+      });
       // The one thing that stops a sweep dead, said BEFORE they press it.
-      if (b.needsGas) {
+      if (!b.gasSponsored) {
         setError(
-          `this account has no ETH, and a withdrawal is an on-chain operation it has to pay for. Send a little ETH to ${b.smartAccount} and try again — a few dollars is plenty.`,
+          b.sponsorshipReason ?? "Merrymen gas coverage is unavailable. Your balances are shown below; retry withdrawal when coverage is restored.",
         );
       }
     } catch (e) {
@@ -342,7 +349,7 @@ export function RecoverPanelView({
       .join(", ");
     if (
       !window.confirm(
-        `Sweep ${list} to ${normalizeAddr(to)}?\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.` +
+        `Sweep ${list}${ethLeg ? `, approximately ${ethLeg.recoverable} ETH` : ""} to ${normalizeAddr(to)}?\n\nThis is real and irreversible. Merrymen covers the network fees.` +
           (alsoHeld
             ? `\n\nNOT in this sweep: ${alsoHeld}, held in another of your class vaults. Run this again afterwards to move it.`
             : ""),
@@ -427,6 +434,7 @@ export function RecoverPanelView({
   const smartAccount = plan?.smartAccount ?? ctx?.smartAccount;
   const explorer = plan?.explorer ?? ctx?.explorer;
   const activeChain = plan?.chainId ?? ctx?.chainId ?? chainId;
+  const gasSponsored = plan?.gasSponsored ?? ctx?.gasSponsored ?? false;
   // CAN THIS WITHDRAWAL BE SUBMITTED AT ALL?
   //
   // Hosted, the answer is always yes: the relay holds the house bundler key, and
@@ -435,7 +443,7 @@ export function RecoverPanelView({
   // hosted owner to add a Pimlico key in settings, a field the hosted settings
   // route silently strips, and then disabled the button so they could not proceed
   // even if they ignored the advice. A dead end dressed as an instruction.
-  const canSubmit = clientSide || (ctx?.hasBundler ?? false);
+  const canSubmit = clientSide ? plan?.gasSponsored === true : (ctx?.hasBundler ?? false);
   // Do we know what's in the account yet? (stored-key ctx, or a checked paste.)
   const known = !!(plan || (ctx?.hasStoredKey && ctx));
   // "Empty" is a CLAIM, and it may only be made when everything was actually
@@ -451,17 +459,17 @@ export function RecoverPanelView({
    * figure. `unreadable` already carries "gas price" when it was the latter.
    */
   const ethLeg = (() => {
-    const raw = plan?.nativeRecoverableWei;
+    const raw = plan?.nativeRecoverableWei ?? ctx?.nativeRecoverableWei;
     if (raw === undefined) return null;
     const wei = BigInt(raw);
     if (wei <= 0n) return null;
     const fmt = (v: bigint) => (Number(v) / 1e18).toFixed(9);
-    return { recoverable: fmt(wei), reserve: fmt(BigInt(plan?.nativeReserveWei ?? "0")) };
+    return { recoverable: fmt(wei), reserve: fmt(BigInt(plan?.nativeReserveWei ?? ctx?.nativeReserveWei ?? "0")) };
   })();
 
   // A vault holding is something to recover, so it cannot be "empty" either.
-  const empty = known && balances.length === 0 && classHoldings.length === 0 && unreadable.length === 0;
-  const blind = known && balances.length === 0 && classHoldings.length === 0 && unreadable.length > 0;
+  const empty = known && balances.length === 0 && classHoldings.length === 0 && ethLeg === null && unreadable.length === 0;
+  const blind = known && balances.length === 0 && classHoldings.length === 0 && ethLeg === null && unreadable.length > 0;
 
   async function sweep() {
     setError(null);
@@ -502,7 +510,7 @@ export function RecoverPanelView({
       ) || "the balance";
     if (
       !window.confirm(
-        `Sweep:\n\n${lines.join("\n")}\n\nThis is real and irreversible. The account keeps a little ETH to pay for gas.`,
+        `Sweep:\n\n${lines.join("\n")}\n\nThis is real and irreversible. ${gasSponsored ? "Merrymen covers the network fees." : "The account keeps a little ETH to pay for gas."}`,
       )
     ) {
       return;
@@ -694,17 +702,17 @@ export function RecoverPanelView({
                     <p className="recover-sub">
                       <strong>Native ETH</strong> · approximately{" "}
                       <span className="mono">{ethLeg.recoverable}</span> ETH recoverable, leaving about{" "}
-                      <span className="mono">{ethLeg.reserve}</span> ETH on the account to pay for the
-                      withdrawal itself.
+                      <span className="mono">{ethLeg.reserve}</span> ETH on the account{gasSponsored ? ". Merrymen covers the withdrawal fees." : " to pay for the withdrawal itself."}
                     </p>
                   )}
 
-                  {!canSubmit && (
+                  {!clientSide && !canSubmit && (
                     <p className="recover-warn">
                       Recovery sends an on-chain transaction, so it needs your bundler key. Add a free
                       Pimlico key in <a href="/settings">settings</a>, then come back.
                     </p>
                   )}
+                  {clientSide && plan?.gasSponsored && <p className="recover-sub">Network fees covered by Merrymen.</p>}
 
                   <input
                     className="recover-input mono"

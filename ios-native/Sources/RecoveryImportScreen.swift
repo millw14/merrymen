@@ -34,6 +34,7 @@ struct RecoveryImportScreen: View {
                 Text("Recover an older account").font(.title.bold())
                 Text("Use the original owner recovery key or a saved Merrymen grant backup. This reads the account that key controls, including after an agent is stood down.")
                 Text("The key stays on this device for this recovery session. It is never sent to Merrymen, copied to the clipboard or saved in chat.").font(.caption)
+                Text("Reading signs an ownership proof to check network fee coverage. It moves no funds and grants no trading permission.").font(.caption)
                 SecureField("Owner recovery key (0x…)", text: $key).textInputAutocapitalization(.never).autocorrectionDisabled().privacySensitive().accessibilityIdentifier("recovery-key")
                 Button("Import grant backup") { importFile = true }
                 if let backup { Text("Backup account: \(backup["smartAccount"].text)").font(.caption.monospaced()).textSelection(.enabled) }

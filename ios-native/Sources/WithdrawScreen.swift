@@ -22,7 +22,7 @@ struct WithdrawScreen: View {
             Group {
                 Card {
                     Text("Withdraw to your wallet").font(.largeTitle.bold())
-                    Text("The owner wallet signs this transfer. Withdrawal gas is paid in ETH by the smart account, even when trading gas is sponsored.")
+                    Text("The owner wallet signs this transfer. Merrymen checks whether it can cover the network fee before you review the withdrawal.")
                     Text("Stand down the agent first if you want it to stop trading while you withdraw.").font(.caption).foregroundStyle(.secondary)
                     NavigationLink("Wallet & permissions", value: Route.permissions)
                     Button("Recover an older owner-key account") { importing = true }.disabled(wallet.busy || reviewed != nil)
@@ -35,6 +35,7 @@ struct WithdrawScreen: View {
                 }
                 if input != nil {
                     Button("Read balances and recovery plan") { Task { await readPlan() } }.disabled(wallet.busy || (legacyKey == nil && store.privy == nil))
+                    Text("Your wallet signs an ownership proof to check fee coverage. This proof moves no funds and grants no permissions.").font(.caption).foregroundStyle(.secondary)
                     if legacyKey == nil && store.privy == nil { Text("This build needs its Privy iOS Client ID to open the owning wallet.").foregroundStyle(.orange) }
                 }
                 if let plan {
@@ -42,9 +43,11 @@ struct WithdrawScreen: View {
                         Text("Account balances").font(.title2.bold())
                         Text(plan["smartAccount"].text).font(.caption.monospaced()).textSelection(.enabled)
                         Rows(values: plan["balances"].array) { balance in Metric(label: balance["symbol"].text, value: balance["amount"].text) }
-                        Metric(label: "ETH for gas", value: rawUnits(plan["gasWei"].string, decimals: 18))
-                        Metric(label: "ETH reserved for gas", value: rawUnits(plan["nativeReserveWei"].string, decimals: 18))
-                        if plan["needsGas"].bool == true { Text("Add ETH on Robinhood Chain before withdrawing.").foregroundStyle(.orange) }
+                        Metric(label: "ETH balance", value: rawUnits(plan["gasWei"].string, decimals: 18))
+                        if plan["gasSponsored"].bool == true { Metric(label: "ETH reserved for gas", value: "0") }
+                        if plan["gasSponsored"].bool == true { Text("Merrymen covers the network fee for this recovery, including the selected Class vault. You do not need ETH to pay it.").foregroundStyle(.green) }
+                        if plan["gasSponsored"].bool != true, let reason = plan["sponsorshipReason"].string { Text(reason).font(.caption).foregroundStyle(.orange) }
+                        if plan["gasSponsored"].bool != true { Text("Fee coverage is unavailable. Refresh the plan when Merrymen coverage is restored; this app will not charge your ETH as a fallback.").foregroundStyle(.orange) }
                         if !plan["unreadable"].array.isEmpty { Text("Some balances could not be read: " + plan["unreadable"].array.map(\.text).joined(separator: ", ")).foregroundStyle(.orange) }
                         if plan["trencher"]["state"].text == "unread" { Text("The Trencher vault could not be read. Its balance is unknown and is not included in this withdrawal.").foregroundStyle(.orange) }
                         if plan["trencher"]["funded"].bool == true {
@@ -66,14 +69,14 @@ struct WithdrawScreen: View {
                                     if !vault["holdings"].array.isEmpty { Text("\(vault["version"].text) · \(vault["vault"].text.prefix(10))…").tag(vault["vault"].text) }
                                 }
                             }
-                            Text("Only the selected class vault is included. Other vaults require a separate recovery and enough ETH for its gas.").foregroundStyle(.orange)
+                            Text("Only the selected class vault is included. Recover the other vaults separately; fee coverage is checked each time.").foregroundStyle(.orange)
                         }
                     }
                     if !unresolved {
                         Card {
                             TextField("Recipient address (0x…)", text: $recipient).textInputAutocapitalization(.never).autocorrectionDisabled()
                             Toggle("I checked the recipient and Robinhood network", isOn: $acknowledged)
-                            Button("Review withdrawal") { prepare() }.buttonStyle(PrimaryButtonStyle()).disabled(wallet.busy || !acknowledged || plan["needsGas"].bool == true || !plan["unreadable"].array.isEmpty)
+                            Button("Review withdrawal") { prepare() }.buttonStyle(PrimaryButtonStyle()).disabled(wallet.busy || !acknowledged || plan["gasSponsored"].bool != true || !plan["unreadable"].array.isEmpty)
                         }
                     }
                 }
@@ -127,7 +130,7 @@ struct WithdrawScreen: View {
                     Metric(label: "From", value: reviewed["smartAccount"].text)
                     Metric(label: "Recipient", value: reviewed["to"].text)
                     Text("Robinhood Chain · 4663").font(.headline)
-                    Text("This transfers recoverable tokens and ETH above the gas reserve. Amounts and gas are read again immediately before signing. Assets that cannot transfer are reported individually.")
+                    Text(reviewed["gasSponsored"].bool == true ? "Merrymen covers the network fee. This transfers recoverable tokens and ETH without keeping a fee reserve. Amounts and fee coverage are checked again before signing." : "This transfers recoverable tokens and ETH above the gas reserve. Amounts and fees are checked again before signing. Assets that cannot transfer are reported individually.")
                     if reviewed["approvedClass"] != .null { Text("Includes the reviewed class vault: \(reviewed["approvedClass"]["vault"].text)") }
                     Button("Sign withdrawal", role: .destructive) { Task { await withdraw(reviewed) } }.buttonStyle(PrimaryButtonStyle()).disabled(wallet.busy)
                     if wallet.busy { ProgressView("Waiting for the wallet and receipt…") }
@@ -158,7 +161,9 @@ struct WithdrawScreen: View {
     private func prepare() {
         let to = recipient.trimmingCharacters(in: .whitespacesAndNewlines)
         guard to.range(of: "^0x[0-9a-fA-F]{40}$", options: .regularExpression) != nil, !to.lowercased().hasSuffix(String(repeating: "0", count: 40)), to.lowercased() != input?["smartAccount"].text.lowercased(), let input, let plan else { error = "Enter a valid recipient other than this smart account."; return }
+        guard plan["gasSponsored"].bool == true else { error = "Merrymen fee coverage is unavailable. Refresh the plan before withdrawing."; return }
         var fields = input.object; fields["to"] = .string(to)
+        fields["gasSponsored"] = plan["gasSponsored"]
         fields["reviewTenant"] = store.owner.map(J.string) ?? .null; fields["reviewGeneration"] = .number(Double(store.generation))
         if let vault = plan["classVaults"].array.first(where: { $0["vault"].text == selectedVault }), !vault["holdings"].array.isEmpty {
             fields["approvedClass"] = .object(["vault": vault["vault"], "tokens": .array(vault["holdings"].array.map { $0["token"] })])
