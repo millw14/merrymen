@@ -710,10 +710,10 @@ export default function GrantPage() {
   const [capText, setCapText] = useState<Partial<Record<keyof GrantCaps, string>>>({});
   const [capError, setCapError] = useState("");
   const capShown = (k: keyof GrantCaps) => capText[k] ?? String(caps[k]);
-  // Raw invalid text must not renew using a different, last-valid number.
-  // Check every edited field: a valid edit elsewhere can clear capError.
-  const capsInputInvalid = Object.entries(capText).some(([key, raw]) =>
-    !parseAmount(raw, CAP_FIELDS[key as keyof GrantCaps]).ok,
+  // Validate every displayed cap, including an invalid legacy grant loaded
+  // untouched. Raw edits also cannot renew using a last-valid hidden number.
+  const capsInputInvalid = (Object.keys(CAP_FIELDS) as (keyof GrantCaps)[]).some(key =>
+    !parseAmount(capShown(key), CAP_FIELDS[key]).ok,
   );
   const set = (k: keyof GrantCaps) => (e: React.ChangeEvent<HTMLInputElement>) => {
     const raw = e.target.value;

@@ -24,6 +24,7 @@ const grant = {
   grantTokens: [],
   grantFeatures: [],
 } as unknown as StoredGrant;
+let loadedGrant: StoredGrant = grant;
 const tooWide = `${WALL_TOO_WIDE}: installing it would need about 15,980,519 gas against a limit of 14,000,000. You have 20 custom tokens; the most that fits with the features you have enabled is 17. Remove at least 3 custom tokens, then sign again.`;
 let renew: (options: { caps: GrantCaps; onStatus: (status: string) => void }) => Promise<unknown>;
 let Wallet: typeof import("./screens/Wallet").default;
@@ -49,7 +50,7 @@ before(async () => {
       if (id === "@/terminal/usePrivyOwner") return { usePrivyOwner: () => null };
       if (id === "@/lib/verified-adapter") return { verifiedAdapter: async () => undefined };
       if (id === "@/lib/session") return {
-        loadGrant: () => grant,
+        loadGrant: () => loadedGrant,
         listSavedWallets: () => savedWallets,
         isPrivyOwned: () => false,
         readFunding: async () => ({ gasWei: 1n, usdgUnits: 71_580_000n, usdg: 71.58 }),
@@ -70,12 +71,13 @@ before(async () => {
 
 beforeEach(() => {
   ui = testDom();
+  loadedGrant = grant;
   savedWallets = [];
   renew = async () => { throw new Error("Unexpected signing request"); };
   localStorage.setItem("merrymen.grant.backedup.v1", "1");
   globalThis.fetch = async (input) => {
     const path = String(input);
-    if (path === "/api/grants") return json({ exists: true, grant, gasSponsored: true });
+    if (path === "/api/grants") return json({ exists: true, grant: loadedGrant, gasSponsored: true });
     if (path === "/api/auth/session") return json({ hosted: false, address: null });
     if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
     throw new Error(`Unexpected request: ${path}`);
@@ -104,6 +106,52 @@ async function type(input: HTMLInputElement, value: string) {
 }
 
 describe("the funded wallet's re-sign control", () => {
+  for (const [key, label] of [
+    ["maxDrawdownPct", "drawdown limit"],
+    ["perTradeUsdg", "most it can spend on one trade"],
+    ["dailyUsdg", "most it can spend in a day"],
+    ["expiryDays", "auto-expire the agent after"],
+    ["maxOpsPerDay", "most trades per day"],
+  ] as const) {
+    it(`blocks an untouched zero ${key} from a legacy grant until its owner corrects it`, async () => {
+      loadedGrant = { ...grant, caps: { ...grant.caps, [key]: 0 } };
+      let signedCaps: GrantCaps | undefined;
+      renew = async ({ caps }) => {
+        signedCaps = structuredClone(caps);
+        return { local: { ...loadedGrant, caps }, handoff: { ok: true } };
+      };
+      await ui.render(React.createElement(Wallet));
+      assert.equal(renewalInput(label).value, "0", "the loaded limit is displayed without automatic repair");
+      assert.equal(ui.container.querySelector<HTMLButtonElement>("#resign button")!.disabled, true);
+      assert.ok(ui.container.querySelector('#resign [role="alert"]'));
+      await ui.click("re-sign this key (free)");
+      assert.equal(signedCaps, undefined, "an untouched invalid cap must never reach the signer");
+      await type(renewalInput(label), String(grant.caps[key]));
+      assert.equal(signedCaps, undefined, "the owner's correction still requires an explicit signature");
+      assert.equal(ui.container.querySelector<HTMLButtonElement>("#resign button")!.disabled, false);
+      await ui.click("re-sign this key (free)");
+      assert.deepEqual(signedCaps, grant.caps, "only the owner-corrected cap changes");
+    });
+  }
+
+  it("requires an explicit value for a missing legacy cap instead of inserting a default", async () => {
+    const legacyCaps: Partial<GrantCaps> = { ...grant.caps };
+    delete legacyCaps.maxOpsPerDay;
+    loadedGrant = { ...grant, caps: legacyCaps as GrantCaps };
+    let signedCaps: GrantCaps | undefined;
+    renew = async ({ caps }) => {
+      signedCaps = structuredClone(caps);
+      return { local: { ...loadedGrant, caps }, handoff: { ok: true } };
+    };
+    await ui.render(React.createElement(Wallet));
+    assert.equal(ui.container.querySelector<HTMLButtonElement>("#resign button")!.disabled, true);
+    await ui.click("re-sign this key (free)");
+    assert.equal(signedCaps, undefined);
+    await type(renewalInput("most trades per day"), "24");
+    await ui.click("re-sign this key (free)");
+    assert.deepEqual(signedCaps, { ...grant.caps, maxOpsPerDay: 24 });
+  });
+
   it("shows and preserves the existing 5% drawdown limit when renewing without changes", async () => {
     let signedCaps: GrantCaps | undefined;
     renew = async ({ caps }) => {
