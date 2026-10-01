@@ -70,6 +70,19 @@ describe("recovery tickets", () => {
 });
 
 describe("the challenge text", () => {
+  it("keeps the installed native client's exact legacy text by default", () => {
+    assert.equal(recoveryChallengeMessage("https://app.merrymen.dev", "N"), [
+      "https://app.merrymen.dev — withdraw from your merrymen account.",
+      "",
+      "This proves you control the owner key so the site will relay your withdrawal.",
+      "It moves no funds by itself and grants no permissions: the withdrawal itself",
+      "is a separate operation you sign next.",
+      "",
+      "URI: https://app.merrymen.dev",
+      "Nonce: N",
+    ].join("\n"));
+    assert.match(recoveryChallengeMessage("https://app.merrymen.dev", "N", true), /permission revocations/);
+  });
   it("binds BOTH origin and nonce into what gets signed", () => {
     // A fixed message would make the signature a permanent bearer credential:
     // anyone who ever saw it — a log line, a support paste, a screenshot — could

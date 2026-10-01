@@ -198,7 +198,8 @@ final class WalletHost: NSObject, ObservableObject, URLSessionTaskDelegate {
             guard callID != nil, callID == runID else { throw fail("Wallet operation closed.") }
             if url.path == "/api/grants" { try await store.verifyOwner(identity) }
             guard callID == runID, let sessionBinding else { throw fail("Wallet operation closed.") }
-            (data, response) = try await store.api.raw(url.path, method: method, data: body, token: token, expectedSession: sessionBinding)
+            let apiPath = url.path + (url.query.map { "?" + $0 } ?? "")
+            (data, response) = try await store.api.raw(apiPath, method: method, data: body, token: token, expectedSession: sessionBinding)
         } else {
             var request = URLRequest(url: url); request.httpMethod = method; request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")

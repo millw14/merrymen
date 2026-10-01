@@ -152,7 +152,7 @@ before(() => {
     if (url.includes("/api/bundler/46630") || url.includes("rpc.testnet.chain")) activeChain = 46630;
     else if (url.includes("/api/bundler/4663") || url.includes("rpc.mainnet.chain")) activeChain = 4663;
     // The relay ticket: a challenge to sign, then the account the server derived.
-    if (url.endsWith("/api/recover/ticket")) {
+    if (url.includes("/api/recover/ticket")) {
       return init?.method === "POST" ? json({ smartAccount: ACCOUNT }) : json({ nonce: "n", message: "recover" });
     }
     if (url.includes("/api/bundler/") && !init?.body) return json({ gasSponsored, sponsorshipEnabled: gasSponsored, reason: gasSponsored ? null : "Merrymen gas coverage is unavailable." });

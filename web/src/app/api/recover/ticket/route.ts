@@ -42,22 +42,34 @@ import {
 export const runtime = "nodejs";
 
 const KNOWN_CHAINS = new Set<number>([robinhoodChain.id, robinhoodTestnet.id]);
+const OWNER_ACTIONS_SCOPE = "owner-actions";
+const nonceOrigin = (origin: string, ownerActions: boolean) => ownerActions ? `${origin}|recovery-owner-actions-v2` : origin;
 
 export async function GET(req: Request) {
   const origin = requestOrigin(req);
-  const nonce = issueChallengeNonce(origin);
-  return NextResponse.json({ nonce, message: recoveryChallengeMessage(origin, nonce) });
+  const scopes = new URL(req.url).searchParams.getAll("scope");
+  if (scopes.length > 1 || (scopes.length === 1 && scopes[0] !== OWNER_ACTIONS_SCOPE)) {
+    return NextResponse.json({ error: "unknown recovery scope" }, { status: 400 });
+  }
+  const ownerActions = scopes[0] === OWNER_ACTIONS_SCOPE;
+  // Installed native clients enforce the legacy text exactly. New clients
+  // opt into owner actions, with a distinct nonce namespace to prevent mixing.
+  const nonce = issueChallengeNonce(nonceOrigin(origin, ownerActions));
+  return NextResponse.json({ nonce, message: recoveryChallengeMessage(origin, nonce, ownerActions) });
 }
 
 export async function POST(req: Request) {
   const origin = requestOrigin(req);
 
-  let body: { nonce?: unknown; signature?: unknown; chainId?: unknown };
+  let body: { nonce?: unknown; signature?: unknown; chainId?: unknown; scope?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: "malformed request" }, { status: 400 });
   }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return NextResponse.json({ error: "malformed request" }, { status: 400 });
+  if (body.scope !== undefined && body.scope !== OWNER_ACTIONS_SCOPE) return NextResponse.json({ error: "unknown recovery scope" }, { status: 400 });
+  const ownerActions = body.scope === OWNER_ACTIONS_SCOPE;
 
   const nonce = typeof body.nonce === "string" ? body.nonce : "";
   const signature = typeof body.signature === "string" ? body.signature : "";
@@ -74,13 +86,13 @@ export async function POST(req: Request) {
   // BURN THE NONCE FIRST. The signature alone binds origin (it is in the text)
   // but nothing else — without a single-use, expiring nonce, anyone who ever saw
   // that signature could mint tickets for the account forever.
-  const gate = await consumeChallengeNonce(nonce, origin);
+  const gate = await consumeChallengeNonce(nonce, nonceOrigin(origin, ownerActions));
   if (!gate.ok) return NextResponse.json({ error: gate.why }, { status: 401 });
 
   // Reconstruct the exact text that was signed. Nothing the caller sends is
   // trusted as an identity — the address falls out of the signature or the
   // request fails.
-  const message = recoveryChallengeMessage(origin, nonce);
+  const message = recoveryChallengeMessage(origin, nonce, ownerActions);
   let owner: `0x${string}`;
   try {
     owner = await recoverMessageAddress({ message, signature: signature as `0x${string}` });

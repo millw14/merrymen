@@ -1,7 +1,7 @@
 {
   "ios-native/Resources/FeedEngine.js": "3079e0aa1a9f7c5c320146206a185424f96375e1e9e52f42f35200ea185d988d",
   "ios-native/Resources/WalletCryptography.js": "2acd222eb726c067fefe9b18aa9af7e98c138e2f1c518c951650dfd0393ee02c",
-  "ios-native/Resources/WalletEngine.js": "0b840676a6a1acde89fe7a6c973bbca9b4d0eace0e79da62e9f0a4f7ac9301f9",
+  "ios-native/Resources/WalletEngine.js": "454bef83a43276688275f984fc2a6f4084d3a854f20121b505749cb46af268dc",
   "ios-native/Resources/WalletRuntime.js": "ab934c4b8ff5fb422e2276dc30cc0eaf7696a4a31dd9c2606533d6aca95dfdd3",
   "ios-native/Signing/build.mjs": "457a8884e0f46acf5319492fb3f6c6bbe0bd26db7bdd0ad7f0f6d00e95c3d8b2",
   "ios-native/Signing/crypto-platform.js": "508224e9cb61498f7680f0321d4f003b9135fb1032cb881b09c22fe8b8f1659d",
@@ -51,7 +51,7 @@
   "web/src/lib/hold-time.ts": "93a59edaad878247c8096e6c2e18657cdf30ea7cad4fb721616eba9481cf5d6c",
   "web/src/lib/locale.ts": "2ee80b3c1e180dac18abcb4a852d012a13aecdaf48e61669041fba896d78462d",
   "web/src/lib/post-line.ts": "3f85dd8a84d558ed9e2d1ac0e122b6cb485ee14186affdf543592b9ad85335d4",
-  "web/src/lib/recover-client.ts": "0f5a962a0b256c8d3caaf2aee6722d774e0ed2a104bb22b391ab828d8ef9c97e",
+  "web/src/lib/recover-client.ts": "f7fb815d86989de232ea94c56c09ceda74941db43c0597b853901bebb593ccff",
   "web/src/lib/session.ts": "3d4e3e79a44d44520b4ea9671337352e41213ce245e59250c83de216a3cdb062",
   "web/src/lib/trencher-permission.ts": "5f742b52e4e658ac7ff061362dd8a7b6ee3983a777a45146898ed3fdc4710e87",
   "web/src/lib/verified-adapter.ts": "ae8b01cb5865a4838e65addf6c6bcac4041ce36e7add9316a1ba4e0a4d97e672",

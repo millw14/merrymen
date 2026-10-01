@@ -17,6 +17,12 @@ final class WalletNetworkPolicyTests: XCTestCase {
         for operation in ["preview", "plan", "withdraw", "reconcile"] {
             XCTAssertNotNil(WalletNetworkPolicy.destination("/api/recover/ticket", method: "GET", operation: operation, rpcMethod: nil))
             XCTAssertNotNil(WalletNetworkPolicy.destination("/api/recover/ticket", method: "POST", operation: operation, rpcMethod: nil))
+            XCTAssertNotNil(WalletNetworkPolicy.destination("/api/recover/ticket?scope=owner-actions", method: "GET", operation: operation, rpcMethod: nil))
+            XCTAssertNil(WalletNetworkPolicy.destination("/api/recover/ticket?scope=owner-actions", method: "POST", operation: operation, rpcMethod: nil))
+            for query in ["scope=unknown", "scope=owner-actions&policy=caller", "scope=owner-actions&scope=owner-actions", "scope=owner-actions/", "owner-actions", "scope=owner%2Dactions"] {
+                XCTAssertNil(WalletNetworkPolicy.destination("/api/recover/ticket?" + query, method: "GET", operation: operation, rpcMethod: nil))
+            }
+            XCTAssertNil(WalletNetworkPolicy.destination("/api/recover/ticket?scope=owner-actions", method: "GET", operation: operation, rpcMethod: "eth_sendUserOperation"))
             XCTAssertNotNil(WalletNetworkPolicy.destination("/api/bundler/4663", method: "GET", operation: operation, rpcMethod: nil))
             XCTAssertNil(WalletNetworkPolicy.destination("/api/bundler/46630", method: "GET", operation: operation, rpcMethod: nil))
         }
@@ -33,5 +39,8 @@ final class WalletNetworkPolicyTests: XCTestCase {
         }
         XCTAssertNil(WalletNetworkPolicy.destination("/api/bundler/4663?policy=caller", method: "GET", operation: "plan", rpcMethod: nil))
         XCTAssertNil(WalletNetworkPolicy.destination("/api/bundler/4663", method: "GET", operation: "create", rpcMethod: nil))
+        for operation in ["create", "restore"] {
+            XCTAssertNil(WalletNetworkPolicy.destination("/api/recover/ticket?scope=owner-actions", method: "GET", operation: operation, rpcMethod: nil))
+        }
     }
 }

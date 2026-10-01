@@ -128,7 +128,7 @@ export function ownerGasError(e: unknown, ownerKey?: string): string {
  */
 export async function getRecoveryTicket(w: BrowserWallet): Promise<void> {
   const ticketUrl = `${w.apiOrigin ?? ""}/api/recover/ticket`;
-  const chal = await fetch(ticketUrl, { cache: "no-store", credentials: "include" });
+  const chal = await fetch(`${ticketUrl}?scope=owner-actions`, { cache: "no-store", credentials: "include" });
   if (!chal.ok) throw new Error("could not start recovery — the site did not issue a challenge");
   const { nonce, message } = (await chal.json()) as { nonce: string; message: string };
 
@@ -143,7 +143,7 @@ export async function getRecoveryTicket(w: BrowserWallet): Promise<void> {
     method: "POST",
     headers: { "content-type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ nonce, signature, chainId: w.chainId }),
+    body: JSON.stringify({ nonce, signature, chainId: w.chainId, scope: "owner-actions" }),
   });
   const body = (await res.json()) as { smartAccount?: string; error?: string };
   if (!res.ok) throw new Error(body.error ?? "the site would not issue a recovery ticket");

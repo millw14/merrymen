@@ -53,12 +53,16 @@ const hmac = (payload: string, secret: string) =>
  * to sign something with the key that controls all their money and deserves to
  * read a sentence rather than a hex blob.
  */
-export function recoveryChallengeMessage(origin: string, nonce: string): string {
+export function recoveryChallengeMessage(origin: string, nonce: string, ownerActions = false): string {
   return [
-    `${origin} — recover your merrymen account.`,
+    ownerActions ? `${origin} — recover your merrymen account.` : `${origin} — withdraw from your merrymen account.`,
     "",
-    "This proves you control the owner key so the site can relay withdrawals and permission revocations.",
-    "It moves no funds by itself and grants no permissions: each operation",
+    ownerActions
+      ? "This proves you control the owner key so the site can relay withdrawals and permission revocations."
+      : "This proves you control the owner key so the site will relay your withdrawal.",
+    ownerActions
+      ? "It moves no funds by itself and grants no permissions: each operation"
+      : "It moves no funds by itself and grants no permissions: the withdrawal itself",
     "is a separate operation you sign next.",
     "",
     `URI: ${origin}`,

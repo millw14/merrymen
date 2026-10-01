@@ -67,10 +67,15 @@ const handle = async (op, args) => {
     if (url.pathname === '/api/recover/ticket') {
       const nonce = 'fee_check';
       const message = ['https://app.merrymen.dev — recover your merrymen account.', '', 'This proves you control the owner key so the site can relay withdrawals and permission revocations.', 'It moves no funds by itself and grants no permissions: each operation', 'is a separate operation you sign next.', '', 'URI: https://app.merrymen.dev', `Nonce: ${nonce}`].join('\n');
-      if (args.method === 'GET') return { status: 200, body: JSON.stringify({ nonce, message }) };
+      if (args.method === 'GET') {
+        assert.equal(url.search, '?scope=owner-actions', 'New native recovery requests the versioned owner-actions proof');
+        return { status: 200, body: JSON.stringify({ nonce, message }) };
+      }
       assert.equal(args.method, 'POST');
+      assert.equal(url.search, '', 'The proof scope belongs to the signed POST body');
       const proof = JSON.parse(args.body);
       assert.equal(proof.nonce, nonce); assert.equal(proof.chainId, 4663);
+      assert.equal(proof.scope, 'owner-actions');
       assert.equal(proof.ownerKey, undefined); assert.equal(proof.demoOwnerPrivateKey, undefined);
       assert.equal((await recoverMessageAddress({ message, signature: proof.signature })).toLowerCase(), owner.address.toLowerCase());
       ownershipProofs++;
