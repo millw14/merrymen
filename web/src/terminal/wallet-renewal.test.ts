@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import Module, { createRequire } from "node:module";
 import { afterEach, before, beforeEach, describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
+import { JSDOM } from "jsdom";
 import React, { act } from "react";
-import { WALL_TOO_WIDE, type StoredGrant } from "@merrymen/core";
+import { WALL_TOO_WIDE, type GrantCaps, type StoredGrant } from "@merrymen/core";
 import type { SavedWallet } from "@/lib/session";
-import { deferred, json, testDom } from "./test-dom";
+
+let deferred: typeof import("./test-dom").deferred;
+let json: typeof import("./test-dom").json;
+let testDom: typeof import("./test-dom").testDom;
 
 const address = `0x${"1".repeat(40)}` as const;
 const grant = {
@@ -14,20 +18,26 @@ const grant = {
   sessionKeyAddress: `0x${"2".repeat(40)}`,
   demoOwnerPrivateKey: `0x${"3".repeat(64)}`,
   chainId: 4663,
-  caps: { perTradeUsdg: 50, dailyUsdg: 500, expiryDays: 14, maxDrawdownPct: 10, maxOpsPerDay: 48 },
+  caps: { perTradeUsdg: 50, dailyUsdg: 500, expiryDays: 14, maxDrawdownPct: 5, maxOpsPerDay: 48 },
   grantedAt: Math.floor(Date.now() / 1000),
   expiresAt: Math.floor(Date.now() / 1000) + 14 * 86_400,
   grantTokens: [],
   grantFeatures: [],
 } as unknown as StoredGrant;
 const tooWide = `${WALL_TOO_WIDE}: installing it would need about 15,980,519 gas against a limit of 14,000,000. You have 20 custom tokens; the most that fits with the features you have enabled is 17. Remove at least 3 custom tokens, then sign again.`;
-let renew: (options: { onStatus: (status: string) => void }) => Promise<unknown>;
+let renew: (options: { caps: GrantCaps; onStatus: (status: string) => void }) => Promise<unknown>;
 let Wallet: typeof import("./screens/Wallet").default;
 let ui: ReturnType<typeof testDom>;
 let savedWallets: SavedWallet[] = [];
 const originalFetch = globalThis.fetch;
 
-before(() => {
+before(async () => {
+  // Real input events require React DOM to see a browser at initial import.
+  const boot = new JSDOM("<!doctype html><p></p>", { url: "https://app.example.test", pretendToBeVisual: true });
+  const g = globalThis as Record<string, unknown>;
+  g.window = boot.window;
+  g.document = boot.window.document;
+  ({ deferred, json, testDom } = await import("./test-dom"));
   // Load the actual screen and its click handler. Only wallet/RPC boundaries
   // are replaced: this test must not sign a permission or contact a chain.
   const walletPath = fileURLToPath(new URL("./screens/Wallet.tsx", import.meta.url));
@@ -52,12 +62,16 @@ before(() => {
     Wallet = createRequire(import.meta.url)(walletPath).default;
   } finally {
     intercepted.mock.restore();
+    Reflect.deleteProperty(g, "window");
+    Reflect.deleteProperty(g, "document");
+    boot.window.close();
   }
 });
 
 beforeEach(() => {
   ui = testDom();
   savedWallets = [];
+  renew = async () => { throw new Error("Unexpected signing request"); };
   localStorage.setItem("merrymen.grant.backedup.v1", "1");
   globalThis.fetch = async (input) => {
     const path = String(input);
@@ -73,7 +87,88 @@ afterEach(async () => {
   globalThis.fetch = originalFetch;
 });
 
+function renewalInput(label: string): HTMLInputElement {
+  const field = [...ui.container.querySelectorAll("#resign .field")]
+    .find(element => element.querySelector(".field-label")?.textContent === label);
+  const input = field?.querySelector("input");
+  assert.ok(input, `renewal field ${label}`);
+  return input;
+}
+
+async function type(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(ui.dom.window.HTMLInputElement.prototype, "value")!.set!;
+  await act(async () => {
+    setter.call(input, value);
+    input.dispatchEvent(new ui.dom.window.Event("input", { bubbles: true }));
+  });
+}
+
 describe("the funded wallet's re-sign control", () => {
+  it("shows and preserves the existing 5% drawdown limit when renewing without changes", async () => {
+    let signedCaps: GrantCaps | undefined;
+    renew = async ({ caps }) => {
+      signedCaps = structuredClone(caps);
+      return { local: { ...grant, caps }, handoff: { ok: true } };
+    };
+    await ui.render(React.createElement(Wallet));
+    assert.equal(renewalInput("drawdown limit").value, "5");
+    assert.match(ui.container.querySelector("#resign")!.textContent!, /at or above/);
+    assert.match(ui.container.querySelector("#resign")!.textContent!, /Raising it allows a larger loss/);
+    assert.equal(signedCaps, undefined, "loading the form never signs");
+    await ui.click("re-sign this key (free)");
+    assert.deepEqual(signedCaps, grant.caps);
+    assert.equal(renewalInput("drawdown limit").value, "5");
+  });
+
+  it("shows an explicit owner's drawdown edit before signing exactly that choice", async () => {
+    let signedCaps: GrantCaps | undefined;
+    renew = async ({ caps }) => {
+      signedCaps = structuredClone(caps);
+      return { local: { ...grant, caps }, handoff: { ok: true } };
+    };
+    await ui.render(React.createElement(Wallet));
+    await type(renewalInput("drawdown limit"), "8");
+    assert.equal(signedCaps, undefined, "editing does not sign or submit");
+    assert.match(ui.container.querySelector("#resign")!.textContent!, /breaker 5 % → 8 %/);
+    await ui.click("re-sign this key (free)");
+    assert.deepEqual(signedCaps, { ...grant.caps, maxDrawdownPct: 8 });
+    assert.match(ui.container.textContent!, /Permission renewed/);
+  });
+
+  it("refuses blank, non-numeric, fractional, zero and over-maximum drawdown edits", async () => {
+    let signs = 0;
+    renew = async ({ caps }) => {
+      signs++;
+      return { local: { ...grant, caps }, handoff: { ok: true } };
+    };
+    await ui.render(React.createElement(Wallet));
+    for (const invalid of ["", "oops", "5.5", "0", "51"]) {
+      await type(renewalInput("drawdown limit"), invalid);
+      assert.equal(renewalInput("drawdown limit").value, invalid, "raw text stays visible");
+      assert.equal(renewalInput("drawdown limit").getAttribute("aria-invalid"), "true");
+      const button = ui.container.querySelector<HTMLButtonElement>("#resign button")!;
+      assert.equal(button.disabled, true, `cannot sign invalid ${JSON.stringify(invalid)}`);
+      assert.ok(ui.container.querySelector('#resign [role="alert"]'));
+      await ui.click("re-sign this key (free)");
+      assert.equal(signs, 0, "never substitutes the previous valid number into a signature");
+    }
+    await type(renewalInput("drawdown limit"), "4");
+    await ui.click("re-sign this key (free)");
+    assert.equal(signs, 1, "a valid lower owner-chosen limit can be signed");
+  });
+
+  it("keeps an invalid limit blocked when another field receives a valid edit", async () => {
+    let signs = 0;
+    renew = async () => { signs++; return { local: grant, handoff: { ok: true } }; };
+    await ui.render(React.createElement(Wallet));
+    await type(renewalInput("drawdown limit"), "51");
+    await type(renewalInput("most it can spend on one trade"), "25");
+    assert.equal(ui.container.querySelector<HTMLButtonElement>("#resign button")!.disabled, true);
+    assert.ok(ui.container.querySelector('#resign [role="alert"]'));
+    await ui.click("re-sign this key (free)");
+    assert.equal(signs, 0);
+  });
+
   it("does not call a 500 response a discarded wallet, and recovers on retry", async () => {
     let unavailable = true;
     savedWallets = [{ smartAccount: address, owner: address, chainId: 4663,

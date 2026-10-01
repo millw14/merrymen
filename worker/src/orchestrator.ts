@@ -94,6 +94,7 @@ import {
 } from "./telegram-claims";
 import { getMe as telegramGetMe } from "./telegram/api";
 import { parseLinkedChatAt, parsePollHealth, tokenTagOf, type PollHealth } from "./telegram/state";
+import { conditionAlertTimes } from "./telegram/condition-alert-state";
 import { linksToPromote } from "./telegram/link";
 import { livenessAlertLine, telegramLivenessVerdict } from "./telegram-liveness";
 import { makePgDb, translateSchema, type Db } from "./db";
@@ -120,6 +121,7 @@ import {
   publishTelegramRuntime,
   publishTenantChildState,
   readTenantTelegram,
+  readTenantConditionAlerts,
 } from "./telegram-store";
 import { UNCLASSIFIED_BLOCK, clearRestoreBlocked, isNamedBlock, readRestoreBlocked, restoreBlockClass, writeRestoreBlocked } from "./restore-block";
 import { notifyHoldOnce, type HoldNoticeOutcome } from "./hold-notice";
@@ -951,6 +953,7 @@ function readChildTelegram(tenant: string, nowSec = Math.floor(Date.now() / 1000
   linkCode: string | null;
   ownerId: number | null;
   linkedAt: number | null;
+  firedAlerts: Record<string, number>;
   linkedChats: number[];
   /** When each of `linkedChats` last linked (telegram/state.ts linkedChatAt). */
   linkedChatAt: Record<string, number>;
@@ -967,6 +970,7 @@ function readChildTelegram(tenant: string, nowSec = Math.floor(Date.now() / 1000
       linkCode: typeof t.linkCode === "string" && t.linkCode ? t.linkCode : null,
       ownerId: typeof t.ownerId === "number" ? t.ownerId : null,
       linkedAt: typeof t.linkedAt === "number" ? t.linkedAt : null,
+      firedAlerts: conditionAlertTimes(t.firedAlerts, nowSec),
       linkedChats: Array.isArray(t.linkedChats)
         ? (t.linkedChats as unknown[]).filter((c): c is number => typeof c === "number")
         : [],
@@ -1055,7 +1059,9 @@ export async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db):
   const url = process.env.DATABASE_URL;
   if (!url && !shared) return;
   try {
-    const tg = await readTenantTelegram(shared ?? (await makePgDb(url!)), tenant);
+    const db = shared ?? (await makePgDb(url!));
+    const tg = await readTenantTelegram(db, tenant);
+    if (tg) tg.firedAlerts = await readTenantConditionAlerts(db, tenant, tg.ownerId);
     let ownerId = tg?.ownerId ?? null;
 
     // THE MIRROR IS USUALLY EMPTY TOO, so fall back to the allowlist.
@@ -1122,14 +1128,18 @@ export async function writeTelegramForChild(tenant: `0x${string}`, shared?: Db):
  * what keeps a replayed backlog from running.
  */
 export function restoredTelegramFile(
-  tg: { linkCode: string | null; linkedAt: number | null } | null,
+  tg: { linkCode: string | null; linkedAt: number | null; ownerId?: number | null; firedAlerts?: Record<string, number> } | null,
   ownerId: number | null,
-): { linkCode?: string; ownerId?: number; linkedAt?: number } | null {
-  const out: { linkCode?: string; ownerId?: number; linkedAt?: number } = {};
+): { linkCode?: string; ownerId?: number; linkedAt?: number; firedAlerts?: Record<string, number> } | null {
+  const out: { linkCode?: string; ownerId?: number; linkedAt?: number; firedAlerts?: Record<string, number> } = {};
   if (tg?.linkCode) out.linkCode = tg.linkCode;
   if (ownerId) {
     out.ownerId = ownerId;
     if (typeof tg?.linkedAt === "number") out.linkedAt = tg.linkedAt;
+    if (tg?.ownerId === ownerId) {
+      const firedAlerts = conditionAlertTimes(tg.firedAlerts);
+      if (Object.keys(firedAlerts).length) out.firedAlerts = firedAlerts;
+    }
   }
   return Object.keys(out).length > 0 ? out : null;
 }
@@ -1161,7 +1171,7 @@ async function publishChildTelegram(tenant: `0x${string}`, shared: Db, childStat
     const failed = await publishTelegramRuntime(
       shared,
       tenant,
-      { linkCode: tg.linkCode, ownerId: tg.ownerId, linkedAt: tg.linkedAt },
+      { linkCode: tg.linkCode, ownerId: tg.ownerId, linkedAt: tg.linkedAt, firedAlerts: tg.firedAlerts },
       liveness,
     );
     livenessPublished(tenant, failed);
@@ -1260,7 +1270,7 @@ function livenessPublished(tenant: string, failed: unknown): void {
   }
   if (livenessPublishFailing) return;
   livenessPublishFailing = true;
-  log(`telegram liveness: could not publish (${tenant}) — ${failed instanceof Error ? failed.message : String(failed)}; said once until it works`);
+  log(`telegram runtime: could not publish (${tenant}) — ${failed instanceof Error ? failed.message : String(failed)}; said once until it works`);
 }
 
 /**
