@@ -26,7 +26,7 @@
  * THE HOUSE SETS THE BASELINES, NEVER THE OWNER. "A tenth of your own normal"
  * computed from inputs the throttled owner controls is no throttle at all:
  * `llmIntervalMin` is tenant-settable down to one minute, and a grant's
- * `maxOpsPerDay` has no ceiling and re-signing is free. So each baseline is
+ * `maxOpsPerDay` has no ceiling and can be changed at renewal. So each baseline is
  * the smaller of the owner's figure and a house one — an owner can make a low
  * day smaller, never larger.
  */

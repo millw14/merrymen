@@ -382,9 +382,10 @@ describe("the fixed sentences — each names what to do instead", async () => {
   it("not mainnet: keep it in your own wallet on Robinhood Chain", () => {
     assert.match(m.ENERGY_NOT_MAINNET, /own wallet on Robinhood Chain/);
   });
-  it("resign: re-sign at /grant (free), or send it directly", () => {
+  it("resign: review the revocation fees at /grant, or send it directly", () => {
     assert.match(m.ENERGY_RESIGN, /re-sign at \/grant/);
-    assert.match(m.ENERGY_RESIGN, /free/);
+    assert.match(m.ENERGY_RESIGN, /revoking the old permissions requires network fees/);
+    assert.doesNotMatch(m.ENERGY_RESIGN, /\bfree\b/i);
     assert.match(m.ENERGY_RESIGN, /directly/);
   });
   it("needs live: says why it is not live, and both ways round it", () => {

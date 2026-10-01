@@ -152,7 +152,7 @@ export function EnergyNote({
           )}
           {remedies.usdg === "resign" && (
             <>
-              <p>My key can&apos;t buy it yet — re-sign my permission (free) first.</p>
+              <p>My key can&apos;t buy it yet — renew my permission first; revocation requires network fees.</p>
               <button type="button" onClick={onResign}>
                 Re-sign my permission →
               </button>

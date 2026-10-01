@@ -899,12 +899,12 @@ export function rejectRuleRemedy(rule: string | null | undefined): string | null
   if (!rule) return null;
   switch (rule) {
     case "no-exit":
-      return "Re-sign your trading permission at /grant so it covers that token — it is free, and nothing moves on-chain.";
+      return "Re-sign your trading permission at /grant so it covers that token — renewal revokes old permissions on-chain and requires network fees.";
     case "asset-allowlist":
       return "Add the token at /settings, then re-sign your trading permission at /grant to cover it.";
     case "dead-policy":
     case "not-armed":
-      return "Re-sign your trading permission at /grant — it is free and takes a moment.";
+      return "Re-sign your trading permission at /grant — renewal revokes old permissions on-chain and requires network fees.";
     case "grant-too-wide":
       return "Re-sign at /grant with fewer tokens or fewer venues; the current set is too large to install on-chain.";
     case "no-cash":
@@ -922,7 +922,7 @@ export function rejectRuleRemedy(rule: string | null | undefined): string | null
     // owner's — except that sending the tokens directly is always open, which
     // is why `energy-tax` still says so.
     case "energy-not-granted":
-      return "Re-sign your trading permission at /grant — it is free — or send $MERRYMEN to the agent's account on Robinhood Chain directly.";
+      return "Re-sign your trading permission at /grant — revocation requires network fees — or send $MERRYMEN to the agent's account on Robinhood Chain directly.";
     case "energy-needs-live":
       return "Turn on Live trading in Settings, or send $MERRYMEN to the agent's account on Robinhood Chain directly.";
     case "energy-tax":

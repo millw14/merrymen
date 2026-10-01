@@ -1308,7 +1308,7 @@ export default function SettingsPage({onFund, slug, onSaved}:{onFund:()=>void; s
                   : "When we publish verified coins on this chain they appear here automatically. There are none yet, so this setting changes nothing today. Coins trade"}{" "}
                 around the clock, so your agent keeps working when the stock market is shut. Your
                 caps, budgets and trading permissions still apply — and a coin listed after you
-                signed needs a free re-sign at /grant before your key can touch it.
+                signed needs renewal at /grant before your key can touch it. Revocation requires network fees.
               </span>
             </label>
             <Field

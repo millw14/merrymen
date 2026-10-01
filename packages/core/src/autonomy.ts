@@ -66,12 +66,12 @@ export function liveBlockerText(rule: RefuseRule): string {
     case "not-armed":
       return "your trading key is not active yet — the agent has no permission to trade with";
     case "dead-policy":
-      return "this trading key was signed before a fix and cannot reach the chain; re-signing it is free and instant";
+      return "this trading key was signed before a fix and cannot reach the chain; renew it on the wallet page, where revoking old permissions requires network fees";
     case "grant-too-wide":
       return (
         "this key's permission set is too wide to install on-chain — its first operation would cost more " +
         "gas than we will sign for, so it can never reach the chain. Re-signing with fewer tokens or " +
-        "fewer venues fixes it, and costs nothing"
+        "fewer venues addresses the oversized permission; revoking old permissions requires network fees"
       );
     case "no-executor":
       return "no bundler is configured, so nothing can be submitted to the chain";
@@ -170,7 +170,7 @@ function ownerRemedy(rule: RefuseRule | "expired"): {
       };
     default:
       return {
-        headline: "Your Merryman needs a free permission renewal to trade autonomously.",
+        headline: "Your Merryman needs permission renewal to trade autonomously. Revocation requires network fees.",
         action: { label: "Renew permission", kind: "renew-grant" },
       };
   }

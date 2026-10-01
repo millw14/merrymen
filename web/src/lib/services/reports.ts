@@ -517,7 +517,7 @@ function expiryBlockers(expiresAt: number | null, now: number): { blockers: Bloc
   if (expiresAt <= now) {
     return {
       blockers: [{ kind: "permission", code: "permission-expired", text: `The trading permission expired at ${iso(expiresAt)}.`, owner_can_fix: true }],
-      items: [{ action: "Re-sign the trading permission in Merrymen. It is free and nothing moves on chain.", because: "permission-expired" }],
+      items: [{ action: "Re-sign the trading permission in Merrymen. Renewal revokes old permissions on-chain and requires network fees.", because: "permission-expired" }],
     };
   }
   if (expiresAt - now <= EXPIRY_WARN_SEC) {

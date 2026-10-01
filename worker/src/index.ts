@@ -6274,7 +6274,7 @@ async function main() {
         "warn",
         `your key can't sell ${list}, so buys of ${names.length === 1 ? "it are" : "them are"} refused — ` +
           `entering a position you can't exit is the one thing no cap protects you from. ` +
-          `The tradable list is sealed into the signature; re-sign at /grant (free, same wallet, same funds).`,
+          `The tradable list is sealed into the signature; review renewal at /grant (revocation requires network fees; the account stays the same).`,
       );
     }
     // A SEPARATE SENTENCE, because it is a different fact with a different
@@ -6308,8 +6308,8 @@ async function main() {
         `${list} ${officialNames.length === 1 ? "is" : "are"} on the platform's coin list, which your key was ` +
           `signed before — so ${officialNames.length === 1 ? "it stays" : "they stay"} watched but untradable. ` +
           `Coins trade around the clock, which is what lets your agent keep working when the stock market is ` +
-          `shut. Re-sign at /grant to turn ${officialNames.length === 1 ? "it" : "them"} on (free, same wallet, ` +
-          `same funds, nothing moves), or switch the coin list off in /settings.${also}`,
+          `shut. Re-sign at /grant to turn ${officialNames.length === 1 ? "it" : "them"} on (revocation requires network fees; ` +
+          `the account stays the same), or switch the coin list off in /settings.${also}`,
       );
     }
   }
@@ -6710,9 +6710,9 @@ async function main() {
         agentId,
         "err",
         "this key was signed before a wall fix and CANNOT trade: it carries a rate-limit policy whose " +
-          "contract has no code on this chain, so every operation fails validation. Re-signing is free " +
-          "and instant — open the wallet page and use 're-sign this key'. Your funds are untouched, " +
-          "and Paper still works meanwhile.",
+          "contract has no code on this chain, so every operation fails validation. Open the wallet page " +
+          "to renew; revoking the old permissions requires network fees before signing the replacement. " +
+          "Paper still works meanwhile.",
       );
     }
 
@@ -12552,7 +12552,7 @@ async function main() {
           "warn",
           "This agent's key was signed with a 0% drawdown limit, so the breaker refuses every " +
             "buy — even with the book at its high-water mark. Nothing else is wrong and adding " +
-            "funds will not help. Re-sign the permission (free) to set a real limit.",
+            "funds will not help. Review the permission at /grant; renewing it revokes old permissions and requires network fees.",
         );
       }
       return;

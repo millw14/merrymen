@@ -143,7 +143,8 @@ test("paper is called Paper, and the testnet is called the testnet", () => {
 
   const testnet = statusLine({ ...base, testnet: true });
   assert.match(testnet.headline, /none of this is real money/);
-  assert.match(testnet.next, /free and takes one signature/);
+  assert.match(testnet.next, /revoking the old permissions requires network fees/);
+  assert.doesNotMatch(testnet.next, /\bfree\b/i);
 });
 
 test("no gas is distinguished from no capital — different problems, different fixes", () => {

@@ -337,7 +337,7 @@ const agentStatus: ChatTool = {
 
         const need = settledNeed(blocker, ctx);
         if (need === "just-signed") lines.push("The owner just signed a new trading permission; I'm still switching over to it.");
-        else if (need) lines.push(`My trading permission needs a new signature from the owner (${need.reason}). It's free; I can send them the button.`);
+        else if (need) lines.push(`My trading permission needs a new signature from the owner (${need.reason}). Renewal revokes old permissions on-chain and requires network fees; I can send them the button.`);
 
         if (s.grant) {
           lines.push(
@@ -1080,7 +1080,7 @@ const permissionStatus: ChatTool = {
       need === "just-signed"
         ? "It was just signed and I'm still switching over to it — no new signature is needed."
         : need
-          ? `NEEDS A NEW SIGNATURE (${need.reason}). It's free; I'll send the owner a Sign now button.`
+          ? `NEEDS A NEW SIGNATURE (${need.reason}). Renewal revokes old permissions and requires network fees; I can send the owner a Sign now button.`
           : "It does not need a new signature right now.",
     );
     return cap(lines.join("\n"));

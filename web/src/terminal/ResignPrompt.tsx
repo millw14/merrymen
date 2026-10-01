@@ -165,7 +165,7 @@ export function ResignPrompt({
               nothing: it re-seals the permission around today's settings and
               today's wall. The grant screen shows the diff before signing —
               this says enough to decide to go there, and no more. */}
-          <p>Re-signing is free, takes one signature and moves nothing on-chain. Your wallet, your funds and your balance all stay exactly where they are.</p>
+          <p>Renewal first revokes the old permissions on-chain, which requires network fees, then asks you to sign the replacement. Your account address stays the same.</p>
           <p className="mm-hint">The new permission is sealed around today’s settings, so anything you have changed since you last signed takes effect at the same time. You will see what changes before you sign.</p>
           <div className="resign-actions">
             <button type="button" className="mm-btn primary" onClick={go}>Re-sign my permission →</button>
@@ -185,7 +185,7 @@ export function ResignPrompt({
         <aside className="desk-notice resign-strip" aria-label="Trading permission out of date">
           <strong>Trading permission is out of date</strong>
           <p>Signed before the last update. Your agent may refuse trades it looks able to make.</p>
-          <button type="button" className="mm-btn" onClick={go}>Re-sign — free, one signature →</button>
+          <button type="button" className="mm-btn" onClick={go}>Review renewal and fees →</button>
         </aside>
       )}
     </>

@@ -235,5 +235,5 @@ test("a stale grant is DETECTED, so its owner is told rather than left guessing"
   assert.match(src, /export function grantHasDeadRateLimit/);
   const idx = readFileSync("worker/src/index.ts", "utf8");
   assert.match(idx, /grantHasDeadRateLimit\(grant\.serialized\)/);
-  assert.match(idx, /Re-signing is free/);
+  assert.match(idx, /revoking the old permissions requires network fees/);
 });

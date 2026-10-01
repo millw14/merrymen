@@ -229,7 +229,7 @@ describe("what the panel says", () => {
 
   it("RESIGN: the key cannot buy it yet, and the re-sign is offered", async () => {
     const t = text(await note(report({ spent: true, buy: "resign" })));
-    assert.match(t, /My key can't buy it yet — re-sign my permission \(free\) first\./);
+    assert.match(t, /My key can't buy it yet — renew my permission first; revocation requires network fees\./);
     assert.ok(!/Ask me to get it/.test(t));
   });
 
@@ -348,7 +348,7 @@ describe("the funding screen", () => {
   });
 
   it("RESIGN says the key cannot buy it yet", async () => {
-    assert.match(await funding(report({ buy: "resign" })), /re-sign your agent's permission \(free — its current key can't buy it\)/);
+    assert.match(await funding(report({ buy: "resign" })), /renew your agent's permission \(revocation requires network fees — its current key can't buy it\)/);
   });
 
   it("ANOTHER NETWORK: never 'send it here'", async () => {

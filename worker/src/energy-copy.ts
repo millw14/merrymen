@@ -155,7 +155,7 @@ export function energyNotice(f: EnergyNoticeFacts, style: EnergyNoticeStyle = {}
       line += `, or send USDG to my account and ask me ${chat} to get my $MERRYMEN — you confirm the amount first${estimate}.`;
     } else if (f.buy === "resign") {
       line +=
-        `, or send USDG to my account, re-sign my permission (free — my current key can't buy it), then ask me ` +
+        `, or send USDG to my account, renew my permission (revocation requires network fees — my current key can't buy it), then ask me ` +
         `${chat} to get my $MERRYMEN${estimate}.`;
     } else if (f.buy === "paper") {
       line += ". I'm in Paper mode, so I won't spend real USDG on it — send $MERRYMEN instead, or turn on Live trading first.";

@@ -721,7 +721,7 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
         `🪙 your per-trade limit is <b>$${inputs.maxActionUsdg.toFixed(2)}</b> against $${inputs.cashUsdg.toFixed(2)} of cash, ` +
           `so I keep deciding there is nothing worth buying at that size — a trade that small cannot move your book. ` +
           `Nothing is broken: I am funded and live and the limit is doing exactly what it says. ` +
-          `Raise it at the dashboard <b>/grant</b> (free, same wallet, same funds, nothing moves), ` +
+          `Review it at the dashboard <b>/grant</b> (renewal revokes old permissions and requires network fees), ` +
           `and check <b>LLM max per action</b> in /settings — whichever is lower is the one that binds.`,
       );
     }

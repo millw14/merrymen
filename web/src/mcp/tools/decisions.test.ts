@@ -8,6 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
+import { liveBlockerText } from "@merrymen/core";
 import { classifyEvent, diagnoseInactivity, emptyEvents, EMPTY_TALLY, parseRailNotice, type InactivityInputs } from "@/lib/services/inactivity";
 import { describeRule, pairRealizedEvidence, signalsSubsetOf } from "@/lib/services/decisions";
 import { projectSettings } from "@/lib/services/settings-view";
@@ -931,6 +932,10 @@ test("describeRule, classifyEvent and parseRailNotice keep their vocabularies", 
   assert.equal(classifyEvent("trencher is running but your asset mode is Stocks only, so it sees no candidates."), "consent_notice");
   const rail = parseRailNotice("NOT trading for real yet: this trading key was signed before a fix and cannot reach the chain; re-signing it is free and instant. Fills below…", 1);
   assert.deepEqual(rail, { at: 1, state: "blocked", wouldBlock: "dead-policy" });
+  assert.deepEqual(parseRailNotice(`NOT trading for real yet: ${liveBlockerText("dead-policy")}. Fills below…`, 2), { at: 2, state: "blocked", wouldBlock: "dead-policy" });
+  const oldWide = "this key's permission set is too wide to install on-chain — its first operation would cost more gas than we will sign for, so it can never reach the chain. Re-signing with fewer tokens or fewer venues fixes it, and costs nothing";
+  assert.deepEqual(parseRailNotice(`NOT trading for real yet: ${oldWide}. Fills below…`, 3), { at: 3, state: "blocked", wouldBlock: "grant-too-wide" });
+  assert.deepEqual(parseRailNotice(`NOT trading for real yet: ${liveBlockerText("grant-too-wide")}. Fills below…`, 4), { at: 4, state: "blocked", wouldBlock: "grant-too-wide" });
   assert.equal(signalsSubsetOf("{not json").state, "unreadable");
   assert.equal(signalsSubsetOf("x".repeat(200_000)).state, "too_large");
 });

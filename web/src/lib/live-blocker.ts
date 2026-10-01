@@ -73,7 +73,7 @@ const ADVICE: Readonly<Record<string, BlockerAdvice>> = Object.freeze({
   // exact failure this codebase keeps refusing: a screen that looks like it is
   // telling you what to do while being wrong about what would happen.
   "dead-policy": {
-    say: "This agent's trading permission was signed before a fix and cannot reach the chain. Re-signing it is free and takes a moment — adding funds will not help until you do.",
+    say: "This agent's trading permission was signed before a fix and cannot reach the chain. Funding alone cannot fix it. Renew it on the wallet page; revoking the old permissions requires network fees.",
     funding: false,
     resign: true,
     fault: true,
@@ -89,7 +89,7 @@ const ADVICE: Readonly<Record<string, BlockerAdvice>> = Object.freeze({
     // grows with tokens AND venues together — every venue you allow is pinned
     // on every token you allow — so an owner who only hears "too many tokens"
     // may remove five and still be refused.
-    say: "This agent's permission set covers too many tokens and venues to install on-chain, so its first operation can never be signed. Re-signing with fewer of either is free and fixes it — adding funds will not, because nothing has been spent.",
+    say: "This agent's permission set covers too many tokens and venues to install on-chain, so its first operation can never be signed. Review fewer tokens or venues on the wallet page and renew. Funding alone cannot fix the oversized permission; revoking it requires network fees.",
     funding: false,
     resign: true,
     fault: true,

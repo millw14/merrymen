@@ -165,7 +165,8 @@ test("the message names BOTH places the cap can live, and says nothing is broken
   assert.match(body, /LLM max per action/, "and the settings ceiling");
   assert.match(body, /whichever is lower/i, "because only one of them binds");
   assert.match(body, /[Nn]othing is broken/, "an agent behaving correctly must not read as a fault");
-  assert.match(body, /free, same wallet/, "re-signing must not sound like moving money");
+  assert.match(body, /renewal revokes old permissions and requires network fees/, "the owner must know renewal includes a paid on-chain revocation");
+  assert.doesNotMatch(body, /\bfree\b|nothing moves/i);
 });
 
 test("the ceiling reported is the one that BINDS, not whichever is handier", () => {

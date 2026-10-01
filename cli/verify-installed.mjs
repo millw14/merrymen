@@ -17,6 +17,10 @@ export function physicalLock(installedRoot) {
   const packages = { "": manifest };
   const fields = ["name", "version", "dependencies", "optionalDependencies", "peerDependencies", "peerDependenciesMeta", "engines", "os", "cpu"];
   function visit(directory, location) {
+    // npm can leave an empty nested placeholder after hoisting its package.
+    // Only a truly empty directory is ignorable; dependency resolution below
+    // must still find every required package elsewhere inside this install.
+    if (!existsSync(path.join(directory, "package.json")) && readdirSync(directory).length === 0) return;
     const pkg = readJson(path.join(directory, "package.json"));
     assert.ok(pkg.name && pkg.version, `Invalid installed package at ${location}`);
     // Deliberately omit bundled/dev/override flags: audit the physical tree,
@@ -37,9 +41,24 @@ export function physicalLock(installedRoot) {
     }
   }
   visit(root, "node_modules/merrymen");
-  for (const name of Object.keys(installed.dependencies ?? {})) {
-    if (installed.optionalDependencies?.[name]) continue;
-    assert.ok(packages[`node_modules/merrymen/node_modules/${name}`], `Required runtime dependency missing from isolated install: ${name}`);
+  function resolves(from, name) {
+    for (let ancestor = from; ; ) {
+      if (packages[`${ancestor}/node_modules/${name}`]) return true;
+      if (ancestor === "node_modules/merrymen") return false;
+      const index = ancestor.lastIndexOf("/node_modules/");
+      if (index < 0) return false;
+      ancestor = ancestor.slice(0, index);
+    }
+  }
+  for (const [location, pkg] of Object.entries(packages)) {
+    if (!location) continue;
+    const required = new Set([
+      ...Object.keys(pkg.dependencies ?? {}).filter(name => !pkg.optionalDependencies?.[name]),
+      ...Object.keys(pkg.peerDependencies ?? {}).filter(name => !pkg.peerDependenciesMeta?.[name]?.optional),
+    ]);
+    for (const name of required) {
+      assert.ok(resolves(location, name), `Required runtime dependency missing from isolated install: ${name} (required by ${location})`);
+    }
   }
   return { manifest, lock: { name: manifest.name, version: manifest.version, lockfileVersion: 3, requires: true, packages } };
 }

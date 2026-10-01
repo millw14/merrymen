@@ -118,7 +118,8 @@ describe("the arms", () => {
 
   it("resign: the re-sign comes before the ask", () => {
     const t = render(VARIANTS.resign!);
-    assert.match(t, /re-sign my permission \(free — my current key can't buy it\), then ask me in chat/);
+    assert.match(t, /renew my permission \(revocation requires network fees — my current key can't buy it\), then ask me in chat/);
+    assert.doesNotMatch(t, /\bfree\b/i);
   });
 
   it("NOT MAINNET: only their own wallet counts, and the account is never printed", () => {

@@ -172,7 +172,7 @@ const OWNER_REMEDIES: Readonly<Record<string, string>> = {
   "ops-cap": "Wait for the trailing 24-hour operation count to roll over, or re-sign at /grant with a higher daily operation limit.",
   "per-trade-cap": "Re-sign at /grant with a higher per-trade limit; the cap is sealed into the signature.",
   "deposit-cap": "Re-sign at /grant with a higher limit; vault deposits are measured against a signed cap.",
-  expiry: "Re-sign your trading permission at /grant — it is free and nothing moves on-chain.",
+  expiry: "Re-sign your trading permission at /grant — renewal revokes old permissions on-chain and requires network fees.",
   "drawdown-breaker": "New buys stay blocked while drawdown is at or above the signed limit. This rule permits sell attempts. Drawdown must fall below that limit; full recovery to the high-water mark is not required. Review the current limit at /grant#resign. Renewing it unchanged does not clear the drawdown. If the balances look wrong, ask support to check the accounting.",
   "scout-budget": "Raise the scout budget in Settings if you want it to buy coins it discovers (it is 0 by default).",
   "impact-cap": "Raise the maximum price impact in Settings, or let it trade a smaller size.",

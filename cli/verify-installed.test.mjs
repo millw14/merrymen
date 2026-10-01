@@ -40,3 +40,25 @@ test("a missing required runtime fails even without npm's empty placeholder dire
   writeFileSync(path.join(directory, "package.json"), JSON.stringify({ name: "merrymen", version: "1.0.0", dependencies: { react: "19.2.4" } }));
   assert.throws(() => physicalLock(directory), /Required runtime dependency missing.*react/);
 });
+
+test("empty hoisted placeholders are accepted only when required dependencies and peers resolve", (t) => {
+  const directory = mkdtempSync(path.join(tmpdir(), "merrymen-verify-hoisted-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  function pkg(location, value) {
+    const target = path.join(directory, location);
+    mkdirSync(target, { recursive: true });
+    writeFileSync(path.join(target, "package.json"), JSON.stringify(value));
+  }
+  pkg("", { name: "merrymen", version: "1.0.0", dependencies: { wrapper: "1.0.0" } });
+  pkg("node_modules/wrapper", { name: "wrapper", version: "1.0.0", dependencies: { "@noble/curves": "1.9.7" }, peerDependencies: { react: "19.2.4", absentOptional: "*" }, peerDependenciesMeta: { absentOptional: { optional: true } } });
+  mkdirSync(path.join(directory, "node_modules/wrapper/node_modules/@noble/curves"), { recursive: true });
+  assert.throws(() => physicalLock(directory), /missing.*@noble\/curves/);
+  pkg("node_modules/@noble/curves", { name: "@noble/curves", version: "1.9.7" });
+  assert.throws(() => physicalLock(directory), /missing.*react/);
+  pkg("node_modules/react", { name: "react", version: "19.2.4" });
+  const snapshot = physicalLock(directory);
+  assert.equal(snapshot.lock.packages["node_modules/merrymen/node_modules/wrapper/node_modules/@noble/curves"], undefined);
+  assert.equal(snapshot.lock.packages["node_modules/merrymen/node_modules/@noble/curves"].version, "1.9.7");
+  writeFileSync(path.join(directory, "node_modules/wrapper/node_modules/@noble/curves/partial.js"), "// incomplete extraction");
+  assert.throws(() => physicalLock(directory), /package\.json/);
+});

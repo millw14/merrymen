@@ -115,7 +115,7 @@ export function resolveSettingName(phrase: string): string | null {
 /** Keys of the sealed limits the old /cap path also clamps against. */
 const SEALED_SENTENCE =
   "That limit is part of the trading permission you signed, so only a new signature can change it. " +
-  "Signing is free and takes a few seconds — tap below and set the new limit there.";
+  "Renewal first revokes old permissions on-chain and requires network fees. Tap below to review the limits and fees before signing.";
 
 /** What can change, in one short list — the answer to "unknown". */
 export function whatCanChange(): string {

@@ -364,8 +364,7 @@ export function Proposals({ onResign }: { onResign: () => void }) {
           <p>
             {/* THE SECOND FACT, said before they sign rather than after. */}
             One more step, and it is the one that matters: re-sign your trading permission so it
-            covers {added.size === 1 ? "this coin" : "these coins"}. Re-signing is free and nothing
-            moves on-chain — but it re-seals the permission around{" "}
+            covers {added.size === 1 ? "this coin" : "these coins"}. Renewal revokes the old permissions on-chain and requires network fees. It seals the replacement around{" "}
             <b>every token in your settings</b>
             {covered > 0 ? ` (${covered} today)` : ""}, not only what you just added.
           </p>

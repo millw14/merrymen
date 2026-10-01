@@ -99,12 +99,13 @@ describe("signDecision — once, settled, then daily", () => {
 });
 
 describe("the message and the button", () => {
-  it("says free, names the agent, and never uses the internal words", () => {
+  it("discloses renewal's network fees, names the agent, and avoids internal jargon", () => {
     for (const reason of ["dead-policy", "wrong-chain", "grant-too-wide", "expiring", "expired", "update"] as const) {
       const text = signPromptText(reason, { blocker: null, ...grant, grantExpiresAt: NOW + 3600 * 5, now: NOW }, "Shogun");
       assert.match(text, /Shogun/);
-      assert.match(text, /free/i, reason);
-      assert.doesNotMatch(text, /\bgrant\b|policy|wall|session key|bundler|smart account/i, reason);
+      assert.match(text, /network fees/i, reason);
+      assert.doesNotMatch(text, /\bfree\b|funds (?:stay|are untouched|don't move)/i, reason);
+      assert.doesNotMatch(text, /\b(?:grant|policy|wall|session key|bundler|smart account)\b/i, reason);
     }
   });
 

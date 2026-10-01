@@ -144,7 +144,14 @@ export interface RailNotice {
 const RULES: readonly RefuseRule[] = ["not-armed", "dead-policy", "grant-too-wide", "no-executor", "live-not-enabled", "wrong-chain", "no-gas", "no-cash"];
 
 export function parseRailNotice(message: string, at: number): RailNotice | null {
-  const ruleIn = (text: string): RefuseRule | null => RULES.find((r) => text.includes(liveBlockerText(r))) ?? null;
+  // These notices are persisted across releases. Classify the stable cause,
+  // not renewal advice that changed when replacement began revoking on-chain.
+  const persistedCauses: Partial<Record<RefuseRule, string>> = {
+    "dead-policy": "this trading key was signed before a fix and cannot reach the chain;",
+    "grant-too-wide": "this key's permission set is too wide to install on-chain — its first operation would cost more gas than we will sign for, so it can never reach the chain.",
+  };
+  const ruleIn = (text: string): RefuseRule | null => RULES.find((r) =>
+    text.includes(persistedCauses[r] ?? liveBlockerText(r))) ?? null;
   if (/^trading for real — every leg/.test(message)) return { at, state: "live", wouldBlock: null };
   if (/^NOT trading for real yet: /.test(message)) return { at, state: "blocked", wouldBlock: ruleIn(message) };
   const later = /One thing to know first: when you do turn it on, (.*)$/s.exec(message);
@@ -528,7 +535,7 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
   {
     const observed = { signed: !!i.account, expires_at: i.permission.expiresAt === null ? null : iso(i.permission.expiresAt), agent_status: status, expired };
     const threshold = { expires_after: iso(i.now) };
-    const resign = "Re-sign your trading permission at /grant — it is free and nothing moves on-chain.";
+    const resign = "Re-sign your trading permission at /grant — renewal revokes old permissions on-chain and requires network fees.";
     if (!i.account) {
       add({ category: "permission", status: "blocking", kind: "not_permitted", summary: "No trading permission has been signed yet, so the agent cannot run.", observed, threshold, remedy: ["Sign a trading permission for your agent at /grant."] });
     } else if (pendingGrant && (status === "killed" || status === "expired" || status === "error")) {
