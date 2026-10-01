@@ -1,22 +1,16 @@
 # Owner runbook — memecoins and new pairs via the v4 adapter
 
-Everything the software can do is done and committed. This file is the part
-only you can do, in the order it has to happen. Each step names what it
-unblocks; nothing here is optional if the goal is "trade all, including new
-pairs."
+This runbook covers the owner-controlled deployment and signing steps for a
+v4 adapter. Use your own existing account, current settings, and chosen risk
+limits throughout. A saved adapter address is not proof that the contract is
+safe to authorize.
 
 ## Already done for you (no action)
 
-- `V4SelfSwap` contract written, tested (20 tests), attacked, and verified
-  against mainnet by simulation. The recipient is `msg.sender` in bytecode.
+- `V4SelfSwap` contract and tests are in this repository. Its intended output
+  recipient is the calling smart account.
 - Wall permission, grant marker, worker mirror, execution path, discovery
-  PoolKey capture, and routing over discovered (hooked) pools — all committed
-  with tests (975 worker tests green).
-- Settings profile for a memecoin-primary run:
-  `basketSymbols ["QQQ"]`, `buyPerTickUsdg 50`, `idleFloorUsdg 200`,
-  `scoutEnabled true`, `scoutBudgetUsdg 100`, `scoutPerTokenUsdg 25`,
-  `minPoolLiquidityUsdg 10000`, `maxPriceDivergenceBps 2000`,
-  `slippageBps 300`, `maxImpactBps 300`.
+  PoolKey capture, and routing over discovered pools are implemented.
 - The renew button on `/grant` is now trustworthy: it fetches settings at
   click time and signs on the chain the page shows.
 
@@ -27,13 +21,14 @@ the hook address can only be learned from the Initialize event, and Bitquery
 indexes those). Without a key, discovery stays silently off.
 
 - Get a key at bitquery.io (free tier is fine to start).
-- Paste it into `/settings` → `bitqueryApiKey`. Nothing else to configure;
-  `discoveryEnabled` is already on.
+- Paste it into `/settings` → `bitqueryApiKey`. Confirm that
+  `discoveryEnabled` is on for your account.
 
 ## Step 2 — Deploy the adapter (twice)
 
 Deployment spends real gas from a real key, so it is yours to run. The key is
-read from the environment and never logged; the script prints only addresses.
+read from the environment and is not printed by the script; the script does
+print public addresses and the deployer's ETH balance.
 
 In PowerShell, from `contracts/`:
 
@@ -45,11 +40,24 @@ npx hardhat run scripts/deploy-v4selfswap.ts --network robinhood
 
 - Testnet gas: free at https://faucet.testnet.chain.robinhood.com
 - Mainnet gas: a small amount of ETH on chain 4663.
-- The two runs print two DIFFERENT addresses. That is correct (independent
-  nonces). The script refuses wrong chains, missing keys, and a missing
-  PoolManager, and verifies the deploy before printing success.
-- Paste the MAINNET address into `/settings` → "v4 adapter contract".
-  (Use the testnet address only if you sign a testnet grant to rehearse.)
+- The two runs may print different addresses. Check each address against its
+  actual chain; never use a testnet address in a mainnet grant.
+- The script refuses unknown chains, missing keys, and an address with no
+  PoolManager code. After deployment, it checks that the adapter has code and
+  that `poolManager()` returns the pinned PoolManager address. These checks do
+  not, by themselves, prove the deployed adapter's code identity.
+- Before saving or signing, independently verify that the deployed address is
+  **this repository's `V4SelfSwap` runtime**, built from the reviewed source
+  with the expected constructor argument, and that its immutable
+  `poolManager()` equals the **canonical PoolManager for that chain**. Cross-check
+  the PoolManager in `contracts/scripts/deploy-v4selfswap.ts` against
+  `packages/core/src/protocols.ts` and independently confirm the chain's
+  intended deployment. Compare deployed runtime bytecode with the
+  corresponding build after immutable substitution, or verify reproducible
+  source and constructor arguments on a trusted explorer. Merely finding
+  non-empty code or a matching `poolManager()` return value is insufficient.
+- Paste only the verified MAINNET adapter address into `/settings` → "v4 adapter
+  contract". Use the verified testnet address only for a testnet grant.
 
 ## Step 3 — Name your memecoins
 
@@ -64,34 +72,42 @@ sell-approve permission is sealed into the signature (the no-exit rule).
 
 ## Step 4 — Re-sign on mainnet
 
-- Open `/grant` → **restore a funded wallet** tab.
+- Open `/grant` → **restore a funded wallet** tab for the owner of the
+  **existing account you intend to renew**.
 - Click the **mainnet · 4663** pill and tick the acknowledgement.
-- Paste your owner key (the one you backed up), **check this wallet** — it
-  must show `0xbC78E8…75D7`. A different address means the wrong key.
-- Set "most it can spend on one trade" to at least 60 (your tick is 50; zero
-  headroom invites `per-trade-cap` edge rejections).
+- Restore your backed-up owner key and use **check this wallet**. Compare the
+  displayed owner address and derived smart-account address with **your own
+  existing account records**. Stop if either differs. No address in this
+  runbook is a substitute for that comparison.
+- Review the proposed token scope, per-trade and daily caps, expiry, and
+  other limits against your current strategy and intended exposure. Do not
+  increase a limit merely to clear a rejection.
+- Confirm that `/settings` contains the independently verified mainnet
+  `V4SelfSwap` address and canonical PoolManager binding from step 2 **before
+  signing**. An arbitrary contract address, even one with code, must not be
+  sealed into the grant.
 - Sign. Then verify `~/.merrymen/grant.json` contains:
   - `"chainId": 4663`
-  - `"grantTokens": [...]` listing your memecoin addresses
+  - `"grantTokens": [...]` listing only the token addresses you authorized
   - `"v4-adapter"` in `grantFeatures`, and `"v4AdapterAddress"` = the mainnet
-    adapter you pasted in step 2.
+    adapter whose code identity and PoolManager binding you verified.
 
 If any of those is missing, the settings save and the signature crossed —
 hard-reload `/grant` and sign again.
 
 ## Step 5 — Fund the smart account
 
-Send to your smart account (same address as before — it derives from your
-owner key):
+Send only to the smart-account address you matched to your existing account in
+step 4:
 
 1. **ETH first** — the account self-pays gas, and the first operation also
    pays to deploy the account.
-2. **USDG** — your trading capital. `idleFloorUsdg` is 200, so keep the
-   deposit under ~250 or raise that setting, or the first tick sweeps the
-   excess into Morpho and spends most of the daily cap doing it.
-3. The scout budget (100 USDG of it) is money you have decided you can lose:
-   quarantined positions are carried at cost and the drawdown breaker cannot
-   protect them. That is the honest price of trading the unpriceable.
+2. **USDG** — your chosen trading capital. Check your account's current
+   `idleFloorUsdg`, daily cap, and sweep behavior before funding; this
+   runbook provides no universal deposit amount.
+3. Any scout budget is money you have decided you can lose: quarantined
+   positions are carried at cost and the drawdown breaker cannot protect
+   them. Keep the budget within your own risk limits.
 
 ## Step 6 — Prove it
 
