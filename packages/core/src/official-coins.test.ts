@@ -23,12 +23,21 @@ import {
   officialCoinsFor,
 } from "./official-coins";
 import { CASH, STOCK_TOKENS } from "./tokens";
-import { builtinGrantTargets, usableExtraTokens } from "./index";
+import { builtinGrantTargets, usableExtraTokens, V4_SELF_SWAP } from "./index";
 import { ponsAdapterForSigning, PONS_CLASS_VAULT_FACTORY, PONS_CLASS_VAULT_FACTORY_V2, PONS_SELF_TRADE } from "./protocols";
 
 const MAINNET = 4663;
 const TESTNET = 46630;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+describe("verified v4 deployment registry", () => {
+  it("exports the verified mainnet adapter without implying a testnet deployment", () => {
+    assert.equal(V4_SELF_SWAP[MAINNET], "0xe0ce6bd81a472f021a9e85392a8008b8786f9218");
+    assert.equal(V4_SELF_SWAP[TESTNET], null);
+    assert.equal(V4_SELF_SWAP[1], undefined);
+    assert.ok(Object.isFrozen(V4_SELF_SWAP));
+  });
+});
 
 describe("official coins — the listing", () => {
   it("returns a list for every known chain, empty or not", () => {
@@ -271,6 +280,7 @@ describe("ponsAdapterForSigning", () => {
       present = false;
     }
     const PINNED: readonly [string, Readonly<Record<number, string | null>>][] = [
+      ["V4SelfSwap", V4_SELF_SWAP],
       ["PonsSelfTrade", PONS_SELF_TRADE],
       ["PonsClassVaultFactory", PONS_CLASS_VAULT_FACTORY],
       ["PonsClassVaultFactoryV2", PONS_CLASS_VAULT_FACTORY_V2],
@@ -312,6 +322,7 @@ describe("ponsAdapterForSigning", () => {
       return; // nothing deployed yet is a legitimate state
     }
     const TABLES: Record<string, Readonly<Record<number, string | null>>> = {
+      V4SelfSwap: V4_SELF_SWAP,
       PonsSelfTrade: PONS_SELF_TRADE,
       PonsClassVaultFactory: PONS_CLASS_VAULT_FACTORY,
       PonsClassVaultFactoryV2: PONS_CLASS_VAULT_FACTORY_V2,

@@ -28,6 +28,19 @@ export const UNISWAP = {
 } as const;
 
 /**
+ * V4SelfSwap, per chain. Mainnet deployed 2026-10-01, block 77643415.
+ * All 4,201 runtime bytes and the immutable PoolManager binding were checked
+ * against the reviewed build; provenance is in contracts/deployments.json.
+ * This registry records the deployment. Signing still requires the owner to
+ * save the adapter address in Settings and explicitly renew the permission.
+ */
+export const V4_SELF_SWAP: Readonly<Record<number, string | null>> = Object.freeze({
+  4663: "0xe0ce6bd81a472f021a9e85392a8008b8786f9218",
+  /** Robinhood Chain testnet — not deployed. */
+  46630: null,
+});
+
+/**
  * Rialto — on-chain spot exchange, best-execution meta-routing over propAMMs + DEX
  * pools. API-first: GET /quote returns a ready-to-send tx targeting the current
  * RialtoRouter (never build calldata by hand). /tokens is public; /quote requires
@@ -71,12 +84,8 @@ export const MORPHO = {
 } as const;
 
 /**
- * PonsClassVaultFactory, per chain. NOT YET DEPLOYED ANYWHERE.
- *
- * Both entries are `null`, and that is the honest state rather than a
- * placeholder waiting to be forgotten: `contracts/deployments.json` does not
- * exist in this checkout, so nothing here — not this factory, not PonsSelfTrade,
- * not V4SelfSwap — has been deployed from it.
+ * PonsClassVaultFactory, per chain. Mainnet deployment is recorded in
+ * contracts/deployments.json; testnet remains undeployed.
  *
  * WHY A CONSTANT AT ALL, when the grant already seals the factory it was signed
  * against. Because RECOVERY may have no grant. `merrymen recover` accepts a
