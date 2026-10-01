@@ -241,6 +241,143 @@
 :where(.terminal-host) .swap-pnl.down {
   color: var(--down);
 }
+:where(.terminal-host) .swap-pnl-image {
+  min-height: 32px;
+  margin-top: 2px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--tx-2);
+  font-size: 11px;
+}
+:where(.terminal-host) .swap-pnl-image:hover {
+  background: var(--raised);
+  color: var(--tx);
+}
+:where(.terminal-host) .swap-pnl-image:focus-visible,
+:where(.terminal-host) .pnl-card-dialog :is(button, a):focus-visible {
+  outline: 2px solid var(--tx-2);
+  outline-offset: 3px;
+}
+
+/* Portalled outside the portfolio dialog so native modal focus and printing
+   work on a phone as well as a desktop. Only the PNG enters the printout. */
+.terminal-host.pnl-card-layer {
+  min-height: 0;
+}
+:where(.terminal-host) .pnl-card-dialog {
+  width: min(760px, calc(100vw - 24px));
+  max-width: none;
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 20px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--card);
+  color: var(--tx);
+}
+:where(.terminal-host) .pnl-card-dialog::backdrop {
+  background: rgb(0 0 0 / 75%);
+}
+:where(.terminal-host) .pnl-card-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+:where(.terminal-host) .pnl-card-toolbar h2 {
+  margin: 0;
+  font-size: 20px;
+  overflow-wrap: anywhere;
+}
+:where(.terminal-host) .pnl-card-note {
+  margin: 12px 0 20px;
+  color: var(--tx-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+:where(.terminal-host) .pnl-card-dialog :is(button, a[download]) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 10px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+  color: var(--tx);
+  font-size: 14px;
+  text-decoration: none;
+  flex-shrink: 0;
+}
+:where(.terminal-host) .pnl-card-dialog button:disabled {
+  opacity: .45;
+  cursor: wait;
+}
+:where(.terminal-host) .pnl-card-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: max(80px, calc(100dvh - 250px));
+  object-fit: contain;
+  border-radius: 8px;
+}
+:where(.terminal-host) .pnl-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 20px;
+}
+:where(.terminal-host) .pnl-card-actions a[download] {
+  background: var(--tx);
+  color: var(--card);
+}
+:where(.terminal-host) .pnl-card-status {
+  padding: 30px 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+@media print {
+  body:has(.pnl-card-layer) > :not(.pnl-card-layer) {
+    display: none !important;
+  }
+  body:has(.pnl-card-layer),
+  .terminal-host.pnl-card-layer {
+    display: block !important;
+    width: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    background: white !important;
+  }
+  :where(.terminal-host) .pnl-card-dialog {
+    position: static !important;
+    width: 100%;
+    max-height: none;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    overflow: visible;
+    background: white;
+  }
+  :where(.terminal-host) .pnl-card-dialog::backdrop,
+  :where(.terminal-host) .pnl-card-dialog > :not(.pnl-card-image) {
+    display: none !important;
+  }
+  :where(.terminal-host) .pnl-card-image {
+    max-height: 95vh;
+    object-fit: contain;
+    border-radius: 0;
+    break-inside: avoid;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+}
 :where(.terminal-host) .swap-meta {
   display: flex;
   flex-direction: column;

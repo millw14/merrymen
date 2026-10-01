@@ -21,6 +21,7 @@
     "cli",
     "web",
     "worker",
+    "pnl/PNL.jpg",
     "packages/core",
     "sdk",
     "strategies",

@@ -1,6 +1,11 @@
+import { fileURLToPath } from "node:url";
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   devIndicators: false,
+  // The PNG renderer shares the worker's house template outside web/.
+  outputFileTracingRoot: fileURLToPath(new URL("..", import.meta.url)),
+  outputFileTracingIncludes: { "/api/pnl": ["../pnl/PNL.jpg"] },
   // A production build can be sent somewhere other than the dev server's
   // `.next`, so the two do not clobber each other mid-run — which is a real
   // problem here, because `npm run build` and `npm run dev:web` in the same

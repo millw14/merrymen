@@ -731,9 +731,11 @@ export function Agent({
                     and still says why — folded into one line per reason, so
                     thirty ops-cap refusals no longer push the fills away. */}
                 <SwapsTable
+                  key={account ?? mine.slug ?? mine.name}
                   rows={swapRowsOfDesk(mine.moves)}
                   tokens={tokens}
                   showMoney
+                  allowPnlCards
                   tapeFull={mine.moves.length >= DESK_TAPE_ROWS}
                   emptyTitle="No trades yet."
                   onToken={onToken}

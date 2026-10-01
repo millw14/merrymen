@@ -60,6 +60,8 @@ describe("the owner's desk and chat see every trade the agent made", () => {
       assert.equal(rows.length, 4, "the reconciler's copy of 0xOP1 and the epoch-1 row are not this run's operations");
       const buy = rows.find((r) => r.fill_side === "buy" && r.symbol === "CASHCAT");
       assert.ok(buy, "the curve buy is on the tape with its coin");
+      assert.equal(buy.id, 1, "the canonical ledger id survives the private tape read");
+      assert.equal(buy.fill_cash_usdg, null, "an old ledger missing cash retains its labels without invented proceeds");
       assert.equal(buy!.display_name, "Cash Cat");
       assert.equal(buy!.reason, "volume doubled on the curve");
       const refused = rows.find((r) => r.status === "rejected");
@@ -193,6 +195,21 @@ describe("the owner's tape says whether a sell's realized dollars are a measurem
     } finally {
       raw.close();
     }
+  });
+
+  it("carries actual cash with the canonical row id so the owner can request its image", async () => {
+    const { raw, db } = await booked();
+    try {
+      await db.exec("ALTER TABLE trades ADD COLUMN fill_cash_usdg REAL");
+      await db.prepare("UPDATE trades SET fill_cash_usdg = 6.25 WHERE id = 2").run();
+      const rows = await readDeskTrades(db, "0xA", 2, NOW - WEEK);
+      const sale = rows.find((r) => r.id === 2)!;
+      assert.equal(sale.fill_cash_usdg, 6.25);
+      assert.equal(sale.realized_vouched, true);
+      const move = mineOf({ agent: { name: "Shogun", strategy: "trencher", slug: null },
+        trades: rows.map((r) => ({ ...r, created_at: fmtEpoch(r.created_at) })) }, [])!.moves.find((m) => m.tradeId === 2)!;
+      assert.equal(move.fillCashUsdg, 6.25, "the value reaches the owner's UI instead of a quote or proposed order amount");
+    } finally { raw.close(); }
   });
 
   it("a ledger the replay cannot read vouches for nothing, and still returns its tape", async () => {

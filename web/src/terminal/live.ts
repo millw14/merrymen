@@ -261,6 +261,9 @@ export interface Thesis {
   txHash?: string | null;
   realizedPnlUsdg?: number | null;
   realizedVouched?: boolean;
+  /** The canonical owner-ledger fill, used for an authenticated P&L image. */
+  tradeId?: number | null;
+  fillCashUsdg?: number | null;
 }
 
 export interface ChainHolder {
@@ -1222,6 +1225,8 @@ export function mineOf(feed: Feed | null, theses: Thesis[]): FeedMine | null {
         // sell and the route carries it; dropped here, the desk withheld the
         // dollars of every sell, vouched ones too. Only an explicit true.
         realizedVouched:t.realized_vouched === true,
+        tradeId:typeof t.id === "number" && Number.isSafeInteger(t.id) && t.id > 0 ? t.id : null,
+        fillCashUsdg:ledgerNumber(t.fill_cash_usdg),
       };
     }),
     glance: {
@@ -1454,6 +1459,7 @@ interface Feed {
   events?: { level?: string; message?: string; created_at?: string }[];
   agent?: { name?: string; nameSource?: string; strategy?: string; slug?: string | null } | null;
   trades?: {
+    id?: number;
     kind: string;
     buy_token: string | null;
     sell_token: string | null;
@@ -1482,6 +1488,7 @@ interface Feed {
     reason?: string | null;
     /** Whole USDG, booked on a sell. A driver may hand a NUMERIC back as text. */
     realized_pnl_usdg?: number | string | null;
+    fill_cash_usdg?: number | string | null;
     /** The tape checked both halves of that figure — see lib/desk-trades.ts. */
     realized_vouched?: boolean;
     /** The fill's transaction; null for a refusal and for a paper fill. */
