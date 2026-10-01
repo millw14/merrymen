@@ -29,6 +29,7 @@
  */
 import type { Db } from "./db";
 import type { AccountPlan, ProposedFlowRow } from "./accounting-reconstruction";
+import { FLOW_SNAPSHOT_COLUMNS, flowFingerprintOf } from "./accounting-reconstruction";
 // The ONE list of sources that count as evidence, shared with the worker's
 // anchor and the web. Hard-coding it here is how this repair once disagreed
 // with both: a new evidenced source (energy-buy) would have flipped every
@@ -122,16 +123,17 @@ async function verifyInserted(
   account: string,
   chainId: number,
   expected: readonly ProposedFlowRow[],
+  checkTime = false,
 ): Promise<{ ok: boolean; why: string; present: number }> {
   let present = 0;
   for (const r of expected) {
     const row = (await db
       .prepare(
-        `SELECT direction, amount_usdg, source, block_number FROM flows
+        `SELECT direction, amount_usdg, source, block_number, epoch, at FROM flows
           WHERE chain_id = ? AND agent_id = ? AND tx_hash = ? AND log_index = ?`,
       )
       .get(chainId, account, r.txHash, r.logIndex)) as
-      | { direction: string; amount_usdg: number; source: string; block_number: number }
+      | { direction: string; amount_usdg: number; source: string; block_number: number; epoch: number; at: number }
       | undefined;
 
     if (!row) {
@@ -159,6 +161,12 @@ async function verifyInserted(
     // under ANOTHER source is a disagreement about what the movement was.
     if (String(row.source) !== r.source) {
       return { ok: false, why: `${r.txHash}#${r.logIndex} is source '${row.source}', not ${r.source}`, present };
+    }
+    if (num(row.block_number) !== r.blockNumber || num(row.epoch) !== r.epoch) {
+      return { ok: false, why: `${r.txHash}#${r.logIndex} belongs to a different block or epoch`, present };
+    }
+    if (checkTime && Number(row.at) !== r.at) {
+      return { ok: false, why: `${r.txHash}#${r.logIndex} has a different historical timestamp`, present };
     }
     present += 1;
   }
@@ -197,6 +205,9 @@ export async function repairAccount(
     // A blocked account is not a failure — it is the tool declining to guess.
     return { ...base, stage: "skipped-blocked", why: plan.blocked };
   }
+  if (plan.epoch !== 1) {
+    return { ...base, stage: "skipped-blocked", why: "lifetime chain reconstruction requires epoch 1" };
+  }
   if (plan.insert.length === 0 && plan.quarantine.length === 0) {
     return { ...base, stage: "skipped-nothing-to-do", why: "the ledger already matches the chain" };
   }
@@ -221,38 +232,77 @@ export async function repairAccount(
     };
   }
 
-  // RESUME reads the data, not a checkpoint. An account whose chain-log rows are
-  // all present and whose inferred rows are all gone is finished, whatever any
-  // bookkeeping thinks.
-  if (opts.resume) {
-    const v = await verifyInserted(db, plan.smartAccount, chainId, plan.insert);
-    if (v.ok && plan.quarantine.length === 0) {
-      return { ...base, stage: "already-repaired", insertsAlreadyPresent: v.present, why: "nothing left to do" };
-    }
-  }
-
   const now = Math.floor(Date.now() / 1000);
   try {
+    // Detect the engine OUTSIDE the transaction. A failed sqlite catalogue
+    // probe aborts a Postgres transaction even when JavaScript catches it.
+    const index = await inspectChainIdentityIndex(db);
+    if (!index.valid) throw new Error("flows_chain_identity unique index is not present with the required definition");
     return await db.tx(async (tx) => {
+      if (!(await inspectChainIdentityIndex(tx, index.dialect)).valid) {
+        throw new Error("flows_chain_identity changed before the repair transaction");
+      }
+      const lock = index.dialect === "postgres" ? " FOR UPDATE" : "";
+      const agent = await tx.prepare(
+        `SELECT epoch, chain_id FROM agents WHERE smart_account = ?${lock}`,
+      ).get(plan.smartAccount) as { epoch: unknown; chain_id: unknown } | undefined;
+      if (!agent || num(agent.epoch) !== plan.epoch || num(agent.chain_id) !== chainId) {
+        throw new Error("account epoch or chain changed since the plan was built");
+      }
+      const beforeRows = await tx.prepare(
+        `SELECT ${FLOW_SNAPSHOT_COLUMNS} FROM flows WHERE agent_id = ? ORDER BY id${lock}`,
+      ).all(plan.smartAccount) as Record<string, unknown>[];
+      if (typeof plan.flowFingerprint !== "string" || flowFingerprintOf(beforeRows) !== plan.flowFingerprint) {
+        throw new Error("flow rows changed since the plan was built, or the plan has no complete flow fingerprint");
+      }
+      for (const q of plan.quarantine) {
+        const old = beforeRows.find((r) => num(r.id) === q.id);
+        if (!old || old.agent_id !== plan.smartAccount || num(old.epoch) !== plan.epoch ||
+            old.direction !== q.direction || Number(old.amount_usdg) !== q.amountUsdg || old.source !== q.source) {
+          throw new Error(`quarantine row ${q.id} does not match this account and epoch's captured flow`);
+        }
+      }
+      if (plan.insert.some((r) => r.agentId !== plan.smartAccount || r.epoch !== plan.epoch)) {
+        throw new Error("a proposed receipt belongs to another account or epoch");
+      }
+      const inserts = plan.insert.map((r) => {
+        const existing = beforeRows.find((old) => num(old.chain_id) === chainId && old.tx_hash === r.txHash &&
+          old.log_index !== null && num(old.log_index) === r.logIndex);
+        // Existing receipts retain their original record byte-for-byte. A new
+        // receipt must carry the verified block time; repair time would rewrite
+        // the contribution history even if its final net total stayed the same.
+        const at = existing ? Number(existing.at) : r.at;
+        if (at === undefined || !Number.isSafeInteger(at) || at < (existing ? 0 : 1)) {
+          throw new Error(`${r.txHash}#${r.logIndex} has no verified historical timestamp — nothing was written`);
+        }
+        return { ...r, at };
+      });
+      // A resume still requires a fresh plan and the same transaction guards.
+      if (opts.resume) {
+        const v = await verifyInserted(tx, plan.smartAccount, chainId, inserts, true);
+        if (v.ok && plan.quarantine.length === 0) {
+          return { ...base, stage: "already-repaired" as const, insertsAlreadyPresent: v.present, why: "nothing left to do" };
+        }
+      }
       // ── 1. INSERT ────────────────────────────────────────────────────────
       //
       // ON CONFLICT DO NOTHING against the partial unique index makes a re-run a
       // no-op rather than a doubled deposit. The index is the guarantee; this
       // clause only decides how the collision is reported.
       let inserted = 0;
-      for (const r of plan.insert) {
+      for (const r of inserts) {
         const res = await tx
           .prepare(
-            `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `INSERT INTO flows (agent_id, direction, amount_usdg, tx_hash, block_number, log_index, source, epoch, chain_id, at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT DO NOTHING`,
           )
-          .run(r.agentId, r.direction, r.amountUsdg, r.txHash, r.blockNumber, r.logIndex, r.source, r.epoch, chainId);
+          .run(r.agentId, r.direction, r.amountUsdg, r.txHash, r.blockNumber, r.logIndex, r.source, r.epoch, chainId, r.at);
         if (num((res as { changes?: number }).changes) > 0) inserted += 1;
       }
 
       // ── 2. VERIFY, before anything is taken away ─────────────────────────
-      const v = await verifyInserted(tx, plan.smartAccount, chainId, plan.insert);
+      const v = await verifyInserted(tx, plan.smartAccount, chainId, inserts, true);
       if (!v.ok) {
         // Throwing rolls the transaction back, so the inserts go too. Nothing
         // was quarantined, which is the property that matters.
@@ -270,11 +320,15 @@ export async function repairAccount(
                 source, at, run_id, quarantined_at, reason, replaced_by)
              SELECT id, agent_id, epoch, direction, amount_usdg, tx_hash, block_number, log_index,
                     source, at, ?, ?, ?, ?
-               FROM flows WHERE id = ?`,
+               FROM flows WHERE id = ? AND agent_id = ? AND epoch = ?`,
           )
-          .run(opts.runId, now, q.reason, replacedBy, q.id);
-        if (num((moved as { changes?: number }).changes) === 0) continue; // already moved by a prior run
-        await tx.prepare("DELETE FROM flows WHERE id = ?").run(q.id);
+          .run(opts.runId, now, q.reason, replacedBy, q.id, plan.smartAccount, plan.epoch);
+        if (num((moved as { changes?: number }).changes) !== 1) {
+          throw new Error(`quarantine row ${q.id} changed during the repair`);
+        }
+        const removed = await tx.prepare("DELETE FROM flows WHERE id = ? AND agent_id = ? AND epoch = ?")
+          .run(q.id, plan.smartAccount, plan.epoch);
+        if (removed.changes !== 1) throw new Error(`quarantine row ${q.id} could not be removed from this account`);
         quarantined += 1;
       }
 
@@ -401,18 +455,51 @@ export function parseRepairOptions(env: Record<string, string | undefined>, now 
  * Read-only, and asked in both dialects because the seam does not expose which
  * engine is underneath and this is metadata rather than a translatable query.
  */
-export async function hasChainIdentityIndex(db: Db): Promise<boolean> {
-  for (const sql of [
-    "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'flows_chain_identity'",
-    "SELECT indexname AS name FROM pg_indexes WHERE indexname = 'flows_chain_identity'",
-  ]) {
+type IndexDialect = "sqlite" | "postgres";
+const IDENTITY_COLUMNS = ["chain_id", "agent_id", "tx_hash", "log_index"];
+const correctIndexColumns = (columns: unknown) => Array.isArray(columns) &&
+  columns.length === IDENTITY_COLUMNS.length && columns.every((c, i) => c === IDENTITY_COLUMNS[i]);
+
+/** Require the actual unique identity, including its complete partial predicate. */
+function correctIndexDefinition(definition: unknown): boolean {
+  if (typeof definition !== "string") return false;
+  const sql = definition.replace(/"([a-z_][a-z_0-9]*)"/gi, "$1").replace(/\s+/g, " ").trim().replace(/;$/, "");
+  const match = /^CREATE UNIQUE INDEX (?:IF NOT EXISTS )?flows_chain_identity ON (?:[a-z_][a-z_0-9]*\.)?flows (?:USING btree )?\(\s*chain_id\s*,\s*agent_id\s*,\s*tx_hash\s*,\s*log_index\s*\) WHERE (.+)$/i.exec(sql);
+  if (!match) return false;
+  return match[1]!.replace(/[()]/g, "").replace(/\s+/g, " ").trim().toLowerCase() ===
+    "tx_hash is not null and log_index is not null";
+}
+
+async function inspectChainIdentityIndex(db: Db, dialect?: IndexDialect): Promise<{ dialect: IndexDialect; valid: boolean }> {
+  if (dialect !== "postgres") {
     try {
-      if (await db.prepare(sql).get()) return true;
-    } catch {
-      // the other engine's catalogue — try the next dialect
+      const row = await db.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'flows_chain_identity' AND tbl_name = 'flows'",
+      ).get() as { sql?: unknown } | undefined;
+      const columns = await db.prepare("SELECT name FROM pragma_index_info('flows_chain_identity') ORDER BY seqno")
+        .all() as { name: unknown }[];
+      return { dialect: "sqlite", valid: correctIndexDefinition(row?.sql) && correctIndexColumns(columns.map((c) => c.name)) };
+    } catch (error) {
+      if (dialect === "sqlite") throw error;
     }
   }
-  return false;
+  const row = await db.prepare(
+    `SELECT i.indisunique, i.indisvalid, i.indisready, pg_get_indexdef(i.indexrelid) AS definition,
+            ARRAY(SELECT pg_get_indexdef(i.indexrelid, k, TRUE)
+                    FROM generate_series(1, i.indnkeyatts) AS k ORDER BY k) AS key_columns
+       FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+      WHERE i.indrelid = 'flows'::regclass AND c.relname = 'flows_chain_identity'`,
+  ).get() as { indisunique?: unknown; indisvalid?: unknown; indisready?: unknown; definition?: unknown; key_columns?: unknown } | undefined;
+  return { dialect: "postgres", valid: row?.indisunique === true && row.indisvalid === true &&
+    row.indisready === true && correctIndexDefinition(row.definition) && correctIndexColumns(row.key_columns) };
+}
+
+export async function hasChainIdentityIndex(db: Db): Promise<boolean> {
+  try {
+    return (await inspectChainIdentityIndex(db)).valid;
+  } catch {
+    return false;
+  }
 }
 
 /**
