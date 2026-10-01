@@ -80,11 +80,13 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@npmcli/arborist": "9.9.2",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "jsdom": "^29.1.1"
+    "jsdom": "^29.1.1",
+    "npm-packlist": "10.0.4"
   },
   "overrides": {
     "postcss": "^8.5.28",

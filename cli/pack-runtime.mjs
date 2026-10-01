@@ -8,6 +8,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import Arborist from "@npmcli/arborist";
+import packlist from "npm-packlist";
 
 export const BUNDLE_ROOTS = ["next", "@privy-io/react-auth", "@zerodev/permissions"];
 const digest = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -104,7 +106,7 @@ function assertInside(root, filename) {
   if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error(`Refusing to copy a file outside the package: ${filename}`);
 }
 
-export function packRuntime({ root, outDir, bundleRoots = BUNDLE_ROOTS, requireBuild = true }) {
+export async function packRuntime({ root, outDir, bundleRoots = BUNDLE_ROOTS, requireBuild = true }) {
   root = path.resolve(root);
   outDir = path.resolve(outDir);
   if (requireBuild) {
@@ -115,9 +117,13 @@ export function packRuntime({ root, outDir, bundleRoots = BUNDLE_ROOTS, requireB
   const plan = runtimeBundlePlan(json(path.join(root, "package.json")), JSON.parse(lockBytes), bundleRoots);
   const stage = mkdtempSync(path.join(tmpdir(), "merrymen-release-"));
   try {
-    const [listing] = npmJson(["pack", "--dry-run", "--ignore-scripts", "--json"], root);
-    for (const file of listing.files) refuseEnvironmentFile(file.path);
-    for (const { path: rel } of listing.files) {
+    // npm 10 still runs prepare during `pack --dry-run --ignore-scripts`.
+    // Read npm's file list directly so source lifecycle scripts cannot execute.
+    // This also avoids temporarily modifying the source package manifest.
+    const tree = await new Arborist({ path: root }).loadActual();
+    const files = await packlist(tree);
+    for (const file of files) refuseEnvironmentFile(file);
+    for (const rel of files) {
       if (rel === "npm-shrinkwrap.json" || rel === "package-lock.json") continue;
       const source = path.join(root, rel);
       assertInside(root, source);
@@ -169,6 +175,6 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
   const args = process.argv.slice(2);
   if (args.length && (args.length !== 2 || args[0] !== "--out-dir")) throw new Error("Usage: node cli/pack-runtime.mjs [--out-dir directory]");
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  const result = packRuntime({ root, outDir: args[1] ?? path.join(root, "release") });
+  const result = await packRuntime({ root, outDir: args[1] ?? path.join(root, "release") });
   console.log(JSON.stringify(result));
 }

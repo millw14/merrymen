@@ -85,7 +85,7 @@ test("bundled required peers must exist in the audit lock and remain explicitly 
   assert.deepEqual(plan.packages[0].externalPeers, ["required-peer", "unused-optional-peer"]);
 });
 
-test("packed external peer declarations cannot suppress installation of pinned root peers", t => {
+test("packed external peer declarations cannot suppress installation of pinned root peers", async t => {
   const f = fixture(t);
   const peers = { "required-peer": "^3.0.0", "unused-optional-peer": "*" };
   const peerMeta = { "unused-optional-peer": { optional: true } };
@@ -93,7 +93,7 @@ test("packed external peer declarations cannot suppress installation of pinned r
   f.lock.packages["node_modules/required-peer"] = { version: "3.0.4" };
   writeFileSync(path.join(f.root, "package-lock.json"), JSON.stringify(f.lock));
   writeFileSync(path.join(f.root, "node_modules/wrapper/package.json"), JSON.stringify({ ...f.wrapper, peerDependencies: peers, peerDependenciesMeta: peerMeta }));
-  const packed = packRuntime(f);
+  const packed = await packRuntime(f);
   const wrapper = JSON.parse(tarRead(packed.path, "node_modules/wrapper/package.json"));
   assert.deepEqual(wrapper.peerDependencies, {});
   assert.deepEqual(wrapper.peerDependenciesMeta, {});
@@ -102,17 +102,17 @@ test("packed external peer declarations cannot suppress installation of pinned r
   assert.equal(manifest.dependencies["unused-optional-peer"], undefined);
 });
 
-test("release packaging refuses incomplete dashboard builds", t => {
+test("release packaging refuses incomplete dashboard builds", async t => {
   const f = fixture(t);
-  assert.throws(() => packRuntime({ ...f, requireBuild: true }), /Production dashboard is incomplete/);
+  await assert.rejects(() => packRuntime({ ...f, requireBuild: true }), /Production dashboard is incomplete/);
   assert.equal(existsSync(f.outDir), false);
 });
 
-test("real npm pack includes audited JS and licenses without mutating source or running scripts", t => {
+test("real npm pack includes audited JS and licenses without mutating source or running scripts", async t => {
   const f = fixture(t);
   const manifestBefore = readFileSync(path.join(f.root, "package.json"), "utf8");
   const wrapperBefore = readFileSync(path.join(f.root, "node_modules/wrapper/package.json"), "utf8");
-  const packed = packRuntime(f);
+  const packed = await packRuntime(f);
   assert.equal(readFileSync(path.join(f.root, "package.json"), "utf8"), manifestBefore);
   assert.equal(readFileSync(path.join(f.root, "node_modules/wrapper/package.json"), "utf8"), wrapperBefore);
   assert.equal(JSON.parse(tarRead(packed.path, "node_modules/leaf/package.json")).version, "2.0.0");
@@ -126,27 +126,27 @@ test("real npm pack includes audited JS and licenses without mutating source or 
   assert(!listing.stdout.includes("package/.env"));
   assert(!listing.stdout.includes("npm-shrinkwrap.json"));
   assert(!listing.stdout.includes("node_modules/platform-addon"));
-  assert.throws(() => packRuntime(f), /EEXIST/);
+  await assert.rejects(() => packRuntime(f), /EEXIST/);
 });
 
-test("packing refuses installed code with a different version than the audited lock", t => {
+test("packing refuses installed code with a different version than the audited lock", async t => {
   const f = fixture(t);
   writeFileSync(path.join(f.root, "node_modules/leaf/package.json"), JSON.stringify({ name: "leaf", version: "1.0.0" }));
-  assert.throws(() => packRuntime(f), /audited lock requires 2.0.0/);
+  await assert.rejects(() => packRuntime(f), /audited lock requires 2.0.0/);
   assert.equal(existsSync(f.outDir), false);
 });
 
-test("a files allowlist cannot accidentally publish nested environment files", t => {
+test("a files allowlist cannot accidentally publish nested environment files", async t => {
   const f = fixture(t);
   mkdirSync(path.join(f.root, "web"));
   writeFileSync(path.join(f.root, "web/.env.local"), "synthetic test sentinel");
   f.manifest.files.push("web");
   writeFileSync(path.join(f.root, "package.json"), JSON.stringify(f.manifest));
-  assert.throws(() => packRuntime(f), /Refusing to package an environment file/);
+  await assert.rejects(() => packRuntime(f), /Refusing to package an environment file/);
   assert.equal(existsSync(f.outDir), false);
   f.manifest.files.push("!**/.env", "!**/.env.*");
   writeFileSync(path.join(f.root, "package.json"), JSON.stringify(f.manifest));
-  const packed = packRuntime(f);
+  const packed = await packRuntime(f);
   const listing = spawnSync("tar", ["-tzf", packed.path], { encoding: "utf8" });
   assert.equal(listing.status, 0);
   assert(!listing.stdout.includes(".env"));

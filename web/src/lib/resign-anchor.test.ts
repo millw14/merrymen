@@ -45,7 +45,8 @@ describe("INVARIANT: the grant page wires both", () => {
   it("the section keeps its anchor, and the page jumps to it through the rule above", () => {
     assert.match(src, /<div id="resign"/);
     assert.match(src, /shouldJumpToResign\(window\.location\.hash, resignJumped\.current, present\)/);
-    assert.match(src, /\}, \[wizStep, grant, serverArmed\]\);/, "re-checked as the grant loads");
+    // wallet-renewal.test.ts executes delayed loading and subsequent renders:
+    // the scroll must happen when the section appears, exactly once.
   });
 
   it("the reload goes through the loop guard", () => {

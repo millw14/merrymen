@@ -31,21 +31,8 @@ const wallet = () => readFileSync(new URL("../terminal/screens/Wallet.tsx", impo
 const route = () => readFileSync(new URL("../app/api/grants/route.ts", import.meta.url), "utf8");
 
 describe("the server's grant may be adopted, never stored", () => {
-  it("IT IS ADOPTED WHENEVER THE SERVER HANDS ONE BACK, whatever the binding says", () => {
-    // THE FIRST FIX WAS HALF A FIX, and the report came back because of it.
-    // Adoption was gated on `binding.version === "privy-did-owner-v1"`, which
-    // asks how the agent is BOUND. Reading your own agent needs no owner at
-    // all — the address, the balances and the caps are the server's answer to
-    // a request it already authenticated. Three cohorts were refused a look at
-    // their own wallet by that gate, and the largest is grants minted BEFORE
-    // `binding` existed, where `.version` is undefined and the check is false.
-    const src = wallet();
-    assert.match(src, /if \(s\.grant\) \{[\s\S]{0,200}setGrant\(s\.grant\);/);
-    assert.ok(
-      !/const adoptable\s*=/.test(src),
-      "the binding-version gate on ADOPTION is the bug; only signing may depend on the owner",
-    );
-  });
+  // wallet-renewal.test.ts mounts Wallet to exercise adoption across binding
+  // cohorts and verifies that the full local recovery record is untouched.
 
   it("AND NEVER WRITTEN TO merrymen.grant.v1", () => {
     // The whole hazard in one assertion. `setGrant` is React state; the storage
@@ -114,16 +101,8 @@ describe("what the endpoint may hand over", () => {
   });
 });
 
-describe("re-arming says why it cannot, instead of doing nothing", () => {
-  it("AN ADOPTED BROWSER HAS NOTHING TO RE-PUSH, AND SAYS SO", () => {
-    // This panel has already shipped one button that silently did nothing;
-    // an adopted grant carries no session key, so the same failure was
-    // available again by a different route.
-    const src = wallet();
-    assert.match(src, /if \(!stored\) \{[\s\S]{0,600}setError\(/);
-    assert.match(src, /this browser doesn't hold a copy of the signed key/);
-  });
-});
+// Missing local grants and public grants without serialized keys are exercised
+// through the mounted re-arm control in wallet-renewal.test.ts.
 
 describe("the chat no longer refuses what it can do", () => {
   it("SYSTEM NO LONGER CONTRADICTS THE COMMAND BLOCK", async () => {

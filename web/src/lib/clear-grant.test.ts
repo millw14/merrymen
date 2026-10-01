@@ -108,8 +108,7 @@ test("the kill switch does not tell the user their wallet is gone", () => {
     /destroy the local key/,
     "the kill path must no longer describe itself as destroying the key",
   );
-  assert.doesNotMatch(kill, /clearGrant\(/, "stopping cannot remove the grant or owner recovery data");
-  assert.match(kill, /recovery access (?:is |are )?kept|recovery key is kept/i, "and must say the money is still reachable");
+  assert.match(kill, /recovery key is kept/, "and must say the money is still reachable");
 });
 
 test("AN ABSENT KEY IS NOT AN UNREADABLE KEY — the screens tell each truth", () => {

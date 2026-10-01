@@ -42,7 +42,6 @@ let activeGrant = grant;
 let storedGrantAvailable = true;
 let privyOwner: PrivyOwner | null = null;
 let Wallet: typeof import("./screens/Wallet").default;
-let KillSwitch: typeof import("../components/KillSwitch").KillSwitch;
 let ui: ReturnType<typeof testDom>;
 let savedWallets: SavedWallet[] = [];
 const originalFetch = globalThis.fetch;
@@ -58,11 +57,10 @@ before(async () => {
   // Load the actual screen and its click handler. Only wallet/RPC boundaries
   // are replaced: this test must not sign a permission or contact a chain.
   const walletPath = fileURLToPath(new URL("./screens/Wallet.tsx", import.meta.url));
-  const killSwitchPath = fileURLToPath(new URL("../components/KillSwitch.tsx", import.meta.url));
   const loader = Module as unknown as { _load: (id: string, parent: { filename?: string }, isMain: boolean) => unknown };
   const load = loader._load;
   const intercepted = mock.method(loader, "_load", function (this: typeof loader, id: string, parent: { filename?: string }, isMain: boolean) {
-    if (parent?.filename === walletPath || parent?.filename === killSwitchPath) {
+    if (parent?.filename === walletPath) {
       if (id === "next/link") return ({ children, ...props }: React.ComponentProps<"a">) => React.createElement("a", props, children);
       if (id === "@/terminal/usePrivyOwner") return { usePrivyOwner: () => privyOwner };
       if (id === "@/lib/verified-adapter") return { verifiedAdapter: async () => undefined };
@@ -83,7 +81,6 @@ before(async () => {
   });
   try {
     Wallet = createRequire(import.meta.url)(walletPath).default;
-    KillSwitch = createRequire(import.meta.url)(killSwitchPath).KillSwitch;
   } finally {
     intercepted.mock.restore();
   }
@@ -159,6 +156,71 @@ async function type(input: HTMLInputElement, value: string) {
 }
 
 describe("the funded wallet's re-sign control", () => {
+  it("jumps to the renewal anchor after the grant loads, and never again on later renders", async () => {
+    ui.dom.window.history.replaceState(null, "", "/grant#resign");
+    const pendingGrant = deferred<Response>();
+    const fetch = globalThis.fetch;
+    globalThis.fetch = (input, init) => String(input) === "/api/grants" ? pendingGrant.promise : fetch(input, init);
+    const scrolled: string[] = [];
+    Object.defineProperty(ui.dom.window.HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value(this: HTMLElement) { scrolled.push(this.id); },
+    });
+    await ui.render(React.createElement(Wallet));
+    assert.equal(ui.container.querySelector("#resign"), null, "the grant is still loading");
+    assert.deepEqual(scrolled, []);
+    await act(async () => { pendingGrant.resolve(json({ exists: true, grant: activeGrant, gasSponsored: true })); });
+    assert.ok(ui.container.querySelector("#resign"));
+    assert.deepEqual(scrolled, ["resign"], "loading the grant must make the anchor reachable");
+    await acknowledge("I authorize revoking");
+    await type(renewalInput("drawdown limit"), "8");
+    await ui.render(React.createElement(Wallet));
+    assert.deepEqual(scrolled, ["resign"], "form changes must not drag the owner back to the anchor");
+  });
+
+  for (const binding of [undefined, { version: "legacy-wallet-owner-v1" }, { version: "privy-did-owner-v1" }] as const) {
+    it(`adopts the authenticated server's public grant with ${binding?.version ?? "no binding"} without overwriting local recovery data`, async () => {
+      storedGrantAvailable = false;
+      activeGrant = { ...grant, demoOwnerPrivateKey: undefined, binding } as StoredGrant;
+      const recovery = JSON.stringify({ ...grant, serialized: "private serialized permission", demoSessionPrivateKey: `0x${"6".repeat(64)}` });
+      localStorage.setItem("merrymen.grant.v1", recovery);
+      localStorage.removeItem("merrymen.grant.backedup.v1");
+      await ui.render(React.createElement(Wallet));
+      assert.ok(ui.container.querySelector("#resign"), "public grant display does not require a local key or binding version");
+      assert.match(ui.container.textContent!, /breaker 5%/);
+      assert.match(ui.container.textContent!, /max 50 USDG\/trade/);
+      assert.match(ui.container.textContent!, /500 USDG\/day/);
+      assert.equal(ui.container.querySelector("input.restore-input"), null, "a second browser is not sent to the lost-wallet form");
+      assert.equal(localStorage.getItem("merrymen.grant.v1"), recovery, "the server's public grant cannot erase owner/session recovery material");
+      assert.equal(mintCalls, 0);
+      assert.equal(revokeCalls, 0);
+    });
+  }
+
+  for (const missing of ["local grant", "serialized key"] as const) {
+    it(`explains a missing ${missing} when re-arming and never submits a public grant`, async () => {
+      activeGrant = { ...grant, serialized: undefined } as unknown as StoredGrant;
+      let posted = 0;
+      globalThis.fetch = async (input, init) => {
+        const path = String(input);
+        if (path === "/api/grants" && init?.method === "POST") { posted++; return json({ ok: true }); }
+        if (path === "/api/grants") return json({ exists: false });
+        if (path === "/api/auth/session") return json({ hosted: false, address: null });
+        if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
+        throw new Error(`Unexpected request: ${path}`);
+      };
+      await ui.render(React.createElement(Wallet));
+      if (missing === "local grant") storedGrantAvailable = false;
+      await ui.click("re-arm this wallet");
+      assert.match(ui.container.querySelector(".desync-panel")!.textContent!, /this browser doesn't hold a copy of the signed key/);
+      assert.match(ui.container.querySelector(".desync-panel")!.textContent!, /Re-sign the key below instead/);
+      assert.equal(posted, 0);
+      assert.equal(stopCalls, 0);
+      assert.equal(revokeCalls, 0);
+      assert.equal(mintCalls, 0);
+    });
+  }
+
   for (const [key, label] of [
     ["maxDrawdownPct", "drawdown limit"],
     ["perTradeUsdg", "most it can spend on one trade"],
@@ -748,75 +810,5 @@ describe("the funded wallet's re-sign control", () => {
     assert.equal(mintCalls, 0);
   });
 
-  it("the legacy stop preserves an adopted Privy wallet so Wallet can resume after refresh", async () => {
-    const owner = privateKeyToAccount(`0x${"7".repeat(64)}`);
-    const did = "did:privy:legacy-stop";
-    const nonce = "historical-binding";
-    const ownerSignature = await owner.signMessage({ message: bindingMessage({ version: "privy-did-owner-v1", origin: window.location.origin, nonce, owner: owner.address, smartAccount: address, chainId: 4663, did }) });
-    activeGrant = { ...grant, owner: owner.address, demoOwnerPrivateKey: undefined, binding: { version: "privy-did-owner-v1", did, nonce, ownerSignature } };
-    storedGrantAvailable = false;
-    privyOwner = { account: owner, did };
-    let exists = true;
-    globalThis.fetch = async input => {
-      const path = String(input);
-      if (path === "/api/grants") return json({ exists, tenant: owner.address, ...(exists ? { grant: activeGrant } : {}) });
-      if (path === "/api/auth/session") return json({ hosted: true, address: owner.address });
-      if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
-      throw new Error(`Unexpected request: ${path}`);
-    };
-    stop = async expected => {
-      assert.equal(expected, owner.address);
-      assert.equal(loadRecoveryGrants().length, 1, "public recovery is persisted before DELETE");
-      exists = false;
-    };
-    await ui.render(React.createElement(KillSwitch));
-    await ui.click("Stop agent");
-    await ui.click("Confirm stop agent");
-    assert.equal(stopCalls, 1);
-    assert.match(ui.container.textContent!, /Stop request accepted/);
-    await ui.remount(React.createElement(Wallet));
-    assert.ok(ui.container.querySelector("#resign"));
-    assert.match(ui.container.textContent!, /review and renew permission/);
-    assert.equal(mintCalls, 0);
-    assert.equal(revokeCalls, 0);
-  });
-
-  it("the legacy stop still succeeds when storage is full and can retry saving without another stop", async () => {
-    localStorage.setItem("merrymen.grant.v1", "original owner recovery access");
-    const storagePrototype = Object.getPrototypeOf(localStorage);
-    const full = mock.method(storagePrototype, "setItem", () => { throw new Error("storage full"); });
-    try {
-      await ui.render(React.createElement(KillSwitch));
-      await ui.click("Stop agent");
-      await ui.click("Confirm stop agent");
-      assert.equal(stopCalls, 1);
-      assert.match(ui.container.textContent!, /Stop request accepted/);
-      assert.match(ui.container.textContent!, /Recovery details could not be saved/);
-      assert.equal(localStorage.getItem("merrymen.grant.v1"), "original owner recovery access");
-    } finally { full.mock.restore(); }
-    await ui.click("Retry saving wallet details");
-    assert.equal(stopCalls, 1, "saving public details never repeats the stop");
-    assert.equal(loadRecoveryGrants().length, 1);
-    assert.equal(localStorage.getItem("merrymen.grant.v1"), "original owner recovery access");
-    assert.doesNotMatch(JSON.stringify(loadRecoveryGrants()), /demoOwnerPrivateKey|demoSessionPrivateKey|serialized/);
-    assert.match(ui.container.textContent!, /recovery details are now saved/);
-  });
-
-  it("the legacy stop still uses a freshly confirmed tenant when the grant read fails", async () => {
-    const tenant = `0x${"a".repeat(40)}`;
-    globalThis.fetch = async input => {
-      if (String(input) === "/api/grants") return json({ error: "grant store unavailable" }, 500);
-      if (String(input) === "/api/auth/session") return json({ hosted: true, address: tenant });
-      throw new Error(`Unexpected request: ${input}`);
-    };
-    stop = async expected => { assert.equal(expected, tenant); };
-    await ui.render(React.createElement(KillSwitch));
-    await ui.click("Stop agent");
-    await ui.click("Confirm stop agent");
-    assert.equal(stopCalls, 1);
-    assert.match(ui.container.textContent!, /Stop request accepted/);
-    assert.match(ui.container.textContent!, /could not provide recovery details/);
-    assert.deepEqual(loadRecoveryGrants(), []);
-  });
 
 });
