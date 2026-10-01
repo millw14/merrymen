@@ -6,11 +6,13 @@ import { verifiedAdapter } from "@/lib/verified-adapter";
 import { revokeFromBrowser } from "@/lib/revoke-client";
 import { stopAgent } from "@/lib/stop-agent";
 import { markPermissionForReplacement, needsPermissionReplacement } from "@/lib/permission-replacement";
+import { loadRecoveryGrants, saveRecoveryGrant, trustedSavedGrant } from "@/lib/saved-grant-binding";
 import { MAX_USDG_UI, isWallTooWide } from "@merrymen/core";
 import { parseAmount, type AmountField } from "@/lib/parse-amount";
 import { fullDateTime } from "@/lib/format";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPublicClient, erc20Abi, formatEther, http } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { Info } from "@/components/Info";
 import { FormPage as AppShell, FormHeading as PageHeader } from "../FormPage";
 import {
@@ -404,6 +406,15 @@ export default function GrantPage() {
   const [preview, setPreview] = useState<OwnerPreview | null>(null);
   const [previewFunding, setPreviewFunding] = useState<Funding | null>(null);
   const [previewing, setPreviewing] = useState(false);
+  const restorePreviewGeneration = useRef(0);
+  useEffect(() => {
+    ++restorePreviewGeneration.current;
+    setPreview(null);
+    setPreviewFunding(null);
+    setPreviewing(false);
+    setRestoreRevocationAck(false);
+    return () => { ++restorePreviewGeneration.current; };
+  }, [chainId]);
   // Swapping the ACTIVE wallet for another one you own. Without this you'd have
   // to "discard" a funded wallet just to reach the restore tab — the exact scary
   // click that strands people. Switching archives the outgoing wallet instead.
@@ -443,16 +454,38 @@ export default function GrantPage() {
     }
     setBackedUp(localStorage.getItem(BACKUP_KEY) === "1");
     void fetchAccountForSession(null)
-      .then((result) => {
+      .then(async (result) => {
         if (!active || generation !== accountReadGeneration.current) return;
         if (result.kind !== "ready") throw result.kind === "changed" ? new Error("Account changed while loading.") : result.error;
         const { session: verifiedSession } = result.account;
         const s = result.account.status as { exists: boolean; gasSponsored?: boolean | null; grant?: Grant };
         // A browser's saved key may belong to a different hosted login. Keep it
         // for recovery, but never display or sign it as this tenant's agent.
-        const trustedStored = !verifiedSession.hosted ? stored :
-          s.exists && stored && s.grant?.smartAccount?.toLowerCase() === stored.smartAccount.toLowerCase() ? stored : null;
+        const matchesServerGrant = stored && s.grant?.smartAccount?.toLowerCase() === stored.smartAccount.toLowerCase() &&
+          s.grant.chainId === stored.chainId &&
+          (!s.grant.sessionKeyAddress || !stored.sessionKeyAddress || s.grant.sessionKeyAddress.toLowerCase() === stored.sessionKeyAddress.toLowerCase());
+        // Another browser may have replaced a permission for this same account.
+        // Adopt the current server grant, retaining the old full key for recovery.
+        let trustedStored = s.exists ? (matchesServerGrant ? stored : null) : (!verifiedSession.hosted ? stored : null);
+        if (!s.exists && !trustedStored) {
+          // Stopping deliberately deletes the server grant. Historical signed
+          // bindings preserve this tenant's renewal path across a refresh;
+          // an address or DID merely claimed in localStorage is insufficient.
+          for (const candidate of [stored, ...loadRecoveryGrants()]) {
+            if (await trustedSavedGrant(candidate, verifiedSession, window.location.origin)) {
+              trustedStored = candidate;
+              break;
+            }
+          }
+        }
+        if (!active || generation !== accountReadGeneration.current) return;
         setGrant(trustedStored);
+        if (trustedStored && !s.exists) {
+          setChainId(requestedChain() ?? trustedStored.chainId);
+          setCaps(trustedStored.caps);
+          setCapText({});
+          setBackedUp(true);
+        }
         setSession({ hosted: verifiedSession.hosted, address: verifiedSession.address as `0x${string}` | null });
         setServerArmed(s.exists);
         setAccountReadFailed(false);
@@ -512,9 +545,20 @@ export default function GrantPage() {
            *
            * NEVER WRITTEN TO localStorage — the paragraph above is why. State
            * for the life of the screen, and nowhere else.
-           */
+          */
           if (s.grant) {
-            setGrant(s.grant);
+            // Retain a proven legacy owner while adopting the current public
+            // permission. Never copy the stale serialized grant/session secret.
+            let currentGrant = s.grant;
+            if (stored?.demoOwnerPrivateKey && stored.smartAccount.toLowerCase() === s.grant.smartAccount.toLowerCase()) {
+              try {
+                const owner = privateKeyToAccount(stored.demoOwnerPrivateKey as `0x${string}`);
+                if (owner.address.toLowerCase() === s.grant.owner.toLowerCase()) {
+                  currentGrant = { ...s.grant, demoOwnerPrivateKey: stored.demoOwnerPrivateKey };
+                }
+              } catch { /* A mismatched or invalid saved key cannot authorize this grant. */ }
+            }
+            setGrant(currentGrant);
             // THE SAME INTENT ON THE OTHER ARM. This branch serves a hosted
             // Privy owner signed in from any browser that did not mint the
             // agent — which is most of them — so an intent applied only to the
@@ -571,9 +615,12 @@ export default function GrantPage() {
     const generation = accountReadGeneration.current;
     if (serverArmed === null || !expected) throw new Error("We couldn't confirm this account. Try again after it reloads.");
     const result = await fetchAccountForSession(expected);
+    const freshGrant = result.kind === "ready" ? result.account.status.grant as { smartAccount?: string; chainId?: number; sessionKeyAddress?: string } | undefined : undefined;
     if (generation !== accountReadGeneration.current || result.kind !== "ready" ||
         (grant && result.account.status.exists &&
-          result.account.status.grant?.smartAccount?.toLowerCase() !== grant.smartAccount.toLowerCase())) {
+          (freshGrant?.smartAccount?.toLowerCase() !== grant.smartAccount.toLowerCase() ||
+           freshGrant?.chainId !== grant.chainId ||
+           (freshGrant?.sessionKeyAddress && grant.sessionKeyAddress && freshGrant.sessionKeyAddress.toLowerCase() !== grant.sessionKeyAddress.toLowerCase())))) {
       accountReadGeneration.current++;
       setServerArmed(null);
       setSession(null);
@@ -592,7 +639,7 @@ export default function GrantPage() {
       setError("This saved permission was selected for revocation and cannot be re-armed. Review and renew below; your owner recovery access is kept.");
       return;
     }
-    if (!stored) {
+    if (!stored?.serialized) {
       // THE BUTTON THAT DID NOTHING, second edition. Re-arming re-POSTs the
       // browser's own grant, and this browser may be holding an ADOPTED one —
       // read from the server for display and re-signing, with the session key
@@ -738,6 +785,8 @@ export default function GrantPage() {
   // Mainnet is real money — the create button stays locked until the user
   // explicitly acknowledges real funds and the owner-key custody risk.
   const createBlocked = isMainnet && !mainnetAck;
+  const restoreCurrentGrant = preview && grant?.smartAccount.toLowerCase() === preview.smartAccount.toLowerCase() ? grant : null;
+  const restoreNetworks = [...(restoreCurrentGrant && restoreCurrentGrant.chainId !== chainId ? [restoreCurrentGrant.chainId] : []), chainId];
 
   async function onCreate() {
     if (status !== null || createBlocked) return;
@@ -760,6 +809,19 @@ export default function GrantPage() {
     setStatus("starting…");
     try {
       await verifyCurrentAccount();
+      if (chainId === MAINNET && privyOwner) {
+        for (const candidate of [grant, loadGrant(), ...loadRecoveryGrants()]) {
+          if (candidate?.owner.toLowerCase() === privyOwner.account.address.toLowerCase() &&
+              await trustedSavedGrant(candidate, session, window.location.origin)) {
+            setSwitching(false);
+            setGrant(candidate);
+            setBackedUp(true);
+            setError("This signing wallet already owns this account. Review and renew its existing permission below instead of creating another grant.");
+            setStatus(null);
+            return;
+          }
+        }
+      }
       const options = {
         caps,
         onStatus: setStatus,
@@ -794,23 +856,30 @@ export default function GrantPage() {
 
   /** Which account does this owner key control, and what's in it? Read-only. */
   async function checkOwnerKey() {
+    const generation = ++restorePreviewGeneration.current;
     setError(null);
     setPreview(null);
     setPreviewFunding(null);
+    setRestoreRevocationAck(false);
     const key = restoreKey.trim();
+    const selectedChain = chainId;
     if (!/^0x[0-9a-fA-F]{64}$/.test(key)) {
       setError("that isn't an owner key — expected 0x followed by 64 hex characters.");
       return;
     }
     setPreviewing(true);
     try {
-      const p = await previewOwnerAccount(key as `0x${string}`, chainId);
+      const p = await previewOwnerAccount(key as `0x${string}`, selectedChain);
+      if (generation !== restorePreviewGeneration.current) return;
+      const balance = await readFunding(p.smartAccount, selectedChain).catch(() => null);
+      if (generation !== restorePreviewGeneration.current) return;
       setPreview(p);
-      setPreviewFunding(await readFunding(p.smartAccount, chainId).catch(() => null));
+      setPreviewFunding(balance);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (generation === restorePreviewGeneration.current) setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (generation === restorePreviewGeneration.current) setPreviewing(false);
     }
-    setPreviewing(false);
   }
 
   /** Invalidate earlier permissions before restoring an owner-authorized grant. */
@@ -819,6 +888,7 @@ export default function GrantPage() {
     const ownerKey = restoreKey.trim() as `0x${string}`;
     const expectedAccount = preview.smartAccount as `0x${string}`;
     const selectedChain = chainId;
+    const previousGrant = grant?.smartAccount.toLowerCase() === expectedAccount.toLowerCase() ? grant : null;
     setError(null);
     setRenewed(false);
     setStatus("starting…");
@@ -837,11 +907,17 @@ export default function GrantPage() {
       };
       // The preview account is immutable for this operation; a changed input
       // cannot revoke one wallet and then sign for another.
+      if (previousGrant) {
+        saveRecoveryGrant(previousGrant);
+        markPermissionForReplacement(previousGrant);
+        setReplacementRequired(true);
+      }
       await stopAgent(session?.hosted ? session.address : undefined);
       setServerArmed(false);
-      if (grant?.smartAccount.toLowerCase() === expectedAccount.toLowerCase() && grant.chainId === selectedChain) {
-        markPermissionForReplacement(grant);
-        setReplacementRequired(true);
+      // A network move leaves funds and copied session keys on the old chain.
+      // Both chains must confirm revocation before replacement can overwrite it.
+      if (previousGrant && previousGrant.chainId !== selectedChain) {
+        await revokeFromBrowser({ ownerKey, smartAccount: expectedAccount, chainId: previousGrant.chainId }, setStatus);
       }
       await revokeFromBrowser({ ownerKey, smartAccount: expectedAccount, chainId: selectedChain }, setStatus);
       const { local: g, handoff } = await restoreAgentWallet(ownerKey, options);
@@ -922,6 +998,14 @@ export default function GrantPage() {
     setSecurityError(null);
     setSecurityMessage(null);
     try {
+      try { saveRecoveryGrant(grant); } catch (e) {
+        if (revoke) throw e;
+        setSecurityError("Browser recovery details could not be saved. Keep this page open to manage this wallet after stopping.");
+      }
+      if (revoke) {
+        markPermissionForReplacement(grant);
+        setReplacementRequired(true);
+      }
       // A service outage must not veto the owner’s separate on-chain authority.
       try {
         await verifyCurrentAccount();
@@ -933,8 +1017,6 @@ export default function GrantPage() {
         setSecurityError(`The service stop was not confirmed: ${e instanceof Error ? e.message : String(e)}. On-chain revocation is being attempted separately.`);
       }
       if (revoke) {
-        markPermissionForReplacement(grant);
-        setReplacementRequired(true);
         const result = await revokeFromBrowser(ownerWallet(), setSecurityMessage);
         setSecurityMessage(`Earlier permissions on ${chainLabel(grant.chainId)} are revoked on-chain. Transaction: ${result.transactionHash}. Your wallet and withdrawal access are kept.`);
         setRevokeAck(false);
@@ -1036,10 +1118,12 @@ export default function GrantPage() {
       };
       // Invalidate first: a new grant signed before this receipt would carry
       // the old enable nonce and be invalidated along with the old permission.
-      await stopAgent(session?.hosted ? session.address : undefined);
-      stopped = true;
+      // Preserve only public recovery inputs for an adopted second-browser grant.
+      saveRecoveryGrant(grant);
       markPermissionForReplacement(grant);
       setReplacementRequired(true);
+      await stopAgent(session?.hosted ? session.address : undefined);
+      stopped = true;
       await revokeFromBrowser(ownerWallet(), setStatus);
       if (chainId !== grant.chainId) await revokeFromBrowser(ownerWallet(chainId), setStatus);
       revoked = true;
@@ -1278,7 +1362,7 @@ export default function GrantPage() {
     // Instant, like a real anchor jump: a smooth scroll is driven by animation
     // frames, which a hidden tab or an in-app browser may never deliver.
     document.getElementById(RESIGN_ANCHOR)?.scrollIntoView({ block: "start" });
-  }, [wizStep, grant, serverArmed]);
+  }, [wizStep, grant, serverArmed, replacementRequired]);
 
   // SIGNED IN ON THIS SCREEN. It loads the grant once, on mount, as whoever
   // was signed in then — so an owner who opened a "Sign now" link signed out
@@ -1453,10 +1537,13 @@ export default function GrantPage() {
                 ))}
             </div>
             <div className="fund-actions" style={{ display: "flex", gap: 10 }}>
-              <button className="grant-btn" onClick={() => void reArm()} disabled={reArming} style={{ flex: 1 }}>
-                {reArming ? "re-arming…" : "re-arm this wallet"}
+              <button className="grant-btn" onClick={() => {
+                if (session?.hosted || replacementRequired) document.getElementById(RESIGN_ANCHOR)?.scrollIntoView({ block: "center" });
+                else void reArm();
+              }} disabled={reArming || renewing || securityBusy} style={{ flex: 1 }}>
+                {reArming ? "re-arming…" : session?.hosted || replacementRequired ? "review and renew permission" : "re-arm this wallet"}
               </button>
-              <button className="btn-kill" onClick={() => void discard()} disabled={discarding} style={{ flex: 1 }}>
+              <button className="btn-kill" onClick={() => void discard()} disabled={discarding || renewing || securityBusy} style={{ flex: 1 }}>
                 {discarding ? "discarding…" : "discard & start fresh"}
               </button>
             </div>
@@ -1597,7 +1684,7 @@ export default function GrantPage() {
                   placeholder="0x… (the key you backed up when you created it)"
                   value={restoreKey}
                   disabled={status !== null}
-                  onChange={(e) => { setRestoreKey(e.target.value); setPreview(null); setRestoreRevocationAck(false); }}
+                  onChange={(e) => { ++restorePreviewGeneration.current; setRestoreKey(e.target.value); setPreview(null); setPreviewFunding(null); setPreviewing(false); setRestoreRevocationAck(false); }}
                   autoComplete="off"
                 />
                 <button className="copy-btn" onClick={() => void checkOwnerKey()} disabled={previewing || status !== null}>
@@ -1750,7 +1837,18 @@ export default function GrantPage() {
                   limits lived in the key you lost, so nothing can read them back; set them here
                   if they mattered. Revocation spends ETH for network fees; it does not move your trading balances.
                 </p>
-                <label className="ack-row"><input type="checkbox" checked={restoreRevocationAck} disabled={status !== null} onChange={e => setRestoreRevocationAck(e.target.checked)} /><span>I understand restore first stops the service and revokes earlier permissions on this network. The account needs ETH for network fees before a new permission can be signed.</span></label>
+                {preview && <div className="grant-note" data-restore-funding style={{ marginTop: 12 }}>
+                  <b>ETH for revocation fees</b>
+                  <p>Restore revokes earlier permissions on {restoreNetworks.length > 1 ? "both networks below, starting with the current network" : "the network below"} before signing a replacement. Fund this same account address on {restoreNetworks.length > 1 ? "each network" : "this network"}:</p>
+                  <code style={{ display: "block", overflowWrap: "anywhere" }}>{preview.smartAccount}</code>
+                  <CopyBtn value={preview.smartAccount} label="copy restore funding address" />
+                  <ul>{restoreNetworks.map(network => <li key={network}>
+                    <b>{network === MAINNET ? "Robinhood Chain" : "Robinhood Chain testnet"} ({network})</b>: send {network === TESTNET ? "testnet ETH" : "ETH"} for network fees.
+                  </li>)}</ul>
+                  {restoreNetworks.includes(TESTNET) && <p><a href={FAUCET_URL} target="_blank" rel="noreferrer">Get testnet ETH from the faucet ↗</a>, then send it to the account above on testnet.</p>}
+                  <p>Balances do not move between networks. Revocation needs ETH even when trading gas is sponsored; an empty destination account also needs ETH. If you see AA21 or an insufficient-funds error, fund the named network and retry here.</p>
+                </div>}
+                <label className="ack-row"><input type="checkbox" checked={restoreRevocationAck} disabled={status !== null} onChange={e => setRestoreRevocationAck(e.target.checked)} /><span>I understand restore first stops the service and revokes earlier permissions on {restoreNetworks.map(network => network === MAINNET ? "Robinhood Chain (4663)" : "Robinhood Chain testnet (46630)").join(" and ")}. The account needs ETH for network fees on {restoreNetworks.length > 1 ? "both networks" : "this network"} before a new permission can be signed.</span></label>
                 <button
                   className="grant-btn"
                   onClick={() => void onRestore()}
@@ -1833,7 +1931,7 @@ export default function GrantPage() {
         )}
 
         {/* ─── phase 3: fund the account ───────────────────────────────── */}
-        {grant && backedUp && (!desynced || replacementRequired) && !switching && (
+        {grant && backedUp && (!desynced || replacementRequired || session?.hosted) && !switching && (
           <div className="grant-panel">
             {/* Tokens added in settings after this key was signed. The wall can't
                 widen without a signature — that's the point — so say it plainly

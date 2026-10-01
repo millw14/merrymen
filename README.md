@@ -689,6 +689,23 @@ npm run onboard && npm start
 npm run typecheck && npm test
 ```
 
+### Package a release
+
+```bash
+npm ci
+npm run pack:release
+# After reviewing and testing the generated release/merrymen-<version>.tgz:
+npm publish ./release/merrymen-<version>.tgz
+```
+
+The release command builds the SDK and dashboard, then stages a tarball with the
+patched runtime dependency tree. Native optional packages are installed for the
+consumer's platform. Publish that tarball: direct directory `npm pack` and
+`npm publish` are blocked because consumers do not inherit this repository's npm
+overrides. CI checks an isolated global install, executes its native modules and
+audits the packages actually installed. Development installs still use the normal
+`package.json` and `package-lock.json`.
+
 ### Configuration
 The dashboard `/settings` is the source of truth (Anthropic/Rialto/Telegram keys,
 bundler + RPC URLs, strategy + every trading knob, the Telegram + PC-control

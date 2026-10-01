@@ -3,9 +3,13 @@ import Module, { createRequire } from "node:module";
 import { afterEach, before, beforeEach, describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import React, { act } from "react";
-import { WALL_TOO_WIDE, type StoredGrant } from "@merrymen/core";
+import { bindingMessage, WALL_TOO_WIDE, type StoredGrant } from "@merrymen/core";
 import type { SavedWallet } from "@/lib/session";
 import { JSDOM } from "jsdom";
+import { privateKeyToAccount } from "viem/accounts";
+import type { PrivyOwner } from "./usePrivyOwner";
+import { needsPermissionReplacement } from "@/lib/permission-replacement";
+import { loadRecoveryGrants } from "@/lib/saved-grant-binding";
 let deferred: typeof import("./test-dom").deferred;
 let json: typeof import("./test-dom").json;
 let testDom: typeof import("./test-dom").testDom;
@@ -24,13 +28,21 @@ const grant = {
   grantFeatures: [],
 } as unknown as StoredGrant;
 const tooWide = `${WALL_TOO_WIDE}: installing it would need about 15,980,519 gas against a limit of 14,000,000. You have 20 custom tokens; the most that fits with the features you have enabled is 17. Remove at least 3 custom tokens, then sign again.`;
-let renew: (options: { onStatus: (status: string) => void }) => Promise<unknown>;
-let revoke: () => Promise<unknown>;
-let stop: () => Promise<void>;
+let renew: (options: { onStatus: (status: string) => void; chainId?: number; expectAccount?: string }) => Promise<unknown>;
+type RevocationWallet = { ownerKey?: string; smartAccount: string; chainId: number };
+let revoke: (wallet: RevocationWallet) => Promise<unknown>;
+let revokeWallets: RevocationWallet[] = [];
+let restoredKeys: unknown[] = [];
+let previewOwner: (key: string, chainId: number) => Promise<{ smartAccount: string; owner: string }>;
+let stop: (expectedTenant?: string | null) => Promise<void>;
+let stopCalls = 0;
 let revokeCalls = 0;
 let mintCalls = 0;
 let activeGrant = grant;
+let storedGrantAvailable = true;
+let privyOwner: PrivyOwner | null = null;
 let Wallet: typeof import("./screens/Wallet").default;
+let KillSwitch: typeof import("../components/KillSwitch").KillSwitch;
 let ui: ReturnType<typeof testDom>;
 let savedWallets: SavedWallet[] = [];
 const originalFetch = globalThis.fetch;
@@ -46,29 +58,32 @@ before(async () => {
   // Load the actual screen and its click handler. Only wallet/RPC boundaries
   // are replaced: this test must not sign a permission or contact a chain.
   const walletPath = fileURLToPath(new URL("./screens/Wallet.tsx", import.meta.url));
+  const killSwitchPath = fileURLToPath(new URL("../components/KillSwitch.tsx", import.meta.url));
   const loader = Module as unknown as { _load: (id: string, parent: { filename?: string }, isMain: boolean) => unknown };
   const load = loader._load;
   const intercepted = mock.method(loader, "_load", function (this: typeof loader, id: string, parent: { filename?: string }, isMain: boolean) {
-    if (parent?.filename === walletPath) {
+    if (parent?.filename === walletPath || parent?.filename === killSwitchPath) {
       if (id === "next/link") return ({ children, ...props }: React.ComponentProps<"a">) => React.createElement("a", props, children);
-      if (id === "@/terminal/usePrivyOwner") return { usePrivyOwner: () => null };
+      if (id === "@/terminal/usePrivyOwner") return { usePrivyOwner: () => privyOwner };
       if (id === "@/lib/verified-adapter") return { verifiedAdapter: async () => undefined };
-      if (id === "@/lib/revoke-client") return { revokeFromBrowser: async () => { revokeCalls++; return revoke(); } };
-      if (id === "@/lib/stop-agent") return { stopAgent: () => stop() };
+      if (id === "@/lib/revoke-client") return { revokeFromBrowser: async (wallet: RevocationWallet) => { revokeCalls++; revokeWallets.push(wallet); return revoke(wallet); } };
+      if (id === "@/lib/stop-agent") return { stopAgent: (expectedTenant?: string | null) => { stopCalls++; return stop(expectedTenant); } };
       if (id === "@/lib/session") return {
         FAUCET_URL: "https://faucet.testnet.chain.robinhood.com",
-        loadGrant: () => activeGrant,
+        loadGrant: () => storedGrantAvailable ? activeGrant : null,
         listSavedWallets: () => savedWallets,
-        isPrivyOwned: () => false,
-        previewOwnerAccount: async () => ({ smartAccount: address, owner: address }),
+        isPrivyOwned: (g: StoredGrant | null) => g?.binding?.version === "privy-did-owner-v1",
+        previewOwnerAccount: (key: string, chainId: number) => previewOwner(key, chainId),
         readFunding: async () => ({ gasWei: 1n, usdgUnits: 71_580_000n, usdg: 71.58 }),
-        restoreAgentWallet: (_key: unknown, options: Parameters<typeof renew>[0]) => { mintCalls++; return renew(options); },
+        createPrivyOwnedWallet: (_owner: unknown, _did: unknown, options: Parameters<typeof renew>[0]) => { mintCalls++; return renew(options); },
+        restoreAgentWallet: (key: unknown, options: Parameters<typeof renew>[0]) => { mintCalls++; restoredKeys.push(key); return renew(options); },
       };
     }
     return load.call(this, id, parent, isMain);
   });
   try {
     Wallet = createRequire(import.meta.url)(walletPath).default;
+    KillSwitch = createRequire(import.meta.url)(killSwitchPath).KillSwitch;
   } finally {
     intercepted.mock.restore();
   }
@@ -78,9 +93,15 @@ beforeEach(() => {
   ui = testDom();
   savedWallets = [];
   activeGrant = grant;
+  storedGrantAvailable = true;
+  privyOwner = null;
   revokeCalls = 0;
+  revokeWallets = [];
+  restoredKeys = [];
   mintCalls = 0;
+  stopCalls = 0;
   revoke = async () => ({ transactionHash: `0x${"4".repeat(64)}` });
+  previewOwner = async () => ({ smartAccount: address, owner: address });
   stop = async () => {};
   Object.defineProperty(ui.dom.window.HTMLElement.prototype, "scrollIntoView", { configurable: true, value() {} });
   localStorage.setItem("merrymen.grant.backedup.v1", "1");
@@ -102,6 +123,15 @@ async function acknowledge(text: string) {
   const label = [...ui.container.querySelectorAll("label")].find(label => label.textContent?.includes(text));
   assert.ok(label, `missing acknowledgment: ${text}`);
   await act(async () => { (label.querySelector("input") as HTMLInputElement).click(); });
+}
+
+async function enterRestoreKey(key = grant.demoOwnerPrivateKey!) {
+  const input = ui.container.querySelector("input.restore-input") as HTMLInputElement;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(ui.dom.window.HTMLInputElement.prototype, "value")!.set!.call(input, key);
+    input.dispatchEvent(new ui.dom.window.Event("input", { bubbles: true }));
+  });
+  return input;
 }
 
 describe("the funded wallet's re-sign control", () => {
@@ -243,8 +273,9 @@ describe("the funded wallet's re-sign control", () => {
     assert.equal(mintCalls, 0);
     assert.match(ui.container.textContent!, /receipt unconfirmed/);
     assert.doesNotMatch(ui.container.textContent!, /Permission renewed/);
-    await ui.click("re-arm this wallet");
-    assert.match(ui.container.textContent!, /cannot be re-armed/);
+    await ui.click("review and renew permission");
+    assert.equal(needsPermissionReplacement(activeGrant), true);
+    assert.equal([...ui.container.querySelectorAll("button")].some(button => button.textContent === "re-arm this wallet"), false);
     assert.equal(activeGrant.demoOwnerPrivateKey, grant.demoOwnerPrivateKey);
   });
 
@@ -304,6 +335,338 @@ describe("the funded wallet's re-sign control", () => {
     assert.equal(input.matches(":disabled"), true, "restoration locks the selected key and network during revocation");
     await act(async () => { receipt.resolve({ transactionHash: `0x${"4".repeat(64)}` }); });
     assert.equal(mintCalls, 1);
+  });
+
+  it("restoring the same account across networks waits for source and destination revocations", async () => {
+    activeGrant = { ...grant, chainId: 46630 };
+    ui.dom.window.history.replaceState({}, "", "/grant?chain=4663");
+    const source = deferred<unknown>();
+    const destination = deferred<unknown>();
+    revoke = wallet => wallet.chainId === 46630 ? source.promise : destination.promise;
+    stop = async () => {
+      assert.equal(needsPermissionReplacement(activeGrant), true, "old-chain marker precedes DELETE");
+      assert.equal(loadRecoveryGrants()[0]?.chainId, 46630, "old-chain recovery snapshot precedes DELETE");
+    };
+    renew = async options => {
+      assert.equal(options.chainId, 4663);
+      assert.equal(options.expectAccount, address);
+      return { local: { ...activeGrant, chainId: 4663, sessionKeyAddress: `0x${"8".repeat(40)}` }, handoff: { ok: true } };
+    };
+    await ui.render(React.createElement(Wallet));
+    await ui.click("switch to another wallet");
+    const input = await enterRestoreKey();
+    await ui.click("check this wallet");
+    const funding = ui.container.querySelector("[data-restore-funding]")!;
+    assert.match(funding.textContent!, /both networks.*starting with the current network/);
+    assert.ok(funding.textContent?.includes(address));
+    assert.match(funding.textContent!, /Robinhood Chain testnet \(46630\).*testnet ETH/);
+    assert.match(funding.textContent!, /Robinhood Chain \(4663\).*ETH/);
+    assert.match(funding.textContent!, /AA21.*fund the named network and retry/);
+    assert.ok(funding.querySelector("a")?.href.includes("faucet"));
+    await acknowledge("I understand — real funds");
+    await acknowledge("I understand restore first stops");
+    await ui.click("Restore & arm 0x1111…1111");
+    assert.deepEqual(revokeWallets.map(w => w.chainId), [46630]);
+    assert.equal(mintCalls, 0);
+    assert.equal(input.matches(":disabled"), true);
+    await act(async () => { source.resolve({ transactionHash: `0x${"4".repeat(64)}` }); });
+    assert.deepEqual(revokeWallets.map(w => w.chainId), [46630, 4663]);
+    assert.equal(mintCalls, 0, "a source receipt alone cannot mint the replacement");
+    assert.ok(revokeWallets.every(w => w.smartAccount === address && w.ownerKey === grant.demoOwnerPrivateKey));
+    await act(async () => { destination.resolve({ transactionHash: `0x${"5".repeat(64)}` }); });
+    assert.equal(mintCalls, 1);
+    assert.deepEqual(restoredKeys, [grant.demoOwnerPrivateKey]);
+  });
+
+  for (const failedChain of [46630, 4663]) it(`cross-network restore retains recovery after an unconfirmed revocation on ${failedChain}`, async () => {
+    activeGrant = { ...grant, chainId: 46630 };
+    ui.dom.window.history.replaceState({}, "", "/grant?chain=4663");
+    let exists = true;
+    globalThis.fetch = async input => {
+      const path = String(input);
+      if (path === "/api/grants") return json({ exists, ...(exists ? { grant: activeGrant } : {}) });
+      if (path === "/api/auth/session") return json({ hosted: false, address: null });
+      if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
+      throw new Error(`Unexpected request: ${path}`);
+    };
+    stop = async () => { exists = false; };
+    revoke = async wallet => {
+      if (wallet.chainId === failedChain) throw new Error(`Receipt unconfirmed on ${failedChain}; retry the pending operation`);
+      return { transactionHash: `0x${"4".repeat(64)}` };
+    };
+    await ui.render(React.createElement(Wallet));
+    await ui.click("switch to another wallet");
+    await enterRestoreKey();
+    await ui.click("check this wallet");
+    await acknowledge("I understand — real funds");
+    await acknowledge("I understand restore first stops");
+    await ui.click("Restore & arm 0x1111…1111");
+    assert.equal(mintCalls, 0);
+    assert.deepEqual(revokeWallets.map(w => w.chainId), failedChain === 46630 ? [46630] : [46630, 4663]);
+    assert.match(ui.container.textContent!, /Receipt unconfirmed/);
+    assert.equal(needsPermissionReplacement(activeGrant), true);
+    assert.equal(loadRecoveryGrants()[0]?.chainId, 46630);
+    storedGrantAvailable = false;
+    await ui.remount(React.createElement(Wallet));
+    assert.ok(ui.container.querySelector("#resign"), "the public snapshot survives losing the server grant");
+    assert.equal(needsPermissionReplacement(activeGrant), true, "refresh cannot re-arm the old permission");
+    assert.equal([...ui.container.querySelectorAll("button")].some(b => b.textContent === "re-arm this wallet"), false);
+    assert.equal(mintCalls, 0);
+  });
+
+  it("changing the restore network clears preview and fee consent", async () => {
+    await ui.render(React.createElement(Wallet));
+    await ui.click("switch to another wallet");
+    await enterRestoreKey();
+    await ui.click("check this wallet");
+    await acknowledge("I understand restore first stops");
+    const testnet = [...ui.container.querySelectorAll("button.chain-card")].find(b => b.textContent?.includes("Testnet (46630)")) as HTMLButtonElement;
+    await act(async () => { testnet.click(); });
+    assert.equal(ui.container.querySelector(".restore-preview"), null);
+    const ack = [...ui.container.querySelectorAll("label")].find(l => l.textContent?.includes("I understand restore first stops"))!.querySelector("input")!;
+    assert.equal(ack.checked, false);
+    await ui.click("check your owner key above first");
+    assert.equal(stopCalls, 0);
+    assert.equal(revokeCalls, 0);
+    assert.equal(mintCalls, 0);
+    await ui.click("check this wallet");
+    assert.match(ui.container.querySelector("[data-restore-funding]")!.textContent!, /both networks/);
+  });
+
+  it("a stale owner-key preview cannot restore signing controls after the key changes", async () => {
+    const preview = deferred<{ smartAccount: string; owner: string }>();
+    previewOwner = () => preview.promise;
+    await ui.render(React.createElement(Wallet));
+    await ui.click("switch to another wallet");
+    await enterRestoreKey();
+    await ui.click("check this wallet");
+    await enterRestoreKey(`0x${"9".repeat(64)}`);
+    await act(async () => { preview.resolve({ smartAccount: address, owner: address }); });
+    assert.equal(ui.container.querySelector(".restore-preview"), null);
+    assert.equal(ui.container.querySelector("[data-restore-funding]"), null);
+    assert.equal(stopCalls, 0);
+    assert.equal(revokeCalls, 0);
+    assert.equal(mintCalls, 0);
+  });
+
+  for (const change of ["chain", "session"] as const) it(`refuses restore when another tab changed the active ${change} for the same account`, async () => {
+    let serverGrant = grant;
+    globalThis.fetch = async input => {
+      const path = String(input);
+      if (path === "/api/grants") return json({ exists: true, grant: serverGrant });
+      if (path === "/api/auth/session") return json({ hosted: false, address: null });
+      if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
+      throw new Error(`Unexpected request: ${path}`);
+    };
+    await ui.render(React.createElement(Wallet));
+    await ui.click("switch to another wallet");
+    await enterRestoreKey();
+    await ui.click("check this wallet");
+    await acknowledge("I understand — real funds");
+    await acknowledge("I understand restore first stops");
+    serverGrant = change === "chain" ? { ...grant, chainId: 46630 } : { ...grant, sessionKeyAddress: `0x${"8".repeat(40)}` };
+    await ui.click("Restore & arm 0x1111…1111");
+    assert.equal(stopCalls, 0);
+    assert.equal(revokeCalls, 0);
+    assert.equal(mintCalls, 0);
+    assert.equal(loadRecoveryGrants().length, 0);
+    assert.equal(needsPermissionReplacement(grant), false);
+    assert.match(ui.container.textContent!, /Couldn.t check your agent/);
+    await ui.click("Try again");
+    // A different browser's fresh server grant must win over this browser's
+    // stale full grant, without deleting its owner recovery access.
+    await ui.click("check this wallet");
+    await acknowledge("I understand restore first stops");
+    revoke = async () => { throw new Error("new permission revocation pending"); };
+    await ui.click("Restore & arm 0x1111…1111");
+    assert.equal(stopCalls, 1, "retry does not loop on the stale local grant");
+    assert.equal(revokeCalls, 1);
+    assert.equal(revokeWallets[0]?.chainId, serverGrant.chainId);
+    assert.equal(needsPermissionReplacement(serverGrant), true);
+    assert.equal(activeGrant.demoOwnerPrivateKey, grant.demoOwnerPrivateKey);
+    assert.equal(mintCalls, 0);
+  });
+
+  for (const matchingOwner of [true, false]) it(`adopting a fresh legacy grant ${matchingOwner ? "retains only a proven owner key" : "refuses an unrelated saved owner key"}`, async () => {
+    const owner = privateKeyToAccount(grant.demoOwnerPrivateKey as `0x${string}`);
+    activeGrant = { ...grant, owner: owner.address, chainId: 46630, serialized: "old serialized permission", demoSessionPrivateKey: `0x${"6".repeat(64)}` };
+    const serverGrant = { ...grant, owner: matchingOwner ? owner.address : address, demoOwnerPrivateKey: undefined, sessionKeyAddress: `0x${"8".repeat(40)}` };
+    globalThis.fetch = async input => {
+      const path = String(input);
+      if (path === "/api/grants") return json({ exists: true, grant: serverGrant });
+      if (path === "/api/auth/session") return json({ hosted: false, address: null });
+      if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
+      throw new Error(`Unexpected request: ${path}`);
+    };
+    await ui.render(React.createElement(Wallet));
+    if (matchingOwner) {
+      renew = async options => {
+        assert.equal(options.chainId, serverGrant.chainId);
+        assert.equal(options.expectAccount, address);
+        return { local: { ...serverGrant, sessionKeyAddress: `0x${"9".repeat(40)}` }, handoff: { ok: true } };
+      };
+      await acknowledge("I authorize revoking");
+      await ui.click("revoke earlier permissions & re-sign");
+      assert.equal(mintCalls, 1);
+      assert.deepEqual(restoredKeys, [grant.demoOwnerPrivateKey]);
+      assert.deepEqual(revokeWallets.map(w => w.chainId), [serverGrant.chainId]);
+      assert.equal(needsPermissionReplacement(serverGrant), true);
+      assert.equal(needsPermissionReplacement(activeGrant), false, "the current server permission is replaced, not stale local metadata");
+      const recovery = loadRecoveryGrants()[0]!;
+      assert.equal(recovery.serialized, undefined);
+      assert.equal(recovery.demoSessionPrivateKey, undefined);
+      assert.equal(recovery.demoOwnerPrivateKey, undefined);
+    } else {
+      assert.match(ui.container.textContent!, /Use switch to another wallet below and paste the key in/);
+      assert.equal(revokeCalls, 0);
+      assert.equal(mintCalls, 0);
+    }
+    assert.equal(activeGrant.serialized, "old serialized permission", "full local recovery grant is untouched");
+    assert.equal(activeGrant.demoOwnerPrivateKey, grant.demoOwnerPrivateKey);
+  });
+
+  it("resumes a stopped hosted Privy grant after reload, including an adopted second-browser grant", async () => {
+    const owner = privateKeyToAccount(`0x${"7".repeat(64)}`);
+    const did = "did:privy:recovery-test";
+    const nonce = "historical-binding-nonce";
+    const ownerSignature = await owner.signMessage({ message: bindingMessage({ version: "privy-did-owner-v1", origin: window.location.origin, nonce, owner: owner.address, smartAccount: address, chainId: 4663, did }) });
+    activeGrant = { ...grant, owner: owner.address, demoOwnerPrivateKey: undefined, binding: { version: "privy-did-owner-v1", did, nonce, ownerSignature } };
+    storedGrantAvailable = false; // Only the authenticated server supplied this grant.
+    privyOwner = { account: owner, did };
+    let exists = true;
+    globalThis.fetch = async input => {
+      const path = String(input);
+      if (path === "/api/grants") return json({ exists, tenant: owner.address, ...(exists ? { grant: activeGrant } : {}) });
+      if (path === "/api/auth/session") return json({ hosted: true, address: owner.address });
+      if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
+      throw new Error(`Unexpected request: ${path}`);
+    };
+    stop = async () => {
+      assert.equal(needsPermissionReplacement(activeGrant), true, "replacement intent survives even a crash immediately after DELETE");
+      exists = false;
+    };
+    revoke = async () => { throw new Error("Pending revocation; check again"); };
+    await ui.render(React.createElement(Wallet));
+    // Stop alone must remain usable and leave a renewal route after refresh.
+    stop = async () => { exists = false; };
+    await ui.click("Stop agent now");
+    await ui.remount(React.createElement(Wallet));
+    assert.ok(ui.container.querySelector("#resign"));
+    assert.equal(revokeCalls, 0);
+    assert.equal(mintCalls, 0);
+    await ui.click("review and renew permission");
+    stop = async () => {
+      assert.equal(needsPermissionReplacement(activeGrant), true, "replacement intent is durable before DELETE");
+      exists = false;
+    };
+    await acknowledge("I authorize revoking");
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.equal(exists, false);
+    assert.equal(mintCalls, 0);
+    await ui.remount(React.createElement(Wallet));
+    assert.ok(ui.container.querySelector("#resign"), "the authenticated owner's renewal survives the missing server grant");
+    assert.match(ui.container.textContent!, /this wallet isn't active/);
+    revoke = async () => ({ transactionHash: `0x${"4".repeat(64)}` });
+    renew = async () => ({ local: { ...activeGrant, sessionKeyAddress: `0x${"8".repeat(40)}` }, handoff: { ok: true } });
+    await acknowledge("I authorize revoking");
+    await ui.click("revoke earlier permissions & re-sign");
+    assert.equal(revokeCalls, 2, "the same owner can resume the pending revocation boundary");
+    assert.equal(mintCalls, 1);
+    assert.match(ui.container.textContent!, /Permission renewed/);
+  });
+
+  it("does not adopt a stopped saved grant from another hosted tenant or forged metadata", async () => {
+    const a = privateKeyToAccount(`0x${"7".repeat(64)}`);
+    const b = privateKeyToAccount(`0x${"8".repeat(64)}`);
+    const did = "did:privy:original-owner";
+    const nonce = "historical";
+    activeGrant = { ...grant, owner: a.address, demoOwnerPrivateKey: undefined, binding: { version: "privy-did-owner-v1", did, nonce, ownerSignature: await a.signMessage({ message: bindingMessage({ version: "privy-did-owner-v1", origin: window.location.origin, nonce, owner: a.address, smartAccount: address, chainId: 4663, did }) }) } };
+    privyOwner = { account: b, did: "did:privy:different-owner" };
+    globalThis.fetch = async input => {
+      const path = String(input);
+      if (path === "/api/grants") return json({ exists: false, tenant: b.address });
+      if (path === "/api/auth/session") return json({ hosted: true, address: b.address });
+      if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
+      throw new Error(`Unexpected request: ${path}`);
+    };
+    await ui.render(React.createElement(Wallet));
+    assert.equal(ui.container.querySelector("#resign"), null);
+    activeGrant = { ...activeGrant, owner: b.address }; // Metadata alone is not authority.
+    await ui.remount(React.createElement(Wallet));
+    assert.equal(ui.container.querySelector("#resign"), null);
+    assert.equal(revokeCalls, 0);
+    assert.equal(mintCalls, 0);
+  });
+
+  it("the legacy stop preserves an adopted Privy wallet so Wallet can resume after refresh", async () => {
+    const owner = privateKeyToAccount(`0x${"7".repeat(64)}`);
+    const did = "did:privy:legacy-stop";
+    const nonce = "historical-binding";
+    const ownerSignature = await owner.signMessage({ message: bindingMessage({ version: "privy-did-owner-v1", origin: window.location.origin, nonce, owner: owner.address, smartAccount: address, chainId: 4663, did }) });
+    activeGrant = { ...grant, owner: owner.address, demoOwnerPrivateKey: undefined, binding: { version: "privy-did-owner-v1", did, nonce, ownerSignature } };
+    storedGrantAvailable = false;
+    privyOwner = { account: owner, did };
+    let exists = true;
+    globalThis.fetch = async input => {
+      const path = String(input);
+      if (path === "/api/grants") return json({ exists, tenant: owner.address, ...(exists ? { grant: activeGrant } : {}) });
+      if (path === "/api/auth/session") return json({ hosted: true, address: owner.address });
+      if (path === "/api/settings") return json({ values: { customTokens: [], basketSymbols: [] } });
+      throw new Error(`Unexpected request: ${path}`);
+    };
+    stop = async expected => {
+      assert.equal(expected, owner.address);
+      assert.equal(loadRecoveryGrants().length, 1, "public recovery is persisted before DELETE");
+      exists = false;
+    };
+    await ui.render(React.createElement(KillSwitch));
+    await ui.click("Stop agent");
+    await ui.click("Confirm stop agent");
+    assert.equal(stopCalls, 1);
+    assert.match(ui.container.textContent!, /Stop request accepted/);
+    await ui.remount(React.createElement(Wallet));
+    assert.ok(ui.container.querySelector("#resign"));
+    assert.match(ui.container.textContent!, /review and renew permission/);
+    assert.equal(mintCalls, 0);
+    assert.equal(revokeCalls, 0);
+  });
+
+  it("the legacy stop still succeeds when storage is full and can retry saving without another stop", async () => {
+    localStorage.setItem("merrymen.grant.v1", "original owner recovery access");
+    const storagePrototype = Object.getPrototypeOf(localStorage);
+    const full = mock.method(storagePrototype, "setItem", () => { throw new Error("storage full"); });
+    try {
+      await ui.render(React.createElement(KillSwitch));
+      await ui.click("Stop agent");
+      await ui.click("Confirm stop agent");
+      assert.equal(stopCalls, 1);
+      assert.match(ui.container.textContent!, /Stop request accepted/);
+      assert.match(ui.container.textContent!, /Recovery details could not be saved/);
+      assert.equal(localStorage.getItem("merrymen.grant.v1"), "original owner recovery access");
+    } finally { full.mock.restore(); }
+    await ui.click("Retry saving wallet details");
+    assert.equal(stopCalls, 1, "saving public details never repeats the stop");
+    assert.equal(loadRecoveryGrants().length, 1);
+    assert.equal(localStorage.getItem("merrymen.grant.v1"), "original owner recovery access");
+    assert.doesNotMatch(JSON.stringify(loadRecoveryGrants()), /demoOwnerPrivateKey|demoSessionPrivateKey|serialized/);
+    assert.match(ui.container.textContent!, /recovery details are now saved/);
+  });
+
+  it("the legacy stop still uses a freshly confirmed tenant when the grant read fails", async () => {
+    const tenant = `0x${"a".repeat(40)}`;
+    globalThis.fetch = async input => {
+      if (String(input) === "/api/grants") return json({ error: "grant store unavailable" }, 500);
+      if (String(input) === "/api/auth/session") return json({ hosted: true, address: tenant });
+      throw new Error(`Unexpected request: ${input}`);
+    };
+    stop = async expected => { assert.equal(expected, tenant); };
+    await ui.render(React.createElement(KillSwitch));
+    await ui.click("Stop agent");
+    await ui.click("Confirm stop agent");
+    assert.equal(stopCalls, 1);
+    assert.match(ui.container.textContent!, /Stop request accepted/);
+    assert.match(ui.container.textContent!, /could not provide recovery details/);
+    assert.deepEqual(loadRecoveryGrants(), []);
   });
 
 });

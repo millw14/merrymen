@@ -33,17 +33,21 @@ jobs:
         env:
           MERRYMEN_SKIP_BUILD: "1"
 
-      # npm pack does not run prepublishOnly; require the strict clean-build
-      # gate explicitly so an install hook cannot hide a broken dashboard.
-      - name: Validate production package
-        run: npm run typecheck && node cli/prepublish.mjs
+      - name: Typecheck production package
+        run: npm run typecheck
 
       # Pack merrymen into a tarball (with the prebuilt dashboard + worker) so the
       # desktop app installs a REAL COPY of it — not a `file:` symlink, which a
       # fresh CI npm may create and which electron-builder (asar off) chokes on.
       - name: Pack merrymen (symlink-free copy)
         shell: bash
-        run: npm pack
+        run: npm run pack:release -- --out-dir .
+
+      - name: Verify isolated global install
+        shell: bash
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/merrymen-global" --ignore-scripts --no-audit --no-fund ./merrymen-*.tgz
+          node cli/verify-installed.mjs "$(npm root --global --prefix "$RUNNER_TEMP/merrymen-global")/merrymen"
 
       - name: Install desktop deps
         shell: bash
