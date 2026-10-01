@@ -86,14 +86,27 @@ sell-approve permission is sealed into the signature (the no-exit rule).
   `V4SelfSwap` address and canonical PoolManager binding from step 2 **before
   signing**. An arbitrary contract address, even one with code, must not be
   sealed into the grant.
-- Sign. Then verify `~/.merrymen/grant.json` contains:
-  - `"chainId": 4663`
-  - `"grantTokens": [...]` listing only the token addresses you authorized
-  - `"v4-adapter"` in `grantFeatures`, and `"v4AdapterAddress"` = the mainnet
-    adapter whose code identity and PoolManager binding you verified.
+- Sign once and wait for the Wallet panel to report **Permission renewed**.
+  For a hosted account, that message means the server accepted the renewal;
+  completing a wallet signature alone is not enough.
+- For a **hosted account**, reopen its Wallet status in the app. Check the
+  displayed chain and caps, then check **Trading permissions → Uniswap v4**.
+  It must say the adapter permission is sealed to the exact verified mainnet
+  address from step 2. A saved address in Settings without that sealed
+  permission is not a completed grant. The Wallet panel does not display the
+  exact signed token list; if you need to audit it, inspect your authenticated
+  `/api/grants` response rather than assuming Settings proves what was signed.
+- For a **self-hosted installation only**, also inspect its local
+  `~/.merrymen/grant.json` (or the `grant.json` under its configured
+  `MERRYMEN_HOME`). Check `"chainId": 4663`, `"grantTokens"` for only the token
+  addresses you authorized, `"v4-adapter"` in `grantFeatures`, and
+  `"v4AdapterAddress"` for the verified mainnet adapter.
 
-If any of those is missing, the settings save and the signature crossed —
-hard-reload `/grant` and sign again.
+If the server refuses the renewal or any expected marker, address, chain, or
+limit is missing or mismatched, **stop**. Recheck the saved settings, deployed
+adapter code and PoolManager identity, selected chain, and intended grant
+scope. Resolve the discrepancy before signing once more, then verify the new
+server-accepted status. Do not keep re-signing the same configuration.
 
 ## Step 5 — Fund the smart account
 
