@@ -1609,6 +1609,30 @@ describe("linked public research and factual replies", () => {
     assert.equal(port.nominations.length, 0);
   });
 
+  it("switching coins off during typing cancels a partial unknown research reply before Telegram sends it", async () => {
+    make();
+    approveRoom();
+    port.looks.set(CA1, { kind: "unknown", name: "PRISM", research: {
+      source: "geckoterminal", observedAtMs: clock, liquidityUsd: 200_000, volume24hUsd: 500_000,
+    } });
+    let readinessReads = 0;
+    port.readiness = () => { readinessReads++; return port.ready; };
+    let switched = false;
+    onSleep = () => {
+      assert.ok(tg.of("sendChatAction").length > 0, "the setting changes after typing began, rather than before the lookup");
+      switched = true;
+      cfg.telegramGroupCoinsEnabled = false;
+    };
+    await said(msg(`@pinebot how's this ${CA1}`));
+    assert.ok(switched, "the partial fact reply reached the handler's typing delay");
+    assert.equal(tg.sends().length, 0, "neither research, an unavailable fallback nor an owner prompt may land after coins are disabled");
+    assert.equal(tg.reactions().length, 0);
+    assert.equal(port.nominations.length, 0);
+    assert.equal(readinessReads, 0);
+    assert.deepEqual(store.room(CHAT)!.coins, []);
+    assert.equal(store.room(CHAT)!.lastCoinUnknownAtMs, undefined);
+  });
+
   it("trade history and a bare why reload the same public fill facts; owner amounts stay private", async () => {
     let reads = 0;
     make({ facts: () => ({ tradesToday: async () => { reads++; return { day: "2026-09-28", complete: true, trades: [{ side: "buy", symbol: "PRISM", paper: false, why: "brain" }, { side: "sell", symbol: "FROG", paper: true, why: "strategy" }] }; } }) });

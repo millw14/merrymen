@@ -1083,6 +1083,7 @@ export class CoinFlow {
         const tag = tagSender();
         await say({ kind: "public-fact", fact: { kind: "coin", look, nowMs: d.now() } }, {
           replyTo: line.messageId, trigger: line, ...(tag ? { mention: tag } : {}), ...(look.name ? { coinName: look.name } : {}),
+          stillWanted: () => this.coinsOn() && !gone(),
         });
       }
       return hush("coin-unknown");
